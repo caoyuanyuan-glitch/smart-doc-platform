@@ -29,11 +29,9 @@
 
 ## 💻 第 2 步：用 VS Code 打开项目
 
-### 第一次：安装 VS Code
+### 安装 VS Code 和 Qwen（联系 IT）
 
-1. 打开 **https://code.visualstudio.com/**
-2. 点击绿色按钮 **Download for Windows**
-3. 双击安装，一路"下一步"完成
+⚠️ **VS Code 和 Qwen（通义千问）需要联系 IT 安装，不要自己下载！**
 
 ### 打开项目
 
