@@ -8,6 +8,7 @@ class ReviewCreate(BaseModel):
 class Review(BaseModel):
     id: int
     document_id: int
+    document_name: str = ""
     mode: str
     status: str
     total_issues: int

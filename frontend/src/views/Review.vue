@@ -55,7 +55,7 @@
           <el-table-column prop="status" label="状态" width="100">
             <template #default="scope">
               <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'info'">
-                {{ scope.row.status }}
+                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : '进行中' }}
               </el-tag>
             </template>
           </el-table-column>
@@ -101,9 +101,9 @@
             </template>
           </el-table-column>
           <el-table-column prop="category" label="分类" width="120" />
-          <el-table-column prop="chapter" label="章节" width="150" />
-          <el-table-column prop="original_text" label="原文" width="200" />
-          <el-table-column prop="context" label="上下文" min-width="300">
+          <el-table-column prop="chapter" label="章节" width="180" />
+          <el-table-column prop="original_text" label="原文" width="150" />
+          <el-table-column prop="context" label="上下文" min-width="400">
             <template #default="scope">
               <span class="context-text">{{ scope.row.context }}</span>
             </template>
@@ -111,7 +111,7 @@
           <el-table-column prop="suggestion" label="修改建议" min-width="200" />
           <el-table-column prop="audit_basis" label="审核依据" min-width="200" />
         </el-table>
-        <el-button @click="exportReport">导出报告</el-button>
+        <el-button @click="exportReport" type="primary">导出报告</el-button>
       </div>
     </div>
 
@@ -121,13 +121,38 @@
       <div class="table-section">
         <div class="table-header-actions">
           <el-button type="primary" @click="showRuleDialog = true">添加规则</el-button>
+          <el-button @click="exportRules">导出规则库</el-button>
+          <el-upload
+            class="upload-btn"
+            :action="rulesImportUrl"
+            :on-success="handleRulesImport"
+            :before-upload="beforeRulesUpload"
+            accept=".json"
+          >
+            <el-button>批量导入规则</el-button>
+          </el-upload>
+          <el-button v-if="selectedRules.length > 0" type="danger" @click="batchDeleteRules">批量删除</el-button>
         </div>
-        <el-table :data="rules" border>
-          <el-table-column prop="id" label="编号" width="100" />
+        <el-table 
+          :data="rules" 
+          border 
+          :default-sort="{prop: 'rule_no', order: 'ascending'}"
+          @sort-change="handleSortChange"
+        >
+          <el-table-column type="selection" width="55" />
+          <el-table-column 
+            prop="rule_no" 
+            label="规则编号" 
+            width="100"
+            sortable="custom"
+          />
           <el-table-column prop="category" label="分类" width="120" />
           <el-table-column prop="description" label="规则描述" />
           <el-table-column prop="regex" label="正则" width="200" />
           <el-table-column prop="example" label="示例" width="160" />
+          <el-table-column prop="suggestion" label="建议" width="150" />
+          <el-table-column prop="audit_basis" label="审核依据" width="180" />
+          <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom" />
           <el-table-column label="操作" width="180">
             <template #default="scope">
               <el-button size="small" @click="editRule(scope.row)">编辑</el-button>
@@ -137,10 +162,13 @@
         </el-table>
       </div>
 
-      <el-dialog v-model="showRuleDialog" :title="editingRule ? '编辑规则' : '添加规则'" width="500px">
+      <el-dialog v-model="showRuleDialog" :title="editingRule ? '编辑规则' : '添加规则'" width="550px">
         <el-form :model="ruleForm" label-width="80px">
+          <el-form-item label="规则编号">
+            <el-input v-model="ruleForm.rule_no" placeholder="如：R001" :disabled="!!editingRule" />
+          </el-form-item>
           <el-form-item label="分类">
-            <el-input v-model="ruleForm.category" placeholder="如：术语" />
+            <el-input v-model="ruleForm.category" placeholder="如：标点符号" />
           </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="ruleForm.description" placeholder="规则描述" />
@@ -176,7 +204,7 @@
           <el-table-column prop="status" label="状态" width="100">
             <template #default="scope">
               <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'info'">
-                {{ scope.row.status }}
+                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : '进行中' }}
               </el-tag>
             </template>
           </el-table-column>
@@ -197,13 +225,18 @@
             <div><strong>任务 ID：</strong>{{ currentReport.id }}</div>
             <div><strong>文档：</strong>{{ currentReport.document_name }}</div>
             <div><strong>模式：</strong>{{ currentReport.mode }}</div>
-            <div><strong>状态：</strong>{{ currentReport.status }}</div>
+            <div><strong>状态：</strong>{{ currentReport.status === 'completed' ? '已完成' : currentReport.status === 'failed' ? '失败' : '进行中' }}</div>
             <div><strong>问题总数：</strong>{{ currentReport.total_issues }}</div>
-            <div><strong>创建时间：</strong>{{ currentReport.created_at }}</div>
+            <div><strong>创建时间：</strong>{{ formatDateTime(currentReport.created_at) }}</div>
           </div>
           <div class="report-summary">
             <h4>概览</h4>
-            <p>{{ currentReport.summary || '暂无概览' }}</p>
+            <div class="stats-row">
+              <span class="stat-item fatal">致命: {{ reportStats.fatal }}</span>
+              <span class="stat-item serious">严重: {{ reportStats.serious }}</span>
+              <span class="stat-item general">一般: {{ reportStats.general }}</span>
+              <span class="stat-item suggestion">建议: {{ reportStats.suggestion }}</span>
+            </div>
           </div>
           <div class="report-issues">
             <h4>问题列表</h4>
@@ -214,12 +247,20 @@
                 </template>
               </el-table-column>
               <el-table-column prop="category" label="分类" width="120" />
-              <el-table-column prop="chapter" label="章节" width="150" />
-              <el-table-column prop="original_text" label="原文" width="220" />
-              <el-table-column prop="suggestion" label="建议" />
-              <el-table-column prop="audit_basis" label="审核依据" width="200" />
+              <el-table-column prop="chapter" label="章节" width="180" />
+              <el-table-column prop="original_text" label="原文" width="150" />
+              <el-table-column prop="context" label="上下文" min-width="400">
+                <template #default="scope">
+                  <span class="context-text">{{ scope.row.context }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="suggestion" label="建议" min-width="200" />
+              <el-table-column prop="audit_basis" label="审核依据" min-width="200" />
             </el-table>
           </div>
+        </div>
+        <div class="report-actions">
+          <el-button type="primary" @click="exportReport">导出报告</el-button>
         </div>
       </div>
     </div>
@@ -264,10 +305,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { documentAPI, reviewAPI, rulesAPI, auditBasisAPI } from '@/api'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
 const documents = ref([])
@@ -281,7 +322,10 @@ const currentReport = ref({})
 
 const showRuleDialog = ref(false)
 const editingRule = ref(null)
-const ruleForm = ref({ category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' })
+const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' })
+
+const selectedRules = ref([])
+const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
 const basisUploadUrl = '/api/audit_basis/upload'
@@ -289,6 +333,9 @@ const basisUploadUrl = '/api/audit_basis/upload'
 const filterKeyword = ref('')
 const filterSeverity = ref('')
 const filterCategory = ref('')
+
+const sortField = ref('rule_no')
+const sortOrder = ref('asc')
 
 const currentView = computed(() => {
   if (route.path === '/review/tasks') return 'tasks'
@@ -311,24 +358,40 @@ const issueStats = computed(() => {
   ]
 })
 
+const reportStats = computed(() => {
+  const stats = { fatal: 0, serious: 0, general: 0, suggestion: 0 }
+  issues.value.forEach(issue => {
+    if (stats[issue.severity] !== undefined) stats[issue.severity]++
+  })
+  return stats
+})
+
 const categories = computed(() => {
   const cats = new Set(issues.value.map(i => i.category))
   return Array.from(cats).filter(Boolean)
 })
 
 const filteredIssues = computed(() => {
-  return issues.value.filter(issue => {
-    if (filterKeyword.value && !issue.original_text.includes(filterKeyword.value) && !issue.context.includes(filterKeyword.value)) {
-      return false
-    }
-    if (filterSeverity.value && issue.severity !== filterSeverity.value) {
-      return false
-    }
-    if (filterCategory.value && issue.category !== filterCategory.value) {
-      return false
-    }
-    return true
-  })
+  let result = [...issues.value]
+  if (filterKeyword.value) {
+    const keyword = filterKeyword.value.toLowerCase()
+    result = result.filter(issue => 
+      (issue.original_text && issue.original_text.toLowerCase().includes(keyword)) || 
+      (issue.context && issue.context.toLowerCase().includes(keyword)) ||
+      (issue.chapter && issue.chapter.toLowerCase().includes(keyword))
+    )
+  }
+  if (filterSeverity.value) {
+    result = result.filter(issue => issue.severity === filterSeverity.value)
+  }
+  if (filterCategory.value) {
+    result = result.filter(issue => issue.category === filterCategory.value)
+  }
+  return result
+})
+
+watch(() => route.path, () => {
+  loadByView()
 })
 
 onMounted(() => {
@@ -347,7 +410,7 @@ async function loadDocuments() {
     const resp = await documentAPI.list()
     documents.value = resp.data || []
   } catch (e) {
-    ElMessage.info('加载文档列表失败')
+    ElMessage.error('加载文档列表失败')
   }
 }
 
@@ -356,7 +419,7 @@ async function loadReviews() {
     const resp = await reviewAPI.list()
     reviews.value = resp.data || []
   } catch (e) {
-    ElMessage.info('加载任务列表失败')
+    ElMessage.error('加载任务列表失败')
   }
 }
 
@@ -365,7 +428,7 @@ async function loadRules() {
     const resp = await rulesAPI.list()
     rules.value = resp.data || []
   } catch (e) {
-    ElMessage.info('加载规则列表失败')
+    ElMessage.error('加载规则列表失败')
   }
 }
 
@@ -374,7 +437,7 @@ async function loadBasis() {
     const resp = await auditBasisAPI.list()
     basisList.value = resp.data || []
   } catch (e) {
-    ElMessage.info('加载依据列表失败')
+    ElMessage.error('加载依据列表失败')
   }
 }
 
@@ -385,27 +448,42 @@ function formatSize(size) {
   return (size / 1024 / 1024).toFixed(1) + ' MB'
 }
 
+function formatDateTime(dateStr) {
+  if (!dateStr) return '-'
+  const date = new Date(dateStr)
+  return date.toLocaleString('zh-CN')
+}
+
 function beforeUpload(file) {
   const allowed = ['pdf', 'docx', 'md', 'zip', 'txt', 'idml']
   const ext = file.name.split('.').pop().toLowerCase()
   if (!allowed.includes(ext)) {
-    ElMessage.info('不支持的文件格式: .' + ext)
+    ElMessage.error('不支持的文件格式: .' + ext)
     return false
   }
   if (file.size > 50 * 1024 * 1024) {
-    ElMessage.info('文件大小超过 50MB')
+    ElMessage.error('文件大小超过 50MB')
     return false
   }
   return true
 }
 
-function handleUploadSuccess() {
+function beforeRulesUpload(file) {
+  const ext = file.name.split('.').pop().toLowerCase()
+  if (ext !== 'json') {
+    ElMessage.error('仅支持 JSON 格式文件')
+    return false
+  }
+  return true
+}
+
+function handleUploadSuccess(response) {
   ElMessage.success('上传成功')
   loadDocuments()
 }
 
 function handleUploadError() {
-  ElMessage.info('上传失败，请重试')
+  ElMessage.error('上传失败，请重试')
 }
 
 function handleBasisSuccess() {
@@ -414,20 +492,27 @@ function handleBasisSuccess() {
 }
 
 function handleBasisError() {
-  ElMessage.info('上传失败，请重试')
+  ElMessage.error('上传失败，请重试')
+}
+
+function handleRulesImport(response) {
+  ElMessage.success(`成功导入 ${response.message || '多条'} 规则`)
+  loadRules()
 }
 
 async function startReview(documentId) {
   try {
+    ElMessage.info('正在审核中...')
     const response = await reviewAPI.create(documentId, 'hybrid')
     const reviewId = response.data.review_id
     if (reviewId) {
       await loadReviewIssues(reviewId)
+      await loadReviews()
     }
     showIssues.value = true
     ElMessage.success('审核完成')
   } catch (error) {
-    ElMessage.info('审核失败，请重试')
+    ElMessage.error('审核失败，请重试: ' + (error.response?.data?.detail || error.message))
   }
 }
 
@@ -437,7 +522,7 @@ async function loadReviewIssues(reviewId) {
     issues.value = response.data || []
     showIssues.value = true
   } catch (error) {
-    ElMessage.info('加载问题列表失败')
+    ElMessage.error('加载问题列表失败')
   }
 }
 
@@ -452,7 +537,7 @@ async function viewDocument(id) {
     await documentAPI.get(id)
     ElMessage.info('已加载文档信息')
   } catch (error) {
-    ElMessage.info('查看失败')
+    ElMessage.error('查看失败')
   }
 }
 
@@ -462,7 +547,7 @@ async function deleteDocument(id) {
     loadDocuments()
     ElMessage.success('删除成功')
   } catch (error) {
-    ElMessage.info('删除失败')
+    ElMessage.error('删除失败')
   }
 }
 
@@ -471,7 +556,7 @@ async function viewBasis(id) {
     await auditBasisAPI.get(id)
     ElMessage.info('已加载依据信息')
   } catch (error) {
-    ElMessage.info('查看失败')
+    ElMessage.error('查看失败')
   }
 }
 
@@ -481,13 +566,14 @@ async function deleteBasis(id) {
     loadBasis()
     ElMessage.success('删除成功')
   } catch (error) {
-    ElMessage.info('删除失败')
+    ElMessage.error('删除失败')
   }
 }
 
 function editRule(row) {
   editingRule.value = row
   ruleForm.value = {
+    rule_no: row.rule_no || '',
     category: row.category || '',
     description: row.description || '',
     regex: row.regex || '',
@@ -500,6 +586,19 @@ function editRule(row) {
 
 async function saveRule() {
   try {
+    if (!ruleForm.value.rule_no) {
+      ElMessage.error('请填写规则编号')
+      return
+    }
+    if (!ruleForm.value.category) {
+      ElMessage.error('请填写分类')
+      return
+    }
+    if (!ruleForm.value.description) {
+      ElMessage.error('请填写规则描述')
+      return
+    }
+    
     if (editingRule.value) {
       await rulesAPI.update(editingRule.value.id, ruleForm.value)
       ElMessage.success('更新成功')
@@ -509,21 +608,84 @@ async function saveRule() {
     }
     showRuleDialog.value = false
     editingRule.value = null
-    ruleForm.value = { category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' }
+    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' }
     loadRules()
   } catch (error) {
-    ElMessage.info('保存失败')
+    ElMessage.error('保存失败: ' + (error.response?.data?.detail || error.message))
   }
 }
 
 async function deleteRule(id) {
   try {
+    await ElMessageBox.confirm('确定要删除这条规则吗？', '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消'
+    })
     await rulesAPI.delete(id)
     loadRules()
     ElMessage.success('删除成功')
   } catch (error) {
-    ElMessage.info('删除失败')
+    if (error !== 'cancel') {
+      ElMessage.error('删除失败')
+    }
   }
+}
+
+async function batchDeleteRules() {
+  try {
+    await ElMessageBox.confirm(`确定要删除选中的 ${selectedRules.value.length} 条规则吗？`, '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消'
+    })
+    await rulesAPI.batchDelete(selectedRules.value)
+    selectedRules.value = []
+    loadRules()
+    ElMessage.success('批量删除成功')
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('删除失败')
+    }
+  }
+}
+
+async function exportRules() {
+  try {
+    const response = await rulesAPI.export()
+    const dataStr = JSON.stringify(response.data, null, 2)
+    const blob = new Blob([dataStr], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `rules_export_${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    ElMessage.success('导出成功')
+  } catch (error) {
+    ElMessage.error('导出失败')
+  }
+}
+
+function handleSortChange({ prop, order }) {
+  sortField.value = prop
+  sortOrder.value = order === 'ascending' ? 'asc' : 'desc'
+  
+  rules.value.sort((a, b) => {
+    let aVal = a[prop]
+    let bVal = b[prop]
+    
+    if (typeof aVal === 'string') {
+      aVal = aVal.toLowerCase()
+      bVal = bVal.toLowerCase()
+    }
+    
+    if (sortOrder.value === 'asc') {
+      return aVal > bVal ? 1 : -1
+    } else {
+      return aVal < bVal ? 1 : -1
+    }
+  })
 }
 
 async function loadReport(id) {
@@ -534,12 +696,113 @@ async function loadReport(id) {
     issues.value = response.data || []
     showReport.value = true
   } catch (error) {
-    ElMessage.info('加载报告失败')
+    ElMessage.error('加载报告失败')
   }
 }
 
-function exportReport() {
-  ElMessage.success('报告导出功能演示')
+async function exportReport() {
+  try {
+    let htmlContent = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能技术文档审核报告</title>
+    <style>
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; margin: 30px; }
+        .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 20px; }
+        .header h1 { color: #333; }
+        .report-info { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
+        .stats-row { display: flex; gap: 20px; margin-bottom: 20px; }
+        .stat-item { padding: 8px 16px; border-radius: 20px; font-weight: bold; }
+        .stat-item.fatal { background: #fef0f0; color: #dc3545; }
+        .stat-item.serious { background: #fff7ed; color: #fd7e14; }
+        .stat-item.general { background: #fffbeb; color: #ffc107; }
+        .stat-item.suggestion { background: #ecfdf5; color: #10b981; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background: #f8f9fa; font-weight: bold; }
+        .issue-row:hover { background: #f8f9fa; }
+        .severity-fatal { color: #dc3545; font-weight: bold; }
+        .severity-serious { color: #fd7e14; font-weight: bold; }
+        .severity-general { color: #ffc107; font-weight: bold; }
+        .severity-suggestion { color: #10b981; font-weight: bold; }
+        .context-text { font-size: 13px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>智能技术文档审核报告</h1>
+        <p>生成时间：${new Date().toLocaleString('zh-CN')}</p>
+    </div>
+    <div class="report-info">
+        <div><strong>任务 ID：</strong>${currentReport.value.id || '-'}</div>
+        <div><strong>文档名称：</strong>${currentReport.value.document_name || '-'}</div>
+        <div><strong>审核模式：</strong>${currentReport.value.mode || '-'}</div>
+        <div><strong>审核状态：</strong>${currentReport.value.status === 'completed' ? '已完成' : currentReport.value.status === 'failed' ? '失败' : '进行中'}</div>
+        <div><strong>问题总数：</strong>${currentReport.value.total_issues || 0}</div>
+        <div><strong>创建时间：</strong>${formatDateTime(currentReport.value.created_at)}</div>
+    </div>
+    <h2>问题统计</h2>
+    <div class="stats-row">
+        <span class="stat-item fatal">致命: ${reportStats.value.fatal}</span>
+        <span class="stat-item serious">严重: ${reportStats.value.serious}</span>
+        <span class="stat-item general">一般: ${reportStats.value.general}</span>
+        <span class="stat-item suggestion">建议: ${reportStats.value.suggestion}</span>
+    </div>
+    <h2>问题详情</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>级别</th>
+                <th>分类</th>
+                <th>章节</th>
+                <th>原文</th>
+                <th>上下文</th>
+                <th>修改建议</th>
+                <th>审核依据</th>
+            </tr>
+        </thead>
+        <tbody>
+    `
+    
+    filteredIssues.value.forEach(issue => {
+      const severityClass = `severity-${issue.severity}`
+      const severityLabel = getSeverityLabel(issue.severity)
+      htmlContent += `
+            <tr class="issue-row">
+                <td class="${severityClass}">${severityLabel}</td>
+                <td>${issue.category || '-'}</td>
+                <td>${issue.chapter || '-'}</td>
+                <td>${issue.original_text || '-'}</td>
+                <td class="context-text">${issue.context || '-'}</td>
+                <td>${issue.suggestion || '-'}</td>
+                <td>${issue.audit_basis || '-'}</td>
+            </tr>
+      `
+    })
+    
+    htmlContent += `
+        </tbody>
+    </table>
+</body>
+</html>
+    `
+    
+    const blob = new Blob([htmlContent], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `audit_report_${new Date().toISOString().slice(0, 10)}.html`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    ElMessage.success('报告导出成功')
+  } catch (error) {
+    ElMessage.error('导出失败: ' + error.message)
+  }
 }
 
 function getSeverityType(severity) {
@@ -592,7 +855,14 @@ function getSeverityLabel(severity) {
 }
 
 .table-header-actions {
+  display: flex;
+  gap: 12px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.upload-btn {
+  display: inline-block;
 }
 
 .filter-section {
@@ -631,6 +901,7 @@ function getSeverityLabel(severity) {
   font-size: 12px;
   color: #606266;
   line-height: 1.6;
+  word-break: break-all;
 }
 
 .report-content {
@@ -666,4 +937,26 @@ function getSeverityLabel(severity) {
   color: #606266;
   line-height: 1.7;
 }
+
+.report-actions {
+  margin-top: 20px;
+  text-align: right;
+}
+
+.stats-row {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+
+.stat-item {
+  padding: 6px 14px;
+  border-radius: 18px;
+  font-size: 14px;
+}
+
+.stat-item.fatal { background: #fef0f0; color: #dc3545; }
+.stat-item.serious { background: #fff7ed; color: #fd7e14; }
+.stat-item.general { background: #fffbeb; color: #ffc107; }
+.stat-item.suggestion { background: #ecfdf5; color: #10b981; }
 </style>

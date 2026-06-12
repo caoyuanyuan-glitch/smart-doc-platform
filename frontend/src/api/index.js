@@ -58,7 +58,9 @@ export const rulesAPI = {
   create: (rule) => instance.post('/rules/', rule),
   update: (id, rule) => instance.put(`/rules/${id}`, rule),
   delete: (id) => instance.delete(`/rules/${id}`),
-  bulkCreate: (rules) => instance.post('/rules/bulk', rules)
+  bulkCreate: (rules) => instance.post('/rules/bulk', rules),
+  bulkDelete: (ids) => instance.delete('/rules/bulk', { params: { rule_ids: ids } }),
+  export: () => instance.get('/rules/export')
 }
 
 export const termsAPI = {

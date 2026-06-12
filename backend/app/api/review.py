@@ -36,7 +36,13 @@ def get_context(content, start, end, context_length=200):
 @router.get("/", response_model=list[Review])
 async def list_reviews(db: Session = Depends(get_db)):
     reviews = get_reviews(db)
-    return reviews
+    result = []
+    for review in reviews:
+        doc = get_document(db, document_id=review.document_id)
+        review_dict = review.__dict__.copy()
+        review_dict['document_name'] = doc.filename if doc else ''
+        result.append(review_dict)
+    return result
 
 def run_rule_audit(content, rules):
     issues = []
@@ -153,7 +159,10 @@ async def read_review(review_id: int, db: Session = Depends(get_db)):
     review = get_review(db, review_id=review_id)
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
-    return review
+    doc = get_document(db, document_id=review.document_id)
+    review_dict = review.__dict__.copy()
+    review_dict['document_name'] = doc.filename if doc else ''
+    return review_dict
 
 @router.get("/{review_id}/issues", response_model=list[Issue])
 async def read_review_issues(review_id: int, db: Session = Depends(get_db)):

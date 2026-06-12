@@ -8,7 +8,9 @@ def create_rule(db: Session, rule: RuleCreate):
         category=rule.category,
         description=rule.description,
         regex=rule.regex,
-        example=rule.example
+        example=rule.example,
+        suggestion=rule.suggestion,
+        audit_basis=rule.audit_basis
     )
     db.add(db_rule)
     db.commit()
@@ -35,6 +37,10 @@ def update_rule(db: Session, rule_id: int, rule_update: RuleUpdate):
             rule.regex = rule_update.regex
         if rule_update.example is not None:
             rule.example = rule_update.example
+        if rule_update.suggestion is not None:
+            rule.suggestion = rule_update.suggestion
+        if rule_update.audit_basis is not None:
+            rule.audit_basis = rule_update.audit_basis
         db.commit()
         db.refresh(rule)
     return rule
@@ -55,9 +61,21 @@ def bulk_create_rules(db: Session, rules: list[RuleCreate]):
                 category=rule.category,
                 description=rule.description,
                 regex=rule.regex,
-                example=rule.example
+                example=rule.example,
+                suggestion=rule.suggestion,
+                audit_basis=rule.audit_basis
             ))
     if db_rules:
         db.add_all(db_rules)
         db.commit()
     return len(db_rules)
+
+def bulk_delete_rules(db: Session, rule_ids: list[int]):
+    count = 0
+    for rule_id in rule_ids:
+        rule = db.query(Rule).filter(Rule.id == rule_id).first()
+        if rule:
+            db.delete(rule)
+            count += 1
+    db.commit()
+    return count
