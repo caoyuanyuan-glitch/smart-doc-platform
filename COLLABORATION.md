@@ -320,56 +320,271 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-## 📚 Git 入门教程（可选，但学会了更高效）
+## 📚 Git 团队协作完整教程（从下载到提交，每一步都有）
 
-### 第 1 步：安装 Git
+> ⚠️ **重要说明：** 这个教程教你怎么把代码上传到 GitHub，让负责人能收到你的修改并审核。完全不会 Git 也没关系，按步骤操作即可！
 
-**下载地址：** https://git-scm.com/download/win
+---
 
-1. 下载 `64-bit Git for Windows Setup`
-2. 双击安装，一路 **Next**（全部用默认设置）
-3. 安装完成后，在桌面右键应该能看到 **"Git Bash Here"** 选项
+### 📦 第一部分：第一次设置（只做一次）
 
-**验证安装：** 打开新的命令提示符，输入：
-```
-git --version
-```
-应该显示：`git version 2.x.x`
+#### 1.1 安装 Git
 
-### 第 2 步：克隆项目（第一次使用）
+1. 打开 **https://git-scm.com/download/win**
+2. 点击 **64-bit Git for Windows Setup** 下载
+3. 双击安装包，一路点击 **Next**（全部用默认设置）
+4. 安装完成后，**重启电脑**
+
+**验证是否安装成功：**
+- 按 **Win 键** → 输入 `cmd` → 回车
+- 输入 `git --version`
+- 应该显示 `git version 2.x.x`
+
+#### 1.2 克隆项目到本地（第一次）
+
+1. 按 **Win 键** → 输入 `cmd` → 回车，打开命令提示符
+2. 输入以下命令（直接复制粘贴）：
 
 ```cmd
 cd C:\
 git clone https://github.com/caoyanyuan-glitch/smart-doc-platform.git
-cd smart-doc-platform
 ```
 
-✅ 现在你有了项目的最新代码
+3. 应该看到类似以下内容，表示克隆成功：
+```
+Cloning into 'smart-doc-platform'...
+remote: Enumerating objects: 100%, done.
+Receiving objects: 100%
+```
 
-### 第 3 步：获取最新代码（每天上班前）
+4. 进入项目目录：
+```cmd
+cd C:\smart-doc-platform
+```
+
+✅ 现在你本地有了最新代码！
+
+---
+
+### 📝 第二部分：每天的开发流程
+
+#### 每天上班第一步：获取最新代码
 
 ```cmd
 cd C:\smart-doc-platform
 git pull
 ```
 
-### 第 4 步：提交你的修改（修改完成后）
+看到类似 `Already up to date.` 或 `Updating xxx..xxx` 就表示成功。
+
+#### 然后开始修改代码
+
+用 VS Code 或记事本打开文件修改，保存即可。
+
+#### 修改完成后，提交代码（见下方详细步骤）
+
+---
+
+### 🚀 第三部分：提交代码的详细步骤（重点！）
+
+#### 步骤 1：创建自己的分支
+
+> 💡 **什么是分支？** 就像你在一张纸上写草稿，创建分支就是在"复制一张纸"，你在上面写错了不会影响原来的内容。
+
+在命令提示符中输入（把 `你的名字` 换成你的名字，例如 `zhangsan`）：
 
 ```cmd
-# 查看改了哪些文件
-git status
-
-# 添加所有修改
-git add .
-
-# 提交修改（写清楚你改了什么）
-git commit -m "文档审核模块：新增批量上传功能"
-
-# 推送到 GitHub
-git push
+cd C:\smart-doc-platform
+git checkout -b feature-zhangsan
 ```
 
-> ⚠️ 推送（`git push`）需要 Token，联系项目负责人获取
+✅ 应该显示 `Switched to a new branch 'feature-zhangsan'`
+
+> ⚠️ **注意：** 第一次创建分支后，以后每天只需要做步骤 2-4，**不需要再创建分支**！
+
+---
+
+#### 步骤 2：告诉 Git 你改了哪些文件
+
+```cmd
+cd C:\smart-doc-platform
+git add .
+```
+
+✅ 没有任何错误信息就是成功
+
+---
+
+#### 步骤 3：提交你的修改
+
+```cmd
+git commit -m "你的名字：修改了什么功能"
+```
+
+**例子：**
+```cmd
+git commit -m "张三：文档审核模块新增批量上传按钮"
+```
+
+或：
+```cmd
+git commit -m "李四：润色页面修改了字体大小"
+```
+
+> ⚠️ `-m` 后面必须加引号，引号里写清楚你改了什么，这样负责人才能看懂！
+
+✅ 应该显示类似：
+```
+[feature-zhangsan abc1234] 张三：文档审核模块新增批量上传按钮
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+```
+
+---
+
+#### 步骤 4：推送代码到 GitHub
+
+```cmd
+git push origin feature-zhangsan
+```
+
+✅ 应该看到类似：
+```
+Enumerating objects: 5, done.
+Counting objects: 100%
+To https://github.com/caoyanyuan-glitch/smart-doc-platform.git
+ * [new branch]     feature-zhangsan -> feature-zhangsan
+```
+
+---
+
+#### 步骤 5：在 GitHub 网页上创建合并请求
+
+**这是最重要的一步！让你的修改被负责人审核和合并！**
+
+1. 打开浏览器，访问：**https://github.com/caoyanyuan-glitch/smart-doc-platform**
+
+2. 你应该能看到一个黄色的提示条：**`feature-zhangsan had recent pushes`**，点击旁边的绿色按钮 **Compare & pull request**
+
+3. 如果没看到黄色提示条，点击 **branches** 链接（页面顶部），找到你的分支，点击 **New pull request**
+
+4. 填写合并请求：
+   - **Title（标题）：** 写清楚你做了什么修改
+     - 例如：`张三：文档审核模块新增批量上传按钮`
+   - **Leave a comment（留言）：** 可以简单描述一下
+     - 例如：`新增了批量上传文档的功能，请审核`
+
+5. 点击绿色的 **Create pull request** 按钮
+
+6. ✅ 完成！现在负责人会收到通知，看到你的修改，决定是否合并！
+
+---
+
+### 📋 完整的提交代码流程（汇总）
+
+每天修改代码后，执行以下 5 个命令：
+
+```cmd
+# 1. 进入项目目录
+cd C:\smart-doc-platform
+
+# 2. 先获取最新代码（避免冲突）
+git pull
+
+# 3. 切换到你的分支（如果不在分支上）
+git checkout feature-你的名字
+
+# 4. 添加所有修改
+git add .
+
+# 5. 提交（写清楚改了什么）
+git commit -m "你的名字：修改了什么"
+
+# 6. 推送到 GitHub
+git push origin feature-你的名字
+
+# 7. 然后去 GitHub 网页创建 Pull Request
+```
+
+---
+
+### 🔄 第二天继续工作的流程
+
+```cmd
+# 1. 进入项目
+cd C:\smart-doc-platform
+
+# 2. 获取最新代码
+git pull
+
+# 3. 切换到你的分支
+git checkout feature-你的名字
+
+# 4. 修改代码...
+
+# 5. 添加修改
+git add .
+
+# 6. 提交
+git commit -m "你的名字：今天又改了哪里"
+
+# 7. 推送
+git push origin feature-你的名字
+
+# 8. 去 GitHub 创建新的 Pull Request
+```
+
+---
+
+### ⚠️ 注意事项
+
+1. **不要直接修改 main 分支！** main 是正式版本，只能通过 Pull Request 合并
+
+2. **每次修改前先 `git pull`**，确保拿到最新代码
+
+3. **commit message 要写清楚**，方便负责人审核
+
+4. **推送后记得去 GitHub 创建 Pull Request**，不创建的话负责人看不到你的修改！
+
+5. **多人同时修改同一个文件怎么办？** Git 会提示冲突，需要手动解决（可以先问负责人）
+
+---
+
+### 🆘 如果遇到问题
+
+**问题：`git push` 需要用户名和密码？**
+
+这是正常的。如果是第一次推送，可能会要求你登录 GitHub。按照提示操作即可。
+
+**问题：提示 `src refspec feature-xxx does not match any`？**
+
+说明你不在正确的分支上。先执行：
+```cmd
+git checkout feature-你的名字
+```
+
+**问题：提示 `! [rejected] main -> main (non-fast-forward)`？**
+
+说明有人已经更新了 main 分支。先拉取最新代码：
+```cmd
+git pull origin main
+```
+
+然后再提交你的修改。
+
+**问题：不知道自己在哪个分支？**
+
+执行：
+```cmd
+git branch
+```
+
+会显示所有分支，当前分支前面有 `*`
+
+---
+
+### 📞 需要帮助？
+
+把终端里显示的**红色错误信息**截图发给负责人，负责人会帮你解决！
 
 ---
 
