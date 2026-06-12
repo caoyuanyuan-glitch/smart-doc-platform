@@ -14,6 +14,10 @@ def init_data():
     
     db = SessionLocal()
     
+    db.query(Rule).delete()
+    db.query(Term).delete()
+    db.query(AuditBasis).delete()
+    
     # 添加50条审核规则（基于MGI中英文写作风格指南和常见错误清单）
     rules = [
         # ========== 标点符号规则 ==========
@@ -24,7 +28,8 @@ def init_data():
             "regex": r"(?<![a-zA-Z])[.,?!;](?![a-zA-Z])",
             "example": "Hello. 应改为 Hello。",
             "suggestion": "请将半角标点替换为全角标点",
-            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号"
+            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号",
+            "language": "cn"
         },
         {
             "rule_no": "R002",
@@ -33,7 +38,8 @@ def init_data():
             "regex": r"([.,?!;:])([a-zA-Z])",
             "example": "word.word 应改为 word. word",
             "suggestion": "英文标点后请添加空格",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Punctuation"
+            "audit_basis": "MGI英文技术文档写作风格指南 - Punctuation",
+            "language": "en"
         },
         {
             "rule_no": "R003",
@@ -42,16 +48,18 @@ def init_data():
             "regex": r"([.,?!;:]){2,}",
             "example": "Hello.. 应改为 Hello.",
             "suggestion": "请删除重复的标点符号",
-            "audit_basis": "技术文档常见错误清单与规范 - 标点符号"
+            "audit_basis": "技术文档常见错误清单与规范 - 标点符号",
+            "language": "both"
         },
         {
             "rule_no": "R004",
             "category": "标点符号",
             "description": "引号应成对出现",
             "regex": r"[\"“]([^\"”]*)$",
-            "example": "“Hello 应改为 “Hello”",
+            "example": "\"Hello 应改为 \"Hello\"",
             "suggestion": "请补全缺失的右引号",
-            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号"
+            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号",
+            "language": "both"
         },
         {
             "rule_no": "R005",
@@ -60,7 +68,8 @@ def init_data():
             "regex": r"[\(\（]([^\)\）]*)$",
             "example": "(Hello 应改为 (Hello)",
             "suggestion": "请补全缺失的右括号",
-            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号"
+            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号",
+            "language": "both"
         },
         {
             "rule_no": "R006",
@@ -69,16 +78,18 @@ def init_data():
             "regex": r"（[a-zA-Z]+）",
             "example": "（DNA）应改为 (DNA)",
             "suggestion": "英文内容请使用半角括号",
-            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号"
+            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号",
+            "language": "cn"
         },
         {
             "rule_no": "R007",
             "category": "标点符号",
             "description": "引号方向正确",
             "regex": r"(\")([^\"]*)(\"|$)",
-            "example": "\"ON\" 不应为 ”ON\"",
+            "example": "\"ON\" 不应为 \"ON\"",
             "suggestion": "请使用正确方向的引号",
-            "audit_basis": "技术文档常见错误清单与规范 - 标点符号"
+            "audit_basis": "技术文档常见错误清单与规范 - 标点符号",
+            "language": "both"
         },
         {
             "rule_no": "R008",
@@ -87,7 +98,8 @@ def init_data():
             "regex": r"(\w+)[®™]",
             "example": "Qubit® 应改为 Qubit^®^",
             "suggestion": "商标符号应使用上角标格式",
-            "audit_basis": "技术文档常见错误清单与规范 - 标点符号"
+            "audit_basis": "技术文档常见错误清单与规范 - 标点符号",
+            "language": "en"
         },
         
         # ========== 单位规则 ==========
@@ -98,7 +110,8 @@ def init_data():
             "regex": r"\bul\b",
             "example": "10ul 应改为 10 μL",
             "suggestion": "请将ul改为μL",
-            "audit_basis": "技术文档常见错误清单与规范 - 单位"
+            "audit_basis": "技术文档常见错误清单与规范 - 单位",
+            "language": "both"
         },
         {
             "rule_no": "R010",
@@ -107,7 +120,8 @@ def init_data():
             "regex": r"\bml\b",
             "example": "100ml 应改为 100 mL",
             "suggestion": "请将ml改为mL",
-            "audit_basis": "技术文档常见错误清单与规范 - 单位"
+            "audit_basis": "技术文档常见错误清单与规范 - 单位",
+            "language": "both"
         },
         {
             "rule_no": "R011",
@@ -116,7 +130,8 @@ def init_data():
             "regex": r"\b(mins?|hs?|secs?)\b",
             "example": "5mins 应改为 5 min",
             "suggestion": "单位不应加s",
-            "audit_basis": "技术文档常见错误清单与规范 - 单位"
+            "audit_basis": "技术文档常见错误清单与规范 - 单位",
+            "language": "en"
         },
         {
             "rule_no": "R012",
@@ -125,7 +140,8 @@ def init_data():
             "regex": r"\bKg\b",
             "example": "10Kg 应改为 10 kg",
             "suggestion": "请将Kg改为kg",
-            "audit_basis": "技术文档常见错误清单与规范 - 单位"
+            "audit_basis": "技术文档常见错误清单与规范 - 单位",
+            "language": "both"
         },
         {
             "rule_no": "R013",
@@ -134,7 +150,8 @@ def init_data():
             "regex": r"(\d+)([a-zA-Zμ℃℉%]+)",
             "example": "10mm 应改为 10 mm",
             "suggestion": "数字与单位之间请添加空格",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Numbers and measurements"
+            "audit_basis": "MGI英文技术文档写作风格指南 - Numbers and measurements",
+            "language": "en"
         },
         {
             "rule_no": "R014",
@@ -143,7 +160,8 @@ def init_data():
             "regex": r"(\d+\s*[a-zA-Zμ℃℉%]*)\s*[-–—]\s*(\d+\s*[a-zA-Zμ℃℉%]*)",
             "example": "10-20℃ 应改为 10 ~ 20 ℃",
             "suggestion": "范围表示请使用~连接",
-            "audit_basis": "中文技术文档写作风格指南 - 数及数量"
+            "audit_basis": "中文技术文档写作风格指南 - 数及数量",
+            "language": "cn"
         },
         {
             "rule_no": "R015",
@@ -152,7 +170,8 @@ def init_data():
             "regex": r"(\d+)\s+%",
             "example": "50 % 应改为 50%",
             "suggestion": "百分比符号前不应有空格",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Numbers and measurements"
+            "audit_basis": "MGI英文技术文档写作风格指南 - Numbers and measurements",
+            "language": "en"
         },
         
         # ========== 数字规则 ==========
@@ -163,7 +182,8 @@ def init_data():
             "regex": r"\d{1,2}[-/]\d{1,2}[-/](\d{2}|\d{4})(?!\d)",
             "example": "2024/01/15 应改为 2024-01-15",
             "suggestion": "日期格式请统一为YYYY-MM-DD",
-            "audit_basis": "中文技术文档写作风格指南 - 数及数量"
+            "audit_basis": "中文技术文档写作风格指南 - 数及数量",
+            "language": "both"
         },
         {
             "rule_no": "R017",
@@ -172,16 +192,18 @@ def init_data():
             "regex": r"\b(\d{4,})\b",
             "example": "10000 应改为 10,000",
             "suggestion": "大数字请使用逗号分隔",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Numbers and measurements"
+            "audit_basis": "MGI英文技术文档写作风格指南 - Numbers and measurements",
+            "language": "en"
         },
         {
             "rule_no": "R018",
             "category": "数字格式",
-            "description": "小于10的数字应使用文字",
-            "regex": r"\b([1-9])\b(?!\d)",
+            "description": "中文文档中小于10的数字应使用文字",
+            "regex": r"(?<!\d)\b([1-9])\b(?!\d)",
             "example": "5 应改为 五",
             "suggestion": "小于10的数字请使用中文数字",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Numbers and measurements"
+            "audit_basis": "中文技术文档写作风格指南 - 数及数量",
+            "language": "cn"
         },
         {
             "rule_no": "R019",
@@ -190,375 +212,345 @@ def init_data():
             "regex": r"\d{1,2}:\d{2}(?!:\d{2})",
             "example": "14:30 应改为 14:30:00",
             "suggestion": "时间格式请统一为HH:MM:SS",
-            "audit_basis": "中文技术文档写作风格指南 - 数及数量"
-        },
-        
-        # ========== 术语规则 ==========
-        {
-            "rule_no": "R020",
-            "category": "术语规范",
-            "description": "禁止使用非标准术语",
-            "regex": r"(账套|用户名|平台)",
-            "example": "账套应改为租户",
-            "suggestion": "请使用标准术语",
-            "audit_basis": "中文技术文档写作风格指南 - 缩略语"
-        },
-        {
-            "rule_no": "R021",
-            "category": "术语规范",
-            "description": "试剂与硬件用词正确",
-            "regex": r"配[置制]",
-            "example": "配置溶液应改为配制溶液",
-            "suggestion": "试剂相关请使用'配制'，硬件相关请使用'配置'",
-            "audit_basis": "技术文档常见错误清单与规范 - 错别字"
-        },
-        {
-            "rule_no": "R022",
-            "category": "术语规范",
-            "description": "振荡与震荡用词正确",
-            "regex": r"\b震[荡动]\b",
-            "example": "震荡混匀应改为振荡混匀",
-            "suggestion": "请使用'振荡'而非'震荡'",
-            "audit_basis": "技术文档常见错误清单与规范 - 错别字"
-        },
-        {
-            "rule_no": "R023",
-            "category": "术语规范",
-            "description": "仓与舱用词正确",
-            "regex": r"试剂[舱仓]",
-            "example": "试剂舱应改为试剂仓",
-            "suggestion": "请使用'仓'表示存储空间",
-            "audit_basis": "技术文档常见错误清单与规范 - 错别字"
-        },
-        {
-            "rule_no": "R024",
-            "category": "术语规范",
-            "description": "储存与存储用词统一",
-            "regex": r"\b存[\u50a8储]\b",
-            "example": "存储应改为储存",
-            "suggestion": "请统一使用'储存'",
-            "audit_basis": "技术文档常见错误清单与规范 - 错别字"
-        },
-        {
-            "rule_no": "R025",
-            "category": "术语规范",
-            "description": "移液器写法正确",
-            "regex": r"\bPipet[s]?\b",
-            "example": "Pipets 应改为 Pipettes",
-            "suggestion": "请使用正确拼写Pipettes",
-            "audit_basis": "技术文档常见错误清单与规范 - 错别字"
-        },
-        {
-            "rule_no": "R026",
-            "category": "术语规范",
-            "description": "中英文夹杂处理",
-            "regex": r"(Cat\.\s*No\.|Item\s*No\.)",
-            "example": "Cat. No. 应改为 货号",
-            "suggestion": "请使用中文表述",
-            "audit_basis": "技术文档常见错误清单与规范 - 共性问题"
-        },
-        {
-            "rule_no": "R027",
-            "category": "术语规范",
-            "description": "欧代标识正确",
-            "regex": r"\bEC\s+REP\b",
-            "example": "EC REP 应改为 EU REP",
-            "suggestion": "请使用正确标识EU REP",
-            "audit_basis": "技术文档常见错误清单与规范 - 共性问题"
-        },
-        {
-            "rule_no": "R028",
-            "category": "术语规范",
-            "description": "缩略语首次出现应注明全称",
-            "regex": r"\b(DNA|RNA|PCR|IVD|RUO)\b",
-            "example": "DNA应注明(deoxyribonucleic acid)",
-            "suggestion": "首次出现请注明全称",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Abbreviations and acronyms"
-        },
-        
-        # ========== 时态语态规则 ==========
-        {
-            "rule_no": "R029",
-            "category": "时态语态",
-            "description": "应使用主动语态",
-            "regex": r"[被被]动语态结构",
-            "example": "被执行应改为执行",
-            "suggestion": "请使用主动语态",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Voice"
-        },
-        {
-            "rule_no": "R030",
-            "category": "时态语态",
-            "description": "应使用现在时态",
-            "regex": r"(将|将会|将要|已)\s+[执行处理]",
-            "example": "将执行应改为执行",
-            "suggestion": "请使用现在时态",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Tense"
-        },
-        {
-            "rule_no": "R031",
-            "category": "时态语态",
-            "description": "避免使用shall/will",
-            "regex": r"\b(shall|will)\b",
-            "example": "will begin 应改为 begins",
-            "suggestion": "避免使用shall/will",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Tense"
-        },
-        
-        # ========== 标题规则 ==========
-        {
-            "rule_no": "R032",
-            "category": "标题格式",
-            "description": "标题应使用正确样式",
-            "regex": r"^#{1,6}\s+.+",
-            "example": "一级标题使用#",
-            "suggestion": "标题格式请遵循规范",
-            "audit_basis": "中文技术文档写作风格指南 - 标题"
-        },
-        {
-            "rule_no": "R033",
-            "category": "标题格式",
-            "description": "标题层级应正确嵌套",
-            "regex": r"#{3,}\s+.+",
-            "example": "三级标题应在二级标题之后",
-            "suggestion": "请检查标题层级",
-            "audit_basis": "中文技术文档写作风格指南 - 标题"
-        },
-        
-        # ========== 句子规则 ==========
-        {
-            "rule_no": "R034",
-            "category": "句子结构",
-            "description": "句子应简洁",
-            "regex": r"[^。！？]{100,}",
-            "example": "句子超过100字",
-            "suggestion": "请拆分长句",
-            "audit_basis": "中文技术文档写作风格指南 - 句子"
-        },
-        {
-            "rule_no": "R035",
-            "category": "句子结构",
-            "description": "避免使用双重否定",
-            "regex": r"不.*不.*",
-            "example": "不得不执行应改为必须执行",
-            "suggestion": "请避免双重否定",
-            "audit_basis": "中文技术文档写作风格指南 - 句子"
-        },
-        {
-            "rule_no": "R036",
-            "category": "句子结构",
-            "description": "避免使用被动语态",
-            "regex": r"[被被]\+动词",
-            "example": "被处理应改为处理",
-            "suggestion": "请使用主动语态",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Voice"
-        },
-        {
-            "rule_no": "R037",
-            "category": "句子结构",
-            "description": "正确使用的/地/得",
-            "regex": r"(的\s+动词|地\s+名词|得\s+名词)",
-            "example": "开心的笑了应改为开心地笑了",
-            "suggestion": "请正确使用的/地/得",
-            "audit_basis": "中文技术文档写作风格指南 - 句子"
+            "audit_basis": "中文技术文档写作风格指南 - 数及数量",
+            "language": "both"
         },
         
         # ========== 英文规则 ==========
         {
-            "rule_no": "R038",
+            "rule_no": "R020",
             "category": "英文规范",
-            "description": "英文单词拼写正确",
-            "regex": r"\b(teh|adn|wtih|hvae|tihs)\b",
+            "description": "英文单词拼写检查",
+            "regex": r"\b(teh|adn|wtih|hvae|tihs|taht|whta)\b",
             "example": "teh 应改为 the",
-            "suggestion": "请检查英文拼写",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Grammar"
+            "suggestion": "请检查单词拼写",
+            "audit_basis": "MGI英文技术文档写作风格指南 - Spelling",
+            "language": "en"
         },
         {
-            "rule_no": "R039",
+            "rule_no": "R021",
             "category": "英文规范",
-            "description": "英文大小写正确",
-            "regex": r"\b(mysql|html|dna|rna)\b",
-            "example": "mysql 应改为 MySQL",
-            "suggestion": "专有名词首字母请大写",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Capitalization"
+            "description": "英文首字母大写",
+            "regex": r"\b([a-z][a-z]+)\b(?=\s*\.)",
+            "example": "hello. 应改为 Hello.",
+            "suggestion": "句首单词首字母请大写",
+            "audit_basis": "MGI英文技术文档写作风格指南 - Capitalization",
+            "language": "en"
+        },
+        {
+            "rule_no": "R022",
+            "category": "英文规范",
+            "description": "标题首字母大写",
+            "regex": r"^([a-z])",
+            "example": "hello world 应改为 Hello World",
+            "suggestion": "标题首字母请大写",
+            "audit_basis": "MGI英文技术文档写作风格指南 - Capitalization",
+            "language": "en"
+        },
+        {
+            "rule_no": "R023",
+            "category": "英文规范",
+            "description": "冠词使用检查",
+            "regex": r"\b(a|an)\s+([aeiouAEIOU])",
+            "example": "a apple 应改为 an apple",
+            "suggestion": "元音开头单词前请使用an",
+            "audit_basis": "MGI英文技术文档写作风格指南 - Articles",
+            "language": "en"
+        },
+        {
+            "rule_no": "R024",
+            "category": "英文规范",
+            "description": "英文单词连续重复",
+            "regex": r"\b(\w+)\s+\1\b",
+            "example": "the the 应改为 the",
+            "suggestion": "请删除重复的单词",
+            "audit_basis": "技术文档常见错误清单与规范 - 英文",
+            "language": "en"
+        },
+        
+        # ========== 中文规则 ==========
+        {
+            "rule_no": "R025",
+            "category": "中文规范",
+            "description": "禁止中英文混排无空格",
+            "regex": r"([\u4e00-\u9fff])([a-zA-Z])|([a-zA-Z])([\u4e00-\u9fff])",
+            "example": "中文English 应改为 中文 English",
+            "suggestion": "中英文之间请添加空格",
+            "audit_basis": "中文技术文档写作风格指南 - 中英文混排",
+            "language": "cn"
+        },
+        {
+            "rule_no": "R026",
+            "category": "中文规范",
+            "description": "禁止使用多余空格",
+            "regex": r" {2,}",
+            "example": "多 余 空格",
+            "suggestion": "请删除多余空格",
+            "audit_basis": "中文技术文档写作风格指南 - 排版规范",
+            "language": "cn"
+        },
+        {
+            "rule_no": "R027",
+            "category": "中文规范",
+            "description": "禁止使用全角空格",
+            "regex": r"　",
+            "example": "全角空格",
+            "suggestion": "请使用半角空格",
+            "audit_basis": "中文技术文档写作风格指南 - 排版规范",
+            "language": "cn"
+        },
+        {
+            "rule_no": "R028",
+            "category": "中文规范",
+            "description": "括号前不应有空格",
+            "regex": r"(\S)\s+([\(\（])",
+            "example": "内容 (括号) 应改为 内容(括号)",
+            "suggestion": "括号前不应有空格",
+            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号",
+            "language": "cn"
+        },
+        {
+            "rule_no": "R029",
+            "category": "中文规范",
+            "description": "括号后应有空格",
+            "regex": r"([\)\）])(\S)",
+            "example": "(括号)内容 应改为 (括号) 内容",
+            "suggestion": "括号后请添加空格",
+            "audit_basis": "中文技术文档写作风格指南 - 中文标点符号",
+            "language": "cn"
+        },
+        
+        # ========== 格式规则 ==========
+        {
+            "rule_no": "R030",
+            "category": "格式规范",
+            "description": "标题格式统一",
+            "regex": r"^(#+)\s*([^#].*)$",
+            "example": "##标题 应改为 ## 标题",
+            "suggestion": "标题符号后请添加空格",
+            "audit_basis": "技术文档常见错误清单与规范 - Markdown",
+            "language": "both"
+        },
+        {
+            "rule_no": "R031",
+            "category": "格式规范",
+            "description": "列表格式检查",
+            "regex": r"^\s*[-*+]\s*$",
+            "example": "- 空列表项",
+            "suggestion": "列表项请添加内容",
+            "audit_basis": "技术文档常见错误清单与规范 - Markdown",
+            "language": "both"
+        },
+        {
+            "rule_no": "R032",
+            "category": "格式规范",
+            "description": "代码块格式检查",
+            "regex": r"```(\w*)\s*$",
+            "example": "```python 后应添加代码",
+            "suggestion": "代码块请添加内容",
+            "audit_basis": "技术文档常见错误清单与规范 - Markdown",
+            "language": "both"
+        },
+        {
+            "rule_no": "R033",
+            "category": "格式规范",
+            "description": "链接格式检查",
+            "regex": r"\[([^\]]+)\]\(\)",
+            "example": "[链接]() 应改为 [链接](url)",
+            "suggestion": "链接请添加URL",
+            "audit_basis": "技术文档常见错误清单与规范 - Markdown",
+            "language": "both"
+        },
+        {
+            "rule_no": "R034",
+            "category": "格式规范",
+            "description": "图片格式检查",
+            "regex": r"!\[([^\]]*)\]\(\)",
+            "example": "![图片]() 应改为 ![图片](url)",
+            "suggestion": "图片请添加URL",
+            "audit_basis": "技术文档常见错误清单与规范 - Markdown",
+            "language": "both"
+        },
+        
+        # ========== 语法规则 ==========
+        {
+            "rule_no": "R035",
+            "category": "语法检查",
+            "description": "中文句子过长",
+            "regex": r"([^。！？\n]{50,})",
+            "example": "超长句子",
+            "suggestion": "建议拆分为多个短句",
+            "audit_basis": "中文技术文档写作风格指南 - 句子",
+            "language": "cn"
+        },
+        {
+            "rule_no": "R036",
+            "category": "语法检查",
+            "description": "英文句子过长",
+            "regex": r"([^.!?\n]{60,})",
+            "example": "Very long sentence without punctuation",
+            "suggestion": "建议拆分为多个短句",
+            "audit_basis": "MGI英文技术文档写作风格指南 - Sentences",
+            "language": "en"
+        },
+        {
+            "rule_no": "R037",
+            "category": "语法检查",
+            "description": "被动语态检查",
+            "regex": r"\b(was|were|is|are)\s+[a-z]+ed\b",
+            "example": "was done 应改为 did",
+            "suggestion": "建议使用主动语态",
+            "audit_basis": "MGI英文技术文档写作风格指南 - Voice",
+            "language": "en"
+        },
+        {
+            "rule_no": "R038",
+            "category": "语法检查",
+            "description": "冗余修饰",
+            "regex": r"\b(非常|十分|特别)\s+(重要|关键|核心)",
+            "example": "非常重要 应改为 重要",
+            "suggestion": "请简化修饰词",
+            "audit_basis": "中文技术文档写作风格指南 - 词汇",
+            "language": "cn"
+        },
+        
+        # ========== 命名规则 ==========
+        {
+            "rule_no": "R039",
+            "category": "命名规范",
+            "description": "变量命名应使用驼峰式",
+            "regex": r"\b(_[a-zA-Z]|[a-z][A-Z][a-z])\b",
+            "example": "my_variable 应改为 myVariable",
+            "suggestion": "变量命名请使用驼峰式",
+            "audit_basis": "技术文档常见错误清单与规范 - 命名",
+            "language": "en"
         },
         {
             "rule_no": "R040",
-            "category": "英文规范",
-            "description": "冠词使用正确",
-            "regex": r"\b([aeiouAEIOU][a-zA-Z]+)\b",
-            "example": "university 前应使用a",
-            "suggestion": "请正确使用冠词",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Articles"
+            "category": "命名规范",
+            "description": "类名应使用 PascalCase",
+            "regex": r"\bclass\s+[a-z]",
+            "example": "class myClass 应改为 class MyClass",
+            "suggestion": "类名首字母请大写",
+            "audit_basis": "技术文档常见错误清单与规范 - 命名",
+            "language": "en"
         },
+        
+        # ========== 专业术语 ==========
         {
             "rule_no": "R041",
-            "category": "英文规范",
-            "description": "使用美式英语",
-            "regex": r"\b(colour|centre|analyse)\b",
-            "example": "colour 应改为 color",
-            "suggestion": "请使用美式英语拼写",
-            "audit_basis": "MGI英文技术文档写作风格指南 - Version of English"
+            "category": "专业术语",
+            "description": "技术术语拼写检查",
+            "regex": r"\b(tecnology|tecnical|devlop|implementaion)\b",
+            "example": "tecnology 应改为 technology",
+            "suggestion": "请检查技术术语拼写",
+            "audit_basis": "技术文档常见错误清单与规范 - 术语",
+            "language": "en"
         },
-        
-        # ========== 界面元素规则 ==========
         {
             "rule_no": "R042",
-            "category": "界面元素",
-            "description": "界面元素应加粗",
-            "regex": r"(Click|Select|Tap)\s+(\w+)",
-            "example": "Click Continue 应改为 Click **Continue**",
-            "suggestion": "界面元素名称请加粗",
-            "audit_basis": "MGI英文技术文档写作风格指南 - User interface"
+            "category": "专业术语",
+            "description": "医学术语规范",
+            "regex": r"\b(mg|mg\.|ml|ml\.)\b",
+            "example": "mg 应改为 mg",
+            "suggestion": "医学单位请使用标准缩写",
+            "audit_basis": "医疗器械说明书和标签管理规定",
+            "language": "both"
         },
+        
+        # ========== 一致性规则 ==========
         {
             "rule_no": "R043",
-            "category": "界面元素",
-            "description": "菜单路径格式正确",
-            "regex": r"(Menu|菜单)\s*[-→]\s*(\w+)",
-            "example": "File -> Save 应使用 >",
-            "suggestion": "菜单路径请使用 > 连接",
-            "audit_basis": "中文技术文档写作风格指南 - 界面和控件"
+            "category": "一致性",
+            "description": "术语前后不一致",
+            "regex": r"\b(API|api|Api)\b",
+            "example": "API和api混用",
+            "suggestion": "请保持术语一致性",
+            "audit_basis": "技术文档常见错误清单与规范 - 一致性",
+            "language": "both"
         },
-        
-        # ========== 表格规则 ==========
         {
             "rule_no": "R044",
-            "category": "表格规范",
-            "description": "表格应有表头",
-            "regex": r"\|.+\|",
-            "example": "表格缺少表头",
-            "suggestion": "请添加表头",
-            "audit_basis": "中文技术文档写作风格指南 - 表格"
-        },
-        {
-            "rule_no": "R045",
-            "category": "表格规范",
-            "description": "表格单元格不应为空",
-            "regex": r"\|\s*\|",
-            "example": "表格有空单元格",
-            "suggestion": "空单元格请填写'无'或'-'",
-            "audit_basis": "中文技术文档写作风格指南 - 表格"
+            "category": "一致性",
+            "description": "数字格式不一致",
+            "regex": r"\b(\d{1,3})(\d{3})\b",
+            "example": "100000 应改为 100,000",
+            "suggestion": "大数字请使用千位分隔符",
+            "audit_basis": "技术文档常见错误清单与规范 - 一致性",
+            "language": "en"
         },
         
-        # ========== 列表规则 ==========
+        # ========== 其他规则 ==========
+        {
+            "rule_no": "R045",
+            "category": "其他",
+            "description": "文件编码应为UTF-8",
+            "regex": r"[\x80-\xFF]",
+            "example": "非UTF-8字符",
+            "suggestion": "请确保文件编码为UTF-8",
+            "audit_basis": "技术文档常见错误清单与规范 - 编码",
+            "language": "both"
+        },
         {
             "rule_no": "R046",
-            "category": "列表规范",
-            "description": "列表项应格式统一",
-            "regex": r"^(\*|-|\d+\.)\s+",
-            "example": "列表项格式不一致",
-            "suggestion": "请使用统一的列表格式",
-            "audit_basis": "中文技术文档写作风格指南 - 项目列表"
+            "category": "其他",
+            "description": "禁止使用Tab缩进",
+            "regex": r"\t",
+            "example": "Tab缩进",
+            "suggestion": "请使用空格缩进",
+            "audit_basis": "技术文档常见错误清单与规范 - 缩进",
+            "language": "both"
         },
         {
             "rule_no": "R047",
-            "category": "列表规范",
-            "description": "列表应至少包含两项",
-            "regex": r"^(\*|-)\s+.+$",
-            "example": "列表只有一项",
-            "suggestion": "列表应至少包含两项",
-            "audit_basis": "中文技术文档写作风格指南 - 项目列表"
+            "category": "其他",
+            "description": "行尾不应有空格",
+            "regex": r" +$",
+            "example": "行尾空格",
+            "suggestion": "请删除行尾空格",
+            "audit_basis": "技术文档常见错误清单与规范 - 格式",
+            "language": "both"
         },
-        
-        # ========== 共性问题规则 ==========
         {
             "rule_no": "R048",
-            "category": "共性问题",
-            "description": "禁止使用推销性质词汇",
-            "regex": r"(最佳|最好|最著名|最新技术|最高水平|最先进)",
-            "example": "最佳产品应改为产品",
-            "suggestion": "请避免使用推销性质词汇",
-            "audit_basis": "中文技术文档写作风格指南 - 写作要求"
+            "category": "其他",
+            "description": "文件应以空行结尾",
+            "regex": r"[^\n]$",
+            "example": "文件末尾无空行",
+            "suggestion": "文件末尾请添加空行",
+            "audit_basis": "技术文档常见错误清单与规范 - 格式",
+            "language": "both"
         },
         {
             "rule_no": "R049",
-            "category": "共性问题",
-            "description": "注意与切忌用词正确",
-            "regex": r"(切忌|切记)",
-            "example": "切忌远离应改为切记远离",
-            "suggestion": "请正确区分注意与切忌",
-            "audit_basis": "技术文档常见错误清单与规范 - 错别字"
+            "category": "其他",
+            "description": "禁止使用BOM头",
+            "regex": r"^\xef\xbb\xbf",
+            "example": "UTF-8 BOM",
+            "suggestion": "请移除BOM头",
+            "audit_basis": "技术文档常见错误清单与规范 - 编码",
+            "language": "both"
         },
         {
             "rule_no": "R050",
-            "category": "共性问题",
-            "description": "以与已用词正确",
-            "regex": r"\b以\b",
-            "example": "设备以停止应改为设备已停止",
-            "suggestion": "请正确区分以与已",
-            "audit_basis": "技术文档常见错误清单与规范 - 错别字"
+            "category": "其他",
+            "description": "URL格式检查",
+            "regex": r"https?://[^\s]+",
+            "example": "http://example.com",
+            "suggestion": "URL格式请正确",
+            "audit_basis": "技术文档常见错误清单与规范 - 链接",
+            "language": "both"
         }
     ]
     
     for rule_data in rules:
-        if not db.query(Rule).filter(Rule.rule_no == rule_data["rule_no"]).first():
-            db.add(Rule(**rule_data))
-    
-    # 添加术语
-    terms = [
-        {"standard": "租户", "non_standard": "账套"},
-        {"standard": "用户", "non_standard": "用户名"},
-        {"standard": "系统", "non_standard": "平台"},
-        {"standard": "配置", "non_standard": "设定"},
-        {"standard": "接口", "non_standard": "API"},
-        {"standard": "执行", "non_standard": "运行"},
-        {"standard": "完成", "non_standard": "结束"},
-        {"standard": "开始", "non_standard": "启动"},
-        {"standard": "使用", "non_standard": "采用"},
-        {"standard": "包含", "non_standard": "包括"},
-        {"standard": "进行", "non_standard": "执行"},
-        {"standard": "检查", "non_standard": "查看"},
-        {"standard": "设置", "non_standard": "配置"},
-        {"standard": "选择", "non_standard": "挑选"},
-        {"standard": "创建", "non_standard": "建立"}
-    ]
-    
-    for term_data in terms:
-        if not db.query(Term).filter(Term.non_standard == term_data["non_standard"]).first():
-            db.add(Term(**term_data))
-    
-    # 添加审核依据
-    basis_list = [
-        {
-            "name": "MGI中文技术文档写作风格指南",
-            "file_type": "md",
-            "content": "规定产品说明书/操作指南的中文写作风格，适用于产品说明书、操作指南、快速操作指南、软件操作指南等。"
-        },
-        {
-            "name": "MGI英文技术文档写作风格指南",
-            "file_type": "md",
-            "content": "Provides writing rules for MGI technical writers, editors, reviewers, and UI designers. Covers language, grammar, punctuation, structure, numbers, user interface, etc."
-        },
-        {
-            "name": "技术文档常见错误清单与规范",
-            "file_type": "md",
-            "content": "用于确保技术文档的准确性、一致性和专业性，涵盖标点符号、错别字、共性问题、单位等常见错误。"
-        },
-        {
-            "name": "医疗器械说明书和标签管理规定（6号令）",
-            "file_type": "pdf",
-            "content": "医疗器械说明书应当符合国家标准和行业规范，内容应当真实、准确、完整。"
-        },
-        {
-            "name": "GB/T 18268.1 电磁兼容性要求",
-            "file_type": "pdf",
-            "content": "测量、控制和实验室用的电设备电磁兼容性要求。"
-        },
-        {
-            "name": "GB 4793.1 安全要求",
-            "file_type": "pdf",
-            "content": "测量、控制和实验室用电气设备的安全要求。"
-        }
-    ]
-    
-    for basis_data in basis_list:
-        if not db.query(AuditBasis).filter(AuditBasis.name == basis_data["name"]).first():
-            db.add(AuditBasis(**basis_data))
+        rule = Rule(**rule_data)
+        db.add(rule)
     
     db.commit()
+    print("规则初始化完成")
+    
     db.close()
-    print("初始化数据成功！")
 
 if __name__ == "__main__":
     init_data()

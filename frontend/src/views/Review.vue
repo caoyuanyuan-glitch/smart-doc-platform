@@ -102,10 +102,9 @@
           </el-table-column>
           <el-table-column prop="category" label="分类" width="120" />
           <el-table-column prop="chapter" label="章节" width="180" />
-          <el-table-column prop="original_text" label="原文" width="150" />
-          <el-table-column prop="context" label="上下文" min-width="400">
+          <el-table-column label="上下文" min-width="500">
             <template #default="scope">
-              <span class="context-text">{{ scope.row.context }}</span>
+              <span class="context-text" v-html="highlightIssue(scope.row)"></span>
             </template>
           </el-table-column>
           <el-table-column prop="suggestion" label="修改建议" min-width="200" />
@@ -248,10 +247,9 @@
               </el-table-column>
               <el-table-column prop="category" label="分类" width="120" />
               <el-table-column prop="chapter" label="章节" width="180" />
-              <el-table-column prop="original_text" label="原文" width="150" />
-              <el-table-column prop="context" label="上下文" min-width="400">
+              <el-table-column label="上下文" min-width="500">
                 <template #default="scope">
-                  <span class="context-text">{{ scope.row.context }}</span>
+                  <span class="context-text" v-html="highlightIssue(scope.row)"></span>
                 </template>
               </el-table-column>
               <el-table-column prop="suggestion" label="建议" min-width="200" />
@@ -813,6 +811,20 @@ function getSeverityType(severity) {
 function getSeverityLabel(severity) {
   const labels = { fatal: '致命', serious: '严重', general: '一般', suggestion: '建议' }
   return labels[severity] || severity
+}
+
+function highlightIssue(issue) {
+  if (!issue.context && !issue.original_text) return '-'
+  
+  let text = issue.context || issue.original_text
+  
+  if (issue.original_text && text.includes(issue.original_text)) {
+    const escaped = issue.original_text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regex = new RegExp(`(${escaped})`, 'g')
+    text = text.replace(regex, '<span style="color: red; font-weight: bold; background-color: #ffeaea; padding: 1px 3px; border-radius: 2px;">$1</span>')
+  }
+  
+  return text
 }
 </script>
 

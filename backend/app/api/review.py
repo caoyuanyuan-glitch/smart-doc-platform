@@ -44,14 +44,38 @@ async def list_reviews(db: Session = Depends(get_db)):
         result.append(review_dict)
     return result
 
+def detect_language(content):
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]', content)
+    english_chars = re.findall(r'[a-zA-Z]', content)
+    
+    if len(chinese_chars) > len(english_chars) * 2:
+        return "cn"
+    elif len(english_chars) > len(chinese_chars) * 2:
+        return "en"
+    return "both"
+
 def run_rule_audit(content, rules):
     issues = []
+    document_language = detect_language(content)
+    seen_issues = set()
+    
     for rule in rules:
         try:
+            if rule.language == "cn" and document_language == "en":
+                continue
+            if rule.language == "en" and document_language == "cn":
+                continue
+            
             matches = re.finditer(rule.regex, content)
             for match in matches:
                 chapter = extract_chapter(content, match.start())
                 context = get_context(content, match.start(), match.end(), 200)
+                
+                issue_key = f"{rule.rule_no}-{match.start()}"
+                if issue_key in seen_issues:
+                    continue
+                seen_issues.add(issue_key)
+                
                 issues.append({
                     "severity": "general",
                     "category": rule.category,

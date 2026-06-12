@@ -7,6 +7,9 @@ class RuleBase(BaseModel):
     description: str
     regex: str
     example: str = ""
+    suggestion: str = ""
+    audit_basis: str = ""
+    language: str = "both"  # cn, en, both
 
 class RuleCreate(RuleBase):
     pass
@@ -23,3 +26,6 @@ class RuleUpdate(BaseModel):
     description: str | None = None
     regex: str | None = None
     example: str | None = None
+    suggestion: str | None = None
+    audit_basis: str | None = None
+    language: str | None = None
