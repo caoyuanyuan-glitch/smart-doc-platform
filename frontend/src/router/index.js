@@ -1,0 +1,133 @@
+import { createRouter, createWebHistory } from 'vue-router'
+import Login from '@/views/Login.vue'
+import Home from '@/views/Home.vue'
+import Review from '@/views/Review.vue'
+import Polish from '@/views/Polish.vue'
+import QA from '@/views/QA.vue'
+import Generate from '@/views/Generate.vue'
+import Compare from '@/views/Compare.vue'
+import Convert from '@/views/Convert.vue'
+import Rules from '@/views/Rules.vue'
+import Terms from '@/views/Terms.vue'
+import AuditBasis from '@/views/AuditBasis.vue'
+import Users from '@/views/Users.vue'
+
+const routes = [
+  {
+    path: '/login',
+    name: 'Login',
+    component: Login
+  },
+  {
+    path: '/',
+    name: 'Home',
+    component: Home
+  },
+  {
+    path: '/review',
+    name: 'Review',
+    component: Review
+  },
+  {
+    path: '/review/tasks',
+    name: 'ReviewTasks',
+    component: Review
+  },
+  {
+    path: '/review/rules',
+    name: 'ReviewRules',
+    component: Rules
+  },
+  {
+    path: '/review/reports',
+    name: 'ReviewReports',
+    component: Review
+  },
+  {
+    path: '/review/basis',
+    name: 'ReviewBasis',
+    component: AuditBasis
+  },
+  {
+    path: '/polish',
+    name: 'Polish',
+    component: Polish
+  },
+  {
+    path: '/polish/document',
+    name: 'PolishDocument',
+    component: Polish
+  },
+  {
+    path: '/qa',
+    name: 'QA',
+    component: QA
+  },
+  {
+    path: '/qa/library',
+    name: 'QALibrary',
+    component: QA
+  },
+  {
+    path: '/generate',
+    name: 'Generate',
+    component: Generate
+  },
+  {
+    path: '/generate/templates',
+    name: 'GenerateTemplates',
+    component: Generate
+  },
+  {
+    path: '/compare',
+    name: 'Compare',
+    component: Compare
+  },
+  {
+    path: '/compare/tasks',
+    name: 'CompareTasks',
+    component: Compare
+  },
+  {
+    path: '/compare/config',
+    name: 'CompareConfig',
+    component: Compare
+  },
+  {
+    path: '/convert',
+    name: 'Convert',
+    component: Convert
+  },
+  {
+    path: '/convert/history',
+    name: 'ConvertHistory',
+    component: Convert
+  },
+  {
+    path: '/rules',
+    name: 'Rules',
+    component: Rules
+  },
+  {
+    path: '/terms',
+    name: 'Terms',
+    component: Terms
+  },
+  {
+    path: '/audit_basis',
+    name: 'AuditBasis',
+    component: AuditBasis
+  },
+  {
+    path: '/users',
+    name: 'Users',
+    component: Users
+  }
+]
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes
+})
+
+export default router
