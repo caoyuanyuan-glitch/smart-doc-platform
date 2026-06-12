@@ -11,4 +11,6 @@ class Rule(Base):
     description = Column(Text)
     regex = Column(Text)
     example = Column(Text)
+    suggestion = Column(Text)
+    audit_basis = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)

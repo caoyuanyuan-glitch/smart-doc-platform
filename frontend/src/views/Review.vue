@@ -76,18 +76,40 @@
             {{ stat.label }}: {{ stat.value }}
           </span>
         </div>
-        <el-table :data="issues" border>
+        
+        <div class="filter-section">
+          <el-input v-model="filterKeyword" placeholder="关键词搜索" class="filter-input" />
+          <el-select v-model="filterSeverity" placeholder="严重级别" class="filter-select">
+            <el-option label="全部" value="" />
+            <el-option label="致命" value="fatal" />
+            <el-option label="严重" value="serious" />
+            <el-option label="一般" value="general" />
+            <el-option label="建议" value="suggestion" />
+          </el-select>
+          <el-select v-model="filterCategory" placeholder="分类" class="filter-select">
+            <el-option label="全部" value="" />
+            <el-option v-for="cat in categories" :key="cat" :label="cat" :value="cat" />
+          </el-select>
+          <el-button @click="clearFilters">重置筛选</el-button>
+        </div>
+
+        <el-table :data="filteredIssues" border>
           <el-table-column prop="id" label="ID" width="80" />
           <el-table-column prop="severity" label="严重级别" width="120">
             <template #default="scope">
               <el-tag :type="getSeverityType(scope.row.severity)">{{ getSeverityLabel(scope.row.severity) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="category" label="分类" width="100" />
+          <el-table-column prop="category" label="分类" width="120" />
+          <el-table-column prop="chapter" label="章节" width="150" />
           <el-table-column prop="original_text" label="原文" width="200" />
-          <el-table-column prop="suggestion" label="修改建议" />
-          <el-table-column prop="confidence" label="置信度" width="100" />
-          <el-table-column prop="source" label="来源" width="100" />
+          <el-table-column prop="context" label="上下文" min-width="300">
+            <template #default="scope">
+              <span class="context-text">{{ scope.row.context }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="suggestion" label="修改建议" min-width="200" />
+          <el-table-column prop="audit_basis" label="审核依据" min-width="200" />
         </el-table>
         <el-button @click="exportReport">导出报告</el-button>
       </div>
@@ -104,7 +126,7 @@
           <el-table-column prop="id" label="编号" width="100" />
           <el-table-column prop="category" label="分类" width="120" />
           <el-table-column prop="description" label="规则描述" />
-          <el-table-column prop="pattern" label="正则" width="200" />
+          <el-table-column prop="regex" label="正则" width="200" />
           <el-table-column prop="example" label="示例" width="160" />
           <el-table-column label="操作" width="180">
             <template #default="scope">
@@ -124,10 +146,16 @@
             <el-input v-model="ruleForm.description" placeholder="规则描述" />
           </el-form-item>
           <el-form-item label="正则">
-            <el-input v-model="ruleForm.pattern" placeholder="正则表达式" />
+            <el-input v-model="ruleForm.regex" placeholder="正则表达式" />
           </el-form-item>
           <el-form-item label="示例">
             <el-input v-model="ruleForm.example" placeholder="示例文本" />
+          </el-form-item>
+          <el-form-item label="建议">
+            <el-input v-model="ruleForm.suggestion" placeholder="修改建议" />
+          </el-form-item>
+          <el-form-item label="审核依据">
+            <el-input v-model="ruleForm.audit_basis" placeholder="审核依据来源" />
           </el-form-item>
         </el-form>
         <template #footer>
@@ -186,8 +214,10 @@
                 </template>
               </el-table-column>
               <el-table-column prop="category" label="分类" width="120" />
+              <el-table-column prop="chapter" label="章节" width="150" />
               <el-table-column prop="original_text" label="原文" width="220" />
               <el-table-column prop="suggestion" label="建议" />
+              <el-table-column prop="audit_basis" label="审核依据" width="200" />
             </el-table>
           </div>
         </div>
@@ -251,10 +281,14 @@ const currentReport = ref({})
 
 const showRuleDialog = ref(false)
 const editingRule = ref(null)
-const ruleForm = ref({ category: '', description: '', pattern: '', example: '' })
+const ruleForm = ref({ category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' })
 
 const uploadUrl = '/api/documents/upload/'
 const basisUploadUrl = '/api/audit_basis/upload'
+
+const filterKeyword = ref('')
+const filterSeverity = ref('')
+const filterCategory = ref('')
 
 const currentView = computed(() => {
   if (route.path === '/review/tasks') return 'tasks'
@@ -275,6 +309,26 @@ const issueStats = computed(() => {
     { label: '一般', value: stats.general, class: 'stat-general' },
     { label: '建议', value: stats.suggestion, class: 'stat-suggestion' }
   ]
+})
+
+const categories = computed(() => {
+  const cats = new Set(issues.value.map(i => i.category))
+  return Array.from(cats).filter(Boolean)
+})
+
+const filteredIssues = computed(() => {
+  return issues.value.filter(issue => {
+    if (filterKeyword.value && !issue.original_text.includes(filterKeyword.value) && !issue.context.includes(filterKeyword.value)) {
+      return false
+    }
+    if (filterSeverity.value && issue.severity !== filterSeverity.value) {
+      return false
+    }
+    if (filterCategory.value && issue.category !== filterCategory.value) {
+      return false
+    }
+    return true
+  })
 })
 
 onMounted(() => {
@@ -387,6 +441,12 @@ async function loadReviewIssues(reviewId) {
   }
 }
 
+function clearFilters() {
+  filterKeyword.value = ''
+  filterSeverity.value = ''
+  filterCategory.value = ''
+}
+
 async function viewDocument(id) {
   try {
     await documentAPI.get(id)
@@ -430,8 +490,10 @@ function editRule(row) {
   ruleForm.value = {
     category: row.category || '',
     description: row.description || '',
-    pattern: row.pattern || '',
-    example: row.example || ''
+    regex: row.regex || '',
+    example: row.example || '',
+    suggestion: row.suggestion || '',
+    audit_basis: row.audit_basis || ''
   }
   showRuleDialog.value = true
 }
@@ -447,7 +509,7 @@ async function saveRule() {
     }
     showRuleDialog.value = false
     editingRule.value = null
-    ruleForm.value = { category: '', description: '', pattern: '', example: '' }
+    ruleForm.value = { category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' }
     loadRules()
   } catch (error) {
     ElMessage.info('保存失败')
@@ -533,6 +595,21 @@ function getSeverityLabel(severity) {
   margin-bottom: 12px;
 }
 
+.filter-section {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 15px;
+  flex-wrap: wrap;
+}
+
+.filter-input {
+  width: 200px;
+}
+
+.filter-select {
+  width: 150px;
+}
+
 .issue-stats {
   margin-bottom: 15px;
 }
@@ -549,6 +626,12 @@ function getSeverityLabel(severity) {
 .stat-serious { background: #fff7ed; color: #fd7e14; }
 .stat-general { background: #fffbeb; color: #ffc107; }
 .stat-suggestion { background: #ecfdf5; color: #10b981; }
+
+.context-text {
+  font-size: 12px;
+  color: #606266;
+  line-height: 1.6;
+}
 
 .report-content {
   border: 1px solid #ebeef5;

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 import json
 import re
@@ -7,10 +7,31 @@ from app.crud.document import get_document
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
+from app.crud.audit_basis import get_audit_basis
 from app.schemas.review import Review, Issue, IssueUpdate
 from app.utils.ai_client import ai_client
 
 router = APIRouter()
+
+def extract_chapter(content, position):
+    lines = content[:position].split('\n')
+    chapter = ""
+    for i in range(len(lines)-1, max(0, len(lines)-20), -1):
+        line = lines[i].strip()
+        if line.startswith('#') or line.startswith('##') or line.startswith('###'):
+            chapter = line.lstrip('#').strip()
+            break
+    return chapter
+
+def get_context(content, start, end, context_length=200):
+    start_idx = max(0, start - context_length)
+    end_idx = min(len(content), end + context_length)
+    context = content[start_idx:end_idx]
+    if start_idx > 0:
+        context = "..." + context
+    if end_idx < len(content):
+        context = context + "..."
+    return context
 
 @router.get("/", response_model=list[Review])
 async def list_reviews(db: Session = Depends(get_db)):
@@ -23,39 +44,46 @@ def run_rule_audit(content, rules):
         try:
             matches = re.finditer(rule.regex, content)
             for match in matches:
+                chapter = extract_chapter(content, match.start())
+                context = get_context(content, match.start(), match.end(), 200)
                 issues.append({
                     "severity": "general",
                     "category": rule.category,
                     "rule": rule.rule_no,
-                    "chapter": "",
+                    "chapter": chapter,
                     "original_text": match.group(),
-                    "context": content[max(0, match.start()-50):min(len(content), match.end()+50)],
-                    "suggestion": "",
+                    "context": context,
+                    "suggestion": rule.suggestion if rule.suggestion else "",
                     "description": rule.description,
-                    "audit_basis": "",
+                    "audit_basis": rule.audit_basis if rule.audit_basis else "技术文档写作规范",
                     "confidence": 100,
-                    "source": "rule"
+                    "source": rule.audit_basis if rule.audit_basis else "技术文档写作规范",
+                    "position": f"{match.start()}-{match.end()}"
                 })
-        except:
+        except Exception as e:
             continue
     return issues
 
 def run_term_check(content, terms):
     issues = []
     for term in terms:
-        if term.non_standard in content:
+        occurrences = [m.start() for m in re.finditer(re.escape(term.non_standard), content)]
+        for pos in occurrences:
+            chapter = extract_chapter(content, pos)
+            context = get_context(content, pos, pos + len(term.non_standard), 200)
             issues.append({
                 "severity": "suggestion",
-                "category": "字词",
+                "category": "术语规范",
                 "rule": "TERM",
-                "chapter": "",
+                "chapter": chapter,
                 "original_text": term.non_standard,
-                "context": "",
+                "context": context,
                 "suggestion": f"建议使用标准术语: {term.standard}",
                 "description": f"发现非标准术语: {term.non_standard}",
-                "audit_basis": "",
+                "audit_basis": "MGI中文技术文档写作风格指南 - 缩略语",
                 "confidence": 95,
-                "source": "rule"
+                "source": "MGI中文技术文档写作风格指南 - 缩略语",
+                "position": f"{pos}-{pos + len(term.non_standard)}"
             })
     return issues
 
