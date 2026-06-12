@@ -1,350 +1,522 @@
-# 团队协作开发指南
+# 团队协作开发指南（超详细版）
 
-## 📋 目录
-
-- [快速开始](#快速开始)
-- [开发流程](#开发流程)
-- [模块分工](#模块分工)
-- [代码规范](#代码规范)
-- [常见问题](#常见问题)
+> 适用对象：**零基础同事**，不会用 Git/GitHub 也没关系！
 
 ---
 
-## 🚀 快速开始
+## 📦 方式一：下载 ZIP 包（最简单，推荐小白）
 
-### 方式一：每个人本地运行（推荐用于开发测试）
+### 第 1 步：打开 GitHub 仓库
 
-```bash
-# 1. 解压最新版本
-unzip smart-doc-platform-v1.1.3.zip
-cd smart-doc-platform-v4
+在浏览器打开：**https://github.com/caoyanyuan-glitch/smart-doc-platform**
 
-# 2. 启动后端（终端1）
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+### 第 2 步：下载 ZIP 包
 
-# 3. 启动前端（终端2）
-cd ../frontend
-npm install
-npm run dev
+1. 点击页面中间偏右的绿色按钮 **<> Code**
+2. 在弹出的菜单最底部，点击 **Download ZIP**
+3. 浏览器开始下载文件 `smart-doc-platform-main.zip`
 
-# 4. 访问
-# 浏览器打开 http://localhost:5173
-```
+### 第 3 步：解压文件
 
-### 方式二：一键启动脚本（Linux/Mac）
+**Windows 用户：**
 
-```bash
-cd smart-doc-platform-v4
-chmod +x start.sh
-./start.sh
-```
+1. 在下载目录找到 `smart-doc-platform-main.zip`
+2. 右键点击文件 → **"全部提取"**（或用 7-Zip / 解压到当前文件夹）
+3. 选择解压位置，例如 `C:\smart-doc-platform`
+4. 点击 **"提取"**
 
-### 方式三：Windows 用户
-
-```bat
-# 后端
-cd smart-doc-platform-v4\backend
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# 另开终端 - 前端
-cd smart-doc-platform-v4\frontend
-npm install
-npm run dev
-```
-
----
-
-## 📦 项目结构
+**解压后目录结构：**
 
 ```
-smart-doc-platform-v4/
-├── backend/                    # 后端 (Python + FastAPI)
+smart-doc-platform-main/
+├── backend/          ← Python 后端
 │   ├── app/
-│   │   ├── main.py          # 入口文件
-│   │   ├── api/             # API路由（各模块独立）
-│   │   │   ├── review.py       # 文档审核
-│   │   │   ├── polish.py     # 润色
-│   │   │   ├── qa.py         # 问答
-│   │   │   ├── generate.py   # 内容生成
-│   │   │   ├── compare.py    # 对比
-│   │   │   ├── convert.py    # 格式转换
-│   │   │   ├── rules.py      # 规则管理
-│   │   │   ├── terms.py      # 术语库
-│   │   │   └── auth.py       # 认证/用户
-│   │   ├── crud/            # 数据库操作
-│   │   ├── models/          # 数据模型
-│   │   ├── schemas/         # 请求/响应结构
-│   │   └── utils/           # 工具函数
-│   └── requirements.txt       # Python依赖
-│
-├── frontend/                   # 前端 (Vue 3 + Vite)
-│   ├── src/
-│   │   ├── views/           # 页面组件（各模块独立）
-│   │   │   ├── Home.vue       # 首页
-│   │   │   ├── Review.vue     # 文档审核
-│   │   │   ├── Polish.vue     # 润色
-│   │   │   ├── QA.vue         # 问答
-│   │   │   ├── Generate.vue   # 内容生成
-│   │   │   ├── Compare.vue    # 对比
-│   │   │   ├── Convert.vue    # 格式转换
-│   │   │   ├── Terms.vue      # 术语库
-│   │   │   ├── Rules.vue      # 规则管理
-│   │   │   └── Users.vue     # 用户管理
-│   │   ├── App.vue          # 主布局（左侧菜单）
-│   │   ├── router/          # 路由配置
-│   │   ├── api/             # API调用封装
-│   │   └── main.js          # 入口文件
-│   ├── vite.config.js       # Vite配置
-│   └── package.json         # NPM依赖
-│
-└── start.sh                 # 一键启动脚本
-└── COLLABORATION.md         # 本文件
+│   └── requirements.txt
+└── frontend/          ← Vue 前端
+    ├── src/
+    └── package.json
 ```
 
 ---
 
-## 👥 模块分工建议
+## 🛠️ 安装必要的工具
 
-### 推荐的分工方式
-
-| 模块 | 负责人 | 文件 | 说明 |
-|------|--------|------|
-| **文档审核** | A | `backend/app/api/review.py` + `frontend/src/views/Review.vue` | 核心模块，文件上传、规则匹配、问题报告 |
-| **智能润色** | B | `backend/app/api/polish.py` + `frontend/src/views/Polish.vue` | 文本优化、AI润色、前后文对比 |
-| **智能问答** | C | `backend/app/api/qa.py` + `frontend/src/views/QA.vue` | 知识库、对话、问答系统 |
-| **内容生成** | D | `backend/app/api/generate.py` + `frontend/src/views/Generate.vue` | 说明书生成、模板管理 |
-| **文档对比** | E | `backend/app/api/compare.py` + `frontend/src/views/Compare.vue` | 双文档上传、差异分析 |
-| **格式转换** | F | `backend/app/api/convert.py` + `frontend/src/views/Convert.vue` | Markdown/Word转DITA |
-| **基础配置** | G | `backend/app/api/rules.py`、`terms.py`、`auth.py` | 规则/术语库/用户管理 |
-| **UI/UX** | H | `App.vue`、`Home.vue` | 界面美化、统一风格 |
-
-### 开发流程
-
-```
-1. 获取最新代码 → 2. 修改自己负责的模块 → 3. 本地测试 → 4. 提交修改 → 5. 打包分享
-```
+### Windows 用户需要安装 3 个软件
 
 ---
 
-## 🛠 各模块开发指南
+### 🔧 1. 安装 Python（后端运行环境）
 
-### 前端模块开发要点
+**下载地址：** https://www.python.org/downloads/
 
-#### 1. 新增API（后端）
-```python
-# 在 backend/app/api/[模块名].py
+1. 点击黄色按钮 **"Download Python 3.x.x"**
+2. 双击下载的安装包 `python-3.x.x-amd64.exe`
+3. **⚠️ 非常重要：勾选 "Add Python.exe to PATH"**（安装界面最下方的复选框）
+4. 点击 **Install Now**
+5. 等待安装完成（约 1-2 分钟）
 
-from fastapi import APIRouter
-from fastapi import Depends
-from sqlalchemy.orm import Session
-from app.database import get_db
+**验证安装：**
 
-router = APIRouter()
+打开 **命令提示符**（Win 键 + R，输入 `cmd` 回车）：
 
-@router.get("/")
-async def get_items(db: Session = Depends(get_db)):
-    # 你的逻辑
-    return {"message": "Hello"}
-
-# 然后在 backend/app/main.py 中注册
-# app.include_router(router, prefix="/api/[模块名]", tags=["模块名"])
+```
+python --version
 ```
 
-#### 2. 新增页面（前端）
-```vue
-<!-- 在 frontend/src/views/[模块名].vue -->
-<template>
-  <div class="your-container">
-    <h2>页面标题</h2>
-    <!-- 你的内容 -->
-  </div>
-</template>
-
-<script setup>
-import { ref, onMounted } from 'vue'
-import { yourAPI } from '@/api'
-
-const data = ref([])
-
-onMounted(async () => {
-  try {
-    const response = await yourAPI.list()
-    data.value = response.data
-  } catch (e) {
-    console.log('加载失败')
-  }
-})
-</script>
-
-<style>
-.your-container {
-  padding: 20px;
-}
-</style>
-```
-
-#### 3. 添加路由（在 `frontend/src/router/index.js`）
-```javascript
-{
-  path: '/your-module',
-  name: 'YourModule',
-  component: () => import('@/views/YourModule.vue')
-}
-```
-
-#### 4. 添加到菜单（在 `frontend/src/App.vue`）
-```vue
-<!-- 在 el-menu 中添加
-<el-menu-item index="/your-module">
-  <el-icon><Document /></el-icon>
-  <template #title>你的模块</template>
-</el-menu-item>
-```
+应该显示：`Python 3.x.x`
 
 ---
 
-## 📝 API 调用方式
+### 🔧 2. 安装 Node.js（前端运行环境）
 
-### 前端调用后端 API
+**下载地址：** https://nodejs.org/
 
-所有 API 都通过 `frontend/src/api/index.js` 封装：
+1. 点击绿色按钮 **"20.x.x LTS"** 下载
+2. 双击安装包 `node-v20.x.x-x64.msi`
+3. 一路点击 **Next**（使用默认设置）
+4. 点击 **Install** → 等待安装完成
+5. 安装完成后可能需要**重启电脑**
 
-```javascript
-// 1. 在 index.js 中添加你的 API
-export const yourAPI = {
-  list: () => instance.get('/your-module/'),
-  create: (data) => instance.post('/your-module/', data),
-  get: (id) => instance.get(`/your-module/${id}`),
-  delete: (id) => instance.delete(`/your-module/${id}`)
-}
+**验证安装：**
 
-// 2. 在页面中使用
-import { yourAPI } from '@/api'
+打开新的命令提示符窗口：
 
-const response = await yourAPI.list()
+```
+node --version
 ```
 
-### API 路径约定
+应该显示：`v20.x.x`
 
-- 列表: `GET /api/[模块名]/`
-- 详情: `GET /api/[模块名]/{id}`
-- 创建: `POST /api/[模块名]/`
-- 更新: `PUT /api/[模块名]/{id}`
-- 删除: `DELETE /api/[模块名]/{id}`
+```
+npm --version
+```
 
----
-
-## 🎨 统一UI风格
-
-### 颜色规范
-
-| 用途 | 颜色 |
-|------|------|
-| 主色调 | #3b82f6（浅蓝色） |
-| 强调色 | #2563eb（深蓝色） |
-| 背景色 | #f5f7fa（浅灰） |
-| 卡片背景 | #ffffff |
-| 成功 | #10b981 |
-| 警告 | #f59e0b |
-| 错误 | #ef4444 |
-
-### Element Plus 组件规范
-
-- 表格: `<el-table>`
-- 按钮: `<el-button type="primary">`
-- 提示: `ElMessage.success('操作成功')`
-- 对话框: `<el-dialog>`
+应该显示：`10.x.x`
 
 ---
 
-## 🔄 测试流程
+### 🔧 3. 安装 VS Code（代码编辑器，可选但推荐）
 
-### 测试你的模块
+**下载地址：** https://code.visualstudio.com/
 
-```bash
-# 后端测试
-cd backend
-# 直接用 curl 测试接口
-curl http://localhost:8000/api/[你的模块]/
+1. 点击 **Download for Windows**
+2. 双击安装包 `VSCodeUserSetup-x64-x.x.x.exe`
+3. 一路点击 **下一步**
+4. 勾选 **"添加到 PATH"** 选项（默认已勾选）
+5. 点击 **安装**
 
-# 前端测试
-cd ../frontend
+> ⚠️ 不装 VS Code 也可以，用记事本或其他编辑器也行
+
+---
+
+## 🚀 启动项目（Windows 详细步骤）
+
+### 第 1 步：打开两个命令提示符窗口
+
+按 **Win 键**，输入 `cmd`，回车，**打开两次**（需要两个终端）
+
+你会看到：
+```
+C:\Users\你的用户名>_
+```
+
+### 第 2 步：在终端 1 启动后端
+
+```cmd
+# 1. 进入项目目录（根据你的解压位置调整）
+cd C:\smart-doc-platform\smart-doc-platform-main\backend
+
+# 2. 安装 Python 依赖（第一次需要几分钟）
+pip install -r requirements.txt
+
+# 3. 启动后端服务
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+✅ **成功标志：** 终端显示类似以下内容，并且光标在底部闪烁：
+```
+INFO:     Started server process [12345]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+**⚠️ 保持这个终端窗口打开，不要关闭！**
+
+---
+
+### 第 3 步：在终端 2 启动前端
+
+打开另一个新的命令提示符窗口：
+
+```cmd
+# 1. 进入前端目录
+cd C:\smart-doc-platform\smart-doc-platform-main\frontend
+
+# 2. 安装前端依赖（第一次需要 3-5 分钟，耐心等待）
+npm install
+
+# 3. 启动前端服务
 npm run dev
-# 浏览器访问测试页面
+```
+
+✅ **成功标志：** 终端显示类似：
+```
+  VITE v5.x.x  ready in 500 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+  ➜  press h + enter to show help
+```
+
+**⚠️ 保持这个终端窗口打开，不要关闭！**
+
+---
+
+### 第 4 步：访问应用
+
+打开浏览器（Chrome/Edge 都可以），访问：
+
+```
+http://localhost:5173
+```
+
+你应该看到：**智能技术文档平台**的首页！
+
+---
+
+## 🌳 项目目录说明
+
+```
+smart-doc-platform-main/
+│
+├── backend/              ← Python 后端
+│   ├── app/
+│   │   ├── main.py          入口文件（启动时读取）
+│   │   ├── api/             API 接口（各模块独立）
+│   │   │   ├── review.py      文档审核
+│   │   │   ├── polish.py      智能润色
+│   │   │   ├── qa.py          智能问答
+│   │   │   ├── generate.py    内容生成
+│   │   │   ├── compare.py     文档对比
+│   │   │   └── convert.py     格式转换
+│   │   ├── crud/            数据库操作
+│   │   ├── models/          数据模型
+│   │   ├── schemas/         请求/响应格式
+│   │   ├── utils/           工具函数
+│   │   └── database.py      数据库配置
+│   └── requirements.txt     Python 依赖列表
+│
+└── frontend/              ← Vue 前端
+    ├── src/
+    │   ├── main.js          入口文件
+    │   ├── App.vue          主布局（左侧菜单）
+    │   ├── router/          路由配置
+    │   ├── api/             API 调用封装
+    │   ├── store/           状态管理
+    │   └── views/           页面组件
+    │       ├── Home.vue       首页
+    │       ├── Review.vue     文档审核
+    │       ├── Polish.vue     智能润色
+    │       ├── QA.vue         智能问答
+    │       ├── Generate.vue   内容生成
+    │       ├── Compare.vue    文档对比
+    │       └── Convert.vue    格式转换
+    └── package.json         NPM 依赖和脚本
+│
+├── README.md              项目简介
+└── COLLABORATION.md       本文件（团队协作指南）
 ```
 
 ---
 
-## ❓ 常见问题
+## 👨‍💻 各模块负责人分工建议
 
-### Q1: 端口被占用？
+| 模块 | 文件路径 | 功能描述 |
+|------|----------|----------|
+| **文档审核** | `backend/app/api/review.py` + `frontend/src/views/Review.vue` | 上传文档 → 规则匹配 → 生成审核报告 |
+| **智能润色** | `backend/app/api/polish.py` + `frontend/src/views/Polish.vue` | 输入文本 → AI 润色 → 前后对比 |
+| **智能问答** | `backend/app/api/qa.py` + `frontend/src/views/QA.vue` | 选择知识库 → 提问 → 获取答案 |
+| **内容生成** | `backend/app/api/generate.py` + `frontend/src/views/Generate.vue` | 输入参数 → 生成说明书/文档 |
+| **文档对比** | `backend/app/api/compare.py` + `frontend/src/views/Compare.vue` | 上传两个文档 → 高亮差异 |
+| **格式转换** | `backend/app/api/convert.py` + `frontend/src/views/Convert.vue` | 上传文档 → 转换为 DITA/Markdown |
 
-```bash
-# Windows - 查找占用端口的进程
-netstat -ano | findstr :8000
-# 或使用其他端口
-uvicorn app.main:app --port 8001
+---
 
-# 修改 vite 冲突时
-npm run dev -- --port 5174
+## 🔧 修改某个模块的步骤（举例：修改文档审核）
+
+### 第 1 步：停止前端服务
+
+在前端终端窗口，按 **Ctrl + C**（不需要停止后端）
+
+### 第 2 步：打开文件
+
+用 VS Code 或记事本打开：
+
+```
+C:\smart-doc-platform\smart-doc-platform-main\frontend\src\views\Review.vue
 ```
 
-### Q2: Python 依赖安装慢？
+### 第 3 步：修改代码
 
-```bash
-# 使用国内镜像
+比如修改页面标题、添加按钮等
+
+### 第 4 步：保存文件
+
+按 **Ctrl + S** 保存
+
+### 第 5 步：重启前端
+
+```cmd
+cd C:\smart-doc-platform\smart-doc-platform-main\frontend
+npm run dev
+```
+
+浏览器访问 `http://localhost:5173` 查看效果。
+
+> 💡 **小技巧：** 前端支持热更新，大多数修改**不需要重启**，保存后浏览器自动刷新！
+
+---
+
+## 🔧 修改后端代码
+
+### 第 1 步：停止后端服务
+
+在后端终端窗口，按 **Ctrl + C**
+
+### 第 2 步：打开文件
+
+用 VS Code 或记事本打开：
+
+```
+C:\smart-doc-platform\smart-doc-platform-main\backend\app\api\review.py
+```
+
+### 第 3 步：修改代码并保存
+
+### 第 4 步：重启后端
+
+```cmd
+cd C:\smart-doc-platform\smart-doc-platform-main\backend
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+> 💡 **小技巧：** 加了 `--reload` 参数后，**大多数修改不需要重启**，保存后后端自动重新加载！
+
+---
+
+## 🔄 获取最新代码（项目负责人更新代码后）
+
+### 方式 A：重新下载 ZIP（最简单）
+
+1. 访问 https://github.com/caoyanyuan-glitch/smart-doc-platform
+2. 点击 **Code** → **Download ZIP**
+3. 删除旧的项目目录
+4. 解压新的 ZIP 到同一路径
+
+### 方式 B：使用 Git（学会了更方便）
+
+详见下方 Git 教程
+
+---
+
+## 📚 Git 入门教程（可选，但学会了更高效）
+
+### 第 1 步：安装 Git
+
+**下载地址：** https://git-scm.com/download/win
+
+1. 下载 `64-bit Git for Windows Setup`
+2. 双击安装，一路 **Next**（全部用默认设置）
+3. 安装完成后，在桌面右键应该能看到 **"Git Bash Here"** 选项
+
+**验证安装：** 打开新的命令提示符，输入：
+```
+git --version
+```
+应该显示：`git version 2.x.x`
+
+### 第 2 步：克隆项目（第一次使用）
+
+```cmd
+cd C:\
+git clone https://github.com/caoyanyuan-glitch/smart-doc-platform.git
+cd smart-doc-platform
+```
+
+✅ 现在你有了项目的最新代码
+
+### 第 3 步：获取最新代码（每天上班前）
+
+```cmd
+cd C:\smart-doc-platform
+git pull
+```
+
+### 第 4 步：提交你的修改（修改完成后）
+
+```cmd
+# 查看改了哪些文件
+git status
+
+# 添加所有修改
+git add .
+
+# 提交修改（写清楚你改了什么）
+git commit -m "文档审核模块：新增批量上传功能"
+
+# 推送到 GitHub
+git push
+```
+
+> ⚠️ 推送（`git push`）需要 Token，联系项目负责人获取
+
+---
+
+## ❓ 常见问题 FAQ
+
+### Q1：`pip install` 很慢或报错？
+
+**解决方案：** 使用国内镜像源
+
+```cmd
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-### Q3: npm install 慢？
+或者设置默认镜像：
+```cmd
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
 
-```bash
-# 使用国内镜像
+---
+
+### Q2：`npm install` 很慢或报错？
+
+**解决方案：** 使用国内镜像源
+
+```cmd
 npm config set registry https://registry.npmmirror.com
 npm install
 ```
 
-### Q4: 前端修改后没生效？
+---
 
-```bash
-# 清除缓存
-cd frontend
-rm -rf node_modules/.vite
-npm run dev
+### Q3：端口 8000 或 5173 被占用？
+
+**解决方案：**
+
+1. 关闭之前打开的终端窗口
+2. 或者用其他端口：
+
+```cmd
+# 后端换端口
+uvicorn app.main:app --host 0.0.0.0 --port 8001
+
+# 前端换端口（在 vite.config.js 中修改，或运行时指定）
+npm run dev -- --port 5174
 ```
-
-### Q5: 如何添加新模块？
-
-1. 后端：新建 `backend/app/api/[模块名].py
-2. 在 `main.py` 中注册路由
-3. 前端：新建 `frontend/src/views/[模块名].vue
-4. 在 `router/index.js` 添加路由
-5. 在 `App.vue` 添加菜单项
-6. 在 `api/index.js` 添加API封装
 
 ---
 
-## 📞 技术支持
+### Q4：`uvicorn` 不是内部或外部命令？
 
-如有问题，先检查：
+**解决方案：** 用 Python 模块方式运行
 
-1. 后端是否启动？访问 http://localhost:8000
-2. 前端是否启动？访问 http://localhost:5173
-3. 查看浏览器 Console 和终端输出
-4. 查看后端终端输出
+```cmd
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+---
+
+### Q5：`'npm' 不是内部或外部命令`？
+
+**解决方案：** Node.js 没安装或需要重启电脑
+
+1. 确认已安装 Node.js
+2. 重启电脑
+3. 重新打开命令提示符
+
+---
+
+### Q6：浏览器访问 http://localhost:5173 空白？
+
+**排查步骤：**
+
+1. ✅ 检查后端终端是否在运行（显示 `Uvicorn running on http://0.0.0.0:8000`）
+2. ✅ 检查前端终端是否在运行（显示 `VITE ready in xxx ms`）
+3. ✅ 刷新浏览器（F5 或 Ctrl + F5 强制刷新）
+4. ✅ 按 F12 打开开发者工具，查看 Console 是否有红色错误
+
+---
+
+### Q7：修改代码后浏览器没变化？
+
+**解决方案：**
+
+1. 浏览器按 **Ctrl + F5** 强制刷新
+2. 或者前端终端按 **Ctrl + C** 停止后重新 `npm run dev`
+
+---
+
+### Q8：Python 依赖安装报错缺少 Microsoft Visual C++？
+
+**解决方案：** 安装 Build Tools
+
+下载地址：https://visualstudio.microsoft.com/visual-cpp-build-tools/
+
+安装时勾选 **"Desktop development with C++"**
+
+---
+
+## 📞 遇到问题怎么办？
+
+1. **查看终端输出** - 后端和前端终端都会显示错误信息（红色文字）
+2. **查看浏览器 Console** - 按 F12，点击 Console 标签
+3. **把错误信息截图发给负责人** - 帮助快速定位问题
+4. **重启服务** - 按 Ctrl+C 停止，再重新启动
+
+---
+
+## 🎯 快速命令速查卡（贴在显示器旁）
+
+### 后端启动命令
+```cmd
+cd C:\smart-doc-platform\backend
+pip install -r requirements.txt      （仅第一次）
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 前端启动命令
+```cmd
+cd C:\smart-doc-platform\frontend
+npm install                           （仅第一次）
+npm run dev
+```
+
+### 访问地址
+```
+浏览器打开：http://localhost:5173
+```
+
+### 获取最新代码
+```cmd
+cd C:\smart-doc-platform
+git pull                              （装了 Git 后）
+```
 
 ---
 
 ## ✅ 功能清单
 
-- [x] 文档审核（上传文档 → 规则匹配 → 审核报告
-- [x] 智能润色（文本输入 → AI润色 → 对比显示）
-- [x] 智能问答（知识库选择 → 对话问答）
-- [x] 内容生成（参数输入 → 生成文档）
-- [x] 文档对比（双文档上传 → 差异分析）
-- [x] 格式转换（Markdown → DITA）
-- [x] 术语库（术语管理）
-- [x] 用户管理（角色分配）
+- [x] 文档审核（上传文档 → 规则匹配 → 审核报告）
+- [x] 智能润色（文本输入 → AI 润色 → 前后文对比显示）
+- [x] 智能问答（选择知识库 → 对话式问答）
+- [x] 内容生成（参数输入 → 生成说明书/文档）
+- [x] 文档对比（双文档上传 → 差异高亮显示）
+- [x] 格式转换（上传文档 → 转换为 DITA/Markdown）
+- [x] 术语库管理（在内容生成子菜单中）
+- [x] 用户管理（角色分配管理）
+
+---
+
+> 💡 **提示：** 把这个页面收藏起来，遇到问题随时查阅！
