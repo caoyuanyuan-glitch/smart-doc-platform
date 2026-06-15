@@ -3,6 +3,7 @@ import Login from '@/views/Login.vue'
 import Home from '@/views/Home.vue'
 import Review from '@/views/Review.vue'
 import Polish from '@/views/Polish.vue'
+import PolishHistory from '@/views/PolishHistory.vue'
 import QA from '@/views/QA.vue'
 import Generate from '@/views/Generate.vue'
 import Compare from '@/views/Compare.vue'
@@ -11,6 +12,9 @@ import Rules from '@/views/Rules.vue'
 import Terms from '@/views/Terms.vue'
 import AuditBasis from '@/views/AuditBasis.vue'
 import Users from '@/views/Users.vue'
+import Knowledge from '@/views/Knowledge.vue'
+
+import PolishPreview from '@/views/PolishPreview.vue'
 
 const routes = [
   {
@@ -57,6 +61,16 @@ const routes = [
     path: '/polish/document',
     name: 'PolishDocument',
     component: Polish
+  },
+  {
+    path: '/polish/history',
+    name: 'PolishHistory',
+    component: PolishHistory
+  },
+  {
+    path: '/polish/preview/:id',
+    name: 'PolishPreview',
+    component: PolishPreview
   },
   {
     path: '/qa',
@@ -122,6 +136,16 @@ const routes = [
     path: '/users',
     name: 'Users',
     component: Users
+  },
+  {
+    path: '/knowledge',
+    name: 'Knowledge',
+    component: Knowledge
+  },
+  {
+    path: '/knowledge/:id',
+    name: 'KnowledgeFolder',
+    component: Knowledge
   }
 ]
 

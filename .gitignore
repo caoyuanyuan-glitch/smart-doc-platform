@@ -30,6 +30,10 @@ Thumbs.db
 backend/static/uploads/*
 !backend/static/uploads/.gitkeep
 
+# Knowledge base files
+backend/app/static/knowledge/
+backend/app/static/polished/
+
 # Database
 *.db
 *.sqlite

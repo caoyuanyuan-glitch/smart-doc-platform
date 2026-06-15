@@ -5,6 +5,34 @@ const instance = axios.create({
   timeout: 60000
 })
 
+// 请求拦截器 - 添加 token
+instance.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
+  },
+  (error) => {
+    return Promise.reject(error)
+  }
+)
+
+// 响应拦截器 - 处理 401 错误
+instance.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      localStorage.removeItem('token')
+      window.location.href = '/login'
+    }
+    return Promise.reject(error)
+  }
+)
+
+export { instance }
+
 export const authAPI = {
   login: (username, password) => {
     const formData = new FormData()
@@ -83,7 +111,51 @@ export const auditBasisAPI = {
 
 export const polishAPI = {
   document: (id) => instance.post(`/polish/${id}`),
-  text: (text) => instance.post('/polish/text', { text })
+  text: (text) => instance.post('/polish/text', { text }),
+  polishWithSkill: (text, skillId = 3, styleGuideId = 1) =>
+    instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId }),
+  analyzeFile: (formData) => {
+    return instance.post('/polish/analyze-file', formData)
+  },
+  listPolishedDocuments: () => instance.get('/polish/'),
+  getPolishedDocument: (id) => instance.get(`/polish/${id}`),
+  uploadPolishedFile: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/polish/upload', formData)
+  },
+  previewPolishedFile: (id) => instance.get(`/polish/${id}/preview`),
+  downloadPolishedFile: (id, filename) => {
+    return instance.get(`/polish/${id}/download`, {
+      responseType: 'blob',
+      transformResponse: [(data) => data]
+    }).then((response) => {
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    })
+  },
+  downloadPolishedReport: (id, filename = '润色报告.docx') => {
+    return instance.get(`/polish/${id}/download-report`, {
+      responseType: 'blob',
+      transformResponse: [(data) => data]
+    }).then((response) => {
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    })
+  },
+  deletePolishedDocument: (id) => instance.delete(`/polish/${id}`)
 }
 
 export const qaAPI = {
@@ -107,4 +179,37 @@ export const convertAPI = {
     formData.append('file', file)
     return instance.post('/convert/docx2dita', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   }
+}
+
+export const knowledgeAPI = {
+  getTree: () => instance.get('/knowledge/tree'),
+  getFolderContent: (folderId) => instance.get(`/knowledge/folders/${folderId}`),
+  createFolder: (folder) => instance.post('/knowledge/folders', folder),
+  renameFolder: (folderId, data) => instance.put(`/knowledge/folders/${folderId}`, data),
+  deleteFolder: (folderId) => instance.delete(`/knowledge/folders/${folderId}`),
+  uploadFile: (folderId, file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post(`/knowledge/folders/${folderId}/files/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  previewFile: (fileId) => instance.get(`/knowledge/files/${fileId}/preview`),
+  downloadFile: (fileId, filename) => {
+    return instance.get(`/knowledge/files/${fileId}/download`, {
+      responseType: 'blob',
+      transformResponse: [(data) => data]
+    }).then((response) => {
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    })
+  },
+  getFile: (fileId) => instance.get(`/knowledge/files/${fileId}`),
+  deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`)
 }
