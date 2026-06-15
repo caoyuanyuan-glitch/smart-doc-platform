@@ -1,0 +1,26 @@
+{
+  "name": "Smart Doc Platform",
+  "image": "mcr.microsoft.com/devcontainers/python:3.10",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {}
+  },
+  "portsAttributes": {
+    "8000": {
+      "label": "Backend API",
+      "onAutoForward": "openPreview"
+    },
+    "5173": {
+      "label": "Frontend",
+      "onAutoForward": "openPreview"
+    }
+  },
+  "postCreateCommand": "bash scripts/setup.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "Vue.volar",
+        "ms-python.python"
+      ]
+    }
+  }
+}
