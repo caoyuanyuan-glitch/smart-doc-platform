@@ -8,20 +8,22 @@ from app.crud.review import create_review, get_review, get_reviews, update_revie
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
 from app.crud.audit_basis import get_audit_basis
-from app.schemas.review import Review, Issue, IssueUpdate
+from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate
 from app.utils.ai_client import ai_client
 
 router = APIRouter()
 
+
 def extract_chapter(content, position):
     lines = content[:position].split('\n')
     chapter = ""
-    for i in range(len(lines)-1, max(0, len(lines)-20), -1):
+    for i in range(len(lines) - 1, max(0, len(lines) - 20), -1):
         line = lines[i].strip()
         if line.startswith('#') or line.startswith('##') or line.startswith('###'):
             chapter = line.lstrip('#').strip()
             break
     return chapter
+
 
 def get_context(content, start, end, context_length=200):
     start_idx = max(0, start - context_length)
@@ -32,6 +34,7 @@ def get_context(content, start, end, context_length=200):
     if end_idx < len(content):
         context = context + "..."
     return context
+
 
 @router.get("/", response_model=list[Review])
 async def list_reviews(db: Session = Depends(get_db)):
@@ -44,115 +47,217 @@ async def list_reviews(db: Session = Depends(get_db)):
         result.append(review_dict)
     return result
 
+
 def detect_language(content):
     chinese_chars = re.findall(r'[\u4e00-\u9fff]', content)
     english_chars = re.findall(r'[a-zA-Z]', content)
-    
+
     if len(chinese_chars) > len(english_chars) * 2:
         return "cn"
     elif len(english_chars) > len(chinese_chars) * 2:
         return "en"
     return "both"
 
+
+# ------------------------------------------------------------------
+# 误报白名单: 常见合法英文缩写 / 公司名 / 术语 (避免简单正则误报)
+# ------------------------------------------------------------------
+_EN_ABBREV_ALLOWED = [
+    "Ltd.", "Co.", "Inc.", "LLC.", "LLP.", "Corp.",
+    "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.",
+    "e.g.", "i.e.", "etc.", "et al.",
+    "P.R.", "R.P.", "U.S.A.", "U.K.", "U.S.",
+    "vs.", "etc", "sq.",
+]
+
+
+def _in_abbreviation_allowed(text):
+    t = text.strip()
+    for a in _EN_ABBREV_ALLOWED:
+        if t.lower() == a.lower() or t.lower().endswith(a.lower()):
+            return True
+    return False
+
+
 def run_rule_audit(content, rules):
+    """规则审核: 基于正则, 加上简易白名单过滤, 按内容去重"""
     issues = []
     document_language = detect_language(content)
-    seen_issues = set()
-    
+    seen_keys = set()  # 按 "规则编号 + 归一化原文" 去重
+
     for rule in rules:
         try:
             if rule.language == "cn" and document_language == "en":
                 continue
             if rule.language == "en" and document_language == "cn":
                 continue
-            
-            matches = re.finditer(rule.regex, content)
+
+            matches = list(re.finditer(rule.regex, content))
             for match in matches:
-                chapter = extract_chapter(content, match.start())
-                context = get_context(content, match.start(), match.end(), 200)
-                
-                issue_key = f"{rule.rule_no}-{match.start()}"
-                if issue_key in seen_issues:
+                original_text = match.group()
+
+                # 白名单过滤: 英文缩写点号不算错
+                if document_language in ("en", "both") and _in_abbreviation_allowed(original_text):
                     continue
-                seen_issues.add(issue_key)
-                
+
+                # 归一化 key: 规则编号 + 去空格后的原文 + 章节
+                chapter = extract_chapter(content, match.start())
+                norm_text = re.sub(r"\s+", "", original_text).lower()
+                dedup_key = f"{rule.rule_no}|{norm_text}|{chapter}"
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+
+                context = get_context(content, match.start(), match.end(), 200)
                 issues.append({
                     "severity": "general",
-                    "category": rule.category,
+                    "category": rule.category or "其他",
                     "rule": rule.rule_no,
                     "chapter": chapter,
-                    "original_text": match.group(),
+                    "original_text": original_text,
                     "context": context,
                     "suggestion": rule.suggestion if rule.suggestion else "",
-                    "description": rule.description,
+                    "description": rule.description or "",
                     "audit_basis": rule.audit_basis if rule.audit_basis else "技术文档写作规范",
                     "confidence": 100,
-                    "source": rule.audit_basis if rule.audit_basis else "技术文档写作规范",
+                    "source": "rule",
                     "position": f"{match.start()}-{match.end()}"
                 })
         except Exception as e:
+            print(f"规则 {getattr(rule,'rule_no','?')} 匹配出错: {e}")
             continue
     return issues
 
+
 def run_term_check(content, terms):
+    """术语检查: 按归一化原文去重"""
     issues = []
+    if not terms:
+        return issues
+
+    seen_keys = set()
     for term in terms:
-        occurrences = [m.start() for m in re.finditer(re.escape(term.non_standard), content)]
-        for pos in occurrences:
-            chapter = extract_chapter(content, pos)
-            context = get_context(content, pos, pos + len(term.non_standard), 200)
-            issues.append({
-                "severity": "suggestion",
-                "category": "术语规范",
-                "rule": "TERM",
-                "chapter": chapter,
-                "original_text": term.non_standard,
-                "context": context,
-                "suggestion": f"建议使用标准术语: {term.standard}",
-                "description": f"发现非标准术语: {term.non_standard}",
-                "audit_basis": "MGI中文技术文档写作风格指南 - 缩略语",
-                "confidence": 95,
-                "source": "MGI中文技术文档写作风格指南 - 缩略语",
-                "position": f"{pos}-{pos + len(term.non_standard)}"
-            })
+        try:
+            if not term.non_standard:
+                continue
+            occurrences = list(re.finditer(re.escape(term.non_standard), content))
+            for match in occurrences:
+                chapter = extract_chapter(content, match.start())
+                norm_text = re.sub(r"\s+", "", term.non_standard).lower()
+                dedup_key = f"TERM|{norm_text}|{chapter}"
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+
+                context = get_context(content, match.start(), match.end(), 200)
+                issues.append({
+                    "severity": "suggestion",
+                    "category": "术语规范",
+                    "rule": "TERM",
+                    "chapter": chapter,
+                    "original_text": term.non_standard,
+                    "context": context,
+                    "suggestion": f"建议使用标准术语: {term.standard}",
+                    "description": f"发现非标准术语: {term.non_standard}",
+                    "audit_basis": "MGI中文技术文档写作风格指南 - 缩略语",
+                    "confidence": 95,
+                    "source": "term",
+                    "position": f"{match.start()}-{match.end()}"
+                })
+        except Exception as e:
+            print(f"术语 {getattr(term, 'non_standard', '?')} 匹配出错: {e}")
+            continue
     return issues
+
+
+def dedupe_issues_by_original(issues):
+    """按 '分类 + 归一化原文' 合并, 并保留出现次数最多的项"""
+    if not issues:
+        return []
+    seen = {}
+    for issue in issues:
+        norm = re.sub(r"\s+", "", str(issue.get("original_text", ""))).lower()
+        key = f"{issue.get('category','')}|{norm}"
+        if not key.strip():
+            continue
+        if key in seen:
+            # 保留 confidence 更高 / 章节更明确的项
+            old = seen[key]
+            new_conf = issue.get("confidence", 0) or 0
+            old_conf = old.get("confidence", 0) or 0
+            if new_conf > old_conf:
+                seen[key] = issue
+        else:
+            seen[key] = issue
+    return list(seen.values())
+
 
 @router.post("/{document_id}")
 async def create_review_task(document_id: int, mode: str = "hybrid", db: Session = Depends(get_db)):
     document = get_document(db, document_id=document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    from app.schemas.review import ReviewCreate, IssueCreate
+
     review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode))
-    
+
     try:
         issues = []
-        
+        document_language = detect_language(document.content or "")
+
         if mode in ["rule", "hybrid"]:
             rules = get_rules(db)
             rule_issues = run_rule_audit(document.content, rules)
-            issues.extend(rule_issues)
-            
             terms = get_terms(db)
             term_issues = run_term_check(document.content, terms)
-            issues.extend(term_issues)
-        
+
+            candidate_rule_issues = rule_issues + term_issues
+
+            # 二次验证: 如有 arkclaw 等大模型可用, 调用 AI 过滤误报 (最多 50 条)
+            if ai_client.arkclaw_client is not None and len(candidate_rule_issues) > 0:
+                try:
+                    filtered = ai_client.filter_rule_false_positives(
+                        candidate_rule_issues, document_language
+                    )
+                    candidate_rule_issues = filtered
+                except Exception as e:
+                    print(f"AI 二次验证失败, 使用原始规则结果: {e}")
+
+            issues.extend(candidate_rule_issues)
+
         if mode in ["ai", "hybrid"]:
-            ai_result = ai_client.audit_document(document.content)
+            ai_result = ai_client.audit_document(document.content, language=document_language)
             ai_issues = ai_result.get("issues", [])
             for issue in ai_issues:
                 issue["source"] = "ai"
+                # 补齐字段
+                issue.setdefault("severity", "general")
+                issue.setdefault("category", "其他")
+                issue.setdefault("original_text", "")
+                issue.setdefault("context", "")
+                issue.setdefault("chapter", "")
+                issue.setdefault("rule", "AI")
+                issue.setdefault("suggestion", "")
+                issue.setdefault("description", "")
+                issue.setdefault("audit_basis", "AI 审核")
+                issue.setdefault("confidence", 80)
+                issue.setdefault("position", "")
+                # severity 白名单: 规范化非法值
+                if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
+                    issue["severity"] = "general"
+
             issues.extend(ai_issues)
-        
+
+        # 全局去重: 按分类 + 归一化原文
+        issues = dedupe_issues_by_original(issues)
+
         for issue in issues:
             create_issue(db=db, issue=IssueCreate(
                 review_id=review.id,
                 severity=issue["severity"],
-                category=issue["category"],
-                rule=issue["rule"],
-                chapter=issue["chapter"],
-                original_text=issue["original_text"],
+                category=issue.get("category", ""),
+                rule=issue.get("rule", ""),
+                chapter=issue.get("chapter", ""),
+                original_text=issue.get("original_text", ""),
                 context=issue.get("context", ""),
                 suggestion=issue.get("suggestion", ""),
                 description=issue.get("description", ""),
@@ -161,22 +266,24 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
                 source=issue.get("source", "rule"),
                 position=issue.get("position", "")
             ))
-        
+
         summary = json.dumps({
             "total": len(issues),
-            "fatal": len([i for i in issues if i["severity"] == "fatal"]),
-            "serious": len([i for i in issues if i["severity"] == "serious"]),
-            "general": len([i for i in issues if i["severity"] == "general"]),
-            "suggestion": len([i for i in issues if i["severity"] == "suggestion"])
+            "fatal": len([i for i in issues if i.get("severity") == "fatal"]),
+            "serious": len([i for i in issues if i.get("severity") == "serious"]),
+            "general": len([i for i in issues if i.get("severity") == "general"]),
+            "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
+            "language": document_language,
         })
-        
+
         update_review_status(db, review.id, "completed", len(issues), summary)
-        
+
         return {"review_id": review.id, "total_issues": len(issues)}
-    
+
     except Exception as e:
         update_review_status(db, review.id, "failed", 0, str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/{review_id}", response_model=Review)
 async def read_review(review_id: int, db: Session = Depends(get_db)):
@@ -188,10 +295,12 @@ async def read_review(review_id: int, db: Session = Depends(get_db)):
     review_dict['document_name'] = doc.filename if doc else ''
     return review_dict
 
+
 @router.get("/{review_id}/issues", response_model=list[Issue])
 async def read_review_issues(review_id: int, db: Session = Depends(get_db)):
     issues = get_issues(db, review_id=review_id)
     return issues
+
 
 @router.put("/issues/{issue_id}", response_model=Issue)
 async def update_issue_status(issue_id: int, issue_update: IssueUpdate, db: Session = Depends(get_db)):
@@ -200,17 +309,18 @@ async def update_issue_status(issue_id: int, issue_update: IssueUpdate, db: Sess
         raise HTTPException(status_code=404, detail="Issue not found")
     return issue
 
+
 @router.get("/{review_id}/report")
 async def generate_report(review_id: int, db: Session = Depends(get_db)):
     review = get_review(db, review_id=review_id)
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
-    
+
     issues = get_issues(db, review_id=review_id)
     confirmed_issues = [i for i in issues if i.status in ["confirmed", "converted_to_rule"]]
-    
+
     summary = json.loads(review.summary) if review.summary else {}
-    
+
     html_content = f"""
 <!DOCTYPE html>
 <html>
@@ -240,7 +350,7 @@ async def generate_report(review_id: int, db: Session = Depends(get_db)):
     </table>
     <h2>问题详情</h2>
 """
-    
+
     for issue in confirmed_issues:
         html_content += f"""
     <div class="issue {issue.severity}">
@@ -250,6 +360,7 @@ async def generate_report(review_id: int, db: Session = Depends(get_db)):
         <p><strong>规则:</strong> {issue.rule}</p>
         <p><strong>章节:</strong> {issue.chapter}</p>
         <p><strong>原文:</strong> {issue.original_text}</p>
+        <p><strong>上下文:</strong> {issue.context}</p>
         <p><strong>修改建议:</strong> {issue.suggestion}</p>
         <p><strong>问题描述:</strong> {issue.description}</p>
         <p><strong>审核依据:</strong> {issue.audit_basis}</p>
@@ -257,7 +368,7 @@ async def generate_report(review_id: int, db: Session = Depends(get_db)):
         <p><strong>来源:</strong> {issue.source}</p>
     </div>
 """
-    
+
     html_content += "</body></html>"
-    
+
     return {"content": html_content, "format": "html"}
