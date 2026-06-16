@@ -90,7 +90,7 @@
                 <span>智能问答</span>
               </template>
               <el-menu-item index="/qa">知识库问答</el-menu-item>
-              <el-menu-item index="/qa/library">知识库管理</el-menu-item>
+              <el-menu-item index="/knowledge">知识库管理</el-menu-item>
             </el-sub-menu>
 
             <el-menu-item index="/users">
