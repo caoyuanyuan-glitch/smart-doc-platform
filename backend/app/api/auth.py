@@ -15,18 +15,19 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False)
 
-_default_user = None
-
 def get_default_user(db: Session):
-    global _default_user
-    if _default_user is None:
-        _default_user = get_user(db, username="admin")
-        if _default_user is None:
-            try:
-                _default_user = create_user(db, UserCreate(username="admin", password="admin123"))
-            except:
-                _default_user = User(id=1, username="admin", role="admin", status="active")
-    return _default_user
+    user = get_user(db, username="admin")
+    if user is None:
+        try:
+            user = create_user(db, UserCreate(username="admin", password="admin123"))
+        except:
+            user = User(id=1, username="admin", role="admin", status="active")
+    # Ensure admin user has admin role
+    if user.username == "admin" and user.role != "admin":
+        user.role = "admin"
+        db.commit()
+        db.refresh(user)
+    return user
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
@@ -39,12 +40,10 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     return encoded_jwt
 
 async def get_current_user(db: Session = Depends(get_db)):
-    user = get_default_user(db)
-    return user
+    return get_default_user(db)
 
 async def get_current_active_user(db: Session = Depends(get_db)):
-    user = get_default_user(db)
-    return user
+    return get_default_user(db)
 
 @router.post("/login", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
