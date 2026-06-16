@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
+from datetime import timedelta
 import os
 import uuid
 import mimetypes
@@ -1164,7 +1165,7 @@ async def list_polished_documents(db: Session = Depends(get_db)):
     for d in docs:
         created_at_str = None
         if d.created_at:
-            created_at_str = d.created_at.strftime("%Y/%m/%d %H:%M:%S")
+            created_at_str = (d.created_at + timedelta(hours=8)).strftime("%Y/%m/%d %H:%M:%S")
         result.append({
             "id": d.id,
             "name": d.name,
@@ -1193,7 +1194,7 @@ async def get_polished_document_info(doc_id: int, db: Session = Depends(get_db))
         "file_type": doc.file_type,
         "original_content": doc.original_content,
         "polished_content": doc.polished_content,
-        "created_at": doc.created_at.isoformat() if doc.created_at else None
+        "created_at": (doc.created_at + timedelta(hours=8)).isoformat() if doc.created_at else None
     }
 
 

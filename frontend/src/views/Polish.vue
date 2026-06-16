@@ -275,17 +275,10 @@ async function submitPolish() {
     
     const resp = await polishAPI.analyzeFile(payload)
     const data = resp.data || {}
-    docResult.value = {
-      id: data.id,
-      original: data.original || '',
-      polished: data.polished || '',
-      changes: data.changes?.length || 0,
-      changeDetails: data.changes || [],
-      reportFile: data.report_file || null
-    }
+    docResult.value = null
     pendingLocalFile = null
     formData.value.sourceFile = ''
-    ElMessage.success('润色成功')
+    ElMessage.success('润色成功，已保存到已润色文档')
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
