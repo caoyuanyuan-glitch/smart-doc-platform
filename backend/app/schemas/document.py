@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
+from typing import Optional
 
 class DocumentBase(BaseModel):
     filename: str
@@ -8,6 +9,18 @@ class DocumentBase(BaseModel):
 class DocumentCreate(DocumentBase):
     content: str
     preview: str = ""
+
+class DocumentListItem(BaseModel):
+    id: int
+    filename: str
+    file_type: str
+    file_size: Optional[int] = 0
+    status: str
+    user_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class Document(DocumentBase):
     id: int
@@ -18,4 +31,4 @@ class Document(DocumentBase):
     created_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True

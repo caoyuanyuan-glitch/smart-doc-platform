@@ -22,7 +22,7 @@ def get_documents(db: Session, user_id: int = None, skip: int = 0, limit: int = 
     query = db.query(Document)
     if user_id is not None:
         query = query.filter(Document.user_id == user_id)
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(Document.id.desc()).offset(skip).limit(limit).all()
 
 def delete_document(db: Session, document_id: int):
     document = db.query(Document).filter(Document.id == document_id).first()
@@ -35,6 +35,14 @@ def update_document_status(db: Session, document_id: int, status: str):
     document = db.query(Document).filter(Document.id == document_id).first()
     if document:
         document.status = status
+        db.commit()
+        db.refresh(document)
+    return document
+
+def update_document_file_size(db: Session, document_id: int, file_size: int):
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if document:
+        document.file_size = file_size
         db.commit()
         db.refresh(document)
     return document

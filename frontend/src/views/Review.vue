@@ -10,14 +10,20 @@
           :on-success="handleUploadSuccess"
           :on-error="handleUploadError"
           :before-upload="beforeUpload"
+          :on-progress="handleUploadProgress"
           accept=".pdf,.docx,.md,.zip,.txt,.idml"
           :auto-upload="true"
+          :show-file-list="false"
         >
           <el-button type="primary">上传文档</el-button>
           <template #tip>
             <div class="upload-tip">支持 PDF、DOCX、MD、TXT、IDML 格式，单文件最大 50MB</div>
           </template>
         </el-upload>
+        <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
+          <el-progress :percentage="uploadProgress" :stroke-width="6" />
+          <span class="progress-text">上传中 {{ uploadProgress }}%</span>
+        </div>
       </div>
 
       <div class="table-section">
@@ -328,6 +334,8 @@ const rulesImportUrl = '/api/rules/bulk'
 const uploadUrl = '/api/documents/upload/'
 const basisUploadUrl = '/api/audit_basis/upload'
 
+const uploadProgress = ref(0)
+
 const filterKeyword = ref('')
 const filterSeverity = ref('')
 const filterCategory = ref('')
@@ -475,12 +483,21 @@ function beforeRulesUpload(file) {
   return true
 }
 
+function handleUploadProgress(event, file, fileList) {
+  uploadProgress.value = Math.round((event.loaded / event.total) * 100)
+}
+
 function handleUploadSuccess(response) {
+  uploadProgress.value = 100
+  setTimeout(() => {
+    uploadProgress.value = 0
+  }, 500)
   ElMessage.success('上传成功')
   loadDocuments()
 }
 
 function handleUploadError() {
+  uploadProgress.value = 0
   ElMessage.error('上传失败，请重试')
 }
 
@@ -855,6 +872,18 @@ function highlightIssue(issue) {
   color: #909399;
   font-size: 12px;
   margin-top: 6px;
+}
+
+.progress-section {
+  margin-top: 15px;
+}
+
+.progress-text {
+  display: block;
+  text-align: center;
+  margin-top: 8px;
+  font-size: 14px;
+  color: #606266;
 }
 
 .table-section h3,
