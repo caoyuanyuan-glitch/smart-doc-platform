@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -19,24 +20,27 @@ class AIClient:
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-        # ArkClaw: 大模型审核主引擎
         self.arkclaw_api_key = os.getenv("ARKCLAW_API_KEY")
         self.arkclaw_base_url = os.getenv("ARKCLAW_BASE_URL", "https://api.arkclaw.com/v1")
         self.arkclaw_model = os.getenv("ARKCLAW_MODEL", "arkclaw-chat")
 
+        timeout = httpx.Timeout(30.0, read=120.0)
         self.qwen_client = OpenAI(
             api_key=self.dashscope_api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            timeout=timeout,
         ) if _is_valid_key(self.dashscope_api_key) else None
 
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
-            base_url="https://api.deepseek.com/v1"
+            base_url="https://api.deepseek.com/v1",
+            timeout=timeout,
         ) if _is_valid_key(self.deepseek_api_key) else None
 
         self.arkclaw_client = OpenAI(
             api_key=self.arkclaw_api_key,
             base_url=self.arkclaw_base_url,
+            timeout=timeout,
         ) if _is_valid_key(self.arkclaw_api_key) else None
 
     # ------------------------------------------------------------------
