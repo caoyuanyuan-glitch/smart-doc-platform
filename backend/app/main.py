@@ -32,6 +32,11 @@ app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识库�
 @app.on_event("startup")
 async def startup_event():
     create_tables()
+    try:
+        from seed.knowledge_seed import seed_knowledge_base
+        seed_knowledge_base()
+    except Exception as e:
+        print(f"[startup] 知识库种子初始化失败: {e}")
 
 @app.get("/")
 async def root():

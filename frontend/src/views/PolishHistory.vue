@@ -35,7 +35,12 @@
           empty-text="暂无文档，请上传"
         >
           <el-table-column prop="name" label="文件名" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="file_type" label="类型" width="80" align="center" />
+          <el-table-column prop="file_type" label="类型" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.name.startsWith('【修订标记版】')" type="primary">修订标记版</el-tag>
+              <el-tag v-else type="info">{{ row.file_type || '文档' }}</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="大小" width="100" align="center">
             <template #default="{ row }">
               {{ formatFileSize(row.file_size) }}
@@ -44,13 +49,6 @@
           <el-table-column label="上传时间" width="170">
             <template #default="{ row }">
               {{ formatDateTime(row.created_at) }}
-            </template>
-          </el-table-column>
-          <el-table-column prop="has_polished_content" label="类型" width="100" align="center">
-            <template #default="{ row }">
-              <el-tag v-if="row.name.startsWith('【润色报告】')" type="warning">润色报告</el-tag>
-              <el-tag v-else-if="row.name.startsWith('【修订标记版】')" type="primary">修订标记版</el-tag>
-              <el-tag v-else type="info">{{ row.file_type || '文档' }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="420" fixed="right" align="center">
@@ -64,7 +62,7 @@
                 下载
               </el-button>
               <el-button
-                v-if="row.report_file_path && !row.name.startsWith('【润色报告】')"
+                v-if="row.report_file_path"
                 size="small"
                 type="success"
                 @click="handleDownloadReport(row)"
@@ -128,7 +126,9 @@ async function loadDocuments() {
   loading.value = true
   try {
     const resp = await polishAPI.listPolishedDocuments()
-    documents.value = resp.data || []
+    const allDocs = resp.data || []
+    // 过滤掉单独的润色报告条目
+    documents.value = allDocs.filter(d => !d.name.startsWith('【润色报告】'))
   } catch (e) {
     ElMessage.error('加载文档列表失败')
   } finally {

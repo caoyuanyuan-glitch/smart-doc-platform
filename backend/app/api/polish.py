@@ -205,73 +205,186 @@ def _apply_skill_polish(
 
 
 def _extract_style_rules(guide_text: str) -> list[dict]:
-    """从句式指南中提取可执行的检测规则"""
+    """从句式指南中提取可执行的检测规则，解析 Markdown 内容"""
     rules = []
     
-    forbidden_phrases = [
-        "最佳", "最好", "最著名", "最新技术", "最高水平", 
-        "最先进水平", "最高技术", "非常", "极其"
-    ]
-    rules.append({
-        "type": "forbidden_words",
-        "name": "禁用强调词",
-        "patterns": forbidden_phrases,
-        "fix": "删除或替换为客观描述"
-    })
+    # 从 guide_text 中解析实际规则，否则使用默认规则
+    if guide_text and guide_text.strip():
+        # 解析 ## 开头的章节作为规则类别
+        sections = re.split(r'\n(?=##\s)', guide_text)
+        for section in sections:
+            header_match = re.match(r'##\s+(.+)', section)
+            if not header_match:
+                continue
+            header = header_match.group(1).strip()
+            
+            # 提取列表项作为具体规则
+            items = re.findall(r'(?:^|\n)[-*]\s+(.+)', section)
+            
+            if not items:
+                continue
+            
+            # 判断规则类型
+            lower_header = header.lower()
+            if any(kw in lower_header for kw in ['禁用', '禁止', 'forbidden', '避免使用', '不要用']):
+                # 从列表中提取短语
+                phrases = []
+                replacements = {}
+                for item in items:
+                    # 匹配 "A → B" 或 "A -> B" 或 "A：B" 格式
+                    arrow_match = re.match(r'(.+?)\s*(?:→|->|：)\s*(.+)', item)
+                    if arrow_match:
+                        old_phrase = arrow_match.group(1).strip().strip('"\'「」""''')
+                        new_phrase = arrow_match.group(2).strip().strip('"\'「」""''')
+                        phrases.append(old_phrase)
+                        replacements[old_phrase] = new_phrase
+                    else:
+                        phrase = item.strip().strip('"\'「」""''')
+                        if phrase:
+                            phrases.append(phrase)
+                
+                if phrases:
+                    rules.append({
+                        "type": "forbidden_words",
+                        "name": header,
+                        "patterns": phrases,
+                        "replacements": replacements if replacements else None,
+                        "fix": "替换为更规范的表达"
+                    })
+            
+            elif any(kw in lower_header for kw in ['被动', 'passive', '语态']):
+                patterns = []
+                for item in items:
+                    item = item.strip().strip('`')
+                    if item:
+                        patterns.append((item, "主动语态"))
+                if patterns:
+                    rules.append({
+                        "type": "passive_voice",
+                        "name": header,
+                        "patterns": patterns,
+                        "fix": "改用主动语态"
+                    })
+            
+            elif any(kw in lower_header for kw in ['双重否定', 'double negative']):
+                patterns = []
+                for item in items:
+                    item = item.strip().strip('`')
+                    if item:
+                        patterns.append((item, "双重否定"))
+                if patterns:
+                    rules.append({
+                        "type": "double_negative",
+                        "name": header,
+                        "patterns": patterns,
+                        "fix": "改用肯定表达"
+                    })
+            
+            elif any(kw in lower_header for kw in ['非正式', 'informal', '口语', '俚语']):
+                patterns = []
+                for item in items:
+                    item = item.strip().strip('`')
+                    if item:
+                        patterns.append((item, "非正式语言"))
+                if patterns:
+                    rules.append({
+                        "type": "informal",
+                        "name": header,
+                        "patterns": patterns,
+                        "fix": "使用正式表达"
+                    })
+            
+            elif any(kw in lower_header for kw in ['句子长度', 'sentence length', '长句', '字数']):
+                max_chars = 100
+                for item in items:
+                    num_match = re.search(r'(\d+)', item)
+                    if num_match:
+                        max_chars = int(num_match.group(1))
+                        break
+                rules.append({
+                    "type": "sentence_length",
+                    "name": header,
+                    "max_chars": max_chars,
+                    "fix": "拆分过长句子"
+                })
+            
+            elif any(kw in lower_header for kw in ['代词', 'pronoun', '指代']):
+                patterns = []
+                for item in items:
+                    item = item.strip().strip('`')
+                    if item:
+                        patterns.append((item, "代词指代不明确"))
+                if patterns:
+                    rules.append({
+                        "type": "pronoun_reference",
+                        "name": header,
+                        "patterns": patterns,
+                        "fix": "明确指代对象"
+                    })
+            
+            elif any(kw in lower_header for kw in ['术语', 'terminology', '词汇']):
+                term_map = {}
+                for item in items:
+                    arrow_match = re.match(r'(.+?)\s*(?:→|->|：)\s*(.+)', item)
+                    if arrow_match:
+                        old_term = arrow_match.group(1).strip().strip('"\'「」""''')
+                        new_term = arrow_match.group(2).strip().strip('"\'「」""''')
+                        term_map[old_term] = new_term
+                if term_map:
+                    rules.append({
+                        "type": "terminology_rule",
+                        "name": header,
+                        "term_map": term_map,
+                        "fix": "统一术语"
+                    })
     
-    passive_patterns = [
-        (r'被(用于|应用于|设计|制造|创建|安装|设置|配置|提供|调用|使用)', "主动语态"),
-        (r'由.+?提供(了)?', "主动语态"),
-    ]
-    rules.append({
-        "type": "passive_voice",
-        "name": "被动转主动",
-        "patterns": passive_patterns,
-        "fix": "改用主动语态"
-    })
-    
-    double_negatives = [
-        (r'不(能|得|可|允许).+?不(能|得|可|允许)', "双重否定"),
-        (r'没(有)?.+?不(能|得|可)', "双重否定"),
-        (r'非.+?不', "双重否定"),
-    ]
-    rules.append({
-        "type": "double_negative",
-        "name": "避免双重否定",
-        "patterns": double_negatives,
-        "fix": "改用肯定表达"
-    })
-    
-    informal_patterns = [
-        (r'[酷毙|爽翻|给力|碉堡|牛逼]', "非正式语言"),
-        (r'！{2,}', "过度感叹"),
-        (r'～{2,}', "过度波浪号"),
-    ]
-    rules.append({
-        "type": "informal",
-        "name": "避免非正式语言",
-        "patterns": informal_patterns,
-        "fix": "使用正式表达"
-    })
-    
-    rules.append({
-        "type": "sentence_length",
-        "name": "句子长度控制",
-        "max_chars": 100,
-        "fix": "拆分长句"
-    })
-    
-    rules.append({
-        "type": "pronoun_reference",
-        "name": "代词指代明确",
-        "patterns": [
-            (r'其[中他它们她]', "代词指代不明"),
-            (r'该.+?(?!系统|设备|产品|方法|技术|功能|模块|参数|配置)', "代词指代不明"),
-        ],
-        "fix": "明确指代对象"
-    })
+    # 如果没有从文件中解析出规则，使用默认规则
+    if not rules:
+        rules = _default_style_rules()
     
     return rules
+
+
+def _default_style_rules() -> list[dict]:
+    """默认句式规则（当 KB 中无自定义规则时使用）"""
+    return [
+        {
+            "type": "forbidden_words",
+            "name": "禁用强调词",
+            "patterns": ["最佳", "最好", "最著名", "最新技术", "最高水平", "最先进水平", "最高技术", "非常", "极其"],
+            "fix": "删除或替换为客观描述"
+        },
+        {
+            "type": "passive_voice",
+            "name": "被动转主动",
+            "patterns": [(r'被(用于|应用于|设计|制造|创建|安装|设置|配置|提供|调用|使用)', "主动语态"), (r'由.+?提供(了)?', "主动语态")],
+            "fix": "改用主动语态"
+        },
+        {
+            "type": "double_negative",
+            "name": "避免双重否定",
+            "patterns": [(r'不(能|得|可|允许).+?不(能|得|可|允许)', "双重否定"), (r'没(有)?.+?不(能|得|可)', "双重否定"), (r'非.+?不', "双重否定")],
+            "fix": "改用肯定表达"
+        },
+        {
+            "type": "informal",
+            "name": "避免非正式语言",
+            "patterns": [(r'[酷毙|爽翻|给力|碉堡|牛逼]', "非正式语言"), (r'！{2,}', "过度感叹"), (r'～{2,}', "过度波浪号")],
+            "fix": "使用正式表达"
+        },
+        {
+            "type": "sentence_length",
+            "name": "句子长度控制",
+            "max_chars": 100,
+            "fix": "拆分长句"
+        },
+        {
+            "type": "pronoun_reference",
+            "name": "代词指代明确",
+            "patterns": [(r'其[中他它们她]', "代词指代不明"), (r'该.+?(?!系统|设备|产品|方法|技术|功能|模块|参数|配置)', "代词指代不明")],
+            "fix": "明确指代对象"
+        },
+    ]
 
 
 def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRuleMatch]]:
@@ -294,10 +407,12 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
     
     for rule in rules:
         if rule["type"] == "forbidden_words":
+            # 优先使用规则中指定的替换表，回退到硬编码映射
+            rule_replacements = rule.get("replacements", {}) or {}
             for phrase in rule["patterns"]:
                 if phrase in result:
                     original = result
-                    replacement = forbidden_words_map.get(phrase, "")
+                    replacement = rule_replacements.get(phrase) or forbidden_words_map.get(phrase, "")
                     result = result.replace(phrase, replacement)
                     result = re.sub(r'\s+', ' ', result).strip()
                     if result != original:
@@ -419,7 +534,41 @@ async def polish_with_skill(
     # 加载skill规则
     skill_rules = _load_skill_rules(input_data.skill_id, db)
     
-    polished, changes = _apply_skill_polish(input_data.text, skill_rules, db, None, None, None)
+    # 加载句式清单文件内容
+    sentence_guide = None
+    if input_data.style_guide_id:
+        try:
+            style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.style_guide_id).first()
+            if style_file and style_file.file_path:
+                with open(style_file.file_path, 'r', encoding='utf-8') as f:
+                    sentence_guide = f.read()
+        except Exception as e:
+            print(f"加载句式清单失败: {e}")
+    
+    # 先执行 AI 润色
+    ai_polished = input_data.text
+    ai_changes = []
+    try:
+        from app.utils.ai_client import ai_client
+        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide)
+        if ai_result and ai_result.get("polished") and ai_result["polished"] != input_data.text:
+            ai_polished = ai_result["polished"]
+            ai_changes = ai_result.get("changes") or [{"type": "ai", "summary": "AI 根据句式清单完成智能润色"}]
+    except Exception as e:
+        print(f"AI 润色失败(继续使用规则润色): {e}")
+    
+    # 在 AI 润色结果上执行规则润色
+    polished, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, None, None)
+    # 合并变更：AI 变更转为 PolishRuleMatch
+    if ai_changes:
+        for ac in ai_changes:
+            if isinstance(ac, dict):
+                changes.insert(0, PolishRuleMatch(
+                    rule_name=ac.get("type", "ai"),
+                    before=ac.get("original", "")[:50],
+                    after=ac.get("polished", "")[:50],
+                    type="ai"
+                ))
     
     return {
         "original": input_data.text,
@@ -921,6 +1070,7 @@ async def analyze_file_endpoint(
     
     user = get_default_user(db)
     temp_path = None
+    original_temp_path = None
     try:
         filename = file.filename or "unnamed"
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else "txt"
@@ -970,8 +1120,44 @@ async def analyze_file_endpoint(
                 with open(term_file.file_path, 'r', encoding='utf-8') as f:
                     terminology = f.read()
         
+        # === AI 润色：将句式清单注入 AI prompt ===
+        ai_polished = content
+        ai_changes = []
+        try:
+            from app.utils.ai_client import ai_client
+            ai_result = ai_client.polish_text(content, style_guide=sentence_guide)
+            if ai_result and ai_result.get("polished") and ai_result["polished"] != content:
+                ai_polished = ai_result["polished"]
+                ai_changes = ai_result.get("changes") or [{
+                    "type": "ai",
+                    "summary": "AI 根据句式清单完成智能润色"
+                }]
+        except Exception as e:
+            print(f"AI 润色失败(继续使用规则润色): {e}")
+        # === AI 润色结束 ===
+        
         if is_docx:
-            # 使用物理目录而非知识库文件夹
+            # === AI 润色后的文本写回 DOCX ===
+            if ai_polished != content:
+                from docx import Document as DocxDoc
+                ai_doc = DocxDoc(temp_path)
+                ai_lines = ai_polished.split('\n')
+                for i, para in enumerate(ai_doc.paragraphs):
+                    if i < len(ai_lines):
+                        for run in para.runs:
+                            run.text = ''
+                        if para.runs:
+                            para.runs[0].text = ai_lines[i]
+                        else:
+                            para.text = ai_lines[i]
+                ai_temp_path = tempfile.NamedTemporaryFile(delete=False, suffix=".docx").name
+                ai_doc.save(ai_temp_path)
+                # 切换到 AI 润色后的文件用于后续规则润色
+                original_temp_path = temp_path
+                temp_path = ai_temp_path
+            else:
+                original_temp_path = None
+            # === AI 润色后的文本写回 DOCX 结束 ===
             _, date_str = _get_date_subfolder_id(db, None, user.id)
             date_dir = os.path.join(UPLOAD_DIR, date_str)
             if not os.path.exists(date_dir):
@@ -1013,19 +1199,6 @@ async def analyze_file_endpoint(
                 created_by=user.id
             )
             
-            db_report = create_polished_document(
-                db=db,
-                name=f"【润色报告】{filename.rsplit('.', 1)[0]}.docx",
-                filename=report_filename,
-                file_path=report_path,
-                file_size=os.path.getsize(report_path),
-                file_type="docx",
-                original_content="",
-                polished_content="",
-                folder_id=None,
-                created_by=user.id
-            )
-            
             return {
                 "id": db_doc.id,
                 "original": content,
@@ -1034,7 +1207,18 @@ async def analyze_file_endpoint(
                 "report_file": report_filename
             }
         else:    
-            polished_text, changes = _apply_skill_polish(content, skill_rules, db, sentence_guide, terminology, requirements)
+            # 在 AI 润色后的文本上执行规则润色
+            polished_text, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology, requirements)
+            # 合并 AI 变更与规则变更
+            if ai_changes:
+                for ac in ai_changes:
+                    if isinstance(ac, dict):
+                        changes.insert(0, PolishRuleMatch(
+                            rule_name=ac.get("type", "ai"),
+                            before=ac.get("summary", "")[:50],
+                            after="AI 根据句式清单完成智能润色",
+                            type="ai"
+                        ))
             
             if not os.path.exists(UPLOAD_DIR):
                 os.makedirs(UPLOAD_DIR)
@@ -1073,6 +1257,11 @@ async def analyze_file_endpoint(
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
+            except:
+                pass
+        if original_temp_path and os.path.exists(original_temp_path):
+            try:
+                os.remove(original_temp_path)
             except:
                 pass
 
@@ -1319,6 +1508,10 @@ async def delete_polished_document_endpoint(
     
     if os.path.exists(doc.file_path):
         os.remove(doc.file_path)
+    
+    # 同时删除关联的润色报告文件
+    if doc.report_file_path and os.path.exists(doc.report_file_path):
+        os.remove(doc.report_file_path)
     
     delete_polished_document(db, doc_id)
     return {"message": "删除成功"}
