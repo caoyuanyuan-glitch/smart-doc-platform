@@ -170,16 +170,26 @@ export const generateAPI = {
 }
 
 export const convertAPI = {
-  md2dita: (file) => {
+  convert: (sourceFile, targetFormat, templateFile, requirements) => {
     const formData = new FormData()
-    formData.append('file', file)
-    return instance.post('/convert/md2dita', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+    formData.append('source_file', sourceFile)
+    formData.append('target_format', targetFormat)
+    if (templateFile) formData.append('template_file', templateFile)
+    if (requirements) formData.append('requirements', requirements)
+    return instance.post('/convert/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
-  docx2dita: (file) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    return instance.post('/convert/docx2dita', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
-  }
+  getProgress: (taskId) => instance.get(`/convert/${taskId}/progress`),
+  download: (taskId) => {
+    return instance.get(`/convert/${taskId}/download`, {
+      responseType: 'blob',
+      timeout: 120000,
+      transformResponse: [(data) => data]
+    })
+  },
+  getReport: (taskId) => instance.get(`/convert/${taskId}/report`),
+  getDetail: (taskId) => instance.get(`/convert/${taskId}/detail`),
+  list: (skip = 0, limit = 100) => instance.get('/convert/', { params: { skip, limit } }),
+  delete: (taskId) => instance.delete(`/convert/${taskId}`)
 }
 
 export const knowledgeAPI = {
