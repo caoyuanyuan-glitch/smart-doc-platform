@@ -1,9 +1,15 @@
 import os
 import json
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+
+def _is_valid_key(val):
+    return bool(val) and val and "your-" not in val.lower()
+
 
 class AIClient:
     def __init__(self):
@@ -12,29 +18,42 @@ class AIClient:
         self.qwen_model = os.getenv("QWEN_MODEL", "qwen-max")
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-        
+
+        # ArkClaw: 大模型审核主引擎
+        self.arkclaw_api_key = os.getenv("ARKCLAW_API_KEY")
+        self.arkclaw_base_url = os.getenv("ARKCLAW_BASE_URL", "https://api.arkclaw.com/v1")
+        self.arkclaw_model = os.getenv("ARKCLAW_MODEL", "arkclaw-chat")
+
         # 自动识别火山引擎方舟 API Key
         VOLC_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
-        if self.dashscope_api_key and self.dashscope_api_key.startswith("ark-"):
+        if _is_valid_key(self.dashscope_api_key) and self.dashscope_api_key.startswith("ark-"):
             self.qwen_client = OpenAI(
                 api_key=self.dashscope_api_key,
                 base_url=VOLC_ARK_BASE
             )
             print(f"[AI] 火山引擎方舟已连接, base_url={VOLC_ARK_BASE}, model={self.qwen_model}")
-        elif self.dashscope_api_key:
+        elif _is_valid_key(self.dashscope_api_key):
             self.qwen_client = OpenAI(
                 api_key=self.dashscope_api_key,
                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
         else:
             self.qwen_client = None
-        
+
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
             base_url="https://api.deepseek.com/v1"
-        ) if self.deepseek_api_key else None
+        ) if _is_valid_key(self.deepseek_api_key) else None
 
-    def call_qwen(self, messages, max_tokens=2048):
+        self.arkclaw_client = OpenAI(
+            api_key=self.arkclaw_api_key,
+            base_url=self.arkclaw_base_url,
+        ) if _is_valid_key(self.arkclaw_api_key) else None
+
+    # ------------------------------------------------------------------
+    # 基础 chat 接口
+    # ------------------------------------------------------------------
+    def call_qwen(self, messages, max_tokens=2048, temperature=0.3):
         if not self.qwen_client:
             return None
         try:
@@ -42,14 +61,14 @@ class AIClient:
                 model=self.qwen_model,
                 messages=messages,
                 max_tokens=max_tokens,
-                temperature=0.3
+                temperature=temperature
             )
             return response.choices[0].message.content
         except Exception as e:
             print(f"Qwen调用失败: {str(e)}")
             return None
 
-    def call_deepseek(self, messages, max_tokens=2048):
+    def call_deepseek(self, messages, max_tokens=2048, temperature=0.3):
         if not self.deepseek_client:
             return None
         try:
@@ -57,65 +76,55 @@ class AIClient:
                 model=self.deepseek_model,
                 messages=messages,
                 max_tokens=max_tokens,
-                temperature=0.3
+                temperature=temperature
             )
             return response.choices[0].message.content
         except Exception as e:
             print(f"DeepSeek调用失败: {str(e)}")
             return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True):
+    def call_arkclaw(self, messages, max_tokens=2048, temperature=0.3):
+        if not self.arkclaw_client:
+            return None
+        try:
+            response = self.arkclaw_client.chat.completions.create(
+                model=self.arkclaw_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"ArkClaw调用失败: {str(e)}")
+            return None
+
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
         result = None
-        
-        if self.default_provider == "qwen":
-            result = self.call_qwen(messages, max_tokens)
+
+        if self.default_provider == "arkclaw":
+            result = self.call_arkclaw(messages, max_tokens, temperature)
             if result is None and fallback:
-                result = self.call_deepseek(messages, max_tokens)
+                result = self.call_qwen(messages, max_tokens, temperature)
+            if result is None and fallback:
+                result = self.call_deepseek(messages, max_tokens, temperature)
+        elif self.default_provider == "qwen":
+            result = self.call_qwen(messages, max_tokens, temperature)
+            if result is None and fallback:
+                result = self.call_deepseek(messages, max_tokens, temperature)
+            if result is None and fallback:
+                result = self.call_arkclaw(messages, max_tokens, temperature)
         else:
-            result = self.call_deepseek(messages, max_tokens)
+            result = self.call_deepseek(messages, max_tokens, temperature)
             if result is None and fallback:
-                result = self.call_qwen(messages, max_tokens)
-        
+                result = self.call_qwen(messages, max_tokens, temperature)
+            if result is None and fallback:
+                result = self.call_arkclaw(messages, max_tokens, temperature)
+
         return result
 
-    def audit_document(self, content):
-        prompt = f"""
-请对以下技术文档进行智能审核，识别潜在问题并提供修改建议：
-
-文档内容：
-{content[:5000]}
-
-请按照以下JSON格式输出审核结果：
-{{
-  "issues": [
-    {{
-      "severity": "fatal|serious|general|suggestion",
-      "category": "分类",
-      "rule": "匹配规则",
-      "chapter": "章节位置",
-      "original_text": "原文片段",
-      "context": "上下文",
-      "suggestion": "修改建议",
-      "description": "问题描述",
-      "audit_basis": "审核依据",
-      "confidence": 0-100
-    }}
-  ]
-}}
-
-注意：
-1. severity分为四级：fatal(致命), serious(严重), general(一般), suggestion(建议)
-2. category包括：字词、句子、标点、段落、逻辑、拼写、句式、语法
-3. 请尽可能多地发现问题，置信度表示你对该问题的确定程度
-"""
-        messages = [{"role": "user", "content": prompt}]
-        result = self.chat(messages, max_tokens=4096)
-        
-        try:
-            return json.loads(result)
-        except:
-            return {"issues": []}
-
+    # ------------------------------------------------------------------
+    # 文档润色
+    # ------------------------------------------------------------------
     def polish_text(self, text, style_guide=None):
         system = """你是一位资深的技术文档编辑，负责对中国政府/企业公文和技术文档进行专业润色。
 你需要同时做到以下五点：
@@ -144,7 +153,6 @@ class AIClient:
         if not result:
             return {"original": text, "polished": text}
         
-        # 尝试解析 JSON，失败则直接使用返回文本
         try:
             parsed = json.loads(result)
             if isinstance(parsed, dict) and "polished" in parsed:
@@ -152,7 +160,6 @@ class AIClient:
         except:
             pass
         
-        # 如果不是 JSON，直接作为润色结果
         return {"original": text, "polished": result.strip()}
 
     def qa_answer(self, question, context):
@@ -168,12 +175,11 @@ class AIClient:
 1. 回答必须基于提供的文档内容，禁止编造信息
 2. 如果文档中没有相关信息，请明确说明"文档中未找到相关信息"
 3. 回答请附带引用来源（章节名或段落位置）
-4. 保持回答简洁明了
 
 请以JSON格式输出：
 {{
-  "answer": "回答内容",
-  "sources": ["来源1", "来源2"]
+  "answer": "你的回答",
+  "source": "引用来源"
 }}
 """
         messages = [{"role": "user", "content": prompt}]
@@ -182,46 +188,55 @@ class AIClient:
         try:
             return json.loads(result)
         except:
-            return {"answer": "文档中未找到相关信息", "sources": []}
+            return {"answer": result or "文档中未找到相关信息", "source": ""}
 
-    def generate_content(self, product_name, product_model, doc_type, target_chapter):
+    def generate_document(self, topic, doc_type, template_text="", requirements=""):
         prompt = f"""
-请根据以下参数生成技术文档内容：
+根据以下要求生成技术文档：
 
-产品名称：{product_name}
-产品型号：{product_model}
-文档类型：{doc_type}（中文IVD/中文RUO/英文IVDR/英文RUO+CE）
-目标章节：{target_chapter}
+主题：{topic}
+文档类型：{doc_type}
 
-要求：
-1. 内容必须符合对应文档类型的规范
-2. 使用专业术语
-3. 结构清晰，逻辑严谨
-4. 输出DITA格式或纯文本格式
+{"参考模板：" + template_text[:3000] if template_text else ""}
 
-请直接输出生成的内容。
+{"特殊要求：" + requirements if requirements else ""}
+
+请生成一份专业的技术文档。对于中文技术文档，重点检查：
+1. 术语解释 
+2. 使用流程
+
+输出格式：JSON
+{{
+  "title": "文档标题",
+  "content": "文档内容（Markdown格式）",
+  "sections": ["章节1", "章节2", ...],
+  "word_count": 字数
+}}
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=4096)
         
-        return result or ""
+        try:
+            return json.loads(result)
+        except:
+            return {"title": topic, "content": result or "", "sections": [], "word_count": 0}
 
-    def general_answer(self, question):
+    def generate_qa_pairs(self, content, count=3):
         prompt = f"""
-请回答以下问题：
+根据以下文档内容生成{count}个问答对：
 
-问题：{question}
+文档内容：
+{content[:6000]}
 
-请按照以下要求回答：
-1. 基于你的专业知识给出准确回答
-2. 保持回答简洁明了
-3. 如果涉及技术文档相关内容，请提供专业建议
+要求：
+1. 问题应该涵盖文档中的不同方面（概念解释、关键参数、操作步骤等）
+2. 答案应该准确、简洁，引用源文相关段落
 
-请以JSON格式输出：
-{{
-  "answer": "回答内容",
-  "sources": []
-}}
+请以JSON数组格式输出：
+[
+  {{"question": "问题1", "answer": "答案1", "category": "类别"}},
+  {{"question": "问题2", "answer": "答案2", "category": "类别"}}
+]
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=2048)
@@ -229,6 +244,171 @@ class AIClient:
         try:
             return json.loads(result)
         except:
-            return {"answer": result or "无法回答该问题", "sources": []}
+            return []
+
+    # ------------------------------------------------------------------
+    # 规则审核的二次验证 (ArkClaw 过滤误报)
+    # 输入: [{original_text, context, rule, category, ...}] 候选问题
+    # 输出: 过滤后的列表 (仅保留确定为错误的项)
+    # ------------------------------------------------------------------
+    def filter_rule_false_positives(self, candidate_issues, document_language):
+        if not candidate_issues:
+            return []
+
+        lang_desc = "中文" if document_language == "cn" else "英文" if document_language == "en" else "中英文混合"
+
+        # 最多送入 50 条进行验证 (降低 token 成本)
+        capped = candidate_issues[:50]
+        sample_text = "\n".join([
+            f"[{idx+1}] 规则: {c.get('rule','')} | 原文: {c.get('original_text','')} | 上下文: {(c.get('context','') or '')[:120]}"
+            for idx, c in enumerate(capped)
+        ])
+
+        prompt = f"""请作为{lang_desc}技术文档审核专家，判断以下规则匹配出的候选问题是否是真正的错误。
+
+判断原则（非常重要）：
+1. 英文公司名 / 专有名词中的点号（如 "Ltd."、"Co."、"Inc."、"P.R."、"U.S.A."）是合法写法，不算错误。
+2. 常见缩写（"e.g."、"i.e."、"etc."）合法。
+3. 正常的英文句号后空一格不算问题。
+4. 只把确定为错误的项标记为 valid=true。
+5. 如果原文片段本身不构成问题（只是正则误匹配），标记为 valid=false。
+
+输入候选问题（每条一行，编号从 1 开始）：
+{sample_text}
+
+请严格输出 JSON，数组长度必须为 {len(capped)}，每项为 {{"index": 编号, "valid": true|false, "reason": "简短理由"}}。只输出 JSON，不要额外文字。"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = self.chat(messages, max_tokens=3000, temperature=0.1)
+        if not result:
+            return candidate_issues
+
+        try:
+            text = result.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+                text = re.sub(r"\n?```$", "", text)
+            data = json.loads(text)
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                data = data["items"]
+            valid_indices = set()
+            for item in data:
+                if isinstance(item, dict) and item.get("valid") is True:
+                    valid_indices.add(int(item.get("index", 0)))
+        except Exception as e:
+            print(f"过滤误报失败: {e}")
+            return candidate_issues
+
+        filtered = []
+        for idx, issue in enumerate(capped, 1):
+            if idx in valid_indices:
+                filtered.append(issue)
+
+        # 如果有超过 50 条未处理的，直接保留
+        if len(candidate_issues) > len(capped):
+            filtered.extend(candidate_issues[len(capped):])
+
+        return filtered
+
+    # ------------------------------------------------------------------
+    # 对比分析结果的 AI 二次验证
+    # ------------------------------------------------------------------
+    def verify_comparison_result(self, diffs, doc_a_lang, doc_b_lang):
+        if not diffs:
+            return diffs
+
+        lang_a = "中文" if doc_a_lang == "cn" else "英文" if doc_a_lang == "en" else "中英文混合"
+        lang_b = "中文" if doc_b_lang == "cn" else "英文" if doc_b_lang == "en" else "中英文混合"
+
+        capped = diffs[:30]
+        sample_text = "\n".join([
+            f"[{idx+1}] 类型: {d.get('type','')} | 文档A: {d.get('text_a','')[:80]} | 文档B: {d.get('text_b','')[:80]}"
+            for idx, d in enumerate(capped)
+        ])
+
+        prompt = f"""请作为技术文档对比分析专家，验证以下文档对比结果是否为真实差异。
+
+文档 A 语言: {lang_a}
+文档 B 语言: {lang_b}
+
+输入候选差异 (每条一行):
+{sample_text}
+
+请严格输出 JSON，数组长度必须为 {len(capped)}，每项为 {{"index": 编号, "valid": true|false, "reason": "简短理由"}}。只输出 JSON，不要额外文字。"""
+
+        messages = [{"role": "user", "content": prompt}]
+        result = self.chat(messages, max_tokens=3000, temperature=0.1)
+        if not result:
+            return diffs
+
+        try:
+            text = result.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+                text = re.sub(r"\n?```$", "", text)
+            data = json.loads(text)
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                data = data["items"]
+            valid_indices = set()
+            for item in data:
+                if isinstance(item, dict) and item.get("valid") is True:
+                    valid_indices.add(int(item.get("index", 0)))
+        except Exception as e:
+            print(f"对比验证失败: {e}")
+            return diffs
+
+        verified = []
+        for idx, diff in enumerate(capped, 1):
+            if idx in valid_indices:
+                verified.append(diff)
+
+        if len(diffs) > len(capped):
+            verified.extend(diffs[len(capped):])
+
+        return verified
+
+    # ------------------------------------------------------------------
+    # 文档审核
+    # ------------------------------------------------------------------
+    def review_document(self, content, rules_text="", audit_basis="", document_language="cn"):
+        lang_desc = "中文" if document_language == "cn" else "英文" if document_language == "en" else "中英文混合"
+        prompt = f"""
+请作为{lang_desc}技术文档审核专家，审核以下文档：
+
+文档内容：
+{content[:8000]}
+
+{"{'审核规则：' + rules_text[:3000] if rules_text else ''}"}
+{"{'审核依据：' + audit_basis[:3000] if audit_basis else ''}"}
+
+请从以下维度进行审核：
+1. 内容完整性
+2. 术语准确性
+3. 格式规范性
+4. 逻辑清晰度
+
+请以JSON格式输出：
+{{
+  "score": 综合评分(0-100),
+  "summary": "总体评价",
+  "issues": [
+    {{
+      "severity": "严重程度(error/warning/info)",
+      "category": "问题类别",
+      "description": "问题描述",
+      "location": "问题位置",
+      "suggestion": "修改建议"
+    }}
+  ]
+}}
+"""
+        messages = [{"role": "user", "content": prompt}]
+        result = self.chat(messages, max_tokens=4096)
+        
+        try:
+            return json.loads(result)
+        except:
+            return {"score": 0, "summary": "审核失败", "issues": []}
+
 
 ai_client = AIClient()
