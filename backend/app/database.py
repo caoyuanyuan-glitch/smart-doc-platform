@@ -23,5 +23,5 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, knowledge, polished_document
     Base.metadata.create_all(bind=engine)
