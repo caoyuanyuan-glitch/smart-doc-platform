@@ -38,10 +38,9 @@
             </template>
           </el-table-column>
           <el-table-column prop="created_at" label="上传时间" width="180" />
-          <el-table-column label="操作" width="260">
+          <el-table-column label="操作" width="200">
             <template #default="scope">
               <el-button size="small" @click="startReview(scope.row.id)">开始审核</el-button>
-              <el-button size="small" @click="viewDocument(scope.row.id)">查看</el-button>
               <el-button size="small" type="danger" @click="deleteDocument(scope.row.id)">删除</el-button>
             </template>
           </el-table-column>
