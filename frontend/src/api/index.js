@@ -27,6 +27,7 @@ instance.interceptors.response.use(
       localStorage.removeItem('token')
       window.location.href = '/login'
     }
+    console.error('API Error:', error.response?.status, error.response?.data || error.message)
     return Promise.reject(error)
   }
 )

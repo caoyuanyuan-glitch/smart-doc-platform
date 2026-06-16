@@ -8,9 +8,7 @@ import QA from '@/views/QA.vue'
 import Generate from '@/views/Generate.vue'
 import Compare from '@/views/Compare.vue'
 import Convert from '@/views/Convert.vue'
-import Rules from '@/views/Rules.vue'
 import Terms from '@/views/Terms.vue'
-import AuditBasis from '@/views/AuditBasis.vue'
 import Users from '@/views/Users.vue'
 import Knowledge from '@/views/Knowledge.vue'
 
@@ -40,7 +38,7 @@ const routes = [
   {
     path: '/review/rules',
     name: 'ReviewRules',
-    component: Rules
+    component: Review
   },
   {
     path: '/review/reports',
@@ -50,7 +48,7 @@ const routes = [
   {
     path: '/review/basis',
     name: 'ReviewBasis',
-    component: AuditBasis
+    component: Review
   },
   {
     path: '/polish',
@@ -118,19 +116,9 @@ const routes = [
     component: Convert
   },
   {
-    path: '/rules',
-    name: 'Rules',
-    component: Rules
-  },
-  {
     path: '/terms',
     name: 'Terms',
     component: Terms
-  },
-  {
-    path: '/audit_basis',
-    name: 'AuditBasis',
-    component: AuditBasis
   },
   {
     path: '/users',
