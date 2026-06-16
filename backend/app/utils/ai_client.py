@@ -13,10 +13,21 @@ class AIClient:
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
         
-        self.qwen_client = OpenAI(
-            api_key=self.dashscope_api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ) if self.dashscope_api_key else None
+        # 自动识别火山引擎方舟 API Key
+        VOLC_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
+        if self.dashscope_api_key and self.dashscope_api_key.startswith("ark-"):
+            self.qwen_client = OpenAI(
+                api_key=self.dashscope_api_key,
+                base_url=VOLC_ARK_BASE
+            )
+            print(f"[AI] 火山引擎方舟已连接, base_url={VOLC_ARK_BASE}, model={self.qwen_model}")
+        elif self.dashscope_api_key:
+            self.qwen_client = OpenAI(
+                api_key=self.dashscope_api_key,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+        else:
+            self.qwen_client = None
         
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
@@ -105,32 +116,44 @@ class AIClient:
         except:
             return {"issues": []}
 
-    def polish_text(self, text):
-        prompt = f"""
-请对以下文本进行专业润色，优化表达和句式：
+    def polish_text(self, text, style_guide=None):
+        system = """你是一位资深的技术文档编辑，负责对中国政府/企业公文和技术文档进行专业润色。
+你需要同时做到以下五点：
+1. 修正语法错误、错别字、标点不当
+2. 删除空洞套话（如"众所周知""不言而喻"），换成具体事实
+3. 将口语化表达转为正式书面语（如"搞""弄""做"等动词替换为精确动词）
+4. 拆分超过80字的超长句，合并相邻的破碎短句
+5. 保持原意不变，不添加原文没有的信息
 
-原文：
-{text}
+严禁事项：
+- 不要改变数据、日期、人名、地名
+- 不要替换专业术语（除非明显错误）
+- 不要添加任何解释性内容"""
 
-润色要求：
-1. 保持原意不变
-2. 优化句式结构，使表达更流畅自然
-3. 修正语法和用词问题
-4. 提升专业性和可读性
-
-请以JSON格式输出：
-{{
-  "original": "原文",
-  "polished": "润色后内容"
-}}
-"""
-        messages = [{"role": "user", "content": prompt}]
-        result = self.chat(messages, max_tokens=2048)
+        user_prompt = f"请润色以下文本：\n\n{text}"
         
-        try:
-            return json.loads(result)
-        except:
+        if style_guide:
+            user_prompt = f"请根据以下风格指南润色文本：\n{style_guide}\n\n待润色内容：\n{text}"
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt}
+        ]
+        result = self.chat(messages, max_tokens=4096)
+        
+        if not result:
             return {"original": text, "polished": text}
+        
+        # 尝试解析 JSON，失败则直接使用返回文本
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict) and "polished" in parsed:
+                return parsed
+        except:
+            pass
+        
+        # 如果不是 JSON，直接作为润色结果
+        return {"original": text, "polished": result.strip()}
 
     def qa_answer(self, question, context):
         prompt = f"""
