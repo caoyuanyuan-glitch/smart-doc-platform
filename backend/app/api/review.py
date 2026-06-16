@@ -2,16 +2,38 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 import json
 import re
+import asyncio
+import os
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
 from app.crud.audit_basis import get_audit_basis
+from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files
 from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate
 from app.utils.ai_client import ai_client
 
 router = APIRouter()
+
+
+def get_knowledge_basis(db: Session):
+    basis_list = []
+    try:
+        tree = get_folder_tree(db, None)
+        for folder in tree:
+            folder_obj = get_folder(db, folder.id)
+            if folder_obj:
+                files = get_folder_files(db, folder.id)
+                for file in files:
+                    basis_list.append({
+                        "title": file.name,
+                        "folder": folder.name,
+                        "path": f"{folder.name}/{file.name}"
+                    })
+    except Exception as e:
+        print(f"获取知识库审核依据失败: {e}")
+    return basis_list
 
 
 def extract_chapter(content, position):
@@ -79,11 +101,11 @@ def _in_abbreviation_allowed(text):
     return False
 
 
-def run_rule_audit(content, rules):
+def run_rule_audit(content, rules, knowledge_basis=None):
     """规则审核: 基于正则, 加上简易白名单过滤, 按内容去重"""
     issues = []
     document_language = detect_language(content)
-    seen_keys = set()  # 按 "规则编号 + 归一化原文" 去重
+    seen_keys = set()
 
     for rule in rules:
         try:
@@ -96,11 +118,9 @@ def run_rule_audit(content, rules):
             for match in matches:
                 original_text = match.group()
 
-                # 白名单过滤: 英文缩写点号不算错
                 if document_language in ("en", "both") and _in_abbreviation_allowed(original_text):
                     continue
 
-                # 归一化 key: 规则编号 + 去空格后的原文 + 章节
                 chapter = extract_chapter(content, match.start())
                 norm_text = re.sub(r"\s+", "", original_text).lower()
                 dedup_key = f"{rule.rule_no}|{norm_text}|{chapter}"
@@ -109,6 +129,15 @@ def run_rule_audit(content, rules):
                 seen_keys.add(dedup_key)
 
                 context = get_context(content, match.start(), match.end(), 200)
+
+                basis = rule.audit_basis if rule.audit_basis else ""
+                if not basis and knowledge_basis:
+                    for kb in knowledge_basis:
+                        if any(kw.lower() in rule.description.lower() for kw in ["标点", "格式", "术语", "写作"]):
+                            if any(name in kb["title"] for name in ["风格指南", "写作规范", "手册", "指南"]):
+                                basis = kb["path"]
+                                break
+
                 issues.append({
                     "severity": "general",
                     "category": rule.category or "其他",
@@ -118,7 +147,7 @@ def run_rule_audit(content, rules):
                     "context": context,
                     "suggestion": rule.suggestion if rule.suggestion else "",
                     "description": rule.description or "",
-                    "audit_basis": rule.audit_basis if rule.audit_basis else "技术文档写作规范",
+                    "audit_basis": basis if basis else "技术文档写作规范",
                     "confidence": 100,
                     "source": "rule",
                     "position": f"{match.start()}-{match.end()}"
@@ -202,52 +231,65 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
 
     try:
         issues = []
-        document_language = detect_language(document.content or "")
+        content = document.content or ""
+        content = content[:10000]
+        document_language = detect_language(content)
+
+        knowledge_basis = get_knowledge_basis(db)
+
+        has_ai_client = ai_client.arkclaw_client is not None or ai_client.qwen_client is not None or ai_client.deepseek_client is not None
 
         if mode in ["rule", "hybrid"]:
             rules = get_rules(db)
-            rule_issues = run_rule_audit(document.content, rules)
+            rule_issues = run_rule_audit(content, rules, knowledge_basis)
             terms = get_terms(db)
-            term_issues = run_term_check(document.content, terms)
+            term_issues = run_term_check(content, terms)
 
             candidate_rule_issues = rule_issues + term_issues
 
-            # 二次验证: 如有 arkclaw 等大模型可用, 调用 AI 过滤误报 (最多 50 条)
-            if ai_client.arkclaw_client is not None and len(candidate_rule_issues) > 0:
+            if has_ai_client and ai_client.arkclaw_client is not None and len(candidate_rule_issues) > 0:
                 try:
-                    filtered = ai_client.filter_rule_false_positives(
-                        candidate_rule_issues, document_language
+                    filtered = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(None, ai_client.filter_rule_false_positives, candidate_rule_issues, document_language),
+                        timeout=60.0
                     )
                     candidate_rule_issues = filtered
+                except asyncio.TimeoutError:
+                    print(f"AI 二次验证超时, 使用原始规则结果")
                 except Exception as e:
                     print(f"AI 二次验证失败, 使用原始规则结果: {e}")
 
             issues.extend(candidate_rule_issues)
 
-        if mode in ["ai", "hybrid"]:
-            ai_result = ai_client.audit_document(document.content, language=document_language)
-            ai_issues = ai_result.get("issues", [])
-            for issue in ai_issues:
-                issue["source"] = "ai"
-                # 补齐字段
-                issue.setdefault("severity", "general")
-                issue.setdefault("category", "其他")
-                issue.setdefault("original_text", "")
-                issue.setdefault("context", "")
-                issue.setdefault("chapter", "")
-                issue.setdefault("rule", "AI")
-                issue.setdefault("suggestion", "")
-                issue.setdefault("description", "")
-                issue.setdefault("audit_basis", "AI 审核")
-                issue.setdefault("confidence", 80)
-                issue.setdefault("position", "")
-                # severity 白名单: 规范化非法值
-                if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
-                    issue["severity"] = "general"
+        if mode in ["ai", "hybrid"] and has_ai_client:
+            try:
+                ai_result = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(None, ai_client.audit_document, content, document_language),
+                    timeout=120.0
+                )
+                ai_issues = ai_result.get("issues", [])
+                for issue in ai_issues:
+                    issue["source"] = "ai"
+                    issue.setdefault("severity", "general")
+                    issue.setdefault("category", "其他")
+                    issue.setdefault("original_text", "")
+                    issue.setdefault("context", "")
+                    issue.setdefault("chapter", "")
+                    issue.setdefault("rule", "AI")
+                    issue.setdefault("suggestion", "")
+                    issue.setdefault("description", "")
+                    issue.setdefault("audit_basis", "AI 审核")
+                    issue.setdefault("confidence", 80)
+                    issue.setdefault("position", "")
+                    if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
+                        issue["severity"] = "general"
 
-            issues.extend(ai_issues)
+                issues.extend(ai_issues)
+            except asyncio.TimeoutError:
+                print(f"AI 审核超时, 跳过 AI 审核")
+            except Exception as e:
+                print(f"AI 审核失败, 跳过 AI 审核: {e}")
 
-        # 全局去重: 按分类 + 归一化原文
         issues = dedupe_issues_by_original(issues)
 
         for issue in issues:
