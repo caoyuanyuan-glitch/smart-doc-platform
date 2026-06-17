@@ -4,7 +4,7 @@ from app.models.user import User
 from app.schemas.user import UserCreate, UserCreateWithDetails, UserUpdate
 from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["sha256_crypt", "bcrypt"], deprecated="auto")
 
 
 def verify_password(plain_password, hashed_password):
