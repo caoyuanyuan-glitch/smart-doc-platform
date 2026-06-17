@@ -89,6 +89,17 @@
         <div class="feature-enter">进入 <el-icon><ArrowRight /></el-icon></div>
       </div>
 
+      <div class="feature-card card-translate" @click="$router.push('/translate')">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
+          </svg>
+        </div>
+        <h3 class="feature-title">AI翻译</h3>
+        <p class="feature-desc">AI+记忆库双引擎翻译，支持QWEN/DeepSeek多模型，多格式文档翻译</p>
+        <div class="feature-enter">进入 <el-icon><ArrowRight /></el-icon></div>
+      </div>
+
       <div class="feature-card card-knowledge" @click="$router.push('/knowledge')">
         <div class="feature-icon">
           <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -212,6 +223,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 .card-generate .feature-icon, .card-generate::before { background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); }
 .card-compare .feature-icon, .card-compare::before { background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%); }
 .card-convert .feature-icon, .card-convert::before { background: linear-gradient(135deg, #cffafe 0%, #a5f3fc 100%); }
+.card-translate .feature-icon, .card-translate::before { background: linear-gradient(135deg, #fae8ff 0%, #e9d5ff 100%); }
 .card-knowledge .feature-icon, .card-knowledge::before { background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%); }
 
 .feature-title {
@@ -244,6 +256,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 .card-generate .feature-enter { color: #dc2626; }
 .card-compare .feature-enter { color: #7c3aed; }
 .card-convert .feature-enter { color: #0891b2; }
+.card-translate .feature-enter { color: #9333ea; }
 .card-knowledge .feature-enter { color: #6366f1; }
 
 @media (max-width: 1024px) {

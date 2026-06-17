@@ -80,6 +80,102 @@ def parse_idml(file_path):
     except Exception as e:
         raise ValueError(f"IDML解析失败: {str(e)}")
 
+def parse_dita(file_path):
+    try:
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+        ns = {"dita": "http://docs.oasis-open.org/dita/v1.1/ns.dita"}
+        text = " ".join(root.itertext())
+        return text.strip()
+    except Exception as e:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            root = ET.fromstring(content)
+            return " ".join(root.itertext()).strip()
+        except Exception:
+            raise ValueError(f"DITA解析失败: {str(e)}")
+
+def parse_xlsx(file_path):
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        texts = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            texts.append(f"[Sheet: {sheet_name}]")
+            for row in ws.iter_rows(values_only=True):
+                row_texts = []
+                for cell in row:
+                    if cell is not None:
+                        row_texts.append(str(cell))
+                if row_texts:
+                    texts.append("\t".join(row_texts))
+        wb.close()
+        return "\n".join(texts)
+    except Exception as e:
+        raise ValueError(f"XLSX解析失败: {str(e)}")
+
+def parse_pptx(file_path):
+    try:
+        text = ""
+        import re
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            slide_files = [n for n in zf.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml")]
+            slide_files.sort(key=lambda x: int(re.search(r'slide(\d+)', x).group(1)))
+
+            for slide_name in slide_files:
+                with zf.open(slide_name) as f:
+                    content = f.read().decode('utf-8')
+                    root = ET.fromstring(content)
+                    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+                    slide_texts = []
+                    for t_elem in root.iter(f"{{{ns['a']}}}t"):
+                        if t_elem.text:
+                            slide_texts.append(t_elem.text)
+                    if slide_texts:
+                        text += "\n".join(slide_texts) + "\n"
+        return text.strip()
+    except Exception as e:
+        raise ValueError(f"PPTX解析失败: {str(e)}")
+
+def parse_xlf(file_path):
+    try:
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+        ns = {"xliff": "urn:oasis:names:tc:xliff:document:1.2"}
+
+        texts = []
+        for tu in root.iter("{urn:oasis:names:tc:xliff:document:1.2}trans-unit"):
+            source = tu.find("{urn:oasis:names:tc:xliff:document:1.2}source")
+            if source is not None and source.text:
+                texts.append(source.text.strip())
+
+        if not texts:
+            for source in root.iter("{urn:oasis:names:tc:xliff:document:1.2}source"):
+                if source.text and source.text.strip():
+                    texts.append(source.text.strip())
+
+        return "\n".join(texts) if texts else ""
+    except Exception as e:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            root = ET.fromstring(content)
+            texts = []
+            xliff_ns = "urn:oasis:names:tc:xliff:document:1.2"
+            for tu in root.iter(f"{{{xliff_ns}}}trans-unit"):
+                source = tu.find(f"{{{xliff_ns}}}source")
+                if source is not None and source.text:
+                    texts.append(source.text.strip())
+            if not texts:
+                for source in root.iter(f"{{{xliff_ns}}}source"):
+                    if source.text and source.text.strip():
+                        texts.append(source.text.strip())
+            return "\n".join(texts) if texts else ""
+        except Exception:
+            raise ValueError(f"XLF解析失败: {str(e)}")
+
 def parse_file(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     
@@ -91,6 +187,16 @@ def parse_file(file_path):
         return parse_markdown(file_path)
     elif ext == '.zip':
         return parse_dita_zip(file_path)
+    elif ext == '.dita':
+        return parse_dita(file_path)
+    elif ext == '.xls':
+        return parse_xlsx(file_path)
+    elif ext == '.xlsx':
+        return parse_xlsx(file_path)
+    elif ext == '.pptx':
+        return parse_pptx(file_path)
+    elif ext == '.xlf':
+        return parse_xlf(file_path)
     elif ext == '.txt':
         return parse_text(file_path)
     elif ext == '.idml':
@@ -108,6 +214,16 @@ def get_file_type(file_path):
         return 'md'
     elif ext == '.zip':
         return 'dita'
+    elif ext == '.dita':
+        return 'dita'
+    elif ext == '.xls':
+        return 'xlsx'
+    elif ext == '.xlsx':
+        return 'xlsx'
+    elif ext == '.pptx':
+        return 'pptx'
+    elif ext == '.xlf':
+        return 'xlf'
     elif ext == '.txt':
         return 'txt'
     elif ext == '.idml':

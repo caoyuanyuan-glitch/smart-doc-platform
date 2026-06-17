@@ -93,6 +93,23 @@
               <el-menu-item index="/qa">知识库问答</el-menu-item>
             </el-sub-menu>
 
+            <el-sub-menu index="translate-sub">
+              <template #title>
+                <el-icon><Switch /></el-icon>
+                <span>AI翻译</span>
+              </template>
+              <el-menu-item index="/translate">文本翻译</el-menu-item>
+              <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
+            </el-sub-menu>
+
+            <el-sub-menu index="library-sub">
+              <template #title>
+                <el-icon><Box /></el-icon>
+                <span>内容库</span>
+              </template>
+              <el-menu-item index="/translate/memory">记忆库</el-menu-item>
+            </el-sub-menu>
+
             <el-menu-item index="/knowledge">
               <el-icon><FolderOpened /></el-icon>
               <template #title>知识库管理</template>
@@ -119,7 +136,7 @@ import { useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
-  Files, Refresh, Fold, Expand, User, FolderOpened
+  Files, Refresh, CollectionTag, Fold, Expand, Switch, Box, User, FolderOpened
 } from '@element-plus/icons-vue'
 
 const router = useRouter()

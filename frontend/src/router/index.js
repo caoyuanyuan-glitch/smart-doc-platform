@@ -11,8 +11,10 @@ import Convert from '@/views/Convert.vue'
 import ConvertRules from '@/views/ConvertRules.vue'
 import Terms from '@/views/Terms.vue'
 import Users from '@/views/Users.vue'
+import Translate from '@/views/Translate.vue'
+import TranslateDoc from '@/views/TranslateDoc.vue'
+import MemoryBank from '@/views/MemoryBank.vue'
 import Knowledge from '@/views/Knowledge.vue'
-
 import PolishPreview from '@/views/PolishPreview.vue'
 
 const routes = [
@@ -125,6 +127,21 @@ const routes = [
     path: '/users',
     name: 'Users',
     component: Users
+  },
+  {
+    path: '/translate',
+    name: 'Translate',
+    component: Translate
+  },
+  {
+    path: '/translate/docs',
+    name: 'TranslateDocs',
+    component: TranslateDoc
+  },
+  {
+    path: '/translate/memory',
+    name: 'MemoryBank',
+    component: MemoryBank
   },
   {
     path: '/knowledge',

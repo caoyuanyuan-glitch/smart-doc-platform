@@ -5,7 +5,6 @@ const instance = axios.create({
   timeout: 180000
 })
 
-// 请求拦截器 - 添加 token
 instance.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token')
@@ -19,7 +18,6 @@ instance.interceptors.request.use(
   }
 )
 
-// 响应拦截器 - 处理 401 错误
 instance.interceptors.response.use(
   (response) => response,
   (error) => {
@@ -219,6 +217,26 @@ export const convertRulesAPI = {
     formData.append('rule_ids', ids.join(','))
     return instance.post('/convert/rules/bulk-delete', formData)
   }
+}
+
+export const translationAPI = {
+  translate: (data) => instance.post('/translation/translate', data),
+  translateFile: (formData) => instance.post('/translation/translate/file', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 600000
+  }),
+  getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
+  getDocument: (id) => instance.get(`/documents/${id}`),
+  getMemory: (skip = 0, limit = 100, keyword) => {
+    const params = { skip, limit }
+    if (keyword) params.keyword = keyword
+    return instance.get('/translation/memory', { params })
+  },
+  addMemory: (data) => instance.post('/translation/memory', data),
+  deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
+  getDocs: (skip = 0, limit = 100) => instance.get('/translation/docs', { params: { skip, limit } }),
+  getDoc: (id) => instance.get(`/translation/docs/${id}`),
+  deleteDoc: (id) => instance.delete(`/translation/docs/${id}`)
 }
 
 export const knowledgeAPI = {

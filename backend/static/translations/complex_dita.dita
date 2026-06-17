@@ -1,0 +1,13 @@
+<topic id="complex_test">
+  <title>Product Installation and Configuration Guide</title>
+  <shortdesc>This document describes how to install.<ph outputclass="product">Smart Document Platform</ph>and perform basic configuration.</shortdesc>
+  <body>
+    <p>Please ensure the system meets the following<uicontrol>Minimum Requirements</uicontrol>Then proceed with the installation.</p>
+    <p>In<menucascade><uicontrol>File</uicontrol><uicontrol>Settings</uicontrol></menucascade>Parameters can be adjusted in the menu.</p>
+    <note type="important">During installation<ph outputclass="bold">Do not</ph>Disconnect the power supply.</note>
+    <section>
+      <title>Step 1: Download the installation package</title>
+      <p>from<cite>Official Website</cite>Download the latest version of the installer.</p>
+    </section>
+  </body>
+</topic>

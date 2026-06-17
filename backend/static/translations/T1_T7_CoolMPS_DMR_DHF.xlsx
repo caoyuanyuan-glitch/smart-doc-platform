@@ -1,0 +1,26 @@
+[Sheet: sheet1]
+zh-CN
+(Inspection Note)
+Exclamation Mark Warning Label
+0.762*3.2TA1MM - Tubing Reagent Needle Assembly
+0.762*3.2TA1MM - Sequencing Reagent Needle Assembly
+0.762*3.2TA1MM - Primer Reagent Needle
+1. Control software code replacement
+1. Software part number change
+1.6x3.2SUS316LMM - Pure Water Reagent Needle
+10mm open-end wrench head - thinned by 3mm
+1 mL piston pump IQC inspection process
+2. Add algorithm installation package code
+2. Remove tooling/fixture related DHF documents
+2000-FDA Laser Label
+2024.1.4
+2024.12.01
+2025.1.10
+2025.2.5
+3. Add IVD BOM
+3. Separate the component assembly record sheet from the whole machine production record sheet and re-apply for codes
+4. Delete PCR temperature control positioning block
+4. Add BCS system imaging process and record sheet
+5. Add tube cutting calibration process and record sheet
+5. Revise whole machine BOM name
+6. Add 6 packing lists

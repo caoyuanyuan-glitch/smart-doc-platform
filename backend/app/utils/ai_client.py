@@ -4,9 +4,10 @@ import re
 import httpx
 import time
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv()
+
+ANTHROPIC_VERSION = "2023-06-01"
 
 
 def _is_valid_key(val):
@@ -39,6 +40,11 @@ class AIClient:
         self.kimi_api_key = os.getenv("KIMI_API_KEY")
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
+
+        # Anthropic-compatible proxy (for translation module)
+        self.anthropic_model = os.getenv("QWEN_MODEL", "monkeycode-pro/qwen3.6-plus")
+        self.anthropic_base_url = os.getenv("QWEN_BASE_URL", "https://proxy.monkeycode-ai.com/v1")
+        self.anthropic_http_client = httpx.Client(verify=False, timeout=120)
 
         timeout = httpx.Timeout(30.0, read=180.0)
 
@@ -84,6 +90,56 @@ class AIClient:
     @property
     def has_any_client(self):
         return self.kimi_client is not None or self.arkclaw_client is not None or self.qwen_client is not None or self.deepseek_client is not None
+
+    # ------------------------------------------------------------------
+    # Anthropic-compatible _call_model (for translation module)
+    # ------------------------------------------------------------------
+    def _call_model(self, messages, max_tokens=2048, temperature=0.3):
+        system_msg = None
+        user_messages = []
+
+        for msg in messages:
+            if msg["role"] == "system":
+                system_msg = msg["content"]
+            else:
+                user_messages.append(msg)
+
+        body = {
+            "model": self.anthropic_model,
+            "messages": user_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+        if system_msg:
+            body["system"] = system_msg
+
+        try:
+            response = self.anthropic_http_client.post(
+                f"{self.anthropic_base_url}/messages",
+                headers={
+                    "x-api-key": self.dashscope_api_key,
+                    "Content-Type": "application/json",
+                    "anthropic-version": ANTHROPIC_VERSION
+                },
+                json=body
+            )
+
+            if response.status_code != 200:
+                print(f"模型调用失败 [{response.status_code}]: {response.text[:200]}")
+                return None
+
+            data = response.json()
+
+            text_parts = []
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+
+            return "".join(text_parts) if text_parts else None
+
+        except Exception as e:
+            print(f"模型调用异常: {str(e)}")
+            return None
 
     # ------------------------------------------------------------------
     # 基础 chat 接口
@@ -304,25 +360,14 @@ class AIClient:
     # ------------------------------------------------------------------
     @staticmethod
     def _strip_examples_from_guide(guide_text):
-        """剔除句式清单表格中的"示例"列，仅保留"句式模板"列。
-        
-        句式清单格式：
-        |序号|句式模板|示例|
-        |1|操作步骤如下：|"操作步骤如下："|
-        
-        处理后：
-        |序号|句式模板|
-        |1|操作步骤如下：|
-        """
+        """剔除句式清单表格中的"示例"列，仅保留"句式模板"列。"""
         lines = guide_text.split('\n')
         result = []
         for line in lines:
             s = line.strip()
             if s.startswith('|') and s.endswith('|'):
                 parts = s.split('|')
-                # parts: ['', 'col1', 'col2', 'col3', ...]
                 if len(parts) >= 4:
-                    # 仅保留前两列（序号 + 句式模板）
                     result.append('|' + parts[1] + '|' + parts[2] + '|')
                     continue
             result.append(line)
@@ -355,17 +400,16 @@ class AIClient:
 输出：直接输出改写后的完整文本，无需解释。"""
 
         if terminology:
-            # 构建术语替换指令
             term_lines = []
             for non_std, std in terminology.items():
                 if non_std and std and non_std != std:
-                    term_lines.append(f'  - \"{non_std}\" 必须替换为 \"{std}\"')
+                    term_lines.append(f'  - "{non_std}" 必须替换为 "{std}"')
             if term_lines:
                 term_section = "\n术语库强制替换规则（最高优先级）：\n" + "\n".join(term_lines) + "\n"
                 system += term_section
 
         user_prompt = f"请润色以下文本：\n\n{text}"
-        
+
         if style_guide:
             user_prompt = f"""句式清单如下。请严格逐句改写待审核文本。
 
@@ -386,17 +430,17 @@ class AIClient:
             {"role": "user", "content": user_prompt}
         ]
         result = self.chat(messages, max_tokens=4096)
-        
+
         if not result:
             return {"original": text, "polished": text}
-        
+
         try:
             parsed = json.loads(result)
             if isinstance(parsed, dict) and "polished" in parsed:
                 return parsed
         except:
             pass
-        
+
         return {"original": text, "polished": result.strip()}
 
     def qa_answer(self, question, context):
@@ -421,7 +465,7 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=2048)
-        
+
         try:
             return json.loads(result)
         except:
@@ -452,7 +496,7 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=4096)
-        
+
         try:
             return json.loads(result)
         except:
@@ -477,7 +521,7 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=2048)
-        
+
         try:
             return json.loads(result)
         except:
@@ -600,7 +644,7 @@ Return an empty issues array when no high-confidence issue is present."""
   ]
 }}
 
-如果没有高置信度问题，返回 {"issues": []}。"""
+如果没有高置信度问题，返回 {{"issues": []}}。"""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -617,8 +661,6 @@ Return an empty issues array when no high-confidence issue is present."""
 
     # ------------------------------------------------------------------
     # 规则审核的二次验证 (ArkClaw 过滤误报)
-    # 输入: [{original_text, context, rule, category, ...}] 候选问题
-    # 输出: 过滤后的列表 (仅保留确定为错误的项)
     # ------------------------------------------------------------------
     def filter_rule_false_positives(self, candidate_issues, document_language):
         if not candidate_issues:
@@ -805,6 +847,7 @@ Only keep items with clear evidence."""
             return json.loads(result)
         except:
             return {"score": 0, "summary": "审核失败", "issues": []}
+
 
 
 ai_client = AIClient()
