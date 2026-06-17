@@ -18,9 +18,6 @@
         <span class="tree-label">{{ node.name }}</span>
 
         <span class="tree-actions">
-          <span class="tree-action" @click.stop="handleCopyId(node)" title="复制路径">
-            <el-icon><CopyDocument /></el-icon>
-          </span>
           <span class="tree-action" @click.stop="$emit('create-sub', node.id)" title="新建子文件夹">➕</span>
           <span class="tree-action" @click.stop="$emit('rename', node)" title="重命名">✏️</span>
           <span class="tree-action delete" @click.stop="$emit('delete', node)" title="删除">🗑️</span>
@@ -44,9 +41,6 @@
 </template>
 
 <script setup>
-import { CopyDocument } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-
 defineProps({
   nodes: { type: Array, required: true },
   currentFolderId: { type: Number, default: null },
@@ -54,11 +48,6 @@ defineProps({
 })
 
 defineEmits(['toggle', 'select', 'create-sub', 'rename', 'delete'])
-
-function handleCopyId(node) {
-  navigator.clipboard.writeText(`folderId: ${node.id}`)
-  ElMessage.success('文件夹路径已复制')
-}
 </script>
 
 <style scoped>
@@ -76,11 +65,11 @@ function handleCopyId(node) {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 6px;
+  padding: 6px 8px;
   border-radius: 4px;
   cursor: pointer;
   margin: 1px 0;
-  font-size: 13px;
+  font-size: 15px;
   transition: background 0.15s;
 }
 

@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const instance = axios.create({
   baseURL: '/api',
-  timeout: 60000
+  timeout: 180000
 })
 
 // 请求拦截器 - 添加 token

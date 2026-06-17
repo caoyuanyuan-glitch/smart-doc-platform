@@ -38,7 +38,8 @@ async def startup_event():
     except Exception as e:
         print(f"[startup] 知识库种子初始化失败: {e}")
     try:
-        from seed.polished_seed import seed_polished_documents
+        from seed.polished_seed import cleanup_orphan_polished_documents, seed_polished_documents
+        cleanup_orphan_polished_documents()
         seed_polished_documents()
     except Exception as e:
         print(f"[startup] 已润色文档种子初始化失败: {e}")

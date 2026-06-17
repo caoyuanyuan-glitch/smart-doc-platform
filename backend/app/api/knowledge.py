@@ -7,7 +7,7 @@ import mimetypes
 import docx2txt
 from app.database import get_db
 from app.crud.knowledge import (
-    get_folder, get_folder_tree, get_folder_files, create_folder, update_folder, delete_folder,
+    get_folder, get_folder_tree, get_folder_files, get_subfolders, create_folder, update_folder, delete_folder,
     create_file, get_file, delete_file
 )
 from app.schemas.knowledge import FolderCreate, FolderUpdate
@@ -29,6 +29,7 @@ async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="文件夹不存在")
     
     files = get_folder_files(db, folder_id)
+    subfolders = get_subfolders(db, folder_id)
     return {
         "folder": {
             "id": folder.id,
@@ -36,6 +37,7 @@ async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
             "parent_id": folder.parent_id,
             "created_at": folder.created_at.isoformat() if folder.created_at else None
         },
+        "subfolders": subfolders,
         "files": files
     }
 
@@ -184,17 +186,27 @@ async def preview_file(file_id: int, db: Session = Depends(get_db)):
     elif file_type in ["jpg", "jpeg", "png", "gif", "bmp", "svg", "webp"]:
         return {"file_path": f"/api/knowledge/files/{file_id}/raw", "type": "image", "file_name": file.filename}
     
-    # PDF - return raw file URL for browser native preview
+    # PDF - extract text and return as plain text
     elif file_type == "pdf":
-        return {"file_path": f"/api/knowledge/files/{file_id}/raw", "type": "pdf", "file_name": file.filename}
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(file.file_path)
+            content = "\n".join([page.extract_text() or "" for page in reader.pages])
+            if not content.strip():
+                content = "(PDF 文件内容为空或无法提取文字)"
+            return {"content": content, "type": "text", "file_name": file.filename}
+        except Exception as e:
+            return {"content": f"PDF 解析失败: {str(e)}", "type": "error", "file_name": file.filename}
     
-    # DOCX - extract text content
+    # DOCX - extract text and return as plain text
     elif file_type == "docx":
         try:
             content = docx2txt.process(file.file_path)
-            return {"content": content, "type": "docx", "file_name": file.filename}
+            if not content or not content.strip():
+                content = "(DOCX 文件内容为空或无法提取文字)"
+            return {"content": content, "type": "text", "file_name": file.filename}
         except Exception as e:
-            return {"content": f"DOCX 预览失败：{str(e)}", "type": "error", "file_name": file.filename}
+            return {"content": f"DOCX 解析失败: {str(e)}", "type": "error", "file_name": file.filename}
     
     else:
         return {"content": "此文件类型不支持在线预览，请下载后查看", "type": "unsupported", "file_name": file.filename}
@@ -236,3 +248,16 @@ async def delete_file_by_id(
     
     delete_file(db, file_id)
     return {"message": "文件删除成功"}
+
+
+@router.post("/export-seed")
+async def export_knowledge_to_seed(
+    current_user = Depends(get_current_user)
+):
+    """将知识库导出到种子目录，用于 Git 提交后团队共享"""
+    from seed.knowledge_seed import export_kb_to_seed
+    try:
+        export_kb_to_seed()
+        return {"message": "知识库已导出到 seed/knowledge/ 目录，请执行 git add/commit/push 分享给团队"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
