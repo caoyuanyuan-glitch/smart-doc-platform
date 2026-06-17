@@ -2,6 +2,7 @@ import os
 import json
 import re
 import httpx
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -24,7 +25,12 @@ class AIClient:
         self.arkclaw_base_url = os.getenv("ARKCLAW_BASE_URL", "https://api.arkclaw.com/v1")
         self.arkclaw_model = os.getenv("ARKCLAW_MODEL", "arkclaw-chat")
 
-        timeout = httpx.Timeout(30.0, read=120.0)
+        # Kimi (Moonshot AI) 配置
+        self.kimi_api_key = os.getenv("KIMI_API_KEY")
+        self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
+        self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
+
+        timeout = httpx.Timeout(30.0, read=180.0)
 
         # 自动识别火山引擎方舟 API Key
         VOLC_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
@@ -55,6 +61,19 @@ class AIClient:
             base_url=self.arkclaw_base_url,
             timeout=timeout,
         ) if _is_valid_key(self.arkclaw_api_key) else None
+
+        # Kimi 客户端初始化
+        self.kimi_client = OpenAI(
+            api_key=self.kimi_api_key,
+            base_url=self.kimi_base_url,
+            timeout=timeout,
+        ) if _is_valid_key(self.kimi_api_key) else None
+        if self.kimi_client:
+            print(f"[AI] Kimi (Moonshot) 已连接, base_url={self.kimi_base_url}, model={self.kimi_model}")
+
+    @property
+    def has_any_client(self):
+        return self.kimi_client is not None or self.arkclaw_client is not None or self.qwen_client is not None or self.deepseek_client is not None
 
     # ------------------------------------------------------------------
     # 基础 chat 接口
@@ -104,29 +123,64 @@ class AIClient:
             print(f"ArkClaw调用失败: {str(e)}")
             return None
 
+    def call_kimi(self, messages, max_tokens=2048, temperature=0.3):
+        if not self.kimi_client:
+            return None
+        try:
+            response = self.kimi_client.chat.completions.create(
+                model=self.kimi_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Kimi调用失败: {str(e)}")
+            return None
+
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
-        result = None
+        # 优先级: Kimi > ArkClaw > DeepSeek > Qwen
+        providers = []
+        if self.kimi_client:
+            providers.append(('Kimi', self.kimi_client, self.kimi_model))
+        if self.arkclaw_client:
+            providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
+        if self.deepseek_client:
+            providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
+        if self.qwen_client:
+            providers.append(('Qwen', self.qwen_client, self.qwen_model))
 
-        if self.default_provider == "arkclaw":
-            result = self.call_arkclaw(messages, max_tokens, temperature)
-            if result is None and fallback:
-                result = self.call_qwen(messages, max_tokens, temperature)
-            if result is None and fallback:
-                result = self.call_deepseek(messages, max_tokens, temperature)
-        elif self.default_provider == "qwen":
-            result = self.call_qwen(messages, max_tokens, temperature)
-            if result is None and fallback:
-                result = self.call_deepseek(messages, max_tokens, temperature)
-            if result is None and fallback:
-                result = self.call_arkclaw(messages, max_tokens, temperature)
-        else:
-            result = self.call_deepseek(messages, max_tokens, temperature)
-            if result is None and fallback:
-                result = self.call_qwen(messages, max_tokens, temperature)
-            if result is None and fallback:
-                result = self.call_arkclaw(messages, max_tokens, temperature)
+        if not providers:
+            return None
 
-        return result
+        max_retries = 3
+        retry_delay = 2
+
+        for name, client, model in providers:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    return response.choices[0].message.content
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str and attempt < max_retries:
+                        print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    print(f"[AI] {name} 调用失败: {error_str[:100]}")
+                    break  # 非 429 或重试耗尽，切换下一个 provider
+
+            # 当前 provider 全部失败，尝试下一个
+            if not fallback:
+                return None
+
+        return None
 
     # ------------------------------------------------------------------
     # 文档润色
@@ -307,6 +361,152 @@ class AIClient:
             return []
 
     # ------------------------------------------------------------------
+    # 文档审核 (AI 驱动的拼写/语法/风格检查)
+    # ------------------------------------------------------------------
+    def audit_document(self, content, language=None):
+        lang = language or "en"
+        is_english = lang in ("en", "both")
+
+        if is_english:
+            system_prompt = "You are an expert technical document reviewer with 15+ years of experience in medical/technical writing, quality assurance, and technical communication in English. You specialize in reviewing product manuals, user guides, and technical specifications for medical devices and scientific instruments. Think of yourself as Microsoft Word's proofreader combined with a technical writing expert."
+            user_prompt = f"""Please perform a COMPREHENSIVE proofreading and grammar check of this English technical document, similar to Microsoft Word's spell check and grammar check functionality. Find EVERY issue that a professional proofreader would catch.
+
+DOCUMENT TYPE: User Manual for a medical/technical device
+DOCUMENT EXCERPT (first 20000 chars):
+{content[:20000]}
+
+THIS REVIEW IS SIMILAR TO MICROSOFT WORD PROOFREADING - IDENTIFY:
+
+1. SPELLING ERRORS (like Word's red underline):
+   - Typos and misspelled words
+   - Common confusable words: your/you're, their/there/they're, its/it's, affect/effect, etc.
+   - Words that should be hyphenated or combined
+   - Common misspellings like: "accomodate" (should be "accommodate"), "occured" (should be "occurred"), "seperate" (should be "separate"), "recomend" (should be "recommend"), "untill" (should be "until"), "goverment" (should be "government")
+
+2. GRAMMAR ERRORS (like Word's blue/green underline):
+   - Subject-verb disagreement: "The data shows..." vs "The data show..."
+   - Wrong tense usage: "yesterday I go" → "yesterday I went"
+   - Missing or wrong articles: "a apple" → "an apple"
+   - Run-on sentences and sentence fragments
+   - Wrong preposition usage: "different than" → "different from"
+   - Double negatives: "I don't have nothing" → "I don't have anything"
+   - Pronoun reference issues: ambiguous "it", "they", "this"
+   - Faulty parallelism: "She likes hiking, to swim, and cycling" → "She likes hiking, swimming, and cycling"
+
+3. PUNCTUATION ERRORS (like Word's blue underline):
+   - Missing commas in lists and compound sentences
+   - Wrong apostrophe usage: "it's" vs "its"
+   - Missing periods, colons, semicolons
+   - Quotation mark errors
+   - Hyphenation errors
+
+4. WORD CHOICE ISSUES:
+   - Commonly confused words: "ensure/insure/assure", "fewer/less", "who/whom"
+   - Wrong word form: "I am interesting" → "I am interested"
+   - Wordiness and redundancy: "past history" → "history"
+   - Unnecessary jargon
+
+5. CAPITALIZATION ERRORS:
+   - Improper capitalization of proper nouns
+   - All caps usage in running text (except for proper names)
+   - Capitalization inconsistencies
+
+6. STYLE ISSUES:
+   - Inconsistent terminology (using different words for the same thing)
+   - Inconsistent formatting (mixing American/British English)
+   - Passive voice overuse (when active would be clearer)
+
+SPECIFIC COMMON ERRORS TO LOOK FOR:
+- "alot" (not a word) → "a lot"
+- "alright" (nonstandard) → "all right"
+- "could care less" (illogical) → "couldn't care less"
+- "for all intensive purposes" → "for all intents and purposes"
+- "should of", "would of", "could of" (wrong) → "should have", "would have", "could have"
+- "they" used for singular indefinite pronoun → "he or she", "they" (acceptable modern usage)
+- "more then" (wrong) → "more than"
+- contractions in formal technical writing (optional, check style guide)
+
+VALID USAGE (DO NOT REPORT AS ERRORS):
+- Company names: "MGI Tech Co., Ltd.", "BGI Genomics"
+- Legal terms: "P.R.China", "etc." in lists
+- Standard abbreviations: "e.g.", "i.e.", "vs.", "approx."
+- Technical acronyms that are defined: "PCR", "ELISA", "DNA" after first definition
+
+OUTPUT STRICT VALID JSON ONLY, NO extra text, NO markdown code blocks:
+{{
+  "issues": [
+    {{
+      "severity": "general|serious|suggestion",
+      "category": "Spelling|Grammar|Punctuation|Word Choice|Capitalization|Style",
+      "rule": "Brief rule name",
+      "chapter": "Section/Chapter location",
+      "original_text": "Exact problematic text",
+      "context": "1-2 sentences of surrounding context",
+      "suggestion": "Specific correction",
+      "description": "Why this is an issue",
+      "audit_basis": "English grammar/writing standard",
+      "confidence": 85
+    }}
+  ]
+}}
+
+IMPORTANT:
+- Be THOROUGH. A 20000 character document should have 10-30+ issues.
+- Report specific corrections, not vague suggestions.
+- If you find words like "accomodate", "occured", "seperate", "alot" - these ARE errors.
+- Look carefully at contractions - ensure/insure/assure confusion - these are REAL errors to catch."""
+        else:
+            system_prompt = "你是一位拥有15年以上经验的资深技术文档审核专家，擅长审核中文技术文档、产品说明书和操作手册的质量。"
+            user_prompt = f"""请审核以下中文技术文档（节选），识别所有影响文档质量的真实问题。
+
+文档类型：医疗/技术设备用户手册
+文档内容（前20000字）：
+{content[:20000]}
+
+请识别以下类别的问题：
+1. 语法与句子结构 - 句子不完整、主谓不一致、时态混乱、表达生硬
+2. 标点符号与格式 - 标点错误、中英文标点混用、格式不一致、空格问题
+3. 用词与术语 - 错别字、用词错误、专业术语不规范、术语前后不一致
+4. 技术准确性 - 技术信息缺失或错误、内容矛盾、表述不清
+5. 风格一致性 - 大小写不一致、术语不统一、违反写作规范、语气不恰当
+6. 结构与组织 - 章节缺失、逻辑不清晰、标题层级错误、引用问题
+7. 专业性 - 口语化表达、网络用语、语气不适合技术文档
+
+审核原则：
+- 只报告确定的、具体的问题。不要猜测或不确定的内容。
+- 每个问题必须包含：原文片段、上下文、具体修改建议。
+- 相同/相似问题合并为一条。
+
+请严格输出有效的JSON，不要额外文字，不要markdown代码块。
+
+一份良好的技术文档在20000字中通常应该能识别5-20个真实问题。请至少报告你确实发现的问题。"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        result = self.chat(messages, max_tokens=4096, temperature=0.2)
+        if not result:
+            return {"issues": []}
+
+        try:
+            text = result.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+                text = re.sub(r"\n?```$", "", text)
+            return json.loads(text)
+        except Exception as e:
+            print(f"[AI] 解析审核结果失败: {e}")
+            try:
+                m = re.search(r"\{[\s\S]*\}", result)
+                if m:
+                    return json.loads(m.group(0))
+            except Exception:
+                pass
+            return {"issues": []}
+
+    # ------------------------------------------------------------------
     # 规则审核的二次验证 (ArkClaw 过滤误报)
     # 输入: [{original_text, context, rule, category, ...}] 候选问题
     # 输出: 过滤后的列表 (仅保留确定为错误的项)
@@ -315,31 +515,57 @@ class AIClient:
         if not candidate_issues:
             return []
 
-        lang_desc = "中文" if document_language == "cn" else "英文" if document_language == "en" else "中英文混合"
-
-        # 最多送入 50 条进行验证 (降低 token 成本)
+        is_english = document_language in ("en", "both")
         capped = candidate_issues[:50]
-        sample_text = "\n".join([
-            f"[{idx+1}] 规则: {c.get('rule','')} | 原文: {c.get('original_text','')} | 上下文: {(c.get('context','') or '')[:120]}"
-            for idx, c in enumerate(capped)
-        ])
 
-        prompt = f"""请作为{lang_desc}技术文档审核专家，判断以下规则匹配出的候选问题是否是真正的错误。
+        if is_english:
+            sample_text = "\n".join([
+                f"[{idx+1}] Rule: {c.get('rule','')} | Text: {c.get('original_text','')} | Context: {(c.get('context','') or '')[:100]}"
+                for idx, c in enumerate(capped)
+            ])
 
-判断原则（非常重要）：
-1. 英文公司名 / 专有名词中的点号（如 "Ltd."、"Co."、"Inc."、"P.R."、"U.S.A."）是合法写法，不算错误。
-2. 常见缩写（"e.g."、"i.e."、"etc."）合法。
-3. 正常的英文句号后空一格不算问题。
-4. 只把确定为错误的项标记为 valid=true。
-5. 如果原文片段本身不构成问题（只是正则误匹配），标记为 valid=false。
+            prompt = f"""You are reviewing potential issues found by regex rules in an English technical document. For each candidate issue below, determine if it is a TRUE problem (valid issue) or FALSE positive (not actually a problem in this context).
 
-输入候选问题（每条一行，编号从 1 开始）：
+CANDIDATE ISSUES (numbered 1 to {len(capped)}):
 {sample_text}
 
-请严格输出 JSON，数组长度必须为 {len(capped)}，每项为 {{"index": 编号, "valid": true|false, "reason": "简短理由"}}。只输出 JSON，不要额外文字。"""
+IMPORTANT RULES FOR VALIDATION:
+- Company names like "MGI Tech Co., Ltd." are CORRECT - do NOT flag as issue
+- Legal/geographic terms like "P.R.China" or "Wuhan" are CORRECT
+- Normal English punctuation at the end of sentences is CORRECT
+- Standard technical abbreviations (e.g., i.e., etc.) are CORRECT
+- Only flag items where the text truly violates English technical writing conventions
+
+OUTPUT: Strict JSON only:
+{{
+  "valid_indices": [list of indices that are TRUE issues, e.g., [1, 5, 12]]
+}}
+
+If NO items are valid issues, return: {{"valid_indices": []}}"""
+        else:
+            sample_text = "\n".join([
+                f"[{idx+1}] 规则: {c.get('rule','')} | 原文: {c.get('original_text','')} | 上下文: {(c.get('context','') or '')[:100]}"
+                for idx, c in enumerate(capped)
+            ])
+            prompt = f"""请判断以下在中文技术文档中由正则规则匹配出的候选问题，哪些是真正的问题（valid=true），哪些是误报（valid=false）。
+
+候选问题列表（编号1-{len(capped)}）：
+{sample_text}
+
+重要判断原则：
+- 英文公司名称如 "MGI Tech Co., Ltd." 中的标点是正确用法，不要误报
+- 正常的中英文混排专有名词通常是正确的
+- 只有真正违反中文技术文档写作规范的才标记为问题
+
+请严格输出JSON格式：
+{{
+  "valid_indices": [真正是问题的编号，如 [1, 5, 12]]
+}}
+
+如果没有有效问题，返回: {{"valid_indices": []}}"""
 
         messages = [{"role": "user", "content": prompt}]
-        result = self.chat(messages, max_tokens=3000, temperature=0.1)
+        result = self.chat(messages, max_tokens=2000, temperature=0.1)
         if not result:
             return candidate_issues
 
@@ -349,25 +575,18 @@ class AIClient:
                 text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
                 text = re.sub(r"\n?```$", "", text)
             data = json.loads(text)
-            if isinstance(data, dict) and isinstance(data.get("items"), list):
-                data = data["items"]
-            valid_indices = set()
-            for item in data:
-                if isinstance(item, dict) and item.get("valid") is True:
-                    valid_indices.add(int(item.get("index", 0)))
+            valid_indices = set(int(x) for x in data.get("valid_indices", []))
         except Exception as e:
-            print(f"过滤误报失败: {e}")
+            print(f"[AI] 过滤误报失败: {e}")
             return candidate_issues
 
         filtered = []
-        for idx, issue in enumerate(capped, 1):
-            if idx in valid_indices:
+        for idx, issue in enumerate(capped):
+            if (idx + 1) in valid_indices:
                 filtered.append(issue)
 
-        # 如果有超过 50 条未处理的，直接保留
         if len(candidate_issues) > len(capped):
             filtered.extend(candidate_issues[len(capped):])
-
         return filtered
 
     # ------------------------------------------------------------------
