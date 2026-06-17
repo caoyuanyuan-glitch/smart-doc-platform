@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from app.models.knowledge import Folder, KnowledgeFile
+from app.models.user import User
 from app.schemas.knowledge import FolderCreate, FileCreate
 
 def get_folder(db: Session, folder_id: int):
@@ -38,6 +39,12 @@ def get_folder_tree(db: Session, parent_id: int = None):
 
 def get_folder_files(db: Session, folder_id: int):
     files = db.query(KnowledgeFile).filter(KnowledgeFile.folder_id == folder_id).all()
+    # 批量获取用户名映射
+    user_ids = {f.created_by for f in files if f.created_by}
+    user_map = {}
+    if user_ids:
+        users = db.query(User).filter(User.id.in_(user_ids)).all()
+        user_map = {u.id: u.username for u in users}
     return [
         {
             "id": f.id,
@@ -48,10 +55,27 @@ def get_folder_files(db: Session, folder_id: int):
             "file_type": f.file_type,
             "folder_id": f.folder_id,
             "created_by": f.created_by,
+            "created_by_name": user_map.get(f.created_by, "未知用户") if f.created_by else "未知用户",
             "created_at": f.created_at,
             "updated_at": f.updated_at
         }
         for f in files
+    ]
+
+
+def get_subfolders(db: Session, folder_id: int):
+    """获取指定文件夹下的所有子文件夹"""
+    folders = db.query(Folder).filter(Folder.parent_id == folder_id).all()
+    return [
+        {
+            "id": f.id,
+            "name": f.name,
+            "parent_id": f.parent_id,
+            "created_by": f.created_by,
+            "created_at": f.created_at,
+            "updated_at": f.updated_at
+        }
+        for f in folders
     ]
 
 def create_folder(db: Session, folder: FolderCreate, created_by: int):

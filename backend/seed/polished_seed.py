@@ -12,6 +12,31 @@ SEED_DIR = Path(__file__).parent / "polished"
 TARGET_DIR = Path(__file__).parent.parent / "app" / "static" / "polished"
 
 
+def cleanup_orphan_polished_documents():
+    """清理磁盘文件已不存在的已润色文档 DB 记录。"""
+    db = SessionLocal()
+    try:
+        docs = db.query(PolishedDocument).all()
+        orphan_ids = []
+        for doc in docs:
+            if not doc.file_path or not os.path.exists(doc.file_path):
+                orphan_ids.append(doc.id)
+
+        if orphan_ids:
+            for oid in orphan_ids:
+                db.query(PolishedDocument).filter(PolishedDocument.id == oid).delete()
+            db.commit()
+            print(f"[seed] 已清理 {len(orphan_ids)} 条无磁盘文件的已润色文档记录")
+        else:
+            print("[seed] 已润色文档记录完好，无需清理")
+    except Exception as e:
+        db.rollback()
+        print(f"[seed] 已润色文档清理失败: {e}")
+        raise
+    finally:
+        db.close()
+
+
 def seed_polished_documents():
     """增量同步：种子目录中的已润色文档如在 DB 中不存在则创建，已存在则跳过。"""
     db = SessionLocal()

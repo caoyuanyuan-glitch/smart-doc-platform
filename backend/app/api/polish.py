@@ -15,8 +15,54 @@ from app.crud.polished_document import (
 )
 from app.api.auth import get_current_user, get_default_user
 from app.models.knowledge import KnowledgeFile, Folder
+from app.models.term import Term
 
 router = APIRouter()
+
+
+def _load_terms_from_db(db: Session) -> dict:
+    """从术语库表中加载所有术语，返回 {非标准用语: 标准用语} 映射"""
+    terms = db.query(Term).all()
+    term_dict = {}
+    for t in terms:
+        if t.non_standard and t.standard and t.non_standard.strip() != t.standard.strip():
+            term_dict[t.non_standard.strip()] = t.standard.strip()
+    return term_dict
+
+
+# 句式清单所在知识库文件夹 ID（写作规范 / 句式清单）
+SENTENCE_GUIDE_FOLDER_IDS = [3]
+
+
+def _load_sentence_guides(db: Session) -> str:
+    """递归加载知识库中句式清单文件夹下的所有 .md 文件内容，拼接后返回"""
+    guides = []
+    files = db.query(KnowledgeFile).filter(
+        KnowledgeFile.folder_id.in_(SENTENCE_GUIDE_FOLDER_IDS),
+        KnowledgeFile.file_type == "md"
+    ).all()
+    # 也递归加载子文件夹下的文件
+    subfolder_ids = list(SENTENCE_GUIDE_FOLDER_IDS)
+    while subfolder_ids:
+        fid = subfolder_ids.pop()
+        folders = db.query(Folder).filter(Folder.parent_id == fid).all()
+        for sf in folders:
+            subfolder_ids.append(sf.id)
+            sf_files = db.query(KnowledgeFile).filter(
+                KnowledgeFile.folder_id == sf.id,
+                KnowledgeFile.file_type == "md"
+            ).all()
+            files.extend(sf_files)
+    for kf in files:
+        if kf.file_path and os.path.exists(kf.file_path):
+            try:
+                with open(kf.file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if content.strip():
+                        guides.append(content)
+            except Exception:
+                pass
+    return "\n\n".join(guides) if guides else None
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "polished")
 POLISHED_FOLDER_NAME = "已润色文档"
@@ -118,7 +164,8 @@ def _apply_skill_polish(
     sentence_guide: str = None,
     terminology: str = None,
     requirements: str = None,
-    is_title: bool = False
+    is_title: bool = False,
+    db_terminology: dict = None
 ) -> tuple[str, list[PolishRuleMatch]]:
     """应用skill规则进行润色。is_title=True 时跳过尾部标点规范化。"""
     changes = []
@@ -130,6 +177,7 @@ def _apply_skill_polish(
         style_rules = _extract_style_rules(sentence_guide)
     
     term_dict = {}
+    # 先解析文件中的术语替换（markdown table 格式）
     if terminology:
         try:
             for row in terminology.split('\n'):
@@ -146,6 +194,9 @@ def _apply_skill_polish(
                             term_dict[old_term] = new_term
         except Exception:
             pass
+    # 合并数据库术语库（优先级高于文件术语）
+    if db_terminology:
+        term_dict.update(db_terminology)
     
     for line in lines:
         original = line
@@ -496,11 +547,13 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
 
 
 @router.post("/text")
-async def polish_text_endpoint(input_data: TextPolishInput):
-    """基础文本润色（不引用skill）"""
+async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depends(get_db)):
+    """基础文本润色（自动加载句式清单和术语库）"""
     try:
         from app.utils.ai_client import ai_client
-        result = ai_client.polish_text(input_data.text)
+        terminology = _load_terms_from_db(db)
+        sentence_guide = _load_sentence_guides(db)
+        result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=terminology if terminology else None)
         changes = result.get("changes") or []
         if not changes:
             for key in ("original", "polished"):
@@ -518,7 +571,9 @@ async def polish_text_endpoint(input_data: TextPolishInput):
             "changes": changes
         }
     except Exception:
-        polished, changes = _apply_skill_polish(input_data.text, {}, None, None, None, None)
+        db_terminology = _load_terms_from_db(db)
+        sentence_guide = _load_sentence_guides(db)
+        polished, changes = _apply_skill_polish(input_data.text, {}, None, sentence_guide, None, None, db_terminology=db_terminology if db_terminology else None)
         return {
             "original": input_data.text,
             "polished": polished,
@@ -551,7 +606,8 @@ async def polish_with_skill(
     ai_changes = []
     try:
         from app.utils.ai_client import ai_client
-        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide)
+        terminology = _load_terms_from_db(db)
+        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=terminology if terminology else None)
         if ai_result and ai_result.get("polished") and ai_result["polished"] != input_data.text:
             ai_polished = ai_result["polished"]
             ai_changes = ai_result.get("changes") or [{"type": "ai", "summary": "AI 根据句式清单完成智能润色"}]
@@ -559,7 +615,8 @@ async def polish_with_skill(
         print(f"AI 润色失败(继续使用规则润色): {e}")
     
     # 在 AI 润色结果上执行规则润色
-    polished, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, None, None)
+    db_terms = _load_terms_from_db(db)
+    polished, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, None, None, db_terminology=db_terms if db_terms else None)
     # 合并变更：AI 变更转为 PolishRuleMatch
     if ai_changes:
         for ac in ai_changes:
@@ -588,7 +645,8 @@ def _polish_docx_with_comments(
     sentence_guide: str = None,
     terminology: str = None,
     requirements: str = None,
-    ai_lines: list = None
+    ai_lines: list = None,
+    db_terminology: dict = None
 ) -> list[PolishRuleMatch]:
     """对 DOCX 文件进行润色，保留排版并添加批注。
     
@@ -621,6 +679,9 @@ def _polish_docx_with_comments(
                             term_dict[old_term] = new_term
         except Exception:
             pass
+    # 合并数据库术语库（优先级高于文件术语）
+    if db_terminology:
+        term_dict.update(db_terminology)
     
     doc = Document(docx_path)
     author = "技术文档智能润色助手"
@@ -680,7 +741,8 @@ def _polish_docx_with_comments(
         else:
             polished_text, para_changes = _apply_skill_polish(
                 intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,
-                is_title=is_title
+                is_title=is_title,
+                db_terminology=db_terminology
             )
         
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
@@ -1157,7 +1219,8 @@ async def analyze_file_endpoint(
         ai_changes = []
         try:
             from app.utils.ai_client import ai_client
-            ai_result = ai_client.polish_text(content, style_guide=sentence_guide)
+            db_terms = _load_terms_from_db(db)
+            ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=db_terms if db_terms else None)
             if ai_result and ai_result.get("polished") and ai_result["polished"] != content:
                 ai_polished = ai_result["polished"]
                 ai_changes = ai_result.get("changes") or [{
@@ -1183,7 +1246,8 @@ async def analyze_file_endpoint(
             changes = _polish_docx_with_comments(
                 temp_path, saved_file_path, skill_rules, db,
                 sentence_guide, terminology, requirements,
-                ai_lines=ai_lines
+                ai_lines=ai_lines,
+                db_terminology=db_terms
             )
             
             from docx import Document
@@ -1225,7 +1289,7 @@ async def analyze_file_endpoint(
             }
         else:    
             # 在 AI 润色后的文本上执行规则润色
-            polished_text, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology, requirements)
+            polished_text, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology, requirements, db_terminology=db_terms)
             # 合并 AI 变更与规则变更
             if ai_changes:
                 for ac in ai_changes:
@@ -1303,7 +1367,8 @@ async def polish_document(document_id: int, db: Session = Depends(get_db)):
 
     try:
         from app.utils.ai_client import ai_client
-        result = ai_client.polish_text(document.content or "")
+        terminology = _load_terms_from_db(db)
+        result = ai_client.polish_text(document.content or "", terminology=terminology if terminology else None)
         changes = result.get("changes") or []
         return {
             "document_id": document_id,
@@ -1312,13 +1377,13 @@ async def polish_document(document_id: int, db: Session = Depends(get_db)):
             "changes": changes
         }
     except Exception:
-        fb = _polish_fallback(document.content or "")
+        fb = _polish_fallback(document.content or "", db_terminology=terminology if terminology else None)
         fb["document_id"] = document_id
         return fb
 
 
-def _polish_fallback(text: str):
-    polished, changes = _apply_skill_polish(text, {}, None, None, None, None)
+def _polish_fallback(text: str, db_terminology: dict = None):
+    polished, changes = _apply_skill_polish(text, {}, None, None, None, None, db_terminology=db_terminology)
     return {
         "original": text,
         "polished": polished,
@@ -1457,11 +1522,23 @@ async def preview_polished_file(doc_id: int, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=404, detail="文件不存在")
     
-    if not os.path.exists(doc.file_path):
-        raise HTTPException(status_code=404, detail="服务器文件不存在")
+    # 文件在磁盘上不存在时，回退到 DB 中已保存的文字内容
+    if not doc.file_path or not os.path.exists(doc.file_path):
+        fallback_content = doc.polished_content or doc.original_content or ""
+        if fallback_content:
+            return {
+                "content": fallback_content,
+                "type": "text",
+                "file_name": doc.filename,
+                "polished_content": doc.polished_content,
+                "fallback": True
+            }
+        else:
+            raise HTTPException(status_code=404, detail="文件内容不可用")
     
     file_type = doc.file_type.lower()
     
+    # Text-based files
     if file_type in ["txt", "md", "markdown", "json", "xml", "html", "css", "js", "py"]:
         with open(doc.file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -1472,6 +1549,7 @@ async def preview_polished_file(doc_id: int, db: Session = Depends(get_db)):
             "polished_content": doc.polished_content
         }
     
+    # Images
     elif file_type in ["jpg", "jpeg", "png", "gif", "bmp", "svg", "webp"]:
         return {
             "file_path": f"/api/polish/{doc_id}/raw",
@@ -1479,25 +1557,30 @@ async def preview_polished_file(doc_id: int, db: Session = Depends(get_db)):
             "file_name": doc.filename
         }
     
+    # PDF - extract text
     elif file_type == "pdf":
-        return {
-            "file_path": f"/api/polish/{doc_id}/raw",
-            "type": "pdf",
-            "file_name": doc.filename
-        }
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(doc.file_path)
+            content = "\n".join([page.extract_text() or "" for page in reader.pages])
+            return {"content": content, "type": "text", "file_name": doc.filename}
+        except Exception:
+            fallback = doc.polished_content or doc.original_content or ""
+            return {"content": fallback, "type": "text", "file_name": doc.filename, "fallback": True}
     
+    # DOCX - extract text
     elif file_type == "docx":
         try:
-            import docx2txt
             content = docx2txt.process(doc.file_path)
             return {
                 "content": content,
-                "type": "docx",
+                "type": "text",
                 "file_name": doc.filename,
                 "polished_content": doc.polished_content
             }
-        except Exception as e:
-            return {"content": f"DOCX 预览失败：{str(e)}", "type": "error", "file_name": doc.filename}
+        except Exception:
+            fallback = doc.polished_content or doc.original_content or ""
+            return {"content": fallback, "type": "text", "file_name": doc.filename, "fallback": True}
     
     else:
         return {"content": "此文件类型不支持在线预览，请下载后查看", "type": "unsupported", "file_name": doc.filename}
