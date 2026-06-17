@@ -48,11 +48,73 @@
       </div>
     </div>
 
-    <!-- 审核任务 -->
+    <!-- 审核任务 - 行内展开显示报告 -->
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">审核任务</h2>
       <div class="table-section">
-        <el-table :data="reviews" border>
+        <el-table :data="reviews" border @expand-change="handleRowExpand">
+          <el-table-column type="expand" width="60">
+            <template #default="props">
+              <div class="inline-report">
+                <div class="report-meta">
+                  <span class="meta-item"><strong>文档：</strong>{{ props.row.document_name }}</span>
+                  <span class="meta-item"><strong>模式：</strong>{{ props.row.mode }}</span>
+                  <span class="meta-item"><strong>创建时间：</strong>{{ formatDateTime(props.row.created_at) }}</span>
+                </div>
+
+                <div v-if="taskIssues[props.row.id] && taskIssues[props.row.id].length > 0" class="report-content">
+                  <div class="issue-stats">
+                    <span v-for="stat in computeIssueStats(taskIssues[props.row.id])" :key="stat.label" class="stat-badge" :class="stat.class">
+                      {{ stat.label }}: {{ stat.value }}
+                    </span>
+                  </div>
+
+                  <div class="filter-section">
+                    <el-input v-model="rowFilters[props.row.id].keyword" placeholder="关键词搜索" class="filter-input" />
+                    <el-select v-model="rowFilters[props.row.id].severity" placeholder="严重级别" class="filter-select">
+                      <el-option label="全部" value="" />
+                      <el-option label="致命" value="fatal" />
+                      <el-option label="严重" value="serious" />
+                      <el-option label="一般" value="general" />
+                      <el-option label="建议" value="suggestion" />
+                    </el-select>
+                    <el-button @click="resetRowFilter(props.row.id)">重置</el-button>
+                    <el-button @click="exportTaskReport(props.row)" type="primary" size="small">导出报告</el-button>
+                  </div>
+
+                  <el-table :data="filterTaskIssues(props.row.id)" border size="small">
+                    <el-table-column prop="severity" label="级别" width="90">
+                      <template #default="scope">
+                        <el-tag size="small" :type="getSeverityType(scope.row.severity)">{{ getSeverityLabel(scope.row.severity) }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="category" label="分类" width="110" />
+                    <el-table-column prop="chapter" label="章节" width="150" />
+                    <el-table-column label="问题详情" min-width="400">
+                      <template #default="scope">
+                        <div class="issue-detail">
+                          <div class="context-text" v-html="highlightIssue(scope.row)"></div>
+                          <div v-if="scope.row.suggestion" class="suggestion-text"><strong>建议：</strong>{{ scope.row.suggestion }}</div>
+                          <div v-if="scope.row.audit_basis" class="basis-text"><strong>依据：</strong>{{ scope.row.audit_basis }}</div>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="rule" label="规则" width="100" />
+                    <el-table-column prop="source" label="来源" width="90" />
+                  </el-table>
+                </div>
+
+                <div v-else-if="taskIssues[props.row.id] && taskIssues[props.row.id].length === 0" class="empty-report">
+                  <el-empty description="该任务未检测出问题，文档质量良好" />
+                </div>
+
+                <div v-else class="loading-report">
+                  <el-icon class="is-loading"><Loading /></el-icon>
+                  <span>正在加载问题列表...</span>
+                </div>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="id" label="任务ID" width="100" />
           <el-table-column prop="document_id" label="文档ID" width="100" />
           <el-table-column prop="document_name" label="文档名" />
@@ -66,56 +128,7 @@
           </el-table-column>
           <el-table-column prop="total_issues" label="问题数" width="100" />
           <el-table-column prop="created_at" label="开始时间" width="180" />
-          <el-table-column label="操作" width="140">
-            <template #default="scope">
-              <el-button size="small" @click="loadReviewIssues(scope.row.id)">查看详情</el-button>
-            </template>
-          </el-table-column>
         </el-table>
-      </div>
-
-      <div v-if="showIssues" class="issues-section">
-        <h3>审核结果</h3>
-        <div class="issue-stats">
-          <span v-for="stat in issueStats" :key="stat.label" class="stat-badge" :class="stat.class">
-            {{ stat.label }}: {{ stat.value }}
-          </span>
-        </div>
-        
-        <div class="filter-section">
-          <el-input v-model="filterKeyword" placeholder="关键词搜索" class="filter-input" />
-          <el-select v-model="filterSeverity" placeholder="严重级别" class="filter-select">
-            <el-option label="全部" value="" />
-            <el-option label="致命" value="fatal" />
-            <el-option label="严重" value="serious" />
-            <el-option label="一般" value="general" />
-            <el-option label="建议" value="suggestion" />
-          </el-select>
-          <el-select v-model="filterCategory" placeholder="分类" class="filter-select">
-            <el-option label="全部" value="" />
-            <el-option v-for="cat in categories" :key="cat" :label="cat" :value="cat" />
-          </el-select>
-          <el-button @click="clearFilters">重置筛选</el-button>
-        </div>
-
-        <el-table :data="filteredIssues" border>
-          <el-table-column prop="id" label="ID" width="80" />
-          <el-table-column prop="severity" label="严重级别" width="120">
-            <template #default="scope">
-              <el-tag :type="getSeverityType(scope.row.severity)">{{ getSeverityLabel(scope.row.severity) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="category" label="分类" width="120" />
-          <el-table-column prop="chapter" label="章节" width="180" />
-          <el-table-column label="上下文" min-width="500">
-            <template #default="scope">
-              <span class="context-text" v-html="highlightIssue(scope.row)"></span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="suggestion" label="修改建议" min-width="200" />
-          <el-table-column prop="audit_basis" label="审核依据" min-width="200" />
-        </el-table>
-        <el-button @click="exportReport" type="primary">导出报告</el-button>
       </div>
     </div>
 
@@ -308,10 +321,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, reactive } from 'vue'
 import { useRoute } from 'vue-router'
 import { documentAPI, reviewAPI, rulesAPI, auditBasisAPI } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Loading } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const documents = ref([])
@@ -319,9 +333,10 @@ const reviews = ref([])
 const issues = ref([])
 const rules = ref([])
 const basisList = ref([])
-const showIssues = ref(false)
-const showReport = ref(false)
-const currentReport = ref({})
+
+// 行内报告：按任务ID存储问题列表和筛选条件
+const taskIssues = reactive({})
+const rowFilters = reactive({})
 
 const showRuleDialog = ref(false)
 const editingRule = ref(null)
@@ -345,7 +360,6 @@ const sortOrder = ref('asc')
 const currentView = computed(() => {
   if (route.path === '/review/tasks') return 'tasks'
   if (route.path === '/review/rules') return 'rules'
-  if (route.path === '/review/reports') return 'reports'
   if (route.path === '/review/basis') return 'basis'
   return 'documents'
 })
@@ -516,15 +530,14 @@ function handleRulesImport(response) {
 
 async function startReview(documentId) {
   try {
-    ElMessage.info('正在审核中...')
+    ElMessage.info('正在审核中，请稍候...')
     const response = await reviewAPI.create(documentId, 'hybrid')
     const reviewId = response.data.review_id
     if (reviewId) {
       await loadReviewIssues(reviewId)
       await loadReviews()
     }
-    showIssues.value = true
-    ElMessage.success('审核完成')
+    ElMessage.success('审核完成，点击任务行左侧箭头可查看详细报告')
   } catch (error) {
     ElMessage.error('审核失败，请重试: ' + (error.response?.data?.detail || error.message))
   }
@@ -533,10 +546,132 @@ async function startReview(documentId) {
 async function loadReviewIssues(reviewId) {
   try {
     const response = await reviewAPI.getIssues(reviewId)
-    issues.value = response.data || []
-    showIssues.value = true
+    const data = response.data || []
+    issues.value = data
+    taskIssues[reviewId] = data
+    if (!rowFilters[reviewId]) {
+      rowFilters[reviewId] = { keyword: '', severity: '', category: '' }
+    }
   } catch (error) {
+    taskIssues[reviewId] = []
     ElMessage.error('加载问题列表失败')
+  }
+}
+
+// 行展开时加载问题列表
+async function handleRowExpand(row, expandedRows) {
+  if (!row) return
+  if (taskIssues[row.id] === undefined) {
+    await loadReviewIssues(row.id)
+  }
+}
+
+// 计算任务问题统计
+function computeIssueStats(issueList) {
+  const stats = { fatal: 0, serious: 0, general: 0, suggestion: 0 }
+  issueList.forEach(issue => {
+    if (stats[issue.severity] !== undefined) stats[issue.severity]++
+  })
+  return [
+    { label: '致命', value: stats.fatal, class: 'stat-fatal' },
+    { label: '严重', value: stats.serious, class: 'stat-serious' },
+    { label: '一般', value: stats.general, class: 'stat-general' },
+    { label: '建议', value: stats.suggestion, class: 'stat-suggestion' }
+  ]
+}
+
+// 筛选任务问题
+function filterTaskIssues(taskId) {
+  const list = taskIssues[taskId] || []
+  const filter = rowFilters[taskId] || { keyword: '', severity: '', category: '' }
+  let result = [...list]
+  if (filter.keyword) {
+    const kw = filter.keyword.toLowerCase()
+    result = result.filter(issue =>
+      (issue.original_text && issue.original_text.toLowerCase().includes(kw)) ||
+      (issue.context && issue.context.toLowerCase().includes(kw)) ||
+      (issue.chapter && issue.chapter.toLowerCase().includes(kw))
+    )
+  }
+  if (filter.severity) {
+    result = result.filter(issue => issue.severity === filter.severity)
+  }
+  if (filter.category) {
+    result = result.filter(issue => issue.category === filter.category)
+  }
+  return result
+}
+
+function resetRowFilter(taskId) {
+  if (rowFilters[taskId]) {
+    rowFilters[taskId].keyword = ''
+    rowFilters[taskId].severity = ''
+    rowFilters[taskId].category = ''
+  }
+}
+
+function exportTaskReport(row) {
+  try {
+    const taskId = row.id
+    const taskIssuesList = taskIssues[taskId] || []
+    const stats = computeIssueStats(taskIssuesList)
+
+    let html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<title>审核报告 - ${row.document_name || ''}</title>
+<style>body{font-family:"Microsoft YaHei",Arial,sans-serif;margin:30px}
+.header{text-align:center;margin-bottom:30px;border-bottom:2px solid #333;padding-bottom:20px}
+.report-info{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:20px;padding:15px;background:#f8f9fa;border-radius:8px}
+.stats-row{display:flex;gap:20px;margin-bottom:20px}
+.stat-item{padding:8px 16px;border-radius:20px;font-weight:bold}
+.stat-fatal{background:#fef0f0;color:#dc3545}
+.stat-serious{background:#fff7ed;color:#fd7e14}
+.stat-general{background:#fffbeb;color:#ffc107}
+.stat-suggestion{background:#ecfdf5;color:#10b981}
+table{width:100%;border-collapse:collapse;margin-top:20px}
+th,td{border:1px solid #ddd;padding:12px;text-align:left}
+th{background:#f8f9fa;font-weight:bold}
+.issue-row:hover{background:#f8f9fa}
+.context-text{font-size:13px;color:#666}
+</style></head><body>
+<div class="header"><h1>智能技术文档审核报告</h1>
+<p>生成时间：${new Date().toLocaleString('zh-CN')}</p></div>
+<div class="report-info">
+<div><strong>任务 ID：</strong>${row.id}</div>
+<div><strong>文档名称：</strong>${row.document_name || '-'}</div>
+<div><strong>审核模式：</strong>${row.mode || '-'}</div>
+<div><strong>审核状态：</strong>${row.status === 'completed' ? '已完成' : row.status === 'failed' ? '失败' : '进行中'}</div>
+<div><strong>问题总数：</strong>${row.total_issues || 0}</div>
+<div><strong>创建时间：</strong>${formatDateTime(row.created_at)}</div>
+</div>
+<h2>问题统计</h2><div class="stats-row">`
+    stats.forEach(s => {
+      html += `<span class="stat-item stat-${s.class.split('-')[1]}">${s.label}: ${s.value}</span>`
+    })
+    html += `</div><h2>问题详情</h2><table><thead><tr>
+<th>级别</th><th>分类</th><th>章节</th><th>原文</th><th>上下文</th><th>修改建议</th><th>审核依据</th></tr></thead><tbody>`
+
+    filterTaskIssues(taskId).forEach(issue => {
+      html += `<tr class="issue-row"><td>${getSeverityLabel(issue.severity)}</td>
+<td>${issue.category || '-'}</td><td>${issue.chapter || '-'}</td>
+<td>${issue.original_text || '-'}</td>
+<td class="context-text">${issue.context || '-'}</td>
+<td>${issue.suggestion || '-'}</td><td>${issue.audit_basis || '-'}</td></tr>`
+    })
+
+    html += '</tbody></table></body></html>'
+
+    const blob = new Blob([html], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `audit_report_${row.id}_${new Date().toISOString().slice(0, 10)}.html`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    ElMessage.success('报告导出成功')
+  } catch (error) {
+    ElMessage.error('导出失败: ' + error.message)
   }
 }
 
@@ -999,4 +1134,77 @@ function highlightIssue(issue) {
 .stat-item.serious { background: #fff7ed; color: #fd7e14; }
 .stat-item.general { background: #fffbeb; color: #ffc107; }
 .stat-item.suggestion { background: #ecfdf5; color: #10b981; }
+
+/* 行内报告样式 */
+.inline-report {
+  padding: 16px 24px;
+  background: #fafafa;
+  border-left: 3px solid #409eff;
+}
+
+.inline-report .report-meta {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: #fff;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.inline-report .meta-item {
+  display: inline-block;
+}
+
+.inline-report .report-content {
+  background: #fff;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.inline-report .loading-report {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px;
+  color: #909399;
+  font-size: 14px;
+}
+
+.inline-report .empty-report {
+  padding: 24px;
+}
+
+.inline-report .issue-detail {
+  line-height: 1.7;
+}
+
+.inline-report .issue-detail .suggestion-text,
+.inline-report .issue-detail .basis-text {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.inline-report .issue-detail .suggestion-text strong,
+.inline-report .issue-detail .basis-text strong {
+  color: #409eff;
+}
+
+.inline-report .issue-detail .context-text {
+  font-size: 13px;
+  color: #606266;
+  word-break: break-word;
+}
+
+.inline-report .filter-section {
+  margin: 12px 0;
+}
+
+/* 可展开行的点击提示 */
+.el-table__expand-icon {
+  color: #409eff;
+}
 </style>

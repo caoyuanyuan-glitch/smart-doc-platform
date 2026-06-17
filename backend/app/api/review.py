@@ -13,6 +13,7 @@ from app.crud.audit_basis import get_audit_basis
 from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files
 from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate
 from app.utils.ai_client import ai_client
+from app.utils.spell_checker import run_spelling_and_grammar_check
 
 router = APIRouter()
 
@@ -232,42 +233,63 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
     try:
         issues = []
         content = document.content or ""
-        content = content[:10000]
+        content = content[:20000]
         document_language = detect_language(content)
+        print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}字符")
 
         knowledge_basis = get_knowledge_basis(db)
 
-        has_ai_client = ai_client.arkclaw_client is not None or ai_client.qwen_client is not None or ai_client.deepseek_client is not None
+        has_ai_client = ai_client.has_any_client
+        print(f"[审核] AI客户端可用: {has_ai_client}, 模式={mode}")
 
         if mode in ["rule", "hybrid"]:
             rules = get_rules(db)
+            print(f"[审核] 加载规则数量: {len(rules)}")
             rule_issues = run_rule_audit(content, rules, knowledge_basis)
+            print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
             terms = get_terms(db)
+            print(f"[审核] 加载术语数量: {len(terms)}")
             term_issues = run_term_check(content, terms)
+            print(f"[审核] 术语匹配到问题: {len(term_issues)}个")
+
+            # 英文文档进行拼写和语法检查
+            if document_language in ("en", "both"):
+                print(f"[审核] 开始拼写和语法检查...")
+                try:
+                    spelling_issues = run_spelling_and_grammar_check(content)
+                    print(f"[审核] 拼写/语法检查发现问题: {len(spelling_issues)}个")
+                    rule_issues.extend(spelling_issues)
+                except Exception as e:
+                    print(f"[审核] 拼写/语法检查失败: {e}")
 
             candidate_rule_issues = rule_issues + term_issues
 
-            if has_ai_client and ai_client.arkclaw_client is not None and len(candidate_rule_issues) > 0:
+            if has_ai_client and len(candidate_rule_issues) > 0:
+                print(f"[审核] 开始AI二次验证，候选问题数={len(candidate_rule_issues)}")
                 try:
                     filtered = await asyncio.wait_for(
                         asyncio.get_event_loop().run_in_executor(None, ai_client.filter_rule_false_positives, candidate_rule_issues, document_language),
-                        timeout=60.0
+                        timeout=90.0
                     )
                     candidate_rule_issues = filtered
+                    print(f"[审核] AI二次验证后保留问题数={len(candidate_rule_issues)}")
                 except asyncio.TimeoutError:
-                    print(f"AI 二次验证超时, 使用原始规则结果")
+                    print(f"[审核] AI 二次验证超时(90s), 使用原始规则结果({len(candidate_rule_issues)}个)")
                 except Exception as e:
-                    print(f"AI 二次验证失败, 使用原始规则结果: {e}")
+                    print(f"[审核] AI 二次验证失败, 使用原始规则结果: {e}")
 
             issues.extend(candidate_rule_issues)
+            print(f"[审核] 规则审核阶段共产出问题数={len(candidate_rule_issues)}")
 
         if mode in ["ai", "hybrid"] and has_ai_client:
+            print(f"[审核] 开始AI智能审核，模式={mode}")
             try:
                 ai_result = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(None, ai_client.audit_document, content, document_language),
-                    timeout=120.0
+                    timeout=180.0
                 )
                 ai_issues = ai_result.get("issues", [])
+                print(f"[审核] AI审核返回问题数={len(ai_issues)}")
                 for issue in ai_issues:
                     issue["source"] = "ai"
                     issue.setdefault("severity", "general")
@@ -286,11 +308,18 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
 
                 issues.extend(ai_issues)
             except asyncio.TimeoutError:
-                print(f"AI 审核超时, 跳过 AI 审核")
+                print(f"[审核] AI 审核超时(180s), 跳过 AI 审核")
             except Exception as e:
-                print(f"AI 审核失败, 跳过 AI 审核: {e}")
+                print(f"[审核] AI 审核失败, 跳过 AI 审核: {e}")
 
         issues = dedupe_issues_by_original(issues)
+        print(f"[审核] 去重后最终问题数={len(issues)}")
+        if len(issues) > 0:
+            categories = {}
+            for issue in issues:
+                cat = issue.get("category", "未分类")
+                categories[cat] = categories.get(cat, 0) + 1
+            print(f"[审核] 问题分类统计: {categories}")
 
         for issue in issues:
             create_issue(db=db, issue=IssueCreate(
