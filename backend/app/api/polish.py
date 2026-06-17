@@ -117,9 +117,10 @@ def _apply_skill_polish(
     db: Session,
     sentence_guide: str = None,
     terminology: str = None,
-    requirements: str = None
+    requirements: str = None,
+    is_title: bool = False
 ) -> tuple[str, list[PolishRuleMatch]]:
-    """应用skill规则进行润色"""
+    """应用skill规则进行润色。is_title=True 时跳过尾部标点规范化。"""
     changes = []
     lines = text.split('\n')
     polished_lines = []
@@ -172,16 +173,16 @@ def _apply_skill_polish(
         
         new_line = re.sub(r'\s+', ' ', new_line)
         
-        if new_line and not new_line.endswith(('。', '.', '！', '!', '？', '?')):
-            if re.search(r'[\u4e00-\u9fff]', new_line):
-                new_line = new_line.rstrip('，,；;：:') + '。'
-            else:
-                new_line = new_line.rstrip(',,;;::') + '.'
-        
-        new_line = re.sub(r'(\d)([a-zA-Z℃%μ])', r'\1 \2', new_line)
-        
-        new_line = re.sub(r'([\u4e00-\u9fff])([A-Za-z0-9])', r'\1 \2', new_line)
-        new_line = re.sub(r'([A-Za-z0-9])([\u4e00-\u9fff])', r'\1 \2', new_line)
+        # 标题、表标题、图标题等不加句号，也不做空间距规整
+        if not is_title:
+            if new_line and not new_line.endswith(('。', '.', '！', '!', '？', '?')):
+                if re.search(r'[\u4e00-\u9fff]', new_line):
+                    new_line = new_line.rstrip('，,；;：:') + '。'
+                else:
+                    new_line = new_line.rstrip(',,;;::') + '.'
+            new_line = re.sub(r'(\d)([a-zA-Z℃%μ])', r'\1 \2', new_line)
+            new_line = re.sub(r'([\u4e00-\u9fff])([A-Za-z0-9])', r'\1 \2', new_line)
+            new_line = re.sub(r'([A-Za-z0-9])([\u4e00-\u9fff])', r'\1 \2', new_line)
         
         if new_line != original or has_changes:
             change_type = "format"
@@ -586,9 +587,13 @@ def _polish_docx_with_comments(
     db: Session,
     sentence_guide: str = None,
     terminology: str = None,
-    requirements: str = None
+    requirements: str = None,
+    ai_lines: list = None
 ) -> list[PolishRuleMatch]:
-    """对 DOCX 文件进行润色，保留排版并添加批注"""
+    """对 DOCX 文件进行润色，保留排版并添加批注。
+    
+    ai_lines: AI 预润色后的文本行列表，与原始段落逐行对应。用于句式清单匹配润色。
+    """
     from docx import Document
     from docx.oxml.ns import qn, nsdecls
     from lxml import etree
@@ -626,7 +631,14 @@ def _polish_docx_with_comments(
     
     toc_prefixes = ("TOC", "Table of Contents", "目录")
     
-    for para_idx, para in enumerate(doc.paragraphs):
+    # 构建非空段落与 AI 行的平行映射
+    non_empty_paras = [(idx, para) for idx, para in enumerate(doc.paragraphs) 
+                       if para.text and para.text.strip()]
+    non_empty_ai_lines = [l.strip() for l in ai_lines if l.strip()] if ai_lines else []
+    
+    for i, (para_idx, para) in enumerate(non_empty_paras):
+        original_text = para.text.strip()
+        
         style_name = para.style.name if para.style else ""
         
         is_toc = False
@@ -638,20 +650,61 @@ def _polish_docx_with_comments(
         if is_toc:
             continue
         
-        original_text = para.text
-        if not original_text.strip():
-            continue
+        # 检测是否为标题、表标题、图标题
+        title_keywords = ['heading', 'title', '目录', '标题', 'toc', '表', '图', 'table', 'figure', 'caption']
+        is_title = any(kw in (style_name or "").lower() for kw in title_keywords) if style_name else False
+        # 内容也检测：以"表"或"图"开头 + 数字的视为图表标题
+        if not is_title and original_text.strip():
+            first_char = original_text.strip()[:2]
+            if re.match(r'^(表|图|Table|Figure)\s*\d', original_text.strip()):
+                is_title = True
         
-        polished_text, para_changes = _apply_skill_polish(
-            original_text, skill_rules, db, sentence_guide, terminology, requirements
-        )
+        # Step 1: AI 句式匹配润色
+        intermediate_text = original_text
+        para_ai_change = None
+        if i < len(non_empty_ai_lines):
+            ai_line = non_empty_ai_lines[i]
+            if ai_line and ai_line != original_text:
+                intermediate_text = ai_line
+                para_ai_change = PolishRuleMatch(
+                    rule_name="ai",
+                    before=original_text[:100],
+                    after=ai_line[:100],
+                    type="ai"
+                )
         
-        if polished_text != original_text and para_changes:
+        # Step 2: 规则润色——AI 已有建议时跳过规则，仅保留 AI；无 AI 时执行规则
+        if para_ai_change:
+            polished_text = intermediate_text
+            para_changes = [para_ai_change]
+        else:
+            polished_text, para_changes = _apply_skill_polish(
+                intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,
+                is_title=is_title
+            )
+        
+        if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
             all_changes.extend(para_changes)
             comment_id += 1
             
-            changes_summary = "; ".join([c.rule_name for c in para_changes[:5]])
-            comment_text = f"润色修改：{changes_summary}"
+            # 构建批注文本：包含润色建议
+            # AI 变更 + 规则变更
+            ai_suggestion = ""
+            if para_ai_change and intermediate_text != original_text:
+                ai_suggestion = f"AI句式匹配建议：{intermediate_text[:100]}"
+            
+            rule_suggestions = []
+            for pc in para_changes:
+                if isinstance(pc, PolishRuleMatch) and pc.type != "ai":
+                    rule_suggestions.append(f"[{pc.rule_name}] {pc.before} → {pc.after}")
+            
+            suggestion_parts = []
+            if ai_suggestion:
+                suggestion_parts.append(ai_suggestion)
+            if rule_suggestions:
+                suggestion_parts.append("规则润色：" + "；".join(rule_suggestions[:3]))
+            
+            comment_text = "\n".join(suggestion_parts) if suggestion_parts else "句式润色"
             
             comments_data.append({
                 "id": comment_id,
@@ -750,29 +803,7 @@ def _polish_docx_with_comments(
                 p_element.remove(comment_ref_r)
                 p_element.insert(insert_idx + 1, comment_ref_r)
             
-            # Replace paragraph text while preserving formatting of first run
-            first_text_run = None
-            for child in p_element:
-                tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                if tag == 'r':
-                    t_elem = child.find(f'{{{w_ns}}}t')
-                    if t_elem is not None and t_elem.text and t_elem.text.strip():
-                        first_text_run = child
-                        break
-            
-            if first_text_run is not None:
-                t_elem = first_text_run.find(f'{{{w_ns}}}t')
-                if t_elem is not None:
-                    t_elem.text = polished_text
-                
-                for child in p_element:
-                    tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                    if tag == 'r' and child is not first_text_run:
-                        t_elem = child.find(f'{{{w_ns}}}t')
-                        if t_elem is not None:
-                            t_elem.text = ""
-            else:
-                para.add_run(polished_text)
+            # 批注已添加，不修改正文（保留原始排版）
     
     doc.save(output_path)
     
@@ -975,6 +1006,7 @@ def _generate_polish_report(
         'format': '格式规范',
         'punctuation': '标点修正',
         'style': '句式检测',
+        'ai': 'AI句式润色',
     }
     for ct, count in change_types.items():
         name = type_names.get(ct, ct)
@@ -1137,27 +1169,9 @@ async def analyze_file_endpoint(
         # === AI 润色结束 ===
         
         if is_docx:
-            # === AI 润色后的文本写回 DOCX ===
-            if ai_polished != content:
-                from docx import Document as DocxDoc
-                ai_doc = DocxDoc(temp_path)
-                ai_lines = ai_polished.split('\n')
-                for i, para in enumerate(ai_doc.paragraphs):
-                    if i < len(ai_lines):
-                        for run in para.runs:
-                            run.text = ''
-                        if para.runs:
-                            para.runs[0].text = ai_lines[i]
-                        else:
-                            para.text = ai_lines[i]
-                ai_temp_path = tempfile.NamedTemporaryFile(delete=False, suffix=".docx").name
-                ai_doc.save(ai_temp_path)
-                # 切换到 AI 润色后的文件用于后续规则润色
-                original_temp_path = temp_path
-                temp_path = ai_temp_path
-            else:
-                original_temp_path = None
-            # === AI 润色后的文本写回 DOCX 结束 ===
+            # 在原始 DOCX 上直接应用 AI + 规则润色（保留排版）
+            # AI 输出可能含空行，过滤空白行以保证段落映射准确
+            ai_lines = [l for l in ai_polished.split('\n') if l.strip()] if ai_polished != content else None
             _, date_str = _get_date_subfolder_id(db, None, user.id)
             date_dir = os.path.join(UPLOAD_DIR, date_str)
             if not os.path.exists(date_dir):
@@ -1168,12 +1182,15 @@ async def analyze_file_endpoint(
             
             changes = _polish_docx_with_comments(
                 temp_path, saved_file_path, skill_rules, db,
-                sentence_guide, terminology, requirements
+                sentence_guide, terminology, requirements,
+                ai_lines=ai_lines
             )
             
             from docx import Document
             polished_doc = Document(saved_file_path)
-            polished_text = '\n'.join([p.text for p in polished_doc.paragraphs])
+            # 修订标记版保持原文+批注，此处返回 AI 润色后的文本作为预览
+            preview_text = ai_polished if ai_polished != content else '\n'.join([p.text for p in polished_doc.paragraphs])
+            polished_text = preview_text
             
             report_filename = f"【润色报告】{filename.rsplit('.', 1)[0]}.docx"
             report_path = os.path.join(date_dir, report_filename)
@@ -1264,6 +1281,18 @@ async def analyze_file_endpoint(
                 os.remove(original_temp_path)
             except:
                 pass
+
+
+@router.post("/export-seed")
+def export_polished_seed(db: Session = Depends(get_db)):
+    """将已润色文档导出到种子目录，用于 Git 团队共享"""
+    current_user = get_default_user(db)
+    try:
+        from seed.polished_seed import export_polished_to_seed
+        export_polished_to_seed()
+        return {"message": "已润色文档已导出到 seed/polished/ 目录，请执行 git add/commit/push 分享给团队"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
 
 
 @router.post("/{document_id}")
