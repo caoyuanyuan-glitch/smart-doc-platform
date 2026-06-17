@@ -153,7 +153,84 @@ def _is_sentence_start(content, position):
     return before.strip().endswith('.') or before.strip().endswith('!') or before.strip().endswith('?') or position == 0
 
 
-def run_rule_audit(content, rules, knowledge_basis=None):
+_DISABLED_RULES_FOR_REVIEW = {
+    # These rules describe style preferences, file-level properties, or consistency checks
+    # that cannot be reliably determined by a single regex hit in extracted document text.
+    "R017", "R018", "R019", "R037", "R039", "R040",
+    "R042", "R043", "R044", "R045", "R048", "R050",
+}
+
+
+def _should_skip_rule_match(rule, match, content, document_language, file_type=None):
+    rule_no = getattr(rule, "rule_no", "")
+    original_text = match.group()
+    start = match.start()
+    end = match.end()
+    context = content[max(0, start - 40):min(len(content), end + 40)]
+
+    if rule_no in _DISABLED_RULES_FOR_REVIEW:
+        return True
+
+    if file_type == "pdf" and rule_no in {"R002", "R013", "R036"}:
+        return True
+
+    # Numeric punctuation inside decimals, versions, and enumerations is usually valid.
+    if rule_no == "R001":
+        if re.search(r"\d[\.,]\d", context):
+            return True
+
+    # Quotation direction regex currently matches normal quoted text too often.
+    if rule_no == "R007":
+        return True
+
+    # Trademark markers are common inline forms in extracted text and need richer formatting context.
+    if rule_no == "R008":
+        return True
+
+    # Unit spacing rule should not flag model numbers, percentages, temperatures without unit intent, or compact codes.
+    if rule_no == "R013":
+        if re.search(r"[A-Z]{2,}\d|\d[A-Z]{2,}", original_text):
+            return True
+
+    if rule_no == "R011":
+        if "/" in context or "rpm/min" in context.lower():
+            return True
+
+    if rule_no == "R021":
+        if ".com" in context.lower() or "@" in context or "http" in context.lower():
+            return True
+
+    if rule_no == "R023":
+        if not original_text.lower().startswith("a "):
+            return True
+
+    if rule_no == "R024":
+        tokens = original_text.split()
+        if any(any(ch.isdigit() for ch in token) for token in tokens):
+            return True
+        if tokens and all(len(token) <= 1 for token in tokens):
+            return True
+
+    # Mixed Chinese-English spacing rule should keep common product names and protocol acronyms intact.
+    if rule_no == "R025":
+        if re.search(r"[A-Z]{2,}|[A-Za-z]+\d|\d+[A-Za-z]+", original_text):
+            return True
+
+    # Markdown/code formatting rules only apply when the extracted text still clearly shows markdown structure.
+    if rule_no in {"R030", "R031", "R032", "R033", "R034", "R046", "R047", "R049"}:
+        if "```" not in content and "#" not in content and "[" not in content and "](" not in content:
+            return True
+
+    # Long-sentence rules are too noisy on table rows, lists, and extracted fragments.
+    if rule_no in {"R035", "R036"}:
+        line = content[max(0, start - 120):min(len(content), end + 120)]
+        if "|" in line or re.search(r"\b(?:Figure|Table|Step|Note|WARNING|CAUTION)\b", line, re.IGNORECASE):
+            return True
+
+    return False
+
+
+def run_rule_audit(content, rules, knowledge_basis=None, file_type=None):
     """规则审核: 基于正则, 加上简易白名单过滤, 按内容去重"""
     issues = []
     document_language = detect_language(content)
@@ -169,6 +246,9 @@ def run_rule_audit(content, rules, knowledge_basis=None):
             matches = list(re.finditer(rule.regex, content))
             for match in matches:
                 original_text = match.group()
+
+                if _should_skip_rule_match(rule, match, content, document_language, file_type):
+                    continue
 
                 if document_language in ("en", "both") and _in_abbreviation_allowed(original_text):
                     continue
@@ -283,19 +363,25 @@ def dedupe_issues_by_original(issues):
     filtered = [i for i in issues if not is_false_positive(i.get('original_text', ''))]
     print(f"[审核] 误报过滤: 过滤 {len(issues) - len(filtered)} 个, 剩余 {len(filtered)} 个")
     
-    # 第二步：去重（按分类+归一化原文+章节）
+    def issue_rank(issue):
+        source = issue.get("source", "")
+        severity = issue.get("severity", "general")
+        confidence = issue.get("confidence", 0) or 0
+        severity_rank = {"fatal": 4, "serious": 3, "general": 2, "suggestion": 1}.get(severity, 0)
+        source_rank = {"rule": 3, "term": 2, "ai": 1}.get(source, 0)
+        return (severity_rank, source_rank, confidence)
+
+    # 第二步：去重（优先按原文+章节聚合，避免规则与 AI 对同一问题重复上报）
     seen = {}
     for issue in filtered:
         norm = re.sub(r"\s+", "", str(issue.get("original_text", ""))).lower()
         chapter = issue.get("chapter", "")
-        key = f"{issue.get('category','')}|{norm}|{chapter}"
+        key = f"{norm}|{chapter}"
         if not norm.strip():
             continue
         if key in seen:
             old = seen[key]
-            new_conf = issue.get("confidence", 0) or 0
-            old_conf = old.get("confidence", 0) or 0
-            if new_conf > old_conf:
+            if issue_rank(issue) > issue_rank(old):
                 seen[key] = issue
         else:
             seen[key] = issue
@@ -331,7 +417,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             print(f"[审核] 加载规则数量: {len(rules)}")
             
             set_progress(review_id, 'running', '规则审核', 25, '正在执行规则匹配...')
-            rule_issues = run_rule_audit(content, rules, knowledge_basis)
+            rule_issues = run_rule_audit(content, rules, knowledge_basis, document.file_type)
             print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
 
             set_progress(review_id, 'running', '术语检查', 35, '正在执行术语检查...')

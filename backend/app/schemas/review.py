@@ -1,5 +1,14 @@
 from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime
+
+
+class ReviewProgress(BaseModel):
+    status: str = "unknown"
+    step: str = ""
+    progress: int = 0
+    message: str = ""
+    timestamp: str = ""
 
 class ReviewCreate(BaseModel):
     document_id: int
@@ -14,6 +23,7 @@ class Review(BaseModel):
     total_issues: int
     summary: str
     created_at: datetime
+    progress: Optional[ReviewProgress] = None
 
     class Config:
         orm_mode = True
