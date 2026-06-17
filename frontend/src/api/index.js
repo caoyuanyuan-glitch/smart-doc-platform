@@ -122,9 +122,9 @@ export const auditBasisAPI = {
 
 export const polishAPI = {
   document: (id) => instance.post(`/polish/${id}`),
-  text: (text) => instance.post('/polish/text', { text }),
-  polishWithSkill: (text, skillId = 3, styleGuideId = 1) =>
-    instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId }),
+  text: (text, styleGuideId = null, terminologyId = null) => instance.post('/polish/text', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
+  polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
+    instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
