@@ -37,8 +37,13 @@ const routes = [
     component: Review
   },
   {
-    path: '/review/reports',
-    name: 'ReviewReports',
+    path: '/review/rules',
+    name: 'ReviewRules',
+    component: Review
+  },
+  {
+    path: '/review/basis',
+    name: 'ReviewBasis',
     component: Review
   },
   {
