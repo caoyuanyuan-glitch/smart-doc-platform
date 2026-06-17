@@ -7,116 +7,120 @@
           <span class="logo">智能技术文档平台</span>
         </div>
         <div class="header-right">
-          <span class="system-info">智能技术文档审核系统</span>
+          <span class="user-badge" v-if="userStore.isLoggedIn">{{ userStore.user?.username }} ({{ userStore.user?.role }})</span>
+          <el-button text @click="handleLogout" class="logout-btn">退出</el-button>
         </div>
       </header>
 
       <aside class="sidebar">
-        <el-menu
-          :default-active="activeMenu"
-          class="sidebar-menu"
-          mode="vertical"
-          :collapse="isCollapsed"
-          :collapse-transition="false"
-          @select="handleMenuSelect"
-        >
-          <div class="collapse-btn" @click="toggleCollapse" v-if="!isCollapsed">
-            <el-icon><Fold /></el-icon>
-          </div>
-          <div class="collapse-btn" @click="toggleCollapse" v-else>
-            <el-icon><Expand /></el-icon>
-          </div>
+        <div class="collapse-btn" @click="toggleCollapse" v-if="!isCollapsed">
+          <el-icon><Fold /></el-icon>
+        </div>
+        <div class="collapse-btn" @click="toggleCollapse" v-else>
+          <el-icon><Expand /></el-icon>
+        </div>
 
-          <el-menu-item index="/">
-            <el-icon><House /></el-icon>
-            <template #title>首页</template>
-          </el-menu-item>
+        <div class="sidebar-content" :class="{ collapsed: isCollapsed }">
+          <el-menu
+            :default-active="activeMenu"
+            class="sidebar-menu"
+            mode="vertical"
+            :collapse="isCollapsed"
+            :collapse-transition="false"
+            @select="handleMenuSelect"
+          >
+            <el-menu-item index="/">
+              <el-icon><House /></el-icon>
+              <template #title>首页</template>
+            </el-menu-item>
 
-          <el-sub-menu index="polish-sub">
-            <template #title>
-              <el-icon><MagicStick /></el-icon>
-              <span>智能润色</span>
-            </template>
-            <el-menu-item index="/polish">文本润色</el-menu-item>
-            <el-menu-item index="/polish/document">文档润色</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="polish-sub">
+              <template #title>
+                <el-icon><MagicStick /></el-icon>
+                <span>智能润色</span>
+              </template>
+              <el-menu-item index="/polish">文本润色</el-menu-item>
+              <el-menu-item index="/polish/document">文档润色</el-menu-item>
+              <el-menu-item index="/polish/history">已润色文档</el-menu-item>
+            </el-sub-menu>
 
-          <el-sub-menu index="generate-sub">
-            <template #title>
-              <el-icon><DocumentAdd /></el-icon>
-              <span>内容生成</span>
-            </template>
-            <el-menu-item index="/generate">文档生成</el-menu-item>
-            <el-menu-item index="/generate/templates">模板管理</el-menu-item>
-            <el-menu-item index="/terms">术语库</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="generate-sub">
+              <template #title>
+                <el-icon><DocumentAdd /></el-icon>
+                <span>内容生成</span>
+              </template>
+              <el-menu-item index="/generate">文档生成</el-menu-item>
+              <el-menu-item index="/generate/templates">模板管理</el-menu-item>
+              <el-menu-item index="/terms">术语库</el-menu-item>
+            </el-sub-menu>
 
-          <el-sub-menu index="compare-sub">
-            <template #title>
-              <el-icon><Files /></el-icon>
-              <span>文档对比</span>
-            </template>
-            <el-menu-item index="/compare">对比上传</el-menu-item>
-            <el-menu-item index="/compare/tasks">历史任务</el-menu-item>
-            <el-menu-item index="/compare/config">对比配置</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="compare-sub">
+              <template #title>
+                <el-icon><Files /></el-icon>
+                <span>文档对比</span>
+              </template>
+              <el-menu-item index="/compare">对比上传</el-menu-item>
+              <el-menu-item index="/compare/tasks">历史任务</el-menu-item>
+              <el-menu-item index="/compare/config">对比配置</el-menu-item>
+            </el-sub-menu>
 
-          <el-sub-menu index="convert-sub">
-            <template #title>
-              <el-icon><Refresh /></el-icon>
-              <span>格式转换</span>
-            </template>
-            <el-menu-item index="/convert">格式转换</el-menu-item>
-            <el-menu-item index="/convert/history">转换历史</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="convert-sub">
+              <template #title>
+                <el-icon><Refresh /></el-icon>
+                <span>格式转换</span>
+              </template>
+              <el-menu-item index="/convert">格式转换</el-menu-item>
+              <el-menu-item index="/convert/history">转换历史</el-menu-item>
+              <el-menu-item index="/convert/rules">转换规则库</el-menu-item>
+            </el-sub-menu>
 
-          <el-sub-menu index="review-sub">
-            <template #title>
-              <el-icon><DocumentChecked /></el-icon>
-              <span>文档审核</span>
-            </template>
-            <el-menu-item index="/review">文档管理</el-menu-item>
-            <el-menu-item index="/review/tasks">审核任务</el-menu-item>
-            <el-menu-item index="/review/rules">规则管理</el-menu-item>
-            <el-menu-item index="/review/reports">审核报告</el-menu-item>
-            <el-menu-item index="/review/basis">审核依据</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="review-sub">
+              <template #title>
+                <el-icon><DocumentChecked /></el-icon>
+                <span>文档审核</span>
+              </template>
+              <el-menu-item index="/review">文档管理</el-menu-item>
+              <el-menu-item index="/review/tasks">审核任务</el-menu-item>
+              <el-menu-item index="/review/rules">规则管理</el-menu-item>
+              <el-menu-item index="/review/basis">审核依据</el-menu-item>
+            </el-sub-menu>
 
-          <el-sub-menu index="qa-sub">
-            <template #title>
-              <el-icon><ChatDotRound /></el-icon>
-              <span>智能问答</span>
-            </template>
-            <el-menu-item index="/qa">知识库问答</el-menu-item>
-            <el-menu-item index="/qa/library">知识库管理</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="qa-sub">
+              <template #title>
+                <el-icon><ChatDotRound /></el-icon>
+                <span>智能问答</span>
+              </template>
+              <el-menu-item index="/qa">知识库问答</el-menu-item>
+            </el-sub-menu>
 
-          <el-sub-menu index="translate-sub">
-            <template #title>
-              <el-icon><Switch /></el-icon>
-              <span>AI翻译</span>
-            </template>
-            <el-menu-item index="/translate">文本翻译</el-menu-item>
-            <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="translate-sub">
+              <template #title>
+                <el-icon><Switch /></el-icon>
+                <span>AI翻译</span>
+              </template>
+              <el-menu-item index="/translate">文本翻译</el-menu-item>
+              <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
+            </el-sub-menu>
 
-          <el-sub-menu index="library-sub">
-            <template #title>
-              <el-icon><Box /></el-icon>
-              <span>内容库</span>
-            </template>
-            <el-menu-item index="/translate/memory">记忆库</el-menu-item>
-          </el-sub-menu>
+            <el-sub-menu index="library-sub">
+              <template #title>
+                <el-icon><Box /></el-icon>
+                <span>内容库</span>
+              </template>
+              <el-menu-item index="/translate/memory">记忆库</el-menu-item>
+            </el-sub-menu>
 
-                    <el-menu-item index="/users">
+            <el-menu-item index="/knowledge">
+              <el-icon><FolderOpened /></el-icon>
+              <template #title>知识库管理</template>
+            </el-menu-item>
 
-
-
-
-            <el-icon><User /></el-icon>
-            <template #title>用户管理</template>
-          </el-menu-item>
-        </el-menu>
+            <el-menu-item v-if="userStore.isAdmin" index="/users">
+              <el-icon><User /></el-icon>
+              <template #title>用户管理</template>
+            </el-menu-item>
+          </el-menu>
+        </div>
       </aside>
 
       <main class="main-content">
@@ -129,15 +133,21 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useUserStore } from '@/store/user'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
-  Files, Refresh, CollectionTag, Fold, Expand, Switch, Box
+  Files, Refresh, CollectionTag, Fold, Expand, Switch, Box, User, FolderOpened
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
+const userStore = useUserStore()
 const isCollapsed = ref(false)
 
-const activeMenu = computed(() => router.currentRoute.value.path)
+const activeMenu = computed(() => {
+  const path = router.currentRoute.value.path
+  if (path.startsWith('/knowledge')) return '/knowledge'
+  return path
+})
 
 function handleMenuSelect(index) {
   router.push(index)
@@ -145,6 +155,11 @@ function handleMenuSelect(index) {
 
 function toggleCollapse() {
   isCollapsed.value = !isCollapsed.value
+}
+
+function handleLogout() {
+  userStore.logout()
+  router.push('/login')
 }
 </script>
 
@@ -165,11 +180,10 @@ body {
   min-height: 100vh;
 }
 
-/* 顶部导航栏 - 浅蓝色主题 */
 .header {
   position: fixed;
   top: 0;
-  left: 240px;
+  left: 260px;
   right: 0;
   height: 60px;
   background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 50%, #3b82f6 100%);
@@ -192,11 +206,26 @@ body {
 .header-right .system-info {
   color: rgba(255, 255, 255, 0.9);
   font-size: 14px;
+  margin-right: 16px;
 }
 
-/* 左侧菜单栏 - 浅蓝色主题 */
+.logout-btn {
+  color: rgba(255, 255, 255, 0.9) !important;
+  font-size: 13px;
+}
+.logout-btn:hover { color: #fff !important; }
+
+.user-badge {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  margin-right: 12px;
+  padding: 2px 10px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+}
+
 .sidebar {
-  width: 240px;
+  width: 260px;
   background: #eff6ff;
   min-height: 100vh;
   position: fixed;
@@ -207,13 +236,21 @@ body {
   z-index: 101;
   overflow: hidden;
   border-right: 1px solid #dbeafe;
+  display: flex;
+  flex-direction: column;
 }
 
 .sidebar.collapsed {
   width: 64px;
 }
 
-/* 折叠按钮 */
+.sidebar-content {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow-y: auto;
+}
+
 .collapse-btn {
   position: absolute;
   right: 8px;
@@ -243,15 +280,13 @@ body {
   transform: translateX(-50%);
 }
 
-/* el-menu 浅蓝色主题覆盖 */
 .sidebar-menu {
   border-right: none !important;
-  height: 100vh;
   padding-top: 60px;
   background: transparent !important;
+  flex-shrink: 0;
 }
 
-/* 一级菜单项 */
 .sidebar-menu .el-menu-item {
   height: 44px;
   line-height: 44px;
@@ -283,7 +318,6 @@ body {
   color: inherit;
 }
 
-/* 子菜单标题 */
 .sidebar-menu .el-sub-menu__title {
   height: 44px;
   line-height: 44px;
@@ -314,7 +348,6 @@ body {
   color: inherit;
 }
 
-/* 二级子菜单项 */
 .sidebar-menu .el-sub-menu .el-menu {
   background: #f0f9ff !important;
   padding: 4px 0 !important;
@@ -352,7 +385,6 @@ body {
   color: inherit;
 }
 
-/* 折叠状态下 */
 .sidebar.collapsed .sidebar-menu .el-menu-item,
 .sidebar.collapsed .sidebar-menu .el-sub-menu__title {
   justify-content: center;
@@ -365,9 +397,8 @@ body {
   margin: 0;
 }
 
-/* 主内容区 */
 .main-content {
-  margin-left: 240px;
+  margin-left: 260px;
   margin-top: 60px;
   flex: 1;
   padding: 24px;
@@ -386,33 +417,8 @@ body {
   left: 64px;
 }
 
-/* Element Plus 弹窗深色背景下拉菜单修正 */
 .el-dropdown-menu {
   border: 1px solid #e4e7ed !important;
-}
-
-/* 加载状态样式 */
-.loading-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 100vh;
-  background: #f5f7fa;
-}
-
-.loading-content {
-  text-align: center;
-  color: #64748b;
-}
-
-.loading-spinner {
-  width: 40px;
-  height: 40px;
-  border: 4px solid #dbeafe;
-  border-top: 4px solid #2563eb;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-  margin: 0 auto 16px;
 }
 
 @keyframes spin {
@@ -420,7 +426,6 @@ body {
   100% { transform: rotate(360deg); }
 }
 
-/* 隐藏不需要的默认分隔线 */
 .sidebar-menu .el-menu-item-group__title {
   padding: 8px 20px;
   font-size: 12px;

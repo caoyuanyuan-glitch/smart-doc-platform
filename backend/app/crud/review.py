@@ -20,7 +20,7 @@ def get_reviews(db: Session, document_id: int = None, skip: int = 0, limit: int 
     query = db.query(Review)
     if document_id is not None:
         query = query.filter(Review.document_id == document_id)
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(Review.id.desc()).offset(skip).limit(limit).all()
 
 def update_review_status(db: Session, review_id: int, status: str, total_issues: int = 0, summary: str = ""):
     review = db.query(Review).filter(Review.id == review_id).first()
