@@ -116,3 +116,23 @@ export const convertAPI = {
     return instance.post('/convert/docx2dita', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   }
 }
+
+export const translationAPI = {
+  translate: (data) => instance.post('/translation/translate', data),
+  translateFile: (formData) => instance.post('/translation/translate/file', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 600000
+  }),
+  getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
+  getDocument: (id) => instance.get(`/documents/${id}`),
+  getMemory: (skip = 0, limit = 100, keyword) => {
+    const params = { skip, limit }
+    if (keyword) params.keyword = keyword
+    return instance.get('/translation/memory', { params })
+  },
+  addMemory: (data) => instance.post('/translation/memory', data),
+  deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
+  getDocs: (skip = 0, limit = 100) => instance.get('/translation/docs', { params: { skip, limit } }),
+  getDoc: (id) => instance.get(`/translation/docs/${id}`),
+  deleteDoc: (id) => instance.delete(`/translation/docs/${id}`)
+}

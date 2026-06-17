@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE concept PUBLIC "-//OASIS//DTD DITA Concept//EN" "/ime4/apache-tomcat-8.5.73/webapps/imeWeb/config/DEFAULT_CUS/doctypes/DITA1.3-dtds/dtd1.3/technicalContent/dtd/concept.dtd">
+<concept xmlns:cms="http://www.example.com/cms" xmlns:m="http://www.w3.org/1998/Math/MathML" id="test_concept">
+  <title>Product Installation Guide</title>
+  <conbody>
+    <p>Please follow the steps below to complete<cms:product>Intelligent Platform</cms:product>Installation.</p>
+    <p>Please restart after installation is complete.<uicontrol>System Services</uicontrol>has taken effect.</p>
+    <note type="important">During the installation process,<ph outputclass="bold">Do not</ph>Disconnect the power.</note>
+  </conbody>
+</concept>

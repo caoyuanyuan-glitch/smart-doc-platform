@@ -91,7 +91,28 @@
             <el-menu-item index="/qa/library">知识库管理</el-menu-item>
           </el-sub-menu>
 
-          <el-menu-item index="/users">
+          <el-sub-menu index="translate-sub">
+            <template #title>
+              <el-icon><Switch /></el-icon>
+              <span>AI翻译</span>
+            </template>
+            <el-menu-item index="/translate">文本翻译</el-menu-item>
+            <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
+          </el-sub-menu>
+
+          <el-sub-menu index="library-sub">
+            <template #title>
+              <el-icon><Box /></el-icon>
+              <span>内容库</span>
+            </template>
+            <el-menu-item index="/translate/memory">记忆库</el-menu-item>
+          </el-sub-menu>
+
+                    <el-menu-item index="/users">
+
+
+
+
             <el-icon><User /></el-icon>
             <template #title>用户管理</template>
           </el-menu-item>
@@ -110,7 +131,7 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
-  Files, Refresh, CollectionTag, Fold, Expand
+  Files, Refresh, CollectionTag, Fold, Expand, Switch, Box
 } from '@element-plus/icons-vue'
 
 const router = useRouter()

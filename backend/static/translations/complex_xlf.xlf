@@ -1,0 +1,20 @@
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file source-language="zh-CN" target-language="en-US" datatype="plaintext">
+    <body>
+      <group id="menu">
+        <trans-unit id="1">
+          <source>文件<g id="1">&amp;</g>编辑</source>
+        <target state="translated">File<g id="1">&amp;</g>Edit</target></trans-unit>
+        <trans-unit id="2">
+          <source>点击<x id="1" ctype="bold" />按钮继续</source>
+        <target state="translated">Click<x id="1" ctype="bold" />Continue Button</target></trans-unit>
+      </group>
+      <trans-unit id="3">
+        <source>请输入<bpt id="1">&lt;b&gt;</bpt>用户名<ept id="1">&lt;/b&gt;</ept>和密码</source>
+      <target state="translated">Please enter<bpt id="1">&lt;b&gt;</bpt>Username<ept id="1">&lt;/b&gt;</ept>and password</target></trans-unit>
+      <trans-unit id="4">
+        <source>确认<ph id="1">删除</ph>操作</source>
+      <target state="translated">Confirm<ph id="1">删除</ph>Operation</target></trans-unit>
+    </body>
+  </file>
+</xliff>

@@ -1,70 +1,77 @@
 import os
 import json
+import httpx
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv()
 
+ANTHROPIC_VERSION = "2023-06-01"
+
+
 class AIClient:
     def __init__(self):
-        self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "qwen")
-        self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
-        self.qwen_model = os.getenv("QWEN_MODEL", "qwen-max")
-        self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-        
-        self.qwen_client = OpenAI(
-            api_key=self.dashscope_api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ) if self.dashscope_api_key else None
-        
-        self.deepseek_client = OpenAI(
-            api_key=self.deepseek_api_key,
-            base_url="https://api.deepseek.com/v1"
-        ) if self.deepseek_api_key else None
+        self.api_key = os.getenv("DASHSCOPE_API_KEY")
+        self.model = os.getenv("QWEN_MODEL", "monkeycode-pro/qwen3.6-plus")
+        self.base_url = os.getenv("QWEN_BASE_URL", "https://proxy.monkeycode-ai.com/v1")
+        self.http_client = httpx.Client(verify=False, timeout=120)
+
+    def _call_model(self, messages, max_tokens=2048, temperature=0.3):
+        system_msg = None
+        user_messages = []
+
+        for msg in messages:
+            if msg["role"] == "system":
+                system_msg = msg["content"]
+            else:
+                user_messages.append(msg)
+
+        body = {
+            "model": self.model,
+            "messages": user_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+        if system_msg:
+            body["system"] = system_msg
+
+        try:
+            response = self.http_client.post(
+                f"{self.base_url}/messages",
+                headers={
+                    "x-api-key": self.api_key,
+                    "Content-Type": "application/json",
+                    "anthropic-version": ANTHROPIC_VERSION
+                },
+                json=body
+            )
+
+            if response.status_code != 200:
+                print(f"模型调用失败 [{response.status_code}]: {response.text[:200]}")
+                return None
+
+            data = response.json()
+
+            text_parts = []
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+
+            return "".join(text_parts) if text_parts else None
+
+        except Exception as e:
+            print(f"模型调用异常: {str(e)}")
+            return None
 
     def call_qwen(self, messages, max_tokens=2048):
-        if not self.qwen_client:
-            return None
-        try:
-            response = self.qwen_client.chat.completions.create(
-                model=self.qwen_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.3
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"Qwen调用失败: {str(e)}")
-            return None
+        return self._call_model(messages, max_tokens)
 
     def call_deepseek(self, messages, max_tokens=2048):
-        if not self.deepseek_client:
-            return None
-        try:
-            response = self.deepseek_client.chat.completions.create(
-                model=self.deepseek_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.3
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"DeepSeek调用失败: {str(e)}")
-            return None
+        return self._call_model(messages, max_tokens)
 
     def chat(self, messages, max_tokens=2048, fallback=True):
-        result = None
-        
-        if self.default_provider == "qwen":
-            result = self.call_qwen(messages, max_tokens)
-            if result is None and fallback:
-                result = self.call_deepseek(messages, max_tokens)
-        else:
-            result = self.call_deepseek(messages, max_tokens)
-            if result is None and fallback:
-                result = self.call_qwen(messages, max_tokens)
-        
+        result = self._call_model(messages, max_tokens)
+        if result is None and fallback:
+            result = self._call_model(messages, max_tokens)
         return result
 
     def audit_document(self, content):
@@ -99,7 +106,7 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=4096)
-        
+
         try:
             return json.loads(result)
         except:
@@ -126,7 +133,7 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=2048)
-        
+
         try:
             return json.loads(result)
         except:
@@ -155,7 +162,7 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=2048)
-        
+
         try:
             return json.loads(result)
         except:
@@ -180,7 +187,7 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=4096)
-        
+
         return result or ""
 
     def general_answer(self, question):
@@ -202,10 +209,11 @@ class AIClient:
 """
         messages = [{"role": "user", "content": prompt}]
         result = self.chat(messages, max_tokens=2048)
-        
+
         try:
             return json.loads(result)
         except:
             return {"answer": result or "无法回答该问题", "sources": []}
+
 
 ai_client = AIClient()

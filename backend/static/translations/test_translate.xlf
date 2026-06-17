@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file source-language="zh" target-language="en" datatype="plaintext">
+    <body>
+      <trans-unit id="msg1"><source>保存成功</source><target state="translated">Saved successfully</target></trans-unit>
+      <trans-unit id="msg2"><source>删除确认</source><target state="translated">Delete Confirmation</target></trans-unit>
+    </body>
+  </file>
+</xliff>
