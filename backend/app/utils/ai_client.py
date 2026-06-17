@@ -13,6 +13,16 @@ def _is_valid_key(val):
     return bool(val) and val and "your-" not in val.lower()
 
 
+def _strip_code_fence(text):
+    if not text:
+        return ""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    return text.strip()
+
+
 class AIClient:
     def __init__(self):
         self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "qwen")
@@ -181,6 +191,113 @@ class AIClient:
                 return None
 
         return None
+
+    @staticmethod
+    def _extract_json(result, default):
+        if not result:
+            return default
+        try:
+            return json.loads(_strip_code_fence(result))
+        except Exception:
+            try:
+                m = re.search(r"\{[\s\S]*\}", result)
+                if m:
+                    return json.loads(m.group(0))
+            except Exception:
+                pass
+        return default
+
+    @staticmethod
+    def _normalize_confidence(value, default=0):
+        try:
+            confidence = float(value)
+            if confidence <= 1:
+                confidence *= 100
+            confidence = int(round(confidence))
+        except Exception:
+            confidence = default
+        return max(0, min(100, confidence))
+
+    @staticmethod
+    def _normalize_severity(value, confidence=0):
+        text = str(value or "").strip().lower()
+        mapping = {
+            "fatal": "fatal",
+            "serious": "serious",
+            "general": "general",
+            "suggestion": "suggestion",
+            "error": "serious",
+            "warning": "general",
+            "info": "suggestion",
+        }
+        severity = mapping.get(text, "general")
+        if confidence < 70 and severity != "suggestion":
+            return "suggestion"
+        return severity
+
+    @staticmethod
+    def _clean_text(value, limit=500):
+        text = str(value or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        return text[:limit]
+
+    def normalize_audit_issues(self, issues, content, source="ai", min_confidence=70):
+        normalized = []
+        if not isinstance(issues, list):
+            return normalized
+
+        for item in issues:
+            if not isinstance(item, dict):
+                continue
+
+            original_text = self._clean_text(item.get("original_text"), 200)
+            context = self._clean_text(item.get("context"), 500)
+            suggestion = self._clean_text(item.get("suggestion"), 300)
+            description = self._clean_text(item.get("description") or item.get("rule_description"), 300)
+            chapter = self._clean_text(item.get("chapter") or item.get("section"), 120)
+            category = self._clean_text(item.get("category"), 80) or "其他"
+            rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
+            audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
+            confidence = self._normalize_confidence(item.get("confidence"), 0)
+            severity = self._normalize_severity(item.get("severity"), confidence)
+
+            if confidence < min_confidence:
+                continue
+            if not description or not suggestion:
+                continue
+            if len(description) < 4:
+                continue
+
+            if original_text:
+                if len(original_text) == 1 and not re.search(r"[\u4e00-\u9fffA-Za-z]", original_text):
+                    continue
+                if content and original_text not in content and context and original_text not in context:
+                    continue
+            elif source == "ai":
+                continue
+
+            if source == "ai" and not audit_basis:
+                continue
+
+            if context and len(context) < len(original_text) and original_text:
+                context = original_text
+
+            normalized.append({
+                "severity": severity,
+                "category": category,
+                "rule": rule,
+                "chapter": chapter,
+                "original_text": original_text,
+                "context": context,
+                "suggestion": suggestion,
+                "description": description,
+                "audit_basis": audit_basis,
+                "confidence": confidence,
+                "source": source,
+                "position": self._clean_text(item.get("position"), 80),
+            })
+
+        return normalized
 
     # ------------------------------------------------------------------
     # 文档润色
@@ -374,118 +491,116 @@ class AIClient:
         is_english = lang in ("en", "both")
 
         if is_english:
-            system_prompt = "You are an expert technical document reviewer with 15+ years of experience in medical/technical writing, quality assurance, and technical communication in English. You specialize in reviewing product manuals, user guides, and technical specifications for medical devices and scientific instruments. Think of yourself as Microsoft Word's proofreader combined with a technical writing expert."
-            user_prompt = f"""Please perform a COMPREHENSIVE proofreading and grammar check of this English technical document, similar to Microsoft Word's spell check and grammar check functionality. Find EVERY issue that a professional proofreader would catch.
+            system_prompt = "You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments. Report only verifiable issues with explicit evidence from the text and a concrete writing-rule basis."
+            user_prompt = f"""Review the following English technical document excerpt for real issues only.
 
-DOCUMENT TYPE: User Manual for a medical/technical device
-DOCUMENT EXCERPT (first 20000 chars):
+Document excerpt:
 {content[:20000]}
 
-THIS REVIEW IS SIMILAR TO MICROSOFT WORD PROOFREADING - IDENTIFY:
+Review basis:
+1. American English technical writing.
+2. MGI-style technical documentation conventions.
+3. Explicit language, terminology, punctuation, grammar, unit, and consistency issues.
 
-1. SPELLING ERRORS (like Word's red underline):
-   - Typos and misspelled words
-   - Common confusable words: your/you're, their/there/they're, its/it's, affect/effect, etc.
-   - Words that should be hyphenated or combined
-   - Common misspellings like: "accomodate" (should be "accommodate"), "occured" (should be "occurred"), "seperate" (should be "separate"), "recomend" (should be "recommend"), "untill" (should be "until"), "goverment" (should be "government")
+Hard constraints:
+- Report only issues that are clearly supported by the quoted text.
+- Keep valid company names, legal names, product names, acronyms, model names, addresses, URLs, email addresses, and standard abbreviations unless the text itself proves an error.
+- Keep optional style preferences out of the result unless the wording is clearly awkward, ambiguous, inconsistent, or noncompliant.
+- If you are uncertain, do not report the item.
+- Low-confidence items must be omitted.
+- If a problem depends on missing broader context, do not report it from this excerpt.
 
-2. GRAMMAR ERRORS (like Word's blue/green underline):
-   - Subject-verb disagreement: "The data shows..." vs "The data show..."
-   - Wrong tense usage: "yesterday I go" → "yesterday I went"
-   - Missing or wrong articles: "a apple" → "an apple"
-   - Run-on sentences and sentence fragments
-   - Wrong preposition usage: "different than" → "different from"
-   - Double negatives: "I don't have nothing" → "I don't have anything"
-   - Pronoun reference issues: ambiguous "it", "they", "this"
-   - Faulty parallelism: "She likes hiking, to swim, and cycling" → "She likes hiking, swimming, and cycling"
+Allowed categories:
+- Spelling
+- Grammar
+- Punctuation
+- Terminology
+- Units
+- Consistency
+- Style
+- Structure
+- Compliance
 
-3. PUNCTUATION ERRORS (like Word's blue underline):
-   - Missing commas in lists and compound sentences
-   - Wrong apostrophe usage: "it's" vs "its"
-   - Missing periods, colons, semicolons
-   - Quotation mark errors
-   - Hyphenation errors
+Severity rules:
+- fatal: regulatory or safety risk clearly visible in the excerpt.
+- serious: definite factual writing error, terminology error, unit error, or grammar error that affects professionalism or interpretation.
+- general: definite punctuation, formatting, or consistency issue.
+- suggestion: clear improvement with strong evidence, only when still objectively useful.
 
-4. WORD CHOICE ISSUES:
-   - Commonly confused words: "ensure/insure/assure", "fewer/less", "who/whom"
-   - Wrong word form: "I am interesting" → "I am interested"
-   - Wordiness and redundancy: "past history" → "history"
-   - Unnecessary jargon
-
-5. CAPITALIZATION ERRORS:
-   - Improper capitalization of proper nouns
-   - All caps usage in running text (except for proper names)
-   - Capitalization inconsistencies
-
-6. STYLE ISSUES:
-   - Inconsistent terminology (using different words for the same thing)
-   - Inconsistent formatting (mixing American/British English)
-   - Passive voice overuse (when active would be clearer)
-
-SPECIFIC COMMON ERRORS TO LOOK FOR:
-- "alot" (not a word) → "a lot"
-- "alright" (nonstandard) → "all right"
-- "could care less" (illogical) → "couldn't care less"
-- "for all intensive purposes" → "for all intents and purposes"
-- "should of", "would of", "could of" (wrong) → "should have", "would have", "could have"
-- "they" used for singular indefinite pronoun → "he or she", "they" (acceptable modern usage)
-- "more then" (wrong) → "more than"
-- contractions in formal technical writing (optional, check style guide)
-
-VALID USAGE (DO NOT REPORT AS ERRORS):
-- Company names: "MGI Tech Co., Ltd.", "BGI Genomics"
-- Legal terms: "P.R.China", "etc." in lists
-- Standard abbreviations: "e.g.", "i.e.", "vs.", "approx."
-- Technical acronyms that are defined: "PCR", "ELISA", "DNA" after first definition
-
-OUTPUT STRICT VALID JSON ONLY, NO extra text, NO markdown code blocks:
+Output strict JSON only:
 {{
   "issues": [
     {{
-      "severity": "general|serious|suggestion",
-      "category": "Spelling|Grammar|Punctuation|Word Choice|Capitalization|Style",
-      "rule": "Brief rule name",
-      "chapter": "Section/Chapter location",
-      "original_text": "Exact problematic text",
-      "context": "1-2 sentences of surrounding context",
-      "suggestion": "Specific correction",
-      "description": "Why this is an issue",
-      "audit_basis": "English grammar/writing standard",
+      "severity": "fatal|serious|general|suggestion",
+      "category": "Spelling|Grammar|Punctuation|Terminology|Units|Consistency|Style|Structure|Compliance",
+      "rule": "short rule id or rule name",
+      "chapter": "section title if visible, otherwise empty string",
+      "original_text": "exact problematic text copied from excerpt",
+      "context": "surrounding sentence or short context from excerpt",
+      "suggestion": "specific correction or rewrite direction",
+      "description": "why this is a real issue",
+      "audit_basis": "explicit basis such as American English spelling, unit convention, terminology consistency, punctuation rule",
       "confidence": 85
     }}
   ]
 }}
 
-IMPORTANT:
-- Be THOROUGH. A 20000 character document should have 10-30+ issues.
-- Report specific corrections, not vague suggestions.
-- If you find words like "accomodate", "occured", "seperate", "alot" - these ARE errors.
-- Look carefully at contractions - ensure/insure/assure confusion - these are REAL errors to catch."""
+Return an empty issues array when no high-confidence issue is present."""
         else:
-            system_prompt = "你是一位拥有15年以上经验的资深技术文档审核专家，擅长审核中文技术文档、产品说明书和操作手册的质量。"
-            user_prompt = f"""请审核以下中文技术文档（节选），识别所有影响文档质量的真实问题。
+            system_prompt = "你是一位医疗器械、IVD 和科研试剂技术文档审核专家。你只输出有明确证据、可复核、可定位的问题。"
+            user_prompt = f"""请审核下面这段中文技术文档，按技术文档规范识别真实问题。
 
-文档类型：医疗/技术设备用户手册
-文档内容（前20000字）：
+文档内容：
 {content[:20000]}
 
-请识别以下类别的问题：
-1. 语法与句子结构 - 句子不完整、主谓不一致、时态混乱、表达生硬
-2. 标点符号与格式 - 标点错误、中英文标点混用、格式不一致、空格问题
-3. 用词与术语 - 错别字、用词错误、专业术语不规范、术语前后不一致
-4. 技术准确性 - 技术信息缺失或错误、内容矛盾、表述不清
-5. 风格一致性 - 大小写不一致、术语不统一、违反写作规范、语气不恰当
-6. 结构与组织 - 章节缺失、逻辑不清晰、标题层级错误、引用问题
-7. 专业性 - 口语化表达、网络用语、语气不适合技术文档
+审核依据：
+1. 中文技术文档写作规范。
+2. 医疗器械/IVD 技术文档常见错误清单。
+3. 术语一致性、单位规范、标点规范、结构与法规表达要求。
 
-审核原则：
-- 只报告确定的、具体的问题。不要猜测或不确定的内容。
-- 每个问题必须包含：原文片段、上下文、具体修改建议。
-- 相同/相似问题合并为一条。
+严格约束：
+- 只报告有明确文本证据的问题。
+- 原文片段必须能从文档中直接定位。
+- 公司名称、产品名、型号、地址、网址、邮箱、专有术语、中英混排专有名词，默认按正确处理，除非文本本身显示出明显错误。
+- 对结构完整性、法规完整性、目录缺失这类问题，只有当前节选里存在直接证据时才报告。
+- 没有把握的问题不要报。
+- 低置信度问题不要输出。
 
-请严格输出有效的JSON，不要额外文字，不要markdown代码块。
+问题范围：
+1. 标点符号
+2. 错别字
+3. 术语
+4. 单位
+5. 语法与句式
+6. 格式一致性
+7. 结构表达
+8. 法规与合规表述
 
-一份良好的技术文档在20000字中通常应该能识别5-20个真实问题。请至少报告你确实发现的问题。"""
+分级规则：
+- fatal：当前文本中清晰可见的安全或法规风险。
+- serious：明确的术语、单位、错别字、专业表达错误。
+- general：明确的标点、格式、一致性问题。
+- suggestion：基于明确证据的优化建议。
+
+请严格输出 JSON，不要输出任何额外文字：
+{{
+  "issues": [
+    {{
+      "severity": "fatal|serious|general|suggestion",
+      "category": "标点符号|错别字|术语|单位|语法|格式|结构|法规|逻辑|其他",
+      "rule": "规则编号或简短规则名",
+      "chapter": "章节标题，无法判断则为空字符串",
+      "original_text": "文档中的原文片段",
+      "context": "足够定位问题的上下文",
+      "suggestion": "具体修改建议",
+      "description": "为何这是真实问题",
+      "audit_basis": "明确审核依据，例如中文标点规范、单位规范、术语一致性",
+      "confidence": 90
+    }}
+  ]
+}}
+
+如果没有高置信度问题，返回 {"issues": []}。"""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -496,21 +611,9 @@ IMPORTANT:
         if not result:
             return {"issues": []}
 
-        try:
-            text = result.strip()
-            if text.startswith("```"):
-                text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-                text = re.sub(r"\n?```$", "", text)
-            return json.loads(text)
-        except Exception as e:
-            print(f"[AI] 解析审核结果失败: {e}")
-            try:
-                m = re.search(r"\{[\s\S]*\}", result)
-                if m:
-                    return json.loads(m.group(0))
-            except Exception:
-                pass
-            return {"issues": []}
+        data = self._extract_json(result, {"issues": []})
+        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+        return {"issues": issues}
 
     # ------------------------------------------------------------------
     # 规则审核的二次验证 (ArkClaw 过滤误报)
@@ -522,77 +625,85 @@ IMPORTANT:
             return []
 
         is_english = document_language in ("en", "both")
-        capped = candidate_issues[:50]
-
-        if is_english:
-            sample_text = "\n".join([
-                f"[{idx+1}] Rule: {c.get('rule','')} | Text: {c.get('original_text','')} | Context: {(c.get('context','') or '')[:100]}"
-                for idx, c in enumerate(capped)
-            ])
-
-            prompt = f"""You are reviewing potential issues found by regex rules in an English technical document. For each candidate issue below, determine if it is a TRUE problem (valid issue) or FALSE positive (not actually a problem in this context).
-
-CANDIDATE ISSUES (numbered 1 to {len(capped)}):
-{sample_text}
-
-IMPORTANT RULES FOR VALIDATION:
-- Company names like "MGI Tech Co., Ltd." are CORRECT - do NOT flag as issue
-- Legal/geographic terms like "P.R.China" or "Wuhan" are CORRECT
-- Normal English punctuation at the end of sentences is CORRECT
-- Standard technical abbreviations (e.g., i.e., etc.) are CORRECT
-- Only flag items where the text truly violates English technical writing conventions
-
-OUTPUT: Strict JSON only:
-{{
-  "valid_indices": [list of indices that are TRUE issues, e.g., [1, 5, 12]]
-}}
-
-If NO items are valid issues, return: {{"valid_indices": []}}"""
-        else:
-            sample_text = "\n".join([
-                f"[{idx+1}] 规则: {c.get('rule','')} | 原文: {c.get('original_text','')} | 上下文: {(c.get('context','') or '')[:100]}"
-                for idx, c in enumerate(capped)
-            ])
-            prompt = f"""请判断以下在中文技术文档中由正则规则匹配出的候选问题，哪些是真正的问题（valid=true），哪些是误报（valid=false）。
-
-候选问题列表（编号1-{len(capped)}）：
-{sample_text}
-
-重要判断原则：
-- 英文公司名称如 "MGI Tech Co., Ltd." 中的标点是正确用法，不要误报
-- 正常的中英文混排专有名词通常是正确的
-- 只有真正违反中文技术文档写作规范的才标记为问题
-
-请严格输出JSON格式：
-{{
-  "valid_indices": [真正是问题的编号，如 [1, 5, 12]]
-}}
-
-如果没有有效问题，返回: {{"valid_indices": []}}"""
-
-        messages = [{"role": "user", "content": prompt}]
-        result = self.chat(messages, max_tokens=2000, temperature=0.1)
-        if not result:
-            return candidate_issues
-
-        try:
-            text = result.strip()
-            if text.startswith("```"):
-                text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-                text = re.sub(r"\n?```$", "", text)
-            data = json.loads(text)
-            valid_indices = set(int(x) for x in data.get("valid_indices", []))
-        except Exception as e:
-            print(f"[AI] 过滤误报失败: {e}")
-            return candidate_issues
-
         filtered = []
-        for idx, issue in enumerate(capped):
-            if (idx + 1) in valid_indices:
-                filtered.append(issue)
+        chunk_size = 20
 
-        if len(candidate_issues) > len(capped):
-            filtered.extend(candidate_issues[len(capped):])
+        for start in range(0, len(candidate_issues), chunk_size):
+            chunk = candidate_issues[start:start + chunk_size]
+            if is_english:
+                sample_text = "\n".join([
+                    f"[{idx+1}] Rule: {c.get('rule','')} | Category: {c.get('category','')} | Text: {c.get('original_text','')} | Context: {(c.get('context','') or '')[:160]}"
+                    for idx, c in enumerate(chunk)
+                ])
+
+                prompt = f"""You are validating candidate issues found by rules in an English regulated technical document.
+
+Candidate issues:
+{sample_text}
+
+Validation principles:
+- Keep only clear, text-supported violations.
+- Treat company names, product names, model names, technical abbreviations, addresses, URLs, email addresses, and legal names as valid unless the context proves an error.
+- If context is insufficient, mark invalid.
+- If the item is only a style preference or uncertain inference, mark invalid.
+
+Return strict JSON only:
+{{
+  "items": [
+    {{"index": 1, "valid": true, "confidence": 92, "reason": "short reason"}}
+  ]
+}}
+
+Only keep items with clear evidence."""
+            else:
+                sample_text = "\n".join([
+                    f"[{idx+1}] 规则: {c.get('rule','')} | 分类: {c.get('category','')} | 原文: {c.get('original_text','')} | 上下文: {(c.get('context','') or '')[:160]}"
+                    for idx, c in enumerate(chunk)
+                ])
+                prompt = f"""请验证以下规则命中的候选问题，判断哪些是真实问题。
+
+候选问题：
+{sample_text}
+
+判断原则：
+- 只保留有明确文本证据的问题。
+- 公司名、产品名、型号、地址、网址、邮箱、专有术语、中英混排专有名词默认视为正确，除非上下文明确显示错误。
+- 证据不足、依赖更多上下文、属于可选风格偏好的项，判定为无效。
+
+请严格输出 JSON：
+{{
+  "items": [
+    {{"index": 1, "valid": true, "confidence": 92, "reason": "简短理由"}}
+  ]
+}}
+
+只有确定为真实问题的项才返回 valid=true。"""
+
+            messages = [{"role": "user", "content": prompt}]
+            result = self.chat(messages, max_tokens=2500, temperature=0.1)
+            if not result:
+                filtered.extend(chunk)
+                continue
+
+            data = self._extract_json(result, {"items": []})
+            items = data.get("items", []) if isinstance(data, dict) else []
+            try:
+                valid_map = {
+                    int(item.get("index", 0)): self._normalize_confidence(item.get("confidence"), 0)
+                    for item in items
+                    if isinstance(item, dict) and item.get("valid") is True
+                }
+            except Exception as e:
+                print(f"[AI] 过滤误报失败: {e}")
+                filtered.extend(chunk)
+                continue
+
+            for idx, issue in enumerate(chunk, 1):
+                confidence = valid_map.get(idx, 0)
+                if confidence >= 75:
+                    issue["confidence"] = max(self._normalize_confidence(issue.get("confidence"), 0), confidence)
+                    filtered.append(issue)
+
         return filtered
 
     # ------------------------------------------------------------------

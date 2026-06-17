@@ -81,7 +81,7 @@
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">审核任务</h2>
       <div class="table-section">
-        <el-table :data="reviews" border>
+          <el-table :data="reviews" border>
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
           <el-table-column prop="id" label="任务ID" width="80" />
           <el-table-column prop="document_id" label="文档ID" width="80" />
@@ -92,6 +92,17 @@
               <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'info'">
                 {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : '进行中' }}
               </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="进度" min-width="220">
+            <template #default="scope">
+              <div v-if="scope.row.status === 'running' && scope.row.progress">
+                <el-progress :percentage="scope.row.progress.progress || 0" :stroke-width="16" />
+                <div class="task-progress-text">{{ scope.row.progress.message || scope.row.progress.step || '审核进行中...' }}</div>
+              </div>
+              <span v-else-if="scope.row.status === 'completed'">审核完成</span>
+              <span v-else-if="scope.row.status === 'failed'">{{ scope.row.summary || '审核失败' }}</span>
+              <span v-else style="color:#999">-</span>
             </template>
           </el-table-column>
           <el-table-column prop="total_issues" label="问题数" width="100" />
@@ -214,6 +225,7 @@
           :data="rules" 
           border 
           :default-sort="{prop: 'rule_no', order: 'ascending'}"
+          @selection-change="onRuleSelectionChange"
           @sort-change="handleSortChange"
         >
           <el-table-column type="selection" width="55" />
@@ -381,7 +393,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { useRoute } from 'vue-router'
 import { documentAPI, reviewAPI, rulesAPI, auditBasisAPI } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -401,6 +413,7 @@ const rowFilters = reactive({})
 // 文档审核状态 (按文档ID存储)
 const docReviewStatus = reactive({})
 let progressPollingTimers = {}  // 轮询定时器
+let reviewsPollingTimer = null
 
 // 问题详情弹窗
 const issueDialogVisible = ref(false)
@@ -529,6 +542,7 @@ onMounted(() => {
 })
 
 function loadByView() {
+  stopReviewsPolling()
   if (currentView.value === 'documents') loadDocuments()
   else if (currentView.value === 'tasks' || currentView.value === 'reports') loadReviews()
   else if (currentView.value === 'rules') loadRules()
@@ -553,17 +567,27 @@ async function loadDocuments() {
     for (const doc of documents.value) {
       const latestReview = reviewMap[doc.id]
       if (latestReview) {
+        const progressInfo = latestReview.progress || null
+        const progressValue = latestReview.status === 'completed'
+          ? 100
+          : latestReview.status === 'running'
+            ? (progressInfo?.progress || 0)
+            : 0
+        const message = latestReview.status === 'completed'
+          ? `审核完成，共 ${latestReview.total_issues} 个问题`
+          : latestReview.status === 'failed'
+            ? '审核失败'
+            : progressInfo?.message || progressInfo?.step || '审核进行中...'
+
         docReviewStatus[doc.id] = {
           review_id: latestReview.id,
           status: latestReview.status,
-          progress: latestReview.status === 'completed' ? 100 : (latestReview.status === 'running' ? 0 : 0),
-          message: latestReview.status === 'completed' 
-            ? `审核完成，共 ${latestReview.total_issues} 个问题` 
-            : latestReview.status === 'failed' 
-              ? '审核失败' 
-              : latestReview.status === 'running' 
-                ? '审核进行中...' 
-                : '未审核'
+          progress: progressValue,
+          message
+        }
+
+        if (latestReview.status === 'running') {
+          startProgressPolling(doc.id, latestReview.id)
         }
       }
     }
@@ -576,8 +600,34 @@ async function loadReviews() {
   try {
     const resp = await reviewAPI.list()
     reviews.value = resp.data || []
+    syncReviewsPolling()
   } catch (e) {
     ElMessage.error('加载任务列表失败')
+  }
+}
+
+function syncReviewsPolling() {
+  stopReviewsPolling()
+  if (currentView.value !== 'tasks' && currentView.value !== 'reports') return
+  if (!reviews.value.some(review => review.status === 'running')) return
+
+  reviewsPollingTimer = setInterval(async () => {
+    try {
+      const resp = await reviewAPI.list()
+      reviews.value = resp.data || []
+      if (!reviews.value.some(review => review.status === 'running')) {
+        stopReviewsPolling()
+      }
+    } catch (error) {
+      stopReviewsPolling()
+    }
+  }, 3000)
+}
+
+function stopReviewsPolling() {
+  if (reviewsPollingTimer) {
+    clearInterval(reviewsPollingTimer)
+    reviewsPollingTimer = null
   }
 }
 
@@ -972,6 +1022,10 @@ async function exportReviewHtml(taskId) {
   }
 }
 
+function onRuleSelectionChange(rows) {
+  selectedRules.value = rows.map(row => row.id)
+}
+
 function onIssueSelectionChange(rows) {
   selectedIssueIds.value = rows.map(r => r.id)
 }
@@ -1299,6 +1353,12 @@ function highlightOriginalText(context, originalText) {
   
   return text
 }
+
+onUnmounted(() => {
+  Object.values(progressPollingTimers).forEach(timer => clearInterval(timer))
+  progressPollingTimers = {}
+  stopReviewsPolling()
+})
 </script>
 
 <style>
@@ -1539,6 +1599,12 @@ function highlightOriginalText(context, originalText) {
   justify-content: space-between;
   margin-top: 12px;
   padding: 8px 0;
+  color: #606266;
+}
+.task-progress-text {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
   color: #606266;
 }
 .text-error { color: #f56c6c; font-family: 'Courier New', monospace; font-size: 13px; }
