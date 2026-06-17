@@ -60,40 +60,97 @@ def _get_topic_type(heading_text):
     return "concept"
 
 
-def _parse_md_sections(content):
-    sections = []
-    lines = content.split("\n")
-    current_h1 = {"title": "", "sections": []}
-    current_h2 = None
-    current_lines = []
+def _clean_title(title):
+    """Clean markdown formatting from section titles.
+    - Unescape markdown backslash escapes
+    - Strip ** bold markers
+    - Remove leading numbering (1.1, Chapter 1:, etc.)
+    """
+    if not title:
+        return title
 
-    def _flush_section(sections_list, title, text_lines):
-        if title or text_lines:
-            sections_list.append({
-                "title": title,
-                "content": "\n".join(text_lines).strip()
-            })
+    # 1. Unescape markdown: \\ must come first to avoid double-unescaping
+    t = title
+    t = t.replace("\\\\", "\\")
+    for ch in "&*_`.-#":
+        t = t.replace("\\" + ch, ch)
+
+    # 2. Strip ** bold markers
+    t = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', t)
+
+    # 3. Remove leading numbering patterns
+    t = re.sub(r'^\d+[\.\s]+', '', t)
+    t = re.sub(r'^(Chapter|Appendix|第)\s*\d+[\.\s:：]*\s*', '', t, flags=re.IGNORECASE)
+
+    # 4. Trim and clean up
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def _parse_md_sections(content):
+    """Parse markdown into nested sections for all heading levels (H1-H6).
+    Returns: [{"title": str, "sections": [...], "content": str}]
+    """
+    lines = content.split("\n")
+    root_sections = []
+    # Stack entries: {"title": str, "level": int, "sections": list, "content_lines": list}
+    stack = []
+    pending_lines = []
 
     for line in lines:
-        if line.startswith("# ") and not line.startswith("## "):
-            _flush_section(current_h1["sections"], current_h2["title"] if current_h2 else "", current_lines)
-            current_h2 = None
-            current_lines = []
-            if current_h1["title"] or current_h1["sections"]:
-                sections.append(current_h1)
-            current_h1 = {"title": line[2:].strip(), "sections": []}
-        elif line.startswith("## "):
-            _flush_section(current_h1["sections"], current_h2["title"] if current_h2 else "", current_lines)
-            current_h2 = {"title": line[3:].strip(), "content": ""}
-            current_lines = []
+        heading_match = re.match(r'^(#{1,6})\s+(.*)', line)
+        if heading_match:
+            level = len(heading_match.group(1))
+            title = heading_match.group(2).strip()
+
+            if pending_lines:
+                if stack:
+                    ck = "content_lines"
+                    if ck not in stack[-1]:
+                        stack[-1][ck] = []
+                    stack[-1][ck].extend(pending_lines)
+                pending_lines = []
+
+            while stack and stack[-1]["level"] >= level:
+                complete = stack.pop()
+                sec_content = "\n".join(complete.get("content_lines", [])).strip()
+                entry = {
+                    "title": complete["title"],
+                    "sections": complete.get("sections", []),
+                    "content": sec_content,
+                }
+                if stack:
+                    stack[-1].setdefault("sections", []).append(entry)
+                else:
+                    root_sections.append(entry)
+
+            stack.append({
+                "title": title,
+                "level": level,
+                "sections": [],
+            })
         else:
-            current_lines.append(line)
+            pending_lines.append(line)
 
-    _flush_section(current_h1["sections"], current_h2["title"] if current_h2 else "", current_lines)
-    if current_h1["title"] or current_h1["sections"]:
-        sections.append(current_h1)
+    if pending_lines:
+        if stack:
+            stack[-1].setdefault("content_lines", []).extend(pending_lines)
+        pending_lines = []
 
-    return sections
+    while stack:
+        complete = stack.pop()
+        sec_content = "\n".join(complete.get("content_lines", [])).strip()
+        entry = {
+            "title": complete["title"],
+            "sections": complete.get("sections", []),
+            "content": sec_content,
+        }
+        if stack:
+            stack[-1].setdefault("sections", []).append(entry)
+        else:
+            root_sections.append(entry)
+
+    return root_sections
 
 
 def _parse_docx_sections(file_path):
@@ -104,49 +161,85 @@ def _parse_docx_sections(file_path):
         if not paragraphs:
             return [{"title": "文档", "sections": [{"title": "正文", "content": "(无内容)"}]}]
 
-        sections = []
-        current_h1 = {"title": "", "sections": []}
-        current_h2 = None
-        current_lines = []
+        root_sections = []
+        stack = []
+        pending_lines = []
 
         for p in paragraphs:
             text = p.text.strip()
             style_name = p.style.name if p.style else ""
+            heading_level = _get_heading_level(style_name)
 
-            if "Heading 1" in style_name or "heading 1" in style_name.lower():
-                if current_h2:
-                    current_h2["content"] = "\n".join(current_lines)
-                    current_h1["sections"].append(current_h2)
-                    current_lines = []
-                if current_h1["title"] or current_h1["sections"]:
-                    sections.append(current_h1)
-                current_h1 = {"title": text, "sections": []}
-                current_h2 = None
-            elif "Heading 2" in style_name or "heading 2" in style_name.lower():
-                if current_h2:
-                    current_h2["content"] = "\n".join(current_lines)
-                    current_h1["sections"].append(current_h2)
-                current_h2 = {"title": text, "content": ""}
-                current_lines = []
+            if heading_level:
+                if pending_lines:
+                    if stack:
+                        stack[-1].setdefault("content_lines", []).extend(pending_lines)
+                    pending_lines = []
+
+                while stack and stack[-1]["level"] >= heading_level:
+                    complete = stack.pop()
+                    sec_content = "\n".join(complete.get("content_lines", [])).strip()
+                    entry = {
+                        "title": complete["title"],
+                        "sections": complete.get("sections", []),
+                        "content": sec_content,
+                    }
+                    if stack:
+                        stack[-1].setdefault("sections", []).append(entry)
+                    else:
+                        root_sections.append(entry)
+
+                stack.append({
+                    "title": text,
+                    "level": heading_level,
+                    "sections": [],
+                })
             else:
-                if current_h2 is not None:
-                    current_lines.append(text)
-                elif current_h1["title"]:
-                    current_lines.append(text)
+                pending_lines.append(text)
 
-        if current_h2:
-            current_h2["content"] = "\n".join(current_lines)
-            current_h1["sections"].append(current_h2)
-        if current_h1["title"] or current_h1["sections"]:
-            sections.append(current_h1)
+        if pending_lines:
+            if stack:
+                stack[-1].setdefault("content_lines", []).extend(pending_lines)
+            pending_lines = []
 
-        if not sections:
+        while stack:
+            complete = stack.pop()
+            sec_content = "\n".join(complete.get("content_lines", [])).strip()
+            entry = {
+                "title": complete["title"],
+                "sections": complete.get("sections", []),
+                "content": sec_content,
+            }
+            if stack:
+                stack[-1].setdefault("sections", []).append(entry)
+            else:
+                root_sections.append(entry)
+
+        if not root_sections:
             full_text = "\n".join(p.text.strip() for p in paragraphs)
             return [{"title": "文档", "sections": [{"title": "正文", "content": full_text}]}]
 
-        return sections
+        return root_sections
     except Exception as e:
         raise ValueError(f"DOCX解析失败: {str(e)}")
+
+
+def _get_heading_level(style_name):
+    """Extract heading level (1-6) from Word style name, or 0 if not a heading."""
+    if not style_name:
+        return 0
+    import re as _re
+    m = _re.match(r'(?i)heading\s+(\d+)', style_name)
+    if m:
+        return int(m.group(1))
+    # Map common Chinese style names
+    lower = style_name.lower()
+    for i in range(1, 7):
+        if f"heading {i}" in lower:
+            return i
+        if f"标题 {i}" in lower:
+            return i
+    return 0
 
 
 def _parse_content(source_format, file_path, content):
@@ -157,12 +250,49 @@ def _parse_content(source_format, file_path, content):
     raise ValueError(f"不支持的文件格式: {source_format}")
 
 
-def _extract_images_from_md(content):
+def _extract_images_md(content):
+    """Extract image metadata from markdown content (no download)."""
     images = []
     pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
     for match in re.finditer(pattern, content):
         images.append({"alt": match.group(1), "path": match.group(2)})
     return images
+
+
+def _download_images_for_output(images, output_base, timeout=30):
+    """Download external images and save to output_dir/image/.
+    Returns dict mapping original URL to local filename.
+    """
+    import urllib.request
+    import urllib.error
+    from pathlib import Path
+
+    image_dir = os.path.join(output_base, "image")
+    _ensure_dir(image_dir)
+
+    url_to_local = {}
+    idx = 0
+    for img in images:
+        url = img["path"]
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        if url in url_to_local:
+            continue
+        try:
+            ext = os.path.splitext(url.split("?")[0])[1] or ".png"
+            if ext.lower() not in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp"):
+                ext = ".png"
+            local_name = f"image_{idx:03d}{ext}"
+            local_path = os.path.join(image_dir, local_name)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with open(local_path, "wb") as f:
+                    f.write(resp.read())
+            url_to_local[url] = f"image/{local_name}"
+            idx += 1
+        except Exception:
+            url_to_local[url] = url
+    return url_to_local
 
 
 def _parse_template_zip(template_path):
@@ -193,6 +323,61 @@ def _parse_template_zip(template_path):
     return tree
 
 
+def _extract_template_parts(template_path):
+    """Extract frontmatter XML, Manufacturer appendix XML, and file list from template ZIP."""
+    result = {
+        "frontmatter_xml": "",
+        "manufacturer_xml": "",
+        "files": {},        # filename -> content (bytes)
+        "image_files": {},  # image/filename -> content (bytes)
+    }
+    try:
+        with zipfile.ZipFile(template_path, "r") as zf:
+            namelist = zf.namelist()
+
+            # Find and parse the ditamap
+            ditamap_content = ""
+            for name in namelist:
+                if name.endswith(".ditamap"):
+                    ditamap_content = zf.read(name).decode("utf-8", errors="ignore")
+                    break
+
+            if not ditamap_content:
+                return result
+
+            # Extract frontmatter section
+            fm_match = re.search(r'<frontmatter[^>]*>.*?</frontmatter>', ditamap_content, re.DOTALL)
+            if fm_match:
+                result["frontmatter_xml"] = fm_match.group(0)
+
+            # Extract Manufacturer appendix
+            appx_pattern = r'<appendix[^>]*navtitle="Manufacturer[^"]*"[^>]*>.*?</appendix>'
+            mfg_match = re.search(appx_pattern, ditamap_content, re.DOTALL)
+            if mfg_match:
+                result["manufacturer_xml"] = mfg_match.group(0)
+
+            # Collect all referenced dita files
+            all_xml = result["frontmatter_xml"] + result["manufacturer_xml"]
+            refs = re.findall(r'href="([^"]+\.dita)"', all_xml)
+
+            # Copy dita files from template ZIP
+            for ref in refs:
+                for name in namelist:
+                    if name == ref or name.endswith("/" + ref):
+                        result["files"][ref] = zf.read(name)
+                        break
+
+            # Copy all image files from template ZIP
+            for name in namelist:
+                if name.startswith("image/") and not name.endswith("/"):
+                    img_name = name
+                    result["image_files"][img_name] = zf.read(name)
+
+    except Exception:
+        pass
+    return result
+
+
 def _parse_special_requirements(requirements_text):
     parsed = {"reuse_topics": [], "type_overrides": {}, "auto_split": False, "other": []}
     if not requirements_text:
@@ -216,12 +401,22 @@ def _parse_special_requirements(requirements_text):
 
 def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, level=2):
     safe_title = section_title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    safe_content = section_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    paragraphs = []
-    table_lines = []
-    in_table = False
+    def _unescape_md(text):
+        for ch in ['*', '_', '\\', '.', '-', '#']:
+            text = text.replace('\\' + ch, ch)
+        return text
+
+    def _strip_md_bold(text):
+        return re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+
+    def _strip_md_image_alt(text):
+        return re.sub(r'!\[([^\]]*)\]\(', r'\1[', text)
+
+    safe_content = section_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("<br>", "")
+
     table_rows = []
+    in_table = False
     list_lines = []
     in_list = False
     list_type = None
@@ -254,7 +449,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
                 in_table = True
                 table_rows = []
             cells = [c.strip() for c in stripped.strip("|").split("|")]
-            table_rows.append(cells)
+            table_rows.append([_strip_md_bold(_unescape_md(c)) for c in cells])
             continue
         elif in_table and re.match(r'^\|[-:\s|]+\|$', stripped):
             continue
@@ -262,14 +457,27 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
             if in_table:
                 in_table = False
                 if table_rows:
+                    has_title = False
+                    if body_parts and not body_parts[-1]:
+                        body_parts.pop()
+                    if len(body_parts) >= 1:
+                        prev = body_parts[-1]
+                        if prev and prev.strip().startswith("<p>") and re.match(r'<p>Table\s+\d+[-–]\d+', prev):
+                            has_title = True
+                            body_parts.pop()
                     cols = max(len(r) for r in table_rows)
-                    table_xml = ['        <table>', f'          <tgroup cols="{cols}">']
+                    if has_title:
+                        table_xml = ['        <table>', f'          <title>{_strip_tag(prev)}</title>']
+                    else:
+                        table_xml = ['        <table>']
+                    table_xml.append(f'          <tgroup cols="{cols}">')
                     if len(table_rows) > 1:
                         table_xml.append('            <thead>')
                         table_xml.append('              <row>')
                         for c in table_rows[0]:
                             table_xml.append(f'                <entry>{c}</entry>')
-                        while len(table_rows[0]) < cols:
+                        empty_needed = cols - len(table_rows[0])
+                        for _ in range(empty_needed):
                             table_xml.append('                <entry></entry>')
                         table_xml.append('              </row>')
                         table_xml.append('            </thead>')
@@ -278,7 +486,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
                             table_xml.append('              <row>')
                             for c in row:
                                 table_xml.append(f'                <entry>{c}</entry>')
-                            while len(row) < cols:
+                            empty_needed = cols - len(row)
+                            for _ in range(empty_needed):
                                 table_xml.append('                <entry></entry>')
                             table_xml.append('              </row>')
                         table_xml.append('            </tbody>')
@@ -295,6 +504,16 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
                     body_parts.append("\n".join(table_xml))
                 table_rows = []
 
+        image_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', stripped)
+        if image_match:
+            result = _flush_list()
+            if result:
+                body_parts.append(result)
+            alt = image_match.group(1)
+            href = image_match.group(2)
+            body_parts.append(f'        <image href="{href}" placement="break"><alt>{alt}</alt></image>')
+            continue
+
         if re.match(r'^\s*[-*+]\s+', line):
             if not in_list or list_type != "ul":
                 result = _flush_list()
@@ -303,7 +522,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
                 in_list = True
                 list_type = "ul"
             item = re.sub(r'^\s*[-*+]\s+', '', line)
-            list_lines.append(item)
+            list_lines.append(_strip_md_bold(_unescape_md(item)))
         elif re.match(r'^\s*\d+[.)]\s+', line):
             if not in_list or list_type != "ol":
                 result = _flush_list()
@@ -312,19 +531,20 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
                 in_list = True
                 list_type = "ol"
             item = re.sub(r'^\s*\d+[.)]\s+', '', line)
-            list_lines.append(item)
+            list_lines.append(_strip_md_bold(_unescape_md(item)))
         elif re.match(r'^#{1,6}\s+', line):
             result = _flush_list()
             if result:
                 body_parts.append(result)
             h_level = len(re.match(r'^(#+)', line).group(1))
-            h_text = re.sub(r'^#{1,6}\s+', '', line)
+            h_text = _unescape_md(re.sub(r'^#{1,6}\s+', '', line))
             body_parts.append(f"        <section><title>{h_text}</title></section>")
         else:
             result = _flush_list()
             if result:
                 body_parts.append(result)
-            body_parts.append(f"        <p>{stripped}</p>")
+            clean = _unescape_md(_strip_md_bold(stripped))
+            body_parts.append(f"        <p>{clean}</p>")
 
     result = _flush_list()
     if result:
@@ -357,8 +577,46 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
 </topic>"""
 
 
+def _strip_tag(xml):
+    return re.sub(r'<[^>]+>', '', xml)
+
+
+def _flatten_sections(sections, parent_h1=""):
+    """Recursively flatten nested sections into a list of topics.
+    Every heading at any level becomes its own topic.
+    """
+    result = []
+    for sec in sections:
+        title = sec.get("title", "")
+        content = sec.get("content", "")
+        children = sec.get("sections", [])
+
+        if content or not children:
+            result.append({
+                "h1": parent_h1,
+                "title": title,
+                "content": content,
+                "dita_type": _get_topic_type(title),
+            })
+
+        if children:
+            new_parent = title or parent_h1
+            result.extend(_flatten_sections(children, new_parent))
+
+    return result
+
+
 def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_content,
                    target_format, template_path, requirements_text):
+    """格式转换流水线。
+
+    固定行为（不可变）：
+    - 标题清理: 去 \\ 转义/去 ** 加粗/去编号前缀
+    - 全级拆分: H1-H6 每个标题一个独立 topic
+    - 图片下载: 外部图片打包到 image/ 目录
+    - 模板复用: 从模板复制 <frontmatter> + Manufacturer <appendix> 及其文件
+    可变部分: 仅复用哪些具体 topic 可随任务调整。
+    """
     import time as _time
     from app.database import SessionLocal
 
@@ -378,13 +636,13 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         _set_progress(5, "解析")
 
         sections = _parse_content(source_format, file_path, source_content)
-        images = _extract_images_from_md(source_content)
+        images = _extract_images_md(source_content)
 
         _set_progress(20, "解析")
 
-        templates = {}
+        template_parts = None
         if template_path and os.path.exists(template_path):
-            templates = _parse_template_zip(template_path)
+            template_parts = _extract_template_parts(template_path)
 
         _set_progress(30, "结构映射")
 
@@ -395,43 +653,35 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         image_count = len(images)
         topic_index = 0
 
-        all_sections = []
-        for h1 in sections:
-            if not h1["sections"]:
-                all_sections.append({
-                    "h1": h1["title"],
-                    "title": h1["title"],
-                    "content": "",
-                    "dita_type": _get_topic_type(h1["title"]),
-                })
-            else:
-                for h2 in h1["sections"]:
-                    all_sections.append({
-                        "h1": h1["title"],
-                        "title": h2["title"],
-                        "content": h2["content"],
-                        "dita_type": _get_topic_type(h2["title"]),
-                    })
+        all_sections = _flatten_sections(sections)
 
         if special["auto_split"] and len(all_sections) == 1:
+            def _rebuild_content(sec):
+                parts = []
+                if sec.get("content"):
+                    parts.append(sec["content"])
+                for child in sec.get("sections", []):
+                    parts.append(f"{'#' * (sec.get('level', 1) + 1)} {child['title']}")
+                    parts.append(_rebuild_content(child))
+                return "\n".join(p.strip() for p in parts if p.strip())
+
             all_sections = []
             for h1 in sections:
                 if h1["title"]:
                     all_sections.append({
                         "h1": "",
                         "title": h1["title"],
-                        "content": "\n".join(
-                            f"## {s['title']}\n{s['content']}" for s in h1["sections"]
-                        ) if h1["sections"] else "",
+                        "content": _rebuild_content(h1),
                         "dita_type": _get_topic_type(h1["title"]),
                     })
             if not all_sections:
-                all_sections = sections
+                all_sections = _flatten_sections(sections)
 
         for section in all_sections:
-            title = section["title"]
+            title = _clean_title(section["title"])
+            h1_title = _clean_title(section.get("h1", ""))
             if not title:
-                continue
+                title = h1_title or f"Section {topic_index + 1}"
 
             dita_type = section["dita_type"]
             for keyword, override_type in special["type_overrides"].items():
@@ -496,12 +746,28 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         output_base = os.path.join(OUTPUT_DIR, output_name)
         _ensure_dir(output_base)
 
+        url_map = _download_images_for_output(images, output_base)
+
+        if template_parts:
+            for fname, content in template_parts["files"].items():
+                tpl_fname = os.path.join(output_base, fname)
+                with open(tpl_fname, "wb") as f:
+                    f.write(content)
+            for img_path, img_content in template_parts["image_files"].items():
+                tpl_img = os.path.join(output_base, img_path)
+                os.makedirs(os.path.dirname(tpl_img), exist_ok=True)
+                with open(tpl_img, "wb") as f:
+                    f.write(img_content)
+
         for topic in topics_output:
+            content = topic["content"]
+            for url, local in url_map.items():
+                content = content.replace(f'href="{url}"', f'href="{local}"')
             fname = os.path.join(output_base, topic["filename"])
             with open(fname, "w", encoding="utf-8") as f:
-                f.write(topic["content"])
+                f.write(content)
 
-        map_title = sections[0]["title"] if sections else "Generated Document"
+        map_title = _clean_title(sections[0]["title"]) if sections else "Generated Document"
         map_title = map_title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         sanitized_name = re.sub(r'[^\w\s-]', '', map_title).strip()
         sanitized_name = re.sub(r'[-\s]+', '_', sanitized_name) or "document"
@@ -516,6 +782,11 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             f'    <mainbooktitle>{map_title}</mainbooktitle>',
             '  </booktitle>',
         ]
+
+        if template_parts and template_parts.get("frontmatter_xml"):
+            fm_xml = template_parts["frontmatter_xml"]
+            for line in fm_xml.strip().split("\n"):
+                map_lines.append(f"  {line.strip()}")
 
         chapter_index = 0
         for i, topic in enumerate(topics_output):
@@ -543,6 +814,11 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 f' version="A.1"/>'
             )
             map_lines.append('  </chapter>')
+
+        if template_parts and template_parts.get("manufacturer_xml"):
+            mfg_xml = template_parts["manufacturer_xml"]
+            for line in mfg_xml.strip().split("\n"):
+                map_lines.append(f"  {line.strip()}")
 
         map_lines.append('</bookmap>')
         with open(os.path.join(output_base, map_filename), "w", encoding="utf-8") as f:
@@ -578,6 +854,17 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             "checks": checks,
             "unmapped_sections": unmapped,
         }
+
+        try:
+            from app.crud.convert_rule import get_active_rules, seed_default_rules
+            seed_default_rules(db)
+            rules = get_active_rules(db)
+            verification_report["active_rules"] = [
+                {"rule_number": r.rule_number, "category": r.category, "description": r.description}
+                for r in rules
+            ]
+        except Exception:
+            verification_report["active_rules"] = []
 
         update_convert_task_result(
             db, task_id,
@@ -615,6 +902,8 @@ async def start_conversion(
     target_format: str = Form("dita"),
     template_file: UploadFile = File(None),
     requirements: str = Form(None),
+    retry_feedback: str = Form(None),
+    retry_screenshot: UploadFile = File(None),
     db: Session = Depends(get_db),
 ):
     ext = os.path.splitext(source_file.filename)[1].lower()
@@ -636,6 +925,19 @@ async def start_conversion(
         with open(template_path, "wb") as f:
             f.write(await template_file.read())
 
+    retry_screenshot_path = None
+    if retry_screenshot and retry_screenshot.filename:
+        retry_screenshot_path = os.path.join(UPLOAD_DIR, f"ss_{int(time.time() * 1000)}_{retry_screenshot.filename}")
+        with open(retry_screenshot_path, "wb") as f:
+            f.write(await retry_screenshot.read())
+
+    combined_requirements = requirements or ""
+    if retry_feedback:
+        if combined_requirements:
+            combined_requirements += "\n[IME反馈] " + retry_feedback
+        else:
+            combined_requirements = "[IME反馈] " + retry_feedback
+
     source_content = ""
     try:
         if source_format == "md":
@@ -656,7 +958,9 @@ async def start_conversion(
         source_format=source_format,
         target_format=target_format,
         template_filename=template_filename,
-        requirements=requirements,
+        requirements=combined_requirements,
+        retry_feedback=retry_feedback,
+        retry_screenshot_path=retry_screenshot_path,
     ))
 
     with _tasks_lock:
@@ -667,7 +971,7 @@ async def start_conversion(
     thread = threading.Thread(
         target=_run_pipeline,
         args=(task.task_id, None, source_format, source_path, source_content,
-              target_format, template_path, requirements),
+              target_format, template_path, combined_requirements),
         daemon=True,
     )
     thread.start()
@@ -762,6 +1066,7 @@ async def get_report(task_id: str, db: Session = Depends(get_db)):
         overall=report_data.get("overall", "failed"),
         checks=checks,
         unmapped_sections=report_data.get("unmapped_sections"),
+        active_rules=report_data.get("active_rules"),
     )
 
 
@@ -791,3 +1096,67 @@ async def remove_task(task_id: str, db: Session = Depends(get_db)):
     with _tasks_lock:
         _task_store.pop(task_id, None)
     return {"message": "任务已删除"}
+
+
+# ─── 转换规则库 ─────────────────────────────────────────────
+
+@router.get("/rules", response_model=list)
+async def list_convert_rules(db: Session = Depends(get_db)):
+    from app.crud.convert_rule import get_convert_rules, seed_default_rules
+    seed_default_rules(db)
+    rules = get_convert_rules(db)
+    return [
+        {
+            "id": r.id,
+            "rule_number": r.rule_number,
+            "category": r.category,
+            "description": r.description,
+            "is_active": r.is_active,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+        }
+        for r in rules
+    ]
+
+
+@router.post("/rules", response_model=dict)
+async def create_convert_rule_api(
+    category: str = Form(...),
+    description: str = Form(...),
+    rule_number: str = Form(None),
+    db: Session = Depends(get_db),
+):
+    from app.crud.convert_rule import create_convert_rule
+    from app.schemas.convert_rule import ConvertRuleCreate
+    rule = create_convert_rule(db, ConvertRuleCreate(
+        rule_number=rule_number, category=category, description=description
+    ))
+    return {"id": rule.id, "rule_number": rule.rule_number}
+
+
+@router.put("/rules/{rule_id}", response_model=dict)
+async def toggle_convert_rule_api(rule_id: int, db: Session = Depends(get_db)):
+    from app.crud.convert_rule import toggle_convert_rule
+    rule = toggle_convert_rule(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return {"id": rule.id, "is_active": rule.is_active}
+
+
+@router.delete("/rules/{rule_id}", response_model=dict)
+async def delete_convert_rule_api(rule_id: int, db: Session = Depends(get_db)):
+    from app.crud.convert_rule import delete_convert_rule
+    rule = delete_convert_rule(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return {"ok": True}
+
+
+@router.post("/rules/bulk-delete", response_model=dict)
+async def bulk_delete_convert_rules_api(
+    rule_ids: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    from app.crud.convert_rule import bulk_delete_convert_rules
+    ids = [int(x) for x in rule_ids.split(",") if x.strip()]
+    cnt = bulk_delete_convert_rules(db, ids)
+    return {"deleted": cnt}

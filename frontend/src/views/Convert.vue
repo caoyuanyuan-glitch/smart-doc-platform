@@ -43,6 +43,17 @@
               <span>{{ check.name }}: {{ check.status === 'passed' ? '通过' : '警告' }}</span>
               <span v-if="check.detail" class="check-detail">{{ check.detail }}</span>
             </div>
+            <div v-if="report.active_rules && report.active_rules.length > 0" class="active-rules">
+              <p><el-icon><Check /></el-icon>本次转换应用的规则 ({{ report.active_rules.length }})：</p>
+              <ul>
+                <li v-for="r in report.active_rules" :key="r.rule_number">
+                  <span class="rule-num">{{ r.rule_number }}</span>
+                  <span class="rule-cat">[{{ r.category }}]</span>
+                  {{ r.description }}
+                </li>
+              </ul>
+            </div>
+
             <div v-if="report.unmapped_sections && report.unmapped_sections.length > 0" class="unmapped-warn">
               <p><el-icon><Warning /></el-icon>以下章节未映射：</p>
               <ul>
@@ -86,6 +97,43 @@
               <el-icon><Refresh /></el-icon>
               重新转换
             </el-button>
+          </div>
+
+          <div class="ime-feedback-panel">
+            <div class="panel-header">
+              <span>IME 导入反馈</span>
+              <el-tag size="small" type="warning">导入 IME 平台时遇到问题？</el-tag>
+            </div>
+            <el-form-item label="问题描述">
+              <el-input
+                v-model="imeFeedback"
+                type="textarea"
+                :rows="3"
+                placeholder="例如: dita中缺少imesofttype属性、主题结构缺失封面章节、缺少bookmeta元数据等"
+              />
+            </el-form-item>
+            <el-form-item label="报错截图">
+              <div class="upload-area upload-area-small" @click="triggerScreenshotUpload"
+                @dragover.prevent @drop.prevent="onScreenshotDrop"
+                @paste="onScreenshotPaste" tabindex="0">
+                <input ref="screenshotInput" type="file" accept="image/*" style="display:none"
+                  @change="onScreenshotChange" />
+                <p v-if="!imeScreenshot">
+                  <el-icon><Upload /></el-icon>
+                  拖拽、粘贴或点击上传报错截图</p>
+                <div v-else class="file-info">
+                  <el-icon><Picture /></el-icon>
+                  <span>{{ imeScreenshot.name }}</span>
+                  <el-button size="small" type="danger" link @click.stop="imeScreenshot = null">移除</el-button>
+                </div>
+              </div>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="warning" :loading="retrying" :disabled="!sourceFile && !imeFeedback" @click="retryConvert">
+                <el-icon><Refresh /></el-icon>
+                反馈并重新转换
+              </el-button>
+            </el-form-item>
           </div>
         </div>
       </div>
@@ -213,7 +261,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { convertAPI } from '@/api'
-import { Upload, Document, FolderOpened, CircleCheck, Warning, Download, Refresh } from '@element-plus/icons-vue'
+import { Upload, Document, FolderOpened, CircleCheck, Warning, Download, Refresh, Picture } from '@element-plus/icons-vue'
 
 const route = useRoute()
 
@@ -254,7 +302,10 @@ const conversionDetail = ref([])
 const history = ref([])
 const historyLoading = ref(false)
 
-let pollTimer = null
+const imeFeedback = ref('')
+const imeScreenshot = ref(null)
+const retrying = ref(false)
+const screenshotInput = ref(null)
 
 const progressColor = computed(() => {
   if (taskResult.value && taskResult.value.overall === 'warning') return '#e6a23c'
@@ -484,8 +535,76 @@ function resetConvert() {
   report.value = null
   conversionDetail.value = []
   customFilename.value = ''
+  imeFeedback.value = ''
+  imeScreenshot.value = null
   pipelineSteps.value = pipelineSteps.value.map(s => ({ ...s, status: 'pending' }))
   converting.value = false
+}
+
+function triggerScreenshotUpload() { screenshotInput.value?.click() }
+
+function onScreenshotChange(e) {
+  const f = e.target.files[0]
+  if (f) imeScreenshot.value = f
+}
+
+function onScreenshotDrop(e) {
+  const items = e.dataTransfer.items
+  if (items && items.length) {
+    for (const item of items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        imeScreenshot.value = item.getAsFile()
+        return
+      }
+    }
+  }
+  const f = e.dataTransfer.files[0]
+  if (f && f.type.startsWith('image/')) imeScreenshot.value = f
+}
+
+function onScreenshotPaste(e) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      imeScreenshot.value = item.getAsFile()
+      return
+    }
+  }
+}
+
+async function retryConvert() {
+  if (!sourceFile.value && !imeFeedback.value) {
+    ElMessage.info('请先选择源文件或填写IME反馈')
+    return
+  }
+  retrying.value = true
+  taskResult.value = null
+  taskProgress.value = 0
+  report.value = null
+  conversionDetail.value = []
+  const baseName = sourceFile.value ? sourceFile.value.name.replace(/\.[^.]+$/, '') : 'output'
+  customFilename.value = `output_${baseName}`
+  pipelineSteps.value = pipelineSteps.value.map(s => ({ ...s, status: 'pending' }))
+
+  try {
+    const resp = await convertAPI.convert(
+      sourceFile.value,
+      targetFormat.value,
+      templateFile.value,
+      requirements.value || null,
+      imeFeedback.value || null,
+      imeScreenshot.value || null
+    )
+    taskId.value = resp.data.task_id
+    converting.value = true
+    retrying.value = false
+    ElMessage.success('反馈已提交，重新转换中...')
+    startPolling()
+  } catch (e) {
+    retrying.value = false
+    ElMessage.error('重新转换失败: ' + (e.response?.data?.detail || e.message))
+  }
 }
 
 async function loadHistory() {
@@ -664,6 +783,19 @@ onBeforeUnmount(() => stopPolling())
 .check-pass { color: #16a34a; }
 .check-warn { color: #e6a23c; }
 
+.active-rules {
+  margin-bottom: 12px;
+  padding: 10px;
+  background: #ecfdf5;
+  border-radius: 6px;
+  border: 1px solid #bbf7d0;
+}
+.active-rules p { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #166534; margin-bottom: 8px; }
+.active-rules ul { list-style: none; padding: 0; }
+.active-rules li { padding: 3px 0; font-size: 12px; color: #374151; }
+.rule-num { display: inline-block; background: #166534; color: #fff; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-right: 4px; }
+.rule-cat { color: #6b7280; margin-right: 4px; }
+
 .check-detail { color: #9ca3af; font-size: 12px; margin-left: auto; }
 
 .unmapped-warn {
@@ -715,5 +847,20 @@ onBeforeUnmount(() => stopPolling())
   text-align: center;
   color: #9ca3af;
   padding: 40px;
+}
+
+.ime-feedback-panel {
+  margin-top: 16px;
+  padding: 16px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+}
+
+.ime-feedback-panel .panel-header {
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 </style>

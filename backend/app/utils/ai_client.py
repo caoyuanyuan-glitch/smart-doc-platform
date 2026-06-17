@@ -55,3 +55,5 @@ class AIClient:
             base_url=self.arkclaw_base_url,
             timeout=timeout,
         ) if _is_valid_key(self.arkclaw_api_key) else None
+
+ai_client = AIClient()

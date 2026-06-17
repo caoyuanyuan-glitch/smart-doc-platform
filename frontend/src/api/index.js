@@ -170,12 +170,14 @@ export const generateAPI = {
 }
 
 export const convertAPI = {
-  convert: (sourceFile, targetFormat, templateFile, requirements) => {
+  convert: (sourceFile, targetFormat, templateFile, requirements, retryFeedback, retryScreenshot) => {
     const formData = new FormData()
     formData.append('source_file', sourceFile)
     formData.append('target_format', targetFormat)
     if (templateFile) formData.append('template_file', templateFile)
     if (requirements) formData.append('requirements', requirements)
+    if (retryFeedback) formData.append('retry_feedback', retryFeedback)
+    if (retryScreenshot) formData.append('retry_screenshot', retryScreenshot)
     return instance.post('/convert/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   getProgress: (taskId) => instance.get(`/convert/${taskId}/progress`),
@@ -190,6 +192,23 @@ export const convertAPI = {
   getDetail: (taskId) => instance.get(`/convert/${taskId}/detail`),
   list: (skip = 0, limit = 100) => instance.get('/convert/', { params: { skip, limit } }),
   delete: (taskId) => instance.delete(`/convert/${taskId}`)
+}
+
+export const convertRulesAPI = {
+  list: () => instance.get('/convert/rules'),
+  create: (category, description) => {
+    const formData = new FormData()
+    formData.append('category', category)
+    formData.append('description', description)
+    return instance.post('/convert/rules', formData)
+  },
+  toggle: (id) => instance.put(`/convert/rules/${id}`),
+  delete: (id) => instance.delete(`/convert/rules/${id}`),
+  bulkDelete: (ids) => {
+    const formData = new FormData()
+    formData.append('rule_ids', ids.join(','))
+    return instance.post('/convert/rules/bulk-delete', formData)
+  }
 }
 
 export const knowledgeAPI = {

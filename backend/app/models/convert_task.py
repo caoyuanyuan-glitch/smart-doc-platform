@@ -22,4 +22,6 @@ class ConvertTask(Base):
     verification_report = Column(Text, nullable=True)
     conversion_detail = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
+    retry_feedback = Column(Text, nullable=True)
+    retry_screenshot_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

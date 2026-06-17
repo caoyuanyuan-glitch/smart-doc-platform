@@ -9,6 +9,8 @@ class ConvertTaskCreate(BaseModel):
     target_format: str
     template_filename: Optional[str] = None
     requirements: Optional[str] = None
+    retry_feedback: Optional[str] = None
+    retry_screenshot_path: Optional[str] = None
 
 
 class ConvertTaskOut(BaseModel):
@@ -30,8 +32,6 @@ class ConvertTaskOut(BaseModel):
 
     class Config:
         from_attributes = True
-
-
 class StepStatus(BaseModel):
     name: str
     status: str
@@ -56,6 +56,7 @@ class ReportOut(BaseModel):
     overall: str
     checks: List[CheckItem] = []
     unmapped_sections: Optional[List[dict]] = None
+    active_rules: Optional[List[dict]] = None
 
 
 class ConversionDetail(BaseModel):
