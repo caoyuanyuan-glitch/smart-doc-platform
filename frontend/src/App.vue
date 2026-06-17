@@ -7,7 +7,8 @@
           <span class="logo">智能技术文档平台</span>
         </div>
         <div class="header-right">
-          <span class="system-info">智能技术文档审核系统</span>
+          <span class="user-badge" v-if="userStore.isLoggedIn">{{ userStore.user?.username }} ({{ userStore.user?.role }})</span>
+          <el-button text @click="handleLogout" class="logout-btn">退出</el-button>
         </div>
       </header>
 
@@ -93,7 +94,7 @@
               <el-menu-item index="/knowledge">知识库管理</el-menu-item>
             </el-sub-menu>
 
-            <el-menu-item index="/users">
+            <el-menu-item v-if="userStore.isAdmin" index="/users">
               <el-icon><User /></el-icon>
               <template #title>用户管理</template>
             </el-menu-item>
@@ -157,6 +158,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useUserStore } from '@/store/user'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
   Files, Refresh, Fold, Expand, User, Plus, Edit, Delete, FolderAdd,
@@ -166,6 +168,7 @@ import { knowledgeAPI } from '@/api'
 import RecursiveTree from '@/components/RecursiveTree.vue'
 
 const router = useRouter()
+const userStore = useUserStore()
 const isCollapsed = ref(false)
 const folderTree = ref([])
 const currentFolderId = ref(null)
@@ -207,6 +210,11 @@ function handleMenuSelect(index) {
 
 function toggleCollapse() {
   isCollapsed.value = !isCollapsed.value
+}
+
+function handleLogout() {
+  userStore.logout()
+  router.push('/login')
 }
 
 async function loadFolderTree() {
@@ -374,6 +382,22 @@ body {
 .header-right .system-info {
   color: rgba(255, 255, 255, 0.9);
   font-size: 14px;
+  margin-right: 16px;
+}
+
+.logout-btn {
+  color: rgba(255, 255, 255, 0.9) !important;
+  font-size: 13px;
+}
+.logout-btn:hover { color: #fff !important; }
+
+.user-badge {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  margin-right: 12px;
+  padding: 2px 10px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
 }
 
 .sidebar {

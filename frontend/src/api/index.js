@@ -43,8 +43,15 @@ export const authAPI = {
   },
   register: (username, password) => instance.post('/auth/register', { username, password }),
   getMe: () => instance.get('/auth/users/me'),
-  getUsers: () => instance.get('/auth/users'),
-  updateRole: (userId, role) => instance.put(`/auth/users/${userId}/role`, { role })
+}
+
+export const userAPI = {
+  list: (params = {}) => instance.get('/auth/users', { params }),
+  create: (data) => instance.post('/auth/users', data),
+  get: (id) => instance.get(`/auth/users/${id}`),
+  update: (id, data) => instance.put(`/auth/users/${id}`, data),
+  updateStatus: (id, status) => instance.put(`/auth/users/${id}/status`, null, { params: { status } }),
+  resetPassword: (id, newPassword) => instance.post(`/auth/users/${id}/reset-password`, { new_password: newPassword }),
 }
 
 export const documentAPI = {

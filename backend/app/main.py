@@ -33,6 +33,20 @@ app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识库�
 async def startup_event():
     create_tables()
     try:
+        from app.database import SessionLocal
+        from app.crud.user import get_user, create_user_with_details
+        from app.schemas.user import UserCreateWithDetails
+        db = SessionLocal()
+        if not get_user(db, "admin"):
+            create_user_with_details(db, UserCreateWithDetails(
+                username="admin", password="admin123",
+                display_name="管理员", role="admin", status="active",
+            ))
+            print("[startup] 默认管理员已创建 (admin/admin123)")
+        db.close()
+    except Exception as e:
+        print(f"[startup] 管理员初始化失败: {e}")
+    try:
         from seed.knowledge_seed import seed_knowledge_base
         seed_knowledge_base()
     except Exception as e:
