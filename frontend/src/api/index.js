@@ -59,12 +59,15 @@ export const documentAPI = {
 }
 
 export const reviewAPI = {
-  create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode } }),
+  create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode }, timeout: 300000 }),
   get: (id) => instance.get(`/review/${id}`),
   getIssues: (id) => instance.get(`/review/${id}/issues`),
+  getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
   list: () => instance.get('/review/'),
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
-  getReport: (id) => instance.get(`/review/${id}/report`)
+  batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
+  getReport: (id) => instance.get(`/review/${id}/report`),
+  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' })
 }
 
 export const compareAPI = {

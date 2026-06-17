@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 import json
 import re
 import asyncio
 import os
+from datetime import datetime
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue
@@ -14,6 +15,22 @@ from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files
 from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check
+
+_review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
+
+
+def get_progress(review_id: int):
+    return _review_progress.get(review_id, {'status': 'unknown', 'step': '', 'progress': 0, 'message': ''})
+
+
+def set_progress(review_id: int, status: str, step: str, progress: int, message: str = ''):
+    _review_progress[review_id] = {
+        'status': status,
+        'step': step,
+        'progress': progress,
+        'message': message,
+        'timestamp': datetime.now().isoformat()
+    }
 
 router = APIRouter()
 
@@ -67,8 +84,19 @@ async def list_reviews(db: Session = Depends(get_db)):
         doc = get_document(db, document_id=review.document_id)
         review_dict = review.__dict__.copy()
         review_dict['document_name'] = doc.filename if doc else ''
+        if not review_dict.get('summary'):
+            review_dict['summary'] = '{}'
+        # 添加进度信息
+        if review.status == 'running':
+            progress = get_progress(review.id)
+            review_dict['progress'] = progress
         result.append(review_dict)
     return result
+
+
+@router.get("/{review_id}/progress")
+async def get_review_progress(review_id: int):
+    return get_progress(review_id)
 
 
 def detect_language(content):
@@ -102,6 +130,29 @@ def _in_abbreviation_allowed(text):
     return False
 
 
+_TECH_TERMS = {
+    'prep', 'device', 'consumables', 'reagents', 'extraction', 'extent', 'selection',
+    'mg', 'ml', 'ul', 'μg', 'μl', 'kb', 'mb', 'gb', 'nm', 'mm', 'cm',
+    'dna', 'rna', 'pcr', 'elisa', 'atp', 'cdna', 'mrna', 'trna',
+    'buffer', 'solution', 'kit', 'system', 'assay', 'protocol', 'procedure',
+    'sample', 'specimen', 'tube', 'plate', 'well', 'tip', 'pipette',
+    'centrifuge', 'incubator', 'shaker', 'homogenizer', 'lyser',
+    'volume', 'concentration', 'temperature', 'time', 'rpm', 'min', 'hr',
+    'mgisp', 'bgiseq', 'dnbseq', 'dnb', 'cpas', 'coolmps',
+    'quality', 'control', 'standard', 'reference', 'calibration', 'validation',
+    'protocol', 'method', 'technique', 'approach', 'strategy', 'step',
+}
+
+
+def _is_tech_term(word):
+    return word.lower() in _TECH_TERMS
+
+
+def _is_sentence_start(content, position):
+    before = content[max(0, position - 20):position]
+    return before.strip().endswith('.') or before.strip().endswith('!') or before.strip().endswith('?') or position == 0
+
+
 def run_rule_audit(content, rules, knowledge_basis=None):
     """规则审核: 基于正则, 加上简易白名单过滤, 按内容去重"""
     issues = []
@@ -121,6 +172,12 @@ def run_rule_audit(content, rules, knowledge_basis=None):
 
                 if document_language in ("en", "both") and _in_abbreviation_allowed(original_text):
                     continue
+
+                if rule.rule_no in ("R021", "R022"):
+                    if _is_tech_term(original_text):
+                        continue
+                    if rule.rule_no == "R021" and not _is_sentence_start(content, match.start()):
+                        continue
 
                 chapter = extract_chapter(content, match.start())
                 norm_text = re.sub(r"\s+", "", original_text).lower()
@@ -201,17 +258,40 @@ def run_term_check(content, terms):
 
 
 def dedupe_issues_by_original(issues):
-    """按 '分类 + 归一化原文' 合并, 并保留出现次数最多的项"""
+    """按 '分类 + 归一化原文 + 位置相近' 合并, 并保留出现次数最多的项"""
     if not issues:
         return []
+    
+    # 误报过滤 - 已知无效的模式
+    FALSE_POSITIVE_PATTERNS = [
+        re.compile(r'^[×±÷∞∑∏∫°℃℉]$'),  # 纯数学符号
+        re.compile(r'^[\d\.]+$'),  # 纯数字
+        re.compile(r'^[A-Z]{1,3}$'),  # 1-3个大写字母（避免误报为单词错误）
+        re.compile(r'^[\.,;:\?!]+$'),  # 纯标点
+    ]
+    
+    def is_false_positive(text):
+        text = str(text).strip()
+        if not text or len(text) < 2:
+            return True
+        for pat in FALSE_POSITIVE_PATTERNS:
+            if pat.match(text):
+                return True
+        return False
+    
+    # 第一步：过滤已知误报
+    filtered = [i for i in issues if not is_false_positive(i.get('original_text', ''))]
+    print(f"[审核] 误报过滤: 过滤 {len(issues) - len(filtered)} 个, 剩余 {len(filtered)} 个")
+    
+    # 第二步：去重（按分类+归一化原文+章节）
     seen = {}
-    for issue in issues:
+    for issue in filtered:
         norm = re.sub(r"\s+", "", str(issue.get("original_text", ""))).lower()
-        key = f"{issue.get('category','')}|{norm}"
-        if not key.strip():
+        chapter = issue.get("chapter", "")
+        key = f"{issue.get('category','')}|{norm}|{chapter}"
+        if not norm.strip():
             continue
         if key in seen:
-            # 保留 confidence 更高 / 章节更明确的项
             old = seen[key]
             new_conf = issue.get("confidence", 0) or 0
             old_conf = old.get("confidence", 0) or 0
@@ -222,15 +302,19 @@ def dedupe_issues_by_original(issues):
     return list(seen.values())
 
 
-@router.post("/{document_id}")
-async def create_review_task(document_id: int, mode: str = "hybrid", db: Session = Depends(get_db)):
-    document = get_document(db, document_id=document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode))
-
+def _run_review_background(review_id: int, document_id: int, mode: str):
+    """后台执行审核任务（带进度更新）"""
+    from app.database import SessionLocal
+    db = SessionLocal()
     try:
+        set_progress(review_id, 'running', '加载文档', 5, '正在读取文档内容...')
+        
+        document = get_document(db, document_id=document_id)
+        if not document:
+            set_progress(review_id, 'failed', '文档不存在', 0, f'文档ID={document_id}不存在')
+            update_review_status(db, review_id, "failed", 0, "Document not found")
+            return
+
         issues = []
         content = document.content or ""
         content = content[:20000]
@@ -238,23 +322,26 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
         print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}字符")
 
         knowledge_basis = get_knowledge_basis(db)
-
         has_ai_client = ai_client.has_any_client
         print(f"[审核] AI客户端可用: {has_ai_client}, 模式={mode}")
 
         if mode in ["rule", "hybrid"]:
+            set_progress(review_id, 'running', '规则审核', 15, '正在加载审核规则...')
             rules = get_rules(db)
             print(f"[审核] 加载规则数量: {len(rules)}")
+            
+            set_progress(review_id, 'running', '规则审核', 25, '正在执行规则匹配...')
             rule_issues = run_rule_audit(content, rules, knowledge_basis)
             print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
+
+            set_progress(review_id, 'running', '术语检查', 35, '正在执行术语检查...')
             terms = get_terms(db)
             print(f"[审核] 加载术语数量: {len(terms)}")
             term_issues = run_term_check(content, terms)
             print(f"[审核] 术语匹配到问题: {len(term_issues)}个")
 
-            # 英文文档进行拼写和语法检查
             if document_language in ("en", "both"):
-                print(f"[审核] 开始拼写和语法检查...")
+                set_progress(review_id, 'running', '拼写检查', 45, '正在进行拼写和语法检查...')
                 try:
                     spelling_issues = run_spelling_and_grammar_check(content)
                     print(f"[审核] 拼写/语法检查发现问题: {len(spelling_issues)}个")
@@ -265,12 +352,11 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
             candidate_rule_issues = rule_issues + term_issues
 
             if has_ai_client and len(candidate_rule_issues) > 0:
+                set_progress(review_id, 'running', 'AI二次验证', 55, f'正在AI验证 {len(candidate_rule_issues)} 个候选问题...')
                 print(f"[审核] 开始AI二次验证，候选问题数={len(candidate_rule_issues)}")
                 try:
-                    filtered = await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(None, ai_client.filter_rule_false_positives, candidate_rule_issues, document_language),
-                        timeout=90.0
-                    )
+                    filtered = asyncio.get_event_loop().run_in_executor(None, ai_client.filter_rule_false_positives, candidate_rule_issues, document_language)
+                    filtered = asyncio.run(asyncio.wait_for(filtered, timeout=90.0))
                     candidate_rule_issues = filtered
                     print(f"[审核] AI二次验证后保留问题数={len(candidate_rule_issues)}")
                 except asyncio.TimeoutError:
@@ -282,12 +368,11 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
             print(f"[审核] 规则审核阶段共产出问题数={len(candidate_rule_issues)}")
 
         if mode in ["ai", "hybrid"] and has_ai_client:
+            set_progress(review_id, 'running', 'AI智能审核', 65, '正在进行AI深度审核...')
             print(f"[审核] 开始AI智能审核，模式={mode}")
             try:
-                ai_result = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(None, ai_client.audit_document, content, document_language),
-                    timeout=180.0
-                )
+                ai_result = asyncio.get_event_loop().run_in_executor(None, ai_client.audit_document, content, document_language)
+                ai_result = asyncio.run(asyncio.wait_for(ai_result, timeout=180.0))
                 ai_issues = ai_result.get("issues", [])
                 print(f"[审核] AI审核返回问题数={len(ai_issues)}")
                 for issue in ai_issues:
@@ -305,13 +390,13 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
                     issue.setdefault("position", "")
                     if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
                         issue["severity"] = "general"
-
                 issues.extend(ai_issues)
             except asyncio.TimeoutError:
                 print(f"[审核] AI 审核超时(180s), 跳过 AI 审核")
             except Exception as e:
                 print(f"[审核] AI 审核失败, 跳过 AI 审核: {e}")
 
+        set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
         issues = dedupe_issues_by_original(issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
         if len(issues) > 0:
@@ -323,7 +408,7 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
 
         for issue in issues:
             create_issue(db=db, issue=IssueCreate(
-                review_id=review.id,
+                review_id=review_id,
                 severity=issue["severity"],
                 category=issue.get("category", ""),
                 rule=issue.get("rule", ""),
@@ -347,13 +432,32 @@ async def create_review_task(document_id: int, mode: str = "hybrid", db: Session
             "language": document_language,
         })
 
-        update_review_status(db, review.id, "completed", len(issues), summary)
-
-        return {"review_id": review.id, "total_issues": len(issues)}
+        set_progress(review_id, 'completed', '完成', 100, f'审核完成，发现 {len(issues)} 个问题')
+        update_review_status(db, review_id, "completed", len(issues), summary)
+        print(f"[审核] 任务完成, review_id={review_id}, 问题数={len(issues)}")
 
     except Exception as e:
-        update_review_status(db, review.id, "failed", 0, str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        set_progress(review_id, 'failed', '失败', 0, str(e))
+        update_review_status(db, review_id, "failed", 0, str(e))
+        print(f"[审核] 任务失败, review_id={review_id}, 错误={e}")
+    finally:
+        db.close()
+
+
+@router.post("/{document_id}")
+async def create_review_task(document_id: int, mode: str = "hybrid", background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+    document = get_document(db, document_id=document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode))
+    set_progress(review.id, 'running', '初始化', 0, '审核任务已创建')
+    
+    # 启动后台审核任务
+    if background_tasks:
+        background_tasks.add_task(_run_review_background, review.id, document_id, mode)
+    
+    return {"review_id": review.id, "status": "running", "message": "审核任务已启动，请轮询进度"}
 
 
 @router.get("/{review_id}", response_model=Review)
@@ -379,6 +483,167 @@ async def update_issue_status(issue_id: int, issue_update: IssueUpdate, db: Sess
     if not issue:
         raise HTTPException(status_code=404, detail="Issue not found")
     return issue
+
+
+@router.post("/{review_id}/judge")
+async def batch_judge_issues(review_id: int, payload: dict, db: Session = Depends(get_db)):
+    """批量人工判定问题: { 'judgments': [{'issue_id': 1, 'status': 'confirmed'}, ...] }"""
+    judgments = payload.get("judgments", [])
+    updated = 0
+    for j in judgments:
+        issue_id = j.get("issue_id")
+        status = j.get("status")
+        if not issue_id or not status:
+            continue
+        # 允许的状态: pending, confirmed, false_positive, ignored
+        if status not in ["pending", "confirmed", "false_positive", "ignored"]:
+            continue
+        from app.schemas.review import IssueUpdate
+        issue = update_issue(db, issue_id=issue_id, issue_update=IssueUpdate(status=status))
+        if issue:
+            updated += 1
+    return {"updated": updated, "total": len(judgments)}
+
+
+@router.get("/{review_id}/export-html")
+async def export_review_html(review_id: int, db: Session = Depends(get_db)):
+    """导出 HTML 报告 (包含所有问题及人工判定状态)"""
+    from fastapi.responses import HTMLResponse
+    review = get_review(db, review_id=review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    issues = get_issues(db, review_id=review_id)
+    summary = json.loads(review.summary) if review.summary else {}
+
+    # 统计人工判定结果
+    confirmed = [i for i in issues if i.status == "confirmed"]
+    false_pos = [i for i in issues if i.status == "false_positive"]
+    pending = [i for i in issues if i.status in ["pending", None]]
+    ignored = [i for i in issues if i.status == "ignored"]
+
+    # 获取文档名
+    doc = get_document(db, document_id=review.document_id)
+    doc_name = doc.filename if doc else f"文档{review.document_id}"
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>审核报告 - {doc_name}</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: 'Microsoft YaHei', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f7fa; color: #333; }}
+        .container {{ max-width: 1100px; margin: 0 auto; background: #fff; padding: 30px 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+        h1 {{ color: #2c3e50; border-bottom: 3px solid #409eff; padding-bottom: 10px; }}
+        h2 {{ color: #409eff; margin-top: 30px; }}
+        .meta {{ background: #f8f9fa; padding: 15px; border-left: 4px solid #409eff; margin: 20px 0; }}
+        .meta-row {{ margin: 5px 0; }}
+        .meta-label {{ font-weight: bold; color: #555; display: inline-block; width: 100px; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 20px 0; }}
+        .summary-card {{ padding: 15px; text-align: center; border-radius: 4px; color: #fff; }}
+        .summary-card .num {{ font-size: 28px; font-weight: bold; }}
+        .summary-card .label {{ font-size: 12px; margin-top: 5px; }}
+        .card-total {{ background: #409eff; }}
+        .card-confirmed {{ background: #67c23a; }}
+        .card-false {{ background: #909399; }}
+        .card-pending {{ background: #e6a23c; }}
+        .card-ignored {{ background: #c0c4cc; }}
+        .issue {{ border: 1px solid #e4e7ed; border-radius: 4px; padding: 15px 20px; margin: 12px 0; background: #fff; }}
+        .issue.confirmed {{ border-left: 5px solid #67c23a; background: #f0f9eb; }}
+        .issue.false_positive {{ border-left: 5px solid #909399; background: #f4f4f5; opacity: 0.7; }}
+        .issue.ignored {{ border-left: 5px solid #c0c4cc; background: #fafafa; opacity: 0.6; }}
+        .issue.pending {{ border-left: 5px solid #e6a23c; }}
+        .issue-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
+        .issue-title {{ font-weight: bold; color: #303133; }}
+        .badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; margin-left: 6px; }}
+        .badge-confirmed {{ background: #67c23a; }}
+        .badge-false {{ background: #909399; }}
+        .badge-pending {{ background: #e6a23c; }}
+        .badge-ignored {{ background: #c0c4cc; }}
+        .badge-severity-fatal {{ background: #f56c6c; }}
+        .badge-severity-serious {{ background: #e6a23c; }}
+        .badge-severity-general {{ background: #909399; }}
+        .badge-severity-suggestion {{ background: #67c23a; }}
+        .issue-field {{ margin: 6px 0; font-size: 14px; }}
+        .issue-label {{ font-weight: bold; color: #606266; display: inline-block; min-width: 80px; }}
+        .original-text {{ background: #fef0f0; padding: 4px 8px; border-radius: 3px; color: #c45656; font-family: 'Courier New', monospace; }}
+        .suggestion {{ background: #f0f9eb; padding: 4px 8px; border-radius: 3px; color: #5a8e3f; }}
+        .context {{ color: #666; font-style: italic; font-size: 13px; }}
+        .empty {{ text-align: center; color: #909399; padding: 40px; }}
+        .footer {{ margin-top: 40px; text-align: center; color: #909399; font-size: 12px; border-top: 1px solid #ebeef5; padding-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>智能技术文档审核报告</h1>
+        <div class="meta">
+            <div class="meta-row"><span class="meta-label">文档名称:</span> {doc_name}</div>
+            <div class="meta-row"><span class="meta-label">审核任务:</span> #{review.id}</div>
+            <div class="meta-row"><span class="meta-label">审核模式:</span> {review.mode}</div>
+            <div class="meta-row"><span class="meta-label">审核时间:</span> {review.created_at}</div>
+            <div class="meta-row"><span class="meta-label">报告生成:</span> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+        </div>
+
+        <h2>审核概览</h2>
+        <div class="summary-grid">
+            <div class="summary-card card-total"><div class="num">{len(issues)}</div><div class="label">发现问题</div></div>
+            <div class="summary-card card-confirmed"><div class="num">{len(confirmed)}</div><div class="label">已确认</div></div>
+            <div class="summary-card card-false"><div class="num">{len(false_pos)}</div><div class="label">误报</div></div>
+            <div class="summary-card card-pending"><div class="num">{len(pending)}</div><div class="label">待确认</div></div>
+            <div class="summary-card card-ignored"><div class="num">{len(ignored)}</div><div class="label">已忽略</div></div>
+        </div>
+"""
+
+    if not issues:
+        html += '<div class="empty">未发现任何问题</div>'
+    else:
+        html += '<h2>问题详情 (共 {0} 条)</h2>'.format(len(issues))
+        # 按状态排序: confirmed > pending > false_positive > ignored
+        order = {"confirmed": 0, "pending": 1, None: 1, "": 1, "false_positive": 2, "ignored": 3}
+        sorted_issues = sorted(issues, key=lambda i: (order.get(i.status, 1), i.id))
+
+        for issue in sorted_issues:
+            sev_class = f"badge-severity-{issue.severity or 'general'}"
+            status = issue.status or "pending"
+            status_class = {
+                "confirmed": "badge-confirmed",
+                "false_positive": "badge-false",
+                "ignored": "badge-ignored",
+                "pending": "badge-pending"
+            }.get(status, "badge-pending")
+            status_text = {
+                "confirmed": "已确认",
+                "false_positive": "误报",
+                "ignored": "已忽略",
+                "pending": "待确认"
+            }.get(status, "待确认")
+
+            html += f"""
+        <div class="issue {status}">
+            <div class="issue-header">
+                <div class="issue-title">问题 #{issue.id} - {issue.category or '未分类'}</div>
+                <div>
+                    <span class="badge {sev_class}">{(issue.severity or 'general').upper()}</span>
+                    <span class="badge {status_class}">{status_text}</span>
+                </div>
+            </div>
+            <div class="issue-field"><span class="issue-label">规则:</span> {issue.rule or '-'}</div>
+            <div class="issue-field"><span class="issue-label">章节:</span> {issue.chapter or '-'}</div>
+            <div class="issue-field"><span class="issue-label">原文:</span> <span class="original-text">{issue.original_text or ''}</span></div>
+            <div class="issue-field"><span class="issue-label">上下文:</span> <span class="context">{issue.context or '-'}</span></div>
+            <div class="issue-field"><span class="issue-label">建议:</span> <span class="suggestion">{issue.suggestion or '-'}</span></div>
+            <div class="issue-field"><span class="issue-label">依据:</span> {issue.audit_basis or '-'}</div>
+            <div class="issue-field"><span class="issue-label">置信度:</span> {issue.confidence or 0}% | <span class="issue-label">来源:</span> {issue.source or '-'}</div>
+        </div>
+"""
+
+    html += f"""
+        <div class="footer">由 智能技术文档审核平台 生成 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+    </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 @router.get("/{review_id}/report")
