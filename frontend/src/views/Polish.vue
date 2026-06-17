@@ -81,6 +81,22 @@
       <h2 class="page-title">智能润色</h2>
 
       <div class="panel">
+        <div class="form-item">
+          <label class="form-label">句式表达文件</label>
+          <div class="input-with-button">
+            <el-input v-model="textSentenceFileName" readonly placeholder="选择知识库中的句式表达文件（留空则加载全部）" />
+            <el-button type="primary" @click="openTextSentencePicker">选择文件</el-button>
+            <el-button v-if="textSentenceFileId" size="small" @click="clearTextSentenceFile">清除</el-button>
+          </div>
+        </div>
+        <div class="form-item">
+          <label class="form-label">术语库文件</label>
+          <div class="input-with-button">
+            <el-input v-model="textTerminologyFileName" readonly placeholder="选择知识库中的术语库文件（留空则使用数据库术语）" />
+            <el-button type="primary" @click="openTextTerminologyPicker">选择文件</el-button>
+            <el-button v-if="textTerminologyFileId" size="small" @click="clearTextTerminologyFile">清除</el-button>
+          </div>
+        </div>
         <div class="panel-header">
           <span>请输入需要润色的文本</span>
           <div class="panel-actions">
@@ -170,6 +186,10 @@ const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
 
 const originalText = ref('')
+const textSentenceFileName = ref('')
+const textSentenceFileId = ref(null)
+const textTerminologyFileName = ref('')
+const textTerminologyFileId = ref(null)
 const result = ref(null)
 const docResult = ref(null)
 const loading = ref(false)
@@ -193,6 +213,24 @@ function openFilePicker(field, type) {
     selectedKnowledgeFile.value = null
     filePickerVisible.value = true
   }
+}
+
+function openTextSentencePicker() {
+  openFilePicker('textSentenceFile', 'knowledge')
+}
+
+function openTextTerminologyPicker() {
+  openFilePicker('textTerminologyFile', 'knowledge')
+}
+
+function clearTextSentenceFile() {
+  textSentenceFileName.value = ''
+  textSentenceFileId.value = null
+}
+
+function clearTextTerminologyFile() {
+  textTerminologyFileName.value = ''
+  textTerminologyFileId.value = null
 }
 
 async function loadKnowledgeTree() {
@@ -230,8 +268,16 @@ function onTreeNodeClick(data) {
 
 function confirmKnowledgeFile() {
   if (selectedKnowledgeFile.value && currentPickerField.value) {
-    formData.value[currentPickerField.value] = selectedKnowledgeFile.value.name
-    formData.value[currentPickerField.value + 'Id'] = selectedKnowledgeFile.value.id
+    if (currentPickerField.value === 'textSentenceFile') {
+      textSentenceFileName.value = selectedKnowledgeFile.value.name
+      textSentenceFileId.value = selectedKnowledgeFile.value.id
+    } else if (currentPickerField.value === 'textTerminologyFile') {
+      textTerminologyFileName.value = selectedKnowledgeFile.value.name
+      textTerminologyFileId.value = selectedKnowledgeFile.value.id
+    } else {
+      formData.value[currentPickerField.value] = selectedKnowledgeFile.value.name
+      formData.value[currentPickerField.value + 'Id'] = selectedKnowledgeFile.value.id
+    }
     filePickerVisible.value = false
     selectedKnowledgeFile.value = null
   }
@@ -325,7 +371,7 @@ async function doPolish() {
   }
   loading.value = true
   try {
-    const resp = await polishAPI.text(originalText.value)
+    const resp = await polishAPI.text(originalText.value, textSentenceFileId.value, textTerminologyFileId.value)
     const data = resp.data || {}
     result.value = {
       original: data.original || originalText.value,
@@ -348,6 +394,8 @@ async function doPolish() {
 function clearAll() {
   originalText.value = ''
   result.value = null
+  textSentenceFileName.value = ''
+  textSentenceFileId.value = null
 }
 
 function copyResult() {

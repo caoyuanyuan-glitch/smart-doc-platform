@@ -30,18 +30,247 @@ def _load_terms_from_db(db: Session) -> dict:
     return term_dict
 
 
+def _detect_language(text: str) -> str:
+    """检测文本语言。返回 'zh' (中文) 或 'en' (英文)。"""
+    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    total_chars = len(text.replace(' ', '').replace('\n', ''))
+    if total_chars == 0:
+        return 'zh'
+    ratio = chinese_chars / total_chars
+    return 'zh' if ratio > 0.3 else 'en'
+
+
+def _term_column_lang(header: str) -> str:
+    """根据列表头判断该列的语言倾向：zh / en / None（中性）。"""
+    zh_keywords = ['中', '中文', 'zh', '汉语', '汉']
+    en_keywords = ['英', '英文', 'en', 'english', 'eng']
+    for kw in zh_keywords:
+        if kw in header.lower():
+            return 'zh'
+    for kw in en_keywords:
+        if kw in header.lower():
+            return 'en'
+    return None
+
+
+def _parse_terminology_md(md_content: str) -> dict:
+    """解析术语库 Markdown 文件，返回 {非标准: 标准} 映射。
+
+    支持的列格式：
+    - 简单格式：| 非标准 | 标准 |
+    - 分语言格式：| 非标准(中) | 标准(中) | 非标准(英) | 标准(英) |
+    - 带语言列：| 非标准 | 标准 | 语言 |
+    """
+    term_dict = {}
+    if not md_content:
+        return term_dict
+
+    lines = md_content.split('\n')
+    header = ''
+    col_langs = []
+    has_lang_col = False
+    lang_col_idx = -1
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # 捕获表头行（第一个含 | 且不含分隔符的行）
+        if not header and '|' in stripped and '---' not in stripped:
+            header = stripped
+            cells = [c.strip() for c in stripped.split('|') if c.strip()]
+            # 检查是否有"语言"列
+            for idx, cell in enumerate(cells):
+                if any(kw in cell.lower() for kw in ['语言', 'lang', 'language']):
+                    has_lang_col = True
+                    lang_col_idx = idx
+                col_langs.append(_term_column_lang(cell))
+            continue
+
+        if '|' not in stripped:
+            continue
+        if stripped.startswith('#'):
+            continue
+        if stripped.startswith('|---') or stripped.startswith('| :--') or stripped.startswith('|:--'):
+            continue
+        if stripped.startswith('|序号') or stripped.startswith('| 序号'):
+            continue
+
+        cells = [c.strip() for c in stripped.split('|') if c.strip()]
+        clean_cells = [c for c in cells if c.strip() and c.strip() != '---']
+        if len(clean_cells) < 2:
+            continue
+
+        # 模式 A：带语言列
+        if has_lang_col and lang_col_idx >= 0 and lang_col_idx < len(clean_cells):
+            lang_val = clean_cells[lang_col_idx].lower()
+            is_zh = any(kw in lang_val for kw in ['zh', '中', 'cn', 'chinese'])
+            is_en = any(kw in lang_val for kw in ['en', '英', 'english', 'eng'])
+            # 构建不包含语言列的数据列
+            data_cells = [c for i, c in enumerate(clean_cells) if i != lang_col_idx]
+            # 数据列两两配对
+            for i in range(0, len(data_cells) - 1, 2):
+                old_term = data_cells[i].strip().strip('!')
+                new_term = data_cells[i + 1].strip().strip('!')
+                if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                    # 根据语言列值分配语言标记
+                    lang_suffix = ''
+                    if is_zh:
+                        lang_suffix = '##zh'
+                    elif is_en:
+                        lang_suffix = '##en'
+                    # 存入时带语言标记
+                    key = f"{old_term}{lang_suffix}" if lang_suffix else old_term
+                    if key not in term_dict:
+                        term_dict[key] = new_term
+            continue
+
+        # 模式 B：无语言列，但有表头指示列语言
+        if col_langs and len(col_langs) == len(clean_cells):
+            # 两列配对，每对继承对应表头的语言
+            for i in range(0, len(clean_cells) - 1, 2):
+                old_term = clean_cells[i].strip().strip('!')
+                new_term = clean_cells[i + 1].strip().strip('!')
+                if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                    lang = col_langs[i] or col_langs[i + 1] or ''
+                    lang_suffix = f'##{lang}' if lang else ''
+                    key = f"{old_term}{lang_suffix}" if lang_suffix else old_term
+                    if key not in term_dict:
+                        term_dict[key] = new_term
+            continue
+
+        # 模式 C：无语言信息，简单两列配对
+        for i in range(0, len(clean_cells) - 1, 2):
+            old_term = clean_cells[i].strip().strip('!')
+            new_term = clean_cells[i + 1].strip().strip('!')
+            if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                if old_term not in term_dict:
+                    term_dict[old_term] = new_term
+
+    return term_dict
+
+
+def _filter_terms_by_lang(term_dict: dict, target_lang: str) -> dict:
+    """从带语言标记的术语字典中筛选出目标语言的术语。返回纯净的 {非标准: 标准}。"""
+    filtered = {}
+    for key, val in term_dict.items():
+        if '##zh' in key:
+            if target_lang == 'zh':
+                clean_key = key.replace('##zh', '')
+                filtered[clean_key] = val
+        elif '##en' in key:
+            if target_lang == 'en':
+                clean_key = key.replace('##en', '')
+                filtered[clean_key] = val
+        else:
+            # 无语言标记，通用术语，适用于所有语言
+            filtered[key] = val
+    return filtered
+
+
+def _resolve_terminology(db: Session, terminology_md: str = None, text: str = None) -> dict:
+    """加载术语：文件术语优先，自动按文本语言过滤。返回纯净 {非标准: 标准}。"""
+    if terminology_md:
+        parsed = _parse_terminology_md(terminology_md)
+        if parsed:
+            # 自动检测语言并过滤
+            if text:
+                lang = _detect_language(text)
+                return _filter_terms_by_lang(parsed, lang)
+            return parsed
+    return _load_terms_from_db(db)
+
+
 # 句式清单所在知识库文件夹 ID（写作规范 / 句式清单）
 SENTENCE_GUIDE_FOLDER_IDS = [3]
 
+# 默认写作风格指南文件 ID（写作规范 / 写作风格指南 / 中文技术文档写作风格指南）
+DEFAULT_STYLE_GUIDE_ID = 1
 
-def _load_sentence_guides(db: Session) -> str:
-    """递归加载知识库中句式清单文件夹下的所有 .md 文件内容，拼接后返回"""
+
+def _read_file_safe(file_path: str) -> str:
+    """安全读取文件，自动尝试多种编码：UTF-8 -> GBK -> GB2312 -> GB18030 -> latin-1"""
+    encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'latin-1']
+    for enc in encodings:
+        try:
+            with open(file_path, 'r', encoding=enc) as f:
+                return f.read()
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    # 最终兜底
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        return f.read()
+
+
+def _load_file_content(db: Session, file_id: int) -> str:
+    """加载单个知识库文件的内容"""
+    kf = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
+    if kf and kf.file_path and os.path.exists(kf.file_path):
+        try:
+            return _read_file_safe(kf.file_path).strip()
+        except Exception:
+            pass
+    return None
+
+
+def _build_document_polish_guide(
+    db: Session,
+    sentence_file_id: int = None,
+    requirements: str = None
+) -> str:
+    """构建文档润色的完整规则指南。
+
+    优先级: 句式匹配 > 术语匹配 > 风格指南 > 数据库规则
+    句式文件在前，风格指南在后，AI 按顺序给予优先权重。
+    """
+    parts = []
+
+    # 1. 句式清单（优先匹配）
+    if sentence_file_id and sentence_file_id != DEFAULT_STYLE_GUIDE_ID:
+        sentence_guide = _load_sentence_guides(db, style_guide_id=sentence_file_id)
+        if sentence_guide:
+            parts.append(sentence_guide)
+    elif not sentence_file_id:
+        all_guides = _load_sentence_guides(db)
+        if all_guides:
+            parts.append(all_guides)
+
+    # 2. 用户额外的润色要求
+    if requirements and requirements.strip():
+        parts.append(f"## 额外润色要求\n\n{requirements.strip()}")
+
+    # 3. 写作风格指南（句式匹配后再套用风格规范）
+    default_guide = _load_file_content(db, DEFAULT_STYLE_GUIDE_ID)
+    if default_guide:
+        parts.append(default_guide)
+
+    return "\n\n".join(parts) if parts else None
+
+
+def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
+    """加载句式清单内容。
+
+    若指定了 style_guide_id，仅加载该文件；
+    否则递归加载句式清单文件夹下所有 .md 文件。
+    """
+    if style_guide_id:
+        style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
+        if style_file and style_file.file_path and os.path.exists(style_file.file_path):
+            try:
+                content = _read_file_safe(style_file.file_path)
+                if content.strip():
+                    return content
+            except Exception as e:
+                print(f"加载句式文件失败 (id={style_guide_id}): {e}")
+        return None
+
+    # 未指定文件，递归加载句式清单文件夹下所有 .md
     guides = []
     files = db.query(KnowledgeFile).filter(
         KnowledgeFile.folder_id.in_(SENTENCE_GUIDE_FOLDER_IDS),
         KnowledgeFile.file_type == "md"
     ).all()
-    # 也递归加载子文件夹下的文件
     subfolder_ids = list(SENTENCE_GUIDE_FOLDER_IDS)
     while subfolder_ids:
         fid = subfolder_ids.pop()
@@ -56,10 +285,9 @@ def _load_sentence_guides(db: Session) -> str:
     for kf in files:
         if kf.file_path and os.path.exists(kf.file_path):
             try:
-                with open(kf.file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    if content.strip():
-                        guides.append(content)
+                content = _read_file_safe(kf.file_path)
+                if content.strip():
+                    guides.append(content)
             except Exception:
                 pass
     return "\n\n".join(guides) if guides else None
@@ -82,6 +310,8 @@ def _get_date_subfolder_id(db, folder_id: int, user_id: int) -> tuple:
 
 class TextPolishInput(BaseModel):
     text: str
+    style_guide_id: Optional[int] = None
+    terminology_id: Optional[int] = None
 
 
 class SkillPolishInput(BaseModel):
@@ -144,8 +374,7 @@ def _load_skill_rules(skill_id: int, db: Session) -> dict:
     if not skill_file:
         return {}
     
-    with open(skill_file.file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    content = _read_file_safe(skill_file.file_path)
     
     return {
         "skill_content": content,
@@ -168,6 +397,34 @@ def _apply_skill_polish(
     db_terminology: dict = None
 ) -> tuple[str, list[PolishRuleMatch]]:
     """应用skill规则进行润色。is_title=True 时跳过尾部标点规范化。"""
+
+    def _is_noun_phrase(text: str) -> bool:
+        """判断文本是否为纯名词短语（标题、标签、参数说明等），不需要追加标点。"""
+        t = text.strip()
+        if not t:
+            return False
+        # 1. 极短文本（<=4字）通常是标签/名称
+        if len(t) <= 4:
+            return True
+        # 2. 以冒号结尾，通常是字段标签（如"试剂名称："）
+        if t.endswith(('：', ':')):
+            return True
+        # 3. 包含编号/列表标记，通常是标题（如"1. 概述"、"第2章"）
+        if re.match(r'^[\d一二三四五六七八九十]+[\.、\s]', t):
+            return True
+        # 4. 不包含任何谓语动词标记，判定为名词短语
+        verb_markers = [
+            '将', '请', '按', '点击', '选择', '输入', '打开', '关闭',
+            '启动', '停止', '设置', '检查', '确认', '安装', '连接',
+            '使用', '进行', '可以', '需要', '应该', '必须', '确保',
+            '是', '为', '有', '在', '可', '会', '能', '要',
+            '按下', '旋转', '调节', '插入', '取出', '放置', '点击',
+            '执行', '访问', '查看', '显示', '支持', '提供', '包含',
+            '通过', '根据', '按照', '用于', '适用于', '分为',
+        ]
+        if not any(marker in t for marker in verb_markers):
+            return True
+        return False
     changes = []
     lines = text.split('\n')
     polished_lines = []
@@ -177,21 +434,13 @@ def _apply_skill_polish(
         style_rules = _extract_style_rules(sentence_guide)
     
     term_dict = {}
-    # 先解析文件中的术语替换（markdown table 格式）
+    # 先解析文件中的术语替换（支持中英文多列表，自动语言过滤）
     if terminology:
         try:
-            for row in terminology.split('\n'):
-                row = row.strip()
-                if '|' not in row or row.startswith('#') or row.startswith('|---') or row.startswith('|序号'):
-                    continue
-                cells = [c.strip() for c in row.split('|') if c.strip()]
-                clean_cells = [c for c in cells if c and c != '---']
-                if len(clean_cells) >= 2 and not clean_cells[0].startswith('##'):
-                    for i in range(0, len(clean_cells) - 1, 2):
-                        old_term = clean_cells[i].strip().strip('!')
-                        new_term = clean_cells[i + 1].strip().strip('!')
-                        if old_term and new_term and len(old_term) > 1 and old_term != new_term:
-                            term_dict[old_term] = new_term
+            parsed = _parse_terminology_md(terminology)
+            if parsed:
+                lang = _detect_language(text)
+                term_dict = _filter_terms_by_lang(parsed, lang)
         except Exception:
             pass
     # 合并数据库术语库（优先级高于文件术语）
@@ -227,10 +476,11 @@ def _apply_skill_polish(
         # 标题、表标题、图标题等不加句号，也不做空间距规整
         if not is_title:
             if new_line and not new_line.endswith(('。', '.', '！', '!', '？', '?')):
-                if re.search(r'[\u4e00-\u9fff]', new_line):
-                    new_line = new_line.rstrip('，,；;：:') + '。'
-                else:
-                    new_line = new_line.rstrip(',,;;::') + '.'
+                if not _is_noun_phrase(new_line):
+                    if re.search(r'[\u4e00-\u9fff]', new_line):
+                        new_line = new_line.rstrip('，,;；;：:') + '。'
+                    else:
+                        new_line = new_line.rstrip(',,;;::') + '.'
             new_line = re.sub(r'(\d)([a-zA-Z℃%μ])', r'\1 \2', new_line)
             new_line = re.sub(r'([\u4e00-\u9fff])([A-Za-z0-9])', r'\1 \2', new_line)
             new_line = re.sub(r'([A-Za-z0-9])([\u4e00-\u9fff])', r'\1 \2', new_line)
@@ -549,11 +799,18 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
 @router.post("/text")
 async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depends(get_db)):
     """基础文本润色（自动加载句式清单和术语库）"""
+    import os
     try:
         from app.utils.ai_client import ai_client
-        terminology = _load_terms_from_db(db)
-        sentence_guide = _load_sentence_guides(db)
-        result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=terminology if terminology else None)
+        # 术语优先级：文件 > 数据库
+        terminology_md = None
+        if input_data.terminology_id:
+            term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
+            if term_file and term_file.file_path and os.path.exists(term_file.file_path):
+                terminology_md = _read_file_safe(term_file.file_path)
+        resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
+        sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
+        result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
         changes = result.get("changes") or []
         if not changes:
             for key in ("original", "polished"):
@@ -572,7 +829,7 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         }
     except Exception:
         db_terminology = _load_terms_from_db(db)
-        sentence_guide = _load_sentence_guides(db)
+        sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
         polished, changes = _apply_skill_polish(input_data.text, {}, None, sentence_guide, None, None, db_terminology=db_terminology if db_terminology else None)
         return {
             "original": input_data.text,
@@ -590,24 +847,27 @@ async def polish_with_skill(
     # 加载skill规则
     skill_rules = _load_skill_rules(input_data.skill_id, db)
     
-    # 加载句式清单文件内容
-    sentence_guide = None
-    if input_data.style_guide_id:
-        try:
-            style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.style_guide_id).first()
-            if style_file and style_file.file_path:
-                with open(style_file.file_path, 'r', encoding='utf-8') as f:
-                    sentence_guide = f.read()
-        except Exception as e:
-            print(f"加载句式清单失败: {e}")
-    
+    # 构建完整润色指南：写作风格指南 + 句式文件 + 额外要求
+    sentence_guide = _build_document_polish_guide(
+        db,
+        sentence_file_id=input_data.style_guide_id if input_data.style_guide_id != DEFAULT_STYLE_GUIDE_ID else None,
+        requirements=None
+    )
+
+    # 加载术语：文件术语优先，否则回退数据库术语
+    terminology_md = None
+    if input_data.terminology_id:
+        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
+        if term_file and term_file.file_path and os.path.exists(term_file.file_path):
+            terminology_md = _read_file_safe(term_file.file_path)
+    resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
+
     # 先执行 AI 润色
     ai_polished = input_data.text
     ai_changes = []
     try:
         from app.utils.ai_client import ai_client
-        terminology = _load_terms_from_db(db)
-        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=terminology if terminology else None)
+        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
         if ai_result and ai_result.get("polished") and ai_result["polished"] != input_data.text:
             ai_polished = ai_result["polished"]
             ai_changes = ai_result.get("changes") or [{"type": "ai", "summary": "AI 根据句式清单完成智能润色"}]
@@ -615,8 +875,8 @@ async def polish_with_skill(
         print(f"AI 润色失败(继续使用规则润色): {e}")
     
     # 在 AI 润色结果上执行规则润色
-    db_terms = _load_terms_from_db(db)
-    polished, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, None, None, db_terminology=db_terms if db_terms else None)
+    db_terms_for_rule = None if terminology_md else _load_terms_from_db(db)
+    polished, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology_md, None, db_terminology=db_terms_for_rule)
     # 合并变更：AI 变更转为 PolishRuleMatch
     if ai_changes:
         for ac in ai_changes:
@@ -662,28 +922,22 @@ def _polish_docx_with_comments(
     
     all_changes = []
     
+    doc = Document(docx_path)
+    
     term_dict = {}
     if terminology:
         try:
-            for row in terminology.split('\n'):
-                row = row.strip()
-                if '|' not in row or row.startswith('#') or row.startswith('|---') or row.startswith('|序号'):
-                    continue
-                cells = [c.strip() for c in row.split('|') if c.strip()]
-                clean_cells = [c for c in cells if c and c != '---']
-                if len(clean_cells) >= 2 and not clean_cells[0].startswith('##'):
-                    for i in range(0, len(clean_cells) - 1, 2):
-                        old_term = clean_cells[i].strip().strip('!')
-                        new_term = clean_cells[i + 1].strip().strip('!')
-                        if old_term and new_term and len(old_term) > 1 and old_term != new_term:
-                            term_dict[old_term] = new_term
+            parsed = _parse_terminology_md(terminology)
+            if parsed:
+                all_text = '\n'.join([p.text for p in doc.paragraphs if p.text and p.text.strip()])
+                lang = _detect_language(all_text)
+                term_dict = _filter_terms_by_lang(parsed, lang)
         except Exception:
             pass
     # 合并数据库术语库（优先级高于文件术语）
     if db_terminology:
         term_dict.update(db_terminology)
     
-    doc = Document(docx_path)
     author = "技术文档智能润色助手"
     initial = "AI"
     
@@ -748,25 +1002,46 @@ def _polish_docx_with_comments(
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
             all_changes.extend(para_changes)
             comment_id += 1
-            
-            # 构建批注文本：包含润色建议
-            # AI 变更 + 规则变更
-            ai_suggestion = ""
+
+            # ---- 1. 正文直接替换为润色后的文字 ----
+            # 清除段落原有 runs，替换为新文本（保留首 run 样式）
+            para_runs = para.runs
+            if para_runs:
+                preserved_style = None
+                for r in para_runs:
+                    if r.text and r.text.strip():
+                        preserved_style = r
+                        break
+                for r in para_runs:
+                    r.text = ''
+                para.clear()
+                new_run = para.add_run(polished_text)
+                if preserved_style and preserved_style.font:
+                    try:
+                        new_run.font.name = preserved_style.font.name
+                        new_run.font.size = preserved_style.font.size
+                        new_run.font.bold = preserved_style.font.bold
+                        new_run.font.italic = preserved_style.font.italic
+                        new_run.font.color.rgb = preserved_style.font.color.rgb
+                    except Exception:
+                        pass
+            else:
+                para.text = polished_text
+
+            # ---- 2. 标注框写入原文及变更详情 ----
+            change_lines = [f"原文：{original_text}"]
+
             if para_ai_change and intermediate_text != original_text:
-                ai_suggestion = f"AI句式匹配建议：{intermediate_text[:100]}"
-            
-            rule_suggestions = []
+                change_lines.append(f"AI句式匹配：{intermediate_text[:100]}")
+
+            rule_lines = []
             for pc in para_changes:
                 if isinstance(pc, PolishRuleMatch) and pc.type != "ai":
-                    rule_suggestions.append(f"[{pc.rule_name}] {pc.before} → {pc.after}")
-            
-            suggestion_parts = []
-            if ai_suggestion:
-                suggestion_parts.append(ai_suggestion)
-            if rule_suggestions:
-                suggestion_parts.append("规则润色：" + "；".join(rule_suggestions[:3]))
-            
-            comment_text = "\n".join(suggestion_parts) if suggestion_parts else "句式润色"
+                    rule_lines.append(f"[{pc.rule_name}] {pc.before} → {pc.after}")
+            if rule_lines:
+                change_lines.append("规则变更：" + "；".join(rule_lines[:5]))
+
+            comment_text = "\n".join(change_lines)
             
             comments_data.append({
                 "id": comment_id,
@@ -1184,8 +1459,7 @@ async def analyze_file_endpoint(
             output_filename = filename
 
         if ext in ['txt', 'md', 'markdown']:
-            with open(temp_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+            content = _read_file_safe(temp_path)
         elif ext == 'docx':
             from docx import Document
             doc = Document(temp_path)
@@ -1196,14 +1470,17 @@ async def analyze_file_endpoint(
 
         skill_rules = _load_skill_rules(3, db)
         
-        sentence_guide = None
+        # 构建完整润色指南：写作风格指南 + 句式文件 + 额外要求
+        sentence_guide = _build_document_polish_guide(
+            db,
+            sentence_file_id=sentence_file_id,
+            requirements=requirements
+        )
         sentence_file_name = None
         if sentence_file_id:
-            sentence_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == sentence_file_id).first()
-            if sentence_file:
-                sentence_file_name = sentence_file.name
-                with open(sentence_file.file_path, 'r', encoding='utf-8') as f:
-                    sentence_guide = f.read()
+            sf = db.query(KnowledgeFile).filter(KnowledgeFile.id == sentence_file_id).first()
+            if sf:
+                sentence_file_name = sf.name
         
         terminology = None
         term_file_name = None
@@ -1211,16 +1488,18 @@ async def analyze_file_endpoint(
             term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == terminology_file_id).first()
             if term_file:
                 term_file_name = term_file.name
-                with open(term_file.file_path, 'r', encoding='utf-8') as f:
-                    terminology = f.read()
-        
+                terminology = _read_file_safe(term_file.file_path)
+
+        # 术语优先级：文件术语 > 数据库术语
+        db_terms = None if terminology else _load_terms_from_db(db)
+
         # === AI 润色：将句式清单注入 AI prompt ===
         ai_polished = content
         ai_changes = []
         try:
             from app.utils.ai_client import ai_client
-            db_terms = _load_terms_from_db(db)
-            ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=db_terms if db_terms else None)
+            resolved_terms = _resolve_terminology(db, terminology, content)
+            ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None)
             if ai_result and ai_result.get("polished") and ai_result["polished"] != content:
                 ai_polished = ai_result["polished"]
                 ai_changes = ai_result.get("changes") or [{
