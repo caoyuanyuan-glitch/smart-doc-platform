@@ -38,9 +38,38 @@
             </template>
           </el-table-column>
           <el-table-column prop="created_at" label="上传时间" width="180" />
-          <el-table-column label="操作" width="200">
+          <el-table-column label="审核状态" width="200">
             <template #default="scope">
-              <el-button size="small" @click="startReview(scope.row.id)">开始审核</el-button>
+              <div v-if="docReviewStatus[scope.row.id]">
+                <el-progress 
+                  v-if="docReviewStatus[scope.row.id].progress < 100" 
+                  :percentage="docReviewStatus[scope.row.id].progress" 
+                  :text-inside="true" 
+                  :stroke-width="18"
+                  :status="docReviewStatus[scope.row.id].status === 'failed' ? 'exception' : ''"
+                />
+                <span style="font-size:12px;color:#666">{{ docReviewStatus[scope.row.id].message }}</span>
+              </div>
+              <span v-else style="color:#999">未审核</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="250">
+            <template #default="scope">
+              <el-button 
+                size="small" 
+                :disabled="docReviewStatus[scope.row.id]?.status === 'running'"
+                @click="startReview(scope.row.id)"
+              >
+                {{ docReviewStatus[scope.row.id]?.status === 'running' ? '审核中...' : '开始审核' }}
+              </el-button>
+              <el-button 
+                size="small" 
+                type="success" 
+                :disabled="!docReviewStatus[scope.row.id]?.review_id || docReviewStatus[scope.row.id]?.status !== 'completed'"
+                @click="openIssueDialogByDoc(scope.row.id)"
+              >
+                查看结果
+              </el-button>
               <el-button size="small" type="danger" @click="deleteDocument(scope.row.id)">删除</el-button>
             </template>
           </el-table-column>
@@ -52,74 +81,13 @@
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">审核任务</h2>
       <div class="table-section">
-        <el-table :data="reviews" border @expand-change="handleRowExpand">
-          <el-table-column type="expand" width="60">
-            <template #default="props">
-              <div class="inline-report">
-                <div class="report-meta">
-                  <span class="meta-item"><strong>文档：</strong>{{ props.row.document_name }}</span>
-                  <span class="meta-item"><strong>模式：</strong>{{ props.row.mode }}</span>
-                  <span class="meta-item"><strong>创建时间：</strong>{{ formatDateTime(props.row.created_at) }}</span>
-                </div>
-
-                <div v-if="taskIssues[props.row.id] && taskIssues[props.row.id].length > 0" class="report-content">
-                  <div class="issue-stats">
-                    <span v-for="stat in computeIssueStats(taskIssues[props.row.id])" :key="stat.label" class="stat-badge" :class="stat.class">
-                      {{ stat.label }}: {{ stat.value }}
-                    </span>
-                  </div>
-
-                  <div class="filter-section">
-                    <el-input v-model="rowFilters[props.row.id].keyword" placeholder="关键词搜索" class="filter-input" />
-                    <el-select v-model="rowFilters[props.row.id].severity" placeholder="严重级别" class="filter-select">
-                      <el-option label="全部" value="" />
-                      <el-option label="致命" value="fatal" />
-                      <el-option label="严重" value="serious" />
-                      <el-option label="一般" value="general" />
-                      <el-option label="建议" value="suggestion" />
-                    </el-select>
-                    <el-button @click="resetRowFilter(props.row.id)">重置</el-button>
-                    <el-button @click="exportTaskReport(props.row)" type="primary" size="small">导出报告</el-button>
-                  </div>
-
-                  <el-table :data="filterTaskIssues(props.row.id)" border size="small">
-                    <el-table-column prop="severity" label="级别" width="90">
-                      <template #default="scope">
-                        <el-tag size="small" :type="getSeverityType(scope.row.severity)">{{ getSeverityLabel(scope.row.severity) }}</el-tag>
-                      </template>
-                    </el-table-column>
-                    <el-table-column prop="category" label="分类" width="110" />
-                    <el-table-column prop="chapter" label="章节" width="150" />
-                    <el-table-column label="问题详情" min-width="400">
-                      <template #default="scope">
-                        <div class="issue-detail">
-                          <div class="context-text" v-html="highlightIssue(scope.row)"></div>
-                          <div v-if="scope.row.suggestion" class="suggestion-text"><strong>建议：</strong>{{ scope.row.suggestion }}</div>
-                          <div v-if="scope.row.audit_basis" class="basis-text"><strong>依据：</strong>{{ scope.row.audit_basis }}</div>
-                        </div>
-                      </template>
-                    </el-table-column>
-                    <el-table-column prop="rule" label="规则" width="100" />
-                    <el-table-column prop="source" label="来源" width="90" />
-                  </el-table>
-                </div>
-
-                <div v-else-if="taskIssues[props.row.id] && taskIssues[props.row.id].length === 0" class="empty-report">
-                  <el-empty description="该任务未检测出问题，文档质量良好" />
-                </div>
-
-                <div v-else class="loading-report">
-                  <el-icon class="is-loading"><Loading /></el-icon>
-                  <span>正在加载问题列表...</span>
-                </div>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column prop="id" label="任务ID" width="100" />
-          <el-table-column prop="document_id" label="文档ID" width="100" />
-          <el-table-column prop="document_name" label="文档名" />
-          <el-table-column prop="mode" label="模式" width="100" />
-          <el-table-column prop="status" label="状态" width="100">
+        <el-table :data="reviews" border>
+          <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
+          <el-table-column prop="id" label="任务ID" width="80" />
+          <el-table-column prop="document_id" label="文档ID" width="80" />
+          <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="mode" label="模式" width="80" />
+          <el-table-column prop="status" label="状态" width="90">
             <template #default="scope">
               <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'info'">
                 {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : '进行中' }}
@@ -127,10 +95,102 @@
             </template>
           </el-table-column>
           <el-table-column prop="total_issues" label="问题数" width="100" />
-          <el-table-column prop="created_at" label="开始时间" width="180" />
+          <el-table-column label="判定状态" width="180">
+            <template #default="scope">
+              <span v-if="judgmentStats[scope.row.id]">
+                <el-tag type="success" size="small" effect="plain" style="margin-right:4px">已确认 {{ judgmentStats[scope.row.id].confirmed }}</el-tag>
+                <el-tag type="info" size="small" effect="plain" style="margin-right:4px">误报 {{ judgmentStats[scope.row.id].false_positive }}</el-tag>
+                <el-tag type="warning" size="small" effect="plain">待审 {{ judgmentStats[scope.row.id].pending }}</el-tag>
+              </span>
+              <span v-else style="color:#999">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="created_at" label="开始时间" width="160" />
+          <el-table-column label="操作" width="320" fixed="right">
+            <template #default="scope">
+              <el-button size="small" type="primary" @click="openIssueDialog(scope.row)">查看问题</el-button>
+              <el-button size="small" :disabled="!taskIssues[scope.row.id] || taskIssues[scope.row.id].length === 0" @click="batchConfirmAll(scope.row.id)">一键确认</el-button>
+              <el-button size="small" type="success" @click="exportReviewHtml(scope.row.id)">导出HTML</el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </div>
     </div>
+
+    <!-- 问题详情弹窗 -->
+    <el-dialog v-model="issueDialogVisible" :title="`问题详情 - 任务#${currentTaskId}`" width="95%" top="5vh">
+      <div class="issue-dialog-toolbar">
+        <el-input v-model="issueFilter.keyword" placeholder="搜索原文/上下文/建议" style="width:300px" clearable />
+        <el-select v-model="issueFilter.category" placeholder="分类" clearable style="width:140px;margin-left:8px">
+          <el-option v-for="cat in dialogCategories" :key="cat" :label="cat" :value="cat" />
+        </el-select>
+        <el-select v-model="issueFilter.status" placeholder="状态" clearable style="width:120px;margin-left:8px">
+          <el-option label="待确认" value="pending" />
+          <el-option label="已确认" value="confirmed" />
+          <el-option label="误报" value="false_positive" />
+          <el-option label="已忽略" value="ignored" />
+        </el-select>
+        <el-select v-model="issueFilter.severity" placeholder="严重度" clearable style="width:120px;margin-left:8px">
+          <el-option label="致命" value="fatal" />
+          <el-option label="严重" value="serious" />
+          <el-option label="一般" value="general" />
+          <el-option label="建议" value="suggestion" />
+        </el-select>
+        <span style="margin-left:auto">
+          <el-button size="small" @click="batchSetStatus('confirmed')">批量确认</el-button>
+          <el-button size="small" @click="batchSetStatus('false_positive')">批量误报</el-button>
+          <el-button size="small" @click="batchSetStatus('ignored')">批量忽略</el-button>
+        </span>
+      </div>
+      <el-table
+        :data="filteredDialogIssues"
+        border
+        height="60vh"
+        @selection-change="onIssueSelectionChange"
+        ref="issueTableRef"
+        row-key="id"
+      >
+        <el-table-column type="selection" width="48" />
+        <el-table-column prop="id" label="ID" width="70" />
+        <el-table-column prop="severity" label="级别" width="80">
+          <template #default="scope">
+            <el-tag size="small" :type="severityTagType(scope.row.severity)" effect="plain">
+              {{ severityLabel(scope.row.severity) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="category" label="分类" width="110" />
+        <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
+        <el-table-column label="原文" min-width="450">
+          <template #default="scope">
+            <span class="context-cell" v-html="highlightOriginalText(scope.row.context, scope.row.original_text)"></span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="suggestion" label="建议" min-width="200" show-overflow-tooltip>
+          <template #default="scope">
+            <span class="text-success">{{ scope.row.suggestion || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status" label="判定" width="120">
+          <template #default="scope">
+            <el-tag size="small" :type="statusTagType(scope.row.status)" effect="plain">
+              {{ statusLabel(scope.row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="220" fixed="right">
+          <template #default="scope">
+            <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
+            <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
+            <el-button size="small" type="info" plain @click="judgeSingle(scope.row, 'ignored')">忽略</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="dialog-footer">
+        <span>共 {{ filteredDialogIssues.length }} 条 (已选 {{ selectedIssueIds.length }} 条)</span>
+        <el-button @click="issueDialogVisible = false">关闭</el-button>
+      </div>
+    </el-dialog>
 
     <!-- 规则管理 -->
     <div v-if="currentView === 'rules'">
@@ -338,6 +398,57 @@ const basisList = ref([])
 const taskIssues = reactive({})
 const rowFilters = reactive({})
 
+// 文档审核状态 (按文档ID存储)
+const docReviewStatus = reactive({})
+let progressPollingTimers = {}  // 轮询定时器
+
+// 问题详情弹窗
+const issueDialogVisible = ref(false)
+const currentTaskId = ref(null)
+const issueFilter = reactive({ keyword: '', category: '', status: '', severity: '' })
+const selectedIssueIds = ref([])
+const issueTableRef = ref(null)
+const dialogCategories = computed(() => {
+  const set = new Set()
+  const list = taskIssues[currentTaskId.value] || []
+  for (const i of list) {
+    if (i.category) set.add(i.category)
+  }
+  return Array.from(set).sort()
+})
+const filteredDialogIssues = computed(() => {
+  const list = taskIssues[currentTaskId.value] || []
+  return list.filter(i => {
+    if (issueFilter.category && i.category !== issueFilter.category) return false
+    if (issueFilter.status && (i.status || 'pending') !== issueFilter.status) return false
+    if (issueFilter.severity && i.severity !== issueFilter.severity) return false
+    if (issueFilter.keyword) {
+      const k = issueFilter.keyword.toLowerCase()
+      const hay = `${i.original_text || ''} ${i.context || ''} ${i.suggestion || ''}`.toLowerCase()
+      if (!hay.includes(k)) return false
+    }
+    return true
+  })
+})
+
+// 判定状态统计 (按任务ID)
+const judgmentStats = computed(() => {
+  const stats = {}
+  for (const key in taskIssues) {
+    const list = taskIssues[key]
+    let confirmed = 0, false_positive = 0, pending = 0, ignored = 0
+    for (const i of list) {
+      const s = i.status || 'pending'
+      if (s === 'confirmed') confirmed++
+      else if (s === 'false_positive') false_positive++
+      else if (s === 'ignored') ignored++
+      else pending++
+    }
+    stats[key] = { confirmed, false_positive, pending, ignored }
+  }
+  return stats
+})
+
 const showRuleDialog = ref(false)
 const editingRule = ref(null)
 const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' })
@@ -426,8 +537,36 @@ function loadByView() {
 
 async function loadDocuments() {
   try {
-    const resp = await documentAPI.list()
-    documents.value = resp.data || []
+    const [docResp, reviewResp] = await Promise.all([
+      documentAPI.list(),
+      reviewAPI.list()
+    ])
+    documents.value = docResp.data || []
+    
+    const reviewMap = {}
+    for (const r of reviewResp.data || []) {
+      if (!reviewMap[r.document_id] || r.id > reviewMap[r.document_id].id) {
+        reviewMap[r.document_id] = r
+      }
+    }
+    
+    for (const doc of documents.value) {
+      const latestReview = reviewMap[doc.id]
+      if (latestReview) {
+        docReviewStatus[doc.id] = {
+          review_id: latestReview.id,
+          status: latestReview.status,
+          progress: latestReview.status === 'completed' ? 100 : (latestReview.status === 'running' ? 0 : 0),
+          message: latestReview.status === 'completed' 
+            ? `审核完成，共 ${latestReview.total_issues} 个问题` 
+            : latestReview.status === 'failed' 
+              ? '审核失败' 
+              : latestReview.status === 'running' 
+                ? '审核进行中...' 
+                : '未审核'
+        }
+      }
+    }
   } catch (e) {
     ElMessage.error('加载文档列表失败')
   }
@@ -530,17 +669,60 @@ function handleRulesImport(response) {
 
 async function startReview(documentId) {
   try {
-    ElMessage.info('正在审核中，请稍候...')
     const response = await reviewAPI.create(documentId, 'hybrid')
     const reviewId = response.data.review_id
-    if (reviewId) {
-      await loadReviewIssues(reviewId)
-      await loadReviews()
+    
+    docReviewStatus[documentId] = {
+      review_id: reviewId,
+      status: 'running',
+      progress: 0,
+      message: '审核任务已创建，正在初始化...'
     }
-    ElMessage.success('审核完成，点击任务行左侧箭头可查看详细报告')
+    
+    startProgressPolling(documentId, reviewId)
   } catch (error) {
+    docReviewStatus[documentId] = {
+      status: 'failed',
+      progress: 0,
+      message: error.response?.data?.detail || '创建审核任务失败'
+    }
     ElMessage.error('审核失败，请重试: ' + (error.response?.data?.detail || error.message))
   }
+}
+
+function startProgressPolling(documentId, reviewId) {
+  if (progressPollingTimers[documentId]) {
+    clearInterval(progressPollingTimers[documentId])
+  }
+  
+  progressPollingTimers[documentId] = setInterval(async () => {
+    try {
+      const resp = await reviewAPI.getProgress(reviewId)
+      const progress = resp.data
+      
+      docReviewStatus[documentId] = {
+        review_id: reviewId,
+        status: progress.status,
+        progress: progress.progress || 0,
+        message: progress.message || progress.step || ''
+      }
+      
+      if (progress.status === 'completed' || progress.status === 'failed') {
+        clearInterval(progressPollingTimers[documentId])
+        delete progressPollingTimers[documentId]
+        
+        if (progress.status === 'completed') {
+          await loadReviewIssues(reviewId)
+          await loadReviews()
+          ElMessage.success(`审核完成，发现 ${progress.message.includes('问题') ? progress.message : '若干'} 问题`)
+        } else if (progress.status === 'failed') {
+          ElMessage.error('审核失败: ' + progress.message)
+        }
+      }
+    } catch (err) {
+      console.error('轮询进度失败:', err)
+    }
+  }, 2000)
 }
 
 async function loadReviewIssues(reviewId) {
@@ -679,6 +861,132 @@ function clearFilters() {
   filterKeyword.value = ''
   filterSeverity.value = ''
   filterCategory.value = ''
+}
+
+// 打开问题详情弹窗
+async function openIssueDialog(row) {
+  currentTaskId.value = row.id
+  issueFilter.keyword = ''
+  issueFilter.category = ''
+  issueFilter.status = ''
+  issueFilter.severity = ''
+  selectedIssueIds.value = []
+  issueDialogVisible.value = true
+  if (taskIssues[row.id] === undefined) {
+    await loadReviewIssues(row.id)
+  }
+}
+
+// 通过文档ID打开问题详情弹窗
+async function openIssueDialogByDoc(documentId) {
+  const status = docReviewStatus[documentId]
+  if (!status || !status.review_id) {
+    ElMessage.warning('暂无审核结果')
+    return
+  }
+  const reviewId = status.review_id
+  currentTaskId.value = reviewId
+  issueFilter.keyword = ''
+  issueFilter.category = ''
+  issueFilter.status = ''
+  issueFilter.severity = ''
+  selectedIssueIds.value = []
+  issueDialogVisible.value = true
+  if (taskIssues[reviewId] === undefined) {
+    await loadReviewIssues(reviewId)
+  }
+}
+
+// 单个问题判定
+async function judgeSingle(issue, status) {
+  try {
+    await reviewAPI.updateIssue(issue.id, status)
+    issue.status = status
+    ElMessage.success(`已标记为${statusLabel(status)}`)
+  } catch (err) {
+    ElMessage.error('判定失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+
+// 批量设置状态
+async function batchSetStatus(status) {
+  if (selectedIssueIds.value.length === 0) {
+    ElMessage.warning('请先选择问题')
+    return
+  }
+  try {
+    const judgments = selectedIssueIds.value.map(id => ({ issue_id: id, status }))
+    const res = await reviewAPI.batchJudge(currentTaskId.value, judgments)
+    // 更新本地状态
+    const list = taskIssues[currentTaskId.value] || []
+    for (const i of list) {
+      if (selectedIssueIds.value.includes(i.id)) i.status = status
+    }
+    ElMessage.success(`已更新 ${res.data.updated} 条问题为${statusLabel(status)}`)
+  } catch (err) {
+    ElMessage.error('批量判定失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+
+// 一键确认所有未判定问题
+async function batchConfirmAll(taskId) {
+  const list = taskIssues[taskId] || []
+  const pending = list.filter(i => !i.status || i.status === 'pending')
+  if (pending.length === 0) {
+    ElMessage.info('没有待确认的问题')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(`将确认 ${pending.length} 条问题为有效问题, 是否继续?`, '一键确认', {
+      confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning'
+    })
+  } catch { return }
+  try {
+    const judgments = pending.map(i => ({ issue_id: i.id, status: 'confirmed' }))
+    const res = await reviewAPI.batchJudge(taskId, judgments)
+    for (const i of pending) i.status = 'confirmed'
+    ElMessage.success(`已确认 ${res.data.updated} 条问题`)
+  } catch (err) {
+    ElMessage.error('批量确认失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+
+// 导出 HTML 报告 (调用后端接口)
+async function exportReviewHtml(taskId) {
+  try {
+    const res = await reviewAPI.exportHtml(taskId)
+    const blob = new Blob([res.data], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    const doc = reviews.value.find(r => r.id === taskId)
+    const name = doc?.document_name || `task_${taskId}`
+    link.download = `审核报告_${taskId}_${new Date().toISOString().slice(0, 10)}.html`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    ElMessage.success('报告导出成功')
+  } catch (err) {
+    ElMessage.error('导出失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+
+function onIssueSelectionChange(rows) {
+  selectedIssueIds.value = rows.map(r => r.id)
+}
+
+function severityTagType(sev) {
+  return { fatal: 'danger', serious: 'warning', general: 'info', suggestion: 'success' }[sev] || 'info'
+}
+function severityLabel(sev) {
+  return { fatal: '致命', serious: '严重', general: '一般', suggestion: '建议' }[sev] || sev || '-'
+}
+function statusTagType(s) {
+  return { confirmed: 'success', false_positive: 'info', ignored: 'info', pending: 'warning' }[s || 'pending'] || 'warning'
+}
+function statusLabel(s) {
+  return { confirmed: '已确认', false_positive: '误报', ignored: '已忽略' }[s] || '待确认'
 }
 
 async function viewDocument(id) {
@@ -977,6 +1285,20 @@ function highlightIssue(issue) {
   
   return text
 }
+
+function highlightOriginalText(context, originalText) {
+  if (!context && !originalText) return '-'
+  
+  let text = context || originalText || ''
+  
+  if (originalText && text.includes(originalText)) {
+    const escaped = originalText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regex = new RegExp(`(${escaped})`, 'gi')
+    text = text.replace(regex, '<span class="highlight-problem">$1</span>')
+  }
+  
+  return text
+}
 </script>
 
 <style>
@@ -1203,8 +1525,38 @@ function highlightIssue(issue) {
   margin: 12px 0;
 }
 
-/* 可展开行的点击提示 */
-.el-table__expand-icon {
-  color: #409eff;
+/* 问题详情弹窗样式 */
+.issue-dialog-toolbar {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 8px 0;
+  color: #606266;
+}
+.text-error { color: #f56c6c; font-family: 'Courier New', monospace; font-size: 13px; }
+.text-success { color: #67c23a; font-size: 13px; }
+
+.context-cell {
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+  color: #303133;
+}
+
+.highlight-problem {
+  color: #dc3545;
+  font-weight: bold;
+  background-color: #fef0f0;
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid #fbcfe8;
 }
 </style>
