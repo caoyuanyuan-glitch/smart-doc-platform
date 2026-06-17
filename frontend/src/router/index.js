@@ -8,6 +8,7 @@ import QA from '@/views/QA.vue'
 import Generate from '@/views/Generate.vue'
 import Compare from '@/views/Compare.vue'
 import Convert from '@/views/Convert.vue'
+import ConvertRules from '@/views/ConvertRules.vue'
 import Terms from '@/views/Terms.vue'
 import Users from '@/views/Users.vue'
 import Knowledge from '@/views/Knowledge.vue'
@@ -109,6 +110,11 @@ const routes = [
     path: '/convert/history',
     name: 'ConvertHistory',
     component: Convert
+  },
+  {
+    path: '/convert/rules',
+    name: 'ConvertRules',
+    component: ConvertRules
   },
   {
     path: '/terms',
