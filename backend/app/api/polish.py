@@ -1388,7 +1388,9 @@ async def analyze_file_endpoint(
                 "original": content,
                 "polished": polished_text,
                 "changes": changes,
-                "report_file": report_filename
+                "report_file": report_filename,
+                "download_filename": unique_filename,
+                "file_type": "docx"
             }
             _finish_task(result_data)
             return result_data
@@ -1433,7 +1435,9 @@ async def analyze_file_endpoint(
                 "id": db_doc.id,
                 "original": content,
                 "polished": polished_text,
-                "changes": changes
+                "changes": changes,
+                "download_filename": unique_filename,
+                "file_type": ext
             }
             _finish_task(result_data)
             return result_data

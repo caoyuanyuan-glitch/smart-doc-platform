@@ -354,7 +354,9 @@ async function submitPolish() {
         polished: data.polished || '',
         changes: (data.changes || []).length,
         changeDetails: data.changes || [],
-        reportFile: data.report_file || data.reportFile
+        reportFile: data.report_file || data.reportFile,
+        download_filename: data.download_filename,
+        file_type: data.file_type
       }
       ElMessage.success('润色成功，已保存到已润色文档')
     }
@@ -386,7 +388,9 @@ function _startPollingProgress(taskId) {
           polished: data.result.polished || '',
           changes: (data.result.changes || []).length,
           changeDetails: data.result.changes || [],
-          reportFile: data.result.report_file || data.result.reportFile
+          reportFile: data.result.report_file || data.result.reportFile,
+          download_filename: data.result.download_filename,
+          file_type: data.result.file_type
         }
         ElMessage.success('润色成功，已保存到已润色文档')
         polishProgressMsg.value = '润色完成'
@@ -422,11 +426,23 @@ function resetForm() {
 }
 
 function downloadPolishedDoc() {
-  const blob = new Blob([docResult.value.polished], { type: 'text/plain;charset=utf-8' })
+  if (!docResult.value) {
+    ElMessage.warning('暂无润色结果')
+    return
+  }
+  // 如果后端已保存 DOCX 文件，通过 API 下载原始文件
+  if (docResult.value.id) {
+    const downloadName = docResult.value.download_filename || 'polished_document.docx'
+    polishAPI.downloadPolishedFile(docResult.value.id, downloadName)
+    return
+  }
+  // 纯文本结果 fallback
+  const ext = docResult.value.fileType === 'docx' ? '.docx' : '.txt'
+  const blob = new Blob([docResult.value.polished], { type: 'application/octet-stream' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'polished_document.txt'
+  a.download = `polished_document${ext}`
   a.click()
   URL.revokeObjectURL(url)
 }
