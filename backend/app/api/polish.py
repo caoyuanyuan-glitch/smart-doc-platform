@@ -88,6 +88,98 @@ def _parse_terminology_md(md_content: str) -> dict:
     
     兼容全角竖线 ｜ 和半角竖线 |。
     """
+    term_dict = {}
+    if not md_content:
+        return term_dict
+
+    # 兼容全角竖线和全角横线
+    content = md_content
+    # 分隔符行全角转半角：｜---｜ → |---|
+    content = content.replace('\uff5c', '|')  # fullwidth vertical bar
+    content = content.replace('\u2502', '|')  # box drawing light vertical
+
+    lines = content.split('\n')
+    header = ''
+    col_langs = []
+    has_lang_col = False
+    lang_col_idx = -1
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # 捕获表头行（第一个含 | 且不含分隔符的行）
+        if not header and '|' in stripped and '---' not in stripped:
+            header = stripped
+            cells = [c.strip() for c in stripped.split('|') if c.strip()]
+            # 检查是否有"语言"列
+            for idx, cell in enumerate(cells):
+                if any(kw in cell.lower() for kw in ['语言', 'lang', 'language']):
+                    has_lang_col = True
+                    lang_col_idx = idx
+                col_langs.append(_term_column_lang(cell))
+            continue
+
+        if '|' not in stripped:
+            continue
+        if stripped.startswith('#'):
+            continue
+        if stripped.startswith('|---') or stripped.startswith('| :--') or stripped.startswith('|:--'):
+            continue
+        if stripped.startswith('|序号') or stripped.startswith('| 序号'):
+            continue
+
+        cells = [c.strip() for c in stripped.split('|') if c.strip()]
+        clean_cells = [c for c in cells if c.strip() and c.strip() != '---']
+        if len(clean_cells) < 2:
+            continue
+
+        # 模式 A：带语言列
+        if has_lang_col and lang_col_idx >= 0 and lang_col_idx < len(clean_cells):
+            lang_val = clean_cells[lang_col_idx].lower()
+            is_zh = any(kw in lang_val for kw in ['zh', '中', 'cn', 'chinese'])
+            is_en = any(kw in lang_val for kw in ['en', '英', 'english', 'eng'])
+            # 构建不包含语言列的数据列
+            data_cells = [c for i, c in enumerate(clean_cells) if i != lang_col_idx]
+            # 数据列两两配对
+            for i in range(0, len(data_cells) - 1, 2):
+                old_term = data_cells[i].strip().strip('!')
+                new_term = data_cells[i + 1].strip().strip('!')
+                if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                    # 根据语言列值分配语言标记
+                    lang_suffix = ''
+                    if is_zh:
+                        lang_suffix = '##zh'
+                    elif is_en:
+                        lang_suffix = '##en'
+                    key = f"{old_term}{lang_suffix}" if lang_suffix else old_term
+                    if key not in term_dict:
+                        term_dict[key] = new_term
+            continue
+
+        # 模式 B：无语言列，但有表头指示列语言
+        if col_langs and len(col_langs) == len(clean_cells):
+            for i in range(0, len(clean_cells) - 1, 2):
+                old_term = clean_cells[i].strip().strip('!')
+                new_term = clean_cells[i + 1].strip().strip('!')
+                if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                    lang = col_langs[i] or col_langs[i + 1] or ''
+                    lang_suffix = f'##{lang}' if lang else ''
+                    key = f"{old_term}{lang_suffix}" if lang_suffix else old_term
+                    if key not in term_dict:
+                        term_dict[key] = new_term
+            continue
+
+        # 模式 C：无语言信息，简单两列配对
+        for i in range(0, len(clean_cells) - 1, 2):
+            old_term = clean_cells[i].strip().strip('!')
+            new_term = clean_cells[i + 1].strip().strip('!')
+            if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                if old_term not in term_dict:
+                    term_dict[old_term] = new_term
+
+    return term_dict
 
 
 def _parse_terminology_xlsx(file_path: str) -> dict:
