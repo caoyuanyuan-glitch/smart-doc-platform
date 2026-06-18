@@ -362,6 +362,28 @@ def _load_skill_rules(skill_id: int, db: Session) -> dict:
     }
 
 
+def _apply_term_only(text: str, term_dict: dict) -> tuple[str, list[PolishRuleMatch]]:
+    """仅按术语库逐行替换（不触发样式规则），用于 AI 已润色后的术语修正。"""
+    if not term_dict:
+        return text, []
+    changes = []
+    lines = text.split('\n')
+    result_lines = []
+    for line in lines:
+        new_line = line
+        for old_term, new_term in term_dict.items():
+            if old_term in new_line:
+                new_line = new_line.replace(old_term, new_term)
+                changes.append(PolishRuleMatch(
+                    rule_name="术语替换",
+                    before=old_term,
+                    after=new_term,
+                    type="terminology"
+                ))
+        result_lines.append(new_line)
+    return '\n'.join(result_lines), changes
+
+
 def _apply_skill_polish(
     text: str, 
     skill_rules: dict, 
@@ -961,8 +983,11 @@ def _polish_docx_with_comments(
         
         # Step 2: Rule polish
         if para_ai_change:
-            polished_text = intermediate_text
+            # AI 已修改文本，但术语替换仍需应用
+            polished_text, term_changes = _apply_term_only(intermediate_text, term_dict)
             para_changes = [para_ai_change]
+            if term_changes:
+                para_changes.extend(term_changes)
         else:
             polished_text, para_changes = _apply_skill_polish(
                 intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,

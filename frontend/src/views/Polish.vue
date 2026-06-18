@@ -55,33 +55,13 @@
         <el-progress :percentage="polishProgress" :stroke-width="8" :show-text="false" />
       </div>
 
-      <div v-if="docResult" class="panel">
-        <div class="panel-header">
-          <span>润色报告</span>
-          <div class="panel-actions">
-            <el-tag type="info" size="small">修改 {{ docResult.changes }} 处</el-tag>
-            <el-button size="small" @click="downloadPolishedDoc">下载润色文件</el-button>
-            <el-button size="small" type="success" @click="downloadReport" :disabled="!docResult.reportFile">下载润色报告</el-button>
-          </div>
-        </div>
-        <div class="result-grid">
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-blue"></span>润色前</div>
-            <div class="col-content">{{ docResult.original }}</div>
-          </div>
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-green"></span>润色后</div>
-            <div class="col-content">{{ docResult.polished }}</div>
-          </div>
-        </div>
-        <div v-if="docResult.changeDetails && docResult.changeDetails.length" class="changes-table">
-          <h4 class="changes-title">修改详情</h4>
-          <el-table :data="docResult.changeDetails" border stripe style="width: 100%" size="small">
-            <el-table-column prop="rule_name" label="规则" width="150" />
-            <el-table-column prop="type" label="类型" width="100" />
-            <el-table-column prop="before" label="修改前" />
-            <el-table-column prop="after" label="修改后" />
-          </el-table>
+      <div v-if="docResult" class="panel" style="padding:16px 20px">
+        <div class="panel-header" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <el-tag type="success" size="small">润色完成</el-tag>
+          <span style="color:#6b7280;font-size:13px">修改 {{ docResult.changes }} 处</span>
+          <div style="flex:1"></div>
+          <el-button size="small" type="primary" @click="downloadPolishedDoc">下载润色文件</el-button>
+          <el-button size="small" @click="downloadReport" :disabled="!docResult.reportFile">下载润色报告</el-button>
         </div>
       </div>
     </div>
