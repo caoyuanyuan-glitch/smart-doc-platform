@@ -910,19 +910,15 @@ def _polish_docx_with_comments(
                 term_dict = _filter_terms_by_lang(parsed, lang)
         except Exception:
             pass
-    # 合并数据库术语库（优先级高于文件术语）
     if db_terminology:
         term_dict.update(db_terminology)
     
     author = "技术文档智能润色助手"
-    initial = "AI"
-    
-    comment_id = 0
-    comments_data = []
+    revision_id = 0
+    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     
     toc_prefixes = ("TOC", "Table of Contents", "目录")
     
-    # 构建非空段落与 AI 行的平行映射
     non_empty_paras = [(idx, para) for idx, para in enumerate(doc.paragraphs) 
                        if para.text and para.text.strip()]
     non_empty_ai_lines = [l.strip() for l in ai_lines if l.strip()] if ai_lines else []
@@ -941,16 +937,13 @@ def _polish_docx_with_comments(
         if is_toc:
             continue
         
-        # 检测是否为标题、表标题、图标题
         title_keywords = ['heading', 'title', '目录', '标题', 'toc', '表', '图', 'table', 'figure', 'caption']
         is_title = any(kw in (style_name or "").lower() for kw in title_keywords) if style_name else False
-        # 内容也检测：以"表"或"图"开头 + 数字的视为图表标题
         if not is_title and original_text.strip():
-            first_char = original_text.strip()[:2]
             if re.match(r'^(表|图|Table|Figure)\s*\d', original_text.strip()):
                 is_title = True
         
-        # Step 1: AI 句式匹配润色
+        # Step 1: AI polish
         intermediate_text = original_text
         para_ai_change = None
         if i < len(non_empty_ai_lines):
@@ -958,292 +951,147 @@ def _polish_docx_with_comments(
             if ai_line and ai_line != original_text:
                 intermediate_text = ai_line
                 para_ai_change = PolishRuleMatch(
-                    rule_name="ai",
-                    before=original_text[:100],
-                    after=ai_line[:100],
-                    type="ai"
+                    rule_name="ai", before=original_text[:100], after=ai_line[:100], type="ai"
                 )
         
-        # Step 2: 规则润色——AI 已有建议时跳过规则，仅保留 AI；无 AI 时执行规则
+        # Step 2: Rule polish
         if para_ai_change:
             polished_text = intermediate_text
             para_changes = [para_ai_change]
         else:
             polished_text, para_changes = _apply_skill_polish(
                 intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,
-                is_title=is_title,
-                db_terminology=db_terminology
+                is_title=is_title, db_terminology=db_terminology
             )
         
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
             all_changes.extend(para_changes)
-            comment_id += 1
-
-            # ---- 1. 正文直接替换为润色后的文字 ----
-            # 清除段落原有 runs，替换为新文本（保留首 run 样式）
-            para_runs = para.runs
-            if para_runs:
-                preserved_style = None
-                for r in para_runs:
-                    if r.text and r.text.strip():
-                        preserved_style = r
-                        break
-                for r in para_runs:
-                    r.text = ''
-                para.clear()
-                new_run = para.add_run(polished_text)
-                if preserved_style and preserved_style.font:
-                    try:
-                        new_run.font.name = preserved_style.font.name
-                        new_run.font.size = preserved_style.font.size
-                        new_run.font.bold = preserved_style.font.bold
-                        new_run.font.italic = preserved_style.font.italic
-                        new_run.font.color.rgb = preserved_style.font.color.rgb
-                    except Exception:
-                        pass
-            else:
-                para.text = polished_text
-
-            # ---- 2. 标注框写入原文及变更详情 ----
-            change_lines = [f"原文：{original_text}"]
-
-            if para_ai_change and intermediate_text != original_text:
-                change_lines.append(f"AI句式匹配：{intermediate_text[:100]}")
-
-            rule_lines = []
-            for pc in para_changes:
-                if isinstance(pc, PolishRuleMatch) and pc.type != "ai":
-                    rule_lines.append(f"[{pc.rule_name}] {pc.before} → {pc.after}")
-            if rule_lines:
-                change_lines.append("规则变更：" + "；".join(rule_lines[:5]))
-
-            comment_text = "\n".join(change_lines)
             
-            comments_data.append({
-                "id": comment_id,
-                "author": author,
-                "initials": initial,
-                "text": comment_text
-            })
-            
+            # ---- 1. 正文替换为润色后文字（保留原字体样式） ----
             p_element = para._p
-            w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            preserved_style = None
+            for r in para.runs:
+                if r.text and r.text.strip():
+                    preserved_style = r
+                    break
+            for r in para.runs:
+                r.text = ''
+            para.clear()
+            new_run = para.add_run(polished_text)
+            if preserved_style and preserved_style.font:
+                try:
+                    new_run.font.name = preserved_style.font.name
+                    new_run.font.size = preserved_style.font.size
+                    new_run.font.bold = preserved_style.font.bold
+                    new_run.font.italic = preserved_style.font.italic
+                    new_run.font.color.rgb = preserved_style.font.color.rgb
+                except Exception:
+                    pass
             
-            # Find position to insert comment markers
-            # Insert commentRangeStart at the beginning of the paragraph's first run content
-            first_child = None
+            # ---- 2. 插入修订标记：<w:del> 原文 + <w:ins> 润色后 ----
+            revision_id += 1
+            rid = str(revision_id)
+            now = '2026-06-18T00:00:00Z'
+            
+            # 获取插入位置：段落第一个 run 之前
+            first_run_el = None
             for child in p_element:
                 tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                if tag in ('r', 'hyperlink'):
-                    first_child = child
+                if tag == 'r':
+                    first_run_el = child
                     break
             
-            # If no runs found, append to end
-            if first_child is None:
-                # Add comment markers at the end
-                comment_start = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeStart'
-                )
-                comment_start.set(f'{{{w_ns}}}id', str(comment_id))
-                
-                comment_end = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeEnd'
-                )
-                comment_end.set(f'{{{w_ns}}}id', str(comment_id))
-                
-                comment_ref_r = etree.SubElement(
-                    p_element, f'{{{w_ns}}}r'
-                )
-                comment_ref_rpr = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}rPr'
-                )
-                comment_ref_style = etree.SubElement(
-                    comment_ref_rpr, f'{{{w_ns}}}rStyle'
-                )
-                comment_ref_style.set(f'{{{w_ns}}}val', 'CommentReference')
-                
-                comment_ref = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}commentReference'
-                )
-                comment_ref.set(f'{{{w_ns}}}id', str(comment_id))
-            else:
-                # Insert commentRangeStart before the first run
-                comment_start = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeStart'
-                )
-                comment_start.set(f'{{{w_ns}}}id', str(comment_id))
-                p_element.remove(comment_start)
-                p_element.insert(p_element.index(first_child), comment_start)
-                
-                # Insert commentRangeEnd after the last run with text
-                last_text_run = None
-                for child in reversed(list(p_element)):
-                    tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                    if tag == 'r':
-                        t_elem = child.find(f'{{{w_ns}}}t')
-                        if t_elem is not None and t_elem.text and t_elem.text.strip():
-                            last_text_run = child
-                            break
-                
-                if last_text_run is None:
-                    last_text_run = first_child
-                
-                insert_idx = p_element.index(last_text_run) + 1
-                
-                comment_end = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeEnd'
-                )
-                comment_end.set(f'{{{w_ns}}}id', str(comment_id))
-                p_element.remove(comment_end)
-                p_element.insert(insert_idx, comment_end)
-                
-                # Insert commentReference after commentRangeEnd
-                comment_ref_r = etree.SubElement(
-                    p_element, f'{{{w_ns}}}r'
-                )
-                comment_ref_rpr = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}rPr'
-                )
-                comment_ref_style = etree.SubElement(
-                    comment_ref_rpr, f'{{{w_ns}}}rStyle'
-                )
-                comment_ref_style.set(f'{{{w_ns}}}val', 'CommentReference')
-                
-                comment_ref = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}commentReference'
-                )
-                comment_ref.set(f'{{{w_ns}}}id', str(comment_id))
-                p_element.remove(comment_ref_r)
-                p_element.insert(insert_idx + 1, comment_ref_r)
+            # 创建 <w:del> run（原文标记为删除）
+            del_r = etree.SubElement(p_element, f'{{{w_ns}}}r')
+            del_rPr = etree.SubElement(del_r, f'{{{w_ns}}}rPr')
+            del_el = etree.SubElement(del_rPr, f'{{{w_ns}}}del')
+            del_el.set(f'{{{w_ns}}}id', rid)
+            del_el.set(f'{{{w_ns}}}author', author)
+            del_el.set(f'{{{w_ns}}}date', now)
+            del_text = etree.SubElement(del_r, f'{{{w_ns}}}delText')
+            del_text.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            del_text.text = original_text
             
-            # 批注已添加（正文已在上方替换为润色后文本）
+            # 创建 <w:ins> run（润色后标记为插入）
+            revision_id += 1
+            rid2 = str(revision_id)
+            ins_r = etree.SubElement(p_element, f'{{{w_ns}}}r')
+            ins_rPr = etree.SubElement(ins_r, f'{{{w_ns}}}rPr')
+            ins_el = etree.SubElement(ins_rPr, f'{{{w_ns}}}ins')
+            ins_el.set(f'{{{w_ns}}}id', rid2)
+            ins_el.set(f'{{{w_ns}}}author', author)
+            ins_el.set(f'{{{w_ns}}}date', now)
+            # 复制 polished run 的样式到 ins run
+            if preserved_style and preserved_style.font:
+                try:
+                    if preserved_style.font.bold:
+                        b_el = etree.SubElement(ins_rPr, f'{{{w_ns}}}b')
+                    if preserved_style.font.italic:
+                        i_el = etree.SubElement(ins_rPr, f'{{{w_ns}}}i')
+                except Exception:
+                    pass
+            ins_t = etree.SubElement(ins_r, f'{{{w_ns}}}t')
+            ins_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            ins_t.text = polished_text
+            
+            # 把 del 和 ins run 移到 polished run 之前
+            if first_run_el is not None:
+                p_element.remove(del_r)
+                p_element.remove(ins_r)
+                insert_pos = p_element.index(first_run_el)
+                p_element.insert(insert_pos, del_r)
+                p_element.insert(insert_pos + 1, ins_r)
     
     doc.save(output_path)
-    
-    if comments_data:
-        _inject_comments_to_docx(output_path, comments_data)
+    _inject_revision_settings(output_path)
     
     return all_changes
 
 
-def _inject_comments_to_docx(docx_path: str, comments_data: list):
-    """向 DOCX 文件中注入 comments.xml 和 relationships"""
+def _inject_revision_settings(docx_path: str):
+    """向 DOCX 的 settings.xml 注入 <w:trackRevisions/>，使文档打开即显示修订标记。"""
     import zipfile
     import tempfile
     import os as os_mod
     from lxml import etree
     from shutil import move
-    from copy import deepcopy
     
-    nsmap = {
-        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-    }
-    
-    comments_xml = etree.Element(
-        '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}comments',
-        nsmap={'w': nsmap['w']}
-    )
-    
-    for cdata in comments_data:
-        comment_el = etree.SubElement(
-            comments_xml, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}comment'
-        )
-        comment_el.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id', str(cdata['id']))
-        comment_el.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author', cdata['author'])
-        comment_el.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}initials', cdata['initials'])
-        
-        p_el = etree.SubElement(
-            comment_el, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'
-        )
-        r_el = etree.SubElement(
-            p_el, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r'
-        )
-        t_el = etree.SubElement(
-            r_el, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'
-        )
-        t_el.text = cdata['text']
-    
-    comments_bytes = etree.tostring(
-        comments_xml, xml_declaration=True, encoding='UTF-8', standalone=True
-    )
-    
+    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     temp_dir = tempfile.mkdtemp()
-    temp_output = os_mod.path.join(temp_dir, 'output.docx')
     
     try:
         with zipfile.ZipFile(docx_path, 'r') as zin:
             zin.extractall(temp_dir)
         
-        word_dir = os_mod.path.join(temp_dir, 'word')
+        settings_path = os_mod.path.join(temp_dir, 'word', 'settings.xml')
         
-        with open(os_mod.path.join(word_dir, 'comments.xml'), 'wb') as f:
-            f.write(comments_bytes)
+        if os_mod.path.exists(settings_path):
+            tree = etree.parse(settings_path)
+            root = tree.getroot()
+        else:
+            root = etree.Element(f'{{{w_ns}}}settings')
+            tree = etree.ElementTree(root)
         
-        rels_path = os_mod.path.join(word_dir, '_rels', 'document.xml.rels')
+        # 添加 trackRevisions（若已存在则跳过）
+        nsmap = {'w': w_ns}
+        existing = root.findall(f'{{{w_ns}}}trackRevisions')
+        if not existing:
+            tr = etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
         
-        if os_mod.path.exists(rels_path):
-            rels_tree = etree.parse(rels_path)
-            root = rels_tree.getroot()
-            
-            existing_ids = set()
-            for rel in root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                existing_ids.add(rel.get('Id', ''))
-            
-            new_id_num = 1
-            while f'rId{new_id_num}' in existing_ids:
-                new_id_num += 1
-            
-            r_id = f'rId{new_id_num}'
-            
-            new_rel = etree.SubElement(
-                root, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'
-            )
-            new_rel.set('Id', r_id)
-            new_rel.set('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments')
-            new_rel.set('Target', 'comments.xml')
-            
-            with open(rels_path, 'wb') as f:
-                f.write(etree.tostring(rels_tree, xml_declaration=True, encoding='UTF-8', standalone=True))
+        tree.write(settings_path, xml_declaration=True, encoding='UTF-8', standalone=True)
         
-        doc_path = os_mod.path.join(word_dir, 'document.xml')
-        if os_mod.path.exists(doc_path):
-            doc_tree = etree.parse(doc_path)
-            doc_root = doc_tree.getroot()
-            
-            body = doc_root.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body')
-            
-            comments_ref_el = etree.SubElement(
-                body, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}comments'
-            )
-            comments_ref_el.set(
-                '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', r_id
-            )
-            
-            with open(doc_path, 'wb') as f:
-                f.write(etree.tostring(doc_tree, xml_declaration=True, encoding='UTF-8', standalone=True))
-        
-        with zipfile.ZipFile(temp_output, 'w', zipfile.ZIP_DEFLATED) as zout:
+        # 重新打包
+        os_mod.remove(docx_path)
+        with zipfile.ZipFile(docx_path, 'w', zipfile.ZIP_DEFLATED) as zout:
             for dirpath, dirnames, filenames in os_mod.walk(temp_dir):
-                for fname in filenames:
-                    full_path = os_mod.path.join(dirpath, fname)
+                for fn in filenames:
+                    full_path = os_mod.path.join(dirpath, fn)
                     arcname = os_mod.path.relpath(full_path, temp_dir)
                     zout.write(full_path, arcname)
-        
-        if os_mod.path.exists(docx_path):
-            os_mod.remove(docx_path)
-        move(temp_output, docx_path)
-        
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Failed to inject comments to DOCX: {e}", exc_info=True)
-        raise
     finally:
         import shutil
-        try:
-            shutil.rmtree(temp_dir)
-        except:
-            pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 
 
