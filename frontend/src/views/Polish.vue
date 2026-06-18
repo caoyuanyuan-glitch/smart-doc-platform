@@ -162,11 +162,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { polishAPI, knowledgeAPI } from '@/api'
-import { usePolishStore } from '@/store/polish'
 import { Loading } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -184,11 +183,8 @@ const textTerminologyFileId = ref(null)
 const result = ref(null)
 const docResult = ref(null)
 const loading = ref(false)
-const polishStore = usePolishStore()
 const polishProgress = ref(0)
 const polishProgressMsg = ref('')
-const activeTaskId = ref(null)
-let _progressTimer = null
 
 const formData = ref({
   sentenceFile: '',
@@ -320,26 +316,21 @@ async function submitPolish() {
   try {
     const resp = await polishAPI.analyzeFile(payload)
     const data = resp.data || {}
-    activeTaskId.value = data.task_id
     
-    if (data.task_id) {
-      // 轮询后端进度
-      _startPollingProgress(data.task_id)
-    } else {
-      // 无 task_id，直接使用返回结果
-      polishProgress.value = 100
-      docResult.value = {
-        id: data.id,
-        original: data.original || '',
-        polished: data.polished || '',
-        changes: (data.changes || []).length,
-        changeDetails: data.changes || [],
-        reportFile: data.report_file || data.reportFile,
-        download_filename: data.download_filename,
-        file_type: data.file_type
-      }
-      ElMessage.success('润色成功，已保存到已润色文档')
+    // 后端同步返回完整结果，直接使用
+    polishProgress.value = 100
+    polishProgressMsg.value = '润色完成'
+    docResult.value = {
+      id: data.id,
+      original: data.original || '',
+      polished: data.polished || '',
+      changes: (data.changes || []).length,
+      changeDetails: data.changes || [],
+      reportFile: data.report_file || data.reportFile,
+      download_filename: data.download_filename,
+      file_type: data.file_type
     }
+    ElMessage.success('润色成功')
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
@@ -348,47 +339,6 @@ async function submitPolish() {
     loading.value = false
     pendingLocalFile = null
     formData.value.sourceFile = ''
-  }
-}
-
-function _startPollingProgress(taskId) {
-  _clearProgressTimer()
-  _progressTimer = setInterval(async () => {
-    try {
-      const resp = await polishAPI.getProgress(taskId)
-      const data = resp.data || {}
-      polishProgress.value = data.progress || 0
-      polishProgressMsg.value = data.message || ''
-      
-      if (data.status === 'done' && data.result) {
-        _clearProgressTimer()
-        docResult.value = {
-          id: data.result.id,
-          original: data.result.original || '',
-          polished: data.result.polished || '',
-          changes: (data.result.changes || []).length,
-          changeDetails: data.result.changes || [],
-          reportFile: data.result.report_file || data.result.reportFile,
-          download_filename: data.result.download_filename,
-          file_type: data.result.file_type
-        }
-        ElMessage.success('润色成功，已保存到已润色文档')
-        polishProgressMsg.value = '润色完成'
-      } else if (data.status === 'error') {
-        _clearProgressTimer()
-        ElMessage.error(`润色失败：${data.message}`)
-        polishProgress.value = 0
-      }
-    } catch (e) {
-      _clearProgressTimer()
-    }
-  }, 1500)
-}
-
-function _clearProgressTimer() {
-  if (_progressTimer) {
-    clearInterval(_progressTimer)
-    _progressTimer = null
   }
 }
 
@@ -488,10 +438,6 @@ function downloadResult() {
 
 onMounted(() => {
   loadKnowledgeTree()
-})
-
-onUnmounted(() => {
-  _clearProgressTimer()
 })
 </script>
 
