@@ -62,13 +62,13 @@
         <div class="stats-card">
           <span class="stats-label">准确率</span>
           <span class="stats-value">{{ feedbackStats.averageAccuracy }}%</span>
-          <span class="stats-sep">|</span>
+          <span class="stats-divider">|</span>
           <span class="stats-label">共润色</span>
           <span class="stats-count">{{ feedbackStats.totalCount }} 次</span>
         </div>
       </div>
 
-      <!-- 文件选择行：句式 + 术语 同行 -->
+      <!-- 文件选择行 -->
       <div class="panel">
         <div class="file-select-row">
           <div class="file-select-col">
@@ -88,39 +88,53 @@
             </div>
           </div>
         </div>
-        <div class="panel-header">
-          <span>请输入需要润色的文本</span>
-          <div class="panel-actions">
-            <el-button type="primary" size="small" :loading="loading" @click="doPolish">开始润色</el-button>
-            <el-button size="small" @click="clearAll">清空</el-button>
-          </div>
-        </div>
-        <el-input
-          v-model="originalText"
-          type="textarea"
-          :rows="10"
-          placeholder="请输入需要润色的文本..."
-        />
       </div>
 
-      <!-- 润色结果行 -->
-      <div v-if="result" class="panel">
-        <div class="panel-header">
-          <span>润色结果</span>
-          <div class="panel-actions">
-            <el-tag type="info" size="small">修改 {{ result.changes }} 处</el-tag>
-            <el-button size="small" @click="copyResult">复制结果</el-button>
-            <el-button size="small" @click="downloadResult">导出文档</el-button>
+      <!-- 左右分栏：输入 + 结果 -->
+      <div class="content-row">
+        <div class="content-left">
+          <div class="panel">
+            <div class="panel-header">
+              <span>请输入需要润色的文本</span>
+              <div class="panel-actions">
+                <el-button type="primary" size="small" :loading="loading" @click="doPolish">开始润色</el-button>
+                <el-button size="small" @click="clearAll">清空</el-button>
+              </div>
+            </div>
+            <el-input
+              v-model="originalText"
+              type="textarea"
+              :rows="14"
+              placeholder="请输入需要润色的文本..."
+            />
           </div>
         </div>
-        <div class="result-grid">
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-blue"></span>原文</div>
-            <div class="col-content">{{ result.original }}</div>
+        <div class="content-right">
+          <div v-if="result" class="panel result-panel">
+            <div class="panel-header">
+              <span>润色结果</span>
+              <div class="panel-actions">
+                <el-tag type="info" size="small">修改 {{ result.changes }} 处</el-tag>
+                <el-button size="small" @click="copyResult">复制</el-button>
+                <el-button size="small" @click="downloadResult">导出</el-button>
+              </div>
+            </div>
+            <div class="result-grid-vertical">
+              <div class="result-col-v">
+                <div class="col-title"><span class="dot dot-blue"></span>原文</div>
+                <div class="col-content col-content-compact">{{ result.original }}</div>
+              </div>
+              <div class="result-col-v">
+                <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
+                <div class="col-content col-content-compact">{{ result.polished }}</div>
+              </div>
+            </div>
           </div>
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
-            <div class="col-content">{{ result.polished }}</div>
+          <div v-else class="panel result-placeholder">
+            <div class="panel-header">
+              <span>润色结果</span>
+            </div>
+            <div class="placeholder-text">点击"开始润色"查看结果</div>
           </div>
         </div>
       </div>
@@ -130,28 +144,36 @@
         <div class="panel-header">
           <span>意见反馈</span>
         </div>
-        <div class="form-item">
-          <label class="form-label">准确率评分 (0-100%)</label>
-          <el-slider v-model="feedbackAccuracy" :min="0" :max="100" :step="5" show-input />
+        <div class="feedback-row">
+          <div class="feedback-left">
+            <div class="form-item">
+              <label class="form-label">准确率评分 (0-100%)</label>
+              <el-slider v-model="feedbackAccuracy" :min="0" :max="100" :step="5" show-input />
+            </div>
+          </div>
+          <div class="feedback-right">
+            <div class="form-item">
+              <label class="form-label">需要修正的词语</label>
+              <el-input
+                v-model="feedbackCorrections"
+                type="textarea"
+                :rows="3"
+                placeholder="每行一条，格式：非标准词 → 标准词&#10;例如：移液枪 → 移液器"
+              />
+            </div>
+          </div>
         </div>
-        <div class="form-item">
-          <label class="form-label">需要修正的词语</label>
-          <el-input
-            v-model="feedbackCorrections"
-            type="textarea"
-            :rows="3"
-            placeholder="每行一条，格式：非标准词 → 标准词&#10;例如：移液枪 → 移液器"
-          />
-        </div>
-        <div class="form-item">
-          <label class="form-label">写入目标（将自动写入上方选中的对应文件）</label>
-          <el-radio-group v-model="feedbackTarget">
-            <el-radio value="terminology">术语库文件</el-radio>
-            <el-radio value="sentence_guide">句式表达文件</el-radio>
-          </el-radio-group>
-        </div>
-        <div class="form-item" style="text-align: right">
-          <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
+        <div class="feedback-bottom">
+          <div class="form-item">
+            <label class="form-label">写入目标（将写入上方选中的对应文件）</label>
+            <el-radio-group v-model="feedbackTarget">
+              <el-radio value="terminology">术语库文件</el-radio>
+              <el-radio value="sentence_guide">句式表达文件</el-radio>
+            </el-radio-group>
+          </div>
+          <div style="text-align: right">
+            <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
+          </div>
         </div>
       </div>
     </div>
@@ -523,22 +545,22 @@ async function submitFeedback() {
 async function loadFeedbackStats() {
   try {
     const resp = await polishAPI.getFeedbackStats()
-    feedbackStats.value = resp.data || { totalCount: 0, averageAccuracy: 0 }
+    feedbackStats.value = { totalCount: resp.data.total_count || 0, averageAccuracy: resp.data.average_accuracy || 0 }
   } catch (e) {
-    // 静默失败，不影响主流程
+    console.error('加载准确率统计失败:', e)
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadKnowledgeTree()
-  loadFeedbackStats()
+  await loadFeedbackStats()
 })
 </script>
 
 <style scoped>
 .polish-container { 
   padding: 0; 
-  max-width: 900px;
+  max-width: 1100px;
 }
 
 .page-title {
@@ -578,14 +600,92 @@ onMounted(() => {
   margin: 0 2px;
 }
 
-.stats-sep {
-  color: #94a3b8;
+.stats-divider {
+  color: #cbd5e1;
   margin: 0 4px;
 }
 
 .stats-count {
   color: #0284c7;
   font-weight: 600;
+}
+
+/* 左右分栏 */
+.content-row {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.content-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.content-right {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 结果面板 */
+.result-panel {
+  margin-bottom: 0;
+}
+
+.result-placeholder {
+  border: 1px dashed #d1d5db;
+  background: #fafbfc;
+}
+
+.placeholder-text {
+  text-align: center;
+  padding: 40px 20px;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+/* 垂直结果网格 */
+.result-grid-vertical {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.result-col-v {
+  background: #fafbfc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.col-content-compact {
+  min-height: 100px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* 意见反馈布局 */
+.feedback-row {
+  display: flex;
+  gap: 20px;
+}
+
+.feedback-left {
+  flex: 0 0 280px;
+}
+
+.feedback-right {
+  flex: 1;
+  min-width: 0;
+}
+
+.feedback-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #f3f4f6;
 }
 
 .panel {
