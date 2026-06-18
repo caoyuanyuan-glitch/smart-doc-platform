@@ -1343,6 +1343,7 @@ async def analyze_file_endpoint(
             if term_file:
                 term_file_name = term_file.name
                 terminology = _read_file_safe(term_file.file_path)
+                print(f"[POLISH] 已加载术语文件: {term_file_name} ({len(terminology or '')} 字节)")
 
         db_terms = None if terminology else _load_terms_from_db(db)
 
