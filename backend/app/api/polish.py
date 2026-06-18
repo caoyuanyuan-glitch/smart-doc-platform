@@ -1744,6 +1744,8 @@ def submit_polish_feedback(
         guide_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
         if not guide_file or not guide_file.file_path or not os.path.exists(guide_file.file_path):
             raise HTTPException(status_code=404, detail="句式文件不存在")
+        if not guide_file.file_path.lower().endswith('.md'):
+            raise HTTPException(status_code=400, detail="句式文件仅支持 Markdown (.md) 格式，请先将 .docx 转为 .md 上传")
         timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         try:
             with open(guide_file.file_path, 'a', encoding='utf-8') as f:
