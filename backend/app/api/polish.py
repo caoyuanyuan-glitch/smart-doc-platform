@@ -1709,14 +1709,18 @@ def submit_polish_feedback(
     """提交润色反馈：记录准确率评分，并将修正词写入选中的术语文件或句式文件。"""
     current_user = get_default_user(db)
     corrections_pairs = _parse_corrections(feedback.corrections)
+    raw_lines = [line.strip() for line in (feedback.corrections or '').splitlines() if line.strip()]
     processed_count = 0
     errors = []
 
-    if feedback.target == "terminology":
+    if not raw_lines and feedback.accuracy >= 100:
+        processed_count = 0
+
+    elif feedback.target == "terminology":
         # 术语修正 → 写入选中的术语文件
         file_id = feedback.terminology_file_id
         if not file_id:
-            raise HTTPException(status_code=400, detail="请先选择术语库文件")
+            raise HTTPException(status_code=400, detail="请先选择术语对照表")
         term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
         if not term_file or not term_file.file_path or not os.path.exists(term_file.file_path):
             raise HTTPException(status_code=404, detail="术语文件不存在")
@@ -1740,20 +1744,22 @@ def submit_polish_feedback(
         # 句式修正 → 写入选中的句式文件
         file_id = feedback.sentence_file_id
         if not file_id:
-            raise HTTPException(status_code=400, detail="请先选择句式表达文件")
+            raise HTTPException(status_code=400, detail="请先选择句式清单文件")
         guide_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
         if not guide_file or not guide_file.file_path or not os.path.exists(guide_file.file_path):
             raise HTTPException(status_code=404, detail="句式文件不存在")
         if not guide_file.file_path.lower().endswith('.md'):
             raise HTTPException(status_code=400, detail="句式文件仅支持 Markdown (.md) 格式，请先将 .docx 转为 .md 上传")
+        if not raw_lines:
+            raise HTTPException(status_code=400, detail="请填写需修正的词语或句子")
         timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         try:
             with open(guide_file.file_path, 'a', encoding='utf-8') as f:
                 f.write(f'\n## 用户反馈修正 ({timestamp})\n\n')
-                for old_term, new_term in corrections_pairs:
-                    f.write(f'- {old_term} → {new_term}\n')
+                for line in raw_lines:
+                    f.write(f'- {line}\n')
                     processed_count += 1
-                f.write(f'\n准确率评分: {feedback.accuracy}%\n')
+                f.write('\n')
         except Exception as e:
             errors.append(str(e))
 
@@ -1771,7 +1777,7 @@ def submit_polish_feedback(
     return {
         "message": "反馈已提交",
         "accuracy": feedback.accuracy,
-        "corrections_count": len(corrections_pairs),
+        "corrections_count": len(raw_lines) if feedback.target == "sentence_guide" else len(corrections_pairs),
         "processed_count": processed_count,
         "target": feedback.target,
         "errors": errors if errors else None

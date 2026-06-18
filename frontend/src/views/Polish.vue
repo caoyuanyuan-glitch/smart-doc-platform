@@ -64,7 +64,10 @@
           <span class="stats-value" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.averageAccuracy }}%</span>
           <span class="stats-divider">|</span>
           <span class="stats-label">共润色</span>
-          <span class="stats-count" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.totalCount }} 次</span>
+          <span class="stats-count-wrap">
+            <span class="stats-count" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.totalCount }}</span>
+            <span class="stats-unit">次</span>
+          </span>
         </div>
       </div>
 
@@ -160,8 +163,9 @@
                 v-model="feedbackCorrections"
                 type="textarea"
                 :rows="3"
-                placeholder="每行一条，格式：非标准词 → 标准词&#10;例如：移液枪 → 移液器"
+                :placeholder="feedbackPlaceholder"
               />
+              <div class="feedback-hint">{{ feedbackHint }}</div>
             </div>
           </div>
         </div>
@@ -248,6 +252,18 @@ const feedbackCorrections = ref('')
 const feedbackTarget = ref('terminology')
 const feedbackLoading = ref(false)
 const feedbackStats = ref({ totalCount: 0, averageAccuracy: 0 })
+
+const feedbackPlaceholder = computed(() => (
+  feedbackTarget.value === 'sentence_guide'
+    ? '每行一条，直接填写需补充或修正的词语/句子\n例如：请勿在开机状态下断开电源。'
+    : '每行一条，格式：非标准词 → 标准词\n例如：移液枪 → 移液器'
+))
+
+const feedbackHint = computed(() => (
+  feedbackTarget.value === 'sentence_guide'
+    ? '句式清单文件：直接写原句或建议句，每行一条。'
+    : '术语对照表：按“非标准词 → 标准词”填写。'
+))
 
 const formData = ref({
   sentenceFile: '',
@@ -596,13 +612,15 @@ onMounted(async () => {
 
 .stats-label {
   color: #64748b;
-  font-weight: 400;
-  font-size: 12px;
+  font-weight: 600;
+  font-size: 22px;
+  line-height: 1;
 }
 
 .stats-value {
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 700;
+  line-height: 1;
 }
 
 .stats-green {
@@ -615,13 +633,28 @@ onMounted(async () => {
 
 .stats-divider {
   color: #cbd5e1;
-  font-size: 12px;
+  font-size: 22px;
   margin: 0 2px;
+  line-height: 1;
+}
+
+.stats-count-wrap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
 }
 
 .stats-count {
+  font-weight: 700;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.stats-unit {
+  color: #64748b;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 22px;
+  line-height: 1;
 }
 
 /* ── 面板 ── */
@@ -795,6 +828,12 @@ onMounted(async () => {
   font-weight: 500;
   color: #374151;
   font-size: 13px;
+}
+
+.feedback-hint {
+  margin-top: 6px;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .input-with-button {
