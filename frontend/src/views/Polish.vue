@@ -153,7 +153,7 @@
           </div>
           <div class="feedback-right">
             <div class="form-item">
-              <label class="form-label">需要修正的词语</label>
+              <label class="form-label">需修正的词语/句子</label>
               <el-input
                 v-model="feedbackCorrections"
                 type="textarea"
@@ -505,14 +505,16 @@ async function submitFeedback() {
     ElMessage.warning('请先完成润色再提交反馈')
     return
   }
-  // 验证文件选择
-  if (feedbackTarget.value === 'terminology' && !textTerminologyFileId.value) {
-    ElMessage.warning('请先在上方选择术语库文件')
-    return
-  }
-  if (feedbackTarget.value === 'sentence_guide' && !textSentenceFileId.value) {
-    ElMessage.warning('请先在上方选择句式表达文件')
-    return
+  // 验证文件选择（准确率100%时无需修正，跳过文件校验）
+  if (feedbackAccuracy.value < 100) {
+    if (feedbackTarget.value === 'terminology' && !textTerminologyFileId.value) {
+      ElMessage.warning('请先在上方选择术语库文件')
+      return
+    }
+    if (feedbackTarget.value === 'sentence_guide' && !textSentenceFileId.value) {
+      ElMessage.warning('请先在上方选择句式表达文件')
+      return
+    }
   }
   feedbackLoading.value = true
   try {
@@ -559,61 +561,103 @@ onMounted(async () => {
 
 <style scoped>
 .polish-container { 
-  padding: 0; 
+  padding: 0 0 40px; 
   max-width: 1100px;
 }
 
+/* ── 标题行 ── */
 .page-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: #1f2937;
-  margin-bottom: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0;
 }
 
 .page-title-row {
   display: flex;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: 14px;
+  margin-bottom: 18px;
 }
 
+/* ── 统计卡片 ── */
 .stats-card {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  border-radius: 8px;
-  padding: 5px 14px;
+  gap: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 20px;
+  padding: 4px 16px;
   font-size: 13px;
 }
 
 .stats-label {
-  color: #0369a1;
-  font-weight: 500;
+  color: #64748b;
+  font-weight: 400;
+  font-size: 12px;
 }
 
 .stats-value {
-  color: #0284c7;
-  font-size: 18px;
+  color: #0f172a;
+  font-size: 16px;
   font-weight: 700;
-  margin: 0 2px;
 }
 
 .stats-divider {
   color: #cbd5e1;
-  margin: 0 4px;
+  font-size: 12px;
+  margin: 0 2px;
 }
 
 .stats-count {
-  color: #0284c7;
+  color: #0f172a;
   font-weight: 600;
+  font-size: 13px;
 }
 
-/* 左右分栏 */
+/* ── 面板 ── */
+.panel {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 16px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 15px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── 文件选择行 ── */
+.file-select-row {
+  display: flex;
+  gap: 16px;
+}
+
+.file-select-col {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── 左右分栏 ── */
 .content-row {
   display: flex;
-  gap: 20px;
+  gap: 16px;
   align-items: flex-start;
 }
 
@@ -627,51 +671,55 @@ onMounted(async () => {
   min-width: 0;
 }
 
-/* 结果面板 */
+/* ── 结果面板 ── */
 .result-panel {
   margin-bottom: 0;
 }
 
 .result-placeholder {
-  border: 1px dashed #d1d5db;
+  border-style: dashed;
+  border-color: #e5e7eb;
   background: #fafbfc;
 }
 
 .placeholder-text {
   text-align: center;
-  padding: 40px 20px;
-  color: #9ca3af;
-  font-size: 14px;
+  padding: 36px 20px;
+  color: #94a3b8;
+  font-size: 13px;
 }
 
-/* 垂直结果网格 */
 .result-grid-vertical {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .result-col-v {
-  background: #fafbfc;
+  background: #f8fafc;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   overflow: hidden;
 }
 
 .col-content-compact {
-  min-height: 100px;
-  max-height: 200px;
+  min-height: 80px;
+  max-height: 180px;
   overflow-y: auto;
 }
 
-/* 意见反馈布局 */
+/* ── 意见反馈 ── */
+.feedback-panel {
+  margin-top: 16px;
+}
+
 .feedback-row {
   display: flex;
   gap: 20px;
 }
 
 .feedback-left {
-  flex: 0 0 280px;
+  flex: 0 0 260px;
 }
 
 .feedback-right {
@@ -683,55 +731,20 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 8px;
+  margin-top: 4px;
   padding-top: 12px;
   border-top: 1px solid #f3f4f6;
 }
 
-.panel {
-  background: #fff;
-  border-radius: 10px;
-  padding: 20px;
-  margin-bottom: 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-
-.file-select-row {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.file-select-col {
-  flex: 1;
-  min-width: 0;
-}
-
-.panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #f0f0f0;
-  font-weight: 600;
-  color: #1f2937;
-}
-
-.panel-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.form-item { margin-bottom: 16px; }
+/* ── 表单 ── */
+.form-item { margin-bottom: 14px; }
 
 .form-label {
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   font-weight: 500;
   color: #374151;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .input-with-button {
@@ -752,61 +765,28 @@ onMounted(async () => {
   margin-top: 20px;
 }
 
-.result-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-}
-
-.result-col {
-  background: #fafbfc;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
+/* ── 旧样式保留 ── */
 .col-title {
-  padding: 10px 16px;
+  padding: 8px 14px;
   background: #fff;
   font-weight: 500;
+  font-size: 13px;
   color: #374151;
   border-bottom: 1px solid #e5e7eb;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   display: inline-block;
 }
 
 .dot-blue { background: #3b82f6; }
 .dot-green { background: #10b981; }
-
-.col-content {
-  padding: 16px;
-  line-height: 1.8;
-  color: #374151;
-  font-size: 14px;
-  min-height: 200px;
-  white-space: pre-wrap;
-}
-
-.changes-table {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #e5e7eb;
-}
-
-.changes-title {
-  margin-bottom: 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #374151;
-}
 
 .file-picker-content {
   max-height: 400px;
@@ -862,5 +842,7 @@ onMounted(async () => {
 
 @media (max-width: 768px) {
   .polish-container { max-width: 100%; }
+  .content-row { flex-direction: column; }
+  .feedback-row { flex-direction: column; }
 }
 </style>
