@@ -67,6 +67,17 @@ def _term_column_lang(header: str) -> str:
     return None
 
 
+def _parse_terminology(terminology_input: str) -> dict:
+    """统一术语解析入口：自动识别 Markdown 文本或 Excel 文件路径。"""
+    if not terminology_input:
+        return {}
+    # 如果是 .xlsx 文件路径
+    if terminology_input.lower().endswith('.xlsx'):
+        return _parse_terminology_xlsx(terminology_input)
+    # 否则作为 Markdown 文本解析
+    return _parse_terminology_md(terminology_input)
+
+
 def _parse_terminology_md(md_content: str) -> dict:
     """解析术语库 Markdown 文件，返回 {非标准: 标准} 映射。
 
@@ -77,6 +88,69 @@ def _parse_terminology_md(md_content: str) -> dict:
     
     兼容全角竖线 ｜ 和半角竖线 |。
     """
+
+
+def _parse_terminology_xlsx(file_path: str) -> dict:
+    """解析 Excel (.xlsx) 术语文件，返回 {非标准: 标准} 映射。
+    
+    支持两种格式：
+    - 替换表：| 非标准 | 标准 |   → 直接作为 old→new 映射
+    - 双语表：| zh-CN | en-US | → 仅提取中文列作为标准术语（不做替换，避免中文→英文错乱）
+    """
+    term_dict = {}
+    try:
+        import openpyxl
+    except ImportError:
+        return term_dict
+    
+    try:
+        wb = openpyxl.load_workbook(file_path, read_only=True)
+        ws = wb.active
+        
+        rows = list(ws.iter_rows(min_row=1, max_row=min(ws.max_row, 500), values_only=True))
+        if not rows:
+            wb.close()
+            return term_dict
+        
+        headers = [str(h).strip().lower() if h else '' for h in rows[0]]
+        is_replacement = any(kw in h for h in headers for kw in ['非标准', '旧', 'old', '非标', 'source'])
+        is_bilingual = any(kw in h for h in headers for kw in ['zh', 'cn', '中文', 'en', '英', 'us'])
+        
+        for row in rows[1:]:
+            cells = [str(c).strip() if c else '' for c in row]
+            cells = [c for c in cells if c]
+            if len(cells) < 2:
+                continue
+            
+            if is_replacement:
+                # 替换表：col1=非标准, col2=标准
+                old_term = cells[0]
+                new_term = cells[1]
+                if old_term and new_term and old_term != new_term and len(old_term) > 0:
+                    if old_term not in term_dict:
+                        term_dict[old_term] = new_term
+            elif is_bilingual:
+                # 双语表：col1=中文标准术语, col2=英文 —— 仅提取中文列，不做替换
+                # 将中文标准术语自身作为 key（标识已知标准术语，供 AI 参考）
+                std_cn = cells[0]
+                if std_cn and len(std_cn) > 0:
+                    term_dict[f"__std__{std_cn}"] = std_cn
+            else:
+                # 未知格式：假设 col1→col2 替换
+                old_term = cells[0]
+                new_term = cells[1]
+                if old_term and new_term and old_term != new_term and len(old_term) > 0:
+                    if old_term not in term_dict:
+                        term_dict[old_term] = new_term
+        
+        wb.close()
+        if is_bilingual and not is_replacement:
+            std_terms = [v for k, v in term_dict.items() if k.startswith('__std__')]
+            print(f"[TERM] Excel 双语对照表: 标准中文术语 {len(std_terms)} 条 ({', '.join(std_terms[:5])})")
+    except Exception as e:
+        print(f"[TERM] Excel 解析失败: {e}")
+    
+    return term_dict
     term_dict = {}
     if not md_content:
         return term_dict
@@ -173,6 +247,9 @@ def _filter_terms_by_lang(term_dict: dict, target_lang: str) -> dict:
     """从带语言标记的术语字典中筛选出目标语言的术语。返回纯净的 {非标准: 标准}。"""
     filtered = {}
     for key, val in term_dict.items():
+        # 跳过 Excel 双语表的标准术语标记（__std__ 前缀）
+        if key.startswith('__std__'):
+            continue
         if '##zh' in key:
             if target_lang == 'zh':
                 clean_key = key.replace('##zh', '')
@@ -190,7 +267,7 @@ def _filter_terms_by_lang(term_dict: dict, target_lang: str) -> dict:
 def _resolve_terminology(db: Session, terminology_md: str = None, text: str = None) -> dict:
     """加载术语：文件术语优先，自动按文本语言过滤。返回纯净 {非标准: 标准}。"""
     if terminology_md:
-        parsed = _parse_terminology_md(terminology_md)
+        parsed = _parse_terminology(terminology_md)
         if parsed:
             # 自动检测语言并过滤
             if text:
@@ -439,7 +516,7 @@ def _apply_skill_polish(
     # 先解析文件中的术语替换（支持中英文多列表，自动语言过滤）
     if terminology:
         try:
-            parsed = _parse_terminology_md(terminology)
+            parsed = _parse_terminology(terminology)
             if parsed:
                 lang = _detect_language(text)
                 term_dict = _filter_terms_by_lang(parsed, lang)
@@ -809,7 +886,10 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         if input_data.terminology_id:
             term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
             if term_file and term_file.file_path and os.path.exists(term_file.file_path):
-                terminology_md = _read_file_safe(term_file.file_path)
+                if term_file.file_path.lower().endswith('.xlsx'):
+                    terminology_md = term_file.file_path  # Excel: 传路径
+                else:
+                    terminology_md = _read_file_safe(term_file.file_path)
         resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
         sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
         result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
@@ -934,7 +1014,7 @@ def _polish_docx_with_comments(
     term_dict = {}
     if terminology:
         try:
-            parsed = _parse_terminology_md(terminology)
+            parsed = _parse_terminology(terminology)
             if parsed:
                 all_text = '\n'.join([p.text for p in doc.paragraphs if p.text and p.text.strip()])
                 lang = _detect_language(all_text)
@@ -1346,8 +1426,13 @@ async def analyze_file_endpoint(
             term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == terminology_file_id).first()
             if term_file:
                 term_file_name = term_file.name
-                terminology = _read_file_safe(term_file.file_path)
-                print(f"[POLISH] 已加载术语文件: {term_file_name} ({len(terminology or '')} 字节)")
+                # Excel 文件直接用路径，Markdown 读文本内容
+                if term_file.file_path and term_file.file_path.lower().endswith('.xlsx'):
+                    terminology = term_file.file_path  # 传路径给 _parse_terminology_xlsx
+                    print(f"[POLISH] 已加载术语Excel: {term_file_name}")
+                else:
+                    terminology = _read_file_safe(term_file.file_path)
+                    print(f"[POLISH] 已加载术语文件: {term_file_name} ({len(terminology or '')} 字节)")
 
         db_terms = None if terminology else _load_terms_from_db(db)
 
