@@ -20,6 +20,10 @@ from app.models.term import Term
 router = APIRouter()
 
 
+# ============================================================
+# 术语库加载 & 语言检测
+# ============================================================
+
 def _load_terms_from_db(db: Session) -> dict:
     """从术语库表中加载所有术语，返回 {非标准用语: 标准用语} 映射"""
     terms = db.query(Term).all()
@@ -293,13 +297,10 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     return "\n\n".join(guides) if guides else None
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "polished")
-POLISHED_FOLDER_NAME = "已润色文档"
 
-
-def _get_or_create_polished_folder(db, user_id: int) -> tuple:
-    """已合并至物理目录创建逻辑，不再使用知识库文件夹。"""
-    return None, None
-
+# ============================================================
+# 模型定义
+# ============================================================
 
 def _get_date_subfolder_id(db, folder_id: int, user_id: int) -> tuple:
     """返回物理目录路径和 None 作为 folder_id"""
@@ -328,45 +329,10 @@ class PolishRuleMatch(BaseModel):
     type: str
 
 
-def _apply_style_rules(text: str) -> tuple[str, list]:
-    """根据写作风格指南应用基础润色规则"""
-    changes = []
-    
-    # 规则1: 中文标点统一
-    text = re.sub(r'(?<=[\u4e00-\u9fff])[,;:!?](?!\s)', lambda m: {
-        ',': '，',
-        ';': '；',
-        ':': '：',
-        '!': '！',
-        '?': '？'
-    }.get(m.group(), m.group()), text)
-    
-    # 规则2: UI控件格式化为【】
-    text = re.sub(r'["""](.*?)["""]', r'【\1】', text)
-    
-    # 规则3: 数字与单位间加空格
-    text = re.sub(r'(\d)([a-zA-Z℃%])', r'\1 \2', text)
-    
-    # 规则4: 中英文间加空格（中文在英文前）
-    text = re.sub(r'([\u4e00-\u9fff])([A-Za-z])', r'\1 \2', text)
-    
-    # 规则5: 中英文间加空格（英文在中文前）
-    text = re.sub(r'([A-Za-z])([\u4e00-\u9fff])', r'\1 \2', text)
-    
-    # 规则6: 去除多余空格
-    text = re.sub(r'[ \t]{2,}', ' ', text)
-    
-    # 收集修改记录
-    if text != text:
-        changes.append({
-            "rule_name": "标点符号规范化",
-            "before": "...",
-            "after": "...",
-            "type": "format"
-        })
-    
-    return text, changes
 
+# ============================================================
+# 规则引擎：skill 加载、句式风格规则
+# ============================================================
 
 def _load_skill_rules(skill_id: int, db: Session) -> dict:
     """从知识库加载skill规则"""
@@ -897,6 +863,11 @@ async def polish_with_skill(
     }
 
 
+
+# ============================================================
+# DOCX 润色与批注注入
+# ============================================================
+
 def _polish_docx_with_comments(
     docx_path: str,
     output_path: str,
@@ -1140,7 +1111,7 @@ def _polish_docx_with_comments(
                 p_element.remove(comment_ref_r)
                 p_element.insert(insert_idx + 1, comment_ref_r)
             
-            # 批注已添加，不修改正文（保留原始排版）
+            # 批注已添加（正文已在上方替换为润色后文本）
     
     doc.save(output_path)
     
@@ -1269,6 +1240,11 @@ def _inject_comments_to_docx(docx_path: str, comments_data: list):
         except:
             pass
 
+
+
+# ============================================================
+# 润色报告生成
+# ============================================================
 
 def _generate_polish_report(
     report_path: str,
@@ -1626,6 +1602,11 @@ async def analyze_file_endpoint(
                 pass
 
 
+
+# ============================================================
+# 文档润色端点（历史文档 / 种子导出）
+# ============================================================
+
 @router.post("/export-seed")
 def export_polished_seed(db: Session = Depends(get_db)):
     """将已润色文档导出到种子目录，用于 Git 团队共享"""
@@ -1669,6 +1650,11 @@ def _polish_fallback(text: str, db_terminology: dict = None):
         "changes": changes or [{"line": 1, "original": text[:80], "polished": polished[:80], "type": "format"}]
     }
 
+
+
+# ============================================================
+# 已润色文档 CRUD
+# ============================================================
 
 @router.post("/upload")
 async def upload_polished_file(
