@@ -46,6 +46,15 @@
         <el-button type="primary" :loading="loading" @click="submitPolish">提交</el-button>
       </div>
 
+      <div v-if="polishProgress > 0 && polishProgress < 100" class="progress-card">
+        <div class="progress-header">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span class="progress-msg">{{ polishProgressMsg || '润色中...' }}</span>
+          <span class="progress-pct">{{ polishProgress }}%</span>
+        </div>
+        <el-progress :percentage="polishProgress" :stroke-width="8" :show-text="false" />
+      </div>
+
       <div v-if="docResult" class="panel">
         <div class="panel-header">
           <span>润色报告</span>
@@ -173,10 +182,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { polishAPI, knowledgeAPI } from '@/api'
+import { usePolishStore } from '@/store/polish'
+import { Loading } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const localFileInputRef = ref(null)
@@ -193,6 +204,11 @@ const textTerminologyFileId = ref(null)
 const result = ref(null)
 const docResult = ref(null)
 const loading = ref(false)
+const polishStore = usePolishStore()
+const polishProgress = ref(0)
+const polishProgressMsg = ref('')
+const activeTaskId = ref(null)
+let _progressTimer = null
 
 const formData = ref({
   sentenceFile: '',
@@ -306,30 +322,89 @@ async function submitPolish() {
   }
   
   loading.value = true
+  polishProgress.value = 0
+  polishProgressMsg.value = '提交中...'
+  
+  const payload = new FormData()
+  payload.append('file', pendingLocalFile)
+  if (formData.value.sentenceFileId) {
+    payload.append('sentence_file_id', formData.value.sentenceFileId)
+  }
+  if (formData.value.terminologyFileId) {
+    payload.append('terminology_file_id', formData.value.terminologyFileId)
+  }
+  if (formData.value.requirements) {
+    payload.append('requirements', formData.value.requirements)
+  }
+  
   try {
-    const payload = new FormData()
-    payload.append('file', pendingLocalFile)
-    if (formData.value.sentenceFileId) {
-      payload.append('sentence_file_id', formData.value.sentenceFileId)
-    }
-    if (formData.value.terminologyFileId) {
-      payload.append('terminology_file_id', formData.value.terminologyFileId)
-    }
-    if (formData.value.requirements) {
-      payload.append('requirements', formData.value.requirements)
-    }
-    
     const resp = await polishAPI.analyzeFile(payload)
     const data = resp.data || {}
-    docResult.value = null
-    pendingLocalFile = null
-    formData.value.sourceFile = ''
-    ElMessage.success('润色成功，已保存到已润色文档')
+    activeTaskId.value = data.task_id
+    
+    if (data.task_id) {
+      // 轮询后端进度
+      _startPollingProgress(data.task_id)
+    } else {
+      // 无 task_id，直接使用返回结果
+      polishProgress.value = 100
+      docResult.value = {
+        id: data.id,
+        original: data.original || '',
+        polished: data.polished || '',
+        changes: (data.changes || []).length,
+        changeDetails: data.changes || [],
+        reportFile: data.report_file || data.reportFile
+      }
+      ElMessage.success('润色成功，已保存到已润色文档')
+    }
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
+    polishProgress.value = 0
   } finally {
     loading.value = false
+    pendingLocalFile = null
+    formData.value.sourceFile = ''
+  }
+}
+
+function _startPollingProgress(taskId) {
+  _clearProgressTimer()
+  _progressTimer = setInterval(async () => {
+    try {
+      const resp = await polishAPI.getProgress(taskId)
+      const data = resp.data || {}
+      polishProgress.value = data.progress || 0
+      polishProgressMsg.value = data.message || ''
+      
+      if (data.status === 'done' && data.result) {
+        _clearProgressTimer()
+        docResult.value = {
+          id: data.result.id,
+          original: data.result.original || '',
+          polished: data.result.polished || '',
+          changes: (data.result.changes || []).length,
+          changeDetails: data.result.changes || [],
+          reportFile: data.result.report_file || data.result.reportFile
+        }
+        ElMessage.success('润色成功，已保存到已润色文档')
+        polishProgressMsg.value = '润色完成'
+      } else if (data.status === 'error') {
+        _clearProgressTimer()
+        ElMessage.error(`润色失败：${data.message}`)
+        polishProgress.value = 0
+      }
+    } catch (e) {
+      _clearProgressTimer()
+    }
+  }, 1500)
+}
+
+function _clearProgressTimer() {
+  if (_progressTimer) {
+    clearInterval(_progressTimer)
+    _progressTimer = null
   }
 }
 
@@ -417,6 +492,10 @@ function downloadResult() {
 
 onMounted(() => {
   loadKnowledgeTree()
+})
+
+onUnmounted(() => {
+  _clearProgressTimer()
 })
 </script>
 
@@ -563,11 +642,35 @@ onMounted(() => {
 
 .selected-info {
   margin-top: 10px;
-  padding: 8px 12px;
-  background: #f0fdf4;
-  border-radius: 4px;
-  color: #166534;
+  color: #059669;
   font-size: 13px;
+}
+
+.progress-card {
+  margin-top: 16px;
+  padding: 14px 18px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.progress-msg {
+  flex: 1;
+  font-size: 13px;
+  color: #374151;
+}
+
+.progress-pct {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2563eb;
 }
 
 @media (max-width: 768px) {

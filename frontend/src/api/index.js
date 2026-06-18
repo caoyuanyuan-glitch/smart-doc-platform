@@ -126,6 +126,7 @@ export const polishAPI = {
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
+  getProgress: (taskId) => instance.get(`/polish/progress/${taskId}`),
   listPolishedDocuments: () => instance.get('/polish/'),
   getPolishedDocument: (id) => instance.get(`/polish/${id}`),
   uploadPolishedFile: (file) => {

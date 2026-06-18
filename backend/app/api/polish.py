@@ -8,6 +8,7 @@ import os
 import uuid
 import mimetypes
 import re
+import threading
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.polished_document import (
@@ -19,6 +20,10 @@ from app.models.term import Term
 from app.utils.file_utils import read_file_safe as _read_file_safe
 
 router = APIRouter()
+
+# 润色任务进度追踪
+_polish_tasks: dict = {}  # {task_id: {"status", "progress", "message", "result"}}
+_polish_tasks_lock = threading.Lock()
 
 
 # ============================================================
@@ -1238,6 +1243,22 @@ async def analyze_file_endpoint(
     import tempfile
     import docx2txt
     
+    task_id = str(uuid.uuid4())
+    with _polish_tasks_lock:
+        _polish_tasks[task_id] = {"status": "running", "progress": 0, "message": "开始润色..."}
+    
+    def _update_progress(pct: int, msg: str):
+        with _polish_tasks_lock:
+            if task_id in _polish_tasks:
+                _polish_tasks[task_id] = {"status": "running", "progress": pct, "message": msg}
+    
+    def _finish_task(result=None, error=None):
+        with _polish_tasks_lock:
+            if error:
+                _polish_tasks[task_id] = {"status": "error", "progress": 100, "message": str(error)}
+            else:
+                _polish_tasks[task_id] = {"status": "done", "progress": 100, "message": "润色完成", "result": result}
+    
     user = get_default_user(db)
     temp_path = None
     original_temp_path = None
@@ -1245,6 +1266,7 @@ async def analyze_file_endpoint(
         filename = file.filename or "unnamed"
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else "txt"
         
+        _update_progress(5, "读取文件中...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
             content_bytes = await file.read()
             tmp.write(content_bytes)
@@ -1259,6 +1281,7 @@ async def analyze_file_endpoint(
         else:
             output_filename = filename
 
+        _update_progress(10, "解析文本内容...")
         if ext in ['txt', 'md', 'markdown']:
             content = _read_file_safe(temp_path)
         elif ext == 'docx':
@@ -1269,9 +1292,9 @@ async def analyze_file_endpoint(
         if content is None or content.strip() == "":
             raise HTTPException(status_code=400, detail="无法提取文本内容")
 
+        _update_progress(15, "加载润色规则...")
         skill_rules = _load_skill_rules(3, db)
         
-        # 构建完整润色指南：写作风格指南 + 句式文件 + 额外要求
         sentence_guide = _build_document_polish_guide(
             db,
             sentence_file_id=sentence_file_id,
@@ -1291,10 +1314,9 @@ async def analyze_file_endpoint(
                 term_file_name = term_file.name
                 terminology = _read_file_safe(term_file.file_path)
 
-        # 术语优先级：文件术语 > 数据库术语
         db_terms = None if terminology else _load_terms_from_db(db)
 
-        # === AI 润色：将句式清单注入 AI prompt ===
+        _update_progress(20, "AI 智能润色中...")
         ai_polished = content
         ai_changes = []
         try:
@@ -1309,11 +1331,9 @@ async def analyze_file_endpoint(
                 }]
         except Exception as e:
             print(f"AI 润色失败(继续使用规则润色): {e}")
-        # === AI 润色结束 ===
-        
+
+        _update_progress(50, "应用修订标记...")
         if is_docx:
-            # 在原始 DOCX 上直接应用 AI + 规则润色（保留排版）
-            # AI 输出可能含空行，过滤空白行以保证段落映射准确
             ai_lines = [l for l in ai_polished.split('\n') if l.strip()] if ai_polished != content else None
             _, date_str = _get_date_subfolder_id(db, None, user.id)
             date_dir = os.path.join(UPLOAD_DIR, date_str)
@@ -1323,6 +1343,7 @@ async def analyze_file_endpoint(
             unique_filename = f"【修订标记版】{filename}"
             saved_file_path = os.path.join(date_dir, unique_filename)
             
+            _update_progress(60, "生成修订版 DOCX...")
             changes = _polish_docx_with_comments(
                 temp_path, saved_file_path, skill_rules, db,
                 sentence_guide, terminology, requirements,
@@ -1332,10 +1353,10 @@ async def analyze_file_endpoint(
             
             from docx import Document
             polished_doc = Document(saved_file_path)
-            # 修订标记版保持原文+批注，此处返回 AI 润色后的文本作为预览
             preview_text = ai_polished if ai_polished != content else '\n'.join([p.text for p in polished_doc.paragraphs])
             polished_text = preview_text
             
+            _update_progress(80, "生成润色报告...")
             report_filename = f"【润色报告】{filename.rsplit('.', 1)[0]}.docx"
             report_path = os.path.join(date_dir, report_filename)
             _generate_polish_report(
@@ -1345,6 +1366,7 @@ async def analyze_file_endpoint(
                 requirements
             )
             
+            _update_progress(90, "保存到知识库...")
             db_doc = create_polished_document(
                 db=db,
                 name=f"【修订标记版】{filename}",
@@ -1360,17 +1382,19 @@ async def analyze_file_endpoint(
                 created_by=user.id
             )
             
-            return {
+            result_data = {
+                "task_id": task_id,
                 "id": db_doc.id,
                 "original": content,
                 "polished": polished_text,
                 "changes": changes,
                 "report_file": report_filename
             }
+            _finish_task(result_data)
+            return result_data
         else:    
-            # 在 AI 润色后的文本上执行规则润色
+            _update_progress(70, "规则润色中...")
             polished_text, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology, requirements, db_terminology=db_terms)
-            # 合并 AI 变更与规则变更
             if ai_changes:
                 for ac in ai_changes:
                     if isinstance(ac, dict):
@@ -1381,6 +1405,7 @@ async def analyze_file_endpoint(
                             type="ai"
                         ))
             
+            _update_progress(90, "保存结果...")
             if not os.path.exists(UPLOAD_DIR):
                 os.makedirs(UPLOAD_DIR)
             
@@ -1403,16 +1428,21 @@ async def analyze_file_endpoint(
                 created_by=user.id
             )
             
-            return {
+            result_data = {
+                "task_id": task_id,
                 "id": db_doc.id,
                 "original": content,
                 "polished": polished_text,
                 "changes": changes
             }
+            _finish_task(result_data)
+            return result_data
 
     except HTTPException:
+        _finish_task(error="请求参数错误")
         raise
     except Exception as e:
+        _finish_task(error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -1425,6 +1455,16 @@ async def analyze_file_endpoint(
                 os.remove(original_temp_path)
             except:
                 pass
+
+
+@router.get("/progress/{task_id}")
+async def get_polish_progress(task_id: str):
+    """查询润色任务进度"""
+    with _polish_tasks_lock:
+        task = _polish_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task
 
 
 
