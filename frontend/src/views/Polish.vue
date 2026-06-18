@@ -54,16 +54,6 @@
         </div>
         <el-progress :percentage="polishProgress" :stroke-width="8" :show-text="false" />
       </div>
-
-      <div v-if="docResult" class="panel" style="padding:16px 20px">
-        <div class="panel-header" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <el-tag type="success" size="small">润色完成</el-tag>
-          <span style="color:#6b7280;font-size:13px">修改 {{ docResult.changes }} 处</span>
-          <div style="flex:1"></div>
-          <el-button size="small" type="primary" @click="downloadPolishedDoc">下载润色文件</el-button>
-          <el-button size="small" @click="downloadReport" :disabled="!docResult.reportFile">下载润色报告</el-button>
-        </div>
-      </div>
     </div>
 
     <div v-if="currentView === 'text'">
