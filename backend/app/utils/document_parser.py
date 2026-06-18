@@ -4,19 +4,7 @@ import xml.etree.ElementTree as ET
 from docx import Document as DocxDocument
 from PyPDF2 import PdfReader
 import markdown
-
-
-def _read_file_safe(file_path: str) -> str:
-    """安全读取文件，自动尝试多种编码"""
-    encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'latin-1']
-    for enc in encodings:
-        try:
-            with open(file_path, 'r', encoding=enc) as f:
-                return f.read()
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-        return f.read()
+from app.utils.file_utils import read_file_safe as _read_file_safe
 
 
 def parse_pdf(file_path):

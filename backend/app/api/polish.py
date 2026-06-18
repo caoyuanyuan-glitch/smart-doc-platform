@@ -4,10 +4,13 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from datetime import timedelta
+from difflib import SequenceMatcher
 import os
 import uuid
 import mimetypes
 import re
+import threading
+import datetime
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.polished_document import (
@@ -16,17 +19,32 @@ from app.crud.polished_document import (
 from app.api.auth import get_current_user, get_default_user
 from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
+from app.models.polish_feedback import PolishFeedback
+from app.utils.file_utils import read_file_safe as _read_file_safe
+from app.crud.term import bulk_create_terms
 
 router = APIRouter()
 
+# 润色任务进度追踪
+_polish_tasks: dict = {}  # {task_id: {"status", "progress", "message", "result"}}
+_polish_tasks_lock = threading.Lock()
+
+
+# ============================================================
+# 术语库加载 & 语言检测
+# ============================================================
 
 def _load_terms_from_db(db: Session) -> dict:
-    """从术语库表中加载所有术语，返回 {非标准用语: 标准用语} 映射"""
+    """从术语库表中加载所有术语，返回 {非标准用语: 标准用语} 映射（带缓存）。"""
+    if '__db_terms__' in _term_cache:
+        return dict(_term_cache['__db_terms__'])
+
     terms = db.query(Term).all()
     term_dict = {}
     for t in terms:
         if t.non_standard and t.standard and t.non_standard.strip() != t.standard.strip():
             term_dict[t.non_standard.strip()] = t.standard.strip()
+    _term_cache['__db_terms__'] = dict(term_dict)
     return term_dict
 
 
@@ -53,6 +71,17 @@ def _term_column_lang(header: str) -> str:
     return None
 
 
+def _parse_terminology(terminology_input: str) -> dict:
+    """统一术语解析入口：自动识别 Markdown 文本或 Excel 文件路径。"""
+    if not terminology_input:
+        return {}
+    # 如果是 .xlsx 文件路径
+    if terminology_input.lower().endswith('.xlsx'):
+        return _parse_terminology_xlsx(terminology_input)
+    # 否则作为 Markdown 文本解析
+    return _parse_terminology_md(terminology_input)
+
+
 def _parse_terminology_md(md_content: str) -> dict:
     """解析术语库 Markdown 文件，返回 {非标准: 标准} 映射。
 
@@ -60,11 +89,170 @@ def _parse_terminology_md(md_content: str) -> dict:
     - 简单格式：| 非标准 | 标准 |
     - 分语言格式：| 非标准(中) | 标准(中) | 非标准(英) | 标准(英) |
     - 带语言列：| 非标准 | 标准 | 语言 |
+    
+    兼容全角竖线 ｜ 和半角竖线 |。
     """
     term_dict = {}
     if not md_content:
         return term_dict
 
+    # 兼容全角竖线和全角横线
+    content = md_content
+    # 分隔符行全角转半角：｜---｜ → |---|
+    content = content.replace('\uff5c', '|')  # fullwidth vertical bar
+    content = content.replace('\u2502', '|')  # box drawing light vertical
+
+    lines = content.split('\n')
+    header = ''
+    col_langs = []
+    has_lang_col = False
+    lang_col_idx = -1
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # 捕获表头行（第一个含 | 且不含分隔符的行）
+        if not header and '|' in stripped and '---' not in stripped:
+            header = stripped
+            cells = [c.strip() for c in stripped.split('|') if c.strip()]
+            # 检查是否有"语言"列
+            for idx, cell in enumerate(cells):
+                if any(kw in cell.lower() for kw in ['语言', 'lang', 'language']):
+                    has_lang_col = True
+                    lang_col_idx = idx
+                col_langs.append(_term_column_lang(cell))
+            continue
+
+        if '|' not in stripped:
+            continue
+        if stripped.startswith('#'):
+            continue
+        if stripped.startswith('|---') or stripped.startswith('| :--') or stripped.startswith('|:--'):
+            continue
+        if stripped.startswith('|序号') or stripped.startswith('| 序号'):
+            continue
+
+        cells = [c.strip() for c in stripped.split('|') if c.strip()]
+        clean_cells = [c for c in cells if c.strip() and c.strip() != '---']
+        if len(clean_cells) < 2:
+            continue
+
+        # 模式 A：带语言列
+        if has_lang_col and lang_col_idx >= 0 and lang_col_idx < len(clean_cells):
+            lang_val = clean_cells[lang_col_idx].lower()
+            is_zh = any(kw in lang_val for kw in ['zh', '中', 'cn', 'chinese'])
+            is_en = any(kw in lang_val for kw in ['en', '英', 'english', 'eng'])
+            # 构建不包含语言列的数据列
+            data_cells = [c for i, c in enumerate(clean_cells) if i != lang_col_idx]
+            # 数据列两两配对
+            for i in range(0, len(data_cells) - 1, 2):
+                old_term = data_cells[i].strip().strip('!')
+                new_term = data_cells[i + 1].strip().strip('!')
+                if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                    # 根据语言列值分配语言标记
+                    lang_suffix = ''
+                    if is_zh:
+                        lang_suffix = '##zh'
+                    elif is_en:
+                        lang_suffix = '##en'
+                    key = f"{old_term}{lang_suffix}" if lang_suffix else old_term
+                    if key not in term_dict:
+                        term_dict[key] = new_term
+            continue
+
+        # 模式 B：无语言列，但有表头指示列语言
+        if col_langs and len(col_langs) == len(clean_cells):
+            for i in range(0, len(clean_cells) - 1, 2):
+                old_term = clean_cells[i].strip().strip('!')
+                new_term = clean_cells[i + 1].strip().strip('!')
+                if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                    lang = col_langs[i] or col_langs[i + 1] or ''
+                    lang_suffix = f'##{lang}' if lang else ''
+                    key = f"{old_term}{lang_suffix}" if lang_suffix else old_term
+                    if key not in term_dict:
+                        term_dict[key] = new_term
+            continue
+
+        # 模式 C：无语言信息，简单两列配对
+        for i in range(0, len(clean_cells) - 1, 2):
+            old_term = clean_cells[i].strip().strip('!')
+            new_term = clean_cells[i + 1].strip().strip('!')
+            if old_term and new_term and old_term != new_term and len(old_term) > 1:
+                if old_term not in term_dict:
+                    term_dict[old_term] = new_term
+
+    return term_dict
+
+
+def _parse_terminology_xlsx(file_path: str) -> dict:
+    """解析 Excel (.xlsx) 术语文件，返回 {非标准: 标准} 映射。
+    
+    支持两种格式：
+    - 替换表：| 非标准 | 标准 |   → 直接作为 old→new 映射
+    - 双语表：| zh-CN | en-US | → 仅提取中文列作为标准术语（不做替换，避免中文→英文错乱）
+    """
+    term_dict = {}
+    try:
+        import openpyxl
+    except ImportError:
+        return term_dict
+    
+    try:
+        wb = openpyxl.load_workbook(file_path, read_only=True)
+        ws = wb.active
+        
+        rows = list(ws.iter_rows(min_row=1, max_row=min(ws.max_row, 500), values_only=True))
+        if not rows:
+            wb.close()
+            return term_dict
+        
+        headers = [str(h).strip().lower() if h else '' for h in rows[0]]
+        is_replacement = any(kw in h for h in headers for kw in ['非标准', '旧', 'old', '非标', 'source'])
+        is_bilingual = any(kw in h for h in headers for kw in ['zh', 'cn', '中文', 'en', '英', 'us'])
+        
+        for row in rows[1:]:
+            cells = [str(c).strip() if c else '' for c in row]
+            cells = [c for c in cells if c]
+            if len(cells) < 2:
+                continue
+            
+            if is_replacement:
+                # 替换表：col1=非标准, col2=标准
+                old_term = cells[0]
+                new_term = cells[1]
+                if old_term and new_term and old_term != new_term and len(old_term) > 0:
+                    if old_term not in term_dict:
+                        term_dict[old_term] = new_term
+            elif is_bilingual:
+                # 双语表：col1=中文标准术语, col2=英文 —— 仅提取中文列，不做替换
+                # 将中文标准术语自身作为 key（标识已知标准术语，供 AI 参考）
+                std_cn = cells[0]
+                if std_cn and len(std_cn) > 0:
+                    term_dict[f"__std__{std_cn}"] = std_cn
+            else:
+                # 未知格式：假设 col1→col2 替换
+                old_term = cells[0]
+                new_term = cells[1]
+                if old_term and new_term and old_term != new_term and len(old_term) > 0:
+                    if old_term not in term_dict:
+                        term_dict[old_term] = new_term
+        
+        wb.close()
+        if is_bilingual and not is_replacement:
+            std_terms = [v for k, v in term_dict.items() if k.startswith('__std__')]
+            print(f"[TERM] Excel 双语对照表: 标准中文术语 {len(std_terms)} 条 ({', '.join(std_terms[:5])})")
+    except Exception as e:
+        print(f"[TERM] Excel 解析失败: {e}")
+    
+    return term_dict
+    term_dict = {}
+    if not md_content:
+        return term_dict
+
+    # 统一处理全角竖线
+    md_content = md_content.replace('\uFF5C', '|')
     lines = md_content.split('\n')
     header = ''
     col_langs = []
@@ -155,6 +343,9 @@ def _filter_terms_by_lang(term_dict: dict, target_lang: str) -> dict:
     """从带语言标记的术语字典中筛选出目标语言的术语。返回纯净的 {非标准: 标准}。"""
     filtered = {}
     for key, val in term_dict.items():
+        # 跳过 Excel 双语表的标准术语标记（__std__ 前缀）
+        if key.startswith('__std__'):
+            continue
         if '##zh' in key:
             if target_lang == 'zh':
                 clean_key = key.replace('##zh', '')
@@ -172,7 +363,7 @@ def _filter_terms_by_lang(term_dict: dict, target_lang: str) -> dict:
 def _resolve_terminology(db: Session, terminology_md: str = None, text: str = None) -> dict:
     """加载术语：文件术语优先，自动按文本语言过滤。返回纯净 {非标准: 标准}。"""
     if terminology_md:
-        parsed = _parse_terminology_md(terminology_md)
+        parsed = _parse_terminology(terminology_md)
         if parsed:
             # 自动检测语言并过滤
             if text:
@@ -189,18 +380,6 @@ SENTENCE_GUIDE_FOLDER_IDS = [3]
 DEFAULT_STYLE_GUIDE_ID = 1
 
 
-def _read_file_safe(file_path: str) -> str:
-    """安全读取文件，自动尝试多种编码：UTF-8 -> GBK -> GB2312 -> GB18030 -> latin-1"""
-    encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'latin-1']
-    for enc in encodings:
-        try:
-            with open(file_path, 'r', encoding=enc) as f:
-                return f.read()
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    # 最终兜底
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-        return f.read()
 
 
 def _load_file_content(db: Session, file_id: int) -> str:
@@ -248,40 +427,64 @@ def _build_document_polish_guide(
     return "\n\n".join(parts) if parts else None
 
 
+# 句式清单缓存
+_sentence_guide_cache: dict = {}
+_term_cache: dict = {}
+
+
+def _invalidate_sentence_guide_cache(style_guide_id: Optional[int] = None):
+    """句式文件更新后清理相关缓存，保证新内容立即生效。"""
+    _sentence_guide_cache.pop('__all__', None)
+    if style_guide_id is not None:
+        _sentence_guide_cache.pop(style_guide_id, None)
+
+
+def _normalize_sentence_for_match(text: str) -> str:
+    """去掉空白和常见标点，用于轻量句式相似度匹配。"""
+    if not text:
+        return ""
+    return re.sub(r'[\s，。！？；：,.!?;:""''()（）【】\[\]<>《》-]+', '', text)
+
 def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
-    """加载句式清单内容。
+    """加载句式清单内容（带缓存）。
 
     若指定了 style_guide_id，仅加载该文件；
     否则递归加载句式清单文件夹下所有 .md 文件。
     """
+    cache_key = style_guide_id or '__all__'
+    if cache_key in _sentence_guide_cache:
+        return _sentence_guide_cache[cache_key]
+
     if style_guide_id:
         style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
         if style_file and style_file.file_path and os.path.exists(style_file.file_path):
             try:
                 content = _read_file_safe(style_file.file_path)
                 if content.strip():
+                    _sentence_guide_cache[cache_key] = content
                     return content
             except Exception as e:
                 print(f"加载句式文件失败 (id={style_guide_id}): {e}")
+        _sentence_guide_cache[cache_key] = None
         return None
 
     # 未指定文件，递归加载句式清单文件夹下所有 .md
     guides = []
+    # 一次性收集所有相关文件夹 ID 及其后代
+    all_folder_ids = set(SENTENCE_GUIDE_FOLDER_IDS)
+    stack = list(SENTENCE_GUIDE_FOLDER_IDS)
+    while stack:
+        fid = stack.pop()
+        subfolders = db.query(Folder).filter(Folder.parent_id == fid).all()
+        for sf in subfolders:
+            all_folder_ids.add(sf.id)
+            stack.append(sf.id)
+
     files = db.query(KnowledgeFile).filter(
-        KnowledgeFile.folder_id.in_(SENTENCE_GUIDE_FOLDER_IDS),
+        KnowledgeFile.folder_id.in_(all_folder_ids),
         KnowledgeFile.file_type == "md"
     ).all()
-    subfolder_ids = list(SENTENCE_GUIDE_FOLDER_IDS)
-    while subfolder_ids:
-        fid = subfolder_ids.pop()
-        folders = db.query(Folder).filter(Folder.parent_id == fid).all()
-        for sf in folders:
-            subfolder_ids.append(sf.id)
-            sf_files = db.query(KnowledgeFile).filter(
-                KnowledgeFile.folder_id == sf.id,
-                KnowledgeFile.file_type == "md"
-            ).all()
-            files.extend(sf_files)
+
     for kf in files:
         if kf.file_path and os.path.exists(kf.file_path):
             try:
@@ -290,16 +493,15 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
                     guides.append(content)
             except Exception:
                 pass
-    return "\n\n".join(guides) if guides else None
+    result = "\n\n".join(guides) if guides else None
+    _sentence_guide_cache[cache_key] = result
+    return result
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "polished")
-POLISHED_FOLDER_NAME = "已润色文档"
 
-
-def _get_or_create_polished_folder(db, user_id: int) -> tuple:
-    """已合并至物理目录创建逻辑，不再使用知识库文件夹。"""
-    return None, None
-
+# ============================================================
+# 模型定义
+# ============================================================
 
 def _get_date_subfolder_id(db, folder_id: int, user_id: int) -> tuple:
     """返回物理目录路径和 None 作为 folder_id"""
@@ -321,6 +523,16 @@ class SkillPolishInput(BaseModel):
     terminology_id: Optional[int] = None
 
 
+class FeedbackInput(BaseModel):
+    original_text: str
+    polished_text: str
+    accuracy: int              # 0-100
+    corrections: str = ""       # 用户修正内容，每行一条 "非标准 → 标准"
+    target: str = "terminology" # "terminology" 或 "sentence_guide"
+    terminology_file_id: Optional[int] = None
+    sentence_file_id: Optional[int] = None
+
+
 class PolishRuleMatch(BaseModel):
     rule_name: str
     before: str
@@ -328,45 +540,10 @@ class PolishRuleMatch(BaseModel):
     type: str
 
 
-def _apply_style_rules(text: str) -> tuple[str, list]:
-    """根据写作风格指南应用基础润色规则"""
-    changes = []
-    
-    # 规则1: 中文标点统一
-    text = re.sub(r'(?<=[\u4e00-\u9fff])[,;:!?](?!\s)', lambda m: {
-        ',': '，',
-        ';': '；',
-        ':': '：',
-        '!': '！',
-        '?': '？'
-    }.get(m.group(), m.group()), text)
-    
-    # 规则2: UI控件格式化为【】
-    text = re.sub(r'["""](.*?)["""]', r'【\1】', text)
-    
-    # 规则3: 数字与单位间加空格
-    text = re.sub(r'(\d)([a-zA-Z℃%])', r'\1 \2', text)
-    
-    # 规则4: 中英文间加空格（中文在英文前）
-    text = re.sub(r'([\u4e00-\u9fff])([A-Za-z])', r'\1 \2', text)
-    
-    # 规则5: 中英文间加空格（英文在中文前）
-    text = re.sub(r'([A-Za-z])([\u4e00-\u9fff])', r'\1 \2', text)
-    
-    # 规则6: 去除多余空格
-    text = re.sub(r'[ \t]{2,}', ' ', text)
-    
-    # 收集修改记录
-    if text != text:
-        changes.append({
-            "rule_name": "标点符号规范化",
-            "before": "...",
-            "after": "...",
-            "type": "format"
-        })
-    
-    return text, changes
 
+# ============================================================
+# 规则引擎：skill 加载、句式风格规则
+# ============================================================
 
 def _load_skill_rules(skill_id: int, db: Session) -> dict:
     """从知识库加载skill规则"""
@@ -384,6 +561,28 @@ def _load_skill_rules(skill_id: int, db: Session) -> dict:
             "格式规范": True
         }
     }
+
+
+def _apply_term_only(text: str, term_dict: dict) -> tuple[str, list[PolishRuleMatch]]:
+    """仅按术语库逐行替换（不触发样式规则），用于 AI 已润色后的术语修正。"""
+    if not term_dict:
+        return text, []
+    changes = []
+    lines = text.split('\n')
+    result_lines = []
+    for line in lines:
+        new_line = line
+        for old_term, new_term in term_dict.items():
+            if old_term in new_line:
+                new_line = new_line.replace(old_term, new_term)
+                changes.append(PolishRuleMatch(
+                    rule_name="术语替换",
+                    before=old_term,
+                    after=new_term,
+                    type="terminology"
+                ))
+        result_lines.append(new_line)
+    return '\n'.join(result_lines), changes
 
 
 def _apply_skill_polish(
@@ -437,7 +636,7 @@ def _apply_skill_polish(
     # 先解析文件中的术语替换（支持中英文多列表，自动语言过滤）
     if terminology:
         try:
-            parsed = _parse_terminology_md(terminology)
+            parsed = _parse_terminology(terminology)
             if parsed:
                 lang = _detect_language(text)
                 term_dict = _filter_terms_by_lang(parsed, lang)
@@ -639,6 +838,20 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                         "term_map": term_map,
                         "fix": "统一术语"
                     })
+
+            elif any(kw in lower_header for kw in ['用户反馈修正', '推荐句式', '优先句式', '反馈句式']):
+                preferred_sentences = []
+                for item in items:
+                    sentence = item.strip().strip('`').strip()
+                    if sentence:
+                        preferred_sentences.append(sentence)
+                if preferred_sentences:
+                    rules.append({
+                        "type": "preferred_sentences",
+                        "name": header,
+                        "sentences": preferred_sentences,
+                        "fix": "优先采用用户确认过的句式"
+                    })
     
     # 如果没有从文件中解析出规则，使用默认规则
     if not rules:
@@ -724,6 +937,41 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
                             after=result[:50],
                             type="style"
                         ))
+
+        elif rule["type"] == "preferred_sentences":
+            normalized_result = _normalize_sentence_for_match(result)
+            if not normalized_result:
+                continue
+            best_sentence = None
+            best_score = 0.0
+            for sentence in rule.get("sentences", []):
+                normalized_sentence = _normalize_sentence_for_match(sentence)
+                if not normalized_sentence:
+                    continue
+                if normalized_result == normalized_sentence:
+                    best_sentence = sentence
+                    best_score = 1.0
+                    break
+                contains_match = (
+                    normalized_result in normalized_sentence or
+                    normalized_sentence in normalized_result
+                )
+                score = SequenceMatcher(None, normalized_result, normalized_sentence).ratio()
+                if contains_match:
+                    score = max(score, 0.9)
+                if score > best_score:
+                    best_score = score
+                    best_sentence = sentence
+
+            if best_sentence and best_score >= 0.72 and result.strip() != best_sentence.strip():
+                original = result
+                result = best_sentence.strip()
+                changes.append(PolishRuleMatch(
+                    rule_name=rule["name"],
+                    before=original[:50],
+                    after=result[:50],
+                    type="style"
+                ))
         
         elif rule["type"] == "passive_voice":
             for pattern, issue in rule["patterns"]:
@@ -800,41 +1048,63 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
 async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depends(get_db)):
     """基础文本润色（自动加载句式清单和术语库）"""
     import os
+    terminology_md = None
+    if input_data.terminology_id:
+        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
+        if term_file and term_file.file_path and os.path.exists(term_file.file_path):
+            if term_file.file_path.lower().endswith('.xlsx'):
+                terminology_md = term_file.file_path
+            else:
+                terminology_md = _read_file_safe(term_file.file_path)
+    sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
     try:
         from app.utils.ai_client import ai_client
-        # 术语优先级：文件 > 数据库
-        terminology_md = None
-        if input_data.terminology_id:
-            term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
-            if term_file and term_file.file_path and os.path.exists(term_file.file_path):
-                terminology_md = _read_file_safe(term_file.file_path)
         resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
-        sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
-        result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
-        changes = result.get("changes") or []
-        if not changes:
-            for key in ("original", "polished"):
-                if result.get(key) and result.get("polished") != result.get("original"):
-                    changes.append({
-                        "line": 1,
-                        "original": result.get("original", "")[:200],
-                        "polished": result.get("polished", "")[:200],
-                        "type": "ai"
-                    })
-                    break
+        result = ai_client.polish_text(
+            input_data.text,
+            style_guide=sentence_guide,
+            terminology=resolved_terminology if resolved_terminology else None
+        )
+        ai_polished = result.get("polished", input_data.text)
+        db_terms_for_rule = None if terminology_md else _load_terms_from_db(db)
+        polished, rule_changes = _apply_skill_polish(
+            ai_polished,
+            {},
+            db,
+            sentence_guide,
+            terminology_md,
+            None,
+            db_terminology=db_terms_for_rule if db_terms_for_rule else None
+        )
+        changes = []
+        if ai_polished != input_data.text:
+            changes.append({
+                "line": 1,
+                "original": input_data.text[:200],
+                "polished": ai_polished[:200],
+                "type": "ai"
+            })
+        changes.extend([c.dict() if hasattr(c, 'dict') else c for c in rule_changes])
         return {
             "original": result.get("original", input_data.text),
-            "polished": result.get("polished", input_data.text),
+            "polished": polished,
             "changes": changes
         }
     except Exception:
-        db_terminology = _load_terms_from_db(db)
-        sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
-        polished, changes = _apply_skill_polish(input_data.text, {}, None, sentence_guide, None, None, db_terminology=db_terminology if db_terminology else None)
+        db_terminology = None if terminology_md else _load_terms_from_db(db)
+        polished, changes = _apply_skill_polish(
+            input_data.text,
+            {},
+            None,
+            sentence_guide,
+            terminology_md,
+            None,
+            db_terminology=db_terminology if db_terminology else None
+        )
         return {
             "original": input_data.text,
             "polished": polished,
-            "changes": changes
+            "changes": [c.dict() if hasattr(c, 'dict') else c for c in changes]
         }
 
 
@@ -897,6 +1167,11 @@ async def polish_with_skill(
     }
 
 
+
+# ============================================================
+# DOCX 润色与批注注入
+# ============================================================
+
 def _polish_docx_with_comments(
     docx_path: str,
     output_path: str,
@@ -927,26 +1202,22 @@ def _polish_docx_with_comments(
     term_dict = {}
     if terminology:
         try:
-            parsed = _parse_terminology_md(terminology)
+            parsed = _parse_terminology(terminology)
             if parsed:
                 all_text = '\n'.join([p.text for p in doc.paragraphs if p.text and p.text.strip()])
                 lang = _detect_language(all_text)
                 term_dict = _filter_terms_by_lang(parsed, lang)
         except Exception:
             pass
-    # 合并数据库术语库（优先级高于文件术语）
     if db_terminology:
         term_dict.update(db_terminology)
     
     author = "技术文档智能润色助手"
-    initial = "AI"
-    
-    comment_id = 0
-    comments_data = []
+    revision_id = 0
+    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     
     toc_prefixes = ("TOC", "Table of Contents", "目录")
     
-    # 构建非空段落与 AI 行的平行映射
     non_empty_paras = [(idx, para) for idx, para in enumerate(doc.paragraphs) 
                        if para.text and para.text.strip()]
     non_empty_ai_lines = [l.strip() for l in ai_lines if l.strip()] if ai_lines else []
@@ -954,27 +1225,21 @@ def _polish_docx_with_comments(
     for i, (para_idx, para) in enumerate(non_empty_paras):
         original_text = para.text.strip()
         
-        style_name = para.style.name if para.style else ""
+        style_name = (para.style.name or "").lower()
         
-        is_toc = False
-        for prefix in toc_prefixes:
-            if prefix in style_name or "toc" in style_name.lower():
-                is_toc = True
-                break
+        # 仅跳过确认为目录的段落（样式名以 "toc" 开头或为 "toc heading"）
+        is_toc = style_name.startswith('toc') or style_name == 'table of contents'
         
         if is_toc:
             continue
         
-        # 检测是否为标题、表标题、图标题
         title_keywords = ['heading', 'title', '目录', '标题', 'toc', '表', '图', 'table', 'figure', 'caption']
         is_title = any(kw in (style_name or "").lower() for kw in title_keywords) if style_name else False
-        # 内容也检测：以"表"或"图"开头 + 数字的视为图表标题
         if not is_title and original_text.strip():
-            first_char = original_text.strip()[:2]
             if re.match(r'^(表|图|Table|Figure)\s*\d', original_text.strip()):
                 is_title = True
         
-        # Step 1: AI 句式匹配润色
+        # Step 1: AI polish
         intermediate_text = original_text
         para_ai_change = None
         if i < len(non_empty_ai_lines):
@@ -982,293 +1247,136 @@ def _polish_docx_with_comments(
             if ai_line and ai_line != original_text:
                 intermediate_text = ai_line
                 para_ai_change = PolishRuleMatch(
-                    rule_name="ai",
-                    before=original_text[:100],
-                    after=ai_line[:100],
-                    type="ai"
+                    rule_name="ai", before=original_text[:100], after=ai_line[:100], type="ai"
                 )
         
-        # Step 2: 规则润色——AI 已有建议时跳过规则，仅保留 AI；无 AI 时执行规则
+        # Step 2: Rule polish + 术语替换
         if para_ai_change:
             polished_text = intermediate_text
             para_changes = [para_ai_change]
         else:
             polished_text, para_changes = _apply_skill_polish(
                 intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,
-                is_title=is_title,
-                db_terminology=db_terminology
+                is_title=is_title, db_terminology=db_terminology
             )
+        
+        # 最终术语替换（无论 AI 是否已改，确保术语库强制生效）
+        if term_dict:
+            polished_text, term_changes = _apply_term_only(polished_text, term_dict)
+            if term_changes:
+                para_changes.extend(term_changes)
         
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
             all_changes.extend(para_changes)
-            comment_id += 1
-
-            # ---- 1. 正文直接替换为润色后的文字 ----
-            # 清除段落原有 runs，替换为新文本（保留首 run 样式）
-            para_runs = para.runs
-            if para_runs:
-                preserved_style = None
-                for r in para_runs:
-                    if r.text and r.text.strip():
-                        preserved_style = r
-                        break
-                for r in para_runs:
-                    r.text = ''
-                para.clear()
-                new_run = para.add_run(polished_text)
-                if preserved_style and preserved_style.font:
-                    try:
-                        new_run.font.name = preserved_style.font.name
-                        new_run.font.size = preserved_style.font.size
-                        new_run.font.bold = preserved_style.font.bold
-                        new_run.font.italic = preserved_style.font.italic
-                        new_run.font.color.rgb = preserved_style.font.color.rgb
-                    except Exception:
-                        pass
-            else:
-                para.text = polished_text
-
-            # ---- 2. 标注框写入原文及变更详情 ----
-            change_lines = [f"原文：{original_text}"]
-
-            if para_ai_change and intermediate_text != original_text:
-                change_lines.append(f"AI句式匹配：{intermediate_text[:100]}")
-
-            rule_lines = []
-            for pc in para_changes:
-                if isinstance(pc, PolishRuleMatch) and pc.type != "ai":
-                    rule_lines.append(f"[{pc.rule_name}] {pc.before} → {pc.after}")
-            if rule_lines:
-                change_lines.append("规则变更：" + "；".join(rule_lines[:5]))
-
-            comment_text = "\n".join(change_lines)
-            
-            comments_data.append({
-                "id": comment_id,
-                "author": author,
-                "initials": initial,
-                "text": comment_text
-            })
-            
             p_element = para._p
-            w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
             
-            # Find position to insert comment markers
-            # Insert commentRangeStart at the beginning of the paragraph's first run content
-            first_child = None
-            for child in p_element:
+            # ---- 1. 将原文所有 run 标记为删除（保留各自原有格式） ----
+            revision_id += 1
+            rid_del = str(revision_id)
+            now = '2026-06-18T00:00:00Z'
+            
+            for child in list(p_element):
                 tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                if tag in ('r', 'hyperlink'):
-                    first_child = child
-                    break
+                if tag != 'r':
+                    continue
+                rPr = child.find(f'{{{w_ns}}}rPr')
+                if rPr is None:
+                    rPr = etree.SubElement(child, f'{{{w_ns}}}rPr')
+                    child.insert(0, rPr)
+                del_el = etree.SubElement(rPr, f'{{{w_ns}}}del')
+                del_el.set(f'{{{w_ns}}}id', rid_del)
+                del_el.set(f'{{{w_ns}}}author', author)
+                del_el.set(f'{{{w_ns}}}date', now)
+                # 把 <w:t> 改名为 <w:delText>
+                for t_elem in child.findall(f'{{{w_ns}}}t'):
+                    t_elem.tag = f'{{{w_ns}}}delText'
             
-            # If no runs found, append to end
-            if first_child is None:
-                # Add comment markers at the end
-                comment_start = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeStart'
-                )
-                comment_start.set(f'{{{w_ns}}}id', str(comment_id))
-                
-                comment_end = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeEnd'
-                )
-                comment_end.set(f'{{{w_ns}}}id', str(comment_id))
-                
-                comment_ref_r = etree.SubElement(
-                    p_element, f'{{{w_ns}}}r'
-                )
-                comment_ref_rpr = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}rPr'
-                )
-                comment_ref_style = etree.SubElement(
-                    comment_ref_rpr, f'{{{w_ns}}}rStyle'
-                )
-                comment_ref_style.set(f'{{{w_ns}}}val', 'CommentReference')
-                
-                comment_ref = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}commentReference'
-                )
-                comment_ref.set(f'{{{w_ns}}}id', str(comment_id))
-            else:
-                # Insert commentRangeStart before the first run
-                comment_start = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeStart'
-                )
-                comment_start.set(f'{{{w_ns}}}id', str(comment_id))
-                p_element.remove(comment_start)
-                p_element.insert(p_element.index(first_child), comment_start)
-                
-                # Insert commentRangeEnd after the last run with text
-                last_text_run = None
-                for child in reversed(list(p_element)):
-                    tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                    if tag == 'r':
-                        t_elem = child.find(f'{{{w_ns}}}t')
-                        if t_elem is not None and t_elem.text and t_elem.text.strip():
-                            last_text_run = child
-                            break
-                
-                if last_text_run is None:
-                    last_text_run = first_child
-                
-                insert_idx = p_element.index(last_text_run) + 1
-                
-                comment_end = etree.SubElement(
-                    p_element, f'{{{w_ns}}}commentRangeEnd'
-                )
-                comment_end.set(f'{{{w_ns}}}id', str(comment_id))
-                p_element.remove(comment_end)
-                p_element.insert(insert_idx, comment_end)
-                
-                # Insert commentReference after commentRangeEnd
-                comment_ref_r = etree.SubElement(
-                    p_element, f'{{{w_ns}}}r'
-                )
-                comment_ref_rpr = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}rPr'
-                )
-                comment_ref_style = etree.SubElement(
-                    comment_ref_rpr, f'{{{w_ns}}}rStyle'
-                )
-                comment_ref_style.set(f'{{{w_ns}}}val', 'CommentReference')
-                
-                comment_ref = etree.SubElement(
-                    comment_ref_r, f'{{{w_ns}}}commentReference'
-                )
-                comment_ref.set(f'{{{w_ns}}}id', str(comment_id))
-                p_element.remove(comment_ref_r)
-                p_element.insert(insert_idx + 1, comment_ref_r)
-            
-            # 批注已添加，不修改正文（保留原始排版）
+            # ---- 2. 追加润色后文字 run（标记为插入，沿用首个原 run 字体） ----
+            revision_id += 1
+            rid_ins = str(revision_id)
+            first_run = para.runs[0] if para.runs else None
+            new_run = para.add_run(polished_text)
+            if first_run and first_run.font:
+                try:
+                    new_run.font.name = first_run.font.name
+                    new_run.font.size = first_run.font.size
+                    new_run.font.bold = first_run.font.bold
+                    new_run.font.italic = first_run.font.italic
+                    new_run.font.color.rgb = first_run.font.color.rgb
+                except Exception:
+                    pass
+            # 在 XML 层给新 run 加上 <w:ins>
+            new_r_element = new_run._r
+            new_rPr = new_r_element.find(f'{{{w_ns}}}rPr')
+            if new_rPr is None:
+                new_rPr = etree.SubElement(new_r_element, f'{{{w_ns}}}rPr')
+                new_r_element.insert(0, new_rPr)
+            ins_el = etree.SubElement(new_rPr, f'{{{w_ns}}}ins')
+            ins_el.set(f'{{{w_ns}}}id', rid_ins)
+            ins_el.set(f'{{{w_ns}}}author', author)
+            ins_el.set(f'{{{w_ns}}}date', now)
     
     doc.save(output_path)
-    
-    if comments_data:
-        _inject_comments_to_docx(output_path, comments_data)
+    _inject_revision_settings(output_path)
     
     return all_changes
 
 
-def _inject_comments_to_docx(docx_path: str, comments_data: list):
-    """向 DOCX 文件中注入 comments.xml 和 relationships"""
+def _inject_revision_settings(docx_path: str):
+    """向 DOCX 的 settings.xml 注入 <w:trackRevisions/>，使文档打开即显示修订标记。
+    
+    直接在 ZIP 内替换 word/settings.xml，保留所有其他 ZIP 条目的原始结构。
+    """
     import zipfile
     import tempfile
     import os as os_mod
     from lxml import etree
-    from shutil import move
-    from copy import deepcopy
     
-    nsmap = {
-        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-    }
-    
-    comments_xml = etree.Element(
-        '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}comments',
-        nsmap={'w': nsmap['w']}
-    )
-    
-    for cdata in comments_data:
-        comment_el = etree.SubElement(
-            comments_xml, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}comment'
-        )
-        comment_el.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id', str(cdata['id']))
-        comment_el.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author', cdata['author'])
-        comment_el.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}initials', cdata['initials'])
-        
-        p_el = etree.SubElement(
-            comment_el, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'
-        )
-        r_el = etree.SubElement(
-            p_el, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r'
-        )
-        t_el = etree.SubElement(
-            r_el, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'
-        )
-        t_el.text = cdata['text']
-    
-    comments_bytes = etree.tostring(
-        comments_xml, xml_declaration=True, encoding='UTF-8', standalone=True
-    )
-    
-    temp_dir = tempfile.mkdtemp()
-    temp_output = os_mod.path.join(temp_dir, 'output.docx')
+    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    temp_path = docx_path + '.tmp'
     
     try:
-        with zipfile.ZipFile(docx_path, 'r') as zin:
-            zin.extractall(temp_dir)
-        
-        word_dir = os_mod.path.join(temp_dir, 'word')
-        
-        with open(os_mod.path.join(word_dir, 'comments.xml'), 'wb') as f:
-            f.write(comments_bytes)
-        
-        rels_path = os_mod.path.join(word_dir, '_rels', 'document.xml.rels')
-        
-        if os_mod.path.exists(rels_path):
-            rels_tree = etree.parse(rels_path)
-            root = rels_tree.getroot()
+        with zipfile.ZipFile(docx_path, 'r') as zin, \
+             zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
             
-            existing_ids = set()
-            for rel in root.findall('.//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
-                existing_ids.add(rel.get('Id', ''))
+            settings_xml = None
+            settings_found = False
             
-            new_id_num = 1
-            while f'rId{new_id_num}' in existing_ids:
-                new_id_num += 1
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == 'word/settings.xml':
+                    settings_found = True
+                    root = etree.fromstring(data)
+                    existing = root.findall(f'{{{w_ns}}}trackRevisions')
+                    if not existing:
+                        etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
+                    # 写入时不添加 standalone
+                    data = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
+                elif item.filename == 'word/settings.xml':
+                    pass  # already handled
+                
+                zout.writestr(item, data)
             
-            r_id = f'rId{new_id_num}'
-            
-            new_rel = etree.SubElement(
-                root, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'
-            )
-            new_rel.set('Id', r_id)
-            new_rel.set('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments')
-            new_rel.set('Target', 'comments.xml')
-            
-            with open(rels_path, 'wb') as f:
-                f.write(etree.tostring(rels_tree, xml_declaration=True, encoding='UTF-8', standalone=True))
+            # 如果原文档没有 settings.xml，创建并添加
+            if not settings_found:
+                root = etree.Element(f'{{{w_ns}}}settings')
+                etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
+                data = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
+                zi = zipfile.ZipInfo('word/settings.xml')
+                zout.writestr(zi, data)
         
-        doc_path = os_mod.path.join(word_dir, 'document.xml')
-        if os_mod.path.exists(doc_path):
-            doc_tree = etree.parse(doc_path)
-            doc_root = doc_tree.getroot()
-            
-            body = doc_root.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body')
-            
-            comments_ref_el = etree.SubElement(
-                body, '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}comments'
-            )
-            comments_ref_el.set(
-                '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', r_id
-            )
-            
-            with open(doc_path, 'wb') as f:
-                f.write(etree.tostring(doc_tree, xml_declaration=True, encoding='UTF-8', standalone=True))
-        
-        with zipfile.ZipFile(temp_output, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for dirpath, dirnames, filenames in os_mod.walk(temp_dir):
-                for fname in filenames:
-                    full_path = os_mod.path.join(dirpath, fname)
-                    arcname = os_mod.path.relpath(full_path, temp_dir)
-                    zout.write(full_path, arcname)
-        
-        if os_mod.path.exists(docx_path):
-            os_mod.remove(docx_path)
-        move(temp_output, docx_path)
-        
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Failed to inject comments to DOCX: {e}", exc_info=True)
-        raise
+        # 替换原文件
+        os_mod.replace(temp_path, docx_path)
     finally:
-        import shutil
-        try:
-            shutil.rmtree(temp_dir)
-        except:
-            pass
+        if os_mod.path.exists(temp_path):
+            os_mod.remove(temp_path)
 
+
+
+
+# ============================================================
+# 润色报告生成
+# ============================================================
 
 def _generate_polish_report(
     report_path: str,
@@ -1437,6 +1545,22 @@ async def analyze_file_endpoint(
     import tempfile
     import docx2txt
     
+    task_id = str(uuid.uuid4())
+    with _polish_tasks_lock:
+        _polish_tasks[task_id] = {"status": "running", "progress": 0, "message": "开始润色..."}
+    
+    def _update_progress(pct: int, msg: str):
+        with _polish_tasks_lock:
+            if task_id in _polish_tasks:
+                _polish_tasks[task_id] = {"status": "running", "progress": pct, "message": msg}
+    
+    def _finish_task(result=None, error=None):
+        with _polish_tasks_lock:
+            if error:
+                _polish_tasks[task_id] = {"status": "error", "progress": 100, "message": str(error)}
+            else:
+                _polish_tasks[task_id] = {"status": "done", "progress": 100, "message": "润色完成", "result": result}
+    
     user = get_default_user(db)
     temp_path = None
     original_temp_path = None
@@ -1444,6 +1568,7 @@ async def analyze_file_endpoint(
         filename = file.filename or "unnamed"
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else "txt"
         
+        _update_progress(5, "读取文件中...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
             content_bytes = await file.read()
             tmp.write(content_bytes)
@@ -1458,6 +1583,7 @@ async def analyze_file_endpoint(
         else:
             output_filename = filename
 
+        _update_progress(10, "解析文本内容...")
         if ext in ['txt', 'md', 'markdown']:
             content = _read_file_safe(temp_path)
         elif ext == 'docx':
@@ -1468,9 +1594,9 @@ async def analyze_file_endpoint(
         if content is None or content.strip() == "":
             raise HTTPException(status_code=400, detail="无法提取文本内容")
 
+        _update_progress(15, "加载润色规则...")
         skill_rules = _load_skill_rules(3, db)
         
-        # 构建完整润色指南：写作风格指南 + 句式文件 + 额外要求
         sentence_guide = _build_document_polish_guide(
             db,
             sentence_file_id=sentence_file_id,
@@ -1488,12 +1614,17 @@ async def analyze_file_endpoint(
             term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == terminology_file_id).first()
             if term_file:
                 term_file_name = term_file.name
-                terminology = _read_file_safe(term_file.file_path)
+                # Excel 文件直接用路径，Markdown 读文本内容
+                if term_file.file_path and term_file.file_path.lower().endswith('.xlsx'):
+                    terminology = term_file.file_path  # 传路径给 _parse_terminology_xlsx
+                    print(f"[POLISH] 已加载术语Excel: {term_file_name}")
+                else:
+                    terminology = _read_file_safe(term_file.file_path)
+                    print(f"[POLISH] 已加载术语文件: {term_file_name} ({len(terminology or '')} 字节)")
 
-        # 术语优先级：文件术语 > 数据库术语
         db_terms = None if terminology else _load_terms_from_db(db)
 
-        # === AI 润色：将句式清单注入 AI prompt ===
+        _update_progress(20, "AI 智能润色中...")
         ai_polished = content
         ai_changes = []
         try:
@@ -1508,11 +1639,9 @@ async def analyze_file_endpoint(
                 }]
         except Exception as e:
             print(f"AI 润色失败(继续使用规则润色): {e}")
-        # === AI 润色结束 ===
-        
+
+        _update_progress(50, "应用修订标记...")
         if is_docx:
-            # 在原始 DOCX 上直接应用 AI + 规则润色（保留排版）
-            # AI 输出可能含空行，过滤空白行以保证段落映射准确
             ai_lines = [l for l in ai_polished.split('\n') if l.strip()] if ai_polished != content else None
             _, date_str = _get_date_subfolder_id(db, None, user.id)
             date_dir = os.path.join(UPLOAD_DIR, date_str)
@@ -1522,6 +1651,7 @@ async def analyze_file_endpoint(
             unique_filename = f"【修订标记版】{filename}"
             saved_file_path = os.path.join(date_dir, unique_filename)
             
+            _update_progress(60, "生成修订版 DOCX...")
             changes = _polish_docx_with_comments(
                 temp_path, saved_file_path, skill_rules, db,
                 sentence_guide, terminology, requirements,
@@ -1531,10 +1661,11 @@ async def analyze_file_endpoint(
             
             from docx import Document
             polished_doc = Document(saved_file_path)
-            # 修订标记版保持原文+批注，此处返回 AI 润色后的文本作为预览
-            preview_text = ai_polished if ai_polished != content else '\n'.join([p.text for p in polished_doc.paragraphs])
+            # 从修订标记版 DOCX 读取润色后文本（<w:delText> 被忽略，仅读 <w:t> 即插入文本）
+            preview_text = '\n'.join([p.text for p in polished_doc.paragraphs])
             polished_text = preview_text
             
+            _update_progress(80, "生成润色报告...")
             report_filename = f"【润色报告】{filename.rsplit('.', 1)[0]}.docx"
             report_path = os.path.join(date_dir, report_filename)
             _generate_polish_report(
@@ -1544,6 +1675,7 @@ async def analyze_file_endpoint(
                 requirements
             )
             
+            _update_progress(90, "保存到知识库...")
             db_doc = create_polished_document(
                 db=db,
                 name=f"【修订标记版】{filename}",
@@ -1559,17 +1691,21 @@ async def analyze_file_endpoint(
                 created_by=user.id
             )
             
-            return {
+            result_data = {
+                "task_id": task_id,
                 "id": db_doc.id,
                 "original": content,
                 "polished": polished_text,
                 "changes": changes,
-                "report_file": report_filename
+                "report_file": report_filename,
+                "download_filename": unique_filename,
+                "file_type": "docx"
             }
+            _finish_task(result_data)
+            return result_data
         else:    
-            # 在 AI 润色后的文本上执行规则润色
+            _update_progress(70, "规则润色中...")
             polished_text, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology, requirements, db_terminology=db_terms)
-            # 合并 AI 变更与规则变更
             if ai_changes:
                 for ac in ai_changes:
                     if isinstance(ac, dict):
@@ -1580,6 +1716,7 @@ async def analyze_file_endpoint(
                             type="ai"
                         ))
             
+            _update_progress(90, "保存结果...")
             if not os.path.exists(UPLOAD_DIR):
                 os.makedirs(UPLOAD_DIR)
             
@@ -1602,16 +1739,23 @@ async def analyze_file_endpoint(
                 created_by=user.id
             )
             
-            return {
+            result_data = {
+                "task_id": task_id,
                 "id": db_doc.id,
                 "original": content,
                 "polished": polished_text,
-                "changes": changes
+                "changes": changes,
+                "download_filename": unique_filename,
+                "file_type": ext
             }
+            _finish_task(result_data)
+            return result_data
 
     except HTTPException:
+        _finish_task(error="请求参数错误")
         raise
     except Exception as e:
+        _finish_task(error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -1625,6 +1769,122 @@ async def analyze_file_endpoint(
             except:
                 pass
 
+
+@router.get("/progress/{task_id}")
+async def get_polish_progress(task_id: str):
+    """查询润色任务进度"""
+    with _polish_tasks_lock:
+        task = _polish_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task
+
+
+# ============================================================
+# 润色反馈：准确率评分 + 修正词自动入库
+# ============================================================
+
+@router.post("/feedback", response_model=None)
+def submit_polish_feedback(
+    feedback: FeedbackInput,
+    db: Session = Depends(get_db)
+):
+    """提交润色反馈：记录准确率评分，并将修正词写入选中的术语文件或句式文件。"""
+    current_user = get_default_user(db)
+    corrections_pairs = _parse_corrections(feedback.corrections)
+    raw_lines = [line.strip() for line in (feedback.corrections or '').splitlines() if line.strip()]
+    processed_count = 0
+    errors = []
+
+    if not raw_lines and feedback.accuracy >= 100:
+        processed_count = 0
+
+    elif feedback.target == "terminology":
+        # 术语修正 → 写入选中的术语文件
+        file_id = feedback.terminology_file_id
+        if not file_id:
+            raise HTTPException(status_code=400, detail="请先选择术语对照表")
+        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
+        if not term_file or not term_file.file_path or not os.path.exists(term_file.file_path):
+            raise HTTPException(status_code=404, detail="术语文件不存在")
+        if not term_file.file_path.lower().endswith('.md'):
+            raise HTTPException(status_code=400, detail="仅支持写入 Markdown (.md) 术语文件")
+        try:
+            # 读取现有内容，追加术语行
+            with open(term_file.file_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            with open(term_file.file_path, 'a', encoding='utf-8') as f:
+                for old_term, new_term in corrections_pairs:
+                    # 避免重复（简单检测）
+                    if f'| {old_term} |' in existing or f'|{old_term}|' in existing:
+                        continue
+                    f.write(f'| {old_term} | {new_term} |\n')
+                    processed_count += 1
+        except Exception as e:
+            errors.append(str(e))
+
+    elif feedback.target == "sentence_guide":
+        # 句式修正 → 写入选中的句式文件
+        file_id = feedback.sentence_file_id
+        if not file_id:
+            raise HTTPException(status_code=400, detail="请先选择句式清单文件")
+        guide_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
+        if not guide_file or not guide_file.file_path or not os.path.exists(guide_file.file_path):
+            raise HTTPException(status_code=404, detail="句式文件不存在")
+        if not guide_file.file_path.lower().endswith('.md'):
+            raise HTTPException(status_code=400, detail="句式文件仅支持 Markdown (.md) 格式，请先将 .docx 转为 .md 上传")
+        if not raw_lines:
+            raise HTTPException(status_code=400, detail="请填写需修正的词语或句子")
+        timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with open(guide_file.file_path, 'a', encoding='utf-8') as f:
+                f.write(f'\n## 用户反馈修正 ({timestamp})\n\n')
+                for line in raw_lines:
+                    f.write(f'- {line}\n')
+                    processed_count += 1
+                f.write('\n')
+            _invalidate_sentence_guide_cache(file_id)
+        except Exception as e:
+            errors.append(str(e))
+
+    db.add(PolishFeedback(
+        original_text=feedback.original_text,
+        polished_text=feedback.polished_text,
+        accuracy=feedback.accuracy,
+        corrections=feedback.corrections,
+        target=feedback.target,
+        processed_count=processed_count,
+        created_by=current_user.username if current_user else "guest"
+    ))
+    db.commit()
+
+    return {
+        "message": "反馈已提交",
+        "accuracy": feedback.accuracy,
+        "corrections_count": len(raw_lines) if feedback.target == "sentence_guide" else len(corrections_pairs),
+        "processed_count": processed_count,
+        "target": feedback.target,
+        "errors": errors if errors else None
+    }
+
+
+@router.get("/feedback/stats", response_model=None)
+def get_feedback_stats(db: Session = Depends(get_db)):
+    """获取润色准确率统计：总准确率总和 ÷ 总反馈次数。"""
+    from sqlalchemy import func
+    total = db.query(func.count(PolishFeedback.id)).scalar() or 0
+    if total == 0:
+        return {"total_count": 0, "average_accuracy": 0}
+    accuracy_sum = db.query(func.sum(PolishFeedback.accuracy)).scalar() or 0
+    return {
+        "total_count": total,
+        "average_accuracy": round(accuracy_sum / total, 1)
+    }
+
+
+# ============================================================
+# 文档润色端点（历史文档 / 种子导出）
+# ============================================================
 
 @router.post("/export-seed")
 def export_polished_seed(db: Session = Depends(get_db)):
@@ -1669,6 +1929,11 @@ def _polish_fallback(text: str, db_terminology: dict = None):
         "changes": changes or [{"line": 1, "original": text[:80], "polished": polished[:80], "type": "format"}]
     }
 
+
+
+# ============================================================
+# 已润色文档 CRUD
+# ============================================================
 
 @router.post("/upload")
 async def upload_polished_file(
@@ -1906,3 +2171,41 @@ async def delete_polished_document_endpoint(
     
     delete_polished_document(db, doc_id)
     return {"message": "删除成功"}
+
+
+# ============================================================
+# 润色反馈：准确率评分 + 修正词自动入库
+# ============================================================
+
+def _parse_corrections(text: str) -> list[tuple[str, str]]:
+    """解析用户输入的修正内容，返回 [(非标准, 标准), ...] 列表。
+    支持格式：'非标准→标准'、'非标准|标准'、'非标准 标准'
+    """
+    pairs = []
+    if not text or not text.strip():
+        return pairs
+    
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        
+        # 尝试多种分隔符
+        for sep in ['→', '->', '|', '\t']:
+            if sep in line:
+                parts = line.split(sep, 1)
+                old = parts[0].strip()
+                new = parts[1].strip() if len(parts) > 1 else ''
+                if old and new and old != new and len(old) >= 1:
+                    pairs.append((old, new))
+                break
+        else:
+            # 空格分隔（取前两个词）
+            words = line.split()
+            if len(words) >= 2:
+                old = words[0].strip()
+                new = words[1].strip()
+                if old and new and old != new and len(old) >= 1:
+                    pairs.append((old, new))
+    
+    return pairs
