@@ -613,7 +613,7 @@ onMounted(async () => {
 .stats-label {
   color: #64748b;
   font-weight: 600;
-  font-size: 22px;
+  font-size: 20px;
   line-height: 1;
 }
 
@@ -653,7 +653,7 @@ onMounted(async () => {
 .stats-unit {
   color: #64748b;
   font-weight: 600;
-  font-size: 22px;
+  font-size: 20px;
   line-height: 1;
 }
 
