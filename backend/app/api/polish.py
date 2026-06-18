@@ -1388,7 +1388,8 @@ async def analyze_file_endpoint(
             
             from docx import Document
             polished_doc = Document(saved_file_path)
-            preview_text = ai_polished if ai_polished != content else '\n'.join([p.text for p in polished_doc.paragraphs])
+            # 从修订标记版 DOCX 读取润色后文本（<w:delText> 被忽略，仅读 <w:t> 即插入文本）
+            preview_text = '\n'.join([p.text for p in polished_doc.paragraphs])
             polished_text = preview_text
             
             _update_progress(80, "生成润色报告...")
