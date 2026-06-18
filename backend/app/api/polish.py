@@ -16,6 +16,7 @@ from app.crud.polished_document import (
 from app.api.auth import get_current_user, get_default_user
 from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
+from app.utils.file_utils import read_file_safe as _read_file_safe
 
 router = APIRouter()
 
@@ -25,12 +26,16 @@ router = APIRouter()
 # ============================================================
 
 def _load_terms_from_db(db: Session) -> dict:
-    """从术语库表中加载所有术语，返回 {非标准用语: 标准用语} 映射"""
+    """从术语库表中加载所有术语，返回 {非标准用语: 标准用语} 映射（带缓存）。"""
+    if '__db_terms__' in _term_cache:
+        return dict(_term_cache['__db_terms__'])
+
     terms = db.query(Term).all()
     term_dict = {}
     for t in terms:
         if t.non_standard and t.standard and t.non_standard.strip() != t.standard.strip():
             term_dict[t.non_standard.strip()] = t.standard.strip()
+    _term_cache['__db_terms__'] = dict(term_dict)
     return term_dict
 
 
@@ -193,18 +198,6 @@ SENTENCE_GUIDE_FOLDER_IDS = [3]
 DEFAULT_STYLE_GUIDE_ID = 1
 
 
-def _read_file_safe(file_path: str) -> str:
-    """安全读取文件，自动尝试多种编码：UTF-8 -> GBK -> GB2312 -> GB18030 -> latin-1"""
-    encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'latin-1']
-    for enc in encodings:
-        try:
-            with open(file_path, 'r', encoding=enc) as f:
-                return f.read()
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    # 最终兜底
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-        return f.read()
 
 
 def _load_file_content(db: Session, file_id: int) -> str:
@@ -252,40 +245,50 @@ def _build_document_polish_guide(
     return "\n\n".join(parts) if parts else None
 
 
+# 句式清单缓存
+_sentence_guide_cache: dict = {}
+_term_cache: dict = {}
+
 def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
-    """加载句式清单内容。
+    """加载句式清单内容（带缓存）。
 
     若指定了 style_guide_id，仅加载该文件；
     否则递归加载句式清单文件夹下所有 .md 文件。
     """
+    cache_key = style_guide_id or '__all__'
+    if cache_key in _sentence_guide_cache:
+        return _sentence_guide_cache[cache_key]
+
     if style_guide_id:
         style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
         if style_file and style_file.file_path and os.path.exists(style_file.file_path):
             try:
                 content = _read_file_safe(style_file.file_path)
                 if content.strip():
+                    _sentence_guide_cache[cache_key] = content
                     return content
             except Exception as e:
                 print(f"加载句式文件失败 (id={style_guide_id}): {e}")
+        _sentence_guide_cache[cache_key] = None
         return None
 
     # 未指定文件，递归加载句式清单文件夹下所有 .md
     guides = []
+    # 一次性收集所有相关文件夹 ID 及其后代
+    all_folder_ids = set(SENTENCE_GUIDE_FOLDER_IDS)
+    stack = list(SENTENCE_GUIDE_FOLDER_IDS)
+    while stack:
+        fid = stack.pop()
+        subfolders = db.query(Folder).filter(Folder.parent_id == fid).all()
+        for sf in subfolders:
+            all_folder_ids.add(sf.id)
+            stack.append(sf.id)
+
     files = db.query(KnowledgeFile).filter(
-        KnowledgeFile.folder_id.in_(SENTENCE_GUIDE_FOLDER_IDS),
+        KnowledgeFile.folder_id.in_(all_folder_ids),
         KnowledgeFile.file_type == "md"
     ).all()
-    subfolder_ids = list(SENTENCE_GUIDE_FOLDER_IDS)
-    while subfolder_ids:
-        fid = subfolder_ids.pop()
-        folders = db.query(Folder).filter(Folder.parent_id == fid).all()
-        for sf in folders:
-            subfolder_ids.append(sf.id)
-            sf_files = db.query(KnowledgeFile).filter(
-                KnowledgeFile.folder_id == sf.id,
-                KnowledgeFile.file_type == "md"
-            ).all()
-            files.extend(sf_files)
+
     for kf in files:
         if kf.file_path and os.path.exists(kf.file_path):
             try:
@@ -294,7 +297,9 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
                     guides.append(content)
             except Exception:
                 pass
-    return "\n\n".join(guides) if guides else None
+    result = "\n\n".join(guides) if guides else None
+    _sentence_guide_cache[cache_key] = result
+    return result
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "polished")
 

@@ -375,17 +375,18 @@ async function doPolish() {
     const data = resp.data || {}
     result.value = {
       original: data.original || originalText.value,
-      polished: data.polished || '本产品是一种采用先进免疫层析技术的病毒体外诊断试剂，可在15分钟内快速完成目标病毒的检测。使用前请详细阅读产品说明书，并严格按照标准操作流程执行。本试剂仅限体外诊断用途，严禁其他应用。请于阴凉干燥处保存，储存温度控制在2~30°C。',
-      changes: data.changes?.length || 3
+      polished: data.polished || data.original || originalText.value,
+      changes: data.changes?.length || 0
     }
-    ElMessage.success('润色完成')
+    if (!data.polished || data.polished === data.original) {
+      ElMessage.info('润色完成，未检测到需要修改的内容')
+    } else {
+      ElMessage.success('润色完成')
+    }
   } catch (e) {
-    result.value = {
-      original: originalText.value,
-      polished: '本产品是一种采用先进免疫层析技术的病毒体外诊断试剂，可在15分钟内快速完成目标病毒的检测。使用前请详细阅读产品说明书，并严格按照标准操作流程执行。本试剂仅限体外诊断用途，严禁其他应用。请于阴凉干燥处保存，储存温度控制在2~30°C。',
-      changes: 3
-    }
-    ElMessage.info('AI接口调用失败，已展示示例润色结果')
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`润色失败：${errorMsg}`)
+    result.value = null
   } finally {
     loading.value = false
   }
