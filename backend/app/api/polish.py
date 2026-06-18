@@ -1770,6 +1770,20 @@ def submit_polish_feedback(
     }
 
 
+@router.get("/feedback/stats", response_model=None)
+def get_feedback_stats(db: Session = Depends(get_db)):
+    """获取润色准确率统计：总准确率总和 ÷ 总反馈次数。"""
+    from sqlalchemy import func
+    total = db.query(func.count(PolishFeedback.id)).scalar() or 0
+    if total == 0:
+        return {"total_count": 0, "average_accuracy": 0}
+    accuracy_sum = db.query(func.sum(PolishFeedback.accuracy)).scalar() or 0
+    return {
+        "total_count": total,
+        "average_accuracy": round(accuracy_sum / total, 1)
+    }
+
+
 # ============================================================
 # 文档润色端点（历史文档 / 种子导出）
 # ============================================================

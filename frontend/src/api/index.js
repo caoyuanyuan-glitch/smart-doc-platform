@@ -173,7 +173,8 @@ export const polishAPI = {
       accuracy,
       corrections,
       target
-    })
+    }),
+  getFeedbackStats: () => instance.get('/polish/feedback/stats')
 }
 
 export const qaAPI = {

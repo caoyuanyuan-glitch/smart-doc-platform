@@ -57,7 +57,14 @@
     </div>
 
     <div v-if="currentView === 'text'">
-      <h2 class="page-title">智能润色</h2>
+      <div class="page-title-row">
+        <h2 class="page-title">智能润色</h2>
+        <div class="stats-card" v-if="feedbackStats.totalCount > 0">
+          <span class="stats-label">累计润色准确率</span>
+          <span class="stats-value">{{ feedbackStats.averageAccuracy }}%</span>
+          <span class="stats-sub">(共 {{ feedbackStats.totalCount }} 次)</span>
+        </div>
+      </div>
 
       <div class="panel">
         <div class="form-item">
@@ -209,6 +216,7 @@ const feedbackAccuracy = ref(80)
 const feedbackCorrections = ref('')
 const feedbackTarget = ref('terminology')
 const feedbackLoading = ref(false)
+const feedbackStats = ref({ totalCount: 0, averageAccuracy: 0 })
 
 const formData = ref({
   sentenceFile: '',
@@ -485,6 +493,8 @@ async function submitFeedback() {
       ElMessage.success('反馈已提交')
     }
     feedbackCorrections.value = ''
+    // 刷新准确率统计
+    await loadFeedbackStats()
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`反馈失败：${errorMsg}`)
@@ -493,8 +503,18 @@ async function submitFeedback() {
   }
 }
 
+async function loadFeedbackStats() {
+  try {
+    const resp = await polishAPI.getFeedbackStats()
+    feedbackStats.value = resp.data || { totalCount: 0, averageAccuracy: 0 }
+  } catch (e) {
+    // 静默失败，不影响主流程
+  }
+}
+
 onMounted(() => {
   loadKnowledgeTree()
+  loadFeedbackStats()
 })
 </script>
 
@@ -508,7 +528,41 @@ onMounted(() => {
   font-size: 20px;
   font-weight: 600;
   color: #1f2937;
+  margin-bottom: 0;
+}
+
+.page-title-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
   margin-bottom: 20px;
+}
+
+.stats-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+  border: 1px solid #6ee7b7;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+.stats-label {
+  color: #065f46;
+  font-weight: 500;
+}
+
+.stats-value {
+  color: #059669;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.stats-sub {
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .panel {
