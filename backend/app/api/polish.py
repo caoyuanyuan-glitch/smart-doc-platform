@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from datetime import timedelta
+from difflib import SequenceMatcher
 import os
 import uuid
 import mimetypes
@@ -430,6 +431,20 @@ def _build_document_polish_guide(
 _sentence_guide_cache: dict = {}
 _term_cache: dict = {}
 
+
+def _invalidate_sentence_guide_cache(style_guide_id: Optional[int] = None):
+    """句式文件更新后清理相关缓存，保证新内容立即生效。"""
+    _sentence_guide_cache.pop('__all__', None)
+    if style_guide_id is not None:
+        _sentence_guide_cache.pop(style_guide_id, None)
+
+
+def _normalize_sentence_for_match(text: str) -> str:
+    """去掉空白和常见标点，用于轻量句式相似度匹配。"""
+    if not text:
+        return ""
+    return re.sub(r'[\s，。！？；：,.!?;:""''()（）【】\[\]<>《》-]+', '', text)
+
 def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     """加载句式清单内容（带缓存）。
 
@@ -823,6 +838,20 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                         "term_map": term_map,
                         "fix": "统一术语"
                     })
+
+            elif any(kw in lower_header for kw in ['用户反馈修正', '推荐句式', '优先句式', '反馈句式']):
+                preferred_sentences = []
+                for item in items:
+                    sentence = item.strip().strip('`').strip()
+                    if sentence:
+                        preferred_sentences.append(sentence)
+                if preferred_sentences:
+                    rules.append({
+                        "type": "preferred_sentences",
+                        "name": header,
+                        "sentences": preferred_sentences,
+                        "fix": "优先采用用户确认过的句式"
+                    })
     
     # 如果没有从文件中解析出规则，使用默认规则
     if not rules:
@@ -908,6 +937,41 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
                             after=result[:50],
                             type="style"
                         ))
+
+        elif rule["type"] == "preferred_sentences":
+            normalized_result = _normalize_sentence_for_match(result)
+            if not normalized_result:
+                continue
+            best_sentence = None
+            best_score = 0.0
+            for sentence in rule.get("sentences", []):
+                normalized_sentence = _normalize_sentence_for_match(sentence)
+                if not normalized_sentence:
+                    continue
+                if normalized_result == normalized_sentence:
+                    best_sentence = sentence
+                    best_score = 1.0
+                    break
+                contains_match = (
+                    normalized_result in normalized_sentence or
+                    normalized_sentence in normalized_result
+                )
+                score = SequenceMatcher(None, normalized_result, normalized_sentence).ratio()
+                if contains_match:
+                    score = max(score, 0.9)
+                if score > best_score:
+                    best_score = score
+                    best_sentence = sentence
+
+            if best_sentence and best_score >= 0.72 and result.strip() != best_sentence.strip():
+                original = result
+                result = best_sentence.strip()
+                changes.append(PolishRuleMatch(
+                    rule_name=rule["name"],
+                    before=original[:50],
+                    after=result[:50],
+                    type="style"
+                ))
         
         elif rule["type"] == "passive_voice":
             for pattern, issue in rule["patterns"]:
@@ -984,44 +1048,63 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
 async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depends(get_db)):
     """基础文本润色（自动加载句式清单和术语库）"""
     import os
+    terminology_md = None
+    if input_data.terminology_id:
+        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
+        if term_file and term_file.file_path and os.path.exists(term_file.file_path):
+            if term_file.file_path.lower().endswith('.xlsx'):
+                terminology_md = term_file.file_path
+            else:
+                terminology_md = _read_file_safe(term_file.file_path)
+    sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
     try:
         from app.utils.ai_client import ai_client
-        # 术语优先级：文件 > 数据库
-        terminology_md = None
-        if input_data.terminology_id:
-            term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
-            if term_file and term_file.file_path and os.path.exists(term_file.file_path):
-                if term_file.file_path.lower().endswith('.xlsx'):
-                    terminology_md = term_file.file_path  # Excel: 传路径
-                else:
-                    terminology_md = _read_file_safe(term_file.file_path)
         resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
-        sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
-        result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
-        changes = result.get("changes") or []
-        if not changes:
-            for key in ("original", "polished"):
-                if result.get(key) and result.get("polished") != result.get("original"):
-                    changes.append({
-                        "line": 1,
-                        "original": result.get("original", "")[:200],
-                        "polished": result.get("polished", "")[:200],
-                        "type": "ai"
-                    })
-                    break
+        result = ai_client.polish_text(
+            input_data.text,
+            style_guide=sentence_guide,
+            terminology=resolved_terminology if resolved_terminology else None
+        )
+        ai_polished = result.get("polished", input_data.text)
+        db_terms_for_rule = None if terminology_md else _load_terms_from_db(db)
+        polished, rule_changes = _apply_skill_polish(
+            ai_polished,
+            {},
+            db,
+            sentence_guide,
+            terminology_md,
+            None,
+            db_terminology=db_terms_for_rule if db_terms_for_rule else None
+        )
+        changes = []
+        if ai_polished != input_data.text:
+            changes.append({
+                "line": 1,
+                "original": input_data.text[:200],
+                "polished": ai_polished[:200],
+                "type": "ai"
+            })
+        changes.extend([c.dict() if hasattr(c, 'dict') else c for c in rule_changes])
         return {
             "original": result.get("original", input_data.text),
-            "polished": result.get("polished", input_data.text),
+            "polished": polished,
             "changes": changes
         }
     except Exception:
-        db_terminology = _load_terms_from_db(db)
-        sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
-        polished, changes = _apply_skill_polish(input_data.text, {}, None, sentence_guide, None, None, db_terminology=db_terminology if db_terminology else None)
+        db_terminology = None if terminology_md else _load_terms_from_db(db)
+        polished, changes = _apply_skill_polish(
+            input_data.text,
+            {},
+            None,
+            sentence_guide,
+            terminology_md,
+            None,
+            db_terminology=db_terminology if db_terminology else None
+        )
         return {
             "original": input_data.text,
             "polished": polished,
-            "changes": changes
+            "changes": [c.dict() if hasattr(c, 'dict') else c for c in changes]
         }
 
 
@@ -1760,6 +1843,7 @@ def submit_polish_feedback(
                     f.write(f'- {line}\n')
                     processed_count += 1
                 f.write('\n')
+            _invalidate_sentence_guide_cache(file_id)
         except Exception as e:
             errors.append(str(e))
 
