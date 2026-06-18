@@ -74,11 +74,15 @@ def _parse_terminology_md(md_content: str) -> dict:
     - 简单格式：| 非标准 | 标准 |
     - 分语言格式：| 非标准(中) | 标准(中) | 非标准(英) | 标准(英) |
     - 带语言列：| 非标准 | 标准 | 语言 |
+    
+    兼容全角竖线 ｜ 和半角竖线 |。
     """
     term_dict = {}
     if not md_content:
         return term_dict
 
+    # 统一处理全角竖线
+    md_content = md_content.replace('\uFF5C', '|')
     lines = md_content.split('\n')
     header = ''
     col_langs = []
@@ -953,13 +957,10 @@ def _polish_docx_with_comments(
     for i, (para_idx, para) in enumerate(non_empty_paras):
         original_text = para.text.strip()
         
-        style_name = para.style.name if para.style else ""
+        style_name = (para.style.name or "").lower()
         
-        is_toc = False
-        for prefix in toc_prefixes:
-            if prefix in style_name or "toc" in style_name.lower():
-                is_toc = True
-                break
+        # 仅跳过确认为目录的段落（样式名以 "toc" 开头或为 "toc heading"）
+        is_toc = style_name.startswith('toc') or style_name == 'table of contents'
         
         if is_toc:
             continue
@@ -981,18 +982,21 @@ def _polish_docx_with_comments(
                     rule_name="ai", before=original_text[:100], after=ai_line[:100], type="ai"
                 )
         
-        # Step 2: Rule polish
+        # Step 2: Rule polish + 术语替换
         if para_ai_change:
-            # AI 已修改文本，但术语替换仍需应用
-            polished_text, term_changes = _apply_term_only(intermediate_text, term_dict)
+            polished_text = intermediate_text
             para_changes = [para_ai_change]
-            if term_changes:
-                para_changes.extend(term_changes)
         else:
             polished_text, para_changes = _apply_skill_polish(
                 intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,
                 is_title=is_title, db_terminology=db_terminology
             )
+        
+        # 最终术语替换（无论 AI 是否已改，确保术语库强制生效）
+        if term_dict:
+            polished_text, term_changes = _apply_term_only(polished_text, term_dict)
+            if term_changes:
+                para_changes.extend(term_changes)
         
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
             all_changes.extend(para_changes)
