@@ -104,7 +104,6 @@
             <el-input
               v-model="originalText"
               type="textarea"
-              :rows="14"
               placeholder="请输入需要润色的文本..."
             />
           </div>
@@ -658,28 +657,64 @@ onMounted(async () => {
 .content-row {
   display: flex;
   gap: 16px;
-  align-items: flex-start;
+  align-items: stretch;
 }
 
 .content-left {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-left .panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-left .panel :deep(.el-textarea) {
+  flex: 1;
+  display: flex;
+}
+
+.content-left .panel :deep(.el-textarea__inner) {
+  flex: 1;
+  resize: vertical;
+  min-height: 320px;
 }
 
 .content-right {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-right .panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ── 结果面板 ── */
 .result-panel {
   margin-bottom: 0;
+  overflow: hidden;
+}
+
+.result-panel .result-grid-vertical {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 320px;
 }
 
 .result-placeholder {
   border-style: dashed;
   border-color: #e5e7eb;
   background: #fafbfc;
+  display: flex;
+  flex-direction: column;
 }
 
 .placeholder-text {
@@ -703,9 +738,15 @@ onMounted(async () => {
 }
 
 .col-content-compact {
-  min-height: 80px;
-  max-height: 180px;
+  flex: 1;
+  min-height: 60px;
+  max-height: 160px;
   overflow-y: auto;
+  padding: 12px 14px;
+  line-height: 1.7;
+  color: #374151;
+  font-size: 13px;
+  white-space: pre-wrap;
 }
 
 /* ── 意见反馈 ── */
