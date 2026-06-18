@@ -1026,48 +1026,53 @@ def _polish_docx_with_comments(
 
 
 def _inject_revision_settings(docx_path: str):
-    """向 DOCX 的 settings.xml 注入 <w:trackRevisions/>，使文档打开即显示修订标记。"""
+    """向 DOCX 的 settings.xml 注入 <w:trackRevisions/>，使文档打开即显示修订标记。
+    
+    直接在 ZIP 内替换 word/settings.xml，保留所有其他 ZIP 条目的原始结构。
+    """
     import zipfile
     import tempfile
     import os as os_mod
     from lxml import etree
-    from shutil import move
     
     w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-    temp_dir = tempfile.mkdtemp()
+    temp_path = docx_path + '.tmp'
     
     try:
-        with zipfile.ZipFile(docx_path, 'r') as zin:
-            zin.extractall(temp_dir)
+        with zipfile.ZipFile(docx_path, 'r') as zin, \
+             zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            
+            settings_xml = None
+            settings_found = False
+            
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == 'word/settings.xml':
+                    settings_found = True
+                    root = etree.fromstring(data)
+                    existing = root.findall(f'{{{w_ns}}}trackRevisions')
+                    if not existing:
+                        etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
+                    # 写入时不添加 standalone
+                    data = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
+                elif item.filename == 'word/settings.xml':
+                    pass  # already handled
+                
+                zout.writestr(item, data)
+            
+            # 如果原文档没有 settings.xml，创建并添加
+            if not settings_found:
+                root = etree.Element(f'{{{w_ns}}}settings')
+                etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
+                data = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
+                zi = zipfile.ZipInfo('word/settings.xml')
+                zout.writestr(zi, data)
         
-        settings_path = os_mod.path.join(temp_dir, 'word', 'settings.xml')
-        
-        if os_mod.path.exists(settings_path):
-            tree = etree.parse(settings_path)
-            root = tree.getroot()
-        else:
-            root = etree.Element(f'{{{w_ns}}}settings')
-            tree = etree.ElementTree(root)
-        
-        # 添加 trackRevisions（若已存在则跳过）
-        nsmap = {'w': w_ns}
-        existing = root.findall(f'{{{w_ns}}}trackRevisions')
-        if not existing:
-            tr = etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
-        
-        tree.write(settings_path, xml_declaration=True, encoding='UTF-8', standalone=True)
-        
-        # 重新打包
-        os_mod.remove(docx_path)
-        with zipfile.ZipFile(docx_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for dirpath, dirnames, filenames in os_mod.walk(temp_dir):
-                for fn in filenames:
-                    full_path = os_mod.path.join(dirpath, fn)
-                    arcname = os_mod.path.relpath(full_path, temp_dir)
-                    zout.write(full_path, arcname)
+        # 替换原文件
+        os_mod.replace(temp_path, docx_path)
     finally:
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        if os_mod.path.exists(temp_path):
+            os_mod.remove(temp_path)
 
 
 
