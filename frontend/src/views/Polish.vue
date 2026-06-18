@@ -5,17 +5,17 @@
       
       <div class="panel">
         <div class="form-item">
-          <label class="form-label">句式表达文件</label>
+          <label class="form-label">句式清单文件</label>
           <div class="input-with-button">
-            <el-input v-model="formData.sentenceFile" readonly placeholder="选择知识库中的句式表达文件" />
+            <el-input v-model="formData.sentenceFile" readonly placeholder="选择知识库中的句式清单文件" />
             <el-button type="primary" @click="openFilePicker('sentenceFile', 'knowledge')">选择文件</el-button>
           </div>
         </div>
 
         <div class="form-item">
-          <label class="form-label">术语库文件</label>
+          <label class="form-label">术语对照表</label>
           <div class="input-with-button">
-            <el-input v-model="formData.terminologyFile" readonly placeholder="选择知识库中的术语库文件" />
+            <el-input v-model="formData.terminologyFile" readonly placeholder="选择知识库中的术语对照表" />
             <el-button type="primary" @click="openFilePicker('terminologyFile', 'knowledge')">选择文件</el-button>
           </div>
         </div>
@@ -61,18 +61,21 @@
         <h2 class="page-title">智能润色</h2>
         <div class="stats-card">
           <span class="stats-label">准确率</span>
-          <span class="stats-value">{{ feedbackStats.averageAccuracy }}%</span>
+          <span class="stats-value" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.averageAccuracy }}%</span>
           <span class="stats-divider">|</span>
           <span class="stats-label">共润色</span>
-          <span class="stats-count">{{ feedbackStats.totalCount }} 次</span>
+          <span class="stats-count" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.totalCount }} 次</span>
         </div>
       </div>
 
       <!-- 文件选择行 -->
       <div class="panel">
+        <div class="panel-header">
+          <span>参考文件</span>
+        </div>
         <div class="file-select-row">
           <div class="file-select-col">
-            <label class="form-label">句式表达文件</label>
+            <label class="form-label">句式清单文件</label>
             <div class="input-with-button">
               <el-input v-model="textSentenceFileName" size="small" readonly placeholder="留空则加载全部" />
               <el-button type="primary" size="small" @click="openTextSentencePicker">选择文件</el-button>
@@ -80,7 +83,7 @@
             </div>
           </div>
           <div class="file-select-col">
-            <label class="form-label">术语库文件</label>
+            <label class="form-label">术语对照表</label>
             <div class="input-with-button">
               <el-input v-model="textTerminologyFileName" size="small" readonly placeholder="留空则使用数据库术语" />
               <el-button type="primary" size="small" @click="openTextTerminologyPicker">选择文件</el-button>
@@ -166,8 +169,8 @@
           <div class="form-item">
             <label class="form-label">写入目标（将写入上方选中的对应文件）</label>
             <el-radio-group v-model="feedbackTarget">
-              <el-radio value="terminology">术语库文件</el-radio>
-              <el-radio value="sentence_guide">句式表达文件</el-radio>
+              <el-radio value="terminology">术语对照表</el-radio>
+              <el-radio value="sentence_guide">句式清单文件</el-radio>
             </el-radio-group>
           </div>
           <div style="text-align: right">
@@ -507,11 +510,11 @@ async function submitFeedback() {
   // 验证文件选择（准确率100%时无需修正，跳过文件校验）
   if (feedbackAccuracy.value < 100) {
     if (feedbackTarget.value === 'terminology' && !textTerminologyFileId.value) {
-      ElMessage.warning('请先在上方选择术语库文件')
+      ElMessage.warning('请先在上方选择术语对照表')
       return
     }
     if (feedbackTarget.value === 'sentence_guide' && !textSentenceFileId.value) {
-      ElMessage.warning('请先在上方选择句式表达文件')
+      ElMessage.warning('请先在上方选择句式清单文件')
       return
     }
   }
@@ -527,7 +530,7 @@ async function submitFeedback() {
       textSentenceFileId.value
     )
     const data = resp.data || {}
-    const targetName = feedbackTarget.value === 'terminology' ? '术语文件' : '句式文件'
+    const targetName = feedbackTarget.value === 'terminology' ? '术语对照表' : '句式清单文件'
     if (data.processed_count > 0) {
       ElMessage.success(`反馈已提交，已将 ${data.processed_count} 条修正写入${targetName}`)
     } else {
@@ -598,9 +601,16 @@ onMounted(async () => {
 }
 
 .stats-value {
-  color: #0f172a;
-  font-size: 16px;
+  font-size: 20px;
   font-weight: 700;
+}
+
+.stats-green {
+  color: #16a34a;
+}
+
+.stats-red {
+  color: #dc2626;
 }
 
 .stats-divider {
@@ -610,7 +620,6 @@ onMounted(async () => {
 }
 
 .stats-count {
-  color: #0f172a;
   font-weight: 600;
   font-size: 13px;
 }
