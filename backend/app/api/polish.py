@@ -511,9 +511,11 @@ class SkillPolishInput(BaseModel):
 class FeedbackInput(BaseModel):
     original_text: str
     polished_text: str
-    accuracy: int          # 0-100
-    corrections: str = ""   # 用户修正内容，每行一条 "非标准 → 标准"
-    target: str = "terminology"  # "terminology" 或 "sentence_guide"
+    accuracy: int              # 0-100
+    corrections: str = ""       # 用户修正内容，每行一条 "非标准 → 标准"
+    target: str = "terminology" # "terminology" 或 "sentence_guide"
+    terminology_file_id: Optional[int] = None
+    sentence_file_id: Optional[int] = None
 
 
 class PolishRuleMatch(BaseModel):
@@ -1704,51 +1706,56 @@ def submit_polish_feedback(
     feedback: FeedbackInput,
     db: Session = Depends(get_db)
 ):
-    """提交润色反馈：记录准确率评分，并将修正词写入术语库或句式清单。"""
+    """提交润色反馈：记录准确率评分，并将修正词写入选中的术语文件或句式文件。"""
     current_user = get_default_user(db)
     corrections_pairs = _parse_corrections(feedback.corrections)
     processed_count = 0
     errors = []
-    
+
     if feedback.target == "terminology":
-        for old_term, new_term in corrections_pairs:
-            try:
-                existing = db.query(Term).filter(
-                    Term.non_standard == old_term,
-                    Term.standard == new_term
-                ).first()
-                if existing:
-                    continue
-                term = Term(
-                    non_standard=old_term,
-                    standard=new_term,
-                    category="用户反馈"
-                )
-                db.add(term)
-                processed_count += 1
-            except Exception as e:
-                errors.append(f"{old_term}→{new_term}: {str(e)}")
-        db.commit()
-    
+        # 术语修正 → 写入选中的术语文件
+        file_id = feedback.terminology_file_id
+        if not file_id:
+            raise HTTPException(status_code=400, detail="请先选择术语库文件")
+        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
+        if not term_file or not term_file.file_path or not os.path.exists(term_file.file_path):
+            raise HTTPException(status_code=404, detail="术语文件不存在")
+        if not term_file.file_path.lower().endswith('.md'):
+            raise HTTPException(status_code=400, detail="仅支持写入 Markdown (.md) 术语文件")
+        try:
+            # 读取现有内容，追加术语行
+            with open(term_file.file_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            with open(term_file.file_path, 'a', encoding='utf-8') as f:
+                for old_term, new_term in corrections_pairs:
+                    # 避免重复（简单检测）
+                    if f'| {old_term} |' in existing or f'|{old_term}|' in existing:
+                        continue
+                    f.write(f'| {old_term} | {new_term} |\n')
+                    processed_count += 1
+        except Exception as e:
+            errors.append(str(e))
+
     elif feedback.target == "sentence_guide":
-        feedback_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
-        feedback_file = os.path.join(feedback_dir, "_polish_feedback.md")
-        os.makedirs(feedback_dir, exist_ok=True)
-        
+        # 句式修正 → 写入选中的句式文件
+        file_id = feedback.sentence_file_id
+        if not file_id:
+            raise HTTPException(status_code=400, detail="请先选择句式表达文件")
+        guide_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
+        if not guide_file or not guide_file.file_path or not os.path.exists(guide_file.file_path):
+            raise HTTPException(status_code=404, detail="句式文件不存在")
         timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        
-        with open(feedback_file, 'a', encoding='utf-8') as f:
-            if not os.path.getsize(feedback_file):
-                f.write("# 润色反馈修正记录\n\n")
-                f.write("| 时间 | 准确率 | 原文(摘要) | 修正内容 |\n")
-                f.write("|------|--------|-----------|----------|\n")
-            summary = feedback.original_text[:50].replace('\n', ' ') + ('...' if len(feedback.original_text) > 50 else '')
-            corrections_summary = '; '.join(f'{o}→{n}' for o, n in corrections_pairs) if corrections_pairs else '-'
-            f.write(f"| {timestamp} | {feedback.accuracy}% | {summary} | {corrections_summary} |\n")
-        
-        processed_count = len(corrections_pairs)
-    
-    fb = PolishFeedback(
+        try:
+            with open(guide_file.file_path, 'a', encoding='utf-8') as f:
+                f.write(f'\n## 用户反馈修正 ({timestamp})\n\n')
+                for old_term, new_term in corrections_pairs:
+                    f.write(f'- {old_term} → {new_term}\n')
+                    processed_count += 1
+                f.write(f'\n准确率评分: {feedback.accuracy}%\n')
+        except Exception as e:
+            errors.append(str(e))
+
+    db.add(PolishFeedback(
         original_text=feedback.original_text,
         polished_text=feedback.polished_text,
         accuracy=feedback.accuracy,
@@ -1756,10 +1763,9 @@ def submit_polish_feedback(
         target=feedback.target,
         processed_count=processed_count,
         created_by=current_user.username if current_user else "guest"
-    )
-    db.add(fb)
+    ))
     db.commit()
-    
+
     return {
         "message": "反馈已提交",
         "accuracy": feedback.accuracy,

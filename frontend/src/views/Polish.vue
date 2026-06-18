@@ -59,28 +59,33 @@
     <div v-if="currentView === 'text'">
       <div class="page-title-row">
         <h2 class="page-title">智能润色</h2>
-        <div class="stats-card" v-if="feedbackStats.totalCount > 0">
-          <span class="stats-label">累计润色准确率</span>
+        <div class="stats-card">
+          <span class="stats-label">准确率</span>
           <span class="stats-value">{{ feedbackStats.averageAccuracy }}%</span>
-          <span class="stats-sub">(共 {{ feedbackStats.totalCount }} 次)</span>
+          <span class="stats-sep">|</span>
+          <span class="stats-label">共润色</span>
+          <span class="stats-count">{{ feedbackStats.totalCount }} 次</span>
         </div>
       </div>
 
+      <!-- 文件选择行：句式 + 术语 同行 -->
       <div class="panel">
-        <div class="form-item">
-          <label class="form-label">句式表达文件</label>
-          <div class="input-with-button">
-            <el-input v-model="textSentenceFileName" readonly placeholder="选择知识库中的句式表达文件（留空则加载全部）" />
-            <el-button type="primary" @click="openTextSentencePicker">选择文件</el-button>
-            <el-button v-if="textSentenceFileId" size="small" @click="clearTextSentenceFile">清除</el-button>
+        <div class="file-select-row">
+          <div class="file-select-col">
+            <label class="form-label">句式表达文件</label>
+            <div class="input-with-button">
+              <el-input v-model="textSentenceFileName" size="small" readonly placeholder="留空则加载全部" />
+              <el-button type="primary" size="small" @click="openTextSentencePicker">选择文件</el-button>
+              <el-button v-if="textSentenceFileId" size="small" @click="clearTextSentenceFile">清除</el-button>
+            </div>
           </div>
-        </div>
-        <div class="form-item">
-          <label class="form-label">术语库文件</label>
-          <div class="input-with-button">
-            <el-input v-model="textTerminologyFileName" readonly placeholder="选择知识库中的术语库文件（留空则使用数据库术语）" />
-            <el-button type="primary" @click="openTextTerminologyPicker">选择文件</el-button>
-            <el-button v-if="textTerminologyFileId" size="small" @click="clearTextTerminologyFile">清除</el-button>
+          <div class="file-select-col">
+            <label class="form-label">术语库文件</label>
+            <div class="input-with-button">
+              <el-input v-model="textTerminologyFileName" size="small" readonly placeholder="留空则使用数据库术语" />
+              <el-button type="primary" size="small" @click="openTextTerminologyPicker">选择文件</el-button>
+              <el-button v-if="textTerminologyFileId" size="small" @click="clearTextTerminologyFile">清除</el-button>
+            </div>
           </div>
         </div>
         <div class="panel-header">
@@ -98,6 +103,7 @@
         />
       </div>
 
+      <!-- 润色结果行 -->
       <div v-if="result" class="panel">
         <div class="panel-header">
           <span>润色结果</span>
@@ -119,9 +125,10 @@
         </div>
       </div>
 
+      <!-- 意见反馈行（独立） -->
       <div v-if="result" class="panel feedback-panel">
         <div class="panel-header">
-          <span>润色反馈</span>
+          <span>意见反馈</span>
         </div>
         <div class="form-item">
           <label class="form-label">准确率评分 (0-100%)</label>
@@ -132,15 +139,15 @@
           <el-input
             v-model="feedbackCorrections"
             type="textarea"
-            :rows="4"
-            placeholder="每行一条，格式：非标准词 → 标准词&#10;例如：&#10;移液枪 → 移液器&#10;样品 → 样本"
+            :rows="3"
+            placeholder="每行一条，格式：非标准词 → 标准词&#10;例如：移液枪 → 移液器"
           />
         </div>
         <div class="form-item">
-          <label class="form-label">写入目标</label>
+          <label class="form-label">写入目标（将自动写入上方选中的对应文件）</label>
           <el-radio-group v-model="feedbackTarget">
-            <el-radio value="terminology">术语库（数据库）</el-radio>
-            <el-radio value="sentence_guide">句式清单（文件）</el-radio>
+            <el-radio value="terminology">术语库文件</el-radio>
+            <el-radio value="sentence_guide">句式表达文件</el-radio>
           </el-radio-group>
         </div>
         <div class="form-item" style="text-align: right">
@@ -476,6 +483,15 @@ async function submitFeedback() {
     ElMessage.warning('请先完成润色再提交反馈')
     return
   }
+  // 验证文件选择
+  if (feedbackTarget.value === 'terminology' && !textTerminologyFileId.value) {
+    ElMessage.warning('请先在上方选择术语库文件')
+    return
+  }
+  if (feedbackTarget.value === 'sentence_guide' && !textSentenceFileId.value) {
+    ElMessage.warning('请先在上方选择句式表达文件')
+    return
+  }
   feedbackLoading.value = true
   try {
     const resp = await polishAPI.submitFeedback(
@@ -483,17 +499,18 @@ async function submitFeedback() {
       result.value.polished,
       feedbackAccuracy.value,
       feedbackCorrections.value,
-      feedbackTarget.value
+      feedbackTarget.value,
+      textTerminologyFileId.value,
+      textSentenceFileId.value
     )
     const data = resp.data || {}
-    const targetName = feedbackTarget.value === 'terminology' ? '术语库' : '句式清单'
+    const targetName = feedbackTarget.value === 'terminology' ? '术语文件' : '句式文件'
     if (data.processed_count > 0) {
       ElMessage.success(`反馈已提交，已将 ${data.processed_count} 条修正写入${targetName}`)
     } else {
       ElMessage.success('反馈已提交')
     }
     feedbackCorrections.value = ''
-    // 刷新准确率统计
     await loadFeedbackStats()
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
@@ -539,30 +556,36 @@ onMounted(() => {
 }
 
 .stats-card {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background: linear-gradient(135deg, #ecfdf5, #d1fae5);
-  border: 1px solid #6ee7b7;
+  gap: 4px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
   border-radius: 8px;
-  padding: 6px 14px;
+  padding: 5px 14px;
   font-size: 13px;
 }
 
 .stats-label {
-  color: #065f46;
+  color: #0369a1;
   font-weight: 500;
 }
 
 .stats-value {
-  color: #059669;
+  color: #0284c7;
   font-size: 18px;
   font-weight: 700;
+  margin: 0 2px;
 }
 
-.stats-sub {
-  color: #6b7280;
-  font-size: 12px;
+.stats-sep {
+  color: #94a3b8;
+  margin: 0 4px;
+}
+
+.stats-count {
+  color: #0284c7;
+  font-weight: 600;
 }
 
 .panel {
@@ -571,6 +594,17 @@ onMounted(() => {
   padding: 20px;
   margin-bottom: 20px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.file-select-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.file-select-col {
+  flex: 1;
+  min-width: 0;
 }
 
 .panel-header {

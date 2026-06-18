@@ -166,13 +166,15 @@ export const polishAPI = {
     })
   },
   deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
-  submitFeedback: (originalText, polishedText, accuracy, corrections, target) =>
+  submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
     instance.post('/polish/feedback', {
       original_text: originalText,
       polished_text: polishedText,
       accuracy,
       corrections,
-      target
+      target,
+      terminology_file_id: terminologyFileId || null,
+      sentence_file_id: sentenceFileId || null
     }),
   getFeedbackStats: () => instance.get('/polish/feedback/stats')
 }
