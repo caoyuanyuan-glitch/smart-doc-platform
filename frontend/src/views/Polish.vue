@@ -111,6 +111,35 @@
           </div>
         </div>
       </div>
+
+      <div v-if="result" class="panel feedback-panel">
+        <div class="panel-header">
+          <span>润色反馈</span>
+        </div>
+        <div class="form-item">
+          <label class="form-label">准确率评分 (0-100%)</label>
+          <el-slider v-model="feedbackAccuracy" :min="0" :max="100" :step="5" show-input />
+        </div>
+        <div class="form-item">
+          <label class="form-label">需要修正的词语</label>
+          <el-input
+            v-model="feedbackCorrections"
+            type="textarea"
+            :rows="4"
+            placeholder="每行一条，格式：非标准词 → 标准词&#10;例如：&#10;移液枪 → 移液器&#10;样品 → 样本"
+          />
+        </div>
+        <div class="form-item">
+          <label class="form-label">写入目标</label>
+          <el-radio-group v-model="feedbackTarget">
+            <el-radio value="terminology">术语库（数据库）</el-radio>
+            <el-radio value="sentence_guide">句式清单（文件）</el-radio>
+          </el-radio-group>
+        </div>
+        <div class="form-item" style="text-align: right">
+          <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
+        </div>
+      </div>
     </div>
 
     <input
@@ -175,6 +204,11 @@ const docResult = ref(null)
 const loading = ref(false)
 const polishProgress = ref(0)
 const polishProgressMsg = ref('')
+// 反馈相关
+const feedbackAccuracy = ref(80)
+const feedbackCorrections = ref('')
+const feedbackTarget = ref('terminology')
+const feedbackLoading = ref(false)
 
 const formData = ref({
   sentenceFile: '',
@@ -408,6 +442,9 @@ function clearAll() {
   result.value = null
   textSentenceFileName.value = ''
   textSentenceFileId.value = null
+  feedbackAccuracy.value = 80
+  feedbackCorrections.value = ''
+  feedbackTarget.value = 'terminology'
 }
 
 function copyResult() {
@@ -424,6 +461,36 @@ function downloadResult() {
   a.download = 'polished_document.txt'
   a.click()
   URL.revokeObjectURL(url)
+}
+
+async function submitFeedback() {
+  if (!result.value) {
+    ElMessage.warning('请先完成润色再提交反馈')
+    return
+  }
+  feedbackLoading.value = true
+  try {
+    const resp = await polishAPI.submitFeedback(
+      result.value.original,
+      result.value.polished,
+      feedbackAccuracy.value,
+      feedbackCorrections.value,
+      feedbackTarget.value
+    )
+    const data = resp.data || {}
+    const targetName = feedbackTarget.value === 'terminology' ? '术语库' : '句式清单'
+    if (data.processed_count > 0) {
+      ElMessage.success(`反馈已提交，已将 ${data.processed_count} 条修正写入${targetName}`)
+    } else {
+      ElMessage.success('反馈已提交')
+    }
+    feedbackCorrections.value = ''
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`反馈失败：${errorMsg}`)
+  } finally {
+    feedbackLoading.value = false
+  }
 }
 
 onMounted(() => {

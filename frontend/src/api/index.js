@@ -165,7 +165,15 @@ export const polishAPI = {
       window.URL.revokeObjectURL(url)
     })
   },
-  deletePolishedDocument: (id) => instance.delete(`/polish/${id}`)
+  deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
+  submitFeedback: (originalText, polishedText, accuracy, corrections, target) =>
+    instance.post('/polish/feedback', {
+      original_text: originalText,
+      polished_text: polishedText,
+      accuracy,
+      corrections,
+      target
+    })
 }
 
 export const qaAPI = {

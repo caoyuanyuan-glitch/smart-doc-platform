@@ -9,6 +9,7 @@ import uuid
 import mimetypes
 import re
 import threading
+import datetime
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.polished_document import (
@@ -17,7 +18,9 @@ from app.crud.polished_document import (
 from app.api.auth import get_current_user, get_default_user
 from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
+from app.models.polish_feedback import PolishFeedback
 from app.utils.file_utils import read_file_safe as _read_file_safe
+from app.crud.term import bulk_create_terms
 
 router = APIRouter()
 
@@ -503,6 +506,14 @@ class SkillPolishInput(BaseModel):
     skill_id: int = 3
     style_guide_id: int = 1
     terminology_id: Optional[int] = None
+
+
+class FeedbackInput(BaseModel):
+    original_text: str
+    polished_text: str
+    accuracy: int          # 0-100
+    corrections: str = ""   # 用户修正内容，每行一条 "非标准 → 标准"
+    target: str = "terminology"  # "terminology" 或 "sentence_guide"
 
 
 class PolishRuleMatch(BaseModel):
@@ -1684,6 +1695,80 @@ async def get_polish_progress(task_id: str):
     return task
 
 
+# ============================================================
+# 润色反馈：准确率评分 + 修正词自动入库
+# ============================================================
+
+@router.post("/feedback", response_model=None)
+def submit_polish_feedback(
+    feedback: FeedbackInput,
+    db: Session = Depends(get_db)
+):
+    """提交润色反馈：记录准确率评分，并将修正词写入术语库或句式清单。"""
+    current_user = get_default_user(db)
+    corrections_pairs = _parse_corrections(feedback.corrections)
+    processed_count = 0
+    errors = []
+    
+    if feedback.target == "terminology":
+        for old_term, new_term in corrections_pairs:
+            try:
+                existing = db.query(Term).filter(
+                    Term.non_standard == old_term,
+                    Term.standard == new_term
+                ).first()
+                if existing:
+                    continue
+                term = Term(
+                    non_standard=old_term,
+                    standard=new_term,
+                    category="用户反馈"
+                )
+                db.add(term)
+                processed_count += 1
+            except Exception as e:
+                errors.append(f"{old_term}→{new_term}: {str(e)}")
+        db.commit()
+    
+    elif feedback.target == "sentence_guide":
+        feedback_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
+        feedback_file = os.path.join(feedback_dir, "_polish_feedback.md")
+        os.makedirs(feedback_dir, exist_ok=True)
+        
+        timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        
+        with open(feedback_file, 'a', encoding='utf-8') as f:
+            if not os.path.getsize(feedback_file):
+                f.write("# 润色反馈修正记录\n\n")
+                f.write("| 时间 | 准确率 | 原文(摘要) | 修正内容 |\n")
+                f.write("|------|--------|-----------|----------|\n")
+            summary = feedback.original_text[:50].replace('\n', ' ') + ('...' if len(feedback.original_text) > 50 else '')
+            corrections_summary = '; '.join(f'{o}→{n}' for o, n in corrections_pairs) if corrections_pairs else '-'
+            f.write(f"| {timestamp} | {feedback.accuracy}% | {summary} | {corrections_summary} |\n")
+        
+        processed_count = len(corrections_pairs)
+    
+    fb = PolishFeedback(
+        original_text=feedback.original_text,
+        polished_text=feedback.polished_text,
+        accuracy=feedback.accuracy,
+        corrections=feedback.corrections,
+        target=feedback.target,
+        processed_count=processed_count,
+        created_by=current_user.username if current_user else "guest"
+    )
+    db.add(fb)
+    db.commit()
+    
+    return {
+        "message": "反馈已提交",
+        "accuracy": feedback.accuracy,
+        "corrections_count": len(corrections_pairs),
+        "processed_count": processed_count,
+        "target": feedback.target,
+        "errors": errors if errors else None
+    }
+
 
 # ============================================================
 # 文档润色端点（历史文档 / 种子导出）
@@ -1974,3 +2059,41 @@ async def delete_polished_document_endpoint(
     
     delete_polished_document(db, doc_id)
     return {"message": "删除成功"}
+
+
+# ============================================================
+# 润色反馈：准确率评分 + 修正词自动入库
+# ============================================================
+
+def _parse_corrections(text: str) -> list[tuple[str, str]]:
+    """解析用户输入的修正内容，返回 [(非标准, 标准), ...] 列表。
+    支持格式：'非标准→标准'、'非标准|标准'、'非标准 标准'
+    """
+    pairs = []
+    if not text or not text.strip():
+        return pairs
+    
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        
+        # 尝试多种分隔符
+        for sep in ['→', '->', '|', '\t']:
+            if sep in line:
+                parts = line.split(sep, 1)
+                old = parts[0].strip()
+                new = parts[1].strip() if len(parts) > 1 else ''
+                if old and new and old != new and len(old) >= 1:
+                    pairs.append((old, new))
+                break
+        else:
+            # 空格分隔（取前两个词）
+            words = line.split()
+            if len(words) >= 2:
+                old = words[0].strip()
+                new = words[1].strip()
+                if old and new and old != new and len(old) >= 1:
+                    pairs.append((old, new))
+    
+    return pairs
