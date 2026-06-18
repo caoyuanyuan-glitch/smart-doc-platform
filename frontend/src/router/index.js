@@ -16,6 +16,9 @@ import TranslateDoc from '@/views/TranslateDoc.vue'
 import MemoryBank from '@/views/MemoryBank.vue'
 import Knowledge from '@/views/Knowledge.vue'
 import PolishPreview from '@/views/PolishPreview.vue'
+import SpellCheck from '@/views/SpellCheck.vue'
+import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
+import WhiteList from '@/views/WhiteList.vue'
 
 const routes = [
   {
@@ -47,6 +50,21 @@ const routes = [
     path: '/review/basis',
     name: 'ReviewBasis',
     component: Review
+  },
+  {
+    path: '/review/spell-check',
+    name: 'SpellCheck',
+    component: SpellCheck
+  },
+  {
+    path: '/review/spell-check/history',
+    name: 'SpellCheckHistory',
+    component: SpellCheckHistory
+  },
+  {
+    path: '/review/spell-check/whitelist',
+    name: 'WhiteList',
+    component: WhiteList
   },
   {
     path: '/polish',

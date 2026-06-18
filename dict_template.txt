@@ -1,0 +1,51 @@
+# 词典导入填写规范
+# 1. 每行只填写1个英文单词
+# 2. #开头行为注释，程序自动忽略
+# 3. 空白行会自动跳过，无需删除空行
+# 示例：
+apple
+banana
+computer
+MGI
+DNBelab
+PCR
+IEC
+DNBs
+DNB
+Nanoballs
+Nanoball
+omics
+Omics
+pipetting
+biosafety
+extranet
+cDNA
+ssDNA
+dsDNA
+DNA
+RNA
+rRNA
+mRNA
+scRNA
+demulsification
+Milli-Q
+www.
+Barcode
+barcode
+Barcodes
+barcodes
+DNBSEQ
+DNBSEQTM
+Thermo
+Oligo
+RXN
+Qubit
+QubitTM
+hemocytometer
+ mL
+ μL
+ ng
+Agilent
+
+
+
