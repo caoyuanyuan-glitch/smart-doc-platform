@@ -966,81 +966,53 @@ def _polish_docx_with_comments(
         
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
             all_changes.extend(para_changes)
-            
-            # ---- 1. 正文替换为润色后文字（保留原字体样式） ----
             p_element = para._p
-            preserved_style = None
-            for r in para.runs:
-                if r.text and r.text.strip():
-                    preserved_style = r
-                    break
-            for r in para.runs:
-                r.text = ''
-            para.clear()
-            new_run = para.add_run(polished_text)
-            if preserved_style and preserved_style.font:
-                try:
-                    new_run.font.name = preserved_style.font.name
-                    new_run.font.size = preserved_style.font.size
-                    new_run.font.bold = preserved_style.font.bold
-                    new_run.font.italic = preserved_style.font.italic
-                    new_run.font.color.rgb = preserved_style.font.color.rgb
-                except Exception:
-                    pass
             
-            # ---- 2. 插入修订标记：<w:del> 原文 + <w:ins> 润色后 ----
+            # ---- 1. 将原文所有 run 标记为删除（保留各自原有格式） ----
             revision_id += 1
-            rid = str(revision_id)
+            rid_del = str(revision_id)
             now = '2026-06-18T00:00:00Z'
             
-            # 获取插入位置：段落第一个 run 之前
-            first_run_el = None
-            for child in p_element:
+            for child in list(p_element):
                 tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                if tag == 'r':
-                    first_run_el = child
-                    break
+                if tag != 'r':
+                    continue
+                rPr = child.find(f'{{{w_ns}}}rPr')
+                if rPr is None:
+                    rPr = etree.SubElement(child, f'{{{w_ns}}}rPr')
+                    child.insert(0, rPr)
+                del_el = etree.SubElement(rPr, f'{{{w_ns}}}del')
+                del_el.set(f'{{{w_ns}}}id', rid_del)
+                del_el.set(f'{{{w_ns}}}author', author)
+                del_el.set(f'{{{w_ns}}}date', now)
+                # 把 <w:t> 改名为 <w:delText>
+                for t_elem in child.findall(f'{{{w_ns}}}t'):
+                    t_elem.tag = f'{{{w_ns}}}delText'
             
-            # 创建 <w:del> run（原文标记为删除）
-            del_r = etree.SubElement(p_element, f'{{{w_ns}}}r')
-            del_rPr = etree.SubElement(del_r, f'{{{w_ns}}}rPr')
-            del_el = etree.SubElement(del_rPr, f'{{{w_ns}}}del')
-            del_el.set(f'{{{w_ns}}}id', rid)
-            del_el.set(f'{{{w_ns}}}author', author)
-            del_el.set(f'{{{w_ns}}}date', now)
-            del_text = etree.SubElement(del_r, f'{{{w_ns}}}delText')
-            del_text.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            del_text.text = original_text
-            
-            # 创建 <w:ins> run（润色后标记为插入）
+            # ---- 2. 追加润色后文字 run（标记为插入，沿用首个原 run 字体） ----
             revision_id += 1
-            rid2 = str(revision_id)
-            ins_r = etree.SubElement(p_element, f'{{{w_ns}}}r')
-            ins_rPr = etree.SubElement(ins_r, f'{{{w_ns}}}rPr')
-            ins_el = etree.SubElement(ins_rPr, f'{{{w_ns}}}ins')
-            ins_el.set(f'{{{w_ns}}}id', rid2)
-            ins_el.set(f'{{{w_ns}}}author', author)
-            ins_el.set(f'{{{w_ns}}}date', now)
-            # 复制 polished run 的样式到 ins run
-            if preserved_style and preserved_style.font:
+            rid_ins = str(revision_id)
+            first_run = para.runs[0] if para.runs else None
+            new_run = para.add_run(polished_text)
+            if first_run and first_run.font:
                 try:
-                    if preserved_style.font.bold:
-                        b_el = etree.SubElement(ins_rPr, f'{{{w_ns}}}b')
-                    if preserved_style.font.italic:
-                        i_el = etree.SubElement(ins_rPr, f'{{{w_ns}}}i')
+                    new_run.font.name = first_run.font.name
+                    new_run.font.size = first_run.font.size
+                    new_run.font.bold = first_run.font.bold
+                    new_run.font.italic = first_run.font.italic
+                    new_run.font.color.rgb = first_run.font.color.rgb
                 except Exception:
                     pass
-            ins_t = etree.SubElement(ins_r, f'{{{w_ns}}}t')
-            ins_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            ins_t.text = polished_text
-            
-            # 把 del 和 ins run 移到 polished run 之前
-            if first_run_el is not None:
-                p_element.remove(del_r)
-                p_element.remove(ins_r)
-                insert_pos = p_element.index(first_run_el)
-                p_element.insert(insert_pos, del_r)
-                p_element.insert(insert_pos + 1, ins_r)
+            # 在 XML 层给新 run 加上 <w:ins>
+            new_r_element = new_run._r
+            new_rPr = new_r_element.find(f'{{{w_ns}}}rPr')
+            if new_rPr is None:
+                new_rPr = etree.SubElement(new_r_element, f'{{{w_ns}}}rPr')
+                new_r_element.insert(0, new_rPr)
+            ins_el = etree.SubElement(new_rPr, f'{{{w_ns}}}ins')
+            ins_el.set(f'{{{w_ns}}}id', rid_ins)
+            ins_el.set(f'{{{w_ns}}}author', author)
+            ins_el.set(f'{{{w_ns}}}date', now)
     
     doc.save(output_path)
     _inject_revision_settings(output_path)
