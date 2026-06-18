@@ -111,7 +111,7 @@
 
           <div v-if="translating" class="result-loading">
             <div class="loading-spinner"></div>
-            <p>正在翻译文档，请稍候...</p>
+            <p>{{ pollingStatus ? `正在翻译... (${pollingCount}s)` : '正在提交翻译任务...' }}</p>
           </div>
 
           <div v-if="result && !translating" class="result-content">
@@ -119,9 +119,14 @@
               <template #extra>
                 <el-button type="primary" @click="downloadTranslatedFile">
                   <el-icon><Download /></el-icon>
-                  下载译文 ({{ result.translated_filename }})
+                  下载译文 ({{ result.translated_filename || result.original_filename }})
                 </el-button>
               </template>
+            </el-result>
+          </div>
+
+          <div v-if="pollError" class="result-error">
+            <el-result icon="error" title="翻译失败" :sub-title="pollError">
             </el-result>
           </div>
         </el-card>
@@ -143,6 +148,10 @@ const targetLang = ref('en')
 const docSource = ref('upload')
 const translating = ref(false)
 const result = ref(null)
+const pollingStatus = ref(false)
+const pollingCount = ref(0)
+const pollError = ref('')
+let pollTimer = null
 
 const fileUploadRef = ref(null)
 const selectedFile = ref(null)
@@ -190,6 +199,7 @@ async function translateReviewedDoc() {
   if (!selectedReviewedDoc.value) return
   translating.value = true
   result.value = null
+  pollError.value = ''
   try {
     const res = await translationAPI.getDocument(selectedReviewedDoc.value.id)
     const content = res.data.content || ''
@@ -202,12 +212,11 @@ async function translateReviewedDoc() {
     formData.append('source_lang', sourceLang.value)
     formData.append('target_lang', targetLang.value)
     const tres = await translationAPI.translateFile(formData)
-    result.value = tres.data
-    ElMessage.success('文档翻译完成')
+    startPolling(tres.data.doc_id)
   } catch (e) {
-    ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
-  } finally {
     translating.value = false
+    pollError.value = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
+    ElMessage.error(pollError.value)
   }
 }
 
@@ -237,6 +246,7 @@ function submitFileUpload() {
 function handleFileTranslate(options) {
   translating.value = true
   result.value = null
+  pollError.value = ''
   const formData = new FormData()
   formData.append('file', options.file)
   formData.append('engine', engine.value)
@@ -245,19 +255,67 @@ function handleFileTranslate(options) {
   formData.append('target_lang', targetLang.value)
 
   translationAPI.translateFile(formData).then(res => {
-    result.value = res.data
-    ElMessage.success('文档翻译完成')
+    startPolling(res.data.doc_id)
   }).catch(e => {
-    ElMessage.error('文件翻译失败: ' + (e.response?.data?.detail || e.message))
-  }).finally(() => {
     translating.value = false
+    pollError.value = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
+    ElMessage.error(pollError.value)
   })
 }
 
-function downloadTranslatedFile() {
-  if (result.value?.download_url) {
-    window.open(result.value.download_url, '_blank')
+function startPolling(docId) {
+  stopPolling()
+  pollingStatus.value = true
+  pollingCount.value = 0
+  pollError.value = ''
+
+  pollTimer = setInterval(async () => {
+    pollingCount.value++
+    try {
+      const res = await translationAPI.getFileStatus(docId)
+      const statusData = res.data
+      if (statusData.status === 'completed') {
+        stopPolling()
+        translating.value = false
+        result.value = {
+          doc_id: docId,
+          original_filename: statusData.original_filename || '',
+          translated_filename: statusData.translated_filename || '',
+          download_url: statusData.download_url || `/api/translation/download/${docId}`
+        }
+        ElMessage.success('文档翻译完成')
+      } else if (statusData.status === 'error') {
+        stopPolling()
+        translating.value = false
+        pollError.value = statusData.error || '翻译过程中发生错误'
+        ElMessage.error(pollError.value)
+      }
+    } catch (e) {
+      stopPolling()
+      translating.value = false
+      pollError.value = '查询翻译状态失败'
+      ElMessage.error(pollError.value)
+    }
+  }, 3000)
+}
+
+function stopPolling() {
+  pollingStatus.value = false
+  pollingCount.value = 0
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
   }
+}
+
+function downloadTranslatedFile() {
+  if (!result.value?.download_url) return
+  const link = document.createElement('a')
+  link.href = result.value.download_url
+  link.setAttribute('download', result.value.translated_filename || result.value.original_filename)
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
 }
 </script>
 
@@ -416,6 +474,10 @@ function downloadTranslatedFile() {
 }
 
 .result-content {
+  padding: 20px 0;
+}
+
+.result-error {
   padding: 20px 0;
 }
 
