@@ -1,0 +1,12 @@
+不联网版spell-check:
+
+1、安装 Python3.11.9。
+     打开python后，安装前，需要勾选“Add python.exe to PATH”，再点【Install Now】。
+2、以管理员身份点击【一键安装依赖.bat】安装依赖。
+3、双击【启动检查.bat】，等黑色窗口运行完，即会出现spellcheck窗口。
+    如运行bat文件失败，执行如下步骤打开spellcheck：
+  （首次执行步骤1-3，后续直接执行1和3）
+   1）在小程序存放目录下如D盘，在地址栏键入powershell，按【Enter】打开powershell
+   2）执行“cd D:\SpellCheckTool”
+   3）再执行“python spell_check.py”
+
