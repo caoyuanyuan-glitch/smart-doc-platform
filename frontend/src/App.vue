@@ -111,14 +111,6 @@
               <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
             </el-sub-menu>
 
-            <el-sub-menu index="library-sub">
-              <template #title>
-                <el-icon><Box /></el-icon>
-                <span>内容库</span>
-              </template>
-              <el-menu-item index="/translate/memory">记忆库</el-menu-item>
-            </el-sub-menu>
-
             <el-menu-item index="/knowledge">
               <el-icon><FolderOpened /></el-icon>
               <template #title>知识库管理</template>
@@ -145,7 +137,7 @@ import { useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
-  Files, Refresh, CollectionTag, Fold, Expand, Switch, Box, User, FolderOpened,
+  Files, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
   Edit, Setting
 } from '@element-plus/icons-vue'
 

@@ -238,6 +238,7 @@ export const translationAPI = {
     timeout: 600000
   }),
   getFileStatus: (docId) => instance.get(`/translation/translate/file/${docId}/status`),
+  getMemoryBanks: () => instance.get('/translation/memory/banks'),
   getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
   getDocument: (id) => instance.get(`/documents/${id}`),
   getMemory: (skip = 0, limit = 100, keyword) => {

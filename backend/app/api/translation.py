@@ -17,7 +17,7 @@ from app.crud.document import get_document, get_documents
 from app.crud.review import get_reviews
 from app.crud.memory import (
     create_memory_entry, get_memory_entries, get_memory_entry,
-    delete_memory_entry, search_memory
+    delete_memory_entry, search_memory, get_memory_banks
 )
 from app.models.translation_doc import TranslationDoc
 from app.utils.document_parser import parse_file
@@ -30,12 +30,21 @@ TRANSLATION_OUTPUT_DIR = "./static/translations"
 
 _translate_tasks = {}
 _translate_tasks_lock = threading.Lock()
+_thread_locals = threading.local()
+
+
+def _get_memory_bank():
+    return getattr(_thread_locals, 'memory_bank', None)
+
+
+def _set_memory_bank(bank: str):
+    _thread_locals.memory_bank = bank if bank else None
 
 
 def _do_translate(text: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> str:
     result = None
     if engine in ["memory", "hybrid"]:
-        r, hit = translate_with_memory(text, source_lang, target_lang, db)
+        r, hit = translate_with_memory(text, source_lang, target_lang, db, bank=_get_memory_bank())
         if hit:
             result = r
     if engine in ["ai", "hybrid"] and not result:
@@ -235,6 +244,203 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
     return out_buf2.read(), pptx_original, pptx_translated
 
 
+def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
+    """Translate DOCX preserving formatting (paragraphs, runs, tables, headers, footers)."""
+    from docx import Document
+
+    doc = Document(fpath)
+    all_original = []
+    all_translated = []
+
+    paragraphs_to_translate = []
+
+    for para in doc.paragraphs:
+        full_text = para.text
+        if full_text.strip():
+            paragraphs_to_translate.append(para)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    full_text = para.text
+                    if full_text.strip():
+                        paragraphs_to_translate.append(para)
+
+    texts = [p.text for p in paragraphs_to_translate]
+    if texts:
+        sep = "\n---DOCXPARA---\n"
+        combined = sep.join(texts)
+        translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+        translated_texts = [t.strip() for t in translated_combined.split(sep)]
+        if len(translated_texts) != len(texts):
+            translated_texts = [_do_translate(t, engine, model, source_lang, target_lang, db) for t in texts]
+        for i, para in enumerate(paragraphs_to_translate):
+            if i < len(translated_texts):
+                translated = translated_texts[i]
+                all_original.append(texts[i])
+                all_translated.append(translated)
+                runs = para.runs
+                if not runs:
+                    continue
+                if len(runs) == 1:
+                    runs[0].text = translated
+                else:
+                    total_orig = sum(len(r.text or "") for r in runs)
+                    if total_orig == 0:
+                        runs[0].text = translated
+                        for r in runs[1:]:
+                            r.text = ""
+                    else:
+                        pos = 0
+                        for r in runs:
+                            orig_len = len(r.text or "")
+                            chunk_len = max(1, int(len(translated) * orig_len / total_orig))
+                            chunk = translated[pos:pos + chunk_len]
+                            r.text = chunk
+                            pos += chunk_len
+                        if pos < len(translated):
+                            runs[-1].text += translated[pos:]
+
+    out_buf = io.BytesIO()
+    doc.save(out_buf)
+    out_buf.seek(0)
+    return out_buf.read(), all_original, all_translated
+
+
+def _translate_xlsx(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
+    """Translate XLSX preserving all formatting, formulas, and structure."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(fpath)
+    all_original = []
+    all_translated = []
+    cells_to_translate = []
+
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value and isinstance(cell.value, str) and cell.value.strip():
+                    cells_to_translate.append(cell)
+
+    texts = [c.value.strip() for c in cells_to_translate]
+    if texts:
+        sep = "\n---XLSXCELL---\n"
+        combined = sep.join(texts)
+        translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+        translated_texts = [t.strip() for t in translated_combined.split(sep)]
+        if len(translated_texts) != len(texts):
+            translated_texts = [_do_translate(t, engine, model, source_lang, target_lang, db) for t in texts]
+        for i, cell in enumerate(cells_to_translate):
+            if i < len(translated_texts):
+                all_original.append(texts[i])
+                all_translated.append(translated_texts[i])
+                cell.value = translated_texts[i]
+
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    out_buf.seek(0)
+    return out_buf.read(), all_original, all_translated
+
+
+def _translate_pdf(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
+    """Translate PDF: extracts text page-by-page, translates, outputs structured text (PDF font limitation)."""
+    import pdfplumber
+
+    all_original = []
+    all_translated = []
+    pages_text = []
+
+    with pdfplumber.open(fpath) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            pages_text.append(text.strip() if text and text.strip() else "")
+
+    non_empty = [p for p in pages_text if p]
+    if non_empty:
+        sep = "\n---PDFPAGE---\n"
+        combined = sep.join(non_empty)
+        translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+        translated_pages = translated_combined.split(sep)
+    else:
+        translated_pages = []
+
+    all_original = non_empty
+    all_translated = translated_pages
+
+    output_lines = []
+    ti = 0
+    for pi, page_text in enumerate(pages_text):
+        if page_text:
+            output_lines.append(f"=== Page {pi + 1} ===")
+            if ti < len(translated_pages):
+                output_lines.append(translated_pages[ti])
+                ti += 1
+            output_lines.append("")
+        else:
+            output_lines.append(f"=== Page {pi + 1} === [no text]")
+            output_lines.append("")
+
+    output_text = "\n".join(output_lines)
+    return output_text.encode("utf-8"), all_original, all_translated
+
+
+def _translate_markdown(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
+    """Translate Markdown preserving all syntax (headings, links, code blocks, tables, lists)."""
+    import re as md_re
+
+    with open(fpath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    code_blocks = []
+    inline_codes = []
+    links = []
+    images = []
+
+    def _preserve_code_blocks(text):
+        def _repl(m):
+            code_blocks.append(m.group(0))
+            return f"%%CODEBLOCK{len(code_blocks) - 1}%%"
+        return md_re.sub(r'```[\s\S]*?```', _repl, text)
+
+    def _preserve_inline_code(text):
+        def _repl(m):
+            inline_codes.append(m.group(0))
+            return f"%%INLINECODE{len(inline_codes) - 1}%%"
+        return md_re.sub(r'`[^`]+`', _repl, text)
+
+    def _preserve_links(text):
+        def _repl(m):
+            links.append(m.group(0))
+            return f"%%LINK{len(links) - 1}%%"
+        return md_re.sub(r'\[([^\]]*)\]\([^)]+\)', _repl, text)
+
+    def _preserve_images(text):
+        def _repl(m):
+            images.append(m.group(0))
+            return f"%%IMAGE{len(images) - 1}%%"
+        return md_re.sub(r'!\[([^\]]*)\]\([^)]+\)', _repl, text)
+
+    protected = content
+    protected = _preserve_code_blocks(protected)
+    protected = _preserve_inline_code(protected)
+    protected = _preserve_images(protected)
+    protected = _preserve_links(protected)
+
+    translated = _do_translate(protected, engine, model, source_lang, target_lang, db)
+
+    for i, cb in enumerate(code_blocks):
+        translated = translated.replace(f"%%CODEBLOCK{i}%%", cb)
+    for i, ic in enumerate(inline_codes):
+        translated = translated.replace(f"%%INLINECODE{i}%%", ic)
+    for i, img in enumerate(images):
+        translated = translated.replace(f"%%IMAGE{i}%%", img)
+    for i, link in enumerate(links):
+        translated = translated.replace(f"%%LINK{i}%%", link)
+
+    return translated.encode("utf-8"), [content], [translated]
+
+
 def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str) -> str:
     lang_names = {
         "zh": "中文", "en": "英文", "ja": "日文", "ko": "韩文",
@@ -255,27 +461,33 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 {content[:8000]}"""
     messages = [{"role": "user", "content": prompt}]
 
-    if model == "deepseek":
+    if model == "kimi":
+        result = ai_client.call_kimi(messages, max_tokens=4096)
+        if result is None:
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+    elif model == "deepseek":
         result = ai_client.call_deepseek(messages, max_tokens=4096)
         if result is None:
-            result = ai_client.call_qwen(messages, max_tokens=4096)
-    else:
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+    elif model == "qwen":
         result = ai_client.call_qwen(messages, max_tokens=4096)
         if result is None:
-            result = ai_client.call_deepseek(messages, max_tokens=4096)
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+    else:
+        result = ai_client.chat(messages, max_tokens=4096, fallback=True)
 
     if result is None:
         raise HTTPException(
             status_code=500,
-            detail="AI翻译引擎不可用，请检查 QWEN (DASHSCOPE_API_KEY) 或 DeepSeek (DEEPSEEK_API_KEY) 的 API Key 是否已配置"
+            detail="AI翻译引擎不可用，请检查 QWEN (DASHSCOPE_API_KEY)、DeepSeek (DEEPSEEK_API_KEY) 或 Kimi (KIMI_API_KEY) 的 API Key 是否已配置"
         )
 
     return result
 
 
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
-                          db: Session) -> tuple:
-    memory_result = search_memory(db, content, source_lang, target_lang)
+                          db: Session, bank: str = None) -> tuple:
+    memory_result = search_memory(db, content, source_lang, target_lang, bank=bank)
     if memory_result:
         return memory_result, True
     return None, False
@@ -305,9 +517,11 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str) -> st
 
 
 def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
-                          engine: str, model: str, source_lang: str, target_lang: str):
+                          engine: str, model: str, source_lang: str, target_lang: str,
+                          memory_bank: str = ""):
     """Background thread that performs the actual translation and updates the DB record."""
     db = SessionLocal()
+    _set_memory_bank(memory_bank)
     try:
         with _translate_tasks_lock:
             _translate_tasks[doc_id] = {"status": "processing", "error": None}
@@ -361,6 +575,35 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                                 all_translated_parts.append("\n".join(trans))
                             except Exception:
                                 continue
+                        elif ext_lower in (".docx", ".doc"):
+                            try:
+                                translated_content, orig, trans = _translate_docx(safe_fpath, engine, model, source_lang, target_lang, db)
+                                all_original_parts.extend(orig)
+                                all_translated_parts.extend(trans)
+                            except Exception:
+                                continue
+                        elif ext_lower in (".xlsx", ".xls"):
+                            try:
+                                translated_content, orig, trans = _translate_xlsx(safe_fpath, engine, model, source_lang, target_lang, db)
+                                all_original_parts.extend(orig)
+                                all_translated_parts.extend(trans)
+                            except Exception:
+                                continue
+                        elif ext_lower == ".md":
+                            try:
+                                translated_content, orig, trans = _translate_markdown(safe_fpath, engine, model, source_lang, target_lang, db)
+                                all_original_parts.extend(orig)
+                                all_translated_parts.extend(trans)
+                            except Exception:
+                                continue
+                        elif ext_lower == ".pdf":
+                            try:
+                                translated_content, orig, trans = _translate_pdf(safe_fpath, engine, model, source_lang, target_lang, db)
+                                all_original_parts.extend(orig)
+                                all_translated_parts.extend(trans)
+                                name_ext = ".txt"  # PDF outputs structured text
+                            except Exception:
+                                continue
                         else:
                             try:
                                 file_content = parse_file(safe_fpath)
@@ -404,6 +647,42 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             all_translated_parts.append("\n".join(trans))
             with open(output_path, "wb") as f:
                 f.write(translated_bytes)
+        elif ext in (".docx", ".doc"):
+            translated_bytes, orig, trans = _translate_docx(file_path, engine, model, source_lang, target_lang, db)
+            all_original_parts.extend(orig)
+            all_translated_parts.extend(trans)
+            with open(output_path, "wb") as f:
+                f.write(translated_bytes)
+        elif ext in (".xlsx", ".xls"):
+            translated_bytes, orig, trans = _translate_xlsx(file_path, engine, model, source_lang, target_lang, db)
+            all_original_parts.extend(orig)
+            all_translated_parts.extend(trans)
+            with open(output_path, "wb") as f:
+                f.write(translated_bytes)
+        elif ext == ".md":
+            translated_bytes, orig, trans = _translate_markdown(file_path, engine, model, source_lang, target_lang, db)
+            all_original_parts.extend(orig)
+            all_translated_parts.extend(trans)
+            with open(output_path, "wb") as f:
+                f.write(translated_bytes)
+        elif ext == ".pdf":
+            translated_bytes, orig, trans = _translate_pdf(file_path, engine, model, source_lang, target_lang, db)
+            all_original_parts.extend(orig)
+            all_translated_parts.extend(trans)
+            output_filename = f"{translated_filename}.txt"
+            output_path = os.path.join(TRANSLATION_OUTPUT_DIR, output_filename)
+            with open(output_path, "wb") as f:
+                f.write(translated_bytes)
+        elif ext == ".txt":
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            if not content.strip():
+                raise Exception("无法从文件中提取文本内容")
+            translated = _do_translate(content, engine, model, source_lang, target_lang, db)
+            all_original_parts.append(content)
+            all_translated_parts.append(translated)
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(translated)
         else:
             content = parse_file(file_path)
             if not content.strip():
@@ -447,9 +726,10 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     from_memory = False
     from_ai = False
     engine = req.engine
+    _set_memory_bank(req.memory_bank)
 
     if engine in ["memory", "hybrid"]:
-        result, hit = translate_with_memory(req.content, req.source_lang, req.target_lang, db)
+        result, hit = translate_with_memory(req.content, req.source_lang, req.target_lang, db, bank=req.memory_bank)
         if hit:
             translated = result
             from_memory = True
@@ -472,7 +752,8 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
                 source_text=req.content,
                 translated_text=translated,
                 source_lang=req.source_lang,
-                target_lang=req.target_lang
+                target_lang=req.target_lang,
+                tags=req.memory_bank or ""
             )
 
     if not translated:
@@ -494,6 +775,7 @@ async def translate_file(
     model: str = Form("qwen"),
     source_lang: str = Form("zh"),
     target_lang: str = Form("en"),
+    memory_bank: str = Form(""),
     db: Session = Depends(get_db)
 ):
     if not os.path.exists(UPLOAD_DIR):
@@ -532,7 +814,7 @@ async def translate_file(
 
     thread = threading.Thread(
         target=_run_translate_thread,
-        args=(doc.id, file_path, ext, filename, engine, model, source_lang, target_lang),
+        args=(doc.id, file_path, ext, filename, engine, model, source_lang, target_lang, memory_bank),
         daemon=True
     )
     thread.start()
@@ -630,6 +912,13 @@ async def get_reviewed_documents(db: Session = Depends(get_db)):
             })
 
     return result
+
+
+@router.get("/memory/banks")
+async def get_banks(db: Session = Depends(get_db)):
+    """Return list of distinct memory bank names (tags) available for translation."""
+    banks = get_memory_banks(db)
+    return {"banks": banks}
 
 
 @router.get("/memory", response_model=list[MemoryEntryOut])
