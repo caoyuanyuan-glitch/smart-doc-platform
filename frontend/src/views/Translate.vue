@@ -2,7 +2,7 @@
   <div class="translate-container">
     <div class="page-header">
       <h2 class="page-title">文本翻译</h2>
-      <p class="page-desc">AI + 记忆库双引擎智能翻译，支持多模型选择</p>
+      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，记忆库配置可从知识库资源库调用</p>
     </div>
 
     <div class="content-grid">
@@ -17,14 +17,34 @@
               <el-radio-group v-model="engine" @change="onEngineChange">
                 <el-radio-button value="hybrid">AI + 记忆库</el-radio-button>
                 <el-radio-button value="ai">仅 AI</el-radio-button>
+                <el-radio-button value="memory">仅记忆库</el-radio-button>
               </el-radio-group>
             </el-form-item>
 
-            <el-form-item label="记忆库" v-if="engine === 'hybrid'">
+            <el-form-item label="记忆库标签" v-if="engine !== 'ai'">
               <el-select v-model="memoryBank" placeholder="全部记忆库" clearable style="width: 100%">
                 <el-option label="全部记忆库" value="" />
                 <el-option v-for="bank in memoryBanks" :key="bank" :label="bank" :value="bank" />
               </el-select>
+            </el-form-item>
+
+            <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
+              <el-select
+                v-model="memoryFileId"
+                placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
+                clearable
+                filterable
+                :loading="memoryLibraryLoading"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="file in memoryLibraryFiles"
+                  :key="file.id"
+                  :label="file.label"
+                  :value="file.id"
+                />
+              </el-select>
+              <div class="memory-library-hint">仅读取知识库下“资源库 / 记忆库”中的文件，当前配置可留空。</div>
             </el-form-item>
 
             <el-form-item label="AI 模型" v-if="engine !== 'memory'">
@@ -132,7 +152,8 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Switch, Document, CopyDocument, Download } from '@element-plus/icons-vue'
-import { translationAPI } from '@/api'
+import { knowledgeAPI, translationAPI } from '@/api'
+import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const engine = ref('hybrid')
 const model = ref('qwen')
@@ -140,18 +161,37 @@ const sourceLang = ref('zh')
 const targetLang = ref('en')
 const memoryBank = ref('')
 const memoryBanks = ref([])
+const memoryFileId = ref(null)
+const memoryLibraryFiles = ref([])
+const memoryLibraryLoading = ref(false)
 const inputText = ref('')
 const translating = ref(false)
 const result = ref(null)
 
 onMounted(async () => {
+  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
+})
+
+async function loadMemoryBanks() {
   try {
     const res = await translationAPI.getMemoryBanks()
     memoryBanks.value = res.data.banks || []
   } catch (e) {
     // ignore
   }
-})
+}
+
+async function loadMemoryLibraryFiles() {
+  memoryLibraryLoading.value = true
+  try {
+    const res = await knowledgeAPI.getTree()
+    memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
+  } catch (e) {
+    memoryLibraryFiles.value = []
+  } finally {
+    memoryLibraryLoading.value = false
+  }
+}
 
 function onEngineChange(val) {
   // no-op now
@@ -171,7 +211,8 @@ async function translateText() {
       model: model.value,
       source_lang: sourceLang.value,
       target_lang: targetLang.value,
-      memory_bank: memoryBank.value || null
+      memory_bank: memoryBank.value || null,
+      memory_file_id: memoryFileId.value || null
     })
     result.value = res.data
     ElMessage.success('翻译完成')
@@ -347,6 +388,13 @@ function downloadResult() {
   display: flex;
   gap: 10px;
   margin-top: 16px;
+}
+
+.memory-library-hint {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.5;
+  margin-top: 6px;
 }
 
 @media (max-width: 1024px) {

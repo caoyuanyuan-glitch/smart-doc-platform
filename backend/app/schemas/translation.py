@@ -10,6 +10,7 @@ class TranslationRequest(BaseModel):
     source_lang: str = "zh"
     target_lang: str = "en"
     memory_bank: Optional[str] = None
+    memory_file_id: Optional[int] = None
 
 
 class TranslationResponse(BaseModel):
