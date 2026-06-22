@@ -10,7 +10,7 @@ router = APIRouter()
 
 UPLOAD_DIR = "./static/uploads"
 
-@router.post("/upload/")
+@router.post("/upload/", response_model=DocumentListItem)
 async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -39,10 +39,10 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
             user_id=1
         )
         from app.crud.document import update_document_status
-        update_document_status(db, document.id, "ready")
+        document = update_document_status(db, document.id, "ready")
         from app.crud.document import update_document_file_size
-        update_document_file_size(db, document.id, file_size)
-        return {"message": "File uploaded successfully", "document_id": document.id}
+        document = update_document_file_size(db, document.id, file_size)
+        return document
     except Exception as e:
         if os.path.exists(file_path):
             os.remove(file_path)

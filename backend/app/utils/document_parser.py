@@ -1,9 +1,45 @@
 import os
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 from docx import Document as DocxDocument
 from PyPDF2 import PdfReader
 import markdown
+
+
+def _merge_pdf_paragraph_lines(text: str) -> str:
+    paragraphs = re.split(r'\n{2,}', text)
+    merged = []
+
+    for paragraph in paragraphs:
+        lines = [re.sub(r'\s+', ' ', line).strip() for line in paragraph.split('\n') if line.strip()]
+        if not lines:
+            continue
+
+        current = lines[0]
+        for line in lines[1:]:
+            if re.match(r'^(?:\d+[\.)]|[-*•])\s*', line):
+                current += '\n' + line
+                continue
+            if len(line.split()) <= 6 and re.match(r'^[A-Z][A-Za-z0-9 /&()_\-]{0,48}$', line):
+                current += '\n' + line
+                continue
+            current += ' ' + line
+        merged.append(current)
+
+    return '\n\n'.join(merged)
+
+
+def clean_pdf_text(text: str) -> str:
+    text = str(text or '')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = re.sub(r'(?<=\n)\s*y(?=[A-Za-z])', ' ', text)
+    text = re.sub(r'(?<=[A-Za-z])\s*-\s*\n\s*(?=[A-Za-z])', '', text)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    text = _merge_pdf_paragraph_lines(text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 def _read_file_safe(file_path: str) -> str:
@@ -25,7 +61,7 @@ def parse_pdf(file_path):
         text = ""
         for page in reader.pages:
             text += page.extract_text() + "\n"
-        return text.strip()
+        return clean_pdf_text(text)
     except Exception as e:
         raise ValueError(f"PDF解析失败: {str(e)}")
 

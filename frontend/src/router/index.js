@@ -45,8 +45,7 @@ const routes = [
   },
   {
     path: '/review/basis',
-    name: 'ReviewBasis',
-    component: Review
+    redirect: '/review'
   },
   {
     path: '/polish',

@@ -82,7 +82,6 @@
               <el-menu-item index="/review">文档管理</el-menu-item>
               <el-menu-item index="/review/tasks">审核任务</el-menu-item>
               <el-menu-item index="/review/rules">规则管理</el-menu-item>
-              <el-menu-item index="/review/basis">审核依据</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="qa-sub">

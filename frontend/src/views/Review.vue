@@ -6,11 +6,8 @@
       <div class="upload-section">
         <el-upload
           class="upload-demo"
-          :action="uploadUrl"
-          :on-success="handleUploadSuccess"
-          :on-error="handleUploadError"
+          :http-request="uploadDocument"
           :before-upload="beforeUpload"
-          :on-progress="handleUploadProgress"
           accept=".pdf,.docx,.md,.zip,.txt,.idml"
           :auto-upload="true"
           :show-file-list="false"
@@ -21,8 +18,8 @@
           </template>
         </el-upload>
         <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
-          <el-progress :percentage="uploadProgress" :stroke-width="6" />
-          <span class="progress-text">上传中 {{ uploadProgress }}%</span>
+          <el-progress :percentage="uploadProgress" :stroke-width="4" />
+          <span class="progress-text">{{ uploadProgressText }}</span>
         </div>
       </div>
 
@@ -53,7 +50,7 @@
               <span v-else style="color:#999">未审核</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="250">
+          <el-table-column label="操作" width="340">
             <template #default="scope">
               <el-button 
                 size="small" 
@@ -66,9 +63,18 @@
                 size="small" 
                 type="success" 
                 :disabled="!docReviewStatus[scope.row.id]?.review_id || docReviewStatus[scope.row.id]?.status !== 'completed'"
+                @click="downloadReviewResultByDoc(scope.row)"
+              >
+                {{ resultButtonLabel(scope.row.file_type) }}
+              </el-button>
+              <el-button 
+                size="small"
+                type="info"
+                plain
+                :disabled="!docReviewStatus[scope.row.id]?.review_id || docReviewStatus[scope.row.id]?.status !== 'completed'"
                 @click="openIssueDialogByDoc(scope.row.id)"
               >
-                查看结果
+                问题详情
               </el-button>
               <el-button size="small" type="danger" @click="deleteDocument(scope.row.id)">删除</el-button>
             </template>
@@ -117,11 +123,11 @@
             </template>
           </el-table-column>
           <el-table-column prop="created_at" label="开始时间" width="160" />
-          <el-table-column label="操作" width="320" fixed="right">
+          <el-table-column label="操作" width="360" fixed="right">
             <template #default="scope">
               <el-button size="small" type="primary" @click="openIssueDialog(scope.row)">查看问题</el-button>
               <el-button size="small" :disabled="!taskIssues[scope.row.id] || taskIssues[scope.row.id].length === 0" @click="batchConfirmAll(scope.row.id)">一键确认</el-button>
-              <el-button size="small" type="success" @click="exportReviewHtml(scope.row.id)">导出HTML</el-button>
+              <el-button size="small" type="success" @click="downloadReviewResult(scope.row)">{{ resultButtonLabel(scope.row.document_file_type) }}</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -353,49 +359,13 @@
       </div>
     </div>
 
-    <!-- 审核依据 -->
-    <div v-if="currentView === 'basis'">
-      <h2 class="page-title">审核依据</h2>
-      <div class="upload-section">
-        <el-upload
-          class="upload-demo"
-          :action="basisUploadUrl"
-          :on-success="handleBasisSuccess"
-          :on-error="handleBasisError"
-          :before-upload="beforeUpload"
-          accept=".pdf,.docx,.md,.txt"
-          :auto-upload="true"
-        >
-          <el-button type="primary">上传依据</el-button>
-          <template #tip>
-            <div class="upload-tip">支持 PDF、DOCX、MD、TXT 格式</div>
-          </template>
-        </el-upload>
-      </div>
-
-      <div class="table-section">
-        <h3>依据列表</h3>
-        <el-table :data="basisList" border>
-          <el-table-column prop="id" label="ID" width="80" />
-          <el-table-column prop="filename" label="文件名" />
-          <el-table-column prop="file_type" label="类型" width="100" />
-          <el-table-column prop="created_at" label="上传时间" width="180" />
-          <el-table-column label="操作" width="180">
-            <template #default="scope">
-              <el-button size="small" @click="viewBasis(scope.row.id)">查看</el-button>
-              <el-button size="small" type="danger" @click="deleteBasis(scope.row.id)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { useRoute } from 'vue-router'
-import { documentAPI, reviewAPI, rulesAPI, auditBasisAPI } from '@/api'
+import { documentAPI, reviewAPI, rulesAPI } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
@@ -404,7 +374,6 @@ const documents = ref([])
 const reviews = ref([])
 const issues = ref([])
 const rules = ref([])
-const basisList = ref([])
 
 // 行内报告：按任务ID存储问题列表和筛选条件
 const taskIssues = reactive({})
@@ -470,9 +439,9 @@ const selectedRules = ref([])
 const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
-const basisUploadUrl = '/api/audit_basis/upload'
-
 const uploadProgress = ref(0)
+const uploadProgressText = ref('')
+let uploadingTempId = 0
 
 const filterKeyword = ref('')
 const filterSeverity = ref('')
@@ -484,7 +453,6 @@ const sortOrder = ref('asc')
 const currentView = computed(() => {
   if (route.path === '/review/tasks') return 'tasks'
   if (route.path === '/review/rules') return 'rules'
-  if (route.path === '/review/basis') return 'basis'
   return 'documents'
 })
 
@@ -546,7 +514,6 @@ function loadByView() {
   if (currentView.value === 'documents') loadDocuments()
   else if (currentView.value === 'tasks' || currentView.value === 'reports') loadReviews()
   else if (currentView.value === 'rules') loadRules()
-  else if (currentView.value === 'basis') loadBasis()
 }
 
 async function loadDocuments() {
@@ -555,7 +522,8 @@ async function loadDocuments() {
       documentAPI.list(),
       reviewAPI.list()
     ])
-    documents.value = docResp.data || []
+    const uploadingDocs = documents.value.filter(doc => String(doc.id).startsWith('uploading-'))
+    documents.value = [...uploadingDocs, ...(docResp.data || [])]
     
     const reviewMap = {}
     for (const r of reviewResp.data || []) {
@@ -640,15 +608,6 @@ async function loadRules() {
   }
 }
 
-async function loadBasis() {
-  try {
-    const resp = await auditBasisAPI.list()
-    basisList.value = resp.data || []
-  } catch (e) {
-    ElMessage.error('加载依据列表失败')
-  }
-}
-
 function formatSize(size) {
   if (!size) return '-'
   if (size < 1024) return size + ' B'
@@ -676,6 +635,34 @@ function beforeUpload(file) {
   return true
 }
 
+function insertUploadingPlaceholder(file) {
+  const tempId = `uploading-${++uploadingTempId}`
+  documents.value = [
+    {
+      id: tempId,
+      filename: file.name,
+      file_type: file.name.split('.').pop().toLowerCase(),
+      file_size: file.size,
+      status: 'uploading',
+      created_at: new Date().toISOString()
+    },
+    ...documents.value.filter(doc => String(doc.id) !== tempId)
+  ]
+  return tempId
+}
+
+function removeUploadingPlaceholder(tempId) {
+  documents.value = documents.value.filter(doc => String(doc.id) !== String(tempId))
+}
+
+function upsertDocumentRow(document) {
+  if (!document?.id) return
+  documents.value = [
+    document,
+    ...documents.value.filter(doc => String(doc.id) !== String(document.id) && !String(doc.id).startsWith('uploading-'))
+  ]
+}
+
 function beforeRulesUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
   if (ext !== 'json') {
@@ -685,31 +672,38 @@ function beforeRulesUpload(file) {
   return true
 }
 
-function handleUploadProgress(event, file, fileList) {
-  uploadProgress.value = Math.round((event.loaded / event.total) * 100)
-}
+async function uploadDocument(options) {
+  const file = options.file
+  const tempId = insertUploadingPlaceholder(file)
+  uploadProgress.value = 1
+  uploadProgressText.value = '上传中 1%'
 
-function handleUploadSuccess(response) {
-  uploadProgress.value = 100
-  setTimeout(() => {
-    uploadProgress.value = 0
-  }, 500)
-  ElMessage.success('上传成功')
-  loadDocuments()
-}
-
-function handleUploadError() {
-  uploadProgress.value = 0
-  ElMessage.error('上传失败，请重试')
-}
-
-function handleBasisSuccess() {
-  ElMessage.success('上传成功')
-  loadBasis()
-}
-
-function handleBasisError() {
-  ElMessage.error('上传失败，请重试')
+  try {
+    const response = await documentAPI.upload(file, {
+      onUploadProgress: (event) => {
+        if (!event.total) return
+        const percent = Math.min(99, Math.max(1, Math.round((event.loaded / event.total) * 100)))
+        uploadProgress.value = percent
+        uploadProgressText.value = percent >= 99 ? '文件已上传，正在解析文档...' : `上传中 ${percent}%`
+      }
+    })
+    uploadProgress.value = 100
+    uploadProgressText.value = '文档已入库'
+    removeUploadingPlaceholder(tempId)
+    upsertDocumentRow(response.data)
+    await loadDocuments()
+    options.onSuccess?.(response.data)
+    ElMessage.success('上传成功')
+  } catch (error) {
+    removeUploadingPlaceholder(tempId)
+    options.onError?.(error)
+    ElMessage.error('上传失败，请重试')
+  } finally {
+    setTimeout(() => {
+      uploadProgress.value = 0
+      uploadProgressText.value = ''
+    }, 600)
+  }
 }
 
 function handleRulesImport(response) {
@@ -907,6 +901,10 @@ th{background:#f8f9fa;font-weight:bold}
   }
 }
 
+function resultButtonLabel(fileType) {
+  return fileType === 'docx' ? '下载Word' : '导出HTML'
+}
+
 function clearFilters() {
   filterKeyword.value = ''
   filterSeverity.value = ''
@@ -945,6 +943,19 @@ async function openIssueDialogByDoc(documentId) {
   if (taskIssues[reviewId] === undefined) {
     await loadReviewIssues(reviewId)
   }
+}
+
+async function downloadReviewResultByDoc(document) {
+  const status = docReviewStatus[document.id]
+  if (!status || !status.review_id) {
+    ElMessage.warning('暂无审核结果')
+    return
+  }
+  await downloadReviewResult({
+    id: status.review_id,
+    document_name: document.filename,
+    document_file_type: document.file_type
+  })
 }
 
 // 单个问题判定
@@ -1022,6 +1033,30 @@ async function exportReviewHtml(taskId) {
   }
 }
 
+async function downloadReviewResult(row) {
+  try {
+    const fileType = row.document_file_type || row.file_type || ''
+    const res = await reviewAPI.exportResult(row.id)
+    const blobType = fileType === 'docx'
+      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : 'text/html;charset=utf-8'
+    const blob = new Blob([res.data], { type: blobType })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    const baseName = (row.document_name || `task_${row.id}`).replace(/\.[^.]+$/, '')
+    const suffix = fileType === 'docx' ? '.docx' : '.html'
+    link.download = `${baseName}_审核结果_${new Date().toISOString().slice(0, 10)}${suffix}`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    ElMessage.success(fileType === 'docx' ? 'Word审核结果下载成功' : 'HTML审核报告导出成功')
+  } catch (err) {
+    ElMessage.error('导出失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+
 function onRuleSelectionChange(rows) {
   selectedRules.value = rows.map(row => row.id)
 }
@@ -1056,25 +1091,6 @@ async function deleteDocument(id) {
   try {
     await documentAPI.delete(id)
     loadDocuments()
-    ElMessage.success('删除成功')
-  } catch (error) {
-    ElMessage.error('删除失败')
-  }
-}
-
-async function viewBasis(id) {
-  try {
-    await auditBasisAPI.get(id)
-    ElMessage.info('已加载依据信息')
-  } catch (error) {
-    ElMessage.error('查看失败')
-  }
-}
-
-async function deleteBasis(id) {
-  try {
-    await auditBasisAPI.delete(id)
-    loadBasis()
     ElMessage.success('删除成功')
   } catch (error) {
     ElMessage.error('删除失败')
@@ -1392,13 +1408,14 @@ onUnmounted(() => {
 
 .progress-section {
   margin-top: 15px;
+  width: 260px;
 }
 
 .progress-text {
   display: block;
-  text-align: center;
+  text-align: left;
   margin-top: 8px;
-  font-size: 14px;
+  font-size: 12px;
   color: #606266;
 }
 

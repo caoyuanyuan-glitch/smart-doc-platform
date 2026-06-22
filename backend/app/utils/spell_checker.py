@@ -8,6 +8,29 @@ from spellchecker import SpellChecker
 # 初始化英文拼写检查器
 spell = SpellChecker(language='en')
 
+_JOINER_SMALL_WORDS = {
+    'a', 'an', 'and', 'as', 'at', 'be', 'by', 'for', 'from', 'if', 'in', 'into',
+    'is', 'it', 'of', 'on', 'or', 'out', 'than', 'that', 'the', 'to', 'up', 'with',
+}
+
+_PDF_TECH_FRAGMENTS = {
+    'dnb', 'dna', 'rna', 'coli', 'well', 'plate', 'buffer', 'library', 'sample',
+    'reagent', 'kit', 'seq', 'mgi', 'sscir', 'dsdna', 'oligreen', 'qubit', 'contents',
+}
+
+_PDF_SPELL_SKIP_WORDS = {
+    'transcranial', 'anonymization', 'jpg', 'fps', 'snr', 'tib', 'vrms', 'ghz', 'tis', 'pag', 'mproper',
+}
+
+DOMAIN_ABBREVIATIONS = {
+    'audt', 'auth', 'alof', 'dtbk', 'emrg', 'didt', 'paut', 'plok', 'sgud', 'rdmp',
+    'imt', 'mi', 'ti', 'prf', 'ri', 'pi', 'sd', 'roi', 'fov', 'tgc',
+    'ac', 'fl', 'hc', 'bpd', 'thd', 'apad', 'aptd', 'ttd', 'fta',
+    'lvids', 'lvid', 'ef', 'clv', 'cle', 'clt', 'ef6', 'ef6-clv', 'ef6-cle', 'ef6-clt',
+    'mah', 'mwh', 'vdc', 'vac', 'https', 'http', 'tcp', 'kcp', 'bmu', 'fda', 'iec', 'emc', 'rf', 'alara',
+    'jpg', 'fps', 'snr', 'tib', 'vrms', 'ghz', 'tis', 'pag',
+}
+
 # 技术文档常用术语白名单
 TECH_TERMS_WHITELIST = {
     'DNA', 'RNA', 'PCR', 'ELISA', 'IVD', 'FDA', 'CE', 'ISO', 'IEC',
@@ -35,10 +58,46 @@ TECH_TERMS_WHITELIST = {
     'IHC', 'ICC', 'IF', 'FISH', 'ISH', 'ELISPOT',
     'FACS', 'FCM',
     'app', 'apps', 'etc',
+    'barcode', 'thermo', 'onestep', 'dsdna', 'invitrogen', 'axygen', 'wfex',
+    'MGISP', 'MGISP-960', 'MGISP-100', 'MGISP-Smart', 'MGICLab', 'MGICLab-FZ90', 'MGICLab-FZ150K',
+    'MGISEQ', 'DNBelab', 'DNBelab-D4RS', 'DIPSEQ', 'StereOmics', 'GenSIRO', 'DNBs', 'ssCir',
+    'cDNA', 'gDNA', 'cfDNA', 'ctDNA', 'FFPE', 'WGS', 'WES', 'RNA-seq', 'ChIP-seq', 'ATAC-seq',
+    'qPCR', 'dPCR', 'NGS', 'SBS', 'OliGreen', 'Quant-iT', 'RiboGreen', 'PicoGreen', 'Qubit',
+    'App-D', 'OS-SB', 'OS-DB', 'OS-App', 'aliquoting', 'quantitation', 'quantification',
+    'oligonucleotide', 'uncyclized', 'microplates', 'vortexing', 'pipetting', 'centrifuging',
+    'hybridization', 'denaturation', 'annealing', 'elongation', 'amplicon', 'multiplexing',
+    'barcoding', 'pooling', 'normalization', 'titration', 'supernatant', 'precipitate', 'elution',
+    'lysis', 'aliquots', 'WDesigner', 'Consumables.sp960', 'sp960', 'BWA', 'GATK', 'SAMtools',
+    'BLAST', 'Bowtie', 'STAR', 'HISAT2', 'SPAdes', 'SOAPdenovo', 'FastQC', 'MultiQC', 'Trimmomatic',
+    'Cutadapt', 'Seurat', 'Scanpy', 'NCBI', 'EMBL', 'DDBJ', 'Ensembl', 'UCSC', 'RefSeq', 'dbSNP',
+    'dbGaP', 'GEO', 'SRA', 'COSMIC', 'ClinVar', 'OMIM', 'UniProt', 'PDB', 'nM', 'μM', 'mM',
+    'RUO', 'IVDR', 'RoHS', 'WEEE', 'FCL', 'workflow', 'desktop', 'login', 'logout', 'Hamilton',
+    'HamiLton', 'Eppendorf', 'Fisher', 'LABTECH', 'Fluostar', 'Omega', 'BL21', 'DH5α', 'Greiner',
+    'Bio-One', 'ssDNA', 'Oligreen', 'g-force', 'in vitro', 'in vivo', 'in situ', 'ex vivo', 'de novo',
     'e.g', 'i.e', 'P.R', 'R.P', 'U.S.A', 'U.S', 'U.K',
     'Ltd.', 'Co.', 'Inc.', 'LLC.', 'LLP.', 'Corp.',
     'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.',
+    'DNBSEQ-T20×2RS', 'DNBSEQ-T7', 'DNBSEQ-G400', 'MGISP-Smart 8', 'RCR', 'OneStep', 'High-throughput',
+    'Run Wizard', 'Cell Ranger', 'fluorometer', 'luminescence', 'chemiluminescence', 'nucleotide',
+    'nuclease', 'polymerase', 'ligase', 'vector', 'plasmid', 'genome', 'transcriptome', 'proteome',
+    'metabolome', 'diploid', 'haploid', 'polyploid', 'transformation', 'transfection', 'transduction',
+    'cloning', 'fluorescence', 'purification', 'centrifugation', 'electrophoresis', 'chromatography',
+    'spectrophotometer', 'restriction', 'fragmentation', 'mutation', 'allele', 'genotype', 'phenotype',
+    'haplotype', 'phylogenetic', 'homologous', 'orthologous', 'paralogous', 'heterologous', 'polymorphism',
+    'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
 }
+
+
+def _load_whitelist_into_dictionary():
+    words = set()
+    for term in TECH_TERMS_WHITELIST:
+        for piece in re.findall(r"[A-Za-z]+", str(term)):
+            if len(piece) >= 2:
+                words.add(piece.lower())
+    spell.word_frequency.load_words(sorted(words))
+
+
+_load_whitelist_into_dictionary()
 
 # 常见拼写错误映射表
 COMMON_MISSPELLINGS = {
@@ -67,6 +126,8 @@ COMMON_MISSPELLINGS = {
     'carefull': 'careful',
     'carreer': 'career',
     'certifice': 'certified',
+    'charater': 'character',
+    'charaters': 'characters',
     'challange': 'challenge',
     'changable': 'changeable',
     'charecter': 'character',
@@ -98,6 +159,8 @@ COMMON_MISSPELLINGS = {
     'curiousity': 'curiosity',
     'decribe': 'describe',
     'decribed': 'described',
+    'defination': 'definition',
+    'desciption': 'description',
     'descripton': 'description',
     'desparatly': 'desperately',
     'dessigned': 'designed',
@@ -301,6 +364,8 @@ COMMON_MISSPELLINGS = {
     'magin': 'magic',
     'magnificient': 'magnificent',
     'maintainance': 'maintenance',
+    'maintanance': 'maintenance',
+    'maintenence': 'maintenance',
     'maintina': 'maintain',
     'majorirty': 'majority',
     'malfunc': 'malfunction',
@@ -316,6 +381,8 @@ COMMON_MISSPELLINGS = {
     'mispell': 'misspell',
     'mispelled': 'misspelled',
     'mispelling': 'misspelling',
+    'occured': 'occurred',
+    'ocurred': 'occurred',
     'misterious': 'mysterious',
     'mistery': 'mystery',
     'mistry': 'mystery',
@@ -514,6 +581,7 @@ COMMON_MISSPELLINGS = {
     'predomantly': 'predominantly',
     'prefered': 'preferred',
     'prefering': 'preferring',
+    'priviledge': 'privilege',
     'pregancy': 'pregnancy',
     'preganant': 'pregnant',
     'pregnant': 'pregnant',
@@ -595,6 +663,11 @@ COMMON_MISSPELLINGS = {
     'programer': 'programmer',
     'programing': 'programming',
     'programme': 'program',
+    'recieve': 'receive',
+    'refered': 'referred',
+    'refering': 'referring',
+    'referrence': 'reference',
+    'seperate': 'separate',
     'progres': 'progress',
     'progress': 'progress',
     'progresive': 'progressive',
@@ -1549,6 +1622,7 @@ COMMON_MISSPELLINGS = {
     'speedy': 'speedy',
     'spell': 'spell',
     'spelling': 'spelling',
+    'tecnical': 'technical',
     'spend': 'spend',
     'spent': 'spend',
     'sphere': 'sphere',
@@ -2282,6 +2356,7 @@ COMMON_MISSPELLINGS = {
     'unprecedented': 'unprecedented',
     'unrest': 'unrest',
     'until': 'until',
+    'untill': 'until',
     'unusual': 'unusual',
     'unwilling': 'unwilling',
     'up': 'up',
@@ -2305,6 +2380,7 @@ COMMON_MISSPELLINGS = {
     'us': 'us',
     'usage': 'usage',
     'use': 'use',
+    'useing': 'using',
     'used': 'use',
     'useful': 'useful',
     'useless': 'useless',
@@ -2508,10 +2584,12 @@ COMMON_MISSPELLINGS = {
     'when': 'when',
     'whenever': 'whenever',
     'where': 'where',
+    'wheras': 'whereas',
     'whereas': 'whereas',
     'wherever': 'wherever',
     'whether': 'whether',
     'which': 'which',
+    'wich': 'which',
     'whichever': 'whichever',
     'while': 'while',
     'whim': 'whim',
@@ -2664,6 +2742,54 @@ COMMON_MISSPELLINGS = {
     'zone': 'zone',
     'zoo': 'zoo',
     'zoom': 'zoom',
+    'sequensing': 'sequencing',
+    'amplifcation': 'amplification',
+    'hybrization': 'hybridization',
+    'denaturtion': 'denaturation',
+    'anealing': 'annealing',
+    'elongtion': 'elongation',
+    'purifcation': 'purification',
+    'centrifigation': 'centrifugation',
+    'electrophresis': 'electrophoresis',
+    'chromatograpy': 'chromatography',
+    'spectophotometer': 'spectrophotometer',
+    'fluoroscence': 'fluorescence',
+    'oligonucletide': 'oligonucleotide',
+    'nucletide': 'nucleotide',
+    'restiction': 'restriction',
+    'fragmenttion': 'fragmentation',
+    'transformtion': 'transformation',
+    'clonning': 'cloning',
+    'genom': 'genome',
+    'proteom': 'proteome',
+    'epigenom': 'epigenome',
+    'microbiom': 'microbiome',
+    'phylogentic': 'phylogenetic',
+    'homologus': 'homologous',
+    'orthologus': 'orthologous',
+    'paralogus': 'paralogous',
+    'heterologus': 'heterologous',
+    'polymorhpism': 'polymorphism',
+    'mutaion': 'mutation',
+    'varaint': 'variant',
+    'allel': 'allele',
+    'genotye': 'genotype',
+    'phenotye': 'phenotype',
+    'haplotye': 'haplotype',
+    'purifcation': 'purification',
+    'centrifigation': 'centrifugation',
+    'electrophresis': 'electrophoresis',
+    'chromatograpy': 'chromatography',
+    'spectophotometer': 'spectrophotometer',
+    'fluoroscence': 'fluorescence',
+    'hybrization': 'hybridization',
+    'denaturtion': 'denaturation',
+    'anealing': 'annealing',
+    'elongtion': 'elongation',
+    'transcriptom': 'transcriptome',
+    'metabolom': 'metabolome',
+    'mgisp': 'MGISP',
+    'dnblab': 'DNBelab',
 }
 
 
@@ -2673,18 +2799,125 @@ def _is_technical_term(word):
     return w in TECH_TERMS_WHITELIST or w.upper() in TECH_TERMS_WHITELIST
 
 
+def _is_domain_abbreviation(word):
+    token = word.strip('.').lower()
+    return token in DOMAIN_ABBREVIATIONS
+
+
 def _normalize_for_check(word):
     """标准化单词用于拼写检查"""
     w = word.strip('.')
     return w.lower()
 
 
-def check_spelling(content, min_word_length=3):
+def _extract_chapter(content, position):
+    lines = content[:position].split('\n')
+    for i in range(len(lines) - 1, max(-1, len(lines) - 25), -1):
+        line = lines[i].strip()
+        if not line:
+            continue
+        if line.startswith('#'):
+            return line.lstrip('#').strip()
+        if re.match(r'^\d+(?:\.\d+)*(?:[\)\.])?\s*[A-Z][^\n]{2,}$', line):
+            return re.sub(r'^(\d+(?:\.\d+)*)([A-Z])', r'\1 \2', line)
+    return ''
+
+
+def _is_dictionary_word(token):
+    lowered = token.lower()
+    if not lowered:
+        return False
+    if lowered in _JOINER_SMALL_WORDS:
+        return True
+    if _is_technical_term(token):
+        return True
+    if _is_domain_abbreviation(token):
+        return True
+    return lowered in spell
+
+
+def _is_extraction_artifact(word):
+    lowered = word.lower()
+    if not lowered.startswith('y') or len(word) <= 2:
+        return False
+    rest = word[1:]
+    if not rest:
+        return False
+    return (
+        _is_dictionary_word(rest.lower())
+        or _is_technical_term(rest)
+        or _is_domain_abbreviation(rest)
+        or rest.lower() in COMMON_MISSPELLINGS
+    )
+
+
+def _looks_like_joined_words(word):
+    lowered = word.lower()
+    if len(lowered) < 5 or not lowered.isalpha():
+        return False
+
+    memo = {}
+
+    def can_split(start, parts):
+        key = (start, parts)
+        if key in memo:
+            return memo[key]
+        if start == len(lowered):
+            return parts >= 2
+        if parts >= 3:
+            return False
+
+        upper = min(len(lowered), start + 12)
+        for end in range(start + 2, upper + 1):
+            piece = lowered[start:end]
+            if not _is_dictionary_word(piece):
+                continue
+            if can_split(end, parts + 1):
+                memo[key] = True
+                return True
+
+        memo[key] = False
+        return False
+
+    return can_split(0, 0)
+
+
+def _should_skip_spelling_issue(word, context, file_type=None):
+    if _is_domain_abbreviation(word) or _is_extraction_artifact(word):
+        return True
+
+    if file_type != 'pdf':
+        return False
+
+    if word.lower() in _PDF_SPELL_SKIP_WORDS:
+        return True
+
+    if _looks_like_joined_words(word):
+        return True
+
+    lowered = word.lower()
+    fragment_hits = sum(1 for fragment in _PDF_TECH_FRAGMENTS if fragment in lowered)
+    if fragment_hits >= 2:
+        return True
+    if lowered.endswith('dnb') and lowered[:2] in {'of', 'to', 'in'}:
+        return True
+    if lowered.startswith('coli') and 'and' in lowered:
+        return True
+    if re.match(r'^(?:ii|iii|iv|vi)+[a-z]+$', lowered):
+        return True
+
+    compact_tokens = re.findall(r'\b[a-z]{8,}\b', context.lower())
+    merged_like_count = sum(1 for token in compact_tokens if _looks_like_joined_words(token))
+    return merged_like_count >= 2
+
+
+def check_spelling(content, min_word_length=3, file_type=None):
     """
     检查英文文档的拼写错误
     返回拼写错误列表
     """
     issues = []
+    seen_issue_keys = set()
     
     # 提取所有单词
     words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", content)
@@ -2696,9 +2929,9 @@ def check_spelling(content, min_word_length=3):
         # 跳过太短的词
         if len(word) < min_word_length:
             continue
-        
+
         # 跳过技术术语白名单
-        if _is_technical_term(word):
+        if _is_technical_term(word) or _is_domain_abbreviation(word) or _is_extraction_artifact(word):
             continue
         
         # 检查常见错误映射表
@@ -2710,10 +2943,16 @@ def check_spelling(content, min_word_length=3):
                 context_start = max(0, match.start() - 50)
                 context_end = min(len(content), match.end() + 50)
                 context = content[context_start:context_end]
-                chapter = ""
+                if _should_skip_spelling_issue(word, context, file_type):
+                    continue
+                dedupe_key = (normalized, 'spell')
+                if dedupe_key in seen_issue_keys:
+                    continue
+                seen_issue_keys.add(dedupe_key)
+                chapter = _extract_chapter(content, match.start())
                 
                 issues.append({
-                    "severity": "general",
+                    "severity": "serious",
                     "category": "拼写/用词错误",
                     "rule": "SPELL",
                     "chapter": chapter,
@@ -2737,7 +2976,13 @@ def check_spelling(content, min_word_length=3):
                 context_start = max(0, match.start() - 50)
                 context_end = min(len(content), match.end() + 50)
                 context = content[context_start:context_end]
-                chapter = ""
+                if _should_skip_spelling_issue(word, context, file_type):
+                    continue
+                dedupe_key = (normalized, 'spell')
+                if dedupe_key in seen_issue_keys:
+                    continue
+                seen_issue_keys.add(dedupe_key)
+                chapter = _extract_chapter(content, match.start())
                 
                 issues.append({
                     "severity": "general",
@@ -2757,56 +3002,62 @@ def check_spelling(content, min_word_length=3):
     return issues
 
 
+def _is_vowel_sound(word):
+    token = (word or '').strip('.,;:()[]{}"\'').strip()
+    if not token:
+        return False
+
+    lower = token.lower()
+    if re.match(r'^(honest|hour|honor|heir)', lower):
+        return True
+    if re.match(r'^(university|universal|user|unit|unique|european|eucalyptus|one|one-step)', lower):
+        return False
+    if token.isupper() and token[0] in set('AEFHILMNORSX'):
+        return True
+    return lower[0] in 'aeiou'
+
+
 def check_grammar_patterns(content):
-    """
-    检查常见的语法错误模式
-    类似于 Word 的语法校对功能
-    """
+    """检查技术文档中的高置信语法问题。"""
     issues = []
-    
-    # 语法错误模式 (简化版，避免转义问题)
-    grammar_patterns = [
-        (r'\ba\b\s+[aeiouAEIOU]', "冠词错误", "元音开头的单词前应使用 'an'"),
-        (r'\ban\b\s+[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]', "冠词错误", "辅音开头的单词前应使用 'a'"),
-    ]
-    
-    for pattern, category, description in grammar_patterns:
-        for match in re.finditer(pattern, content, re.IGNORECASE):
-            original_text = match.group()
-            start = match.start()
-            end = match.end()
-            
-            # 提取上下文
-            context_start = max(0, start - 50)
-            context_end = min(len(content), end + 50)
-            context = content[context_start:context_end]
-            
-            # 提取章节
-            chapter = ""
-            pre_text = content[:start]
-            heading_matches = list(re.finditer(r'#{1,6}\s+[^\n]+', pre_text))
-            if heading_matches:
-                chapter = heading_matches[-1].group().lstrip('#').strip()
-            
-            issues.append({
-                "severity": "general",
-                "category": category,
-                "rule": "GRAMMAR",
-                "chapter": chapter,
-                "original_text": original_text,
-                "context": context,
-                "suggestion": description,
-                "description": description,
-                "audit_basis": "英语语法规范",
-                "confidence": 75,
-                "source": "grammar",
-                "position": f"{start}-{end}"
-            })
-    
+    seen = set()
+
+    def add_issue(start, end, original_text, suggestion, description, confidence=80):
+        key = (start, end, suggestion)
+        if key in seen:
+            return
+        seen.add(key)
+        context_start = max(0, start - 50)
+        context_end = min(len(content), end + 50)
+        context = content[context_start:context_end]
+        issues.append({
+            "severity": "general",
+            "category": "冠词错误",
+            "rule": "GRAMMAR",
+            "chapter": _extract_chapter(content, start),
+            "original_text": original_text,
+            "context": context,
+            "suggestion": suggestion,
+            "description": description,
+            "audit_basis": "英语语法规范",
+            "confidence": confidence,
+            "source": "grammar",
+            "position": f"{start}-{end}"
+        })
+
+    for match in re.finditer(r'\b(a|an)\s+([A-Za-z][A-Za-z0-9\-]*)', content):
+        article = match.group(1).lower()
+        noun = match.group(2)
+        vowel_sound = _is_vowel_sound(noun)
+        if article == 'a' and vowel_sound:
+            add_issue(match.start(), match.end(), match.group(0), f"建议改为: an {noun}", "元音发音开头的单词前应使用 an")
+        if article == 'an' and not vowel_sound:
+            add_issue(match.start(), match.end(), match.group(0), f"建议改为: a {noun}", "辅音发音开头的单词前应使用 a")
+
     return issues
 
 
-def run_spelling_and_grammar_check(content):
+def run_spelling_and_grammar_check(content, file_type=None):
     """
     综合拼写和语法检查
     返回所有发现的问题
@@ -2814,7 +3065,7 @@ def run_spelling_and_grammar_check(content):
     all_issues = []
     
     # 1. 拼写检查
-    spelling_issues = check_spelling(content)
+    spelling_issues = check_spelling(content, file_type=file_type)
     all_issues.extend(spelling_issues)
     
     # 2. 语法模式检查
