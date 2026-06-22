@@ -17,12 +17,19 @@
               <el-radio-group v-model="engine" @change="onEngineChange">
                 <el-radio-button value="hybrid">AI + 记忆库</el-radio-button>
                 <el-radio-button value="ai">仅 AI</el-radio-button>
-                <el-radio-button value="memory">仅记忆库</el-radio-button>
               </el-radio-group>
+            </el-form-item>
+
+            <el-form-item label="记忆库" v-if="engine === 'hybrid'">
+              <el-select v-model="memoryBank" placeholder="全部记忆库" clearable style="width: 100%">
+                <el-option label="全部记忆库" value="" />
+                <el-option v-for="bank in memoryBanks" :key="bank" :label="bank" :value="bank" />
+              </el-select>
             </el-form-item>
 
             <el-form-item label="AI 模型" v-if="engine !== 'memory'">
               <el-select v-model="model" placeholder="选择AI模型" style="width: 100%">
+                <el-option label="Kimi (Moonshot)" value="kimi" />
                 <el-option label="Qwen3.6-Plus" value="qwen" />
                 <el-option label="DeepSeek Chat" value="deepseek" />
               </el-select>
@@ -122,7 +129,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Switch, Document, CopyDocument, Download } from '@element-plus/icons-vue'
 import { translationAPI } from '@/api'
@@ -131,14 +138,23 @@ const engine = ref('hybrid')
 const model = ref('qwen')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
+const memoryBank = ref('')
+const memoryBanks = ref([])
 const inputText = ref('')
 const translating = ref(false)
 const result = ref(null)
 
-function onEngineChange(val) {
-  if (val === 'memory') {
-    model.value = 'qwen'
+onMounted(async () => {
+  try {
+    const res = await translationAPI.getMemoryBanks()
+    memoryBanks.value = res.data.banks || []
+  } catch (e) {
+    // ignore
   }
+})
+
+function onEngineChange(val) {
+  // no-op now
 }
 
 async function translateText() {
@@ -152,9 +168,10 @@ async function translateText() {
     const res = await translationAPI.translate({
       content: inputText.value,
       engine: engine.value,
-      model: engine.value === 'memory' ? 'qwen' : model.value,
+      model: model.value,
       source_lang: sourceLang.value,
-      target_lang: targetLang.value
+      target_lang: targetLang.value,
+      memory_bank: memoryBank.value || null
     })
     result.value = res.data
     ElMessage.success('翻译完成')

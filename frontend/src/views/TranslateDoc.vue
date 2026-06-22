@@ -16,11 +16,17 @@
               <el-radio-group v-model="engine" @change="onEngineChange">
                 <el-radio-button value="hybrid">AI + 记忆库</el-radio-button>
                 <el-radio-button value="ai">仅 AI</el-radio-button>
-                <el-radio-button value="memory">仅记忆库</el-radio-button>
               </el-radio-group>
+            </el-form-item>
+            <el-form-item label="记忆库" v-if="engine === 'hybrid'">
+              <el-select v-model="memoryBank" placeholder="全部记忆库" clearable style="width: 100%">
+                <el-option label="全部记忆库" value="" />
+                <el-option v-for="bank in memoryBanks" :key="bank" :label="bank" :value="bank" />
+              </el-select>
             </el-form-item>
             <el-form-item label="AI 模型" v-if="engine !== 'memory'">
               <el-select v-model="model" style="width: 100%">
+                <el-option label="Kimi (Moonshot)" value="kimi" />
                 <el-option label="Qwen3.6-Plus" value="qwen" />
                 <el-option label="DeepSeek Chat" value="deepseek" />
               </el-select>
@@ -145,6 +151,8 @@ const engine = ref('hybrid')
 const model = ref('qwen')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
+const memoryBank = ref('')
+const memoryBanks = ref([])
 const docSource = ref('upload')
 const translating = ref(false)
 const result = ref(null)
@@ -161,14 +169,18 @@ const reviewedDocsLoading = ref(false)
 const selectedReviewedDoc = ref(null)
 const selectedReviewedRow = ref(null)
 
-onMounted(() => {
+onMounted(async () => {
   loadReviewedDocs()
+  try {
+    const res = await translationAPI.getMemoryBanks()
+    memoryBanks.value = res.data.banks || []
+  } catch (e) {
+    // ignore
+  }
 })
 
 function onEngineChange(val) {
-  if (val === 'memory') {
-    model.value = 'qwen'
-  }
+  // no-op now
 }
 
 function tableRowClassName({ row }) {
@@ -208,9 +220,10 @@ async function translateReviewedDoc() {
     const fname = selectedReviewedDoc.value.filename
     formData.append('file', blob, fname)
     formData.append('engine', engine.value)
-    formData.append('model', engine.value === 'memory' ? 'qwen' : model.value)
+    formData.append('model', model.value)
     formData.append('source_lang', sourceLang.value)
     formData.append('target_lang', targetLang.value)
+    formData.append('memory_bank', memoryBank.value || '')
     const tres = await translationAPI.translateFile(formData)
     startPolling(tres.data.doc_id)
   } catch (e) {
@@ -250,9 +263,10 @@ function handleFileTranslate(options) {
   const formData = new FormData()
   formData.append('file', options.file)
   formData.append('engine', engine.value)
-  formData.append('model', engine.value === 'memory' ? 'qwen' : model.value)
+  formData.append('model', model.value)
   formData.append('source_lang', sourceLang.value)
   formData.append('target_lang', targetLang.value)
+  formData.append('memory_bank', memoryBank.value || '')
 
   translationAPI.translateFile(formData).then(res => {
     startPolling(res.data.doc_id)

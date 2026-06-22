@@ -32,11 +32,14 @@ def get_memory_entries(db: Session, skip: int = 0, limit: int = 100, keyword: st
 
 
 def search_memory(db: Session, source_text: str, source_lang: str = "zh", target_lang: str = "en",
-                  threshold: float = 0.7):
-    entries = db.query(MemoryBank).filter(
+                  threshold: float = 0.7, bank: str = None):
+    query = db.query(MemoryBank).filter(
         MemoryBank.source_lang == source_lang,
         MemoryBank.target_lang == target_lang
-    ).all()
+    )
+    if bank:
+        query = query.filter(MemoryBank.tags == bank)
+    entries = query.all()
 
     best_match = None
     for entry in entries:
@@ -64,3 +67,11 @@ def delete_memory_entry(db: Session, entry_id: int):
         db.delete(entry)
         db.commit()
     return entry
+
+
+def get_memory_banks(db: Session):
+    """Return distinct tag values (memory banks) from the memory table."""
+    from sqlalchemy import distinct
+    rows = db.query(distinct(MemoryBank.tags)).filter(MemoryBank.tags != "").all()
+    banks = [row[0] for row in rows if row[0]]
+    return sorted(banks)

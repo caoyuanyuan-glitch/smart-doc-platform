@@ -9,6 +9,7 @@ class TranslationRequest(BaseModel):
     model: str = "qwen"
     source_lang: str = "zh"
     target_lang: str = "en"
+    memory_bank: Optional[str] = None
 
 
 class TranslationResponse(BaseModel):
