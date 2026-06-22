@@ -5,17 +5,17 @@
       
       <div class="panel">
         <div class="form-item">
-          <label class="form-label">句式表达文件</label>
+          <label class="form-label">句式清单文件</label>
           <div class="input-with-button">
-            <el-input v-model="formData.sentenceFile" readonly placeholder="选择知识库中的句式表达文件" />
+            <el-input v-model="formData.sentenceFile" readonly placeholder="选择知识库中的句式清单文件" />
             <el-button type="primary" @click="openFilePicker('sentenceFile', 'knowledge')">选择文件</el-button>
           </div>
         </div>
 
         <div class="form-item">
-          <label class="form-label">术语库文件</label>
+          <label class="form-label">术语对照表</label>
           <div class="input-with-button">
-            <el-input v-model="formData.terminologyFile" readonly placeholder="选择知识库中的术语库文件" />
+            <el-input v-model="formData.terminologyFile" readonly placeholder="选择知识库中的术语对照表" />
             <el-button type="primary" @click="openFilePicker('terminologyFile', 'knowledge')">选择文件</el-button>
           </div>
         </div>
@@ -46,89 +46,139 @@
         <el-button type="primary" :loading="loading" @click="submitPolish">提交</el-button>
       </div>
 
-      <div v-if="docResult" class="panel">
-        <div class="panel-header">
-          <span>润色报告</span>
-          <div class="panel-actions">
-            <el-tag type="info" size="small">修改 {{ docResult.changes }} 处</el-tag>
-            <el-button size="small" @click="downloadPolishedDoc">下载润色文件</el-button>
-            <el-button size="small" type="success" @click="downloadReport" :disabled="!docResult.reportFile">下载润色报告</el-button>
-          </div>
+      <div v-if="polishProgress > 0 && polishProgress < 100" class="progress-card">
+        <div class="progress-header">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span class="progress-msg">{{ polishProgressMsg || '润色中...' }}</span>
+          <span class="progress-pct">{{ polishProgress }}%</span>
         </div>
-        <div class="result-grid">
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-blue"></span>润色前</div>
-            <div class="col-content">{{ docResult.original }}</div>
-          </div>
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-green"></span>润色后</div>
-            <div class="col-content">{{ docResult.polished }}</div>
-          </div>
-        </div>
-        <div v-if="docResult.changeDetails && docResult.changeDetails.length" class="changes-table">
-          <h4 class="changes-title">修改详情</h4>
-          <el-table :data="docResult.changeDetails" border stripe style="width: 100%" size="small">
-            <el-table-column prop="rule_name" label="规则" width="150" />
-            <el-table-column prop="type" label="类型" width="100" />
-            <el-table-column prop="before" label="修改前" />
-            <el-table-column prop="after" label="修改后" />
-          </el-table>
-        </div>
+        <el-progress :percentage="polishProgress" :stroke-width="8" :show-text="false" />
       </div>
     </div>
 
     <div v-if="currentView === 'text'">
-      <h2 class="page-title">智能润色</h2>
-
-      <div class="panel">
-        <div class="form-item">
-          <label class="form-label">句式表达文件</label>
-          <div class="input-with-button">
-            <el-input v-model="textSentenceFileName" readonly placeholder="选择知识库中的句式表达文件（留空则加载全部）" />
-            <el-button type="primary" @click="openTextSentencePicker">选择文件</el-button>
-            <el-button v-if="textSentenceFileId" size="small" @click="clearTextSentenceFile">清除</el-button>
-          </div>
+      <div class="page-title-row">
+        <h2 class="page-title">智能润色</h2>
+        <div class="stats-card">
+          <span class="stats-label">准确率</span>
+          <span class="stats-value" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.averageAccuracy }}%</span>
+          <span class="stats-divider">|</span>
+          <span class="stats-label">共润色</span>
+          <span class="stats-count-wrap">
+            <span class="stats-count" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.totalCount }}</span>
+            <span class="stats-unit">次</span>
+          </span>
         </div>
-        <div class="form-item">
-          <label class="form-label">术语库文件</label>
-          <div class="input-with-button">
-            <el-input v-model="textTerminologyFileName" readonly placeholder="选择知识库中的术语库文件（留空则使用数据库术语）" />
-            <el-button type="primary" @click="openTextTerminologyPicker">选择文件</el-button>
-            <el-button v-if="textTerminologyFileId" size="small" @click="clearTextTerminologyFile">清除</el-button>
-          </div>
-        </div>
-        <div class="panel-header">
-          <span>请输入需要润色的文本</span>
-          <div class="panel-actions">
-            <el-button type="primary" size="small" :loading="loading" @click="doPolish">开始润色</el-button>
-            <el-button size="small" @click="clearAll">清空</el-button>
-          </div>
-        </div>
-        <el-input
-          v-model="originalText"
-          type="textarea"
-          :rows="10"
-          placeholder="请输入需要润色的文本..."
-        />
       </div>
 
-      <div v-if="result" class="panel">
+      <!-- 文件选择行 -->
+      <div class="panel">
         <div class="panel-header">
-          <span>润色结果</span>
-          <div class="panel-actions">
-            <el-tag type="info" size="small">修改 {{ result.changes }} 处</el-tag>
-            <el-button size="small" @click="copyResult">复制结果</el-button>
-            <el-button size="small" @click="downloadResult">导出文档</el-button>
+          <span>参考文件</span>
+        </div>
+        <div class="file-select-row">
+          <div class="file-select-col">
+            <label class="form-label">句式清单文件</label>
+            <div class="input-with-button">
+              <el-input v-model="textSentenceFileName" size="small" readonly placeholder="留空则加载全部" />
+              <el-button type="primary" size="small" @click="openTextSentencePicker">选择文件</el-button>
+              <el-button v-if="textSentenceFileId" size="small" @click="clearTextSentenceFile">清除</el-button>
+            </div>
+          </div>
+          <div class="file-select-col">
+            <label class="form-label">术语对照表</label>
+            <div class="input-with-button">
+              <el-input v-model="textTerminologyFileName" size="small" readonly placeholder="留空则使用数据库术语" />
+              <el-button type="primary" size="small" @click="openTextTerminologyPicker">选择文件</el-button>
+              <el-button v-if="textTerminologyFileId" size="small" @click="clearTextTerminologyFile">清除</el-button>
+            </div>
           </div>
         </div>
-        <div class="result-grid">
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-blue"></span>原文</div>
-            <div class="col-content">{{ result.original }}</div>
+      </div>
+
+      <!-- 左右分栏：输入 + 结果 -->
+      <div class="content-row">
+        <div class="content-left">
+          <div class="panel">
+            <div class="panel-header">
+              <span>请输入需要润色的文本</span>
+              <div class="panel-actions">
+                <el-button type="primary" size="small" :loading="loading" @click="doPolish">开始润色</el-button>
+                <el-button size="small" @click="clearAll">清空</el-button>
+              </div>
+            </div>
+            <el-input
+              v-model="originalText"
+              type="textarea"
+              placeholder="请输入需要润色的文本..."
+            />
           </div>
-          <div class="result-col">
-            <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
-            <div class="col-content">{{ result.polished }}</div>
+        </div>
+        <div class="content-right">
+          <div v-if="result" class="panel result-panel">
+            <div class="panel-header">
+              <span>润色结果</span>
+              <div class="panel-actions">
+                <el-tag type="info" size="small">修改 {{ result.changes }} 处</el-tag>
+                <el-button size="small" @click="copyResult">复制</el-button>
+                <el-button size="small" @click="downloadResult">导出</el-button>
+              </div>
+            </div>
+            <div class="result-grid-vertical">
+              <div class="result-col-v">
+                <div class="col-title"><span class="dot dot-blue"></span>原文</div>
+                <div class="col-content col-content-compact">{{ result.original }}</div>
+              </div>
+              <div class="result-col-v">
+                <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
+                <div class="col-content col-content-compact">{{ result.polished }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="panel result-placeholder">
+            <div class="panel-header">
+              <span>润色结果</span>
+            </div>
+            <div class="placeholder-text">点击"开始润色"查看结果</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 意见反馈行（独立） -->
+      <div v-if="result" class="panel feedback-panel">
+        <div class="panel-header">
+          <span>意见反馈</span>
+        </div>
+        <div class="feedback-row">
+          <div class="feedback-left">
+            <div class="form-item">
+              <label class="form-label">准确率评分 (0-100%)</label>
+              <el-slider v-model="feedbackAccuracy" :min="0" :max="100" :step="5" show-input />
+            </div>
+          </div>
+          <div class="feedback-right">
+            <div class="form-item">
+              <label class="form-label">需修正的词语/句子</label>
+              <el-input
+                v-model="feedbackCorrections"
+                type="textarea"
+                :rows="3"
+                :placeholder="feedbackPlaceholder"
+              />
+              <div class="feedback-hint">{{ feedbackHint }}</div>
+            </div>
+          </div>
+        </div>
+        <div class="feedback-bottom">
+          <div class="form-item">
+            <label class="form-label">写入目标（将写入上方选中的对应文件）</label>
+            <el-radio-group v-model="feedbackTarget">
+              <el-radio value="terminology">术语对照表</el-radio>
+              <el-radio value="sentence_guide">句式清单文件</el-radio>
+            </el-radio-group>
+          </div>
+          <div style="text-align: right">
+            <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
           </div>
         </div>
       </div>
@@ -177,6 +227,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { polishAPI, knowledgeAPI } from '@/api'
+import { Loading } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const localFileInputRef = ref(null)
@@ -193,6 +244,26 @@ const textTerminologyFileId = ref(null)
 const result = ref(null)
 const docResult = ref(null)
 const loading = ref(false)
+const polishProgress = ref(0)
+const polishProgressMsg = ref('')
+// 反馈相关
+const feedbackAccuracy = ref(80)
+const feedbackCorrections = ref('')
+const feedbackTarget = ref('terminology')
+const feedbackLoading = ref(false)
+const feedbackStats = ref({ totalCount: 0, averageAccuracy: 0 })
+
+const feedbackPlaceholder = computed(() => (
+  feedbackTarget.value === 'sentence_guide'
+    ? '每行一条，直接填写需补充或修正的词语/句子\n例如：请勿在开机状态下断开电源。'
+    : '每行一条，格式：非标准词 → 标准词\n例如：移液枪 → 移液器'
+))
+
+const feedbackHint = computed(() => (
+  feedbackTarget.value === 'sentence_guide'
+    ? '句式清单文件：直接写原句或建议句，每行一条。'
+    : '术语对照表：按“非标准词 → 标准词”填写。'
+))
 
 const formData = ref({
   sentenceFile: '',
@@ -306,30 +377,47 @@ async function submitPolish() {
   }
   
   loading.value = true
+  polishProgress.value = 0
+  polishProgressMsg.value = '提交中...'
+  
+  const payload = new FormData()
+  payload.append('file', pendingLocalFile)
+  if (formData.value.sentenceFileId) {
+    payload.append('sentence_file_id', formData.value.sentenceFileId)
+  }
+  if (formData.value.terminologyFileId) {
+    payload.append('terminology_file_id', formData.value.terminologyFileId)
+  }
+  if (formData.value.requirements) {
+    payload.append('requirements', formData.value.requirements)
+  }
+  
   try {
-    const payload = new FormData()
-    payload.append('file', pendingLocalFile)
-    if (formData.value.sentenceFileId) {
-      payload.append('sentence_file_id', formData.value.sentenceFileId)
-    }
-    if (formData.value.terminologyFileId) {
-      payload.append('terminology_file_id', formData.value.terminologyFileId)
-    }
-    if (formData.value.requirements) {
-      payload.append('requirements', formData.value.requirements)
-    }
-    
     const resp = await polishAPI.analyzeFile(payload)
     const data = resp.data || {}
-    docResult.value = null
-    pendingLocalFile = null
-    formData.value.sourceFile = ''
-    ElMessage.success('润色成功，已保存到已润色文档')
+    
+    // 后端同步返回完整结果，直接使用
+    polishProgress.value = 100
+    polishProgressMsg.value = '润色完成'
+    docResult.value = {
+      id: data.id,
+      original: data.original || '',
+      polished: data.polished || '',
+      changes: (data.changes || []).length,
+      changeDetails: data.changes || [],
+      reportFile: data.report_file || data.reportFile,
+      download_filename: data.download_filename,
+      file_type: data.file_type
+    }
+    ElMessage.success('润色成功')
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
+    polishProgress.value = 0
   } finally {
     loading.value = false
+    pendingLocalFile = null
+    formData.value.sourceFile = ''
   }
 }
 
@@ -347,11 +435,23 @@ function resetForm() {
 }
 
 function downloadPolishedDoc() {
-  const blob = new Blob([docResult.value.polished], { type: 'text/plain;charset=utf-8' })
+  if (!docResult.value) {
+    ElMessage.warning('暂无润色结果')
+    return
+  }
+  // 如果后端已保存 DOCX 文件，通过 API 下载原始文件
+  if (docResult.value.id) {
+    const downloadName = docResult.value.download_filename || 'polished_document.docx'
+    polishAPI.downloadPolishedFile(docResult.value.id, downloadName)
+    return
+  }
+  // 纯文本结果 fallback
+  const ext = docResult.value.fileType === 'docx' ? '.docx' : '.txt'
+  const blob = new Blob([docResult.value.polished], { type: 'application/octet-stream' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'polished_document.txt'
+  a.download = `polished_document${ext}`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -375,17 +475,18 @@ async function doPolish() {
     const data = resp.data || {}
     result.value = {
       original: data.original || originalText.value,
-      polished: data.polished || '本产品是一种采用先进免疫层析技术的病毒体外诊断试剂，可在15分钟内快速完成目标病毒的检测。使用前请详细阅读产品说明书，并严格按照标准操作流程执行。本试剂仅限体外诊断用途，严禁其他应用。请于阴凉干燥处保存，储存温度控制在2~30°C。',
-      changes: data.changes?.length || 3
+      polished: data.polished || data.original || originalText.value,
+      changes: data.changes?.length || 0
     }
-    ElMessage.success('润色完成')
+    if (!data.polished || data.polished === data.original) {
+      ElMessage.info('润色完成，未检测到需要修改的内容')
+    } else {
+      ElMessage.success('润色完成')
+    }
   } catch (e) {
-    result.value = {
-      original: originalText.value,
-      polished: '本产品是一种采用先进免疫层析技术的病毒体外诊断试剂，可在15分钟内快速完成目标病毒的检测。使用前请详细阅读产品说明书，并严格按照标准操作流程执行。本试剂仅限体外诊断用途，严禁其他应用。请于阴凉干燥处保存，储存温度控制在2~30°C。',
-      changes: 3
-    }
-    ElMessage.info('AI接口调用失败，已展示示例润色结果')
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`润色失败：${errorMsg}`)
+    result.value = null
   } finally {
     loading.value = false
   }
@@ -396,6 +497,9 @@ function clearAll() {
   result.value = null
   textSentenceFileName.value = ''
   textSentenceFileId.value = null
+  feedbackAccuracy.value = 80
+  feedbackCorrections.value = ''
+  feedbackTarget.value = 'terminology'
 }
 
 function copyResult() {
@@ -414,57 +518,322 @@ function downloadResult() {
   URL.revokeObjectURL(url)
 }
 
-onMounted(() => {
+async function submitFeedback() {
+  if (!result.value) {
+    ElMessage.warning('请先完成润色再提交反馈')
+    return
+  }
+  // 验证文件选择（准确率100%时无需修正，跳过文件校验）
+  if (feedbackAccuracy.value < 100) {
+    if (feedbackTarget.value === 'terminology' && !textTerminologyFileId.value) {
+      ElMessage.warning('请先在上方选择术语对照表')
+      return
+    }
+    if (feedbackTarget.value === 'sentence_guide' && !textSentenceFileId.value) {
+      ElMessage.warning('请先在上方选择句式清单文件')
+      return
+    }
+  }
+  feedbackLoading.value = true
+  try {
+    const resp = await polishAPI.submitFeedback(
+      result.value.original,
+      result.value.polished,
+      feedbackAccuracy.value,
+      feedbackCorrections.value,
+      feedbackTarget.value,
+      textTerminologyFileId.value,
+      textSentenceFileId.value
+    )
+    const data = resp.data || {}
+    const targetName = feedbackTarget.value === 'terminology' ? '术语对照表' : '句式清单文件'
+    if (data.processed_count > 0) {
+      ElMessage.success(`反馈已提交，已将 ${data.processed_count} 条修正写入${targetName}`)
+    } else {
+      ElMessage.success('反馈已提交')
+    }
+    feedbackCorrections.value = ''
+    await loadFeedbackStats()
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`反馈失败：${errorMsg}`)
+  } finally {
+    feedbackLoading.value = false
+  }
+}
+
+async function loadFeedbackStats() {
+  try {
+    const resp = await polishAPI.getFeedbackStats()
+    feedbackStats.value = { totalCount: resp.data.total_count || 0, averageAccuracy: resp.data.average_accuracy || 0 }
+  } catch (e) {
+    console.error('加载准确率统计失败:', e)
+  }
+}
+
+onMounted(async () => {
   loadKnowledgeTree()
+  await loadFeedbackStats()
 })
 </script>
 
 <style scoped>
 .polish-container { 
-  padding: 0; 
-  max-width: 900px;
+  padding: 0 0 40px; 
+  max-width: 1100px;
 }
 
+/* ── 标题行 ── */
 .page-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: #1f2937;
-  margin-bottom: 20px;
+  font-size: 22px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0;
 }
 
+.page-title-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+/* ── 统计卡片 ── */
+.stats-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 20px;
+  padding: 4px 16px;
+  font-size: 13px;
+}
+
+.stats-label {
+  color: #64748b;
+  font-weight: 600;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.stats-value {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.stats-green {
+  color: #16a34a;
+}
+
+.stats-red {
+  color: #dc2626;
+}
+
+.stats-divider {
+  color: #cbd5e1;
+  font-size: 22px;
+  margin: 0 2px;
+  line-height: 1;
+}
+
+.stats-count-wrap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.stats-count {
+  font-weight: 700;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.stats-unit {
+  color: #64748b;
+  font-weight: 600;
+  font-size: 20px;
+  line-height: 1;
+}
+
+/* ── 面板 ── */
 .panel {
   background: #fff;
-  border-radius: 10px;
-  padding: 20px;
-  margin-bottom: 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 16px;
 }
 
 .panel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #f0f0f0;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 15px;
   font-weight: 600;
-  color: #1f2937;
+  color: #111827;
 }
 
 .panel-actions {
   display: flex;
   align-items: center;
+  gap: 8px;
+}
+
+/* ── 文件选择行 ── */
+.file-select-row {
+  display: flex;
+  gap: 16px;
+}
+
+.file-select-col {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── 左右分栏 ── */
+.content-row {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.content-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-left .panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-left .panel :deep(.el-textarea) {
+  flex: 1;
+  display: flex;
+}
+
+.content-left .panel :deep(.el-textarea__inner) {
+  flex: 1;
+  resize: vertical;
+  min-height: 320px;
+}
+
+.content-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-right .panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── 结果面板 ── */
+.result-panel {
+  margin-bottom: 0;
+  overflow: hidden;
+}
+
+.result-panel .result-grid-vertical {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 320px;
+}
+
+.result-placeholder {
+  border-style: dashed;
+  border-color: #e5e7eb;
+  background: #fafbfc;
+  display: flex;
+  flex-direction: column;
+}
+
+.placeholder-text {
+  text-align: center;
+  padding: 36px 20px;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.result-grid-vertical {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
 }
 
-.form-item { margin-bottom: 16px; }
+.result-col-v {
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.col-content-compact {
+  flex: 1;
+  min-height: 60px;
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  line-height: 1.7;
+  color: #374151;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+/* ── 意见反馈 ── */
+.feedback-panel {
+  margin-top: 16px;
+}
+
+.feedback-row {
+  display: flex;
+  gap: 20px;
+}
+
+.feedback-left {
+  flex: 0 0 260px;
+}
+
+.feedback-right {
+  flex: 1;
+  min-width: 0;
+}
+
+.feedback-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid #f3f4f6;
+}
+
+/* ── 表单 ── */
+.form-item { margin-bottom: 14px; }
 
 .form-label {
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   font-weight: 500;
   color: #374151;
-  font-size: 14px;
+  font-size: 13px;
+}
+
+.feedback-hint {
+  margin-top: 6px;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .input-with-button {
@@ -485,61 +854,28 @@ onMounted(() => {
   margin-top: 20px;
 }
 
-.result-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-}
-
-.result-col {
-  background: #fafbfc;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
+/* ── 旧样式保留 ── */
 .col-title {
-  padding: 10px 16px;
+  padding: 8px 14px;
   background: #fff;
   font-weight: 500;
+  font-size: 13px;
   color: #374151;
   border-bottom: 1px solid #e5e7eb;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   display: inline-block;
 }
 
 .dot-blue { background: #3b82f6; }
 .dot-green { background: #10b981; }
-
-.col-content {
-  padding: 16px;
-  line-height: 1.8;
-  color: #374151;
-  font-size: 14px;
-  min-height: 200px;
-  white-space: pre-wrap;
-}
-
-.changes-table {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #e5e7eb;
-}
-
-.changes-title {
-  margin-bottom: 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #374151;
-}
 
 .file-picker-content {
   max-height: 400px;
@@ -562,14 +898,40 @@ onMounted(() => {
 
 .selected-info {
   margin-top: 10px;
-  padding: 8px 12px;
-  background: #f0fdf4;
-  border-radius: 4px;
-  color: #166534;
+  color: #059669;
   font-size: 13px;
+}
+
+.progress-card {
+  margin-top: 16px;
+  padding: 14px 18px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.progress-msg {
+  flex: 1;
+  font-size: 13px;
+  color: #374151;
+}
+
+.progress-pct {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2563eb;
 }
 
 @media (max-width: 768px) {
   .polish-container { max-width: 100%; }
+  .content-row { flex-direction: column; }
+  .feedback-row { flex-direction: column; }
 }
 </style>

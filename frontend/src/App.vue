@@ -81,8 +81,18 @@
               </template>
               <el-menu-item index="/review">文档管理</el-menu-item>
               <el-menu-item index="/review/tasks">审核任务</el-menu-item>
-              <el-menu-item index="/review/rules">规则管理</el-menu-item>
+              <el-sub-menu index="spell-check-sub">
+                <template #title>拼写检查</template>
+                <el-menu-item index="/review/spell-check">开始检查</el-menu-item>
+                <el-menu-item index="/review/spell-check/history">检查历史</el-menu-item>
+                <el-menu-item index="/review/spell-check/whitelist">白名单管理</el-menu-item>
+              </el-sub-menu>
             </el-sub-menu>
+
+            <el-menu-item index="/review/rules">
+              <el-icon><Setting /></el-icon>
+              <template #title>规则管理</template>
+            </el-menu-item>
 
             <el-sub-menu index="qa-sub">
               <template #title>
@@ -99,14 +109,6 @@
               </template>
               <el-menu-item index="/translate">文本翻译</el-menu-item>
               <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
-            </el-sub-menu>
-
-            <el-sub-menu index="library-sub">
-              <template #title>
-                <el-icon><Box /></el-icon>
-                <span>内容库</span>
-              </template>
-              <el-menu-item index="/translate/memory">记忆库</el-menu-item>
             </el-sub-menu>
 
             <el-menu-item index="/knowledge">
@@ -135,7 +137,8 @@ import { useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
-  Files, Refresh, CollectionTag, Fold, Expand, Switch, Box, User, FolderOpened
+  Files, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
+  Edit, Setting
 } from '@element-plus/icons-vue'
 
 const router = useRouter()

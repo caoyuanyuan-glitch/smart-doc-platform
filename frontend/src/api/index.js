@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const instance = axios.create({
   baseURL: '/api',
-  timeout: 180000
+  timeout: 600000
 })
 
 instance.interceptors.request.use(
@@ -130,6 +130,7 @@ export const polishAPI = {
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
+  getProgress: (taskId) => instance.get(`/polish/progress/${taskId}`),
   listPolishedDocuments: () => instance.get('/polish/'),
   getPolishedDocument: (id) => instance.get(`/polish/${id}`),
   uploadPolishedFile: (file) => {
@@ -168,7 +169,18 @@ export const polishAPI = {
       window.URL.revokeObjectURL(url)
     })
   },
-  deletePolishedDocument: (id) => instance.delete(`/polish/${id}`)
+  deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
+  submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
+    instance.post('/polish/feedback', {
+      original_text: originalText,
+      polished_text: polishedText,
+      accuracy,
+      corrections,
+      target,
+      terminology_file_id: terminologyFileId || null,
+      sentence_file_id: sentenceFileId || null
+    }),
+  getFeedbackStats: () => instance.get('/polish/feedback/stats')
 }
 
 export const qaAPI = {
@@ -229,6 +241,8 @@ export const translationAPI = {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 600000
   }),
+  getFileStatus: (docId) => instance.get(`/translation/translate/file/${docId}/status`),
+  getMemoryBanks: () => instance.get('/translation/memory/banks'),
   getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
   getDocument: (id) => instance.get(`/documents/${id}`),
   getMemory: (skip = 0, limit = 100, keyword) => {
