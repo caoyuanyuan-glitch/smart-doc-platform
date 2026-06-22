@@ -3,6 +3,8 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 import os
 import io
+import csv
+import json
 import zipfile
 import tempfile
 import sys
@@ -19,6 +21,7 @@ from app.crud.memory import (
     create_memory_entry, get_memory_entries, get_memory_entry,
     delete_memory_entry, search_memory, get_memory_banks
 )
+from app.models.knowledge import KnowledgeFile
 from app.models.translation_doc import TranslationDoc
 from app.utils.document_parser import parse_file
 from app.utils.ai_client import ai_client
@@ -31,6 +34,8 @@ TRANSLATION_OUTPUT_DIR = "./static/translations"
 _translate_tasks = {}
 _translate_tasks_lock = threading.Lock()
 _thread_locals = threading.local()
+_memory_file_cache = {}
+_memory_file_cache_lock = threading.Lock()
 
 
 def _get_memory_bank():
@@ -41,10 +46,208 @@ def _set_memory_bank(bank: str):
     _thread_locals.memory_bank = bank if bank else None
 
 
+def _get_memory_file_id():
+    return getattr(_thread_locals, 'memory_file_id', None)
+
+
+def _set_memory_file_id(file_id):
+    _thread_locals.memory_file_id = file_id
+
+
+def _normalize_header_key(value: str) -> str:
+    return re.sub(r"[\s_\-]+", "", str(value or "").strip().lower())
+
+
+def _parse_memory_text_entries(raw_text: str):
+    entries = []
+    delimiters = ["\t", "=>", "->", "→", "|", "｜"]
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for delimiter in delimiters:
+            if delimiter in line:
+                source_text, translated_text = [part.strip() for part in line.split(delimiter, 1)]
+                if source_text and translated_text:
+                    entries.append({
+                        "source_text": source_text,
+                        "translated_text": translated_text
+                    })
+                break
+    return entries
+
+
+def _normalize_memory_entry(row: dict):
+    if not isinstance(row, dict):
+        return None
+
+    normalized_row = {_normalize_header_key(key): value for key, value in row.items()}
+    source_keys = ["source", "sourcetext", "src", "原文", "源文", "text"]
+    target_keys = ["target", "translatedtext", "translation", "译文", "targettext", "result"]
+    source_lang_keys = ["sourcelang", "srclang", "源语言"]
+    target_lang_keys = ["targetlang", "tgtlang", "目标语言"]
+
+    def pick_value(keys):
+        for key in keys:
+            normalized_key = _normalize_header_key(key)
+            if normalized_key in normalized_row:
+                value = normalized_row[normalized_key]
+                if value is not None and str(value).strip() != "":
+                    return str(value).strip()
+        return None
+
+    source_text = pick_value(source_keys)
+    translated_text = pick_value(target_keys)
+    if not source_text or not translated_text:
+        return None
+
+    return {
+        "source_text": source_text,
+        "translated_text": translated_text,
+        "source_lang": pick_value(source_lang_keys),
+        "target_lang": pick_value(target_lang_keys),
+    }
+
+
+def _load_memory_entries_from_json(file_path: str):
+    with open(file_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    if isinstance(data, dict):
+        for key in ["entries", "items", "data", "records"]:
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+
+    if not isinstance(data, list):
+        return []
+
+    entries = []
+    for item in data:
+        normalized = _normalize_memory_entry(item)
+        if normalized:
+            entries.append(normalized)
+    return entries
+
+
+def _load_memory_entries_from_delimited_file(file_path: str, delimiter: str = None):
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
+        sample = handle.read(2048)
+        handle.seek(0)
+        if delimiter is None:
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+                delimiter = dialect.delimiter
+            except Exception:
+                delimiter = ","
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        entries = []
+        for row in reader:
+            normalized = _normalize_memory_entry(row)
+            if normalized:
+                entries.append(normalized)
+        return entries
+
+
+def _load_memory_entries_from_excel(file_path: str):
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(file_path, read_only=True, data_only=True)
+    worksheet = workbook.active
+    rows = list(worksheet.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [str(cell).strip() if cell is not None else "" for cell in rows[0]]
+    entries = []
+    for row_values in rows[1:]:
+        row = {headers[index]: row_values[index] for index in range(min(len(headers), len(row_values)))}
+        normalized = _normalize_memory_entry(row)
+        if normalized:
+            entries.append(normalized)
+    return entries
+
+
+def _load_memory_file_entries(file_path: str, file_type: str):
+    ext = file_type.lower()
+    if ext == "json":
+        return _load_memory_entries_from_json(file_path)
+    if ext in ["csv", "tsv"]:
+        return _load_memory_entries_from_delimited_file(file_path, "\t" if ext == "tsv" else None)
+    if ext in ["xlsx", "xlsm", "xltx", "xltm"]:
+        return _load_memory_entries_from_excel(file_path)
+
+    try:
+        raw_text = parse_file(file_path)
+    except Exception:
+        raw_text = ""
+    return _parse_memory_text_entries(raw_text or "")
+
+
+def _get_cached_memory_file_entries(memory_file: KnowledgeFile):
+    cache_key = (
+        memory_file.id,
+        memory_file.updated_at.isoformat() if memory_file.updated_at else "",
+        memory_file.file_path,
+    )
+    with _memory_file_cache_lock:
+        if cache_key in _memory_file_cache:
+            return _memory_file_cache[cache_key]
+
+    entries = _load_memory_file_entries(memory_file.file_path, memory_file.file_type or "")
+    with _memory_file_cache_lock:
+        _memory_file_cache[cache_key] = entries
+    return entries
+
+
+def _search_memory_file(db: Session, memory_file_id: int, source_text: str, source_lang: str, target_lang: str,
+                        threshold: float = 0.7):
+    if not memory_file_id:
+        return None
+
+    memory_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == memory_file_id).first()
+    if not memory_file or not os.path.exists(memory_file.file_path):
+        return None
+
+    entries = _get_cached_memory_file_entries(memory_file)
+    candidates = []
+    for entry in entries:
+        entry_source_lang = (entry.get("source_lang") or source_lang).strip()
+        entry_target_lang = (entry.get("target_lang") or target_lang).strip()
+        if entry_source_lang != source_lang or entry_target_lang != target_lang:
+            continue
+        candidates.append(entry)
+
+    for entry in candidates:
+        if entry["source_text"].strip() == source_text.strip():
+            return entry["translated_text"]
+
+    best_match = None
+    best_score = threshold
+    for entry in candidates:
+        if len(source_text) <= 20:
+            continue
+        shorter = min(entry["source_text"], source_text, key=len)
+        longer = max(entry["source_text"], source_text, key=len)
+        score = sum(1 for char in shorter if char in longer) / len(longer) if longer else 0
+        if score > best_score:
+            best_score = score
+            best_match = entry["translated_text"]
+
+    return best_match
+
+
 def _do_translate(text: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> str:
     result = None
     if engine in ["memory", "hybrid"]:
-        r, hit = translate_with_memory(text, source_lang, target_lang, db, bank=_get_memory_bank())
+        r, hit = translate_with_memory(
+            text,
+            source_lang,
+            target_lang,
+            db,
+            bank=_get_memory_bank(),
+            memory_file_id=_get_memory_file_id(),
+        )
         if hit:
             result = r
     if engine in ["ai", "hybrid"] and not result:
@@ -177,30 +380,24 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
     pptx_original = []
     pptx_translated = []
     texts_to_translate = []
+    xml_roots = {}
     text_targets = []
 
-    out_buf = io.BytesIO()
     with zipfile.ZipFile(in_buf, 'r') as z_in:
-        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as z_out:
-            for zinfo in z_in.infolist():
-                raw = z_in.read(zinfo)
-                name = zinfo.filename
-                if name.startswith("ppt/slides/slide") and name.endswith(".xml") and "/_rels/" not in name:
-                    root = ET_LXML.fromstring(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
-                    for t_elem in root.iter(f"{{{DRAWING_NS}}}t"):
-                        if t_elem.text and t_elem.text.strip():
-                            texts_to_translate.append(t_elem.text.strip())
-                            text_targets.append(t_elem)
-                    z_out.writestr(zinfo, raw)
-                elif name.startswith("ppt/notesSlides/notesSlide") and name.endswith(".xml") and "/_rels/" not in name:
-                    root = ET_LXML.fromstring(raw)
-                    for t_elem in root.iter(f"{{{DRAWING_NS}}}t"):
-                        if t_elem.text and t_elem.text.strip():
-                            texts_to_translate.append(t_elem.text.strip())
-                            text_targets.append(t_elem)
-                    z_out.writestr(zinfo, raw)
-                else:
-                    z_out.writestr(zinfo, raw)
+        for zinfo in z_in.infolist():
+            name = zinfo.filename
+            if not name.endswith(".xml") or "/_rels/" in name:
+                continue
+            if not (name.startswith("ppt/slides/slide") or name.startswith("ppt/notesSlides/notesSlide")):
+                continue
+
+            raw = z_in.read(zinfo)
+            root = ET_LXML.fromstring(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
+            xml_roots[name] = root
+            for t_elem in root.iter(f"{{{DRAWING_NS}}}t"):
+                if t_elem.text and t_elem.text.strip():
+                    texts_to_translate.append(t_elem.text.strip())
+                    text_targets.append(t_elem)
 
     if texts_to_translate:
         sep = "\n---PPTXSEG---\n"
@@ -216,32 +413,19 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
                 pptx_translated.append(translated)
                 t_elem.text = translated
 
-    out_buf2 = io.BytesIO()
-    with zipfile.ZipFile(out_buf, 'r') as z_in:
-        with zipfile.ZipFile(out_buf2, 'w', zipfile.ZIP_DEFLATED) as z_out:
+    out_buf = io.BytesIO()
+    in_buf.seek(0)
+    with zipfile.ZipFile(in_buf, 'r') as z_in:
+        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as z_out:
             for zinfo in z_in.infolist():
                 raw = z_in.read(zinfo)
                 name = zinfo.filename
-                if name.startswith("ppt/slides/slide") and name.endswith(".xml") and "/_rels/" not in name:
-                    root = ET_LXML.fromstring(raw)
-                    for t_elem in root.iter(f"{{{DRAWING_NS}}}t"):
-                        if t_elem in text_targets:
-                            idx = text_targets.index(t_elem)
-                            if idx < len(pptx_translated):
-                                t_elem.text = pptx_translated[idx]
-                    raw = ET_LXML.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=False)
-                elif name.startswith("ppt/notesSlides/notesSlide") and name.endswith(".xml") and "/_rels/" not in name:
-                    root = ET_LXML.fromstring(raw)
-                    for t_elem in root.iter(f"{{{DRAWING_NS}}}t"):
-                        if t_elem in text_targets:
-                            idx = text_targets.index(t_elem)
-                            if idx < len(pptx_translated):
-                                t_elem.text = pptx_translated[idx]
-                    raw = ET_LXML.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=False)
+                if name in xml_roots:
+                    raw = ET_LXML.tostring(xml_roots[name], xml_declaration=True, encoding="UTF-8", pretty_print=False)
                 z_out.writestr(zinfo, raw)
-    out_buf2.seek(0)
+    out_buf.seek(0)
 
-    return out_buf2.read(), pptx_original, pptx_translated
+    return out_buf.read(), pptx_original, pptx_translated
 
 
 def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
@@ -486,7 +670,10 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 
 
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
-                          db: Session, bank: str = None) -> tuple:
+                          db: Session, bank: str = None, memory_file_id: int = None) -> tuple:
+    file_result = _search_memory_file(db, memory_file_id, content, source_lang, target_lang)
+    if file_result:
+        return file_result, True
     memory_result = search_memory(db, content, source_lang, target_lang, bank=bank)
     if memory_result:
         return memory_result, True
@@ -518,10 +705,11 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str) -> st
 
 def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                           engine: str, model: str, source_lang: str, target_lang: str,
-                          memory_bank: str = ""):
+                          memory_bank: str = "", memory_file_id: int = None):
     """Background thread that performs the actual translation and updates the DB record."""
     db = SessionLocal()
     _set_memory_bank(memory_bank)
+    _set_memory_file_id(memory_file_id)
     try:
         with _translate_tasks_lock:
             _translate_tasks[doc_id] = {"status": "processing", "error": None}
@@ -727,9 +915,17 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     from_ai = False
     engine = req.engine
     _set_memory_bank(req.memory_bank)
+    _set_memory_file_id(req.memory_file_id)
 
     if engine in ["memory", "hybrid"]:
-        result, hit = translate_with_memory(req.content, req.source_lang, req.target_lang, db, bank=req.memory_bank)
+        result, hit = translate_with_memory(
+            req.content,
+            req.source_lang,
+            req.target_lang,
+            db,
+            bank=req.memory_bank,
+            memory_file_id=req.memory_file_id,
+        )
         if hit:
             translated = result
             from_memory = True
@@ -776,6 +972,7 @@ async def translate_file(
     source_lang: str = Form("zh"),
     target_lang: str = Form("en"),
     memory_bank: str = Form(""),
+    memory_file_id: int = Form(None),
     db: Session = Depends(get_db)
 ):
     if not os.path.exists(UPLOAD_DIR):
@@ -814,7 +1011,7 @@ async def translate_file(
 
     thread = threading.Thread(
         target=_run_translate_thread,
-        args=(doc.id, file_path, ext, filename, engine, model, source_lang, target_lang, memory_bank),
+        args=(doc.id, file_path, ext, filename, engine, model, source_lang, target_lang, memory_bank, memory_file_id),
         daemon=True
     )
     thread.start()
