@@ -18,10 +18,11 @@ class Review(BaseModel):
     id: int
     document_id: int
     document_name: str = ""
+    document_file_type: str = ""
     mode: str
     status: str
     total_issues: int
-    summary: str
+    summary: Optional[str] = ""
     created_at: datetime
     progress: Optional[ReviewProgress] = None
 

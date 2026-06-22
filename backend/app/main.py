@@ -37,6 +37,23 @@ async def startup_event():
     create_tables()
     try:
         from app.database import SessionLocal
+        from app.crud.convert_rule import seed_default_rules
+        from app.crud.rule import seed_external_review_rules
+
+        db = SessionLocal()
+        try:
+            seeded_count = seed_default_rules(db)
+            if seeded_count:
+                print(f"[startup] 已初始化 {seeded_count} 条默认转换规则")
+            review_rule_count = seed_external_review_rules(db)
+            if review_rule_count:
+                print(f"[startup] 已初始化 {review_rule_count} 条外部评审规则")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[startup] 转换规则种子初始化失败: {e}")
+    try:
+        from app.database import SessionLocal
         from app.crud.user import get_user, create_user_with_details
         from app.schemas.user import UserCreateWithDetails
         db = SessionLocal()

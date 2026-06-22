@@ -1,0 +1,241 @@
+{
+  "export_date": "2026-06-18",
+  "source": "飞书多维表格 - 技术文档评审规则库",
+  "total_rules": 29,
+  "synced_count": 4,
+  "unsynced_count": 25,
+  "rules": [
+    {
+      "rule_id": "R001",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "仅可交互UI元素（按钮、菜单、输入框、选项等）使用【】标注，界面名称/标题（如主界面、测序界面等）不使用【】",
+      "applicable_scenarios": ["通用"],
+      "synced": true
+    },
+    {
+      "rule_id": "R002",
+      "category": "其他",
+      "severity": "建议",
+      "rule_content": "°C与℃视觉无区别，不列为错误",
+      "applicable_scenarios": ["通用"],
+      "synced": true
+    },
+    {
+      "rule_id": "R003",
+      "category": "格式错误",
+      "severity": "建议",
+      "rule_content": "只要公式内容正确，排版差异不列为问题",
+      "applicable_scenarios": ["通用"],
+      "synced": true
+    },
+    {
+      "rule_id": "R004",
+      "category": "其他",
+      "severity": "建议",
+      "rule_content": "PDF转Word导致的格式丢失属于转换 artifact，不列为错误",
+      "applicable_scenarios": ["通用"],
+      "synced": true
+    },
+    {
+      "rule_id": "R005",
+      "category": "其他",
+      "severity": "严重",
+      "rule_content": "所有文档中涉及的公司官网地址必须使用统一规范的正确地址，不得使用旧版/错误地址",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R006",
+      "category": "格式错误",
+      "severity": "建议",
+      "rule_content": "相同的商标标识只在首次出现位置出现一次即可，并且商标要包含在内文中，若全文没有出现该商标则不需要对其进行声明",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R007",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "文档排版的行间距/段落间隙必须符合公司统一的排版规范，不得出现过大/过小的异常间隙",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R008",
+      "category": "其他",
+      "severity": "建议",
+      "rule_content": "产品功能描述只需保留核心有效内容，删除不必要的冗余表述",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R009",
+      "category": "格式错误",
+      "severity": "建议",
+      "rule_content": "文档内容中不得出现多余的空格、空行等排版问题",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R010",
+      "category": "其他",
+      "severity": "一般",
+      "rule_content": "英文描述必须符合语法规则",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R011",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "文档中所有需要使用引号的场景统一使用双引号，不得混用单引号",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R012",
+      "category": "其他",
+      "severity": "一般",
+      "rule_content": "正确表述是 \"For details about xxx, refer to xxx.\" 而不是 \"Details about XXX refer to XXX.\"",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R013",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "文档中标点符号使用必须符合规范，不得遗漏必要的标点（逗号、句号等）",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R014",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "图片中标注文字和数字字号统一为9pt",
+      "applicable_scenarios": ["仪器说明书", "通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R015",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "图片中文字体统一使用思源黑体 CN Regular",
+      "applicable_scenarios": ["仪器说明书", "通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R016",
+      "category": "格式错误",
+      "severity": "建议",
+      "rule_content": "中文文字之间不能有多余空格",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R017",
+      "category": "格式错误",
+      "severity": "建议",
+      "rule_content": "警告/提示/危险/注意图标文字底部需与右侧文字底部对齐",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R018",
+      "category": "格式错误",
+      "severity": "建议",
+      "rule_content": "说明书中图片和图注需左对齐",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R019",
+      "category": "合规问题",
+      "severity": "严重",
+      "rule_content": "需包含产品中有害物质的名称及含有物质表",
+      "applicable_scenarios": ["仪器说明书", "试剂说明书"],
+      "synced": false
+    },
+    {
+      "rule_id": "R020",
+      "category": "格式错误",
+      "severity": "严重",
+      "rule_content": "错别字检查：避免\"现成\"误用为\"现场\"，注意区分\"现成情况\"和\"现场情况\"",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R021",
+      "category": "格式错误",
+      "severity": "严重",
+      "rule_content": "避免\"不避免\"类语法错误。\"如操作不当或不避免\"不通顺，应改为\"如不按照说明操作\"或\"如操作不当或未加避免\"",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R022",
+      "category": "术语错误",
+      "severity": "严重",
+      "rule_content": "避免非专业表述，\"手工冰箱\"不是专业术语，应使用\"传统冰箱\"或\"手动存取冰箱\"",
+      "applicable_scenarios": ["仪器说明书"],
+      "synced": false
+    },
+    {
+      "rule_id": "R023",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "尺寸标注用乘号\"×\"，不用星号\"*\"。如：W×D×H",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R024",
+      "category": "术语错误",
+      "severity": "一般",
+      "rule_content": "术语准确性：扫码器（条码扫描器）不属于\"拍摄\"设备，统称为\"拍摄模组\"不准确，应使用\"识别模组\"或\"图像采集模组\"",
+      "applicable_scenarios": ["仪器说明书"],
+      "synced": false
+    },
+    {
+      "rule_id": "R025",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "技术文档中避免使用成语（如\"周而复始\"），应使用直白表述（如\"如此循环\"）",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R026",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "避免文言化表述（如\"未尽事宜\"），技术文档应使用直白表述（如\"未覆盖的信息\"）",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R027",
+      "category": "格式错误",
+      "severity": "建议",
+      "rule_content": "\"限期\"建议改为\"期限\"或\"使用寿命\"，\"使用限期\"表述不够准确",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R028",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "字符样式应用错误导致文字显示不全",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    },
+    {
+      "rule_id": "R029",
+      "category": "格式错误",
+      "severity": "一般",
+      "rule_content": "表格内容显示不全，提醒修改表格宽度",
+      "applicable_scenarios": ["通用"],
+      "synced": false
+    }
+  ]
+}

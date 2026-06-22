@@ -53,10 +53,13 @@ export const userAPI = {
 }
 
 export const documentAPI = {
-  upload: (file) => {
+  upload: (file, config = {}) => {
     const formData = new FormData()
     formData.append('file', file)
-    return instance.post('/documents/upload/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+    return instance.post('/documents/upload/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      ...config
+    })
   },
   list: () => instance.get('/documents/'),
   get: (id) => instance.get(`/documents/${id}`),
@@ -72,7 +75,8 @@ export const reviewAPI = {
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),
-  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' })
+  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' }),
+  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' })
 }
 
 export const compareAPI = {

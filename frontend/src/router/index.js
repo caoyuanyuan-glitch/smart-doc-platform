@@ -47,8 +47,7 @@ const routes = [
   },
   {
     path: '/review/basis',
-    name: 'ReviewBasis',
-    component: Review
+    redirect: '/review'
   },
   {
     path: '/review/spell-check',
