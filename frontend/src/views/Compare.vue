@@ -66,7 +66,7 @@
 
       <div v-if="result" class="result-panel">
         <div class="panel-header">
-          <span>对比结果</span>
+          <span>对比完成</span>
           <div class="panel-actions">
             <el-tag :type="verdictType" size="small">{{ result.verdict }}</el-tag>
             <el-tag type="info" size="small">差异数：{{ result.total_diffs || 0 }}</el-tag>
@@ -82,157 +82,16 @@
           </div>
           <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
         </div>
-
-        <div class="cards">
-          <div class="card primary">
-            <div class="num">{{ (result.similarity * 100).toFixed(1) }}%</div>
-            <div class="lbl">整体一致性 · 模糊 Jaccard</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ (result.avg_match * 100).toFixed(1) }}%</div>
-            <div class="lbl">匹配平均</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ result.n_matched_topics || 0 }}</div>
-            <div class="lbl">匹配 topic</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ result.stat_full_match || 0 }}</div>
-            <div class="lbl">完全一致</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ result.stat_high || 0 }}</div>
-            <div class="lbl">高度相似</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ result.stat_partial || 0 }}</div>
-            <div class="lbl">部分相似</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ result.stat_low || 0 }}</div>
-            <div class="lbl">差异较大</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ result.n_only_a || 0 }}/{{ result.n_only_b || 0 }}</div>
-            <div class="lbl">仅在 A / 仅在 B</div>
-          </div>
-        </div>
-
-        <div class="explain">
-          <b>当前算法: 全量 topic 模糊 Jaccard（方案 2）</b><br>
-          按 ditamap 中 navtitle 标准化匹配 topic，对每个匹配上的 topic 抽出句段跑模糊 Jaccard。
-          句段总数覆盖全部 topic，包括仅在 A / 仅在 B 的孤儿 topic；Jaccard = 匹配句段对数 / (A 全部句段数 + B 全部句段数 - 匹配句段对数)。<br>
-          本次 A={{ result.n_a || 0 }} 句段，B={{ result.n_b || 0 }} 句段，
-          匹配 topic={{ result.n_matched_topics || 0 }}，整体一致性=<b>{{ (result.similarity * 100).toFixed(2) }}%</b>。
-          作为对照，加权一致性为 <b>{{ (result.weighted_sim * 100).toFixed(2) }}%</b>。<br>
-          <span style="color:#888">判定：{{ result.verdict }}</span>
-        </div>
-
-        <div class="file-info">
-          <h3>文件基本信息</h3>
-          <div class="file-info-grid">
-            <div class="label">文件A名称</div>
-            <div class="value">{{ fileA?.name || '-' }}</div>
-            <div class="label">文件B名称</div>
-            <div class="value">{{ fileB?.name || '-' }}</div>
-            <div class="label">文件A统计</div>
-            <div class="value">{{ result.n_a || 0 }} 句段 / {{ result.n_topics_a || 0 }} topics</div>
-            <div class="label">文件B统计</div>
-            <div class="value">{{ result.n_b || 0 }} 句段 / {{ result.n_topics_b || 0 }} topics</div>
-          </div>
-        </div>
-
-        <h2>差异点汇总 (按 ditamap 中 topic 顺序)</h2>
-        <table class="summary">
-          <thead>
-            <tr>
-              <th>序号</th>
-              <th>一级章节</th>
-              <th>小节 (topic)</th>
-              <th>类型</th>
-              <th>一致性</th>
-              <th>相似度</th>
-              <th>判定</th>
-              <th>差异</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template v-for="(topic, idx) in topics" :key="idx">
-              <tr :class="[topic.row_class, 'row-main']" @click="toggleDiff(idx)">
-                <td>{{ idx + 1 }}</td>
-                <td>{{ topic.chapter }}</td>
-                <td>{{ topic.navtitle }}</td>
-                <td>
-                  <span v-if="topic.type === 'only_a'" class="tag only-a">仅在 A</span>
-                  <span v-else-if="topic.type === 'only_b'" class="tag only-b">仅在 B</span>
-                  <span v-else class="tag ok">topic_match</span>
-                </td>
-                <td>
-                  <div class="bar">
-                    <div class="fill" :style="{ width: (topic.topic_sim * 100) + '%', background: topic.bar_color }"></div>
-                    <span>{{ (topic.topic_sim * 100).toFixed(1) }}%</span>
-                  </div>
-                </td>
-                <td>{{ (topic.topic_sim * 100).toFixed(1) }}%</td>
-                <td>{{ topic.consistency_label }}</td>
-                <td class="diff-cell"><b>{{ topic.n_diffs }}</b> 处</td>
-              </tr>
-              <tr v-if="expandedDiffs.includes(idx)" class="row-diff">
-                <td colspan="8">
-                  <div class="diffs">
-                    <template v-if="topic.diffs && topic.diffs.length > 0">
-                      <div v-for="(diff, dIdx) in topic.diffs" :key="dIdx" class="diff-row changed">
-                        <span class="tag-c">
-                          {{ diff.type === 'modify' ? 'A → B' : diff.type === 'only_a' ? 'A 独有' : 'B 独有' }}
-                        </span>
-                        <div class="text">
-                          <div v-if="diff.text_a" class="side-a">{{ diff.text_a }}</div>
-                          <div v-if="diff.text_b" class="side-b">{{ diff.text_b }}</div>
-                        </div>
-                      </div>
-                    </template>
-                    <div v-else class="diff-empty">✓ 该 topic 句段全部完全一致，无差异</div>
-                  </div>
-                </td>
-              </tr>
-            </template>
-            <tr v-if="!topics || topics.length === 0">
-              <td colspan="8" style="text-align:center;padding:40px;color:#888">
-                <div class="diff-list">
-                  <div v-for="(diff, index) in filteredDiffs" :key="index" class="diff-item" :class="[diff.diff_type, `severity-${diff.severity}`]">
-                    <div class="diff-header">
-                      <span class="diff-index">#{{ index + 1 }}</span>
-                      <span class="diff-type">{{ getDiffTypeName(diff.diff_type) }}</span>
-                      <span :class="['severity-tag', diff.severity]">{{ getSeverityName(diff.severity) }}</span>
-                      <span class="similarity-tag">{{ (diff.similarity * 100).toFixed(1) }}%</span>
-                    </div>
-                    <div class="diff-content">
-                      <div v-if="diff.text_a" class="diff-text diff-text-a">
-                        <span class="text-label">文档A:</span>
-                        <span>{{ diff.text_a }}</span>
-                      </div>
-                      <div v-if="diff.text_b" class="diff-text diff-text-b">
-                        <span class="text-label">文档B:</span>
-                        <span>{{ diff.text_b }}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div v-if="filteredDiffs.length === 0" class="empty-state">
-                    <el-icon style="font-size: 48px; color: #999; margin-bottom: 10px;"><CircleCheck /></el-icon>
-                    <div>暂无差异</div>
-                  </div>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
       </div>
     </div>
 
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">历史任务</h2>
       <div class="panel">
-        <el-table :data="history" border style="width: 100%">
+        <el-empty v-if="history.length === 0" description="暂无历史任务，请先进行文档对比">
+          <el-button type="primary" @click="currentView = 'upload'; $router.push('/compare')">去对比</el-button>
+        </el-empty>
+        <el-table v-else :data="history" border style="width: 100%">
           <el-table-column prop="id" label="任务ID" width="100" />
           <el-table-column prop="file_a_name" label="文档A" />
           <el-table-column prop="file_b_name" label="文档B" />
@@ -279,193 +138,24 @@
           </div>
           <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
         </div>
-
-        <div class="cards">
-          <div class="card primary">
-            <div class="num">{{ (selectedTask.similarity * 100).toFixed(1) }}%</div>
-            <div class="lbl">整体一致性 · 模糊 Jaccard</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ (selectedTask.avg_match * 100).toFixed(1) }}%</div>
-            <div class="lbl">匹配平均</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ selectedTask.n_matched_topics || 0 }}</div>
-            <div class="lbl">匹配 topic</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ selectedTask.stat_full_match || 0 }}</div>
-            <div class="lbl">完全一致</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ selectedTask.stat_high || 0 }}</div>
-            <div class="lbl">高度相似</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ selectedTask.stat_partial || 0 }}</div>
-            <div class="lbl">部分相似</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ selectedTask.stat_low || 0 }}</div>
-            <div class="lbl">差异较大</div>
-          </div>
-          <div class="card">
-            <div class="num">{{ selectedTask.n_only_a || 0 }}/{{ selectedTask.n_only_b || 0 }}</div>
-            <div class="lbl">仅在 A / 仅在 B</div>
-          </div>
-        </div>
-
-        <div class="explain">
-          <b>当前算法: 全量 topic 模糊 Jaccard（方案 2）</b><br>
-          本次 A={{ selectedTask.n_a || 0 }} 句段，B={{ selectedTask.n_b || 0 }} 句段，
-          匹配 topic={{ selectedTask.n_matched_topics || 0 }}，整体一致性=<b>{{ (selectedTask.similarity * 100).toFixed(2) }}%</b>。<br>
-          <span style="color:#888">判定：{{ selectedTask.verdict }}</span>
-        </div>
-
-        <div class="file-info">
-          <h3>文件基本信息</h3>
-          <div class="file-info-grid">
-            <div class="label">文件A名称</div>
-            <div class="value">{{ selectedTask.file_a_name || '-' }}</div>
-            <div class="label">文件B名称</div>
-            <div class="value">{{ selectedTask.file_b_name || '-' }}</div>
-            <div class="label">文件A统计</div>
-            <div class="value">{{ selectedTask.n_a || 0 }} 句段 / {{ selectedTask.n_topics_a || 0 }} topics</div>
-            <div class="label">文件B统计</div>
-            <div class="value">{{ selectedTask.n_b || 0 }} 句段 / {{ selectedTask.n_topics_b || 0 }} topics</div>
-          </div>
-        </div>
-
-        <h2>差异点汇总 (按 ditamap 中 topic 顺序)</h2>
-        <table class="summary">
-          <thead>
-            <tr>
-              <th>序号</th>
-              <th>一级章节</th>
-              <th>小节 (topic)</th>
-              <th>类型</th>
-              <th>一致性</th>
-              <th>相似度</th>
-              <th>判定</th>
-              <th>差异</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template v-for="(topic, idx) in selectedTask.topics" :key="idx">
-              <tr :class="[topic.row_class, 'row-main']" @click="toggleTaskDiff(idx)">
-                <td>{{ idx + 1 }}</td>
-                <td>{{ topic.chapter }}</td>
-                <td>{{ topic.navtitle }}</td>
-                <td>
-                  <span v-if="topic.type === 'only_a'" class="tag only-a">仅在 A</span>
-                  <span v-else-if="topic.type === 'only_b'" class="tag only-b">仅在 B</span>
-                  <span v-else class="tag ok">topic_match</span>
-                </td>
-                <td>
-                  <div class="bar">
-                    <div class="fill" :style="{ width: (topic.topic_sim * 100) + '%', background: topic.bar_color }"></div>
-                    <span>{{ (topic.topic_sim * 100).toFixed(1) }}%</span>
-                  </div>
-                </td>
-                <td>{{ (topic.topic_sim * 100).toFixed(1) }}%</td>
-                <td>{{ topic.consistency_label }}</td>
-                <td class="diff-cell"><b>{{ topic.n_diffs }}</b> 处</td>
-              </tr>
-              <tr v-if="expandedTaskDiffs.includes(idx)" class="row-diff">
-                <td colspan="8">
-                  <div class="diffs">
-                    <template v-if="topic.diffs && topic.diffs.length > 0">
-                      <div v-for="(diff, dIdx) in topic.diffs" :key="dIdx" class="diff-row changed">
-                        <span class="tag-c">
-                          {{ diff.type === 'modify' ? 'A → B' : diff.type === 'only_a' ? 'A 独有' : 'B 独有' }}
-                        </span>
-                        <div class="text">
-                          <div v-if="diff.text_a" class="side-a">{{ diff.text_a }}</div>
-                          <div v-if="diff.text_b" class="side-b">{{ diff.text_b }}</div>
-                        </div>
-                      </div>
-                    </template>
-                    <div v-else class="diff-empty">✓ 该 topic 句段全部完全一致，无差异</div>
-                  </div>
-                </td>
-              </tr>
-            </template>
-            <tr v-if="!selectedTask.topics || selectedTask.topics.length === 0">
-              <td colspan="8" style="text-align:center;padding:40px;color:#888">
-                <div class="diff-list">
-                  <div v-for="(diff, index) in selectedTask.diffs" :key="index" class="diff-item" :class="[diff.diff_type, `severity-${diff.severity}`]">
-                    <div class="diff-header">
-                      <span class="diff-index">#{{ index + 1 }}</span>
-                      <span class="diff-type">{{ getDiffTypeName(diff.diff_type) }}</span>
-                      <span :class="['severity-tag', diff.severity]">{{ getSeverityName(diff.severity) }}</span>
-                      <span class="similarity-tag">{{ (diff.similarity * 100).toFixed(1) }}%</span>
-                    </div>
-                    <div class="diff-content">
-                      <div v-if="diff.text_a" class="diff-text diff-text-a">
-                        <span class="text-label">文档A:</span>
-                        <span>{{ diff.text_a }}</span>
-                      </div>
-                      <div v-if="diff.text_b" class="diff-text diff-text-b">
-                        <span class="text-label">文档B:</span>
-                        <span>{{ diff.text_b }}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div v-if="!selectedTask.diffs || selectedTask.diffs.length === 0" class="empty-state">
-                    <el-icon style="font-size: 48px; color: #999; margin-bottom: 10px;"><CircleCheck /></el-icon>
-                    <div>暂无差异</div>
-                  </div>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
       </div>
     </div>
 
     <div v-if="currentView === 'config'">
-      <h2 class="page-title">对比配置</h2>
+      <h2 class="page-title">对比配置已停用</h2>
       <div class="panel">
-        <el-form :model="config" label-width="200px" style="max-width: 700px;">
-          <el-form-item label="匹配阈值">
-            <el-slider v-model="config.threshold" :min="0.5" :max="0.95" :step="0.01" show-input />
-          </el-form-item>
-          <el-form-item label="对比精度">
-            <el-radio-group v-model="config.precision">
-              <el-radio label="paragraph">段落级</el-radio>
-              <el-radio label="sentence">句子级</el-radio>
-              <el-radio label="word">词语级</el-radio>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="忽略空白字符">
-            <el-switch v-model="config.ignoreWhitespace" />
-          </el-form-item>
-          <el-form-item label="忽略大小写">
-            <el-switch v-model="config.ignoreCase" />
-          </el-form-item>
-          <el-form-item label="支持格式">
-            <el-tag size="small" style="margin-right: 8px;">PDF</el-tag>
-            <el-tag size="small" style="margin-right: 8px;">DOCX</el-tag>
-            <el-tag size="small" style="margin-right: 8px;">MD</el-tag>
-            <el-tag size="small" style="margin-right: 8px;">TXT</el-tag>
-            <el-tag size="small" style="margin-right: 8px;">DITA</el-tag>
-            <el-tag size="small">ZIP</el-tag>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" @click="saveConfig">保存配置</el-button>
-          </el-form-item>
-        </el-form>
+        <el-empty description="对比配置功能已停用。匹配阈值、对比精度等参数已硬编码在系统中，如需调整请联系开发人员。" />
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { compareAPI } from '@/api'
-import { Upload, Search, CircleCheck } from '@element-plus/icons-vue'
+import { Upload, Search } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -476,16 +166,12 @@ const progress = ref(0)
 const progressText = ref('')
 const result = ref(null)
 const history = ref([])
-const diffFilter = ref('all')
-const severityFilter = ref('all')
 const selectedTask = ref(null)
 const showPreview = ref(false)
 const reportContent = ref('')
-const expandedDiffs = ref([])
-const expandedTaskDiffs = ref([])
 
 const config = ref({
-  threshold: 0.8,
+  threshold: 0.7,
   precision: 'sentence',
   ignoreWhitespace: true,
   ignoreCase: false
@@ -497,18 +183,6 @@ const currentView = computed(() => {
   return 'upload'
 })
 
-const topics = computed(() => {
-  if (result.value && result.value.dita_full && result.value.dita_full.topics) {
-    return result.value.dita_full.topics.map(tr => ({
-      ...tr,
-      chapter: tr.chapter_a || tr.chapter_b || '',
-      row_class: tr.row_class || '',
-      bar_color: tr.bar_color || '#1976d2',
-    }))
-  }
-  return []
-})
-
 const verdictType = computed(() => {
   if (!result.value?.verdict) return 'info'
   if (result.value.verdict.includes('通过')) return 'success'
@@ -516,46 +190,37 @@ const verdictType = computed(() => {
   return 'warning'
 })
 
-const filteredDiffs = computed(() => {
-  if (!result.value?.diffs) return []
-  return result.value.diffs.filter(diff => {
-    if (diffFilter.value !== 'all' && diff.diff_type !== diffFilter.value) return false
-    if (severityFilter.value !== 'all' && diff.severity !== severityFilter.value) return false
-    return true
-  })
-})
-
 onMounted(async () => {
+  console.log('[Compare] Component mounted, currentView:', currentView.value, 'route:', route.path)
   if (currentView.value === 'tasks') {
     await loadHistory()
   }
 })
 
+// 监听路由变化，进入历史任务页面时重新加载
+watch(() => route.path, async (newPath) => {
+  if (newPath === '/compare/tasks') {
+    await loadHistory()
+  }
+})
+
 async function loadHistory() {
+  console.log('[History] loadHistory called, current route:', route.path)
   try {
     const resp = await compareAPI.list()
+    console.log('[History] API response:', resp)
+    console.log('[History] resp.data:', resp.data)
     if (resp.data && Array.isArray(resp.data)) {
       history.value = resp.data
+      console.log('[History] Loaded', history.value.length, 'tasks')
+    } else {
+      console.warn('[History] Unexpected response format:', resp.data)
+      history.value = []
     }
   } catch (e) {
+    console.error('[History] Load failed:', e)
     history.value = []
   }
-}
-
-function getSimilarityClass(similarity) {
-  if (similarity >= 0.8) return 'similarity-high'
-  if (similarity >= 0.6) return 'similarity-medium'
-  return 'similarity-low'
-}
-
-function getDiffTypeName(type) {
-  const map = { add: '新增', delete: '删除', modify: '修改', only_a: 'A独有', only_b: 'B独有' }
-  return map[type] || type
-}
-
-function getSeverityName(severity) {
-  const map = { critical: '严重', high: '高', medium: '中', low: '低' }
-  return map[severity] || severity
 }
 
 function formatTime(timestamp) {
@@ -571,7 +236,6 @@ function clearFiles() {
   fileA.value = null
   fileB.value = null
   result.value = null
-  expandedDiffs.value = []
 }
 
 function updateProgress(pct, text) {
@@ -584,24 +248,6 @@ function updateProgress(pct, text) {
   })
 }
 
-function toggleDiff(idx) {
-  const i = expandedDiffs.value.indexOf(idx)
-  if (i > -1) {
-    expandedDiffs.value.splice(i, 1)
-  } else {
-    expandedDiffs.value.push(idx)
-  }
-}
-
-function toggleTaskDiff(idx) {
-  const i = expandedTaskDiffs.value.indexOf(idx)
-  if (i > -1) {
-    expandedTaskDiffs.value.splice(i, 1)
-  } else {
-    expandedTaskDiffs.value.push(idx)
-  }
-}
-
 async function doCompare() {
   if (!fileA.value || !fileB.value) {
     ElMessage.info('请上传两个文档后再进行对比')
@@ -610,55 +256,37 @@ async function doCompare() {
   loading.value = true
   progress.value = 0
   progressText.value = ''
-  expandedDiffs.value = []
-  
+
   try {
     await updateProgress(5, '正在初始化...')
     await updateProgress(10, '正在上传文件...')
     await updateProgress(15, '正在解析文档A...')
-    
+
     const respPromise = compareAPI.create(fileA.value, fileB.value)
-    
+
     for (let p = 20; p < 80; p += 5) {
       await updateProgress(p, `正在处理文档B... ${p}%`)
       await new Promise(r => setTimeout(r, 300))
     }
-    
+
     await updateProgress(80, '正在对比分析...')
-    
+
     const resp = await respPromise
     const data = resp.data || {}
-    
+
     await updateProgress(90, '正在生成结果...')
-    
+
     result.value = {
       similarity: data.similarity || 0,
       verdict: data.verdict || '',
       total_diffs: data.total_diffs || 0,
-      stats: data.stats || data.diff_stats || {},
-      diffs: data.diffs || [],
-      exact_match: data.exact_match || 0,
-      n_a: data.n_a || 0,
-      n_b: data.n_b || 0,
-      n_topics_a: data.dita_full?.n_topics_a || 0,
-      n_topics_b: data.dita_full?.n_topics_b || 0,
-      n_matched_topics: data.dita_full?.n_matched_topics || 0,
-      n_only_a: data.dita_full?.n_only_a || 0,
-      n_only_b: data.dita_full?.n_only_b || 0,
-      stat_full_match: data.dita_full?.stat_full_match || 0,
-      stat_high: data.dita_full?.stat_high || 0,
-      stat_partial: data.dita_full?.stat_partial || 0,
-      stat_low: data.dita_full?.stat_low || 0,
-      avg_match: data.dita_full?.avg_match || 0,
-      weighted_sim: data.dita_full?.weighted_sim || 0,
-      dita_full: data.dita_full || {},
       comparison_id: data.comparison_id || data.task_id || 0,
       task_id: data.comparison_id || data.task_id || 0,
     }
-    
+
     await updateProgress(95, '正在整理报告...')
     await updateProgress(100, '对比完成')
-    
+
     setTimeout(() => { progress.value = 0 }, 1500)
     ElMessage.success('对比完成')
   } catch (e) {
@@ -674,22 +302,22 @@ async function exportCompare() {
     ElMessage.warning('请先进行对比')
     return
   }
-  
+
   const taskId = result.value.comparison_id || result.value.task_id
   if (!taskId) {
     ElMessage.warning('无法获取任务ID，请重新对比')
     return
   }
-  
+
   try {
     const resp = await compareAPI.getReport(taskId, 'html')
     const content = resp.data?.content || ''
-    
+
     if (!content.trim()) {
       ElMessage.warning('报告内容为空')
       return
     }
-    
+
     downloadFile(content, `compare_report_${taskId}_${Date.now()}.html`, 'text/html')
     ElMessage.success('对比报告已导出')
   } catch (e) {
@@ -703,22 +331,22 @@ async function previewReport() {
     ElMessage.warning('请先进行对比')
     return
   }
-  
+
   const taskId = result.value.comparison_id || result.value.task_id
   if (!taskId) {
     ElMessage.warning('无法获取任务ID，请重新对比')
     return
   }
-  
+
   try {
     const resp = await compareAPI.getReport(taskId, 'html')
     reportContent.value = resp.data?.content || ''
-    
+
     if (!reportContent.value.trim()) {
       ElMessage.warning('报告内容为空')
       return
     }
-    
+
     showPreview.value = true
     ElMessage.success('报告已加载')
   } catch (e) {
@@ -731,63 +359,14 @@ async function viewTask(taskId) {
   try {
     const resp = await compareAPI.get(taskId)
     const data = resp.data || {}
-    
-    let dita_full = {}
-    try {
-      if (data.dita_full && typeof data.dita_full === 'string') {
-        dita_full = JSON.parse(data.dita_full)
-      } else if (data.dita_full) {
-        dita_full = data.dita_full
-      }
-    } catch (e) {
-      dita_full = {}
-    }
-    
-    const diffs = (data.diffs || []).map(d => {
-      try {
-        return {
-          ...d,
-          position_a: typeof d.position_a === 'string' ? JSON.parse(d.position_a) : (d.position_a || {}),
-          position_b: typeof d.position_b === 'string' ? JSON.parse(d.position_b) : (d.position_b || {}),
-        }
-      } catch (e) {
-        return d
-      }
-    })
-    
-    const topics = (dita_full.topics || []).map(tr => ({
-      ...tr,
-      chapter: tr.chapter_a || tr.chapter_b || '',
-      row_class: tr.row_class || '',
-      bar_color: tr.bar_color || '#1976d2',
-    }))
-    
+
     selectedTask.value = {
       id: taskId,
       similarity: data.similarity || 0,
       verdict: data.verdict || '',
-      total_diffs: data.total_diffs || 0,
-      stats: data.stats || data.diff_stats || {},
-      diffs: diffs,
-      exact_match: data.exact_match || 0,
-      n_a: data.n_a || 0,
-      n_b: data.n_b || 0,
-      n_topics_a: dita_full.n_topics_a || 0,
-      n_topics_b: dita_full.n_topics_b || 0,
-      n_matched_topics: dita_full.n_matched_topics || 0,
-      n_only_a: dita_full.n_only_a || 0,
-      n_only_b: dita_full.n_only_b || 0,
-      stat_full_match: dita_full.stat_full_match || 0,
-      stat_high: dita_full.stat_high || 0,
-      stat_partial: dita_full.stat_partial || 0,
-      stat_low: dita_full.stat_low || 0,
-      avg_match: dita_full.avg_match || 0,
-      weighted_sim: dita_full.weighted_sim || 0,
       file_a_name: data.file_a_name || '',
       file_b_name: data.file_b_name || '',
-      topics: topics,
     }
-    expandedTaskDiffs.value = []
   } catch (e) {
     ElMessage.error('查看失败：' + (e.message || '未知错误'))
   }
@@ -808,12 +387,12 @@ async function previewTaskReport(taskId) {
   try {
     const resp = await compareAPI.getReport(taskId, 'html')
     reportContent.value = resp.data?.content || ''
-    
+
     if (!reportContent.value.trim()) {
       ElMessage.warning('报告内容为空')
       return
     }
-    
+
     showPreview.value = true
     ElMessage.success('报告已加载')
   } catch (e) {

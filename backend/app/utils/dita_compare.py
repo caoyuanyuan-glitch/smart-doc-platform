@@ -54,8 +54,14 @@ def normalize_navtitle(s: str) -> str:
 
 def extract_topic_text(dita_path: str) -> dict:
     """
-    从 .dita 文件提取文本：title, 段句
+    从 .dita 文件提取文本：title, 句段
     返回 {"topic_id", "title", "sentences": [...], "raw_text": "..."}
+    统一句段切分规则（根据优化指令）：
+    - 表格按行拆分（每行一个句段，合并所有单元格文本）
+    - 列表按项拆分（每项一个句段）
+    - 提取文本标签：p、li、entry、note、title、shortdesc、step、cmd 等
+    - 过滤空句段和纯空格句段
+    - 过滤纯 XML 标签内容（如 ph、b、i、u 等内联标签不单独成句段）
     """
     result = {"topic_id": "", "title": "", "sentences": [], "raw_text": ""}
     try:
@@ -80,17 +86,102 @@ def extract_topic_text(dita_path: str) -> dict:
     if result["title"]:
         text_parts.append(result["title"])
 
-    for elem in root.iter():
+    # 需要处理的文本标签
+    block_tags = {"p", "li", "note", "step", "shortdesc", "cmd", "entry", 
+                  "dt", "dd", "stentry", "refsyn", "conbodydiv",
+                  "section", "paragraph"}
+    
+    # 内联标签（不单独成句段）
+    inline_tags = {"ph", "b", "i", "u", "strong", "em", "tt", "codeph",
+                   "keyword", "tm", "sup", "sub", "xref", "linktext"}
+    
+    def get_text(elem, include_tail=True):
+        """递归获取元素的文本内容，包括 tail"""
+        parts = []
+        if elem.text:
+            parts.append(elem.text)
+        for child in elem:
+            if strip_ns(child.tag) not in inline_tags:
+                parts.append(get_text(child))
+            else:
+                if child.text:
+                    parts.append(child.text)
+                if include_tail and child.tail:
+                    parts.append(child.tail)
+        if include_tail and elem.tail:
+            parts.append(elem.tail)
+        return "".join(parts).strip()
+    
+    def process_table(table_elem):
+        """处理表格，按行拆分"""
+        rows = table_elem.findall(".//tr")
+        for row in rows:
+            cells = row.findall(".//entry")
+            if cells:
+                cell_texts = []
+                for cell in cells:
+                    cell_text = get_text(cell)
+                    if cell_text:
+                        cell_texts.append(cell_text)
+                if cell_texts:
+                    row_text = " | ".join(cell_texts)
+                    if row_text.strip():
+                        text_parts.append(row_text)
+    
+    def process_list(list_elem, list_type="ul"):
+        """处理列表，按项拆分"""
+        items = list_elem.findall(f"./{list_type}/li") or list_elem.findall(".//li")
+        for item in items:
+            item_text = get_text(item)
+            if item_text.strip():
+                text_parts.append(item_text)
+    
+    def walk_elem(elem):
+        """遍历元素并提取文本"""
         tag = strip_ns(elem.tag)
-        if tag in ("p", "li", "note", "step", "shortdesc", "ph", "b", "i", "u"):
-            if elem.text and elem.text.strip():
-                text_parts.append(normalize_text(elem.text))
-        elif tag == "fig":
-            cap = elem.find(".//title")
-            if cap is not None and cap.text:
-                text_parts.append(f"[图] {normalize_text(cap.text)}")
+        
+        # 处理表格
+        if tag in ("table", "simpletable"):
+            process_table(elem)
+            return
+        
+        # 处理列表
+        if tag in ("ul", "ol", "sl"):
+            process_list(elem, tag)
+            return
+        
+        # 处理块级标签
+        if tag in block_tags:
+            text = get_text(elem)
+            if text:
+                text_parts.append(text)
+        
+        # 处理图片
+        if tag == "fig":
+            caption_el = elem.find(".//title")
+            if caption_el is not None and caption_el.text:
+                text_parts.append(f"[图] {normalize_text(caption_el.text)}")
+        
+        # 递归处理子元素
+        for child in elem:
+            walk_elem(child)
+    
+    # 从 topic 或 concept/mainbody 开始遍历
+    main_body = root.find(".//topic") or root.find(".//concept") or root.find(".//task") or root
+    walk_elem(main_body)
+    
+    # 过滤空句段和纯空格句段
+    text_parts = [t for t in text_parts if t.strip()]
+    
+    # 去重，相邻重复的句段只保留一个
+    deduped = []
+    prev_text = None
+    for t in text_parts:
+        if t != prev_text:
+            deduped.append(t)
+            prev_text = t
 
-    full_text = " ".join(text_parts)
+    full_text = " ".join(deduped)
     result["raw_text"] = full_text
     result["sentences"] = tokenize_sentences(full_text)
     return result
@@ -178,9 +269,10 @@ def match_topics_by_navtitle(topics_a, topics_b):
     return matched, only_a, only_b
 
 
-def fuzzy_match_sentences(sentences_a, sentences_b, threshold=0.80):
+def fuzzy_match_sentences(sentences_a, sentences_b, threshold=0.70):
     """
     对同一 topic 内的句段做模糊匹配（精确 + Levenshtein）。
+    根据优化指令，匹配阈值从 ≥80% 调整为 ≥70%，使匹配对数量更合理。
     返回 (matched_pairs, only_a_indices, only_b_indices, exact_match_count)
     - matched_pairs: [(i, j, sim, ta, tb)]
     """
@@ -248,13 +340,21 @@ def compute_topic_similarity(n_a, n_b, pairs, exact_match):
 
 
 def classify_consistency(sim):
-    """分类一致性等级"""
+    """
+    分类一致性等级（根据优化指令调整区间）。
+    新区间：<50% / 50-70% / 70-85% / 85-95% / 95-99% / 100%
+    严格区分"完全一致"（文本完全相同）和"高度相似"（≥95%）
+    """
     if sim >= 0.99:
         return ("完全一致", "ok-row", "#2e7d32")
-    if sim >= 0.80:
+    if sim >= 0.95:
         return ("高度相似", "high-row", "#558b2f")
+    if sim >= 0.85:
+        return ("基本一致", "mid-row", "#ef6c00")
     if sim >= 0.70:
-        return ("部分相似", "mid-row", "#ef6c00")
+        return ("部分相似", "low-row", "#f57c00")
+    if sim >= 0.50:
+        return ("较大差异", "low-row", "#e65100")
     return ("差异较大", "low-row", "#c62828")
 
 
@@ -294,10 +394,152 @@ def compute_word_diff(text_a, text_b):
     return {"a_html": "".join(a_parts), "b_html": "".join(b_parts)}
 
 
+def _classify_severity(text_a, text_b, diff_type):
+    """
+    根据变更类型自动标记严重程度：
+    - 安全警告变更 → critical（重大）
+    - 参数/数值变更 → high（重要）
+    - 措辞/冠词调整 → low（轻微）
+    """
+    combined = (text_a or "") + " " + (text_b or "")
+
+    # 安全警告相关
+    safety_keywords = [
+        "warning", "caution", "danger", "警告", "注意", "危险",
+        "must not", "do not", "must", "shall", "不得", "禁止", "严禁",
+        "personal injury", "death", "electrocution", "人身伤害", "死亡", "触电"
+    ]
+    if any(kw in combined.lower() for kw in safety_keywords):
+        return "critical"
+
+    # 参数/数值变更
+    import re
+    param_pattern = re.compile(
+        r'\d+\.?\d*\s*[kW℃°MLVVAΩHzkVkgcm]|'
+        r'\d+\s*[Vv]|[0-9]+(?:\.[0-9]+)?\s*(?:mm|cm|m|kg|g|L|ml|Hz|kHz|MHz|nm|μm|W|kW|A|mA|μA|V|kV|°C|°F|%|rpm)',
+        re.IGNORECASE
+    )
+    if param_pattern.search(text_a or "") or param_pattern.search(text_b or ""):
+        return "high"
+
+    # 默认识别为轻微
+    return "low"
+
+
+def _is_minor_modify(text_a, text_b, threshold=0.70):
+    """
+    判断是否为轻微修改（措辞调整、冠词/代词调整）
+    threshold 降低以更好识别措辞调整
+    """
+    if not text_a or not text_b:
+        return False
+    # 空格变连字符、标点变化、同义词替换
+    norm_a = text_a.replace(" - ", "-").replace(" ", "").replace(",", "").replace(".", "").lower()
+    norm_b = text_b.replace(" - ", "-").replace(" ", "").replace(",", "").replace(".", "").lower()
+    # 完全相同（去除格式后）视为轻微
+    if norm_a == norm_b:
+        return True
+    # 计算 Jaccard
+    set_a = set(text_a.lower().split())
+    set_b = set(text_b.lower().split())
+    if not set_a or not set_b:
+        return False
+    inter = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return inter / union >= threshold
+
+
+def _deduplicate_diffs(diffs):
+    """
+    对 diffs 去重：完全相同内容的 diff 只保留一条。
+    判断标准：text_a 和 text_b 完全相同即为重复。
+    """
+    if not diffs:
+        return diffs
+    seen = set()
+    result = []
+    for d in diffs:
+        key = (d.get("type", ""), d.get("text_a", ""), d.get("text_b", ""))
+        if key not in seen:
+            seen.add(key)
+            result.append(d)
+    return result
+
+
+def _merge_adjacent_diffs(diffs, merge_minor=True, merge_only=True):
+    """
+    合并相邻的同类差异：
+    - merge_minor: 多个连续的轻微修改（severity=low）合并为1条"措辞调整"
+    - merge_only: 连续的 only_a / only_b 合并为1条
+    """
+    if not diffs:
+        return diffs
+
+    merged = []
+    i = 0
+    while i < len(diffs):
+        d = diffs[i]
+
+        # 尝试合并多个连续的轻微修改
+        if merge_minor and d["type"] == "modify" and d.get("severity") == "low":
+            # 收集所有连续的 severity=low 的 modify diff
+            minor_group = [d]
+            j = i + 1
+            while j < len(diffs) and diffs[j]["type"] == "modify" and diffs[j].get("severity") == "low":
+                if _is_minor_modify(diffs[j].get("text_a", ""), diffs[j].get("text_b", ""), threshold=0.70):
+                    minor_group.append(diffs[j])
+                    j += 1
+                else:
+                    break
+
+            if len(minor_group) > 1:
+                # 合并为一条
+                first = minor_group[0]
+                merged_texts_a = [first.get("text_a", "")]
+                merged_texts_b = [first.get("text_b", "")]
+                for m in minor_group[1:]:
+                    merged_texts_a.append(m.get("text_a", ""))
+                    merged_texts_b.append(m.get("text_b", ""))
+                merged.append({
+                    "type": "modify",
+                    "text_a": " | ".join(merged_texts_a),
+                    "text_b": " | ".join(merged_texts_b),
+                    "a_html": " | ".join([m.get("a_html", "") for m in minor_group]),
+                    "b_html": " | ".join([m.get("b_html", "") for m in minor_group]),
+                    "similarity": min(m.get("similarity", 1.0) for m in minor_group),
+                    "severity": "low",
+                    "merged_count": len(minor_group),
+                    "diff_label": "措辞调整",
+                })
+                i = j
+                continue
+
+        # 同类型的 only_a/only_b 合并
+        if merge_only and d["type"] in ("only_a", "only_b"):
+            if merged and merged[-1]["type"] == d["type"]:
+                # 合并到上一条
+                if d["type"] == "only_a":
+                    prev_text = merged[-1].get("text_a", "")
+                    merged[-1]["text_a"] = (prev_text + " " + d.get("text_a", "")).strip()
+                    merged[-1]["a_html"] = (merged[-1].get("a_html", "") + " " + d.get("a_html", "")).strip()
+                else:
+                    prev_text = merged[-1].get("text_b", "")
+                    merged[-1]["text_b"] = (prev_text + " " + d.get("text_b", "")).strip()
+                    merged[-1]["b_html"] = (merged[-1].get("b_html", "") + " " + d.get("b_html", "")).strip()
+                merged[-1]["merged_count"] = merged[-1].get("merged_count", 1) + 1
+                i += 1
+                continue
+
+        merged.append(diffs[i])
+        i += 1
+
+    return merged
+
+
 def build_topic_diff_details(topic_a_text, topic_b_text, threshold=0.80, max_diffs=10):
     """
     对单个 topic 内的句段对比，生成差异详情列表。
-    每条 diff: {text_a, text_b, similarity, diff_html}
+    每条 diff: {text_a, text_b, similarity, diff_html, severity, type}
     """
     pairs, only_a, only_b, exact = fuzzy_match_sentences(
         topic_a_text["sentences"], topic_b_text["sentences"], threshold
@@ -308,6 +550,7 @@ def build_topic_diff_details(topic_a_text, topic_b_text, threshold=0.80, max_dif
     for i, j, sim, ta, tb in pairs:
         if sim < 0.99:
             diff_html = compute_word_diff(ta, tb)
+            severity = _classify_severity(ta, tb, "modify")
             diffs.append({
                 "type": "modify",
                 "text_a": ta,
@@ -315,29 +558,41 @@ def build_topic_diff_details(topic_a_text, topic_b_text, threshold=0.80, max_dif
                 "similarity": sim,
                 "a_html": diff_html["a_html"],
                 "b_html": diff_html["b_html"],
+                "severity": severity,
             })
 
     # 仅 A
     for i in only_a[:max_diffs]:
+        text_a = topic_a_text["sentences"][i] if i < len(topic_a_text["sentences"]) else ""
+        severity = _classify_severity(text_a, "", "only_a")
         diffs.append({
             "type": "only_a",
-            "text_a": topic_a_text["sentences"][i] if i < len(topic_a_text["sentences"]) else "",
+            "text_a": text_a,
             "text_b": "",
             "similarity": 0.0,
-            "a_html": topic_a_text["sentences"][i] if i < len(topic_a_text["sentences"]) else "",
+            "a_html": text_a,
             "b_html": "",
+            "severity": severity,
         })
 
     # 仅 B
     for j in only_b[:max_diffs]:
+        text_b = topic_b_text["sentences"][j] if j < len(topic_b_text["sentences"]) else ""
+        severity = _classify_severity("", text_b, "only_b")
         diffs.append({
             "type": "only_b",
             "text_a": "",
-            "text_b": topic_b_text["sentences"][j] if j < len(topic_b_text["sentences"]) else "",
+            "text_b": text_b,
             "similarity": 0.0,
             "a_html": "",
-            "b_html": topic_b_text["sentences"][j] if j < len(topic_b_text["sentences"]) else "",
+            "b_html": text_b,
+            "severity": severity,
         })
+
+    # 合并相邻同类差异
+    diffs = _merge_adjacent_diffs(diffs, merge_minor=True, merge_only=True)
+    # 去重：完全相同的 diff 只保留一条
+    diffs = _deduplicate_diffs(diffs)
 
     return diffs, len(pairs), exact, len(only_a), len(only_b)
 
@@ -379,11 +634,14 @@ def compare_dita_packages(dir_a: str, dir_b: str, threshold: float = 0.80) -> di
     total_matched_pairs = 0
     total_exact = 0
 
-    # 统计分类
+    # 统计分类（与 classify_consistency 阈值对齐）
+    # 新区间：<50% / 50-70% / 70-85% / 85-95% / 95-99% / 100%
     stat_full_match = 0      # 完全一致 (≥99%)
-    stat_high = 0            # 高度相似 (80-99%)
-    stat_partial = 0         # 部分相似 (70-80%)
-    stat_low = 0             # 差异较大 (<70%)
+    stat_high = 0            # 高度相似 (95-99%)
+    stat_mid = 0             # 基本一致 (85-95%)
+    stat_partial = 0         # 部分相似 (70-85%)
+    stat_low = 0              # 差异较大 (50-70%)
+    stat_very_low = 0        # 差异很大 (<50%)
 
     for ta, tb, nav_sim in matched:
         path_a = os.path.join(base_a, ta["href"])
@@ -411,12 +669,16 @@ def compare_dita_packages(dir_a: str, dir_b: str, threshold: float = 0.80) -> di
         consistency_label, row_class, bar_color = classify_consistency(sim)
         if sim >= 0.99:
             stat_full_match += 1
-        elif sim >= 0.80:
+        elif sim >= 0.95:
             stat_high += 1
+        elif sim >= 0.85:
+            stat_mid += 1
         elif sim >= 0.70:
             stat_partial += 1
-        else:
+        elif sim >= 0.50:
             stat_low += 1
+        else:
+            stat_very_low += 1
 
         topic_results.append({
             "type": "matched",
