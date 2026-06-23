@@ -75,24 +75,25 @@
               <el-table
                 :data="currentFiles"
                 border
+                class="files-table"
                 style="width: 100%"
                 v-loading="fileLoading"
               >
                 <el-table-column prop="name" label="文件名" min-width="180" show-overflow-tooltip />
-                <el-table-column prop="file_type" label="类型" width="70" align="center" />
-                <el-table-column label="上传人" width="100" align="center">
+                <el-table-column prop="file_type" label="文件类型" width="90" align="center" />
+                <el-table-column label="提交人" width="110" align="center">
                   <template #default="{ row }">
                     <span class="uploader-name">{{ row.created_by_name || '未知用户' }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="大小" width="90" align="center">
+                <el-table-column label="文件大小" width="100" align="center">
                   <template #default="{ row }">
                     {{ formatFileSize(row.file_size) }}
                   </template>
                 </el-table-column>
-                <el-table-column label="上传时间" width="160">
+                <el-table-column label="修改时间" width="180">
                   <template #default="{ row }">
-                    {{ formatDateTime(row.created_at) }}
+                    {{ formatDateTime(row.updated_at || row.created_at) }}
                   </template>
                 </el-table-column>
                 <el-table-column label="操作" width="280" fixed="right" align="center">
@@ -264,7 +265,8 @@ const isAllExpanded = computed(() => {
 // 当前文件夹路径
 const folderPath = computed(() => {
   if (!currentFolderId.value) return ''
-  return findPath(folderTree.value, currentFolderId.value).join(' / ')
+  const path = findPath(folderTree.value, currentFolderId.value)
+  return path ? path.join(' / ') : ''
 })
 
 function findPath(nodes, targetId, path = []) {
@@ -322,8 +324,7 @@ function handleToggle(id) {
 }
 
 function handleFolderSelect(folder) {
-  currentFolderId.value = folder.id
-  router.push(`/knowledge/${folder.id}`)
+  router.push({ path: `/knowledge/${folder.id}` })
 }
 
 function toggleAllTree() {
@@ -432,13 +433,16 @@ function formatDateTime(dateStr) {
   try {
     const d = new Date(dateStr)
     if (isNaN(d.getTime())) return dateStr
-    const y = d.getFullYear()
-    const m = String(d.getMonth() + 1).padStart(2, '0')
-    const day = String(d.getDate()).padStart(2, '0')
-    const h = String(d.getHours()).padStart(2, '0')
-    const min = String(d.getMinutes()).padStart(2, '0')
-    const s = String(d.getSeconds()).padStart(2, '0')
-    return `${y}/${m}/${day} ${h}:${min}:${s}`
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(d).replace(/\//g, '/')
   } catch (e) {
     return dateStr
   }
@@ -692,6 +696,16 @@ onMounted(() => {
 .file-count {
   font-size: 12px;
   color: #9ca3af;
+}
+
+.files-table {
+  flex: 0 0 auto;
+}
+
+.files-table :deep(.el-table__header-wrapper th) {
+  background: #f8fafc;
+  color: #111827;
+  font-weight: 700;
 }
 
 /* 子文件夹列表 */
