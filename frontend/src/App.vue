@@ -61,7 +61,6 @@
               </template>
               <el-menu-item index="/compare">对比上传</el-menu-item>
               <el-menu-item index="/compare/tasks">历史任务</el-menu-item>
-              <el-menu-item index="/compare/config">对比配置</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="convert-sub">

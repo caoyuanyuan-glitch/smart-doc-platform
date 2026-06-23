@@ -18,27 +18,43 @@ def _diff_html(diff):
     a = diff.get("a_html") or html.escape(diff.get("text_a", "") or "")
     b = diff.get("b_html") or html.escape(diff.get("text_b", "") or "")
 
+    diff_label = diff.get("diff_label", "")
+    severity = diff.get("severity", "")
+
+    # 严重程度标记
+    sev_icon = ""
+    if severity == "critical":
+        sev_icon = "🔴 "
+    elif severity == "high":
+        sev_icon = "🟠 "
+    elif severity == "low":
+        sev_icon = "🟢 "
+
     if diff["type"] == "modify":
+        tag = diff_label if diff_label else ("A → B")
+        tag_html = f'{sev_icon}{html.escape(tag)}' if sev_icon else html.escape(tag)
         return (
             f'<div class="diff-row changed">'
-            f'<span class="tag-c">A → B</span>'
+            f'<span class="tag-c">{tag_html}</span>'
             f'<div class="text">'
             f'<div class="side-a">{a}</div>'
             f'<div class="side-b">{b}</div>'
             f'</div></div>'
         )
     elif diff["type"] == "only_a":
+        icon = "🟠" if severity == "critical" else ("🟡" if severity == "high" else "🔵")
         return (
             f'<div class="diff-row changed">'
-            f'<span class="tag-c">A 独有</span>'
+            f'<span class="tag-c">{icon} A 独有</span>'
             f'<div class="text">'
             f'<div class="side-a">{a}</div>'
             f'</div></div>'
         )
     elif diff["type"] == "only_b":
+        icon = "🟠" if severity == "critical" else ("🟡" if severity == "high" else "🔵")
         return (
             f'<div class="diff-row changed">'
-            f'<span class="tag-c">B 独有</span>'
+            f'<span class="tag-c">{icon} B 独有</span>'
             f'<div class="text">'
             f'<div class="side-b">{b}</div>'
             f'</div></div>'
@@ -55,16 +71,54 @@ def render_dita_html_report(compare_result: dict, name_a: str, name_b: str) -> s
     n_matched = cr.get("n_matched_topics", 0)
     n_only_a = cr.get("n_only_a", 0)
     n_only_b = cr.get("n_only_b", 0)
-    full = cr.get("stat_full_match", 0)
-    high = cr.get("stat_high", 0)
-    partial = cr.get("stat_partial", 0)
-    low = cr.get("stat_low", 0)
-    jaccard = cr.get("overall_jaccard", 0.0)
     weighted = cr.get("weighted_sim", 0.0)
     avg_match = cr.get("avg_match", 0.0)
     n_sent_a = cr.get("n_sentences_a", 0)
     n_sent_b = cr.get("n_sentences_b", 0)
     n_pairs = cr.get("n_matched_pairs", 0)
+
+    # 从明细表（topics）实际判定结果重新统计汇总卡片数据
+    # 与明细表判定逻辑完全对齐（get_consistency_label）
+    # 仅统计匹配上的 topic（type=matched），only_a/only_b 单独统计
+    real_full = 0      # 100%
+    real_high = 0      # 95%~99%
+    real_eighty = 0    # 85%~95%
+    real_seventy = 0   # 70%~85%
+    real_sixty = 0     # 50%~70%
+    real_low = 0       # <50%
+
+    for tr in topics:
+        # 跳过仅 A 或仅 B 的 topic，它们不在一致性统计范围内
+        ttype = tr.get("type", "")
+        if ttype in ("only_a", "only_b"):
+            continue
+        sim = tr.get("topic_sim", 0.0)
+        if sim >= 0.99:
+            real_full += 1
+        elif sim >= 0.95:
+            real_high += 1
+        elif sim >= 0.85:
+            real_eighty += 1
+        elif sim >= 0.70:
+            real_seventy += 1
+        elif sim >= 0.50:
+            real_sixty += 1
+        else:
+            real_low += 1
+
+    # 汇总卡片使用实际统计
+    full = real_full
+    high = real_high
+    partial = real_seventy + real_eighty  # 70-95% 算部分相似
+    low = real_sixty + real_low            # <70% 算差异较大
+
+    # 整体一致性：以明细表为准重新计算模糊 Jaccard
+    jaccard = cr.get("overall_jaccard", 0.0)
+    # 如果传入了 n_sentences 和 n_pairs，使用明细数据计算
+    if n_sent_a > 0 and n_sent_b > 0:
+        union = n_sent_a + n_sent_b - n_pairs
+        if union > 0:
+            jaccard = n_pairs / union
 
     if jaccard >= 0.80:
         verdict_icon = "✅"
@@ -162,57 +216,98 @@ document.addEventListener('DOMContentLoaded', function() {
             return "100%"
         elif sim >= 0.95:
             return "95%~99%"
-        elif sim >= 0.80:
-            return "80%~95%"
+        elif sim >= 0.85:
+            return "85%~95%"
         elif sim >= 0.70:
-            return "70%~80%"
-        elif sim >= 0.60:
-            return "60%~70%"
+            return "70%~85%"
+        elif sim >= 0.50:
+            return "50%~70%"
         else:
-            return "<60%"
+            return "<50%"
 
-    def _analyze_diff_types(diffs):
+    def _extract_diff_keywords(diffs):
         """
-        分析差异类型，返回类型列表。
+        从 diffs 中提取实际差异关键字，返回差异类型。
         差异类型：型号/编号差异、措辞调整、结构重组、参数变更、新增/删除安全警告、操作流程重写、内容完全不同
         """
         if not diffs:
             return []
 
         types_found = []
+        has_safety = False
+        has_param = False
+        has_model = False
+        has_step = False
+        has_wording = False
+        has_wipe = False
+
         for d in diffs:
             text_a = d.get("text_a", "") or ""
             text_b = d.get("text_b", "") or ""
             combined = text_a + " " + text_b
 
             # 检测安全警告相关
-            safety_keywords = ["警告", "注意", "危险", "warning", "caution", "danger", "安全", "注意", "危险"]
-            if any(kw in combined for kw in safety_keywords):
-                if "安全" not in types_found and "新增/删除安全警告" not in types_found:
-                    types_found.append("新增/删除安全警告")
+            safety_keywords = ["警告", "注意", "危险", "warning", "caution", "danger", "安全", "must not", "do not", "shall", "不得", "禁止", "严禁"]
+            if any(kw in combined.lower() for kw in safety_keywords):
+                has_safety = True
 
-            # 检测参数变更（数字+单位的组合）
+            # 检测参数变更
             import re
-            numbers_a = set(re.findall(r'\d+\.?\d*\s*[kW℃°MLVVAΩHzkVkgcm]', text_a))
-            numbers_b = set(re.findall(r'\d+\.?\d*\s*[kW℃°MLVVAΩHzkVkgcm]', text_b))
-            if numbers_a or numbers_b:
-                if numbers_a != numbers_b and "参数变更" not in types_found:
-                    types_found.append("参数变更")
+            param_pattern = re.compile(
+                r'\d+\.?\d*\s*[kW℃°MLVVAΩHzkVkgcm]|'
+                r'\d+\s*[Vv]|[0-9]+(?:\.[0-9]+)?\s*(?:mm|cm|m|kg|g|L|ml|Hz|kHz|MHz|nm|μm|W|kW|A|mA|μA|V|kV|°C|°F|%|rpm)',
+                re.IGNORECASE
+            )
+            if param_pattern.search(text_a) or param_pattern.search(text_b):
+                has_param = True
 
             # 检测型号/编号差异
             model_pattern = re.compile(r'[A-Z]{2,}[-\s]?\d+|[A-Z]\d{2,}')
-            models_a = model_pattern.findall(text_a)
-            models_b = model_pattern.findall(text_b)
-            if models_a != models_b and "型号/编号差异" not in types_found:
-                types_found.append("型号/编号差异")
+            models_a = set(model_pattern.findall(text_a))
+            models_b = set(model_pattern.findall(text_b))
+            if models_a != models_b:
+                has_model = True
 
             # 检测操作流程
-            step_keywords = ["步骤", "操作", "流程", "点击", "选择", "输入", "启动", "停止", "step", "click"]
-            if any(kw in combined for kw in step_keywords):
-                if "操作流程重写" not in types_found:
-                    types_found.append("操作流程重写")
+            step_keywords = ["步骤", "操作", "流程", "点击", "选择", "输入", "启动", "停止", "step", "click", "first", "then", "next", "press", "select"]
+            if any(kw in combined.lower() for kw in step_keywords):
+                has_step = True
 
-        return types_found if types_found else ["内容调整"]
+            # 措辞调整（同时有 text_a 和 text_b，差异不大）
+            if text_a and text_b and len(text_a) > 5 and len(text_b) > 5:
+                # 计算差异比例
+                set_a = set(text_a.lower().split())
+                set_b = set(text_b.lower().split())
+                if set_a and set_b:
+                    inter = len(set_a & set_b)
+                    union = len(set_a | set_b)
+                    if union > 0 and inter / union >= 0.7:
+                        has_wording = True
+
+            # 内容完全不同
+            if text_a and text_b:
+                set_a = set(text_a.lower().split())
+                set_b = set(text_b.lower().split())
+                if set_a and set_b:
+                    inter = len(set_a & set_b)
+                    union = len(set_a | set_b)
+                    if union > 0 and inter / union < 0.3:
+                        has_wipe = True
+
+        if has_safety:
+            types_found.append("⚠️ 安全警告变更")
+        if has_param:
+            types_found.append("参数变更")
+        if has_model:
+            types_found.append("型号/编号差异")
+        if has_step:
+            types_found.append("操作流程变更")
+        if has_wipe:
+            types_found.append("内容完全不同")
+        if has_wording and not types_found:
+            types_found.append("措辞调整")
+
+        return types_found if types_found else []
 
     def get_diff_explanation(tr):
         diffs = tr.get("diffs", [])
@@ -221,38 +316,49 @@ document.addEventListener('DOMContentLoaded', function() {
         if not diffs:
             return "内容一致，无差异"
 
+        # 基于实际差异内容生成说明
+        diff_types = _extract_diff_keywords(diffs)
         type_counts = {"modify": 0, "only_a": 0, "only_b": 0}
+        n_merged = 0  # 合并的 diff 组数
         for d in diffs:
             t = d.get("type", "")
             if t in type_counts:
                 type_counts[t] += 1
+            if d.get("merged_count", 0) > 1:
+                n_merged += 1
 
-        # 分析实际差异类型
-        diff_types = _analyze_diff_types(diffs)
+        n_modify = type_counts["modify"]
+        n_only_a = type_counts["only_a"]
+        n_only_b = type_counts["only_b"]
 
-        # 根据相似度区间和差异类型生成说明
-        if sim >= 0.99:
-            return "内容完全一致"
-        elif sim >= 0.95:
-            if diff_types:
-                return f"微小差异：{'、'.join(diff_types)}，正文结构基本一致"
-            return "微小差异：主要为个别措辞或短句调整"
-        elif sim >= 0.85:
-            if diff_types:
-                return f"基本一致：{'、'.join(diff_types)}，需核对确认"
-            return "部分差异：章节主题一致，但存在局部调整"
-        elif sim >= 0.70:
-            if diff_types:
-                return f"部分相似：{'、'.join(diff_types)}，建议复核"
-            return "部分差异：章节结构相似，但内容存在明显调整"
-        elif sim >= 0.50:
-            if diff_types:
-                return f"较大差异：{'、'.join(diff_types)}，需详细复核"
-            return "差异较大：章节内容存在较多不同，需详细复核"
+        # 主体描述（按实际差异类型）
+        if diff_types:
+            main = "、".join(diff_types)
+        elif n_merged > 0 and n_modify > 0:
+            main = "措辞调整"
         else:
-            if diff_types:
-                return f"内容完全不同：{'、'.join(diff_types)}"
-            return "内容完全不同：章节结构或主要内容完全不同"
+            if sim >= 0.99:
+                main = "内容完全一致"
+            elif n_modify > 0 and n_only_a == 0 and n_only_b == 0:
+                main = "内容调整"
+            elif n_only_a > 0 and n_only_b == 0:
+                main = "A 独有内容"
+            elif n_only_b > 0 and n_only_a == 0:
+                main = "B 独有内容"
+            else:
+                main = "内容变更"
+
+        # 数量补充（考虑合并）
+        count_parts = []
+        if n_modify > 0:
+            count_parts.append(f"修改 {n_modify} 处")
+        if n_only_a > 0:
+            count_parts.append(f"A 独有 {n_only_a} 处")
+        if n_only_b > 0:
+            count_parts.append(f"B 独有 {n_only_b} 处")
+        count_str = "（" + "，".join(count_parts) + "）" if count_parts else ""
+
+        return f"{main}{count_str}"
 
     rows_html = []
     for idx, tr in enumerate(topics):
@@ -321,36 +427,41 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         chapter_stats[chapter]["total"] += 1
         sim = tr.get("topic_sim", 0.0)
-        row_class = tr.get("row_class", "")
-        if row_class == "ok-row":
-            chapter_stats[chapter]["full"] += 1
-        elif row_class == "high-row":
-            chapter_stats[chapter]["high"] += 1
-        elif row_class == "mid-row":
-            chapter_stats[chapter]["partial"] += 1
-        elif row_class == "low-row":
-            chapter_stats[chapter]["low"] += 1
+        ttype = tr.get("type", "")
+        if ttype == "only_a":
+            chapter_stats[chapter]["only_a"] += 1
+        elif ttype == "only_b":
+            chapter_stats[chapter]["only_b"] += 1
+        else:
+            if sim >= 0.99:
+                chapter_stats[chapter]["full"] += 1
+            elif sim >= 0.95:
+                chapter_stats[chapter]["high"] += 1
+            elif sim >= 0.70:
+                chapter_stats[chapter]["partial"] += 1
+            else:
+                chapter_stats[chapter]["low"] += 1
 
     # 生成章节统计表 HTML
     chapter_rows = []
     for chapter, stats in chapter_stats.items():
-        total = stats["total"]
-        full = stats["full"]
-        high = stats["high"]
-        partial = stats["partial"]
-        low = stats["low"]
-        if total > 0:
-            chapter_sim = (full * 1.0 + high * 0.97 + partial * 0.80 + low * 0.40) / total
+        ch_total = stats["total"]
+        ch_full = stats["full"]
+        ch_high = stats["high"]
+        ch_partial = stats["partial"]
+        ch_low = stats["low"]
+        if ch_total > 0:
+            chapter_sim = (ch_full * 1.0 + ch_high * 0.97 + ch_partial * 0.80 + ch_low * 0.40) / ch_total
         else:
             chapter_sim = 0
         chapter_rows.append(
             f"<tr>"
             f"<td>{html.escape(chapter)}</td>"
-            f"<td style='text-align:center'>{total}</td>"
-            f"<td style='text-align:center'>{full}</td>"
-            f"<td style='text-align:center'>{high}</td>"
-            f"<td style='text-align:center'>{partial}</td>"
-            f"<td style='text-align:center'>{low}</td>"
+            f"<td style='text-align:center'>{ch_total}</td>"
+            f"<td style='text-align:center'>{ch_full}</td>"
+            f"<td style='text-align:center'>{ch_high}</td>"
+            f"<td style='text-align:center'>{ch_partial}</td>"
+            f"<td style='text-align:center'>{ch_low}</td>"
             f"<td style='text-align:center;font-weight:600'>{chapter_sim*100:.1f}%</td>"
             f"</tr>"
         )
@@ -406,11 +517,12 @@ document.addEventListener('DOMContentLoaded', function() {
     {"".join([f"<li><b>仅在 B 的 topic（{n_only_b} 个）</b>：需确认是否为新增内容</li>"] if n_only_b > 0 else [])}
   </ul>
 
-  <h3>培训建议</h3>
+  <h3>复核建议</h3>
   <ul>
-    <li>高度相似（≥95%）章节可共享培训材料</li>
-    <li>部分相似（70-85%）章节需按机型分别培训重点差异部分</li>
-    <li>差异较大（&lt;70%）章节需按机型分别培训</li>
+    <li>建议优先复核一致性低于 70% 的章节，确认内容变更是否符合预期</li>
+    <li>安全相关章节（warning/caution/danger）应重点确认</li>
+    <li>参数/数值变更需核对技术规格是否同步</li>
+    <li>仅在 A 或仅在 B 的 topic 需确认是否需同步或归档</li>
   </ul>
 </div>
 """

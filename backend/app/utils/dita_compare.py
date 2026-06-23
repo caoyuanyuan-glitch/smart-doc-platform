@@ -394,10 +394,152 @@ def compute_word_diff(text_a, text_b):
     return {"a_html": "".join(a_parts), "b_html": "".join(b_parts)}
 
 
+def _classify_severity(text_a, text_b, diff_type):
+    """
+    根据变更类型自动标记严重程度：
+    - 安全警告变更 → critical（重大）
+    - 参数/数值变更 → high（重要）
+    - 措辞/冠词调整 → low（轻微）
+    """
+    combined = (text_a or "") + " " + (text_b or "")
+
+    # 安全警告相关
+    safety_keywords = [
+        "warning", "caution", "danger", "警告", "注意", "危险",
+        "must not", "do not", "must", "shall", "不得", "禁止", "严禁",
+        "personal injury", "death", "electrocution", "人身伤害", "死亡", "触电"
+    ]
+    if any(kw in combined.lower() for kw in safety_keywords):
+        return "critical"
+
+    # 参数/数值变更
+    import re
+    param_pattern = re.compile(
+        r'\d+\.?\d*\s*[kW℃°MLVVAΩHzkVkgcm]|'
+        r'\d+\s*[Vv]|[0-9]+(?:\.[0-9]+)?\s*(?:mm|cm|m|kg|g|L|ml|Hz|kHz|MHz|nm|μm|W|kW|A|mA|μA|V|kV|°C|°F|%|rpm)',
+        re.IGNORECASE
+    )
+    if param_pattern.search(text_a or "") or param_pattern.search(text_b or ""):
+        return "high"
+
+    # 默认识别为轻微
+    return "low"
+
+
+def _is_minor_modify(text_a, text_b, threshold=0.70):
+    """
+    判断是否为轻微修改（措辞调整、冠词/代词调整）
+    threshold 降低以更好识别措辞调整
+    """
+    if not text_a or not text_b:
+        return False
+    # 空格变连字符、标点变化、同义词替换
+    norm_a = text_a.replace(" - ", "-").replace(" ", "").replace(",", "").replace(".", "").lower()
+    norm_b = text_b.replace(" - ", "-").replace(" ", "").replace(",", "").replace(".", "").lower()
+    # 完全相同（去除格式后）视为轻微
+    if norm_a == norm_b:
+        return True
+    # 计算 Jaccard
+    set_a = set(text_a.lower().split())
+    set_b = set(text_b.lower().split())
+    if not set_a or not set_b:
+        return False
+    inter = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return inter / union >= threshold
+
+
+def _deduplicate_diffs(diffs):
+    """
+    对 diffs 去重：完全相同内容的 diff 只保留一条。
+    判断标准：text_a 和 text_b 完全相同即为重复。
+    """
+    if not diffs:
+        return diffs
+    seen = set()
+    result = []
+    for d in diffs:
+        key = (d.get("type", ""), d.get("text_a", ""), d.get("text_b", ""))
+        if key not in seen:
+            seen.add(key)
+            result.append(d)
+    return result
+
+
+def _merge_adjacent_diffs(diffs, merge_minor=True, merge_only=True):
+    """
+    合并相邻的同类差异：
+    - merge_minor: 多个连续的轻微修改（severity=low）合并为1条"措辞调整"
+    - merge_only: 连续的 only_a / only_b 合并为1条
+    """
+    if not diffs:
+        return diffs
+
+    merged = []
+    i = 0
+    while i < len(diffs):
+        d = diffs[i]
+
+        # 尝试合并多个连续的轻微修改
+        if merge_minor and d["type"] == "modify" and d.get("severity") == "low":
+            # 收集所有连续的 severity=low 的 modify diff
+            minor_group = [d]
+            j = i + 1
+            while j < len(diffs) and diffs[j]["type"] == "modify" and diffs[j].get("severity") == "low":
+                if _is_minor_modify(diffs[j].get("text_a", ""), diffs[j].get("text_b", ""), threshold=0.70):
+                    minor_group.append(diffs[j])
+                    j += 1
+                else:
+                    break
+
+            if len(minor_group) > 1:
+                # 合并为一条
+                first = minor_group[0]
+                merged_texts_a = [first.get("text_a", "")]
+                merged_texts_b = [first.get("text_b", "")]
+                for m in minor_group[1:]:
+                    merged_texts_a.append(m.get("text_a", ""))
+                    merged_texts_b.append(m.get("text_b", ""))
+                merged.append({
+                    "type": "modify",
+                    "text_a": " | ".join(merged_texts_a),
+                    "text_b": " | ".join(merged_texts_b),
+                    "a_html": " | ".join([m.get("a_html", "") for m in minor_group]),
+                    "b_html": " | ".join([m.get("b_html", "") for m in minor_group]),
+                    "similarity": min(m.get("similarity", 1.0) for m in minor_group),
+                    "severity": "low",
+                    "merged_count": len(minor_group),
+                    "diff_label": "措辞调整",
+                })
+                i = j
+                continue
+
+        # 同类型的 only_a/only_b 合并
+        if merge_only and d["type"] in ("only_a", "only_b"):
+            if merged and merged[-1]["type"] == d["type"]:
+                # 合并到上一条
+                if d["type"] == "only_a":
+                    prev_text = merged[-1].get("text_a", "")
+                    merged[-1]["text_a"] = (prev_text + " " + d.get("text_a", "")).strip()
+                    merged[-1]["a_html"] = (merged[-1].get("a_html", "") + " " + d.get("a_html", "")).strip()
+                else:
+                    prev_text = merged[-1].get("text_b", "")
+                    merged[-1]["text_b"] = (prev_text + " " + d.get("text_b", "")).strip()
+                    merged[-1]["b_html"] = (merged[-1].get("b_html", "") + " " + d.get("b_html", "")).strip()
+                merged[-1]["merged_count"] = merged[-1].get("merged_count", 1) + 1
+                i += 1
+                continue
+
+        merged.append(diffs[i])
+        i += 1
+
+    return merged
+
+
 def build_topic_diff_details(topic_a_text, topic_b_text, threshold=0.80, max_diffs=10):
     """
     对单个 topic 内的句段对比，生成差异详情列表。
-    每条 diff: {text_a, text_b, similarity, diff_html}
+    每条 diff: {text_a, text_b, similarity, diff_html, severity, type}
     """
     pairs, only_a, only_b, exact = fuzzy_match_sentences(
         topic_a_text["sentences"], topic_b_text["sentences"], threshold
@@ -408,6 +550,7 @@ def build_topic_diff_details(topic_a_text, topic_b_text, threshold=0.80, max_dif
     for i, j, sim, ta, tb in pairs:
         if sim < 0.99:
             diff_html = compute_word_diff(ta, tb)
+            severity = _classify_severity(ta, tb, "modify")
             diffs.append({
                 "type": "modify",
                 "text_a": ta,
@@ -415,29 +558,41 @@ def build_topic_diff_details(topic_a_text, topic_b_text, threshold=0.80, max_dif
                 "similarity": sim,
                 "a_html": diff_html["a_html"],
                 "b_html": diff_html["b_html"],
+                "severity": severity,
             })
 
     # 仅 A
     for i in only_a[:max_diffs]:
+        text_a = topic_a_text["sentences"][i] if i < len(topic_a_text["sentences"]) else ""
+        severity = _classify_severity(text_a, "", "only_a")
         diffs.append({
             "type": "only_a",
-            "text_a": topic_a_text["sentences"][i] if i < len(topic_a_text["sentences"]) else "",
+            "text_a": text_a,
             "text_b": "",
             "similarity": 0.0,
-            "a_html": topic_a_text["sentences"][i] if i < len(topic_a_text["sentences"]) else "",
+            "a_html": text_a,
             "b_html": "",
+            "severity": severity,
         })
 
     # 仅 B
     for j in only_b[:max_diffs]:
+        text_b = topic_b_text["sentences"][j] if j < len(topic_b_text["sentences"]) else ""
+        severity = _classify_severity("", text_b, "only_b")
         diffs.append({
             "type": "only_b",
             "text_a": "",
-            "text_b": topic_b_text["sentences"][j] if j < len(topic_b_text["sentences"]) else "",
+            "text_b": text_b,
             "similarity": 0.0,
             "a_html": "",
-            "b_html": topic_b_text["sentences"][j] if j < len(topic_b_text["sentences"]) else "",
+            "b_html": text_b,
+            "severity": severity,
         })
+
+    # 合并相邻同类差异
+    diffs = _merge_adjacent_diffs(diffs, merge_minor=True, merge_only=True)
+    # 去重：完全相同的 diff 只保留一条
+    diffs = _deduplicate_diffs(diffs)
 
     return diffs, len(pairs), exact, len(only_a), len(only_b)
 
@@ -479,11 +634,14 @@ def compare_dita_packages(dir_a: str, dir_b: str, threshold: float = 0.80) -> di
     total_matched_pairs = 0
     total_exact = 0
 
-    # 统计分类
+    # 统计分类（与 classify_consistency 阈值对齐）
+    # 新区间：<50% / 50-70% / 70-85% / 85-95% / 95-99% / 100%
     stat_full_match = 0      # 完全一致 (≥99%)
-    stat_high = 0            # 高度相似 (80-99%)
-    stat_partial = 0         # 部分相似 (70-80%)
-    stat_low = 0             # 差异较大 (<70%)
+    stat_high = 0            # 高度相似 (95-99%)
+    stat_mid = 0             # 基本一致 (85-95%)
+    stat_partial = 0         # 部分相似 (70-85%)
+    stat_low = 0              # 差异较大 (50-70%)
+    stat_very_low = 0        # 差异很大 (<50%)
 
     for ta, tb, nav_sim in matched:
         path_a = os.path.join(base_a, ta["href"])
@@ -513,10 +671,14 @@ def compare_dita_packages(dir_a: str, dir_b: str, threshold: float = 0.80) -> di
             stat_full_match += 1
         elif sim >= 0.95:
             stat_high += 1
+        elif sim >= 0.85:
+            stat_mid += 1
         elif sim >= 0.70:
             stat_partial += 1
-        else:
+        elif sim >= 0.50:
             stat_low += 1
+        else:
+            stat_very_low += 1
 
         topic_results.append({
             "type": "matched",

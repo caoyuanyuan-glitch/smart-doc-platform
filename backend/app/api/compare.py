@@ -436,8 +436,53 @@ def _is_dita_package(filename: str) -> bool:
 def _parse_file(file_path: str, filename: str):
     ext = os.path.splitext(filename)[1].lower()
     if ext in (".pdf",):
-        text = _extract_pdf(file_path)
-        return {"text": text, "segments": [], "structure": [], "type": "pdf"}
+        # 使用专门的 PDF 解析器
+        try:
+            from app.utils.doc_parser import parse_pdf
+            result = parse_pdf(file_path)
+            return {
+                "text": result.get("full_text", ""),
+                "segments": result.get("pages_text", []),
+                "structure": result.get("chapters", []),
+                "type": "pdf",
+                "chapters": result.get("chapters", [])
+            }
+        except Exception as e:
+            print(f"PDF parse error: {e}")
+            text = _extract_pdf(file_path)
+            return {"text": text, "segments": [], "structure": [], "type": "pdf"}
+    elif ext in (".docx", ".doc"):
+        # 使用 Word 解析器
+        try:
+            from app.utils.doc_parser import parse_docx
+            result = parse_docx(file_path)
+            return {
+                "text": result.get("full_text", ""),
+                "segments": result.get("paragraphs", []),
+                "structure": result.get("chapters", []),
+                "type": "docx",
+                "chapters": result.get("chapters", [])
+            }
+        except Exception as e:
+            print(f"DOCX parse error: {e}")
+            text = _read_upload_as_text(file_path)
+            return {"text": text, "segments": [], "structure": [], "type": "docx"}
+    elif ext in (".md", ".markdown"):
+        # 使用 Markdown 解析器
+        try:
+            from app.utils.doc_parser import parse_markdown
+            result = parse_markdown(file_path)
+            return {
+                "text": result.get("full_text", ""),
+                "segments": [],
+                "structure": result.get("chapters", []),
+                "type": "md",
+                "chapters": result.get("chapters", [])
+            }
+        except Exception as e:
+            print(f"MD parse error: {e}")
+            text = _read_upload_as_text(file_path)
+            return {"text": text, "segments": [], "structure": [], "type": "md"}
     elif ext in (".dita", ".ditamap"):
         result = _extract_dita_dir(file_path)
         if isinstance(result, str):
@@ -566,6 +611,63 @@ async def create_compare(
                 is_dita = False
                 print(f"[DITA对比失败] 走通用对比: {e}")
 
+        # 判断是否为通用文档（Word/PDF/Markdown）
+        is_doc = (
+            parsed_a.get("type") in ("docx", "pdf", "md") and
+            parsed_b.get("type") in ("docx", "pdf", "md")
+        )
+
+        doc_full = None
+        if is_doc and result is None:
+            try:
+                from app.utils.doc_parser import compare_documents_by_format
+                doc_full = compare_documents_by_format(file_a_path, file_b_path)
+
+                # 转换结果格式
+                diffs = []
+                for r in doc_full.get("results", []):
+                    for d in r.get("diffs", []):
+                        diffs.append({
+                            "diff_type": "modify",
+                            "severity": "low",
+                            "similarity": d.get("score", 0.0),
+                            "text_a": d.get("a", ""),
+                            "text_b": d.get("b", ""),
+                            "position_a": {},
+                            "position_b": {},
+                            "chapter": r.get("heading", ""),
+                        })
+
+                stats = doc_full.get("stats", {})
+                result = {
+                    "similarity": stats.get("overall_sim", 0.0),
+                    "verdict": (
+                        "✅ 自动通过（≥80%）" if stats.get("overall_sim", 0.0) >= 0.80
+                        else "⚠️ 建议复核（60% ~ 80%）" if stats.get("overall_sim", 0.0) >= 0.60
+                        else "🟥 强制人工复核（<60%，不可互换）"
+                    ),
+                    "total_diffs": len(diffs),
+                    "diff_stats": {
+                        "add": stats.get("n_only_b", 0),
+                        "delete": stats.get("n_only_a", 0),
+                        "modify": stats.get("n_low", 0),
+                    },
+                    "diffs": diffs,
+                    "exact_match": 0,
+                    "matched_pairs": [],
+                    "only_a": [{"chapter": r.get("heading", ""), "section": r.get("heading", "")}
+                               for r in doc_full.get("results", []) if r.get("status") == "仅在A中"],
+                    "only_b": [{"chapter": r.get("heading", ""), "section": r.get("heading", "")}
+                               for r in doc_full.get("results", []) if r.get("status") == "仅在B中"],
+                    "n_a": len(doc_full.get("results", [])),
+                    "n_b": len(doc_full.get("results", [])),
+                    "doc_full": doc_full,
+                }
+            except Exception as e:
+                print(f"[文档对比失败] 走通用对比: {e}")
+                import traceback
+                traceback.print_exc()
+
         if result is None:
             try:
                 from app.utils.compare_utils import compare_documents
@@ -581,8 +683,9 @@ async def create_compare(
         try:
             from app.crud.compare import create_compare_task, update_compare_task, create_compare_diff
             task = create_compare_task(db, file_a.filename, file_b.filename, 1)
-            # 序列化 dita_full 用于存储
-            dita_full_json = json.dumps(dita_full, ensure_ascii=False) if dita_full else ""
+            # 序列化 dita_full 用于存储（也用于 doc_full，复用字段）
+            doc_full_json = json.dumps(doc_full, ensure_ascii=False) if doc_full else ""
+            dita_full_json = json.dumps(dita_full, ensure_ascii=False) if dita_full else doc_full_json
             update_compare_task(
                 db, task.id,
                 result["similarity"], result["verdict"],
@@ -679,7 +782,9 @@ async def create_compare(
             "n_a": result.get("n_a", 0),
             "n_b": result.get("n_b", 0),
             "is_dita": is_dita,
+            "is_doc": is_doc,
             "dita_full": dita_full,
+            "doc_full": doc_full,
         }
     except Exception as exc:
         try:
@@ -873,6 +978,7 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
         "only_a": only_a,
         "only_b": only_b,
         "dita_full": dita_full,
+        "doc_full": dita_full,  # 复用字段，doc_full 也存这里
     }
 
 
@@ -920,9 +1026,19 @@ async def generate_report(task_id: int, format: str = "html", db: Session = Depe
     only_a = data.get("only_a", [])
     only_b = data.get("only_b", [])
     dita_full = data.get("dita_full")
+    doc_full = data.get("doc_full")
 
-    # 优先 DITA 报告（HTML 格式时）
-    if dita_full and format == "html":
+    # 判断数据类型：DITA 有 topics 字段，通用文档有 results 字段
+    is_dita_data = dita_full and isinstance(dita_full, dict) and "topics" in dita_full
+    is_doc_data = (dita_full and isinstance(dita_full, dict) and "results" in dita_full and "topics" not in dita_full) or (doc_full and isinstance(doc_full, dict) and "results" in doc_full)
+
+    # 如果 dita_full 里存的是 doc 数据，转出来
+    if is_doc_data and not doc_full:
+        doc_full = dita_full
+        dita_full = None
+
+    # 优先 DITA 报告
+    if is_dita_data and format == "html":
         try:
             from app.utils.dita_report import render_dita_html_report
             html_content = render_dita_html_report(dita_full, file_a_name, file_b_name)
@@ -930,6 +1046,17 @@ async def generate_report(task_id: int, format: str = "html", db: Session = Depe
         except Exception as e:
             import traceback
             print(f"DITA report error: {e}")
+            print(traceback.format_exc())
+
+    # 通用文档报告（Word/PDF/MD）
+    if is_doc_data and format == "html":
+        try:
+            from app.utils.doc_report import render_doc_html_report
+            html_content = render_doc_html_report(doc_full, file_a_name, file_b_name)
+            return {"content": html_content, "format": "html"}
+        except Exception as e:
+            import traceback
+            print(f"Doc report error: {e}")
             print(traceback.format_exc())
 
     if format == "html":
