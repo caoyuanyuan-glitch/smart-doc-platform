@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
 from datetime import timedelta
 from difflib import SequenceMatcher
 import os
@@ -375,6 +375,10 @@ def _resolve_terminology(db: Session, terminology_md: str = None, text: str = No
 
 # 句式清单所在知识库文件夹 ID（写作规范 / 句式清单）
 SENTENCE_GUIDE_FOLDER_IDS = [3]
+SENTENCE_FEEDBACK_FOLDER_IDS = [20]
+PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单.md"
+TERMINOLOGY_FEEDBACK_FOLDER_IDS = [21]
+PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME = "平台反馈的术语对照表.md"
 
 # 默认写作风格指南文件 ID（写作规范 / 写作风格指南 / 中文技术文档写作风格指南）
 DEFAULT_STYLE_GUIDE_ID = 1
@@ -497,6 +501,101 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     _sentence_guide_cache[cache_key] = result
     return result
 
+
+def _ensure_platform_feedback_sentence_file(db: Session, user_id: int) -> KnowledgeFile:
+    """确保平台反馈句式清单存在于知识库中。"""
+    folder_id = SENTENCE_FEEDBACK_FOLDER_IDS[0]
+    knowledge_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
+    if not os.path.exists(knowledge_dir):
+        os.makedirs(knowledge_dir)
+
+    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_FILENAME)
+    initial_content = "# 平台反馈的句式清单\n\n## 用户反馈修正\n\n"
+
+    feedback_file = db.query(KnowledgeFile).filter(
+        KnowledgeFile.folder_id == folder_id,
+        KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME,
+        KnowledgeFile.file_path == file_path
+    ).first()
+
+    if feedback_file:
+        if not os.path.exists(feedback_file.file_path):
+            with open(feedback_file.file_path, 'w', encoding='utf-8') as f:
+                f.write(initial_content)
+        return feedback_file
+
+    if not os.path.exists(file_path):
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(initial_content)
+
+    feedback_file = KnowledgeFile(
+        folder_id=folder_id,
+        name=PLATFORM_FEEDBACK_FILENAME,
+        filename=PLATFORM_FEEDBACK_FILENAME,
+        file_path=file_path,
+        file_size=os.path.getsize(file_path),
+        file_type='md',
+        created_by=user_id
+    )
+    db.add(feedback_file)
+    db.commit()
+    db.refresh(feedback_file)
+    return feedback_file
+
+
+def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> KnowledgeFile:
+    """确保平台反馈术语对照表存在于知识库中。"""
+    folder_id = TERMINOLOGY_FEEDBACK_FOLDER_IDS[0]
+
+    knowledge_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
+    if not os.path.exists(knowledge_dir):
+        os.makedirs(knowledge_dir)
+
+    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME)
+    initial_content = "# 平台反馈的术语对照表\n\n| 非标准词 | 标准词 |\n| --- | --- |\n"
+
+    feedback_file = db.query(KnowledgeFile).filter(
+        KnowledgeFile.folder_id == folder_id,
+        KnowledgeFile.name == PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME,
+        KnowledgeFile.file_path == file_path
+    ).first()
+
+    if feedback_file:
+        if not os.path.exists(feedback_file.file_path):
+            with open(feedback_file.file_path, 'w', encoding='utf-8') as f:
+                f.write(initial_content)
+        return feedback_file
+
+    if not os.path.exists(file_path):
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(initial_content)
+
+    feedback_file = KnowledgeFile(
+        folder_id=folder_id,
+        name=PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME,
+        filename=PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME,
+        file_path=file_path,
+        file_size=os.path.getsize(file_path),
+        file_type='md',
+        created_by=user_id
+    )
+    db.add(feedback_file)
+    db.commit()
+    db.refresh(feedback_file)
+    return feedback_file
+
+
+def _get_platform_feedback_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
+    """返回平台反馈句式清单固定主文件。"""
+    primary_file = _ensure_platform_feedback_sentence_file(db, user_id)
+    return [primary_file] if primary_file else []
+
+
+def _get_platform_feedback_terminology_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
+    """返回平台反馈术语对照表固定主文件。"""
+    primary_file = _ensure_platform_feedback_terminology_file(db, user_id)
+    return [primary_file] if primary_file else []
+
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "polished")
 
 # ============================================================
@@ -531,6 +630,19 @@ class FeedbackInput(BaseModel):
     target: str = "terminology" # "terminology" 或 "sentence_guide"
     terminology_file_id: Optional[int] = None
     sentence_file_id: Optional[int] = None
+
+
+class DocumentFeedbackItem(BaseModel):
+    before: str = ""
+    after: str = ""
+    type: str = ""
+    accepted: bool = True
+
+
+class DocumentFeedbackInput(BaseModel):
+    document_id: Optional[int] = None
+    source_filename: str = ""
+    items: List[DocumentFeedbackItem] = []
 
 
 class PolishRuleMatch(BaseModel):
@@ -1800,50 +1912,84 @@ def submit_polish_feedback(
         processed_count = 0
 
     elif feedback.target == "terminology":
-        # 术语修正 → 写入选中的术语文件
-        file_id = feedback.terminology_file_id
-        if not file_id:
-            raise HTTPException(status_code=400, detail="请先选择术语对照表")
-        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
-        if not term_file or not term_file.file_path or not os.path.exists(term_file.file_path):
-            raise HTTPException(status_code=404, detail="术语文件不存在")
-        if not term_file.file_path.lower().endswith('.md'):
-            raise HTTPException(status_code=400, detail="仅支持写入 Markdown (.md) 术语文件")
+        # 术语修正 → 固定写入平台反馈术语文件
         try:
-            # 读取现有内容，追加术语行
-            with open(term_file.file_path, 'r', encoding='utf-8') as f:
-                existing = f.read()
-            with open(term_file.file_path, 'a', encoding='utf-8') as f:
+            target_files = _get_platform_feedback_terminology_targets(db, current_user.id if current_user else 1)
+            new_pairs = []
+            for term_file in target_files:
+                existing = ""
+                if term_file.file_path and os.path.exists(term_file.file_path):
+                    with open(term_file.file_path, 'r', encoding='utf-8') as f:
+                        existing = f.read()
+
+                file_new_pairs = []
                 for old_term, new_term in corrections_pairs:
-                    # 避免重复（简单检测）
-                    if f'| {old_term} |' in existing or f'|{old_term}|' in existing:
+                    normalized_old = old_term.strip()
+                    normalized_new = new_term.strip()
+                    if (
+                        f'| {normalized_old} | {normalized_new} |' in existing or
+                        f'|{normalized_old}|{normalized_new}|' in existing
+                    ):
                         continue
-                    f.write(f'| {old_term} | {new_term} |\n')
-                    processed_count += 1
+                    file_new_pairs.append((normalized_old, normalized_new))
+
+                if not file_new_pairs:
+                    term_file.file_size = os.path.getsize(term_file.file_path)
+                    continue
+
+                with open(term_file.file_path, 'a', encoding='utf-8') as f:
+                    for old_term, new_term in file_new_pairs:
+                        f.write(f'| {old_term} | {new_term} |\n')
+
+                term_file.file_size = os.path.getsize(term_file.file_path)
+                if not new_pairs:
+                    new_pairs = file_new_pairs
+
+            processed_count = len(new_pairs)
+            db.commit()
         except Exception as e:
             errors.append(str(e))
 
     elif feedback.target == "sentence_guide":
-        # 句式修正 → 写入选中的句式文件
-        file_id = feedback.sentence_file_id
-        if not file_id:
-            raise HTTPException(status_code=400, detail="请先选择句式清单文件")
-        guide_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
-        if not guide_file or not guide_file.file_path or not os.path.exists(guide_file.file_path):
-            raise HTTPException(status_code=404, detail="句式文件不存在")
-        if not guide_file.file_path.lower().endswith('.md'):
-            raise HTTPException(status_code=400, detail="句式文件仅支持 Markdown (.md) 格式，请先将 .docx 转为 .md 上传")
+        # 句式修正 → 固定写入平台反馈句式文件
         if not raw_lines:
             raise HTTPException(status_code=400, detail="请填写需修正的词语或句子")
         timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         try:
-            with open(guide_file.file_path, 'a', encoding='utf-8') as f:
-                f.write(f'\n## 用户反馈修正 ({timestamp})\n\n')
+            target_files = _get_platform_feedback_targets(db, current_user.id if current_user else 1)
+            feedback_file_id = target_files[0].id if target_files else None
+            new_lines = []
+
+            for guide_file in target_files:
+                existing = ""
+                if guide_file.file_path and os.path.exists(guide_file.file_path):
+                    with open(guide_file.file_path, 'r', encoding='utf-8') as f:
+                        existing = f.read()
+
+                file_new_lines = []
                 for line in raw_lines:
-                    f.write(f'- {line}\n')
-                    processed_count += 1
-                f.write('\n')
-            _invalidate_sentence_guide_cache(file_id)
+                    if f"- {line}\n" in existing:
+                        continue
+                    file_new_lines.append(line)
+
+                if not file_new_lines:
+                    guide_file.file_size = os.path.getsize(guide_file.file_path)
+                    continue
+
+                with open(guide_file.file_path, 'a', encoding='utf-8') as f:
+                    f.write(f'\n## 用户反馈修正 ({timestamp})\n\n')
+                    for line in file_new_lines:
+                        f.write(f'- {line}\n')
+                    f.write('\n')
+
+                guide_file.file_size = os.path.getsize(guide_file.file_path)
+                if not new_lines:
+                    new_lines = file_new_lines
+
+            processed_count = len(new_lines)
+            db.commit()
+            if feedback_file_id is not None:
+                _invalidate_sentence_guide_cache(feedback_file_id)
         except Exception as e:
             errors.append(str(e))
 
@@ -1868,6 +2014,93 @@ def submit_polish_feedback(
     }
 
 
+@router.post("/feedback/document", response_model=None)
+def submit_document_feedback(
+    feedback: DocumentFeedbackInput,
+    db: Session = Depends(get_db)
+):
+    """提交文档润色反馈，将勾选为是的句式写入平台反馈知识库文件。"""
+    from sqlalchemy import func
+
+    current_user = get_default_user(db)
+    total_items = len(feedback.items or [])
+    if total_items == 0:
+        raise HTTPException(status_code=400, detail="当前没有可提交的润色结果")
+
+    accepted_items = [item for item in feedback.items if item.accepted and (item.after or '').strip()]
+    accepted_lines = []
+    seen_lines = set()
+    for item in accepted_items:
+        line = item.after.strip()
+        if line in seen_lines:
+            continue
+        seen_lines.add(line)
+        accepted_lines.append(line)
+
+    processed_count = 0
+    feedback_file_id = None
+    if accepted_lines:
+        target_files = _get_platform_feedback_targets(db, current_user.id if current_user else 1)
+        feedback_file_id = target_files[0].id if target_files else None
+        timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        source_name = (feedback.source_filename or '').strip() or f"文档{feedback.document_id or ''}".strip()
+        new_lines = []
+        for file in target_files:
+            existing = ""
+            if file.file_path and os.path.exists(file.file_path):
+                with open(file.file_path, 'r', encoding='utf-8') as f:
+                    existing = f.read()
+
+            file_new_lines = []
+            for line in accepted_lines:
+                if f"- {line}\n" in existing:
+                    continue
+                file_new_lines.append(line)
+
+            if not file_new_lines:
+                file.file_size = os.path.getsize(file.file_path)
+                continue
+
+            with open(file.file_path, 'a', encoding='utf-8') as f:
+                f.write(f"\n## 用户反馈修正 ({timestamp} / 来源：{source_name})\n\n")
+                for line in file_new_lines:
+                    f.write(f"- {line}\n")
+                f.write("\n")
+
+            file.file_size = os.path.getsize(file.file_path)
+            if not new_lines:
+                new_lines = file_new_lines
+
+        processed_count = len(new_lines)
+        db.commit()
+        if feedback_file_id is not None:
+            _invalidate_sentence_guide_cache(feedback_file_id)
+
+    db.add(PolishFeedback(
+        original_text=feedback.source_filename or '',
+        polished_text='\n'.join(accepted_lines),
+        accuracy=len(accepted_items),
+        corrections='\n'.join(accepted_lines),
+        target='document_sentence_guide',
+        processed_count=total_items,
+        created_by=current_user.username if current_user else 'guest'
+    ))
+    db.commit()
+
+    total_docs = db.query(func.count(PolishFeedback.id)).filter(
+        PolishFeedback.target == 'document_sentence_guide'
+    ).scalar() or 0
+
+    return {
+        "message": "文档润色反馈已提交",
+        "processed_count": processed_count,
+        "accepted_count": len(accepted_lines),
+        "total_count": total_items,
+        "feedback_file_id": feedback_file_id,
+        "total_docs": total_docs
+    }
+
+
 @router.get("/feedback/stats", response_model=None)
 def get_feedback_stats(db: Session = Depends(get_db)):
     """获取润色准确率统计：总准确率总和 ÷ 总反馈次数。"""
@@ -1880,6 +2113,29 @@ def get_feedback_stats(db: Session = Depends(get_db)):
         "total_count": total,
         "average_accuracy": round(accuracy_sum / total, 1)
     }
+
+
+@router.get("/feedback/document-stats", response_model=None)
+def get_document_feedback_stats(db: Session = Depends(get_db)):
+    """获取文档润色页统计。准确率 = 每次润色(修改条数 / 总润色条数)的平均值。"""
+    records = db.query(PolishFeedback).filter(
+        PolishFeedback.target == 'document_sentence_guide'
+    ).all()
+
+    total_docs = len(records)
+    if total_docs == 0:
+        return {"total_docs": 0, "average_accuracy": 0}
+
+    ratios = []
+    for record in records:
+        total_changes = record.processed_count or 0
+        if total_changes <= 0:
+            ratios.append(0)
+            continue
+        ratios.append((record.accuracy or 0) / total_changes)
+
+    average_accuracy = round((sum(ratios) / total_docs) * 100, 1)
+    return {"total_docs": total_docs, "average_accuracy": average_accuracy}
 
 
 # ============================================================

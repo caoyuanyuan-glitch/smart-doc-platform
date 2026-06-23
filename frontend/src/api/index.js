@@ -180,7 +180,14 @@ export const polishAPI = {
       terminology_file_id: terminologyFileId || null,
       sentence_file_id: sentenceFileId || null
     }),
-  getFeedbackStats: () => instance.get('/polish/feedback/stats')
+  getFeedbackStats: () => instance.get('/polish/feedback/stats'),
+  submitDocumentFeedback: (documentId, sourceFilename, items) =>
+    instance.post('/polish/feedback/document', {
+      document_id: documentId || null,
+      source_filename: sourceFilename || '',
+      items
+    }),
+  getDocumentFeedbackStats: () => instance.get('/polish/feedback/document-stats')
 }
 
 export const qaAPI = {

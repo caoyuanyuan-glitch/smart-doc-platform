@@ -8,12 +8,21 @@ from pydantic import BaseModel
 from spellchecker import SpellChecker
 from docx import Document
 from openpyxl import load_workbook
-from pptx import Presentation
 from xml.etree import ElementTree as ET
+
+try:
+    from pptx import Presentation
+except ModuleNotFoundError:
+    Presentation = None
 
 router = APIRouter()
 
 spell_checker = SpellChecker(language='en')
+
+
+def _require_pptx_support():
+    if Presentation is None:
+        raise HTTPException(status_code=500, detail="当前环境缺少 python-pptx 依赖，暂不支持 PPTX 文件处理")
 
 MAX_SPELL_ERRORS = 100
 MAX_GRAMMAR_ERRORS = 200
@@ -1387,6 +1396,7 @@ def extract_text_from_file(file: UploadFile):
                             if xlsx_text.strip():
                                 txt += f"--- {name} ---\n{xlsx_text}\n\n"
                         elif name_lower.endswith(".pptx"):
+                            _require_pptx_support()
                             bio = io.BytesIO(file_content)
                             prs = Presentation(bio)
                             pptx_text = ""
@@ -1423,6 +1433,7 @@ def extract_text_from_file(file: UploadFile):
             txt += row_text + "\n"
         return txt
     elif ext == ".pptx":
+        _require_pptx_support()
         bio = io.BytesIO(content)
         ppt = Presentation(bio)
         txt = ""

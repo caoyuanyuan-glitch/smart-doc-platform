@@ -1,64 +1,120 @@
 <template>
   <div class="polish-container">
     <div v-if="currentView === 'document'">
-      <h2 class="page-title">文档润色</h2>
-      
-      <div class="panel">
-        <div class="form-item">
-          <label class="form-label">句式清单文件</label>
-          <div class="input-with-button">
-            <el-input v-model="formData.sentenceFile" readonly placeholder="选择知识库中的句式清单文件" />
-            <el-button type="primary" @click="openFilePicker('sentenceFile', 'knowledge')">选择文件</el-button>
-          </div>
-        </div>
-
-        <div class="form-item">
-          <label class="form-label">术语对照表</label>
-          <div class="input-with-button">
-            <el-input v-model="formData.terminologyFile" readonly placeholder="选择知识库中的术语对照表" />
-            <el-button type="primary" @click="openFilePicker('terminologyFile', 'knowledge')">选择文件</el-button>
-          </div>
-        </div>
-
-        <div class="form-item">
-          <label class="form-label">待润色文件</label>
-          <div class="input-with-button">
-            <el-input v-model="formData.sourceFile" readonly placeholder="选择本地文件" />
-            <el-button type="primary" @click="openLocalFilePicker()">选择文件</el-button>
-          </div>
-        </div>
-
-        <div class="form-item">
-          <label class="form-label">输出文件路径</label>
-          <div class="input-with-button">
-            <el-input v-model="formData.outputPath" readonly placeholder="已润色文档（默认）" />
-          </div>
-        </div>
-
-        <div class="form-item">
-          <label class="form-label">润色要求</label>
-          <el-input v-model="formData.requirements" type="textarea" :rows="3" placeholder="请输入额外的润色要求（选填）" />
+      <div class="page-title-row">
+        <h2 class="page-title">文档润色</h2>
+        <div class="stats-card">
+          <span class="stats-label">准确率</span>
+          <span class="stats-value" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.averageAccuracy }}%</span>
+          <span class="stats-divider">|</span>
+          <span class="stats-label">共润色</span>
+          <span class="stats-count-wrap">
+            <span class="stats-count" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.totalDocs }}</span>
+            <span class="stats-unit">文档</span>
+          </span>
         </div>
       </div>
 
-      <div class="button-group">
-        <el-button @click="resetForm">重置</el-button>
-        <el-button type="primary" :loading="loading" @click="submitPolish">提交</el-button>
-      </div>
+      <div class="doc-layout">
+        <div class="doc-left">
+          <div class="panel doc-input-panel">
+            <div class="form-item">
+              <label class="form-label">句式清单文件</label>
+              <div class="input-with-button">
+                <el-input v-model="formData.sentenceFile" readonly placeholder="选择知识库中的句式清单文件" />
+                <el-button type="primary" @click="openFilePicker('sentenceFile', 'knowledge')">选择文件</el-button>
+              </div>
+            </div>
 
-      <div v-if="polishProgress > 0 && polishProgress < 100" class="progress-card">
-        <div class="progress-header">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          <span class="progress-msg">{{ polishProgressMsg || '润色中...' }}</span>
-          <span class="progress-pct">{{ polishProgress }}%</span>
+            <div class="form-item">
+              <label class="form-label">术语对照表</label>
+              <div class="input-with-button">
+                <el-input v-model="formData.terminologyFile" readonly placeholder="选择知识库中的术语对照表" />
+                <el-button type="primary" @click="openFilePicker('terminologyFile', 'knowledge')">选择文件</el-button>
+              </div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">待润色文件</label>
+              <div class="input-with-button">
+                <el-input v-model="formData.sourceFile" readonly placeholder="选择本地文件" />
+                <el-button type="primary" @click="openLocalFilePicker()">选择文件</el-button>
+              </div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">输出文件路径</label>
+              <div class="input-with-button">
+                <el-input v-model="formData.outputPath" readonly placeholder="已润色文档（默认）" />
+              </div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">润色要求</label>
+              <el-input v-model="formData.requirements" type="textarea" :rows="3" placeholder="请输入额外的润色要求（选填）" />
+            </div>
+
+            <div class="button-group doc-button-group">
+              <el-button @click="resetForm">重置</el-button>
+              <el-button type="primary" :loading="loading" @click="submitPolish">提交</el-button>
+            </div>
+          </div>
+
         </div>
-        <el-progress :percentage="polishProgress" :stroke-width="8" :show-text="false" />
+
+        <div class="doc-right">
+          <div v-if="docResult" class="panel doc-result-panel">
+            <div class="panel-header">
+              <span>润色结果</span>
+              <div class="panel-actions">
+                <el-tag type="info" size="small">修改 {{ docResult.changes }} 处</el-tag>
+                <el-tag type="success" size="small">已选 {{ acceptedDocChangeCount }} 处</el-tag>
+                <el-button size="small" @click="selectAllDocumentChanges">全选</el-button>
+                <el-button size="small" @click="downloadPolishedDoc">下载文档</el-button>
+                <el-button size="small" @click="downloadReport">润色报告</el-button>
+                <el-button type="primary" size="small" :loading="docFeedbackLoading" @click="submitDocumentFeedback">写入平台反馈句式清单</el-button>
+              </div>
+            </div>
+
+            <div class="doc-result-preview">
+              <div class="result-col-v">
+                <div class="col-title"><span class="dot dot-blue"></span>原文预览</div>
+                <div class="col-content-compact">{{ docResult.original }}</div>
+              </div>
+              <div class="result-col-v">
+                <div class="col-title"><span class="dot dot-green"></span>润色预览</div>
+                <div class="col-content-compact">{{ docResult.polished }}</div>
+              </div>
+            </div>
+
+            <div class="doc-result-table-wrap">
+              <el-table :data="docResult.changeDetails" stripe class="doc-result-table" empty-text="当前没有可确认的润色结果" height="100%">
+                <el-table-column type="index" label="序号" width="70" />
+                <el-table-column prop="before" label="原文" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="after" label="润色后" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="typeLabel" label="修改类型" width="110" />
+                <el-table-column label="是否修改" width="120">
+                  <template #default="scope">
+                    <el-checkbox v-model="scope.row.accepted">是</el-checkbox>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
+
+          <div v-else class="panel result-placeholder doc-result-panel">
+            <div class="panel-header">
+              <span>润色结果</span>
+            </div>
+            <div class="placeholder-text">提交文档后，这里会展示润色结果和每条修改的确认状态。</div>
+          </div>
+        </div>
       </div>
     </div>
 
     <div v-if="currentView === 'text'">
       <div class="page-title-row">
-        <h2 class="page-title">智能润色</h2>
+        <h2 class="page-title">文本润色</h2>
         <div class="stats-card">
           <span class="stats-label">准确率</span>
           <span class="stats-value" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.averageAccuracy }}%</span>
@@ -127,11 +183,11 @@
             <div class="result-grid-vertical">
               <div class="result-col-v">
                 <div class="col-title"><span class="dot dot-blue"></span>原文</div>
-                <div class="col-content col-content-compact">{{ result.original }}</div>
+                <div class="col-content col-content-compact" v-html="highlightedOriginalHtml"></div>
               </div>
               <div class="result-col-v">
                 <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
-                <div class="col-content col-content-compact">{{ result.polished }}</div>
+                <div class="col-content col-content-compact" v-html="highlightedPolishedHtml"></div>
               </div>
             </div>
           </div>
@@ -194,22 +250,21 @@
 
     <el-dialog v-model="filePickerVisible" title="从知识库选择文件" width="480px">
       <div class="file-picker-content">
-        <el-tree
-          ref="treeRef"
-          :data="knowledgeTree"
-          :props="{ label: 'name', children: 'children' }"
-          node-key="id"
-          :highlight-current="true"
-          :expand-on-click-node="false"
-          @node-click="onTreeNodeClick"
-        >
-          <template #default="{ node, data }">
-            <div class="tree-node-content">
-              <span class="node-icon">{{ data.file_path ? '📄' : '📁' }}</span>
-              <span>{{ node.label }}</span>
-            </div>
-          </template>
-        </el-tree>
+        <div v-if="knowledgeTreeList.length === 0" class="picker-empty">暂无知识库文件</div>
+        <div v-else class="picker-list">
+          <button
+            v-for="item in knowledgeTreeList"
+            :key="item.nodeKey"
+            type="button"
+            class="picker-row"
+            :class="{ 'is-file': item.isFile, 'is-folder': !item.isFile, 'is-selected': selectedKnowledgeFile?.nodeKey === item.nodeKey }"
+            :style="{ paddingLeft: `${12 + item.depth * 20}px` }"
+            @click="onTreeNodeClick(item)"
+          >
+            <span class="node-icon">{{ item.isFile ? '📄' : '📁' }}</span>
+            <span class="picker-name">{{ item.name }}</span>
+          </button>
+        </div>
         <div v-if="selectedKnowledgeFile" class="selected-info">
           已选择：{{ selectedKnowledgeFile.name }}
         </div>
@@ -219,20 +274,43 @@
         <el-button type="primary" @click="confirmKnowledgeFile" :disabled="!selectedKnowledgeFile">确认</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      :model-value="currentView === 'document' && loading && polishProgress < 100"
+      title="文档润色中"
+      width="460px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      :show-close="false"
+      append-to-body
+    >
+      <div class="progress-dialog-body">
+        <div class="progress-header">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span class="progress-msg">{{ polishProgressMsg || '润色中...' }}</span>
+        </div>
+        <el-progress :percentage="polishProgress" :stroke-width="10" />
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import { polishAPI, knowledgeAPI } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
+import { usePolishStore } from '@/store/polish'
 
 const route = useRoute()
+const polishStore = usePolishStore()
+const { documentDraft, documentSession } = storeToRefs(polishStore)
 const localFileInputRef = ref(null)
 const filePickerVisible = ref(false)
 const knowledgeTree = ref([])
+const knowledgeTreeList = ref([])
 const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
 
@@ -246,6 +324,8 @@ const docResult = ref(null)
 const loading = ref(false)
 const polishProgress = ref(0)
 const polishProgressMsg = ref('')
+const docFeedbackLoading = ref(false)
+const docFeedbackStats = ref({ totalDocs: 0, averageAccuracy: 0 })
 // 反馈相关
 const feedbackAccuracy = ref(80)
 const feedbackCorrections = ref('')
@@ -261,21 +341,465 @@ const feedbackPlaceholder = computed(() => (
 
 const feedbackHint = computed(() => (
   feedbackTarget.value === 'sentence_guide'
-    ? '句式清单文件：直接写原句或建议句，每行一条。'
-    : '术语对照表：按“非标准词 → 标准词”填写。'
+    ? '句式清单文件：将自动写入平台反馈的句式清单，每行一条。'
+    : '术语对照表：将自动写入平台反馈的术语对照表，按“非标准词 → 标准词”填写。'
 ))
 
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const semanticPunctuationMap = {
+  '，': ',',
+  '。': '.',
+  '；': ';',
+  '：': ':',
+  '！': '!',
+  '？': '?',
+  '（': '(',
+  '）': ')',
+  '【': '[',
+  '】': ']',
+  '《': '<',
+  '》': '>',
+  '“': '"',
+  '”': '"',
+  '‘': "'",
+  '’': "'",
+  '、': ',',
+  '｜': '|'
+}
+
+const lowSignalAnchorTokens = new Set(['的', '地', '得', '了', '着', '过', '吗', '呢', '吧', '啊', '呀', '将', '把', '被', '和', '及', '与'])
+
+function normalizeSemanticUnit(text) {
+  const raw = String(text || '')
+  if (!raw) {
+    return ''
+  }
+  if (/^\s+$/.test(raw)) {
+    return ' '
+  }
+  return Array.from(raw)
+    .map(char => semanticPunctuationMap[char] || char)
+    .join('')
+    .toLowerCase()
+}
+
+function createDiffToken(text) {
+  const raw = String(text || '')
+  const normalized = normalizeSemanticUnit(raw)
+  const isWhitespace = /^\s+$/.test(raw)
+  const isPunctuation = /^[,.;:!?()\[\]<>"'|]+$/.test(normalized)
+  return {
+    text: raw,
+    key: normalized,
+    ignorable: isWhitespace,
+    anchorIgnorable: isWhitespace || isPunctuation || lowSignalAnchorTokens.has(normalized)
+  }
+}
+
+function splitChars(text) {
+  return Array.from(String(text || '')).map(char => createDiffToken(char))
+}
+
+function splitByRegex(text) {
+  const matches = String(text || '').match(/\s+|[A-Za-z0-9_]+|[\u3400-\u9fff]+|[^\sA-Za-z0-9_\u3400-\u9fff]/g) || []
+  return matches.map(part => createDiffToken(part))
+}
+
+function segmentText(text) {
+  const raw = String(text || '')
+  if (!raw) {
+    return []
+  }
+
+  if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+    const segmenter = new Intl.Segmenter('zh-CN', { granularity: 'word' })
+    return Array.from(segmenter.segment(raw), item => createDiffToken(item.segment))
+  }
+
+  return splitByRegex(raw)
+}
+
+function buildFallbackDiffSegments(leftTokens, rightTokens) {
+  let prefix = 0
+  const leftLength = leftTokens.length
+  const rightLength = rightTokens.length
+
+  while (prefix < leftLength && prefix < rightLength && leftTokens[prefix].key === rightTokens[prefix].key) {
+    prefix += 1
+  }
+
+  let leftSuffix = leftLength - 1
+  let rightSuffix = rightLength - 1
+  while (leftSuffix >= prefix && rightSuffix >= prefix && leftTokens[leftSuffix].key === rightTokens[rightSuffix].key) {
+    leftSuffix -= 1
+    rightSuffix -= 1
+  }
+
+  return {
+    left: [
+      { text: leftTokens.slice(0, prefix).map(item => item.text).join(''), changed: false },
+      { text: leftTokens.slice(prefix, leftSuffix + 1).map(item => item.text).join(''), changed: true },
+      { text: leftTokens.slice(leftSuffix + 1).map(item => item.text).join(''), changed: false }
+    ],
+    right: [
+      { text: rightTokens.slice(0, prefix).map(item => item.text).join(''), changed: false },
+      { text: rightTokens.slice(prefix, rightSuffix + 1).map(item => item.text).join(''), changed: true },
+      { text: rightTokens.slice(rightSuffix + 1).map(item => item.text).join(''), changed: false }
+    ]
+  }
+}
+
+function buildCharDiffSegments(leftText, rightText) {
+  const leftTokens = splitChars(leftText)
+  const rightTokens = splitChars(rightText)
+  const leftLength = leftTokens.length
+  const rightLength = rightTokens.length
+
+  if (!leftLength && !rightLength) {
+    return { left: [], right: [] }
+  }
+
+  if (leftLength * rightLength > 120000) {
+    return buildFallbackDiffSegments(leftTokens, rightTokens)
+  }
+
+  const dp = Array.from({ length: leftLength + 1 }, () => Array(rightLength + 1).fill(0))
+
+  for (let i = leftLength - 1; i >= 0; i -= 1) {
+    for (let j = rightLength - 1; j >= 0; j -= 1) {
+      if (leftTokens[i].key === rightTokens[j].key) {
+        dp[i][j] = dp[i + 1][j + 1] + 1
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1])
+      }
+    }
+  }
+
+  const left = []
+  const right = []
+  let i = 0
+  let j = 0
+
+  function findNextIndex(tokens, startIndex, target) {
+    for (let index = startIndex; index < tokens.length; index += 1) {
+      if (tokens[index].key === target.key) {
+        return index
+      }
+    }
+    return -1
+  }
+
+  function shouldPreferInsert(leftIndex, rightIndex) {
+    const leftChar = leftTokens[leftIndex]
+    const rightChar = rightTokens[rightIndex]
+    const leftCharNextInRight = findNextIndex(rightTokens, rightIndex + 1, leftChar)
+    const rightCharNextInLeft = findNextIndex(leftTokens, leftIndex + 1, rightChar)
+
+    if (leftCharNextInRight === -1 && rightCharNextInLeft === -1) {
+      return false
+    }
+    if (leftCharNextInRight === -1) {
+      return false
+    }
+    if (rightCharNextInLeft === -1) {
+      return true
+    }
+
+    const insertDistance = leftCharNextInRight - rightIndex
+    const deleteDistance = rightCharNextInLeft - leftIndex
+    return insertDistance < deleteDistance
+  }
+
+  while (i < leftLength && j < rightLength) {
+    if (leftTokens[i].key === rightTokens[j].key) {
+      left.push({ text: leftTokens[i].text, changed: false })
+      right.push({ text: rightTokens[j].text, changed: false })
+      i += 1
+      j += 1
+      continue
+    }
+
+    if (dp[i + 1][j] > dp[i][j + 1]) {
+      left.push({ text: leftTokens[i].text, changed: true })
+      i += 1
+      continue
+    }
+
+    if (dp[i + 1][j] < dp[i][j + 1]) {
+      right.push({ text: rightTokens[j].text, changed: true })
+      j += 1
+      continue
+    }
+
+    if (shouldPreferInsert(i, j)) {
+      right.push({ text: rightTokens[j].text, changed: true })
+      j += 1
+      continue
+    }
+
+    if (rightTokens[j + 1] && leftTokens[i].key === rightTokens[j + 1].key) {
+      right.push({ text: rightTokens[j].text, changed: true })
+      j += 1
+      continue
+    }
+
+    right.push({ text: rightTokens[j].text, changed: true })
+    left.push({ text: leftTokens[i].text, changed: true })
+    i += 1
+    j += 1
+  }
+
+  while (i < leftLength) {
+    left.push({ text: leftTokens[i].text, changed: true })
+    i += 1
+  }
+
+  while (j < rightLength) {
+    right.push({ text: rightTokens[j].text, changed: true })
+    j += 1
+  }
+
+  return {
+    left: mergeDiffSegments(left),
+    right: mergeDiffSegments(right)
+  }
+}
+
+function collectAnchors(leftTokens, rightTokens) {
+  const leftComparable = leftTokens.filter(token => !token.anchorIgnorable)
+  const rightComparable = rightTokens.filter(token => !token.anchorIgnorable)
+
+  if (!leftComparable.length && !rightComparable.length) {
+    return []
+  }
+
+  if (leftComparable.length * rightComparable.length > 40000) {
+    return null
+  }
+
+  const dp = Array.from({ length: leftComparable.length + 1 }, () => Array(rightComparable.length + 1).fill(0))
+
+  for (let i = leftComparable.length - 1; i >= 0; i -= 1) {
+    for (let j = rightComparable.length - 1; j >= 0; j -= 1) {
+      if (leftComparable[i].key === rightComparable[j].key) {
+        dp[i][j] = dp[i + 1][j + 1] + 1
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1])
+      }
+    }
+  }
+
+  const anchors = []
+  let i = 0
+  let j = 0
+  while (i < leftComparable.length && j < rightComparable.length) {
+    if (leftComparable[i].key === rightComparable[j].key) {
+      anchors.push({
+        leftIndex: leftComparable[i].index,
+        rightIndex: rightComparable[j].index,
+        leftText: leftComparable[i].text,
+        rightText: rightComparable[j].text
+      })
+      i += 1
+      j += 1
+      continue
+    }
+    if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i += 1
+    } else {
+      j += 1
+    }
+  }
+
+  return anchors
+}
+
+function buildTokenDiffSegments(leftText, rightText) {
+  const leftTokens = segmentText(leftText).map((token, index) => ({ ...token, index }))
+  const rightTokens = segmentText(rightText).map((token, index) => ({ ...token, index }))
+  const anchors = collectAnchors(leftTokens, rightTokens)
+
+  if (anchors === null) {
+    return buildCharDiffSegments(leftText, rightText)
+  }
+
+  const left = []
+  const right = []
+  let leftCursor = 0
+  let rightCursor = 0
+
+  function pushGap(nextLeft, nextRight) {
+    const leftGap = leftTokens.slice(leftCursor, nextLeft).map(token => token.text).join('')
+    const rightGap = rightTokens.slice(rightCursor, nextRight).map(token => token.text).join('')
+    const refined = buildCharDiffSegments(leftGap, rightGap)
+    left.push(...refined.left)
+    right.push(...refined.right)
+  }
+
+  for (const anchor of anchors) {
+    pushGap(anchor.leftIndex, anchor.rightIndex)
+    left.push({ text: anchor.leftText, changed: false })
+    right.push({ text: anchor.rightText, changed: false })
+    leftCursor = anchor.leftIndex + 1
+    rightCursor = anchor.rightIndex + 1
+  }
+
+  pushGap(leftTokens.length, rightTokens.length)
+
+  return {
+    left: mergeDiffSegments(left),
+    right: mergeDiffSegments(right)
+  }
+}
+
+function buildDiffSegments(leftText, rightText) {
+  return buildTokenDiffSegments(leftText, rightText)
+}
+
+function mergeDiffSegments(segments) {
+  const merged = []
+  for (const segment of segments) {
+    if (!segment.text) {
+      continue
+    }
+    const last = merged[merged.length - 1]
+    if (last && last.changed === segment.changed) {
+      last.text += segment.text
+      continue
+    }
+    merged.push({ ...segment })
+  }
+  return merged
+}
+
+function renderDiffHtml(sourceText, targetText, mode) {
+  const diff = buildDiffSegments(sourceText, targetText)
+  const segments = mode === 'original' ? diff.left : diff.right
+  return mergeDiffSegments(segments)
+    .map(segment => {
+      const content = escapeHtml(segment.text)
+      return segment.changed ? `<span class="diff-highlight">${content}</span>` : content
+    })
+    .join('')
+}
+
+const highlightedOriginalHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'original'))
+const highlightedPolishedHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'polished'))
+
 const formData = ref({
-  sentenceFile: '',
-  terminologyFile: '',
-  sourceFile: '',
-  outputPath: '已润色文档',
-  requirements: ''
+  sentenceFile: documentDraft.value.sentenceFile || '',
+  sentenceFileId: documentDraft.value.sentenceFileId || null,
+  terminologyFile: documentDraft.value.terminologyFile || '',
+  terminologyFileId: documentDraft.value.terminologyFileId || null,
+  sourceFile: documentDraft.value.sourceFile || '',
+  outputPath: documentDraft.value.outputPath || '已润色文档',
+  requirements: documentDraft.value.requirements || ''
 })
 
 const currentView = computed(() => (route.path === '/polish/document' ? 'document' : 'text'))
 
 let pendingLocalFile = null
+let documentProgressTimer = null
+
+const acceptedDocChangeCount = computed(() => {
+  const items = docResult.value?.changeDetails || []
+  return items.filter(item => item.accepted).length
+})
+
+function selectAllDocumentChanges() {
+  const items = docResult.value?.changeDetails || []
+  items.forEach(item => {
+    item.accepted = true
+  })
+}
+
+function normalizeChangeType(type) {
+  const typeMap = {
+    ai: 'AI',
+    terminology: '术语',
+    terminology_rule: '术语',
+    preferred_sentences: '句式',
+    forbidden_words: '禁用词',
+    passive_voice: '语态',
+    double_negative: '句式',
+    informal: '表达',
+    sentence_length: '长句',
+    pronoun_reference: '指代',
+    format: '格式'
+  }
+  return typeMap[type] || (type ? String(type) : '润色')
+}
+
+function normalizeDocumentChanges(changes) {
+  return (changes || []).map((change, index) => {
+    const before = change.before || change.original || change.summary || ''
+    const after = change.after || change.polished || ''
+    return {
+      rowKey: `${index}-${before}-${after}`,
+      before,
+      after,
+      type: change.type || '',
+      typeLabel: normalizeChangeType(change.type),
+      accepted: false
+    }
+  })
+}
+
+function applyDocumentResult(data, fallbackSourceName = '') {
+  const normalizedChanges = normalizeDocumentChanges(data?.changes || [])
+  docResult.value = {
+    id: data?.id,
+    sourceName: fallbackSourceName || formData.value.sourceFile || data?.download_filename || '',
+    original: data?.original || '',
+    polished: data?.polished || '',
+    changes: normalizedChanges.length,
+    changeDetails: normalizedChanges,
+    reportFile: data?.report_file || data?.reportFile,
+    download_filename: data?.download_filename,
+    file_type: data?.file_type
+  }
+}
+
+function startDocumentProgress() {
+  stopDocumentProgress()
+  polishProgress.value = 3
+  polishProgressMsg.value = '正在上传文件...'
+  documentProgressTimer = window.setInterval(() => {
+    if (!loading.value) {
+      stopDocumentProgress()
+      return
+    }
+    if (polishProgress.value < 25) {
+      polishProgress.value += 4
+      polishProgressMsg.value = '正在解析文档...'
+      return
+    }
+    if (polishProgress.value < 55) {
+      polishProgress.value += 3
+      polishProgressMsg.value = '正在加载规则...'
+      return
+    }
+    if (polishProgress.value < 88) {
+      polishProgress.value += 2
+      polishProgressMsg.value = '正在润色内容...'
+    }
+  }, 500)
+}
+
+function stopDocumentProgress() {
+  if (documentProgressTimer) {
+    window.clearInterval(documentProgressTimer)
+    documentProgressTimer = null
+  }
+}
 
 function openFilePicker(field, type) {
   currentPickerField.value = field
@@ -309,6 +833,8 @@ async function loadKnowledgeTree() {
     const resp = await knowledgeAPI.getTree()
     const rawData = resp.data || []
     knowledgeTree.value = flattenTree(rawData)
+    knowledgeTreeList.value = flattenKnowledgeList(rawData)
+    selectedKnowledgeFile.value = null
   } catch (e) {
     ElMessage.error('加载知识库失败')
   }
@@ -318,19 +844,48 @@ function flattenTree(nodes) {
   return nodes.map(node => {
     const files = (node.files || []).map(f => ({
       ...f,
+      nodeKey: `file-${f.id}`,
+      children: [],
       isFile: true,
       parentFolder: node.name
     }))
     const children = flattenTree(node.children || [])
     return {
       ...node,
+      nodeKey: `folder-${node.id}`,
       children: [...files, ...children]
     }
   })
 }
 
+function flattenKnowledgeList(nodes, depth = 0) {
+  const items = []
+  nodes.forEach(node => {
+    items.push({
+      ...node,
+      nodeKey: `folder-${node.id}`,
+      depth,
+      isFile: false
+    })
+
+    const files = (node.files || []).map(file => ({
+      ...file,
+      nodeKey: `file-${file.id}`,
+      depth: depth + 1,
+      isFile: true,
+      parentFolder: node.name
+    }))
+    items.push(...files)
+
+    if (node.children && node.children.length > 0) {
+      items.push(...flattenKnowledgeList(node.children, depth + 1))
+    }
+  })
+  return items
+}
+
 function onTreeNodeClick(data) {
-  if (data.file_path) {
+  if (data.isFile || data.file_path) {
     selectedKnowledgeFile.value = data
   } else {
     selectedKnowledgeFile.value = null
@@ -377,8 +932,7 @@ async function submitPolish() {
   }
   
   loading.value = true
-  polishProgress.value = 0
-  polishProgressMsg.value = '提交中...'
+  startDocumentProgress()
   
   const payload = new FormData()
   payload.append('file', pendingLocalFile)
@@ -393,38 +947,32 @@ async function submitPolish() {
   }
   
   try {
-    const resp = await polishAPI.analyzeFile(payload)
-    const data = resp.data || {}
-    
-    // 后端同步返回完整结果，直接使用
+    const sourceName = pendingLocalFile?.name || formData.value.sourceFile || ''
+    const data = await polishStore.submitDocumentPolish(payload, sourceName)
     polishProgress.value = 100
     polishProgressMsg.value = '润色完成'
-    docResult.value = {
-      id: data.id,
-      original: data.original || '',
-      polished: data.polished || '',
-      changes: (data.changes || []).length,
-      changeDetails: data.changes || [],
-      reportFile: data.report_file || data.reportFile,
-      download_filename: data.download_filename,
-      file_type: data.file_type
-    }
+    stopDocumentProgress()
+    applyDocumentResult(data, sourceName)
     ElMessage.success('润色成功')
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
     polishProgress.value = 0
+    polishProgressMsg.value = ''
+    stopDocumentProgress()
   } finally {
     loading.value = false
+    stopDocumentProgress()
     pendingLocalFile = null
-    formData.value.sourceFile = ''
   }
 }
 
 function resetForm() {
   formData.value = {
     sentenceFile: '',
+    sentenceFileId: null,
     terminologyFile: '',
+    terminologyFileId: null,
     sourceFile: '',
     outputPath: '已润色文档',
     requirements: ''
@@ -432,6 +980,11 @@ function resetForm() {
   pendingLocalFile = null
   selectedKnowledgeFile.value = null
   docResult.value = null
+  docFeedbackLoading.value = false
+  polishProgress.value = 0
+  polishProgressMsg.value = ''
+  stopDocumentProgress()
+  polishStore.clearDocumentSession()
 }
 
 function downloadPolishedDoc() {
@@ -525,14 +1078,6 @@ async function submitFeedback() {
   }
   // 验证文件选择（准确率100%时无需修正，跳过文件校验）
   if (feedbackAccuracy.value < 100) {
-    if (feedbackTarget.value === 'terminology' && !textTerminologyFileId.value) {
-      ElMessage.warning('请先在上方选择术语对照表')
-      return
-    }
-    if (feedbackTarget.value === 'sentence_guide' && !textSentenceFileId.value) {
-      ElMessage.warning('请先在上方选择句式清单文件')
-      return
-    }
   }
   feedbackLoading.value = true
   try {
@@ -546,7 +1091,7 @@ async function submitFeedback() {
       textSentenceFileId.value
     )
     const data = resp.data || {}
-    const targetName = feedbackTarget.value === 'terminology' ? '术语对照表' : '句式清单文件'
+    const targetName = feedbackTarget.value === 'terminology' ? '平台反馈的术语对照表' : '平台反馈的句式清单'
     if (data.processed_count > 0) {
       ElMessage.success(`反馈已提交，已将 ${data.processed_count} 条修正写入${targetName}`)
     } else {
@@ -571,16 +1116,88 @@ async function loadFeedbackStats() {
   }
 }
 
+async function loadDocumentFeedbackStats() {
+  try {
+    const resp = await polishAPI.getDocumentFeedbackStats()
+    docFeedbackStats.value = {
+      totalDocs: resp.data.total_docs || 0,
+      averageAccuracy: resp.data.average_accuracy || 0
+    }
+  } catch (e) {
+    console.error('加载文档润色统计失败:', e)
+  }
+}
+
+async function submitDocumentFeedback() {
+  if (!docResult.value || !docResult.value.changeDetails?.length) {
+    ElMessage.warning('当前没有可提交的润色结果')
+    return
+  }
+
+  docFeedbackLoading.value = true
+  try {
+    const payload = docResult.value.changeDetails.map(item => ({
+      before: item.before,
+      after: item.after,
+      type: item.type,
+      accepted: item.accepted
+    }))
+    const resp = await polishAPI.submitDocumentFeedback(
+      docResult.value.id,
+      docResult.value.sourceName,
+      payload
+    )
+    const data = resp.data || {}
+    if (data.processed_count > 0) {
+      ElMessage.success(`已写入 ${data.processed_count} 条平台反馈句式`) 
+    } else {
+      ElMessage.success('文档反馈已提交，本次没有新增句式写入')
+    }
+    await loadDocumentFeedbackStats()
+    resetForm()
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`提交失败：${errorMsg}`)
+  } finally {
+    docFeedbackLoading.value = false
+  }
+}
+
+watch(formData, (value) => {
+  polishStore.updateDocumentDraft({
+    sentenceFile: value.sentenceFile,
+    sentenceFileId: value.sentenceFileId || null,
+    terminologyFile: value.terminologyFile,
+    terminologyFileId: value.terminologyFileId || null,
+    sourceFile: value.sourceFile,
+    outputPath: value.outputPath,
+    requirements: value.requirements
+  })
+}, { deep: true })
+
+watch(documentSession, (session) => {
+  loading.value = session.loading
+  polishProgress.value = session.progress || 0
+  polishProgressMsg.value = session.message || ''
+  if (session.result) {
+    applyDocumentResult(session.result, documentDraft.value.sourceFile || '')
+  } else if (!session.loading) {
+    docResult.value = null
+  }
+}, { deep: true, immediate: true })
+
 onMounted(async () => {
   loadKnowledgeTree()
   await loadFeedbackStats()
+  await loadDocumentFeedbackStats()
 })
 </script>
 
 <style scoped>
 .polish-container { 
   padding: 0 0 40px; 
-  max-width: 1100px;
+  max-width: none;
+  width: 100%;
 }
 
 /* ── 标题行 ── */
@@ -594,6 +1211,7 @@ onMounted(async () => {
 .page-title-row {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 14px;
   margin-bottom: 18px;
 }
@@ -664,6 +1282,87 @@ onMounted(async () => {
   border-radius: 12px;
   padding: 20px 24px;
   margin-bottom: 16px;
+}
+
+.doc-layout {
+  display: flex;
+  gap: 18px;
+  align-items: stretch;
+  width: 100%;
+  height: calc(100vh - 220px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.doc-left,
+.doc-right {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-left {
+  margin-top: 2mm;
+}
+
+.doc-right {
+  margin-top: 2mm;
+}
+
+.doc-input-panel {
+  width: 100%;
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.doc-button-group {
+  margin-top: 18px;
+  margin-bottom: 0;
+}
+
+.doc-result-panel {
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.doc-result-preview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+  flex: 0 0 auto;
+}
+
+.doc-result-table {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
+.doc-result-table :deep(.el-table__cell) {
+  vertical-align: top;
+}
+
+.doc-result-table :deep(.el-table__header-wrapper th) {
+  background: #e5e7eb;
+  font-weight: 700;
+  color: #111827;
+}
+
+.doc-result-table :deep(.el-table__header-wrapper) {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.doc-result-table :deep(.el-scrollbar__wrap) {
+  overflow-y: auto;
 }
 
 .panel-header {
@@ -791,6 +1490,13 @@ onMounted(async () => {
   white-space: pre-wrap;
 }
 
+.col-content-compact :deep(.diff-highlight) {
+  color: #dc2626;
+  background: #fee2e2;
+  font-weight: 600;
+  border-radius: 3px;
+}
+
 /* ── 意见反馈 ── */
 .feedback-panel {
   margin-top: 16px;
@@ -885,6 +1591,56 @@ onMounted(async () => {
   padding: 10px;
 }
 
+.picker-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.picker-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #111827;
+  cursor: pointer;
+  text-align: left;
+}
+
+.picker-row:hover {
+  background: #f8fafc;
+}
+
+.picker-row.is-folder {
+  font-weight: 600;
+  color: #334155;
+}
+
+.picker-row.is-file {
+  color: #475569;
+}
+
+.picker-row.is-selected {
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.picker-name {
+  min-width: 0;
+  word-break: break-all;
+}
+
 .tree-node-content {
   display: flex;
   align-items: center;
@@ -910,11 +1666,37 @@ onMounted(async () => {
   border-radius: 8px;
 }
 
+.progress-dialog-body {
+  padding: 6px 2px 2px;
+}
+
 .progress-header {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+@media (max-width: 960px) {
+  .doc-layout,
+  .content-row,
+  .file-select-row,
+  .feedback-row {
+    flex-direction: column;
+  }
+
+  .doc-result-preview {
+    grid-template-columns: 1fr;
+  }
+
+  .feedback-left {
+    flex: 1 1 auto;
+  }
+
+  .feedback-bottom {
+    align-items: flex-start;
+    gap: 12px;
+  }
 }
 
 .progress-msg {
