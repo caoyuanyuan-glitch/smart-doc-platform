@@ -355,7 +355,8 @@
           </div>
           <div class="report-issues">
             <h4>问题列表</h4>
-            <el-table :data="issues" border>
+            <el-table :data="reportIssues" border>
+              <el-table-column prop="display_id" label="编号" width="90" />
               <el-table-column prop="severity" label="级别" width="100">
                 <template #default="scope">
                   <el-tag :type="getSeverityType(scope.row.severity)">{{ getSeverityLabel(scope.row.severity) }}</el-tag>
@@ -497,6 +498,14 @@ const reportStats = computed(() => {
   return stats
 })
 
+const reportIssues = computed(() => {
+  return issues.value.map((issue, index) => ({
+    ...issue,
+    display_id: `#${String(index + 1).padStart(4, '0')}`,
+    db_id: issue.id,
+  }))
+})
+
 const categories = computed(() => {
   const cats = new Set(issues.value.map(i => i.category))
   return Array.from(cats).filter(Boolean)
@@ -551,10 +560,16 @@ async function loadDocuments() {
         reviewMap[r.document_id] = r
       }
     }
+
+    const activeDocIds = new Set()
     
     for (const doc of documents.value) {
       const latestReview = reviewMap[doc.id]
-      if (latestReview) {
+      const docCreatedAt = new Date(doc.created_at || 0).getTime()
+      const reviewCreatedAt = new Date(latestReview?.created_at || 0).getTime()
+      const hasValidReview = Boolean(latestReview) && (!docCreatedAt || !reviewCreatedAt || reviewCreatedAt >= docCreatedAt)
+
+      if (hasValidReview) {
         const progressInfo = latestReview.progress || null
         const progressValue = latestReview.status === 'completed'
           ? 100
@@ -573,12 +588,21 @@ async function loadDocuments() {
           progress: progressValue,
           message
         }
+        activeDocIds.add(String(doc.id))
 
         if (latestReview.status === 'running') {
           startProgressPolling(doc.id, latestReview.id)
         }
+      } else {
+        delete docReviewStatus[doc.id]
       }
     }
+
+    Object.keys(docReviewStatus).forEach((docId) => {
+      if (!activeDocIds.has(String(docId)) && !String(docId).startsWith('uploading-')) {
+        delete docReviewStatus[docId]
+      }
+    })
   } catch (e) {
     ElMessage.error('加载文档列表失败')
   }
@@ -711,6 +735,7 @@ async function uploadDocument(options) {
     uploadProgressText.value = '文档已入库'
     removeUploadingPlaceholder(tempId)
     upsertDocumentRow(response.data)
+    delete docReviewStatus[response.data.id]
     await loadDocuments()
     options.onSuccess?.(response.data)
     ElMessage.success('上传成功')
@@ -1249,99 +1274,17 @@ async function loadReport(id) {
 
 async function exportReport() {
   try {
-    let htmlContent = `
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能技术文档审核报告</title>
-    <style>
-        body { font-family: "Microsoft YaHei", Arial, sans-serif; margin: 30px; }
-        .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 20px; }
-        .header h1 { color: #333; }
-        .report-info { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
-        .stats-row { display: flex; gap: 20px; margin-bottom: 20px; }
-        .stat-item { padding: 8px 16px; border-radius: 20px; font-weight: bold; }
-        .stat-item.fatal { background: #fef0f0; color: #dc3545; }
-        .stat-item.serious { background: #fff7ed; color: #fd7e14; }
-        .stat-item.general { background: #fffbeb; color: #ffc107; }
-        .stat-item.suggestion { background: #ecfdf5; color: #10b981; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        th { background: #f8f9fa; font-weight: bold; }
-        .issue-row:hover { background: #f8f9fa; }
-        .severity-fatal { color: #dc3545; font-weight: bold; }
-        .severity-serious { color: #fd7e14; font-weight: bold; }
-        .severity-general { color: #ffc107; font-weight: bold; }
-        .severity-suggestion { color: #10b981; font-weight: bold; }
-        .context-text { font-size: 13px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>智能技术文档审核报告</h1>
-        <p>生成时间：${new Date().toLocaleString('zh-CN')}</p>
-    </div>
-    <div class="report-info">
-        <div><strong>任务 ID：</strong>${currentReport.value.id || '-'}</div>
-        <div><strong>文档名称：</strong>${currentReport.value.document_name || '-'}</div>
-        <div><strong>审核模式：</strong>${currentReport.value.mode || '-'}</div>
-        <div><strong>审核状态：</strong>${currentReport.value.status === 'completed' ? '已完成' : currentReport.value.status === 'failed' ? '失败' : '进行中'}</div>
-        <div><strong>问题总数：</strong>${currentReport.value.total_issues || 0}</div>
-        <div><strong>创建时间：</strong>${formatDateTime(currentReport.value.created_at)}</div>
-    </div>
-    <h2>问题统计</h2>
-    <div class="stats-row">
-        <span class="stat-item fatal">致命: ${reportStats.value.fatal}</span>
-        <span class="stat-item serious">严重: ${reportStats.value.serious}</span>
-        <span class="stat-item general">一般: ${reportStats.value.general}</span>
-        <span class="stat-item suggestion">建议: ${reportStats.value.suggestion}</span>
-    </div>
-    <h2>问题详情</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>级别</th>
-                <th>分类</th>
-                <th>章节</th>
-                <th>原文</th>
-                <th>上下文</th>
-                <th>修改建议</th>
-                <th>审核依据</th>
-            </tr>
-        </thead>
-        <tbody>
-    `
-    
-    filteredIssues.value.forEach(issue => {
-      const severityClass = `severity-${issue.severity}`
-      const severityLabel = getSeverityLabel(issue.severity)
-      htmlContent += `
-            <tr class="issue-row">
-                <td class="${severityClass}">${severityLabel}</td>
-                <td>${issue.category || '-'}</td>
-                <td>${issue.chapter || '-'}</td>
-                <td>${issue.original_text || '-'}</td>
-                <td class="context-text">${issue.context || '-'}</td>
-                <td>${issue.suggestion || '-'}</td>
-                <td>${issue.audit_basis || '-'}</td>
-            </tr>
-      `
-    })
-    
-    htmlContent += `
-        </tbody>
-    </table>
-</body>
-</html>
-    `
-    
-    const blob = new Blob([htmlContent], { type: 'text/html' })
+    if (!currentReport.value?.id) {
+      ElMessage.warning('当前没有可导出的审核任务')
+      return
+    }
+    const response = await reviewAPI.exportHtml(currentReport.value.id)
+    const blob = new Blob([response.data], { type: 'text/html;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `audit_report_${new Date().toISOString().slice(0, 10)}.html`
+    const baseName = (currentReport.value.document_name || `task_${currentReport.value.id}`).replace(/\.[^.]+$/, '')
+    link.download = `${baseName}_审核报告_${new Date().toISOString().slice(0, 10)}.html`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)

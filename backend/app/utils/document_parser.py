@@ -2,10 +2,22 @@ import os
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from docx import Document as DocxDocument
-from PyPDF2 import PdfReader
 import markdown
 from app.utils.file_utils import read_file_safe as _read_file_safe
+
+
+@dataclass
+class TextBlock:
+    text: str
+    page_num: int
+    block_type: str
+    bbox: tuple
+
+
+def _block_sort_key(block: TextBlock):
+    return (block.page_num, round(block.bbox[1], 1), round(block.bbox[0], 1))
 
 
 def _merge_pdf_paragraph_lines(text: str) -> str:
@@ -34,24 +46,174 @@ def _merge_pdf_paragraph_lines(text: str) -> str:
 def clean_pdf_text(text: str) -> str:
     text = str(text or '')
     text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = text.replace('\f', '\n\f\n')
     text = re.sub(r'(?<=\n)\s*y(?=[A-Za-z])', ' ', text)
     text = re.sub(r'(?<=[A-Za-z])\s*-\s*\n\s*(?=[A-Za-z])', '', text)
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    text = re.sub(r'[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]', '', text)
     text = _merge_pdf_paragraph_lines(text)
+    text = re.sub(r'\n*\f\n*', '\f', text)
     text = re.sub(r'[ \t]{2,}', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
-def parse_pdf(file_path):
+def _extract_pdf_block_text(block: dict) -> str:
+    lines = []
+    for line in block.get("lines", []):
+        line_text = "".join(span.get("text", "") for span in line.get("spans", []))
+        line_text = re.sub(r'\s+', ' ', line_text).strip()
+        if line_text:
+            lines.append(line_text)
+    return "\n".join(lines).strip()
+
+
+def _classify_pdf_block(text: str, block: dict, page_height: float) -> str:
+    y0 = float(block.get("bbox", [0, 0, 0, 0])[1] or 0)
+    if y0 < max(50.0, page_height * 0.06):
+        return 'header'
+    if y0 > max(0.0, page_height - 50.0):
+        return 'footer'
+
+    lines = block.get("lines", [])
+    first_span = lines[0].get("spans", [])[0] if lines and lines[0].get("spans") else {}
+    font_size = float(first_span.get("size", 12) or 12)
+    font_name = str(first_span.get("font", "") or "")
+    is_bold = 'Bold' in font_name
+    line_count = len(lines)
+
+    if (is_bold or font_size > 14) and line_count <= 2:
+        if any(keyword in text for keyword in ['Table', 'Figure', 'FIGURE']):
+            return 'caption'
+        return 'title'
+
+    digit_ratio = sum(1 for ch in text if ch.isdigit()) / max(len(text), 1)
+    if line_count >= 3 and digit_ratio > 0.15:
+        return 'table'
+
+    if digit_ratio > 0.2 and len(text.split()) <= 12:
+        return 'table'
+
+    return 'body'
+
+
+def _looks_like_table_row(blocks):
+    if len(blocks) < 2:
+        return False
+
+    texts = [block.text.strip() for block in blocks if block.text.strip()]
+    if len(texts) < 2:
+        return False
+
+    joined = ' '.join(texts)
+    short_blocks = sum(1 for text in texts if len(text) <= 40 and '\n' not in text)
+    table_like_keywords = re.search(r'\b(?:revision|history|version|date|table|figure|well|tube|sample|reagent)\b', joined, re.IGNORECASE)
+    numeric_hits = len(re.findall(r'\d+(?:\.\d+)?', joined))
+    unit_hits = len(re.findall(r'\b(?:mL|μL|uL|mg|ng|mm|cm|kg|rpm|min|sec|h)\b', joined, re.IGNORECASE))
+    explicit_table_blocks = sum(1 for block in blocks if block.block_type == 'table')
+
+    if explicit_table_blocks >= 1 and short_blocks >= 2:
+        return True
+    if short_blocks >= 3 and (numeric_hits >= 1 or unit_hits >= 1):
+        return True
+    if short_blocks >= 2 and table_like_keywords:
+        return True
+    return False
+
+
+def _merge_table_like_blocks(blocks, y_threshold=5.0):
+    merged = []
+    current_group = []
+    current_key = None
+
+    def flush_group():
+        nonlocal current_group, current_key
+        if not current_group:
+            return
+        row_blocks = sorted(current_group, key=lambda block: block.bbox[0])
+        if _looks_like_table_row(row_blocks):
+            row_text = '  |  '.join(block.text.strip().replace('\n', ' ') for block in row_blocks if block.text.strip())
+            merged.append(TextBlock(
+                text=row_text,
+                page_num=row_blocks[0].page_num,
+                block_type='table_row',
+                bbox=row_blocks[0].bbox,
+            ))
+        else:
+            merged.extend(row_blocks)
+        current_group = []
+        current_key = None
+
+    for block in sorted(blocks, key=_block_sort_key):
+        block_key = (block.page_num, round(block.bbox[1] / y_threshold))
+        if current_key is None or block_key == current_key:
+            current_group.append(block)
+            current_key = block_key
+            continue
+        flush_group()
+        current_group = [block]
+        current_key = block_key
+
+    flush_group()
+    return merged
+
+
+def extract_pdf(file_path):
     try:
-        reader = PdfReader(file_path)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return clean_pdf_text(text)
+        import fitz
+    except ImportError as exc:
+        raise ValueError("PDF解析依赖缺失: 请安装 PyMuPDF") from exc
+
+    try:
+        doc = fitz.open(file_path)
+        blocks = []
+        page_texts = []
+
+        for page_num, page in enumerate(doc):
+            page_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+            page_blocks = []
+            for block in page_dict.get("blocks", []):
+                if "lines" not in block:
+                    continue
+
+                block_text = _extract_pdf_block_text(block)
+                if not block_text:
+                    continue
+
+                block_type = _classify_pdf_block(block_text, block, page.rect.height)
+                text_block = TextBlock(
+                    text=block_text,
+                    page_num=page_num,
+                    block_type=block_type,
+                    bbox=tuple(block.get("bbox", (0, 0, 0, 0))),
+                )
+                page_blocks.append(text_block)
+
+            page_blocks = _merge_table_like_blocks(page_blocks)
+            page_text = "\n\n".join(block.text for block in sorted(page_blocks, key=_block_sort_key))
+            blocks.extend(page_blocks)
+            page_texts.append(page_text)
+
+        return {
+            'blocks': blocks,
+            'page_texts': page_texts,
+            'full_text': "\f\n\n".join(page_texts),
+        }
     except Exception as e:
         raise ValueError(f"PDF解析失败: {str(e)}")
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+
+def parse_pdf(file_path):
+    extracted = extract_pdf(file_path)
+    page_texts = extracted.get('page_texts', []) or []
+    if page_texts:
+        cleaned_pages = [clean_pdf_text(page_text) for page_text in page_texts if str(page_text or '').strip()]
+        return '\f'.join(cleaned_pages)
+    return clean_pdf_text(extracted.get('full_text', ''))
 
 def parse_docx(file_path):
     try:
