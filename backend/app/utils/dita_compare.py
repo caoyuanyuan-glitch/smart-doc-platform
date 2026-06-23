@@ -54,8 +54,14 @@ def normalize_navtitle(s: str) -> str:
 
 def extract_topic_text(dita_path: str) -> dict:
     """
-    从 .dita 文件提取文本：title, 段句
+    从 .dita 文件提取文本：title, 句段
     返回 {"topic_id", "title", "sentences": [...], "raw_text": "..."}
+    统一句段切分规则（根据优化指令）：
+    - 表格按行拆分（每行一个句段，合并所有单元格文本）
+    - 列表按项拆分（每项一个句段）
+    - 提取文本标签：p、li、entry、note、title、shortdesc、step、cmd 等
+    - 过滤空句段和纯空格句段
+    - 过滤纯 XML 标签内容（如 ph、b、i、u 等内联标签不单独成句段）
     """
     result = {"topic_id": "", "title": "", "sentences": [], "raw_text": ""}
     try:
@@ -80,17 +86,102 @@ def extract_topic_text(dita_path: str) -> dict:
     if result["title"]:
         text_parts.append(result["title"])
 
-    for elem in root.iter():
+    # 需要处理的文本标签
+    block_tags = {"p", "li", "note", "step", "shortdesc", "cmd", "entry", 
+                  "dt", "dd", "stentry", "refsyn", "conbodydiv",
+                  "section", "paragraph"}
+    
+    # 内联标签（不单独成句段）
+    inline_tags = {"ph", "b", "i", "u", "strong", "em", "tt", "codeph",
+                   "keyword", "tm", "sup", "sub", "xref", "linktext"}
+    
+    def get_text(elem, include_tail=True):
+        """递归获取元素的文本内容，包括 tail"""
+        parts = []
+        if elem.text:
+            parts.append(elem.text)
+        for child in elem:
+            if strip_ns(child.tag) not in inline_tags:
+                parts.append(get_text(child))
+            else:
+                if child.text:
+                    parts.append(child.text)
+                if include_tail and child.tail:
+                    parts.append(child.tail)
+        if include_tail and elem.tail:
+            parts.append(elem.tail)
+        return "".join(parts).strip()
+    
+    def process_table(table_elem):
+        """处理表格，按行拆分"""
+        rows = table_elem.findall(".//tr")
+        for row in rows:
+            cells = row.findall(".//entry")
+            if cells:
+                cell_texts = []
+                for cell in cells:
+                    cell_text = get_text(cell)
+                    if cell_text:
+                        cell_texts.append(cell_text)
+                if cell_texts:
+                    row_text = " | ".join(cell_texts)
+                    if row_text.strip():
+                        text_parts.append(row_text)
+    
+    def process_list(list_elem, list_type="ul"):
+        """处理列表，按项拆分"""
+        items = list_elem.findall(f"./{list_type}/li") or list_elem.findall(".//li")
+        for item in items:
+            item_text = get_text(item)
+            if item_text.strip():
+                text_parts.append(item_text)
+    
+    def walk_elem(elem):
+        """遍历元素并提取文本"""
         tag = strip_ns(elem.tag)
-        if tag in ("p", "li", "note", "step", "shortdesc", "ph", "b", "i", "u"):
-            if elem.text and elem.text.strip():
-                text_parts.append(normalize_text(elem.text))
-        elif tag == "fig":
-            cap = elem.find(".//title")
-            if cap is not None and cap.text:
-                text_parts.append(f"[图] {normalize_text(cap.text)}")
+        
+        # 处理表格
+        if tag in ("table", "simpletable"):
+            process_table(elem)
+            return
+        
+        # 处理列表
+        if tag in ("ul", "ol", "sl"):
+            process_list(elem, tag)
+            return
+        
+        # 处理块级标签
+        if tag in block_tags:
+            text = get_text(elem)
+            if text:
+                text_parts.append(text)
+        
+        # 处理图片
+        if tag == "fig":
+            caption_el = elem.find(".//title")
+            if caption_el is not None and caption_el.text:
+                text_parts.append(f"[图] {normalize_text(caption_el.text)}")
+        
+        # 递归处理子元素
+        for child in elem:
+            walk_elem(child)
+    
+    # 从 topic 或 concept/mainbody 开始遍历
+    main_body = root.find(".//topic") or root.find(".//concept") or root.find(".//task") or root
+    walk_elem(main_body)
+    
+    # 过滤空句段和纯空格句段
+    text_parts = [t for t in text_parts if t.strip()]
+    
+    # 去重，相邻重复的句段只保留一个
+    deduped = []
+    prev_text = None
+    for t in text_parts:
+        if t != prev_text:
+            deduped.append(t)
+            prev_text = t
 
-    full_text = " ".join(text_parts)
+    full_text = " ".join(deduped)
     result["raw_text"] = full_text
     result["sentences"] = tokenize_sentences(full_text)
     return result
@@ -178,9 +269,10 @@ def match_topics_by_navtitle(topics_a, topics_b):
     return matched, only_a, only_b
 
 
-def fuzzy_match_sentences(sentences_a, sentences_b, threshold=0.80):
+def fuzzy_match_sentences(sentences_a, sentences_b, threshold=0.70):
     """
     对同一 topic 内的句段做模糊匹配（精确 + Levenshtein）。
+    根据优化指令，匹配阈值从 ≥80% 调整为 ≥70%，使匹配对数量更合理。
     返回 (matched_pairs, only_a_indices, only_b_indices, exact_match_count)
     - matched_pairs: [(i, j, sim, ta, tb)]
     """
@@ -248,13 +340,21 @@ def compute_topic_similarity(n_a, n_b, pairs, exact_match):
 
 
 def classify_consistency(sim):
-    """分类一致性等级"""
+    """
+    分类一致性等级（根据优化指令调整区间）。
+    新区间：<50% / 50-70% / 70-85% / 85-95% / 95-99% / 100%
+    严格区分"完全一致"（文本完全相同）和"高度相似"（≥95%）
+    """
     if sim >= 0.99:
         return ("完全一致", "ok-row", "#2e7d32")
-    if sim >= 0.80:
+    if sim >= 0.95:
         return ("高度相似", "high-row", "#558b2f")
+    if sim >= 0.85:
+        return ("基本一致", "mid-row", "#ef6c00")
     if sim >= 0.70:
-        return ("部分相似", "mid-row", "#ef6c00")
+        return ("部分相似", "low-row", "#f57c00")
+    if sim >= 0.50:
+        return ("较大差异", "low-row", "#e65100")
     return ("差异较大", "low-row", "#c62828")
 
 
@@ -411,7 +511,7 @@ def compare_dita_packages(dir_a: str, dir_b: str, threshold: float = 0.80) -> di
         consistency_label, row_class, bar_color = classify_consistency(sim)
         if sim >= 0.99:
             stat_full_match += 1
-        elif sim >= 0.80:
+        elif sim >= 0.95:
             stat_high += 1
         elif sim >= 0.70:
             stat_partial += 1

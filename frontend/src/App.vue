@@ -81,6 +81,7 @@
               </template>
               <el-menu-item index="/review">文档管理</el-menu-item>
               <el-menu-item index="/review/tasks">审核任务</el-menu-item>
+              <el-menu-item index="/review/rules">规则管理</el-menu-item>
               <el-sub-menu index="spell-check-sub">
                 <template #title>拼写检查</template>
                 <el-menu-item index="/review/spell-check">开始检查</el-menu-item>
@@ -88,11 +89,6 @@
                 <el-menu-item index="/review/spell-check/whitelist">白名单管理</el-menu-item>
               </el-sub-menu>
             </el-sub-menu>
-
-            <el-menu-item index="/review/rules">
-              <el-icon><Setting /></el-icon>
-              <template #title>规则管理</template>
-            </el-menu-item>
 
             <el-sub-menu index="qa-sub">
               <template #title>

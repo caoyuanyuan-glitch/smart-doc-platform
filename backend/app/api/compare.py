@@ -48,6 +48,15 @@ def _strip_ns(tag: str) -> str:
 
 
 def _extract_dita_text(dita_file_path):
+    """
+    提取 DITA 文件中的句段。
+    规则：
+    - 表格按行拆分（每行一个句段，合并所有单元格文本）
+    - 列表按项拆分（每项一个句段）
+    - 提取文本标签：p、li、entry、note、title、shortdesc、step、cmd 等
+    - 过滤空句段和纯空格句段
+    - 过滤纯 XML 标签内容（如 ph、b、i、u 等内联标签不单独成句段）
+    """
     try:
         tree = ET.parse(dita_file_path)
         root = tree.getroot()
@@ -59,18 +68,103 @@ def _extract_dita_text(dita_file_path):
         if title:
             segments.append({"text": title, "tag": "title"})
         
-        for elem in root.iter():
+        # 需要处理的文本标签
+        block_tags = {"p", "li", "note", "step", "shortdesc", "cmd", "entry", 
+                      "dt", "dd", "li", "stentry", "refsyn", "conbodydiv",
+                      "section", "paragraph"}
+        
+        # 内联标签（不单独成句段）
+        inline_tags = {"ph", "b", "i", "u", "strong", "em", "tt", "codeph",
+                       "keyword", "tm", "sup", "sub", "xref", "linktext"}
+        
+        def get_text(elem, include_tail=True):
+            """递归获取元素的文本内容，包括 tail"""
+            parts = []
+            if elem.text:
+                parts.append(elem.text)
+            for child in elem:
+                if _strip_ns(child.tag) not in inline_tags:
+                    parts.append(get_text(child))
+                else:
+                    if child.text:
+                        parts.append(child.text)
+                    if include_tail and child.tail:
+                        parts.append(child.tail)
+            if include_tail and elem.tail:
+                parts.append(elem.tail)
+            return "".join(parts).strip()
+        
+        def process_table(table_elem):
+            """处理表格，按行拆分"""
+            rows = table_elem.findall(".//tr")
+            for row in rows:
+                cells = row.findall(".//entry")
+                if cells:
+                    cell_texts = []
+                    for cell in cells:
+                        cell_text = get_text(cell)
+                        if cell_text:
+                            cell_texts.append(cell_text)
+                    if cell_texts:
+                        row_text = " | ".join(cell_texts)
+                        if row_text.strip():
+                            segments.append({"text": row_text, "tag": "table-row"})
+        
+        def process_list(list_elem, list_type="ul"):
+            """处理列表，按项拆分"""
+            items = list_elem.findall(f"./{list_type}/li") or list_elem.findall(".//li")
+            for item in items:
+                item_text = get_text(item)
+                if item_text.strip():
+                    segments.append({"text": item_text, "tag": "list-item"})
+        
+        def walk_elem(elem):
+            """遍历元素并提取文本"""
             tag = _strip_ns(elem.tag)
-            if tag in ("p", "li", "note", "step", "shortdesc", "ph", "b", "i", "u"):
-                if elem.text and elem.text.strip():
-                    segments.append({"text": elem.text.strip(), "tag": tag})
-            elif tag == "fig":
+            
+            # 处理表格
+            if tag in ("table", "simpletable"):
+                process_table(elem)
+                return
+            
+            # 处理列表
+            if tag in ("ul", "ol", "sl"):
+                process_list(elem, tag)
+                return
+            
+            # 处理块级标签
+            if tag in block_tags:
+                text = get_text(elem)
+                if text:
+                    segments.append({"text": text, "tag": tag})
+            
+            # 处理图片
+            if tag == "fig":
                 caption_el = elem.find(".//title")
                 if caption_el is not None and caption_el.text:
                     segments.append({"text": f"[图] {caption_el.text.strip()}", "tag": "fig"})
+            
+            # 递归处理子元素
+            for child in elem:
+                walk_elem(child)
         
-        return topic_id, title, segments
-    except Exception:
+        # 从 topic 或 concept/mainbody 开始遍历
+        main_body = root.find(".//topic") or root.find(".//concept") or root.find(".//task") or root
+        walk_elem(main_body)
+        
+        # 过滤空句段和纯空格句段
+        segments = [s for s in segments if s["text"].strip()]
+        
+        # 去重，相邻重复的句段只保留一个
+        deduped = []
+        prev_text = None
+        for s in segments:
+            if s["text"] != prev_text:
+                deduped.append(s)
+                prev_text = s["text"]
+        
+        return topic_id, title, deduped
+    except Exception as e:
         text = _read_upload_as_text(dita_file_path)
         return "", "", [{"text": text, "tag": "text"}]
 

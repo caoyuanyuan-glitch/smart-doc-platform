@@ -171,10 +171,53 @@ document.addEventListener('DOMContentLoaded', function() {
         else:
             return "<60%"
 
+    def _analyze_diff_types(diffs):
+        """
+        分析差异类型，返回类型列表。
+        差异类型：型号/编号差异、措辞调整、结构重组、参数变更、新增/删除安全警告、操作流程重写、内容完全不同
+        """
+        if not diffs:
+            return []
+
+        types_found = []
+        for d in diffs:
+            text_a = d.get("text_a", "") or ""
+            text_b = d.get("text_b", "") or ""
+            combined = text_a + " " + text_b
+
+            # 检测安全警告相关
+            safety_keywords = ["警告", "注意", "危险", "warning", "caution", "danger", "安全", "注意", "危险"]
+            if any(kw in combined for kw in safety_keywords):
+                if "安全" not in types_found and "新增/删除安全警告" not in types_found:
+                    types_found.append("新增/删除安全警告")
+
+            # 检测参数变更（数字+单位的组合）
+            import re
+            numbers_a = set(re.findall(r'\d+\.?\d*\s*[kW℃°MLVVAΩHzkVkgcm]', text_a))
+            numbers_b = set(re.findall(r'\d+\.?\d*\s*[kW℃°MLVVAΩHzkVkgcm]', text_b))
+            if numbers_a or numbers_b:
+                if numbers_a != numbers_b and "参数变更" not in types_found:
+                    types_found.append("参数变更")
+
+            # 检测型号/编号差异
+            model_pattern = re.compile(r'[A-Z]{2,}[-\s]?\d+|[A-Z]\d{2,}')
+            models_a = model_pattern.findall(text_a)
+            models_b = model_pattern.findall(text_b)
+            if models_a != models_b and "型号/编号差异" not in types_found:
+                types_found.append("型号/编号差异")
+
+            # 检测操作流程
+            step_keywords = ["步骤", "操作", "流程", "点击", "选择", "输入", "启动", "停止", "step", "click"]
+            if any(kw in combined for kw in step_keywords):
+                if "操作流程重写" not in types_found:
+                    types_found.append("操作流程重写")
+
+        return types_found if types_found else ["内容调整"]
+
     def get_diff_explanation(tr):
         diffs = tr.get("diffs", [])
         sim = tr.get("topic_sim", 0.0)
-        
+
         if not diffs:
             return "内容一致，无差异"
 
@@ -184,12 +227,32 @@ document.addEventListener('DOMContentLoaded', function() {
             if t in type_counts:
                 type_counts[t] += 1
 
-        if sim >= 0.95:
-            return "微小差异：主要为型号、编号、日期、个别措辞或短句调整，正文结构基本一致"
-        elif sim >= 0.80:
-            return "部分差异：章节主题一致，但参数、步骤、部件名称或局部条款存在调整"
+        # 分析实际差异类型
+        diff_types = _analyze_diff_types(diffs)
+
+        # 根据相似度区间和差异类型生成说明
+        if sim >= 0.99:
+            return "内容完全一致"
+        elif sim >= 0.95:
+            if diff_types:
+                return f"微小差异：{'、'.join(diff_types)}，正文结构基本一致"
+            return "微小差异：主要为个别措辞或短句调整"
+        elif sim >= 0.85:
+            if diff_types:
+                return f"基本一致：{'、'.join(diff_types)}，需核对确认"
+            return "部分差异：章节主题一致，但存在局部调整"
+        elif sim >= 0.70:
+            if diff_types:
+                return f"部分相似：{'、'.join(diff_types)}，建议复核"
+            return "部分差异：章节结构相似，但内容存在明显调整"
+        elif sim >= 0.50:
+            if diff_types:
+                return f"较大差异：{'、'.join(diff_types)}，需详细复核"
+            return "差异较大：章节内容存在较多不同，需详细复核"
         else:
-            return "差异较大：章节内容、结构、参数或操作程序存在明显差异，需展开明细复核"
+            if diff_types:
+                return f"内容完全不同：{'、'.join(diff_types)}"
+            return "内容完全不同：章节结构或主要内容完全不同"
 
     rows_html = []
     for idx, tr in enumerate(topics):
@@ -206,8 +269,6 @@ document.addEventListener('DOMContentLoaded', function() {
             f"<td>{idx+1}</td>"
             f"<td>{chapter}</td>"
             f"<td>{navtitle}</td>"
-            f"<td>—</td>"
-            f"<td>—</td>"
             f"<td>{html.escape(get_diff_explanation(tr))}</td>"
             f"<td>{consistency_label}</td>"
             f"</tr>"
@@ -218,19 +279,19 @@ document.addEventListener('DOMContentLoaded', function() {
             diffs_content = "\n".join(_diff_html(d) for d in diffs[:15])
             row_diff = (
                 f"<tr class='row-diff' id='{diff_id}'>"
-                f"<td colspan='7'><div class='diffs'>{diffs_content}</div></td>"
+                f"<td colspan='5'><div class='diffs'>{diffs_content}</div></td>"
                 f"</tr>"
             )
         else:
             row_diff = (
                 f"<tr class='row-diff' id='{diff_id}'>"
-                f"<td colspan='7'><div class='diff-empty'>✓ 该 topic 句段全部完全一致，无差异</div></td>"
+                f"<td colspan='5'><div class='diff-empty'>✓ 该 topic 句段全部完全一致，无差异</div></td>"
                 f"</tr>"
             )
 
         rows_html.append(row_main + row_diff)
 
-    rows_str = "\n".join(rows_html) if rows_html else "<tr><td colspan='7' style='text-align:center;padding:40px;color:#888'>无 topic 数据</td></tr>"
+    rows_str = "\n".join(rows_html) if rows_html else "<tr><td colspan='5' style='text-align:center;padding:40px;color:#888'>无 topic 数据</td></tr>"
 
     table_html = f"""
 <h2>差异点汇总 (按 ditamap 中 topic 顺序)</h2>
@@ -240,8 +301,6 @@ document.addEventListener('DOMContentLoaded', function() {
       <th>序号</th>
       <th>一级章节</th>
       <th>小节 (按 A 包 ditamap 顺序)</th>
-      <th>文件1 PDF 页码</th>
-      <th>文件2 PDF 页码</th>
       <th>差异说明</th>
       <th>一致性</th>
     </tr>
@@ -250,6 +309,110 @@ document.addEventListener('DOMContentLoaded', function() {
     {rows_str}
   </tbody>
 </table>
+"""
+
+    # 构建章节级统计
+    chapter_stats = {}
+    for tr in topics:
+        chapter = tr.get("chapter_a", "") or tr.get("chapter_b", "") or "其他"
+        if chapter not in chapter_stats:
+            chapter_stats[chapter] = {
+                "total": 0, "full": 0, "high": 0, "partial": 0, "low": 0, "only_a": 0, "only_b": 0
+            }
+        chapter_stats[chapter]["total"] += 1
+        sim = tr.get("topic_sim", 0.0)
+        row_class = tr.get("row_class", "")
+        if row_class == "ok-row":
+            chapter_stats[chapter]["full"] += 1
+        elif row_class == "high-row":
+            chapter_stats[chapter]["high"] += 1
+        elif row_class == "mid-row":
+            chapter_stats[chapter]["partial"] += 1
+        elif row_class == "low-row":
+            chapter_stats[chapter]["low"] += 1
+
+    # 生成章节统计表 HTML
+    chapter_rows = []
+    for chapter, stats in chapter_stats.items():
+        total = stats["total"]
+        full = stats["full"]
+        high = stats["high"]
+        partial = stats["partial"]
+        low = stats["low"]
+        if total > 0:
+            chapter_sim = (full * 1.0 + high * 0.97 + partial * 0.80 + low * 0.40) / total
+        else:
+            chapter_sim = 0
+        chapter_rows.append(
+            f"<tr>"
+            f"<td>{html.escape(chapter)}</td>"
+            f"<td style='text-align:center'>{total}</td>"
+            f"<td style='text-align:center'>{full}</td>"
+            f"<td style='text-align:center'>{high}</td>"
+            f"<td style='text-align:center'>{partial}</td>"
+            f"<td style='text-align:center'>{low}</td>"
+            f"<td style='text-align:center;font-weight:600'>{chapter_sim*100:.1f}%</td>"
+            f"</tr>"
+        )
+    chapter_stats_html = ""
+    if chapter_rows:
+        chapter_stats_html = f"""
+<h2>章节一致性统计</h2>
+<table class='summary'>
+  <thead>
+    <tr>
+      <th>一级章节</th>
+      <th style='text-align:center'>topic数</th>
+      <th style='text-align:center'>完全一致</th>
+      <th style='text-align:center'>高度相似</th>
+      <th style='text-align:center'>部分相似</th>
+      <th style='text-align:center'>差异较大</th>
+      <th style='text-align:center'>章节一致性</th>
+    </tr>
+  </thead>
+  <tbody>
+    {"".join(chapter_rows)}
+  </tbody>
+</table>
+"""
+
+    # 构建复核重点和建议
+    critical_topics = [tr for tr in topics if tr.get("topic_sim", 0.0) < 0.50]
+    low_sim_topics = [tr for tr in topics if 0.50 <= tr.get("topic_sim", 0.0) < 0.70]
+
+    review_focus = []
+    if critical_topics:
+        review_focus.append(f"<li><b>差异较大章节（&lt;50%）</b>：{', '.join(html.escape(tr.get('navtitle', '') or '') for tr in critical_topics[:5])}</li>")
+    if low_sim_topics:
+        review_focus.append(f"<li><b>较大差异章节（50-70%）</b>：{', '.join(html.escape(tr.get('navtitle', '') or '') for tr in low_sim_topics[:5])}</li>")
+
+    conclusion_html = ""
+    if review_focus or n_only_a > 0 or n_only_b > 0:
+        conclusion_html = f"""
+<h2>结论与建议</h2>
+<div class="file-info">
+  <h3>判定</h3>
+  <div class="file-info-grid">
+    <div class="label">整体一致性</div>
+    <div class="value">{jaccard*100:.1f}%</div>
+    <div class="label">判定结果</div>
+    <div class="value">{verdict_icon} {html.escape(verdict_text)}</div>
+  </div>
+
+  <h3>复核重点</h3>
+  <ul>
+    {"".join(review_focus)}
+    {"".join([f"<li><b>仅在 A 的 topic（{n_only_a} 个）</b>：需确认是否需要迁移到 B 包</li>"] if n_only_a > 0 else [])}
+    {"".join([f"<li><b>仅在 B 的 topic（{n_only_b} 个）</b>：需确认是否为新增内容</li>"] if n_only_b > 0 else [])}
+  </ul>
+
+  <h3>培训建议</h3>
+  <ul>
+    <li>高度相似（≥95%）章节可共享培训材料</li>
+    <li>部分相似（70-85%）章节需按机型分别培训重点差异部分</li>
+    <li>差异较大（&lt;70%）章节需按机型分别培训</li>
+  </ul>
+</div>
 """
 
     full_html = f"""<!DOCTYPE html>
@@ -321,6 +484,8 @@ document.addEventListener('DOMContentLoaded', function() {
   </div>
 
   {table_html}
+  {chapter_stats_html}
+  {conclusion_html}
 </div>
 <script>{js}</script>
 </body>
