@@ -22,6 +22,7 @@ from app.crud.memory import (
     delete_memory_entry, search_memory, get_memory_banks
 )
 from app.models.knowledge import KnowledgeFile
+from app.models.memory import MemoryBank
 from app.models.translation_doc import TranslationDoc
 from app.utils.document_parser import parse_file
 from app.utils.ai_client import ai_client
@@ -237,6 +238,86 @@ def _search_memory_file(db: Session, memory_file_id: int, source_text: str, sour
     return best_match
 
 
+def _collect_memory_candidates(db: Session, source_lang: str, target_lang: str,
+                               bank: str = None, memory_file_id: int = None):
+    candidates = []
+    seen = set()
+
+    if memory_file_id:
+        memory_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == memory_file_id).first()
+        if memory_file and os.path.exists(memory_file.file_path):
+            for entry in _get_cached_memory_file_entries(memory_file):
+                entry_source_lang = (entry.get("source_lang") or source_lang).strip()
+                entry_target_lang = (entry.get("target_lang") or target_lang).strip()
+                if entry_source_lang != source_lang or entry_target_lang != target_lang:
+                    continue
+                source_text_value = (entry.get("source_text") or "").strip()
+                translated_text_value = (entry.get("translated_text") or "").strip()
+                if not source_text_value or not translated_text_value:
+                    continue
+                dedupe_key = (source_text_value, translated_text_value)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                candidates.append({
+                    "source_text": source_text_value,
+                    "translated_text": translated_text_value,
+                })
+
+    query = db.query(MemoryBank).filter(
+        MemoryBank.source_lang == source_lang,
+        MemoryBank.target_lang == target_lang,
+    )
+    if bank:
+        query = query.filter(MemoryBank.tags == bank)
+
+    for entry in query.all():
+        source_text_value = (entry.source_text or "").strip()
+        translated_text_value = (entry.translated_text or "").strip()
+        if not source_text_value or not translated_text_value:
+            continue
+        dedupe_key = (source_text_value, translated_text_value)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        candidates.append({
+            "source_text": source_text_value,
+            "translated_text": translated_text_value,
+        })
+
+    return candidates
+
+
+def _find_memory_glossary(source_text: str, candidates, max_entries: int = 20):
+    glossary = []
+    normalized_source = (source_text or "").strip()
+    if not normalized_source:
+        return glossary
+
+    for entry in sorted(candidates, key=lambda item: len(item["source_text"]), reverse=True):
+        source_term = entry["source_text"]
+        translated_term = entry["translated_text"]
+        if source_term == normalized_source:
+            return [{"source_text": source_term, "translated_text": translated_term, "full_match": True}]
+        if len(source_term) >= 2 and source_term in source_text:
+            glossary.append({"source_text": source_term, "translated_text": translated_term, "full_match": False})
+        if len(glossary) >= max_entries:
+            break
+    return glossary
+
+
+def _apply_memory_glossary(source_text: str, glossary):
+    translated = source_text
+    replaced = False
+    for entry in sorted(glossary, key=lambda item: len(item["source_text"]), reverse=True):
+        source_term = entry["source_text"]
+        translated_term = entry["translated_text"]
+        if source_term and source_term in translated:
+            translated = translated.replace(source_term, translated_term)
+            replaced = True
+    return translated, replaced
+
+
 def _do_translate(text: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> str:
     result = None
     if engine in ["memory", "hybrid"]:
@@ -247,11 +328,24 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             db,
             bank=_get_memory_bank(),
             memory_file_id=_get_memory_file_id(),
+            allow_partial=engine == "memory",
         )
         if hit:
             result = r
     if engine in ["ai", "hybrid"] and not result:
-        result = translate_with_ai(text, model, source_lang, target_lang)
+        glossary = []
+        if engine == "hybrid":
+            glossary = _find_memory_glossary(
+                text,
+                _collect_memory_candidates(
+                    db,
+                    source_lang,
+                    target_lang,
+                    bank=_get_memory_bank(),
+                    memory_file_id=_get_memory_file_id(),
+                ),
+            )
+        result = translate_with_ai(text, model, source_lang, target_lang, glossary=glossary)
     if not result:
         raise HTTPException(status_code=500, detail="翻译失败")
     return result
@@ -528,45 +622,102 @@ def _translate_xlsx(fpath: str, engine: str, model: str, source_lang: str, targe
 
 
 def _translate_pdf(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
-    """Translate PDF: extracts text page-by-page, translates, outputs structured text (PDF font limitation)."""
-    import pdfplumber
+    """Translate PDF and rebuild an approximate layout-preserved PDF."""
+    import fitz
 
     all_original = []
     all_translated = []
-    pages_text = []
+    doc = fitz.open(fpath)
+    block_separator = "\n---PDFBLOCK---\n"
 
-    with pdfplumber.open(fpath) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            pages_text.append(text.strip() if text and text.strip() else "")
+    try:
+        for page in doc:
+            blocks = []
+            for block in page.get_text("blocks", sort=True):
+                if len(block) < 5:
+                    continue
+                x0, y0, x1, y1, text = block[:5]
+                block_type = block[6] if len(block) > 6 else 0
+                cleaned_text = (text or "").strip()
+                if block_type != 0 or not cleaned_text:
+                    continue
+                rect = fitz.Rect(x0, y0, x1, y1)
+                if rect.is_empty or rect.width < 4 or rect.height < 4:
+                    continue
+                blocks.append({
+                    "rect": rect,
+                    "text": cleaned_text,
+                    "line_count": max(1, len([line for line in cleaned_text.splitlines() if line.strip()])),
+                })
 
-    non_empty = [p for p in pages_text if p]
-    if non_empty:
-        sep = "\n---PDFPAGE---\n"
-        combined = sep.join(non_empty)
-        translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
-        translated_pages = translated_combined.split(sep)
-    else:
-        translated_pages = []
+            if not blocks:
+                all_original.append("")
+                all_translated.append("")
+                continue
 
-    all_original = non_empty
-    all_translated = translated_pages
+            original_blocks = [item["text"] for item in blocks]
+            combined = block_separator.join(original_blocks)
+            translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+            translated_blocks = [part.strip() for part in translated_combined.split(block_separator)]
+            if len(translated_blocks) != len(original_blocks):
+                translated_blocks = [_do_translate(text, engine, model, source_lang, target_lang, db) for text in original_blocks]
 
-    output_lines = []
-    ti = 0
-    for pi, page_text in enumerate(pages_text):
-        if page_text:
-            output_lines.append(f"=== Page {pi + 1} ===")
-            if ti < len(translated_pages):
-                output_lines.append(translated_pages[ti])
-                ti += 1
-            output_lines.append("")
-        else:
-            output_lines.append(f"=== Page {pi + 1} === [no text]")
-            output_lines.append("")
+            page_original = []
+            page_translated = []
 
-    output_text = "\n".join(output_lines)
-    return output_text.encode("utf-8"), all_original, all_translated
+            for block_info, translated_text in zip(blocks, translated_blocks):
+                rect = block_info["rect"]
+                final_text = (translated_text or "").strip()
+                page_original.append(block_info["text"])
+                page_translated.append(final_text)
+                page.add_redact_annot(rect, fill=(1, 1, 1))
+
+            page.apply_redactions()
+
+            for block_info, translated_text in zip(blocks, translated_blocks):
+                rect = block_info["rect"]
+                final_text = (translated_text or "").strip()
+
+                line_count = max(block_info["line_count"], len([line for line in final_text.splitlines() if line.strip()]))
+                font_size = min(16, max(7, rect.height / max(line_count * 1.35, 1)))
+                rc = -1
+                while font_size >= 5:
+                    rc = page.insert_textbox(
+                        rect,
+                        final_text,
+                        fontname="china-s",
+                        fontsize=font_size,
+                        color=(0, 0, 0),
+                        align=fitz.TEXT_ALIGN_LEFT,
+                        lineheight=1.1,
+                        overlay=True,
+                    )
+                    if rc >= 0:
+                        break
+                    font_size -= 0.5
+
+                if rc < 0 and final_text:
+                    clipped_text = final_text[: max(1, int(len(final_text) * 0.85))] + "..."
+                    page.insert_textbox(
+                        rect,
+                        clipped_text,
+                        fontname="china-s",
+                        fontsize=5,
+                        color=(0, 0, 0),
+                        align=fitz.TEXT_ALIGN_LEFT,
+                        lineheight=1.05,
+                        overlay=True,
+                    )
+
+            all_original.append("\n".join(page_original))
+            all_translated.append("\n".join(page_translated))
+
+        out_buf = io.BytesIO()
+        doc.save(out_buf, garbage=3, deflate=True)
+        out_buf.seek(0)
+        return out_buf.read(), all_original, all_translated
+    finally:
+        doc.close()
 
 
 def _translate_markdown(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
@@ -625,13 +776,24 @@ def _translate_markdown(fpath: str, engine: str, model: str, source_lang: str, t
     return translated.encode("utf-8"), [content], [translated]
 
 
-def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str) -> str:
+def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str, glossary=None) -> str:
     lang_names = {
         "zh": "中文", "en": "英文", "ja": "日文", "ko": "韩文",
         "fr": "法文", "de": "德文", "es": "西班牙文", "ru": "俄文"
     }
     src_name = lang_names.get(source_lang, source_lang)
     tgt_name = lang_names.get(target_lang, target_lang)
+
+    glossary_lines = ""
+    if glossary:
+        glossary_pairs = []
+        for entry in glossary:
+            source_text = (entry.get("source_text") or "").strip()
+            translated_text = (entry.get("translated_text") or "").strip()
+            if source_text and translated_text:
+                glossary_pairs.append(f"- {source_text} => {translated_text}")
+        if glossary_pairs:
+            glossary_lines = "\n5. 必须优先采用以下术语映射，保持术语译法一致\n\n术语映射：\n" + "\n".join(glossary_pairs) + "\n"
 
     prompt = f"""你是一个专业的技术文档翻译引擎。请将以下{src_name}文本翻译为{tgt_name}。
 
@@ -640,6 +802,7 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 2. 保持原文的段落结构、编号、列表格式完全不变
 3. 使用专业准确的技术术语
 4. 只输出翻译后的{tgt_name}结果，不要添加任何解释、注释或原始文本
+{glossary_lines}
 
 原文：
 {content[:8000]}"""
@@ -670,17 +833,28 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 
 
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
-                          db: Session, bank: str = None, memory_file_id: int = None) -> tuple:
+                          db: Session, bank: str = None, memory_file_id: int = None,
+                          allow_partial: bool = True) -> tuple:
+    candidates = _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+
     file_result = _search_memory_file(db, memory_file_id, content, source_lang, target_lang)
     if file_result:
         return file_result, True
     memory_result = search_memory(db, content, source_lang, target_lang, bank=bank)
     if memory_result:
         return memory_result, True
+
+    glossary = _find_memory_glossary(content, candidates)
+    if glossary and allow_partial:
+        if glossary[0].get("full_match"):
+            return glossary[0]["translated_text"], True
+        replaced_text, replaced = _apply_memory_glossary(content, glossary)
+        if replaced:
+            return replaced_text, True
     return None, False
 
 
-def _translate_filename(filename: str, source_lang: str, target_lang: str) -> str:
+def _translate_filename(filename: str, source_lang: str, target_lang: str, model: str = None) -> str:
     if source_lang == target_lang:
         return filename
 
@@ -693,7 +867,19 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str) -> st
 
     prompt = f'Translate this filename from {src_name} to {tgt_name}. Output ONLY the translated filename, no other text: "{filename}"'
     messages = [{"role": "user", "content": prompt}]
-    result = ai_client._call_model(messages, max_tokens=500)
+    result = None
+    if model == "kimi":
+        result = ai_client.call_kimi(messages, max_tokens=500)
+    elif model == "deepseek":
+        result = ai_client.call_deepseek(messages, max_tokens=500)
+    elif model == "qwen":
+        result = ai_client.call_qwen(messages, max_tokens=500)
+
+    if result is None:
+        result = ai_client.chat(messages, max_tokens=500, fallback=True)
+
+    if result is None:
+        result = ai_client._call_model(messages, max_tokens=500)
 
     if result:
         translated = result.strip().strip('"').strip("'").replace("/", "_").replace("\\", "_").replace(":", "_")
@@ -718,7 +904,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             os.makedirs(TRANSLATION_OUTPUT_DIR, exist_ok=True)
 
         base_name = os.path.splitext(filename)[0]
-        translated_filename = _translate_filename(base_name, source_lang, target_lang)
+        translated_filename = _translate_filename(base_name, source_lang, target_lang, model)
         output_filename = f"{translated_filename}{ext}"
         output_path = os.path.join(TRANSLATION_OUTPUT_DIR, output_filename)
 
@@ -789,7 +975,6 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                                 translated_content, orig, trans = _translate_pdf(safe_fpath, engine, model, source_lang, target_lang, db)
                                 all_original_parts.extend(orig)
                                 all_translated_parts.extend(trans)
-                                name_ext = ".txt"  # PDF outputs structured text
                             except Exception:
                                 continue
                         else:
@@ -804,7 +989,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                             all_translated_parts.append(translated_content)
                         dir_part, name_part = os.path.split(zip_name)
                         name_base = os.path.splitext(name_part)[0]
-                        new_name = _translate_filename(name_base, source_lang, target_lang)
+                        new_name = _translate_filename(name_base, source_lang, target_lang, model)
                         new_rel = os.path.join(dir_part, f"{new_name}{name_ext}") if dir_part else f"{new_name}{name_ext}"
                         translated_files.append((new_rel, translated_content))
                         if os.path.exists(safe_fpath):
@@ -857,8 +1042,6 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             translated_bytes, orig, trans = _translate_pdf(file_path, engine, model, source_lang, target_lang, db)
             all_original_parts.extend(orig)
             all_translated_parts.extend(trans)
-            output_filename = f"{translated_filename}.txt"
-            output_path = os.path.join(TRANSLATION_OUTPUT_DIR, output_filename)
             with open(output_path, "wb") as f:
                 f.write(translated_bytes)
         elif ext == ".txt":
@@ -925,6 +1108,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
             db,
             bank=req.memory_bank,
             memory_file_id=req.memory_file_id,
+            allow_partial=req.engine == "memory",
         )
         if hit:
             translated = result
