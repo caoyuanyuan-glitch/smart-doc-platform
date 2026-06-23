@@ -29,6 +29,8 @@ Thumbs.db
 # Uploads
 backend/static/uploads/*
 !backend/static/uploads/.gitkeep
+backend/static/review_exports/*
+!backend/static/review_exports/.gitkeep
 
 # Knowledge base files
 backend/app/static/knowledge/
@@ -47,3 +49,6 @@ backend/app/static/polished/
 
 # Build
 frontend/dist/
+
+# Workspace artifacts
+${HOME}/

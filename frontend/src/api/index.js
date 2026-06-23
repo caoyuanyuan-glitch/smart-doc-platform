@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const instance = axios.create({
   baseURL: '/api',
-  timeout: 180000
+  timeout: 600000
 })
 
 instance.interceptors.request.use(
@@ -53,10 +53,13 @@ export const userAPI = {
 }
 
 export const documentAPI = {
-  upload: (file) => {
+  upload: (file, config = {}) => {
     const formData = new FormData()
     formData.append('file', file)
-    return instance.post('/documents/upload/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+    return instance.post('/documents/upload/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      ...config
+    })
   },
   list: () => instance.get('/documents/'),
   get: (id) => instance.get(`/documents/${id}`),
@@ -72,7 +75,8 @@ export const reviewAPI = {
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),
-  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' })
+  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' }),
+  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' })
 }
 
 export const compareAPI = {
@@ -244,6 +248,8 @@ export const translationAPI = {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 600000
   }),
+  getFileStatus: (docId) => instance.get(`/translation/translate/file/${docId}/status`),
+  getMemoryBanks: () => instance.get('/translation/memory/banks'),
   getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
   getDocument: (id) => instance.get(`/documents/${id}`),
   getMemory: (skip = 0, limit = 100, keyword) => {

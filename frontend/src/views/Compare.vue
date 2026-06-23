@@ -6,6 +6,9 @@
       <div class="panel">
         <div class="panel-header">
           <span>上传两个文档进行对比</span>
+          <div class="panel-actions">
+            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT / DITA / ZIP</el-tag>
+          </div>
         </div>
 
         <div class="upload-grid">
@@ -17,7 +20,7 @@
               :show-file-list="false"
               :before-upload="(f) => { fileA = f; return false }"
               :on-change="(f) => { fileA = f.raw || f }"
-              accept=".pdf,.docx,.doc,.md,.txt"
+              accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
             >
               <div class="upload-box" :class="{ filled: fileA }">
                 <el-icon style="font-size: 36px; color: #3b82f6; margin-bottom: 8px;"><Upload /></el-icon>
@@ -37,7 +40,7 @@
               :show-file-list="false"
               :before-upload="(f) => { fileB = f; return false }"
               :on-change="(f) => { fileB = f.raw || f }"
-              accept=".pdf,.docx,.doc,.md,.txt"
+              accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
             >
               <div class="upload-box" :class="{ filled: fileB }">
                 <el-icon style="font-size: 36px; color: #7c3aed; margin-bottom: 8px;"><Upload /></el-icon>
@@ -50,48 +53,34 @@
 
         <div class="action-row">
           <el-button type="primary" size="large" :loading="loading" :disabled="!fileA || !fileB" @click="doCompare">
-            开始对比
+            <el-icon><Search /></el-icon> 开始对比
           </el-button>
+          <el-button size="large" @click="clearFiles">清空</el-button>
+        </div>
+
+        <div v-if="progress > 0 && progress < 100" class="progress-panel">
+          <el-progress :percentage="progress" :stroke-width="16" status="success" />
+          <div class="progress-text">{{ progressText }}</div>
         </div>
       </div>
 
-      <div v-if="result" class="panel">
+      <div v-if="result" class="result-panel">
         <div class="panel-header">
-          <span>对比结果</span>
+          <span>对比完成</span>
           <div class="panel-actions">
-            <el-tag type="info" size="small">差异数：{{ result.diffs || 0 }}</el-tag>
+            <el-tag :type="verdictType" size="small">{{ result.verdict }}</el-tag>
+            <el-tag type="info" size="small">差异数：{{ result.total_diffs || 0 }}</el-tag>
+            <el-button size="small" type="primary" @click="previewReport">预览报告</el-button>
             <el-button size="small" @click="exportCompare">导出报告</el-button>
           </div>
         </div>
 
-        <div class="diff-summary">
-          <div class="summary-item add">
-            <div class="summary-num">+{{ result.added || 0 }}</div>
-            <div class="summary-label">新增内容</div>
+        <div v-if="showPreview" class="panel" style="background: #fafafa; margin-top: 12px;">
+          <div class="panel-header">
+            <span>报告预览</span>
+            <el-button size="small" @click="showPreview = false">关闭预览</el-button>
           </div>
-          <div class="summary-item remove">
-            <div class="summary-num">-{{ result.removed || 0 }}</div>
-            <div class="summary-label">删除内容</div>
-          </div>
-          <div class="summary-item modify">
-            <div class="summary-num">~{{ result.modified || 0 }}</div>
-            <div class="summary-label">修改内容</div>
-          </div>
-        </div>
-
-        <div class="compare-grid">
-          <div class="compare-col">
-            <div class="col-title">
-              <span class="dot dot-blue"></span>文档A：{{ fileA.name }}
-            </div>
-            <div class="col-content diff-text" v-html="result.a_html"></div>
-          </div>
-          <div class="compare-col">
-            <div class="col-title">
-              <span class="dot dot-purple"></span>文档B：{{ fileB.name }}
-            </div>
-            <div class="col-content diff-text" v-html="result.b_html"></div>
-          </div>
+          <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
         </div>
       </div>
     </div>
@@ -99,80 +88,93 @@
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">历史任务</h2>
       <div class="panel">
-        <el-table :data="history" border style="width: 100%">
+        <el-empty v-if="history.length === 0" description="暂无历史任务，请先进行文档对比">
+          <el-button type="primary" @click="currentView = 'upload'; $router.push('/compare')">去对比</el-button>
+        </el-empty>
+        <el-table v-else :data="history" border style="width: 100%">
           <el-table-column prop="id" label="任务ID" width="100" />
-          <el-table-column prop="file_a" label="文档A" />
-          <el-table-column prop="file_b" label="文档B" />
-          <el-table-column prop="diffs" label="差异数" width="100" />
-          <el-table-column prop="status" label="状态" width="100">
+          <el-table-column prop="file_a_name" label="文档A" />
+          <el-table-column prop="file_b_name" label="文档B" />
+          <el-table-column prop="similarity" label="相似度" width="120">
             <template #default="scope">
-              <el-tag :type="scope.row.status === 'completed' ? 'success' : 'info'">{{ scope.row.status }}</el-tag>
+              <span :class="getSimilarityClass(scope.row.similarity)">{{ (scope.row.similarity * 100).toFixed(1) }}%</span>
             </template>
           </el-table-column>
-          <el-table-column prop="created_at" label="创建时间" width="180" />
-          <el-table-column label="操作" width="120">
-            <template #default>
-              <el-button size="small">查看</el-button>
+          <el-table-column prop="verdict" label="判定" width="180">
+            <template #default="scope">
+              <el-tag :type="scope.row.verdict?.includes('通过') ? 'success' : (scope.row.verdict?.includes('强制') ? 'danger' : 'warning')" size="small">{{ scope.row.verdict }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="total_diffs" label="差异数" width="100" />
+          <el-table-column prop="created_at" label="创建时间" width="180">
+            <template #default="scope">
+              {{ formatTime(scope.row.created_at) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="200">
+            <template #default="scope">
+              <el-button size="small" @click="viewTask(scope.row.id)">查看</el-button>
+              <el-button size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
+              <el-button size="small" type="danger" @click="deleteTask(scope.row.id)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
       </div>
+
+      <div v-if="selectedTask" class="result-panel" style="margin-top: 20px;">
+        <div class="panel-header">
+          <span>任务详情 - {{ selectedTask.id }}</span>
+          <div class="panel-actions">
+            <el-button size="small" type="primary" @click="previewTaskReport(selectedTask.id)">预览报告</el-button>
+            <el-button size="small" @click="exportTaskReport(selectedTask.id)">导出报告</el-button>
+            <el-button size="small" @click="selectedTask = null">关闭</el-button>
+          </div>
+        </div>
+
+        <div v-if="showPreview" class="panel" style="background: #fafafa; margin-top: 12px;">
+          <div class="panel-header">
+            <span>报告预览 - 任务 {{ selectedTask.id }}</span>
+            <el-button size="small" @click="showPreview = false">关闭预览</el-button>
+          </div>
+          <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+        </div>
+      </div>
     </div>
 
     <div v-if="currentView === 'config'">
-      <h2 class="page-title">对比配置</h2>
+      <h2 class="page-title">对比配置已停用</h2>
       <div class="panel">
-        <el-form :model="config" label-width="200px" style="max-width: 700px;">
-          <el-form-item label="对比精度">
-            <el-radio-group v-model="config.precision">
-              <el-radio label="paragraph">段落级</el-radio>
-              <el-radio label="sentence">句子级</el-radio>
-              <el-radio label="word">词语级</el-radio>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="忽略空白字符">
-            <el-switch v-model="config.ignoreWhitespace" />
-          </el-form-item>
-          <el-form-item label="忽略大小写">
-            <el-switch v-model="config.ignoreCase" />
-          </el-form-item>
-          <el-form-item label="启用AI语义对比">
-            <el-switch v-model="config.aiCompare" />
-          </el-form-item>
-          <el-form-item label="支持格式">
-            <el-tag size="small" style="margin-right: 8px;">PDF</el-tag>
-            <el-tag size="small" style="margin-right: 8px;">DOCX</el-tag>
-            <el-tag size="small" style="margin-right: 8px;">TXT</el-tag>
-            <el-tag size="small" style="margin-right: 8px;">MD</el-tag>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary">保存配置</el-button>
-          </el-form-item>
-        </el-form>
+        <el-empty description="对比配置功能已停用。匹配阈值、对比精度等参数已硬编码在系统中，如需调整请联系开发人员。" />
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { compareAPI } from '@/api'
-import { Upload } from '@element-plus/icons-vue'
+import { Upload, Search } from '@element-plus/icons-vue'
 
 const route = useRoute()
+const router = useRouter()
 const fileA = ref(null)
 const fileB = ref(null)
 const loading = ref(false)
+const progress = ref(0)
+const progressText = ref('')
 const result = ref(null)
 const history = ref([])
+const selectedTask = ref(null)
+const showPreview = ref(false)
+const reportContent = ref('')
 
 const config = ref({
+  threshold: 0.7,
   precision: 'sentence',
   ignoreWhitespace: true,
-  ignoreCase: false,
-  aiCompare: true
+  ignoreCase: false
 })
 
 const currentView = computed(() => {
@@ -181,54 +183,69 @@ const currentView = computed(() => {
   return 'upload'
 })
 
+const verdictType = computed(() => {
+  if (!result.value?.verdict) return 'info'
+  if (result.value.verdict.includes('通过')) return 'success'
+  if (result.value.verdict.includes('强制')) return 'danger'
+  return 'warning'
+})
+
 onMounted(async () => {
+  console.log('[Compare] Component mounted, currentView:', currentView.value, 'route:', route.path)
   if (currentView.value === 'tasks') {
-    try {
-      const resp = await compareAPI.list()
-      if (resp.data && Array.isArray(resp.data)) {
-        history.value = resp.data
-      } else {
-        history.value = [
-          { id: 1, file_a: 'manual_v1.0.pdf', file_b: 'manual_v1.1.pdf', diffs: 28, status: 'completed', created_at: '2025-01-10 10:30' },
-          { id: 2, file_a: 'spec_a.docx', file_b: 'spec_b.docx', diffs: 12, status: 'completed', created_at: '2025-01-09 14:20' },
-          { id: 3, file_a: 'design_v2.md', file_b: 'design_v3.md', diffs: 45, status: 'completed', created_at: '2025-01-08 09:15' }
-        ]
-      }
-    } catch (e) {
-      history.value = [
-        { id: 1, file_a: 'manual_v1.0.pdf', file_b: 'manual_v1.1.pdf', diffs: 28, status: 'completed', created_at: '2025-01-10 10:30' },
-        { id: 2, file_a: 'spec_a.docx', file_b: 'spec_b.docx', diffs: 12, status: 'completed', created_at: '2025-01-09 14:20' },
-        { id: 3, file_a: 'design_v2.md', file_b: 'design_v3.md', diffs: 45, status: 'completed', created_at: '2025-01-08 09:15' }
-      ]
-    }
+    await loadHistory()
   }
 })
 
-function buildExampleResult() {
-  const aName = fileA.value ? fileA.value.name : '文档A'
-  const bName = fileB.value ? fileB.value.name : '文档B'
-  return {
-    added: 12,
-    removed: 8,
-    modified: 5,
-    diffs: 25,
-    a_html: `<div style="line-height:2;"><b>【${aName}】</b><br><br>
-      产品型号：<span style="background:#fee2e2;color:#dc262b;text-decoration:line-through;padding:0 4px;border-radius:3px;">X-100</span><br>
-      产品名称：检测试剂<br>
-      储存温度：<span style="background:#fee2e2;color:#dc262b;text-decoration:line-through;padding:0 4px;border-radius:3px;">2-30°C</span><br>
-      适用样本：血清<br>
-      有效期：<span style="background:#fee2e2;color:#dc262b;text-decoration:line-through;padding:0 4px;border-radius:3px;">12个月</span><br><br>
-      本产品用于体外诊断，仅供专业人员使用。<br>
-      操作人员应具备相关资质并接受培训。</div>`,
-    b_html: `<div style="line-height:2;"><b>【${bName}】</b><br><br>
-      产品型号：<span style="background:#dcfce7;color:#166534;padding:0 4px;border-radius:3px;">X-200（升级版）</span><br>
-      产品名称：检测试剂<br>
-      储存温度：<span style="background:#dcfce7;color:#166534;padding:0 4px;border-radius:3px;">2~25°C</span><br>
-      适用样本：血清 / 血浆 / 全血<br>
-      有效期：<span style="background:#dcfce7;color:#166534;padding:0 4px;border-radius:3px;">24个月（未开封）</span><br><br>
-      本产品用于体外诊断，仅供专业人员使用。<br>
-      操作人员应具备相关资质并接受系统培训。</div>`
+// 监听路由变化，进入历史任务页面时重新加载
+watch(() => route.path, async (newPath) => {
+  if (newPath === '/compare/tasks') {
+    await loadHistory()
   }
+})
+
+async function loadHistory() {
+  console.log('[History] loadHistory called, current route:', route.path)
+  try {
+    const resp = await compareAPI.list()
+    console.log('[History] API response:', resp)
+    console.log('[History] resp.data:', resp.data)
+    if (resp.data && Array.isArray(resp.data)) {
+      history.value = resp.data
+      console.log('[History] Loaded', history.value.length, 'tasks')
+    } else {
+      console.warn('[History] Unexpected response format:', resp.data)
+      history.value = []
+    }
+  } catch (e) {
+    console.error('[History] Load failed:', e)
+    history.value = []
+  }
+}
+
+function formatTime(timestamp) {
+  if (!timestamp) return ''
+  if (typeof timestamp === 'object') return timestamp.toLocaleString()
+  if (typeof timestamp === 'string') {
+    return new Date(timestamp).toLocaleString()
+  }
+  return new Date(timestamp * 1000).toLocaleString()
+}
+
+function clearFiles() {
+  fileA.value = null
+  fileB.value = null
+  result.value = null
+}
+
+function updateProgress(pct, text) {
+  return new Promise(resolve => {
+    setTimeout(() => {
+      progress.value = pct
+      progressText.value = text
+      resolve()
+    }, 200)
+  })
 }
 
 async function doCompare() {
@@ -237,32 +254,185 @@ async function doCompare() {
     return
   }
   loading.value = true
+  progress.value = 0
+  progressText.value = ''
+
   try {
-    const resp = await compareAPI.create(fileA.value, fileB.value)
-    const data = resp.data || {}
-    if (data && (data.a_html || data.content_a || data.diffs)) {
-      result.value = {
-        added: data.added || 0,
-        removed: data.removed || 0,
-        modified: data.modified || 0,
-        diffs: data.diffs || (data.added || 0) + (data.removed || 0) + (data.modified || 0),
-        a_html: data.a_html || data.content_a || buildExampleResult().a_html,
-        b_html: data.b_html || data.content_b || buildExampleResult().b_html
-      }
-    } else {
-      result.value = buildExampleResult()
+    await updateProgress(5, '正在初始化...')
+    await updateProgress(10, '正在上传文件...')
+    await updateProgress(15, '正在解析文档A...')
+
+    const respPromise = compareAPI.create(fileA.value, fileB.value)
+
+    for (let p = 20; p < 80; p += 5) {
+      await updateProgress(p, `正在处理文档B... ${p}%`)
+      await new Promise(r => setTimeout(r, 300))
     }
+
+    await updateProgress(80, '正在对比分析...')
+
+    const resp = await respPromise
+    const data = resp.data || {}
+
+    await updateProgress(90, '正在生成结果...')
+
+    result.value = {
+      similarity: data.similarity || 0,
+      verdict: data.verdict || '',
+      total_diffs: data.total_diffs || 0,
+      comparison_id: data.comparison_id || data.task_id || 0,
+      task_id: data.comparison_id || data.task_id || 0,
+    }
+
+    await updateProgress(95, '正在整理报告...')
+    await updateProgress(100, '对比完成')
+
+    setTimeout(() => { progress.value = 0 }, 1500)
     ElMessage.success('对比完成')
   } catch (e) {
-    result.value = buildExampleResult()
-    ElMessage.info('接口调用失败，已展示示例对比结果')
+    progress.value = 0
+    ElMessage.error('对比失败：' + (e.message || '未知错误'))
   } finally {
     loading.value = false
   }
 }
 
-function exportCompare() {
-  ElMessage.success('对比报告已导出')
+async function exportCompare() {
+  if (!result.value) {
+    ElMessage.warning('请先进行对比')
+    return
+  }
+
+  const taskId = result.value.comparison_id || result.value.task_id
+  if (!taskId) {
+    ElMessage.warning('无法获取任务ID，请重新对比')
+    return
+  }
+
+  try {
+    const resp = await compareAPI.getReport(taskId, 'html')
+    const content = resp.data?.content || ''
+
+    if (!content.trim()) {
+      ElMessage.warning('报告内容为空')
+      return
+    }
+
+    downloadFile(content, `compare_report_${taskId}_${Date.now()}.html`, 'text/html')
+    ElMessage.success('对比报告已导出')
+  } catch (e) {
+    console.error('Export error:', e)
+    ElMessage.error('导出失败：' + (e.message || '未知错误'))
+  }
+}
+
+async function previewReport() {
+  if (!result.value) {
+    ElMessage.warning('请先进行对比')
+    return
+  }
+
+  const taskId = result.value.comparison_id || result.value.task_id
+  if (!taskId) {
+    ElMessage.warning('无法获取任务ID，请重新对比')
+    return
+  }
+
+  try {
+    const resp = await compareAPI.getReport(taskId, 'html')
+    reportContent.value = resp.data?.content || ''
+
+    if (!reportContent.value.trim()) {
+      ElMessage.warning('报告内容为空')
+      return
+    }
+
+    showPreview.value = true
+    ElMessage.success('报告已加载')
+  } catch (e) {
+    console.error('Preview error:', e)
+    ElMessage.error('预览失败：' + (e.message || '未知错误'))
+  }
+}
+
+async function viewTask(taskId) {
+  try {
+    const resp = await compareAPI.get(taskId)
+    const data = resp.data || {}
+
+    selectedTask.value = {
+      id: taskId,
+      similarity: data.similarity || 0,
+      verdict: data.verdict || '',
+      file_a_name: data.file_a_name || '',
+      file_b_name: data.file_b_name || '',
+    }
+  } catch (e) {
+    ElMessage.error('查看失败：' + (e.message || '未知错误'))
+  }
+}
+
+async function exportTaskReport(taskId) {
+  try {
+    const resp = await compareAPI.getReport(taskId, 'html')
+    const content = resp.data?.content || ''
+    downloadFile(content, `compare_report_${taskId}.html`, 'text/html')
+    ElMessage.success('对比报告已导出')
+  } catch (e) {
+    ElMessage.error('导出失败：' + (e.message || '未知错误'))
+  }
+}
+
+async function previewTaskReport(taskId) {
+  try {
+    const resp = await compareAPI.getReport(taskId, 'html')
+    reportContent.value = resp.data?.content || ''
+
+    if (!reportContent.value.trim()) {
+      ElMessage.warning('报告内容为空')
+      return
+    }
+
+    showPreview.value = true
+    ElMessage.success('报告已加载')
+  } catch (e) {
+    console.error('Preview error:', e)
+    ElMessage.error('预览失败：' + (e.message || '未知错误'))
+  }
+}
+
+async function deleteTask(taskId) {
+  try {
+    await compareAPI.delete(taskId)
+    await loadHistory()
+    if (selectedTask.value?.id === taskId) {
+      selectedTask.value = null
+    }
+    ElMessage.success('任务已删除')
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e.message || '未知错误'))
+  }
+}
+
+function downloadFile(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+async function saveConfig() {
+  try {
+    await compareAPI.updateConfig(config.value)
+    ElMessage.success('配置已保存')
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
 }
 </script>
 
@@ -284,6 +454,14 @@ function exportCompare() {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
+.result-panel {
+  background: #fff;
+  border-radius: 10px;
+  padding: 24px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
 .panel-header {
   display: flex;
   justify-content: space-between;
@@ -298,141 +476,220 @@ function exportCompare() {
 .panel-actions { display: flex; align-items: center; gap: 10px; }
 
 .upload-grid {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  gap: 20px;
-  align-items: center;
-  margin-bottom: 24px;
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  justify-content: center;
 }
 
-.upload-slot {
-  background: #f8fafc;
-  border-radius: 10px;
-  padding: 16px;
-}
+.upload-slot { flex: 1; max-width: 400px; }
 
 .slot-label {
-  font-weight: 500;
-  color: #1f2937;
-  margin-bottom: 10px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #374151;
 }
 
 .upload-box {
-  background: #fff;
-  border: 2px dashed #cbd5e1;
+  border: 2px dashed #d1d5db;
   border-radius: 8px;
-  padding: 40px 20px;
+  padding: 30px;
   text-align: center;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.3s;
 }
 
-.upload-box:hover {
-  border-color: #3b82f6;
-  background: #eff6ff;
-}
+.upload-box:hover { border-color: #3b82f6; background: #eff6ff; }
 
-.upload-box.filled {
-  border-color: #10b981;
-  background: #f0fdf4;
-}
+.upload-box.filled { border-color: #3b82f6; background: #f0f9ff; }
 
-.upload-hint { color: #64748b; font-size: 14px; }
-.upload-name { color: #1f2937; font-size: 14px; font-weight: 500; word-break: break-all; }
+.upload-hint { color: #6b7280; font-size: 14px; }
+
+.upload-name { color: #3b82f6; font-weight: 600; font-size: 14px; }
 
 .vs-badge {
-  background: linear-gradient(135deg, #3b82f6 0%, #7c3aed 100%);
-  color: #fff;
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
+  font-size: 20px;
+  font-weight: 700;
+  color: #9ca3af;
+  padding: 8px 16px;
+}
+
+.action-row {
   display: flex;
-  align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 14px;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
-}
-
-.action-row { text-align: center; padding: 10px 0; }
-
-.diff-summary {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
   gap: 16px;
-  margin-bottom: 24px;
+  margin-top: 24px;
 }
 
-.summary-item {
+.progress-panel {
+  margin-top: 20px;
   padding: 16px;
-  border-radius: 8px;
-  text-align: center;
-}
-
-.summary-item.add { background: #dcfce7; }
-.summary-item.remove { background: #fee2e2; }
-.summary-item.modify { background: #fef3c7; }
-
-.summary-num {
-  font-size: 28px;
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.summary-item.add .summary-num { color: #166534; }
-.summary-item.remove .summary-num { color: #991b1b; }
-.summary-item.modify .summary-num { color: #92400e; }
-
-.summary-label { font-size: 14px; color: #374151; }
-
-.compare-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-}
-
-.compare-col {
   background: #f8fafc;
-  border: 1px solid #e5e7eb;
   border-radius: 8px;
-  overflow: hidden;
 }
 
-.col-title {
-  padding: 12px 16px;
-  background: #fff;
-  font-weight: 500;
-  color: #374151;
-  font-size: 14px;
-  border-bottom: 1px solid #e5e7eb;
+.progress-text {
+  text-align: center;
+  margin-top: 8px;
+  color: #6b7280;
+}
+
+.cards { display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px; }
+.card { background:#fff;border-radius:10px;padding:18px 22px;box-shadow:0 1px 3px rgba(0,0,0,.08);min-width:140px; }
+.card.primary { background:linear-gradient(135deg,#1976d2,#2c3e50);color:#fff;min-width:180px; }
+.card.primary .lbl { color:rgba(255,255,255,.85); }
+.card.primary .num { font-size:32px; }
+.card .num { font-size:24px;font-weight:700; }
+.card .lbl { color:#777;font-size:12px;margin-top:4px; }
+
+.explain { background:#fffbea;border-left:4px solid #f9a825;padding:14px 18px;border-radius:6px;font-size:13px;line-height:1.8;color:#444;margin-bottom:22px; }
+
+.file-info { background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:16px 18px;margin:0 0 22px; }
+.file-info h3 { margin:0 0 12px;font-size:16px;color:#2c3e50; }
+.file-info-grid { display:grid;grid-template-columns:120px 1fr;gap:8px 12px;font-size:13px;line-height:1.7; }
+.file-info-grid .label { color:#666;font-weight:600; }
+.file-info-grid .value { word-break:break-word;overflow-wrap:anywhere; }
+
+table { width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);table-layout:fixed; }
+th,td { padding:10px 12px;text-align:left;font-size:13px;border-bottom:1px solid #eee;vertical-align:top;word-break:break-word;overflow-wrap:anywhere; }
+th { background:#2c3e50;color:#fff;font-weight:600;white-space:normal;font-size:12px; }
+tr:hover { background:#f9fafb; }
+code { background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px; }
+
+.tag { background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500; }
+.tag.ok { background:#e8f5e9;color:#2e7d32; }
+.tag.warn { background:#fff3e0;color:#e65100; }
+.tag.danger { background:#ffebee;color:#c62828; }
+.tag.only-a { background:#fff4f4;color:#c62828; }
+.tag.only-b { background:#f4faf4;color:#2e7d32; }
+
+.bar { position:relative;background:#eee;border-radius:10px;height:18px;width:100%;min-width:80px;overflow:hidden; }
+.bar .fill { height:100%;border-radius:10px; }
+.bar span { position:absolute;left:0;right:0;top:0;line-height:18px;text-align:center;font-size:11px;color:#000;font-weight:600; }
+
+h2 { margin-top:32px;font-size:18px;border-left:4px solid #1976d2;padding-left:10px;color:#2c3e50;font-weight:600; }
+
+.row-main { cursor:pointer; }
+.row-main:hover { background:#f0f4f9; }
+.row-main .diff-cell { color:#c62828;font-weight:600; }
+.row-diff { display:none; }
+.row-diff.open { display:table-row; }
+.row-diff > td { background:#fafbfc;padding:0; }
+
+.diffs { padding:12px 16px; }
+.diff-empty { padding:14px 16px;color:#2e7d32;font-size:13px;background:#eaf6ec;border-radius:6px; }
+.diff-row { display:flex;align-items:flex-start;gap:10px;padding:8px 10px;margin:6px 0;border-radius:6px;font-size:13px;line-height:1.6; }
+.diff-row.changed { background:#fff8e1;border-left:3px solid #f9a825; }
+.diff-row .text { flex:1;word-break:break-word; }
+.diff-row .side-a,.diff-row .side-b { padding:4px 0; }
+.diff-row .side-a::before { content:"A: ";color:#c62828;font-weight:600; }
+.diff-row .side-b::before { content:"B: ";color:#2e7d32;font-weight:600; }
+
+.tag-c { font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;font-weight:600;background:#f9a825;color:#fff;min-width:50px;text-align:center; }
+
+.del { background:#ffd6d6;text-decoration:line-through;color:#a31515;padding:0 2px;border-radius:2px; }
+.ins { background:#d6f5d6;color:#1a5e1a;padding:0 2px;border-radius:2px; }
+
+table.summary td { vertical-align:top;font-size:13px;line-height:1.55; }
+table.summary td:nth-child(1) { width:60px;text-align:center; }
+table.summary td:nth-child(2) { width:120px;color:#666; }
+table.summary td:nth-child(3) { font-weight:600;max-width:300px; }
+table.summary td:nth-child(4) { width:80px; }
+table.summary td:nth-child(5) { width:120px; }
+table.summary td:nth-child(6) { width:80px;text-align:center;color:#888; }
+table.summary td:nth-child(7) { width:100px;text-align:center;font-weight:600; }
+table.summary td:nth-child(8) { width:80px;text-align:center;font-weight:600;color:#c62828; }
+
+tr.ok-row td:nth-child(7) { color:#2e7d32; }
+tr.high-row td:nth-child(7) { color:#558b2f; }
+tr.mid-row td:nth-child(7) { color:#ef6c00; }
+tr.low-row td:nth-child(7) { color:#c62828; }
+tr.only-a-row { background:#fff4f4; }
+tr.only-b-row { background:#f4faf4; }
+tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
+
+.small { color:#888;font-size:12px; }
+
+.diff-list { max-height: 600px; overflow-y: auto; }
+
+.diff-item {
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 12px;
+  border-left: 4px solid;
+}
+
+.diff-item.add, .diff-item.only_b { background: #f0fdf4; border-left-color: #22c55e; }
+.diff-item.delete, .diff-item.only_a { background: #fef2f2; border-left-color: #ef4444; }
+.diff-item.modify { background: #fffbeb; border-left-color: #f59e0b; }
+
+.diff-item.severity-critical { border-left-width: 6px; }
+.diff-item.severity-high { border-left-width: 5px; }
+
+.diff-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
+.diff-index {
+  background: #e5e7eb;
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
-.dot-blue { background: #3b82f6; }
-.dot-purple { background: #7c3aed; }
+.diff-type { font-weight: 600; }
 
-.col-content {
-  padding: 16px;
-  line-height: 2;
+.severity-tag {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.severity-tag.critical { background: #fee2e2; color: #dc2626; }
+.severity-tag.high { background: #fef3c7; color: #d97706; }
+.severity-tag.medium { background: #dbeafe; color: #2563eb; }
+.severity-tag.low { background: #dcfce7; color: #16a34a; }
+
+.similarity-tag {
+  font-size: 12px;
+  background: #f3f4f6;
   color: #374151;
-  font-size: 14px;
-  min-height: 300px;
-  white-space: pre-wrap;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-left: auto;
 }
 
-.diff-text { font-size: 14px; }
+.diff-content { margin-top: 8px; }
 
-@media (max-width: 900px) {
-  .upload-grid, .compare-grid, .diff-summary { grid-template-columns: 1fr; }
-  .vs-badge { margin: 0 auto; }
+.diff-text {
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin-bottom: 8px;
 }
+
+.diff-text:last-child { margin-bottom: 0; }
+
+.diff-text-a { background: #f3f4f6; }
+.diff-text-b { background: #e0f2fe; }
+
+.text-label {
+  font-weight: 600;
+  color: #6b7280;
+  margin-right: 8px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px;
+  color: #9ca3af;
+}
+
+.similarity-high { color: #86efac; }
+.similarity-medium { color: #fcd34d; }
+.similarity-low { color: #fca5a5; }
 </style>

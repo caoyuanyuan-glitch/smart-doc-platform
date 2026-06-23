@@ -13,9 +13,11 @@ import Terms from '@/views/Terms.vue'
 import Users from '@/views/Users.vue'
 import Translate from '@/views/Translate.vue'
 import TranslateDoc from '@/views/TranslateDoc.vue'
-import MemoryBank from '@/views/MemoryBank.vue'
 import Knowledge from '@/views/Knowledge.vue'
 import PolishPreview from '@/views/PolishPreview.vue'
+import SpellCheck from '@/views/SpellCheck.vue'
+import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
+import WhiteList from '@/views/WhiteList.vue'
 
 const routes = [
   {
@@ -45,8 +47,22 @@ const routes = [
   },
   {
     path: '/review/basis',
-    name: 'ReviewBasis',
-    component: Review
+    redirect: '/review'
+  },
+  {
+    path: '/review/spell-check',
+    name: 'SpellCheck',
+    component: SpellCheck
+  },
+  {
+    path: '/review/spell-check/history',
+    name: 'SpellCheckHistory',
+    component: SpellCheckHistory
+  },
+  {
+    path: '/review/spell-check/whitelist',
+    name: 'WhiteList',
+    component: WhiteList
   },
   {
     path: '/polish',
@@ -137,11 +153,6 @@ const routes = [
     path: '/translate/docs',
     name: 'TranslateDocs',
     component: TranslateDoc
-  },
-  {
-    path: '/translate/memory',
-    name: 'MemoryBank',
-    component: MemoryBank
   },
   {
     path: '/knowledge',

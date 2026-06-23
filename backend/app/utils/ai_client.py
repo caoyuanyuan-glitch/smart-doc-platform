@@ -3,10 +3,19 @@ import json
 import re
 import httpx
 import time
+from openai import OpenAI
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+# 完整审核规则（从review_rules模块导入）
+from app.api.review_rules import (
+    build_system_prompt,
+    get_all_rules,
+    ENGLISH_CORRECT_SPELLINGS,
+    BRITISH_AMERICAN_SPELLINGS
+)
 
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -303,16 +312,19 @@ class AIClient:
         if not isinstance(issues, list):
             return normalized
 
+        # 去重：记录已报告的错误内容
+        reported_errors = set()
+
         for item in issues:
             if not isinstance(item, dict):
                 continue
 
-            original_text = self._clean_text(item.get("original_text"), 200)
+            original_text = self._clean_text(item.get("original_text") or item.get("original"), 200)
             context = self._clean_text(item.get("context"), 500)
-            suggestion = self._clean_text(item.get("suggestion"), 300)
+            suggestion = self._clean_text(item.get("suggestion") or item.get("expected"), 300)
             description = self._clean_text(item.get("description") or item.get("rule_description"), 300)
-            chapter = self._clean_text(item.get("chapter") or item.get("section"), 120)
-            category = self._clean_text(item.get("category"), 80) or "其他"
+            chapter = self._clean_text(item.get("chapter") or item.get("section") or item.get("location"), 120)
+            category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
             rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
             audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
             confidence = self._normalize_confidence(item.get("confidence"), 0)
@@ -320,10 +332,17 @@ class AIClient:
 
             if confidence < min_confidence:
                 continue
-            if not description or not suggestion:
+            if not description and not suggestion:
                 continue
-            if len(description) < 4:
+            if len(description) < 4 and len(suggestion) < 2:
                 continue
+
+            # 去重逻辑：同一错误内容在同一文档中只报告第一次
+            error_key = original_text.lower().strip()
+            if error_key in reported_errors:
+                continue
+            if error_key:
+                reported_errors.add(error_key)
 
             if original_text:
                 if len(original_text) == 1 and not re.search(r"[\u4e00-\u9fffA-Za-z]", original_text):
@@ -331,9 +350,6 @@ class AIClient:
                 if content and original_text not in content and context and original_text not in context:
                     continue
             elif source == "ai":
-                continue
-
-            if source == "ai" and not audit_basis:
                 continue
 
             if context and len(context) < len(original_text) and original_text:
@@ -535,117 +551,87 @@ class AIClient:
         lang = language or "en"
         is_english = lang in ("en", "both")
 
+        # 使用完整的System Prompt模板（包含所有审核规则）
+        base_system_prompt = build_system_prompt()
+
         if is_english:
-            system_prompt = "You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments. Report only verifiable issues with explicit evidence from the text and a concrete writing-rule basis."
-            user_prompt = f"""Review the following English technical document excerpt for real issues only.
+            system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.
+
+{base_system_prompt}
+
+IMPORTANT REMINDERS:
+- Report only issues with EXPLICIT textual evidence from the document.
+- The following are VALID English words (do NOT flag as spelling errors):
+  {', '.join(ENGLISH_CORRECT_SPELLINGS[:50])}...
+- British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
+- Product names, company names, model numbers, and technical abbreviations are VALID unless context proves an error."""
+
+            user_prompt = f"""Please review the following English technical document.
 
 Document excerpt:
 {content[:20000]}
 
-Review basis:
-1. American English technical writing.
-2. MGI-style technical documentation conventions.
-3. Explicit language, terminology, punctuation, grammar, unit, and consistency issues.
-
-Hard constraints:
-- Report only issues that are clearly supported by the quoted text.
-- Keep valid company names, legal names, product names, acronyms, model names, addresses, URLs, email addresses, and standard abbreviations unless the text itself proves an error.
-- Keep optional style preferences out of the result unless the wording is clearly awkward, ambiguous, inconsistent, or noncompliant.
-- If you are uncertain, do not report the item.
-- Low-confidence items must be omitted.
-- If a problem depends on missing broader context, do not report it from this excerpt.
-
-Allowed categories:
-- Spelling
-- Grammar
-- Punctuation
-- Terminology
-- Units
-- Consistency
-- Style
-- Structure
-- Compliance
-
-Severity rules:
-- fatal: regulatory or safety risk clearly visible in the excerpt.
-- serious: definite factual writing error, terminology error, unit error, or grammar error that affects professionalism or interpretation.
-- general: definite punctuation, formatting, or consistency issue.
-- suggestion: clear improvement with strong evidence, only when still objectively useful.
-
-Output strict JSON only:
+Output ONLY strict JSON:
 {{
   "issues": [
     {{
-      "severity": "fatal|serious|general|suggestion",
-      "category": "Spelling|Grammar|Punctuation|Terminology|Units|Consistency|Style|Structure|Compliance",
-      "rule": "short rule id or rule name",
-      "chapter": "section title if visible, otherwise empty string",
-      "original_text": "exact problematic text copied from excerpt",
-      "context": "surrounding sentence or short context from excerpt",
-      "suggestion": "specific correction or rewrite direction",
-      "description": "why this is a real issue",
-      "audit_basis": "explicit basis such as American English spelling, unit convention, terminology consistency, punctuation rule",
-      "confidence": 85
+      "severity": "serious|general|suggestion",
+      "type": "Spelling|Grammar|Punctuation|Terminology|Units|Compliance|Format",
+      "location": "section or line",
+      "original": "exact text from excerpt",
+      "expected": "correct form",
+      "rule": "which rule is violated"
     }}
-  ]
+  ],
+  "summary": {{
+    "total": number,
+    "serious": number,
+    "general": number,
+    "suggestion": number
+  }}
 }}
 
-Return an empty issues array when no high-confidence issue is present."""
+Return empty issues array if no high-confidence issues found."""
         else:
-            system_prompt = "你是一位医疗器械、IVD 和科研试剂技术文档审核专家。你只输出有明确证据、可复核、可定位的问题。"
-            user_prompt = f"""请审核下面这段中文技术文档，按技术文档规范识别真实问题。
+            system_prompt = f"""{base_system_prompt}
+
+重要提醒：
+- 只报告有明确文本证据的问题。
+- 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
+- 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。"""
+
+            user_prompt = f"""请审核下面这段中文技术文档。
 
 文档内容：
 {content[:20000]}
 
-审核依据：
-1. 中文技术文档写作规范。
-2. 医疗器械/IVD 技术文档常见错误清单。
-3. 术语一致性、单位规范、标点规范、结构与法规表达要求。
+输出要求：
+1. 按JSON格式输出审核结果
+2. 只报告有明确文本证据的真实问题
+3. 不要报告可选的风格偏好问题
+4. 去重：同一错误在同一文档中只报告第一次出现
 
-严格约束：
-- 只报告有明确文本证据的问题。
-- 原文片段必须能从文档中直接定位。
-- 公司名称、产品名、型号、地址、网址、邮箱、专有术语、中英混排专有名词，默认按正确处理，除非文本本身显示出明显错误。
-- 对结构完整性、法规完整性、目录缺失这类问题，只有当前节选里存在直接证据时才报告。
-- 没有把握的问题不要报。
-- 低置信度问题不要输出。
-
-问题范围：
-1. 标点符号
-2. 错别字
-3. 术语
-4. 单位
-5. 语法与句式
-6. 格式一致性
-7. 结构表达
-8. 法规与合规表述
-
-分级规则：
-- fatal：当前文本中清晰可见的安全或法规风险。
-- serious：明确的术语、单位、错别字、专业表达错误。
-- general：明确的标点、格式、一致性问题。
-- suggestion：基于明确证据的优化建议。
-
-请严格输出 JSON，不要输出任何额外文字：
+输出严格JSON：
 {{
   "issues": [
     {{
-      "severity": "fatal|serious|general|suggestion",
-      "category": "标点符号|错别字|术语|单位|语法|格式|结构|法规|逻辑|其他",
-      "rule": "规则编号或简短规则名",
-      "chapter": "章节标题，无法判断则为空字符串",
-      "original_text": "文档中的原文片段",
-      "context": "足够定位问题的上下文",
-      "suggestion": "具体修改建议",
-      "description": "为何这是真实问题",
-      "audit_basis": "明确审核依据，例如中文标点规范、单位规范、术语一致性",
-      "confidence": 90
+      "type": "拼写|语法|标点|术语|单位|合规|格式",
+      "severity": "serious|general|suggestion",
+      "location": "章节名或行号",
+      "original": "原文内容",
+      "expected": "正确写法",
+      "rule": "违反的具体规则"
     }}
-  ]
+  ],
+  "summary": {{
+    "total": 数量,
+    "serious": 严重数量,
+    "general": 一般数量,
+    "suggestion": 建议数量
+  }}
 }}
 
-如果没有高置信度问题，返回 {{"issues": []}}。"""
+如果没有高置信度问题，返回空数组。"""
 
         messages = [
             {"role": "system", "content": system_prompt},

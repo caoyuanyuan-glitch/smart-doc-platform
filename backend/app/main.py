@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge
+from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist
 from app.database import create_tables
 
 app = FastAPI(title="智能技术文档平台", version="1.0.0")
@@ -29,10 +29,29 @@ app.include_router(generate.router, prefix="/api/generate", tags=["内容生成"
 app.include_router(convert.router, prefix="/api/convert", tags=["格式转换"])
 app.include_router(translation.router, prefix="/api/translation", tags=["AI翻译"])
 app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识库管理"])
+app.include_router(spell_check.router, prefix="/api/spell-check", tags=["拼写检查"])
+app.include_router(whitelist.router, prefix="/api/whitelist", tags=["白名单管理"])
 
 @app.on_event("startup")
 async def startup_event():
     create_tables()
+    try:
+        from app.database import SessionLocal
+        from app.crud.convert_rule import seed_default_rules
+        from app.crud.rule import seed_external_review_rules
+
+        db = SessionLocal()
+        try:
+            seeded_count = seed_default_rules(db)
+            if seeded_count:
+                print(f"[startup] 已初始化 {seeded_count} 条默认转换规则")
+            review_rule_count = seed_external_review_rules(db)
+            if review_rule_count:
+                print(f"[startup] 已初始化 {review_rule_count} 条外部评审规则")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[startup] 转换规则种子初始化失败: {e}")
     try:
         from app.database import SessionLocal
         from app.crud.user import get_user, create_user_with_details

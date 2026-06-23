@@ -2,7 +2,7 @@
   <div class="doc-translate-container">
     <div class="page-header">
       <h2 class="page-title">文档翻译</h2>
-      <p class="page-desc">上传文档或从已审核文档中选取，AI翻译后下载同格式译文</p>
+      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，记忆库配置可从知识库资源库调用</p>
     </div>
 
     <div class="content-grid">
@@ -19,8 +19,33 @@
                 <el-radio-button value="memory">仅记忆库</el-radio-button>
               </el-radio-group>
             </el-form-item>
+            <el-form-item label="记忆库标签" v-if="engine !== 'ai'">
+              <el-select v-model="memoryBank" placeholder="全部记忆库" clearable style="width: 100%">
+                <el-option label="全部记忆库" value="" />
+                <el-option v-for="bank in memoryBanks" :key="bank" :label="bank" :value="bank" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
+              <el-select
+                v-model="memoryFileId"
+                placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
+                clearable
+                filterable
+                :loading="memoryLibraryLoading"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="file in memoryLibraryFiles"
+                  :key="file.id"
+                  :label="file.label"
+                  :value="file.id"
+                />
+              </el-select>
+              <div class="memory-library-hint">仅读取知识库下“资源库 / 记忆库”中的文件，当前配置可留空。</div>
+            </el-form-item>
             <el-form-item label="AI 模型" v-if="engine !== 'memory'">
               <el-select v-model="model" style="width: 100%">
+                <el-option label="Kimi (Moonshot)" value="kimi" />
                 <el-option label="Qwen3.6-Plus" value="qwen" />
                 <el-option label="DeepSeek Chat" value="deepseek" />
               </el-select>
@@ -111,7 +136,7 @@
 
           <div v-if="translating" class="result-loading">
             <div class="loading-spinner"></div>
-            <p>正在翻译文档，请稍候...</p>
+            <p>{{ pollingStatus ? `正在翻译... (${pollingCount}s)` : '正在提交翻译任务...' }}</p>
           </div>
 
           <div v-if="result && !translating" class="result-content">
@@ -119,9 +144,14 @@
               <template #extra>
                 <el-button type="primary" @click="downloadTranslatedFile">
                   <el-icon><Download /></el-icon>
-                  下载译文 ({{ result.translated_filename }})
+                  下载译文 ({{ result.translated_filename || result.original_filename }})
                 </el-button>
               </template>
+            </el-result>
+          </div>
+
+          <div v-if="pollError" class="result-error">
+            <el-result icon="error" title="翻译失败" :sub-title="pollError">
             </el-result>
           </div>
         </el-card>
@@ -134,15 +164,25 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download } from '@element-plus/icons-vue'
-import { translationAPI } from '@/api'
+import { knowledgeAPI, translationAPI } from '@/api'
+import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const engine = ref('hybrid')
 const model = ref('qwen')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
+const memoryBank = ref('')
+const memoryBanks = ref([])
+const memoryFileId = ref(null)
+const memoryLibraryFiles = ref([])
+const memoryLibraryLoading = ref(false)
 const docSource = ref('upload')
 const translating = ref(false)
 const result = ref(null)
+const pollingStatus = ref(false)
+const pollingCount = ref(0)
+const pollError = ref('')
+let pollTimer = null
 
 const fileUploadRef = ref(null)
 const selectedFile = ref(null)
@@ -152,14 +192,34 @@ const reviewedDocsLoading = ref(false)
 const selectedReviewedDoc = ref(null)
 const selectedReviewedRow = ref(null)
 
-onMounted(() => {
+onMounted(async () => {
   loadReviewedDocs()
+  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
 })
 
-function onEngineChange(val) {
-  if (val === 'memory') {
-    model.value = 'qwen'
+async function loadMemoryBanks() {
+  try {
+    const res = await translationAPI.getMemoryBanks()
+    memoryBanks.value = res.data.banks || []
+  } catch (e) {
+    // ignore
   }
+}
+
+async function loadMemoryLibraryFiles() {
+  memoryLibraryLoading.value = true
+  try {
+    const res = await knowledgeAPI.getTree()
+    memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
+  } catch (e) {
+    memoryLibraryFiles.value = []
+  } finally {
+    memoryLibraryLoading.value = false
+  }
+}
+
+function onEngineChange(val) {
+  // no-op now
 }
 
 function tableRowClassName({ row }) {
@@ -190,6 +250,7 @@ async function translateReviewedDoc() {
   if (!selectedReviewedDoc.value) return
   translating.value = true
   result.value = null
+  pollError.value = ''
   try {
     const res = await translationAPI.getDocument(selectedReviewedDoc.value.id)
     const content = res.data.content || ''
@@ -198,16 +259,19 @@ async function translateReviewedDoc() {
     const fname = selectedReviewedDoc.value.filename
     formData.append('file', blob, fname)
     formData.append('engine', engine.value)
-    formData.append('model', engine.value === 'memory' ? 'qwen' : model.value)
+    formData.append('model', model.value)
     formData.append('source_lang', sourceLang.value)
     formData.append('target_lang', targetLang.value)
+    formData.append('memory_bank', memoryBank.value || '')
+    if (memoryFileId.value != null) {
+      formData.append('memory_file_id', String(memoryFileId.value))
+    }
     const tres = await translationAPI.translateFile(formData)
-    result.value = tres.data
-    ElMessage.success('文档翻译完成')
+    startPolling(tres.data.doc_id)
   } catch (e) {
-    ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
-  } finally {
     translating.value = false
+    pollError.value = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
+    ElMessage.error(pollError.value)
   }
 }
 
@@ -237,27 +301,80 @@ function submitFileUpload() {
 function handleFileTranslate(options) {
   translating.value = true
   result.value = null
+  pollError.value = ''
   const formData = new FormData()
   formData.append('file', options.file)
   formData.append('engine', engine.value)
-  formData.append('model', engine.value === 'memory' ? 'qwen' : model.value)
+  formData.append('model', model.value)
   formData.append('source_lang', sourceLang.value)
   formData.append('target_lang', targetLang.value)
+  formData.append('memory_bank', memoryBank.value || '')
+  if (memoryFileId.value != null) {
+    formData.append('memory_file_id', String(memoryFileId.value))
+  }
 
   translationAPI.translateFile(formData).then(res => {
-    result.value = res.data
-    ElMessage.success('文档翻译完成')
+    startPolling(res.data.doc_id)
   }).catch(e => {
-    ElMessage.error('文件翻译失败: ' + (e.response?.data?.detail || e.message))
-  }).finally(() => {
     translating.value = false
+    pollError.value = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
+    ElMessage.error(pollError.value)
   })
 }
 
-function downloadTranslatedFile() {
-  if (result.value?.download_url) {
-    window.open(result.value.download_url, '_blank')
+function startPolling(docId) {
+  stopPolling()
+  pollingStatus.value = true
+  pollingCount.value = 0
+  pollError.value = ''
+
+  pollTimer = setInterval(async () => {
+    pollingCount.value++
+    try {
+      const res = await translationAPI.getFileStatus(docId)
+      const statusData = res.data
+      if (statusData.status === 'completed') {
+        stopPolling()
+        translating.value = false
+        result.value = {
+          doc_id: docId,
+          original_filename: statusData.original_filename || '',
+          translated_filename: statusData.translated_filename || '',
+          download_url: statusData.download_url || `/api/translation/download/${docId}`
+        }
+        ElMessage.success('文档翻译完成')
+      } else if (statusData.status === 'error') {
+        stopPolling()
+        translating.value = false
+        pollError.value = statusData.error || '翻译过程中发生错误'
+        ElMessage.error(pollError.value)
+      }
+    } catch (e) {
+      stopPolling()
+      translating.value = false
+      pollError.value = '查询翻译状态失败'
+      ElMessage.error(pollError.value)
+    }
+  }, 3000)
+}
+
+function stopPolling() {
+  pollingStatus.value = false
+  pollingCount.value = 0
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
   }
+}
+
+function downloadTranslatedFile() {
+  if (!result.value?.download_url) return
+  const link = document.createElement('a')
+  link.href = result.value.download_url
+  link.setAttribute('download', result.value.translated_filename || result.value.original_filename)
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
 }
 </script>
 
@@ -282,6 +399,13 @@ function downloadTranslatedFile() {
 .page-desc {
   font-size: 14px;
   color: #6b7280;
+}
+
+.memory-library-hint {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.5;
+  margin-top: 6px;
 }
 
 .content-grid {
@@ -416,6 +540,10 @@ function downloadTranslatedFile() {
 }
 
 .result-content {
+  padding: 20px 0;
+}
+
+.result-error {
   padding: 20px 0;
 }
 

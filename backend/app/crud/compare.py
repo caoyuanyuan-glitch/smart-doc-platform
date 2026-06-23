@@ -26,7 +26,9 @@ def get_compare_tasks(db: Session, user_id: int = None, skip: int = 0, limit: in
         query = query.filter(CompareTask.user_id == user_id)
     return query.offset(skip).limit(limit).all()
 
-def update_compare_task(db: Session, task_id: int, similarity: float, verdict: str, total_diffs: int, diff_stats: dict):
+def update_compare_task(db: Session, task_id: int, similarity: float, verdict: str, total_diffs: int, diff_stats: dict,
+                        exact_match: int = 0, n_a: int = 0, n_b: int = 0, matched_pairs: list = None,
+                        only_a: list = None, only_b: list = None, dita_full_json: str = ""):
     task = db.query(CompareTask).filter(CompareTask.id == task_id).first()
     if task:
         task.similarity = similarity
@@ -34,6 +36,14 @@ def update_compare_task(db: Session, task_id: int, similarity: float, verdict: s
         task.total_diffs = total_diffs
         task.diff_stats = json.dumps(diff_stats)
         task.status = "completed"
+        task.exact_match = exact_match
+        task.n_a = n_a
+        task.n_b = n_b
+        task.matched_pairs = json.dumps(matched_pairs or [])
+        task.only_a = json.dumps(only_a or [])
+        task.only_b = json.dumps(only_b or [])
+        if dita_full_json and hasattr(task, "dita_full"):
+            task.dita_full = dita_full_json
         db.commit()
         db.refresh(task)
     return task

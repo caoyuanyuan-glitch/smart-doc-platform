@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 import os
 from app.database import get_db
 from app.crud.document import create_document, get_document, get_documents, delete_document
+from app.crud.review import delete_reviews_by_document
 from app.schemas.document import Document, DocumentListItem
 from app.utils.document_parser import parse_file, get_file_type
 
@@ -10,7 +11,7 @@ router = APIRouter()
 
 UPLOAD_DIR = "./static/uploads"
 
-@router.post("/upload/")
+@router.post("/upload/", response_model=DocumentListItem)
 async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -39,10 +40,10 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
             user_id=1
         )
         from app.crud.document import update_document_status
-        update_document_status(db, document.id, "ready")
+        document = update_document_status(db, document.id, "ready")
         from app.crud.document import update_document_file_size
-        update_document_file_size(db, document.id, file_size)
-        return {"message": "File uploaded successfully", "document_id": document.id}
+        document = update_document_file_size(db, document.id, file_size)
+        return document
     except Exception as e:
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -66,6 +67,7 @@ async def delete_document_endpoint(document_id: int, db: Session = Depends(get_d
     document = get_document(db, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
+
+    delete_reviews_by_document(db, document_id)
     delete_document(db, document_id)
     return {"message": "Document deleted successfully"}

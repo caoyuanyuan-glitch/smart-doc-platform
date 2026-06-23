@@ -1,6 +1,51 @@
+import json
+from pathlib import Path
+
 from sqlalchemy.orm import Session
 from app.models.rule import Rule
 from app.schemas.rule import RuleCreate, RuleUpdate
+
+
+REVIEW_RULE_LIBRARY_SEED_PATH = Path(__file__).resolve().parents[2] / "seed" / "review_rule_library_seed.json"
+
+
+def seed_external_review_rules(db: Session):
+    if not REVIEW_RULE_LIBRARY_SEED_PATH.exists():
+        return 0
+
+    payload = json.loads(REVIEW_RULE_LIBRARY_SEED_PATH.read_text(encoding="utf-8"))
+    source = payload.get("source", "外部评审规则库")
+    export_date = payload.get("export_date", "")
+    created = 0
+
+    for item in payload.get("rules", []):
+        original_rule_id = str(item.get("rule_id", "")).strip()
+        if not original_rule_id:
+            continue
+
+        rule_no = f"EXT-{original_rule_id}"
+        if get_rule_by_no(db, rule_no):
+            continue
+
+        scenarios = "、".join(item.get("applicable_scenarios") or []) or "通用"
+        sync_status = "已同步" if item.get("synced") else "未同步"
+        severity = item.get("severity", "一般")
+
+        db.add(Rule(
+            rule_no=rule_no,
+            category=item.get("category") or "其他",
+            description=item.get("rule_content") or "",
+            regex=r"(?!)",
+            example=f"原编号: {original_rule_id} | 适用场景: {scenarios} | 同步状态: {sync_status}",
+            suggestion=f"严重级别: {severity} | 该规则当前作为规则库知识展示，请人工确认后补充可执行规则。",
+            audit_basis=f"{source}{' | 导出日期: ' + export_date if export_date else ''}",
+            language="both",
+        ))
+        created += 1
+
+    if created:
+        db.commit()
+    return created
 
 def create_rule(db: Session, rule: RuleCreate):
     db_rule = Rule(
