@@ -70,3 +70,15 @@ def delete_issue(db: Session, issue_id: int):
         db.delete(issue)
         db.commit()
     return issue
+
+
+def delete_reviews_by_document(db: Session, document_id: int):
+    reviews = db.query(Review).filter(Review.document_id == document_id).all()
+    if not reviews:
+        return 0
+
+    review_ids = [review.id for review in reviews]
+    db.query(Issue).filter(Issue.review_id.in_(review_ids)).delete(synchronize_session=False)
+    db.query(Review).filter(Review.id.in_(review_ids)).delete(synchronize_session=False)
+    db.commit()
+    return len(review_ids)

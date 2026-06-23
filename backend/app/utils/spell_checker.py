@@ -87,6 +87,20 @@ TECH_TERMS_WHITELIST = {
     'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
 }
 
+SPELLCHECK_WHITELIST = {
+    'exact': {
+        'hengyunshan', 'guanggu', 'qingdao', 'shandong',
+        'hamilton', 'eppendorf', 'axygen', 'greiner',
+        'dnbseq', 'mgisp', 'dnv', 'app-d', 'stereomics', 'dipseq',
+        'dnase', 'rnase', 'oligodt', 'qubit', 'pcr',
+    },
+    'prefix': {'os-', 'app-', 't20-', 'mgisp-'},
+    'pattern': [
+        (r'^[A-Z]{1,3}-\d{3}-\d{6}-\d{2}$', '产品编号'),
+        (r'^\d+\.\d+$', '版本号'),
+    ],
+}
+
 
 def _load_whitelist_into_dictionary():
     words = set()
@@ -98,6 +112,20 @@ def _load_whitelist_into_dictionary():
 
 
 _load_whitelist_into_dictionary()
+
+
+def is_whitelisted(word: str) -> bool:
+    candidate = str(word or '').strip()
+    lowered = candidate.lower()
+    if lowered in SPELLCHECK_WHITELIST['exact']:
+        return True
+    for prefix in SPELLCHECK_WHITELIST['prefix']:
+        if lowered.startswith(prefix):
+            return True
+    for pattern, _ in SPELLCHECK_WHITELIST['pattern']:
+        if re.match(pattern, candidate):
+            return True
+    return False
 
 # 常见拼写错误映射表
 COMMON_MISSPELLINGS = {
@@ -2928,6 +2956,9 @@ def check_spelling(content, min_word_length=3, file_type=None):
     for word in misspelled:
         # 跳过太短的词
         if len(word) < min_word_length:
+            continue
+
+        if is_whitelisted(word):
             continue
 
         # 跳过技术术语白名单

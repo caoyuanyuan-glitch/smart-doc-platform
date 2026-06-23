@@ -9,6 +9,7 @@ import os
 import shutil
 import difflib
 from copy import deepcopy
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from app.database import get_db
@@ -19,6 +20,8 @@ from app.crud.term import get_terms
 from app.crud.audit_basis import get_audit_basis
 from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files
 from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate
+from app.rules.reference_integrity_rule import ReferenceIntegrityRule
+from app.rules.term_consistency_rule import TermConsistencyRule
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check
 from app.utils.document_parser import clean_pdf_text
@@ -65,6 +68,12 @@ def _encode_issue_position(start=0, end=0, paragraph_index=None, char_start=None
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _encode_issue_position_with_meta(start=0, end=0, **meta):
+    payload = {"start": int(start or 0), "end": int(end or 0)}
+    payload.update({key: value for key, value in meta.items() if value not in (None, '')})
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _decode_issue_position(position):
     if not position:
         return {}
@@ -86,6 +95,19 @@ def _decode_issue_position(position):
 def _parse_issue_position(position):
     data = _decode_issue_position(position)
     return (int(data.get("start", 0) or 0), int(data.get("end", 0) or 0))
+
+
+def _page_number_from_position(content, position):
+    start, _ = _parse_issue_position(position)
+    if not content:
+        return None
+    cursor = 0
+    for index, page in enumerate(_split_content_pages(content), start=1):
+        page_len = len(page)
+        if start <= cursor + page_len:
+            return index
+        cursor += page_len + 1
+    return None
 
 
 def _issue_sort_key(issue):
@@ -389,6 +411,31 @@ def _build_review_comment_lines(issue):
     return [line for line in lines if line]
 
 
+def _normalize_suggestion_text(suggestion):
+    text = str(suggestion or '').strip()
+    text = re.sub(r'^建议(?:改为|替换为|统一为|写为|使用|拆成两句：|改为：|使用标准术语:)\s*', '', text)
+    text = re.sub(r'^改为\s*', '', text)
+    return text.strip()
+
+
+def validate_suggestion(original: str, suggestion: str) -> bool:
+    normalized_suggestion = _normalize_suggestion_text(suggestion)
+    if not normalized_suggestion or normalized_suggestion == '-':
+        return False
+    original_compact = re.sub(r'\s+', ' ', str(original or '')).strip()
+    suggestion_compact = re.sub(r'\s+', ' ', normalized_suggestion).strip()
+    return original_compact != suggestion_compact
+
+
+def _sanitize_issue_suggestions(issues):
+    for issue in issues:
+        suggestion = str(issue.get('suggestion', '') or '')
+        if suggestion and not validate_suggestion(issue.get('original_text', ''), suggestion):
+            issue['suggestion'] = ''
+            issue['confidence'] = max(0, int(issue.get('confidence', 0) or 0) - 10)
+    return issues
+
+
 def _merge_comment_segments(segments):
     merged = []
     for segment in segments:
@@ -600,27 +647,119 @@ def _normalize_heading_text(text):
     return text.strip().lower()
 
 
+TOC_BLACKLIST = {
+    'ml', 'μl', 'ul', 'l', 'tube', 'well', 'wells',
+    'table', 'figure', 'mg', 'ng', 'μg',
+    'according to', '×', 'n×', '×50', '|',
+}
+
+
+def _split_pdf_pages(content):
+    pages = [page.strip() for page in str(content or '').split('\f')]
+    return [page for page in pages if page]
+
+
+def _extract_toc_title(line):
+    title = re.sub(r'\s*\.+\s*\d+\s*$', '', str(line or '')).strip()
+    return re.sub(r'\s+', ' ', title)
+
+
+def _extract_toc_entry(line):
+    match = re.match(r'^(?:(\d+(?:\.\d+)*)\s+)?(.+?)\s*\.{2,}\s*(\d+)\s*$', str(line or '').strip())
+    if not match:
+        return None
+    return {
+        'section_no': match.group(1) or '',
+        'title': re.sub(r'\s+', ' ', match.group(2).strip()),
+        'page_no': match.group(3),
+    }
+
+
+def _is_toc_item(line: str) -> bool:
+    stripped = str(line or '').strip()
+    entry = _extract_toc_entry(stripped)
+    if not entry:
+        return False
+
+    title_part = entry['title']
+    lowered = title_part.lower()
+    if any(keyword in lowered for keyword in TOC_BLACKLIST):
+        return False
+    if len(title_part) > 50:
+        return False
+    if re.match(r'^[\d\)\(\s]+$', title_part):
+        return False
+    if re.match(r'^\d+[\)）]\s*$', title_part):
+        return False
+    return True
+
+
+def _detect_toc_page_indexes(pages):
+    candidate_indexes = []
+    for index, page_text in enumerate(pages[:5]):
+        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+        toc_like_count = sum(1 for line in lines if _is_toc_item(line))
+        has_contents = any(line.lower() == 'contents' for line in lines)
+        if has_contents or toc_like_count >= 3:
+            candidate_indexes.append(index)
+    return candidate_indexes
+
+
+def _collect_toc_entries(pages):
+    toc_entries = {}
+    toc_page_indexes = _detect_toc_page_indexes(pages)
+    if not toc_page_indexes:
+        return toc_entries, set()
+
+    for page_index in toc_page_indexes:
+        lines = [line.strip() for line in pages[page_index].splitlines() if line.strip()]
+        for line in lines:
+            if not _is_toc_item(line):
+                continue
+            entry = _extract_toc_entry(line)
+            if not entry:
+                continue
+            key = entry['section_no'] or _normalize_heading_text(entry['title'])
+            toc_entries[key] = _extract_toc_title(line)
+    return toc_entries, set(toc_page_indexes)
+
+
+def _is_body_heading_line(line):
+    stripped = re.sub(r'\s+', ' ', str(line or '').strip())
+    if not stripped or len(stripped) > 80:
+        return False
+    lowered = stripped.lower()
+    if any(keyword in lowered for keyword in TOC_BLACKLIST):
+        return False
+    if '| ' in stripped or ' |' in stripped or '  |  ' in stripped:
+        return False
+    if '. .' in stripped or re.search(r'\.{2,}\s*\d+$', stripped):
+        return False
+    if re.search(r'\d+(?:\.\d+)?\s*(?:mL|μL|uL|mg|ng|mm|cm|kg|rpm|min|sec|h)\b', stripped, re.IGNORECASE):
+        return False
+    if re.match(r'^\d+(?:\.\d+)*\s+[A-Z][A-Za-z0-9 ,/&()_-]{2,}$', stripped):
+        return True
+    if re.match(r'^(?:Chapter|Section)\s+\d+[\s:.-]+', stripped, re.IGNORECASE):
+        return True
+    return False
+
+
 def _run_pdf_structure_audit(content):
     issues = []
-    lines = [line.strip() for line in str(content or '').splitlines()]
+    pages = _split_pdf_pages(content)
+    if not pages:
+        return issues
+
+    toc_entries, toc_page_indexes = _collect_toc_entries(pages)
+    body_pages = [page for index, page in enumerate(pages) if index not in toc_page_indexes]
+    lines = [line.strip() for page in body_pages for line in page.splitlines() if line.strip()]
     if not lines:
         return issues
 
-    toc_index = next((idx for idx, line in enumerate(lines) if line.lower() == 'contents'), -1)
-    toc_entries = {}
-    if toc_index >= 0:
-        for line in lines[toc_index + 1:toc_index + 80]:
-            if not line:
-                continue
-            match = re.match(r'^(\d+(?:\.\d+)*)\s+(.+?)\s*\d+$', line)
-            if not match:
-                if toc_entries:
-                    break
-                continue
-            toc_entries[match.group(1)] = match.group(2).strip()
-
     headings = {}
     for line in lines:
+        if not _is_body_heading_line(line):
+            continue
         match = re.match(r'^(\d+(?:\.\d+)*)\s+(.+)$', line)
         if not match:
             continue
@@ -738,10 +877,19 @@ def _format_issue_severity(severity):
     }.get(severity or "general", (severity or "general").upper())
 
 
+def _format_issue_display_id(index):
+    return f"#{index:04d}"
+
+
 def _highlight_issue_context(issue):
-    context = str(getattr(issue, "context", "") or "")
-    original = str(getattr(issue, "original_text", "") or "")
-    if not context:
+    content = ''
+    if isinstance(issue, dict):
+        content = issue.get('_document_content', '')
+    else:
+        content = getattr(issue, '_document_content', '')
+    context = _extract_issue_snippet(issue, content)
+    original = str(getattr(issue, "original_text", "") or "") if not isinstance(issue, dict) else str(issue.get('original_text', '') or '')
+    if not context or context == '-':
         return "-"
 
     escaped_context = html_lib.escape(context)
@@ -754,13 +902,313 @@ def _highlight_issue_context(issue):
     return highlighted.replace("\n", "<br>")
 
 
+def _split_content_pages(content):
+    pages = str(content or '').split('\f')
+    return pages if pages else ['']
+
+
+def _extract_document_metadata(doc, content):
+    text = str(content or '')
+    pages = _split_content_pages(text)
+    normalized = text.replace('\f', '\n')
+    metadata = {
+        'name': getattr(doc, 'filename', '') or '-',
+        'file_type': (getattr(doc, 'file_type', '') or '-').upper(),
+        'page_count': len([page for page in pages if page.strip()]) or len(pages),
+        'section_count': 0,
+        'version': '-',
+        'doc_no': '-',
+        'language': detect_language(text),
+    }
+
+    heading_hits = re.findall(r'(?m)^\s*(?:\d+(?:\.\d+)*[\.)]?\s+[A-Z][^\n]{2,}|(?:Chapter|Section)\s+\d+[^\n]*)', normalized)
+    metadata['section_count'] = len(heading_hits)
+
+    patterns = {
+        'version': [
+            r'\b(?:Version|Rev(?:ision)?|Ver\.?)\s*[:：]?\s*([A-Z]?\d+(?:\.\d+)*)\b',
+            r'\bV(?:ersion)?\s*[:：]?\s*([A-Z]?\d+(?:\.\d+)*)\b',
+        ],
+        'doc_no': [
+            r'\bDoc\.?\s*No\.?\s*[:：]?\s*([A-Z0-9\-_/]{4,})\b',
+            r'\bDocument\s*(?:No\.?|ID)\s*[:：]?\s*([A-Z0-9\-_/]{4,})\b',
+        ],
+    }
+    for key, exprs in patterns.items():
+        for expr in exprs:
+            match = re.search(expr, normalized, re.IGNORECASE)
+            if match:
+                metadata[key] = match.group(1).strip()
+                break
+
+    if metadata['doc_no'] == '-' and metadata['name'] and metadata['name'] != '-':
+        stem = Path(metadata['name']).stem
+        if re.search(r'[A-Z]{1,3}-\d{2,}|\d{3,}', stem):
+            metadata['doc_no'] = stem
+
+    return metadata
+
+
+def _infer_issue_area(issue):
+    position_meta = _decode_issue_position(_issue_value(issue, 'position', ''))
+    explicit_area = position_meta.get('area')
+    if explicit_area:
+        return explicit_area
+
+    chapter = str(_issue_value(issue, 'chapter', '') or '')
+    context = str(_issue_value(issue, 'context', '') or '')
+    original = str(_issue_value(issue, 'original_text', '') or '')
+    source = f"{chapter}\n{context}\n{original}".strip()
+    line = max(source.splitlines(), key=len, default=source).strip()
+    lowered = line.lower()
+
+    if re.search(r'\b(doc\.?\s*no\.?|page\s*\d+|copyright|jb-[a-z0-9\-]+)\b', lowered, re.IGNORECASE):
+        return '页脚'
+    if re.match(r'^(?:step\s+)?\d+[\.)、：:]\s+', line, re.IGNORECASE):
+        return '步骤'
+    if re.match(r'^(?:table|表)\s*\d+', line, re.IGNORECASE) or ' | ' in line:
+        return '表格'
+    if re.match(r'^(?:chapter|section)\s+\d+', line, re.IGNORECASE) or re.match(r'^\d+(?:\.\d+)*\s+[A-Z][^\n]{2,}$', line):
+        return '章节'
+    return '正文'
+
+
+def _format_issue_location(issue, content):
+    page_no = _page_number_from_position(content, _issue_value(issue, 'position', ''))
+    page_text = f'第{page_no}页' if page_no else '-'
+    area = _infer_issue_area(issue)
+    return '，'.join([part for part in [page_text, area] if part and part != '-']) or '-'
+
+
+def _format_issue_chapter(issue):
+    area = _infer_issue_area(issue)
+    chapter = str(_issue_value(issue, 'chapter', '') or '').strip()
+    if area in {'页脚', '步骤', '表格'}:
+        return '-'
+    if not chapter:
+        return '-'
+    if re.search(r'\b(doc\.?\s*no\.?|page\s*\d+)\b', chapter, re.IGNORECASE):
+        return '-'
+    if re.match(r'^(?:step\s+)?\d+[\.)、：:]\s+', chapter, re.IGNORECASE):
+        return '-'
+    return chapter
+
+
+def _extract_issue_snippet(issue, content, radius=50):
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    start, end = _parse_issue_position(_issue_value(issue, 'position', ''))
+    if content and original and end > start:
+        left = max(0, start - radius)
+        right = min(len(content), end + radius)
+        snippet = content[left:right].replace('\f', ' ').replace('\n', ' ')
+        snippet = re.sub(r'\s+', ' ', snippet).strip()
+        if left > 0:
+            snippet = '...' + snippet
+        if right < len(content):
+            snippet = snippet + '...'
+        return snippet
+
+    context = str(_issue_value(issue, 'context', '') or '').replace('\n', ' ')
+    context = re.sub(r'\s+', ' ', context).strip()
+    if not context:
+        return original or '-'
+    if not original or original not in context:
+        return context[:100] + ('...' if len(context) > 100 else '')
+
+    pos = context.find(original)
+    left = max(0, pos - radius)
+    right = min(len(context), pos + len(original) + radius)
+    snippet = context[left:right].strip()
+    if left > 0:
+        snippet = '...' + snippet
+    if right < len(context):
+        snippet = snippet + '...'
+    return snippet
+
+
+def _format_issue_description(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '')
+    original = str(_issue_value(issue, 'original_text', '') or '')
+    description = str(_issue_value(issue, 'description', '') or '').strip()
+
+    punct_map = {'，': ',', '。': '.', '；': ';', '：': ':', '（': '(', '）': ')', '、': ','}
+    if rule == 'PUNCT-001' and original in punct_map:
+        return f'使用了中文全角标点（{original}），应改为英文半角标点（{punct_map[original]}）'
+
+    if rule == 'HR004':
+        unit_match = re.match(r'(\d+(?:\.\d+)?)(.+)', original)
+        if unit_match:
+            return f'数字与单位之间缺少空格，应改为 {unit_match.group(1)} {unit_match.group(2)}'
+
+    return description or '-'
+
+
+def _format_issue_suggestion(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '')
+    original = str(_issue_value(issue, 'original_text', '') or '')
+    suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
+    punct_map = {'，': ',', '。': '.', '；': ';', '：': ':', '（': '(', '）': ')', '、': ','}
+
+    if rule == 'PUNCT-001' and original in punct_map:
+        return f'{original} → {punct_map[original]}'
+    if suggestion.startswith('建议改为 '):
+        return suggestion.replace('建议改为 ', '', 1)
+    if suggestion.startswith('建议替换为 '):
+        return suggestion.replace('建议替换为 ', '', 1)
+    return suggestion or '-'
+
+
+def _issue_dimension(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    category = str(_issue_value(issue, 'category', '') or '')
+    text = f'{rule} {category}'
+    if any(token in text for token in ['SPELL', 'GRAMMAR', 'PUNCT', '时态', '标点', '语法', '拼写', '风格']):
+        return '语言质量'
+    if any(token in text for token in ['TERM', '术语']):
+        return '术语一致性'
+    if any(token in text for token in ['LOGIC', '结构', '长句', '步骤连续性', '逻辑完整性']):
+        return '逻辑完整性'
+    if any(token in text for token in ['SAFE', 'WARNING', 'CAUTION', 'DANGER', '安全', '合规']):
+        return '安全合规'
+    if any(token in text for token in ['REF', '引用', '交叉']):
+        return '交叉引用'
+    return '格式规范'
+
+
+def _build_dimension_summary(issues):
+    summary = {name: {'count': 0, 'fatal': 0, 'serious': 0} for name in ['格式规范', '语言质量', '术语一致性', '逻辑完整性', '安全合规', '交叉引用']}
+    for issue in issues:
+        dimension = _issue_dimension(issue)
+        summary[dimension]['count'] += 1
+        if _issue_value(issue, 'severity', 'general') == 'fatal':
+            summary[dimension]['fatal'] += 1
+        if _issue_value(issue, 'severity', 'general') == 'serious':
+            summary[dimension]['serious'] += 1
+    return summary
+
+
+def _build_report_conclusion(issues):
+    fatal = sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'fatal')
+    serious = sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'serious')
+    if fatal:
+        return '当前文档存在高风险问题，建议完成修订并复审后再发布。'
+    if serious >= 5:
+        return '当前文档可作为修订草稿继续流转，建议先关闭严重问题再进入正式发布。'
+    if serious or issues:
+        return '当前文档主体可读，建议按优先级关闭剩余问题并做一次快速回归。'
+    return '当前文档未发现显著问题，可进入发布前终审。'
+
+
+def _build_feedback_advice(issues):
+    statuses = Counter((getattr(issue, 'status', None) or 'pending') for issue in issues)
+    return [
+        f"待确认 {statuses.get('pending', 0)} 条，建议审核人优先处理致命和严重问题。",
+        f"误报 {statuses.get('false_positive', 0)} 条，建议沉淀为规则白名单或定位策略优化样本。",
+        f"已确认 {statuses.get('confirmed', 0)} 条，建议修订后重新执行一次规则审核验证闭环。",
+    ]
+
+
+def _build_consistency_rows(metadata, content):
+    normalized = str(content or '').replace('\f', '\n')
+    urls = sorted(set(re.findall(r'https?://[^\s)]+', normalized, re.IGNORECASE)))
+    emails = sorted(set(re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', normalized)))
+    doc_nos = sorted(set(re.findall(r'\bDoc\.?\s*No\.?\s*[:：]?\s*([A-Z0-9\-_/]{4,})\b', normalized, re.IGNORECASE)))
+    versions = sorted(set(re.findall(r'\b(?:Version|Rev(?:ision)?|Ver\.?)\s*[:：]?\s*([A-Z]?\d+(?:\.\d+)*)\b', normalized, re.IGNORECASE)))
+
+    def row(name, values, expected):
+        values = [value for value in values if value]
+        unique_values = sorted(set(values))
+        status = '一致' if len(unique_values) <= 1 else '不一致'
+        return {
+            'name': name,
+            'expected': expected or '-',
+            'found': ' / '.join(unique_values[:3]) if unique_values else '-',
+            'count': len(unique_values),
+            'status': status,
+        }
+
+    return [
+        row('文档编号', doc_nos or ([metadata.get('doc_no')] if metadata.get('doc_no') not in ('', '-') else []), metadata.get('doc_no')),
+        row('版本号', versions or ([metadata.get('version')] if metadata.get('version') not in ('', '-') else []), metadata.get('version')),
+        row('官网地址', urls, urls[0] if len(urls) == 1 else '-'),
+        row('邮箱地址', emails, emails[0] if len(emails) == 1 else '-'),
+    ]
+
+
+def _build_problem_summary_rows(issues):
+    severity_keys = ['fatal', 'serious', 'general', 'suggestion']
+    labels = {'fatal': '致命', 'serious': '严重', 'general': '一般', 'suggestion': '建议'}
+    rows = []
+    for dimension in ['格式规范', '语言质量', '术语一致性', '逻辑完整性', '安全合规', '交叉引用']:
+        items = [issue for issue in issues if _issue_dimension(issue) == dimension]
+        if not items:
+            continue
+        row = {'dimension': dimension, 'total': len(items)}
+        for key in severity_keys:
+            row[key] = sum(1 for issue in items if _issue_value(issue, 'severity', '') == key)
+            row[f'{key}_label'] = labels[key]
+        rows.append(row)
+    return rows
+
+
+def _group_issues_by_severity(issues):
+    groups = {'fatal': [], 'serious': [], 'general': [], 'suggestion': []}
+    for issue in sorted(issues, key=_issue_sort_key):
+        groups.setdefault(_issue_value(issue, 'severity', 'general'), []).append(issue)
+    return groups
+
+
+def _build_modification_examples(issues):
+    examples = []
+    for issue in sorted(issues, key=_issue_sort_key):
+        before = str(_issue_value(issue, 'original_text', '') or '').strip()
+        after = _format_issue_suggestion(issue)
+        if not before or not after or after == '-':
+            continue
+        examples.append({
+            'title': _format_issue_description(issue),
+            'before': before,
+            'after': after,
+        })
+        if len(examples) >= 2:
+            break
+    return examples
+
+
+def _build_report_verdict(issues):
+    fatal = sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'fatal')
+    serious = sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'serious')
+    if fatal:
+        return '不通过'
+    if serious >= 3:
+        return '需复审'
+    if issues:
+        return '建议修改'
+    return '通过'
+
+
 def _generate_review_html_content(review, doc, issues):
-    summary = _load_review_summary(review.summary)
     confirmed = [i for i in issues if i.status == "confirmed"]
     false_pos = [i for i in issues if i.status == "false_positive"]
     pending = [i for i in issues if i.status in ["pending", None]]
     ignored = [i for i in issues if i.status == "ignored"]
     doc_name = doc.filename if doc else f"文档{review.document_id}"
+    content = getattr(doc, 'content', '') if doc else ''
+    metadata = _extract_document_metadata(doc, content)
+    consistency_rows = _build_consistency_rows(metadata, content)
+    summary_rows = _build_problem_summary_rows(issues)
+    grouped_issues = _group_issues_by_severity(issues)
+    examples = _build_modification_examples(issues)
+    verdict = _build_report_verdict(issues)
+    conclusion = _build_report_conclusion(issues)
+    feedback_advice = _build_feedback_advice(issues)
+    labels = {'fatal': '致命问题', 'serious': '严重问题', 'general': '一般问题', 'suggestion': '建议项'}
+
+    for issue in issues:
+        if isinstance(issue, dict):
+            issue['_document_content'] = content
+        else:
+            setattr(issue, '_document_content', content)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -769,23 +1217,30 @@ def _generate_review_html_content(review, doc, issues):
     <title>审核报告 - {doc_name}</title>
     <style>
         * {{ box-sizing: border-box; }}
-        body {{ font-family: 'Microsoft YaHei', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f7fa; color: #333; }}
-        .container {{ max-width: 1100px; margin: 0 auto; background: #fff; padding: 30px 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-        h1 {{ color: #2c3e50; border-bottom: 3px solid #409eff; padding-bottom: 10px; }}
-        h2 {{ color: #409eff; margin-top: 30px; }}
-        .meta {{ background: #f8f9fa; padding: 15px; border-left: 4px solid #409eff; margin: 20px 0; }}
-        .meta-row {{ margin: 5px 0; }}
-        .meta-label {{ font-weight: bold; color: #555; display: inline-block; width: 100px; }}
-        .summary-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 20px 0; }}
-        .summary-card {{ padding: 15px; text-align: center; border-radius: 4px; color: #fff; }}
-        .summary-card .num {{ font-size: 28px; font-weight: bold; }}
-        .summary-card .label {{ font-size: 12px; margin-top: 5px; }}
-        .card-total {{ background: #409eff; }}
-        .card-confirmed {{ background: #67c23a; }}
-        .card-false {{ background: #909399; }}
-        .card-pending {{ background: #e6a23c; }}
-        .card-ignored {{ background: #c0c4cc; }}
-        .issue {{ border: 1px solid #e4e7ed; border-radius: 4px; padding: 15px 20px; margin: 12px 0; background: #fff; }}
+        :root {{ --ink:#1f2937; --muted:#667085; --line:#dfe5ef; --panel:#ffffff; --bg:#edf2f8; --hero1:#153f70; --hero2:#2f76c9; --good:#167c4b; --warn:#b86a00; --bad:#b42318; --soft:#eff4fb; }}
+        body {{ font-family: 'Microsoft YaHei', Arial, sans-serif; margin: 0; padding: 28px; background: radial-gradient(circle at top left, #f8fbff 0, #edf2f8 45%, #e6edf6 100%); color: var(--ink); }}
+        .container {{ max-width: 1180px; margin: 0 auto; background: var(--panel); padding: 0 0 32px; box-shadow: 0 18px 50px rgba(18, 39, 69, 0.12); border-radius: 24px; overflow: hidden; }}
+        .hero {{ padding: 36px 40px 28px; background: linear-gradient(135deg, var(--hero1), var(--hero2)); color: #fff; }}
+        .hero h1 {{ margin: 0 0 10px; font-size: 32px; }}
+        .hero p {{ margin: 0; max-width: 760px; color: rgba(255,255,255,0.84); line-height: 1.7; }}
+        .section {{ padding: 0 40px; }}
+        h2 {{ color: #143b68; margin: 30px 0 16px; font-size: 22px; }}
+        .module-tag {{ display: inline-block; margin-top: 12px; padding: 6px 12px; border-radius: 999px; background: rgba(255,255,255,0.16); font-size: 12px; letter-spacing: 0.08em; }}
+        .meta {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: -18px; padding: 0 40px; }}
+        .meta-card {{ background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 16px 18px; box-shadow: 0 8px 24px rgba(15, 35, 60, 0.06); }}
+        .meta-label {{ font-size: 12px; color: var(--muted); margin-bottom: 8px; }}
+        .meta-value {{ font-weight: 700; line-height: 1.5; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 18px 0 10px; }}
+        .summary-card {{ padding: 18px 14px; text-align: center; border-radius: 18px; color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,0.12); }}
+        .summary-card .num {{ font-size: 30px; font-weight: 800; }}
+        .summary-card .label {{ font-size: 13px; margin-top: 6px; opacity: 0.92; }}
+        .card-total {{ background: linear-gradient(135deg, #18569c, #2f80ed); }}
+        .card-confirmed {{ background: linear-gradient(135deg, #0f8d56, #36b37e); }}
+        .card-false {{ background: linear-gradient(135deg, #667085, #98a2b3); }}
+        .card-pending {{ background: linear-gradient(135deg, #c46d00, #f59e0b); }}
+        .card-ignored {{ background: linear-gradient(135deg, #8b95a7, #b7c0d0); }}
+        .callout {{ border: 1px solid #cfe0f5; border-radius: 18px; padding: 18px 20px; background: linear-gradient(180deg, #f8fbff, #f1f6fc); line-height: 1.8; color: #2a4365; }}
+        .issue {{ border: 1px solid #e4e7ed; border-radius: 18px; padding: 18px 20px; margin: 12px 0; background: #fff; box-shadow: 0 6px 18px rgba(15, 35, 60, 0.04); }}
         .issue.confirmed {{ border-left: 5px solid #67c23a; background: #f0f9eb; }}
         .issue.false_positive {{ border-left: 5px solid #909399; background: #f4f4f5; opacity: 0.7; }}
         .issue.ignored {{ border-left: 5px solid #c0c4cc; background: #fafafa; opacity: 0.6; }}
@@ -801,31 +1256,48 @@ def _generate_review_html_content(review, doc, issues):
         .badge-severity-serious {{ background: #e6a23c; }}
         .badge-severity-general {{ background: #909399; }}
         .badge-severity-suggestion {{ background: #67c23a; }}
-        .issue-field {{ margin: 6px 0; font-size: 14px; }}
+        .issue-field {{ margin: 8px 0; font-size: 14px; }}
         .issue-label {{ font-weight: bold; color: #606266; display: inline-block; min-width: 80px; }}
         .original-text {{ background: #fef0f0; padding: 4px 8px; border-radius: 3px; color: #c45656; font-family: 'Courier New', monospace; }}
         .suggestion {{ background: #f0f9eb; padding: 4px 8px; border-radius: 3px; color: #5a8e3f; }}
         .context {{ color: #444; font-size: 13px; line-height: 1.7; white-space: normal; }}
         .problem-highlight {{ color: #d93025; background: #fff1f0; font-weight: 700; padding: 1px 3px; border-radius: 3px; }}
         .subtle {{ color: #909399; font-size: 12px; }}
+        .issue-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
         .empty {{ text-align: center; color: #909399; padding: 40px; }}
-        .footer {{ margin-top: 40px; text-align: center; color: #909399; font-size: 12px; border-top: 1px solid #ebeef5; padding-top: 20px; }}
+        .list-card {{ border: 1px solid var(--line); border-radius: 18px; padding: 18px 20px; background: #fff; margin-bottom: 12px; }}
+        .list-card h3 {{ margin: 0 0 10px; font-size: 18px; color: #143b68; }}
+        table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 16px; overflow: hidden; }}
+        th, td {{ border: 1px solid #e7edf5; padding: 12px 14px; text-align: left; vertical-align: top; }}
+        th {{ background: #f6f9fd; color: #163f6f; }}
+        .status-ok {{ color: var(--good); font-weight: 700; }}
+        .status-bad {{ color: var(--bad); font-weight: 700; }}
+        .example-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
+        .example-box {{ border: 1px solid var(--line); border-radius: 18px; padding: 18px; background: linear-gradient(180deg, #fff, #f9fbff); }}
+        .example-title {{ font-weight: 700; color: #163f6f; margin-bottom: 10px; }}
+        .before-box, .after-box {{ padding: 10px 12px; border-radius: 12px; margin-top: 8px; }}
+        .before-box {{ background: #fff4f4; color: #a61b1b; }}
+        .after-box {{ background: #effbf3; color: #166534; }}
+        .footer {{ margin: 36px 40px 0; text-align: center; color: #909399; font-size: 12px; border-top: 1px solid #ebeef5; padding-top: 20px; }}
+        @media (max-width: 920px) {{ .meta, .summary-grid, .issue-grid, .example-grid {{ grid-template-columns: 1fr; }} .section {{ padding: 0 22px; }} .hero {{ padding: 28px 22px 24px; }} .meta {{ padding: 0 22px; }} .footer {{ margin-left: 22px; margin-right: 22px; }} }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>智能技术文档审核报告</h1>
+        <div class="hero">
+            <h1>技术文档审核报告</h1>
+            <p>本报告基于格式规范、语言质量、术语一致性、逻辑完整性、安全合规、交叉引用六个维度输出结构化审核结果，供编辑修订与复审使用。</p>
+            <div class="module-tag">REVIEW TASK #{review.id}</div>
+        </div>
         <div class="meta">
-            <div class="meta-row"><span class="meta-label">文档名称:</span> {doc_name}</div>
-            <div class="meta-row"><span class="meta-label">审核任务:</span> #{review.id}</div>
-            <div class="meta-row"><span class="meta-label">文档类型:</span> {getattr(doc, 'file_type', '') or '-'}</div>
-            <div class="meta-row"><span class="meta-label">审核模式:</span> {_format_review_mode(review.mode)}</div>
-            <div class="meta-row"><span class="meta-label">审核时间:</span> {review.created_at}</div>
-            <div class="meta-row"><span class="meta-label">问题总数:</span> {summary.get('total', len(issues))}</div>
-            <div class="meta-row"><span class="meta-label">报告生成:</span> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+            <div class="meta-card"><div class="meta-label">文档名称</div><div class="meta-value">{metadata['name']}</div></div>
+            <div class="meta-card"><div class="meta-label">文档编号 / 版本</div><div class="meta-value">{html_lib.escape(metadata['doc_no'])} / {html_lib.escape(metadata['version'])}</div></div>
+            <div class="meta-card"><div class="meta-label">文档范围</div><div class="meta-value">{metadata['file_type']} · {metadata['page_count']} 页 · {metadata['section_count']} 个章节</div></div>
+            <div class="meta-card"><div class="meta-label">审核信息</div><div class="meta-value">{_format_review_mode(review.mode)}<br>{review.created_at}</div></div>
         </div>
 
-        <h2>审核概览</h2>
+        <div class="section">
+        <h2>模块 1 · 审核概览</h2>
         <div class="summary-grid">
             <div class="summary-card card-total"><div class="num">{len(issues)}</div><div class="label">发现问题</div></div>
             <div class="summary-card card-confirmed"><div class="num">{len(confirmed)}</div><div class="label">已确认</div></div>
@@ -833,56 +1305,349 @@ def _generate_review_html_content(review, doc, issues):
             <div class="summary-card card-pending"><div class="num">{len(pending)}</div><div class="label">待确认</div></div>
             <div class="summary-card card-ignored"><div class="num">{len(ignored)}</div><div class="label">已忽略</div></div>
         </div>
+        <div class="callout">审核结论：{conclusion}</div>
+        </div>
+
+        <div class="section">
+        <h2>模块 2 · 文档一致性检查</h2>
+        <table>
+            <thead><tr><th>检查项</th><th>期望值</th><th>识别结果</th><th>唯一值数</th><th>状态</th></tr></thead>
+            <tbody>
+"""
+
+    for row in consistency_rows:
+        html += f"""
+            <tr>
+                <td>{row['name']}</td>
+                <td>{html_lib.escape(str(row['expected']))}</td>
+                <td>{html_lib.escape(str(row['found']))}</td>
+                <td>{row['count']}</td>
+                <td class="{'status-ok' if row['status'] == '一致' else 'status-bad'}">{row['status']}</td>
+            </tr>
+"""
+
+    html += """
+            </tbody>
+        </table>
+        </div>
+        <div class="section">
+        <h2>模块 3 · 问题汇总表</h2>
+        <table>
+            <thead><tr><th>类型</th><th>致命</th><th>严重</th><th>一般</th><th>建议</th><th>总计</th></tr></thead>
+            <tbody>
+"""
+
+    for row in summary_rows:
+        html += f"""
+            <tr>
+                <td>{row['dimension']}</td>
+                <td>{row['fatal']}</td>
+                <td>{row['serious']}</td>
+                <td>{row['general']}</td>
+                <td>{row['suggestion']}</td>
+                <td>{row['total']}</td>
+            </tr>
+"""
+
+    html += """
+            </tbody>
+        </table>
+        </div>
+        <div class="section">
+        <h2>模块 4 · 详细问题列表</h2>
 """
 
     if not issues:
         html += '<div class="empty">未发现任何问题</div>'
     else:
-        html += '<h2>问题详情 (共 {0} 条)</h2>'.format(len(issues))
-        order = {"confirmed": 0, "pending": 1, None: 1, "": 1, "false_positive": 2, "ignored": 3}
-        sorted_issues = sorted(issues, key=lambda i: (order.get(i.status, 1), i.id))
-
-        for issue in sorted_issues:
-            sev_class = f"badge-severity-{issue.severity or 'general'}"
-            issue_status = issue.status or "pending"
-            status_class = {
-                "confirmed": "badge-confirmed",
-                "false_positive": "badge-false",
-                "ignored": "badge-ignored",
-                "pending": "badge-pending"
-            }.get(issue_status, "badge-pending")
-            status_text = {
-                "confirmed": "已确认",
-                "false_positive": "误报",
-                "ignored": "已忽略",
-                "pending": "待确认"
-            }.get(issue_status, "待确认")
-
-            html += f"""
+        for severity in ['fatal', 'serious', 'general', 'suggestion']:
+            entries = grouped_issues.get(severity) or []
+            if not entries:
+                continue
+            html += f'<h3>{labels[severity]}（{len(entries)}）</h3>'
+            for index, issue in enumerate(entries, start=1):
+                issue_status = _issue_value(issue, 'status', '') or 'pending'
+                sev_class = f"badge-severity-{_issue_value(issue, 'severity', 'general')}"
+                status_class = {
+                    'confirmed': 'badge-confirmed',
+                    'false_positive': 'badge-false',
+                    'ignored': 'badge-ignored',
+                    'pending': 'badge-pending',
+                }.get(issue_status, 'badge-pending')
+                status_text = {
+                    'confirmed': '已确认',
+                    'false_positive': '误报',
+                    'ignored': '已忽略',
+                    'pending': '待确认',
+                }.get(issue_status, '待确认')
+                html += f"""
         <div class="issue {issue_status}">
             <div class="issue-header">
-                <div class="issue-title">问题 #{issue.id} - {issue.category or '未分类'}</div>
+                <div class="issue-title">{_format_issue_display_id(index)} · {_issue_dimension(issue)} · {_issue_value(issue, 'category', '') or '未分类'}</div>
                 <div>
-                    <span class="badge {sev_class}">{_format_issue_severity(issue.severity)}</span>
+                    <span class="badge {sev_class}">{_format_issue_severity(_issue_value(issue, 'severity', 'general'))}</span>
                     <span class="badge {status_class}">{status_text}</span>
                 </div>
             </div>
-            <div class="issue-field"><span class="issue-label">规则:</span> {issue.rule or '-'}</div>
-            <div class="issue-field"><span class="issue-label">章节:</span> {issue.chapter or '-'}</div>
-            <div class="issue-field"><span class="issue-label">原文:</span> <span class="context">{_highlight_issue_context(issue)}</span></div>
-            <div class="issue-field subtle"><span class="issue-label">命中内容:</span> <span class="original-text">{html_lib.escape(issue.original_text or '')}</span></div>
-            <div class="issue-field"><span class="issue-label">建议:</span> <span class="suggestion">{issue.suggestion or '-'}</span></div>
-            <div class="issue-field"><span class="issue-label">依据:</span> {issue.audit_basis or '-'}</div>
-            <div class="issue-field"><span class="issue-label">置信度:</span> {issue.confidence or 0}% | <span class="issue-label">来源:</span> {_format_issue_source(issue.source)}</div>
+            <div class="issue-field"><span class="issue-label">位置:</span> {_format_issue_location(issue, content)}</div>
+            <div class="issue-field"><span class="issue-label">章节:</span> {_format_issue_chapter(issue)}</div>
+            <div class="issue-field"><span class="issue-label">原文片段:</span> <span class="context">{_highlight_issue_context(issue)}</span></div>
+            <div class="issue-field"><span class="issue-label">问题说明:</span> {html_lib.escape(_format_issue_description(issue))}</div>
+            <div class="issue-field"><span class="issue-label">修改建议:</span> <span class="suggestion">{html_lib.escape(_format_issue_suggestion(issue))}</span></div>
+            <div class="issue-field"><span class="issue-label">审核依据:</span> {html_lib.escape(_issue_value(issue, 'audit_basis', '-') or '-')}</div>
         </div>
 """
 
+    html += """
+        </div>
+        <div class="section">
+        <h2>模块 5 · 修改示例</h2>
+        <div class="example-grid">
+"""
+
+    if examples:
+        for example in examples:
+            html += f"""
+        <div class="example-box">
+            <div class="example-title">{html_lib.escape(example['title'])}</div>
+            <div><strong>修改前</strong></div>
+            <div class="before-box">{html_lib.escape(example['before'])}</div>
+            <div><strong>修改后</strong></div>
+            <div class="after-box">{html_lib.escape(example['after'])}</div>
+        </div>
+"""
+    else:
+        html += '<div class="empty">当前没有可展示的修改示例</div>'
+
+    html += f"""
+        </div>
+        <div class="section">
+        <h2>模块 6 · 审核结论</h2>
+        <div class="callout">
+            <div><strong>判定结果:</strong> {html_lib.escape(verdict)}</div>
+            <div><strong>结论说明:</strong> {html_lib.escape(conclusion)}</div>
+            <div><strong>复审建议:</strong></div>
+            <ul>
+                <li>{html_lib.escape(feedback_advice[0])}</li>
+                <li>{html_lib.escape(feedback_advice[1])}</li>
+                <li>{html_lib.escape(feedback_advice[2])}</li>
+            </ul>
+        </div>
+        </div>
+"""
     html += f"""
         <div class="footer">由 智能技术文档审核平台 生成 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
     </div>
 </body>
 </html>"""
     return html
+
+
+def _run_logic_integrity_audit(content):
+    issues = []
+    seen = set()
+    lines = content.replace('\f', '\n').splitlines()
+    previous_step = None
+    cursor = 0
+    previous_non_empty_line = ''
+    for line in lines:
+        text = line.strip()
+        match = re.match(r'^(?:Step\s+)?(\d+)[\.)]\s+(.+)$', text, re.IGNORECASE)
+        if not match:
+            if text:
+                previous_non_empty_line = text
+            cursor += len(line) + 1
+            continue
+        current = int(match.group(1))
+        if re.search(r'\b(?:table|figure|fig\.?|section|chapter)\s*$', previous_non_empty_line, re.IGNORECASE):
+            previous_non_empty_line = text
+            cursor += len(line) + 1
+            continue
+        if previous_step is not None and current - previous_step > 1:
+            key = ('LOGIC-001', current)
+            if key in seen:
+                continue
+            seen.add(key)
+            pos = cursor + line.find(text)
+            issues.append({
+                'severity': 'serious',
+                'category': '逻辑完整性',
+                'rule': 'LOGIC-001',
+                'chapter': '',
+                'original_text': text,
+                'context': get_context(content, max(pos, 0), max(pos, 0) + len(text), 120),
+                'suggestion': f'建议补齐 Step {previous_step + 1}，或重新编号当前步骤。',
+                'description': f'步骤编号从 {previous_step} 跳到 {current}，流程连续性不足。',
+                'audit_basis': '操作步骤应保持连续且可追踪。',
+                'confidence': 90,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(max(pos, 0), max(pos, 0) + len(text), area='步骤'),
+            })
+        previous_step = current
+        previous_non_empty_line = text
+        cursor += len(line) + 1
+    return issues
+
+
+def _run_safety_compliance_audit(content):
+    issues = []
+    normalized = content.replace('\f', '\n')
+    seen = set()
+
+    for match in re.finditer(r'(?im)^\s*(WARNING|CAUTION|DANGER)\b([^\n]*)', normalized):
+        label = match.group(1).upper()
+        line = match.group(0).strip()
+        window = normalized[match.start():match.start() + 120]
+        if re.search(r'警告|注意|危险', window):
+            continue
+        key = ('SAFE-001', match.start())
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append({
+                'severity': 'serious',
+                'category': '安全合规',
+                'rule': 'SAFE-001',
+                'chapter': '',
+                'original_text': line,
+                'context': get_context(normalized, match.start(), match.end(), 120),
+                'suggestion': f'{label}: ... → {label} {"警告" if label == "WARNING" else "注意" if label == "CAUTION" else "危险"}: ...',
+                'description': f'{label} 缺少对应中文警示语，应补充双语安全提示。',
+                'audit_basis': '安全警示应完整传达风险及处置要求。',
+                'confidence': 91,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文'),
+            })
+
+    hazard_pattern = re.compile(r'\b(biohazard|flammable|high voltage|corrosive|laser radiation)\b', re.IGNORECASE)
+    for match in hazard_pattern.finditer(normalized):
+        window = normalized[max(0, match.start() - 80):min(len(normalized), match.end() + 80)]
+        if re.search(r'WARNING|CAUTION|DANGER|警告|注意|危险', window, re.IGNORECASE):
+            continue
+        key = ('SAFE-002', match.start())
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append({
+                'severity': 'fatal',
+                'category': '安全合规',
+                'rule': 'SAFE-002',
+                'chapter': '',
+                'original_text': match.group(0),
+                'context': get_context(normalized, match.start(), match.end(), 120),
+                'suggestion': '建议在该风险描述前增加明确的 WARNING/CAUTION 标题，并说明防护动作。',
+                'description': '检测到风险词，附近缺少明确的安全警示标题。',
+                'audit_basis': '高风险操作应在正文中显式标注安全等级。',
+                'confidence': 93,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文'),
+            })
+
+    return issues
+
+
+def _run_cross_reference_audit(content):
+    issues = []
+    normalized = content.replace('\f', '\n')
+    section_numbers = set(re.findall(r'(?m)^\s*(\d+(?:\.\d+)*)[\.)]?\s+[A-Z][^\n]{2,}', normalized))
+    step_numbers = {int(num) for num in re.findall(r'(?im)^\s*(?:Step\s+)?(\d+)[\.)]\s+.+$', normalized)}
+    table_numbers = set(re.findall(r'(?im)^\s*(?:Table|表)\s*(\d+)\b', normalized))
+    figure_numbers = set(re.findall(r'(?im)^\s*(?:Figure|Fig\.|图)\s*(\d+)\b', normalized))
+    seen = set()
+
+    for match in re.finditer(r'\b(?:Section|Chapter|章节)\s+(\d+(?:\.\d+)*)\b', normalized, re.IGNORECASE):
+        ref = match.group(1)
+        if ref in section_numbers:
+            continue
+        key = ('REF-001', ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append({
+                'severity': 'general',
+                'category': '交叉引用',
+                'rule': 'REF-001',
+                'chapter': '',
+                'original_text': match.group(0),
+                'context': get_context(normalized, match.start(), match.end(), 120),
+                'suggestion': f'补充 Section {ref} 对应章节标题，或删除该引用。',
+                'description': f'引用原文：{match.group(0)}；引用类型：章节；目标对象：Section {ref}；检查结果：引用缺失。文档中没有对应章节标题。',
+                'audit_basis': '交叉引用应可回溯到唯一的章节或对象。',
+                'confidence': 88,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='章节', target=f'Section {ref}', check_result='引用缺失'),
+            })
+
+    for match in re.finditer(r'\b(?:according to|refer to|see)?\s*(?:Table|table|表)\s*(\d+)\b', normalized):
+        ref = match.group(1)
+        if ref in table_numbers:
+            continue
+        key = ('REF-TABLE', ref, match.start())
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append({
+            'severity': 'serious',
+            'category': '交叉引用',
+            'rule': 'REF-003',
+            'chapter': '',
+            'original_text': match.group(0).strip(),
+            'context': get_context(normalized, match.start(), match.end(), 120),
+            'suggestion': f'补充 Table {ref}，或删除该引用。',
+            'description': f'引用原文：{match.group(0).strip()}；引用类型：表；目标对象：Table {ref}；检查结果：引用缺失。文档中没有 Table {ref} 的标题。',
+            'audit_basis': '表格引用应能定位到唯一的表格标题。',
+            'confidence': 92,
+            'source': 'rule',
+            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='表', target=f'Table {ref}', check_result='引用缺失'),
+        })
+
+    for match in re.finditer(r'\b(?:Figure|Fig\.|图)\s*(\d+)\b', normalized, re.IGNORECASE):
+        ref = match.group(1)
+        if ref in figure_numbers:
+            continue
+        key = ('REF-FIGURE', ref, match.start())
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append({
+            'severity': 'general',
+            'category': '交叉引用',
+            'rule': 'REF-004',
+            'chapter': '',
+            'original_text': match.group(0),
+            'context': get_context(normalized, match.start(), match.end(), 120),
+            'suggestion': f'补充 Figure {ref} 对应标题，或删除该引用。',
+            'description': f'引用原文：{match.group(0)}；引用类型：图；目标对象：Figure {ref}；检查结果：引用缺失。文档中没有对应图标题。',
+            'audit_basis': '图引用应能定位到唯一的图标题。',
+            'confidence': 88,
+            'source': 'rule',
+            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='图', target=f'Figure {ref}', check_result='引用缺失'),
+        })
+
+    for match in re.finditer(r'\bStep\s+(\d+)\b', normalized, re.IGNORECASE):
+        ref = int(match.group(1))
+        if ref in step_numbers:
+            continue
+        key = ('REF-002', ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append({
+            'severity': 'general',
+            'category': '交叉引用',
+            'rule': 'REF-002',
+            'chapter': '',
+            'original_text': match.group(0),
+            'context': get_context(normalized, match.start(), match.end(), 120),
+            'suggestion': f'补充 Step {ref}，或将引用改为有效步骤编号。',
+            'description': f'引用原文：{match.group(0)}；引用类型：步骤；目标对象：Step {ref}；检查结果：引用缺失。文档中没有对应步骤。',
+            'audit_basis': '步骤引用应和实际流程编号保持一致。',
+            'confidence': 88,
+            'source': 'rule',
+            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='步骤', target=f'Step {ref}', check_result='引用缺失'),
+        })
+
+    return issues
 
 
 def _export_review_docx(review, document, issues):
@@ -967,8 +1732,20 @@ def _run_english_heuristic_audit(content, file_type=None):
     def add_issue(match, rule, category, suggestion, description, audit_basis, severity="general"):
         add_issue_by_span(match.start(), match.end(), match.group(0), rule, category, suggestion, description, audit_basis, severity)
 
+    def looks_like_table_context(context):
+        snippet = str(context or '')
+        line = max(snippet.splitlines(), key=len, default=snippet)
+        compact = re.sub(r'\s+', ' ', line).strip()
+        if '\t' in snippet or '|' in snippet:
+            return True
+        if re.search(r'\b(?:Table|Figure)\s+\d+\b', compact, re.IGNORECASE):
+            return True
+        if len(re.findall(r'\d+(?:\.\d+)?\s*[A-Za-z%°μ/]+', compact)) >= 2:
+            return True
+        return bool(re.search(r'\s{3,}', line))
+
     for match in re.finditer(r"https?://en\.mgi-tech\.com", content, re.IGNORECASE):
-        add_issue(match, "HR001", "合规", "建议替换为 https://global-mgitech.com", "海外英文文档中官网地址应使用海外官网域名。", "公司特定规范 - 海外官网地址", "serious")
+        add_issue(match, "HR001", "合规", "建议替换为 https://global-mgitech.com", "海外英文文档中官网地址应使用海外官网域名。", "公司特定规范 - 海外官网地址", "fatal")
 
     for match in re.finditer(r"\bdesk\s+top\b", content, re.IGNORECASE):
         add_issue(match, "HR002", "英文规范", "建议改为 desktop", "desktop 在该语境中应使用合成词写法。", "英文技术文档写作规范 - 拼写")
@@ -985,7 +1762,9 @@ def _run_english_heuristic_audit(content, file_type=None):
         if not unit_match:
             continue
         suggestion = f"建议改为 {unit_match.group(1)} {unit_match.group(2)}"
-        add_issue(match, "HR004", "单位", suggestion, "数字与单位之间应保留空格。", "英文技术文档写作规范 - 单位格式", "serious")
+        context = get_context(content, match.start(), match.end(), 120)
+        severity = 'general' if looks_like_table_context(context) else 'serious'
+        add_issue(match, "HR004", "单位", suggestion, "数字与单位之间应保留空格。", "英文技术文档写作规范 - 单位格式", severity)
 
     for match in re.finditer(r"\bWeLL\b", content):
         add_issue(match, "HR005", "格式", "建议统一为 Well", "单词内部大小写形式不一致。", "技术文档常见错误清单 - 格式一致性", "serious")
@@ -1028,9 +1807,11 @@ def _run_english_heuristic_audit(content, file_type=None):
         add_issue(match, "HR011", "格式", f"建议改为 {match.group(0).replace('x', ' × ').replace('X', ' × ')}", "乘号建议使用 × 并保留两侧空格。", "英文技术文档写作规范 - 数学符号")
 
     for match in re.finditer(r"\b(?:www\.)?mgitech\.cn\b", content, re.IGNORECASE):
-        add_issue(match, "HR012", "合规", "建议改为 global-mgitech.com", "海外英文文档中官网域名应统一。", "公司特定规范 - 海外官网地址", "serious")
+        add_issue(match, "HR012", "合规", "建议改为 global-mgitech.com", "海外英文文档中官网域名应统一。", "公司特定规范 - 海外官网地址", "fatal")
 
-    for match in re.finditer(r"\b(?:e-?mail|Email)\s*:", content):
+    for match in re.finditer(r"\b(?:e-?mail)\s*:", content, re.IGNORECASE):
+        if match.group(0).strip() == 'Email:':
+            continue
         add_issue(match, "HR013", "格式", "建议统一为 Email:", "联系方式标签建议统一大小写。", "英文技术文档写作规范 - 标签格式")
 
     for match in re.finditer(r"\b(?:web site|website address)\b", content, re.IGNORECASE):
@@ -1094,18 +1875,47 @@ def get_knowledge_basis(db: Session):
     try:
         tree = get_folder_tree(db, None)
         for folder in tree:
-            folder_obj = get_folder(db, folder.id)
+            folder_id = folder.get('id') if isinstance(folder, dict) else getattr(folder, 'id', None)
+            folder_name = folder.get('name') if isinstance(folder, dict) else getattr(folder, 'name', '')
+            if folder_id is None:
+                continue
+            folder_obj = get_folder(db, folder_id)
             if folder_obj:
-                files = get_folder_files(db, folder.id)
+                files = get_folder_files(db, folder_id)
                 for file in files:
                     basis_list.append({
                         "title": file.name,
-                        "folder": folder.name,
-                        "path": f"{folder.name}/{file.name}"
+                        "folder": folder_name,
+                        "path": f"{folder_name}/{file.name}"
                     })
     except Exception as e:
         print(f"获取知识库审核依据失败: {e}")
     return basis_list
+
+
+def _is_footer_line(line):
+    stripped = str(line or '').strip()
+    if not stripped:
+        return False
+    return bool(re.search(r'\b(doc\.?\s*no\.?|page\s*\d+|copyright|jb-[a-z0-9\-]+)\b', stripped, re.IGNORECASE))
+
+
+def _is_step_line(line):
+    return bool(re.match(r'^(?:step\s+)?\d+[\.)、：:]\s+', str(line or '').strip(), re.IGNORECASE))
+
+
+def _is_table_line(line):
+    stripped = str(line or '').strip()
+    return bool(' | ' in stripped or re.match(r'^(?:Table|表)\s*\d+', stripped, re.IGNORECASE))
+
+
+def _is_heading_line(line):
+    stripped = str(line or '').strip()
+    if not stripped or _is_footer_line(stripped) or _is_step_line(stripped) or _is_table_line(stripped):
+        return False
+    if re.match(r'^(?:Chapter|Section)\s+\d+[\s:.-]+', stripped, re.IGNORECASE):
+        return True
+    return bool(re.match(r'^\d+(?:\.\d+)*(?:[\).])?\s+[A-Z][^\n]{2,}$', stripped))
 
 
 def extract_chapter(content, position):
@@ -1114,12 +1924,12 @@ def extract_chapter(content, position):
         line = lines[i].strip()
         if not line:
             continue
+        if _is_footer_line(line) or _is_step_line(line) or _is_table_line(line):
+            continue
         if line.startswith('#'):
             return line.lstrip('#').strip()
-        if re.match(r'^\d+(?:\.\d+)*(?:[\)\.])?\s*[A-Z][^\n]{2,}$', line):
+        if _is_heading_line(line):
             return re.sub(r'^(\d+(?:\.\d+)*)([A-Z])', r'\1 \2', line)
-        if re.match(r'^(?:Chapter|Section)\s+\d+[\s:.-]+', line, re.IGNORECASE):
-            return line
     return ""
 
 
@@ -1473,6 +2283,29 @@ def dedupe_issues_by_original(issues):
     return list(seen.values())
 
 
+def _run_reference_and_term_consistency_audit(content):
+    issues = []
+
+    try:
+        issues.extend(ReferenceIntegrityRule().check(content))
+    except Exception as e:
+        print(f"[审核] 引用完整性规则执行失败: {e}")
+
+    try:
+        for issue in TermConsistencyRule().check(content):
+            start, end = _parse_issue_position(issue.get('position', ''))
+            issue.setdefault('chapter', extract_chapter(content, start))
+            issue.setdefault('context', get_context(content, start, end or start + len(issue.get('original_text', '')), 120))
+            normalized = str(issue.get('suggestion', '') or '').strip()
+            if normalized and not normalized.startswith('建议'):
+                issue['suggestion'] = f'建议统一为 {normalized}'
+            issues.append(issue)
+    except Exception as e:
+        print(f"[审核] 术语一致性规则执行失败: {e}")
+
+    return issues
+
+
 def _run_review_background(review_id: int, document_id: int, mode: str):
     """后台执行审核任务（带进度更新）"""
     from app.database import SessionLocal
@@ -1541,6 +2374,34 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                         print(f"[审核] PDF结构规则执行失败: {e}")
 
                 try:
+                    supplemental_issues = _run_reference_and_term_consistency_audit(content)
+                    print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
+                    rule_issues.extend(supplemental_issues)
+                except Exception as e:
+                    print(f"[审核] 引用/术语规则执行失败: {e}")
+
+                try:
+                    logic_issues = _run_logic_integrity_audit(content)
+                    print(f"[审核] 逻辑完整性规则发现问题: {len(logic_issues)}个")
+                    rule_issues.extend(logic_issues)
+                except Exception as e:
+                    print(f"[审核] 逻辑完整性规则执行失败: {e}")
+
+                try:
+                    safety_issues = _run_safety_compliance_audit(content)
+                    print(f"[审核] 安全合规规则发现问题: {len(safety_issues)}个")
+                    rule_issues.extend(safety_issues)
+                except Exception as e:
+                    print(f"[审核] 安全合规规则执行失败: {e}")
+
+                try:
+                    cross_ref_issues = _run_cross_reference_audit(content)
+                    print(f"[审核] 交叉引用规则发现问题: {len(cross_ref_issues)}个")
+                    rule_issues.extend(cross_ref_issues)
+                except Exception as e:
+                    print(f"[审核] 交叉引用规则执行失败: {e}")
+
+                try:
                     long_sentence_issues = _run_long_sentence_audit(content, document.file_type)
                     print(f"[审核] 长句规则发现问题: {len(long_sentence_issues)}个")
                     rule_issues.extend(long_sentence_issues)
@@ -1596,6 +2457,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
 
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
         issues = dedupe_issues_by_original(issues)
+        issues = _sanitize_issue_suggestions(issues)
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
@@ -1747,56 +2609,5 @@ async def generate_report(review_id: int, db: Session = Depends(get_db)):
     issues = get_issues(db, review_id=review_id)
     confirmed_issues = [i for i in issues if i.status in ["confirmed", "converted_to_rule"]]
 
-    summary = _load_review_summary(review.summary)
-
-    html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>审核报告</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .header {{ text-align: center; margin-bottom: 30px; }}
-        .summary {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
-        .summary td {{ border: 1px solid #ddd; padding: 8px; }}
-        .issue {{ border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; }}
-        .fatal {{ border-left: 5px solid #dc3545; }}
-        .serious {{ border-left: 5px solid #fd7e14; }}
-        .general {{ border-left: 5px solid #ffc107; }}
-        .suggestion {{ border-left: 5px solid #17a2b8; }}
-    </style>
-</head>
-<body>
-    <div class="header"><h1>智能技术文档审核报告</h1></div>
-    <h2>审核概览</h2>
-    <table class="summary">
-        <tr><td>审核总数</td><td>{summary.get('total', 0)}</td></tr>
-        <tr><td>致命问题</td><td>{summary.get('fatal', 0)}</td></tr>
-        <tr><td>严重问题</td><td>{summary.get('serious', 0)}</td></tr>
-        <tr><td>一般问题</td><td>{summary.get('general', 0)}</td></tr>
-        <tr><td>建议</td><td>{summary.get('suggestion', 0)}</td></tr>
-    </table>
-    <h2>问题详情</h2>
-"""
-
-    for issue in confirmed_issues:
-        html_content += f"""
-    <div class="issue {issue.severity}">
-        <h3>问题 #{issue.id}</h3>
-        <p><strong>严重级别:</strong> {issue.severity}</p>
-        <p><strong>分类:</strong> {issue.category}</p>
-        <p><strong>规则:</strong> {issue.rule}</p>
-        <p><strong>章节:</strong> {issue.chapter}</p>
-        <p><strong>原文:</strong> {issue.original_text}</p>
-        <p><strong>上下文:</strong> {issue.context}</p>
-        <p><strong>修改建议:</strong> {issue.suggestion}</p>
-        <p><strong>问题描述:</strong> {issue.description}</p>
-        <p><strong>审核依据:</strong> {issue.audit_basis}</p>
-        <p><strong>置信度:</strong> {issue.confidence}%</p>
-        <p><strong>来源:</strong> {issue.source}</p>
-    </div>
-"""
-
-    html_content += "</body></html>"
-
+    html_content = _generate_review_html_content(review, get_document(db, document_id=review.document_id), confirmed_issues)
     return {"content": html_content, "format": "html"}
