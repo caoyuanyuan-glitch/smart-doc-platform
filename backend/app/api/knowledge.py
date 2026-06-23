@@ -1,3 +1,4 @@
+from datetime import timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
@@ -16,11 +17,38 @@ from app.api.auth import get_current_user, get_default_user
 router = APIRouter()
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _to_beijing_iso(dt):
+    if not dt:
+        return None
+    return dt.replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ).isoformat(timespec="seconds")
+
+
+def _serialize_tree_nodes(nodes):
+    result = []
+    for node in nodes:
+        result.append({
+            **node,
+            "created_at": _to_beijing_iso(node.get("created_at")),
+            "updated_at": _to_beijing_iso(node.get("updated_at")),
+            "children": _serialize_tree_nodes(node.get("children") or []),
+            "files": [
+                {
+                    **file,
+                    "created_at": _to_beijing_iso(file.get("created_at")),
+                    "updated_at": _to_beijing_iso(file.get("updated_at"))
+                }
+                for file in (node.get("files") or [])
+            ]
+        })
+    return result
 
 @router.get("/tree")
 async def get_knowledge_tree(db: Session = Depends(get_db)):
     tree = get_folder_tree(db, None)
-    return tree
+    return _serialize_tree_nodes(tree)
 
 @router.get("/folders/{folder_id}")
 async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
@@ -35,10 +63,25 @@ async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
             "id": folder.id,
             "name": folder.name,
             "parent_id": folder.parent_id,
-            "created_at": folder.created_at.isoformat() if folder.created_at else None
+            "created_at": _to_beijing_iso(folder.created_at),
+            "updated_at": _to_beijing_iso(folder.updated_at)
         },
-        "subfolders": subfolders,
-        "files": files
+        "subfolders": [
+            {
+                **item,
+                "created_at": _to_beijing_iso(item.get("created_at")),
+                "updated_at": _to_beijing_iso(item.get("updated_at"))
+            }
+            for item in subfolders
+        ],
+        "files": [
+            {
+                **item,
+                "created_at": _to_beijing_iso(item.get("created_at")),
+                "updated_at": _to_beijing_iso(item.get("updated_at"))
+            }
+            for item in files
+        ]
     }
 
 @router.post("/folders", response_model=dict)
@@ -147,7 +190,8 @@ async def get_file_info(file_id: int, db: Session = Depends(get_db)):
         "file_size": file.file_size,
         "file_type": file.file_type,
         "folder_id": file.folder_id,
-        "created_at": file.created_at.isoformat() if file.created_at else None
+        "created_at": _to_beijing_iso(file.created_at),
+        "updated_at": _to_beijing_iso(file.updated_at)
     }
 
 @router.get("/files/{file_id}/download")
