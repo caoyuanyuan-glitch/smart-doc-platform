@@ -125,9 +125,29 @@
           <el-table-column prop="created_at" label="开始时间" width="160" />
           <el-table-column label="操作" width="360" fixed="right">
             <template #default="scope">
-              <el-button size="small" type="primary" @click="openIssueDialog(scope.row)">查看问题</el-button>
-              <el-button size="small" :disabled="!taskIssues[scope.row.id] || taskIssues[scope.row.id].length === 0" @click="batchConfirmAll(scope.row.id)">一键确认</el-button>
-              <el-button size="small" type="success" @click="downloadReviewResult(scope.row)">{{ resultButtonLabel(scope.row.document_file_type) }}</el-button>
+              <el-button 
+                size="small" 
+                type="primary" 
+                :disabled="scope.row.status !== 'completed'"
+                @click="openIssueDialog(scope.row)"
+              >
+                查看问题
+              </el-button>
+              <el-button 
+                size="small" 
+                :disabled="scope.row.status !== 'completed' || !taskIssues[scope.row.id] || taskIssues[scope.row.id].length === 0" 
+                @click="batchConfirmAll(scope.row.id)"
+              >
+                一键确认
+              </el-button>
+              <el-button 
+                size="small" 
+                type="success" 
+                :disabled="scope.row.status !== 'completed'"
+                @click="downloadReviewResult(scope.row)"
+              >
+                {{ resultButtonLabel(scope.row.document_file_type) }}
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
