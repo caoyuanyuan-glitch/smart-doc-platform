@@ -10,7 +10,6 @@
         <div class="tree-panel">
           <div class="tree-panel-header">
             <span class="tree-panel-label">文件夹结构</span>
-            <span v-if="folderPath" class="tree-panel-path">/ {{ folderPath }}</span>
           </div>
           <div class="tree-toolbar">
             <el-button size="small" @click="toggleAllTree" text>
@@ -32,11 +31,13 @@
               :nodes="folderTree"
               :current-folder-id="currentFolderId"
               :expanded-ids="expandedNodeIds"
+              :active-action="activeTreeAction"
               @toggle="handleToggle"
               @select="handleFolderSelect"
-              @create-sub="showCreateSubFolder"
-              @rename="showRenameFolder"
-              @delete="showDeleteFolder"
+              @create-sub="handleCreateSubFolderAction"
+              @move="handleMoveFolderAction"
+              @rename="handleRenameFolderAction"
+              @delete="handleDeleteFolderAction"
             />
           </div>
         </div>
@@ -49,6 +50,20 @@
           </div>
 
           <template v-else>
+            <div class="files-breadcrumb" aria-label="当前文件夹路径">
+              <router-link class="path-segment" to="/knowledge">全部文件夹</router-link>
+              <template v-for="item in folderPathItems" :key="`files-${item.id}`">
+                <span class="path-separator">/</span>
+                <router-link
+                  class="path-segment"
+                  :to="`/knowledge/${item.id}`"
+                  :class="{ 'is-current': item.id === currentFolderId }"
+                >
+                  {{ item.name }}
+                </router-link>
+              </template>
+            </div>
+
             <!-- 有文件时显示文件列表 -->
             <template v-if="currentFiles.length > 0">
               <div class="files-header">
@@ -96,17 +111,24 @@
                     {{ formatDateTime(row.updated_at || row.created_at) }}
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="280" fixed="right" align="center">
+                <el-table-column label="操作" width="350" fixed="right" align="center">
                   <template #default="{ row }">
-                    <el-button size="small" @click="handlePreviewFile(row)">
+                    <el-button class="table-action-btn" size="small" @click="handlePreviewFile(row)">
                       <el-icon><View /></el-icon>
                       预览
                     </el-button>
-                    <el-button size="small" @click="handleDownloadFile(row)">
+                    <el-button class="table-action-btn" size="small" @click="handleDownloadFile(row)">
                       <el-icon><Download /></el-icon>
                       下载
                     </el-button>
-                    <el-button size="small" type="danger" @click="handleDeleteFile(row)">
+                    <el-button class="table-action-btn" size="small" @click="showMoveFile(row)">
+                      <svg class="inline-move-icon" viewBox="0 0 1024 1024" aria-hidden="true">
+                        <path fill="currentColor" d="M896 301.653333L618.24 64a77.226667 77.226667 0 0 0-14.933333-11.52L597.333333 50.346667h-2.986666A72.533333 72.533333 0 0 0 567.466667 42.666667H178.773333A72.106667 72.106667 0 0 0 106.666667 114.773333v794.453334A72.106667 72.106667 0 0 0 178.773333 981.333333h298.666667a35.84 35.84 0 0 0 0-71.68h-298.666667V114.773333h354.56v197.12A72.106667 72.106667 0 0 0 605.44 384h240.213333v164.693333a35.84 35.84 0 0 0 71.68 0v-196.266666a72.106667 72.106667 0 0 0-21.333333-50.773334z m-290.986667 10.24V153.173333l199.68 158.72z" />
+                        <path fill="currentColor" d="M906.666667 760.32l-98.986667-98.986667a35.84 35.84 0 0 0-50.773333 50.773334l37.973333 37.973333h-384v-85.333333a35.84 35.84 0 0 0-71.68 0v122.026666a35.84 35.84 0 0 0 35.84 35.84h420.266667l-37.973334 37.973334a35.84 35.84 0 0 0 50.773334 50.773333L906.666667 810.666667a35.84 35.84 0 0 0 0-50.346667z" />
+                      </svg>
+                      移动
+                    </el-button>
+                    <el-button class="table-action-btn" size="small" type="danger" @click="handleDeleteFile(row)">
                       <el-icon><Delete /></el-icon>
                       删除
                     </el-button>
@@ -209,20 +231,57 @@
     </el-dialog>
 
     <!-- 新建文件夹对话框 -->
-    <el-dialog v-model="createFolderVisible" :title="createFolderParentId ? '新建子文件夹' : '新建根文件夹'" width="400px">
+    <el-dialog v-model="createFolderVisible" :title="createFolderParentId ? '新建子文件夹' : '新建根文件夹'" width="400px" @closed="closeCreateFolderDialog">
       <el-input v-model="createFolderName" placeholder="请输入文件夹名称" @keyup.enter="confirmCreateFolder" />
       <template #footer>
-        <el-button @click="createFolderVisible = false">取消</el-button>
+        <el-button @click="closeCreateFolderDialog">取消</el-button>
         <el-button type="primary" @click="confirmCreateFolder">确定</el-button>
       </template>
     </el-dialog>
 
     <!-- 重命名对话框 -->
-    <el-dialog v-model="renameFolderVisible" title="重命名文件夹" width="400px">
+    <el-dialog v-model="renameFolderVisible" title="重命名文件夹" width="400px" @closed="closeRenameFolderDialog">
       <el-input v-model="renameFolderName" placeholder="请输入新名称" @keyup.enter="confirmRenameFolder" />
       <template #footer>
-        <el-button @click="renameFolderVisible = false">取消</el-button>
+        <el-button @click="closeRenameFolderDialog">取消</el-button>
         <el-button type="primary" @click="confirmRenameFolder">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="moveDialogVisible" :title="moveDialogTitle" width="520px">
+      <div class="move-dialog-body">
+        <div class="move-path-line">
+          <span class="move-path-label">当前路径</span>
+          <span class="move-path-value">{{ moveSourcePathLabel }}</span>
+        </div>
+        <div class="move-path-line">
+          <span class="move-path-label">目标路径</span>
+          <span class="move-path-value">{{ selectedMoveTargetLabel || '请选择目标路径' }}</span>
+        </div>
+        <div v-if="moveTargetType === 'folder'" class="move-root-option">
+          <el-button
+            size="small"
+            :type="moveDestinationId === null ? 'primary' : 'default'"
+            @click="moveDestinationId = null"
+          >
+            移动到根目录
+          </el-button>
+        </div>
+        <el-tree
+          class="move-tree"
+          :data="moveTreeData"
+          node-key="id"
+          default-expand-all
+          highlight-current
+          :expand-on-click-node="false"
+          :current-node-key="moveDestinationId"
+          :props="{ label: 'name', children: 'children' }"
+          @node-click="handleMoveTargetSelect"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="closeMoveDialog">取消</el-button>
+        <el-button type="primary" :disabled="isMoveConfirmDisabled" @click="confirmMoveTarget">确定</el-button>
       </template>
     </el-dialog>
   </div>
@@ -246,6 +305,7 @@ const router = useRouter()
 const folderTree = ref([])
 const currentFolderId = ref(null)
 const expandedNodeIds = ref(new Set())
+const activeTreeAction = ref({ folderId: null, type: '' })
 
 const isAllExpanded = computed(() => {
   const collectAllIds = (nodes) => {
@@ -263,21 +323,69 @@ const isAllExpanded = computed(() => {
 })
 
 // 当前文件夹路径
-const folderPath = computed(() => {
-  if (!currentFolderId.value) return ''
-  const path = findPath(folderTree.value, currentFolderId.value)
-  return path ? path.join(' / ') : ''
+const folderPathItems = computed(() => {
+  if (!currentFolderId.value) return []
+  return findPath(folderTree.value, currentFolderId.value) || []
 })
 
 function findPath(nodes, targetId, path = []) {
   for (const node of nodes) {
-    if (node.id === targetId) return [...path, node.name]
+    const nextPath = [...path, { id: node.id, name: node.name }]
+    if (node.id === targetId) return nextPath
     if (node.children && node.children.length > 0) {
-      const found = findPath(node.children, targetId, [...path, node.name])
+      const found = findPath(node.children, targetId, nextPath)
       if (found) return found
     }
   }
   return null
+}
+
+function getFolderPathLabel(folderId) {
+  const path = findPath(folderTree.value, folderId) || []
+  return path.map(item => item.name).join(' / ')
+}
+
+function locateFolderNode(nodes, folderId) {
+  for (const node of nodes) {
+    if (node.id === folderId) return node
+    if (node.children?.length) {
+      const found = locateFolderNode(node.children, folderId)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+function collectDescendantIds(folderId) {
+  const descendants = new Set()
+  const sourceNode = locateFolderNode(folderTree.value, folderId)
+
+  const walk = (nodes) => {
+    nodes.forEach(node => {
+      descendants.add(node.id)
+      if (node.children?.length) {
+        walk(node.children)
+      }
+    })
+  }
+
+  if (sourceNode?.children?.length) {
+    walk(sourceNode.children)
+  }
+  return descendants
+}
+
+function buildMoveTree(nodes, excludedIds) {
+  return nodes.reduce((result, node) => {
+    if (excludedIds.has(node.id)) {
+      return result
+    }
+    result.push({
+      ...node,
+      children: buildMoveTree(node.children || [], excludedIds)
+    })
+    return result
+  }, [])
 }
 
 const createFolderVisible = ref(false)
@@ -287,6 +395,12 @@ const createFolderParentId = ref(null)
 const renameFolderVisible = ref(false)
 const renameFolderName = ref('')
 const renameFolderId = ref(null)
+
+const moveDialogVisible = ref(false)
+const moveTargetType = ref('file')
+const moveFolderItem = ref(null)
+const moveFileItem = ref(null)
+const moveDestinationId = ref(null)
 
 // -------- 文件列表 --------
 const currentFiles = ref([])
@@ -303,6 +417,44 @@ const previewFileUrl = ref('')
 const folderId = computed(() => {
   const id = route.params.id
   return id ? parseInt(id) : null
+})
+
+const moveDialogTitle = computed(() => moveTargetType.value === 'folder' ? '移动文件夹' : '移动文件')
+
+const moveSourcePathLabel = computed(() => {
+  if (moveTargetType.value === 'folder' && moveFolderItem.value) {
+    return getFolderPathLabel(moveFolderItem.value.id)
+  }
+  if (moveTargetType.value === 'file' && moveFileItem.value?.folder_id) {
+    return `${getFolderPathLabel(moveFileItem.value.folder_id)} / ${moveFileItem.value.name}`
+  }
+  return moveFileItem.value?.name || ''
+})
+
+const selectedMoveTargetLabel = computed(() => {
+  if (moveDestinationId.value === null) {
+    return moveTargetType.value === 'folder' ? '全部文件夹' : ''
+  }
+  return getFolderPathLabel(moveDestinationId.value)
+})
+
+const moveTreeData = computed(() => {
+  if (moveTargetType.value !== 'folder' || !moveFolderItem.value) {
+    return folderTree.value
+  }
+  const excludedIds = collectDescendantIds(moveFolderItem.value.id)
+  excludedIds.add(moveFolderItem.value.id)
+  return buildMoveTree(folderTree.value, excludedIds)
+})
+
+const isMoveConfirmDisabled = computed(() => {
+  if (moveTargetType.value === 'folder' && moveFolderItem.value) {
+    return moveDestinationId.value === (moveFolderItem.value.parent_id ?? null)
+  }
+  if (moveTargetType.value === 'file' && moveFileItem.value) {
+    return moveDestinationId.value === moveFileItem.value.folder_id || moveDestinationId.value === null
+  }
+  return true
 })
 
 // -------- 树操作 --------
@@ -324,7 +476,16 @@ function handleToggle(id) {
 }
 
 function handleFolderSelect(folder) {
+  activeTreeAction.value = { folderId: null, type: '' }
   router.push({ path: `/knowledge/${folder.id}` })
+}
+
+function setActiveTreeAction(folderId, type) {
+  activeTreeAction.value = { folderId, type }
+}
+
+function clearActiveTreeAction() {
+  activeTreeAction.value = { folderId: null, type: '' }
 }
 
 function toggleAllTree() {
@@ -344,6 +505,7 @@ function toggleAllTree() {
 }
 
 function showCreateRootFolder() {
+  clearActiveTreeAction()
   createFolderParentId.value = null
   createFolderName.value = ''
   createFolderVisible.value = true
@@ -355,6 +517,16 @@ function showCreateSubFolder(parentId) {
   createFolderVisible.value = true
 }
 
+function handleCreateSubFolderAction(parentId) {
+  setActiveTreeAction(parentId, 'create-sub')
+  showCreateSubFolder(parentId)
+}
+
+function closeCreateFolderDialog() {
+  createFolderVisible.value = false
+  clearActiveTreeAction()
+}
+
 async function confirmCreateFolder() {
   if (!createFolderName.value.trim()) {
     ElMessage.warning('请输入文件夹名称')
@@ -363,7 +535,7 @@ async function confirmCreateFolder() {
   try {
     await knowledgeAPI.createFolder({ name: createFolderName.value.trim(), parent_id: createFolderParentId.value })
     ElMessage.success('文件夹创建成功')
-    createFolderVisible.value = false
+    closeCreateFolderDialog()
     await loadFolderTree()
     if (createFolderParentId.value) {
       expandedNodeIds.value.add(createFolderParentId.value)
@@ -379,6 +551,74 @@ function showRenameFolder(folder) {
   renameFolderVisible.value = true
 }
 
+function handleRenameFolderAction(folder) {
+  setActiveTreeAction(folder.id, 'rename')
+  showRenameFolder(folder)
+}
+
+function closeRenameFolderDialog() {
+  renameFolderVisible.value = false
+  clearActiveTreeAction()
+}
+
+function showMoveFolder(folder) {
+  moveTargetType.value = 'folder'
+  moveFolderItem.value = folder
+  moveFileItem.value = null
+  moveDestinationId.value = folder.parent_id ?? null
+  moveDialogVisible.value = true
+}
+
+function handleMoveFolderAction(folder) {
+  setActiveTreeAction(folder.id, 'move')
+  showMoveFolder(folder)
+}
+
+function showMoveFile(file) {
+  moveTargetType.value = 'file'
+  moveFileItem.value = file
+  moveFolderItem.value = null
+  moveDestinationId.value = file.folder_id
+  moveDialogVisible.value = true
+}
+
+function handleMoveTargetSelect(node) {
+  moveDestinationId.value = node.id
+}
+
+function closeMoveDialog() {
+  moveDialogVisible.value = false
+  moveTargetType.value = 'file'
+  moveFolderItem.value = null
+  moveFileItem.value = null
+  moveDestinationId.value = null
+  clearActiveTreeAction()
+}
+
+async function confirmMoveTarget() {
+  if (isMoveConfirmDisabled.value) {
+    return
+  }
+
+  try {
+    if (moveTargetType.value === 'folder' && moveFolderItem.value) {
+      await knowledgeAPI.moveFolder(moveFolderItem.value.id, { parent_id: moveDestinationId.value })
+      ElMessage.success('文件夹移动完成')
+    } else if (moveTargetType.value === 'file' && moveFileItem.value) {
+      await knowledgeAPI.moveFile(moveFileItem.value.id, { folder_id: moveDestinationId.value })
+      ElMessage.success('文件移动完成')
+    }
+
+    closeMoveDialog()
+    await loadFolderTree()
+    if (folderId.value) {
+      await loadFolderContent(folderId.value)
+    }
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '移动失败')
+  }
+}
+
 async function confirmRenameFolder() {
   if (!renameFolderName.value.trim()) {
     ElMessage.warning('请输入文件夹名称')
@@ -387,11 +627,16 @@ async function confirmRenameFolder() {
   try {
     await knowledgeAPI.renameFolder(renameFolderId.value, { name: renameFolderName.value.trim() })
     ElMessage.success('重命名成功')
-    renameFolderVisible.value = false
+    closeRenameFolderDialog()
     await loadFolderTree()
   } catch (e) {
     ElMessage.error('重命名失败')
   }
+}
+
+async function handleDeleteFolderAction(folder) {
+  setActiveTreeAction(folder.id, 'delete')
+  await showDeleteFolder(folder)
 }
 
 async function showDeleteFolder(folder) {
@@ -416,6 +661,8 @@ async function showDeleteFolder(folder) {
     if (e !== 'cancel') {
       ElMessage.error('删除失败')
     }
+  } finally {
+    clearActiveTreeAction()
   }
 }
 
@@ -616,14 +863,46 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.tree-panel-path {
+.files-breadcrumb {
+  display: flex;
+  align-items: center;
+  padding: 14px 20px 0;
+  min-height: 24px;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: 13px;
   color: #6b7280;
+  flex-shrink: 0;
+}
+
+.path-separator {
+  flex-shrink: 0;
+  margin: 0 4px;
+}
+
+.path-segment {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
   min-width: 0;
+  pointer-events: auto;
+}
+
+.path-segment:hover {
+  color: #1d4ed8;
+  text-decoration: underline;
+}
+
+.path-segment.is-current {
+  color: #1f2937;
+  font-weight: 600;
 }
 
 .tree-toolbar {
@@ -708,6 +987,23 @@ onMounted(() => {
   font-weight: 700;
 }
 
+.files-table :deep(.table-action-btn > span) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.files-table :deep(.table-action-btn .el-icon) {
+  margin-right: 0;
+}
+
+.inline-move-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  flex-shrink: 0;
+}
+
 /* 子文件夹列表 */
 .subfolders-section {
   padding: 8px 20px 12px;
@@ -747,6 +1043,42 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #1f2937;
+  flex: 1;
+}
+
+.move-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.move-path-line {
+  display: flex;
+  gap: 10px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.move-path-label {
+  color: #6b7280;
+  flex-shrink: 0;
+}
+
+.move-path-value {
+  color: #1f2937;
+  word-break: break-all;
+}
+
+.move-root-option {
+  padding-top: 4px;
+}
+
+.move-tree {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px;
+  max-height: 320px;
+  overflow: auto;
 }
 
 /* 仅子文件夹列表 */

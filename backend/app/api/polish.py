@@ -502,47 +502,6 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     return result
 
 
-def _ensure_platform_feedback_sentence_file(db: Session, user_id: int) -> KnowledgeFile:
-    """确保平台反馈句式清单存在于知识库中。"""
-    folder_id = SENTENCE_FEEDBACK_FOLDER_IDS[0]
-    knowledge_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
-    if not os.path.exists(knowledge_dir):
-        os.makedirs(knowledge_dir)
-
-    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_FILENAME)
-    initial_content = "# 平台反馈的句式清单\n\n## 用户反馈修正\n\n"
-
-    feedback_file = db.query(KnowledgeFile).filter(
-        KnowledgeFile.folder_id == folder_id,
-        KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME,
-        KnowledgeFile.file_path == file_path
-    ).first()
-
-    if feedback_file:
-        if not os.path.exists(feedback_file.file_path):
-            with open(feedback_file.file_path, 'w', encoding='utf-8') as f:
-                f.write(initial_content)
-        return feedback_file
-
-    if not os.path.exists(file_path):
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(initial_content)
-
-    feedback_file = KnowledgeFile(
-        folder_id=folder_id,
-        name=PLATFORM_FEEDBACK_FILENAME,
-        filename=PLATFORM_FEEDBACK_FILENAME,
-        file_path=file_path,
-        file_size=os.path.getsize(file_path),
-        file_type='md',
-        created_by=user_id
-    )
-    db.add(feedback_file)
-    db.commit()
-    db.refresh(feedback_file)
-    return feedback_file
-
-
 def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> KnowledgeFile:
     """确保平台反馈术语对照表存在于知识库中。"""
     folder_id = TERMINOLOGY_FEEDBACK_FOLDER_IDS[0]
@@ -586,9 +545,10 @@ def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> Kno
 
 
 def _get_platform_feedback_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
-    """返回平台反馈句式清单固定主文件。"""
-    primary_file = _ensure_platform_feedback_sentence_file(db, user_id)
-    return [primary_file] if primary_file else []
+    """返回已有的平台反馈句式清单文件，不执行自动创建。"""
+    return db.query(KnowledgeFile).filter(
+        KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME
+    ).order_by(KnowledgeFile.id.desc()).all()
 
 
 def _get_platform_feedback_terminology_targets(db: Session, user_id: int) -> list[KnowledgeFile]:

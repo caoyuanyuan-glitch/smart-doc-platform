@@ -269,6 +269,7 @@ export const knowledgeAPI = {
   getFolderContent: (folderId) => instance.get(`/knowledge/folders/${folderId}`),
   createFolder: (folder) => instance.post('/knowledge/folders', folder),
   renameFolder: (folderId, data) => instance.put(`/knowledge/folders/${folderId}`, data),
+  moveFolder: (folderId, data) => instance.put(`/knowledge/folders/${folderId}/move`, data),
   deleteFolder: (folderId) => instance.delete(`/knowledge/folders/${folderId}`),
   uploadFile: (folderId, file) => {
     const formData = new FormData()
@@ -294,5 +295,6 @@ export const knowledgeAPI = {
     })
   },
   getFile: (fileId) => instance.get(`/knowledge/files/${fileId}`),
+  moveFile: (fileId, data) => instance.put(`/knowledge/files/${fileId}/move`, data),
   deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`)
 }
