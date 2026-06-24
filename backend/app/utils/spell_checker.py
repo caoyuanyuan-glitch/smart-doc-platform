@@ -93,11 +93,16 @@ SPELLCHECK_WHITELIST = {
         'hamilton', 'eppendorf', 'axygen', 'greiner',
         'dnbseq', 'mgisp', 'dnv', 'app-d', 'stereomics', 'dipseq',
         'dnase', 'rnase', 'oligodt', 'qubit', 'pcr',
+        'dhs', 'bio', 'one', 'mgi', 'sto', 'sscir', 'dsdna',
+        'buffer', 'greiner', 'hamilton', 'mgitech', 'life', 'science',
+        'te',
     },
-    'prefix': {'os-', 'app-', 't20-', 'mgisp-'},
+    'prefix': {'os-', 'app-', 't20-', 'mgisp-', 'dnbseq-'},
     'pattern': [
         (r'^[A-Z]{1,3}-\d{3}-\d{6}-\d{2}$', '产品编号'),
         (r'^\d+\.\d+$', '版本号'),
+        (r'^[A-Za-z]+-[A-Za-z]+-V\d+(?:\.\d+)*$', '软件版本型号'),
+        (r'^[A-Z]{2,}\d*(?:-[A-Za-z0-9]+)+$', '产品型号'),
     ],
 }
 
