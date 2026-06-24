@@ -54,13 +54,10 @@ export const userAPI = {
 }
 
 export const documentAPI = {
-  upload: (file, config = {}) => {
+  upload: (file) => {
     const formData = new FormData()
     formData.append('file', file)
-    return instance.post('/documents/upload/', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      ...config
-    })
+    return instance.post('/documents/upload/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   list: () => instance.get('/documents/'),
   get: (id) => instance.get(`/documents/${id}`),
@@ -76,8 +73,7 @@ export const reviewAPI = {
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),
-  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' }),
-  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' })
+  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' })
 }
 
 export const compareAPI = {
@@ -183,14 +179,7 @@ export const polishAPI = {
       terminology_file_id: terminologyFileId || null,
       sentence_file_id: sentenceFileId || null
     }),
-  getFeedbackStats: () => instance.get('/polish/feedback/stats'),
-  submitDocumentFeedback: (documentId, sourceFilename, items) =>
-    instance.post('/polish/feedback/document', {
-      document_id: documentId || null,
-      source_filename: sourceFilename || '',
-      items
-    }),
-  getDocumentFeedbackStats: () => instance.get('/polish/feedback/document-stats')
+  getFeedbackStats: () => instance.get('/polish/feedback/stats')
 }
 
 export const qaAPI = {
@@ -276,6 +265,7 @@ export const translationAPI = {
     return instance.get('/translation/memory', { params })
   },
   addMemory: (data) => instance.post('/translation/memory', data),
+  writeMemoryFileEntry: (data) => instance.post('/translation/memory/file-entry', data),
   deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
   getDocs: (skip = 0, limit = 100) => instance.get('/translation/docs', { params: { skip, limit } }),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),

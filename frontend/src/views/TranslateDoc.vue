@@ -2,7 +2,7 @@
   <div class="doc-translate-container">
     <div class="page-header">
       <h2 class="page-title">文档翻译</h2>
-      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，记忆库配置可从知识库资源库调用</p>
+      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、XLF 文档</p>
     </div>
 
     <div class="content-grid">
@@ -90,12 +90,13 @@
               :auto-upload="false"
               ref="fileUploadRef"
               :on-change="onFileChange"
-              accept=".zip,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.dita,.xlf"
+              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
                 <p class="upload-title">将文件拖到此处，或点击上传</p>
-                <p class="upload-hint">支持 DITA ZIP、Word、Excel、PPT、PDF、Markdown 格式</p>
+                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、XLF 格式</p>
+                <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
             <el-button class="upload-submit-btn" type="primary" :loading="translating" @click="submitFileUpload">
@@ -106,13 +107,14 @@
 
           <div v-if="docSource === 'reviewed'" class="reviewed-area">
             <div v-if="reviewedDocsLoading" class="loading-hint">加载已审核文档列表...</div>
-            <div v-else-if="reviewedDocs.length === 0" class="empty-hint">暂无已审核完成的文档</div>
+            <div v-else-if="reviewedDocs.length === 0" class="empty-hint">暂无可翻译的已审核文档</div>
             <el-table v-else :data="reviewedDocs" highlight-current-row
               :row-class-name="tableRowClassName" max-height="320" @row-click="selectReviewedDocRow">
               <el-table-column prop="filename" label="文档名称" min-width="180" />
               <el-table-column prop="file_type" label="类型" width="80" />
               <el-table-column prop="preview" label="预览" min-width="200" show-overflow-tooltip />
             </el-table>
+            <div v-if="reviewedDocs.length > 0" class="reviewed-doc-hint">已自动排除当前不支持翻译的格式。</div>
             <div v-if="selectedReviewedDoc" class="selected-doc-hint">
               已选择: {{ selectedReviewedDoc.filename }}
               <el-button type="primary" size="small" :loading="translating" @click="translateReviewedDoc" style="margin-left: 12px">
@@ -191,6 +193,7 @@ const reviewedDocs = ref([])
 const reviewedDocsLoading = ref(false)
 const selectedReviewedDoc = ref(null)
 const selectedReviewedRow = ref(null)
+const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 
 onMounted(async () => {
   loadReviewedDocs()
@@ -230,6 +233,10 @@ function tableRowClassName({ row }) {
 }
 
 function selectReviewedDocRow(row) {
+  if (unsupportedReviewedTypes.has(String(row?.file_type || '').toLowerCase())) {
+    ElMessage.warning('当前文档格式暂不支持翻译')
+    return
+  }
   selectedReviewedDoc.value = row
   selectedReviewedRow.value = row
 }
@@ -238,7 +245,7 @@ async function loadReviewedDocs() {
   reviewedDocsLoading.value = true
   try {
     const res = await translationAPI.getReviewedDocs()
-    reviewedDocs.value = res.data || []
+    reviewedDocs.value = (res.data || []).filter(doc => !unsupportedReviewedTypes.has(String(doc.file_type || '').toLowerCase()))
   } catch (e) {
     ElMessage.error('加载已审核文档失败')
   } finally {
@@ -248,6 +255,10 @@ async function loadReviewedDocs() {
 
 async function translateReviewedDoc() {
   if (!selectedReviewedDoc.value) return
+  if (unsupportedReviewedTypes.has(String(selectedReviewedDoc.value.file_type || '').toLowerCase())) {
+    ElMessage.error('当前文档格式暂不支持翻译')
+    return
+  }
   translating.value = true
   result.value = null
   pollError.value = ''
@@ -281,7 +292,7 @@ function onFileChange(file) {
 
 function beforeFileUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
-  const allowed = ['zip', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'dita', 'xlf']
+  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'xlf']
   if (!allowed.includes(ext)) {
     ElMessage.error(`不支持的文件格式: .${ext}`)
     return false
@@ -474,6 +485,13 @@ function downloadTranslatedFile() {
 .upload-hint {
   font-size: 13px;
   color: #9ca3af;
+}
+
+.upload-tip {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #d97706;
 }
 
 .upload-submit-btn {
