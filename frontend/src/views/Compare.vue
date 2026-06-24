@@ -71,6 +71,7 @@
             <el-tag :type="verdictType" size="small">{{ result.verdict }}</el-tag>
             <el-tag type="info" size="small">差异数：{{ result.total_diffs || 0 }}</el-tag>
             <el-button size="small" type="primary" @click="previewReport">预览报告</el-button>
+            <el-button size="small" @click="openPdfPreview">PDF页码预览</el-button>
             <el-button size="small" @click="exportCompare">导出报告</el-button>
           </div>
         </div>
@@ -83,6 +84,62 @@
           <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
         </div>
       </div>
+
+      <el-dialog
+        v-model="showPdfPreviewDialog"
+        title="PDF页码预览"
+        width="95%"
+        top="3vh"
+        :close-on-click-modal="false"
+        class="pdf-preview-dialog"
+      >
+        <div class="pdf-preview-wrapper">
+          <div class="pdf-preview-pane">
+            <div class="pane-header pane-a">
+              <span>文档A：{{ fileA?.name || '文档A' }}</span>
+            </div>
+            <div class="pane-content">
+              <PdfPreview
+                v-if="pdfUrlA"
+                ref="pdfPreviewARef"
+                :pdf-url="pdfUrlA"
+                :file-name="fileA?.name || 'document_A.pdf'"
+                @page-change="onPageAChange"
+                @loaded="onPdfALoaded"
+              />
+              <el-empty v-else description="暂无PDF预览" />
+            </div>
+          </div>
+          <div class="pdf-preview-divider">
+            <div class="divider-actions">
+              <el-tooltip content="开启后两边同步翻页" placement="top">
+                <el-switch
+                  v-model="syncScroll"
+                  size="small"
+                  active-text="同步"
+                  inactive-text="独立"
+                />
+              </el-tooltip>
+            </div>
+          </div>
+          <div class="pdf-preview-pane">
+            <div class="pane-header pane-b">
+              <span>文档B：{{ fileB?.name || '文档B' }}</span>
+            </div>
+            <div class="pane-content">
+              <PdfPreview
+                v-if="pdfUrlB"
+                ref="pdfPreviewBRef"
+                :pdf-url="pdfUrlB"
+                :file-name="fileB?.name || 'document_B.pdf'"
+                @page-change="onPageBChange"
+                @loaded="onPdfBLoaded"
+              />
+              <el-empty v-else description="暂无PDF预览" />
+            </div>
+          </div>
+        </div>
+      </el-dialog>
     </div>
 
     <div v-if="currentView === 'tasks'">
@@ -111,9 +168,10 @@
               {{ formatTime(scope.row.created_at) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="200">
+          <el-table-column label="操作" width="280">
             <template #default="scope">
               <el-button size="small" @click="viewTask(scope.row.id)">查看</el-button>
+              <el-button size="small" @click="openTaskPdfPreview(scope.row.id)">PDF预览</el-button>
               <el-button size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
               <el-button size="small" type="danger" @click="deleteTask(scope.row.id)">删除</el-button>
             </template>
@@ -151,11 +209,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { compareAPI } from '@/api'
-import { Upload, Search } from '@element-plus/icons-vue'
+import { Upload, Search, View } from '@element-plus/icons-vue'
+import PdfPreview from '@/components/PdfPreview.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -169,6 +228,13 @@ const history = ref([])
 const selectedTask = ref(null)
 const showPreview = ref(false)
 const reportContent = ref('')
+const showPdfPreviewDialog = ref(false)
+const pdfUrlA = ref('')
+const pdfUrlB = ref('')
+const pdfPreviewARef = ref(null)
+const pdfPreviewBRef = ref(null)
+const syncScroll = ref(true)
+const _pageChangingFrom = ref('')
 
 const config = ref({
   threshold: 0.7,
@@ -434,6 +500,59 @@ async function saveConfig() {
     ElMessage.error('保存失败')
   }
 }
+
+function openPdfPreview() {
+  const taskId = result.value?.comparison_id || result.value?.task_id
+  if (!taskId) {
+    ElMessage.warning('无法获取任务ID')
+    return
+  }
+  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+  showPdfPreviewDialog.value = true
+}
+
+function openTaskPdfPreview(taskId) {
+  if (!taskId) {
+    ElMessage.warning('无法获取任务ID')
+    return
+  }
+  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+  showPdfPreviewDialog.value = true
+}
+
+function onPageAChange(page) {
+  if (syncScroll.value && _pageChangingFrom.value !== 'b') {
+    _pageChangingFrom.value = 'a'
+    nextTick(() => {
+      if (pdfPreviewBRef.value?.goToPage) {
+        pdfPreviewBRef.value.goToPage(page)
+      }
+      _pageChangingFrom.value = ''
+    })
+  }
+}
+
+function onPageBChange(page) {
+  if (syncScroll.value && _pageChangingFrom.value !== 'a') {
+    _pageChangingFrom.value = 'b'
+    nextTick(() => {
+      if (pdfPreviewARef.value?.goToPage) {
+        pdfPreviewARef.value.goToPage(page)
+      }
+      _pageChangingFrom.value = ''
+    })
+  }
+}
+
+function onPdfALoaded(info) {
+  console.log('PDF A loaded, total pages:', info.totalPages)
+}
+
+function onPdfBLoaded(info) {
+  console.log('PDF B loaded, total pages:', info.totalPages)
+}
 </script>
 
 <style>
@@ -692,4 +811,66 @@ tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
 .similarity-high { color: #86efac; }
 .similarity-medium { color: #fcd34d; }
 .similarity-low { color: #fca5a5; }
+
+.pdf-preview-dialog :deep(.el-dialog__body) {
+  padding: 0;
+  height: calc(94vh - 60px);
+}
+
+.pdf-preview-wrapper {
+  display: flex;
+  height: 100%;
+  min-height: 600px;
+}
+
+.pdf-preview-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pane-header {
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: 1px solid #e4e7ed;
+  flex-shrink: 0;
+}
+
+.pane-a {
+  background: #fef2f2;
+  color: #dc2626;
+  border-right: 1px solid #fecaca;
+}
+
+.pane-b {
+  background: #f0fdf4;
+  color: #16a34a;
+  border-left: 1px solid #bbf7d0;
+}
+
+.pane-content {
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.pdf-preview-divider {
+  width: 50px;
+  background: #f3f4f6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-left: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+}
+
+.divider-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
 </style>

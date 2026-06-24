@@ -91,7 +91,9 @@ export const compareAPI = {
   delete: (id) => instance.delete(`/compare/${id}`),
   getReport: (id, format) => instance.get(`/compare/${id}/report`, { params: { format } }),
   getConfig: () => instance.get('/compare/config'),
-  updateConfig: (config) => instance.put('/compare/config', config)
+  updateConfig: (config) => instance.put('/compare/config', config),
+  getPreviewInfo: (id) => instance.get(`/compare/${id}/preview/info`),
+  getPreviewFileUrl: (id, side) => `/api/compare/${id}/preview/file?side=${side}`,
 }
 
 export const rulesAPI = {
