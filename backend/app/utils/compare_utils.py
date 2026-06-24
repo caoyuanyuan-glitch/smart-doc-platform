@@ -234,9 +234,9 @@ def weighted_similarity(pairs, total):
 def overall_verdict(jaccard: float) -> str:
     if jaccard >= 0.80:
         return "✅ 自动通过（≥80%）"
-    if jaccard >= 0.50:
-        return "⚠️ 建议复核（50% ~ 80%）"
-    return "🟥 强制人工复核（<50%，不可互换）"
+    if jaccard >= 0.60:
+        return "⚠️ 建议复核（60% ~ 80%）"
+    return "🟥 强制人工复核（<60%，不可互换）"
 
 
 def classify_diff_type(text_a, text_b):

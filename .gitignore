@@ -31,6 +31,7 @@ backend/static/uploads/*
 !backend/static/uploads/.gitkeep
 backend/static/review_exports/*
 !backend/static/review_exports/.gitkeep
+backend/static/preview/
 
 # Knowledge base files
 backend/app/static/knowledge/
