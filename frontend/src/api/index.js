@@ -227,23 +227,6 @@ export const convertAPI = {
   delete: (taskId) => instance.delete(`/convert/${taskId}`)
 }
 
-export const convertRulesAPI = {
-  list: () => instance.get('/convert/rules'),
-  create: (category, description) => {
-    const formData = new FormData()
-    formData.append('category', category)
-    formData.append('description', description)
-    return instance.post('/convert/rules', formData)
-  },
-  toggle: (id) => instance.put(`/convert/rules/${id}`),
-  delete: (id) => instance.delete(`/convert/rules/${id}`),
-  bulkDelete: (ids) => {
-    const formData = new FormData()
-    formData.append('rule_ids', ids.join(','))
-    return instance.post('/convert/rules/bulk-delete', formData)
-  }
-}
-
 export const translationAPI = {
   translate: (data) => instance.post('/translation/translate', data),
   translateFile: (formData) => instance.post('/translation/translate/file', formData, {

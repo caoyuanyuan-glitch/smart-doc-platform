@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+import csv
+import io
 import os
 import re
 import json
@@ -34,6 +36,17 @@ IME_BOOKMAP_DECL = '<!DOCTYPE bookmap PUBLIC "-//OASIS//DTD DITA BookMap//EN" "b
 
 def _ensure_dir(path):
     os.makedirs(path, exist_ok=True)
+
+
+def _media_type_for_file(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".csv":
+        return "text/csv; charset=utf-8"
+    if ext in [".md", ".markdown"]:
+        return "text/markdown; charset=utf-8"
+    if ext == ".zip":
+        return "application/zip"
+    return "application/octet-stream"
 
 
 _ensure_dir(UPLOAD_DIR)
@@ -78,8 +91,7 @@ def _clean_title(title):
     # 2. Strip ** bold markers
     t = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', t)
 
-    # 3. Remove leading numbering patterns
-    t = re.sub(r'^\d+[\.\s]+', '', t)
+    # 3. Remove leading chapter markers while preserving source section numbering
     t = re.sub(r'^(Chapter|Appendix|第)\s*\d+[\.\s:：]*\s*', '', t, flags=re.IGNORECASE)
 
     # 4. Trim and clean up
@@ -224,6 +236,140 @@ def _parse_docx_sections(file_path):
         raise ValueError(f"DOCX解析失败: {str(e)}")
 
 
+def _iter_docx_blocks(doc):
+    from docx.document import Document as DocxDocumentClass
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    parent = doc.element.body if isinstance(doc, DocxDocumentClass) else doc
+    for child in parent.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, doc)
+
+
+def _normalize_docx_text(text):
+    return re.sub(r'\s+', ' ', str(text or '')).strip()
+
+
+def _is_docx_toc_number(text):
+    return bool(re.fullmatch(r'\d+(?:\.\d+)*', text or ''))
+
+
+def _docx_table_to_markdown(table):
+    rows = []
+    for row in table.rows:
+        cells = [_normalize_docx_text(cell.text) for cell in row.cells]
+        while cells and not cells[-1]:
+            cells.pop()
+        if any(cells):
+            rows.append(cells)
+
+    if not rows:
+        return []
+
+    cols = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (cols - len(row)) for row in rows]
+    header = normalized_rows[0]
+    md_lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join([":---"] * cols) + " |",
+    ]
+    for row in normalized_rows[1:]:
+        md_lines.append("| " + " | ".join(row) + " |")
+    return md_lines
+
+
+def _extract_docx_paragraph_images(paragraph, media_dir, image_index):
+    image_refs = []
+    rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+    blips = paragraph._element.xpath('.//*[local-name()="blip"]')
+    for blip in blips:
+        rel_id = blip.get(rel_ns)
+        if not rel_id:
+            continue
+        image_part = paragraph.part.related_parts.get(rel_id)
+        if not image_part:
+            continue
+        ext = os.path.splitext(str(getattr(image_part, "partname", "")))[1] or ".png"
+        file_name = f"docx_image_{image_index:03d}{ext.lower()}"
+        file_path = os.path.join(media_dir, file_name)
+        if not os.path.exists(file_path):
+            with open(file_path, "wb") as f:
+                f.write(image_part.blob)
+        image_refs.append(file_path)
+        image_index += 1
+    return image_refs, image_index
+
+
+def _docx_to_markdown(file_path):
+    from docx import Document as DocxDocument
+    from docx.table import Table
+
+    doc = DocxDocument(file_path)
+    media_dir = os.path.splitext(file_path)[0] + "_media"
+    _ensure_dir(media_dir)
+
+    blocks = list(_iter_docx_blocks(doc))
+    lines = []
+    image_index = 1
+    cover_started = False
+
+    def ensure_cover_heading():
+        nonlocal cover_started
+        if not cover_started:
+            lines.append("# Cover")
+            lines.append("")
+            cover_started = True
+
+    for idx, block in enumerate(blocks):
+        next_block = blocks[idx + 1] if idx + 1 < len(blocks) else None
+        if not isinstance(block, Table):
+            text = _normalize_docx_text(block.text)
+            image_refs, image_index = _extract_docx_paragraph_images(block, media_dir, image_index)
+            style_name = block.style.name if block.style else ""
+            heading_level = _get_heading_level(style_name)
+
+            is_table_title = text.startswith(("Table ", "TABLE ", "Figure ", "FIGURE "))
+            inferred_heading = (
+                heading_level == 0
+                and text
+                and not is_table_title
+                and len(text) <= 80
+                and next_block is not None
+                and hasattr(next_block, "rows")
+            )
+
+            if text and heading_level and _is_docx_toc_number(text):
+                continue
+
+            if text and (heading_level or inferred_heading):
+                lines.append(f"{'#' * max(1, heading_level or 2)} {text}")
+                lines.append("")
+            else:
+                if text:
+                    ensure_cover_heading()
+                    lines.append(text)
+                for image_path in image_refs:
+                    ensure_cover_heading()
+                    lines.append(f"![{os.path.basename(image_path)}]({image_path})")
+                if text or image_refs:
+                    lines.append("")
+        else:
+            ensure_cover_heading()
+            table_lines = _docx_table_to_markdown(block)
+            if table_lines:
+                lines.extend(table_lines)
+                lines.append("")
+
+    markdown_text = "\n".join(lines)
+    markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text).strip()
+    return markdown_text
+
+
 def _get_heading_level(style_name):
     """Extract heading level (1-6) from Word style name, or 0 if not a heading."""
     if not style_name:
@@ -246,8 +392,101 @@ def _parse_content(source_format, file_path, content):
     if source_format == "md":
         return _parse_md_sections(content)
     elif source_format == "docx":
-        return _parse_docx_sections(file_path)
+        return _parse_md_sections(content)
     raise ValueError(f"不支持的文件格式: {source_format}")
+
+
+def _normalize_section_key(title):
+    text = _clean_title(title or "").lower()
+    text = re.sub(r'^\d+(?:\.\d+)*\s*', '', text)
+    text = re.sub(r'[^a-z0-9]+', ' ', text).strip()
+    return text
+
+
+def _split_leading_docx_subheading(content):
+    if not content:
+        return None, content
+
+    lines = content.splitlines()
+    first_idx = next((idx for idx, line in enumerate(lines) if line.strip()), None)
+    if first_idx is None:
+        return None, content
+
+    first_line = lines[first_idx].strip()
+    if (
+        not first_line
+        or len(first_line) > 80
+        or len(first_line.split()) > 12
+        or first_line.startswith(("#", "|", "!["))
+        or re.match(r'^(table|figure|formula)\b', first_line, re.IGNORECASE)
+        or re.search(r'[.!?;:)]$', first_line)
+    ):
+        return None, content
+
+    rest_lines = lines[first_idx + 1:]
+    while rest_lines and not rest_lines[0].strip():
+        rest_lines = rest_lines[1:]
+    rest_content = "\n".join(rest_lines).strip()
+    if not rest_content:
+        return None, content
+    return first_line, rest_content
+
+
+def _docx_child_belongs(parent_title, child_title, is_absorbing):
+    parent_key = _normalize_section_key(parent_title)
+    child_key = _normalize_section_key(child_title)
+    if not parent_key or not child_key:
+        return False
+
+    if child_key in {"preparation", "operation", "procedure"}:
+        return True
+    if child_key == parent_key:
+        return True
+    if parent_key.startswith("cleanup of") and child_key.startswith(("single size selection", "double size selection")):
+        return True
+    if " and " in parent_key:
+        parts = [part.strip() for part in parent_key.split(" and ") if part.strip()]
+        if any(child_key == part or child_key.endswith(part) for part in parts):
+            return True
+    if is_absorbing and "optional" in child_key:
+        return True
+    if is_absorbing and child_key.startswith("qc of"):
+        return True
+    return False
+
+
+def _reshape_docx_sections(sections):
+    prepared = []
+    for sec in sections:
+        current = {
+            "title": sec.get("title", ""),
+            "content": sec.get("content", ""),
+            "sections": _reshape_docx_sections(sec.get("sections", [])),
+        }
+        child_title, child_content = _split_leading_docx_subheading(current["content"])
+        if child_title:
+            current["content"] = ""
+            current["sections"] = [{
+                "title": child_title,
+                "content": child_content,
+                "sections": [],
+            }] + current["sections"]
+        prepared.append(current)
+
+    grouped = []
+    idx = 0
+    while idx < len(prepared):
+        current = prepared[idx]
+        next_idx = idx + 1
+        absorbed = False
+        while next_idx < len(prepared) and _docx_child_belongs(current["title"], prepared[next_idx].get("title", ""), absorbed):
+            current["sections"].append(prepared[next_idx])
+            absorbed = True
+            next_idx += 1
+        grouped.append(current)
+        idx = next_idx
+
+    return grouped
 
 
 def _extract_images_md(content):
@@ -274,7 +513,7 @@ def _download_images_for_output(images, output_base, timeout=30):
     idx = 0
     for img in images:
         url = img["path"]
-        if not url or not url.startswith(("http://", "https://")):
+        if not url:
             continue
         if url in url_to_local:
             continue
@@ -284,10 +523,15 @@ def _download_images_for_output(images, output_base, timeout=30):
                 ext = ".png"
             local_name = f"image_{idx:03d}{ext}"
             local_path = os.path.join(image_dir, local_name)
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                with open(local_path, "wb") as f:
-                    f.write(resp.read())
+            if os.path.exists(url):
+                shutil.copy2(url, local_path)
+            else:
+                if not url.startswith(("http://", "https://")):
+                    continue
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    with open(local_path, "wb") as f:
+                        f.write(resp.read())
             url_to_local[url] = f"image/{local_name}"
             idx += 1
         except Exception:
@@ -444,14 +688,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
             body_parts.append("")
             continue
 
+        if in_table and re.match(r'^\|[-:\s|]+\|$', stripped):
+            continue
+
         if stripped.startswith("|") and stripped.endswith("|"):
             if not in_table:
                 in_table = True
                 table_rows = []
             cells = [c.strip() for c in stripped.strip("|").split("|")]
             table_rows.append([_strip_md_bold(_unescape_md(c)) for c in cells])
-            continue
-        elif in_table and re.match(r'^\|[-:\s|]+\|$', stripped):
             continue
         else:
             if in_table:
@@ -462,7 +707,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
                         body_parts.pop()
                     if len(body_parts) >= 1:
                         prev = body_parts[-1]
-                        if prev and prev.strip().startswith("<p>") and re.match(r'<p>Table\s+\d+[-–]\d+', prev):
+                        if prev and prev.strip().startswith("<p>") and re.match(r'<p>Table\s+\d+([\s:.-]|&amp;|\(|$)', prev):
                             has_title = True
                             body_parts.pop()
                     cols = max(len(r) for r in table_rows)
@@ -564,7 +809,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
 
     body_content = "\n".join(p for p in body_parts if p)
 
-    unique_id = f"topic_{topic_id}"
+    unique_id = topic_id
     ime_topic_type = "sDitaTopic"
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -581,7 +826,349 @@ def _strip_tag(xml):
     return re.sub(r'<[^>]+>', '', xml)
 
 
-def _flatten_sections(sections, parent_h1=""):
+def _content_to_markdown(section_title, section_content):
+    title = _clean_title(section_title) or "未命名章节"
+    content = (section_content or "").strip()
+    if content:
+        return f"# {title}\n\n{content}\n"
+    return f"# {title}\n"
+
+
+def _markdown_to_lossless_csv(content):
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow(["line_number", "content"])
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        writer.writerow([line_number, line])
+    return "\ufeff" + buffer.getvalue()
+
+
+def _csv_table_to_markdown(content):
+    rows = []
+    reader = csv.reader(io.StringIO(content.lstrip("\ufeff")))
+    for row in reader:
+        rows.append([str(cell or "") for cell in row])
+
+    if not rows:
+        return ""
+
+    def _escape_md_cell(cell):
+        return cell.replace("|", "\\|")
+
+    header = rows[0]
+    align = [":---" for _ in header]
+    md_lines = [
+        "| " + " | ".join(_escape_md_cell(cell) for cell in header) + " |",
+        "| " + " | ".join(align) + " |",
+    ]
+    for row in rows[1:]:
+        if len(row) < len(header):
+            row = row + [""] * (len(header) - len(row))
+        md_lines.append("| " + " | ".join(_escape_md_cell(cell) for cell in row[:len(header)]) + " |")
+    return "\n".join(md_lines) + "\n"
+
+
+def _csv_to_markdown(content):
+    text = content.lstrip("\ufeff")
+    reader = csv.DictReader(io.StringIO(text))
+    fieldnames = reader.fieldnames or []
+    normalized = {str(name or "").strip().lower() for name in fieldnames}
+    if {"line_number", "content"}.issubset(normalized):
+        rows = []
+        for row in reader:
+            line_number = row.get("line_number") or row.get("LINE_NUMBER") or row.get("Line_Number") or "0"
+            try:
+                order = int(str(line_number).strip() or "0")
+            except ValueError:
+                order = 0
+            rows.append((order, row.get("content") or row.get("CONTENT") or ""))
+        rows.sort(key=lambda item: item[0])
+        return "\n".join(line for _, line in rows)
+    return _csv_table_to_markdown(text)
+
+
+def _build_active_rules(source_format, target_format, source_content, template_path, images, sections, is_lossless_md_csv):
+    rules = [{
+        "rule_number": "01",
+        "category": "内容",
+        "description": "转换内容须100%与原文保持一致，不得遗漏或添加任何文字、符号、空白段落",
+    }]
+
+    if is_lossless_md_csv:
+        return rules
+
+    if images:
+        rules.append({
+            "rule_number": "02",
+            "category": "图片",
+            "description": "原文中引用的外部图片须下载并嵌入到输出文档包中，确保离线可查看",
+        })
+
+    if target_format == "dita":
+        if re.search(r'^\s{0,3}#{1,6}\s+((\d+(?:\.\d+)*)|chapter\s+\d+|第\s*\d+\s*章)[\s:：-]+', source_content, re.IGNORECASE | re.MULTILINE):
+            rules.append({
+                "rule_number": "03",
+                "category": "编号",
+                "description": "章节标题前的编号按模板样式处理，避免正文重复编号",
+            })
+        if re.search(r'^\|.*\|\s*$', source_content, re.MULTILINE):
+            rules.append({
+                "rule_number": "04",
+                "category": "表格标题",
+                "description": "Markdown 表格结构需映射为 DITA 表格结构",
+            })
+        if re.search(r'^\s*[-*+]\s+', source_content, re.MULTILINE):
+            rules.append({
+                "rule_number": "05",
+                "category": "列表-无序",
+                "description": "Markdown 无序列表需映射为 DITA 列表结构",
+            })
+        if re.search(r'^\s*\d+[.)]\s+', source_content, re.MULTILINE):
+            rules.append({
+                "rule_number": "06",
+                "category": "列表-有序",
+                "description": "Markdown 有序列表需映射为 DITA 列表结构",
+            })
+        if any(section.get("title") for section in sections):
+            rules.append({
+                "rule_number": "07",
+                "category": "结构",
+                "description": "文档标题层级按实际结构拆分并组织为 DITA 输出",
+            })
+        if template_path and os.path.exists(template_path):
+            rules.append({
+                "rule_number": "08",
+                "category": "模板",
+                "description": "提供参考模板时复用模板结构与必要元数据",
+            })
+
+    return rules
+
+
+def _rewrite_template_frontmatter(frontmatter_xml, topics_output):
+    if not frontmatter_xml:
+        return frontmatter_xml, set()
+
+    rewritten = frontmatter_xml
+    used_files = set()
+    title_to_topic = {topic["title"].strip().lower(): topic for topic in topics_output if topic.get("title")}
+
+    for navtitle, topic in title_to_topic.items():
+        pattern = re.compile(rf'(<topicref[^>]*navtitle="{re.escape(topic["title"])}"[^>]*href=")([^"]+)(")')
+        if pattern.search(rewritten):
+            rewritten = pattern.sub(rf'\1{topic["filename"]}\3', rewritten)
+            rewritten = re.sub(
+                rf'(<topicref[^>]*navtitle="{re.escape(topic["title"])}"[^>]*cms:placeHolder=")([^"]*)(")',
+                rf'\1{topic["filename"]}\3',
+                rewritten,
+            )
+            rewritten = re.sub(
+                rf'(<topicref[^>]*navtitle="{re.escape(topic["title"])}"[^>]*keys=")([^"]*)(")',
+                rf'\1{topic["id"]}\3',
+                rewritten,
+            )
+            used_files.add(topic["filename"])
+
+    return rewritten, used_files
+
+
+def _collect_template_dita_refs(*xml_parts):
+    refs = set()
+    for xml in xml_parts:
+        if not xml:
+            continue
+        refs.update(re.findall(r'href="([^"]+\.dita)"', xml))
+    return refs
+
+
+def _prune_unreferenced_output_images(output_base):
+    referenced = set()
+    image_dir = os.path.join(output_base, "image")
+    if not os.path.isdir(image_dir):
+        return set(), set()
+
+    for root, _, files in os.walk(output_base):
+        for fname in files:
+            if not fname.endswith((".dita", ".ditamap", ".md")):
+                continue
+            file_path = os.path.join(root, fname)
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            for href in re.findall(r'href="([^"]+)"', content):
+                href = href.strip()
+                if href.startswith("image/"):
+                    referenced.add(href)
+            for md_path in re.findall(r'!\[[^\]]*\]\(([^)]+)\)', content):
+                md_path = md_path.strip()
+                if md_path.startswith("image/"):
+                    referenced.add(md_path)
+
+    existing = set()
+    for root, _, files in os.walk(image_dir):
+        for fname in files:
+            abs_path = os.path.join(root, fname)
+            rel_path = os.path.relpath(abs_path, output_base).replace(os.sep, "/")
+            existing.add(rel_path)
+            if rel_path not in referenced:
+                os.remove(abs_path)
+
+    return referenced, existing
+
+
+def _escape_xml_attr(value):
+    return (value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _build_topic_hierarchy(topics, skipped_files):
+    roots = []
+    stack = []
+
+    for topic in topics:
+        if topic["filename"] in skipped_files:
+            continue
+
+        node = {
+            "topic": topic,
+            "level": max(1, int(topic.get("level", 1) or 1)),
+            "children": [],
+        }
+
+        while stack and stack[-1]["level"] >= node["level"]:
+            stack.pop()
+
+        if stack:
+            stack[-1]["children"].append(node)
+        else:
+            roots.append(node)
+
+        stack.append(node)
+
+    return roots
+
+
+def _append_topicref_xml(lines, topic, node_id_seq, indent, level_attr, template_name="sDitaTopic"):
+    navtitle = _escape_xml_attr(topic["title"])
+    node_id = f"PN{next(node_id_seq):03d}"
+    ime_soft_type = template_name
+    attrs = (
+        f'navtitle="{navtitle}" '
+        f'xml:lang="zh-CN" id="{node_id}" '
+        f'href="{topic["filename"]}" '
+        f'keys="{topic["id"]}" type="topic" '
+        f'cms:title="{navtitle}" '
+        f'cms:placeHolder="{topic["filename"]}" '
+        f'cms:nodeType="XML" '
+        f'cms:template="{template_name}" '
+        f'level="{level_attr}" '
+        f'cms:imesofttype="{ime_soft_type}" '
+        f'version="A.1"'
+    )
+    lines.append(f'{indent}<topicref {attrs}/>' )
+
+
+def _topic_has_body(topic):
+    return bool((topic.get("raw_content") or "").strip())
+
+
+def _append_topicref_container_xml(lines, node, node_id_seq, indent, level_attr):
+    topic = node["topic"]
+    navtitle = _escape_xml_attr(topic["title"])
+    node_id = f"PN{next(node_id_seq):03d}"
+    attrs = [
+        f'navtitle="{navtitle}"',
+        'xml:lang="zh-CN"',
+        f'id="{node_id}"',
+        'type="topic"',
+        f'level="{level_attr}"',
+        'cms:imesofttype="sDitaTopic"',
+        'version="A.1"',
+    ]
+
+    if _topic_has_body(topic):
+        attrs.extend([
+            f'href="{topic["filename"]}"',
+            f'keys="{topic["id"]}"',
+            f'cms:title="{navtitle}"',
+            f'cms:placeHolder="{topic["filename"]}"',
+            'cms:nodeType="XML"',
+            'cms:template="sDitaTopic"',
+        ])
+    else:
+        attrs.extend([
+            'cms:title=""',
+            'cms:placeHolder=""',
+            'cms:isTemplet="N"',
+            'cms:referenceType=""',
+            'cms:type="topicref"',
+            'cms:outputclass=""',
+            'cms:descriptioin=""',
+            'cms:xCoordination=""',
+            'cms:sourceTag=""',
+            'cms:referenceMap=""',
+            'cms:colNumber="2"',
+            'cms:nodeRemark=""',
+        ])
+
+    joined_attrs = " ".join(attrs)
+    lines.append(f'{indent}<topicref {joined_attrs}>')
+    for child in node["children"]:
+        if child["children"]:
+            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", level_attr + 1)
+        else:
+            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", level_attr + 1)
+    lines.append(f'{indent}</topicref>')
+
+
+def _append_root_container_xml(lines, node, chapter_seq, node_id_seq, indent, level_attr, timestamp):
+    topic = node["topic"]
+    navtitle = _escape_xml_attr(topic["title"])
+    container_tag = "appendix" if topic["title"].strip().lower() == "appendix" else "chapter"
+    chapter_id = f"PG{timestamp}_{next(chapter_seq):03d}"
+    lines.append(
+        f'{indent}<{container_tag} navtitle="{navtitle}" id="{chapter_id}"'
+        f' cms:lang="zh-CN" cms:type="{container_tag}" cms:title=""'
+        f' cms:isTemplet="N"'
+        f' level="{level_attr}" version="A.1">'
+    )
+    if _topic_has_body(topic):
+        root_template = "chapterTopic" if container_tag == "chapter" else "sDitaTopic"
+        _append_topicref_xml(lines, topic, node_id_seq, indent + "  ", level_attr + 1, root_template)
+    for child in node["children"]:
+        if child["children"]:
+            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", level_attr + 1)
+        else:
+            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", level_attr + 1)
+    lines.append(f'{indent}</{container_tag}>')
+
+
+def _append_bookmap_topics(lines, topic_roots, timestamp):
+    chapter_seq = iter(range(1, 10000))
+    node_id_seq = iter(range(1, 100000))
+
+    for root in topic_roots:
+        _append_root_container_xml(lines, root, chapter_seq, node_id_seq, "  ", 1, timestamp)
+
+
+def _derive_map_title(source_format, file_path, sections):
+    if source_format == "docx":
+        stem = os.path.splitext(os.path.basename(file_path))[0]
+        stem = re.sub(r'^src_\d+_', '', stem)
+        stem = stem.replace("_", " ").strip()
+        if stem:
+            return stem
+
+    for sec in sections:
+        title = _clean_title(sec.get("title", ""))
+        if title and title.lower() not in {"cover", "contents"}:
+            return title
+    return "Generated Document"
+
+
+def _flatten_sections(sections, parent_h1="", level=1):
     """Recursively flatten nested sections into a list of topics.
     Every heading at any level becomes its own topic.
     """
@@ -591,9 +1178,10 @@ def _flatten_sections(sections, parent_h1=""):
         content = sec.get("content", "")
         children = sec.get("sections", [])
 
-        if content or not children:
+        if title or content or not children:
             result.append({
                 "h1": parent_h1,
+                "level": level,
                 "title": title,
                 "content": content,
                 "dita_type": _get_topic_type(title),
@@ -601,7 +1189,7 @@ def _flatten_sections(sections, parent_h1=""):
 
         if children:
             new_parent = title or parent_h1
-            result.extend(_flatten_sections(children, new_parent))
+            result.extend(_flatten_sections(children, new_parent, level + 1))
 
     return result
 
@@ -635,8 +1223,18 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 
         _set_progress(5, "解析")
 
-        sections = _parse_content(source_format, file_path, source_content)
-        images = _extract_images_md(source_content)
+        is_lossless_md_csv = (
+            (source_format == "md" and target_format == "csv")
+            or (source_format == "csv" and target_format == "markdown")
+        )
+
+        sections = []
+        images = []
+        if not is_lossless_md_csv:
+            sections = _parse_content(source_format, file_path, source_content)
+            if source_format == "docx":
+                sections = _reshape_docx_sections(sections)
+            images = _extract_images_md(source_content)
 
         _set_progress(20, "解析")
 
@@ -652,64 +1250,100 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         topics_output = []
         image_count = len(images)
         topic_index = 0
+        all_sections = []
 
-        all_sections = _flatten_sections(sections)
+        if is_lossless_md_csv:
+            if source_format == "md":
+                topics_output.append({
+                    "type": "csv",
+                    "filename": "content.csv",
+                    "title": "Markdown 全文",
+                    "content": _markdown_to_lossless_csv(source_content),
+                })
+                conversion_detail.append({
+                    "source_section": "Markdown 全文",
+                    "target_type": "csv",
+                    "topic_file": "content.csv",
+                    "status": "ok",
+                })
+            else:
+                topics_output.append({
+                    "type": "markdown",
+                    "filename": "content.md",
+                    "title": "Markdown 全文",
+                    "content": _csv_to_markdown(source_content),
+                })
+                conversion_detail.append({
+                    "source_section": "CSV 全文",
+                    "target_type": "markdown",
+                    "topic_file": "content.md",
+                    "status": "ok",
+                })
+        else:
+            all_sections = _flatten_sections(sections)
 
-        if special["auto_split"] and len(all_sections) == 1:
-            def _rebuild_content(sec):
-                parts = []
-                if sec.get("content"):
-                    parts.append(sec["content"])
-                for child in sec.get("sections", []):
-                    parts.append(f"{'#' * (sec.get('level', 1) + 1)} {child['title']}")
-                    parts.append(_rebuild_content(child))
-                return "\n".join(p.strip() for p in parts if p.strip())
+            if special["auto_split"] and len(all_sections) == 1:
+                def _rebuild_content(sec):
+                    parts = []
+                    if sec.get("content"):
+                        parts.append(sec["content"])
+                    for child in sec.get("sections", []):
+                        parts.append(f"{'#' * (sec.get('level', 1) + 1)} {child['title']}")
+                        parts.append(_rebuild_content(child))
+                    return "\n".join(p.strip() for p in parts if p.strip())
 
-            all_sections = []
-            for h1 in sections:
-                if h1["title"]:
-                    all_sections.append({
-                        "h1": "",
-                        "title": h1["title"],
-                        "content": _rebuild_content(h1),
-                        "dita_type": _get_topic_type(h1["title"]),
-                    })
-            if not all_sections:
-                all_sections = _flatten_sections(sections)
+                all_sections = []
+                for h1 in sections:
+                    if h1["title"]:
+                        all_sections.append({
+                            "h1": "",
+                            "title": h1["title"],
+                            "content": _rebuild_content(h1),
+                            "dita_type": _get_topic_type(h1["title"]),
+                        })
+                if not all_sections:
+                    all_sections = _flatten_sections(sections)
 
-        for section in all_sections:
-            title = _clean_title(section["title"])
-            h1_title = _clean_title(section.get("h1", ""))
-            if not title:
-                title = h1_title or f"Section {topic_index + 1}"
+            slug_counts = {}
+            for section in all_sections:
+                title = _clean_title(section["title"])
+                h1_title = _clean_title(section.get("h1", ""))
+                if not title:
+                    title = h1_title or f"Section {topic_index + 1}"
 
-            dita_type = section["dita_type"]
-            for keyword, override_type in special["type_overrides"].items():
-                if keyword in title:
-                    dita_type = override_type
-                    break
+                dita_type = section["dita_type"]
+                for keyword, override_type in special["type_overrides"].items():
+                    if keyword in title:
+                        dita_type = override_type
+                        break
 
-            topic_index += 1
-            slug = re.sub(r'[^\w\s-]', '', title).strip().lower()
-            slug = re.sub(r'[-\s]+', '_', slug) or f"topic_{topic_index}"
-            topic_filename = f"{slug}.dita"
-            topic_id = slug
+                topic_index += 1
+                slug = re.sub(r'[^\w\s-]', '', title).strip().lower()
+                slug = re.sub(r'[-\s]+', '_', slug) or f"topic_{topic_index}"
+                slug_count = slug_counts.get(slug, 0)
+                slug_counts[slug] = slug_count + 1
+                if slug_count:
+                    slug = f"{slug}_{slug_count + 1}"
+                topic_filename = f"{slug}.dita"
+                topic_id = slug
 
-            dita_content = _content_to_dita_xml(title, section["content"], dita_type, topic_id)
+                dita_content = _content_to_dita_xml(title, section["content"], dita_type, topic_id)
 
-            topics_output.append({
-                "type": dita_type,
-                "filename": topic_filename,
-                "id": topic_id,
-                "content": dita_content,
-                "title": title,
-            })
-            conversion_detail.append({
-                "source_section": title,
-                "target_type": dita_type,
-                "topic_file": topic_filename,
-                "status": "ok",
-            })
+                topics_output.append({
+                    "type": dita_type,
+                    "filename": topic_filename,
+                    "id": topic_id,
+                    "level": section.get("level", 1),
+                    "content": dita_content,
+                    "raw_content": section["content"],
+                    "title": title,
+                })
+                conversion_detail.append({
+                    "source_section": title,
+                    "target_type": dita_type,
+                    "topic_file": topic_filename,
+                    "status": "ok",
+                })
 
         _set_progress(55, "内容替换")
 
@@ -720,12 +1354,28 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 
         _set_progress(70, "验证")
 
+        template_check_status = "passed"
+        template_check_detail = "未使用模板"
+        if template_path and target_format == "dita":
+            template_check_status = "warning"
+            template_check_detail = "模板已参考"
+        elif template_path and target_format == "markdown":
+            template_check_status = "warning"
+            template_check_detail = "Markdown 输出未使用模板包"
+        elif template_path and target_format == "csv":
+            template_check_status = "warning"
+            template_check_detail = "CSV 输出未使用模板包"
+
+        content_check_detail = "全部章节已映射"
+        if is_lossless_md_csv:
+            content_check_detail = "已按逐行无损格式转换"
+
         checks = [
             {"name": "结构完整性", "status": "passed"},
-            {"name": "模板一致性", "status": "passed" if not template_path else "warning",
-             "detail": "模板已参考" if template_path else "未使用模板"},
+            {"name": "模板一致性", "status": template_check_status,
+             "detail": template_check_detail},
             {"name": "图片验证", "status": "passed", "detail": f"{image_count}/{image_count}"},
-            {"name": "内容完整性", "status": "passed", "detail": "全部章节已映射"},
+            {"name": "内容完整性", "status": "passed", "detail": content_check_detail},
         ]
 
         unmapped = []
@@ -748,81 +1398,93 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 
         url_map = _download_images_for_output(images, output_base)
 
-        if template_parts:
-            for fname, content in template_parts["files"].items():
-                tpl_fname = os.path.join(output_base, fname)
-                with open(tpl_fname, "wb") as f:
+        if is_lossless_md_csv:
+            direct_filename = f"{output_name}{os.path.splitext(topics_output[0]['filename'])[1]}"
+            direct_path = os.path.join(OUTPUT_DIR, direct_filename)
+            with open(direct_path, "w", encoding="utf-8", newline="") as f:
+                f.write(topics_output[0]["content"])
+        elif target_format == "markdown":
+            index_lines = ["# 转换结果", ""]
+            for detail, topic in zip(conversion_detail, topics_output):
+                topic_filename = topic["filename"].rsplit(".", 1)[0] + ".md"
+                markdown_content = _content_to_markdown(topic["title"], topic.get("raw_content", ""))
+                for url, local in url_map.items():
+                    markdown_content = markdown_content.replace(f'({url})', f'({local})')
+                with open(os.path.join(output_base, topic_filename), "w", encoding="utf-8") as f:
+                    f.write(markdown_content)
+                topic["filename"] = topic_filename
+                detail["topic_file"] = topic_filename
+                index_lines.append(f'- [{topic["title"]}]({topic_filename})')
+
+            with open(os.path.join(output_base, "index.md"), "w", encoding="utf-8") as f:
+                f.write("\n".join(index_lines) + "\n")
+        else:
+            frontmatter_used_files = set()
+            manufacturer_used_files = set()
+            fm_xml = ""
+            mfg_xml = ""
+            template_referenced_files = set()
+            if template_parts and template_parts.get("frontmatter_xml"):
+                fm_xml, frontmatter_used_files = _rewrite_template_frontmatter(template_parts["frontmatter_xml"], topics_output)
+            if template_parts and template_parts.get("manufacturer_xml"):
+                mfg_xml, manufacturer_used_files = _rewrite_template_frontmatter(template_parts["manufacturer_xml"], topics_output)
+            if template_parts:
+                template_referenced_files = _collect_template_dita_refs(fm_xml, mfg_xml)
+
+            if template_parts:
+                for fname, content in template_parts["files"].items():
+                    if template_referenced_files and fname not in template_referenced_files:
+                        continue
+                    tpl_fname = os.path.join(output_base, fname)
+                    with open(tpl_fname, "wb") as f:
+                        f.write(content)
+                for img_path, img_content in template_parts["image_files"].items():
+                    tpl_img = os.path.join(output_base, img_path)
+                    os.makedirs(os.path.dirname(tpl_img), exist_ok=True)
+                    with open(tpl_img, "wb") as f:
+                        f.write(img_content)
+
+            for topic in topics_output:
+                content = topic["content"]
+                for url, local in url_map.items():
+                    content = content.replace(f'href="{url}"', f'href="{local}"')
+                fname = os.path.join(output_base, topic["filename"])
+                with open(fname, "w", encoding="utf-8") as f:
                     f.write(content)
-            for img_path, img_content in template_parts["image_files"].items():
-                tpl_img = os.path.join(output_base, img_path)
-                os.makedirs(os.path.dirname(tpl_img), exist_ok=True)
-                with open(tpl_img, "wb") as f:
-                    f.write(img_content)
 
-        for topic in topics_output:
-            content = topic["content"]
-            for url, local in url_map.items():
-                content = content.replace(f'href="{url}"', f'href="{local}"')
-            fname = os.path.join(output_base, topic["filename"])
-            with open(fname, "w", encoding="utf-8") as f:
-                f.write(content)
+            map_title = _derive_map_title(source_format, file_path, sections)
+            map_title = map_title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            sanitized_name = re.sub(r'[^\w\s-]', '', map_title).strip()
+            sanitized_name = re.sub(r'[-\s]+', '_', sanitized_name) or "document"
+            map_filename = f"{sanitized_name}.ditamap"
+            map_id = sanitized_name.upper()[:12]
 
-        map_title = _clean_title(sections[0]["title"]) if sections else "Generated Document"
-        map_title = map_title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        sanitized_name = re.sub(r'[^\w\s-]', '', map_title).strip()
-        sanitized_name = re.sub(r'[-\s]+', '_', sanitized_name) or "document"
-        map_filename = f"{sanitized_name}.ditamap"
-        map_id = sanitized_name.upper()[:12]
+            map_lines = [
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                IME_BOOKMAP_DECL,
+                f'<bookmap xmlns:imeCMS="http://www.megalinkware.com" xmlns:vf="http://www.megalinkware.com" xmlns:cms="http://www.w3.org/ime/cms" imeCMS:imesofttype="PartBookMap" imeCMS:softtype="PartBookMap" xml:lang="zh-CN" id="{map_id}" imeCMS:iba_lang="zh-CN" imeCMS:iba_title="" imeCMS:iba_placeHolder="" imeCMS:iba_isTemplet="N" imeCMS:iba_referenceType="" level="0" version="A.1">',
+                '  <booktitle>',
+                f'    <mainbooktitle>{map_title}</mainbooktitle>',
+                '  </booktitle>',
+            ]
 
-        map_lines = [
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            IME_BOOKMAP_DECL,
-            f'<bookmap xmlns:imeCMS="http://www.megalinkware.com" xmlns:vf="http://www.megalinkware.com" xmlns:cms="http://www.w3.org/ime/cms" imeCMS:imesofttype="PartBookMap" imeCMS:softtype="PartBookMap" xml:lang="zh-CN" id="{map_id}" imeCMS:iba_lang="zh-CN" imeCMS:iba_title="" imeCMS:iba_placeHolder="" imeCMS:iba_isTemplet="N" imeCMS:iba_referenceType="" level="0" version="A.1">',
-            '  <booktitle>',
-            f'    <mainbooktitle>{map_title}</mainbooktitle>',
-            '  </booktitle>',
-        ]
+            if fm_xml:
+                for line in fm_xml.strip().split("\n"):
+                    map_lines.append(f"  {line.strip()}")
 
-        if template_parts and template_parts.get("frontmatter_xml"):
-            fm_xml = template_parts["frontmatter_xml"]
-            for line in fm_xml.strip().split("\n"):
-                map_lines.append(f"  {line.strip()}")
+            referenced_topic_files = frontmatter_used_files | manufacturer_used_files
+            topic_roots = _build_topic_hierarchy(topics_output, referenced_topic_files)
+            _append_bookmap_topics(map_lines, topic_roots, timestamp)
 
-        chapter_index = 0
-        for i, topic in enumerate(topics_output):
-            chapter_index += 1
-            chapter_id = f"PG{timestamp}_{chapter_index:03d}"
-            node_id = f"PN{timestamp}_{i:03d}"
-            navtitle = topic["title"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            map_lines.append(
-                f'  <chapter navtitle="{navtitle}" id="{chapter_id}"'
-                f' cms:lang="zh-CN" cms:type="chapter" cms:title=""'
-                f' cms:isTemplet="N"'
-                f' level="1" version="A.1">'
-            )
-            map_lines.append(
-                f'    <topicref navtitle="{navtitle}"'
-                f' xml:lang="zh-CN" id="{node_id}"'
-                f' href="{topic["filename"]}"'
-                f' keys="{topic["id"]}" type="topic"'
-                f' cms:title="{navtitle}"'
-                f' cms:placeHolder="{topic["filename"]}"'
-                f' cms:nodeType="XML"'
-                f' cms:template="sDitaTopic"'
-                f' level="2"'
-                f' cms:imesofttype="sDitaTopic"'
-                f' version="A.1"/>'
-            )
-            map_lines.append('  </chapter>')
+            if mfg_xml:
+                for line in mfg_xml.strip().split("\n"):
+                    map_lines.append(f"  {line.strip()}")
 
-        if template_parts and template_parts.get("manufacturer_xml"):
-            mfg_xml = template_parts["manufacturer_xml"]
-            for line in mfg_xml.strip().split("\n"):
-                map_lines.append(f"  {line.strip()}")
+            map_lines.append('</bookmap>')
+            with open(os.path.join(output_base, map_filename), "w", encoding="utf-8") as f:
+                f.write("\n".join(map_lines))
 
-        map_lines.append('</bookmap>')
-        with open(os.path.join(output_base, map_filename), "w", encoding="utf-8") as f:
-            f.write("\n".join(map_lines))
+            _prune_unreferenced_output_images(output_base)
 
         metadata_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <metadata>
@@ -836,18 +1498,23 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         with open(os.path.join(output_base, "metadata.xml"), "w", encoding="utf-8") as f:
             f.write(metadata_xml)
 
-        zip_filename = f"{output_name}.zip"
-        zip_path = os.path.join(OUTPUT_DIR, zip_filename)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(output_base):
-                for fname in files:
-                    file_path_abs = os.path.join(root, fname)
-                    arcname = os.path.relpath(file_path_abs, output_base)
-                    zf.write(file_path_abs, arcname)
+        if is_lossless_md_csv:
+            shutil.rmtree(output_base)
+            output_public_path = f"/static/uploads/outputs/{direct_filename}"
+            output_size = os.path.getsize(direct_path)
+        else:
+            zip_filename = f"{output_name}.zip"
+            zip_path = os.path.join(OUTPUT_DIR, zip_filename)
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(output_base):
+                    for fname in files:
+                        file_path_abs = os.path.join(root, fname)
+                        arcname = os.path.relpath(file_path_abs, output_base)
+                        zf.write(file_path_abs, arcname)
 
-        shutil.rmtree(output_base)
-
-        output_size = os.path.getsize(zip_path)
+            shutil.rmtree(output_base)
+            output_public_path = f"/static/uploads/outputs/{zip_filename}"
+            output_size = os.path.getsize(zip_path)
 
         verification_report = {
             "overall": overall,
@@ -855,20 +1522,19 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             "unmapped_sections": unmapped,
         }
 
-        try:
-            from app.crud.convert_rule import get_active_rules, seed_default_rules
-            seed_default_rules(db)
-            rules = get_active_rules(db)
-            verification_report["active_rules"] = [
-                {"rule_number": r.rule_number, "category": r.category, "description": r.description}
-                for r in rules
-            ]
-        except Exception:
-            verification_report["active_rules"] = []
+        verification_report["active_rules"] = _build_active_rules(
+            source_format=source_format,
+            target_format=target_format,
+            source_content=source_content,
+            template_path=template_path,
+            images=images,
+            sections=sections,
+            is_lossless_md_csv=is_lossless_md_csv,
+        )
 
         update_convert_task_result(
             db, task_id,
-            output_zip_path=f"/static/uploads/outputs/{zip_filename}",
+            output_zip_path=output_public_path,
             output_size=output_size,
             topic_count=len(topics_output),
             image_count=image_count,
@@ -906,11 +1572,26 @@ async def start_conversion(
     retry_screenshot: UploadFile = File(None),
     db: Session = Depends(get_db),
 ):
-    ext = os.path.splitext(source_file.filename)[1].lower()
-    if ext not in [".md", ".markdown", ".docx", ".doc"]:
-        raise HTTPException(status_code=400, detail="不支持的文件格式，请上传 .md 或 .docx 文件")
+    if target_format not in ["dita", "markdown", "csv"]:
+        raise HTTPException(status_code=400, detail="目标格式仅支持 dita、markdown 或 csv")
 
-    source_format = "md" if ext in [".md", ".markdown"] else "docx"
+    ext = os.path.splitext(source_file.filename)[1].lower()
+    if ext not in [".md", ".markdown", ".docx", ".doc", ".csv"]:
+        raise HTTPException(status_code=400, detail="不支持的文件格式，请上传 .md、.csv 或 .docx 文件")
+
+    if ext in [".md", ".markdown"]:
+        source_format = "md"
+    elif ext == ".csv":
+        source_format = "csv"
+    else:
+        source_format = "docx"
+
+    if source_format == "csv" and target_format != "markdown":
+        raise HTTPException(status_code=400, detail="CSV 源文件当前仅支持转换为 markdown")
+    if source_format == "md" and target_format == "dita" and template_file and template_file.filename and not template_file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="DITA 模板文件必须是 ZIP 包")
+    if source_format == "docx" and target_format == "csv":
+        raise HTTPException(status_code=400, detail="DOCX 当前仅支持转换为 dita 或 markdown")
 
     _ensure_dir(UPLOAD_DIR)
     source_path = os.path.join(UPLOAD_DIR, f"src_{int(time.time() * 1000)}_{source_file.filename}")
@@ -940,12 +1621,11 @@ async def start_conversion(
 
     source_content = ""
     try:
-        if source_format == "md":
+        if source_format in ["md", "csv"]:
             with open(source_path, "r", encoding="utf-8", errors="ignore") as f:
                 source_content = f.read()
         elif source_format == "docx":
-            from app.utils.document_parser import parse_docx
-            source_content = parse_docx(source_path) or ""
+            source_content = _docx_to_markdown(source_path)
     except Exception as e:
         try:
             os.remove(source_path)
@@ -1035,8 +1715,8 @@ async def download_zip(task_id: str, db: Session = Depends(get_db)):
 
     return FileResponse(
         file_path,
-        media_type="application/zip",
-        filename=f"output_{task_id}.zip",
+        media_type=_media_type_for_file(file_path),
+        filename=os.path.basename(file_path),
     )
 
 
