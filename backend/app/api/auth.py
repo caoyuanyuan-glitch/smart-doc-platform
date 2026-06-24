@@ -71,7 +71,11 @@ async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
-    user = user_crud.authenticate_user(db, form_data.username, form_data.password)
+    username = (form_data.username or "").strip()
+    password = form_data.password or ""
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="请输入用户名和密码")
+    user = user_crud.authenticate_user(db, username, password)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     access_token = create_access_token(
@@ -87,9 +91,18 @@ async def login_for_access_token(
 
 @router.post("/register", response_model=UserOut)
 async def register_user(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = user_crud.get_user(db, username=user.username)
+    username = (user.username or "").strip()
+    password = user.password or ""
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="请输入用户名和密码")
+    if len(username) < 2 or len(username) > 50:
+        raise HTTPException(status_code=400, detail="用户名长度需为 2-50 个字符")
+    if len(password) < 6 or len(password) > 100:
+        raise HTTPException(status_code=400, detail="密码长度需为 6-100 个字符")
+    db_user = user_crud.get_user(db, username=username)
     if db_user:
         raise HTTPException(status_code=409, detail="用户名已存在")
+    user.username = username
     return user_crud.create_user(db=db, user=user)
 
 

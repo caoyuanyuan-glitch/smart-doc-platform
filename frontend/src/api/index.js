@@ -23,6 +23,7 @@ instance.interceptors.response.use(
   (error) => {
     if (error.response && error.response.status === 401) {
       localStorage.removeItem('token')
+      localStorage.removeItem('user')
       window.location.href = '/login'
     }
     console.error('API Error:', error.response?.status, error.response?.data || error.message)
@@ -192,7 +193,39 @@ export const polishAPI = {
 
 export const qaAPI = {
   ask: (documentId, question) => instance.post(`/qa/${documentId}`, {}, { params: { question } }),
-  askGeneral: (question, knowledgeIds = []) => instance.post('/qa/general', { question, knowledge_ids: knowledgeIds })
+  askGeneral: (question, knowledgeIds = [], sessionId = null) => instance.post('/qa/general', { question, knowledge_ids: knowledgeIds, session_id: sessionId }),
+  askDocs: (question, files, sessionId = null) => {
+    const formData = new FormData()
+    formData.append('question', question)
+    if (sessionId) formData.append('session_id', sessionId)
+    files.forEach(f => formData.append('files', f))
+    return instance.post('/qa/docs/chat', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000
+    })
+  },
+  uploadDocs: (files) => {
+    const formData = new FormData()
+    files.forEach(f => formData.append('files', f))
+    return instance.post('/qa/docs/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  submitFeedback: (data) => instance.post('/qa/feedback', data),
+  getFeedbacks: (skip = 0, limit = 50) => instance.get('/qa/feedback', { params: { skip, limit } }),
+  getUnreadFeedbackCount: () => instance.get('/qa/feedback/unread-count'),
+  resolveFeedback: (id) => instance.put(`/qa/feedback/${id}/resolve`),
+  previewDoc: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/qa/docs/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000
+    })
+  },
+  getSessions: (type = 'all') => instance.get('/qa/history/sessions', { params: { type } }),
+  getSessionDetail: (sessionId) => instance.get(`/qa/history/sessions/${sessionId}`),
+  deleteSession: (sessionId) => instance.delete(`/qa/history/sessions/${sessionId}`)
 }
 
 export const generateAPI = {

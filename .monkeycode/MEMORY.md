@@ -50,3 +50,11 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 白天可以随时 commit，但 push 全部等到 17:50
   - 17:50 时检查所有有本地 commit 的分支，逐分支 push
   - 格式: `git push origin <branch>`
+
+前后端自验命令
+- Date: 2026-06-24
+- Context: Agent 在执行登录页、历史记录与问答优化任务时发现
+- Category: 构建方法
+- Instructions:
+  - 前端构建校验使用 `cd /workspace/frontend && npm run build`
+  - 后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
