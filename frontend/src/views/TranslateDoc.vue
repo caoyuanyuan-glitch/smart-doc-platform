@@ -46,7 +46,6 @@
             <el-form-item label="AI 模型" v-if="engine !== 'memory'">
               <el-select v-model="model" style="width: 100%">
                 <el-option label="Kimi (Moonshot)" value="kimi" />
-                <el-option label="Qwen3.6-Plus" value="qwen" />
                 <el-option label="DeepSeek Chat" value="deepseek" />
               </el-select>
             </el-form-item>
@@ -168,7 +167,7 @@ import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const engine = ref('hybrid')
-const model = ref('qwen')
+const model = ref('kimi')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
 const memoryBank = ref('')

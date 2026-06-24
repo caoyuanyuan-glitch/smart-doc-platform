@@ -6,7 +6,7 @@ from datetime import datetime
 class TranslationRequest(BaseModel):
     content: str
     engine: str = "hybrid"
-    model: str = "qwen"
+    model: str = "kimi"
     source_lang: str = "zh"
     target_lang: str = "en"
     memory_bank: Optional[str] = None
