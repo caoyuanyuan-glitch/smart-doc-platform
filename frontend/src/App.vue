@@ -70,7 +70,6 @@
               </template>
               <el-menu-item index="/convert">格式转换</el-menu-item>
               <el-menu-item index="/convert/history">转换历史</el-menu-item>
-              <el-menu-item index="/convert/rules">转换规则库</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="review-sub">
