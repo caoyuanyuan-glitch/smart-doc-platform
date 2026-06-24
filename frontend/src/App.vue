@@ -60,6 +60,7 @@
                 <span>文档对比</span>
               </template>
               <el-menu-item index="/compare">对比上传</el-menu-item>
+              <el-menu-item index="/compare/params">参数对比</el-menu-item>
               <el-menu-item index="/compare/tasks">历史任务</el-menu-item>
             </el-sub-menu>
 

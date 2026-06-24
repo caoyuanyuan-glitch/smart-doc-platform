@@ -1160,39 +1160,3 @@ body {{ font-family: Arial, sans-serif; margin: 20px; }}
                 "",
             ]
         return {"content": "\n".join(md_lines), "format": "md"}
-
-
-@router.get("/config")
-async def get_config(db: Session = Depends(get_db)):
-    try:
-        from app.crud.compare import get_compare_config
-        config = get_compare_config(db)
-        whitelist = []
-        try:
-            if getattr(config, "whitelist", None):
-                whitelist = json.loads(config.whitelist)
-        except Exception:
-            whitelist = []
-        return {
-            "threshold": getattr(config, "threshold", 0.8),
-            "alpha": getattr(config, "alpha", 0.6),
-            "beta": getattr(config, "beta", 0.4),
-            "tolerance": getattr(config, "tolerance", 0.01),
-            "whitelist": whitelist,
-        }
-    except Exception:
-        return {"threshold": 0.8, "alpha": 0.6, "beta": 0.4, "tolerance": 0.01, "whitelist": []}
-
-
-@router.put("/config")
-async def update_config(
-    threshold: float = None, alpha: float = None, beta: float = None,
-    tolerance: float = None, whitelist: list = None,
-    db: Session = Depends(get_db),
-):
-    try:
-        from app.crud.compare import update_compare_config
-        update_compare_config(db, threshold, alpha, beta, tolerance, whitelist)
-    except Exception:
-        pass
-    return {"message": "Config updated successfully"}

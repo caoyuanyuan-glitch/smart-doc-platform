@@ -1,7 +1,6 @@
 from sqlalchemy.orm import Session
 from app.models.compare_task import CompareTask
 from app.models.compare_diff import CompareDiff
-from app.models.compare_config import CompareConfig
 from app.schemas.compare import CompareTaskCreate
 import json
 
@@ -76,29 +75,3 @@ def create_compare_diff(db: Session, task_id: int, diff_type: str, severity: str
 
 def get_compare_diffs(db: Session, task_id: int):
     return db.query(CompareDiff).filter(CompareDiff.task_id == task_id).all()
-
-def get_compare_config(db: Session):
-    config = db.query(CompareConfig).first()
-    if not config:
-        config = CompareConfig()
-        db.add(config)
-        db.commit()
-        db.refresh(config)
-    return config
-
-def update_compare_config(db: Session, threshold: float = None, alpha: float = None,
-                          beta: float = None, tolerance: float = None, whitelist: list = None):
-    config = get_compare_config(db)
-    if threshold is not None:
-        config.threshold = threshold
-    if alpha is not None:
-        config.alpha = alpha
-    if beta is not None:
-        config.beta = beta
-    if tolerance is not None:
-        config.tolerance = tolerance
-    if whitelist is not None:
-        config.whitelist = json.dumps(whitelist)
-    db.commit()
-    db.refresh(config)
-    return config

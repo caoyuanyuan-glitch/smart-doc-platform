@@ -141,12 +141,6 @@
       </div>
     </div>
 
-    <div v-if="currentView === 'config'">
-      <h2 class="page-title">对比配置已停用</h2>
-      <div class="panel">
-        <el-empty description="对比配置功能已停用。匹配阈值、对比精度等参数已硬编码在系统中，如需调整请联系开发人员。" />
-      </div>
-    </div>
   </div>
 </template>
 
@@ -170,16 +164,8 @@ const selectedTask = ref(null)
 const showPreview = ref(false)
 const reportContent = ref('')
 
-const config = ref({
-  threshold: 0.7,
-  precision: 'sentence',
-  ignoreWhitespace: true,
-  ignoreCase: false
-})
-
 const currentView = computed(() => {
   if (route.path === '/compare/tasks') return 'tasks'
-  if (route.path === '/compare/config') return 'config'
   return 'upload'
 })
 
@@ -197,7 +183,6 @@ onMounted(async () => {
   }
 })
 
-// 监听路由变化，进入历史任务页面时重新加载
 watch(() => route.path, async (newPath) => {
   if (newPath === '/compare/tasks') {
     await loadHistory()
@@ -424,15 +409,6 @@ function downloadFile(content, filename, mimeType) {
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
-}
-
-async function saveConfig() {
-  try {
-    await compareAPI.updateConfig(config.value)
-    ElMessage.success('配置已保存')
-  } catch (e) {
-    ElMessage.error('保存失败')
-  }
 }
 </script>
 

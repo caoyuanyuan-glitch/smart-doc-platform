@@ -89,9 +89,8 @@ export const compareAPI = {
   get: (id) => instance.get(`/compare/${id}`),
   list: () => instance.get('/compare/'),
   delete: (id) => instance.delete(`/compare/${id}`),
-  getReport: (id, format) => instance.get(`/compare/${id}/report`, { params: { format } }),
-  getConfig: () => instance.get('/compare/config'),
-  updateConfig: (config) => instance.put('/compare/config', config)
+  getReport: (id, format) => instance.get(`/compare/${id}/report`, { params: { format } })
+  // param compare methods added below
 }
 
 export const rulesAPI = {
