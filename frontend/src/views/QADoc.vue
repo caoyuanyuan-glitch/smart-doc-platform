@@ -1,35 +1,27 @@
 <template>
   <div class="qa-container">
-    <h2 class="page-title">知识库问答</h2>
+    <h2 class="page-title">文档对话</h2>
 
     <div class="qa-layout">
       <aside class="knowledge-panel">
-        <div class="panel-header-row">
-          <span class="panel-title">文件夹结构</span>
-          <el-button text size="small" @click="expandAll">{{ treeExpanded ? '折叠全部' : '展开全部' }}</el-button>
+        <div class="panel-title">上传文档</div>
+        <div class="upload-area" @click="triggerUpload" @dragover.prevent @drop.prevent="handleDrop">
+          <el-icon class="upload-icon"><UploadFilled /></el-icon>
+          <p v-if="uploadedFiles.length === 0">点击或拖拽文件到此处上传</p>
+          <p v-else class="upload-hint">点击继续添加文件</p>
+          <p class="upload-formats">支持 PDF、DOCX、TXT、Excel 格式</p>
+          <input ref="fileInput" type="file" multiple accept=".pdf,.docx,.txt,.xlsx,.xls,.md" style="display:none" @change="handleFileChange" />
         </div>
-        <div v-if="treeLoading" class="tree-loading">加载中...</div>
-        <el-tree
-          v-else
-          ref="treeRef"
-          :data="treeData"
-          show-checkbox
-          node-key="id"
-          :props="treeProps"
-          :default-expand-all="false"
-          :check-strictly="false"
-          :expand-on-click-node="true"
-          @check="handleTreeCheck"
-        >
-          <template #default="{ node, data }">
-            <span class="tree-node">
-              <el-icon class="tree-folder-icon"><Folder /></el-icon>
-              <span class="tree-node-label">{{ node.label }}</span>
-              <span class="tree-node-count" v-if="data.docCount > 0">{{ data.docCount }}个文档</span>
-              <span class="tree-node-count empty" v-else>空</span>
-            </span>
-          </template>
-        </el-tree>
+        <div v-if="uploadedFiles.length > 0" class="file-list">
+          <div class="file-list-title">已上传文档 ({{ uploadedFiles.length }})</div>
+          <div v-for="(f, i) in uploadedFiles" :key="i" class="file-item">
+            <el-icon :style="{ color: fileIconColor(f.name) }"><Document /></el-icon>
+            <span class="file-name" @click="previewFile(i)" :title="'点击预览: ' + f.name">{{ f.name }}</span>
+            <el-icon class="file-remove" @click="removeFile(i)"><Close /></el-icon>
+          </div>
+          <el-button class="clear-btn" size="small" text type="danger" @click="clearFiles">清空全部</el-button>
+        </div>
+        <div v-if="uploadedFiles.length === 0" class="upload-hint-text">上传文档后即可开始对话，AI 将仅基于您上传的文档内容回答。</div>
       </aside>
 
       <section class="chat-panel">
@@ -52,19 +44,6 @@
           </el-dropdown>
         </div>
         <div class="chat-messages" ref="chatBox">
-          <div
-            v-if="checkedLabels.length > 0"
-            class="selected-tags"
-          >
-            <span class="selected-tags-label">已选知识库：</span>
-            <el-tag
-              v-for="label in checkedLabels"
-              :key="label"
-              size="small"
-              closable
-              @close="removeTag(label)"
-            >{{ label }}</el-tag>
-          </div>
           <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
             <div class="avatar" :class="msg.role">
               <el-icon v-if="msg.role === 'user'"><User /></el-icon>
@@ -113,7 +92,7 @@
                 </svg>
               </el-icon>
             </div>
-            <div class="bubble typing">正在分析知识库内容<span class="dots">...</span></div>
+            <div class="bubble typing">正在分析文档内容<span class="dots">...</span></div>
           </div>
         </div>
         <div class="chat-input">
@@ -122,12 +101,13 @@
             type="textarea"
             :rows="2"
             placeholder="请输入您的问题，按Enter发送..."
+            :disabled="uploadedFiles.length === 0"
             @keydown.enter.exact.prevent="sendQuestion(question)"
           />
-          <el-button class="voice-btn" :class="{ recording: isRecording }" @click="toggleVoice">
+          <el-button class="voice-btn" :class="{ recording: isRecording }" @click="toggleVoice" :disabled="uploadedFiles.length === 0">
             <el-icon><Microphone /></el-icon>
           </el-button>
-          <el-button type="primary" :loading="loading" @click="sendQuestion(question)">发送</el-button>
+          <el-button type="primary" :loading="loading" @click="sendQuestion(question)" :disabled="uploadedFiles.length === 0">发送</el-button>
         </div>
       </section>
     </div>
@@ -149,30 +129,32 @@
         <el-button type="primary" @click="submitFeedback">提交反馈</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="previewVisible" :title="'预览: ' + previewFilename" width="700px" top="5vh">
+      <div class="preview-content" v-loading="previewLoading">
+        <div v-if="previewHtml" class="doc-preview-rendered" v-html="previewHtml"></div>
+        <div v-else-if="!previewLoading" class="preview-empty">无法读取该文件内容</div>
+        <div v-if="previewTruncated" class="preview-truncated-notice">（内容较长，仅显示前 10000 字符）</div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, computed, onMounted, inject } from 'vue'
+import { ref, nextTick, inject } from 'vue'
 import { ElMessage } from 'element-plus'
-import { qaAPI, knowledgeAPI } from '@/api'
+import { qaAPI } from '@/api'
 import { useUserStore } from '@/store/user'
-import { User, Folder, Microphone, CopyDocument, Download, ArrowDown } from '@element-plus/icons-vue'
+import { User, UploadFilled, Document, Close, Microphone, CopyDocument, Download, ArrowDown } from '@element-plus/icons-vue'
 
 const question = ref('')
 const loading = ref(false)
 const chatBox = ref(null)
-const treeRef = ref(null)
-const treeData = ref([])
-const treeLoading = ref(false)
-const treeExpanded = ref(false)
-const checkedIds = ref([])
-const checkedLabels = ref([])
-
-const treeProps = { children: 'children', label: 'name' }
+const fileInput = ref(null)
+const uploadedFiles = ref([])
 
 const messages = ref([
-  { role: 'assistant', content: '您好！我是智能文档助手。请在左侧文件夹树中勾选知识库，然后向我提问。', sources: [], rating: 0 }
+  { role: 'assistant', content: '您好！请先上传您想要提问的文档，上传后即可针对文档内容进行对话。AI 将仅基于您上传的文档回答，不会使用外部知识。', sources: [], rating: 0 }
 ])
 
 const feedbackVisible = ref(false)
@@ -184,112 +166,92 @@ const currentFeedbackIndex = ref(-1)
 const isRecording = ref(false)
 let recognition = null
 
+const previewVisible = ref(false)
+const previewContent = ref('')
+const previewHtml = ref('')
+const previewFilename = ref('')
+const previewLoading = ref(false)
+const previewTruncated = ref(false)
+
 const refreshFeedbackCount = inject('refreshFeedbackCount', null)
 const userStore = useUserStore()
 const sessionId = ref(null)
 
-onMounted(() => {
-  loadKnowledgeTree()
-})
+function triggerUpload() {
+  fileInput.value?.click()
+}
 
-async function loadKnowledgeTree() {
-  treeLoading.value = true
+function handleFileChange(e) {
+  const files = Array.from(e.target.files || [])
+  addFiles(files)
+  e.target.value = ''
+}
+
+function handleDrop(e) {
+  const files = Array.from(e.dataTransfer.files || [])
+  addFiles(files)
+}
+
+function addFiles(files) {
+  const allowed = ['.pdf', '.docx', '.txt', '.xlsx', '.xls', '.md']
+  for (const f of files) {
+    const ext = '.' + f.name.split('.').pop().toLowerCase()
+    if (allowed.includes(ext)) {
+      if (!uploadedFiles.value.find(u => u.name === f.name && u.size === f.size)) {
+        uploadedFiles.value.push(f)
+      }
+    } else {
+      ElMessage.warning(`不支持的文件格式: ${f.name}`)
+    }
+  }
+  if (uploadedFiles.value.length > 0) {
+    ElMessage.success(`已添加 ${uploadedFiles.value.length} 个文件`)
+  }
+}
+
+function removeFile(i) {
+  uploadedFiles.value.splice(i, 1)
+}
+
+function clearFiles() {
+  uploadedFiles.value = []
+  messages.value = [
+    { role: 'assistant', content: '您好！请先上传您想要提问的文档，上传后即可针对文档内容进行对话。AI 将仅基于您上传的文档回答，不会使用外部知识。', sources: [], rating: 0 }
+  ]
+}
+
+async function previewFile(i) {
+  const file = uploadedFiles.value[i]
+  if (!file) return
+  previewVisible.value = true
+  previewFilename.value = file.name
+  previewContent.value = ''
+  previewHtml.value = ''
+  previewLoading.value = true
   try {
-    const resp = await knowledgeAPI.getTree()
-    const rawTree = resp.data || []
-    treeData.value = transformTreeData(rawTree)
-  } catch (e) {
-    ElMessage.warning('加载知识库失败')
+    const resp = await qaAPI.previewDoc(file)
+    previewContent.value = resp.data.content || ''
+    previewHtml.value = resp.data.preview_html || ''
+    previewTruncated.value = resp.data.truncated || false
+  } catch {
+    previewContent.value = ''
+    previewHtml.value = ''
+    ElMessage.warning('预览失败，请重试')
   }
-  treeLoading.value = false
+  previewLoading.value = false
 }
 
-function countRecursiveDocs(node) {
-  let count = (node.files || []).length
-  if (node.children && node.children.length) {
-    for (const child of node.children) {
-      count += countRecursiveDocs(child)
-    }
-  }
-  return count
-}
-
-function transformTreeData(nodes) {
-  return nodes.map(node => {
-    const docCount = countRecursiveDocs(node)
-    return {
-      id: node.id,
-      name: node.name,
-      docCount,
-      children: node.children && node.children.length ? transformTreeData(node.children) : []
-    }
-  })
-}
-
-function expandAll() {
-  treeExpanded.value = !treeExpanded.value
-  if (treeExpanded.value) {
-    expandAllNodes(treeData.value)
-  } else {
-    collapseAllNodes(treeData.value)
-  }
-}
-
-function expandAllNodes(nodes) {
-  for (const node of nodes) {
-    treeRef.value?.store?.nodesMap?.[node.id]?.expand()
-    if (node.children && node.children.length) {
-      expandAllNodes(node.children)
-    }
-  }
-}
-
-function collapseAllNodes(nodes) {
-  for (const node of nodes) {
-    treeRef.value?.store?.nodesMap?.[node.id]?.collapse()
-    if (node.children && node.children.length) {
-      collapseAllNodes(node.children)
-    }
-  }
-}
-
-function handleTreeCheck() {
-  const checked = treeRef.value?.getCheckedNodes(false, false) || []
-  const halfChecked = treeRef.value?.getHalfCheckedNodes() || []
-  checkedIds.value = [...checked.map(n => n.id), ...halfChecked.map(n => n.id)]
-  checkedLabels.value = checked.map(n => getNodePath(n))
-}
-
-function getNodePath(node) {
-  if (!node) return ''
-  let nodeData = node
-  const parts = [nodeData.name || nodeData.label]
-  let current = node
-  while (current.parent && current.parent.level > 0) {
-    parts.unshift(current.parent.data?.name || current.parent.label)
-    current = current.parent
-  }
-  return parts.join(' / ')
-}
-
-function removeTag(label) {
-  const pathParts = label.split(' / ')
-  const leafName = pathParts[pathParts.length - 1]
-  const nodes = treeRef.value?.getCheckedNodes(false, false) || []
-  const target = nodes.find(n => (n.name || n.label) === leafName)
-  if (target) {
-    treeRef.value?.setChecked(target.id, false, true)
-    handleTreeCheck()
-  }
+function fileIconColor(name) {
+  const ext = name.split('.').pop()?.toLowerCase()
+  const colors = { pdf: '#ef4444', docx: '#3b82f6', txt: '#6b7280', xlsx: '#10b981', xls: '#10b981', md: '#7c3aed' }
+  return colors[ext] || '#6b7280'
 }
 
 async function sendQuestion(q) {
   const text = (typeof q === 'string' ? q : question.value).trim()
   if (!text) return
-  const checked = treeRef.value?.getCheckedNodes(false, false) || []
-  const ids = checked.map(n => n.id)
-  if (ids.length === 0) {
-    ElMessage.info('请至少选择一个知识库')
+  if (uploadedFiles.value.length === 0) {
+    ElMessage.info('请先上传文档')
     return
   }
   messages.value.push({ role: 'user', content: text, sources: [], rating: 0 })
@@ -299,19 +261,19 @@ async function sendQuestion(q) {
   scrollToBottom()
 
   try {
-    const resp = await qaAPI.askGeneral(text, ids, sessionId.value)
+    const resp = await qaAPI.askDocs(text, uploadedFiles.value, sessionId.value)
     const data = resp.data
     if (data.session_id) sessionId.value = data.session_id
     messages.value.push({
       role: 'assistant',
-      content: data.answer || '知识库中未找到相关信息。',
-      sources: data.sources || [],
+      content: data.answer || '未能从文档中找到相关信息。',
+      sources: data.sources || data.files?.map(f => ({ title: f })) || [],
       rating: 0
     })
   } catch (e) {
     messages.value.push({
       role: 'assistant',
-      content: '抱歉，查询知识库时出现错误，请稍后重试。',
+      content: '抱歉，处理文档时出现错误，请稍后重试。',
       sources: [],
       rating: 0
     })
@@ -323,7 +285,7 @@ async function sendQuestion(q) {
 
 function buildMarkdown() {
   const now = new Date().toLocaleString('zh-CN')
-  let md = `# 知识库问答会话 — ${now}
+  let md = `# 文档对话会话 — ${now}
 
 > 共 ${Math.floor(messages.value.length / 2)} 轮对话
 
@@ -347,12 +309,12 @@ function buildMarkdown() {
 
 function buildHtml() {
   const now = new Date().toLocaleString('zh-CN')
-  let html = `<html><head><meta charset="utf-8"><title>知识库问答会话</title>
+  let html = `<html><head><meta charset="utf-8"><title>文档对话会话</title>
 <style>body{font-family:"Microsoft YaHei",sans-serif;max-width:800px;margin:40px auto;line-height:1.8}
 h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
 .q{margin-top:24px;font-weight:600;color:#1e40af}.a{background:#f8fafc;padding:12px 16px;border-radius:8px;margin:8px 0}
 .src{color:#94a3b8;font-size:13px}.bar{color:#94a3b8;margin:24px 0;text-align:center}</style></head><body>
-<h1>知识库问答会话 — ${now}</h1>
+<h1>文档对话会话 — ${now}</h1>
 <p class="src">共 ${Math.floor(messages.value.length / 2)} 轮对话</p>
 `
   for (let i = 0; i < messages.value.length; i++) {
@@ -400,9 +362,9 @@ function handleExport(format) {
   if (messages.value.length <= 1) return
   const ts = new Date().toISOString().replace(/[:.]/g, '').substring(0, 15)
   if (format === 'md') {
-    downloadFile(buildMarkdown(), `QA_会话_${ts}.md`, 'text/markdown')
+    downloadFile(buildMarkdown(), `QA_文档对话_${ts}.md`, 'text/markdown')
   } else if (format === 'word') {
-    downloadFile(buildHtml(), `QA_会话_${ts}.doc`, 'application/msword')
+    downloadFile(buildHtml(), `QA_文档对话_${ts}.doc`, 'application/msword')
   } else if (format === 'pdf') {
     const w = window.open('', '_blank')
     w.document.write(buildHtml())
@@ -424,14 +386,6 @@ function rateAnswer(idx, rating) {
   }).catch(() => {})
 }
 
-function openFeedbackDialog(idx) {
-  currentFeedbackIndex.value = idx
-  currentFeedbackQuestion.value = messages.value[idx - 1]?.content || ''
-  currentFeedbackAnswer.value = messages.value[idx].content
-  feedbackText.value = ''
-  feedbackVisible.value = true
-}
-
 async function submitFeedback() {
   try {
     await qaAPI.submitFeedback({
@@ -449,32 +403,47 @@ async function submitFeedback() {
 }
 
 function toggleVoice() {
-  if (isRecording.value) { stopVoice(); return }
+  if (isRecording.value) {
+    stopVoice()
+    return
+  }
   startVoice()
 }
 
 function startVoice() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-  if (!SpeechRecognition) { ElMessage.warning('您的浏览器不支持语音输入'); return }
+  if (!SpeechRecognition) {
+    ElMessage.warning('您的浏览器不支持语音输入')
+    return
+  }
   recognition = new SpeechRecognition()
   recognition.lang = 'zh-CN'
   recognition.interimResults = false
   recognition.continuous = false
   recognition.onresult = (event) => {
-    question.value = (question.value + ' ' + event.results[0][0].transcript).trim()
+    const transcript = event.results[0][0].transcript
+    question.value = (question.value + ' ' + transcript).trim()
   }
-  recognition.onerror = () => { isRecording.value = false; ElMessage.warning('语音识别失败') }
+  recognition.onerror = () => {
+    isRecording.value = false
+    ElMessage.warning('语音识别失败，请重试')
+  }
   recognition.onend = () => { isRecording.value = false }
   recognition.start()
   isRecording.value = true
 }
 
 function stopVoice() {
-  if (recognition) { recognition.stop(); isRecording.value = false }
+  if (recognition) {
+    recognition.stop()
+    isRecording.value = false
+  }
 }
 
 function scrollToBottom() {
-  if (chatBox.value) { chatBox.value.scrollTop = chatBox.value.scrollHeight }
+  if (chatBox.value) {
+    chatBox.value.scrollTop = chatBox.value.scrollHeight
+  }
 }
 </script>
 
@@ -486,7 +455,7 @@ function scrollToBottom() {
 }
 
 .qa-layout {
-  display: grid; grid-template-columns: 300px 1fr; gap: 20px; min-height: 600px;
+  display: grid; grid-template-columns: 320px 1fr; gap: 20px; min-height: 600px;
 }
 
 .knowledge-panel {
@@ -495,49 +464,32 @@ function scrollToBottom() {
   max-height: calc(100vh - 180px); overflow-y: auto;
 }
 
-.panel-header-row {
-  display: flex; justify-content: space-between; align-items: center;
-  padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #f0f0f0;
-}
-.panel-title { font-weight: 600; color: #1f2937; }
-
-.tree-loading { color: #94a3b8; padding: 20px; text-align: center; }
-
-.tree-node {
-  display: flex; align-items: center; flex: 1; min-width: 0;
-  padding-right: 4px;
-}
-.tree-folder-icon {
-  color: #e6a23c; font-size: 16px; margin-right: 6px; flex-shrink: 0;
-}
-.tree-node-label {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 14px; color: #374151;
-}
-.tree-node-count {
-  font-size: 11px; color: #9ca3af; margin-left: auto; flex-shrink: 0;
-  background: #f0f0f0; padding: 1px 6px; border-radius: 8px;
-}
-.tree-node-count.empty { color: #d1d5db; }
-
-.knowledge-panel :deep(.el-tree) {
-  background: transparent;
-}
-.knowledge-panel :deep(.el-tree-node__content) {
-  height: 36px; border-radius: 6px; padding-right: 4px;
-}
-.knowledge-panel :deep(.el-tree-node__content:hover) {
-  background: #f5f7fa;
-}
-.knowledge-panel :deep(.el-checkbox__label) {
-  display: none;
+.panel-title {
+  font-weight: 600; color: #1f2937; margin-bottom: 12px;
+  padding-bottom: 8px; border-bottom: 1px solid #f0f0f0;
 }
 
-.selected-tags {
-  padding: 10px 14px; background: #f0f7ff; border-radius: 8px; margin-bottom: 12px;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+.upload-area {
+  border: 2px dashed #d1d5db; border-radius: 10px;
+  padding: 24px 16px; text-align: center; cursor: pointer;
+  transition: all 0.2s; color: #6b7280; font-size: 13px;
 }
-.selected-tags-label { font-size: 12px; color: #6b7280; font-weight: 500; }
+.upload-area:hover { border-color: #3b82f6; background: #f0f7ff; }
+.upload-icon { font-size: 32px; color: #3b82f6; margin-bottom: 8px; }
+.upload-formats { font-size: 12px; color: #9ca3af; margin-top: 6px; }
+.upload-hint { color: #3b82f6; }
+.upload-hint-text { margin-top: 16px; font-size: 13px; color: #94a3b8; line-height: 1.6; }
+
+.file-list { margin-top: 16px; }
+.file-list-title { font-weight: 600; font-size: 13px; color: #374151; margin-bottom: 8px; }
+.file-item {
+  display: flex; align-items: center; padding: 8px 10px;
+  background: #f8fafc; border-radius: 6px; margin-bottom: 4px;
+}
+.file-name { flex: 1; font-size: 13px; color: #374151; margin-left: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.file-name:hover { color: #3b82f6; text-decoration: underline; }
+.file-remove { color: #ef4444; cursor: pointer; flex-shrink: 0; }
+.clear-btn { margin-top: 8px; }
 
 .chat-panel {
   background: #fff; border-radius: 10px;
@@ -610,7 +562,7 @@ function scrollToBottom() {
   animation: pulse 1.2s infinite;
 }
 @keyframes pulse {
-  0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
   50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
 }
 
@@ -618,6 +570,43 @@ function scrollToBottom() {
   background: #f8fafc; border-radius: 6px; padding: 10px;
   font-size: 13px; color: #475569; max-height: 120px; overflow-y: auto;
 }
+
+.preview-content { min-height: 200px; }
+.doc-preview,
+:deep(.doc-preview) {
+  background: #f8fafc; padding: 16px; border-radius: 8px;
+  font-size: 13px; line-height: 1.8; color: #374151;
+  max-height: 60vh; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+}
+.preview-empty { text-align: center; color: #94a3b8; padding: 40px; }
+.preview-truncated-notice { margin-top: 10px; font-size: 12px; color: #f59e0b; }
+
+.doc-preview-rendered {
+  max-height: 70vh; overflow-y: auto; background: #f8fafc;
+  border-radius: 8px; padding: 16px; color: #374151; line-height: 1.8;
+}
+
+:deep(.doc-preview-html p) { margin: 0 0 10px; }
+:deep(.doc-preview-inline-image) {
+  display: block; max-width: 100%; max-height: 420px; object-fit: contain;
+  margin: 10px 0; border-radius: 6px; background: #fff;
+  border: 1px solid #e5e7eb;
+}
+:deep(.doc-preview-table) {
+  width: 100%; border-collapse: collapse; margin: 10px 0; background: #fff;
+}
+:deep(.doc-preview-table td) {
+  border: 1px solid #e5e7eb; padding: 8px; vertical-align: top;
+}
+:deep(.doc-preview-page) {
+  margin: 0 0 16px; padding: 10px; border: 1px solid #e5e7eb;
+  border-radius: 8px; background: #fff;
+}
+:deep(.doc-preview-page img) { width: 100%; display: block; }
+:deep(.doc-preview-page figcaption) {
+  margin-top: 8px; text-align: center; color: #64748b; font-size: 12px;
+}
+:deep(.doc-preview-sheet h4) { margin: 12px 0 8px; color: #1e40af; }
 
 @media (max-width: 900px) {
   .qa-layout { grid-template-columns: 1fr; }

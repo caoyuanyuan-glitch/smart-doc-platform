@@ -97,6 +97,15 @@ class AIClient:
         if self.kimi_client:
             print(f"[AI] Kimi (Moonshot) 已连接, base_url={self.kimi_base_url}, model={self.kimi_model}")
 
+        # Proxy 回退客户端（使用 OpenAI 兼容接口）
+        self.proxy_client = OpenAI(
+            api_key=self.dashscope_api_key or os.getenv("OPENAI_API_KEY"),
+            base_url=self.anthropic_base_url,
+            timeout=timeout,
+        )
+        if self.proxy_client:
+            print(f"[AI] Proxy 回退已配置, base_url={self.anthropic_base_url}, model={self.anthropic_model}")
+
     @property
     def has_any_client(self):
         return self.kimi_client is not None or self.arkclaw_client is not None or self.qwen_client is not None or self.deepseek_client is not None
@@ -127,7 +136,7 @@ class AIClient:
             response = self.anthropic_http_client.post(
                 f"{self.anthropic_base_url}/messages",
                 headers={
-                    "x-api-key": self.dashscope_api_key,
+                    "x-api-key": self.dashscope_api_key or os.getenv("OPENAI_API_KEY"),
                     "Content-Type": "application/json",
                     "anthropic-version": ANTHROPIC_VERSION
                 },
@@ -215,7 +224,7 @@ class AIClient:
             return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
-        # 优先级: Kimi > ArkClaw > DeepSeek > Qwen
+        # 优先级: Kimi > ArkClaw > DeepSeek > Qwen > Proxy
         providers = []
         if self.kimi_client:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
@@ -225,6 +234,8 @@ class AIClient:
             providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
         if self.qwen_client:
             providers.append(('Qwen', self.qwen_client, self.qwen_model))
+        if self.proxy_client:
+            providers.append(('Proxy', self.proxy_client, self.anthropic_model))
 
         if not providers:
             return None
