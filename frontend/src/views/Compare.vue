@@ -13,47 +13,56 @@
 
         <div class="upload-grid">
           <div class="upload-slot">
-            <div class="slot-label">文档A（原始版本）</div>
+            <div class="slot-label">参照文档</div>
             <el-upload
               action="#"
               :auto-upload="false"
               :show-file-list="false"
-              :before-upload="(f) => { fileA = f; return false }"
-              :on-change="(f) => { fileA = f.raw || f }"
+              :before-upload="(f) => { files[0] = f; return false }"
+              :on-change="(f) => { files[0] = f.raw || f }"
               accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
             >
-              <div class="upload-box" :class="{ filled: fileA }">
+              <div class="upload-box" :class="{ filled: files[0] }">
                 <el-icon style="font-size: 36px; color: #3b82f6; margin-bottom: 8px;"><Upload /></el-icon>
-                <div v-if="!fileA" class="upload-hint">点击上传文档A</div>
-                <div v-else class="upload-name">{{ fileA.name }}</div>
+                <div v-if="!files[0]" class="upload-hint">点击上传参照文档</div>
+                <div v-else class="upload-name">{{ files[0].name }}</div>
               </div>
             </el-upload>
           </div>
 
-          <div class="vs-badge">VS</div>
-
-          <div class="upload-slot">
-            <div class="slot-label">文档B（对比版本）</div>
-            <el-upload
-              action="#"
-              :auto-upload="false"
-              :show-file-list="false"
-              :before-upload="(f) => { fileB = f; return false }"
-              :on-change="(f) => { fileB = f.raw || f }"
-              accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
-            >
-              <div class="upload-box" :class="{ filled: fileB }">
-                <el-icon style="font-size: 36px; color: #7c3aed; margin-bottom: 8px;"><Upload /></el-icon>
-                <div v-if="!fileB" class="upload-hint">点击上传文档B</div>
-                <div v-else class="upload-name">{{ fileB.name }}</div>
+          <template v-for="(file, idx) in files.slice(1)" :key="idx">
+            <div class="vs-badge">VS</div>
+            <div class="upload-slot">
+              <div class="slot-label">
+                对比文档 {{ idx + 1 }}
+                <el-button v-if="files.length > 2" type="danger" size="small" circle @click="removeFile(idx + 1)" style="margin-left: 6px;">
+                  <el-icon><Close /></el-icon>
+                </el-button>
               </div>
-            </el-upload>
-          </div>
+              <el-upload
+                action="#"
+                :auto-upload="false"
+                :show-file-list="false"
+                :before-upload="(f) => { files[idx + 1] = f; return false }"
+                :on-change="(f) => { files[idx + 1] = f.raw || f }"
+                accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
+              >
+                <div class="upload-box" :class="{ filled: files[idx + 1] }">
+                  <el-icon style="font-size: 36px; color: #7c3aed; margin-bottom: 8px;"><Upload /></el-icon>
+                  <div v-if="!files[idx + 1]" class="upload-hint">点击上传对比文档</div>
+                  <div v-else class="upload-name">{{ files[idx + 1].name }}</div>
+                </div>
+              </el-upload>
+            </div>
+          </template>
         </div>
 
         <div class="action-row">
-          <el-button type="primary" size="large" :loading="loading" :disabled="!fileA || !fileB" @click="doCompare">
+          <el-button type="primary" size="large" :loading="loading" :disabled="!files[0] || !files[1]" @click="doCompare">
             <el-icon><Search /></el-icon> 开始对比
+          </el-button>
+          <el-button size="large" type="success" @click="addFile" :disabled="files.length >= 8">
+            <el-icon><Plus /></el-icon> 添加文件
           </el-button>
           <el-button size="large" @click="clearFiles">清空</el-button>
         </div>
@@ -64,25 +73,46 @@
         </div>
       </div>
 
-      <div v-if="result" class="result-panel">
+      <div v-if="allResults.length > 0" class="result-panel">
         <div class="panel-header">
-          <span>对比完成</span>
+          <span>对比完成（{{ allResults.length }} 组结果）</span>
           <div class="panel-actions">
-            <el-tag :type="verdictType" size="small">{{ result.verdict }}</el-tag>
-            <el-tag type="info" size="small">差异数：{{ result.total_diffs || 0 }}</el-tag>
-            <el-button size="small" type="primary" @click="previewReport">预览报告</el-button>
-            <el-button size="small" @click="openPdfPreview">PDF页码预览</el-button>
-            <el-button size="small" @click="exportCompare">导出报告</el-button>
+            <el-button size="small" @click="clearFiles">重新对比</el-button>
           </div>
         </div>
 
-        <div v-if="showPreview" class="panel" style="background: #fafafa; margin-top: 12px;">
-          <div class="panel-header">
-            <span>报告预览</span>
-            <el-button size="small" @click="showPreview = false">关闭预览</el-button>
-          </div>
-          <div class="report-preview-content" style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
-        </div>
+        <el-tabs v-model="activeResultTab" type="border-card" class="result-tabs">
+          <el-tab-pane
+            v-for="(r, ri) in allResults"
+            :key="ri"
+            :label="'对比 ' + (ri + 1) + ': ' + (r.file_b_name || '文档')"
+            :name="ri"
+          >
+            <div class="pair-header">
+              <span class="pair-label">
+                {{ r.file_a_name }} <strong>VS</strong> {{ r.file_b_name }}
+              </span>
+              <div class="pair-tags">
+                <el-tag :type="getVerdictTagType(r.verdict)" size="small">{{ r.verdict }}</el-tag>
+                <el-tag type="info" size="small">差异数：{{ r.total_diffs || 0 }}</el-tag>
+                <el-tag type="warning" size="small">相似度：{{ ((r.similarity || 0) * 100).toFixed(1) }}%</el-tag>
+              </div>
+            </div>
+            <div class="pair-actions">
+              <el-button size="small" type="primary" @click="previewPairReport(r.task_id)">预览报告</el-button>
+              <el-button size="small" @click="exportPairReport(r.task_id)">导出报告</el-button>
+              <el-button size="small" @click="openPairPdfPreview(r.task_id)">PDF预览</el-button>
+            </div>
+
+            <div v-if="showPreview && activePreviewTask === r.task_id" class="panel" style="background: #fafafa; margin-top: 12px;">
+              <div class="panel-header">
+                <span>报告预览 - {{ r.file_a_name }} vs {{ r.file_b_name }}</span>
+                <el-button size="small" @click="showPreview = false; activePreviewTask = null">关闭预览</el-button>
+              </div>
+              <div class="report-preview-content" style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
       </div>
 
       <el-dialog
@@ -96,14 +126,14 @@
         <div class="pdf-preview-wrapper">
           <div class="pdf-preview-pane">
             <div class="pane-header pane-a">
-              <span>文档A：{{ fileA?.name || '文档A' }}</span>
+              <span>参照文档：{{ files[0]?.name || '参照文档' }}</span>
             </div>
             <div class="pane-content">
               <PdfPreview
                 v-if="pdfUrlA"
                 ref="pdfPreviewARef"
                 :pdf-url="pdfUrlA"
-                :file-name="fileA?.name || 'document_A.pdf'"
+                :file-name="files[0]?.name || 'document_A.pdf'"
                 @page-change="onPageAChange"
                 @loaded="onPdfALoaded"
               />
@@ -124,14 +154,14 @@
           </div>
           <div class="pdf-preview-pane">
             <div class="pane-header pane-b">
-              <span>文档B：{{ fileB?.name || '文档B' }}</span>
+              <span>对比文档：{{ compareFiles[activePdfSide]?.name || '对比文档' }}</span>
             </div>
             <div class="pane-content">
               <PdfPreview
                 v-if="pdfUrlB"
                 ref="pdfPreviewBRef"
                 :pdf-url="pdfUrlB"
-                :file-name="fileB?.name || 'document_B.pdf'"
+                :file-name="compareFiles[activePdfSide]?.name || 'document_B.pdf'"
                 @page-change="onPageBChange"
                 @loaded="onPdfBLoaded"
               />
@@ -207,20 +237,22 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { compareAPI } from '@/api'
-import { Upload, Search, View } from '@element-plus/icons-vue'
+import { Upload, Search, View, Plus, Close } from '@element-plus/icons-vue'
 import PdfPreview from '@/components/PdfPreview.vue'
 
 const route = useRoute()
 const router = useRouter()
-const fileA = ref(null)
-const fileB = ref(null)
+const files = ref([null, null])
+const compareFiles = ref([])
 const loading = ref(false)
 const progress = ref(0)
 const progressText = ref('')
-const result = ref(null)
+const allResults = ref([])
+const activeResultTab = ref(0)
 const history = ref([])
 const selectedTask = ref(null)
 const showPreview = ref(false)
+const activePreviewTask = ref(null)
 const reportContent = ref('')
 const showPdfPreviewDialog = ref(false)
 const pdfUrlA = ref('')
@@ -229,17 +261,11 @@ const pdfPreviewARef = ref(null)
 const pdfPreviewBRef = ref(null)
 const syncScroll = ref(true)
 const _pageChangingFrom = ref('')
+const activePdfSide = ref(1)
 
 const currentView = computed(() => {
   if (route.path === '/compare/tasks') return 'tasks'
   return 'upload'
-})
-
-const verdictType = computed(() => {
-  if (!result.value?.verdict) return 'info'
-  if (result.value.verdict.includes('通过')) return 'success'
-  if (result.value.verdict.includes('强制')) return 'danger'
-  return 'warning'
 })
 
 onMounted(async () => {
@@ -289,10 +315,32 @@ function getSimilarityClass(similarity) {
   return 'sim-low'
 }
 
+function getVerdictTagType(verdict) {
+  if (!verdict) return 'info'
+  if (verdict.includes('通过') || verdict.includes('80')) return 'success'
+  if (verdict.includes('强制') || verdict.includes('60')) return 'danger'
+  return 'warning'
+}
+
 function clearFiles() {
-  fileA.value = null
-  fileB.value = null
-  result.value = null
+  files.value = [null, null]
+  allResults.value = []
+  compareFiles.value = []
+  activeResultTab.value = 0
+  showPreview.value = false
+  activePreviewTask.value = null
+}
+
+function addFile() {
+  if (files.value.length < 8) {
+    files.value.push(null)
+  }
+}
+
+function removeFile(index) {
+  if (files.value.length > 2) {
+    files.value.splice(index, 1)
+  }
 }
 
 function updateProgress(pct, text) {
@@ -306,10 +354,12 @@ function updateProgress(pct, text) {
 }
 
 async function doCompare() {
-  if (!fileA.value || !fileB.value) {
-    ElMessage.info('请上传两个文档后再进行对比')
+  const validFiles = files.value.filter(f => f)
+  if (validFiles.length < 2) {
+    ElMessage.info('请至少上传2个文档后再进行对比')
     return
   }
+  compareFiles.value = [...validFiles]
   loading.value = true
   progress.value = 0
   progressText.value = ''
@@ -317,12 +367,11 @@ async function doCompare() {
   try {
     await updateProgress(5, '正在初始化...')
     await updateProgress(10, '正在上传文件...')
-    await updateProgress(15, '正在解析文档A...')
 
-    const respPromise = compareAPI.create(fileA.value, fileB.value)
+    const respPromise = compareAPI.create(validFiles)
 
     for (let p = 20; p < 80; p += 5) {
-      await updateProgress(p, `正在处理文档B... ${p}%`)
+      await updateProgress(p, `正在对比分析... ${p}%`)
       await new Promise(r => setTimeout(r, 300))
     }
 
@@ -333,19 +382,16 @@ async function doCompare() {
 
     await updateProgress(90, '正在生成结果...')
 
-    result.value = {
-      similarity: data.similarity || 0,
-      verdict: data.verdict || '',
-      total_diffs: data.total_diffs || 0,
-      comparison_id: data.comparison_id || data.task_id || 0,
-      task_id: data.comparison_id || data.task_id || 0,
-    }
+    allResults.value = (data.results || []).map(r => ({
+      ...r,
+      task_id: r.task_id || r.comparison_id || 0,
+    }))
 
     await updateProgress(95, '正在整理报告...')
     await updateProgress(100, '对比完成')
 
     setTimeout(() => { progress.value = 0 }, 1500)
-    ElMessage.success('对比完成')
+    ElMessage.success(`对比完成，共 ${allResults.value.length} 组结果`)
   } catch (e) {
     progress.value = 0
     ElMessage.error('对比失败：' + (e.message || '未知错误'))
@@ -354,27 +400,29 @@ async function doCompare() {
   }
 }
 
-async function exportCompare() {
-  if (!result.value) {
-    ElMessage.warning('请先进行对比')
-    return
-  }
-
-  const taskId = result.value.comparison_id || result.value.task_id
-  if (!taskId) {
-    ElMessage.warning('无法获取任务ID，请重新对比')
-    return
-  }
-
+async function previewPairReport(taskId) {
+  if (!taskId) return
   try {
     const resp = await compareAPI.getReport(taskId, 'html')
-    const content = resp.data?.content || ''
-
-    if (!content.trim()) {
+    reportContent.value = resp.data?.content || ''
+    if (!reportContent.value.trim()) {
       ElMessage.warning('报告内容为空')
       return
     }
+    showPreview.value = true
+    activePreviewTask.value = taskId
+    ElMessage.success('报告已加载')
+  } catch (e) {
+    console.error('Preview error:', e)
+    ElMessage.error('预览失败：' + (e.message || '未知错误'))
+  }
+}
 
+async function exportPairReport(taskId) {
+  if (!taskId) return
+  try {
+    const resp = await compareAPI.getReport(taskId, 'html')
+    const content = resp.data?.content || ''
     downloadFile(content, `compare_report_${taskId}_${Date.now()}.html`, 'text/html')
     ElMessage.success('对比报告已导出')
   } catch (e) {
@@ -383,33 +431,16 @@ async function exportCompare() {
   }
 }
 
-async function previewReport() {
-  if (!result.value) {
-    ElMessage.warning('请先进行对比')
-    return
-  }
-
-  const taskId = result.value.comparison_id || result.value.task_id
+function openPairPdfPreview(taskId) {
   if (!taskId) {
-    ElMessage.warning('无法获取任务ID，请重新对比')
+    ElMessage.warning('无法获取任务ID')
     return
   }
-
-  try {
-    const resp = await compareAPI.getReport(taskId, 'html')
-    reportContent.value = resp.data?.content || ''
-
-    if (!reportContent.value.trim()) {
-      ElMessage.warning('报告内容为空')
-      return
-    }
-
-    showPreview.value = true
-    ElMessage.success('报告已加载')
-  } catch (e) {
-    console.error('Preview error:', e)
-    ElMessage.error('预览失败：' + (e.message || '未知错误'))
-  }
+  const idx = allResults.value.findIndex(r => r.task_id === taskId)
+  activePdfSide.value = idx >= 0 ? (idx + 1) : 1
+  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+  showPdfPreviewDialog.value = true
 }
 
 async function viewTask(taskId) {
@@ -492,22 +523,12 @@ async function saveConfig() {
   }
 }
 
-function openPdfPreview() {
-  const taskId = result.value?.comparison_id || result.value?.task_id
-  if (!taskId) {
-    ElMessage.warning('无法获取任务ID')
-    return
-  }
-  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
-  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
-  showPdfPreviewDialog.value = true
-}
-
 function openTaskPdfPreview(taskId) {
   if (!taskId) {
     ElMessage.warning('无法获取任务ID')
     return
   }
+  activePdfSide.value = 1
   pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
   pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
   showPdfPreviewDialog.value = true
@@ -570,6 +591,41 @@ function onPdfBLoaded(info) {
   padding: 24px;
   margin-bottom: 20px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.result-tabs {
+  margin-top: 16px;
+}
+
+.pair-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.pair-label {
+  font-size: 15px;
+  color: #1f2937;
+}
+
+.pair-label strong {
+  color: #3b82f6;
+  margin: 0 8px;
+}
+
+.pair-tags {
+  display: flex;
+  gap: 8px;
+}
+
+.pair-actions {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .panel-header {

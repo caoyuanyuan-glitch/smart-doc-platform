@@ -38,6 +38,18 @@ def _ensure_legacy_sqlite_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE rules ADD COLUMN language VARCHAR DEFAULT 'both'"))
 
+    try:
+        compare_columns = {col['name'] for col in inspector.get_columns('compare_tasks')}
+    except Exception:
+        compare_columns = set()
+
+    if compare_columns and 'group_id' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN group_id INTEGER"))
+    if compare_columns and 'file_names' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN file_names TEXT"))
+
 def get_db():
     db = SessionLocal()
     try:

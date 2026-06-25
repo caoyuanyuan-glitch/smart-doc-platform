@@ -77,10 +77,9 @@ export const reviewAPI = {
 }
 
 export const compareAPI = {
-  create: (fileA, fileB) => {
+  create: (files) => {
     const formData = new FormData()
-    formData.append('file_a', fileA)
-    formData.append('file_b', fileB)
+    files.forEach((f, i) => formData.append('files', f))
     return instance.post('/compare/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   get: (id) => instance.get(`/compare/${id}`),

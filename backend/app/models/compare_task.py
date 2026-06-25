@@ -8,6 +8,8 @@ class CompareTask(Base):
     id = Column(Integer, primary_key=True, index=True)
     file_a_name = Column(String)
     file_b_name = Column(String)
+    file_names = Column(Text)
+    group_id = Column(Integer, index=True, nullable=True, default=None)
     similarity = Column(Float)
     verdict = Column(String)
     total_diffs = Column(Integer)
