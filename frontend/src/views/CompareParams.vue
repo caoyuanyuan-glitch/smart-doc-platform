@@ -4,7 +4,7 @@
 
     <div class="panel">
       <div class="panel-header">
-        <span>上传两个文档，对比相同参数的数值是否一致</span>
+        <span>上传参照文档和多个对比文档，对比相同参数的数值是否一致</span>
         <div class="panel-actions">
           <el-tag size="small" type="info">支持 Word / PDF / Excel</el-tag>
         </div>
@@ -12,47 +12,56 @@
 
       <div class="upload-grid">
         <div class="upload-slot">
-          <div class="slot-label">文档A（原始版本）</div>
+          <div class="slot-label">参照文档</div>
           <el-upload
             action="#"
             :auto-upload="false"
             :show-file-list="false"
-            :before-upload="(f) => { fileA = f; return false }"
-            :on-change="(f) => { fileA = f.raw || f }"
+            :before-upload="(f) => { files[0] = f; return false }"
+            :on-change="(f) => { files[0] = f.raw || f }"
             accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md"
           >
-            <div class="upload-box" :class="{ filled: fileA }">
+            <div class="upload-box" :class="{ filled: files[0] }">
               <el-icon style="font-size:36px;color:#3b82f6;margin-bottom:8px;"><Upload /></el-icon>
-              <div v-if="!fileA" class="upload-hint">点击上传文档A</div>
-              <div v-else class="upload-name">{{ fileA.name }}</div>
+              <div v-if="!files[0]" class="upload-hint">点击上传参照文档</div>
+              <div v-else class="upload-name">{{ files[0].name }}</div>
             </div>
           </el-upload>
         </div>
 
-        <div class="vs-badge">VS</div>
-
-        <div class="upload-slot">
-          <div class="slot-label">文档B（对比版本）</div>
-          <el-upload
-            action="#"
-            :auto-upload="false"
-            :show-file-list="false"
-            :before-upload="(f) => { fileB = f; return false }"
-            :on-change="(f) => { fileB = f.raw || f }"
-            accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md"
-          >
-            <div class="upload-box" :class="{ filled: fileB }">
-              <el-icon style="font-size:36px;color:#7c3aed;margin-bottom:8px;"><Upload /></el-icon>
-              <div v-if="!fileB" class="upload-hint">点击上传文档B</div>
-              <div v-else class="upload-name">{{ fileB.name }}</div>
+        <template v-for="(file, idx) in files.slice(1)" :key="idx">
+          <div class="vs-badge">VS</div>
+          <div class="upload-slot">
+            <div class="slot-label">
+              对比文档 {{ idx + 1 }}
+              <el-button v-if="files.length > 2" type="danger" size="small" circle @click="removeFile(idx + 1)" style="margin-left:6px;">
+                <el-icon><Close /></el-icon>
+              </el-button>
             </div>
-          </el-upload>
-        </div>
+            <el-upload
+              action="#"
+              :auto-upload="false"
+              :show-file-list="false"
+              :before-upload="(f) => { files[idx + 1] = f; return false }"
+              :on-change="(f) => { files[idx + 1] = f.raw || f }"
+              accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md"
+            >
+              <div class="upload-box" :class="{ filled: files[idx + 1] }">
+                <el-icon style="font-size:36px;color:#7c3aed;margin-bottom:8px;"><Upload /></el-icon>
+                <div v-if="!files[idx + 1]" class="upload-hint">点击上传对比文档</div>
+                <div v-else class="upload-name">{{ files[idx + 1].name }}</div>
+              </div>
+            </el-upload>
+          </div>
+        </template>
       </div>
 
       <div class="action-row">
-        <el-button type="primary" size="large" :loading="loading" :disabled="!fileA || !fileB" @click="doCompare">
+        <el-button type="primary" size="large" :loading="loading" :disabled="!files[0] || !files[1]" @click="doCompare">
           <el-icon><Search /></el-icon> 开始对比
+        </el-button>
+        <el-button size="large" type="success" @click="addFile" :disabled="files.length >= 8">
+          <el-icon><Plus /></el-icon> 添加文件
         </el-button>
         <el-button size="large" @click="clearFiles">清空</el-button>
       </div>
@@ -63,149 +72,179 @@
       </div>
     </div>
 
-    <div v-if="result" class="result-panel">
+    <div v-if="allResults.length > 0" class="result-panel">
       <div class="panel-header">
-        <span>对比结果</span>
+        <span>对比结果（{{ allResults.length }} 组）</span>
         <div class="panel-actions">
-          <el-tag type="success" size="small">一致: {{ result.match_count }}</el-tag>
-          <el-tag type="danger" size="small">不一致: {{ result.diff_count }}</el-tag>
-          <el-tag type="warning" size="small">仅A: {{ result.only_a_count }}</el-tag>
-          <el-tag size="small">仅B: {{ result.only_b_count }}</el-tag>
+          <el-button size="small" @click="clearFiles">重新对比</el-button>
         </div>
       </div>
 
-      <div class="cards">
-        <div class="card primary">
-          <div class="num">{{ result.total }}</div>
-          <div class="lbl">参数总数</div>
-        </div>
-        <div class="card">
-          <div class="num" style="color:#22c55e">{{ result.match_count }}</div>
-          <div class="lbl">一致</div>
-        </div>
-        <div class="card">
-          <div class="num" style="color:#ef4444">{{ result.diff_count }}</div>
-          <div class="lbl">不一致</div>
-        </div>
-        <div class="card">
-          <div class="num" style="color:#f59e0b">{{ result.only_a_count }}</div>
-          <div class="lbl">仅A有</div>
-        </div>
-        <div class="card">
-          <div class="num" style="color:#8b5cf6">{{ result.only_b_count }}</div>
-          <div class="lbl">仅B有</div>
-        </div>
-      </div>
+      <el-tabs v-model="activeTab" type="border-card" class="result-tabs">
+        <el-tab-pane
+          v-for="(r, ri) in allResults"
+          :key="ri"
+          :label="'对比 ' + (ri + 1) + ': ' + (r.file_b || '文档')"
+          :name="ri"
+        >
+          <div class="pair-header">
+            <span class="pair-label">
+              {{ r.file_a }} <strong>VS</strong> {{ r.file_b }}
+            </span>
+            <div class="pair-tags">
+              <el-tag type="success" size="small">一致: {{ r.match_count }}</el-tag>
+              <el-tag type="danger" size="small">不一致: {{ r.diff_count }}</el-tag>
+              <el-tag type="warning" size="small">仅参照: {{ r.only_a_count }}</el-tag>
+              <el-tag size="small">仅对方: {{ r.only_b_count }}</el-tag>
+            </div>
+          </div>
 
-      <div class="param-table-wrapper">
-        <div class="custom-table-container">
-          <table class="param-table">
-            <thead>
-              <tr>
-                <th>参数名称</th>
-                <th>文档A内容</th>
-                <th>文档B内容</th>
-                <th>一致性</th>
-                <th>匹配方式</th>
-                <th>数据来源</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, idx) in paginatedResults" :key="idx">
-                <td class="param-name-cell">{{ row.param }}</td>
-                <td>{{ row.value_a || '—' }}</td>
-                <td>{{ row.value_b || '—' }}</td>
-                <td class="match-cell">
-                  <el-tag
-                    :type="row.match === '一致' ? 'success' : row.match === '不一致' ? 'danger' : row.match === '仅A有' ? 'warning' : 'info'"
-                    size="small"
-                  >
-                    {{ row.match }}
-                  </el-tag>
-                </td>
-                <td class="fuzzy-cell">
-                  <template v-if="row.match === '仅A有' || row.match === '仅B有'">
-                    <span class="text-muted">—</span>
-                  </template>
-                  <template v-else-if="row.fuzzy">
-                    <el-tag size="small" type="info" effect="plain">
-                      模糊匹配({{ row.fuzzy_score }})
-                    </el-tag>
-                    <div class="matched-name">→{{ row.matched_param }}</div>
-                  </template>
-                  <template v-else>
-                    <el-tag size="small" type="success" effect="plain">精确匹配</el-tag>
-                  </template>
-                </td>
-                <td class="source-cell">
-                  <div>A: {{ row.source_a || '—' }}</div>
-                  <div>B: {{ row.source_b || '—' }}</div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+          <div class="cards">
+            <div class="card primary">
+              <div class="num">{{ r.total }}</div>
+              <div class="lbl">参数总数</div>
+            </div>
+            <div class="card">
+              <div class="num" style="color:#22c55e">{{ r.match_count }}</div>
+              <div class="lbl">一致</div>
+            </div>
+            <div class="card">
+              <div class="num" style="color:#ef4444">{{ r.diff_count }}</div>
+              <div class="lbl">不一致</div>
+            </div>
+            <div class="card">
+              <div class="num" style="color:#f59e0b">{{ r.only_a_count }}</div>
+              <div class="lbl">仅参照有</div>
+            </div>
+            <div class="card">
+              <div class="num" style="color:#8b5cf6">{{ r.only_b_count }}</div>
+              <div class="lbl">仅对方有</div>
+            </div>
+          </div>
 
-        <div class="pagination-row" v-if="result.total > pageSize">
-          <el-pagination
-            v-model:current-page="currentPage"
-            :page-size="pageSize"
-            :total="result.total"
-            layout="prev, pager, next, total"
-            background
-            small
-          />
-        </div>
-      </div>
+          <div class="param-table-wrapper">
+            <div class="custom-table-container">
+              <table class="param-table">
+                <thead>
+                  <tr>
+                    <th>参数名称</th>
+                    <th>{{ r.file_a || '参照文档' }}</th>
+                    <th>{{ r.file_b || '对比文档' }}</th>
+                    <th>一致性</th>
+                    <th>匹配方式</th>
+                    <th>数据来源</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, idx) in paginateResults(r.results || [], ri)" :key="idx">
+                    <td class="param-name-cell">{{ row.param }}</td>
+                    <td>{{ row.value_a || '—' }}</td>
+                    <td>{{ row.value_b || '—' }}</td>
+                    <td class="match-cell">
+                      <el-tag
+                        :type="row.match === '一致' ? 'success' : row.match === '不一致' ? 'danger' : row.match === '仅A有' ? 'warning' : 'info'"
+                        size="small"
+                      >
+                        {{ row.match }}
+                      </el-tag>
+                    </td>
+                    <td class="fuzzy-cell">
+                      <template v-if="row.match === '仅A有' || row.match === '仅B有'">
+                        <span class="text-muted">—</span>
+                      </template>
+                      <template v-else-if="row.fuzzy">
+                        <el-tag size="small" type="info" effect="plain">
+                          模糊匹配({{ row.fuzzy_score }})
+                        </el-tag>
+                        <div class="matched-name">→{{ row.matched_param }}</div>
+                      </template>
+                      <template v-else>
+                        <el-tag size="small" type="success" effect="plain">精确匹配</el-tag>
+                      </template>
+                    </td>
+                    <td class="source-cell">
+                      <div>参照: {{ row.source_a || '—' }}</div>
+                      <div>对比: {{ row.source_b || '—' }}</div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
 
-      <el-collapse v-if="result.extracted_text_a || result.extracted_text_b" style="margin-top:16px">
-        <el-collapse-item title="查看提取的原始文本（调试）" name="debug">
-          <el-tabs>
-            <el-tab-pane label="文档A 提取文本" v-if="result.extracted_text_a">
-              <pre class="debug-text">{{ result.extracted_text_a }}</pre>
-              <div style="margin-top:4px;color:#9ca3af;font-size:12px">
-                从文档A中提取到 {{ result.params_a_count }} 个参数
-              </div>
-            </el-tab-pane>
-            <el-tab-pane label="文档B 提取文本" v-if="result.extracted_text_b">
-              <pre class="debug-text">{{ result.extracted_text_b }}</pre>
-              <div style="margin-top:4px;color:#9ca3af;font-size:12px">
-                从文档B中提取到 {{ result.params_b_count }} 个参数
-              </div>
-            </el-tab-pane>
-          </el-tabs>
-        </el-collapse-item>
-      </el-collapse>
+            <div class="pagination-row" v-if="(r.results || []).length > pageSize">
+              <el-pagination
+                v-model:current-page="pages[ri]"
+                :page-size="pageSize"
+                :total="(r.results || []).length"
+                layout="prev, pager, next, total"
+                background
+                small
+              />
+            </div>
+          </div>
+
+          <el-collapse v-if="r.extracted_text_a || r.extracted_text_b" style="margin-top:16px">
+            <el-collapse-item title="查看提取的原始文本（调试）" name="debug">
+              <el-tabs>
+                <el-tab-pane label="参照文档 提取文本" v-if="r.extracted_text_a">
+                  <pre class="debug-text">{{ r.extracted_text_a }}</pre>
+                  <div style="margin-top:4px;color:#9ca3af;font-size:12px">
+                    从参照文档中提取到 {{ r.params_a_count }} 个参数
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="对比文档 提取文本" v-if="r.extracted_text_b">
+                  <pre class="debug-text">{{ r.extracted_text_b }}</pre>
+                  <div style="margin-top:4px;color:#9ca3af;font-size:12px">
+                    从对比文档中提取到 {{ r.params_b_count }} 个参数
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
+            </el-collapse-item>
+          </el-collapse>
+        </el-tab-pane>
+      </el-tabs>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Upload, Search } from '@element-plus/icons-vue'
+import { Upload, Search, Plus, Close } from '@element-plus/icons-vue'
 import { instance } from '@/api'
 
-const fileA = ref(null)
-const fileB = ref(null)
+const files = ref([null, null])
 const loading = ref(false)
 const progress = ref(0)
 const progressText = ref('')
-const result = ref(null)
-const currentPage = ref(1)
+const allResults = ref([])
+const activeTab = ref(0)
 const pageSize = ref(20)
+const pages = reactive({})
 
-const paginatedResults = computed(() => {
-  if (!result.value?.results) return []
-  const start = (currentPage.value - 1) * pageSize.value
-  return result.value.results.slice(start, start + pageSize.value)
-})
+function paginateResults(results, tabIdx) {
+  if (!results) return []
+  const start = ((pages[tabIdx] || 1) - 1) * pageSize.value
+  if (pages[tabIdx] === undefined) pages[tabIdx] = 1
+  return results.slice(start, start + pageSize.value)
+}
+
+function addFile() {
+  if (files.value.length < 8) {
+    files.value.push(null)
+  }
+}
+
+function removeFile(index) {
+  if (files.value.length > 2) {
+    files.value.splice(index, 1)
+  }
+}
 
 function clearFiles() {
-  fileA.value = null
-  fileB.value = null
-  result.value = null
-  currentPage.value = 1
+  files.value = [null, null]
+  allResults.value = []
+  activeTab.value = 0
 }
 
 function updateProgress(pct, text) {
@@ -219,22 +258,21 @@ function updateProgress(pct, text) {
 }
 
 async function doCompare() {
-  if (!fileA.value || !fileB.value) {
-    ElMessage.warning('请上传两个文档')
+  const validFiles = files.value.filter(f => f)
+  if (validFiles.length < 2) {
+    ElMessage.warning('请至少上传2个文档')
     return
   }
 
   loading.value = true
-  result.value = null
-  currentPage.value = 1
+  allResults.value = []
 
   try {
     await updateProgress(10, '正在上传文件...')
     await updateProgress(25, '正在提取参数...')
 
     const formData = new FormData()
-    formData.append('file_a', fileA.value)
-    formData.append('file_b', fileB.value)
+    validFiles.forEach(f => formData.append('files', f))
 
     await updateProgress(50, '正在对比参数数值...')
 
@@ -244,10 +282,10 @@ async function doCompare() {
 
     await updateProgress(90, '正在整理结果...')
 
-    result.value = resp.data
+    allResults.value = resp.data.results || []
 
     await updateProgress(100, '对比完成')
-    ElMessage.success('参数对比完成')
+    ElMessage.success(`参数对比完成，共 ${allResults.value.length} 组结果`)
 
     setTimeout(() => {
       progress.value = 0
@@ -306,14 +344,17 @@ async function doCompare() {
   align-items: flex-start;
   gap: 24px;
   justify-content: center;
+  flex-wrap: wrap;
 }
 
-.upload-slot { flex: 1; max-width: 400px; }
+.upload-slot { flex: 1; max-width: 400px; min-width: 200px; }
 
 .slot-label {
   font-weight: 600;
   margin-bottom: 12px;
   color: #374151;
+  display: flex;
+  align-items: center;
 }
 
 .upload-box {
@@ -338,6 +379,8 @@ async function doCompare() {
   font-weight: 700;
   color: #9ca3af;
   padding: 8px 16px;
+  display: flex;
+  align-items: center;
 }
 
 .action-row {
@@ -359,6 +402,27 @@ async function doCompare() {
   margin-top: 8px;
   color: #6b7280;
 }
+
+.result-tabs { margin-top: 16px; }
+
+.pair-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.pair-label {
+  font-size: 15px;
+  color: #1f2937;
+}
+
+.pair-label strong { color: #3b82f6; margin: 0 8px; }
+
+.pair-tags { display: flex; gap: 8px; }
 
 .cards { display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px; }
 .card { background:#fff;border-radius:10px;padding:18px 22px;box-shadow:0 1px 3px rgba(0,0,0,.08);min-width:140px; }

@@ -129,7 +129,11 @@
       </aside>
 
       <main class="main-content">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <keep-alive :include="['Compare', 'CompareParams', 'QAHistory', 'PolishHistory', 'SpellCheckHistory']">
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </main>
     </template>
   </div>

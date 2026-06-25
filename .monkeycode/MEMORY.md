@@ -74,3 +74,11 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 大模型调用顺序固定为 `Kimi > DeepSeek > ArkClaw`
   - 项目中移除 `Qwen` 及其 API Key 配置
+
+推送前需用户确认
+- Date: 2026-06-25
+- Context: 用户指出不要擅自推送代码到 GitHub
+- Category: 工作流协作
+- Instructions:
+  - 未收到用户明确推送指令（如"推送"、"push"、"提交到GitHub"等），不得擅自执行 git push
+  - 代码 commit 后等待用户下一步指示
