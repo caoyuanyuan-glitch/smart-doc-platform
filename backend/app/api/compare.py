@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from typing import List, Optional
 from sqlalchemy.orm import Session
 import os
 import json
@@ -9,15 +10,22 @@ from app.database import get_db
 router = APIRouter()
 
 UPLOAD_DIR = "./static/uploads"
+PREVIEW_DIR = "./static/preview"
 
 _MEMORY_TASKS = {}
 _MEMORY_DIFFS = {}
 _MEMORY_NEXT_ID = [1000]
+_MEMORY_FILES = {}  # task_id -> {file_a_path, file_b_path, file_a_name, file_b_name}
 
 
 def _ensure_upload_dir():
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def _ensure_preview_dir():
+    if not os.path.exists(PREVIEW_DIR):
+        os.makedirs(PREVIEW_DIR, exist_ok=True)
 
 
 def _read_upload_as_text(path: str) -> str:
@@ -409,7 +417,7 @@ def _simple_compare(text_a, text_b):
         "delete": len([d for d in diffs if d["diff_type"] == "delete"]),
         "modify": len([d for d in diffs if d["diff_type"] == "modify"]),
     }
-    verdict = "✅ 自动通过（≥80%）" if similarity >= 0.8 else ("⚠️ 建议复核（50% ~ 80%）" if similarity >= 0.5 else "🟥 强制人工复核（<50%，不可互换）")
+    verdict = "✅ 自动通过（≥80%）" if similarity >= 0.8 else ("⚠️ 建议复核（60% ~ 80%）" if similarity >= 0.6 else "🟥 强制人工复核（<60%，不可互换）")
     return {
         "similarity": similarity,
         "verdict": verdict,
@@ -511,314 +519,321 @@ def _parse_file(file_path: str, filename: str):
         return {"text": text, "segments": [], "structure": [], "type": "text"}
 
 
-@router.post("/")
-async def create_compare(
-    file_a: UploadFile = File(...),
-    file_b: UploadFile = File(...),
-    db: Session = Depends(get_db),
-):
-    _ensure_upload_dir()
+def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, group_id=None, file_names=None, db=None):
     task_id = None
-    file_a_path = os.path.join(UPLOAD_DIR, f"{int(time.time() * 1000)}_{file_a.filename}")
-    file_b_path = os.path.join(UPLOAD_DIR, f"{int(time.time() * 1000)}_{file_b.filename}")
+    parsed_a = _parse_file(file_a_path, file_a_name)
+    parsed_b = _parse_file(file_b_path, file_b_name)
 
-    try:
-        with open(file_a_path, "wb") as buffer:
-            buffer.write(await file_a.read())
-        with open(file_b_path, "wb") as buffer:
-            buffer.write(await file_b.read())
-    except Exception:
-        if os.path.exists(file_a_path):
-            try: os.remove(file_a_path)
-            except Exception: pass
-        if os.path.exists(file_b_path):
-            try: os.remove(file_b_path)
-            except Exception: pass
-        raise HTTPException(status_code=500, detail="File upload failed")
+    text_a = parsed_a["text"] if isinstance(parsed_a, dict) else parsed_a
+    text_b = parsed_b["text"] if isinstance(parsed_b, dict) else parsed_b
 
-    try:
-        parsed_a = _parse_file(file_a_path, file_a.filename)
-        parsed_b = _parse_file(file_b_path, file_b.filename)
+    segments_a = parsed_a.get("segments", []) if isinstance(parsed_a, dict) else []
+    segments_b = parsed_b.get("segments", []) if isinstance(parsed_b, dict) else []
+    structure_a = parsed_a.get("structure", []) if isinstance(parsed_a, dict) else []
+    structure_b = parsed_b.get("structure", []) if isinstance(parsed_b, dict) else []
 
-        text_a = parsed_a["text"] if isinstance(parsed_a, dict) else parsed_a
-        text_b = parsed_b["text"] if isinstance(parsed_b, dict) else parsed_b
-        
-        segments_a = parsed_a.get("segments", []) if isinstance(parsed_a, dict) else []
-        segments_b = parsed_b.get("segments", []) if isinstance(parsed_b, dict) else []
-        structure_a = parsed_a.get("structure", []) if isinstance(parsed_a, dict) else []
-        structure_b = parsed_b.get("structure", []) if isinstance(parsed_b, dict) else []
+    is_dita = (
+        parsed_a.get("type") == "dita" and parsed_b.get("type") == "dita"
+        and parsed_a.get("topics") and parsed_b.get("topics")
+    )
 
-        # 判断是否为 DITA 包：两边都是 DITA 类型且有 topic 数据
-        is_dita = (
-            parsed_a.get("type") == "dita" and parsed_b.get("type") == "dita"
-            and parsed_a.get("topics") and parsed_b.get("topics")
-        )
-
-        result = None
-        dita_full = None
-        if is_dita:
-            try:
-                from app.utils.dita_compare import compare_dita_packages
-                dita_full = compare_dita_packages(
-                    parsed_a.get("temp_dir") or os.path.dirname(parsed_a.get("ditamap_path", "")),
-                    parsed_b.get("temp_dir") or os.path.dirname(parsed_b.get("ditamap_path", "")),
-                    threshold=0.80,
-                )
-                # 转成统一 result 格式
-                diffs = []
-                for tr in dita_full.get("topics", []):
-                    for d in tr.get("diffs", []):
-                        diffs.append({
-                            "diff_type": d.get("type", "modify"),
-                            "severity": (
-                                "high" if d.get("type") in ("only_a", "only_b")
-                                else "medium" if d.get("similarity", 0) < 0.7
-                                else "low"
-                            ),
-                            "similarity": float(d.get("similarity", 0.0)),
-                            "text_a": d.get("text_a", ""),
-                            "text_b": d.get("text_b", ""),
-                            "position_a": {},
-                            "position_b": {},
-                            "chapter": tr.get("chapter_a", "") or tr.get("chapter_b", ""),
-                        })
-
-                result = {
-                    "similarity": dita_full.get("overall_jaccard", 0.0),
-                    "verdict": (
-                        "✅ 自动通过（≥80%）" if dita_full.get("overall_jaccard", 0.0) >= 0.80
-                        else "⚠️ 建议复核（50% ~ 80%）" if dita_full.get("overall_jaccard", 0.0) >= 0.50
-                        else "🟥 强制人工复核（<50%，不可互换）"
-                    ),
-                    "total_diffs": sum(tr.get("n_diffs", 0) for tr in dita_full.get("topics", [])),
-                    "diff_stats": {
-                        "add": dita_full.get("n_only_b", 0),
-                        "delete": dita_full.get("n_only_a", 0),
-                        "modify": dita_full.get("stat_low", 0) + dita_full.get("stat_partial", 0),
-                    },
-                    "diffs": diffs,
-                    "exact_match": dita_full.get("n_exact", 0),
-                    "matched_pairs": [],
-                    "only_a": [{"chapter": tr.get("chapter_a", ""), "section": tr.get("navtitle", "")}
-                               for tr in dita_full.get("topics", []) if tr.get("type") == "only_a"],
-                    "only_b": [{"chapter": tr.get("chapter_b", ""), "section": tr.get("navtitle", "")}
-                               for tr in dita_full.get("topics", []) if tr.get("type") == "only_b"],
-                    "n_a": dita_full.get("n_sentences_a", 0),
-                    "n_b": dita_full.get("n_sentences_b", 0),
-                    "dita_full": dita_full,
-                }
-            except Exception as e:
-                is_dita = False
-                print(f"[DITA对比失败] 走通用对比: {e}")
-
-        # 判断是否为通用文档（Word/PDF/Markdown）
-        is_doc = (
-            parsed_a.get("type") in ("docx", "pdf", "md") and
-            parsed_b.get("type") in ("docx", "pdf", "md")
-        )
-
-        doc_full = None
-        if is_doc and result is None:
-            try:
-                from app.utils.doc_parser import compare_documents_by_format
-                doc_full = compare_documents_by_format(file_a_path, file_b_path)
-
-                # 转换结果格式
-                diffs = []
-                for r in doc_full.get("results", []):
-                    for d in r.get("diffs", []):
-                        diffs.append({
-                            "diff_type": "modify",
-                            "severity": "low",
-                            "similarity": d.get("score", 0.0),
-                            "text_a": d.get("a", ""),
-                            "text_b": d.get("b", ""),
-                            "position_a": {},
-                            "position_b": {},
-                            "chapter": r.get("heading", ""),
-                        })
-
-                stats = doc_full.get("stats", {})
-                result = {
-                    "similarity": stats.get("overall_sim", 0.0),
-                    "verdict": (
-                        "✅ 自动通过（≥80%）" if stats.get("overall_sim", 0.0) >= 0.80
-                        else "⚠️ 建议复核（60% ~ 80%）" if stats.get("overall_sim", 0.0) >= 0.60
-                        else "🟥 强制人工复核（<60%，不可互换）"
-                    ),
-                    "total_diffs": len(diffs),
-                    "diff_stats": {
-                        "add": stats.get("n_only_b", 0),
-                        "delete": stats.get("n_only_a", 0),
-                        "modify": stats.get("n_low", 0),
-                    },
-                    "diffs": diffs,
-                    "exact_match": 0,
-                    "matched_pairs": [],
-                    "only_a": [{"chapter": r.get("heading", ""), "section": r.get("heading", "")}
-                               for r in doc_full.get("results", []) if r.get("status") == "仅在A中"],
-                    "only_b": [{"chapter": r.get("heading", ""), "section": r.get("heading", "")}
-                               for r in doc_full.get("results", []) if r.get("status") == "仅在B中"],
-                    "n_a": len(doc_full.get("results", [])),
-                    "n_b": len(doc_full.get("results", [])),
-                    "doc_full": doc_full,
-                }
-            except Exception as e:
-                print(f"[文档对比失败] 走通用对比: {e}")
-                import traceback
-                traceback.print_exc()
-
-        if result is None:
-            try:
-                from app.utils.compare_utils import compare_documents
-                result = compare_documents(text_a, text_b, {
-                    "segments_a": segments_a,
-                    "segments_b": segments_b,
-                    "structure_a": structure_a,
-                    "structure_b": structure_b,
-                })
-            except Exception:
-                result = _simple_compare(text_a, text_b)
-
+    result = None
+    dita_full = None
+    if is_dita:
         try:
-            from app.crud.compare import create_compare_task, update_compare_task, create_compare_diff
-            task = create_compare_task(db, file_a.filename, file_b.filename, 1)
-            # 序列化 dita_full 用于存储（也用于 doc_full，复用字段）
-            doc_full_json = json.dumps(doc_full, ensure_ascii=False) if doc_full else ""
-            dita_full_json = json.dumps(dita_full, ensure_ascii=False) if dita_full else doc_full_json
-            update_compare_task(
-                db, task.id,
-                result["similarity"], result["verdict"],
-                result["total_diffs"], result["diff_stats"],
-                result.get("exact_match", 0),
-                result.get("n_a", 0),
-                result.get("n_b", 0),
-                result.get("matched_pairs", []),
-                result.get("only_a", []),
-                result.get("only_b", []),
-                dita_full_json=dita_full_json,
+            from app.utils.dita_compare import compare_dita_packages
+            dita_full = compare_dita_packages(
+                parsed_a.get("temp_dir") or os.path.dirname(parsed_a.get("ditamap_path", "")),
+                parsed_b.get("temp_dir") or os.path.dirname(parsed_b.get("ditamap_path", "")),
+                threshold=0.80,
             )
-            # 把 topic 级差异保存到 diff 表
-            diffs_to_save = result["diffs"][:200]
-            if dita_full:
-                for tr in dita_full.get("topics", []):
-                    for d in tr.get("diffs", []):
-                        if len(diffs_to_save) >= 200:
-                            break
-                        diffs_to_save.append({
-                            "diff_type": d.get("type", "modify"),
-                            "severity": (
-                                "high" if d.get("type") in ("only_a", "only_b")
-                                else "medium" if d.get("similarity", 0) < 0.7
-                                else "low"
-                            ),
-                            "similarity": float(d.get("similarity", 0.0)),
-                            "text_a": d.get("text_a", ""),
-                            "text_b": d.get("text_b", ""),
-                            "position_a": {},
-                            "position_b": {},
-                            "chapter": tr.get("chapter_a", "") or tr.get("chapter_b", ""),
-                        })
+            diffs = []
+            for tr in dita_full.get("topics", []):
+                for d in tr.get("diffs", []):
+                    diffs.append({
+                        "diff_type": d.get("type", "modify"),
+                        "severity": (
+                            "high" if d.get("type") in ("only_a", "only_b")
+                            else "medium" if d.get("similarity", 0) < 0.7
+                            else "low"
+                        ),
+                        "similarity": float(d.get("similarity", 0.0)),
+                        "text_a": d.get("text_a", ""),
+                        "text_b": d.get("text_b", ""),
+                        "position_a": {},
+                        "position_b": {},
+                        "chapter": tr.get("chapter_a", "") or tr.get("chapter_b", ""),
+                    })
+            result = {
+                "similarity": dita_full.get("overall_jaccard", 0.0),
+                "verdict": (
+                    "自动通过（>=80%）" if dita_full.get("overall_jaccard", 0.0) >= 0.80
+                    else "建议复核（60% ~ 80%）" if dita_full.get("overall_jaccard", 0.0) >= 0.60
+                    else "强制人工复核（<60%，不可互换）"
+                ),
+                "total_diffs": sum(tr.get("n_diffs", 0) for tr in dita_full.get("topics", [])),
+                "diff_stats": {
+                    "add": dita_full.get("n_only_b", 0),
+                    "delete": dita_full.get("n_only_a", 0),
+                    "modify": dita_full.get("stat_low", 0) + dita_full.get("stat_partial", 0),
+                },
+                "diffs": diffs,
+                "exact_match": dita_full.get("n_exact", 0),
+                "matched_pairs": [],
+                "only_a": [{"chapter": tr.get("chapter_a", ""), "section": tr.get("navtitle", "")}
+                           for tr in dita_full.get("topics", []) if tr.get("type") == "only_a"],
+                "only_b": [{"chapter": tr.get("chapter_b", ""), "section": tr.get("navtitle", "")}
+                           for tr in dita_full.get("topics", []) if tr.get("type") == "only_b"],
+                "n_a": dita_full.get("n_sentences_a", 0),
+                "n_b": dita_full.get("n_sentences_b", 0),
+                "dita_full": dita_full,
+            }
+        except Exception as e:
+            is_dita = False
+            print(f"[DITA对比失败] 走通用对比: {e}")
+
+    is_doc = (
+        parsed_a.get("type") in ("docx", "pdf", "md") and
+        parsed_b.get("type") in ("docx", "pdf", "md")
+    )
+
+    doc_full = None
+    if is_doc and result is None:
+        try:
+            from app.utils.doc_parser import compare_documents_by_format
+            doc_full = compare_documents_by_format(file_a_path, file_b_path)
+            diffs = []
+            for r in doc_full.get("results", []):
+                for d in r.get("diffs", []):
+                    diffs.append({
+                        "diff_type": "modify",
+                        "severity": "low",
+                        "similarity": d.get("score", 0.0),
+                        "text_a": d.get("a", ""),
+                        "text_b": d.get("b", ""),
+                        "position_a": {},
+                        "position_b": {},
+                        "chapter": r.get("heading", ""),
+                    })
+            stats = doc_full.get("stats", {})
+            result = {
+                "similarity": stats.get("overall_sim", 0.0),
+                "verdict": (
+                    "自动通过（>=80%）" if stats.get("overall_sim", 0.0) >= 0.80
+                    else "建议复核（60% ~ 80%）" if stats.get("overall_sim", 0.0) >= 0.60
+                    else "强制人工复核（<60%，不可互换）"
+                ),
+                "total_diffs": len(diffs),
+                "diff_stats": {
+                    "add": stats.get("n_only_b", 0),
+                    "delete": stats.get("n_only_a", 0),
+                    "modify": stats.get("n_low", 0),
+                },
+                "diffs": diffs,
+                "exact_match": 0,
+                "matched_pairs": [],
+                "only_a": [{"chapter": r.get("heading", ""), "section": r.get("heading", "")}
+                           for r in doc_full.get("results", []) if r.get("status") == "仅在A中"],
+                "only_b": [{"chapter": r.get("heading", ""), "section": r.get("heading", "")}
+                           for r in doc_full.get("results", []) if r.get("status") == "仅在B中"],
+                "n_a": len(doc_full.get("results", [])),
+                "n_b": len(doc_full.get("results", [])),
+                "doc_full": doc_full,
+            }
+        except Exception as e:
+            print(f"[文档对比失败] 走通用对比: {e}")
+            import traceback
+            traceback.print_exc()
+
+    if result is None:
+        try:
+            from app.utils.compare_utils import compare_documents
+            result = compare_documents(text_a, text_b, {
+                "segments_a": segments_a,
+                "segments_b": segments_b,
+                "structure_a": structure_a,
+                "structure_b": structure_b,
+            })
+        except Exception:
+            result = _simple_compare(text_a, text_b)
+
+    try:
+        from app.crud.compare import create_compare_task, update_compare_task, create_compare_diff
+        task = create_compare_task(db, file_a_name, file_b_name, 1, group_id=group_id, file_names=file_names)
+        doc_full_json = json.dumps(doc_full, ensure_ascii=False) if doc_full else ""
+        dita_full_json = json.dumps(dita_full, ensure_ascii=False) if dita_full else doc_full_json
+        update_compare_task(
+            db, task.id,
+            result["similarity"], result["verdict"],
+            result["total_diffs"], result["diff_stats"],
+            result.get("exact_match", 0),
+            result.get("n_a", 0),
+            result.get("n_b", 0),
+            result.get("matched_pairs", []),
+            result.get("only_a", []),
+            result.get("only_b", []),
+            dita_full_json=dita_full_json,
+        )
+        diffs_to_save = result["diffs"][:200]
+        if dita_full:
+            for tr in dita_full.get("topics", []):
+                for d in tr.get("diffs", []):
                     if len(diffs_to_save) >= 200:
                         break
+                    diffs_to_save.append({
+                        "diff_type": d.get("type", "modify"),
+                        "severity": (
+                            "high" if d.get("type") in ("only_a", "only_b")
+                            else "medium" if d.get("similarity", 0) < 0.7
+                            else "low"
+                        ),
+                        "similarity": float(d.get("similarity", 0.0)),
+                        "text_a": d.get("text_a", ""),
+                        "text_b": d.get("text_b", ""),
+                        "position_a": {},
+                        "position_b": {},
+                        "chapter": tr.get("chapter_a", "") or tr.get("chapter_b", ""),
+                    })
+                if len(diffs_to_save) >= 200:
+                    break
 
-            for diff in diffs_to_save[:200]:
-                try:
-                    create_compare_diff(
-                        db, task.id,
-                        diff.get("diff_type", "modify"),
-                        diff.get("severity", "medium"),
-                        float(diff.get("similarity", 0.0)),
-                        diff.get("text_a", ""),
-                        diff.get("text_b", ""),
-                        diff.get("position_a") or {},
-                        diff.get("position_b") or {},
-                        diff.get("chapter", ""),
-                    )
-                except Exception:
-                    continue
-            task_id = task.id
-        except Exception:
-            task_id = _MEMORY_NEXT_ID[0]
-            _MEMORY_NEXT_ID[0] += 1
-            dita_full_json = json.dumps(dita_full, ensure_ascii=False) if dita_full else ""
-            _MEMORY_TASKS[task_id] = {
-                "id": task_id,
-                "file_a_name": file_a.filename,
-                "file_b_name": file_b.filename,
-                "similarity": result["similarity"],
-                "verdict": result["verdict"],
-                "total_diffs": result["total_diffs"],
-                "diff_stats": json.dumps(result["diff_stats"]),
-                "status": "completed",
-                "user_id": 1,
-                "created_at": int(time.time()),
-                "exact_match": result.get("exact_match", 0),
-                "n_a": result.get("n_a", 0),
-                "n_b": result.get("n_b", 0),
-                "matched_pairs": json.dumps(result.get("matched_pairs", [])),
-                "only_a": json.dumps(result.get("only_a", [])),
-                "only_b": json.dumps(result.get("only_b", [])),
-                "dita_full": dita_full_json,
-            }
-            _MEMORY_DIFFS[task_id] = result["diffs"][:200]
-
-        try:
-            os.remove(file_a_path)
-            os.remove(file_b_path)
-        except Exception:
-            pass
-
-        return {
-            "comparison_id": task_id,
-            "task_id": task_id,
-            "stats": result["diff_stats"],
+        for diff in diffs_to_save[:200]:
+            try:
+                create_compare_diff(
+                    db, task.id,
+                    diff.get("diff_type", "modify"),
+                    diff.get("severity", "medium"),
+                    float(diff.get("similarity", 0.0)),
+                    diff.get("text_a", ""),
+                    diff.get("text_b", ""),
+                    diff.get("position_a") or {},
+                    diff.get("position_b") or {},
+                    diff.get("chapter", ""),
+                )
+            except Exception:
+                continue
+        task_id = task.id
+    except Exception:
+        task_id = _MEMORY_NEXT_ID[0]
+        _MEMORY_NEXT_ID[0] += 1
+        dita_full_json = json.dumps(dita_full, ensure_ascii=False) if dita_full else ""
+        _MEMORY_TASKS[task_id] = {
+            "id": task_id,
+            "file_a_name": file_a_name,
+            "file_b_name": file_b_name,
             "similarity": result["similarity"],
             "verdict": result["verdict"],
             "total_diffs": result["total_diffs"],
-            "diffs": result["diffs"][:200],
-            "status": "completed",
-            "exact_match": result.get("exact_match", 0),
-            "n_a": result.get("n_a", 0),
-            "n_b": result.get("n_b", 0),
-            "is_dita": is_dita,
-            "is_doc": is_doc,
-            "dita_full": dita_full,
-            "doc_full": doc_full,
-        }
-    except Exception as exc:
-        try:
-            os.remove(file_a_path)
-            os.remove(file_b_path)
-        except Exception:
-            pass
-        task_id = _MEMORY_NEXT_ID[0]
-        _MEMORY_NEXT_ID[0] += 1
-        fallback = _simple_compare("", "")
-        _MEMORY_TASKS[task_id] = {
-            "id": task_id,
-            "file_a_name": file_a.filename,
-            "file_b_name": file_b.filename,
-            "similarity": fallback["similarity"],
-            "verdict": fallback["verdict"],
-            "total_diffs": fallback["total_diffs"],
-            "diff_stats": json.dumps(fallback["diff_stats"]),
+            "diff_stats": json.dumps(result["diff_stats"]),
             "status": "completed",
             "user_id": 1,
             "created_at": int(time.time()),
+            "exact_match": result.get("exact_match", 0),
+            "n_a": result.get("n_a", 0),
+            "n_b": result.get("n_b", 0),
+            "matched_pairs": json.dumps(result.get("matched_pairs", [])),
+            "only_a": json.dumps(result.get("only_a", [])),
+            "only_b": json.dumps(result.get("only_b", [])),
+            "dita_full": dita_full_json,
         }
-        _MEMORY_DIFFS[task_id] = fallback["diffs"]
-        return {
-            "comparison_id": task_id,
-            "task_id": task_id,
-            "stats": fallback["diff_stats"],
-            "similarity": fallback["similarity"],
-            "verdict": fallback["verdict"],
-            "total_diffs": fallback["total_diffs"],
-            "diffs": fallback["diffs"][:50],
-            "status": "completed",
-            "error": str(exc),
-        }
+        _MEMORY_DIFFS[task_id] = result["diffs"][:200]
+
+    _ensure_preview_dir()
+    preview_a_path = ""
+    preview_b_path = ""
+    try:
+        ext_a = os.path.splitext(file_a_name)[1].lower()
+        ext_b = os.path.splitext(file_b_name)[1].lower()
+        if ext_a == ".pdf":
+            preview_a_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_a{ext_a}")
+            import shutil
+            shutil.copy2(file_a_path, preview_a_path)
+        if ext_b == ".pdf":
+            preview_b_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_b{ext_b}")
+            import shutil
+            shutil.copy2(file_b_path, preview_b_path)
+    except Exception as e:
+        print(f"[Preview] Save preview files failed: {e}")
+
+    _MEMORY_FILES[task_id] = {
+        "file_a_path": preview_a_path,
+        "file_b_path": preview_b_path,
+        "file_a_name": file_a_name,
+        "file_b_name": file_b_name,
+    }
+
+    return {
+        "task_id": task_id,
+        "comparison_id": task_id,
+        "file_a_name": file_a_name,
+        "file_b_name": file_b_name,
+        "similarity": result["similarity"],
+        "verdict": result["verdict"],
+        "total_diffs": result["total_diffs"],
+        "diff_stats": result["diff_stats"],
+        "diffs": result["diffs"][:200],
+        "exact_match": result.get("exact_match", 0),
+        "n_a": result.get("n_a", 0),
+        "n_b": result.get("n_b", 0),
+        "is_dita": is_dita,
+        "is_doc": is_doc,
+        "dita_full": dita_full,
+        "doc_full": doc_full,
+        "has_preview": bool(preview_a_path or preview_b_path),
+    }
+
+
+@router.post("/")
+async def create_compare(
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    _ensure_upload_dir()
+
+    if not files or len(files) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 files are required for comparison")
+
+    saved_paths = []
+    saved_names = []
+    group_id = int(time.time() * 1000)
+
+    for f in files:
+        path = os.path.join(UPLOAD_DIR, f"{group_id}_{len(saved_paths)}_{f.filename}")
+        try:
+            with open(path, "wb") as buffer:
+                buffer.write(await f.read())
+            saved_paths.append(path)
+            saved_names.append(f.filename)
+        except Exception:
+            for p in saved_paths:
+                try: os.remove(p)
+                except Exception: pass
+            raise HTTPException(status_code=500, detail="File upload failed")
+
+    ref_path = saved_paths[0]
+    ref_name = saved_names[0]
+    all_results = []
+
+    for i in range(1, len(saved_paths)):
+        cmp_path = saved_paths[i]
+        cmp_name = saved_names[i]
+        pair_result = _do_single_compare(
+            ref_path, cmp_path, ref_name, cmp_name,
+            group_id=group_id, file_names=json.dumps(saved_names, ensure_ascii=False),
+            db=db,
+        )
+        all_results.append(pair_result)
+
+    for p in saved_paths:
+        try: os.remove(p)
+        except Exception: pass
+
+    return {
+        "group_id": group_id,
+        "file_count": len(files),
+        "file_names": saved_names,
+        "results": all_results,
+    }
 
 
 @router.get("/")
@@ -835,6 +850,7 @@ async def read_compare_tasks(skip: int = 0, limit: int = 100, db: Session = Depe
     for t in db_tasks:
         items.append({
             "id": t.id,
+            "task_type": getattr(t, "task_type", "doc") or "doc",
             "file_a_name": getattr(t, "file_a_name", ""),
             "file_b_name": getattr(t, "file_b_name", ""),
             "similarity": getattr(t, "similarity", 0.0),
@@ -880,6 +896,7 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
         if task:
             task_obj = {
                 "id": task.id,
+                "task_type": getattr(task, "task_type", "doc") or "doc",
                 "file_a_name": getattr(task, "file_a_name", ""),
                 "file_b_name": getattr(task, "file_b_name", ""),
                 "similarity": getattr(task, "similarity", 0.0),
@@ -959,8 +976,18 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
     except Exception:
         dita_full = None
 
+    # 判断数据类型：通用文档有 results 字段，DITA 有 topics 字段
+    is_dita_data = dita_full and isinstance(dita_full, dict) and "topics" in dita_full
+    is_doc_data = dita_full and isinstance(dita_full, dict) and "results" in dita_full
+    doc_full = dita_full if is_doc_data else None
+
+    # 如果 dita_full 里存的是 doc 数据，转出来
+    if is_doc_data:
+        dita_full = None
+
     return {
         "task_id": task_obj.get("id") if isinstance(task_obj, dict) else task_id,
+        "task_type": task_obj.get("task_type", "doc") if isinstance(task_obj, dict) else "doc",
         "comparison_id": task_obj.get("id") if isinstance(task_obj, dict) else task_id,
         "similarity": task_obj.get("similarity") if isinstance(task_obj, dict) else 0.0,
         "verdict": task_obj.get("verdict") if isinstance(task_obj, dict) else "",
@@ -978,7 +1005,7 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
         "only_a": only_a,
         "only_b": only_b,
         "dita_full": dita_full,
-        "doc_full": dita_full,  # 复用字段，doc_full 也存这里
+        "doc_full": doc_full,  # 通用文档数据
     }
 
 
@@ -1036,6 +1063,73 @@ async def generate_report(task_id: int, format: str = "html", db: Session = Depe
     if is_doc_data and not doc_full:
         doc_full = dita_full
         dita_full = None
+
+    # 如果 dita_full 和 doc_full 都为空，尝试从 diffs 构建 doc_full（兼容旧任务）
+    if not is_dita_data and not is_doc_data and diffs:
+        # 从 diffs 数据构建章节级结果
+        chapters_map = {}
+        for d in diffs:
+            chapter = d.get("chapter", "") or "全文"
+            if chapter not in chapters_map:
+                chapters_map[chapter] = {
+                    "heading": chapter,
+                    "content_a": "",
+                    "content_b": "",
+                    "diffs": [],
+                    "only_a": [],
+                    "only_b": [],
+                    "status": "部分相似",
+                    "similarity": 1.0,
+                }
+            chapters_map[chapter]["diffs"].append({
+                "a": d.get("text_a", ""),
+                "b": d.get("text_b", ""),
+                "score": d.get("similarity", 0.0),
+                "type": d.get("diff_type", "fuzzy"),
+            })
+            if d.get("text_a") and not d.get("text_b"):
+                chapters_map[chapter]["only_a"].append(d.get("text_a", ""))
+            elif d.get("text_b") and not d.get("text_a"):
+                chapters_map[chapter]["only_b"].append(d.get("text_b", ""))
+
+        # 计算每章的相似度
+        for ch_data in chapters_map.values():
+            total = len(ch_data["diffs"])
+            if total > 0:
+                scores = [d["score"] for d in ch_data["diffs"]]
+                ch_data["similarity"] = sum(scores) / total
+                if ch_data["similarity"] >= 0.99:
+                    ch_data["status"] = "完全一致"
+                elif ch_data["similarity"] >= 0.95:
+                    ch_data["status"] = "高度相似"
+                elif ch_data["similarity"] >= 0.70:
+                    ch_data["status"] = "部分相似"
+                else:
+                    ch_data["status"] = "差异较大"
+
+        # 统计
+        results = list(chapters_map.values())
+        n_full = sum(1 for r in results if r["status"] == "完全一致")
+        n_high = sum(1 for r in results if r["status"] == "高度相似")
+        n_partial = sum(1 for r in results if r["status"] == "部分相似")
+        n_low = sum(1 for r in results if r["status"] == "差异较大")
+        n_only_a = sum(len(r["only_a"]) for r in results)
+        n_only_b = sum(len(r["only_b"]) for r in results)
+
+        doc_full = {
+            "results": results,
+            "stats": {
+                "n_full": n_full,
+                "n_high": n_high,
+                "n_partial": n_partial,
+                "n_low": n_low,
+                "n_only_a": n_only_a,
+                "n_only_b": n_only_b,
+                "n_matched": len(results),
+                "overall_sim": similarity,
+            }
+        }
+        is_doc_data = True
 
     # 优先 DITA 报告
     if is_dita_data and format == "html":
@@ -1196,3 +1290,93 @@ async def update_config(
     except Exception:
         pass
     return {"message": "Config updated successfully"}
+
+
+@router.get("/{task_id}/preview/file")
+async def get_preview_file(task_id: int, side: str = "a", db: Session = Depends(get_db)):
+    """
+    获取对比任务的PDF预览文件
+    side: 'a' 或 'b'
+    """
+    from fastapi.responses import FileResponse
+    import os
+
+    file_path = None
+    file_name = None
+
+    # 先从内存查找
+    if task_id in _MEMORY_FILES:
+        info = _MEMORY_FILES[task_id]
+        if side == "a":
+            file_path = info.get("file_a_path", "")
+            file_name = info.get("file_a_name", "")
+        else:
+            file_path = info.get("file_b_path", "")
+            file_name = info.get("file_b_name", "")
+
+    # 再尝试从数据库查找（如果有）
+    if not file_path:
+        try:
+            from app.crud.compare import get_compare_task
+            task = get_compare_task(db, task_id=task_id)
+            if task:
+                # 尝试从预览目录查找
+                ext = ".pdf"
+                candidate = os.path.join(PREVIEW_DIR, f"task_{task_id}_{side}{ext}")
+                if os.path.exists(candidate):
+                    file_path = candidate
+                    if side == "a":
+                        file_name = getattr(task, "file_a_name", f"document_{side}.pdf")
+                    else:
+                        file_name = getattr(task, "file_b_name", f"document_{side}.pdf")
+        except Exception:
+            pass
+
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=file_name or f"document_{side}.pdf"
+    )
+
+
+@router.get("/{task_id}/preview/info")
+async def get_preview_info(task_id: int, db: Session = Depends(get_db)):
+    """
+    获取预览文件信息（是否有PDF预览、文件名等）
+    """
+    info = {
+        "task_id": task_id,
+        "has_preview_a": False,
+        "has_preview_b": False,
+        "file_a_name": "",
+        "file_b_name": "",
+    }
+
+    # 从内存查找
+    if task_id in _MEMORY_FILES:
+        f = _MEMORY_FILES[task_id]
+        info["file_a_name"] = f.get("file_a_name", "")
+        info["file_b_name"] = f.get("file_b_name", "")
+        info["has_preview_a"] = os.path.exists(f.get("file_a_path", "")) if f.get("file_a_path") else False
+        info["has_preview_b"] = os.path.exists(f.get("file_b_path", "")) if f.get("file_b_path") else False
+
+    # 检查数据库任务
+    if not info["has_preview_a"] and not info["has_preview_b"]:
+        try:
+            from app.crud.compare import get_compare_task
+            task = get_compare_task(db, task_id=task_id)
+            if task:
+                info["file_a_name"] = getattr(task, "file_a_name", "")
+                info["file_b_name"] = getattr(task, "file_b_name", "")
+                # 检查预览目录
+                a_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_a.pdf")
+                b_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_b.pdf")
+                info["has_preview_a"] = os.path.exists(a_path)
+                info["has_preview_b"] = os.path.exists(b_path)
+        except Exception:
+            pass
+
+    return info

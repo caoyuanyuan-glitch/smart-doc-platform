@@ -58,6 +58,18 @@ def _detect_language(text: str) -> str:
     return 'zh' if ratio > 0.3 else 'en'
 
 
+def _protect_model_numbers(text: str) -> str:
+    """保持产品型号内部连写，同时保留编号与术语之间的空格。"""
+    if not text:
+        return text
+
+    text = re.sub(r'(?<=[A-Za-z-])\s+(?=\d+[A-Za-z])', '', text)
+    text = re.sub(r'(?<=[A-Za-z-]\d)\s+(?=[A-Za-z])', '', text)
+    text = re.sub(r'(?<=(?:表|图)\d)\s*(?=[A-Za-z]{2,})', ' ', text)
+    text = re.sub(r'(?<=\d\.\d)\s*(?=[A-Za-z]{2,})', ' ', text)
+    return text
+
+
 def _term_column_lang(header: str) -> str:
     """根据列表头判断该列的语言倾向：zh / en / None（中性）。"""
     zh_keywords = ['中', '中文', 'zh', '汉语', '汉']
@@ -362,14 +374,33 @@ def _filter_terms_by_lang(term_dict: dict, target_lang: str) -> dict:
 
 def _resolve_terminology(db: Session, terminology_md: str = None, text: str = None) -> dict:
     """加载术语：文件术语优先，自动按文本语言过滤。返回纯净 {非标准: 标准}。"""
+    merged = {}
+
+    platform_files = _get_platform_feedback_terminology_targets(db, 1)
+    for platform_file in platform_files:
+        if platform_file and platform_file.file_path and os.path.exists(platform_file.file_path):
+            try:
+                platform_terms = _parse_terminology(platform_file.file_path if platform_file.file_path.lower().endswith('.xlsx') else _read_file_safe(platform_file.file_path))
+                if platform_terms:
+                    if text:
+                        lang = _detect_language(text)
+                        merged.update(_filter_terms_by_lang(platform_terms, lang))
+                    else:
+                        merged.update(platform_terms)
+            except Exception:
+                pass
+
     if terminology_md:
         parsed = _parse_terminology(terminology_md)
         if parsed:
-            # 自动检测语言并过滤
             if text:
                 lang = _detect_language(text)
-                return _filter_terms_by_lang(parsed, lang)
-            return parsed
+                merged.update(_filter_terms_by_lang(parsed, lang))
+            else:
+                merged.update(parsed)
+
+    if merged:
+        return merged
     return _load_terms_from_db(db)
 
 
@@ -379,6 +410,8 @@ SENTENCE_FEEDBACK_FOLDER_IDS = [20]
 PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单.md"
 TERMINOLOGY_FEEDBACK_FOLDER_IDS = [21]
 PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME = "平台反馈的术语对照表.md"
+PLATFORM_FEEDBACK_SENTENCE_RELATIVE_PATH = os.path.join("写作规范", "句式清单", "来自平台反馈", PLATFORM_FEEDBACK_FILENAME)
+PLATFORM_FEEDBACK_TERMINOLOGY_RELATIVE_PATH = os.path.join("资源库", "术语库", "来自平台反馈", PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME)
 
 # 默认写作风格指南文件 ID（写作规范 / 写作风格指南 / 中文技术文档写作风格指南）
 DEFAULT_STYLE_GUIDE_ID = 1
@@ -459,18 +492,37 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     if cache_key in _sentence_guide_cache:
         return _sentence_guide_cache[cache_key]
 
+    platform_guides = []
+    selected_file_path = None
+    if style_guide_id:
+        selected_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
+        selected_file_path = selected_file.file_path if selected_file else None
+
+    for platform_file in _get_platform_feedback_targets(db, 1):
+        if platform_file and platform_file.file_path and os.path.exists(platform_file.file_path):
+            if selected_file_path and platform_file.file_path == selected_file_path:
+                continue
+            try:
+                content = _read_file_safe(platform_file.file_path)
+                if content.strip():
+                    platform_guides.append(content)
+            except Exception:
+                pass
+
     if style_guide_id:
         style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
         if style_file and style_file.file_path and os.path.exists(style_file.file_path):
             try:
                 content = _read_file_safe(style_file.file_path)
                 if content.strip():
-                    _sentence_guide_cache[cache_key] = content
-                    return content
+                    result = "\n\n".join([content, *platform_guides]) if platform_guides else content
+                    _sentence_guide_cache[cache_key] = result
+                    return result
             except Exception as e:
                 print(f"加载句式文件失败 (id={style_guide_id}): {e}")
-        _sentence_guide_cache[cache_key] = None
-        return None
+        result = "\n\n".join(platform_guides) if platform_guides else None
+        _sentence_guide_cache[cache_key] = result
+        return result
 
     # 未指定文件，递归加载句式清单文件夹下所有 .md
     guides = []
@@ -497,6 +549,7 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
                     guides.append(content)
             except Exception:
                 pass
+    guides.extend(platform_guides)
     result = "\n\n".join(guides) if guides else None
     _sentence_guide_cache[cache_key] = result
     return result
@@ -509,7 +562,8 @@ def _ensure_platform_feedback_sentence_file(db: Session, user_id: int) -> Knowle
     if not os.path.exists(knowledge_dir):
         os.makedirs(knowledge_dir)
 
-    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_FILENAME)
+    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_SENTENCE_RELATIVE_PATH)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     initial_content = "# 平台反馈的句式清单\n\n## 用户反馈修正\n\n"
 
     feedback_file = db.query(KnowledgeFile).filter(
@@ -518,10 +572,26 @@ def _ensure_platform_feedback_sentence_file(db: Session, user_id: int) -> Knowle
         KnowledgeFile.file_path == file_path
     ).first()
 
+    if not feedback_file:
+        feedback_file = db.query(KnowledgeFile).filter(
+            KnowledgeFile.folder_id == folder_id,
+            KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME
+        ).order_by(KnowledgeFile.id.asc()).first()
+        if feedback_file:
+            feedback_file.file_path = file_path
+            feedback_file.filename = PLATFORM_FEEDBACK_FILENAME
+            feedback_file.file_type = 'md'
+            feedback_file.file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            db.commit()
+            db.refresh(feedback_file)
+
     if feedback_file:
         if not os.path.exists(feedback_file.file_path):
             with open(feedback_file.file_path, 'w', encoding='utf-8') as f:
                 f.write(initial_content)
+            feedback_file.file_size = os.path.getsize(feedback_file.file_path)
+            db.commit()
+            db.refresh(feedback_file)
         return feedback_file
 
     if not os.path.exists(file_path):
@@ -551,7 +621,8 @@ def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> Kno
     if not os.path.exists(knowledge_dir):
         os.makedirs(knowledge_dir)
 
-    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME)
+    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_TERMINOLOGY_RELATIVE_PATH)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     initial_content = "# 平台反馈的术语对照表\n\n| 非标准词 | 标准词 |\n| --- | --- |\n"
 
     feedback_file = db.query(KnowledgeFile).filter(
@@ -560,10 +631,26 @@ def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> Kno
         KnowledgeFile.file_path == file_path
     ).first()
 
+    if not feedback_file:
+        feedback_file = db.query(KnowledgeFile).filter(
+            KnowledgeFile.folder_id == folder_id,
+            KnowledgeFile.name == PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME
+        ).order_by(KnowledgeFile.id.asc()).first()
+        if feedback_file:
+            feedback_file.file_path = file_path
+            feedback_file.filename = PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME
+            feedback_file.file_type = 'md'
+            feedback_file.file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            db.commit()
+            db.refresh(feedback_file)
+
     if feedback_file:
         if not os.path.exists(feedback_file.file_path):
             with open(feedback_file.file_path, 'w', encoding='utf-8') as f:
                 f.write(initial_content)
+            feedback_file.file_size = os.path.getsize(feedback_file.file_path)
+            db.commit()
+            db.refresh(feedback_file)
         return feedback_file
 
     if not os.path.exists(file_path):
@@ -586,9 +673,10 @@ def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> Kno
 
 
 def _get_platform_feedback_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
-    """返回平台反馈句式清单固定主文件。"""
-    primary_file = _ensure_platform_feedback_sentence_file(db, user_id)
-    return [primary_file] if primary_file else []
+    """返回已有的平台反馈句式清单文件，不执行自动创建。"""
+    return db.query(KnowledgeFile).filter(
+        KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME
+    ).order_by(KnowledgeFile.id.desc()).all()
 
 
 def _get_platform_feedback_terminology_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
@@ -650,6 +738,106 @@ class PolishRuleMatch(BaseModel):
     before: str
     after: str
     type: str
+
+
+def _normalize_compare_text(text: str) -> str:
+    if text is None:
+        return ""
+    return re.sub(r'\s+', ' ', str(text)).strip()
+
+
+def _build_doc_change_details(original_text: str, polished_text: str, changes: list) -> list[dict]:
+    original_lines = [line.strip() for line in (original_text or '').split('\n') if line.strip()]
+    polished_lines = [line.strip() for line in (polished_text or '').split('\n') if line.strip()]
+
+    matcher = SequenceMatcher(None, original_lines, polished_lines)
+    diff_rows = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            continue
+
+        before_lines = original_lines[i1:i2]
+        after_lines = polished_lines[j1:j2]
+        max_len = max(len(before_lines), len(after_lines), 1)
+
+        for idx in range(max_len):
+            before = before_lines[idx] if idx < len(before_lines) else ''
+            after = _protect_model_numbers(after_lines[idx]) if idx < len(after_lines) else ''
+            if _normalize_compare_text(before) == _normalize_compare_text(after):
+                continue
+            diff_rows.append({
+                "before": before,
+                "after": after,
+                "type": "ai" if before and after else "format"
+            })
+
+    if not diff_rows:
+        return []
+
+    normalized_changes = []
+    for item in changes or []:
+        if isinstance(item, dict):
+            before = item.get('before', '')
+            after = _protect_model_numbers(item.get('after', ''))
+            change_type = item.get('type', '')
+        else:
+            before = getattr(item, 'before', '')
+            after = _protect_model_numbers(getattr(item, 'after', ''))
+            change_type = getattr(item, 'type', '')
+
+        normalized_before = _normalize_compare_text(before)
+        normalized_after = _normalize_compare_text(after)
+        if normalized_before == normalized_after:
+            continue
+        normalized_changes.append({
+            "before": before,
+            "after": after,
+            "type": change_type
+        })
+
+    for row in diff_rows:
+        row_before = _normalize_compare_text(row['before'])
+        row_after = _normalize_compare_text(row['after'])
+        matched_type = row['type']
+        for item in normalized_changes:
+            item_before = _normalize_compare_text(item['before'])
+            item_after = _normalize_compare_text(item['after'])
+            if item_before and item_before in row_before:
+                matched_type = item['type'] or matched_type
+                break
+            if item_after and item_after in row_after:
+                matched_type = item['type'] or matched_type
+                break
+        row['type'] = matched_type
+
+    return diff_rows
+
+
+def _filter_visible_doc_changes(changes: list) -> list[dict]:
+    visible = []
+    for item in changes or []:
+        if isinstance(item, dict):
+            before = item.get('before', '')
+            after = _protect_model_numbers(item.get('after', ''))
+            change_type = item.get('type', '')
+        else:
+            before = getattr(item, 'before', '')
+            after = _protect_model_numbers(getattr(item, 'after', ''))
+            change_type = getattr(item, 'type', '')
+
+        if _normalize_compare_text(before) == _normalize_compare_text(after):
+            continue
+
+        if not _normalize_compare_text(before) and not _normalize_compare_text(after):
+            continue
+
+        visible.append({
+            'before': before,
+            'after': after,
+            'type': change_type
+        })
+    return visible
 
 
 
@@ -783,6 +971,7 @@ def _apply_skill_polish(
                 has_changes = True
         
         new_line = re.sub(r'\s+', ' ', new_line)
+        new_line = _protect_model_numbers(new_line)
         
         # 标题、表标题、图标题等不加句号，也不做空间距规整
         if not is_title:
@@ -792,9 +981,10 @@ def _apply_skill_polish(
                         new_line = new_line.rstrip('，,;；;：:') + '。'
                     else:
                         new_line = new_line.rstrip(',,;;::') + '.'
-            new_line = re.sub(r'(\d)([a-zA-Z℃%μ])', r'\1 \2', new_line)
-            new_line = re.sub(r'([\u4e00-\u9fff])([A-Za-z0-9])', r'\1 \2', new_line)
+            new_line = re.sub(r'(\d)([℃%μ])', r'\1 \2', new_line)
+            new_line = re.sub(r'([\u4e00-\u9fff])(?!表\d|图\d)([A-Za-z0-9])', r'\1 \2', new_line)
             new_line = re.sub(r'([A-Za-z0-9])([\u4e00-\u9fff])', r'\1 \2', new_line)
+            new_line = _protect_model_numbers(new_line)
         
         if new_line != original or has_changes:
             change_type = "format"
@@ -1177,7 +1367,7 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
             style_guide=sentence_guide,
             terminology=resolved_terminology if resolved_terminology else None
         )
-        ai_polished = result.get("polished", input_data.text)
+        ai_polished = _protect_model_numbers(result.get("polished", input_data.text))
         db_terms_for_rule = None if terminology_md else _load_terms_from_db(db)
         polished, rule_changes = _apply_skill_polish(
             ai_polished,
@@ -1251,7 +1441,7 @@ async def polish_with_skill(
         from app.utils.ai_client import ai_client
         ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
         if ai_result and ai_result.get("polished") and ai_result["polished"] != input_data.text:
-            ai_polished = ai_result["polished"]
+            ai_polished = _protect_model_numbers(ai_result["polished"])
             ai_changes = ai_result.get("changes") or [{"type": "ai", "summary": "AI 根据句式清单完成智能润色"}]
     except Exception as e:
         print(f"AI 润色失败(继续使用规则润色): {e}")
@@ -1266,7 +1456,7 @@ async def polish_with_skill(
                 changes.insert(0, PolishRuleMatch(
                     rule_name=ac.get("type", "ai"),
                     before=ac.get("original", "")[:50],
-                    after=ac.get("polished", "")[:50],
+                    after=_protect_model_numbers(ac.get("polished", ""))[:50],
                     type="ai"
                 ))
     
@@ -1284,6 +1474,189 @@ async def polish_with_skill(
 # DOCX 润色与批注注入
 # ============================================================
 
+def _xml_local_name(element) -> str:
+    tag = getattr(element, 'tag', '')
+    if not tag:
+        return ''
+    return tag.split('}')[-1] if '}' in tag else tag
+
+
+def _read_docx_document_root(docx_path: str):
+    import zipfile
+    from lxml import etree
+
+    with zipfile.ZipFile(docx_path, 'r') as zin:
+        document_xml = zin.read('word/document.xml')
+    return etree.fromstring(document_xml)
+
+
+def _is_simple_revision_paragraph(p_element, w_ns: str) -> bool:
+    """判断段落是否为纯文本段落，可安全写入修订标记。
+    仅允许单 run 段落，每个 run 必须仅包含 rPr + 单个 t。
+    多 run / 复杂格式段落跳过修订写回，避免 Word 中出现原文误删。"""
+    allowed_children = {'pPr', 'r'}
+    allowed_run_children = {'rPr', 't'}
+
+    run_count = 0
+    for child in list(p_element):
+        child_name = _xml_local_name(child)
+        if child_name not in allowed_children:
+            return False
+        if child_name == 'r':
+            run_count += 1
+            text_child_count = 0
+            for run_child in list(child):
+                run_child_name = _xml_local_name(run_child)
+                if run_child_name not in allowed_run_children:
+                    return False
+                if run_child_name == 't':
+                    text_child_count += 1
+            if text_child_count != 1:
+                return False
+
+    return run_count == 1
+
+
+def _extract_run_visible_text(run_element, w_ns: str) -> str:
+    parts = []
+    for child in list(run_element):
+        child_name = _xml_local_name(child)
+        if child_name in {'t', 'delText'}:
+            parts.append(child.text or '')
+        elif child_name == 'tab':
+            parts.append('\t')
+        elif child_name in {'br', 'cr'}:
+            parts.append('\n')
+    return ''.join(parts)
+
+
+def _split_text_by_run_lengths(text: str, run_lengths: list[int]) -> list[str]:
+    if not run_lengths:
+        return [text]
+    if len(run_lengths) == 1:
+        return [text]
+
+    total = sum(max(length, 0) for length in run_lengths)
+    if total <= 0:
+        return [text] + [''] * (len(run_lengths) - 1)
+
+    chunks = []
+    consumed = 0
+    cumulative = 0
+    text_length = len(text)
+    for index, run_length in enumerate(run_lengths):
+        if index == len(run_lengths) - 1:
+            chunks.append(text[consumed:])
+            break
+        cumulative += max(run_length, 0)
+        next_consumed = round(text_length * cumulative / total)
+        chunks.append(text[consumed:next_consumed])
+        consumed = next_consumed
+    return chunks
+
+
+def _strip_revision_display_props(rpr_element, w_ns: str):
+    if rpr_element is None:
+        return
+    for child in list(rpr_element):
+        if _xml_local_name(child) in {'color', 'highlight', 'shd'}:
+            rpr_element.remove(child)
+
+
+def _apply_paragraph_revision_xml(p_element, polished_text: str, author: str, now: str, rid_del: str, rid_ins: str, w_ns: str):
+    from copy import deepcopy
+    from lxml import etree
+
+    children = list(p_element)
+    run_indexes = [index for index, child in enumerate(children) if _xml_local_name(child) == 'r']
+    if not run_indexes:
+        return False
+
+    first_run = children[run_indexes[0]]
+    is_single_run = len(run_indexes) == 1
+
+    # ── <w:del>: 保留所有原始 run 的完整格式 ──
+    del_element = etree.Element(f'{{{w_ns}}}del')
+    del_element.set(f'{{{w_ns}}}id', rid_del)
+    del_element.set(f'{{{w_ns}}}author', author)
+    del_element.set(f'{{{w_ns}}}date', now)
+
+    for run_index in run_indexes:
+        cloned_run = deepcopy(children[run_index])
+        for text_element in cloned_run.findall(f'.//{{{w_ns}}}t'):
+            text_element.tag = f'{{{w_ns}}}delText'
+        del_element.append(cloned_run)
+
+    # ── <w:ins>: 单 run 切分文本，多 run 仅写一个干净 run ──
+    ins_element = etree.Element(f'{{{w_ns}}}ins')
+    ins_element.set(f'{{{w_ns}}}id', rid_ins)
+    ins_element.set(f'{{{w_ns}}}author', author)
+    ins_element.set(f'{{{w_ns}}}date', now)
+
+    if is_single_run:
+        original_runs = [children[index] for index in run_indexes]
+        run_lengths = [len(_extract_run_visible_text(run, w_ns)) for run in original_runs]
+        text_chunks = _split_text_by_run_lengths(polished_text, run_lengths)
+
+        appended = False
+        for run_element, text_chunk in zip(original_runs, text_chunks):
+            if not text_chunk and appended:
+                continue
+            inserted_run = etree.Element(f'{{{w_ns}}}r')
+            first_rpr = run_element.find(f'{{{w_ns}}}rPr')
+            if first_rpr is not None:
+                cloned_rpr = deepcopy(first_rpr)
+                _strip_revision_display_props(cloned_rpr, w_ns)
+                inserted_run.append(cloned_rpr)
+            text_element = etree.SubElement(inserted_run, f'{{{w_ns}}}t')
+            if text_chunk[:1].isspace() or text_chunk[-1:].isspace():
+                text_element.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            text_element.text = text_chunk or ''
+            ins_element.append(inserted_run)
+            appended = True
+
+        if not appended:
+            inserted_run = etree.Element(f'{{{w_ns}}}r')
+            first_rpr = first_run.find(f'{{{w_ns}}}rPr')
+            if first_rpr is not None:
+                cloned_rpr = deepcopy(first_rpr)
+                _strip_revision_display_props(cloned_rpr, w_ns)
+                inserted_run.append(cloned_rpr)
+            text_element = etree.SubElement(inserted_run, f'{{{w_ns}}}t')
+            text_element.text = polished_text
+            ins_element.append(inserted_run)
+    else:
+        # 多 run 段落：仅插入一个干净 run，不再切分文本以避免格式漂移
+        inserted_run = etree.Element(f'{{{w_ns}}}r')
+        first_rpr = first_run.find(f'{{{w_ns}}}rPr')
+        if first_rpr is not None:
+            cloned_rpr = deepcopy(first_rpr)
+            _strip_revision_display_props(cloned_rpr, w_ns)
+            inserted_run.append(cloned_rpr)
+        text_element = etree.SubElement(inserted_run, f'{{{w_ns}}}t')
+        if polished_text[:1].isspace() or polished_text[-1:].isspace():
+            text_element.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        text_element.text = polished_text
+        ins_element.append(inserted_run)
+
+    # ── 重建段落子元素 ──
+    first_run_index = run_indexes[0]
+    last_run_index = run_indexes[-1]
+    new_children = []
+    for index, child in enumerate(children):
+        if index == first_run_index:
+            new_children.append(del_element)
+            new_children.append(ins_element)
+        if first_run_index <= index <= last_run_index and _xml_local_name(child) == 'r':
+            continue
+        new_children.append(child)
+
+    for child in list(p_element):
+        p_element.remove(child)
+    for child in new_children:
+        p_element.append(child)
+    return True
+
 def _polish_docx_with_comments(
     docx_path: str,
     output_path: str,
@@ -1300,16 +1673,14 @@ def _polish_docx_with_comments(
     ai_lines: AI 预润色后的文本行列表，与原始段落逐行对应。用于句式清单匹配润色。
     """
     from docx import Document
-    from docx.oxml.ns import qn, nsdecls
     from lxml import etree
-    from copy import deepcopy
-    import zipfile
-    import tempfile
-    import os as os_mod
     
     all_changes = []
+    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     
     doc = Document(docx_path)
+    document_root = _read_docx_document_root(docx_path)
+    xml_paragraphs = document_root.findall(f'.//{{{w_ns}}}body/{{{w_ns}}}p')
     
     term_dict = {}
     if terminology:
@@ -1326,7 +1697,6 @@ def _polish_docx_with_comments(
     
     author = "技术文档智能润色助手"
     revision_id = 0
-    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     
     toc_prefixes = ("TOC", "Table of Contents", "目录")
     
@@ -1359,7 +1729,7 @@ def _polish_docx_with_comments(
             if ai_line and ai_line != original_text:
                 intermediate_text = ai_line
                 para_ai_change = PolishRuleMatch(
-                    rule_name="ai", before=original_text[:100], after=ai_line[:100], type="ai"
+                    rule_name="ai", before=original_text[:100], after=intermediate_text[:100], type="ai"
                 )
         
         # Step 2: Rule polish + 术语替换
@@ -1377,108 +1747,77 @@ def _polish_docx_with_comments(
             polished_text, term_changes = _apply_term_only(polished_text, term_dict)
             if term_changes:
                 para_changes.extend(term_changes)
-        
+
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
             all_changes.extend(para_changes)
-            p_element = para._p
-            
-            # ---- 1. 将原文所有 run 标记为删除（保留各自原有格式） ----
+            if para_idx >= len(xml_paragraphs):
+                continue
+
+            p_element = xml_paragraphs[para_idx]
+            if not _is_simple_revision_paragraph(p_element, w_ns):
+                continue
+
             revision_id += 1
             rid_del = str(revision_id)
             now = '2026-06-18T00:00:00Z'
-            
-            for child in list(p_element):
-                tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                if tag != 'r':
-                    continue
-                rPr = child.find(f'{{{w_ns}}}rPr')
-                if rPr is None:
-                    rPr = etree.SubElement(child, f'{{{w_ns}}}rPr')
-                    child.insert(0, rPr)
-                del_el = etree.SubElement(rPr, f'{{{w_ns}}}del')
-                del_el.set(f'{{{w_ns}}}id', rid_del)
-                del_el.set(f'{{{w_ns}}}author', author)
-                del_el.set(f'{{{w_ns}}}date', now)
-                # 把 <w:t> 改名为 <w:delText>
-                for t_elem in child.findall(f'{{{w_ns}}}t'):
-                    t_elem.tag = f'{{{w_ns}}}delText'
-            
-            # ---- 2. 追加润色后文字 run（标记为插入，沿用首个原 run 字体） ----
             revision_id += 1
             rid_ins = str(revision_id)
-            first_run = para.runs[0] if para.runs else None
-            new_run = para.add_run(polished_text)
-            if first_run and first_run.font:
-                try:
-                    new_run.font.name = first_run.font.name
-                    new_run.font.size = first_run.font.size
-                    new_run.font.bold = first_run.font.bold
-                    new_run.font.italic = first_run.font.italic
-                    new_run.font.color.rgb = first_run.font.color.rgb
-                except Exception:
-                    pass
-            # 在 XML 层给新 run 加上 <w:ins>
-            new_r_element = new_run._r
-            new_rPr = new_r_element.find(f'{{{w_ns}}}rPr')
-            if new_rPr is None:
-                new_rPr = etree.SubElement(new_r_element, f'{{{w_ns}}}rPr')
-                new_r_element.insert(0, new_rPr)
-            ins_el = etree.SubElement(new_rPr, f'{{{w_ns}}}ins')
-            ins_el.set(f'{{{w_ns}}}id', rid_ins)
-            ins_el.set(f'{{{w_ns}}}author', author)
-            ins_el.set(f'{{{w_ns}}}date', now)
+            _apply_paragraph_revision_xml(p_element, polished_text, author, now, rid_del, rid_ins, w_ns)
     
-    doc.save(output_path)
-    _inject_revision_settings(output_path)
+    document_xml = etree.tostring(document_root, xml_declaration=True, encoding='UTF-8')
+    _write_revised_docx(docx_path, output_path, document_xml)
     
     return all_changes
 
 
-def _inject_revision_settings(docx_path: str):
-    """向 DOCX 的 settings.xml 注入 <w:trackRevisions/>，使文档打开即显示修订标记。
-    
-    直接在 ZIP 内替换 word/settings.xml，保留所有其他 ZIP 条目的原始结构。
-    """
+def _write_revised_docx(source_docx_path: str, output_docx_path: str, document_xml: bytes):
+    """基于原始 DOCX 仅替换 document.xml 与 settings.xml，保留 Word 原始排版结构。"""
     import zipfile
-    import tempfile
     import os as os_mod
     from lxml import etree
     
     w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-    temp_path = docx_path + '.tmp'
+    temp_path = output_docx_path + '.tmp'
     
     try:
-        with zipfile.ZipFile(docx_path, 'r') as zin, \
+        with zipfile.ZipFile(source_docx_path, 'r') as zin, \
              zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-            
-            settings_xml = None
             settings_found = False
             
             for item in zin.infolist():
                 data = zin.read(item.filename)
-                if item.filename == 'word/settings.xml':
+                if item.filename == 'word/document.xml':
+                    data = document_xml
+                elif item.filename == 'word/settings.xml':
                     settings_found = True
                     root = etree.fromstring(data)
                     existing = root.findall(f'{{{w_ns}}}trackRevisions')
                     if not existing:
                         etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
-                    # 写入时不添加 standalone
+                    revision_view = root.find(f'{{{w_ns}}}revisionView')
+                    if revision_view is None:
+                        revision_view = etree.SubElement(root, f'{{{w_ns}}}revisionView')
+                    revision_view.set(f'{{{w_ns}}}markup', '1')
+                    revision_view.set(f'{{{w_ns}}}comments', '0')
+                    revision_view.set(f'{{{w_ns}}}insDel', '1')
+                    revision_view.set(f'{{{w_ns}}}formatting', '1')
                     data = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
-                elif item.filename == 'word/settings.xml':
-                    pass  # already handled
                 
                 zout.writestr(item, data)
             
-            # 如果原文档没有 settings.xml，创建并添加
             if not settings_found:
                 root = etree.Element(f'{{{w_ns}}}settings')
                 etree.SubElement(root, f'{{{w_ns}}}trackRevisions')
+                revision_view = etree.SubElement(root, f'{{{w_ns}}}revisionView')
+                revision_view.set(f'{{{w_ns}}}markup', '1')
+                revision_view.set(f'{{{w_ns}}}comments', '0')
+                revision_view.set(f'{{{w_ns}}}insDel', '1')
+                revision_view.set(f'{{{w_ns}}}formatting', '1')
                 data = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
                 zi = zipfile.ZipInfo('word/settings.xml')
                 zout.writestr(zi, data)
         
-        # 替换原文件
-        os_mod.replace(temp_path, docx_path)
+        os_mod.replace(temp_path, output_docx_path)
     finally:
         if os_mod.path.exists(temp_path):
             os_mod.remove(temp_path)
@@ -1776,12 +2115,15 @@ async def analyze_file_endpoint(
             # 从修订标记版 DOCX 读取润色后文本（<w:delText> 被忽略，仅读 <w:t> 即插入文本）
             preview_text = '\n'.join([p.text for p in polished_doc.paragraphs])
             polished_text = preview_text
+            display_changes = _filter_visible_doc_changes(changes)
+            if not display_changes:
+                display_changes = _build_doc_change_details(content, polished_text, changes)
             
             _update_progress(80, "生成润色报告...")
             report_filename = f"【润色报告】{filename.rsplit('.', 1)[0]}.docx"
             report_path = os.path.join(date_dir, report_filename)
             _generate_polish_report(
-                report_path, filename, changes,
+                report_path, filename, display_changes,
                 sentence_file_name,
                 term_file_name,
                 requirements
@@ -1808,7 +2150,7 @@ async def analyze_file_endpoint(
                 "id": db_doc.id,
                 "original": content,
                 "polished": polished_text,
-                "changes": changes,
+                "changes": display_changes,
                 "report_file": report_filename,
                 "download_filename": unique_filename,
                 "file_type": "docx"
@@ -2427,6 +2769,35 @@ async def delete_polished_document_endpoint(
     
     delete_polished_document(db, doc_id)
     return {"message": "删除成功"}
+
+
+class BatchDeleteRequest(BaseModel):
+    ids: list[int]
+
+
+@router.delete("/batch")
+async def batch_delete_polished_documents(
+    payload: BatchDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    user = get_default_user(db)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可删除文件")
+    
+    deleted = 0
+    for doc_id in payload.ids:
+        doc = get_polished_document(db, doc_id)
+        if not doc:
+            continue
+        if os.path.exists(doc.file_path):
+            os.remove(doc.file_path)
+        if doc.report_file_path and os.path.exists(doc.report_file_path):
+            os.remove(doc.report_file_path)
+        delete_polished_document(db, doc_id)
+        deleted += 1
+    
+    return {"message": f"已删除 {deleted} 个文件", "deleted_count": deleted}
 
 
 # ============================================================

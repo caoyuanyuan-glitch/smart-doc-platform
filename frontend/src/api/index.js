@@ -23,6 +23,7 @@ instance.interceptors.response.use(
   (error) => {
     if (error.response && error.response.status === 401) {
       localStorage.removeItem('token')
+      localStorage.removeItem('user')
       window.location.href = '/login'
     }
     console.error('API Error:', error.response?.status, error.response?.data || error.message)
@@ -76,10 +77,9 @@ export const reviewAPI = {
 }
 
 export const compareAPI = {
-  create: (fileA, fileB) => {
+  create: (files) => {
     const formData = new FormData()
-    formData.append('file_a', fileA)
-    formData.append('file_b', fileB)
+    files.forEach((f, i) => formData.append('files', f))
     return instance.post('/compare/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   get: (id) => instance.get(`/compare/${id}`),
@@ -87,7 +87,9 @@ export const compareAPI = {
   delete: (id) => instance.delete(`/compare/${id}`),
   getReport: (id, format) => instance.get(`/compare/${id}/report`, { params: { format } }),
   getConfig: () => instance.get('/compare/config'),
-  updateConfig: (config) => instance.put('/compare/config', config)
+  updateConfig: (config) => instance.put('/compare/config', config),
+  getPreviewInfo: (id) => instance.get(`/compare/${id}/preview/info`),
+  getPreviewFileUrl: (id, side) => `/api/compare/${id}/preview/file?side=${side}`,
 }
 
 export const rulesAPI = {
@@ -166,6 +168,7 @@ export const polishAPI = {
     })
   },
   deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
+  batchDeletePolishedDocuments: (ids) => instance.delete('/polish/batch', { data: { ids } }),
   submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
     instance.post('/polish/feedback', {
       original_text: originalText,
@@ -181,7 +184,39 @@ export const polishAPI = {
 
 export const qaAPI = {
   ask: (documentId, question) => instance.post(`/qa/${documentId}`, {}, { params: { question } }),
-  askGeneral: (question, knowledgeIds = []) => instance.post('/qa/general', { question, knowledge_ids: knowledgeIds })
+  askGeneral: (question, knowledgeIds = [], sessionId = null) => instance.post('/qa/general', { question, knowledge_ids: knowledgeIds, session_id: sessionId }),
+  askDocs: (question, files, sessionId = null) => {
+    const formData = new FormData()
+    formData.append('question', question)
+    if (sessionId) formData.append('session_id', sessionId)
+    files.forEach(f => formData.append('files', f))
+    return instance.post('/qa/docs/chat', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000
+    })
+  },
+  uploadDocs: (files) => {
+    const formData = new FormData()
+    files.forEach(f => formData.append('files', f))
+    return instance.post('/qa/docs/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  submitFeedback: (data) => instance.post('/qa/feedback', data),
+  getFeedbacks: (skip = 0, limit = 50) => instance.get('/qa/feedback', { params: { skip, limit } }),
+  getUnreadFeedbackCount: () => instance.get('/qa/feedback/unread-count'),
+  resolveFeedback: (id) => instance.put(`/qa/feedback/${id}/resolve`),
+  previewDoc: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/qa/docs/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000
+    })
+  },
+  getSessions: (type = 'all') => instance.get('/qa/history/sessions', { params: { type } }),
+  getSessionDetail: (sessionId) => instance.get(`/qa/history/sessions/${sessionId}`),
+  deleteSession: (sessionId) => instance.delete(`/qa/history/sessions/${sessionId}`)
 }
 
 export const generateAPI = {
@@ -214,23 +249,6 @@ export const convertAPI = {
   delete: (taskId) => instance.delete(`/convert/${taskId}`)
 }
 
-export const convertRulesAPI = {
-  list: () => instance.get('/convert/rules'),
-  create: (category, description) => {
-    const formData = new FormData()
-    formData.append('category', category)
-    formData.append('description', description)
-    return instance.post('/convert/rules', formData)
-  },
-  toggle: (id) => instance.put(`/convert/rules/${id}`),
-  delete: (id) => instance.delete(`/convert/rules/${id}`),
-  bulkDelete: (ids) => {
-    const formData = new FormData()
-    formData.append('rule_ids', ids.join(','))
-    return instance.post('/convert/rules/bulk-delete', formData)
-  }
-}
-
 export const translationAPI = {
   translate: (data) => instance.post('/translation/translate', data),
   translateFile: (formData) => instance.post('/translation/translate/file', formData, {
@@ -260,6 +278,7 @@ export const knowledgeAPI = {
   getFolderContent: (folderId) => instance.get(`/knowledge/folders/${folderId}`),
   createFolder: (folder) => instance.post('/knowledge/folders', folder),
   renameFolder: (folderId, data) => instance.put(`/knowledge/folders/${folderId}`, data),
+  moveFolder: (folderId, data) => instance.put(`/knowledge/folders/${folderId}/move`, data),
   deleteFolder: (folderId) => instance.delete(`/knowledge/folders/${folderId}`),
   uploadFile: (folderId, file) => {
     const formData = new FormData()
@@ -285,5 +304,6 @@ export const knowledgeAPI = {
     })
   },
   getFile: (fileId) => instance.get(`/knowledge/files/${fileId}`),
+  moveFile: (fileId, data) => instance.put(`/knowledge/files/${fileId}/move`, data),
   deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`)
 }

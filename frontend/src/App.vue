@@ -7,6 +7,9 @@
           <span class="logo">智能技术文档平台</span>
         </div>
         <div class="header-right">
+          <el-badge v-if="userStore.isAdmin" :value="unreadFeedbackCount" :hidden="unreadFeedbackCount === 0" class="feedback-badge">
+            <el-icon class="feedback-icon" @click="goToFeedback"><Message /></el-icon>
+          </el-badge>
           <span class="user-badge" v-if="userStore.isLoggedIn">{{ userStore.user?.username }} ({{ userStore.user?.role }})</span>
           <el-button text @click="handleLogout" class="logout-btn">退出</el-button>
         </div>
@@ -60,6 +63,7 @@
                 <span>文档对比</span>
               </template>
               <el-menu-item index="/compare">对比上传</el-menu-item>
+              <el-menu-item index="/compare/params">参数对比</el-menu-item>
               <el-menu-item index="/compare/tasks">历史任务</el-menu-item>
             </el-sub-menu>
 
@@ -70,7 +74,6 @@
               </template>
               <el-menu-item index="/convert">格式转换</el-menu-item>
               <el-menu-item index="/convert/history">转换历史</el-menu-item>
-              <el-menu-item index="/convert/rules">转换规则库</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="review-sub">
@@ -95,6 +98,12 @@
                 <span>智能问答</span>
               </template>
               <el-menu-item index="/qa">知识库问答</el-menu-item>
+              <el-menu-item index="/qa/docs">文档对话</el-menu-item>
+              <el-sub-menu index="qa-history-sub" class="qa-history-sub">
+                <template #title><span>历史记录</span></template>
+                <el-menu-item index="/qa/history/general">知识库问答历史</el-menu-item>
+                <el-menu-item index="/qa/history/doc">文档对话历史</el-menu-item>
+              </el-sub-menu>
             </el-sub-menu>
 
             <el-sub-menu index="translate-sub">
@@ -121,25 +130,32 @@
       </aside>
 
       <main class="main-content">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <keep-alive :include="['Compare', 'CompareParams', 'QAHistory', 'PolishHistory', 'SpellCheckHistory']">
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </main>
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted, provide } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
+import { qaAPI } from '@/api'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
   Files, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
-  Edit, Setting
+  Edit, Setting, Message
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const userStore = useUserStore()
 const isCollapsed = ref(false)
+const unreadFeedbackCount = ref(0)
+let feedbackTimer = null
 
 const activeMenu = computed(() => {
   const path = router.currentRoute.value.path
@@ -159,6 +175,32 @@ function handleLogout() {
   userStore.logout()
   router.push('/login')
 }
+
+function goToFeedback() {
+  router.push('/feedback')
+}
+
+async function fetchUnreadCount() {
+  try {
+    const resp = await qaAPI.getUnreadFeedbackCount()
+    unreadFeedbackCount.value = resp.data?.count || 0
+  } catch (e) {
+    unreadFeedbackCount.value = 0
+  }
+}
+
+provide('refreshFeedbackCount', fetchUnreadCount)
+
+onMounted(() => {
+  if (userStore.isLoggedIn) {
+    fetchUnreadCount()
+    feedbackTimer = setInterval(fetchUnreadCount, 30000)
+  }
+})
+
+onUnmounted(() => {
+  if (feedbackTimer) clearInterval(feedbackTimer)
+})
 </script>
 
 <style>
@@ -175,6 +217,7 @@ body {
 
 .app-container {
   display: flex;
+  width: 100%;
   min-height: 100vh;
 }
 
@@ -220,6 +263,18 @@ body {
   padding: 2px 10px;
   background: rgba(255, 255, 255, 0.15);
   border-radius: 10px;
+}
+
+.feedback-badge {
+  margin-right: 16px;
+}
+.feedback-icon {
+  font-size: 22px;
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+}
+.feedback-icon:hover {
+  color: #fff;
 }
 
 .sidebar {
@@ -428,6 +483,55 @@ body {
   padding: 8px 20px;
   font-size: 12px;
   color: #94a3b8;
+  font-weight: 600;
+}
+
+.sidebar-menu .qa-history-sub .el-sub-menu__title {
+  height: 40px;
+  line-height: 40px;
+  margin: 2px 16px 2px 28px !important;
+  padding: 0 12px 0 24px !important;
+  border-radius: 6px;
+  color: #475569 !important;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sidebar-menu .qa-history-sub .el-sub-menu__title:hover {
+  background: #dbeafe !important;
+  color: #1e40af !important;
+}
+
+.sidebar-menu .qa-history-sub .el-menu {
+  background: #e8f4ff !important;
+  padding: 2px 0 !important;
+  margin: 0 !important;
+  border: none !important;
+}
+
+.sidebar-menu .qa-history-sub .el-menu-item {
+  height: 36px;
+  line-height: 36px;
+  margin: 1px 16px 1px 48px !important;
+  padding-left: 20px !important;
+  padding-right: 12px !important;
+  border-radius: 6px;
+  background: transparent !important;
+  color: #64748b !important;
+  font-size: 13px;
+  border: none !important;
+  min-width: auto !important;
+}
+
+.sidebar-menu .qa-history-sub .el-menu-item:hover {
+  background: #dbeafe !important;
+  color: #1e40af !important;
+}
+
+.sidebar-menu .qa-history-sub .el-menu-item.is-active {
+  background: #2563eb !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
   font-weight: 600;
 }
 </style>

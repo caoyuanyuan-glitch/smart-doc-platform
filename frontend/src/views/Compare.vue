@@ -13,47 +13,56 @@
 
         <div class="upload-grid">
           <div class="upload-slot">
-            <div class="slot-label">文档A（原始版本）</div>
+            <div class="slot-label">参照文档</div>
             <el-upload
               action="#"
               :auto-upload="false"
               :show-file-list="false"
-              :before-upload="(f) => { fileA = f; return false }"
-              :on-change="(f) => { fileA = f.raw || f }"
+              :before-upload="(f) => { files[0] = f; return false }"
+              :on-change="(f) => { files[0] = f.raw || f }"
               accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
             >
-              <div class="upload-box" :class="{ filled: fileA }">
+              <div class="upload-box" :class="{ filled: files[0] }">
                 <el-icon style="font-size: 36px; color: #3b82f6; margin-bottom: 8px;"><Upload /></el-icon>
-                <div v-if="!fileA" class="upload-hint">点击上传文档A</div>
-                <div v-else class="upload-name">{{ fileA.name }}</div>
+                <div v-if="!files[0]" class="upload-hint">点击上传参照文档</div>
+                <div v-else class="upload-name">{{ files[0].name }}</div>
               </div>
             </el-upload>
           </div>
 
-          <div class="vs-badge">VS</div>
-
-          <div class="upload-slot">
-            <div class="slot-label">文档B（对比版本）</div>
-            <el-upload
-              action="#"
-              :auto-upload="false"
-              :show-file-list="false"
-              :before-upload="(f) => { fileB = f; return false }"
-              :on-change="(f) => { fileB = f.raw || f }"
-              accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
-            >
-              <div class="upload-box" :class="{ filled: fileB }">
-                <el-icon style="font-size: 36px; color: #7c3aed; margin-bottom: 8px;"><Upload /></el-icon>
-                <div v-if="!fileB" class="upload-hint">点击上传文档B</div>
-                <div v-else class="upload-name">{{ fileB.name }}</div>
+          <template v-for="(file, idx) in files.slice(1)" :key="idx">
+            <div class="vs-badge">VS</div>
+            <div class="upload-slot">
+              <div class="slot-label">
+                对比文档 {{ idx + 1 }}
+                <el-button v-if="files.length > 2" type="danger" size="small" circle @click="removeFile(idx + 1)" style="margin-left: 6px;">
+                  <el-icon><Close /></el-icon>
+                </el-button>
               </div>
-            </el-upload>
-          </div>
+              <el-upload
+                action="#"
+                :auto-upload="false"
+                :show-file-list="false"
+                :before-upload="(f) => { files[idx + 1] = f; return false }"
+                :on-change="(f) => { files[idx + 1] = f.raw || f }"
+                accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
+              >
+                <div class="upload-box" :class="{ filled: files[idx + 1] }">
+                  <el-icon style="font-size: 36px; color: #7c3aed; margin-bottom: 8px;"><Upload /></el-icon>
+                  <div v-if="!files[idx + 1]" class="upload-hint">点击上传对比文档</div>
+                  <div v-else class="upload-name">{{ files[idx + 1].name }}</div>
+                </div>
+              </el-upload>
+            </div>
+          </template>
         </div>
 
         <div class="action-row">
-          <el-button type="primary" size="large" :loading="loading" :disabled="!fileA || !fileB" @click="doCompare">
+          <el-button type="primary" size="large" :loading="loading" :disabled="!files[0] || !files[1]" @click="doCompare">
             <el-icon><Search /></el-icon> 开始对比
+          </el-button>
+          <el-button size="large" type="success" @click="addFile" :disabled="files.length >= 8">
+            <el-icon><Plus /></el-icon> 添加文件
           </el-button>
           <el-button size="large" @click="clearFiles">清空</el-button>
         </div>
@@ -64,35 +73,120 @@
         </div>
       </div>
 
-      <div v-if="result" class="result-panel">
+      <div v-if="allResults.length > 0" class="result-panel">
         <div class="panel-header">
-          <span>对比完成</span>
+          <span>对比完成（{{ allResults.length }} 组结果）</span>
           <div class="panel-actions">
-            <el-tag :type="verdictType" size="small">{{ result.verdict }}</el-tag>
-            <el-tag type="info" size="small">差异数：{{ result.total_diffs || 0 }}</el-tag>
-            <el-button size="small" type="primary" @click="previewReport">预览报告</el-button>
-            <el-button size="small" @click="exportCompare">导出报告</el-button>
+            <el-button size="small" @click="clearFiles">重新对比</el-button>
           </div>
         </div>
 
-        <div v-if="showPreview" class="panel" style="background: #fafafa; margin-top: 12px;">
-          <div class="panel-header">
-            <span>报告预览</span>
-            <el-button size="small" @click="showPreview = false">关闭预览</el-button>
-          </div>
-          <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
-        </div>
+        <el-tabs v-model="activeResultTab" type="border-card" class="result-tabs">
+          <el-tab-pane
+            v-for="(r, ri) in allResults"
+            :key="ri"
+            :label="'对比 ' + (ri + 1) + ': ' + (r.file_b_name || '文档')"
+            :name="ri"
+          >
+            <div class="pair-header">
+              <span class="pair-label">
+                {{ r.file_a_name }} <strong>VS</strong> {{ r.file_b_name }}
+              </span>
+              <div class="pair-tags">
+                <el-tag :type="getVerdictTagType(r.verdict)" size="small">{{ r.verdict }}</el-tag>
+                <el-tag type="info" size="small">差异数：{{ r.total_diffs || 0 }}</el-tag>
+                <el-tag type="warning" size="small">相似度：{{ ((r.similarity || 0) * 100).toFixed(1) }}%</el-tag>
+              </div>
+            </div>
+            <div class="pair-actions">
+              <el-button size="small" type="primary" @click="previewPairReport(r.task_id)">预览报告</el-button>
+              <el-button size="small" @click="exportPairReport(r.task_id)">导出报告</el-button>
+              <el-button size="small" @click="openPairPdfPreview(r.task_id)">PDF预览</el-button>
+            </div>
+
+            <div v-if="showPreview && activePreviewTask === r.task_id" class="panel" style="background: #fafafa; margin-top: 12px;">
+              <div class="panel-header">
+                <span>报告预览 - {{ r.file_a_name }} vs {{ r.file_b_name }}</span>
+                <el-button size="small" @click="showPreview = false; activePreviewTask = null">关闭预览</el-button>
+              </div>
+              <div class="report-preview-content" style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
       </div>
+
+      <el-dialog
+        v-model="showPdfPreviewDialog"
+        title="PDF页码预览"
+        width="95%"
+        top="3vh"
+        :close-on-click-modal="false"
+        class="pdf-preview-dialog"
+      >
+        <div class="pdf-preview-wrapper">
+          <div class="pdf-preview-pane">
+            <div class="pane-header pane-a">
+              <span>参照文档：{{ files[0]?.name || '参照文档' }}</span>
+            </div>
+            <div class="pane-content">
+              <PdfPreview
+                v-if="pdfUrlA"
+                ref="pdfPreviewARef"
+                :pdf-url="pdfUrlA"
+                :file-name="files[0]?.name || 'document_A.pdf'"
+                @page-change="onPageAChange"
+                @loaded="onPdfALoaded"
+              />
+              <el-empty v-else description="暂无PDF预览" />
+            </div>
+          </div>
+          <div class="pdf-preview-divider">
+            <div class="divider-actions">
+              <el-tooltip content="开启后两边同步翻页" placement="top">
+                <el-switch
+                  v-model="syncScroll"
+                  size="small"
+                  active-text="同步"
+                  inactive-text="独立"
+                />
+              </el-tooltip>
+            </div>
+          </div>
+          <div class="pdf-preview-pane">
+            <div class="pane-header pane-b">
+              <span>对比文档：{{ compareFiles[activePdfSide]?.name || '对比文档' }}</span>
+            </div>
+            <div class="pane-content">
+              <PdfPreview
+                v-if="pdfUrlB"
+                ref="pdfPreviewBRef"
+                :pdf-url="pdfUrlB"
+                :file-name="compareFiles[activePdfSide]?.name || 'document_B.pdf'"
+                @page-change="onPageBChange"
+                @loaded="onPdfBLoaded"
+              />
+              <el-empty v-else description="暂无PDF预览" />
+            </div>
+          </div>
+        </div>
+      </el-dialog>
     </div>
 
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">历史任务</h2>
       <div class="panel">
-        <el-empty v-if="history.length === 0" description="暂无历史任务，请先进行文档对比">
+        <el-empty v-if="history.length === 0" description="暂无历史任务，请先进行文档对比或参数对比">
           <el-button type="primary" @click="currentView = 'upload'; $router.push('/compare')">去对比</el-button>
         </el-empty>
         <el-table v-else :data="history" border style="width: 100%">
           <el-table-column prop="id" label="任务ID" width="100" />
+          <el-table-column label="类型" width="100">
+            <template #default="scope">
+              <el-tag :type="scope.row.task_type === 'param' ? 'success' : 'primary'" size="small">
+                {{ scope.row.task_type === 'param' ? '参数对比' : '文档对比' }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="file_a_name" label="文档A" />
           <el-table-column prop="file_b_name" label="文档B" />
           <el-table-column prop="similarity" label="相似度" width="120">
@@ -100,9 +194,9 @@
               <span :class="getSimilarityClass(scope.row.similarity)">{{ (scope.row.similarity * 100).toFixed(1) }}%</span>
             </template>
           </el-table-column>
-          <el-table-column prop="verdict" label="判定" width="180">
+          <el-table-column prop="verdict" label="判定" width="220">
             <template #default="scope">
-              <el-tag :type="scope.row.verdict?.includes('通过') ? 'success' : (scope.row.verdict?.includes('强制') ? 'danger' : 'warning')" size="small">{{ scope.row.verdict }}</el-tag>
+              <el-tag :type="scope.row.verdict?.includes('通过') || scope.row.verdict?.includes('一致') ? 'success' : (scope.row.verdict?.includes('强制') || scope.row.verdict?.includes('差异较大') ? 'danger' : 'warning')" size="small">{{ scope.row.verdict }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column prop="total_diffs" label="差异数" width="100" />
@@ -111,10 +205,11 @@
               {{ formatTime(scope.row.created_at) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="200">
+          <el-table-column label="操作" width="280">
             <template #default="scope">
               <el-button size="small" @click="viewTask(scope.row.id)">查看</el-button>
-              <el-button size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
+              <el-button v-if="scope.row.task_type !== 'param'" size="small" @click="openTaskPdfPreview(scope.row.id)">PDF预览</el-button>
+              <el-button v-if="scope.row.task_type !== 'param'" size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
               <el-button size="small" type="danger" @click="deleteTask(scope.row.id)">删除</el-button>
             </template>
           </el-table-column>
@@ -123,10 +218,10 @@
 
       <div v-if="selectedTask" class="result-panel" style="margin-top: 20px;">
         <div class="panel-header">
-          <span>任务详情 - {{ selectedTask.id }}</span>
+          <span>任务详情 - {{ selectedTask.id }} ({{ selectedTask.task_type === 'param' ? '参数对比' : '文档对比' }})</span>
           <div class="panel-actions">
-            <el-button size="small" type="primary" @click="previewTaskReport(selectedTask.id)">预览报告</el-button>
-            <el-button size="small" @click="exportTaskReport(selectedTask.id)">导出报告</el-button>
+            <el-button v-if="selectedTask.task_type !== 'param'" size="small" type="primary" @click="previewTaskReport(selectedTask.id)">预览报告</el-button>
+            <el-button v-if="selectedTask.task_type !== 'param'" size="small" @click="exportTaskReport(selectedTask.id)">导出报告</el-button>
             <el-button size="small" @click="selectedTask = null">关闭</el-button>
           </div>
         </div>
@@ -136,58 +231,74 @@
             <span>报告预览 - 任务 {{ selectedTask.id }}</span>
             <el-button size="small" @click="showPreview = false">关闭预览</el-button>
           </div>
-          <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+          <div class="report-preview-content" style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+        </div>
+
+        <div v-if="selectedTask.task_type === 'param' && paramTaskResults.length > 0" style="margin-top: 16px;">
+          <div class="param-stats-row" style="display:flex; gap:16px; margin-bottom:16px;">
+            <el-statistic title="总参数" :value="paramStats.total" />
+            <el-statistic title="一致" :value="paramStats.match" />
+            <el-statistic title="不一致" :value="paramStats.diff" />
+            <el-statistic title="仅A有" :value="paramStats.onlyA" />
+            <el-statistic title="仅B有" :value="paramStats.onlyB" />
+          </div>
+          <el-table :data="paramTaskResults" border stripe max-height="500" style="width:100%">
+            <el-table-column prop="param" label="参数名" width="200" fixed />
+            <el-table-column prop="value_a" label="参照文档值" min-width="180" />
+            <el-table-column prop="value_b" label="对比文档值" min-width="180" />
+            <el-table-column label="匹配" width="100">
+              <template #default="scope">
+                <el-tag :type="scope.row.match === '一致' ? 'success' : (scope.row.match === '不一致' ? 'danger' : 'info')" size="small">
+                  {{ scope.row.match }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="source_a" label="来源A" width="120" />
+            <el-table-column prop="source_b" label="来源B" width="120" />
+          </el-table>
         </div>
       </div>
     </div>
 
-    <div v-if="currentView === 'config'">
-      <h2 class="page-title">对比配置已停用</h2>
-      <div class="panel">
-        <el-empty description="对比配置功能已停用。匹配阈值、对比精度等参数已硬编码在系统中，如需调整请联系开发人员。" />
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { compareAPI } from '@/api'
-import { Upload, Search } from '@element-plus/icons-vue'
+import { Upload, Search, View, Plus, Close } from '@element-plus/icons-vue'
+import PdfPreview from '@/components/PdfPreview.vue'
 
 const route = useRoute()
 const router = useRouter()
-const fileA = ref(null)
-const fileB = ref(null)
+const files = ref([null, null])
+const compareFiles = ref([])
 const loading = ref(false)
 const progress = ref(0)
 const progressText = ref('')
-const result = ref(null)
+const allResults = ref([])
+const activeResultTab = ref(0)
 const history = ref([])
 const selectedTask = ref(null)
 const showPreview = ref(false)
+const activePreviewTask = ref(null)
 const reportContent = ref('')
-
-const config = ref({
-  threshold: 0.7,
-  precision: 'sentence',
-  ignoreWhitespace: true,
-  ignoreCase: false
-})
+const showPdfPreviewDialog = ref(false)
+const pdfUrlA = ref('')
+const pdfUrlB = ref('')
+const pdfPreviewARef = ref(null)
+const pdfPreviewBRef = ref(null)
+const syncScroll = ref(true)
+const _pageChangingFrom = ref('')
+const activePdfSide = ref(1)
+const paramTaskResults = ref([])
+const paramStats = ref({ total: 0, match: 0, diff: 0, onlyA: 0, onlyB: 0 })
 
 const currentView = computed(() => {
   if (route.path === '/compare/tasks') return 'tasks'
-  if (route.path === '/compare/config') return 'config'
   return 'upload'
-})
-
-const verdictType = computed(() => {
-  if (!result.value?.verdict) return 'info'
-  if (result.value.verdict.includes('通过')) return 'success'
-  if (result.value.verdict.includes('强制')) return 'danger'
-  return 'warning'
 })
 
 onMounted(async () => {
@@ -197,7 +308,6 @@ onMounted(async () => {
   }
 })
 
-// 监听路由变化，进入历史任务页面时重新加载
 watch(() => route.path, async (newPath) => {
   if (newPath === '/compare/tasks') {
     await loadHistory()
@@ -232,10 +342,38 @@ function formatTime(timestamp) {
   return new Date(timestamp * 1000).toLocaleString()
 }
 
+function getSimilarityClass(similarity) {
+  if (similarity >= 0.8) return 'sim-high'
+  if (similarity >= 0.6) return 'sim-medium'
+  return 'sim-low'
+}
+
+function getVerdictTagType(verdict) {
+  if (!verdict) return 'info'
+  if (verdict.includes('通过') || verdict.includes('80')) return 'success'
+  if (verdict.includes('强制') || verdict.includes('60')) return 'danger'
+  return 'warning'
+}
+
 function clearFiles() {
-  fileA.value = null
-  fileB.value = null
-  result.value = null
+  files.value = [null, null]
+  allResults.value = []
+  compareFiles.value = []
+  activeResultTab.value = 0
+  showPreview.value = false
+  activePreviewTask.value = null
+}
+
+function addFile() {
+  if (files.value.length < 8) {
+    files.value.push(null)
+  }
+}
+
+function removeFile(index) {
+  if (files.value.length > 2) {
+    files.value.splice(index, 1)
+  }
 }
 
 function updateProgress(pct, text) {
@@ -249,10 +387,12 @@ function updateProgress(pct, text) {
 }
 
 async function doCompare() {
-  if (!fileA.value || !fileB.value) {
-    ElMessage.info('请上传两个文档后再进行对比')
+  const validFiles = files.value.filter(f => f)
+  if (validFiles.length < 2) {
+    ElMessage.info('请至少上传2个文档后再进行对比')
     return
   }
+  compareFiles.value = [...validFiles]
   loading.value = true
   progress.value = 0
   progressText.value = ''
@@ -260,12 +400,11 @@ async function doCompare() {
   try {
     await updateProgress(5, '正在初始化...')
     await updateProgress(10, '正在上传文件...')
-    await updateProgress(15, '正在解析文档A...')
 
-    const respPromise = compareAPI.create(fileA.value, fileB.value)
+    const respPromise = compareAPI.create(validFiles)
 
     for (let p = 20; p < 80; p += 5) {
-      await updateProgress(p, `正在处理文档B... ${p}%`)
+      await updateProgress(p, `正在对比分析... ${p}%`)
       await new Promise(r => setTimeout(r, 300))
     }
 
@@ -276,19 +415,16 @@ async function doCompare() {
 
     await updateProgress(90, '正在生成结果...')
 
-    result.value = {
-      similarity: data.similarity || 0,
-      verdict: data.verdict || '',
-      total_diffs: data.total_diffs || 0,
-      comparison_id: data.comparison_id || data.task_id || 0,
-      task_id: data.comparison_id || data.task_id || 0,
-    }
+    allResults.value = (data.results || []).map(r => ({
+      ...r,
+      task_id: r.task_id || r.comparison_id || 0,
+    }))
 
     await updateProgress(95, '正在整理报告...')
     await updateProgress(100, '对比完成')
 
     setTimeout(() => { progress.value = 0 }, 1500)
-    ElMessage.success('对比完成')
+    ElMessage.success(`对比完成，共 ${allResults.value.length} 组结果`)
   } catch (e) {
     progress.value = 0
     ElMessage.error('对比失败：' + (e.message || '未知错误'))
@@ -297,27 +433,29 @@ async function doCompare() {
   }
 }
 
-async function exportCompare() {
-  if (!result.value) {
-    ElMessage.warning('请先进行对比')
-    return
-  }
-
-  const taskId = result.value.comparison_id || result.value.task_id
-  if (!taskId) {
-    ElMessage.warning('无法获取任务ID，请重新对比')
-    return
-  }
-
+async function previewPairReport(taskId) {
+  if (!taskId) return
   try {
     const resp = await compareAPI.getReport(taskId, 'html')
-    const content = resp.data?.content || ''
-
-    if (!content.trim()) {
+    reportContent.value = resp.data?.content || ''
+    if (!reportContent.value.trim()) {
       ElMessage.warning('报告内容为空')
       return
     }
+    showPreview.value = true
+    activePreviewTask.value = taskId
+    ElMessage.success('报告已加载')
+  } catch (e) {
+    console.error('Preview error:', e)
+    ElMessage.error('预览失败：' + (e.message || '未知错误'))
+  }
+}
 
+async function exportPairReport(taskId) {
+  if (!taskId) return
+  try {
+    const resp = await compareAPI.getReport(taskId, 'html')
+    const content = resp.data?.content || ''
     downloadFile(content, `compare_report_${taskId}_${Date.now()}.html`, 'text/html')
     ElMessage.success('对比报告已导出')
   } catch (e) {
@@ -326,33 +464,16 @@ async function exportCompare() {
   }
 }
 
-async function previewReport() {
-  if (!result.value) {
-    ElMessage.warning('请先进行对比')
-    return
-  }
-
-  const taskId = result.value.comparison_id || result.value.task_id
+function openPairPdfPreview(taskId) {
   if (!taskId) {
-    ElMessage.warning('无法获取任务ID，请重新对比')
+    ElMessage.warning('无法获取任务ID')
     return
   }
-
-  try {
-    const resp = await compareAPI.getReport(taskId, 'html')
-    reportContent.value = resp.data?.content || ''
-
-    if (!reportContent.value.trim()) {
-      ElMessage.warning('报告内容为空')
-      return
-    }
-
-    showPreview.value = true
-    ElMessage.success('报告已加载')
-  } catch (e) {
-    console.error('Preview error:', e)
-    ElMessage.error('预览失败：' + (e.message || '未知错误'))
-  }
+  const idx = allResults.value.findIndex(r => r.task_id === taskId)
+  activePdfSide.value = idx >= 0 ? (idx + 1) : 1
+  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+  showPdfPreviewDialog.value = true
 }
 
 async function viewTask(taskId) {
@@ -362,10 +483,32 @@ async function viewTask(taskId) {
 
     selectedTask.value = {
       id: taskId,
+      task_type: data.task_type || 'doc',
       similarity: data.similarity || 0,
       verdict: data.verdict || '',
       file_a_name: data.file_a_name || '',
       file_b_name: data.file_b_name || '',
+    }
+
+    if (data.task_type === 'param') {
+      const matched = Array.isArray(data.matched_pairs) ? data.matched_pairs : []
+      const onlyA = Array.isArray(data.only_a) ? data.only_a : []
+      const onlyB = Array.isArray(data.only_b) ? data.only_b : []
+      paramTaskResults.value = [
+        ...matched,
+        ...onlyA.map(r => ({ ...r, match: '仅A有', value_b: '-' })),
+        ...onlyB.map(r => ({ ...r, match: '仅B有', value_a: '-' })),
+      ]
+      const stats = data.diff_stats || data.stats || {}
+      paramStats.value = {
+        total: (stats.params_a || 0) + (stats.params_b || 0),
+        match: stats.match || 0,
+        diff: stats.diff || 0,
+        onlyA: stats.only_a || onlyA.length,
+        onlyB: stats.only_b || onlyB.length,
+      }
+    } else {
+      paramTaskResults.value = []
     }
   } catch (e) {
     ElMessage.error('查看失败：' + (e.message || '未知错误'))
@@ -434,6 +577,49 @@ async function saveConfig() {
     ElMessage.error('保存失败')
   }
 }
+
+function openTaskPdfPreview(taskId) {
+  if (!taskId) {
+    ElMessage.warning('无法获取任务ID')
+    return
+  }
+  activePdfSide.value = 1
+  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+  showPdfPreviewDialog.value = true
+}
+
+function onPageAChange(page) {
+  if (syncScroll.value && _pageChangingFrom.value !== 'b') {
+    _pageChangingFrom.value = 'a'
+    nextTick(() => {
+      if (pdfPreviewBRef.value?.goToPage) {
+        pdfPreviewBRef.value.goToPage(page)
+      }
+      _pageChangingFrom.value = ''
+    })
+  }
+}
+
+function onPageBChange(page) {
+  if (syncScroll.value && _pageChangingFrom.value !== 'a') {
+    _pageChangingFrom.value = 'b'
+    nextTick(() => {
+      if (pdfPreviewARef.value?.goToPage) {
+        pdfPreviewARef.value.goToPage(page)
+      }
+      _pageChangingFrom.value = ''
+    })
+  }
+}
+
+function onPdfALoaded(info) {
+  console.log('PDF A loaded, total pages:', info.totalPages)
+}
+
+function onPdfBLoaded(info) {
+  console.log('PDF B loaded, total pages:', info.totalPages)
+}
 </script>
 
 <style>
@@ -460,6 +646,41 @@ async function saveConfig() {
   padding: 24px;
   margin-bottom: 20px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.result-tabs {
+  margin-top: 16px;
+}
+
+.pair-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.pair-label {
+  font-size: 15px;
+  color: #1f2937;
+}
+
+.pair-label strong {
+  color: #3b82f6;
+  margin: 0 8px;
+}
+
+.pair-tags {
+  display: flex;
+  gap: 8px;
+}
+
+.pair-actions {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .panel-header {
@@ -550,90 +771,90 @@ async function saveConfig() {
 .file-info-grid .label { color:#666;font-weight:600; }
 .file-info-grid .value { word-break:break-word;overflow-wrap:anywhere; }
 
-table { width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);table-layout:fixed; }
-th,td { padding:10px 12px;text-align:left;font-size:13px;border-bottom:1px solid #eee;vertical-align:top;word-break:break-word;overflow-wrap:anywhere; }
-th { background:#2c3e50;color:#fff;font-weight:600;white-space:normal;font-size:12px; }
-tr:hover { background:#f9fafb; }
-code { background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px; }
+.report-preview-content table { width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);table-layout:fixed; }
+.report-preview-content th,.report-preview-content td { padding:10px 12px;text-align:left;font-size:13px;border-bottom:1px solid #eee;vertical-align:top;word-break:break-word;overflow-wrap:anywhere; }
+.report-preview-content th { background:#2c3e50;color:#fff;font-weight:600;white-space:normal;font-size:12px; }
+.report-preview-content tr:hover { background:#f9fafb; }
+.report-preview-content code { background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px; }
 
-.tag { background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500; }
-.tag.ok { background:#e8f5e9;color:#2e7d32; }
-.tag.warn { background:#fff3e0;color:#e65100; }
-.tag.danger { background:#ffebee;color:#c62828; }
-.tag.only-a { background:#fff4f4;color:#c62828; }
-.tag.only-b { background:#f4faf4;color:#2e7d32; }
+.report-preview-content .tag { background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500; }
+.report-preview-content .tag.ok { background:#e8f5e9;color:#2e7d32; }
+.report-preview-content .tag.warn { background:#fff3e0;color:#e65100; }
+.report-preview-content .tag.danger { background:#ffebee;color:#c62828; }
+.report-preview-content .tag.only-a { background:#fff4f4;color:#c62828; }
+.report-preview-content .tag.only-b { background:#f4faf4;color:#2e7d32; }
 
-.bar { position:relative;background:#eee;border-radius:10px;height:18px;width:100%;min-width:80px;overflow:hidden; }
-.bar .fill { height:100%;border-radius:10px; }
-.bar span { position:absolute;left:0;right:0;top:0;line-height:18px;text-align:center;font-size:11px;color:#000;font-weight:600; }
+.report-preview-content .bar { position:relative;background:#eee;border-radius:10px;height:18px;width:100%;min-width:80px;overflow:hidden; }
+.report-preview-content .bar .fill { height:100%;border-radius:10px; }
+.report-preview-content .bar span { position:absolute;left:0;right:0;top:0;line-height:18px;text-align:center;font-size:11px;color:#000;font-weight:600; }
 
-h2 { margin-top:32px;font-size:18px;border-left:4px solid #1976d2;padding-left:10px;color:#2c3e50;font-weight:600; }
+.report-preview-content h2 { margin-top:32px;font-size:18px;border-left:4px solid #1976d2;padding-left:10px;color:#2c3e50;font-weight:600; }
 
-.row-main { cursor:pointer; }
-.row-main:hover { background:#f0f4f9; }
-.row-main .diff-cell { color:#c62828;font-weight:600; }
-.row-diff { display:none; }
-.row-diff.open { display:table-row; }
-.row-diff > td { background:#fafbfc;padding:0; }
+.report-preview-content .row-main { cursor:pointer; }
+.report-preview-content .row-main:hover { background:#f0f4f9; }
+.report-preview-content .row-main .diff-cell { color:#c62828;font-weight:600; }
+.report-preview-content .row-diff { display:none; }
+.report-preview-content .row-diff.open { display:table-row; }
+.report-preview-content .row-diff > td { background:#fafbfc;padding:0; }
 
-.diffs { padding:12px 16px; }
-.diff-empty { padding:14px 16px;color:#2e7d32;font-size:13px;background:#eaf6ec;border-radius:6px; }
-.diff-row { display:flex;align-items:flex-start;gap:10px;padding:8px 10px;margin:6px 0;border-radius:6px;font-size:13px;line-height:1.6; }
-.diff-row.changed { background:#fff8e1;border-left:3px solid #f9a825; }
-.diff-row .text { flex:1;word-break:break-word; }
-.diff-row .side-a,.diff-row .side-b { padding:4px 0; }
-.diff-row .side-a::before { content:"A: ";color:#c62828;font-weight:600; }
-.diff-row .side-b::before { content:"B: ";color:#2e7d32;font-weight:600; }
+.report-preview-content .diffs { padding:12px 16px; }
+.report-preview-content .diff-empty { padding:14px 16px;color:#2e7d32;font-size:13px;background:#eaf6ec;border-radius:6px; }
+.report-preview-content .diff-row { display:flex;align-items:flex-start;gap:10px;padding:8px 10px;margin:6px 0;border-radius:6px;font-size:13px;line-height:1.6; }
+.report-preview-content .diff-row.changed { background:#fff8e1;border-left:3px solid #f9a825; }
+.report-preview-content .diff-row .text { flex:1;word-break:break-word; }
+.report-preview-content .diff-row .side-a,.report-preview-content .diff-row .side-b { padding:4px 0; }
+.report-preview-content .diff-row .side-a::before { content:"A: ";color:#c62828;font-weight:600; }
+.report-preview-content .diff-row .side-b::before { content:"B: ";color:#2e7d32;font-weight:600; }
 
-.tag-c { font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;font-weight:600;background:#f9a825;color:#fff;min-width:50px;text-align:center; }
+.report-preview-content .tag-c { font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;font-weight:600;background:#f9a825;color:#fff;min-width:50px;text-align:center; }
 
-.del { background:#ffd6d6;text-decoration:line-through;color:#a31515;padding:0 2px;border-radius:2px; }
-.ins { background:#d6f5d6;color:#1a5e1a;padding:0 2px;border-radius:2px; }
+.report-preview-content .del { background:#ffd6d6;text-decoration:line-through;color:#a31515;padding:0 2px;border-radius:2px; }
+.report-preview-content .ins { background:#d6f5d6;color:#1a5e1a;padding:0 2px;border-radius:2px; }
 
-table.summary td { vertical-align:top;font-size:13px;line-height:1.55; }
-table.summary td:nth-child(1) { width:60px;text-align:center; }
-table.summary td:nth-child(2) { width:120px;color:#666; }
-table.summary td:nth-child(3) { font-weight:600;max-width:300px; }
-table.summary td:nth-child(4) { width:80px; }
-table.summary td:nth-child(5) { width:120px; }
-table.summary td:nth-child(6) { width:80px;text-align:center;color:#888; }
-table.summary td:nth-child(7) { width:100px;text-align:center;font-weight:600; }
-table.summary td:nth-child(8) { width:80px;text-align:center;font-weight:600;color:#c62828; }
+.report-preview-content table.summary td { vertical-align:top;font-size:13px;line-height:1.55; }
+.report-preview-content table.summary td:nth-child(1) { width:60px;text-align:center; }
+.report-preview-content table.summary td:nth-child(2) { width:120px;color:#666; }
+.report-preview-content table.summary td:nth-child(3) { font-weight:600;max-width:300px; }
+.report-preview-content table.summary td:nth-child(4) { width:80px; }
+.report-preview-content table.summary td:nth-child(5) { width:120px; }
+.report-preview-content table.summary td:nth-child(6) { width:80px;text-align:center;color:#888; }
+.report-preview-content table.summary td:nth-child(7) { width:100px;text-align:center;font-weight:600; }
+.report-preview-content table.summary td:nth-child(8) { width:80px;text-align:center;font-weight:600;color:#c62828; }
 
-tr.ok-row td:nth-child(7) { color:#2e7d32; }
-tr.high-row td:nth-child(7) { color:#558b2f; }
-tr.mid-row td:nth-child(7) { color:#ef6c00; }
-tr.low-row td:nth-child(7) { color:#c62828; }
-tr.only-a-row { background:#fff4f4; }
-tr.only-b-row { background:#f4faf4; }
-tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
+.report-preview-content tr.ok-row td:nth-child(7) { color:#2e7d32; }
+.report-preview-content tr.high-row td:nth-child(7) { color:#558b2f; }
+.report-preview-content tr.mid-row td:nth-child(7) { color:#ef6c00; }
+.report-preview-content tr.low-row td:nth-child(7) { color:#c62828; }
+.report-preview-content tr.only-a-row { background:#fff4f4; }
+.report-preview-content tr.only-b-row { background:#f4faf4; }
+.report-preview-content tr.only-a-row td:nth-child(7), .report-preview-content tr.only-b-row td:nth-child(7) { color:#666; }
 
-.small { color:#888;font-size:12px; }
+.report-preview-content .small { color:#888;font-size:12px; }
 
-.diff-list { max-height: 600px; overflow-y: auto; }
+.report-preview-content .diff-list { max-height: 600px; overflow-y: auto; }
 
-.diff-item {
+.report-preview-content .diff-item {
   border-radius: 8px;
   padding: 16px;
   margin-bottom: 12px;
   border-left: 4px solid;
 }
 
-.diff-item.add, .diff-item.only_b { background: #f0fdf4; border-left-color: #22c55e; }
-.diff-item.delete, .diff-item.only_a { background: #fef2f2; border-left-color: #ef4444; }
-.diff-item.modify { background: #fffbeb; border-left-color: #f59e0b; }
+.report-preview-content .diff-item.add, .report-preview-content .diff-item.only_b { background: #f0fdf4; border-left-color: #22c55e; }
+.report-preview-content .diff-item.delete, .report-preview-content .diff-item.only_a { background: #fef2f2; border-left-color: #ef4444; }
+.report-preview-content .diff-item.modify { background: #fffbeb; border-left-color: #f59e0b; }
 
-.diff-item.severity-critical { border-left-width: 6px; }
-.diff-item.severity-high { border-left-width: 5px; }
+.report-preview-content .diff-item.severity-critical { border-left-width: 6px; }
+.report-preview-content .diff-item.severity-high { border-left-width: 5px; }
 
-.diff-header {
+.report-preview-content .diff-header {
   display: flex;
   align-items: center;
   gap: 12px;
   margin-bottom: 8px;
 }
 
-.diff-index {
+.report-preview-content .diff-index {
   background: #e5e7eb;
   color: #6b7280;
   font-size: 12px;
@@ -642,20 +863,20 @@ tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
   border-radius: 4px;
 }
 
-.diff-type { font-weight: 600; }
+.report-preview-content .diff-type { font-weight: 600; }
 
-.severity-tag {
+.report-preview-content .severity-tag {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 4px;
 }
 
-.severity-tag.critical { background: #fee2e2; color: #dc2626; }
-.severity-tag.high { background: #fef3c7; color: #d97706; }
-.severity-tag.medium { background: #dbeafe; color: #2563eb; }
-.severity-tag.low { background: #dcfce7; color: #16a34a; }
+.report-preview-content .severity-tag.critical { background: #fee2e2; color: #dc2626; }
+.report-preview-content .severity-tag.high { background: #fef3c7; color: #d97706; }
+.report-preview-content .severity-tag.medium { background: #dbeafe; color: #2563eb; }
+.report-preview-content .severity-tag.low { background: #dcfce7; color: #16a34a; }
 
-.similarity-tag {
+.report-preview-content .similarity-tag {
   font-size: 12px;
   background: #f3f4f6;
   color: #374151;
@@ -664,32 +885,98 @@ tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
   margin-left: auto;
 }
 
-.diff-content { margin-top: 8px; }
+.report-preview-content .diff-content { margin-top: 8px; }
 
-.diff-text {
+.report-preview-content .diff-text {
   padding: 8px 12px;
   border-radius: 4px;
   margin-bottom: 8px;
 }
 
-.diff-text:last-child { margin-bottom: 0; }
+.report-preview-content .diff-text:last-child { margin-bottom: 0; }
 
-.diff-text-a { background: #f3f4f6; }
-.diff-text-b { background: #e0f2fe; }
+.report-preview-content .diff-text-a { background: #f3f4f6; }
+.report-preview-content .diff-text-b { background: #e0f2fe; }
 
-.text-label {
+.report-preview-content .text-label {
   font-weight: 600;
   color: #6b7280;
   margin-right: 8px;
 }
 
-.empty-state {
+.report-preview-content .empty-state {
   text-align: center;
   padding: 40px;
   color: #9ca3af;
 }
 
-.similarity-high { color: #86efac; }
-.similarity-medium { color: #fcd34d; }
-.similarity-low { color: #fca5a5; }
+.report-preview-content .similarity-high { color: #86efac; }
+.report-preview-content .similarity-medium { color: #fcd34d; }
+.report-preview-content .similarity-low { color: #fca5a5; }
+
+.pdf-preview-dialog :deep(.el-dialog__body) {
+  padding: 0;
+  height: calc(94vh - 60px);
+}
+
+.pdf-preview-wrapper {
+  display: flex;
+  height: 100%;
+  min-height: 600px;
+}
+
+.pdf-preview-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pane-header {
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: 1px solid #e4e7ed;
+  flex-shrink: 0;
+}
+
+.pane-a {
+  background: #fef2f2;
+  color: #dc2626;
+  border-right: 1px solid #fecaca;
+}
+
+.pane-b {
+  background: #f0fdf4;
+  color: #16a34a;
+  border-left: 1px solid #bbf7d0;
+}
+
+.pane-content {
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.pdf-preview-divider {
+  width: 50px;
+  background: #f3f4f6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-left: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+}
+
+.divider-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+.sim-high { color: #10b981; font-weight: 600; }
+.sim-medium { color: #f59e0b; font-weight: 600; }
+.sim-low { color: #ef4444; font-weight: 600; }
 </style>

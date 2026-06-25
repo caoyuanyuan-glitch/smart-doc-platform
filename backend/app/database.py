@@ -39,6 +39,21 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE rules ADD COLUMN language VARCHAR DEFAULT 'both'"))
 
     try:
+        compare_columns = {col['name'] for col in inspector.get_columns('compare_tasks')}
+    except Exception:
+        compare_columns = set()
+
+    if compare_columns and 'group_id' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN group_id INTEGER"))
+    if compare_columns and 'file_names' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN file_names TEXT"))
+    if compare_columns and 'task_type' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN task_type VARCHAR DEFAULT 'doc'"))
+
+    try:
         translation_doc_columns = {col['name'] for col in inspector.get_columns('translation_docs')}
     except Exception:
         translation_doc_columns = set()
@@ -49,6 +64,7 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_char_count INTEGER DEFAULT 0"))
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_char_count INTEGER DEFAULT 0"))
 
+
 def get_db():
     db = SessionLocal()
     try:
@@ -57,6 +73,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()

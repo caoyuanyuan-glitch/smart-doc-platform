@@ -9,9 +9,9 @@ import csv
 from app.database import get_db
 from app.crud.knowledge import (
     get_folder, get_folder_tree, get_folder_files, get_subfolders, create_folder, update_folder, delete_folder,
-    create_file, get_file, delete_file
+    create_file, get_file, delete_file, move_folder, move_file
 )
-from app.schemas.knowledge import FolderCreate, FolderUpdate
+from app.schemas.knowledge import FolderCreate, FolderUpdate, FolderMove, FileMove
 from app.api.auth import get_current_user, get_default_user
 
 router = APIRouter()
@@ -60,6 +60,14 @@ def _preview_csv_file(file_path: str) -> str:
         reader = csv.reader(handle)
         rows = list(reader)
     return _format_tabular_preview(rows)
+
+
+def _collect_descendant_ids(folder):
+    ids = set()
+    for child in folder.children:
+        ids.add(child.id)
+        ids.update(_collect_descendant_ids(child))
+    return ids
 
 @router.get("/tree")
 async def get_knowledge_tree(db: Session = Depends(get_db)):
@@ -110,6 +118,34 @@ async def update_folder_name(
         raise HTTPException(status_code=404, detail="文件夹不存在")
     
     return {"message": "文件夹重命名成功"}
+
+
+@router.put("/folders/{folder_id}/move")
+async def move_folder_to_target(
+    folder_id: int,
+    folder_move: FolderMove,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    folder = get_folder(db, folder_id)
+    if not folder:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+
+    target_parent_id = folder_move.parent_id
+    if target_parent_id == folder.id:
+        raise HTTPException(status_code=400, detail="不能移动到当前文件夹自身")
+
+    if target_parent_id is not None:
+        target_folder = get_folder(db, target_parent_id)
+        if not target_folder:
+            raise HTTPException(status_code=404, detail="目标文件夹不存在")
+
+        descendant_ids = _collect_descendant_ids(folder)
+        if target_parent_id in descendant_ids:
+            raise HTTPException(status_code=400, detail="不能移动到当前文件夹的子文件夹中")
+
+    move_folder(db, folder_id, target_parent_id)
+    return {"message": "文件夹移动完成", "id": folder_id, "parent_id": target_parent_id}
 
 @router.delete("/folders/{folder_id}")
 async def delete_folder_by_id(
@@ -193,6 +229,25 @@ async def get_file_info(file_id: int, db: Session = Depends(get_db)):
         "folder_id": file.folder_id,
         "created_at": file.created_at.isoformat() if file.created_at else None
     }
+
+
+@router.put("/files/{file_id}/move")
+async def move_file_to_target(
+    file_id: int,
+    file_move: FileMove,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    file = get_file(db, file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    target_folder = get_folder(db, file_move.folder_id)
+    if not target_folder:
+        raise HTTPException(status_code=404, detail="目标文件夹不存在")
+
+    move_file(db, file_id, file_move.folder_id)
+    return {"message": "文件移动完成", "id": file_id, "folder_id": file_move.folder_id}
 
 @router.get("/files/{file_id}/download")
 async def download_file(file_id: int, db: Session = Depends(get_db)):

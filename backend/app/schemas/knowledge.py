@@ -13,6 +13,9 @@ class FolderCreate(FolderBase):
 class FolderUpdate(BaseModel):
     name: Optional[str] = None
 
+class FolderMove(BaseModel):
+    parent_id: Optional[int] = None
+
 class FolderResponse(FolderBase):
     id: int
     created_by: Optional[int] = None
@@ -33,6 +36,9 @@ class FileBase(BaseModel):
 
 class FileCreate(FileBase):
     pass
+
+class FileMove(BaseModel):
+    folder_id: int
 
 class FileResponse(FileBase):
     id: int

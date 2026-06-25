@@ -1,6 +1,6 @@
 <template>
-  <div class="polish-container">
-    <div v-if="currentView === 'document'">
+  <div class="polish-container" :class="{ 'document-mode': currentView === 'document' }">
+    <div v-if="currentView === 'document'" class="document-view">
       <div class="page-title-row">
         <h2 class="page-title">文档润色</h2>
         <div class="stats-card">
@@ -12,6 +12,15 @@
             <span class="stats-count" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.totalDocs }}</span>
             <span class="stats-unit">文档</span>
           </span>
+        </div>
+        <div v-if="loading" class="polish-progress-float" :class="{ done: polishProgress >= 100 }">
+          <div class="progress-float-bar">
+            <el-icon class="is-loading" v-if="polishProgress < 100"><Loading /></el-icon>
+            <span class="progress-float-text">{{ polishProgressMsg || '润色中...' }}</span>
+          </div>
+          <div v-if="polishProgress < 100" class="progress-float-body">
+            <el-progress :percentage="polishProgress" :stroke-width="10" />
+          </div>
         </div>
       </div>
 
@@ -69,7 +78,7 @@
               <div class="panel-actions">
                 <el-tag type="info" size="small">修改 {{ docResult.changes }} 处</el-tag>
                 <el-tag type="success" size="small">已选 {{ acceptedDocChangeCount }} 处</el-tag>
-                <el-button size="small" @click="selectAllDocumentChanges">全选</el-button>
+                <el-button size="small" @click="toggleAllDocumentChanges">{{ allDocumentChangesSelected ? '反选' : '全选' }}</el-button>
                 <el-button size="small" @click="downloadPolishedDoc">下载文档</el-button>
                 <el-button size="small" @click="downloadReport">润色报告</el-button>
                 <el-button type="primary" size="small" :loading="docFeedbackLoading" @click="submitDocumentFeedback">写入平台反馈句式清单</el-button>
@@ -79,26 +88,41 @@
             <div class="doc-result-preview">
               <div class="result-col-v">
                 <div class="col-title"><span class="dot dot-blue"></span>原文预览</div>
-                <div class="col-content-compact">{{ docResult.original }}</div>
+                <div class="col-content-compact" v-html="highlightedDocOriginalHtml"></div>
               </div>
               <div class="result-col-v">
                 <div class="col-title"><span class="dot dot-green"></span>润色预览</div>
-                <div class="col-content-compact">{{ docResult.polished }}</div>
+                <div class="col-content-compact" v-html="highlightedDocPolishedHtml"></div>
               </div>
             </div>
 
             <div class="doc-result-table-wrap">
-              <el-table :data="docResult.changeDetails" stripe class="doc-result-table" empty-text="当前没有可确认的润色结果" height="100%">
-                <el-table-column type="index" label="序号" width="70" />
-                <el-table-column prop="before" label="原文" min-width="180" show-overflow-tooltip />
-                <el-table-column prop="after" label="润色后" min-width="220" show-overflow-tooltip />
-                <el-table-column prop="typeLabel" label="修改类型" width="110" />
-                <el-table-column label="是否修改" width="120">
-                  <template #default="scope">
-                    <el-checkbox v-model="scope.row.accepted">是</el-checkbox>
-                  </template>
-                </el-table-column>
-              </el-table>
+              <div v-if="docResult.changeDetails?.length" class="doc-change-table-scroll">
+                <table class="doc-change-table">
+                  <thead>
+                    <tr>
+                      <th class="col-index">序号</th>
+                      <th class="col-before">原文</th>
+                      <th class="col-after">润色后</th>
+                      <th class="col-type">修改类型</th>
+                      <th class="col-accepted">是否接受</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(item, index) in docResult.changeDetails" :key="`${index}-${item.before}-${item.after}`">
+                      <td class="col-index">{{ index + 1 }}</td>
+                      <td class="col-before" v-html="renderDiffHtml(item.before, item.after, 'original')"></td>
+                      <td class="col-after" v-html="renderDiffHtml(item.before, item.after, 'polished')"></td>
+                      <td class="col-type">{{ item.typeLabel }}</td>
+                      <td class="col-accepted">
+                        <div><el-checkbox v-model="item.accepted">是</el-checkbox></div>
+                        <div><el-checkbox v-model="item.needCorrection" @change="onCorrectionChecked(index, item)">修正后接受</el-checkbox></div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="doc-change-empty">当前没有可确认的润色结果</div>
             </div>
           </div>
 
@@ -275,31 +299,41 @@
       </template>
     </el-dialog>
 
+    <!-- 需修正弹窗 -->
     <el-dialog
-      :model-value="currentView === 'document' && loading && polishProgress < 100"
-      title="文档润色中"
-      width="460px"
+      v-model="correctionDialogVisible"
+      title="填写正确描述"
+      width="500px"
       :close-on-click-modal="false"
-      :close-on-press-escape="false"
-      :show-close="false"
       append-to-body
     >
-      <div class="progress-dialog-body">
-        <div class="progress-header">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          <span class="progress-msg">{{ polishProgressMsg || '润色中...' }}</span>
-        </div>
-        <el-progress :percentage="polishProgress" :stroke-width="10" />
+      <div>
+        <p style="margin-bottom: 10px; color: #64748b; font-size: 13px;">
+          原文：<strong>{{ correctionForm.original }}</strong>
+        </p>
+        <p style="margin-bottom: 12px; color: #64748b; font-size: 13px;">
+          润色后：<strong>{{ correctionForm.polished }}</strong>
+        </p>
+        <el-input
+          v-model="correctionForm.correction"
+          type="textarea"
+          :rows="4"
+          placeholder="请填写正确的句子描述..."
+        />
       </div>
+      <template #footer>
+        <el-button @click="closeCorrectionDialog">取消</el-button>
+        <el-button type="primary" :loading="correctionSubmitting" @click="submitCorrection">确定</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { polishAPI, knowledgeAPI } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
 import { usePolishStore } from '@/store/polish'
@@ -342,8 +376,68 @@ const feedbackPlaceholder = computed(() => (
 const feedbackHint = computed(() => (
   feedbackTarget.value === 'sentence_guide'
     ? '句式清单文件：将自动写入平台反馈的句式清单，每行一条。'
-    : '术语对照表：将自动写入平台反馈的术语对照表，按“非标准词 → 标准词”填写。'
+    : '术语对照表：将自动写入平台反馈的术语对照表，按"非标准词 → 标准词"填写。'
 ))
+
+// 文档润色 - 需修正弹窗
+const correctionDialogVisible = ref(false)
+const correctionSubmitting = ref(false)
+const correctionForm = ref({ index: -1, original: '', polished: '', correction: '' })
+
+function onCorrectionChecked(index, item) {
+  if (item.needCorrection) {
+    correctionForm.value = {
+      index,
+      original: item.before || '',
+      polished: item.after || '',
+      correction: ''
+    }
+    correctionDialogVisible.value = true
+  }
+}
+
+function closeCorrectionDialog() {
+  correctionDialogVisible.value = false
+  if (correctionForm.value.index >= 0) {
+    const items = docResult.value?.changeDetails
+    if (items && items[correctionForm.value.index]) {
+      items[correctionForm.value.index].needCorrection = false
+    }
+  }
+}
+
+async function submitCorrection() {
+  if (!correctionForm.value.correction.trim()) {
+    ElMessage.warning('请填写正确的句子描述')
+    return
+  }
+  correctionSubmitting.value = true
+  try {
+    const resp = await polishAPI.submitFeedback(
+      correctionForm.value.original,
+      correctionForm.value.polished,
+      0,  // 准确率不适用
+      correctionForm.value.correction.trim(),
+      'sentence_guide',
+      null,  // 不走选中术语文件
+      null   // 不走选中句式文件
+    )
+    const data = resp.data || {}
+    ElMessage.success(`已写入平台反馈句式清单`)
+    correctionDialogVisible.value = false
+    if (correctionForm.value.index >= 0) {
+      const items = docResult.value?.changeDetails
+      if (items && items[correctionForm.value.index]) {
+        items[correctionForm.value.index].needCorrection = false
+      }
+    }
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`提交失败：${errorMsg}`)
+  } finally {
+    correctionSubmitting.value = false
+  }
+}
 
 function escapeHtml(text) {
   return String(text || '')
@@ -680,9 +774,144 @@ function mergeDiffSegments(segments) {
   return merged
 }
 
-function renderDiffHtml(sourceText, targetText, mode) {
-  const diff = buildDiffSegments(sourceText, targetText)
-  const segments = mode === 'original' ? diff.left : diff.right
+const orderedListLeadPattern = /^(首先|其次|再次|然后|最后|一是|二是|三是|四是|五是|其一|其二|其三|其四|其五|第[一二三四五六七八九十]+|[（(]?\d+[)）][、.]?)/
+const orderedSplitPattern = /(首先|其次|再次|然后|最后|一是|二是|三是|四是|五是|其一|其二|其三|其四|其五|第[一二三四五六七八九十]+|[（(]?\d+[)）][、.]?)/g
+
+function collectRangeItems(text, regex) {
+  const items = []
+  let match = regex.exec(text)
+  while (match) {
+    const value = match[0].trim()
+    if (value) {
+      items.push({
+        start: Array.from(text.slice(0, match.index)).length,
+        end: Array.from(text.slice(0, match.index + match[0].length)).length,
+        text: value
+      })
+    }
+    match = regex.exec(text)
+  }
+  return items
+}
+
+function collectSequentialMarkerItems(text) {
+  const raw = String(text || '')
+  const matches = [...raw.matchAll(orderedSplitPattern)]
+  if (matches.length < 2) {
+    return []
+  }
+
+  return matches.map((match, index) => {
+    const start = Array.from(raw.slice(0, match.index)).length
+    const nextIndex = index + 1 < matches.length ? matches[index + 1].index : raw.length
+    const chunk = raw.slice(match.index, nextIndex).trim()
+    return {
+      start,
+      end: start + Array.from(chunk).length,
+      text: chunk
+    }
+  }).filter(item => item.text.length >= 6)
+}
+
+function splitCommaClauses(text) {
+  return String(text || '')
+    .split(/[，,](?=(?:首先|其次|再次|然后|最后|一是|二是|三是|四是|五是|其一|其二|其三|其四|其五))/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function detectLongParagraphList(text) {
+  const raw = String(text || '')
+  const compact = raw.trim()
+  if (!compact || compact.length < 30 || /\n/.test(compact)) {
+    return null
+  }
+
+  const sequentialItems = collectSequentialMarkerItems(raw)
+  if (sequentialItems.length >= 2 && sequentialItems.length <= 8) {
+    return { type: 'ol', items: sequentialItems }
+  }
+
+  const commaOrderedParts = splitCommaClauses(raw)
+  if (commaOrderedParts.length >= 2 && commaOrderedParts.length <= 8) {
+    return {
+      type: 'ol',
+      items: (() => {
+        const items = []
+        let searchStart = 0
+        for (const part of commaOrderedParts) {
+          const found = raw.indexOf(part, searchStart)
+          const start = found === -1 ? searchStart : Array.from(raw.slice(0, found)).length
+          const end = start + Array.from(part).length
+          items.push({ start, end, text: part })
+          searchStart = found === -1 ? searchStart + part.length : found + part.length
+        }
+        return items
+      })()
+    }
+  }
+
+  const semicolonItems = collectRangeItems(raw, /[^；;]+[；;]?\s*/g)
+  if (
+    semicolonItems.length >= 2 &&
+    semicolonItems.length <= 8 &&
+    semicolonItems.every(item => item.text.length >= 6 && item.text.length <= 120)
+  ) {
+    return { type: 'ul', items: semicolonItems }
+  }
+
+  const sentenceItems = collectRangeItems(raw, /[^。！？!?]+[。！？!?]?\s*/g)
+  if (sentenceItems.length >= 2 && sentenceItems.length <= 6) {
+    const orderedCount = sentenceItems.filter(item => orderedListLeadPattern.test(item.text)).length
+    if (orderedCount >= 1) {
+      return { type: 'ol', items: sentenceItems }
+    }
+    if (sentenceItems.every(item => item.text.length >= 8 && item.text.length <= 80)) {
+      return { type: 'ul', items: sentenceItems }
+    }
+  }
+
+  const commaItems = collectRangeItems(raw, /[^，,]+[，,]?\s*/g)
+  if (
+    compact.length >= 40 &&
+    commaItems.length >= 3 &&
+    commaItems.length <= 6 &&
+    commaItems.every(item => item.text.length >= 6 && item.text.length <= 40)
+  ) {
+    return { type: 'ul', items: commaItems }
+  }
+
+  return null
+}
+
+function sliceSegmentsByRange(segments, start, end) {
+  const result = []
+  let cursor = 0
+
+  for (const segment of segments) {
+    const chars = Array.from(segment.text)
+    const nextCursor = cursor + chars.length
+    if (nextCursor <= start) {
+      cursor = nextCursor
+      continue
+    }
+    if (cursor >= end) {
+      break
+    }
+
+    const from = Math.max(0, start - cursor)
+    const to = Math.min(chars.length, end - cursor)
+    const textPart = chars.slice(from, to).join('')
+    if (textPart) {
+      result.push({ text: textPart, changed: segment.changed })
+    }
+    cursor = nextCursor
+  }
+
+  return mergeDiffSegments(result)
+}
+
+function renderSegmentsHtml(segments) {
   return mergeDiffSegments(segments)
     .map(segment => {
       const content = escapeHtml(segment.text)
@@ -691,8 +920,44 @@ function renderDiffHtml(sourceText, targetText, mode) {
     .join('')
 }
 
+function renderDiffHtml(sourceText, targetText, mode) {
+  const displayText = mode === 'original' ? sourceText : targetText
+  const otherText = mode === 'original' ? targetText : sourceText
+  const structuredList = detectLongParagraphList(displayText)
+
+  if (structuredList) {
+    const tagName = structuredList.type
+    const itemsHtml = structuredList.items.map((item, idx) => {
+      const subSource = mode === 'original' ? item.text : findListItemInOther(item.text, idx, otherText)
+      const subTarget = mode === 'original' ? findListItemInOther(item.text, idx, otherText) : item.text
+      const diff = buildDiffSegments(subSource, subTarget)
+      const segments = mode === 'original' ? diff.left : diff.right
+      return `<li>${renderSegmentsHtml(segments).trim()}</li>`
+    }).join('')
+    return `<${tagName} class="result-auto-list">${itemsHtml}</${tagName}>`
+  }
+
+  const diff = buildDiffSegments(sourceText, targetText)
+  const segments = mode === 'original' ? diff.left : diff.right
+  return `<div class="result-text-block">${renderSegmentsHtml(segments)}</div>`
+}
+
+function findListItemInOther(itemText, index, otherText) {
+  const otherList = detectLongParagraphList(otherText)
+  if (otherList && otherList.items.length > index) {
+    return otherList.items[index].text
+  }
+  const idx = otherText.indexOf(itemText)
+  if (idx !== -1) {
+    return otherText.slice(idx, idx + itemText.length)
+  }
+  return itemText
+}
+
 const highlightedOriginalHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'original'))
 const highlightedPolishedHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'polished'))
+const highlightedDocOriginalHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'original'))
+const highlightedDocPolishedHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'polished'))
 
 const formData = ref({
   sentenceFile: documentDraft.value.sentenceFile || '',
@@ -714,10 +979,16 @@ const acceptedDocChangeCount = computed(() => {
   return items.filter(item => item.accepted).length
 })
 
-function selectAllDocumentChanges() {
+const allDocumentChangesSelected = computed(() => {
   const items = docResult.value?.changeDetails || []
+  return items.length > 0 && items.every(item => item.accepted)
+})
+
+function toggleAllDocumentChanges() {
+  const items = docResult.value?.changeDetails || []
+  const nextValue = !allDocumentChangesSelected.value
   items.forEach(item => {
-    item.accepted = true
+    item.accepted = nextValue
   })
 }
 
@@ -740,7 +1011,7 @@ function normalizeChangeType(type) {
 
 function normalizeDocumentChanges(changes) {
   return (changes || []).map((change, index) => {
-    const before = change.before || change.original || change.summary || ''
+    const before = change.before || change.original || ''
     const after = change.after || change.polished || ''
     return {
       rowKey: `${index}-${before}-${after}`,
@@ -748,8 +1019,16 @@ function normalizeDocumentChanges(changes) {
       after,
       type: change.type || '',
       typeLabel: normalizeChangeType(change.type),
-      accepted: false
+      accepted: false,
+      needCorrection: false
     }
+  }).filter(item => {
+    const before = (item.before || '').replace(/\s+/g, ' ').trim()
+    const after = (item.after || '').replace(/\s+/g, ' ').trim()
+    if (!before && !after) {
+      return false
+    }
+    return before !== after || (!before && after) || (before && !after)
   })
 }
 
@@ -954,6 +1233,17 @@ async function submitPolish() {
     stopDocumentProgress()
     applyDocumentResult(data, sourceName)
     ElMessage.success('润色成功')
+    // 清空已选择的文件
+    pendingLocalFile = null
+    if (localFileInputRef.value) {
+      localFileInputRef.value.value = ''
+    }
+    await nextTick()
+    formData.value.sourceFile = ''
+    formData.value.sentenceFile = ''
+    formData.value.sentenceFileId = null
+    formData.value.terminologyFile = ''
+    formData.value.terminologyFileId = null
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
@@ -963,7 +1253,7 @@ async function submitPolish() {
   } finally {
     loading.value = false
     stopDocumentProgress()
-    pendingLocalFile = null
+    // pendingLocalFile 在成功/失败分支已处理，此处不再重复清空
   }
 }
 
@@ -1200,6 +1490,21 @@ onMounted(async () => {
   width: 100%;
 }
 
+.polish-container.document-mode {
+  height: calc(100vh - 108px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.document-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /* ── 标题行 ── */
 .page-title {
   font-size: 22px;
@@ -1214,6 +1519,20 @@ onMounted(async () => {
   justify-content: flex-start;
   gap: 14px;
   margin-bottom: 18px;
+  flex: 0 0 auto;
+}
+
+.title-progress-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: #3b82f6;
+  font-weight: 600;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 20px;
+  padding: 3px 14px;
 }
 
 /* ── 统计卡片 ── */
@@ -1233,12 +1552,18 @@ onMounted(async () => {
   font-weight: 600;
   font-size: 20px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
 }
 
 .stats-value {
   font-size: 24px;
   font-weight: 700;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  top: -1px;
 }
 
 .stats-green {
@@ -1254,11 +1579,13 @@ onMounted(async () => {
   font-size: 22px;
   margin: 0 2px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
 }
 
 .stats-count-wrap {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 4px;
 }
 
@@ -1266,6 +1593,10 @@ onMounted(async () => {
   font-weight: 700;
   font-size: 24px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  top: -1px;
 }
 
 .stats-unit {
@@ -1273,6 +1604,8 @@ onMounted(async () => {
   font-weight: 600;
   font-size: 20px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
 }
 
 /* ── 面板 ── */
@@ -1289,14 +1622,24 @@ onMounted(async () => {
   gap: 18px;
   align-items: stretch;
   width: 100%;
-  height: calc(100vh - 220px);
+  flex: 1;
+  height: 0;
   min-height: 0;
   overflow: hidden;
 }
 
-.doc-left,
-.doc-right {
+.doc-left {
   flex: 1 1 0;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-right {
+  flex: 2 1 0;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -1324,11 +1667,12 @@ onMounted(async () => {
 
 .doc-result-panel {
   flex: 1;
+  height: 100%;
   min-height: 0;
   margin-bottom: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .doc-result-preview {
@@ -1336,33 +1680,91 @@ onMounted(async () => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 14px;
-  flex: 0 0 auto;
-}
-
-.doc-result-table {
-  width: 100%;
-  flex: 1;
+  height: 220px;
   min-height: 0;
+  flex: 0 0 220px;
 }
 
-.doc-result-table :deep(.el-table__cell) {
-  vertical-align: top;
+.doc-result-table-wrap {
+  height: 400px;
+  min-height: 400px;
+  max-height: 400px;
+  flex: 0 0 400px;
 }
 
-.doc-result-table :deep(.el-table__header-wrapper th) {
-  background: #e5e7eb;
-  font-weight: 700;
-  color: #111827;
+.doc-change-table-scroll {
+  height: 400px;
+  min-height: 400px;
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
 }
 
-.doc-result-table :deep(.el-table__header-wrapper) {
+.doc-change-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+.doc-change-table thead th {
   position: sticky;
   top: 0;
   z-index: 2;
+  background: #e5e7eb;
+  font-weight: 700;
+  color: #111827;
+  padding: 12px 10px;
+  border-bottom: 1px solid #d1d5db;
+  text-align: left;
+  font-size: 13px;
 }
 
-.doc-result-table :deep(.el-scrollbar__wrap) {
-  overflow-y: auto;
+.doc-change-table tbody td {
+  vertical-align: top;
+  padding: 12px 10px;
+  border-bottom: 1px solid #eef2f7;
+  color: #374151;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.doc-change-table tbody tr:nth-child(even) {
+  background: #fafafa;
+}
+
+.doc-change-table .col-index {
+  width: 70px;
+}
+
+.doc-change-table .col-type {
+  width: 110px;
+}
+
+.doc-change-table .col-accepted {
+  width: 180px;
+}
+
+.doc-change-table .col-accepted :deep(.el-checkbox) {
+  align-items: flex-start;
+  margin-right: 12px;
+}
+
+.doc-change-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  color: #94a3b8;
+  font-size: 13px;
+  background: #fafbfc;
 }
 
 .panel-header {
@@ -1492,9 +1894,67 @@ onMounted(async () => {
 
 .col-content-compact :deep(.diff-highlight) {
   color: #dc2626;
-  background: #fee2e2;
+  background: #fecaca;
   font-weight: 600;
   border-radius: 3px;
+}
+
+.doc-change-table td :deep(.diff-highlight) {
+  color: #dc2626;
+  background: #fecaca;
+  font-weight: 600;
+  border-radius: 3px;
+}
+
+.title-progress-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: #3b82f6;
+  font-weight: 600;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 20px;
+  padding: 3px 14px;
+}
+
+/* ── 进度条（准确率区块后面） ── */
+.polish-progress-float {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 20px;
+  overflow: hidden;
+  font-size: 13px;
+  min-width: 280px;
+  padding: 4px 16px;
+}
+
+.polish-progress-float.done {
+  opacity: 0.5;
+}
+
+.progress-float-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #374151;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.progress-float-text {
+  white-space: nowrap;
+}
+
+.progress-float-body {
+  margin-left: 14px;
+  min-width: 140px;
+  flex: 1;
 }
 
 /* ── 意见反馈 ── */
@@ -1687,6 +2147,14 @@ onMounted(async () => {
 
   .doc-result-preview {
     grid-template-columns: 1fr;
+  }
+
+  .doc-result-panel,
+  .doc-result-table-wrap,
+  .doc-change-table-scroll {
+    max-height: none;
+    height: auto;
+    min-height: 0;
   }
 
   .feedback-left {

@@ -5,10 +5,12 @@ import Review from '@/views/Review.vue'
 import Polish from '@/views/Polish.vue'
 import PolishHistory from '@/views/PolishHistory.vue'
 import QA from '@/views/QA.vue'
+import QADoc from '@/views/QADoc.vue'
+import QAHistory from '@/views/QAHistory.vue'
 import Generate from '@/views/Generate.vue'
 import Compare from '@/views/Compare.vue'
+import CompareParams from '@/views/CompareParams.vue'
 import Convert from '@/views/Convert.vue'
-import ConvertRules from '@/views/ConvertRules.vue'
 import Terms from '@/views/Terms.vue'
 import Users from '@/views/Users.vue'
 import Translate from '@/views/Translate.vue'
@@ -19,12 +21,14 @@ import PolishPreview from '@/views/PolishPreview.vue'
 import SpellCheck from '@/views/SpellCheck.vue'
 import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
 import WhiteList from '@/views/WhiteList.vue'
+import Feedback from '@/views/Feedback.vue'
 
 const routes = [
   {
     path: '/login',
     name: 'Login',
-    component: Login
+    component: Login,
+    meta: { public: true }
   },
   {
     path: '/',
@@ -91,9 +95,23 @@ const routes = [
     component: QA
   },
   {
-    path: '/qa/library',
-    name: 'QALibrary',
-    component: QA
+    path: '/qa/docs',
+    name: 'QADocs',
+    component: QADoc
+  },
+  {
+    path: '/qa/history',
+    redirect: '/qa/history/general'
+  },
+  {
+    path: '/qa/history/general',
+    name: 'QAHistoryGeneral',
+    component: QAHistory
+  },
+  {
+    path: '/qa/history/doc',
+    name: 'QAHistoryDoc',
+    component: QAHistory
   },
   {
     path: '/generate',
@@ -116,9 +134,9 @@ const routes = [
     component: Compare
   },
   {
-    path: '/compare/config',
-    name: 'CompareConfig',
-    component: Compare
+    path: '/compare/params',
+    name: 'CompareParams',
+    component: CompareParams
   },
   {
     path: '/convert',
@@ -129,11 +147,6 @@ const routes = [
     path: '/convert/history',
     name: 'ConvertHistory',
     component: Convert
-  },
-  {
-    path: '/convert/rules',
-    name: 'ConvertRules',
-    component: ConvertRules
   },
   {
     path: '/terms',
@@ -169,12 +182,30 @@ const routes = [
     path: '/knowledge/:id',
     name: 'KnowledgeFolder',
     component: Knowledge
+  },
+  {
+    path: '/feedback',
+    name: 'Feedback',
+    component: Feedback
   }
 ]
 
 const router = createRouter({
   history: createWebHistory(),
   routes
+})
+
+router.beforeEach((to, from, next) => {
+  const token = localStorage.getItem('token')
+  if (to.meta.public) {
+    next()
+    return
+  }
+  if (!token) {
+    next('/login')
+    return
+  }
+  next()
 })
 
 export default router
