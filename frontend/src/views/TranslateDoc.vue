@@ -2,7 +2,7 @@
   <div class="doc-translate-container">
     <div class="page-header">
       <h2 class="page-title">文档翻译</h2>
-      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、XLF 文档</p>
+      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、XLF、IDML 文档</p>
     </div>
 
     <el-card class="config-card config-horizontal" shadow="never">
@@ -278,7 +278,7 @@ function onFileChange(file) {
 
 function beforeFileUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
-  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'xlf']
+  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'xlf', 'idml']
   if (!allowed.includes(ext)) {
     ElMessage.error(`不支持的文件格式: .${ext}`)
     return false
