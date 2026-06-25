@@ -37,6 +37,7 @@ def _strip_code_fence(text):
 class AIClient:
     def __init__(self):
         self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "kimi")
+        self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
@@ -71,6 +72,9 @@ class AIClient:
         ) if _is_valid_key(self.kimi_api_key) else None
         if self.kimi_client:
             print(f"[AI] Kimi (Moonshot) 已连接, base_url={self.kimi_base_url}, model={self.kimi_model}")
+
+        self.anthropic_model = os.getenv("QWEN_MODEL", "monkeycode-pro/qwen3.6-plus")
+        self.anthropic_base_url = os.getenv("QWEN_BASE_URL", "https://proxy.monkeycode-ai.com/v1")
 
         # Proxy 回退客户端（使用 OpenAI 兼容接口）
         self.proxy_client = OpenAI(
