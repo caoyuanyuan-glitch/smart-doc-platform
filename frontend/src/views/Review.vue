@@ -45,7 +45,7 @@
                   :stroke-width="18"
                   :status="docReviewStatus[scope.row.id].status === 'failed' ? 'exception' : ''"
                 />
-                <span style="font-size:12px;color:#666">{{ docReviewStatus[scope.row.id].message }}</span>
+                <span style="font-size:12px;color:#666">{{ reviewStatusText(docReviewStatus[scope.row.id]) }}</span>
               </div>
               <span v-else style="color:#999">未审核</span>
             </template>
@@ -104,10 +104,10 @@
             <template #default="scope">
               <div v-if="scope.row.status === 'running' && scope.row.progress">
                 <el-progress :percentage="scope.row.progress.progress || 0" :stroke-width="16" />
-                <div class="task-progress-text">{{ scope.row.progress.message || scope.row.progress.step || '审核进行中...' }}</div>
+                <div class="task-progress-text">{{ reviewProgressText(scope.row.progress) }}</div>
               </div>
               <span v-else-if="scope.row.status === 'completed'">审核完成</span>
-              <span v-else-if="scope.row.status === 'failed'">{{ scope.row.summary || '审核失败' }}</span>
+              <span v-else-if="scope.row.status === 'failed'">{{ reviewFailureText(scope.row) }}</span>
               <span v-else style="color:#999">-</span>
             </template>
           </el-table-column>
@@ -161,11 +161,10 @@
         <el-select v-model="issueFilter.category" placeholder="分类" clearable style="width:140px;margin-left:8px">
           <el-option v-for="cat in dialogCategories" :key="cat" :label="cat" :value="cat" />
         </el-select>
-        <el-select v-model="issueFilter.status" placeholder="状态" clearable style="width:120px;margin-left:8px">
+          <el-select v-model="issueFilter.status" placeholder="状态" clearable style="width:120px;margin-left:8px">
           <el-option label="待确认" value="pending" />
           <el-option label="已确认" value="confirmed" />
           <el-option label="误报" value="false_positive" />
-          <el-option label="已忽略" value="ignored" />
         </el-select>
         <el-select v-model="issueFilter.severity" placeholder="严重度" clearable style="width:120px;margin-left:8px">
           <el-option label="致命" value="fatal" />
@@ -176,7 +175,6 @@
         <span style="margin-left:auto">
           <el-button size="small" @click="batchSetStatus('confirmed')">批量确认</el-button>
           <el-button size="small" @click="batchSetStatus('false_positive')">批量误报</el-button>
-          <el-button size="small" @click="batchSetStatus('ignored')">批量忽略</el-button>
         </span>
       </div>
       <el-table
@@ -215,11 +213,11 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="320" fixed="right">
           <template #default="scope">
             <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
             <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
-            <el-button size="small" type="info" plain @click="judgeSingle(scope.row, 'ignored')">忽略</el-button>
+            <el-button size="small" type="primary" plain @click="openTransferRuleDialog(scope.row)">转规则库</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -227,6 +225,43 @@
         <span>共 {{ filteredDialogIssues.length }} 条 (已选 {{ selectedIssueIds.length }} 条)</span>
         <el-button @click="issueDialogVisible = false">关闭</el-button>
       </div>
+    </el-dialog>
+
+    <el-dialog v-model="transferRuleDialogVisible" title="转入规则库" width="620px">
+      <el-form :model="transferRuleForm" label-width="90px">
+        <el-form-item label="规则编号">
+          <el-input v-model="transferRuleForm.rule_no" placeholder="如：R001" />
+        </el-form-item>
+        <el-form-item label="分类">
+          <el-input v-model="transferRuleForm.category" placeholder="如：拼写" />
+        </el-form-item>
+        <el-form-item label="规则描述">
+          <el-input v-model="transferRuleForm.description" type="textarea" :rows="2" placeholder="规则描述" />
+        </el-form-item>
+        <el-form-item label="正则">
+          <el-input v-model="transferRuleForm.regex" placeholder="正则表达式" />
+        </el-form-item>
+        <el-form-item label="示例">
+          <el-input v-model="transferRuleForm.example" type="textarea" :rows="2" placeholder="示例文本" />
+        </el-form-item>
+        <el-form-item label="建议">
+          <el-input v-model="transferRuleForm.suggestion" type="textarea" :rows="2" placeholder="修改建议" />
+        </el-form-item>
+        <el-form-item label="审核依据">
+          <el-input v-model="transferRuleForm.audit_basis" placeholder="审核依据来源" />
+        </el-form-item>
+        <el-form-item label="语言">
+          <el-select v-model="transferRuleForm.language" placeholder="请选择语言">
+            <el-option label="中英通用" value="both" />
+            <el-option label="中文" value="cn" />
+            <el-option label="英文" value="en" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="transferRuleDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveTransferredRule">保存到规则库</el-button>
+      </template>
     </el-dialog>
 
     <!-- 规则管理 -->
@@ -299,6 +334,13 @@
           </el-form-item>
           <el-form-item label="审核依据">
             <el-input v-model="ruleForm.audit_basis" placeholder="审核依据来源" />
+          </el-form-item>
+          <el-form-item label="语言">
+            <el-select v-model="ruleForm.language" placeholder="请选择语言">
+              <el-option label="中英通用" value="both" />
+              <el-option label="中文" value="cn" />
+              <el-option label="英文" value="en" />
+            </el-select>
           </el-form-item>
         </el-form>
         <template #footer>
@@ -403,6 +445,7 @@ const rowFilters = reactive({})
 // 文档审核状态 (按文档ID存储)
 const docReviewStatus = reactive({})
 let progressPollingTimers = {}  // 轮询定时器
+const progressPollingFailures = reactive({})
 let reviewsPollingTimer = null
 
 // 问题详情弹窗
@@ -439,22 +482,24 @@ const judgmentStats = computed(() => {
   const stats = {}
   for (const key in taskIssues) {
     const list = taskIssues[key]
-    let confirmed = 0, false_positive = 0, pending = 0, ignored = 0
+    let confirmed = 0, false_positive = 0, pending = 0
     for (const i of list) {
       const s = i.status || 'pending'
       if (s === 'confirmed') confirmed++
       else if (s === 'false_positive') false_positive++
-      else if (s === 'ignored') ignored++
       else pending++
     }
-    stats[key] = { confirmed, false_positive, pending, ignored }
+    stats[key] = { confirmed, false_positive, pending }
   }
   return stats
 })
 
 const showRuleDialog = ref(false)
 const editingRule = ref(null)
-const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' })
+const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
+const transferRuleDialogVisible = ref(false)
+const transferRuleSourceIssue = ref(null)
+const transferRuleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
 
 const selectedRules = ref([])
 const rulesImportUrl = '/api/rules/bulk'
@@ -577,16 +622,18 @@ async function loadDocuments() {
             ? (progressInfo?.progress || 0)
             : 0
         const message = latestReview.status === 'completed'
-          ? `审核完成，共 ${latestReview.total_issues} 个问题`
+          ? reviewCompletionText(latestReview)
           : latestReview.status === 'failed'
-            ? '审核失败'
-            : progressInfo?.message || progressInfo?.step || '审核进行中...'
+            ? reviewFailureText(latestReview)
+            : reviewProgressText(progressInfo)
 
         docReviewStatus[doc.id] = {
           review_id: latestReview.id,
           status: latestReview.status,
           progress: progressValue,
-          message
+          message,
+          summary: latestReview.summary,
+          total_issues: latestReview.total_issues
         }
         activeDocIds.add(String(doc.id))
 
@@ -760,12 +807,13 @@ async function startReview(documentId) {
   try {
     const response = await reviewAPI.create(documentId, 'hybrid')
     const reviewId = response.data.review_id
+    const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
     
     docReviewStatus[documentId] = {
       review_id: reviewId,
       status: 'running',
       progress: 0,
-      message: '审核任务已创建，正在初始化...'
+      message: statusMessage
     }
     
     startProgressPolling(documentId, reviewId)
@@ -783,33 +831,59 @@ function startProgressPolling(documentId, reviewId) {
   if (progressPollingTimers[documentId]) {
     clearInterval(progressPollingTimers[documentId])
   }
+  progressPollingFailures[documentId] = 0
   
   progressPollingTimers[documentId] = setInterval(async () => {
     try {
       const resp = await reviewAPI.getProgress(reviewId)
       const progress = resp.data
+      progressPollingFailures[documentId] = 0
       
       docReviewStatus[documentId] = {
         review_id: reviewId,
         status: progress.status,
         progress: progress.progress || 0,
-        message: progress.message || progress.step || ''
+        message: reviewProgressText(progress)
       }
       
       if (progress.status === 'completed' || progress.status === 'failed') {
         clearInterval(progressPollingTimers[documentId])
         delete progressPollingTimers[documentId]
+        delete progressPollingFailures[documentId]
         
         if (progress.status === 'completed') {
           await loadReviewIssues(reviewId)
           await loadReviews()
-          ElMessage.success(`审核完成，发现 ${progress.message.includes('问题') ? progress.message : '若干'} 问题`)
+          docReviewStatus[documentId] = {
+            review_id: reviewId,
+            status: 'completed',
+            progress: 100,
+            message: progress.message,
+            summary: null,
+            total_issues: (taskIssues[reviewId] || []).length
+          }
+          ElMessage.success(reviewCompletionText({ summary: progress.message, total_issues: (taskIssues[reviewId] || []).length }))
         } else if (progress.status === 'failed') {
-          ElMessage.error('审核失败: ' + progress.message)
+          ElMessage.error('审核失败: ' + reviewFailureText({ summary: progress.message }))
         }
       }
     } catch (err) {
+      progressPollingFailures[documentId] = (progressPollingFailures[documentId] || 0) + 1
       console.error('轮询进度失败:', err)
+      if (progressPollingFailures[documentId] >= 3) {
+        clearInterval(progressPollingTimers[documentId])
+        delete progressPollingTimers[documentId]
+        delete progressPollingFailures[documentId]
+        docReviewStatus[documentId] = {
+          review_id: reviewId,
+          status: 'failed',
+          progress: 0,
+          message: '审核状态同步失败，请刷新后重试'
+        }
+        ElMessage.error('审核状态同步失败，请刷新后重试')
+        loadDocuments()
+        loadReviews()
+      }
     }
   }, 2000)
 }
@@ -950,6 +1024,53 @@ function resultButtonLabel(fileType) {
   return fileType === 'docx' ? '下载Word' : '导出HTML'
 }
 
+function parseMaybeJson(value) {
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  if (!text || (text[0] !== '{' && text[0] !== '[')) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+function reviewProgressText(progress) {
+  const parsed = parseMaybeJson(progress?.message)
+  if (parsed && typeof parsed === 'object') {
+    return parsed.message || parsed.step || '审核进行中...'
+  }
+  return progress?.message || progress?.step || '审核进行中...'
+}
+
+function reviewFailureText(review) {
+  const parsed = parseMaybeJson(review?.summary)
+  if (parsed && typeof parsed === 'object') {
+    return parsed.message || '审核失败'
+  }
+  return review?.summary || '审核失败'
+}
+
+function reviewCompletionText(review) {
+  const parsed = parseMaybeJson(review?.summary ?? review?.message)
+  const matchedTotal = typeof review?.message === 'string'
+    ? review.message.match(/(\d+)\s*个问题/)
+    : null
+  const total = parsed?.total ?? review?.total_issues ?? (matchedTotal ? Number(matchedTotal[1]) : 0)
+  return `审核完成，共 ${total} 个问题`
+}
+
+function reviewStatusText(statusInfo) {
+  if (!statusInfo) return '未审核'
+  if (statusInfo.status === 'completed') {
+    return reviewCompletionText(statusInfo)
+  }
+  if (statusInfo.status === 'failed') {
+    return reviewFailureText(statusInfo)
+  }
+  return reviewProgressText(statusInfo)
+}
+
 function clearFilters() {
   filterKeyword.value = ''
   filterSeverity.value = ''
@@ -1007,10 +1128,83 @@ async function downloadReviewResultByDoc(document) {
 async function judgeSingle(issue, status) {
   try {
     await reviewAPI.updateIssue(issue.id, status)
-    issue.status = status
+    if (status === 'false_positive') {
+      removeLocalIssues(currentTaskId.value, [issue.id])
+    } else {
+      issue.status = status
+    }
     ElMessage.success(`已标记为${statusLabel(status)}`)
   } catch (err) {
     ElMessage.error('判定失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+
+function removeLocalIssues(taskId, issueIds) {
+  const removeIds = new Set(issueIds)
+  taskIssues[taskId] = (taskIssues[taskId] || []).filter(issue => !removeIds.has(issue.id))
+  issues.value = issues.value.filter(issue => !removeIds.has(issue.id))
+  selectedIssueIds.value = selectedIssueIds.value.filter(id => !removeIds.has(id))
+}
+
+function escapeRegexLiteral(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function nextReviewRuleNo() {
+  const now = new Date()
+  const stamp = [
+    String(now.getFullYear()).slice(2),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0')
+  ].join('')
+  return `REV-${stamp}`
+}
+
+function openTransferRuleDialog(issue) {
+  transferRuleSourceIssue.value = issue
+  const originalText = issue.original_text || ''
+  const category = issue.category || '其他'
+  transferRuleForm.value = {
+    rule_no: nextReviewRuleNo(),
+    category,
+    description: issue.description || `${category}问题：${originalText || issue.context || ''}`,
+    regex: originalText ? escapeRegexLiteral(originalText) : '',
+    example: originalText || issue.context || '',
+    suggestion: issue.suggestion || '',
+    audit_basis: issue.audit_basis || '审核确认问题转入',
+    language: /[\u4e00-\u9fa5]/.test(`${originalText} ${issue.context || ''}`) ? 'both' : 'en'
+  }
+  transferRuleDialogVisible.value = true
+}
+
+async function saveTransferredRule() {
+  try {
+    if (!transferRuleForm.value.rule_no) {
+      ElMessage.error('请填写规则编号')
+      return
+    }
+    if (!transferRuleForm.value.category) {
+      ElMessage.error('请填写分类')
+      return
+    }
+    if (!transferRuleForm.value.description) {
+      ElMessage.error('请填写规则描述')
+      return
+    }
+    await rulesAPI.create(transferRuleForm.value)
+    if (transferRuleSourceIssue.value) {
+      transferRuleSourceIssue.value.transferred_to_rule = true
+    }
+    transferRuleDialogVisible.value = false
+    ElMessage.success('已转入规则库')
+    if (currentView.value === 'rules') {
+      await loadRules()
+    }
+  } catch (error) {
+    ElMessage.error('转入规则库失败: ' + (error.response?.data?.detail || error.message))
   }
 }
 
@@ -1025,8 +1219,13 @@ async function batchSetStatus(status) {
     const res = await reviewAPI.batchJudge(currentTaskId.value, judgments)
     // 更新本地状态
     const list = taskIssues[currentTaskId.value] || []
-    for (const i of list) {
-      if (selectedIssueIds.value.includes(i.id)) i.status = status
+    const selectedIds = [...selectedIssueIds.value]
+    if (status === 'false_positive') {
+      removeLocalIssues(currentTaskId.value, selectedIds)
+    } else {
+      for (const i of list) {
+        if (selectedIds.includes(i.id)) i.status = status
+      }
     }
     ElMessage.success(`已更新 ${res.data.updated} 条问题为${statusLabel(status)}`)
   } catch (err) {
@@ -1117,10 +1316,10 @@ function severityLabel(sev) {
   return { fatal: '致命', serious: '严重', general: '一般', suggestion: '建议' }[sev] || sev || '-'
 }
 function statusTagType(s) {
-  return { confirmed: 'success', false_positive: 'info', ignored: 'info', pending: 'warning' }[s || 'pending'] || 'warning'
+  return { confirmed: 'success', false_positive: 'info', pending: 'warning' }[s || 'pending'] || 'warning'
 }
 function statusLabel(s) {
-  return { confirmed: '已确认', false_positive: '误报', ignored: '已忽略' }[s] || '待确认'
+  return { confirmed: '已确认', false_positive: '误报' }[s] || '待确认'
 }
 
 async function viewDocument(id) {
@@ -1144,15 +1343,16 @@ async function deleteDocument(id) {
 
 function editRule(row) {
   editingRule.value = row
-  ruleForm.value = {
-    rule_no: row.rule_no || '',
-    category: row.category || '',
-    description: row.description || '',
-    regex: row.regex || '',
-    example: row.example || '',
-    suggestion: row.suggestion || '',
-    audit_basis: row.audit_basis || ''
-  }
+    ruleForm.value = {
+      rule_no: row.rule_no || '',
+      category: row.category || '',
+      description: row.description || '',
+      regex: row.regex || '',
+      example: row.example || '',
+      suggestion: row.suggestion || '',
+      audit_basis: row.audit_basis || '',
+      language: row.language || 'both'
+    }
   showRuleDialog.value = true
 }
 
@@ -1180,7 +1380,7 @@ async function saveRule() {
     }
     showRuleDialog.value = false
     editingRule.value = null
-    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '' }
+    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' }
     loadRules()
   } catch (error) {
     ElMessage.error('保存失败: ' + (error.response?.data?.detail || error.message))
@@ -1336,6 +1536,7 @@ function highlightOriginalText(context, originalText) {
 onUnmounted(() => {
   Object.values(progressPollingTimers).forEach(timer => clearInterval(timer))
   progressPollingTimers = {}
+  Object.keys(progressPollingFailures).forEach(key => delete progressPollingFailures[key])
   stopReviewsPolling()
 })
 </script>

@@ -551,17 +551,71 @@ def _should_drop_spelling_issue(issue):
     return bool(protected_tokens) and not suspicious_tokens
 
 
+def _should_drop_punctuation_issue(issue):
+    rule = str(issue.get('rule', '') or '').upper()
+    if rule not in {'PUNCT-001', 'HR003', 'PUNCT-002', 'R002'}:
+        return False
+
+    original = str(issue.get('original_text', '') or '').strip()
+    context = str(issue.get('context', '') or '')
+    if rule == 'R002' and re.search(r'Part\s+No\.?', context, re.IGNORECASE):
+        return True
+    if original == ':C' and re.search(r'Part\s+No\.?\s*:\s*CSS-\d+', context, re.IGNORECASE):
+        return True
+    if original == '.R' and re.search(r'Fig(?:ure)?\s*\d+', context, re.IGNORECASE):
+        return True
+    return False
+
+
 def _filter_review_false_positives(issues):
     filtered = []
     dropped = 0
     for issue in issues:
-        if _should_drop_spelling_issue(issue):
+        if _should_drop_spelling_issue(issue) or _should_drop_punctuation_issue(issue):
             dropped += 1
             continue
         filtered.append(issue)
     if dropped:
         print(f'[审核] 拼写白名单最终过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
     return filtered
+
+
+def _issue_judgment_signature(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip().lower()
+    category = re.sub(r'\s+', ' ', str(_issue_value(issue, 'category', '') or '')).strip().lower()
+    return f'{rule}|{category}|{original}'
+
+
+def _issue_judgment_signatures(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip().lower()
+    category = re.sub(r'\s+', ' ', str(_issue_value(issue, 'category', '') or '')).strip().lower()
+    if not original:
+        return set()
+    return {
+        f'{rule}|{category}|{original}',
+        f'{rule}|{original}',
+        f'{category}|{original}',
+        original,
+    }
+
+
+def _is_issue_hidden_by_judgment(issue):
+    return str(getattr(issue, 'status', '') or '').lower() in {'false_positive', 'ignored'}
+
+
+def _visible_review_issues(issues):
+    return [issue for issue in issues if not _is_issue_hidden_by_judgment(issue)]
+
+
+def _load_false_positive_signatures_for_document(db: Session, document_id: int):
+    signatures = set()
+    for review in get_reviews(db, document_id=document_id):
+        for issue in get_issues(db, review_id=review.id):
+            if str(getattr(issue, 'status', '') or '').lower() == 'false_positive':
+                signatures.update(_issue_judgment_signatures(issue))
+    return signatures
 
 
 def _merge_comment_segments(segments):
@@ -974,8 +1028,9 @@ def _get_document_upload_path(document):
 
 
 def _select_export_issues(issues):
-    preferred = [i for i in issues if getattr(i, 'status', None) in (None, '', 'pending', 'confirmed', 'converted_to_rule')]
-    return sorted(preferred or list(issues), key=_issue_sort_key)
+    visible_issues = _visible_review_issues(issues)
+    preferred = [i for i in visible_issues if getattr(i, 'status', None) in (None, '', 'pending', 'confirmed', 'converted_to_rule')]
+    return sorted(preferred or visible_issues, key=_issue_sort_key)
 
 
 def _format_review_mode(mode):
@@ -2318,6 +2373,8 @@ def _run_english_heuristic_audit(content, file_type=None):
         add_issue(match, "HR014", "一致性", "建议统一为 website", "网站相关名词建议统一。", "英文技术文档写作规范 - 术语一致性")
 
     for match in re.finditer(r"\bcharaters\b|\bcharater\b|\boccured\b|\bocurred\b|\btecnical\b|\bseperate\b|\bmaintenence\b|\bmaintanance\b|\breferrence\b|\brefered\b|\brefering\b|\buntill\b|\buseing\b|\bwheras\b|\bwich\b|\bdefination\b|\bdesciption\b|\brecieve\b", content, re.IGNORECASE):
+        if is_whitelisted(match.group(0)):
+            continue
         replacements = {
             'charaters': 'characters',
             'charater': 'character',
@@ -2743,7 +2800,16 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
 
     if rule_no == "R011":
-        if "/" in context or "rpm/min" in context.lower():
+        lowered_context = context.lower()
+        if "/" in context or "rpm/min" in lowered_context:
+            return True
+        if re.search(r'\b(?:min|sec|hr)\b', original_text, re.IGNORECASE):
+            return True
+
+    if rule_no == "R013":
+        if re.fullmatch(r'\d+[xX]', original_text):
+            return True
+        if re.search(r'\b\d+[xX]\b', original_text):
             return True
 
     if rule_no == "R021":
@@ -3001,6 +3067,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         content = content[:content_limit]
         document_language = detect_language(content)
         spec_texts = _load_review_spec_texts(db)
+        false_positive_signatures = _load_false_positive_signatures_for_document(db, document_id)
         print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}字符")
         print(
             "[审核] 当前规范文件长度: "
@@ -3140,6 +3207,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         issues = dedupe_issues_by_original(issues)
         issues = _sanitize_issue_suggestions(issues)
         issues = _filter_review_false_positives(issues)
+        if false_positive_signatures:
+            before_count = len(issues)
+            issues = [issue for issue in issues if not (_issue_judgment_signatures(issue) & false_positive_signatures)]
+            print(f"[审核] 历史误报过滤: 过滤 {before_count - len(issues)} 个, 剩余 {len(issues)} 个")
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
@@ -3229,7 +3300,7 @@ async def read_review(review_id: int, db: Session = Depends(get_db)):
 @router.get("/{review_id}/issues", response_model=list[Issue])
 async def read_review_issues(review_id: int, db: Session = Depends(get_db)):
     issues = get_issues(db, review_id=review_id)
-    return issues
+    return _visible_review_issues(issues)
 
 
 @router.put("/issues/{issue_id}", response_model=Issue)
@@ -3267,7 +3338,7 @@ async def export_review_html(review_id: int, db: Session = Depends(get_db)):
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
 
-    issues = get_issues(db, review_id=review_id)
+    issues = _visible_review_issues(get_issues(db, review_id=review_id))
     doc = get_document(db, document_id=review.document_id)
     html = _generate_review_html_content(review, doc, issues)
     return HTMLResponse(content=html)
@@ -3283,7 +3354,7 @@ async def export_review_result(review_id: int, db: Session = Depends(get_db)):
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    issues = get_issues(db, review_id=review_id)
+    issues = _visible_review_issues(get_issues(db, review_id=review_id))
     if document.file_type == "docx":
         export_path, export_name, media_type = _export_review_docx(review, document, issues)
     else:
@@ -3298,7 +3369,7 @@ async def generate_report(review_id: int, db: Session = Depends(get_db)):
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
 
-    issues = get_issues(db, review_id=review_id)
+    issues = _visible_review_issues(get_issues(db, review_id=review_id))
     confirmed_issues = [i for i in issues if i.status in ["confirmed", "converted_to_rule"]]
 
     html_content = _generate_review_html_content(review, get_document(db, document_id=review.document_id), confirmed_issues)

@@ -55,7 +55,8 @@ def create_rule(db: Session, rule: RuleCreate):
         regex=rule.regex,
         example=rule.example,
         suggestion=rule.suggestion,
-        audit_basis=rule.audit_basis
+        audit_basis=rule.audit_basis,
+        language=rule.language
     )
     db.add(db_rule)
     db.commit()
@@ -86,6 +87,8 @@ def update_rule(db: Session, rule_id: int, rule_update: RuleUpdate):
             rule.suggestion = rule_update.suggestion
         if rule_update.audit_basis is not None:
             rule.audit_basis = rule_update.audit_basis
+        if rule_update.language is not None:
+            rule.language = rule_update.language
         db.commit()
         db.refresh(rule)
     return rule
@@ -108,7 +111,8 @@ def bulk_create_rules(db: Session, rules: list[RuleCreate]):
                 regex=rule.regex,
                 example=rule.example,
                 suggestion=rule.suggestion,
-                audit_basis=rule.audit_basis
+                audit_basis=rule.audit_basis,
+                language=rule.language
             ))
     if db_rules:
         db.add_all(db_rules)
