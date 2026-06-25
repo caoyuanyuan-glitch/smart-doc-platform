@@ -1,11 +1,11 @@
 <template>
   <div class="qa-history-page">
     <div class="page-header">
-      <h2 class="page-title">{{ activeTab === 'general' ? '知识库问答历史' : '文档对话历史' }}</h2>
+      <h2 class="page-title">{{ activeTab === 'general' ? '知识库问答历史' : '说明书问答历史' }}</h2>
       <div class="page-tabs">
         <el-radio-group :model-value="activeTab" size="small" @change="handleTabChange">
           <el-radio-button value="general">知识库问答历史</el-radio-button>
-          <el-radio-button value="doc">文档对话历史</el-radio-button>
+          <el-radio-button value="doc">说明书问答历史</el-radio-button>
         </el-radio-group>
       </div>
     </div>

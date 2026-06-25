@@ -54,6 +54,11 @@ class AIClient:
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
         self.proxy_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+        # DashScope / Anthropic 配置
+        self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
+        self.anthropic_base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        self.anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
+
         timeout = httpx.Timeout(30.0, read=180.0)
 
         self.deepseek_client = OpenAI(
@@ -81,17 +86,32 @@ class AIClient:
         self.anthropic_base_url = os.getenv("QWEN_BASE_URL", "https://proxy.monkeycode-ai.com/v1")
 
         # Proxy 回退客户端（使用 OpenAI 兼容接口）
+        mcai_base_url = os.getenv("MCAI_LLM_BASE_URL")
+        mcai_api_key = os.getenv("MCAI_LLM_API_KEY")
+        mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
+
+        self.mcai_proxy_client = None
+        if mcai_base_url and _is_valid_key(mcai_api_key):
+            self.mcai_proxy_client = OpenAI(
+                api_key=mcai_api_key,
+                base_url=mcai_base_url,
+                timeout=timeout,
+            )
+            print(f"[AI] MCAI Proxy 已连接, base_url={mcai_base_url}, model={mcai_model}")
+
+        proxy_api_key = self.dashscope_api_key or os.getenv("OPENAI_API_KEY")
+        proxy_base_url = self.anthropic_base_url or self.proxy_base_url
         self.proxy_client = OpenAI(
-            api_key=self.proxy_api_key,
-            base_url=self.proxy_base_url,
+            api_key=proxy_api_key,
+            base_url=proxy_base_url,
             timeout=timeout,
-        ) if _is_valid_key(self.proxy_api_key) and self.proxy_base_url else None
+        ) if _is_valid_key(proxy_api_key) else None
         if self.proxy_client:
             print(f"[AI] Proxy 回退已配置, base_url={self.proxy_base_url}, model={self.proxy_model}")
 
     @property
     def has_any_client(self):
-        return self.kimi_client is not None or self.arkclaw_client is not None or self.deepseek_client is not None
+        return self.kimi_client is not None or self.arkclaw_client is not None or self.deepseek_client is not None or self.mcai_proxy_client is not None or self.proxy_client is not None
 
     # ------------------------------------------------------------------
     # 基础 chat 接口
@@ -142,14 +162,19 @@ class AIClient:
             return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
-        # 优先级: Kimi > DeepSeek > ArkClaw
+        # 优先级: MCAI Proxy > Kimi > DeepSeek > ArkClaw > Anthropic Proxy
         providers = []
+        if self.mcai_proxy_client:
+            mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
+            providers.append(('MCAI', self.mcai_proxy_client, mcai_model))
         if self.kimi_client:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
         if self.deepseek_client:
             providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
         if self.arkclaw_client:
             providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
+        if self.proxy_client:
+            providers.append(('Proxy', self.proxy_client, self.anthropic_model))
 
         if not providers:
             return None
