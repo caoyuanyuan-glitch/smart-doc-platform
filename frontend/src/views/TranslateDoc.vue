@@ -468,6 +468,7 @@ function downloadTranslatedFile() {
   color: var(--el-color-primary);
   font-size: 16px;
   vertical-align: middle;
+  transform: rotate(90deg);
 }
 .swap-icon:hover {
   color: var(--el-color-primary-light-3);
