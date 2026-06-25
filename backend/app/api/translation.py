@@ -551,18 +551,30 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
     if not texts_to_translate:
         return in_buf.read(), [], []
 
+    BATCH_SIZE = 15
     sep = "\n---IDMLSEG---\n"
-    combined = sep.join(texts_to_translate)
-    translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
-    translated_parts = [p.strip() for p in translated_combined.split(sep)]
-    if len(translated_parts) != len(texts_to_translate):
-        translated_parts = [_do_translate(t, engine, model, source_lang, target_lang, db) for t in texts_to_translate]
-    for i, elem in enumerate(content_targets):
-        if i < len(translated_parts):
-            translated = translated_parts[i]
-            all_original.append(texts_to_translate[i])
+    for batch_start in range(0, len(texts_to_translate), BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, len(texts_to_translate))
+        batch_texts = texts_to_translate[batch_start:batch_end]
+        combined = sep.join(batch_texts)
+        try:
+            translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+            translated_parts = [p.strip() for p in translated_combined.split(sep)]
+        except Exception:
+            translated_parts = []
+            for t in batch_texts:
+                try:
+                    translated_parts.append(_do_translate(t, engine, model, source_lang, target_lang, db))
+                except Exception:
+                    translated_parts.append(t)
+        while len(translated_parts) < len(batch_texts):
+            translated_parts.append(batch_texts[len(translated_parts)])
+        for j in range(len(batch_texts)):
+            text_idx = batch_start + j
+            translated = translated_parts[j]
+            all_original.append(texts_to_translate[text_idx])
             all_translated.append(translated)
-            elem.text = translated
+            content_targets[text_idx].text = translated
 
     out_buf = io.BytesIO()
     in_buf.seek(0)

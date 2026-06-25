@@ -41,7 +41,7 @@
             <el-option label="中文" value="zh" />
             <el-option label="英文" value="en" />
           </el-select>
-          <el-icon style="margin: 0 6px;"><Right /></el-icon>
+          <el-icon class="swap-icon" @click="swapLanguages"><Sort /></el-icon>
           <el-select v-model="targetLang" style="width: 100px">
             <el-option label="英文" value="en" />
             <el-option label="中文" value="zh" />
@@ -164,7 +164,7 @@
 <script setup>
 import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Right } from '@element-plus/icons-vue'
+import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
@@ -172,6 +172,13 @@ const engine = ref('hybrid')
 const model = ref('kimi')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
+
+function swapLanguages() {
+  const tmp = sourceLang.value
+  sourceLang.value = targetLang.value
+  targetLang.value = tmp
+}
+
 const memoryBank = ref('')
 const memoryBanks = ref([])
 const memoryFileId = ref(null)
@@ -387,6 +394,17 @@ function downloadResult() {
 
 .config-form-inline :deep(.el-form-item) {
   margin-bottom: 4px;
+}
+
+.swap-icon {
+  margin: 0 4px;
+  cursor: pointer;
+  color: var(--el-color-primary);
+  font-size: 16px;
+  vertical-align: middle;
+}
+.swap-icon:hover {
+  color: var(--el-color-primary-light-3);
 }
 
 .content-grid {
