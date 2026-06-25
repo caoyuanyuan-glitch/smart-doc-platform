@@ -38,6 +38,33 @@ def _ensure_legacy_sqlite_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE rules ADD COLUMN language VARCHAR DEFAULT 'both'"))
 
+    try:
+        compare_columns = {col['name'] for col in inspector.get_columns('compare_tasks')}
+    except Exception:
+        compare_columns = set()
+
+    if compare_columns and 'group_id' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN group_id INTEGER"))
+    if compare_columns and 'file_names' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN file_names TEXT"))
+    if compare_columns and 'task_type' not in compare_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN task_type VARCHAR DEFAULT 'doc'"))
+
+    try:
+        translation_doc_columns = {col['name'] for col in inspector.get_columns('translation_docs')}
+    except Exception:
+        translation_doc_columns = set()
+
+    if translation_doc_columns and 'source_char_count' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN source_char_count INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_char_count INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_char_count INTEGER DEFAULT 0"))
+
+
 def get_db():
     db = SessionLocal()
     try:

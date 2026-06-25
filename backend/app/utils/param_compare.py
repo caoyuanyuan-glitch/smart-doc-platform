@@ -175,6 +175,42 @@ def extract_params_from_text(text):
     return params
 
 
+def _is_header_row(cells):
+    """判断一行是否为表头（列标题行）
+
+    表头特征：单元格全是短中文词，不含数字/单位，通常为"参数名称"、"规格"、"数值"等
+    """
+    if not cells:
+        return False
+    header_keywords = [
+        '参数', '名称', '项目', '指标', '规格', '型号', '数值', '值', '单位',
+        '要求', '标准', '范围', '条件', '说明', '备注', '描述', '类型', '序号',
+        '编号', '代码', 'name', 'value', 'unit', 'spec', 'param', 'item',
+    ]
+    numeric_count = 0
+    for cell in cells:
+        cell_text = cell.strip()
+        if not cell_text:
+            continue
+        if _NUMERIC_PATTERN.search(cell_text) or _UNIT_PATTERN.search(cell_text.casefold()):
+            numeric_count += 1
+        for kw in header_keywords:
+            if kw in cell_text:
+                return True
+    if numeric_count == 0 and len(cells) >= 2:
+        return True
+    return False
+
+
+def _detect_header_row_idx(rows, max_check=5):
+    """自动检测表头行索引，返回第一个疑似表头的行号"""
+    for idx in range(min(len(rows), max_check)):
+        cells = [c.strip() for c in rows[idx] if c.strip()]
+        if _is_header_row(cells):
+            return idx
+    return -1
+
+
 def extract_params_from_table_rows(rows, header_row_idx=0):
     params = []
     seen = set()
@@ -182,7 +218,11 @@ def extract_params_from_table_rows(rows, header_row_idx=0):
     if not rows or len(rows) < 1:
         return params
 
+    skip_idx = max(header_row_idx, _detect_header_row_idx(rows))
+
     for row_idx, row in enumerate(rows):
+        if row_idx == skip_idx:
+            continue
         cells = [c.strip() for c in row if c.strip()]
         if len(cells) < 2:
             continue
@@ -414,20 +454,56 @@ def _ocr_pdf_pages(filepath):
 
 
 def _ocr_image(pil_image):
-    """对单张 PIL Image 进行 tesserocr OCR，并对结果进行清洗"""
+    """对单张 PIL Image 进行 OCR (tesserocr > pytesseract)，并对结果进行清洗"""
     import os
+
+    _TESSDATA_CANDIDATES = [
+        '/usr/share/tesseract-ocr/5/tessdata',
+        '/usr/share/tesseract-ocr/4.00/tessdata',
+        '/usr/share/tessdata',
+        os.environ.get('TESSDATA_PREFIX', ''),
+    ]
+
+    # 尝试 tesserocr（直接 C API，速度快）
     try:
-        os.environ.setdefault('TESSDATA_PREFIX', '/workspace')
         import tesserocr
-        api = tesserocr.PyTessBaseAPI(lang='chi_sim+eng')
+        tessdata_path = None
+        for candidate in _TESSDATA_CANDIDATES:
+            if candidate and os.path.isdir(candidate):
+                tessdata_path = candidate
+                break
+        api = tesserocr.PyTessBaseAPI(path=tessdata_path, lang='chi_sim+eng')
         api.SetImage(pil_image)
         text = api.GetUTF8Text()
         api.End()
-        return _clean_ocr_text(text)
+        if text and text.strip():
+            print(f"[param_compare] tesserocr OCR success: {len(text)} chars")
+            return _clean_ocr_text(text)
+        else:
+            print("[param_compare] tesserocr OCR returned empty text")
     except ImportError:
-        print("[param_compare] tesserocr not available for OCR")
+        print("[param_compare] tesserocr not available, trying pytesseract")
     except Exception as e:
-        print(f"[param_compare] tesserocr OCR error: {e}")
+        print(f"[param_compare] tesserocr OCR error: {e}, trying pytesseract")
+
+    # 回退到 pytesseract（命令行 wrapper，需安装 tesseract-ocr）
+    try:
+        import pytesseract
+        for candidate in _TESSDATA_CANDIDATES:
+            if candidate and os.path.isdir(candidate):
+                os.environ['TESSDATA_PREFIX'] = candidate
+                break
+        text = pytesseract.image_to_string(pil_image, lang='chi_sim+eng')
+        if text and text.strip():
+            print(f"[param_compare] pytesseract OCR success: {len(text)} chars")
+            return _clean_ocr_text(text)
+        else:
+            print("[param_compare] pytesseract OCR returned empty text")
+    except ImportError:
+        print("[param_compare] pytesseract not available for OCR")
+    except Exception as e:
+        print(f"[param_compare] pytesseract OCR error: {e}")
+
     return ""
 
 
@@ -719,7 +795,7 @@ def extract_params(filepath):
         return []
 
 
-def _fuzzy_match_key(key, candidates, threshold=0.80):
+def _fuzzy_match_key(key, candidates, threshold=0.70):
     best_score = 0
     best_key = None
     key_lower = key.casefold()
@@ -728,12 +804,55 @@ def _fuzzy_match_key(key, candidates, threshold=0.80):
         if key_lower == cand_lower:
             return 1.0, cand
         sim = SequenceMatcher(None, key_lower, cand_lower).ratio()
+        if sim < threshold:
+            edit_sim = _edit_similarity(key_lower, cand_lower)
+            sim = max(sim, edit_sim)
+        if sim < threshold:
+            sim = max(sim, _common_prefix_similarity(key_lower, cand_lower))
         if sim > best_score:
             best_score = sim
             best_key = cand
     if best_score >= threshold:
         return best_score, best_key
     return 0, None
+
+
+def _common_prefix_similarity(s1, s2):
+    """公共前缀加权相似度，用于匹配同义词（如"使用地点"≈"使用场所"）"""
+    n = min(len(s1), len(s2))
+    prefix_len = 0
+    for i in range(n):
+        if s1[i] == s2[i]:
+            prefix_len += 1
+        else:
+            break
+    if prefix_len < 2:
+        return 0
+    prefix_ratio = prefix_len / max(len(s1), len(s2))
+    if prefix_ratio < 0.3:
+        return 0
+    return 0.60 + prefix_ratio * 0.25
+
+
+def _edit_similarity(s1, s2):
+    """字符级编辑距离相似度，对中文短文本（<=15字）更敏感"""
+    if not s1 or not s2:
+        return 0
+    if len(s1) > 15 or len(s2) > 15:
+        return 0
+    max_len = max(len(s1), len(s2))
+    if max_len == 0:
+        return 1.0
+    d = [[0] * (len(s2) + 1) for _ in range(len(s1) + 1)]
+    for i in range(len(s1) + 1):
+        d[i][0] = i
+    for j in range(len(s2) + 1):
+        d[0][j] = j
+    for i in range(1, len(s1) + 1):
+        for j in range(1, len(s2) + 1):
+            cost = 0 if s1[i-1] == s2[j-1] else 1
+            d[i][j] = min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + cost)
+    return 1.0 - d[len(s1)][len(s2)] / max_len
 
 
 def _values_equal(v1, v2):

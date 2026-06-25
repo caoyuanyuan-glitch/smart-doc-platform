@@ -77,10 +77,9 @@ export const reviewAPI = {
 }
 
 export const compareAPI = {
-  create: (fileA, fileB) => {
+  create: (files) => {
     const formData = new FormData()
-    formData.append('file_a', fileA)
-    formData.append('file_b', fileB)
+    files.forEach((f, i) => formData.append('files', f))
     return instance.post('/compare/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   get: (id) => instance.get(`/compare/${id}`),
@@ -270,7 +269,8 @@ export const translationAPI = {
   deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
   getDocs: (skip = 0, limit = 100) => instance.get('/translation/docs', { params: { skip, limit } }),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
-  deleteDoc: (id) => instance.delete(`/translation/docs/${id}`)
+  deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
+  getStats: () => instance.get('/translation/stats')
 }
 
 export const knowledgeAPI = {
