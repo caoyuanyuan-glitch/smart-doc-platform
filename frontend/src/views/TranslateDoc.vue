@@ -170,7 +170,7 @@ import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const engine = ref('hybrid')
-const model = ref('qwen')
+const model = ref('kimi')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
 const memoryBank = ref('')

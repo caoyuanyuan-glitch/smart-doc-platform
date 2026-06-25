@@ -1205,7 +1205,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
 async def translate_file(
     file: UploadFile = File(...),
     engine: str = Form("hybrid"),
-    model: str = Form("qwen"),
+    model: str = Form("kimi"),
     source_lang: str = Form("zh"),
     target_lang: str = Form("en"),
     memory_bank: str = Form(""),
