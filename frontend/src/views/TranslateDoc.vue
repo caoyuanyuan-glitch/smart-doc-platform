@@ -2,8 +2,57 @@
   <div class="doc-translate-container">
     <div class="page-header">
       <h2 class="page-title">文档翻译</h2>
-      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、XLF 文档</p>
+      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、XLF、IDML 文档</p>
     </div>
+
+    <el-card class="config-card config-horizontal" shadow="never">
+      <template #header>
+        <span class="card-header-title">翻译配置</span>
+      </template>
+      <el-form :inline="true" size="default" class="config-form-inline">
+        <el-form-item label="翻译引擎">
+          <el-radio-group v-model="engine" @change="onEngineChange">
+            <el-radio-button value="hybrid">AI + 记忆库</el-radio-button>
+            <el-radio-button value="ai">仅 AI</el-radio-button>
+            <el-radio-button value="memory">仅记忆库</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
+          <el-select
+            v-model="memoryFileId"
+            placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
+            clearable
+            filterable
+            :loading="memoryLibraryLoading"
+            style="width: 260px"
+          >
+            <el-option v-for="file in memoryLibraryFiles" :key="file.id" :label="file.label" :value="file.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="AI 模型" v-if="engine !== 'memory'">
+          <el-select v-model="model" style="width: 160px">
+            <el-option label="Kimi (Moonshot)" value="kimi" />
+            <el-option label="Qwen3.6-Plus" value="qwen" />
+            <el-option label="DeepSeek Chat" value="deepseek" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="语言">
+          <el-select v-model="sourceLang" style="width: 100px">
+            <el-option label="中文" value="zh" />
+            <el-option label="英文" value="en" />
+          </el-select>
+          <el-icon class="swap-icon" @click="swapLanguages"><Sort /></el-icon>
+          <el-select v-model="targetLang" style="width: 100px">
+            <el-option label="英文" value="en" />
+            <el-option label="中文" value="zh" />
+            <el-option label="日文" value="ja" />
+            <el-option label="韩文" value="ko" />
+            <el-option label="法文" value="fr" />
+            <el-option label="德文" value="de" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+    </el-card>
 
     <div class="content-grid">
       <div class="left-panel">
@@ -89,12 +138,12 @@
               :auto-upload="false"
               ref="fileUploadRef"
               :on-change="onFileChange"
-              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf"
+              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf,.idml"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
                 <p class="upload-title">将文件拖到此处，或点击上传</p>
-                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、XLF 格式</p>
+                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、XLF、IDML 格式</p>
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
@@ -160,11 +209,10 @@
     </div>
   </div>
 </template>
-
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled, Switch, FolderOpened, Download } from '@element-plus/icons-vue'
+import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
@@ -172,6 +220,13 @@ const engine = ref('hybrid')
 const model = ref('kimi')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
+
+function swapLanguages() {
+  const tmp = sourceLang.value
+  sourceLang.value = targetLang.value
+  targetLang.value = tmp
+}
+
 const memoryBank = ref('')
 const memoryBanks = ref([])
 const memoryFileId = ref(null)
@@ -291,7 +346,7 @@ function onFileChange(file) {
 
 function beforeFileUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
-  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'xlf']
+  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'xlf', 'idml']
   if (!allowed.includes(ext)) {
     ElMessage.error(`不支持的文件格式: .${ext}`)
     return false
@@ -422,7 +477,62 @@ function downloadTranslatedFile() {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
-  align-items: start;
+  align-items: stretch;
+}
+
+.left-panel, .right-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.source-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.source-card :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.result-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.result-card :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.config-horizontal {
+  margin-bottom: 16px;
+}
+
+.config-form-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.config-form-inline :deep(.el-form-item) {
+  margin-bottom: 4px;
+}
+
+.swap-icon {
+  margin: 0 4px;
+  cursor: pointer;
+  color: var(--el-color-primary);
+  font-size: 16px;
+  vertical-align: middle;
+  transform: rotate(90deg);
+}
+.swap-icon:hover {
+  color: var(--el-color-primary-light-3);
 }
 
 .card-header-title {
