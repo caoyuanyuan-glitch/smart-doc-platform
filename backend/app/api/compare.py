@@ -850,6 +850,7 @@ async def read_compare_tasks(skip: int = 0, limit: int = 100, db: Session = Depe
     for t in db_tasks:
         items.append({
             "id": t.id,
+            "task_type": getattr(t, "task_type", "doc") or "doc",
             "file_a_name": getattr(t, "file_a_name", ""),
             "file_b_name": getattr(t, "file_b_name", ""),
             "similarity": getattr(t, "similarity", 0.0),
@@ -895,6 +896,7 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
         if task:
             task_obj = {
                 "id": task.id,
+                "task_type": getattr(task, "task_type", "doc") or "doc",
                 "file_a_name": getattr(task, "file_a_name", ""),
                 "file_b_name": getattr(task, "file_b_name", ""),
                 "similarity": getattr(task, "similarity", 0.0),
@@ -985,6 +987,7 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
 
     return {
         "task_id": task_obj.get("id") if isinstance(task_obj, dict) else task_id,
+        "task_type": task_obj.get("task_type", "doc") if isinstance(task_obj, dict) else "doc",
         "comparison_id": task_obj.get("id") if isinstance(task_obj, dict) else task_id,
         "similarity": task_obj.get("similarity") if isinstance(task_obj, dict) else 0.0,
         "verdict": task_obj.get("verdict") if isinstance(task_obj, dict) else "",

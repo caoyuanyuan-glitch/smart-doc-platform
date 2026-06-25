@@ -175,11 +175,18 @@
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">历史任务</h2>
       <div class="panel">
-        <el-empty v-if="history.length === 0" description="暂无历史任务，请先进行文档对比">
+        <el-empty v-if="history.length === 0" description="暂无历史任务，请先进行文档对比或参数对比">
           <el-button type="primary" @click="currentView = 'upload'; $router.push('/compare')">去对比</el-button>
         </el-empty>
         <el-table v-else :data="history" border style="width: 100%">
           <el-table-column prop="id" label="任务ID" width="100" />
+          <el-table-column label="类型" width="100">
+            <template #default="scope">
+              <el-tag :type="scope.row.task_type === 'param' ? 'success' : 'primary'" size="small">
+                {{ scope.row.task_type === 'param' ? '参数对比' : '文档对比' }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="file_a_name" label="文档A" />
           <el-table-column prop="file_b_name" label="文档B" />
           <el-table-column prop="similarity" label="相似度" width="120">
@@ -187,9 +194,9 @@
               <span :class="getSimilarityClass(scope.row.similarity)">{{ (scope.row.similarity * 100).toFixed(1) }}%</span>
             </template>
           </el-table-column>
-          <el-table-column prop="verdict" label="判定" width="180">
+          <el-table-column prop="verdict" label="判定" width="220">
             <template #default="scope">
-              <el-tag :type="scope.row.verdict?.includes('通过') ? 'success' : (scope.row.verdict?.includes('强制') ? 'danger' : 'warning')" size="small">{{ scope.row.verdict }}</el-tag>
+              <el-tag :type="scope.row.verdict?.includes('通过') || scope.row.verdict?.includes('一致') ? 'success' : (scope.row.verdict?.includes('强制') || scope.row.verdict?.includes('差异较大') ? 'danger' : 'warning')" size="small">{{ scope.row.verdict }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column prop="total_diffs" label="差异数" width="100" />
@@ -201,8 +208,8 @@
           <el-table-column label="操作" width="280">
             <template #default="scope">
               <el-button size="small" @click="viewTask(scope.row.id)">查看</el-button>
-              <el-button size="small" @click="openTaskPdfPreview(scope.row.id)">PDF预览</el-button>
-              <el-button size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
+              <el-button v-if="scope.row.task_type !== 'param'" size="small" @click="openTaskPdfPreview(scope.row.id)">PDF预览</el-button>
+              <el-button v-if="scope.row.task_type !== 'param'" size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
               <el-button size="small" type="danger" @click="deleteTask(scope.row.id)">删除</el-button>
             </template>
           </el-table-column>
@@ -211,10 +218,10 @@
 
       <div v-if="selectedTask" class="result-panel" style="margin-top: 20px;">
         <div class="panel-header">
-          <span>任务详情 - {{ selectedTask.id }}</span>
+          <span>任务详情 - {{ selectedTask.id }} ({{ selectedTask.task_type === 'param' ? '参数对比' : '文档对比' }})</span>
           <div class="panel-actions">
-            <el-button size="small" type="primary" @click="previewTaskReport(selectedTask.id)">预览报告</el-button>
-            <el-button size="small" @click="exportTaskReport(selectedTask.id)">导出报告</el-button>
+            <el-button v-if="selectedTask.task_type !== 'param'" size="small" type="primary" @click="previewTaskReport(selectedTask.id)">预览报告</el-button>
+            <el-button v-if="selectedTask.task_type !== 'param'" size="small" @click="exportTaskReport(selectedTask.id)">导出报告</el-button>
             <el-button size="small" @click="selectedTask = null">关闭</el-button>
           </div>
         </div>
@@ -225,6 +232,30 @@
             <el-button size="small" @click="showPreview = false">关闭预览</el-button>
           </div>
           <div class="report-preview-content" style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+        </div>
+
+        <div v-if="selectedTask.task_type === 'param' && paramTaskResults.length > 0" style="margin-top: 16px;">
+          <div class="param-stats-row" style="display:flex; gap:16px; margin-bottom:16px;">
+            <el-statistic title="总参数" :value="paramStats.total" />
+            <el-statistic title="一致" :value="paramStats.match" />
+            <el-statistic title="不一致" :value="paramStats.diff" />
+            <el-statistic title="仅A有" :value="paramStats.onlyA" />
+            <el-statistic title="仅B有" :value="paramStats.onlyB" />
+          </div>
+          <el-table :data="paramTaskResults" border stripe max-height="500" style="width:100%">
+            <el-table-column prop="param" label="参数名" width="200" fixed />
+            <el-table-column prop="value_a" label="参照文档值" min-width="180" />
+            <el-table-column prop="value_b" label="对比文档值" min-width="180" />
+            <el-table-column label="匹配" width="100">
+              <template #default="scope">
+                <el-tag :type="scope.row.match === '一致' ? 'success' : (scope.row.match === '不一致' ? 'danger' : 'info')" size="small">
+                  {{ scope.row.match }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="source_a" label="来源A" width="120" />
+            <el-table-column prop="source_b" label="来源B" width="120" />
+          </el-table>
         </div>
       </div>
     </div>
@@ -262,6 +293,8 @@ const pdfPreviewBRef = ref(null)
 const syncScroll = ref(true)
 const _pageChangingFrom = ref('')
 const activePdfSide = ref(1)
+const paramTaskResults = ref([])
+const paramStats = ref({ total: 0, match: 0, diff: 0, onlyA: 0, onlyB: 0 })
 
 const currentView = computed(() => {
   if (route.path === '/compare/tasks') return 'tasks'
@@ -450,10 +483,32 @@ async function viewTask(taskId) {
 
     selectedTask.value = {
       id: taskId,
+      task_type: data.task_type || 'doc',
       similarity: data.similarity || 0,
       verdict: data.verdict || '',
       file_a_name: data.file_a_name || '',
       file_b_name: data.file_b_name || '',
+    }
+
+    if (data.task_type === 'param') {
+      const matched = Array.isArray(data.matched_pairs) ? data.matched_pairs : []
+      const onlyA = Array.isArray(data.only_a) ? data.only_a : []
+      const onlyB = Array.isArray(data.only_b) ? data.only_b : []
+      paramTaskResults.value = [
+        ...matched,
+        ...onlyA.map(r => ({ ...r, match: '仅A有', value_b: '-' })),
+        ...onlyB.map(r => ({ ...r, match: '仅B有', value_a: '-' })),
+      ]
+      const stats = data.diff_stats || data.stats || {}
+      paramStats.value = {
+        total: (stats.params_a || 0) + (stats.params_b || 0),
+        match: stats.match || 0,
+        diff: stats.diff || 0,
+        onlyA: stats.only_a || onlyA.length,
+        onlyB: stats.only_b || onlyB.length,
+      }
+    } else {
+      paramTaskResults.value = []
     }
   } catch (e) {
     ElMessage.error('查看失败：' + (e.message || '未知错误'))

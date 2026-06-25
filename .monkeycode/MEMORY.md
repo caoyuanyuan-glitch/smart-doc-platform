@@ -58,3 +58,11 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 前端构建校验使用 `cd /workspace/frontend && npm run build`
   - 后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+
+推送前需用户确认
+- Date: 2026-06-25
+- Context: 用户指出不要擅自推送代码到 GitHub
+- Category: 工作流协作
+- Instructions:
+  - 未收到用户明确推送指令（如"推送"、"push"、"提交到GitHub"等），不得擅自执行 git push
+  - 代码 commit 后等待用户下一步指示
