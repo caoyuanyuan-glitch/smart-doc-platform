@@ -534,14 +534,18 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
             except Exception:
                 continue
 
-            has_content = False
-            for elem in root.iter():
-                tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-                if tag == "Content" and elem.text and elem.text.strip():
+            try:
+                content_elems = root.xpath("//*[local-name()='Content']")
+            except Exception:
+                continue
+
+            has_text = False
+            for elem in content_elems:
+                if isinstance(elem, ET_LXML._Element) and elem.text and elem.text.strip():
                     texts_to_translate.append(elem.text.strip())
                     content_targets.append(elem)
-                    has_content = True
-            if has_content:
+                    has_text = True
+            if has_text:
                 modified_entries[name] = root
 
     if not texts_to_translate:
