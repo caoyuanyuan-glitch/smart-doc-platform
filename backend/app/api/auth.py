@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -11,6 +13,11 @@ from app.schemas.user import (
 )
 
 router = APIRouter()
+
+USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]{3,20}$")
+PASSWORD_PATTERN = re.compile(r"^\S{8,32}$")
+VALID_ROLES = {"admin", "writer", "reviewer"}
+VALID_STATUS = {"active", "disabled"}
 
 SECRET_KEY = "your-secret-key-here-change-in-production"
 ALGORITHM = "HS256"
@@ -66,6 +73,41 @@ def require_admin(current_user: UserOut = Depends(get_current_active_user)):
     return current_user
 
 
+def normalize_username(username: str) -> str:
+    normalized = (username or "").strip()
+    if not USERNAME_PATTERN.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail="用户名需为 3-20 位字母、数字或下划线")
+    return normalized
+
+
+def validate_password(password: str) -> str:
+    normalized = password or ""
+    if not PASSWORD_PATTERN.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail="密码需为 8-32 位，且不能包含空格")
+    return normalized
+
+
+def normalize_display_name(display_name: str) -> str:
+    normalized = (display_name or "").strip()
+    if len(normalized) < 2 or len(normalized) > 20:
+        raise HTTPException(status_code=400, detail="真实姓名长度需为 2-20 个字符")
+    return normalized
+
+
+def validate_role(role: str) -> str:
+    normalized = (role or "").strip()
+    if normalized not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="角色值无效")
+    return normalized
+
+
+def validate_status_value(status_value: str) -> str:
+    normalized = (status_value or "").strip()
+    if normalized not in VALID_STATUS:
+        raise HTTPException(status_code=400, detail="状态值无效，仅支持 active 或 disabled")
+    return normalized
+
+
 @router.post("/login", response_model=Token)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -91,18 +133,13 @@ async def login_for_access_token(
 
 @router.post("/register", response_model=UserOut)
 async def register_user(user: UserCreate, db: Session = Depends(get_db)):
-    username = (user.username or "").strip()
-    password = user.password or ""
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="请输入用户名和密码")
-    if len(username) < 2 or len(username) > 50:
-        raise HTTPException(status_code=400, detail="用户名长度需为 2-50 个字符")
-    if len(password) < 6 or len(password) > 100:
-        raise HTTPException(status_code=400, detail="密码长度需为 6-100 个字符")
+    username = normalize_username(user.username)
+    password = validate_password(user.password)
     db_user = user_crud.get_user(db, username=username)
     if db_user:
         raise HTTPException(status_code=409, detail="用户名已存在")
     user.username = username
+    user.password = password
     return user_crud.create_user(db=db, user=user)
 
 
@@ -111,7 +148,7 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
 
 @router.get("/users", response_model=UserListOut)
 async def list_users(
-    search: str = Query(None, description="按用户名搜索"),
+    search: str = Query(None, description="按用户名或真实姓名搜索"),
     role: str = Query(None, description="按角色筛选"),
     status: str = Query(None, description="按状态筛选"),
     page: int = Query(1, ge=1),
@@ -131,6 +168,11 @@ async def create_user_api(
     db: Session = Depends(get_db),
     _: UserOut = Depends(require_admin),
 ):
+    data.username = normalize_username(data.username)
+    data.password = validate_password(data.password)
+    data.display_name = normalize_display_name(data.display_name)
+    data.role = validate_role(data.role)
+    data.status = validate_status_value(data.status)
     existing = user_crud.get_user(db, username=data.username)
     if existing:
         raise HTTPException(status_code=409, detail="用户名已存在")
@@ -154,11 +196,33 @@ async def update_user_api(
     user_id: int,
     data: UserUpdate,
     db: Session = Depends(get_db),
-    _: UserOut = Depends(require_admin),
+    current_user: UserOut = Depends(require_admin),
 ):
-    user = user_crud.update_user(db, user_id, data)
-    if not user:
+    existing_user = user_crud.get_user_by_id(db, user_id)
+    if not existing_user:
         raise HTTPException(status_code=404, detail="用户不存在")
+
+    if data.display_name is not None:
+        data.display_name = normalize_display_name(data.display_name)
+    if data.role is not None:
+        data.role = validate_role(data.role)
+    if data.status is not None:
+        data.status = validate_status_value(data.status)
+
+    next_role = data.role if data.role is not None else existing_user.role
+    next_status = data.status if data.status is not None else existing_user.status
+
+    if current_user.id == user_id:
+        if next_role != "admin":
+            raise HTTPException(status_code=400, detail="当前登录管理员需保留管理员角色")
+        if next_status != "active":
+            raise HTTPException(status_code=400, detail="当前登录管理员需保持启用状态")
+
+    if existing_user.role == "admin" and (next_role != "admin" or next_status != "active"):
+        if user_crud.count_admin_users(db, active_only=True) <= 1 and existing_user.status == "active":
+            raise HTTPException(status_code=400, detail="系统至少需要保留一个启用中的管理员账号")
+
+    user = user_crud.update_user(db, user_id, data)
     return user
 
 
@@ -167,13 +231,18 @@ async def toggle_user_status(
     user_id: int,
     status: str = Query(..., description="active 或 disabled"),
     db: Session = Depends(get_db),
-    _: UserOut = Depends(require_admin),
+    current_user: UserOut = Depends(require_admin),
 ):
-    if status not in ("active", "disabled"):
-        raise HTTPException(status_code=400, detail="状态值无效，仅支持 active 或 disabled")
-    user = user_crud.update_user_status(db, user_id, status)
-    if not user:
+    status = validate_status_value(status)
+    existing_user = user_crud.get_user_by_id(db, user_id)
+    if not existing_user:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if current_user.id == user_id and status != "active":
+        raise HTTPException(status_code=400, detail="当前登录管理员需保持启用状态")
+    if existing_user.role == "admin" and existing_user.status == "active" and status != "active":
+        if user_crud.count_admin_users(db, active_only=True) <= 1:
+            raise HTTPException(status_code=400, detail="系统至少需要保留一个启用中的管理员账号")
+    user = user_crud.update_user_status(db, user_id, status)
     return user
 
 
@@ -184,6 +253,7 @@ async def reset_user_password(
     db: Session = Depends(get_db),
     _: UserOut = Depends(require_admin),
 ):
+    data.new_password = validate_password(data.new_password)
     user = user_crud.reset_user_password(db, user_id, data.new_password)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")

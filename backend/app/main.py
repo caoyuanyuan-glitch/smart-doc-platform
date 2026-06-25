@@ -55,15 +55,23 @@ async def startup_event():
         print(f"[startup] 转换规则种子初始化失败: {e}")
     try:
         from app.database import SessionLocal
-        from app.crud.user import get_user, create_user_with_details
+        from app.crud.user import get_user, create_user_with_details, get_password_hash
         from app.schemas.user import UserCreateWithDetails
         db = SessionLocal()
-        if not get_user(db, "admin"):
+        admin_user = get_user(db, "admin")
+        if not admin_user:
             create_user_with_details(db, UserCreateWithDetails(
                 username="admin", password="admin123",
                 display_name="管理员", role="admin", status="active",
             ))
             print("[startup] 默认管理员已创建 (admin/admin123)")
+        else:
+            admin_user.password_hash = get_password_hash("admin123")
+            admin_user.display_name = "管理员"
+            admin_user.role = "admin"
+            admin_user.status = "active"
+            db.commit()
+            print("[startup] 默认管理员已重置为 admin/admin123")
         db.close()
     except Exception as e:
         print(f"[startup] 管理员初始化失败: {e}")
