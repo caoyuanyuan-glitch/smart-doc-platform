@@ -58,3 +58,19 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 前端构建校验使用 `cd /workspace/frontend && npm run build`
   - 后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+
+产品型号与编号空格规则
+- Date: 2026-06-24
+- Context: 用户 уточ明智能润色中的字母数字空格保留规则
+- Category: 行为指令
+- Instructions:
+  - 产品型号内部连续字母数字保持连写，例如 `DNBelab-D4RS`
+  - 编号与标题或术语之间保留空格，例如 `表1 DNBelab-D4RS`、`2.1 RNA`
+
+大模型调用顺序
+- Date: 2026-06-24
+- Context: 用户指定项目内大模型优先级顺序
+- Category: 行为指令
+- Instructions:
+  - 大模型调用顺序固定为 `Kimi > DeepSeek > ArkClaw`
+  - 项目中移除 `Qwen` 及其 API Key 配置

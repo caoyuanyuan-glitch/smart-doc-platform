@@ -96,7 +96,7 @@
           </svg>
         </div>
         <h3 class="feature-title">AI翻译</h3>
-        <p class="feature-desc">AI+记忆库双引擎翻译，支持QWEN/DeepSeek多模型，多格式文档翻译</p>
+        <p class="feature-desc">AI+记忆库双引擎翻译，支持 Kimi / DeepSeek 多模型，多格式文档翻译</p>
         <div class="feature-enter">进入 <el-icon><ArrowRight /></el-icon></div>
       </div>
 
