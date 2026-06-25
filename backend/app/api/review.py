@@ -24,7 +24,7 @@ from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCr
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
 from app.utils.ai_client import ai_client
-from app.utils.spell_checker import run_spelling_and_grammar_check
+from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text
 
 _review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
@@ -44,6 +44,31 @@ def set_progress(review_id: int, status: str, step: str, progress: int, message:
         'message': message,
         'timestamp': datetime.now().isoformat()
     }
+
+
+def _mark_review_as_failed(db: Session, review, message: str):
+    review = update_review_status(db, review.id, "failed", review.total_issues or 0, message)
+    set_progress(review.id, 'failed', '失败', 0, message)
+    return review
+
+
+def _reconcile_review_runtime_state(db: Session, review):
+    if not review or review.status != 'running':
+        return review
+
+    progress = get_progress(review.id)
+    if progress.get('status') == 'running':
+        return review
+
+    return _mark_review_as_failed(db, review, '审核任务已中断，请重新发起审核')
+
+
+def _get_active_review_for_document(db: Session, document_id: int):
+    for review in get_reviews(db, document_id=document_id, limit=20):
+        review = _reconcile_review_runtime_state(db, review)
+        if review and review.status == 'running':
+            return review
+    return None
 
 router = APIRouter()
 
@@ -479,6 +504,66 @@ def _sanitize_issue_suggestions(issues):
     return issues
 
 
+def _is_spelling_like_issue(issue):
+    rule = str(issue.get('rule', '') or '').upper()
+    category = str(issue.get('category', '') or '')
+    source = str(issue.get('source', '') or '').lower()
+    basis = str(issue.get('audit_basis', '') or '')
+    text = f'{rule} {category} {source} {basis}'
+    return 'SPELL' in text or '拼写' in text or 'spelling' in text.lower()
+
+
+def _extract_issue_tokens(issue):
+    fields = [
+        str(issue.get('original_text', '') or ''),
+        str(issue.get('description', '') or ''),
+        str(issue.get('suggestion', '') or ''),
+    ]
+    tokens = []
+    for field in fields:
+        tokens.extend(re.findall(r'[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*', field))
+    return tokens
+
+
+def _should_drop_spelling_issue(issue):
+    if not _is_spelling_like_issue(issue):
+        return False
+
+    original = str(issue.get('original_text', '') or '').strip()
+    context = str(issue.get('context', '') or '').strip()
+    description = str(issue.get('description', '') or '').strip()
+    suggestion = str(issue.get('suggestion', '') or '').strip()
+
+    if not original and not context:
+        return True
+    if not original and suggestion and not description:
+        return True
+
+    original_tokens = re.findall(r'[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*', original)
+    if original_tokens and all(is_whitelisted(token) for token in original_tokens):
+        return True
+
+    protected_tokens = [token for token in _extract_issue_tokens(issue) if is_whitelisted(token)]
+    suspicious_tokens = [
+        token for token in re.findall(r'[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*', original or description)
+        if len(token) > 2 and not is_whitelisted(token)
+    ]
+    return bool(protected_tokens) and not suspicious_tokens
+
+
+def _filter_review_false_positives(issues):
+    filtered = []
+    dropped = 0
+    for issue in issues:
+        if _should_drop_spelling_issue(issue):
+            dropped += 1
+            continue
+        filtered.append(issue)
+    if dropped:
+        print(f'[审核] 拼写白名单最终过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
+    return filtered
+
+
 def _merge_comment_segments(segments):
     merged = []
     for segment in segments:
@@ -639,7 +724,7 @@ def _run_long_sentence_audit(content, file_type=None):
     issues = []
     seen = set()
     sentence_pattern = re.compile(r'[^\n.!?]+[.!?]')
-    skip_pattern = re.compile(r'^(?:contents|chapter\s+\d+|figure\s+\d+|table\s+\d+|note:|\d+[\).])', re.IGNORECASE)
+    skip_pattern = re.compile(r'^(?:contents|chapter\s+\d+|figure\s+\d+|table\s+\d+|note:|[-•*]\s+|\d+[\).])', re.IGNORECASE)
     concise_trigger_pattern = re.compile(r'\b(?:before experiment|it is recommended to|in order to|as shown in|intended to guide)\b', re.IGNORECASE)
     imperative_skip_pattern = re.compile(r'^(?:click|select|open|enter|choose|read|take|place|mix|centrifuge|install|log in|log out)\b', re.IGNORECASE)
     action_hint_pattern = re.compile(r'\b(?:double-click|click|clicking|select|open|place|close|add|mix|aspirate|take out|install|log in|log out)\b', re.IGNORECASE)
@@ -650,23 +735,23 @@ def _run_long_sentence_audit(content, file_type=None):
         sentence = re.sub(r'\s+', ' ', match.group(0)).strip()
         next_fragment = content[match.end():match.end() + 12].lstrip()
         word_count = len(re.findall(r"[A-Za-z]+(?:[-'][A-Za-z]+)?", sentence))
-        if word_count < 20 or skip_pattern.search(sentence) or '|' in sentence or '\t' in sentence:
+        if word_count <= 40 or skip_pattern.search(sentence) or '|' in sentence or '\t' in sentence:
+            continue
+        if not re.search(r'[.!?]$', sentence):
             continue
         if re.search(r'\b[A-Z]\.$', sentence) and next_fragment[:1].islower():
             continue
-        if imperative_skip_pattern.search(sentence) and word_count <= 35 and sentence.count(',') <= 1:
+        if imperative_skip_pattern.search(sentence) and word_count <= 45 and sentence.count(',') <= 1:
             continue
         if action_hint_pattern.search(sentence) and ui_step_pattern.search(sentence) and word_count <= 40:
             continue
         if ui_display_pattern.search(sentence) and ui_step_pattern.search(sentence) and word_count <= 35:
             continue
-        if word_count <= 30 and not concise_trigger_pattern.search(sentence):
-            continue
         normalized = _normalize_search_text(sentence)
         if normalized in seen:
             continue
         seen.add(normalized)
-        severity = 'suggestion' if word_count <= 30 else 'general'
+        severity = 'serious' if word_count > 60 else 'general'
         issues.append({
             "severity": severity,
             "category": "句式",
@@ -675,7 +760,7 @@ def _run_long_sentence_audit(content, file_type=None):
             "original_text": sentence,
             "context": get_context(content, match.start(), match.end(), 120),
             "suggestion": _build_long_sentence_suggestion(sentence),
-            "description": "句子长度过长，建议拆分或压缩冗余表达。",
+            "description": f"单句包含 {word_count} 个词，超过长句阈值，建议拆分或压缩冗余表达。",
             "audit_basis": "英文技术文档写作规范 - 长句优化",
             "confidence": 90,
             "source": "rule",
@@ -1936,30 +2021,32 @@ def _run_cross_reference_audit(content):
     step_numbers = {int(num) for num in re.findall(r'(?im)^\s*(?:Step\s+)?(\d+)[\.)]\s+.+$', normalized)}
     table_numbers = set(re.findall(r'(?im)^\s*(?:Table|表)\s*(\d+)\b', normalized))
     figure_numbers = set(re.findall(r'(?im)^\s*(?:Figure|Fig\.|图)\s*(\d+)\b', normalized))
+    structured_section_numbers = {num for num in section_numbers if '.' in num}
     seen = set()
 
-    for match in re.finditer(r'\b(?:Section|Chapter|章节)\s+(\d+(?:\.\d+)*)\b', normalized, re.IGNORECASE):
-        ref = match.group(1)
-        if ref in section_numbers:
-            continue
-        key = ('REF-001', ref)
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-                'severity': 'general',
-                'category': '交叉引用',
-                'rule': 'REF-001',
-                'chapter': '',
-                'original_text': match.group(0),
-                'context': get_context(normalized, match.start(), match.end(), 120),
-                'suggestion': f'补充 Section {ref} 对应章节标题，或删除该引用。',
-                'description': f'引用原文：{match.group(0)}；引用类型：章节；目标对象：Section {ref}；检查结果：引用缺失。文档中没有对应章节标题。',
-                'audit_basis': '交叉引用应可回溯到唯一的章节或对象。',
-                'confidence': 88,
-                'source': 'rule',
-                'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='章节', target=f'Section {ref}', check_result='引用缺失'),
-            })
+    if len(structured_section_numbers) >= 3:
+        for match in re.finditer(r'\b(?:Section|Chapter|章节)\s+(\d+(?:\.\d+)*)\b', normalized, re.IGNORECASE):
+            ref = match.group(1)
+            if ref in section_numbers:
+                continue
+            key = ('REF-001', ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append({
+                    'severity': 'general',
+                    'category': '交叉引用',
+                    'rule': 'REF-001',
+                    'chapter': '',
+                    'original_text': match.group(0),
+                    'context': get_context(normalized, match.start(), match.end(), 120),
+                    'suggestion': f'补充 Section {ref} 对应章节标题，或删除该引用。',
+                    'description': f'引用原文：{match.group(0)}；引用类型：章节；目标对象：Section {ref}；检查结果：引用缺失。文档中没有对应章节标题。',
+                    'audit_basis': '交叉引用应可回溯到唯一的章节或对象。',
+                    'confidence': 88,
+                    'source': 'rule',
+                    'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='章节', target=f'Section {ref}', check_result='引用缺失'),
+                })
 
     for match in re.finditer(r'\b(?:according to|refer to|see)?\s*(?:Table|table|表)\s*(\d+)\b', normalized):
         ref = match.group(1)
@@ -2007,28 +2094,32 @@ def _run_cross_reference_audit(content):
             'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='图', target=f'Figure {ref}', check_result='引用缺失'),
         })
 
-    for match in re.finditer(r'\bStep\s+(\d+)\b', normalized, re.IGNORECASE):
-        ref = int(match.group(1))
-        if ref in step_numbers:
-            continue
-        key = ('REF-002', ref)
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-            'severity': 'general',
-            'category': '交叉引用',
-            'rule': 'REF-002',
-            'chapter': '',
-            'original_text': match.group(0),
-            'context': get_context(normalized, match.start(), match.end(), 120),
-            'suggestion': f'补充 Step {ref}，或将引用改为有效步骤编号。',
-            'description': f'引用原文：{match.group(0)}；引用类型：步骤；目标对象：Step {ref}；检查结果：引用缺失。文档中没有对应步骤。',
-            'audit_basis': '步骤引用应和实际流程编号保持一致。',
-            'confidence': 88,
-            'source': 'rule',
-            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='步骤', target=f'Step {ref}', check_result='引用缺失'),
-        })
+    if len(step_numbers) >= 3:
+        for match in re.finditer(r'\bStep\s+(\d+)\b', normalized, re.IGNORECASE):
+            ref = int(match.group(1))
+            if ref in step_numbers:
+                continue
+            context = get_context(normalized, match.start(), match.end(), 120)
+            if re.search(r'\bin\s+section\s+\d+(?:\.\d+)*\b', context, re.IGNORECASE):
+                continue
+            key = ('REF-002', ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append({
+                'severity': 'general',
+                'category': '交叉引用',
+                'rule': 'REF-002',
+                'chapter': '',
+                'original_text': match.group(0),
+                'context': context,
+                'suggestion': f'补充 Step {ref}，或将引用改为有效步骤编号。',
+                'description': f'引用原文：{match.group(0)}；引用类型：步骤；目标对象：Step {ref}；检查结果：引用缺失。文档中没有对应步骤。',
+                'audit_basis': '步骤引用应和实际流程编号保持一致。',
+                'confidence': 88,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='步骤', target=f'Step {ref}', check_result='引用缺失'),
+            })
 
     return issues
 
@@ -2134,12 +2225,25 @@ def _run_english_heuristic_audit(content, file_type=None):
         add_issue(match, "HR002", "英文规范", "建议改为 desktop", "desktop 在该语境中应使用合成词写法。", "英文技术文档写作规范 - 拼写")
 
     if file_type != "pdf":
-        for match in re.finditer(r"(?<=[A-Za-z0-9\)])\.(?=[A-Z])", content):
+        abbreviation_pattern = re.compile(r"(?:\be\.g|\bi\.e|\bDr|\bMr|\bMrs|\bMs|\bProf|\bFig|\bNo)$", re.IGNORECASE)
+        for match in re.finditer(r"(?<=[A-Za-z0-9\)])\.(?=[A-Za-z0-9])", content):
+            prefix = content[max(0, match.start() - 8):match.start()]
+            window = content[max(0, match.start() - 30):min(len(content), match.end() + 30)]
+            if abbreviation_pattern.search(prefix):
+                continue
+            if re.search(r'@|https?://|www\.|\b[A-Za-z0-9-]+\.[A-Za-z]{2,}\b', window):
+                continue
+            if re.match(r"\d+\.\d+", content[max(0, match.start() - 1):match.end() + 2]):
+                continue
             original = content[match.start():min(len(content), match.start() + 2)]
             suggestion = f"建议改为 {original[0]} {original[1:]}" if len(original) == 2 else "建议在句号后补一个空格"
-            add_issue_by_span(match.start(), min(len(content), match.start() + len(original)), original, "HR003", "格式", suggestion, "英文正文中的句号后应保留空格。", "英文技术文档写作规范 - 标点与空格")
+            add_issue_by_span(match.start(), min(len(content), match.start() + len(original)), original, "HR003", "标点符号", suggestion, "英文正文中的句号后应保留空格。", "英文技术文档写作规范 - 标点与空格")
 
-    for match in re.finditer(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?(?:mL|μL|uL|ng/μL|mg|mm|cm|kg)\b", content):
+    for match in re.finditer(r"\s+,", content):
+        add_issue(match, "PUNCT-002", "标点符号", "建议删除逗号前空格", "逗号前不应有空格。", "英文技术文档写作规范 - 标点与空格")
+
+    unit_pattern = r"(?:ng/μL|ng/uL|μL|uL|mL|mg|ng|g|kg|mm|cm|min|sec|hr|bp)"
+    for match in re.finditer(rf"(?<![A-Za-z0-9.])\d+(?:\.\d+)?{unit_pattern}\b", content):
         original = match.group(0)
         unit_match = re.match(r"(\d+(?:\.\d+)?)(.+)", original)
         if not unit_match:
@@ -2148,6 +2252,10 @@ def _run_english_heuristic_audit(content, file_type=None):
         context = get_context(content, match.start(), match.end(), 120)
         severity = 'general' if looks_like_table_context(context) else 'serious'
         add_issue(match, "HR004", "单位", suggestion, "数字与单位之间应保留空格。", "英文技术文档写作规范 - 单位格式", severity)
+
+    for match in re.finditer(r"\b(μL|uL|mL|min|sec|ng|bp)s\b", content):
+        unit = match.group(1)
+        add_issue(match, "UNIT-002", "单位", f"建议改为 {unit}", "单位符号不使用复数形式。", "英文技术文档写作规范 - 单位格式")
 
     for match in re.finditer(r"\bWeLL\b", content):
         add_issue(match, "HR005", "格式", "建议统一为 Well", "单词内部大小写形式不一致。", "技术文档常见错误清单 - 格式一致性", "serious")
@@ -2160,6 +2268,15 @@ def _run_english_heuristic_audit(content, file_type=None):
 
     for match in re.finditer(r"greater than upper limit range", content, re.IGNORECASE):
         add_issue(match, "HR007", "语法", "建议改为 greater than the upper limit range", "该短语前缺少定冠词 the。", "英文技术文档写作规范 - 冠词", "serious")
+
+    for match in re.finditer(r"\b(time|yield|result|sample|concentration)\b([^.!?\n]{0,80})\bhave\s+been\b", content, re.IGNORECASE):
+        subject = match.group(1)
+        original = match.group(0)
+        suggestion = re.sub(r"\bhave\s+been\b", "has been", original, flags=re.IGNORECASE)
+        add_issue_by_span(match.start(), match.end(), original, "GRAMMAR-003", "语法", f"建议改为 {suggestion}", f"主语 {subject} 为单数，谓语应使用 has been。", "英语语法规范 - 主谓一致", "serious")
+
+    for match in re.finditer(r"\bmake\s+total\s+volume\b", content, re.IGNORECASE):
+        add_issue(match, "GRAMMAR-004", "语法", "建议改为 make a total volume 或 make the total volume", "total volume 前建议添加冠词。", "英语语法规范 - 冠词")
 
     please_replacements = {
         'please contact': 'contact technical support',
@@ -2486,6 +2603,7 @@ async def list_reviews(db: Session = Depends(get_db)):
     reviews = get_reviews(db)
     result = []
     for review in reviews:
+        review = _reconcile_review_runtime_state(db, review)
         doc = get_document(db, document_id=review.document_id)
         review_dict = review.__dict__.copy()
         review_dict['document_name'] = doc.filename if doc else ''
@@ -2501,8 +2619,22 @@ async def list_reviews(db: Session = Depends(get_db)):
 
 
 @router.get("/{review_id}/progress")
-async def get_review_progress(review_id: int):
-    return get_progress(review_id)
+async def get_review_progress(review_id: int, db: Session = Depends(get_db)):
+    review = get_review(db, review_id=review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    review = _reconcile_review_runtime_state(db, review)
+    if review.status == 'running':
+        return get_progress(review_id)
+
+    return {
+        'status': review.status,
+        'step': '完成' if review.status == 'completed' else '失败',
+        'progress': 100 if review.status == 'completed' else 0,
+        'message': review.summary or ('审核完成' if review.status == 'completed' else '审核失败'),
+        'timestamp': datetime.now().isoformat(),
+    }
 
 
 def detect_language(content):
@@ -3007,6 +3139,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
         issues = dedupe_issues_by_original(issues)
         issues = _sanitize_issue_suggestions(issues)
+        issues = _filter_review_false_positives(issues)
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
@@ -3057,11 +3190,20 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
 
 @router.post("/{document_id}")
 async def create_review_task(document_id: int, mode: str = "hybrid", background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+    if mode not in {"rule", "ai", "hybrid"}:
+        raise HTTPException(status_code=400, detail="Unsupported review mode")
+
     document = get_document(db, document_id=document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
+    active_review = _get_active_review_for_document(db, document_id)
+    if active_review:
+        set_progress(active_review.id, 'running', '初始化', 0, '已有审核任务正在执行')
+        return {"review_id": active_review.id, "status": "running", "message": "已有审核任务正在执行，请轮询进度"}
+
     review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode))
+    update_review_status(db, review.id, "running", 0, "审核任务已创建")
     set_progress(review.id, 'running', '初始化', 0, '审核任务已创建')
     
     # 启动后台审核任务
@@ -3076,6 +3218,7 @@ async def read_review(review_id: int, db: Session = Depends(get_db)):
     review = get_review(db, review_id=review_id)
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
+    review = _reconcile_review_runtime_state(db, review)
     doc = get_document(db, document_id=review.document_id)
     review_dict = review.__dict__.copy()
     review_dict['document_name'] = doc.filename if doc else ''

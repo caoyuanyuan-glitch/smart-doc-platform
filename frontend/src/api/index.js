@@ -73,7 +73,8 @@ export const reviewAPI = {
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),
-  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' })
+  exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' }),
+  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' })
 }
 
 export const compareAPI = {

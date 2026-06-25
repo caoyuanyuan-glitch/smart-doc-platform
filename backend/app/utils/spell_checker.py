@@ -3,6 +3,7 @@
 类似于 Word 的拼写/语法校对功能
 """
 import re
+from pathlib import Path
 from spellchecker import SpellChecker
 
 # 初始化英文拼写检查器
@@ -85,6 +86,14 @@ TECH_TERMS_WHITELIST = {
     'spectrophotometer', 'restriction', 'fragmentation', 'mutation', 'allele', 'genotype', 'phenotype',
     'haplotype', 'phylogenetic', 'homologous', 'orthologous', 'paralogous', 'heterologous', 'polymorphism',
     'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
+    'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
+    'circularization', 'adapter', 'ligation', 'elute', 'enhancer', 'vortexer',
+    'vortex', 'vortexes', 'Agilent', 'ALPAQUA', 'Ambion', 'Axygen', 'Covaris',
+    'DynaMag', 'PerkinElmer', 'Invitrogen', 'ThermoFisher', 'CompleteGenomics',
+    'Illumina', 'NEB', 'Takara', 'Qiagen', 'thaliana', 'saliva', 'ssDNA',
+    'TE Buffer', 'En-TE', 'En-Beads', 'Bioanalyzer', 'Quant-iT',
+    'Tris', 'CSS', 'UDB', 'fmol', 'fragmentase', 'repurification',
+    'demultiplexing', 'techsupport', 'sativa', 'barcodes', 'RXN', 'PF',
 }
 
 SPELLCHECK_WHITELIST = {
@@ -106,10 +115,29 @@ SPELLCHECK_WHITELIST = {
     ],
 }
 
+_DICTIONARY_DIR = Path(__file__).resolve().parents[1] / 'dictionary'
+
+
+def _load_dictionary_file(name):
+    path = _DICTIONARY_DIR / name
+    if not path.exists():
+        return set()
+    terms = set()
+    for line in path.read_text(encoding='utf-8').splitlines():
+        term = line.strip()
+        if term and not term.startswith('#'):
+            terms.add(term)
+    return terms
+
+
+EXTERNAL_TECH_TERMS = _load_dictionary_file('technical_terms.txt')
+EXTERNAL_TRADEMARKS = _load_dictionary_file('trademarks.txt')
+_TECH_TERMS_NORMALIZED = {str(term).lower() for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS}
+
 
 def _load_whitelist_into_dictionary():
     words = set()
-    for term in TECH_TERMS_WHITELIST:
+    for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS:
         for piece in re.findall(r"[A-Za-z]+", str(term)):
             if len(piece) >= 2:
                 words.add(piece.lower())
@@ -122,6 +150,8 @@ _load_whitelist_into_dictionary()
 def is_whitelisted(word: str) -> bool:
     candidate = str(word or '').strip()
     lowered = candidate.lower()
+    if _is_protected_technical_token(candidate):
+        return True
     if lowered in SPELLCHECK_WHITELIST['exact']:
         return True
     for prefix in SPELLCHECK_WHITELIST['prefix']:
@@ -130,6 +160,22 @@ def is_whitelisted(word: str) -> bool:
     for pattern, _ in SPELLCHECK_WHITELIST['pattern']:
         if re.match(pattern, candidate):
             return True
+    return False
+
+
+def _is_protected_technical_token(word: str) -> bool:
+    token = str(word or '').strip().strip('.,;:()[]{}"\'®™©')
+    lowered = token.lower()
+    if not lowered:
+        return False
+    if lowered in _TECH_TERMS_NORMALIZED:
+        return True
+    if re.fullmatch(r'\d+(?:\.\d+)?[xX]', token):
+        return True
+    if re.fullmatch(r'(?:step|table|figure)\s*\d+', token, re.IGNORECASE):
+        return True
+    if re.fullmatch(r'[A-Za-z]+(?:-[A-Za-z0-9]+)+', token):
+        return True
     return False
 
 # 常见拼写错误映射表
@@ -2828,8 +2874,8 @@ COMMON_MISSPELLINGS = {
 
 def _is_technical_term(word):
     """检查是否是技术文档常用术语"""
-    w = word.strip('.')
-    return w in TECH_TERMS_WHITELIST or w.upper() in TECH_TERMS_WHITELIST
+    token = str(word or '').strip('.')
+    return _is_protected_technical_token(token)
 
 
 def _is_domain_abbreviation(word):
@@ -2916,8 +2962,13 @@ def _looks_like_joined_words(word):
 
 
 def _should_skip_spelling_issue(word, context, file_type=None):
-    if _is_domain_abbreviation(word) or _is_extraction_artifact(word):
+    if is_whitelisted(word) or _is_domain_abbreviation(word) or _is_extraction_artifact(word):
         return True
+
+    if re.search(rf'\b{re.escape(word)}\s+[a-z]{{1,2}}\b', context, re.IGNORECASE):
+        joined = re.sub(rf'\b{re.escape(word)}\s+([a-z]{{1,2}})\b', lambda match: word + match.group(1), context, flags=re.IGNORECASE)
+        if re.search(r'\bsupernatant\b', joined, re.IGNORECASE):
+            return True
 
     if file_type != 'pdf':
         return False
@@ -2942,6 +2993,19 @@ def _should_skip_spelling_issue(word, context, file_type=None):
     compact_tokens = re.findall(r'\b[a-z]{8,}\b', context.lower())
     merged_like_count = sum(1 for token in compact_tokens if _looks_like_joined_words(token))
     return merged_like_count >= 2
+
+
+def _build_spelling_context(content, start, end, radius=90):
+    context_start = max(0, start - radius)
+    context_end = min(len(content), end + radius)
+    return re.sub(r'\s+', ' ', content[context_start:context_end]).strip()
+
+
+def _format_spelling_suggestion(word, context, suggestions, certainty='疑似'):
+    suggestion_part = '、'.join(str(item) for item in suggestions if item)
+    if suggestion_part:
+        return f"[general] 拼写/用词错误 — 原文：'{context}'，疑似错误：[{word}]，建议改为：[{suggestion_part}]。是否确定：{certainty}。"
+    return f"[general] 拼写/用词错误 — 原文：'{context}'，疑似错误：[{word}]。是否确定：{certainty}。"
 
 
 def check_spelling(content, min_word_length=3, file_type=None):
@@ -2976,9 +3040,7 @@ def check_spelling(content, min_word_length=3, file_type=None):
             correct = COMMON_MISSPELLINGS[normalized]
             # 找到单词在文档中的位置
             for match in re.finditer(r'\b' + re.escape(word) + r'\b', content, re.IGNORECASE):
-                context_start = max(0, match.start() - 50)
-                context_end = min(len(content), match.end() + 50)
-                context = content[context_start:context_end]
+                context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
                     continue
                 dedupe_key = (normalized, 'spell')
@@ -2994,8 +3056,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
                     "chapter": chapter,
                     "original_text": word,
                     "context": context,
-                    "suggestion": f"建议改为: {correct}",
-                    "description": f"发现疑似拼写错误: '{word}'，常见拼写为 '{correct}'",
+                    "suggestion": _format_spelling_suggestion(word, context, [correct], '确定'),
+                    "description": f"原文片段：'{context}'；疑似错误词：[{word}]；建议修改词：[{correct}]；是否确定：确定。",
                     "audit_basis": "英文拼写规范",
                     "confidence": 95,
                     "source": "spellcheck",
@@ -3003,15 +3065,12 @@ def check_spelling(content, min_word_length=3, file_type=None):
                 })
         else:
             # 使用 spellchecker 的建议
-            suggestions = spell.candidates(word)
-            suggestion_text = ""
-            if suggestions:
-                suggestion_text = f"建议改为: {', '.join(list(suggestions)[:3])}"
+            suggestions = list(spell.candidates(word) or [])[:3]
+            if not suggestions:
+                continue
             
             for match in re.finditer(r'\b' + re.escape(word) + r'\b', content, re.IGNORECASE):
-                context_start = max(0, match.start() - 50)
-                context_end = min(len(content), match.end() + 50)
-                context = content[context_start:context_end]
+                context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
                     continue
                 dedupe_key = (normalized, 'spell')
@@ -3027,8 +3086,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
                     "chapter": chapter,
                     "original_text": word,
                     "context": context,
-                    "suggestion": suggestion_text,
-                    "description": f"发现疑似拼写错误: '{word}'",
+                    "suggestion": _format_spelling_suggestion(word, context, suggestions, '疑似'),
+                    "description": f"原文片段：'{context}'；疑似错误词：[{word}]；建议修改词：[{', '.join(suggestions)}]；是否确定：疑似。",
                     "audit_basis": "英文拼写规范",
                     "confidence": 80,
                     "source": "spellcheck",

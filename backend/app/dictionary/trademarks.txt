@@ -1,0 +1,19 @@
+Agilent
+ALPAQUA
+Ambion
+Axygen
+Covaris
+DynaMag
+PerkinElmer
+Invitrogen
+Qubit
+ThermoFisher
+Thermo Fisher
+DNBSEQ
+CompleteGenomics
+Complete Genomics
+Illumina
+NEB
+Takara
+Qiagen
+Hamilton
