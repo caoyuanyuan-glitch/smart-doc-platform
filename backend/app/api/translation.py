@@ -869,17 +869,13 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
         result = ai_client.call_deepseek(messages, max_tokens=4096)
         if result is None:
             result = ai_client.chat(messages, max_tokens=4096, fallback=True)
-    elif model == "qwen":
-        result = ai_client.call_qwen(messages, max_tokens=4096)
-        if result is None:
-            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
     else:
         result = ai_client.chat(messages, max_tokens=4096, fallback=True)
 
     if result is None:
         raise HTTPException(
             status_code=500,
-            detail="AI翻译引擎不可用，请检查 QWEN (DASHSCOPE_API_KEY)、DeepSeek (DEEPSEEK_API_KEY) 或 Kimi (KIMI_API_KEY) 的 API Key 是否已配置"
+            detail="AI翻译引擎不可用，请检查 Kimi (KIMI_API_KEY)、DeepSeek (DEEPSEEK_API_KEY) 或 ArkClaw 的 API Key 是否已配置"
         )
 
     return result
@@ -925,14 +921,9 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str, model
         result = ai_client.call_kimi(messages, max_tokens=500)
     elif model == "deepseek":
         result = ai_client.call_deepseek(messages, max_tokens=500)
-    elif model == "qwen":
-        result = ai_client.call_qwen(messages, max_tokens=500)
 
     if result is None:
         result = ai_client.chat(messages, max_tokens=500, fallback=True)
-
-    if result is None:
-        result = ai_client._call_model(messages, max_tokens=500)
 
     if result:
         translated = result.strip().strip('"').strip("'").replace("/", "_").replace("\\", "_").replace(":", "_")
@@ -1205,7 +1196,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
 async def translate_file(
     file: UploadFile = File(...),
     engine: str = Form("hybrid"),
-    model: str = Form("qwen"),
+    model: str = Form("kimi"),
     source_lang: str = Form("zh"),
     target_lang: str = Form("en"),
     memory_bank: str = Form(""),

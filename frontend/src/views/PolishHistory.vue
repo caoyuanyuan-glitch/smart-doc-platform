@@ -1,40 +1,46 @@
 <template>
   <div class="polish-history-page">
-    <div class="page-header">
-      <h2 class="page-title">已润色文档</h2>
-      <div class="page-actions">
-        <el-upload
-          ref="uploadRef"
-          action=""
-          :auto-upload="false"
-          :show-file-list="false"
-          :on-change="handleFileChange"
-          accept="*"
-          multiple
-        >
-          <el-button type="primary">
-            <el-icon><Upload /></el-icon>
-            上传文档
-          </el-button>
-        </el-upload>
-      </div>
-    </div>
-
-    <div class="content-area">
-      <div class="files-section">
-        <div class="section-header">
-          <span>文档列表</span>
-          <span class="file-count">共 {{ documents.length }} 个文档</span>
+      <div class="page-header">
+        <h2 class="page-title">已润色文档</h2>
+        <div class="page-actions">
+          <el-button type="danger" :disabled="selectedIds.length === 0" @click="batchDelete">批量删除 ({{ selectedIds.length }})</el-button>
+          <el-upload
+            ref="uploadRef"
+            action=""
+            :auto-upload="false"
+            :show-file-list="false"
+            :on-change="handleFileChange"
+            accept="*"
+            multiple
+          >
+            <el-button type="primary">
+              <el-icon><Upload /></el-icon>
+              上传文档
+            </el-button>
+          </el-upload>
         </div>
+      </div>
 
-        <el-table
-          :data="documents"
-          border
-          style="width: 100%"
-          v-loading="loading"
-          empty-text="暂无文档，请上传"
-        >
-          <el-table-column prop="name" label="文件名" min-width="200" show-overflow-tooltip />
+      <div class="content-area">
+        <div class="files-section">
+          <div class="section-header">
+            <span>文档列表</span>
+            <div class="section-header-right">
+              <span class="file-count">共 {{ documents.length }} 个文档</span>
+              <el-button size="small" @click="loadDocuments" :loading="loading">刷新</el-button>
+            </div>
+          </div>
+
+          <el-table
+            :data="documents"
+            border
+            style="width: 100%"
+            v-loading="loading"
+            empty-text="暂无文档，请上传"
+            @selection-change="handleSelectionChange"
+          >
+            <el-table-column type="selection" width="50" />
+            <el-table-column prop="name" label="文件名" min-width="200" show-overflow-tooltip />
           <el-table-column prop="file_type" label="类型" width="80" align="center">
             <template #default="{ row }">
               <el-tag v-if="row.name.startsWith('【修订标记版】')" type="primary">修订标记版</el-tag>
@@ -95,7 +101,12 @@ import { polishAPI } from '@/api'
 
 const router = useRouter()
 const documents = ref([])
+const selectedIds = ref([])
 const loading = ref(false)
+
+function handleSelectionChange(selection) {
+  selectedIds.value = selection.map(r => r.id)
+}
 
 function formatFileSize(bytes) {
   if (!bytes) return '0 B'
@@ -194,6 +205,26 @@ async function handleDelete(doc) {
   }
 }
 
+async function batchDelete() {
+  if (selectedIds.value.length === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${selectedIds.value.length} 个文档吗？`,
+      '批量删除',
+      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
+    )
+    await polishAPI.batchDeletePolishedDocuments(selectedIds.value)
+    ElMessage.success('批量删除成功')
+    selectedIds.value = []
+    loadDocuments()
+  } catch (e) {
+    if (e !== 'cancel') {
+      const msg = e.response?.data?.detail || '未知错误'
+      ElMessage.error('批量删除失败：' + msg)
+    }
+  }
+}
+
 onMounted(() => {
   loadDocuments()
 })
@@ -220,17 +251,28 @@ onMounted(() => {
   color: #1f2937;
 }
 
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .content-area {
   flex: 1;
-  overflow-y: auto;
+  overflow: hidden;
   background: #fff;
   border-radius: 10px;
   padding: 20px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  display: flex;
+  flex-direction: column;
 }
 
 .files-section {
-  height: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .section-header {
@@ -242,11 +284,24 @@ onMounted(() => {
   border-bottom: 1px solid #f0f0f0;
   font-weight: 600;
   color: #1f2937;
+  flex-shrink: 0;
+}
+
+.section-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .file-count {
   font-size: 12px;
   color: #9ca3af;
   font-weight: normal;
+}
+
+:deep(.el-table__header-wrapper th) {
+  background: #f8fafc;
+  color: #111827;
+  font-weight: 700;
 }
 </style>

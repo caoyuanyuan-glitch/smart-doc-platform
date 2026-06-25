@@ -12,7 +12,7 @@ class TranslationDoc(Base):
     source_lang = Column(String, default="zh")
     target_lang = Column(String, default="en")
     engine = Column(String, default="ai")
-    model = Column(String, default="qwen")
+    model = Column(String, default="kimi")
     original_content = Column(Text, default="")
     translated_content = Column(Text, default="")
     translated_filename = Column(String, default="")
