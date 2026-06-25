@@ -507,6 +507,74 @@ def _translate_xlf_xml(fpath: str, engine: str, model: str, source_lang: str, ta
     return ET.tostring(root_xliff, encoding="unicode"), all_original_parts, all_translated_parts
 
 
+def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
+    """Translate IDML (InDesign Markup Language) preserving formatting."""
+    IDML_NS = "http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"
+    ET_LXML.register_namespace("idPkg", IDML_NS)
+
+    in_buf = io.BytesIO()
+    with open(fpath, "rb") as f:
+        in_buf.write(f.read())
+    in_buf.seek(0)
+
+    all_original = []
+    all_translated = []
+    texts_to_translate = []
+    content_targets = []
+    modified_entries = {}
+
+    with zipfile.ZipFile(in_buf, 'r') as z_in:
+        for zinfo in z_in.infolist():
+            name = zinfo.filename
+            if not name.endswith(".xml"):
+                continue
+            raw = z_in.read(zinfo)
+            try:
+                root = ET_LXML.fromstring(raw)
+            except Exception:
+                continue
+
+            has_content = False
+            for elem in root.iter():
+                tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+                if tag == "Content" and elem.text and elem.text.strip():
+                    texts_to_translate.append(elem.text.strip())
+                    content_targets.append(elem)
+                    has_content = True
+            if has_content:
+                modified_entries[name] = root
+
+    if not texts_to_translate:
+        return in_buf.read(), [], []
+
+    sep = "\n---IDMLSEG---\n"
+    combined = sep.join(texts_to_translate)
+    translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+    translated_parts = [p.strip() for p in translated_combined.split(sep)]
+    if len(translated_parts) != len(texts_to_translate):
+        translated_parts = [_do_translate(t, engine, model, source_lang, target_lang, db) for t in texts_to_translate]
+    for i, elem in enumerate(content_targets):
+        if i < len(translated_parts):
+            translated = translated_parts[i]
+            all_original.append(texts_to_translate[i])
+            all_translated.append(translated)
+            elem.text = translated
+
+    out_buf = io.BytesIO()
+    in_buf.seek(0)
+    with zipfile.ZipFile(in_buf, 'r') as z_in:
+        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as z_out:
+            for zinfo in z_in.infolist():
+                raw = z_in.read(zinfo)
+                name = zinfo.filename
+                if name in modified_entries:
+                    raw = ET_LXML.tostring(modified_entries[name], xml_declaration=True, encoding="UTF-8", pretty_print=False)
+                z_out.writestr(zinfo, raw)
+    out_buf.seek(0)
+
+    return out_buf.read(), all_original, all_translated
+
+
 def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
     """Returns (translated_bytes, all_original_parts, all_translated_parts)"""
     PPTX_NS = {
@@ -1002,6 +1070,13 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                                 all_translated_parts.append("\n".join(trans))
                             except Exception:
                                 continue
+                        elif ext_lower == ".idml":
+                            try:
+                                translated_content, orig, trans = _translate_idml(safe_fpath, engine, model, source_lang, target_lang, db)
+                                all_original_parts.append("\n".join(orig))
+                                all_translated_parts.append("\n".join(trans))
+                            except Exception:
+                                continue
                         elif ext_lower in (".docx", ".doc"):
                             try:
                                 translated_content, orig, trans = _translate_docx(safe_fpath, engine, model, source_lang, target_lang, db)
@@ -1069,6 +1144,12 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                 f.write(translated_xml)
         elif ext == ".pptx":
             translated_bytes, orig, trans = _translate_pptx_xml(file_path, engine, model, source_lang, target_lang, db)
+            all_original_parts.append("\n".join(orig))
+            all_translated_parts.append("\n".join(trans))
+            with open(output_path, "wb") as f:
+                f.write(translated_bytes)
+        elif ext == ".idml":
+            translated_bytes, orig, trans = _translate_idml(file_path, engine, model, source_lang, target_lang, db)
             all_original_parts.append("\n".join(orig))
             all_translated_parts.append("\n".join(trans))
             with open(output_path, "wb") as f:

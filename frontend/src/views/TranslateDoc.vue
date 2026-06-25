@@ -78,12 +78,12 @@
               :auto-upload="false"
               ref="fileUploadRef"
               :on-change="onFileChange"
-              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf"
+              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf,.idml"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
                 <p class="upload-title">将文件拖到此处，或点击上传</p>
-                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、XLF 格式</p>
+                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、XLF、IDML 格式</p>
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
