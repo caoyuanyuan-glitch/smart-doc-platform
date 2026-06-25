@@ -1,0 +1,9 @@
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file source-language="zh" target-language="en" datatype="plaintext">
+    <body>
+      <trans-unit id="btn_save"><source>保存</source><target state="translated">Save</target></trans-unit>
+      <trans-unit id="btn_cancel"><source>取消</source><target state="translated">Cancel</target></trans-unit>
+      <trans-unit id="msg_confirm"><source>确认删除此项目吗？</source><target state="translated">Are you sure you want to delete this project?</target></trans-unit>
+    </body>
+  </file>
+</xliff>
