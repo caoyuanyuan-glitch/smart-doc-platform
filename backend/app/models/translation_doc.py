@@ -18,4 +18,7 @@ class TranslationDoc(Base):
     translated_filename = Column(String, default="")
     original_preview = Column(Text, default="")
     translated_preview = Column(Text, default="")
+    source_char_count = Column(Integer, default=0)
+    ai_char_count = Column(Integer, default=0)
+    memory_char_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)

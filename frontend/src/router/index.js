@@ -13,6 +13,7 @@ import Terms from '@/views/Terms.vue'
 import Users from '@/views/Users.vue'
 import Translate from '@/views/Translate.vue'
 import TranslateDoc from '@/views/TranslateDoc.vue'
+import TranslateStats from '@/views/TranslateStats.vue'
 import Knowledge from '@/views/Knowledge.vue'
 import PolishPreview from '@/views/PolishPreview.vue'
 import SpellCheck from '@/views/SpellCheck.vue'
@@ -153,6 +154,11 @@ const routes = [
     path: '/translate/docs',
     name: 'TranslateDocs',
     component: TranslateDoc
+  },
+  {
+    path: '/translate/stats',
+    name: 'TranslateStats',
+    component: TranslateStats
   },
   {
     path: '/knowledge',

@@ -1127,6 +1127,17 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             doc.translated_content = translated_content[:8000]
             doc.original_preview = original_content[:500] + "..." if len(original_content) > 500 else original_content
             doc.translated_preview = translated_content[:500] + "..." if len(translated_content) > 500 else translated_content
+            total_chars = len(original_content)
+            doc.source_char_count = total_chars
+            if engine == "memory":
+                doc.memory_char_count = total_chars
+                doc.ai_char_count = 0
+            elif engine == "ai":
+                doc.ai_char_count = total_chars
+                doc.memory_char_count = 0
+            else:
+                doc.ai_char_count = total_chars
+                doc.memory_char_count = 0
             db.commit()
 
         with _translate_tasks_lock:
@@ -1152,6 +1163,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     engine = req.engine
     _set_memory_bank(req.memory_bank)
     _set_memory_file_id(req.memory_file_id)
+    source_char_count = len(req.content)
 
     if engine in ["memory", "hybrid"]:
         result, hit = translate_with_memory(
@@ -1167,6 +1179,21 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
             translated = result
             from_memory = True
             if engine == "memory":
+                doc_record = TranslationDoc(
+                    filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    file_type="text",
+                    source_lang=req.source_lang,
+                    target_lang=req.target_lang,
+                    engine=engine,
+                    model=req.model,
+                    original_content=req.content[:8000],
+                    translated_content=translated[:8000],
+                    source_char_count=source_char_count,
+                    ai_char_count=0,
+                    memory_char_count=source_char_count,
+                )
+                db.add(doc_record)
+                db.commit()
                 return TranslationResponse(
                     original=req.content,
                     translated=translated,
@@ -1192,6 +1219,24 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     if not translated:
         raise HTTPException(status_code=500, detail="翻译失败，AI和记忆库引擎均未返回结果")
 
+    ai_chars = source_char_count if from_ai else 0
+    memory_chars = source_char_count if from_memory else 0
+    doc_record = TranslationDoc(
+        filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        file_type="text",
+        source_lang=req.source_lang,
+        target_lang=req.target_lang,
+        engine=engine,
+        model=req.model,
+        original_content=req.content[:8000],
+        translated_content=translated[:8000],
+        source_char_count=source_char_count,
+        ai_char_count=ai_chars,
+        memory_char_count=memory_chars,
+    )
+    db.add(doc_record)
+    db.commit()
+
     return TranslationResponse(
         original=req.content,
         translated=translated,
@@ -1199,6 +1244,27 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
         from_memory=from_memory,
         from_ai=from_ai
     )
+
+
+@router.get("/stats")
+async def get_translation_stats(db: Session = Depends(get_db)):
+    all_docs = db.query(TranslationDoc).all()
+    text_docs = [d for d in all_docs if d.file_type == "text"]
+    file_docs = [d for d in all_docs if d.file_type != "text"]
+
+    text_char_count = sum(d.source_char_count or 0 for d in text_docs)
+    doc_count = len(file_docs)
+    doc_char_count = sum(d.source_char_count or 0 for d in file_docs)
+    ai_char_count = sum(d.ai_char_count or 0 for d in all_docs)
+    memory_char_count = sum(d.memory_char_count or 0 for d in all_docs)
+
+    return {
+        "text_char_count": text_char_count,
+        "doc_count": doc_count,
+        "doc_char_count": doc_char_count,
+        "ai_char_count": ai_char_count,
+        "memory_char_count": memory_char_count,
+    }
 
 
 @router.post("/translate/file")
