@@ -18,6 +18,8 @@ function collectFilesFromFolder(node, path = []) {
   const files = (node.files || []).map(file => ({
     id: file.id,
     name: file.name,
+    filename: file.filename,
+    fileType: String(file.file_type || file.fileType || '').toLowerCase(),
     label: [...currentPath, file.name].join(' / '),
     path: currentPath.join(' / ')
   }))

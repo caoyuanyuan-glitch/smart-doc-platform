@@ -1,4 +1,3 @@
-from datetime import timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
@@ -6,6 +5,7 @@ from typing import Optional
 import os
 import mimetypes
 import docx2txt
+import csv
 from app.database import get_db
 from app.crud.knowledge import (
     get_folder, get_folder_tree, get_folder_files, get_subfolders, create_folder, update_folder, delete_folder,
@@ -17,33 +17,49 @@ from app.api.auth import get_current_user, get_default_user
 router = APIRouter()
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
-BEIJING_TZ = timezone(timedelta(hours=8))
 
 
-def _to_beijing_iso(dt):
-    if not dt:
-        return None
-    return dt.replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ).isoformat(timespec="seconds")
+def _format_tabular_preview(rows, max_rows: int = 20, max_columns: int = 12) -> str:
+    limited_rows = rows[:max_rows]
+    normalized_rows = []
+    for row in limited_rows:
+        current_row = []
+        for cell in list(row)[:max_columns]:
+            current_row.append("" if cell is None else str(cell).strip())
+        normalized_rows.append(current_row)
+
+    if not normalized_rows:
+        return "(表格内容为空)"
+
+    output = []
+    for row in normalized_rows:
+        output.append("\t".join(row))
+
+    if len(rows) > max_rows:
+        output.append(f"... 已截断，仅预览前 {max_rows} 行")
+
+    return "\n".join(output)
 
 
-def _serialize_tree_nodes(nodes):
-    result = []
-    for node in nodes:
-        result.append({
-            **node,
-            "created_at": _to_beijing_iso(node.get("created_at")),
-            "updated_at": _to_beijing_iso(node.get("updated_at")),
-            "children": _serialize_tree_nodes(node.get("children") or []),
-            "files": [
-                {
-                    **file,
-                    "created_at": _to_beijing_iso(file.get("created_at")),
-                    "updated_at": _to_beijing_iso(file.get("updated_at"))
-                }
-                for file in (node.get("files") or [])
-            ]
-        })
-    return result
+def _preview_excel_file(file_path: str) -> str:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        worksheet = workbook.active
+        rows = list(worksheet.iter_rows(values_only=True))
+        sheet_name = worksheet.title or "Sheet1"
+        body = _format_tabular_preview(rows)
+        return f"工作表: {sheet_name}\n\n{body}"
+    finally:
+        workbook.close()
+
+
+def _preview_csv_file(file_path: str) -> str:
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        rows = list(reader)
+    return _format_tabular_preview(rows)
 
 
 def _collect_descendant_ids(folder):
@@ -56,7 +72,7 @@ def _collect_descendant_ids(folder):
 @router.get("/tree")
 async def get_knowledge_tree(db: Session = Depends(get_db)):
     tree = get_folder_tree(db, None)
-    return _serialize_tree_nodes(tree)
+    return tree
 
 @router.get("/folders/{folder_id}")
 async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
@@ -71,25 +87,10 @@ async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
             "id": folder.id,
             "name": folder.name,
             "parent_id": folder.parent_id,
-            "created_at": _to_beijing_iso(folder.created_at),
-            "updated_at": _to_beijing_iso(folder.updated_at)
+            "created_at": folder.created_at.isoformat() if folder.created_at else None
         },
-        "subfolders": [
-            {
-                **item,
-                "created_at": _to_beijing_iso(item.get("created_at")),
-                "updated_at": _to_beijing_iso(item.get("updated_at"))
-            }
-            for item in subfolders
-        ],
-        "files": [
-            {
-                **item,
-                "created_at": _to_beijing_iso(item.get("created_at")),
-                "updated_at": _to_beijing_iso(item.get("updated_at"))
-            }
-            for item in files
-        ]
+        "subfolders": subfolders,
+        "files": files
     }
 
 @router.post("/folders", response_model=dict)
@@ -226,8 +227,7 @@ async def get_file_info(file_id: int, db: Session = Depends(get_db)):
         "file_size": file.file_size,
         "file_type": file.file_type,
         "folder_id": file.folder_id,
-        "created_at": _to_beijing_iso(file.created_at),
-        "updated_at": _to_beijing_iso(file.updated_at)
+        "created_at": file.created_at.isoformat() if file.created_at else None
     }
 
 
@@ -306,6 +306,21 @@ async def preview_file(file_id: int, db: Session = Depends(get_db)):
             return {"content": content, "type": "text", "file_name": file.filename}
         except Exception as e:
             return {"content": f"DOCX 解析失败: {str(e)}", "type": "error", "file_name": file.filename}
+
+    # Excel / CSV - extract first sheet or rows as plain text table preview
+    elif file_type in ["xlsx", "xlsm", "xltx", "xltm"]:
+        try:
+            content = _preview_excel_file(file.file_path)
+            return {"content": content, "type": "text", "file_name": file.filename}
+        except Exception as e:
+            return {"content": f"Excel 解析失败: {str(e)}", "type": "error", "file_name": file.filename}
+
+    elif file_type == "csv":
+        try:
+            content = _preview_csv_file(file.file_path)
+            return {"content": content, "type": "text", "file_name": file.filename}
+        except Exception as e:
+            return {"content": f"CSV 解析失败: {str(e)}", "type": "error", "file_name": file.filename}
     
     else:
         return {"content": "此文件类型不支持在线预览，请下载后查看", "type": "unsupported", "file_name": file.filename}

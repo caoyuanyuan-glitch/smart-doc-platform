@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.orm import Session
 import html as html_lib
@@ -17,8 +17,9 @@ from app.crud.document import get_document
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
+from app.models.term import Term
 from app.crud.audit_basis import get_audit_basis
-from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files
+from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files, get_file
 from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
@@ -45,6 +46,48 @@ def set_progress(review_id: int, status: str, step: str, progress: int, message:
     }
 
 router = APIRouter()
+
+
+def _flatten_folder_tree(nodes):
+    for node in nodes or []:
+        yield node
+        yield from _flatten_folder_tree(node.get("children") or [])
+
+
+def _get_review_spec_files_from_knowledge(db: Session):
+    tree = get_folder_tree(db, None)
+    folders = list(_flatten_folder_tree(tree))
+
+    writing_root = next((folder for folder in folders if folder.get("name") == "写作规范"), None)
+    if not writing_root:
+        return {}
+
+    style_folder = next(
+        (folder for folder in folders if folder.get("parent_id") == writing_root.get("id") and folder.get("name") == "写作风格指南"),
+        None,
+    )
+    common_errors_folder = next(
+        (folder for folder in folders if folder.get("parent_id") == writing_root.get("id") and folder.get("name") == "常见错误清单"),
+        None,
+    )
+
+    style_files = get_folder_files(db, style_folder["id"]) if style_folder else []
+    common_error_files = get_folder_files(db, common_errors_folder["id"]) if common_errors_folder else []
+
+    result = {}
+    for file in style_files:
+        name = str(file.get("name") or "")
+        if "中文技术文档写作风格指南" in name:
+            result["cn_style"] = file
+        elif "MGI英文技术文档写作风格指南" in name:
+            result["en_style"] = file
+
+    for file in common_error_files:
+        name = str(file.get("name") or "")
+        if "技术文档常见错误清单与规范" in name:
+            result["common_errors"] = file
+
+    return result
 
 
 def _issue_value(issue, key, default=''):
@@ -975,15 +1018,22 @@ def _infer_issue_area(issue):
 
 def _format_issue_location(issue, content):
     page_no = _page_number_from_position(content, _issue_value(issue, 'position', ''))
-    page_text = f'第{page_no}页' if page_no else '-'
+    page_text = f'第{page_no}页' if page_no else ''
+    chapter = _resolve_issue_heading(issue, content)
+    if chapter != '-' and page_text:
+        return f'{chapter}（{page_text}）'
+    if chapter != '-':
+        return chapter
     area = _infer_issue_area(issue)
-    return '，'.join([part for part in [page_text, area] if part and part != '-']) or '-'
+    if area and page_text:
+        return f'{page_text}，{area}'
+    return page_text or area or '-'
 
 
 def _format_issue_chapter(issue):
     area = _infer_issue_area(issue)
     chapter = str(_issue_value(issue, 'chapter', '') or '').strip()
-    if area in {'页脚', '步骤', '表格'}:
+    if area in {'页脚', '步骤'}:
         return '-'
     if not chapter:
         return '-'
@@ -991,7 +1041,228 @@ def _format_issue_chapter(issue):
         return '-'
     if re.match(r'^(?:step\s+)?\d+[\.)、：:]\s+', chapter, re.IGNORECASE):
         return '-'
-    return chapter
+    compact = re.sub(r'\s+', ' ', chapter).strip()
+    compact = re.sub(r'^(#+)\s*', '', compact)
+    compact = re.sub(r'^(\d+(?:\.\d+)*)([A-Za-z])', r'\1 \2', compact)
+    if re.match(r'^\d+(?:\.\d+)*\s*(?:mL|μL|uL|ng|kg|cm|mm)\b', compact, re.IGNORECASE):
+        return '-'
+    if _is_inline_reference_heading(compact):
+        return '-'
+    if re.search(r'\b\d{2,4}\s*[μu]L\b', compact, re.IGNORECASE):
+        return '-'
+    if _is_table_cell_like(compact):
+        return '-'
+    if len(compact) > 50:
+        return '-'
+    return compact
+
+
+def _extract_heading_from_context(text):
+    normalized = re.sub(r'\s+', ' ', str(text or '').replace('\f', ' ')).strip()
+    if not normalized:
+        return ''
+    table_match = re.search(r'(Table\s+\d+\s+[A-Za-z][A-Za-z0-9×\- ,/&()]{3,120})', normalized, re.IGNORECASE)
+    if table_match:
+        heading = _normalize_heading_text(table_match.group(1))
+        if heading and not _is_table_cell_like(heading) and not _is_inline_reference_heading(heading):
+            return heading
+    patterns = [
+        r'(\d+(?:\.\d+)+\s+[A-Z][A-Za-z0-9\- ]{3,80})',
+        r'((?:Chapter|Section)\s+\d+[A-Za-z0-9\- :]{3,80})',
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, normalized)
+        if matches:
+            for match in reversed(matches):
+                heading = _normalize_heading_text(match)
+                if heading and not _is_table_cell_like(heading) and not _is_inline_reference_heading(heading):
+                    return heading
+    return ''
+
+
+def _extract_primary_page_heading(content, position):
+    page_no = _page_number_from_position(content, position)
+    if not page_no:
+        return ''
+    pages = _split_content_pages(content)
+    if page_no < 1 or page_no > len(pages):
+        return ''
+    page_lines = [line.strip() for line in pages[page_no - 1].splitlines() if line.strip()]
+    joined = ' '.join(page_lines)
+    table_match = re.search(r'(Table\s+\d+\s+[A-Za-z][A-Za-z0-9×\- ,/&()]{3,120})', joined, re.IGNORECASE)
+    if table_match:
+        heading = _clean_caption_heading(table_match.group(1))
+        if heading and not _is_table_cell_like(heading):
+            return heading
+    candidates = []
+    for index, line in enumerate(page_lines[:80]):
+        candidate = _score_heading_candidate(page_lines, index)
+        if not candidate:
+            continue
+        score, heading = candidate
+        if _is_table_cell_like(heading):
+            continue
+        candidates.append((score, heading))
+    if not candidates:
+        return ''
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _extract_primary_structural_heading(content, position):
+    page_no = _page_number_from_position(content, position)
+    if not page_no:
+        return ''
+    pages = _split_content_pages(content)
+    if page_no < 1 or page_no > len(pages):
+        return ''
+    page_lines = [line.strip() for line in pages[page_no - 1].splitlines() if line.strip()]
+    candidates = []
+    for index, _line in enumerate(page_lines[:120]):
+        candidate = _score_heading_candidate(page_lines, index)
+        if not candidate:
+            continue
+        score, heading = candidate
+        if _is_table_cell_like(heading) or _is_inline_reference_heading(heading):
+            continue
+        if not _is_structural_heading_text(heading):
+            continue
+        candidates.append((score, heading))
+    if not candidates:
+        return ''
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _extract_previous_page_heading(content, position):
+    page_no = _page_number_from_position(content, position)
+    if not page_no or page_no <= 1:
+        return ''
+    pages = _split_content_pages(content)
+    for candidate_page in range(page_no - 1, 0, -1):
+        page_lines = [line.strip() for line in pages[candidate_page - 1].splitlines() if line.strip()]
+        for index in range(len(page_lines) - 1, -1, -1):
+            candidate = _score_heading_candidate(page_lines, index)
+            if not candidate:
+                continue
+            score, heading = candidate
+            if score < 85:
+                continue
+            if _is_table_cell_like(heading):
+                continue
+            return heading
+    return ''
+
+
+def _extract_previous_structural_heading(content, position):
+    page_no = _page_number_from_position(content, position)
+    if not page_no or page_no <= 1:
+        return ''
+    pages = _split_content_pages(content)
+    for candidate_page in range(page_no - 1, 0, -1):
+        page_lines = [line.strip() for line in pages[candidate_page - 1].splitlines() if line.strip()]
+        for index in range(len(page_lines) - 1, -1, -1):
+            candidate = _score_heading_candidate(page_lines, index)
+            if not candidate:
+                continue
+            score, heading = candidate
+            if score < 85:
+                continue
+            if _is_table_cell_like(heading) or _is_inline_reference_heading(heading):
+                continue
+            if _is_structural_heading_text(heading):
+                return heading
+    return ''
+
+
+def _is_structural_heading_text(text):
+    stripped = str(text or '').strip()
+    return bool(re.match(r'^(?:\d+(?:\.\d+)*(?:[\).])?|Chapter|Section)\b', stripped, re.IGNORECASE))
+
+
+def _extract_reference_target(issue):
+    fields = [
+        str(_issue_value(issue, 'original_text', '') or ''),
+        str(_issue_value(issue, 'context', '') or ''),
+        str(_issue_value(issue, 'description', '') or ''),
+    ]
+    combined = ' '.join(fields)
+    match = re.search(r'\b(Figure|Fig\.?|Table)\s*(\d+)\b', combined, re.IGNORECASE)
+    if not match:
+        return '', ''
+    label = match.group(1)
+    kind = 'Figure' if label.lower().startswith('fig') else 'Table'
+    return kind, match.group(2)
+
+
+def _find_reference_caption(content, issue):
+    kind, number = _extract_reference_target(issue)
+    if not kind or not number:
+        return ''
+    page_no = _page_number_from_position(content, _issue_value(issue, 'position', '')) or 1
+    pages = _split_content_pages(content)
+    page_order = [page_no - 1]
+    for distance in range(1, len(pages)):
+        prev_index = page_no - 1 - distance
+        next_index = page_no - 1 + distance
+        if prev_index >= 0:
+            page_order.append(prev_index)
+        if next_index < len(pages):
+            page_order.append(next_index)
+    alias = 'Fig\\.?' if kind == 'Figure' else kind
+    pattern = re.compile(rf'\b(?:{kind}|{alias})\s*{number}\b[^\n]*', re.IGNORECASE)
+    for page_index in page_order:
+        page_lines = [line.strip() for line in pages[page_index].splitlines() if line.strip()]
+        for line in page_lines:
+            if not pattern.search(line):
+                continue
+            if _is_inline_reference_heading(line) or _is_table_cell_like(line):
+                continue
+            heading = _clean_caption_heading(line)
+            if heading:
+                return heading
+    return ''
+
+
+def _issue_prefers_table_caption(issue):
+    fields = [
+        str(_issue_value(issue, 'original_text', '') or ''),
+        str(_issue_value(issue, 'context', '') or ''),
+        str(_issue_value(issue, 'description', '') or ''),
+    ]
+    combined = ' '.join(fields)
+    patterns = [
+        r'\bLibrary Type\b',
+        r'\bcondition\s+condition\b',
+        r'\bPos\d',
+        r'\boperation deck\b',
+        r'\bfilter tips\b',
+    ]
+    return any(re.search(pattern, combined, re.IGNORECASE) for pattern in patterns)
+
+
+def _resolve_issue_heading(issue, content):
+    chapter = _format_issue_chapter(issue)
+    if chapter != '-' and _is_structural_heading_text(chapter):
+        return chapter
+
+    position = _issue_value(issue, 'position', '')
+    structural_page_heading = _extract_primary_structural_heading(content, position)
+    if structural_page_heading and not re.match(r'^(?:\d+(?:\.\d+)*[\).])\s+', structural_page_heading):
+        return structural_page_heading
+
+    previous_structural_heading = _extract_previous_structural_heading(content, position)
+    if previous_structural_heading:
+        return previous_structural_heading
+
+    if structural_page_heading:
+        return structural_page_heading
+
+    context_heading = _extract_heading_from_context(_issue_value(issue, 'context', ''))
+    if context_heading and _is_structural_heading_text(context_heading):
+        return context_heading
+
+    return '-'
 
 
 def _extract_issue_snippet(issue, content, radius=50):
@@ -1099,39 +1370,25 @@ def _build_report_conclusion(issues):
     return '当前文档未发现显著问题，可进入发布前终审。'
 
 
+def _load_review_spec_texts(db: Session):
+    spec_texts = {}
+    spec_files = _get_review_spec_files_from_knowledge(db)
+    for spec_key, file_info in spec_files.items():
+        try:
+            path = Path(file_info.get("file_path") or "")
+            spec_texts[spec_key] = path.read_text(encoding="utf-8") if path.exists() else ""
+        except Exception as exc:
+            print(f"[审核] 读取知识库规范文件失败 {file_info.get('file_path')}: {exc}")
+            spec_texts[spec_key] = ""
+    return spec_texts
+
+
 def _build_feedback_advice(issues):
     statuses = Counter((getattr(issue, 'status', None) or 'pending') for issue in issues)
     return [
         f"待确认 {statuses.get('pending', 0)} 条，建议审核人优先处理致命和严重问题。",
         f"误报 {statuses.get('false_positive', 0)} 条，建议沉淀为规则白名单或定位策略优化样本。",
         f"已确认 {statuses.get('confirmed', 0)} 条，建议修订后重新执行一次规则审核验证闭环。",
-    ]
-
-
-def _build_consistency_rows(metadata, content):
-    normalized = str(content or '').replace('\f', '\n')
-    urls = sorted(set(re.findall(r'https?://[^\s)]+', normalized, re.IGNORECASE)))
-    emails = sorted(set(re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', normalized)))
-    doc_nos = sorted(set(re.findall(r'\bDoc\.?\s*No\.?\s*[:：]?\s*([A-Z0-9\-_/]{4,})\b', normalized, re.IGNORECASE)))
-    versions = sorted(set(re.findall(r'\b(?:Version|Rev(?:ision)?|Ver\.?)\s*[:：]?\s*([A-Z]?\d+(?:\.\d+)*)\b', normalized, re.IGNORECASE)))
-
-    def row(name, values, expected):
-        values = [value for value in values if value]
-        unique_values = sorted(set(values))
-        status = '一致' if len(unique_values) <= 1 else '不一致'
-        return {
-            'name': name,
-            'expected': expected or '-',
-            'found': ' / '.join(unique_values[:3]) if unique_values else '-',
-            'count': len(unique_values),
-            'status': status,
-        }
-
-    return [
-        row('文档编号', doc_nos or ([metadata.get('doc_no')] if metadata.get('doc_no') not in ('', '-') else []), metadata.get('doc_no')),
-        row('版本号', versions or ([metadata.get('version')] if metadata.get('version') not in ('', '-') else []), metadata.get('version')),
-        row('官网地址', urls, urls[0] if len(urls) == 1 else '-'),
-        row('邮箱地址', emails, emails[0] if len(emails) == 1 else '-'),
     ]
 
 
@@ -1158,20 +1415,119 @@ def _group_issues_by_severity(issues):
     return groups
 
 
-def _build_modification_examples(issues):
-    examples = []
+def _build_global_issue_index(groups):
+    ordered = []
+    for severity in ['fatal', 'serious', 'general', 'suggestion']:
+        ordered.extend(groups.get(severity) or [])
+    return {id(issue): index for index, issue in enumerate(ordered, start=1)}
+
+
+def _build_group_heading(severity, entries, index_map):
+    labels = {
+        'fatal': '致命问题',
+        'serious': '严重问题',
+        'general': '一般问题',
+        'suggestion': '建议项',
+    }
+    if not entries:
+        return labels[severity]
+    first_no = index_map[id(entries[0])]
+    last_no = index_map[id(entries[-1])]
+    if first_no == last_no:
+        range_text = _format_issue_display_id(first_no)
+    else:
+        range_text = f'{_format_issue_display_id(first_no)}-{_format_issue_display_id(last_no)}'
+    return f'{labels[severity]}（{range_text}）'
+
+
+def _build_required_and_recommended_lists(issues):
+    required = []
+    recommended = []
     for issue in sorted(issues, key=_issue_sort_key):
+        item = f"{_format_issue_display_id(0)} {_format_issue_description(issue)}"
+        severity = _issue_value(issue, 'severity', '')
+        if severity in {'fatal', 'serious'} and len(required) < 5:
+            required.append((issue, item))
+        elif severity in {'general', 'suggestion'} and len(recommended) < 5:
+            recommended.append((issue, item))
+    return required, recommended
+
+
+def _normalize_example_after(issue, before, after):
+    if after == '-':
+        return after
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    if rule == 'HR005':
+        return 'Well'
+    if rule == 'HR004' and re.match(r'\d+(?:\.\d+)?[A-Za-zμ/%]+', before):
+        match = re.match(r'(\d+(?:\.\d+)?)([A-Za-zμ/%]+)', before)
+        if match:
+            return f'{match.group(1)} {match.group(2)}'
+    if rule == 'HR001':
+        return 'https://global-mgitech.com'
+    return after
+
+
+def _build_diff_markup(before, after):
+    before = str(before or '-')
+    after = str(after or '-')
+    matcher = difflib.SequenceMatcher(None, before, after)
+    before_parts = []
+    after_parts = []
+    for opcode, a0, a1, b0, b1 in matcher.get_opcodes():
+        left = html_lib.escape(before[a0:a1])
+        right = html_lib.escape(after[b0:b1])
+        if opcode == 'equal':
+            before_parts.append(left)
+            after_parts.append(right)
+        else:
+            if left:
+                before_parts.append(f'<span class="diff-remove">{left}</span>')
+            if right:
+                after_parts.append(f'<span class="diff-add">{right}</span>')
+    return ''.join(before_parts) or '-', ''.join(after_parts) or '-'
+
+
+def _build_modification_examples(issues):
+    target_rules = ['HR005', 'HR004', 'GRAMMAR', 'PUNCT-001', 'HR001']
+    examples = []
+    used_rules = set()
+
+    def try_add(issue, forced_title=None):
         before = str(_issue_value(issue, 'original_text', '') or '').strip()
-        after = _format_issue_suggestion(issue)
-        if not before or not after or after == '-':
-            continue
+        after = _normalize_example_after(issue, before, _format_issue_suggestion(issue))
+        if not before or not after or after == '-' or before == after:
+            return False
+        before_markup, after_markup = _build_diff_markup(before, after)
         examples.append({
-            'title': _format_issue_description(issue),
-            'before': before,
-            'after': after,
+            'title': forced_title or _format_issue_description(issue),
+            'before': before_markup,
+            'after': after_markup,
         })
-        if len(examples) >= 2:
+        used_rules.add(str(_issue_value(issue, 'rule', '') or '').upper())
+        return True
+
+    sorted_issues = sorted(issues, key=_issue_sort_key)
+    for target in target_rules:
+        for issue in sorted_issues:
+            rule = str(_issue_value(issue, 'rule', '') or '').upper()
+            if target == 'GRAMMAR':
+                category = str(_issue_value(issue, 'category', '') or '')
+                if '语法' not in category and 'GRAMMAR' not in rule:
+                    continue
+            elif rule != target:
+                continue
+            if try_add(issue):
+                break
+
+    for issue in sorted_issues:
+        if len(examples) >= 5:
             break
+        rule = str(_issue_value(issue, 'rule', '') or '').upper()
+        if rule in used_rules:
+            continue
+        try_add(issue)
+
     return examples
 
 
@@ -1187,23 +1543,79 @@ def _build_report_verdict(issues):
     return '通过'
 
 
+def _load_term_variants_from_db(db: Session):
+    pairs = []
+    for term in db.query(Term).all():
+        non_standard = str(getattr(term, 'non_standard', '') or '').strip()
+        standard = str(getattr(term, 'standard', '') or '').strip()
+        if not non_standard or not standard or non_standard == standard:
+            continue
+        pairs.append((standard, non_standard))
+    return pairs
+
+
+def _run_db_term_consistency_audit(db: Session, content):
+    issues = []
+    normalized = str(content or '')
+    seen = set()
+    for standard, variant in _load_term_variants_from_db(db):
+        pattern = re.compile(rf'(?<![A-Za-z0-9]){re.escape(variant)}(?![A-Za-z0-9])', re.IGNORECASE)
+        for match in pattern.finditer(normalized):
+            key = (variant.lower(), match.start())
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append({
+                'severity': 'general',
+                'category': '术语一致性',
+                'rule': 'TERM-CONSISTENCY-DB',
+                'original_text': match.group(0),
+                'suggestion': standard,
+                'description': f'术语不一致: "{match.group(0)}" 建议统一为 "{standard}"。',
+                'audit_basis': '术语库全文术语一致性检查',
+                'confidence': 90,
+                'source': 'term',
+                'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文'),
+                'chapter': extract_chapter(normalized, match.start()),
+                'context': get_context(normalized, match.start(), match.end(), 120),
+            })
+    return issues
+
+
+def _build_inline_example_html(issue):
+    suggestion = html_lib.escape(_format_issue_suggestion(issue))
+    before = str(_issue_value(issue, 'original_text', '') or '').strip()
+    after = _normalize_example_after(issue, before, _format_issue_suggestion(issue))
+    if not suggestion or suggestion == '-':
+        return ''
+    if not before or not after or before == after or after == '-':
+        return (
+            '<div class="advice-panel">'
+            f'<div class="compare-label">修改建议：<span class="suggestion-inline">{suggestion}</span></div>'
+            '</div>'
+        )
+    before_markup, after_markup = _build_diff_markup(before, after)
+    return (
+        '<div class="advice-panel">'
+        f'<div class="compare-label">修改建议：<span class="suggestion-inline">{suggestion}</span></div>'
+        '<div class="comparison-grid">'
+        f'<div class="before-box"><span class="box-label">修改前</span>{before_markup}</div>'
+        f'<div class="after-box"><span class="box-label">修改后</span>{after_markup}</div>'
+        '</div>'
+        '</div>'
+    )
+
+
 def _generate_review_html_content(review, doc, issues):
-    confirmed = [i for i in issues if i.status == "confirmed"]
-    false_pos = [i for i in issues if i.status == "false_positive"]
-    pending = [i for i in issues if i.status in ["pending", None]]
-    ignored = [i for i in issues if i.status == "ignored"]
     doc_name = doc.filename if doc else f"文档{review.document_id}"
     content = getattr(doc, 'content', '') if doc else ''
     metadata = _extract_document_metadata(doc, content)
-    consistency_rows = _build_consistency_rows(metadata, content)
     summary_rows = _build_problem_summary_rows(issues)
     grouped_issues = _group_issues_by_severity(issues)
-    examples = _build_modification_examples(issues)
+    issue_index_map = _build_global_issue_index(grouped_issues)
     verdict = _build_report_verdict(issues)
     conclusion = _build_report_conclusion(issues)
     feedback_advice = _build_feedback_advice(issues)
-    labels = {'fatal': '致命问题', 'serious': '严重问题', 'general': '一般问题', 'suggestion': '建议项'}
-
     for issue in issues:
         if isinstance(issue, dict):
             issue['_document_content'] = content
@@ -1217,49 +1629,49 @@ def _generate_review_html_content(review, doc, issues):
     <title>审核报告 - {doc_name}</title>
     <style>
         * {{ box-sizing: border-box; }}
-        :root {{ --ink:#1f2937; --muted:#667085; --line:#dfe5ef; --panel:#ffffff; --bg:#edf2f8; --hero1:#153f70; --hero2:#2f76c9; --good:#167c4b; --warn:#b86a00; --bad:#b42318; --soft:#eff4fb; }}
+        :root {{ --ink:#1f2937; --muted:#667085; --line:#dfe5ef; --panel:#ffffff; --bg:#edf2f8; --hero1:#153f70; --hero2:#2f76c9; --fatal:#ef4444; --serious:#f59e0b; --general:#6b7280; --suggestion:#22c55e; --soft:#eff4fb; }}
         body {{ font-family: 'Microsoft YaHei', Arial, sans-serif; margin: 0; padding: 28px; background: radial-gradient(circle at top left, #f8fbff 0, #edf2f8 45%, #e6edf6 100%); color: var(--ink); }}
         .container {{ max-width: 1180px; margin: 0 auto; background: var(--panel); padding: 0 0 32px; box-shadow: 0 18px 50px rgba(18, 39, 69, 0.12); border-radius: 24px; overflow: hidden; }}
-        .hero {{ padding: 36px 40px 28px; background: linear-gradient(135deg, var(--hero1), var(--hero2)); color: #fff; }}
+        .hero {{ padding: 36px 40px 46px; background: linear-gradient(135deg, var(--hero1), var(--hero2)); color: #fff; }}
         .hero h1 {{ margin: 0 0 10px; font-size: 32px; }}
         .hero p {{ margin: 0; max-width: 760px; color: rgba(255,255,255,0.84); line-height: 1.7; }}
         .section {{ padding: 0 40px; }}
         h2 {{ color: #143b68; margin: 30px 0 16px; font-size: 22px; }}
         .module-tag {{ display: inline-block; margin-top: 12px; padding: 6px 12px; border-radius: 999px; background: rgba(255,255,255,0.16); font-size: 12px; letter-spacing: 0.08em; }}
-        .meta {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: -18px; padding: 0 40px; }}
-        .meta-card {{ background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 16px 18px; box-shadow: 0 8px 24px rgba(15, 35, 60, 0.06); }}
+        .meta {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: -26px 40px 0; padding: 14px; background: rgba(255,255,255,0.96); border: 1px solid #d8e4f2; border-radius: 22px; box-shadow: 0 14px 36px rgba(18, 39, 69, 0.12); }}
+        .meta-card {{ background: linear-gradient(180deg, #ffffff, #f8fbff); border: 1px solid #e2eaf5; border-radius: 16px; padding: 15px 16px; }}
         .meta-label {{ font-size: 12px; color: var(--muted); margin-bottom: 8px; }}
         .meta-value {{ font-weight: 700; line-height: 1.5; }}
-        .summary-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 18px 0 10px; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0 10px; }}
         .summary-card {{ padding: 18px 14px; text-align: center; border-radius: 18px; color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,0.12); }}
         .summary-card .num {{ font-size: 30px; font-weight: 800; }}
         .summary-card .label {{ font-size: 13px; margin-top: 6px; opacity: 0.92; }}
-        .card-total {{ background: linear-gradient(135deg, #18569c, #2f80ed); }}
-        .card-confirmed {{ background: linear-gradient(135deg, #0f8d56, #36b37e); }}
-        .card-false {{ background: linear-gradient(135deg, #667085, #98a2b3); }}
-        .card-pending {{ background: linear-gradient(135deg, #c46d00, #f59e0b); }}
-        .card-ignored {{ background: linear-gradient(135deg, #8b95a7, #b7c0d0); }}
+        .card-fatal {{ background: linear-gradient(135deg, #b91c1c, var(--fatal)); }}
+        .card-serious {{ background: linear-gradient(135deg, #d97706, var(--serious)); }}
+        .card-general {{ background: linear-gradient(135deg, #4b5563, var(--general)); }}
+        .card-suggestion {{ background: linear-gradient(135deg, #15803d, var(--suggestion)); }}
         .callout {{ border: 1px solid #cfe0f5; border-radius: 18px; padding: 18px 20px; background: linear-gradient(180deg, #f8fbff, #f1f6fc); line-height: 1.8; color: #2a4365; }}
         .issue {{ border: 1px solid #e4e7ed; border-radius: 18px; padding: 18px 20px; margin: 12px 0; background: #fff; box-shadow: 0 6px 18px rgba(15, 35, 60, 0.04); }}
         .issue.confirmed {{ border-left: 5px solid #67c23a; background: #f0f9eb; }}
         .issue.false_positive {{ border-left: 5px solid #909399; background: #f4f4f5; opacity: 0.7; }}
         .issue.ignored {{ border-left: 5px solid #c0c4cc; background: #fafafa; opacity: 0.6; }}
-        .issue.pending {{ border-left: 5px solid #e6a23c; }}
+        .issue.pending {{ border-left: 5px solid var(--serious); }}
         .issue-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
         .issue-title {{ font-weight: bold; color: #303133; }}
         .badge {{ display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; margin-left: 6px; }}
         .badge-confirmed {{ background: #67c23a; }}
         .badge-false {{ background: #909399; }}
-        .badge-pending {{ background: #e6a23c; }}
+        .badge-pending {{ background: var(--serious); }}
         .badge-ignored {{ background: #c0c4cc; }}
-        .badge-severity-fatal {{ background: #f56c6c; }}
-        .badge-severity-serious {{ background: #e6a23c; }}
-        .badge-severity-general {{ background: #909399; }}
-        .badge-severity-suggestion {{ background: #67c23a; }}
+        .badge-severity-fatal {{ background: var(--fatal); }}
+        .badge-severity-serious {{ background: var(--serious); }}
+        .badge-severity-general {{ background: var(--general); }}
+        .badge-severity-suggestion {{ background: var(--suggestion); }}
         .issue-field {{ margin: 8px 0; font-size: 14px; }}
         .issue-label {{ font-weight: bold; color: #606266; display: inline-block; min-width: 80px; }}
         .original-text {{ background: #fef0f0; padding: 4px 8px; border-radius: 3px; color: #c45656; font-family: 'Courier New', monospace; }}
         .suggestion {{ background: #f0f9eb; padding: 4px 8px; border-radius: 3px; color: #5a8e3f; }}
+        .suggestion-inline {{ color: #14532d; font-weight: 700; }}
         .context {{ color: #444; font-size: 13px; line-height: 1.7; white-space: normal; }}
         .problem-highlight {{ color: #d93025; background: #fff1f0; font-weight: 700; padding: 1px 3px; border-radius: 3px; }}
         .subtle {{ color: #909399; font-size: 12px; }}
@@ -1267,19 +1679,30 @@ def _generate_review_html_content(review, doc, issues):
         .empty {{ text-align: center; color: #909399; padding: 40px; }}
         .list-card {{ border: 1px solid var(--line); border-radius: 18px; padding: 18px 20px; background: #fff; margin-bottom: 12px; }}
         .list-card h3 {{ margin: 0 0 10px; font-size: 18px; color: #143b68; }}
+        .summary-table-note {{ margin: 12px 0 0; color: var(--muted); font-size: 13px; }}
         table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 16px; overflow: hidden; }}
         th, td {{ border: 1px solid #e7edf5; padding: 12px 14px; text-align: left; vertical-align: top; }}
         th {{ background: #f6f9fd; color: #163f6f; }}
-        .status-ok {{ color: var(--good); font-weight: 700; }}
-        .status-bad {{ color: var(--bad); font-weight: 700; }}
-        .example-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
-        .example-box {{ border: 1px solid var(--line); border-radius: 18px; padding: 18px; background: linear-gradient(180deg, #fff, #f9fbff); }}
-        .example-title {{ font-weight: 700; color: #163f6f; margin-bottom: 10px; }}
-        .before-box, .after-box {{ padding: 10px 12px; border-radius: 12px; margin-top: 8px; }}
-        .before-box {{ background: #fff4f4; color: #a61b1b; }}
-        .after-box {{ background: #effbf3; color: #166534; }}
+        .status-ok {{ color: var(--suggestion); font-weight: 700; }}
+        .status-bad {{ color: var(--fatal); font-weight: 700; }}
+        .status-warn {{ color: var(--serious); font-weight: 700; }}
+        .advice-panel {{ margin-top: 12px; padding: 14px 16px; border: 1px solid #d7e6f7; border-radius: 16px; background: #f8fbff; }}
+        .comparison-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }}
+        .before-box, .after-box {{ padding: 12px 14px; border-radius: 14px; line-height: 1.7; }}
+        .before-box {{ background: #fffafa; border: 1px solid #f4caca; color: #7f1d1d; }}
+        .after-box {{ background: #f6fdf8; border: 1px solid #cdebd6; color: #14532d; }}
+        .box-label {{ display: block; color: var(--muted); font-size: 12px; font-weight: 700; margin-bottom: 6px; }}
+        .diff-remove {{ background: #fde8e8; text-decoration: line-through; padding: 1px 3px; border-radius: 4px; }}
+        .diff-add {{ background: #dcfce7; text-decoration: underline; padding: 1px 3px; border-radius: 4px; }}
+        .feedback-block {{ border-top: 1px dashed #cbd5e1; margin-top: 18px; padding-top: 18px; }}
+        .compare-label {{ font-weight: 700; color: #163f6f; margin-bottom: 8px; }}
+        h3 {{ margin: 22px 0 12px; }}
+        .severity-fatal {{ color: var(--fatal); }}
+        .severity-serious {{ color: var(--serious); }}
+        .severity-general {{ color: var(--general); }}
+        .severity-suggestion {{ color: var(--suggestion); }}
         .footer {{ margin: 36px 40px 0; text-align: center; color: #909399; font-size: 12px; border-top: 1px solid #ebeef5; padding-top: 20px; }}
-        @media (max-width: 920px) {{ .meta, .summary-grid, .issue-grid, .example-grid {{ grid-template-columns: 1fr; }} .section {{ padding: 0 22px; }} .hero {{ padding: 28px 22px 24px; }} .meta {{ padding: 0 22px; }} .footer {{ margin-left: 22px; margin-right: 22px; }} }}
+        @media (max-width: 920px) {{ .meta, .summary-grid, .issue-grid, .comparison-grid {{ grid-template-columns: 1fr; }} .section {{ padding: 0 22px; }} .hero {{ padding: 28px 22px 44px; }} .meta {{ margin: -24px 22px 0; padding: 12px; }} .footer {{ margin-left: 22px; margin-right: 22px; }} }}
     </style>
 </head>
 <body>
@@ -1291,47 +1714,23 @@ def _generate_review_html_content(review, doc, issues):
         </div>
         <div class="meta">
             <div class="meta-card"><div class="meta-label">文档名称</div><div class="meta-value">{metadata['name']}</div></div>
-            <div class="meta-card"><div class="meta-label">文档编号 / 版本</div><div class="meta-value">{html_lib.escape(metadata['doc_no'])} / {html_lib.escape(metadata['version'])}</div></div>
+            <div class="meta-card"><div class="meta-label">审核日期</div><div class="meta-value">{review.created_at}</div></div>
+            <div class="meta-card"><div class="meta-label">审核人</div><div class="meta-value">技术文档审核AI助理</div></div>
             <div class="meta-card"><div class="meta-label">文档范围</div><div class="meta-value">{metadata['file_type']} · {metadata['page_count']} 页 · {metadata['section_count']} 个章节</div></div>
-            <div class="meta-card"><div class="meta-label">审核信息</div><div class="meta-value">{_format_review_mode(review.mode)}<br>{review.created_at}</div></div>
         </div>
 
         <div class="section">
         <h2>模块 1 · 审核概览</h2>
         <div class="summary-grid">
-            <div class="summary-card card-total"><div class="num">{len(issues)}</div><div class="label">发现问题</div></div>
-            <div class="summary-card card-confirmed"><div class="num">{len(confirmed)}</div><div class="label">已确认</div></div>
-            <div class="summary-card card-false"><div class="num">{len(false_pos)}</div><div class="label">误报</div></div>
-            <div class="summary-card card-pending"><div class="num">{len(pending)}</div><div class="label">待确认</div></div>
-            <div class="summary-card card-ignored"><div class="num">{len(ignored)}</div><div class="label">已忽略</div></div>
+            <div class="summary-card card-fatal"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'fatal')}</div><div class="label">致命</div></div>
+            <div class="summary-card card-serious"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'serious')}</div><div class="label">严重</div></div>
+            <div class="summary-card card-general"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'general')}</div><div class="label">一般</div></div>
+            <div class="summary-card card-suggestion"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'suggestion')}</div><div class="label">建议</div></div>
         </div>
-        <div class="callout">审核结论：{conclusion}</div>
-        </div>
-
-        <div class="section">
-        <h2>模块 2 · 文档一致性检查</h2>
-        <table>
-            <thead><tr><th>检查项</th><th>期望值</th><th>识别结果</th><th>唯一值数</th><th>状态</th></tr></thead>
-            <tbody>
-"""
-
-    for row in consistency_rows:
-        html += f"""
-            <tr>
-                <td>{row['name']}</td>
-                <td>{html_lib.escape(str(row['expected']))}</td>
-                <td>{html_lib.escape(str(row['found']))}</td>
-                <td>{row['count']}</td>
-                <td class="{'status-ok' if row['status'] == '一致' else 'status-bad'}">{row['status']}</td>
-            </tr>
-"""
-
-    html += """
-            </tbody>
-        </table>
         </div>
         <div class="section">
-        <h2>模块 3 · 问题汇总表</h2>
+        <h2>模块 2 · 问题明细</h2>
+        <h3>问题汇总表</h3>
         <table>
             <thead><tr><th>类型</th><th>致命</th><th>严重</th><th>一般</th><th>建议</th><th>总计</th></tr></thead>
             <tbody>
@@ -1352,9 +1751,7 @@ def _generate_review_html_content(review, doc, issues):
     html += """
             </tbody>
         </table>
-        </div>
-        <div class="section">
-        <h2>模块 4 · 详细问题列表</h2>
+        <h3>详细问题列表</h3>
 """
 
     if not issues:
@@ -1364,8 +1761,9 @@ def _generate_review_html_content(review, doc, issues):
             entries = grouped_issues.get(severity) or []
             if not entries:
                 continue
-            html += f'<h3>{labels[severity]}（{len(entries)}）</h3>'
-            for index, issue in enumerate(entries, start=1):
+            html += f'<h3 class="severity-{severity}">{_build_group_heading(severity, entries, issue_index_map)}</h3>'
+            for issue in entries:
+                display_no = issue_index_map[id(issue)]
                 issue_status = _issue_value(issue, 'status', '') or 'pending'
                 sev_class = f"badge-severity-{_issue_value(issue, 'severity', 'general')}"
                 status_class = {
@@ -1380,49 +1778,28 @@ def _generate_review_html_content(review, doc, issues):
                     'ignored': '已忽略',
                     'pending': '待确认',
                 }.get(issue_status, '待确认')
+                example_html = _build_inline_example_html(issue)
                 html += f"""
         <div class="issue {issue_status}">
             <div class="issue-header">
-                <div class="issue-title">{_format_issue_display_id(index)} · {_issue_dimension(issue)} · {_issue_value(issue, 'category', '') or '未分类'}</div>
+                <div class="issue-title">{_format_issue_display_id(display_no)} · {_issue_dimension(issue)} · {_issue_value(issue, 'category', '') or '未分类'}</div>
                 <div>
                     <span class="badge {sev_class}">{_format_issue_severity(_issue_value(issue, 'severity', 'general'))}</span>
                     <span class="badge {status_class}">{status_text}</span>
                 </div>
             </div>
             <div class="issue-field"><span class="issue-label">位置:</span> {_format_issue_location(issue, content)}</div>
-            <div class="issue-field"><span class="issue-label">章节:</span> {_format_issue_chapter(issue)}</div>
             <div class="issue-field"><span class="issue-label">原文片段:</span> <span class="context">{_highlight_issue_context(issue)}</span></div>
             <div class="issue-field"><span class="issue-label">问题说明:</span> {html_lib.escape(_format_issue_description(issue))}</div>
-            <div class="issue-field"><span class="issue-label">修改建议:</span> <span class="suggestion">{html_lib.escape(_format_issue_suggestion(issue))}</span></div>
             <div class="issue-field"><span class="issue-label">审核依据:</span> {html_lib.escape(_issue_value(issue, 'audit_basis', '-') or '-')}</div>
+            {example_html}
         </div>
 """
-
-    html += """
-        </div>
-        <div class="section">
-        <h2>模块 5 · 修改示例</h2>
-        <div class="example-grid">
-"""
-
-    if examples:
-        for example in examples:
-            html += f"""
-        <div class="example-box">
-            <div class="example-title">{html_lib.escape(example['title'])}</div>
-            <div><strong>修改前</strong></div>
-            <div class="before-box">{html_lib.escape(example['before'])}</div>
-            <div><strong>修改后</strong></div>
-            <div class="after-box">{html_lib.escape(example['after'])}</div>
-        </div>
-"""
-    else:
-        html += '<div class="empty">当前没有可展示的修改示例</div>'
 
     html += f"""
         </div>
         <div class="section">
-        <h2>模块 6 · 审核结论</h2>
+        <h2>模块 3 · 审核结论</h2>
         <div class="callout">
             <div><strong>判定结果:</strong> {html_lib.escape(verdict)}</div>
             <div><strong>结论说明:</strong> {html_lib.escape(conclusion)}</div>
@@ -1432,6 +1809,12 @@ def _generate_review_html_content(review, doc, issues):
                 <li>{html_lib.escape(feedback_advice[1])}</li>
                 <li>{html_lib.escape(feedback_advice[2])}</li>
             </ul>
+            <div class="feedback-block">
+                <div><strong>审核后反馈：</strong></div>
+                <div>1. 本次审核有哪些问题是误报？（请列出编号）</div>
+                <div>2. 哪些问题或规则可以记录到 memory 中供后续审核参考？</div>
+                <div>3. 其他建议：</div>
+            </div>
         </div>
         </div>
 """
@@ -1901,7 +2284,27 @@ def _is_footer_line(line):
 
 
 def _is_step_line(line):
-    return bool(re.match(r'^(?:step\s+)?\d+[\.)、：:]\s+', str(line or '').strip(), re.IGNORECASE))
+    return bool(re.match(r'^(?:step\s+)?\d+(?:\.\d+)*(?:[\.)、：:])\s+', str(line or '').strip(), re.IGNORECASE))
+
+
+def _is_version_history_line(line):
+    stripped = str(line or '').strip()
+    return bool(re.search(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\s+changes\b', stripped, re.IGNORECASE))
+
+
+def _is_material_line(line):
+    stripped = str(line or '').strip()
+    if not stripped:
+        return False
+    patterns = [
+        r'^\d+(?:\.\d+)?\s*(?:mL|μL|uL|L|mg|ng|g|kg|mm|cm)\b',
+        r'\bdeep-well plate\b',
+        r'\bautomated filter tips\b',
+        r'\bskirted PCR plates?\b',
+        r'\bNormalized ssCir sample PCR plate\b',
+        r'\bPos\d(?:-Pos\d)?\b',
+    ]
+    return any(re.search(pattern, stripped, re.IGNORECASE) for pattern in patterns)
 
 
 def _is_table_line(line):
@@ -1909,27 +2312,161 @@ def _is_table_line(line):
     return bool(' | ' in stripped or re.match(r'^(?:Table|表)\s*\d+', stripped, re.IGNORECASE))
 
 
+def _is_figure_or_table_caption(line):
+    stripped = str(line or '').strip()
+    return bool(re.match(r'^(?:Figure|Fig\.?|Table|表|图)\s*\d+\b', stripped, re.IGNORECASE))
+
+
 def _is_heading_line(line):
     stripped = str(line or '').strip()
-    if not stripped or _is_footer_line(stripped) or _is_step_line(stripped) or _is_table_line(stripped):
+    if not stripped or _is_footer_line(stripped) or _is_step_line(stripped) or _is_table_line(stripped) or _is_material_line(stripped) or _is_version_history_line(stripped):
         return False
+    if stripped.startswith('#'):
+        return True
     if re.match(r'^(?:Chapter|Section)\s+\d+[\s:.-]+', stripped, re.IGNORECASE):
         return True
-    return bool(re.match(r'^\d+(?:\.\d+)*(?:[\).])?\s+[A-Z][^\n]{2,}$', stripped))
+    return bool(re.match(r'^\d+(?:\.\d+)*(?:[\).])?\s+[^\n]{2,}$', stripped))
+
+
+def _normalize_heading_text(line):
+    cleaned = re.sub(r'^(\d+(?:\.\d+)*)([A-Za-z])', r'\1 \2', str(line or '').strip())
+    return re.sub(r'\s+', ' ', cleaned).strip(' -:|')
+
+
+def _clean_caption_heading(line):
+    heading = _normalize_heading_text(line)
+    if not heading:
+        return ''
+    heading = re.sub(r'\b(Name|Position|Brand|Cat\.?|Cat No\.?|Quantity|Components)\b.*$', '', heading, flags=re.IGNORECASE).strip(' -:|,')
+    heading = re.sub(r'\s+', ' ', heading).strip()
+    return heading or _normalize_heading_text(line)
+
+
+def _is_inline_reference_heading(text):
+    normalized = _normalize_heading_text(text).lower()
+    if not normalized:
+        return False
+    patterns = [
+        r'\btable\s+\d+\s+and\s+figure\s+\d+\b',
+        r'\bfigure\s+\d+\s+and\s+table\s+\d+\b',
+        r'\baccording\s+to\b',
+        r'\bas\s+shown\s+in\b',
+        r'\bwill\s+be\b',
+        r'\bplace\s+it\b',
+    ]
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in patterns)
+
+
+def _looks_like_standalone_heading(lines, index):
+    current = str(lines[index] or '').strip()
+    if not current:
+        return False
+    if not re.match(r'^[A-Z][A-Za-z0-9\s\-_/]{3,60}$', current):
+        return False
+    prev_line = str(lines[index - 1] or '').strip() if index - 1 >= 0 else ''
+    next_line = str(lines[index + 1] or '').strip() if index + 1 < len(lines) else ''
+    if _is_table_cell_like(current) or _is_table_cell_like(prev_line) or _is_table_cell_like(next_line):
+        return False
+    if prev_line and next_line and not _is_heading_line(prev_line) and not _is_heading_line(next_line):
+        return False
+    return True
+
+
+def _is_table_cell_like(line):
+    stripped = str(line or '').strip()
+    if not stripped:
+        return False
+    if _is_version_history_line(stripped):
+        return True
+    if _is_material_line(stripped):
+        return True
+    if '|' in stripped:
+        return True
+    if re.search(r'\b(?:Cat\.?\s*No\.?|Recommended brand|Quantity|Components|Library Type|types|condition|None)\b', stripped, re.IGNORECASE):
+        return True
+    if re.search(r'\b(?:Vortex mixer|Mini centrifuge|Primer hybridization)\b', stripped, re.IGNORECASE):
+        return True
+    if re.search(r'\bautomated filter tips\b|\bPos\d(?:-Pos\d)?\b', stripped, re.IGNORECASE):
+        return True
+    if re.search(r'\d+(?:\.\d+)?\s*mL/tube', stripped, re.IGNORECASE):
+        return True
+    if re.search(r'\b\d{2,4}\s*[μu]L\b', stripped, re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_isolated_heading(lines, index):
+    prev_line = str(lines[index - 1] or '').strip() if index - 1 >= 0 else ''
+    next_line = str(lines[index + 1] or '').strip() if index + 1 < len(lines) else ''
+    return (not prev_line) or (not next_line)
+
+
+def _score_heading_candidate(lines, index):
+    line = str(lines[index] or '').strip()
+    if not line:
+        return None
+    if _is_footer_line(line) or _is_step_line(line) or _is_material_line(line) or _is_version_history_line(line):
+        return None
+    score = None
+    kind = None
+    if line.startswith('#'):
+        score = 120
+        kind = 'markdown'
+    elif _is_heading_line(line):
+        score = 100
+        kind = 'numbered'
+    elif _is_figure_or_table_caption(line):
+        score = 88
+        kind = 'caption'
+    elif _looks_like_standalone_heading(lines, index):
+        score = 60
+        kind = 'standalone'
+    if score is None:
+        return None
+
+    if _is_inline_reference_heading(line):
+        return None
+    if _is_table_cell_like(line):
+        score -= 45
+    if kind == 'standalone' and not _is_isolated_heading(lines, index):
+        score -= 20
+    if len(line) > 70:
+        score -= 10
+    if len(line.split()) <= 2 and kind == 'standalone':
+        score -= 10
+    if score < 55:
+        return None
+
+    heading = _clean_caption_heading(line) if kind == 'caption' else _normalize_heading_text(line)
+    return score, heading
 
 
 def extract_chapter(content, position):
-    lines = content[:position].split('\n')
-    for i in range(len(lines) - 1, max(0, len(lines) - 20), -1):
-        line = lines[i].strip()
-        if not line:
-            continue
-        if _is_footer_line(line) or _is_step_line(line) or _is_table_line(line):
-            continue
-        if line.startswith('#'):
-            return line.lstrip('#').strip()
-        if _is_heading_line(line):
-            return re.sub(r'^(\d+(?:\.\d+)*)([A-Z])', r'\1 \2', line)
+    normalized = str(content or '').replace('\f', '\n')
+    safe_position = max(0, min(int(position or 0), len(normalized)))
+    before_lines = normalized[:safe_position].split('\n')
+    after_lines = normalized[safe_position:].split('\n')[:12]
+    candidates = []
+
+    start_index = max(0, len(before_lines) - 220)
+    for index in range(len(before_lines) - 1, start_index - 1, -1):
+        candidate = _score_heading_candidate(before_lines, index)
+        if candidate:
+            score, text = candidate
+            distance_penalty = min(len(before_lines) - 1 - index, 30)
+            candidates.append((score - distance_penalty, text))
+
+    for index, _line in enumerate(after_lines[:10]):
+        candidate = _score_heading_candidate(after_lines, index)
+        if candidate:
+            score, text = candidate
+            if _is_table_cell_like(text):
+                continue
+            candidates.append((score - 24 - index, text))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
     return ""
 
 
@@ -2283,7 +2820,7 @@ def dedupe_issues_by_original(issues):
     return list(seen.values())
 
 
-def _run_reference_and_term_consistency_audit(content):
+def _run_reference_and_term_consistency_audit(db: Session, content):
     issues = []
 
     try:
@@ -2302,6 +2839,11 @@ def _run_reference_and_term_consistency_audit(content):
             issues.append(issue)
     except Exception as e:
         print(f"[审核] 术语一致性规则执行失败: {e}")
+
+    try:
+        issues.extend(_run_db_term_consistency_audit(db, content))
+    except Exception as e:
+        print(f"[审核] 术语库一致性规则执行失败: {e}")
 
     return issues
 
@@ -2326,7 +2868,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         content_limit = 120000 if document.file_type == 'pdf' else 20000
         content = content[:content_limit]
         document_language = detect_language(content)
+        spec_texts = _load_review_spec_texts(db)
         print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}字符")
+        print(
+            "[审核] 当前规范文件长度: "
+            f"cn={len(spec_texts.get('cn_style', ''))}, "
+            f"en={len(spec_texts.get('en_style', ''))}, "
+            f"common={len(spec_texts.get('common_errors', ''))}"
+        )
 
         knowledge_basis = get_knowledge_basis(db)
         has_ai_client = ai_client.has_any_client
@@ -2374,7 +2923,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                         print(f"[审核] PDF结构规则执行失败: {e}")
 
                 try:
-                    supplemental_issues = _run_reference_and_term_consistency_audit(content)
+                    supplemental_issues = _run_reference_and_term_consistency_audit(db, content)
                     print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
                     rule_issues.extend(supplemental_issues)
                 except Exception as e:

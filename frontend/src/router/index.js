@@ -9,6 +9,7 @@ import QADoc from '@/views/QADoc.vue'
 import QAHistory from '@/views/QAHistory.vue'
 import Generate from '@/views/Generate.vue'
 import Compare from '@/views/Compare.vue'
+import CompareParams from '@/views/CompareParams.vue'
 import Convert from '@/views/Convert.vue'
 import Terms from '@/views/Terms.vue'
 import Users from '@/views/Users.vue'
@@ -132,9 +133,9 @@ const routes = [
     component: Compare
   },
   {
-    path: '/compare/config',
-    name: 'CompareConfig',
-    component: Compare
+    path: '/compare/params',
+    name: 'CompareParams',
+    component: CompareParams
   },
   {
     path: '/convert',

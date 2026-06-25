@@ -128,9 +128,51 @@
             <el-divider />
             <div class="result-section">
               <h4>译文</h4>
-              <div class="result-text translated-text">{{ result.translated }}</div>
+              <el-input
+                v-if="editingResult"
+                v-model="translatedDraft"
+                type="textarea"
+                :rows="10"
+                resize="none"
+                class="translated-editor"
+              />
+              <div v-else class="result-text translated-text">{{ currentTranslatedText }}</div>
+            </div>
+            <div class="memory-write-section">
+              <span class="memory-write-label">写入目标记忆库</span>
+              <el-select
+                v-model="memoryWriteFileId"
+                placeholder="请选择知识库管理 > 资源库 > 记忆库 下的 Excel 文件"
+                filterable
+                clearable
+                :loading="memoryLibraryLoading"
+                class="memory-write-select"
+              >
+                <el-option
+                  v-for="file in writableMemoryLibraryFiles"
+                  :key="file.id"
+                  :label="file.label"
+                  :value="file.id"
+                />
+              </el-select>
             </div>
             <div class="result-actions">
+              <el-button v-if="!editingResult" size="small" @click="startEditResult">
+                <el-icon><EditPen /></el-icon>
+                编辑译文
+              </el-button>
+              <el-button v-if="editingResult" size="small" type="primary" @click="saveEditedResult">
+                <el-icon><Check /></el-icon>
+                保存修改
+              </el-button>
+              <el-button v-if="editingResult" size="small" @click="cancelEditResult">
+                <el-icon><Close /></el-icon>
+                取消编辑
+              </el-button>
+              <el-button size="small" type="success" :loading="writingMemory" :disabled="!canWriteMemory" @click="writeToMemoryLibrary">
+                <el-icon><Plus /></el-icon>
+                写入记忆库
+              </el-button>
               <el-button size="small" @click="copyResult">
                 <el-icon><CopyDocument /></el-icon>
                 复制译文
@@ -140,6 +182,9 @@
                 下载译文
               </el-button>
             </div>
+            <p class="memory-write-hint">写入记忆库会追加到【知识库管理】>【资源库】>【记忆库】下当前选中的 Excel 文件。</p>
+            <p v-if="writableMemoryLibraryFiles.length === 0" class="memory-write-warning">当前路径下还没有可写入的 Excel 记忆库文件。</p>
+            <p v-else-if="!memoryWriteFileId" class="memory-write-warning">请选择一个 Excel 记忆库文件后再写入。</p>
           </div>
         </el-card>
       </div>
@@ -148,9 +193,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Switch, Document, CopyDocument, Download } from '@element-plus/icons-vue'
+import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
@@ -161,11 +206,29 @@ const targetLang = ref('en')
 const memoryBank = ref('')
 const memoryBanks = ref([])
 const memoryFileId = ref(null)
+const memoryWriteFileId = ref(null)
 const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
 const inputText = ref('')
 const translating = ref(false)
 const result = ref(null)
+const editingResult = ref(false)
+const translatedDraft = ref('')
+const writingMemory = ref(false)
+const writableMemoryFileTypes = ['xlsx', 'xlsm', 'xltx', 'xltm']
+
+const writableMemoryLibraryFiles = computed(() => {
+  return memoryLibraryFiles.value.filter(file => writableMemoryFileTypes.includes(String(file.fileType || '').toLowerCase()))
+})
+const selectedMemoryWriteFile = computed(() => {
+  const currentId = memoryWriteFileId.value
+  if (currentId == null || currentId === '') {
+    return null
+  }
+  return writableMemoryLibraryFiles.value.find(file => String(file.id) === String(currentId)) || null
+})
+const canWriteMemory = computed(() => Boolean(selectedMemoryWriteFile.value))
+const currentTranslatedText = computed(() => editingResult.value ? translatedDraft.value : (result.value?.translated || ''))
 
 onMounted(async () => {
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
@@ -185,6 +248,12 @@ async function loadMemoryLibraryFiles() {
   try {
     const res = await knowledgeAPI.getTree()
     memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
+    if (!memoryWriteFileId.value && memoryFileId.value != null) {
+      const matchedFile = memoryLibraryFiles.value.find(file => String(file.id) === String(memoryFileId.value))
+      if (matchedFile && writableMemoryFileTypes.includes(String(matchedFile.fileType || '').toLowerCase())) {
+        memoryWriteFileId.value = matchedFile.id
+      }
+    }
   } catch (e) {
     memoryLibraryFiles.value = []
   } finally {
@@ -214,6 +283,14 @@ async function translateText() {
       memory_file_id: memoryFileId.value || null
     })
     result.value = res.data
+    translatedDraft.value = res.data.translated || ''
+    editingResult.value = false
+    if (!memoryWriteFileId.value && memoryFileId.value != null) {
+      const matchedFile = writableMemoryLibraryFiles.value.find(file => String(file.id) === String(memoryFileId.value))
+      if (matchedFile) {
+        memoryWriteFileId.value = matchedFile.id
+      }
+    }
     ElMessage.success('翻译完成')
   } catch (e) {
     ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
@@ -222,9 +299,70 @@ async function translateText() {
   }
 }
 
+function startEditResult() {
+  translatedDraft.value = result.value?.translated || ''
+  editingResult.value = true
+}
+
+function saveEditedResult() {
+  const nextText = translatedDraft.value.trim()
+  if (!nextText) {
+    ElMessage.warning('译文内容不能为空')
+    return
+  }
+  result.value = {
+    ...result.value,
+    translated: translatedDraft.value
+  }
+  editingResult.value = false
+  ElMessage.success('译文修改已保存')
+}
+
+function cancelEditResult() {
+  translatedDraft.value = result.value?.translated || ''
+  editingResult.value = false
+}
+
+async function writeToMemoryLibrary() {
+  if (!result.value?.original?.trim()) {
+    ElMessage.warning('当前没有可写入的原文')
+    return
+  }
+  if (!memoryWriteFileId.value) {
+    ElMessage.warning('请先选择记忆库配置文件')
+    return
+  }
+  if (!selectedMemoryWriteFile.value) {
+    ElMessage.warning('请选择可写入的 Excel 记忆库文件')
+    return
+  }
+
+  const translatedText = currentTranslatedText.value.trim()
+  if (!translatedText) {
+    ElMessage.warning('当前没有可写入的译文')
+    return
+  }
+
+  writingMemory.value = true
+  try {
+    await translationAPI.writeMemoryFileEntry({
+      memory_file_id: memoryWriteFileId.value,
+      source_text: result.value.original,
+      translated_text: currentTranslatedText.value,
+      source_lang: sourceLang.value,
+      target_lang: targetLang.value
+    })
+    ElMessage.success('已写入选中的记忆库 Excel 文件')
+  } catch (e) {
+    ElMessage.error('写入记忆库失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    writingMemory.value = false
+  }
+}
+
 function copyResult() {
-  if (result.value?.translated) {
-    navigator.clipboard.writeText(result.value.translated).then(() => {
+  if (currentTranslatedText.value) {
+    navigator.clipboard.writeText(currentTranslatedText.value).then(() => {
       ElMessage.success('已复制到剪贴板')
     }).catch(() => {
       ElMessage.error('复制失败')
@@ -233,8 +371,8 @@ function copyResult() {
 }
 
 function downloadResult() {
-  if (result.value?.translated) {
-    const blob = new Blob([result.value.translated], { type: 'text/plain;charset=utf-8' })
+  if (currentTranslatedText.value) {
+    const blob = new Blob([currentTranslatedText.value], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -375,6 +513,12 @@ function downloadResult() {
   overflow-y: auto;
 }
 
+.translated-editor :deep(.el-textarea__inner) {
+  min-height: 220px;
+  border-radius: 8px;
+  line-height: 1.8;
+}
+
 .original-text {
   color: #64748b;
 }
@@ -383,10 +527,41 @@ function downloadResult() {
   color: #1f2937;
 }
 
+.memory-write-section {
+  margin-top: 16px;
+}
+
+.memory-write-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #374151;
+  font-weight: 500;
+}
+
+.memory-write-select {
+  width: 100%;
+}
+
 .result-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 16px;
+}
+
+.memory-write-hint {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #64748b;
+}
+
+.memory-write-warning {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #d97706;
 }
 
 .memory-library-hint {

@@ -42,6 +42,14 @@ class MemoryEntryOut(BaseModel):
         from_attributes = True
 
 
+class MemoryFileEntryRequest(BaseModel):
+    memory_file_id: int
+    source_text: str
+    translated_text: str
+    source_lang: str = "zh"
+    target_lang: str = "en"
+
+
 class TranslationDocOut(BaseModel):
     id: int
     filename: str

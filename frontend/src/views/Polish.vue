@@ -774,15 +774,184 @@ function mergeDiffSegments(segments) {
   return merged
 }
 
-function renderDiffHtml(sourceText, targetText, mode) {
-  const diff = buildDiffSegments(sourceText, targetText)
-  const segments = mode === 'original' ? diff.left : diff.right
+const orderedListLeadPattern = /^(首先|其次|再次|然后|最后|一是|二是|三是|四是|五是|其一|其二|其三|其四|其五|第[一二三四五六七八九十]+|[（(]?\d+[)）][、.]?)/
+const orderedSplitPattern = /(首先|其次|再次|然后|最后|一是|二是|三是|四是|五是|其一|其二|其三|其四|其五|第[一二三四五六七八九十]+|[（(]?\d+[)）][、.]?)/g
+
+function collectRangeItems(text, regex) {
+  const items = []
+  let match = regex.exec(text)
+  while (match) {
+    const value = match[0].trim()
+    if (value) {
+      items.push({
+        start: Array.from(text.slice(0, match.index)).length,
+        end: Array.from(text.slice(0, match.index + match[0].length)).length,
+        text: value
+      })
+    }
+    match = regex.exec(text)
+  }
+  return items
+}
+
+function collectSequentialMarkerItems(text) {
+  const raw = String(text || '')
+  const matches = [...raw.matchAll(orderedSplitPattern)]
+  if (matches.length < 2) {
+    return []
+  }
+
+  return matches.map((match, index) => {
+    const start = Array.from(raw.slice(0, match.index)).length
+    const nextIndex = index + 1 < matches.length ? matches[index + 1].index : raw.length
+    const chunk = raw.slice(match.index, nextIndex).trim()
+    return {
+      start,
+      end: start + Array.from(chunk).length,
+      text: chunk
+    }
+  }).filter(item => item.text.length >= 6)
+}
+
+function splitCommaClauses(text) {
+  return String(text || '')
+    .split(/[，,](?=(?:首先|其次|再次|然后|最后|一是|二是|三是|四是|五是|其一|其二|其三|其四|其五))/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function detectLongParagraphList(text) {
+  const raw = String(text || '')
+  const compact = raw.trim()
+  if (!compact || compact.length < 30 || /\n/.test(compact)) {
+    return null
+  }
+
+  const sequentialItems = collectSequentialMarkerItems(raw)
+  if (sequentialItems.length >= 2 && sequentialItems.length <= 8) {
+    return { type: 'ol', items: sequentialItems }
+  }
+
+  const commaOrderedParts = splitCommaClauses(raw)
+  if (commaOrderedParts.length >= 2 && commaOrderedParts.length <= 8) {
+    return {
+      type: 'ol',
+      items: (() => {
+        const items = []
+        let searchStart = 0
+        for (const part of commaOrderedParts) {
+          const found = raw.indexOf(part, searchStart)
+          const start = found === -1 ? searchStart : Array.from(raw.slice(0, found)).length
+          const end = start + Array.from(part).length
+          items.push({ start, end, text: part })
+          searchStart = found === -1 ? searchStart + part.length : found + part.length
+        }
+        return items
+      })()
+    }
+  }
+
+  const semicolonItems = collectRangeItems(raw, /[^；;]+[；;]?\s*/g)
+  if (
+    semicolonItems.length >= 2 &&
+    semicolonItems.length <= 8 &&
+    semicolonItems.every(item => item.text.length >= 6 && item.text.length <= 120)
+  ) {
+    return { type: 'ul', items: semicolonItems }
+  }
+
+  const sentenceItems = collectRangeItems(raw, /[^。！？!?]+[。！？!?]?\s*/g)
+  if (sentenceItems.length >= 2 && sentenceItems.length <= 6) {
+    const orderedCount = sentenceItems.filter(item => orderedListLeadPattern.test(item.text)).length
+    if (orderedCount >= 1) {
+      return { type: 'ol', items: sentenceItems }
+    }
+    if (sentenceItems.every(item => item.text.length >= 8 && item.text.length <= 80)) {
+      return { type: 'ul', items: sentenceItems }
+    }
+  }
+
+  const commaItems = collectRangeItems(raw, /[^，,]+[，,]?\s*/g)
+  if (
+    compact.length >= 40 &&
+    commaItems.length >= 3 &&
+    commaItems.length <= 6 &&
+    commaItems.every(item => item.text.length >= 6 && item.text.length <= 40)
+  ) {
+    return { type: 'ul', items: commaItems }
+  }
+
+  return null
+}
+
+function sliceSegmentsByRange(segments, start, end) {
+  const result = []
+  let cursor = 0
+
+  for (const segment of segments) {
+    const chars = Array.from(segment.text)
+    const nextCursor = cursor + chars.length
+    if (nextCursor <= start) {
+      cursor = nextCursor
+      continue
+    }
+    if (cursor >= end) {
+      break
+    }
+
+    const from = Math.max(0, start - cursor)
+    const to = Math.min(chars.length, end - cursor)
+    const textPart = chars.slice(from, to).join('')
+    if (textPart) {
+      result.push({ text: textPart, changed: segment.changed })
+    }
+    cursor = nextCursor
+  }
+
+  return mergeDiffSegments(result)
+}
+
+function renderSegmentsHtml(segments) {
   return mergeDiffSegments(segments)
     .map(segment => {
       const content = escapeHtml(segment.text)
       return segment.changed ? `<span class="diff-highlight">${content}</span>` : content
     })
     .join('')
+}
+
+function renderDiffHtml(sourceText, targetText, mode) {
+  const displayText = mode === 'original' ? sourceText : targetText
+  const otherText = mode === 'original' ? targetText : sourceText
+  const structuredList = detectLongParagraphList(displayText)
+
+  if (structuredList) {
+    const tagName = structuredList.type
+    const itemsHtml = structuredList.items.map((item, idx) => {
+      const subSource = mode === 'original' ? item.text : findListItemInOther(item.text, idx, otherText)
+      const subTarget = mode === 'original' ? findListItemInOther(item.text, idx, otherText) : item.text
+      const diff = buildDiffSegments(subSource, subTarget)
+      const segments = mode === 'original' ? diff.left : diff.right
+      return `<li>${renderSegmentsHtml(segments).trim()}</li>`
+    }).join('')
+    return `<${tagName} class="result-auto-list">${itemsHtml}</${tagName}>`
+  }
+
+  const diff = buildDiffSegments(sourceText, targetText)
+  const segments = mode === 'original' ? diff.left : diff.right
+  return `<div class="result-text-block">${renderSegmentsHtml(segments)}</div>`
+}
+
+function findListItemInOther(itemText, index, otherText) {
+  const otherList = detectLongParagraphList(otherText)
+  if (otherList && otherList.items.length > index) {
+    return otherList.items[index].text
+  }
+  const idx = otherText.indexOf(itemText)
+  if (idx !== -1) {
+    return otherText.slice(idx, idx + itemText.length)
+  }
+  return itemText
 }
 
 const highlightedOriginalHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'original'))

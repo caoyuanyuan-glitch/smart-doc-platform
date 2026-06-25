@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from datetime import datetime
 import os
 import io
 import csv
@@ -14,7 +15,14 @@ import lxml.etree as ET_LXML
 import re
 
 from app.database import get_db, SessionLocal
-from app.schemas.translation import TranslationRequest, TranslationResponse, MemoryEntry, MemoryEntryOut, TranslationDocOut
+from app.schemas.translation import (
+    TranslationRequest,
+    TranslationResponse,
+    MemoryEntry,
+    MemoryEntryOut,
+    MemoryFileEntryRequest,
+    TranslationDocOut,
+)
 from app.crud.document import get_document, get_documents
 from app.crud.review import get_reviews
 from app.crud.memory import (
@@ -31,6 +39,8 @@ router = APIRouter()
 
 UPLOAD_DIR = "./static/uploads/translation"
 TRANSLATION_OUTPUT_DIR = "./static/translations"
+UNSUPPORTED_TRANSLATION_EXTENSIONS = {".dita", ".zip"}
+WRITABLE_MEMORY_FILE_TYPES = {"xlsx", "xlsm", "xltx", "xltm"}
 
 _translate_tasks = {}
 _translate_tasks_lock = threading.Lock()
@@ -83,8 +93,8 @@ def _normalize_memory_entry(row: dict):
         return None
 
     normalized_row = {_normalize_header_key(key): value for key, value in row.items()}
-    source_keys = ["source", "sourcetext", "src", "原文", "源文", "text"]
-    target_keys = ["target", "translatedtext", "translation", "译文", "targettext", "result"]
+    source_keys = ["source", "sourcetext", "src", "原文", "源文", "text", "zh", "zh-cn", "zhcn", "cn", "中文", "chinese"]
+    target_keys = ["target", "translatedtext", "translation", "译文", "targettext", "result", "en", "en-us", "enus", "英文", "english"]
     source_lang_keys = ["sourcelang", "srclang", "源语言"]
     target_lang_keys = ["targetlang", "tgtlang", "目标语言"]
 
@@ -199,6 +209,49 @@ def _get_cached_memory_file_entries(memory_file: KnowledgeFile):
     with _memory_file_cache_lock:
         _memory_file_cache[cache_key] = entries
     return entries
+
+
+def _invalidate_memory_file_cache(memory_file_id: int):
+    with _memory_file_cache_lock:
+        stale_keys = [key for key in _memory_file_cache if key[0] == memory_file_id]
+        for key in stale_keys:
+            _memory_file_cache.pop(key, None)
+
+
+def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, translated_text: str,
+                                  source_lang: str, target_lang: str):
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(memory_file.file_path)
+    worksheet = workbook.active
+
+    headers = []
+    if worksheet.max_row >= 1 and worksheet.max_column >= 1:
+        headers = [worksheet.cell(row=1, column=index).value for index in range(1, worksheet.max_column + 1)]
+        headers = [str(header).strip() if header is not None else "" for header in headers]
+
+    if not any(headers):
+        headers = ["source_text", "translated_text"]
+        for index, header in enumerate(headers, start=1):
+            worksheet.cell(row=1, column=index).value = header
+
+    source_keywords = ["source", "source_text", "sourcetext", "src", "原文", "源文", "text"]
+    translated_keywords = ["target", "translated_text", "translatedtext", "translation", "译文", "targettext", "result"]
+    normalized_headers = {
+        _normalize_header_key(header): index
+        for index, header in enumerate(headers, start=1)
+        if _normalize_header_key(header)
+    }
+
+    source_column = 1
+    translated_column = 2
+
+    next_row = worksheet.max_row + 1 if worksheet.max_row else 2
+    worksheet.cell(row=next_row, column=source_column).value = source_text
+    worksheet.cell(row=next_row, column=translated_column).value = translated_text
+
+    workbook.save(memory_file.file_path)
+    workbook.close()
 
 
 def _search_memory_file(db: Session, memory_file_id: int, source_text: str, source_lang: str, target_lang: str,
@@ -1166,6 +1219,8 @@ async def translate_file(
         raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
 
     ext = os.path.splitext(filename)[1].lower()
+    if ext in UNSUPPORTED_TRANSLATION_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="当前文件格式暂不支持文档翻译，请改用 Word、Excel、PPT、PDF、Markdown、TXT 或 XLF 文件")
 
     doc = TranslationDoc(
         filename=filename,
@@ -1313,6 +1368,51 @@ async def add_memory_entry(entry: MemoryEntry, db: Session = Depends(get_db)):
         target_lang=entry.target_lang,
         tags=entry.tags
     )
+
+
+@router.post("/memory/file-entry")
+async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Depends(get_db)):
+    memory_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == entry.memory_file_id).first()
+    if not memory_file:
+        raise HTTPException(status_code=404, detail="记忆库文件不存在")
+
+    if not os.path.exists(memory_file.file_path):
+        raise HTTPException(status_code=404, detail="记忆库源文件不存在")
+
+    file_type = str(memory_file.file_type or "").lower()
+    if file_type not in WRITABLE_MEMORY_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="当前仅支持写入 Excel 记忆库文件（xlsx、xlsm、xltx、xltm）")
+
+    source_text = (entry.source_text or "").strip()
+    translated_text = (entry.translated_text or "").strip()
+    if not source_text or not translated_text:
+        raise HTTPException(status_code=400, detail="原文和译文不能为空")
+
+    try:
+        _append_memory_entry_to_excel(
+            memory_file=memory_file,
+            source_text=source_text,
+            translated_text=translated_text,
+            source_lang=entry.source_lang,
+            target_lang=entry.target_lang,
+        )
+        memory_file.file_size = os.path.getsize(memory_file.file_path)
+        memory_file.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(memory_file)
+        _invalidate_memory_file_cache(memory_file.id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"写入记忆库文件失败: {str(exc)}")
+
+    return {
+        "message": "已写入记忆库文件",
+        "memory_file_id": memory_file.id,
+        "filename": memory_file.filename,
+        "file_type": file_type,
+    }
 
 
 @router.delete("/memory/{entry_id}")

@@ -1,12 +1,8 @@
 from pydantic import BaseModel
 from datetime import datetime
 
-class CompareConfig(BaseModel):
-    threshold: float = 0.8
-    tolerance: float = 0.01
-
 class CompareTaskCreate(BaseModel):
-    config: CompareConfig | None = None
+    pass
 
 class CompareTask(BaseModel):
     id: int
@@ -21,7 +17,7 @@ class CompareTask(BaseModel):
     created_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class CompareDiff(BaseModel):
     id: int
@@ -36,7 +32,7 @@ class CompareDiff(BaseModel):
     chapter: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class CompareResult(BaseModel):
     task_id: int
