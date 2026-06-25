@@ -49,6 +49,10 @@ class AIClient:
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
 
+        self.proxy_api_key = os.getenv("OPENAI_API_KEY")
+        self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
+        self.proxy_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
         timeout = httpx.Timeout(30.0, read=180.0)
 
         self.deepseek_client = OpenAI(
@@ -74,12 +78,12 @@ class AIClient:
 
         # Proxy 回退客户端（使用 OpenAI 兼容接口）
         self.proxy_client = OpenAI(
-            api_key=self.dashscope_api_key or os.getenv("OPENAI_API_KEY"),
-            base_url=self.anthropic_base_url,
+            api_key=self.proxy_api_key,
+            base_url=self.proxy_base_url,
             timeout=timeout,
-        )
+        ) if _is_valid_key(self.proxy_api_key) and self.proxy_base_url else None
         if self.proxy_client:
-            print(f"[AI] Proxy 回退已配置, base_url={self.anthropic_base_url}, model={self.anthropic_model}")
+            print(f"[AI] Proxy 回退已配置, base_url={self.proxy_base_url}, model={self.proxy_model}")
 
     @property
     def has_any_client(self):

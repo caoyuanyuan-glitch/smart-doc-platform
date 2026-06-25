@@ -57,6 +57,22 @@ def authenticate_user(db: Session, username: str, password: str):
     return user
 
 
+def apply_user_filters(query, search: str = None, role: str = None, status: str = None):
+    if search:
+        keyword = f"%{search}%"
+        query = query.filter(
+            or_(
+                User.username.ilike(keyword),
+                User.display_name.ilike(keyword),
+            )
+        )
+    if role:
+        query = query.filter(User.role == role)
+    if status:
+        query = query.filter(User.status == status)
+    return query
+
+
 def get_users(
     db: Session,
     skip: int = 0,
@@ -65,24 +81,19 @@ def get_users(
     role: str = None,
     status: str = None,
 ):
-    q = db.query(User)
-    if search:
-        q = q.filter(User.username.ilike(f"%{search}%"))
-    if role:
-        q = q.filter(User.role == role)
-    if status:
-        q = q.filter(User.status == status)
+    q = apply_user_filters(db.query(User), search=search, role=role, status=status)
     return q.order_by(User.id).offset(skip).limit(limit).all()
 
 
 def count_users(db: Session, search: str = None, role: str = None, status: str = None):
-    q = db.query(User)
-    if search:
-        q = q.filter(User.username.ilike(f"%{search}%"))
-    if role:
-        q = q.filter(User.role == role)
-    if status:
-        q = q.filter(User.status == status)
+    q = apply_user_filters(db.query(User), search=search, role=role, status=status)
+    return q.count()
+
+
+def count_admin_users(db: Session, active_only: bool = False):
+    q = db.query(User).filter(User.role == "admin")
+    if active_only:
+        q = q.filter(User.status == "active")
     return q.count()
 
 

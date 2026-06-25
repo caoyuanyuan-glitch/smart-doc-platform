@@ -2,7 +2,7 @@
   <div class="app-container">
     <router-view v-if="$route.path === '/login'" />
     <template v-else>
-      <header class="header">
+      <header class="header" :class="{ collapsed: isCollapsed }">
         <div class="header-left">
           <span class="logo">智能技术文档平台</span>
         </div>
@@ -15,7 +15,7 @@
         </div>
       </header>
 
-      <aside class="sidebar">
+      <aside class="sidebar" :class="{ collapsed: isCollapsed }">
         <div class="collapse-btn" @click="toggleCollapse" v-if="!isCollapsed">
           <el-icon><Fold /></el-icon>
         </div>
@@ -128,7 +128,7 @@
         </div>
       </aside>
 
-      <main class="main-content">
+      <main class="main-content" :class="{ collapsed: isCollapsed }">
         <router-view />
       </main>
     </template>
@@ -455,13 +455,11 @@ body {
   transition: margin-left 0.3s ease;
 }
 
-.sidebar.collapsed ~ .main-content,
-.sidebar.collapsed + .main-content,
-.sidebar.collapsed + * + .main-content {
+.main-content.collapsed {
   margin-left: 64px;
 }
 
-.sidebar.collapsed + .header {
+.header.collapsed {
   left: 64px;
 }
 

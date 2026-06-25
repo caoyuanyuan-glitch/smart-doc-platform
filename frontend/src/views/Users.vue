@@ -6,16 +6,25 @@
 
     <div class="panel">
       <div class="toolbar">
-        <el-input v-model="search" placeholder="按用户名搜索" clearable style="width:200px" @keyup.enter="loadUsers" />
-        <el-select v-model="roleFilter" placeholder="角色筛选" clearable style="width:140px" @change="loadUsers">
+        <el-input
+          v-model="search"
+          placeholder="按用户名或真实姓名搜索"
+          clearable
+          style="width:240px"
+          @clear="handleFilterChange"
+          @keyup.enter="handleFilterChange"
+        />
+        <el-select v-model="roleFilter" placeholder="角色筛选" clearable style="width:140px" @change="handleFilterChange">
           <el-option label="管理员" value="admin" />
           <el-option label="技术作者" value="writer" />
           <el-option label="审核员" value="reviewer" />
         </el-select>
-        <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="width:120px" @change="loadUsers">
+        <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="width:120px" @change="handleFilterChange">
           <el-option label="正常" value="active" />
           <el-option label="禁用" value="disabled" />
         </el-select>
+        <el-button @click="handleFilterChange">查询</el-button>
+        <el-button @click="resetFilters">重置</el-button>
         <el-button type="primary" @click="showAddDialog = true">添加用户</el-button>
       </div>
 
@@ -49,9 +58,10 @@
             <el-button
               size="small"
               :type="scope.row.status === 'active' ? 'warning' : 'success'"
+              :disabled="isCurrentUser(scope.row)"
               @click="toggleStatus(scope.row)"
             >
-              {{ scope.row.status === 'active' ? '禁用' : '启用' }}
+              {{ isCurrentUser(scope.row) ? '当前账号' : scope.row.status === 'active' ? '禁用' : '启用' }}
             </el-button>
           </template>
         </el-table-column>
@@ -74,7 +84,7 @@
           <el-input v-model="addForm.username" placeholder="3-20位，字母/数字/下划线" />
         </el-form-item>
         <el-form-item label="密码" prop="password">
-          <el-input v-model="addForm.password" type="password" show-password placeholder="8-32位，含大小写+数字" />
+          <el-input v-model="addForm.password" type="password" show-password placeholder="8-32位，不能含空格" />
         </el-form-item>
         <el-form-item label="真实姓名" prop="display_name">
           <el-input v-model="addForm.display_name" placeholder="2-20字符" />
@@ -108,18 +118,26 @@
           <el-input v-model="editForm.display_name" placeholder="2-20字符" />
         </el-form-item>
         <el-form-item label="角色" prop="role">
-          <el-select v-model="editForm.role" style="width:100%">
+          <el-select v-model="editForm.role" style="width:100%" :disabled="isEditingCurrentUser">
             <el-option label="管理员" value="admin" />
             <el-option label="技术作者" value="writer" />
             <el-option label="审核员" value="reviewer" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态" prop="status">
-          <el-radio-group v-model="editForm.status">
+          <el-radio-group v-model="editForm.status" :disabled="isEditingCurrentUser">
             <el-radio label="active">正常</el-radio>
             <el-radio label="disabled">禁用</el-radio>
           </el-radio-group>
         </el-form-item>
+        <el-alert
+          v-if="isEditingCurrentUser"
+          title="当前登录管理员可修改真实姓名，角色和状态保持受保护状态。"
+          type="info"
+          :closable="false"
+          show-icon
+          class="self-protection-alert"
+        />
         <el-form-item label="密码重置">
           <el-popconfirm
             title="确定重置该用户密码？"
@@ -141,9 +159,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { userAPI } from '@/api'
+import { useUserStore } from '@/store/user'
+
+const userStore = useUserStore()
 
 const users = ref([])
 const total = ref(0)
@@ -162,6 +183,7 @@ const addFormRef = ref(null)
 const editFormRef = ref(null)
 const resetPwdResult = ref('')
 const editingUserId = ref(null)
+const isEditingCurrentUser = computed(() => editingUserId.value === userStore.user?.id)
 
 const addForm = reactive({
   username: '',
@@ -185,7 +207,7 @@ const addRules = {
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
-    { pattern: /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,32}$/, message: '8-32位，含大小写+数字', trigger: 'blur' },
+    { pattern: /^\S{8,32}$/, message: '8-32位，不能含空格', trigger: 'blur' },
   ],
   display_name: [
     { required: true, message: '请输入真实姓名', trigger: 'blur' },
@@ -221,6 +243,22 @@ async function loadUsers() {
   }
 }
 
+function isCurrentUser(row) {
+  return row.id === userStore.user?.id
+}
+
+function handleFilterChange() {
+  page.value = 1
+  loadUsers()
+}
+
+function resetFilters() {
+  search.value = ''
+  roleFilter.value = ''
+  statusFilter.value = ''
+  handleFilterChange()
+}
+
 function resetAddForm() {
   Object.assign(addForm, { username: '', password: '', display_name: '', role: 'writer', status: 'active' })
   addFormRef.value?.resetFields()
@@ -239,7 +277,7 @@ async function handleAddUser() {
     await userAPI.create({ ...addForm })
     ElMessage.success('用户已创建')
     showAddDialog.value = false
-    loadUsers()
+    await loadUsers()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '创建失败')
   } finally {
@@ -269,9 +307,15 @@ async function handleEditUser() {
       role: editForm.role,
       status: editForm.status,
     })
+    if (isEditingCurrentUser.value) {
+      userStore.setUser({
+        ...userStore.user,
+        display_name: editForm.display_name,
+      })
+    }
     ElMessage.success('用户已更新')
     showEditDialog.value = false
-    loadUsers()
+    await loadUsers()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '更新失败')
   } finally {
@@ -280,40 +324,29 @@ async function handleEditUser() {
 }
 
 async function toggleStatus(row) {
+  if (isCurrentUser(row)) {
+    ElMessage.warning('当前登录账号保持受保护状态')
+    return
+  }
   const newStatus = row.status === 'active' ? 'disabled' : 'active'
   try {
     await userAPI.updateStatus(row.id, newStatus)
     ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
-    loadUsers()
+    await loadUsers()
   } catch (e) {
-    ElMessage.error('操作失败')
+    ElMessage.error(e.response?.data?.detail || '操作失败')
   }
 }
 
 async function handleResetPassword() {
   try {
-    const newPwd = generateRandomPassword()
+    const newPwd = 'admin123'
     await userAPI.resetPassword(editingUserId.value, newPwd)
     resetPwdResult.value = '新密码: ' + newPwd
     ElMessage.success('密码已重置')
   } catch (e) {
     ElMessage.error('重置失败')
   }
-}
-
-function generateRandomPassword() {
-  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
-  const lower = 'abcdefghijkmnpqrstuvwxyz'
-  const digits = '23456789'
-  const all = upper + lower + digits
-  let pwd = ''
-  pwd += upper[Math.floor(Math.random() * upper.length)]
-  pwd += lower[Math.floor(Math.random() * lower.length)]
-  pwd += digits[Math.floor(Math.random() * digits.length)]
-  for (let i = 0; i < 7; i++) {
-    pwd += all[Math.floor(Math.random() * all.length)]
-  }
-  return pwd.split('').sort(() => Math.random() - 0.5).join('')
 }
 
 onMounted(() => loadUsers())
@@ -351,5 +384,9 @@ onMounted(() => loadUsers())
   font-size: 13px;
   margin-left: 12px;
   font-family: monospace;
+}
+
+.self-protection-alert {
+  margin-bottom: 18px;
 }
 </style>
