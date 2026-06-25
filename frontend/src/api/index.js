@@ -269,8 +269,7 @@ export const translationAPI = {
   deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
   getDocs: (skip = 0, limit = 100) => instance.get('/translation/docs', { params: { skip, limit } }),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
-  deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
-  getStats: () => instance.get('/translation/stats')
+  deleteDoc: (id) => instance.delete(`/translation/docs/${id}`)
 }
 
 export const knowledgeAPI = {

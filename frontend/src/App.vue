@@ -111,7 +111,6 @@
                 <el-icon><Switch /></el-icon>
                 <span>AI翻译</span>
               </template>
-              <el-menu-item index="/translate/stats">统计面板</el-menu-item>
               <el-menu-item index="/translate">文本翻译</el-menu-item>
               <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
             </el-sub-menu>
