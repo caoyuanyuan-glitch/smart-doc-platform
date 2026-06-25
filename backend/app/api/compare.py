@@ -9,15 +9,22 @@ from app.database import get_db
 router = APIRouter()
 
 UPLOAD_DIR = "./static/uploads"
+PREVIEW_DIR = "./static/preview"
 
 _MEMORY_TASKS = {}
 _MEMORY_DIFFS = {}
 _MEMORY_NEXT_ID = [1000]
+_MEMORY_FILES = {}  # task_id -> {file_a_path, file_b_path, file_a_name, file_b_name}
 
 
 def _ensure_upload_dir():
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def _ensure_preview_dir():
+    if not os.path.exists(PREVIEW_DIR):
+        os.makedirs(PREVIEW_DIR, exist_ok=True)
 
 
 def _read_upload_as_text(path: str) -> str:
@@ -409,7 +416,7 @@ def _simple_compare(text_a, text_b):
         "delete": len([d for d in diffs if d["diff_type"] == "delete"]),
         "modify": len([d for d in diffs if d["diff_type"] == "modify"]),
     }
-    verdict = "✅ 自动通过（≥80%）" if similarity >= 0.8 else ("⚠️ 建议复核（50% ~ 80%）" if similarity >= 0.5 else "🟥 强制人工复核（<50%，不可互换）")
+    verdict = "✅ 自动通过（≥80%）" if similarity >= 0.8 else ("⚠️ 建议复核（60% ~ 80%）" if similarity >= 0.6 else "🟥 强制人工复核（<60%，不可互换）")
     return {
         "similarity": similarity,
         "verdict": verdict,
@@ -587,8 +594,8 @@ async def create_compare(
                     "similarity": dita_full.get("overall_jaccard", 0.0),
                     "verdict": (
                         "✅ 自动通过（≥80%）" if dita_full.get("overall_jaccard", 0.0) >= 0.80
-                        else "⚠️ 建议复核（50% ~ 80%）" if dita_full.get("overall_jaccard", 0.0) >= 0.50
-                        else "🟥 强制人工复核（<50%，不可互换）"
+                        else "⚠️ 建议复核（60% ~ 80%）" if dita_full.get("overall_jaccard", 0.0) >= 0.60
+                        else "🟥 强制人工复核（<60%，不可互换）"
                     ),
                     "total_diffs": sum(tr.get("n_diffs", 0) for tr in dita_full.get("topics", [])),
                     "diff_stats": {
@@ -763,6 +770,32 @@ async def create_compare(
             }
             _MEMORY_DIFFS[task_id] = result["diffs"][:200]
 
+        # 保存文件用于预览（PDF文件保留，其他格式可删除）
+        _ensure_preview_dir()
+        preview_a_path = ""
+        preview_b_path = ""
+        try:
+            ext_a = os.path.splitext(file_a.filename)[1].lower()
+            ext_b = os.path.splitext(file_b.filename)[1].lower()
+            if ext_a == ".pdf":
+                preview_a_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_a{ext_a}")
+                import shutil
+                shutil.copy2(file_a_path, preview_a_path)
+            if ext_b == ".pdf":
+                preview_b_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_b{ext_b}")
+                import shutil
+                shutil.copy2(file_b_path, preview_b_path)
+        except Exception as e:
+            print(f"[Preview] Save preview files failed: {e}")
+
+        # 保存文件信息到内存
+        _MEMORY_FILES[task_id] = {
+            "file_a_path": preview_a_path,
+            "file_b_path": preview_b_path,
+            "file_a_name": file_a.filename,
+            "file_b_name": file_b.filename,
+        }
+
         try:
             os.remove(file_a_path)
             os.remove(file_b_path)
@@ -785,6 +818,7 @@ async def create_compare(
             "is_doc": is_doc,
             "dita_full": dita_full,
             "doc_full": doc_full,
+            "has_preview": bool(preview_a_path or preview_b_path),
         }
     except Exception as exc:
         try:
@@ -959,6 +993,15 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
     except Exception:
         dita_full = None
 
+    # 判断数据类型：通用文档有 results 字段，DITA 有 topics 字段
+    is_dita_data = dita_full and isinstance(dita_full, dict) and "topics" in dita_full
+    is_doc_data = dita_full and isinstance(dita_full, dict) and "results" in dita_full
+    doc_full = dita_full if is_doc_data else None
+
+    # 如果 dita_full 里存的是 doc 数据，转出来
+    if is_doc_data:
+        dita_full = None
+
     return {
         "task_id": task_obj.get("id") if isinstance(task_obj, dict) else task_id,
         "comparison_id": task_obj.get("id") if isinstance(task_obj, dict) else task_id,
@@ -978,7 +1021,7 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
         "only_a": only_a,
         "only_b": only_b,
         "dita_full": dita_full,
-        "doc_full": dita_full,  # 复用字段，doc_full 也存这里
+        "doc_full": doc_full,  # 通用文档数据
     }
 
 
@@ -1036,6 +1079,73 @@ async def generate_report(task_id: int, format: str = "html", db: Session = Depe
     if is_doc_data and not doc_full:
         doc_full = dita_full
         dita_full = None
+
+    # 如果 dita_full 和 doc_full 都为空，尝试从 diffs 构建 doc_full（兼容旧任务）
+    if not is_dita_data and not is_doc_data and diffs:
+        # 从 diffs 数据构建章节级结果
+        chapters_map = {}
+        for d in diffs:
+            chapter = d.get("chapter", "") or "全文"
+            if chapter not in chapters_map:
+                chapters_map[chapter] = {
+                    "heading": chapter,
+                    "content_a": "",
+                    "content_b": "",
+                    "diffs": [],
+                    "only_a": [],
+                    "only_b": [],
+                    "status": "部分相似",
+                    "similarity": 1.0,
+                }
+            chapters_map[chapter]["diffs"].append({
+                "a": d.get("text_a", ""),
+                "b": d.get("text_b", ""),
+                "score": d.get("similarity", 0.0),
+                "type": d.get("diff_type", "fuzzy"),
+            })
+            if d.get("text_a") and not d.get("text_b"):
+                chapters_map[chapter]["only_a"].append(d.get("text_a", ""))
+            elif d.get("text_b") and not d.get("text_a"):
+                chapters_map[chapter]["only_b"].append(d.get("text_b", ""))
+
+        # 计算每章的相似度
+        for ch_data in chapters_map.values():
+            total = len(ch_data["diffs"])
+            if total > 0:
+                scores = [d["score"] for d in ch_data["diffs"]]
+                ch_data["similarity"] = sum(scores) / total
+                if ch_data["similarity"] >= 0.99:
+                    ch_data["status"] = "完全一致"
+                elif ch_data["similarity"] >= 0.95:
+                    ch_data["status"] = "高度相似"
+                elif ch_data["similarity"] >= 0.70:
+                    ch_data["status"] = "部分相似"
+                else:
+                    ch_data["status"] = "差异较大"
+
+        # 统计
+        results = list(chapters_map.values())
+        n_full = sum(1 for r in results if r["status"] == "完全一致")
+        n_high = sum(1 for r in results if r["status"] == "高度相似")
+        n_partial = sum(1 for r in results if r["status"] == "部分相似")
+        n_low = sum(1 for r in results if r["status"] == "差异较大")
+        n_only_a = sum(len(r["only_a"]) for r in results)
+        n_only_b = sum(len(r["only_b"]) for r in results)
+
+        doc_full = {
+            "results": results,
+            "stats": {
+                "n_full": n_full,
+                "n_high": n_high,
+                "n_partial": n_partial,
+                "n_low": n_low,
+                "n_only_a": n_only_a,
+                "n_only_b": n_only_b,
+                "n_matched": len(results),
+                "overall_sim": similarity,
+            }
+        }
+        is_doc_data = True
 
     # 优先 DITA 报告
     if is_dita_data and format == "html":
@@ -1160,3 +1270,129 @@ body {{ font-family: Arial, sans-serif; margin: 20px; }}
                 "",
             ]
         return {"content": "\n".join(md_lines), "format": "md"}
+
+
+@router.get("/config")
+async def get_config(db: Session = Depends(get_db)):
+    try:
+        from app.crud.compare import get_compare_config
+        config = get_compare_config(db)
+        whitelist = []
+        try:
+            if getattr(config, "whitelist", None):
+                whitelist = json.loads(config.whitelist)
+        except Exception:
+            whitelist = []
+        return {
+            "threshold": getattr(config, "threshold", 0.8),
+            "alpha": getattr(config, "alpha", 0.6),
+            "beta": getattr(config, "beta", 0.4),
+            "tolerance": getattr(config, "tolerance", 0.01),
+            "whitelist": whitelist,
+        }
+    except Exception:
+        return {"threshold": 0.8, "alpha": 0.6, "beta": 0.4, "tolerance": 0.01, "whitelist": []}
+
+
+@router.put("/config")
+async def update_config(
+    threshold: float = None, alpha: float = None, beta: float = None,
+    tolerance: float = None, whitelist: list = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        from app.crud.compare import update_compare_config
+        update_compare_config(db, threshold, alpha, beta, tolerance, whitelist)
+    except Exception:
+        pass
+    return {"message": "Config updated successfully"}
+
+
+@router.get("/{task_id}/preview/file")
+async def get_preview_file(task_id: int, side: str = "a", db: Session = Depends(get_db)):
+    """
+    获取对比任务的PDF预览文件
+    side: 'a' 或 'b'
+    """
+    from fastapi.responses import FileResponse
+    import os
+
+    file_path = None
+    file_name = None
+
+    # 先从内存查找
+    if task_id in _MEMORY_FILES:
+        info = _MEMORY_FILES[task_id]
+        if side == "a":
+            file_path = info.get("file_a_path", "")
+            file_name = info.get("file_a_name", "")
+        else:
+            file_path = info.get("file_b_path", "")
+            file_name = info.get("file_b_name", "")
+
+    # 再尝试从数据库查找（如果有）
+    if not file_path:
+        try:
+            from app.crud.compare import get_compare_task
+            task = get_compare_task(db, task_id=task_id)
+            if task:
+                # 尝试从预览目录查找
+                ext = ".pdf"
+                candidate = os.path.join(PREVIEW_DIR, f"task_{task_id}_{side}{ext}")
+                if os.path.exists(candidate):
+                    file_path = candidate
+                    if side == "a":
+                        file_name = getattr(task, "file_a_name", f"document_{side}.pdf")
+                    else:
+                        file_name = getattr(task, "file_b_name", f"document_{side}.pdf")
+        except Exception:
+            pass
+
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=file_name or f"document_{side}.pdf"
+    )
+
+
+@router.get("/{task_id}/preview/info")
+async def get_preview_info(task_id: int, db: Session = Depends(get_db)):
+    """
+    获取预览文件信息（是否有PDF预览、文件名等）
+    """
+    info = {
+        "task_id": task_id,
+        "has_preview_a": False,
+        "has_preview_b": False,
+        "file_a_name": "",
+        "file_b_name": "",
+    }
+
+    # 从内存查找
+    if task_id in _MEMORY_FILES:
+        f = _MEMORY_FILES[task_id]
+        info["file_a_name"] = f.get("file_a_name", "")
+        info["file_b_name"] = f.get("file_b_name", "")
+        info["has_preview_a"] = os.path.exists(f.get("file_a_path", "")) if f.get("file_a_path") else False
+        info["has_preview_b"] = os.path.exists(f.get("file_b_path", "")) if f.get("file_b_path") else False
+
+    # 检查数据库任务
+    if not info["has_preview_a"] and not info["has_preview_b"]:
+        try:
+            from app.crud.compare import get_compare_task
+            task = get_compare_task(db, task_id=task_id)
+            if task:
+                info["file_a_name"] = getattr(task, "file_a_name", "")
+                info["file_b_name"] = getattr(task, "file_b_name", "")
+                # 检查预览目录
+                a_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_a.pdf")
+                b_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_b.pdf")
+                info["has_preview_a"] = os.path.exists(a_path)
+                info["has_preview_b"] = os.path.exists(b_path)
+        except Exception:
+            pass
+
+    return info

@@ -28,82 +28,51 @@
         <div v-if="taskResult && converting === false" class="result-section">
           <div v-if="taskResult.overall === 'passed'" class="result-banner success">
             <el-icon><CircleCheck /></el-icon>
-            <span>转换完成！共生成 {{ conversionDetail.length }} 个 topic，点击下方下载 ZIP</span>
+            <span>转换完成！共生成 {{ conversionDetail.length }} 个{{ resultItemLabel }}，点击下方下载{{ downloadSuffixLabel }}</span>
           </div>
           <div v-else class="result-banner warning">
             <el-icon><Warning /></el-icon>
             <span>转换完成，但存在验证警告</span>
           </div>
 
-          <div v-if="report" class="verify-report">
-            <h4>验证报告</h4>
-            <div v-for="check in report.checks" :key="check.name" class="check-item">
-              <el-icon v-if="check.status === 'passed'" class="check-pass"><CircleCheck /></el-icon>
-              <el-icon v-else class="check-warn"><Warning /></el-icon>
-              <span>{{ check.name }}: {{ check.status === 'passed' ? '通过' : '警告' }}</span>
-              <span v-if="check.detail" class="check-detail">{{ check.detail }}</span>
-            </div>
-            <div v-if="report.active_rules && report.active_rules.length > 0" class="active-rules">
-              <p><el-icon><Check /></el-icon>本次转换应用的规则 ({{ report.active_rules.length }})：</p>
-              <ul>
-                <li v-for="r in report.active_rules" :key="r.rule_number">
-                  <span class="rule-num">{{ r.rule_number }}</span>
-                  <span class="rule-cat">[{{ r.category }}]</span>
-                  {{ r.description }}
-                </li>
-              </ul>
-            </div>
-
-            <div v-if="report.unmapped_sections && report.unmapped_sections.length > 0" class="unmapped-warn">
-              <p><el-icon><Warning /></el-icon>以下章节未映射：</p>
-              <ul>
-                <li v-for="s in report.unmapped_sections" :key="s.title">"{{ s.title }}" — {{ s.reason }}</li>
-              </ul>
-              <p class="suggestion">建议: 在特殊需求中指定这些章节的映射规则后重试</p>
-            </div>
-          </div>
-
           <div v-if="conversionDetail.length > 0" class="detail-table-wrap">
             <h4>转换详情</h4>
-            <el-table :data="conversionDetail" border size="small">
+            <el-table :data="conversionDetail" border size="small" :header-cell-style="tableHeaderStyle">
               <el-table-column prop="source_section" label="源章节" />
               <el-table-column prop="target_type" label="目标类型" width="100" />
-              <el-table-column prop="topic_file" label="topic文件" />
+              <el-table-column prop="topic_file" :label="outputFileLabel" />
               <el-table-column prop="status" label="状态" width="80">
                 <template #default="scope">
                   <el-tag :type="scope.row.status === 'ok' ? 'success' : 'warning'" size="small">
                     {{ scope.row.status === 'ok' ? 'OK' : scope.row.status }}
                   </el-tag>
-                </template>
-              </el-table-column>
+              </template>
+            </el-table-column>
             </el-table>
           </div>
 
           <div class="result-actions">
             <div class="download-row">
               <span class="download-label">文件名：</span>
-              <el-input v-model="customFilename" size="small" style="width: 260px;" placeholder="output.zip" />
-              <span class="download-ext">.zip</span>
+              <el-input v-model="customFilename" size="small" style="width: 260px;" :placeholder="downloadPlaceholder" />
+              <span class="download-ext">{{ downloadExtLabel }}</span>
               <el-button type="primary" @click="downloadZip" :disabled="!customFilename.trim()">
                 <el-icon><Download /></el-icon>
-                下载 ZIP
+                {{ downloadButtonLabel }}
               </el-button>
             </div>
-            <el-button @click="fetchReport">
-              <el-icon><Document /></el-icon>
-              查看验证报告
-            </el-button>
             <el-button @click="resetConvert">
               <el-icon><Refresh /></el-icon>
               重新转换
             </el-button>
           </div>
 
-          <div class="ime-feedback-panel">
+          <div v-if="showImeFeedback" class="ime-feedback-panel">
             <div class="panel-header">
               <span>IME 导入反馈</span>
-              <el-tag size="small" type="warning">导入 IME 平台时遇到问题？</el-tag>
+              <el-tag size="small" type="warning">仅用于 DITA 导入 IME 失败场景</el-tag>
             </div>
+            <div class="form-tip ime-tip">请在 DITA 包导入 IME 平台报错时填写，系统会结合反馈和截图重新生成。</div>
             <el-form-item label="问题描述">
               <el-input
                 v-model="imeFeedback"
@@ -145,27 +114,28 @@
         <el-form label-width="130px" style="max-width: 800px;">
           <el-form-item label="源文件">
             <div class="upload-area" @click="triggerSourceUpload" @dragover.prevent @drop.prevent="onSourceDrop">
-              <input ref="sourceInput" type="file" accept=".md,.markdown,.docx,.doc" style="display:none"
+              <input ref="sourceInput" type="file" accept=".md,.markdown,.csv,.docx,.doc" style="display:none"
                 @change="onSourceChange" />
               <el-icon class="upload-icon"><Upload /></el-icon>
-              <p v-if="!sourceFile">拖拽或点击上传 (.md / .docx, &le; 50MB)</p>
+              <p v-if="!sourceFile">拖拽或点击上传 (.md / .csv / .docx / .doc, &le; 50MB)</p>
               <div v-else class="file-info">
                 <el-icon><Document /></el-icon>
                 <span>{{ sourceFile.name }}</span>
                 <span class="file-size">({{ formatSize(sourceFile.size) }})</span>
-                <el-button size="small" type="danger" link @click.stop="sourceFile = null">移除</el-button>
+                <el-button size="small" type="danger" link @click.stop="clearTaskState(); sourceFile = null">移除</el-button>
               </div>
             </div>
           </el-form-item>
 
           <el-form-item label="目标格式">
             <el-radio-group v-model="targetFormat">
-              <el-radio label="dita">DITA (默认)</el-radio>
-              <el-radio label="markdown">Markdown</el-radio>
+              <el-radio v-for="option in availableTargetFormats" :key="option.value" :label="option.value">
+                {{ option.label }}
+              </el-radio>
             </el-radio-group>
           </el-form-item>
 
-          <el-form-item label="参考模板 (IME DITA包)">
+          <el-form-item v-if="showDitaOptions" label="参考模板 (IME DITA包)">
             <div class="upload-area upload-area-small" @click="triggerTemplateUpload"
               @dragover.prevent @drop.prevent="onTemplateDrop">
               <input ref="templateInput" type="file" accept=".zip" style="display:none"
@@ -191,7 +161,7 @@
             </div>
           </el-form-item>
 
-          <el-form-item label="特殊需求">
+          <el-form-item v-if="showDitaOptions" label="特殊需求">
             <el-input
               v-model="requirements"
               type="textarea"
@@ -199,6 +169,10 @@
               placeholder="例如: product_overview.dita的topic结构直接沿用模板包中的结构"
             />
             <div class="form-tip">支持自然语言描述转换映射规则</div>
+          </el-form-item>
+
+          <el-form-item v-else label="转换说明">
+            <div class="form-tip">`md -> csv` 使用逐行无损映射，可完整回转；`csv -> markdown` 优先按平台导出的无损 CSV 还原原文。</div>
           </el-form-item>
 
           <el-form-item>
@@ -215,7 +189,7 @@
     <div v-if="currentView === 'history'">
       <h2 class="page-title">转换历史</h2>
       <div class="panel">
-        <el-table :data="history" border style="width: 100%" v-loading="historyLoading">
+        <el-table :data="history" border style="width: 100%" v-loading="historyLoading" :header-cell-style="tableHeaderStyle">
           <el-table-column prop="source_filename" label="源文件" min-width="160" />
           <el-table-column prop="target_format" label="目标格式" width="100">
             <template #default="scope">
@@ -232,7 +206,7 @@
               <el-tag :type="statusTagType(scope.row.status)" size="small">{{ statusText(scope.row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="大小" width="100">
+          <el-table-column label="文件大小" width="110">
             <template #default="scope">
               {{ scope.row.output_size ? formatSize(scope.row.output_size) : '—' }}
             </template>
@@ -275,6 +249,61 @@ const templateTree = ref(null)
 const targetFormat = ref('dita')
 const requirements = ref('')
 
+const sourceExt = computed(() => {
+  const name = sourceFile.value?.name || ''
+  const match = name.toLowerCase().match(/\.([^.]+)$/)
+  return match ? `.${match[1]}` : ''
+})
+
+const availableTargetFormats = computed(() => {
+  if (sourceExt.value === '.csv') {
+    return [
+      { value: 'markdown', label: 'Markdown ZIP' },
+    ]
+  }
+  if (sourceExt.value === '.md' || sourceExt.value === '.markdown') {
+    return [
+      { value: 'dita', label: 'DITA (默认)' },
+      { value: 'markdown', label: 'Markdown ZIP' },
+      { value: 'csv', label: 'CSV' },
+    ]
+  }
+  return [
+    { value: 'dita', label: 'DITA (默认)' },
+    { value: 'markdown', label: 'Markdown ZIP' },
+  ]
+})
+
+const showDitaOptions = computed(() => targetFormat.value === 'dita')
+
+const resultItemLabel = computed(() => {
+  if (targetFormat.value === 'csv') return 'CSV 文件'
+  if (targetFormat.value === 'markdown') return 'Markdown 文件'
+  return 'topic'
+})
+
+const outputFileLabel = computed(() => {
+  if (targetFormat.value === 'csv') return 'CSV 文件'
+  if (targetFormat.value === 'markdown') return '输出文件'
+  return 'topic文件'
+})
+
+const isDirectFileDownload = computed(() => {
+  return (sourceExt.value === '.md' || sourceExt.value === '.markdown') && targetFormat.value === 'csv'
+    || sourceExt.value === '.csv' && targetFormat.value === 'markdown'
+})
+const showImeFeedback = computed(() => targetFormat.value === 'dita' && taskResult.value && converting.value === false)
+
+const downloadExtLabel = computed(() => {
+  if (targetFormat.value === 'csv') return '.csv'
+  if (isDirectFileDownload.value) return '.md'
+  return '.zip'
+})
+
+const downloadPlaceholder = computed(() => `output${downloadExtLabel.value}`)
+const downloadButtonLabel = computed(() => (isDirectFileDownload.value ? '下载文件' : '下载 ZIP'))
+const downloadSuffixLabel = computed(() => (isDirectFileDownload.value ? '文件' : ' ZIP'))
+
 const converting = ref(false)
 const taskId = ref('')
 const taskProgress = ref(0)
@@ -298,6 +327,7 @@ const activeStep = computed(() => {
 
 const report = ref(null)
 const conversionDetail = ref([])
+let pollTimer = null
 
 const history = ref([])
 const historyLoading = ref(false)
@@ -306,6 +336,11 @@ const imeFeedback = ref('')
 const imeScreenshot = ref(null)
 const retrying = ref(false)
 const screenshotInput = ref(null)
+const tableHeaderStyle = {
+  background: '#f8fafc',
+  color: '#111827',
+  fontWeight: '600'
+}
 
 const progressColor = computed(() => {
   if (taskResult.value && taskResult.value.overall === 'warning') return '#e6a23c'
@@ -316,26 +351,47 @@ const progressColor = computed(() => {
 function triggerSourceUpload() { sourceInput.value?.click() }
 function triggerTemplateUpload() { templateInput.value?.click() }
 
+function getTemplatePayload() {
+  return showDitaOptions.value ? templateFile.value : null
+}
+
+function getRequirementsPayload() {
+  return showDitaOptions.value ? (requirements.value || null) : null
+}
+
+function clearTaskState() {
+  stopPolling()
+  taskId.value = ''
+  taskProgress.value = 0
+  taskResult.value = null
+  report.value = null
+  conversionDetail.value = []
+  customFilename.value = ''
+  imeFeedback.value = ''
+  imeScreenshot.value = null
+  pipelineSteps.value = pipelineSteps.value.map(s => ({ ...s, status: 'pending' }))
+  converting.value = false
+  retrying.value = false
+}
+
+function setSourceFile(file) {
+  if (!file) return
+  if (file.size > 50 * 1024 * 1024) {
+    ElMessage.warning('文件大小不能超过 50MB')
+    return
+  }
+  clearTaskState()
+  sourceFile.value = file
+}
+
 function onSourceChange(e) {
   const f = e.target.files[0]
-  if (f) {
-    if (f.size > 50 * 1024 * 1024) {
-      ElMessage.warning('文件大小不能超过 50MB')
-      return
-    }
-    sourceFile.value = f
-  }
+  setSourceFile(f)
 }
 
 function onSourceDrop(e) {
   const f = e.dataTransfer.files[0]
-  if (f) {
-    if (f.size > 50 * 1024 * 1024) {
-      ElMessage.warning('文件大小不能超过 50MB')
-      return
-    }
-    sourceFile.value = f
-  }
+  setSourceFile(f)
 }
 
 function onTemplateChange(e) {
@@ -413,8 +469,8 @@ async function startConvert() {
     const resp = await convertAPI.convert(
       sourceFile.value,
       targetFormat.value,
-      templateFile.value,
-      requirements.value || null
+      getTemplatePayload(),
+      getRequirementsPayload()
     )
     taskId.value = resp.data.task_id
     ElMessage.success('转换任务已提交')
@@ -468,14 +524,7 @@ function cancelPolling() {
 
 async function loadTaskResult() {
   try {
-    const [reportResp, detailResp] = await Promise.all([
-      convertAPI.getReport(taskId.value).catch(() => ({ data: null })),
-      convertAPI.getDetail(taskId.value).catch(() => ({ data: null })),
-    ])
-    if (reportResp.data) {
-      report.value = reportResp.data
-      taskResult.value = { overall: reportResp.data.overall }
-    }
+    const detailResp = await convertAPI.getDetail(taskId.value).catch(() => ({ data: null }))
     if (detailResp.data && detailResp.data.detail) {
       conversionDetail.value = detailResp.data.detail
     }
@@ -493,7 +542,9 @@ async function downloadZip() {
     const url = window.URL.createObjectURL(new Blob([resp.data]))
     const a = document.createElement('a')
     a.href = url
-    a.download = `${filename}.zip`
+    const serverFilename = getFilenameFromHeaders(resp.headers)
+    const ext = serverFilename ? serverFilename.replace(/^.*(\.[^.]+)$/, '$1') : downloadExtLabel.value
+    a.download = `${filename}${ext}`
     a.click()
     window.URL.revokeObjectURL(url)
     ElMessage.success('下载已开始')
@@ -508,7 +559,10 @@ async function downloadHistoryZip(row) {
     const url = window.URL.createObjectURL(new Blob([resp.data]))
     const a = document.createElement('a')
     a.href = url
-    a.download = `output_${row.task_id}.zip`
+    const serverFilename = getFilenameFromHeaders(resp.headers)
+    const ext = serverFilename ? serverFilename.replace(/^.*(\.[^.]+)$/, '$1') : inferHistoryDownloadExt(row)
+    const baseName = row.source_filename ? row.source_filename.replace(/\.[^.]+$/, '') : `output_${row.task_id}`
+    a.download = `${baseName}_${row.target_format || 'output'}${ext}`
     a.click()
     window.URL.revokeObjectURL(url)
     ElMessage.success('下载已开始')
@@ -517,28 +571,14 @@ async function downloadHistoryZip(row) {
   }
 }
 
-async function fetchReport() {
-  if (!taskId.value) return
-  try {
-    const resp = await convertAPI.getReport(taskId.value)
-    report.value = resp.data
-    ElMessage.success('验证报告已加载')
-  } catch (e) {
-    ElMessage.error('获取报告失败')
-  }
+function inferHistoryDownloadExt(row) {
+  if (row.target_format === 'csv') return '.csv'
+  if (row.source_format === 'csv' && row.target_format === 'markdown') return '.md'
+  return '.zip'
 }
 
 function resetConvert() {
-  taskId.value = ''
-  taskProgress.value = 0
-  taskResult.value = null
-  report.value = null
-  conversionDetail.value = []
-  customFilename.value = ''
-  imeFeedback.value = ''
-  imeScreenshot.value = null
-  pipelineSteps.value = pipelineSteps.value.map(s => ({ ...s, status: 'pending' }))
-  converting.value = false
+  clearTaskState()
 }
 
 function triggerScreenshotUpload() { screenshotInput.value?.click() }
@@ -591,8 +631,8 @@ async function retryConvert() {
     const resp = await convertAPI.convert(
       sourceFile.value,
       targetFormat.value,
-      templateFile.value,
-      requirements.value || null,
+      getTemplatePayload(),
+      getRequirementsPayload(),
       imeFeedback.value || null,
       imeScreenshot.value || null
     )
@@ -658,8 +698,33 @@ function statusText(status) {
   return '处理中'
 }
 
+function getFilenameFromHeaders(headers) {
+  const contentDisposition = headers?.['content-disposition'] || headers?.['Content-Disposition'] || ''
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1])
+  const normalMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+  return normalMatch?.[1] || ''
+}
+
 watch(currentView, (val) => {
   if (val === 'history') loadHistory()
+})
+
+watch(availableTargetFormats, (options) => {
+  const supported = options.map(item => item.value)
+  if (!supported.includes(targetFormat.value)) {
+    targetFormat.value = supported[0] || 'markdown'
+  }
+})
+
+watch(targetFormat, (val) => {
+  if (val !== 'dita') {
+    templateFile.value = null
+    templateTree.value = null
+    requirements.value = ''
+    imeFeedback.value = ''
+    imeScreenshot.value = null
+  }
 })
 
 onMounted(() => {
@@ -742,6 +807,8 @@ onBeforeUnmount(() => stopPolling())
 .tree-file { padding-left: 24px; color: #6b7280; font-size: 13px; }
 
 .form-tip { color: #9ca3af; font-size: 12px; margin-top: 4px; }
+
+.ime-tip { margin-bottom: 12px; }
 
 .progress-bar-wrap { margin-top: 20px; padding: 0 40px; }
 

@@ -46,6 +46,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()

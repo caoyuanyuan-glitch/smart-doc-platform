@@ -97,6 +97,14 @@ def update_folder(db: Session, folder_id: int, name: str):
         db.refresh(folder)
     return folder
 
+def move_folder(db: Session, folder_id: int, parent_id: int | None):
+    folder = get_folder(db, folder_id)
+    if folder:
+        folder.parent_id = parent_id
+        db.commit()
+        db.refresh(folder)
+    return folder
+
 def delete_folder(db: Session, folder_id: int):
     folder = get_folder(db, folder_id)
     if folder:
@@ -124,6 +132,14 @@ def create_file(db: Session, file: FileCreate, file_path: str, filename: str, fi
 
 def get_file(db: Session, file_id: int):
     return db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).first()
+
+def move_file(db: Session, file_id: int, folder_id: int):
+    file = get_file(db, file_id)
+    if file:
+        file.folder_id = folder_id
+        db.commit()
+        db.refresh(file)
+    return file
 
 def delete_file(db: Session, file_id: int):
     file = get_file(db, file_id)

@@ -71,6 +71,7 @@
             <el-tag :type="verdictType" size="small">{{ result.verdict }}</el-tag>
             <el-tag type="info" size="small">差异数：{{ result.total_diffs || 0 }}</el-tag>
             <el-button size="small" type="primary" @click="previewReport">预览报告</el-button>
+            <el-button size="small" @click="openPdfPreview">PDF页码预览</el-button>
             <el-button size="small" @click="exportCompare">导出报告</el-button>
           </div>
         </div>
@@ -80,9 +81,65 @@
             <span>报告预览</span>
             <el-button size="small" @click="showPreview = false">关闭预览</el-button>
           </div>
-          <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+          <div class="report-preview-content" style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
         </div>
       </div>
+
+      <el-dialog
+        v-model="showPdfPreviewDialog"
+        title="PDF页码预览"
+        width="95%"
+        top="3vh"
+        :close-on-click-modal="false"
+        class="pdf-preview-dialog"
+      >
+        <div class="pdf-preview-wrapper">
+          <div class="pdf-preview-pane">
+            <div class="pane-header pane-a">
+              <span>文档A：{{ fileA?.name || '文档A' }}</span>
+            </div>
+            <div class="pane-content">
+              <PdfPreview
+                v-if="pdfUrlA"
+                ref="pdfPreviewARef"
+                :pdf-url="pdfUrlA"
+                :file-name="fileA?.name || 'document_A.pdf'"
+                @page-change="onPageAChange"
+                @loaded="onPdfALoaded"
+              />
+              <el-empty v-else description="暂无PDF预览" />
+            </div>
+          </div>
+          <div class="pdf-preview-divider">
+            <div class="divider-actions">
+              <el-tooltip content="开启后两边同步翻页" placement="top">
+                <el-switch
+                  v-model="syncScroll"
+                  size="small"
+                  active-text="同步"
+                  inactive-text="独立"
+                />
+              </el-tooltip>
+            </div>
+          </div>
+          <div class="pdf-preview-pane">
+            <div class="pane-header pane-b">
+              <span>文档B：{{ fileB?.name || '文档B' }}</span>
+            </div>
+            <div class="pane-content">
+              <PdfPreview
+                v-if="pdfUrlB"
+                ref="pdfPreviewBRef"
+                :pdf-url="pdfUrlB"
+                :file-name="fileB?.name || 'document_B.pdf'"
+                @page-change="onPageBChange"
+                @loaded="onPdfBLoaded"
+              />
+              <el-empty v-else description="暂无PDF预览" />
+            </div>
+          </div>
+        </div>
+      </el-dialog>
     </div>
 
     <div v-if="currentView === 'tasks'">
@@ -111,9 +168,10 @@
               {{ formatTime(scope.row.created_at) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="200">
+          <el-table-column label="操作" width="280">
             <template #default="scope">
               <el-button size="small" @click="viewTask(scope.row.id)">查看</el-button>
+              <el-button size="small" @click="openTaskPdfPreview(scope.row.id)">PDF预览</el-button>
               <el-button size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
               <el-button size="small" type="danger" @click="deleteTask(scope.row.id)">删除</el-button>
             </template>
@@ -136,7 +194,7 @@
             <span>报告预览 - 任务 {{ selectedTask.id }}</span>
             <el-button size="small" @click="showPreview = false">关闭预览</el-button>
           </div>
-          <div style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
+          <div class="report-preview-content" style="max-height: 800px; overflow-y: auto; background: #fff; padding: 16px; border-radius: 6px;" v-html="reportContent"></div>
         </div>
       </div>
     </div>
@@ -145,11 +203,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { compareAPI } from '@/api'
-import { Upload, Search } from '@element-plus/icons-vue'
+import { Upload, Search, View } from '@element-plus/icons-vue'
+import PdfPreview from '@/components/PdfPreview.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -163,6 +222,13 @@ const history = ref([])
 const selectedTask = ref(null)
 const showPreview = ref(false)
 const reportContent = ref('')
+const showPdfPreviewDialog = ref(false)
+const pdfUrlA = ref('')
+const pdfUrlB = ref('')
+const pdfPreviewARef = ref(null)
+const pdfPreviewBRef = ref(null)
+const syncScroll = ref(true)
+const _pageChangingFrom = ref('')
 
 const currentView = computed(() => {
   if (route.path === '/compare/tasks') return 'tasks'
@@ -215,6 +281,12 @@ function formatTime(timestamp) {
     return new Date(timestamp).toLocaleString()
   }
   return new Date(timestamp * 1000).toLocaleString()
+}
+
+function getSimilarityClass(similarity) {
+  if (similarity >= 0.8) return 'sim-high'
+  if (similarity >= 0.6) return 'sim-medium'
+  return 'sim-low'
 }
 
 function clearFiles() {
@@ -410,6 +482,68 @@ function downloadFile(content, filename, mimeType) {
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
 }
+
+async function saveConfig() {
+  try {
+    await compareAPI.updateConfig(config.value)
+    ElMessage.success('配置已保存')
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+function openPdfPreview() {
+  const taskId = result.value?.comparison_id || result.value?.task_id
+  if (!taskId) {
+    ElMessage.warning('无法获取任务ID')
+    return
+  }
+  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+  showPdfPreviewDialog.value = true
+}
+
+function openTaskPdfPreview(taskId) {
+  if (!taskId) {
+    ElMessage.warning('无法获取任务ID')
+    return
+  }
+  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+  showPdfPreviewDialog.value = true
+}
+
+function onPageAChange(page) {
+  if (syncScroll.value && _pageChangingFrom.value !== 'b') {
+    _pageChangingFrom.value = 'a'
+    nextTick(() => {
+      if (pdfPreviewBRef.value?.goToPage) {
+        pdfPreviewBRef.value.goToPage(page)
+      }
+      _pageChangingFrom.value = ''
+    })
+  }
+}
+
+function onPageBChange(page) {
+  if (syncScroll.value && _pageChangingFrom.value !== 'a') {
+    _pageChangingFrom.value = 'b'
+    nextTick(() => {
+      if (pdfPreviewARef.value?.goToPage) {
+        pdfPreviewARef.value.goToPage(page)
+      }
+      _pageChangingFrom.value = ''
+    })
+  }
+}
+
+function onPdfALoaded(info) {
+  console.log('PDF A loaded, total pages:', info.totalPages)
+}
+
+function onPdfBLoaded(info) {
+  console.log('PDF B loaded, total pages:', info.totalPages)
+}
 </script>
 
 <style>
@@ -526,90 +660,90 @@ function downloadFile(content, filename, mimeType) {
 .file-info-grid .label { color:#666;font-weight:600; }
 .file-info-grid .value { word-break:break-word;overflow-wrap:anywhere; }
 
-table { width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);table-layout:fixed; }
-th,td { padding:10px 12px;text-align:left;font-size:13px;border-bottom:1px solid #eee;vertical-align:top;word-break:break-word;overflow-wrap:anywhere; }
-th { background:#2c3e50;color:#fff;font-weight:600;white-space:normal;font-size:12px; }
-tr:hover { background:#f9fafb; }
-code { background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px; }
+.report-preview-content table { width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);table-layout:fixed; }
+.report-preview-content th,.report-preview-content td { padding:10px 12px;text-align:left;font-size:13px;border-bottom:1px solid #eee;vertical-align:top;word-break:break-word;overflow-wrap:anywhere; }
+.report-preview-content th { background:#2c3e50;color:#fff;font-weight:600;white-space:normal;font-size:12px; }
+.report-preview-content tr:hover { background:#f9fafb; }
+.report-preview-content code { background:#eef1f4;padding:1px 6px;border-radius:4px;font-size:12px; }
 
-.tag { background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500; }
-.tag.ok { background:#e8f5e9;color:#2e7d32; }
-.tag.warn { background:#fff3e0;color:#e65100; }
-.tag.danger { background:#ffebee;color:#c62828; }
-.tag.only-a { background:#fff4f4;color:#c62828; }
-.tag.only-b { background:#f4faf4;color:#2e7d32; }
+.report-preview-content .tag { background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500; }
+.report-preview-content .tag.ok { background:#e8f5e9;color:#2e7d32; }
+.report-preview-content .tag.warn { background:#fff3e0;color:#e65100; }
+.report-preview-content .tag.danger { background:#ffebee;color:#c62828; }
+.report-preview-content .tag.only-a { background:#fff4f4;color:#c62828; }
+.report-preview-content .tag.only-b { background:#f4faf4;color:#2e7d32; }
 
-.bar { position:relative;background:#eee;border-radius:10px;height:18px;width:100%;min-width:80px;overflow:hidden; }
-.bar .fill { height:100%;border-radius:10px; }
-.bar span { position:absolute;left:0;right:0;top:0;line-height:18px;text-align:center;font-size:11px;color:#000;font-weight:600; }
+.report-preview-content .bar { position:relative;background:#eee;border-radius:10px;height:18px;width:100%;min-width:80px;overflow:hidden; }
+.report-preview-content .bar .fill { height:100%;border-radius:10px; }
+.report-preview-content .bar span { position:absolute;left:0;right:0;top:0;line-height:18px;text-align:center;font-size:11px;color:#000;font-weight:600; }
 
-h2 { margin-top:32px;font-size:18px;border-left:4px solid #1976d2;padding-left:10px;color:#2c3e50;font-weight:600; }
+.report-preview-content h2 { margin-top:32px;font-size:18px;border-left:4px solid #1976d2;padding-left:10px;color:#2c3e50;font-weight:600; }
 
-.row-main { cursor:pointer; }
-.row-main:hover { background:#f0f4f9; }
-.row-main .diff-cell { color:#c62828;font-weight:600; }
-.row-diff { display:none; }
-.row-diff.open { display:table-row; }
-.row-diff > td { background:#fafbfc;padding:0; }
+.report-preview-content .row-main { cursor:pointer; }
+.report-preview-content .row-main:hover { background:#f0f4f9; }
+.report-preview-content .row-main .diff-cell { color:#c62828;font-weight:600; }
+.report-preview-content .row-diff { display:none; }
+.report-preview-content .row-diff.open { display:table-row; }
+.report-preview-content .row-diff > td { background:#fafbfc;padding:0; }
 
-.diffs { padding:12px 16px; }
-.diff-empty { padding:14px 16px;color:#2e7d32;font-size:13px;background:#eaf6ec;border-radius:6px; }
-.diff-row { display:flex;align-items:flex-start;gap:10px;padding:8px 10px;margin:6px 0;border-radius:6px;font-size:13px;line-height:1.6; }
-.diff-row.changed { background:#fff8e1;border-left:3px solid #f9a825; }
-.diff-row .text { flex:1;word-break:break-word; }
-.diff-row .side-a,.diff-row .side-b { padding:4px 0; }
-.diff-row .side-a::before { content:"A: ";color:#c62828;font-weight:600; }
-.diff-row .side-b::before { content:"B: ";color:#2e7d32;font-weight:600; }
+.report-preview-content .diffs { padding:12px 16px; }
+.report-preview-content .diff-empty { padding:14px 16px;color:#2e7d32;font-size:13px;background:#eaf6ec;border-radius:6px; }
+.report-preview-content .diff-row { display:flex;align-items:flex-start;gap:10px;padding:8px 10px;margin:6px 0;border-radius:6px;font-size:13px;line-height:1.6; }
+.report-preview-content .diff-row.changed { background:#fff8e1;border-left:3px solid #f9a825; }
+.report-preview-content .diff-row .text { flex:1;word-break:break-word; }
+.report-preview-content .diff-row .side-a,.report-preview-content .diff-row .side-b { padding:4px 0; }
+.report-preview-content .diff-row .side-a::before { content:"A: ";color:#c62828;font-weight:600; }
+.report-preview-content .diff-row .side-b::before { content:"B: ";color:#2e7d32;font-weight:600; }
 
-.tag-c { font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;font-weight:600;background:#f9a825;color:#fff;min-width:50px;text-align:center; }
+.report-preview-content .tag-c { font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;font-weight:600;background:#f9a825;color:#fff;min-width:50px;text-align:center; }
 
-.del { background:#ffd6d6;text-decoration:line-through;color:#a31515;padding:0 2px;border-radius:2px; }
-.ins { background:#d6f5d6;color:#1a5e1a;padding:0 2px;border-radius:2px; }
+.report-preview-content .del { background:#ffd6d6;text-decoration:line-through;color:#a31515;padding:0 2px;border-radius:2px; }
+.report-preview-content .ins { background:#d6f5d6;color:#1a5e1a;padding:0 2px;border-radius:2px; }
 
-table.summary td { vertical-align:top;font-size:13px;line-height:1.55; }
-table.summary td:nth-child(1) { width:60px;text-align:center; }
-table.summary td:nth-child(2) { width:120px;color:#666; }
-table.summary td:nth-child(3) { font-weight:600;max-width:300px; }
-table.summary td:nth-child(4) { width:80px; }
-table.summary td:nth-child(5) { width:120px; }
-table.summary td:nth-child(6) { width:80px;text-align:center;color:#888; }
-table.summary td:nth-child(7) { width:100px;text-align:center;font-weight:600; }
-table.summary td:nth-child(8) { width:80px;text-align:center;font-weight:600;color:#c62828; }
+.report-preview-content table.summary td { vertical-align:top;font-size:13px;line-height:1.55; }
+.report-preview-content table.summary td:nth-child(1) { width:60px;text-align:center; }
+.report-preview-content table.summary td:nth-child(2) { width:120px;color:#666; }
+.report-preview-content table.summary td:nth-child(3) { font-weight:600;max-width:300px; }
+.report-preview-content table.summary td:nth-child(4) { width:80px; }
+.report-preview-content table.summary td:nth-child(5) { width:120px; }
+.report-preview-content table.summary td:nth-child(6) { width:80px;text-align:center;color:#888; }
+.report-preview-content table.summary td:nth-child(7) { width:100px;text-align:center;font-weight:600; }
+.report-preview-content table.summary td:nth-child(8) { width:80px;text-align:center;font-weight:600;color:#c62828; }
 
-tr.ok-row td:nth-child(7) { color:#2e7d32; }
-tr.high-row td:nth-child(7) { color:#558b2f; }
-tr.mid-row td:nth-child(7) { color:#ef6c00; }
-tr.low-row td:nth-child(7) { color:#c62828; }
-tr.only-a-row { background:#fff4f4; }
-tr.only-b-row { background:#f4faf4; }
-tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
+.report-preview-content tr.ok-row td:nth-child(7) { color:#2e7d32; }
+.report-preview-content tr.high-row td:nth-child(7) { color:#558b2f; }
+.report-preview-content tr.mid-row td:nth-child(7) { color:#ef6c00; }
+.report-preview-content tr.low-row td:nth-child(7) { color:#c62828; }
+.report-preview-content tr.only-a-row { background:#fff4f4; }
+.report-preview-content tr.only-b-row { background:#f4faf4; }
+.report-preview-content tr.only-a-row td:nth-child(7), .report-preview-content tr.only-b-row td:nth-child(7) { color:#666; }
 
-.small { color:#888;font-size:12px; }
+.report-preview-content .small { color:#888;font-size:12px; }
 
-.diff-list { max-height: 600px; overflow-y: auto; }
+.report-preview-content .diff-list { max-height: 600px; overflow-y: auto; }
 
-.diff-item {
+.report-preview-content .diff-item {
   border-radius: 8px;
   padding: 16px;
   margin-bottom: 12px;
   border-left: 4px solid;
 }
 
-.diff-item.add, .diff-item.only_b { background: #f0fdf4; border-left-color: #22c55e; }
-.diff-item.delete, .diff-item.only_a { background: #fef2f2; border-left-color: #ef4444; }
-.diff-item.modify { background: #fffbeb; border-left-color: #f59e0b; }
+.report-preview-content .diff-item.add, .report-preview-content .diff-item.only_b { background: #f0fdf4; border-left-color: #22c55e; }
+.report-preview-content .diff-item.delete, .report-preview-content .diff-item.only_a { background: #fef2f2; border-left-color: #ef4444; }
+.report-preview-content .diff-item.modify { background: #fffbeb; border-left-color: #f59e0b; }
 
-.diff-item.severity-critical { border-left-width: 6px; }
-.diff-item.severity-high { border-left-width: 5px; }
+.report-preview-content .diff-item.severity-critical { border-left-width: 6px; }
+.report-preview-content .diff-item.severity-high { border-left-width: 5px; }
 
-.diff-header {
+.report-preview-content .diff-header {
   display: flex;
   align-items: center;
   gap: 12px;
   margin-bottom: 8px;
 }
 
-.diff-index {
+.report-preview-content .diff-index {
   background: #e5e7eb;
   color: #6b7280;
   font-size: 12px;
@@ -618,20 +752,20 @@ tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
   border-radius: 4px;
 }
 
-.diff-type { font-weight: 600; }
+.report-preview-content .diff-type { font-weight: 600; }
 
-.severity-tag {
+.report-preview-content .severity-tag {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 4px;
 }
 
-.severity-tag.critical { background: #fee2e2; color: #dc2626; }
-.severity-tag.high { background: #fef3c7; color: #d97706; }
-.severity-tag.medium { background: #dbeafe; color: #2563eb; }
-.severity-tag.low { background: #dcfce7; color: #16a34a; }
+.report-preview-content .severity-tag.critical { background: #fee2e2; color: #dc2626; }
+.report-preview-content .severity-tag.high { background: #fef3c7; color: #d97706; }
+.report-preview-content .severity-tag.medium { background: #dbeafe; color: #2563eb; }
+.report-preview-content .severity-tag.low { background: #dcfce7; color: #16a34a; }
 
-.similarity-tag {
+.report-preview-content .similarity-tag {
   font-size: 12px;
   background: #f3f4f6;
   color: #374151;
@@ -640,32 +774,98 @@ tr.only-a-row td:nth-child(7), tr.only-b-row td:nth-child(7) { color:#666; }
   margin-left: auto;
 }
 
-.diff-content { margin-top: 8px; }
+.report-preview-content .diff-content { margin-top: 8px; }
 
-.diff-text {
+.report-preview-content .diff-text {
   padding: 8px 12px;
   border-radius: 4px;
   margin-bottom: 8px;
 }
 
-.diff-text:last-child { margin-bottom: 0; }
+.report-preview-content .diff-text:last-child { margin-bottom: 0; }
 
-.diff-text-a { background: #f3f4f6; }
-.diff-text-b { background: #e0f2fe; }
+.report-preview-content .diff-text-a { background: #f3f4f6; }
+.report-preview-content .diff-text-b { background: #e0f2fe; }
 
-.text-label {
+.report-preview-content .text-label {
   font-weight: 600;
   color: #6b7280;
   margin-right: 8px;
 }
 
-.empty-state {
+.report-preview-content .empty-state {
   text-align: center;
   padding: 40px;
   color: #9ca3af;
 }
 
-.similarity-high { color: #86efac; }
-.similarity-medium { color: #fcd34d; }
-.similarity-low { color: #fca5a5; }
+.report-preview-content .similarity-high { color: #86efac; }
+.report-preview-content .similarity-medium { color: #fcd34d; }
+.report-preview-content .similarity-low { color: #fca5a5; }
+
+.pdf-preview-dialog :deep(.el-dialog__body) {
+  padding: 0;
+  height: calc(94vh - 60px);
+}
+
+.pdf-preview-wrapper {
+  display: flex;
+  height: 100%;
+  min-height: 600px;
+}
+
+.pdf-preview-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pane-header {
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: 1px solid #e4e7ed;
+  flex-shrink: 0;
+}
+
+.pane-a {
+  background: #fef2f2;
+  color: #dc2626;
+  border-right: 1px solid #fecaca;
+}
+
+.pane-b {
+  background: #f0fdf4;
+  color: #16a34a;
+  border-left: 1px solid #bbf7d0;
+}
+
+.pane-content {
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.pdf-preview-divider {
+  width: 50px;
+  background: #f3f4f6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-left: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+}
+
+.divider-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+.sim-high { color: #10b981; font-weight: 600; }
+.sim-medium { color: #f59e0b; font-weight: 600; }
+.sim-low { color: #ef4444; font-weight: 600; }
 </style>

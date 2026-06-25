@@ -25,8 +25,12 @@ def render_doc_html_report(compare_result: dict, name_a: str, name_b: str) -> st
     n_only_b = stats.get("n_only_b", 0)
     n_matched = stats.get("n_matched", 0)
     overall_sim = stats.get("overall_sim", 0.0)
-    # 计算匹配平均（匹配上的章节的平均相似度）
-    matched_avg = overall_sim  # 如果没有单独的 matched_avg，使用 overall_sim
+    matched_avg = stats.get("matched_avg", overall_sim)
+    weighted_sim = stats.get("weighted_sim", overall_sim)
+    n_sentences_a = stats.get("n_sentences_a", 0)
+    n_sentences_b = stats.get("n_sentences_b", 0)
+    n_topics_a = stats.get("n_topics_a", 0)
+    n_topics_b = stats.get("n_topics_b", 0)
 
     # 判定结果
     if overall_sim >= 0.80:
@@ -93,7 +97,8 @@ h2 { margin-top:32px;font-size:18px; }
 .diffs { padding:12px 16px; }
 .diff-empty { padding:14px 16px;color:#2e7d32;font-size:13px;background:#eaf6ec;border-radius:6px; }
 .diff-row { display:flex;align-items:flex-start;gap:10px;padding:8px 10px;margin:6px 0;border-radius:6px;font-size:13px;line-height:1.6; }
-.diff-row.changed { background:#fff8e1;border-left:3px solid #f9a825; }
+.diff-row.exact { background:#eaf6ec;border-left:3px solid #4caf50; }
+.diff-row.fuzzy { background:#fff8e1;border-left:3px solid #f9a825; }
 .diff-row .text { flex:1;word-break:break-word; }
 .diff-row .side-a,.diff-row .side-b { padding:4px 0; }
 .diff-row .side-a::before { content:"A: ";color:#c62828;font-weight:600; }
@@ -132,8 +137,8 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 """
 
-    def get_consistency_label(sim):
-        if sim >= 0.99:
+    def get_consistency_label(sim, status=""):
+        if status == "完全一致":
             return "100%"
         elif sim >= 0.95:
             return "95%~99%"
@@ -185,14 +190,24 @@ document.addEventListener('DOMContentLoaded', function() {
                     b_parts.append(f'<span class="ins">{b_seg}</span>')
         return {"a_html": "".join(a_parts), "b_html": "".join(b_parts)}
 
+    is_pdf = (type_a == "pdf") or (type_b == "pdf")
+    colspan = 7 if is_pdf else 5
+
     rows_html = []
     for idx, r in enumerate(results):
         diff_id = f"d{idx}"
         heading = html.escape(r.get("heading", "") or "")
+        parent_heading = html.escape(r.get("parent_heading", "") or "")
         status = r.get("status", "")
         sim = r.get("similarity", 0.0)
-        consistency_label = get_consistency_label(sim)
+        consistency_label = get_consistency_label(sim, status)
         row_class = get_row_class(status)
+
+        # 页码显示
+        page_a = r.get("page_a", 0)
+        page_b = r.get("page_b", 0)
+        page_a_display = str(page_a) if page_a > 0 else "—"
+        page_b_display = str(page_b) if page_b > 0 else "—"
 
         # 状态显示
         if status == "仅在A中":
@@ -204,76 +219,137 @@ document.addEventListener('DOMContentLoaded', function() {
         else:
             status_display = status
 
-        # 差异说明（添加颜色标签）
+        # 差异说明
         if status in ("仅在A中", "仅在B中"):
             diff_explain = f"🔵 {status}"
         elif status == "完全一致":
             diff_explain = "🟢 内容完全一致"
         elif status == "高度相似":
-            diff_explain = "🟢 措辞调整"
+            diff_explain = "🟢 微小差异：措辞调整"
         elif status == "部分相似":
             diff_explain = "🟠 内容变更"
         else:
             diff_explain = "🔴 差异较大"
 
-        row_main = (
-            f"<tr class='{row_class} row-main' data-target='{diff_id}'>"
-            f"<td>{idx+1}</td>"
-            f"<td>{heading}</td>"
-            f"<td>{diff_explain}</td>"
-            f"<td>{consistency_label}</td>"
-            f"</tr>"
-        )
+        if is_pdf:
+            row_main = (
+                f"<tr class='{row_class} row-main' data-target='{diff_id}'>"
+                f"<td>{idx+1}</td>"
+                f"<td>{parent_heading}</td>"
+                f"<td>{heading}</td>"
+                f"<td>{page_a_display}</td>"
+                f"<td>{page_b_display}</td>"
+                f"<td>{diff_explain}</td>"
+                f"<td>{consistency_label}</td>"
+                f"</tr>"
+            )
+        else:
+            row_main = (
+                f"<tr class='{row_class} row-main' data-target='{diff_id}'>"
+                f"<td>{idx+1}</td>"
+                f"<td>{parent_heading}</td>"
+                f"<td>{heading}</td>"
+                f"<td>{diff_explain}</td>"
+                f"<td>{consistency_label}</td>"
+                f"</tr>"
+            )
 
-        # 差异详情（添加颜色标签）
+        # 差异详情
         diffs_content = ""
         if status in ("仅在A中", "仅在B中"):
             content = r.get("content_a") or r.get("content_b") or ""
             diffs_content = f"<div class='diff-empty'>✓ {status}，无对比内容</div>"
-        elif r.get("diffs"):
+        elif status == "完全一致":
+            diffs_content = "<div class='diff-empty'>✓ 该章节内容完全一致，无差异</div>"
+        else:
             diffs = []
-            for d in r.get("diffs", [])[:15]:
-                d_html = compute_word_diff(d.get("a", ""), d.get("b", ""))
-                # 根据相似度添加颜色标签
-                score = d.get("score", 0.0)
-                if score >= 0.95:
-                    tag_icon = "🟢"
-                elif score >= 0.70:
-                    tag_icon = "🟠"
-                else:
-                    tag_icon = "🔴"
-                tag_type = d.get("type", "fuzzy")
+            all_diffs = r.get("diffs", [])
+            only_a = r.get("only_a", [])
+            only_b = r.get("only_b", [])
+
+            exact_diffs = [d for d in all_diffs if d.get("type") == "exact"]
+            fuzzy_diffs = [d for d in all_diffs if d.get("type") == "fuzzy"]
+
+            if not fuzzy_diffs and not only_a and not only_b:
+                diffs_content = "<div class='diff-empty'>✓ 该章节内容完全一致，无差异</div>"
+            else:
+                display_diffs = fuzzy_diffs[:15]
+                for d in display_diffs:
+                    d_html = compute_word_diff(d.get("a", ""), d.get("b", ""))
+                    score = d.get("score", 0.0)
+                    if score >= 0.90:
+                        sev_icon = "🟢"
+                        sev_label = "轻微差异"
+                    elif score >= 0.70:
+                        sev_icon = "🟠"
+                        sev_label = "中度差异"
+                    else:
+                        sev_icon = "🔴"
+                        sev_label = "重大差异"
+                    diffs.append(
+                        f'<div class="diff-row changed">'
+                        f'<span class="tag-c">{sev_icon} {sev_label}</span>'
+                        f'<div class="text">'
+                        f'<div class="side-a">{d_html["a_html"]}</div>'
+                        f'<div class="side-b">{d_html["b_html"]}</div>'
+                        f'</div></div>'
+                    )
+            # 显示仅在A或仅在B的句子
+            for s in only_a[:5]:
                 diffs.append(
                     f'<div class="diff-row changed">'
-                    f'<span class="tag-c">{tag_icon} {tag_type}</span>'
+                    f'<span class="tag-c">🔵 A 独有</span>'
                     f'<div class="text">'
-                    f'<div class="side-a">{d_html["a_html"]}</div>'
-                    f'<div class="side-b">{d_html["b_html"]}</div>'
+                    f'<div class="side-a">{html.escape(s)}</div>'
+                    f'<div class="side-b"></div>'
                     f'</div></div>'
                 )
-            diffs_content = "\n".join(diffs)
-        else:
-            diffs_content = "<div class='diff-empty'>✓ 该章节内容完全一致，无差异</div>"
+            for s in only_b[:5]:
+                diffs.append(
+                    f'<div class="diff-row changed">'
+                    f'<span class="tag-c">🔵 B 独有</span>'
+                    f'<div class="text">'
+                    f'<div class="side-a"></div>'
+                    f'<div class="side-b">{html.escape(s)}</div>'
+                    f'</div></div>'
+                )
+            diffs_content = "\n".join(diffs) if diffs else "<div class='diff-empty'>✓ 该章节内容完全一致，无差异</div>"
 
         row_diff = (
             f"<tr class='row-diff' id='{diff_id}'>"
-            f"<td colspan='4'><div class='diffs'>{diffs_content}</div></td>"
+            f"<td colspan='{colspan}'><div class='diffs'>{diffs_content}</div></td>"
             f"</tr>"
         )
 
         rows_html.append(row_main + row_diff)
 
-    rows_str = "\n".join(rows_html) if rows_html else "<tr><td colspan='4' style='text-align:center;padding:40px;color:#888'>无章节数据</td></tr>"
+    rows_str = "\n".join(rows_html) if rows_html else f"<tr><td colspan='{colspan}' style='text-align:center;padding:40px;color:#888'>无章节数据</td></tr>"
+
+    if is_pdf:
+        table_header = """
+      <th>序号</th>
+      <th>一级章节</th>
+      <th>小节</th>
+      <th>文件1 PDF 页码</th>
+      <th>文件2 PDF 页码</th>
+      <th>差异说明</th>
+      <th>一致性</th>
+"""
+    else:
+        table_header = """
+      <th>序号</th>
+      <th>一级章节</th>
+      <th>小节</th>
+      <th>差异说明</th>
+      <th>一致性</th>
+"""
 
     table_html = f"""
-<h2>章节对比明细</h2>
+<h2>差异点汇总</h2>
 <table class='summary'>
   <thead>
     <tr>
-      <th>序号</th>
-      <th>章节标题</th>
-      <th>差异说明</th>
-      <th>一致性</th>
+{table_header}
     </tr>
   </thead>
   <tbody>
@@ -361,7 +437,7 @@ document.addEventListener('DOMContentLoaded', function() {
   <div class="cards">
     <div class='card primary'>
       <div class='num'>{overall_sim*100:.1f}%</div>
-      <div class='lbl'>整体一致性</div>
+      <div class='lbl'>整体一致性 · 模糊 Jaccard</div>
     </div>
     <div class='card '>
       <div class='num'>{matched_avg*100:.1f}%</div>
@@ -396,20 +472,25 @@ document.addEventListener('DOMContentLoaded', function() {
   <div class="file-info">
     <h2>文件基本信息</h2>
     <div class="file-info-grid">
-      <div class="label">文件1</div>
+      <div class="label">文件1名称</div>
       <div class="value">{html.escape(name_a)}</div>
-      <div class="label">文件2</div>
+      <div class="label">文件2名称</div>
       <div class="value">{html.escape(name_b)}</div>
       <div class="label">文件1格式</div>
       <div class="value">{type_a_display}</div>
       <div class="label">文件2格式</div>
       <div class="value">{type_b_display}</div>
+      <div class="label">文件1统计</div>
+      <div class="value">{n_sentences_a} 句段 / {n_topics_a} 章节</div>
+      <div class="label">文件2统计</div>
+      <div class="value">{n_sentences_b} 句段 / {n_topics_b} 章节</div>
     </div>
   </div>
 
   <div class="explain">
-    <b>文档对比算法: 章节标题匹配 + 句子级模糊 Jaccard</b><br>
-    按章节标题对齐两文档，对齐后按句子级对比计算相似度。<br>
+    <b>当前算法: 全量句段模糊 Jaccard</b><br>
+    按章节标题对齐两文档，对齐后按句子级对比计算相似度。Jaccard = 匹配句段对数 /（A 全部句段数 + B 全部句段数 - 匹配句段对数）。<br>
+    本次 A={n_sentences_a} 句段，B={n_sentences_b} 句段，整体一致性={overall_sim*100:.2f}%。作为对照，加权一致性为 <b>{weighted_sim*100:.2f}%</b>。<br>
     <span style="color:#888">判定：{verdict_icon} {html.escape(verdict_text)}</span>
   </div>
 
