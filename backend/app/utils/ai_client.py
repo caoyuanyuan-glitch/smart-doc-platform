@@ -1,6 +1,8 @@
 import os
 import json
 import re
+import base64
+import mimetypes
 import httpx
 import time
 from openai import OpenAI
@@ -49,6 +51,11 @@ class AIClient:
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
 
+        # 可选的 OpenAI 兼容回退配置
+        self.proxy_api_key = os.getenv("OPENAI_API_KEY")
+        self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
+        self.proxy_model = os.getenv("OPENAI_MODEL")
+
         timeout = httpx.Timeout(30.0, read=180.0)
 
         self.deepseek_client = OpenAI(
@@ -74,12 +81,12 @@ class AIClient:
 
         # Proxy 回退客户端（使用 OpenAI 兼容接口）
         self.proxy_client = OpenAI(
-            api_key=self.dashscope_api_key or os.getenv("OPENAI_API_KEY"),
-            base_url=self.anthropic_base_url,
+            api_key=self.proxy_api_key,
+            base_url=self.proxy_base_url,
             timeout=timeout,
-        )
+        ) if _is_valid_key(self.proxy_api_key) and self.proxy_base_url else None
         if self.proxy_client:
-            print(f"[AI] Proxy 回退已配置, base_url={self.anthropic_base_url}, model={self.anthropic_model}")
+            print(f"[AI] Proxy 回退已配置, base_url={self.proxy_base_url}, model={self.proxy_model}")
 
     @property
     def has_any_client(self):
@@ -435,6 +442,136 @@ class AIClient:
             return json.loads(result)
         except:
             return {"title": topic, "content": result or "", "sections": [], "word_count": 0}
+
+    @staticmethod
+    def build_image_data_url(raw_bytes, file_name="", content_type=""):
+        mime = content_type or mimetypes.guess_type(file_name or "")[0] or "image/png"
+        return f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
+
+    def analyze_images_to_steps(self, images, user_prompt="", style_guide_bundle=None, template_reference=None):
+        if not self.kimi_client or not images:
+            return None
+
+        instruction = f"""
+你是一名技术文档编写助手，需要基于多张连续界面截图或操作图片还原用户操作流程。
+
+你的任务：
+1. 提取每张图片中的关键信息，只保留对操作理解有帮助的界面元素、按钮、输入框、提示文字和状态变化。
+2. 分析图片之间的逻辑关系，判断它们在流程中的先后顺序和依赖关系。
+3. 输出一段按顺序组织的操作步骤，步骤必须可执行、连贯、避免空泛描述。
+4. 优先使用“在……界面，点击……，输入……，进入……”这种操作指令式表达。
+
+输出严格 JSON：
+{{
+  "summary": "对整组图片内容的总体说明",
+  "relation_summary": "图片之间的逻辑关系与排序依据",
+  "used_style_guide_name": "实际使用的风格指南名称",
+  "steps": [
+    "步骤1",
+    "步骤2"
+  ]
+}}
+
+要求：
+- 只输出 JSON。
+- steps 必须体现清晰顺序。
+- steps 必须直接描述用户动作，适合直接放进操作说明书。
+- steps、summary、relation_summary 必须使用图片主要语言输出。中文图片输出中文，英文图片输出英文。
+- 每个 step 尽量包含界面位置、操作对象、输入动作和结果页面。
+- relation_summary 需要说明排序判断依据。
+- 如果顺序存在不确定性，给出最合理的流程假设并说明依据。
+- 如果图片表现的是登录、跳转、按钮点击、软键盘输入等界面流程，按真实操作顺序还原，不要泛泛描述“展示了某界面”。
+- 示例风格（中文）：
+  1. 在登录界面，点击用户名和密码输入框，弹出软键盘，使用软键盘输入用户名和密码，点击【登录】进入主界面。
+  2. 在主界面点击中间的按钮，进入实验任务界面。
+  - 示例风格（英文）：界面元素使用 **粗体** 包裹，如按钮、输入框、标签文字等，禁止使用引号。
+  1. On the **Login** screen, tap the **Username** and **Password** input fields, use the on-screen keyboard to enter your credentials, then tap **Login** to enter the main interface.
+  2. On the main interface, tap the center button to enter the **Task** screen.""".strip()
+
+        if style_guide_bundle and style_guide_bundle.get("guides"):
+            guides = style_guide_bundle["guides"]
+            if style_guide_bundle.get("mode") == "selected":
+                guide = guides[0]
+                instruction += (
+                    f"\n\n写作风格指南\n"
+                    f"请严格遵循以下指南输出操作说明。\n"
+                    f"文件名：{guide.get('name')}\n"
+                    f"语言：{guide.get('language')}\n"
+                    f"内容：\n{guide.get('content')}"
+                )
+            else:
+                guide_blocks = []
+                for guide in guides:
+                    guide_blocks.append(
+                        f"文件名：{guide.get('name')}\n"
+                        f"语言：{guide.get('language')}\n"
+                        f"内容：\n{guide.get('content')}"
+                    )
+                instruction += (
+                    "\n\n候选写作风格指南\n"
+                    "请先判断图片中的主要语言，再选择最匹配的一份风格指南执行。"
+                    "中文界面优先使用中文指南，英文界面优先使用英文指南。"
+                    "输出 JSON 时，used_style_guide_name 必须填写你实际采用的指南文件名。\n\n"
+                    + "\n\n".join(guide_blocks)
+                )
+
+        if template_reference and template_reference.get("content"):
+            instruction += (
+                f"\n\n模板参考文件\n"
+                f"文件名：{template_reference.get('name')}\n"
+                "当模板中的表达与当前图片流程存在相似描述时，优先参考模板中的写法、句式和动作描述。"
+                "你需要保留当前图片里的真实对象、按钮、输入内容和页面名称，避免照搬与图片不符的内容。\n"
+                f"模板内容：\n{template_reference.get('content')}"
+            )
+
+        if user_prompt:
+            instruction += f"\n\n用户补充要求：{user_prompt.strip()}"
+
+        user_content = [{"type": "text", "text": instruction}]
+        for image in images:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": image.get("data_url")}
+            })
+
+        try:
+            response = self.kimi_client.chat.completions.create(
+                model=self.kimi_model,
+                messages=[{"role": "user", "content": user_content}],
+                max_tokens=8192,
+                temperature=1,
+            )
+            result = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            if not result:
+                print(f"[KIMI] WARNING: empty content, finish_reason={finish_reason}, usage={response.usage}")
+                # 保存截断/异常响应以排查问题
+                import time as _time
+                log_path = f"/tmp/kimi_response_{_time.strftime('%Y%m%d_%H%M%S')}.txt"
+                with open(log_path, "w") as f:
+                    f.write(str(response))
+                print(f"[KIMI] response saved to {log_path}")
+            if finish_reason == "length":
+                print(f"[KIMI] WARNING: response truncated (length), content_len={len(result or '')}")
+        except Exception as e:
+            print(f"Kimi 图片分析失败: {str(e)}")
+            return None
+
+        data = self._extract_json(result, {})
+        if not isinstance(data, dict):
+            return None
+
+        steps = data.get("steps") or []
+        if not isinstance(steps, list):
+            steps = [str(steps)] if steps else []
+
+        return {
+            "summary": self._clean_text(data.get("summary"), 500),
+            "relation_summary": self._clean_text(data.get("relation_summary"), 800),
+            "used_style_guide_name": self._clean_text(data.get("used_style_guide_name"), 160),
+            "steps": [self._clean_text(step, 300) for step in steps if str(step).strip()],
+            "model": "kimi",
+        }
 
     def generate_qa_pairs(self, content, count=3):
         prompt = f"""
