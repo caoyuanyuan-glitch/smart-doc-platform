@@ -1,54 +1,189 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-ENV/
-*.egg-info/
-dist/
-build/
+# AI Tools
+.claude
+.gemini
+.opencode
 
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-.vite/
-
-# IDE
+# IDE and Editors
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+.spyproject/
+.ropeproject/
+*.code-workspace
 
-# OS
+# macOS
 .DS_Store
-Thumbs.db
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
 
-# Uploads
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.fuse_hidden*
+.nfs*
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn/cache
+.pnpm-store/
+*.tsbuild*
+.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.so
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+.gradle/
+
+# C/C++/Go/Rust
+*.o
+*.obj
+*.exe
+*.out
+*.app
+*.dll
+*.dylib
+target/
+go.work
+Cargo.lock
+
+# Ruby
+*.gem
+*.rbc
+.bundle/
+vendor/bundle
+.byebug_history
+
+# Logs
+*.log
+logs/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.cache
+.cache/
+tmp/
+temp/
+
+# Dart
+.dart_tool/
+*.dart_tool
+analysis_options.yaml
+.packages
+.pub-cache/
+.pub/
+
+# Flutter
+flutter_export_environment.sh
+flutter_export_environment.bat
+.flutter-plugins
+.flutter-plugins-dependencies
+.flutter-plugins-dependencies.lock
+.metadata
+.flutter_build
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/ephemeral/
+ios/Podfile.lock
+ios/.generated/
+android/**/generated/
+android/.gradle/
+android/gradlew
+android/gradlew.bat
+android/local.properties
+android/**/GeneratedPluginRegistrant.java
+android/**/flutter_*.json
+web/.dart_tool/
+web/build/
+
+# Compressed files
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tbz2
+*.tar.xz
+*.txz
+*.gz
+*.bz2
+*.xz
+*.Z
+*.lz
+*.lzma
+*.iso
+
+# Project-specific: Uploads
 backend/static/uploads/*
 !backend/static/uploads/.gitkeep
 backend/static/review_exports/*
 !backend/static/review_exports/.gitkeep
 
-# Knowledge base files
+# Project-specific: Knowledge base files
 backend/app/static/knowledge/
 backend/app/static/polished/
 
-# Database
+# Project-specific: Database
 *.db
 *.sqlite
 
-# Logs
-*.log
-
-# Env
-.env
-.env.local
-
-# Build
+# Project-specific: Build
 frontend/dist/
-
-# Workspace artifacts
-${HOME}/
