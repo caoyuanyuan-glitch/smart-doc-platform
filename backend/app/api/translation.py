@@ -507,90 +507,6 @@ def _translate_xlf_xml(fpath: str, engine: str, model: str, source_lang: str, ta
     return ET.tostring(root_xliff, encoding="unicode"), all_original_parts, all_translated_parts
 
 
-def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
-    """Translate IDML (InDesign Markup Language) preserving formatting."""
-    IDML_NS = "http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"
-    ET_LXML.register_namespace("idPkg", IDML_NS)
-
-    in_buf = io.BytesIO()
-    with open(fpath, "rb") as f:
-        in_buf.write(f.read())
-    in_buf.seek(0)
-
-    all_original = []
-    all_translated = []
-    texts_to_translate = []
-    content_targets = []
-    modified_entries = {}
-
-    with zipfile.ZipFile(in_buf, 'r') as z_in:
-        for zinfo in z_in.infolist():
-            name = zinfo.filename
-            if not name.endswith(".xml"):
-                continue
-            raw = z_in.read(zinfo)
-            try:
-                root = ET_LXML.fromstring(raw)
-            except Exception:
-                continue
-
-            try:
-                content_elems = root.xpath("//*[local-name()='Content']")
-            except Exception:
-                continue
-
-            has_text = False
-            for elem in content_elems:
-                if isinstance(elem, ET_LXML._Element) and elem.text and elem.text.strip():
-                    texts_to_translate.append(elem.text.strip())
-                    content_targets.append(elem)
-                    has_text = True
-            if has_text:
-                modified_entries[name] = root
-
-    if not texts_to_translate:
-        return in_buf.read(), [], []
-
-    BATCH_SIZE = 15
-    sep = "\n---IDMLSEG---\n"
-    for batch_start in range(0, len(texts_to_translate), BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, len(texts_to_translate))
-        batch_texts = texts_to_translate[batch_start:batch_end]
-        combined = sep.join(batch_texts)
-        try:
-            translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
-            translated_parts = [p.strip() for p in translated_combined.split(sep)]
-        except Exception:
-            translated_parts = []
-            for t in batch_texts:
-                try:
-                    translated_parts.append(_do_translate(t, engine, model, source_lang, target_lang, db))
-                except Exception:
-                    translated_parts.append(t)
-        while len(translated_parts) < len(batch_texts):
-            translated_parts.append(batch_texts[len(translated_parts)])
-        for j in range(len(batch_texts)):
-            text_idx = batch_start + j
-            translated = translated_parts[j]
-            all_original.append(texts_to_translate[text_idx])
-            all_translated.append(translated)
-            content_targets[text_idx].text = translated
-
-    out_buf = io.BytesIO()
-    in_buf.seek(0)
-    with zipfile.ZipFile(in_buf, 'r') as z_in:
-        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as z_out:
-            for zinfo in z_in.infolist():
-                raw = z_in.read(zinfo)
-                name = zinfo.filename
-                if name in modified_entries:
-                    raw = ET_LXML.tostring(modified_entries[name], xml_declaration=True, encoding="UTF-8", pretty_print=False)
-                z_out.writestr(zinfo, raw)
-    out_buf.seek(0)
-
-    return out_buf.read(), all_original, all_translated
-
-
 def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
     """Returns (translated_bytes, all_original_parts, all_translated_parts)"""
     PPTX_NS = {
@@ -1077,13 +993,6 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                                 all_translated_parts.append("\n".join(trans))
                             except Exception:
                                 continue
-                        elif ext_lower == ".idml":
-                            try:
-                                translated_content, orig, trans = _translate_idml(safe_fpath, engine, model, source_lang, target_lang, db)
-                                all_original_parts.append("\n".join(orig))
-                                all_translated_parts.append("\n".join(trans))
-                            except Exception:
-                                continue
                         elif ext_lower in (".docx", ".doc"):
                             try:
                                 translated_content, orig, trans = _translate_docx(safe_fpath, engine, model, source_lang, target_lang, db)
@@ -1155,12 +1064,6 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             all_translated_parts.append("\n".join(trans))
             with open(output_path, "wb") as f:
                 f.write(translated_bytes)
-        elif ext == ".idml":
-            translated_bytes, orig, trans = _translate_idml(file_path, engine, model, source_lang, target_lang, db)
-            all_original_parts.append("\n".join(orig))
-            all_translated_parts.append("\n".join(trans))
-            with open(output_path, "wb") as f:
-                f.write(translated_bytes)
         elif ext in (".docx", ".doc"):
             translated_bytes, orig, trans = _translate_docx(file_path, engine, model, source_lang, target_lang, db)
             all_original_parts.extend(orig)
@@ -1215,17 +1118,6 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             doc.translated_content = translated_content[:8000]
             doc.original_preview = original_content[:500] + "..." if len(original_content) > 500 else original_content
             doc.translated_preview = translated_content[:500] + "..." if len(translated_content) > 500 else translated_content
-            total_chars = len(original_content)
-            doc.source_char_count = total_chars
-            if engine == "memory":
-                doc.memory_char_count = total_chars
-                doc.ai_char_count = 0
-            elif engine == "ai":
-                doc.ai_char_count = total_chars
-                doc.memory_char_count = 0
-            else:
-                doc.ai_char_count = total_chars
-                doc.memory_char_count = 0
             db.commit()
 
         with _translate_tasks_lock:
@@ -1251,7 +1143,6 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     engine = req.engine
     _set_memory_bank(req.memory_bank)
     _set_memory_file_id(req.memory_file_id)
-    source_char_count = len(req.content)
 
     if engine in ["memory", "hybrid"]:
         result, hit = translate_with_memory(
@@ -1267,21 +1158,6 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
             translated = result
             from_memory = True
             if engine == "memory":
-                doc_record = TranslationDoc(
-                    filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                    file_type="text",
-                    source_lang=req.source_lang,
-                    target_lang=req.target_lang,
-                    engine=engine,
-                    model=req.model,
-                    original_content=req.content[:8000],
-                    translated_content=translated[:8000],
-                    source_char_count=source_char_count,
-                    ai_char_count=0,
-                    memory_char_count=source_char_count,
-                )
-                db.add(doc_record)
-                db.commit()
                 return TranslationResponse(
                     original=req.content,
                     translated=translated,
@@ -1307,24 +1183,6 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     if not translated:
         raise HTTPException(status_code=500, detail="翻译失败，AI和记忆库引擎均未返回结果")
 
-    ai_chars = source_char_count if from_ai else 0
-    memory_chars = source_char_count if from_memory else 0
-    doc_record = TranslationDoc(
-        filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-        file_type="text",
-        source_lang=req.source_lang,
-        target_lang=req.target_lang,
-        engine=engine,
-        model=req.model,
-        original_content=req.content[:8000],
-        translated_content=translated[:8000],
-        source_char_count=source_char_count,
-        ai_char_count=ai_chars,
-        memory_char_count=memory_chars,
-    )
-    db.add(doc_record)
-    db.commit()
-
     return TranslationResponse(
         original=req.content,
         translated=translated,
@@ -1332,27 +1190,6 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
         from_memory=from_memory,
         from_ai=from_ai
     )
-
-
-@router.get("/stats")
-async def get_translation_stats(db: Session = Depends(get_db)):
-    all_docs = db.query(TranslationDoc).all()
-    text_docs = [d for d in all_docs if d.file_type == "text"]
-    file_docs = [d for d in all_docs if d.file_type != "text"]
-
-    text_char_count = sum(d.source_char_count or 0 for d in text_docs)
-    doc_count = len(file_docs)
-    doc_char_count = sum(d.source_char_count or 0 for d in file_docs)
-    ai_char_count = sum(d.ai_char_count or 0 for d in all_docs)
-    memory_char_count = sum(d.memory_char_count or 0 for d in all_docs)
-
-    return {
-        "text_char_count": text_char_count,
-        "doc_count": doc_count,
-        "doc_char_count": doc_char_count,
-        "ai_char_count": ai_char_count,
-        "memory_char_count": memory_char_count,
-    }
 
 
 @router.post("/translate/file")
