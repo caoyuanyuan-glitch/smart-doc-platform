@@ -36,9 +36,7 @@ def _strip_code_fence(text):
 
 class AIClient:
     def __init__(self):
-        self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "qwen")
-        self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
-        self.qwen_model = os.getenv("QWEN_MODEL", "qwen-max")
+        self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "kimi")
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
@@ -51,30 +49,7 @@ class AIClient:
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
 
-        # Anthropic-compatible proxy (for translation module)
-        self.anthropic_model = os.getenv("QWEN_MODEL", "monkeycode-pro/qwen3.6-plus")
-        self.anthropic_base_url = os.getenv("QWEN_BASE_URL", "https://proxy.monkeycode-ai.com/v1")
-        self.anthropic_http_client = httpx.Client(verify=False, timeout=120)
-
         timeout = httpx.Timeout(30.0, read=180.0)
-
-        # 自动识别火山引擎方舟 API Key
-        VOLC_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
-        if _is_valid_key(self.dashscope_api_key) and self.dashscope_api_key.startswith("ark-"):
-            self.qwen_client = OpenAI(
-                api_key=self.dashscope_api_key,
-                base_url=VOLC_ARK_BASE,
-                timeout=timeout,
-            )
-            print(f"[AI] 火山引擎方舟已连接, base_url={VOLC_ARK_BASE}, model={self.qwen_model}")
-        elif _is_valid_key(self.dashscope_api_key):
-            self.qwen_client = OpenAI(
-                api_key=self.dashscope_api_key,
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-                timeout=timeout,
-            )
-        else:
-            self.qwen_client = None
 
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
@@ -108,76 +83,11 @@ class AIClient:
 
     @property
     def has_any_client(self):
-        return self.kimi_client is not None or self.arkclaw_client is not None or self.qwen_client is not None or self.deepseek_client is not None
-
-    # ------------------------------------------------------------------
-    # Anthropic-compatible _call_model (for translation module)
-    # ------------------------------------------------------------------
-    def _call_model(self, messages, max_tokens=2048, temperature=0.3):
-        system_msg = None
-        user_messages = []
-
-        for msg in messages:
-            if msg["role"] == "system":
-                system_msg = msg["content"]
-            else:
-                user_messages.append(msg)
-
-        body = {
-            "model": self.anthropic_model,
-            "messages": user_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-        if system_msg:
-            body["system"] = system_msg
-
-        try:
-            response = self.anthropic_http_client.post(
-                f"{self.anthropic_base_url}/messages",
-                headers={
-                    "x-api-key": self.dashscope_api_key or os.getenv("OPENAI_API_KEY"),
-                    "Content-Type": "application/json",
-                    "anthropic-version": ANTHROPIC_VERSION
-                },
-                json=body
-            )
-
-            if response.status_code != 200:
-                print(f"模型调用失败 [{response.status_code}]: {response.text[:200]}")
-                return None
-
-            data = response.json()
-
-            text_parts = []
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-
-            return "".join(text_parts) if text_parts else None
-
-        except Exception as e:
-            print(f"模型调用异常: {str(e)}")
-            return None
+        return self.kimi_client is not None or self.arkclaw_client is not None or self.deepseek_client is not None
 
     # ------------------------------------------------------------------
     # 基础 chat 接口
     # ------------------------------------------------------------------
-    def call_qwen(self, messages, max_tokens=2048, temperature=0.3):
-        if not self.qwen_client:
-            return None
-        try:
-            response = self.qwen_client.chat.completions.create(
-                model=self.qwen_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"Qwen调用失败: {str(e)}")
-            return None
-
     def call_deepseek(self, messages, max_tokens=2048, temperature=0.3):
         if not self.deepseek_client:
             return None
@@ -224,18 +134,14 @@ class AIClient:
             return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
-        # 优先级: Kimi > ArkClaw > DeepSeek > Qwen > Proxy
+        # 优先级: Kimi > DeepSeek > ArkClaw
         providers = []
         if self.kimi_client:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
-        if self.arkclaw_client:
-            providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
         if self.deepseek_client:
             providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
-        if self.qwen_client:
-            providers.append(('Qwen', self.qwen_client, self.qwen_model))
-        if self.proxy_client:
-            providers.append(('Proxy', self.proxy_client, self.anthropic_model))
+        if self.arkclaw_client:
+            providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
 
         if not providers:
             return None

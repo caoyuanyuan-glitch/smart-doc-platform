@@ -173,6 +173,7 @@ export const polishAPI = {
     })
   },
   deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
+  batchDeletePolishedDocuments: (ids) => instance.delete('/polish/batch', { data: { ids } }),
   submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
     instance.post('/polish/feedback', {
       original_text: originalText,
