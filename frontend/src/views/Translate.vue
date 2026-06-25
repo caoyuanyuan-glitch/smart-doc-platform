@@ -36,13 +36,12 @@
             <el-option label="DeepSeek Chat" value="deepseek" />
           </el-select>
         </el-form-item>
-        <el-form-item label="源语言">
+        <el-form-item label="语言">
           <el-select v-model="sourceLang" style="width: 100px">
             <el-option label="中文" value="zh" />
             <el-option label="英文" value="en" />
           </el-select>
-        </el-form-item>
-        <el-form-item label="目标语言">
+          <el-icon style="margin: 0 6px;"><Right /></el-icon>
           <el-select v-model="targetLang" style="width: 100px">
             <el-option label="英文" value="en" />
             <el-option label="中文" value="zh" />
@@ -165,7 +164,7 @@
 <script setup>
 import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus } from '@element-plus/icons-vue'
+import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Right } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
