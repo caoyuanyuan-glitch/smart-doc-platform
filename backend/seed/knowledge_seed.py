@@ -10,6 +10,19 @@ from app.models.knowledge import Folder, KnowledgeFile
 
 SEED_DIR = Path(__file__).parent / "knowledge"
 TARGET_DIR = Path(__file__).parent.parent / "app" / "static" / "knowledge"
+SUPPORTED_SEED_FILE_TYPES = {
+    ".csv",
+    ".doc",
+    ".docx",
+    ".md",
+    ".pdf",
+    ".tsv",
+    ".xls",
+    ".xlsm",
+    ".xlsx",
+    ".xltm",
+    ".xltx",
+}
 
 
 def seed_knowledge_base():
@@ -64,30 +77,32 @@ def _sync_from_seed(db: Session, current_dir: Path, parent_id: int | None, paren
             created += _sync_from_seed(db, entry, parent_id=folder_id, parent_path=child_path)
 
         elif entry.is_file():
-            if entry.suffix == ".md":
-                # 查找同名文件（同一父文件夹下）
-                existing_file = db.query(KnowledgeFile).filter(
-                    KnowledgeFile.name == entry.name,
-                    KnowledgeFile.folder_id == parent_id
-                ).first()
+            suffix = entry.suffix.lower()
+            if suffix not in SUPPORTED_SEED_FILE_TYPES:
+                continue
 
-                if not existing_file:
-                    unique_name = f"{uuid.uuid4()}.md"
-                    target_path = TARGET_DIR / unique_name
-                    shutil.copy2(entry, target_path)
+            # 查找同名文件（同一父文件夹下）
+            existing_file = db.query(KnowledgeFile).filter(
+                KnowledgeFile.name == entry.name,
+                KnowledgeFile.folder_id == parent_id
+            ).first()
 
-                    file_record = KnowledgeFile(
-                        name=entry.name,
-                        folder_id=parent_id,
-                        filename=unique_name,
-                        file_path=str(target_path),
-                        file_size=os.path.getsize(target_path),
-                        file_type="md",
-                        created_by=1
-                    )
-                    db.add(file_record)
-                    created += 1
-            # .gitkeep 等非 .md 文件跳过
+            if not existing_file:
+                unique_name = f"{uuid.uuid4()}{suffix}"
+                target_path = TARGET_DIR / unique_name
+                shutil.copy2(entry, target_path)
+
+                file_record = KnowledgeFile(
+                    name=entry.name,
+                    folder_id=parent_id,
+                    filename=unique_name,
+                    file_path=str(target_path),
+                    file_size=os.path.getsize(target_path),
+                    file_type=suffix.lstrip("."),
+                    created_by=1
+                )
+                db.add(file_record)
+                created += 1
 
     return created
 
@@ -98,7 +113,7 @@ def export_kb_to_seed():
     此函数会：
     1. 清空 seed/knowledge 下的旧内容（保留 .gitkeep）
     2. 根据 DB 中的文件夹/文件重建种子目录结构
-    3. 复制所有 .md 文件内容到种子目录
+    3. 复制知识库文件内容到种子目录
     """
     db = SessionLocal()
     try:

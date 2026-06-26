@@ -5,7 +5,8 @@ import Review from '@/views/Review.vue'
 import Polish from '@/views/Polish.vue'
 import PolishHistory from '@/views/PolishHistory.vue'
 import QA from '@/views/QA.vue'
-import QADoc from '@/views/QADoc.vue'
+import QAManual from '@/views/QADoc.vue'
+import QADashboard from '@/views/QADashboard.vue'
 import QAHistory from '@/views/QAHistory.vue'
 import Generate from '@/views/Generate.vue'
 import Compare from '@/views/Compare.vue'
@@ -15,6 +16,7 @@ import Terms from '@/views/Terms.vue'
 import Users from '@/views/Users.vue'
 import Translate from '@/views/Translate.vue'
 import TranslateDoc from '@/views/TranslateDoc.vue'
+import TranslateStats from '@/views/TranslateStats.vue'
 import Knowledge from '@/views/Knowledge.vue'
 import PolishPreview from '@/views/PolishPreview.vue'
 import SpellCheck from '@/views/SpellCheck.vue'
@@ -94,9 +96,18 @@ const routes = [
     component: QA
   },
   {
+    path: '/qa/manual',
+    name: 'QAManual',
+    component: QAManual
+  },
+  {
     path: '/qa/docs',
-    name: 'QADocs',
-    component: QADoc
+    redirect: '/qa/manual'
+  },
+  {
+    path: '/qa/dashboard',
+    name: 'QADashboard',
+    component: QADashboard
   },
   {
     path: '/qa/history',
@@ -166,6 +177,11 @@ const routes = [
     path: '/translate/docs',
     name: 'TranslateDocs',
     component: TranslateDoc
+  },
+  {
+    path: '/translate/stats',
+    name: 'TranslateStats',
+    component: TranslateStats
   },
   {
     path: '/knowledge',

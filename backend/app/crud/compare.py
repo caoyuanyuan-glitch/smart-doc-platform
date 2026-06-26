@@ -4,11 +4,13 @@ from app.models.compare_diff import CompareDiff
 from app.schemas.compare import CompareTaskCreate
 import json
 
-def create_compare_task(db: Session, file_a_name: str, file_b_name: str, user_id: int):
+def create_compare_task(db: Session, file_a_name: str, file_b_name: str, user_id: int, group_id: int = None, file_names: str = None):
     db_task = CompareTask(
         file_a_name=file_a_name,
         file_b_name=file_b_name,
         user_id=user_id,
+        group_id=group_id,
+        file_names=file_names,
         status="processing"
     )
     db.add(db_task)
@@ -75,3 +77,7 @@ def create_compare_diff(db: Session, task_id: int, diff_type: str, severity: str
 
 def get_compare_diffs(db: Session, task_id: int):
     return db.query(CompareDiff).filter(CompareDiff.task_id == task_id).all()
+
+
+def get_compare_tasks_by_group(db: Session, group_id: int):
+    return db.query(CompareTask).filter(CompareTask.group_id == group_id).order_by(CompareTask.id).all()

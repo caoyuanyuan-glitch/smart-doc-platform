@@ -2,7 +2,7 @@
   <div class="app-container">
     <router-view v-if="$route.path === '/login'" />
     <template v-else>
-      <header class="header">
+      <header class="header" :class="{ collapsed: isCollapsed }">
         <div class="header-left">
           <span class="logo">智能技术文档平台</span>
         </div>
@@ -15,7 +15,7 @@
         </div>
       </header>
 
-      <aside class="sidebar">
+      <aside class="sidebar" :class="{ collapsed: isCollapsed }">
         <div class="collapse-btn" @click="toggleCollapse" v-if="!isCollapsed">
           <el-icon><Fold /></el-icon>
         </div>
@@ -98,12 +98,13 @@
                 <span>智能问答</span>
               </template>
               <el-menu-item index="/qa">知识库问答</el-menu-item>
-              <el-menu-item index="/qa/docs">文档对话</el-menu-item>
+              <el-menu-item index="/qa/manual">说明书问答</el-menu-item>
               <el-sub-menu index="qa-history-sub" class="qa-history-sub">
                 <template #title><span>历史记录</span></template>
                 <el-menu-item index="/qa/history/general">知识库问答历史</el-menu-item>
-                <el-menu-item index="/qa/history/doc">文档对话历史</el-menu-item>
+                <el-menu-item index="/qa/history/doc">说明书问答历史</el-menu-item>
               </el-sub-menu>
+              <el-menu-item v-if="userStore.isAdmin" index="/qa/dashboard">问答看板</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="translate-sub">
@@ -111,6 +112,7 @@
                 <el-icon><Switch /></el-icon>
                 <span>AI翻译</span>
               </template>
+              <el-menu-item index="/translate/stats">统计面板</el-menu-item>
               <el-menu-item index="/translate">文本翻译</el-menu-item>
               <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
             </el-sub-menu>
@@ -128,8 +130,12 @@
         </div>
       </aside>
 
-      <main class="main-content">
-        <router-view />
+      <main class="main-content" :class="{ collapsed: isCollapsed }">
+        <router-view v-slot="{ Component }">
+          <keep-alive :include="['Compare', 'CompareParams', 'QAHistory', 'PolishHistory', 'SpellCheckHistory']">
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </main>
     </template>
   </div>
@@ -455,13 +461,11 @@ body {
   transition: margin-left 0.3s ease;
 }
 
-.sidebar.collapsed ~ .main-content,
-.sidebar.collapsed + .main-content,
-.sidebar.collapsed + * + .main-content {
+.main-content.collapsed {
   margin-left: 64px;
 }
 
-.sidebar.collapsed + .header {
+.header.collapsed {
   left: 64px;
 }
 

@@ -58,54 +58,133 @@ def parse_docx(filepath):
 def parse_pdf(filepath):
     """
     解析 PDF 文档，提取文本和书签结构
-    使用 PyMuPDF (fitz)
+    优先级：PyMuPDF > pdfplumber > pypdf > OCR
     """
+    pages_text = []
+    toc = []
+
+    # 尝试 PyMuPDF (fitz) - 主提取器
     try:
         import fitz
+        doc = fitz.open(filepath)
+
+        toc = doc.get_toc()
+
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            text = page.get_text()
+            if text and text.strip():
+                pages_text.append(text)
+
+        doc.close()
     except ImportError:
-        return {"pages_text": [], "toc": [], "chapters": [], "full_text": "", "error": "pymupdf not installed"}
+        print("[doc_parser] PyMuPDF (fitz) not available")
+    except Exception as e:
+        print(f"[doc_parser] PyMuPDF error: {e}")
 
-    doc = fitz.open(filepath)
+    fitz_text = "\n".join(pages_text)
 
-    # 提取书签（目录结构）
-    toc = doc.get_toc()  # [(level, title, page), ...]
+    # 如果 fitz 提取到文本，用 fitz 做章节分析
+    if fitz_text.strip():
+        full_text = fitz_text
+        chapters = _build_chapters(fitz_text, pages_text, toc, filepath)
+        return {
+            "pages_text": pages_text,
+            "toc": toc,
+            "chapters": chapters,
+            "full_text": full_text,
+            "type": "pdf"
+        }
 
-    # 提取每页文本
-    pages_text = []
-    for page_num in range(doc.page_count):
-        page = doc[page_num]
-        text = page.get_text()
-        pages_text.append(text)
+    # 回退 pdfplumber
+    print("[doc_parser] PyMuPDF got empty text, trying pdfplumber")
+    plumber_texts = []
+    try:
+        import pdfplumber
+        with pdfplumber.open(filepath) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t and t.strip():
+                    plumber_texts.append(t)
+        if plumber_texts:
+            pages_text = plumber_texts
+            full_text = "\n".join(plumber_texts)
+            print(f"[doc_parser] pdfplumber extracted {len(full_text)} chars")
+            chapters = _build_chapters(full_text, pages_text, [], filepath)
+            return {
+                "pages_text": pages_text,
+                "toc": [],
+                "chapters": chapters,
+                "full_text": full_text,
+                "type": "pdf"
+            }
+    except ImportError:
+        print("[doc_parser] pdfplumber not available")
+    except Exception as e:
+        print(f"[doc_parser] pdfplumber error: {e}")
 
-    full_text = "\n".join(pages_text)
+    # 回退 pypdf
+    print("[doc_parser] pdfplumber got empty text, trying pypdf")
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(filepath)
+        pypdf_texts = []
+        for page in reader.pages:
+            t = page.extract_text()
+            if t and t.strip():
+                pypdf_texts.append(t)
+        if pypdf_texts:
+            pages_text = pypdf_texts
+            full_text = "\n".join(pypdf_texts)
+            print(f"[doc_parser] pypdf extracted {len(full_text)} chars")
+            chapters = _build_chapters(full_text, pages_text, [], filepath)
+            return {
+                "pages_text": pages_text,
+                "toc": [],
+                "chapters": chapters,
+                "full_text": full_text,
+                "type": "pdf"
+            }
+    except ImportError:
+        print("[doc_parser] pypdf not available")
+    except Exception as e:
+        print(f"[doc_parser] pypdf error: {e}")
 
-    # 章节检测策略（按优先级）：
-    # 1. 书签（如果有足够多的章节）
-    # 2. 基于字体大小检测
-    # 3. 文本模式匹配
-    # 4. Fallback：全文作为一个章节
+    # OCR 回退（扫描件/图片型PDF）
+    print("[doc_parser] pypdf got empty text, trying OCR")
+    ocr_text = _ocr_pdf_pages_doc_parser(filepath)
+    if ocr_text.strip():
+        pages_text = [ocr_text]
+        full_text = ocr_text
+        print(f"[doc_parser] OCR extracted {len(full_text)} chars")
+        chapters = _build_chapters(full_text, pages_text, [], filepath)
+        return {
+            "pages_text": pages_text,
+            "toc": [],
+            "chapters": chapters,
+            "full_text": full_text,
+            "type": "pdf"
+        }
+
+    # 所有提取器都失败了
+    full_text = ""
+    chapters = [{"heading": "全文", "content": full_text, "subsections": []}]
+    return {
+        "pages_text": pages_text,
+        "toc": [],
+        "chapters": chapters,
+        "full_text": full_text,
+        "type": "pdf",
+        "error": "无法提取PDF文本内容"
+    }
+
+
+def _build_chapters(full_text, pages_text, toc, filepath):
+    """将文本构建为章节结构（使用文本模式匹配）"""
     chapters = []
-
-    # 策略1：书签
-    if toc and len(toc) >= 2:
-        chapters = _extract_chapters_from_toc(toc, pages_text, doc)
-
-    # 策略2：基于字体大小检测（如果书签结果不好或没有书签）
-    if len(chapters) < 2:
-        try:
-            font_chapters = detect_headings_by_font_size(doc)
-            if len(font_chapters) > len(chapters):
-                chapters = font_chapters
-        except Exception:
-            pass
-
-    # 策略3：文本模式匹配
-    if len(chapters) < 2:
-        text_chapters = detect_headings_from_text(pages_text)
-        if len(text_chapters) > len(chapters):
-            chapters = text_chapters
-
-    # 策略4：Fallback —— 全文作为一个章节
+    text_chapters = detect_headings_from_text(pages_text)
+    if text_chapters and len(text_chapters) >= 2:
+        chapters = text_chapters
     if not chapters:
         first_page_text = pages_text[0] if pages_text else ""
         first_line = ""
@@ -116,24 +195,102 @@ def parse_pdf(filepath):
                 break
         heading = first_line or "全文"
         chapters = [{"heading": heading, "content": full_text, "subsections": []}]
-
-    # 策略5：如果顶级章节太少（≤2个），但子节很多，把子节提升为一级
-    # 这样报告里能看到更细粒度的对比
     chapters = _flatten_chapters_if_needed(chapters)
-
-    # 策略6：过滤掉封面/文档标题（没有实质内容的章节）
-    # 过滤规则：内容很短且没有子节，或内容远少于其他章节
     chapters = _filter_cover_chapters(chapters)
+    return chapters
 
-    doc.close()
 
-    return {
-        "pages_text": pages_text,
-        "toc": toc,
-        "chapters": chapters,
-        "full_text": full_text,
-        "type": "pdf"
-    }
+def _ocr_pdf_pages_doc_parser(filepath):
+    """对扫描件/图片型 PDF 进行 OCR 识别"""
+    text_parts = []
+    try:
+        import fitz
+        import io
+        from PIL import Image, ImageFilter, ImageEnhance
+
+        doc = fitz.open(filepath)
+        zoom = 3.0
+        mat = fitz.Matrix(zoom, zoom)
+
+        for i, page in enumerate(doc):
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            img = img.convert('L')
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(1.5)
+            img = img.filter(ImageFilter.SHARPEN)
+            page_text = _ocr_image_doc_parser(img)
+            if page_text and page_text.strip():
+                text_parts.append(page_text)
+                print(f"[doc_parser] OCR Page {i+1}: {len(page_text)} chars")
+
+        doc.close()
+    except ImportError as e:
+        print(f"[doc_parser] OCR: required library not available - {e}")
+    except Exception as e:
+        print(f"[doc_parser] OCR error: {e}")
+
+    return "\n".join(text_parts)
+
+
+def _ocr_image_doc_parser(pil_image):
+    """对单张 PIL Image 进行 OCR"""
+    import os
+
+    _TESSDATA_CANDIDATES = [
+        '/usr/share/tesseract-ocr/5/tessdata',
+        '/usr/share/tesseract-ocr/4.00/tessdata',
+        '/usr/share/tessdata',
+        os.environ.get('TESSDATA_PREFIX', ''),
+    ]
+
+    try:
+        import tesserocr
+        tessdata_path = None
+        for candidate in _TESSDATA_CANDIDATES:
+            if candidate and os.path.isdir(candidate):
+                tessdata_path = candidate
+                break
+        api = tesserocr.PyTessBaseAPI(path=tessdata_path, lang='chi_sim+eng')
+        api.SetImage(pil_image)
+        text = api.GetUTF8Text()
+        api.End()
+        if text and text.strip():
+            return _clean_ocr_doc_parser(text)
+    except ImportError:
+        print("[doc_parser] tesserocr not available for OCR")
+    except Exception as e:
+        print(f"[doc_parser] tesserocr OCR error: {e}")
+
+    try:
+        import pytesseract
+        for candidate in _TESSDATA_CANDIDATES:
+            if candidate and os.path.isdir(candidate):
+                os.environ['TESSDATA_PREFIX'] = candidate
+                break
+        text = pytesseract.image_to_string(pil_image, lang='chi_sim+eng')
+        if text and text.strip():
+            return _clean_ocr_doc_parser(text)
+    except ImportError:
+        print("[doc_parser] pytesseract not available for OCR")
+    except Exception as e:
+        print(f"[doc_parser] pytesseract OCR error: {e}")
+
+    return ""
+
+
+def _clean_ocr_doc_parser(text):
+    """清理 OCR 文本"""
+    import re
+    while True:
+        cleaned = re.sub(r'([\u4e00-\u9fff\u3400-\u4dbf])\s+([\u4e00-\u9fff\u3400-\u4dbf])', r'\1\2', text)
+        if cleaned == text:
+            break
+        text = cleaned
+    text = re.sub(r'([\u4e00-\u9fff])\s+(\d)', r'\1\2', text)
+    text = re.sub(r'(\d)\s+([\u4e00-\u9fff])', r'\1\2', text)
+    text = re.sub(r'([\u4e00-\u9fff])\s+([a-zA-Z])', r'\1\2', text)
+    return text
 
 
 def parse_markdown(filepath):

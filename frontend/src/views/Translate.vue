@@ -5,75 +5,57 @@
       <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，记忆库配置可从知识库资源库调用</p>
     </div>
 
+    <el-card class="config-card config-horizontal" shadow="never">
+      <template #header>
+        <span class="card-header-title">翻译配置</span>
+      </template>
+      <el-form :inline="true" size="default" class="config-form-inline">
+        <el-form-item label="翻译引擎">
+          <el-radio-group v-model="engine" @change="onEngineChange">
+            <el-radio-button value="hybrid">AI + 记忆库</el-radio-button>
+            <el-radio-button value="ai">仅 AI</el-radio-button>
+            <el-radio-button value="memory">仅记忆库</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
+          <el-select
+            v-model="memoryFileId"
+            placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
+            clearable
+            filterable
+            :loading="memoryLibraryLoading"
+            style="width: 260px"
+          >
+            <el-option v-for="file in memoryLibraryFiles" :key="file.id" :label="file.label" :value="file.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="AI 模型" v-if="engine !== 'memory'">
+          <el-select v-model="model" placeholder="选择AI模型" style="width: 160px">
+            <el-option label="Kimi (Moonshot)" value="kimi" />
+            <el-option label="Qwen3.6-Plus" value="qwen" />
+            <el-option label="DeepSeek Chat" value="deepseek" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="语言">
+          <el-select v-model="sourceLang" style="width: 100px">
+            <el-option label="中文" value="zh" />
+            <el-option label="英文" value="en" />
+          </el-select>
+          <el-icon class="swap-icon" @click="swapLanguages"><Sort /></el-icon>
+          <el-select v-model="targetLang" style="width: 100px">
+            <el-option label="英文" value="en" />
+            <el-option label="中文" value="zh" />
+            <el-option label="日文" value="ja" />
+            <el-option label="韩文" value="ko" />
+            <el-option label="法文" value="fr" />
+            <el-option label="德文" value="de" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+    </el-card>
+
     <div class="content-grid">
       <div class="left-panel">
-        <el-card class="config-card" shadow="never">
-          <template #header>
-            <span class="card-header-title">翻译配置</span>
-          </template>
-
-          <el-form label-width="90px" label-position="left" size="default">
-            <el-form-item label="翻译引擎">
-              <el-radio-group v-model="engine" @change="onEngineChange">
-                <el-radio-button value="hybrid">AI + 记忆库</el-radio-button>
-                <el-radio-button value="ai">仅 AI</el-radio-button>
-                <el-radio-button value="memory">仅记忆库</el-radio-button>
-              </el-radio-group>
-            </el-form-item>
-
-            <el-form-item label="记忆库标签" v-if="engine !== 'ai'">
-              <el-select v-model="memoryBank" placeholder="全部记忆库" clearable style="width: 100%">
-                <el-option label="全部记忆库" value="" />
-                <el-option v-for="bank in memoryBanks" :key="bank" :label="bank" :value="bank" />
-              </el-select>
-            </el-form-item>
-
-            <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
-              <el-select
-                v-model="memoryFileId"
-                placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
-                clearable
-                filterable
-                :loading="memoryLibraryLoading"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="file in memoryLibraryFiles"
-                  :key="file.id"
-                  :label="file.label"
-                  :value="file.id"
-                />
-              </el-select>
-              <div class="memory-library-hint">仅读取知识库下“资源库 / 记忆库”中的文件，当前配置可留空。</div>
-            </el-form-item>
-
-            <el-form-item label="AI 模型" v-if="engine !== 'memory'">
-              <el-select v-model="model" placeholder="选择AI模型" style="width: 100%">
-                <el-option label="Kimi (Moonshot)" value="kimi" />
-                <el-option label="DeepSeek Chat" value="deepseek" />
-              </el-select>
-            </el-form-item>
-
-            <el-form-item label="源语言">
-              <el-select v-model="sourceLang" style="width: 100%">
-                <el-option label="中文" value="zh" />
-                <el-option label="英文" value="en" />
-              </el-select>
-            </el-form-item>
-
-            <el-form-item label="目标语言">
-              <el-select v-model="targetLang" style="width: 100%">
-                <el-option label="英文" value="en" />
-                <el-option label="中文" value="zh" />
-                <el-option label="日文" value="ja" />
-                <el-option label="韩文" value="ko" />
-                <el-option label="法文" value="fr" />
-                <el-option label="德文" value="de" />
-              </el-select>
-            </el-form-item>
-          </el-form>
-        </el-card>
-
         <el-card class="source-card" shadow="never">
           <template #header>
             <span class="card-header-title">翻译内容</span>
@@ -121,23 +103,15 @@
           </div>
 
           <div v-if="result && !translating" class="result-content">
-            <div class="result-section">
-              <h4>原文</h4>
-              <div class="result-text original-text">{{ result.original }}</div>
-            </div>
-            <el-divider />
-            <div class="result-section">
-              <h4>译文</h4>
-              <el-input
-                v-if="editingResult"
-                v-model="translatedDraft"
-                type="textarea"
-                :rows="10"
-                resize="none"
-                class="translated-editor"
-              />
-              <div v-else class="result-text translated-text">{{ currentTranslatedText }}</div>
-            </div>
+            <el-input
+              v-if="editingResult"
+              v-model="translatedDraft"
+              type="textarea"
+              :rows="10"
+              resize="none"
+              class="translated-editor"
+            />
+            <div v-else class="result-text translated-text">{{ currentTranslatedText }}</div>
             <div class="memory-write-section">
               <span class="memory-write-label">写入目标记忆库</span>
               <el-select
@@ -148,12 +122,7 @@
                 :loading="memoryLibraryLoading"
                 class="memory-write-select"
               >
-                <el-option
-                  v-for="file in writableMemoryLibraryFiles"
-                  :key="file.id"
-                  :label="file.label"
-                  :value="file.id"
-                />
+                <el-option v-for="file in writableMemoryLibraryFiles" :key="file.id" :label="file.label" :value="file.id" />
               </el-select>
             </div>
             <div class="result-actions">
@@ -195,7 +164,7 @@
 <script setup>
 import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus } from '@element-plus/icons-vue'
+import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
@@ -203,6 +172,13 @@ const engine = ref('hybrid')
 const model = ref('kimi')
 const sourceLang = ref('zh')
 const targetLang = ref('en')
+
+function swapLanguages() {
+  const tmp = sourceLang.value
+  sourceLang.value = targetLang.value
+  targetLang.value = tmp
+}
+
 const memoryBank = ref('')
 const memoryBanks = ref([])
 const memoryFileId = ref(null)
@@ -391,7 +367,7 @@ function downloadResult() {
 }
 
 .page-header {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .page-title {
@@ -406,11 +382,67 @@ function downloadResult() {
   color: #6b7280;
 }
 
+.config-horizontal {
+  margin-bottom: 16px;
+}
+
+.config-form-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.config-form-inline :deep(.el-form-item) {
+  margin-bottom: 4px;
+}
+
+.swap-icon {
+  margin: 0 4px;
+  cursor: pointer;
+  color: var(--el-color-primary);
+  font-size: 16px;
+  vertical-align: middle;
+  transform: rotate(90deg);
+}
+.swap-icon:hover {
+  color: var(--el-color-primary-light-3);
+}
+
 .content-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
-  align-items: start;
+  align-items: stretch;
+}
+
+.left-panel, .right-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.source-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.source-card :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.result-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.result-card :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .card-header-title {
@@ -425,14 +457,22 @@ function downloadResult() {
   justify-content: space-between;
 }
 
-.config-card {
-  margin-bottom: 16px;
+.text-input-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.text-input-area :deep(.el-textarea) {
+  flex: 1;
 }
 
 .text-input-area :deep(.el-textarea__inner) {
   border-radius: 8px;
   font-size: 14px;
   line-height: 1.7;
+  height: 100% !important;
+  min-height: 320px;
 }
 
 .input-actions {
@@ -491,26 +531,9 @@ function downloadResult() {
 }
 
 .result-content {
-  padding: 0;
-}
-
-.result-section h4 {
-  font-size: 14px;
-  font-weight: 600;
-  color: #374151;
-  margin-bottom: 10px;
-}
-
-.result-text {
-  background: #f8fafc;
-  border-radius: 8px;
-  padding: 16px;
-  font-size: 14px;
-  line-height: 1.8;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 300px;
-  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 .translated-editor :deep(.el-textarea__inner) {
@@ -519,12 +542,18 @@ function downloadResult() {
   line-height: 1.8;
 }
 
-.original-text {
-  color: #64748b;
-}
-
 .translated-text {
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 16px;
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 420px;
+  overflow-y: auto;
   color: #1f2937;
+  flex: 1;
 }
 
 .memory-write-section {
