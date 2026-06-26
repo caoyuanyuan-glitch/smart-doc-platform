@@ -98,3 +98,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 2026-06-25 当天，用户要求的所有代码或配置更新完成后，都需要提交并推送到 GitHub
   - 若推送因凭据或平台服务异常失败，需要保留本地提交并向用户说明阻塞原因
+
+AI 翻译引擎排查规则
+- Date: 2026-06-26
+- Context: 用户要求将 Kimi 调用优先级和排查方法写入调用规则
+- Category: 排错调试
+- Instructions:
+  - AI 翻译默认优先使用 `Kimi`，再依次回退到 `DeepSeek`、`ArkClaw`、`MCAI Proxy`、`Proxy`
+  - 发生 `AI翻译引擎不可用` 时，先检查 `/api/translation/providers/status` 返回的 provider 可用状态
+  - 排查重点是当前服务进程是否已注入 `KIMI_API_KEY`，再检查 `DEEPSEEK_API_KEY` 和 `ARKCLAW_API_KEY`
+  - 仓库内只保留 `.env.example` 模板，实际服务配置以部署环境注入为准

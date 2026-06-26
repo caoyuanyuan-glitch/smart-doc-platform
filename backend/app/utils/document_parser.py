@@ -275,8 +275,7 @@ def parse_dita(file_path):
         return text.strip()
     except Exception as e:
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = _read_file_safe(file_path)
             root = ET.fromstring(content)
             return " ".join(root.itertext()).strip()
         except Exception:
@@ -341,12 +340,11 @@ def parse_xlf(file_path):
             for source in root.iter("{urn:oasis:names:tc:xliff:document:1.2}source"):
                 if source.text and source.text.strip():
                     texts.append(source.text.strip())
-
+        
         return "\n".join(texts) if texts else ""
     except Exception as e:
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = _read_file_safe(file_path)
             root = ET.fromstring(content)
             texts = []
             xliff_ns = "urn:oasis:names:tc:xliff:document:1.2"

@@ -29,13 +29,13 @@
             <el-option v-for="file in memoryLibraryFiles" :key="file.id" :label="file.label" :value="file.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="AI 模型" v-if="engine !== 'memory'">
-          <el-select v-model="model" placeholder="选择AI模型" style="width: 160px">
-            <el-option label="Kimi (Moonshot)" value="kimi" />
-            <el-option label="Qwen3.6-Plus" value="qwen" />
-            <el-option label="DeepSeek Chat" value="deepseek" />
-          </el-select>
-        </el-form-item>
+          <el-form-item label="AI 模型" v-if="engine !== 'memory'">
+            <el-select v-model="model" placeholder="选择AI模型" style="width: 160px">
+              <el-option label="Kimi (Moonshot)" value="kimi" />
+              <el-option label="DeepSeek Chat" value="deepseek" />
+              <el-option label="ArkClaw Chat" value="arkclaw" />
+            </el-select>
+          </el-form-item>
         <el-form-item label="语言">
           <el-select v-model="sourceLang" style="width: 100px">
             <el-option label="中文" value="zh" />
