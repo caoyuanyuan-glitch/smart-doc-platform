@@ -477,7 +477,7 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
 2. 信息不足时明确说明“文档中未找到相关信息”
 3. 回答末尾附上最相关的来源名称或片段编号"""
         messages = [{"role": "user", "content": prompt}]
-        proxy_result = ai_client._call_model(messages, max_tokens=2048)
+        proxy_result = ai_client.chat(messages, max_tokens=2048)
         if proxy_result:
             return {"answer": proxy_result, "source": source_hint}
     except Exception:
