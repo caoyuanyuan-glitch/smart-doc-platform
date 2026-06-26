@@ -76,6 +76,7 @@
       <div class="panel-header">
         <span>对比结果（{{ allResults.length }} 组）</span>
         <div class="panel-actions">
+          <el-button size="small" type="primary" @click="exportReport">导出报告</el-button>
           <el-button size="small" @click="clearFiles">重新对比</el-button>
         </div>
       </div>
@@ -297,6 +298,124 @@ async function doCompare() {
   } finally {
     loading.value = false
   }
+}
+
+function exportReport() {
+  const results = allResults.value
+  if (!results || results.length === 0) {
+    ElMessage.warning('没有可导出的对比结果')
+    return
+  }
+
+  const now = new Date().toLocaleString('zh-CN', { hour12: false })
+  const rowsHtml = results.map((r, ri) => {
+    const items = r.results || []
+    const rows = items.map(row => {
+      const matchClass = row.match === '一致' ? 'match-ok' : row.match === '不一致' ? 'match-diff' : 'match-only'
+      let fuzzyHtml = ''
+      if (row.match === '仅A有' || row.match === '仅B有') {
+        fuzzyHtml = '<span class="text-muted">—</span>'
+      } else if (row.fuzzy) {
+        fuzzyHtml = '<span class="tag tag-info">模糊匹配(' + row.fuzzy_score + ')</span><div class="matched-name">→' + _esc(row.matched_param || '') + '</div>'
+      } else {
+        fuzzyHtml = '<span class="tag tag-ok">精确匹配</span>'
+      }
+      return '<tr>' +
+        '<td class="param-name">' + _esc(row.param) + '</td>' +
+        '<td>' + _esc(row.value_a || '—') + '</td>' +
+        '<td>' + _esc(row.value_b || '—') + '</td>' +
+        '<td><span class="tag ' + matchClass + '">' + _esc(row.match) + '</span></td>' +
+        '<td class="fuzzy-cell">' + fuzzyHtml + '</td>' +
+        '<td class="source-cell">参照: ' + _esc(row.source_a || '—') + '<br>对比: ' + _esc(row.source_b || '—') + '</td>' +
+        '</tr>'
+    }).join('')
+
+    return '<div class="pair-section">' +
+      '<h2>对比 ' + (ri + 1) + ': ' + _esc(r.file_a || '参照文档') + ' VS ' + _esc(r.file_b || '对比文档') + '</h2>' +
+      '<div class="cards">' +
+      '<div class="card primary"><div class="num">' + (r.total || 0) + '</div><div class="lbl">参数总数</div></div>' +
+      '<div class="card"><div class="num" style="color:#22c55e">' + (r.match_count || 0) + '</div><div class="lbl">一致</div></div>' +
+      '<div class="card"><div class="num" style="color:#ef4444">' + (r.diff_count || 0) + '</div><div class="lbl">不一致</div></div>' +
+      '<div class="card"><div class="num" style="color:#f59e0b">' + (r.only_a_count || 0) + '</div><div class="lbl">仅参照有</div></div>' +
+      '<div class="card"><div class="num" style="color:#8b5cf6">' + (r.only_b_count || 0) + '</div><div class="lbl">仅对方有</div></div>' +
+      '</div>' +
+      '<table class="param-table">' +
+      '<thead><tr>' +
+      '<th>参数名称</th>' +
+      '<th>' + _esc(r.file_a || '参照文档') + '</th>' +
+      '<th>' + _esc(r.file_b || '对比文档') + '</th>' +
+      '<th>一致性</th>' +
+      '<th>匹配方式</th>' +
+      '<th>数据来源</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+      '</table>' +
+      '</div>'
+  }).join('')
+
+  const htmlContent = '<!DOCTYPE html>\n' +
+    '<html lang="zh-CN">\n' +
+    '<head>\n' +
+    '<meta charset="UTF-8">\n' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+    '<title>参数数值对比报告</title>\n' +
+    '<style>\n' +
+    'body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;background:#f5f6f8;color:#1a1a1a}\n' +
+    '.wrap{max-width:1180px;margin:0 auto;padding:32px 24px}\n' +
+    'h1{font-size:26px;margin:0 0 4px}\n' +
+    '.meta{color:#666;font-size:13px;margin-bottom:24px}\n' +
+    '.cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px}\n' +
+    '.card{background:#fff;border-radius:10px;padding:18px 22px;box-shadow:0 1px 3px rgba(0,0,0,.08);min-width:140px}\n' +
+    '.card.primary{background:linear-gradient(135deg,#1976d2,#2c3e50);color:#fff;min-width:180px}\n' +
+    '.card.primary .lbl{color:rgba(255,255,255,.85)}\n' +
+    '.card.primary .num{font-size:32px}\n' +
+    '.card .num{font-size:28px;font-weight:700}\n' +
+    '.card .lbl{color:#777;font-size:13px;margin-top:4px}\n' +
+    '.pair-section{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:24px;margin-bottom:24px}\n' +
+    '.pair-section h2{font-size:18px;margin:0 0 20px;color:#1f2937}\n' +
+    '.param-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}\n' +
+    '.param-table thead{position:sticky;top:0;z-index:10}\n' +
+    '.param-table th{background:#f5f7fa;color:#303133;font-weight:600;font-size:13px;padding:12px 10px;text-align:left;border-bottom:2px solid #dcdfe6;white-space:nowrap}\n' +
+    '.param-table td{padding:10px;border-bottom:1px solid #ebeef5;color:#303133;vertical-align:top}\n' +
+    '.param-table tbody tr:hover{background:#f5f7fa}\n' +
+    '.param-name{font-weight:600;color:#1f2937;white-space:nowrap}\n' +
+    '.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}\n' +
+    '.tag.match-ok{background:#f0fdf4;color:#16a34a}\n' +
+    '.tag.match-diff{background:#fef2f2;color:#dc2626}\n' +
+    '.tag.match-only{background:#fffbeb;color:#d97706}\n' +
+    '.tag.tag-info{background:#eff6ff;color:#3b82f6}\n' +
+    '.tag.tag-ok{background:#f0fdf4;color:#16a34a}\n' +
+    '.fuzzy-cell{text-align:center;font-size:12px}\n' +
+    '.source-cell{font-size:12px;color:#606266;white-space:nowrap}\n' +
+    '.text-muted{color:#c0c4cc}\n' +
+    '.matched-name{font-size:11px;color:#909399;margin-top:2px}\n' +
+    '@media print{.wrap{max-width:100%}}\n' +
+    '</style>\n' +
+    '</head>\n' +
+    '<body>\n' +
+    '<div class="wrap">\n' +
+    '<h1>参数数值对比报告</h1>\n' +
+    '<div class="meta">生成时间: ' + now + ' | 对比组数: ' + results.length + '</div>\n' +
+    rowsHtml +
+    '\n</div>\n' +
+    '</body>\n' +
+    '</html>'
+
+  const blob = new Blob([htmlContent], { type: 'text/html;charset=UTF-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = '参数对比报告_' + new Date().toISOString().slice(0, 10) + '.html'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  ElMessage.success('报告已导出')
+}
+
+function _esc(str) {
+  if (!str) return ''
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 </script>
 
