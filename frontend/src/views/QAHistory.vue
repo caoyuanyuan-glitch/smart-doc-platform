@@ -74,7 +74,7 @@
               <div class="msg-content">{{ msg.content }}</div>
               <div v-if="msg.sources && msg.sources.length" class="msg-sources">
                 <span class="sources-label">参考来源：</span>
-                <template v-for="(s, si) in msg.sources" :key="si">
+                <template v-for="(s, si) in uniqSources(msg.sources)" :key="si">
                   <el-tag size="small" type="info" class="source-tag">{{ s.title || s }}</el-tag>
                 </template>
               </div>
@@ -187,7 +187,7 @@ function buildMarkdown() {
     } else if (msg.role === 'assistant') {
       md += msg.content + '\n'
       if (msg.sources && msg.sources.length) {
-        md += '\n> 参考来源：' + msg.sources.map(s => s.title || s).join('、') + '\n'
+        md += '\n> 参考来源：' + uniqSources(msg.sources).map(s => s.title || s).join('、') + '\n'
       }
       md += '\n---\n\n'
     }
@@ -210,7 +210,7 @@ h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
     } else if (msg.role === 'assistant') {
       html += `<div class="a">${escapeHtml(msg.content)}</div>`
       if (msg.sources && msg.sources.length) {
-        html += `<p class="src">参考来源：${escapeHtml(msg.sources.map(s => s.title || s).join('、'))}</p>`
+        html += `<p class="src">参考来源：${escapeHtml(uniqSources(msg.sources).map(s => s.title || s).join('、'))}</p>`
       }
       html += '<div class="bar">---</div>'
     }
@@ -221,6 +221,17 @@ h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
 
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+function uniqSources(arr) {
+  if (!arr || !arr.length) return []
+  const seen = new Set()
+  return arr.filter(s => {
+    const key = typeof s === 'string' ? s : (s.title || '') + '_' + (s.page || '')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function downloadFile(content, filename, mime) {

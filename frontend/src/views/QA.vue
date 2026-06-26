@@ -85,7 +85,7 @@
               <div class="bubble">{{ msg.content }}</div>
               <div v-if="msg.sources && msg.sources.length" class="sources">
                 <div class="sources-title">参考来源：</div>
-                <div v-for="(s, si) in msg.sources" :key="si" class="source-item">{{ s.title || s }}</div>
+                <div v-for="(s, si) in uniqSources(msg.sources)" :key="si" class="source-item">{{ s.title || s }}</div>
               </div>
               <div v-if="msg.role === 'assistant' && i > 0" class="feedback-row">
                 <div class="feedback-actions">
@@ -328,6 +328,17 @@ async function sendQuestion(q) {
   scrollToBottom()
 }
 
+function uniqSources(arr) {
+  if (!arr || !arr.length) return []
+  const seen = new Set()
+  return arr.filter(s => {
+    const key = typeof s === 'string' ? s : (s.title || '') + '_' + (s.page || '')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 function buildMarkdown() {
   const now = new Date().toLocaleString('zh-CN')
   let md = `# 知识库问答会话 — ${now}
@@ -342,7 +353,7 @@ function buildMarkdown() {
     } else if (msg.role === 'assistant') {
       md += msg.content + '\n'
       if (msg.sources && msg.sources.length) {
-        md += '\n> 参考来源：' + msg.sources.map(s => s.title || s).join('、') + '\n'
+        md += '\n> 参考来源：' + uniqSources(msg.sources).map(s => s.title || s).join('、') + '\n'
       }
       if (msg.rating === 1) md += '> 评价：👍 有帮助\n'
       if (msg.rating === -1) md += '> 评价：👎 无帮助\n'
@@ -369,7 +380,7 @@ h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
     } else if (msg.role === 'assistant') {
       html += `<div class="a">${escapeHtml(msg.content)}</div>`
       if (msg.sources && msg.sources.length) {
-        html += `<p class="src">参考来源：${escapeHtml(msg.sources.map(s => s.title || s).join('、'))}</p>`
+        html += `<p class="src">参考来源：${escapeHtml(uniqSources(msg.sources).map(s => s.title || s).join('、'))}</p>`
       }
       if (msg.rating === 1) html += '<p class="src">评价：👍 有帮助</p>'
       if (msg.rating === -1) html += '<p class="src">评价：👎 无帮助</p>'
