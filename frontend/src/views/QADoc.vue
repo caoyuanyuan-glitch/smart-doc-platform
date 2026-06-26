@@ -266,9 +266,9 @@ const currentFeedbackQuestion = ref('')
 const currentFeedbackAnswer = ref('')
 const currentFeedbackIndex = ref(-1)
 
-function startDrag(e) { dragging.value = true; startX.value = e.clientX; startW.value = leftW.value; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }
+function startDrag(e) { dragging.value = true; startX.value = e.clientX; startW.value = leftW.value; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; const iframe = document.querySelector('.site-iframe'); if (iframe) iframe.style.pointerEvents = 'none' }
 function onDrag(e) { if (!dragging.value) return; leftW.value = Math.max(340, Math.min(startW.value + e.clientX - startX.value, Math.round(window.innerWidth * 0.65))) }
-function stopDrag() { dragging.value = false; document.body.style.cursor = ''; document.body.style.userSelect = '' }
+function stopDrag() { dragging.value = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; const iframe = document.querySelector('.site-iframe'); if (iframe) iframe.style.pointerEvents = '' }
 
 function onFileChange(file) {
   if (file.raw) pendingFiles.value.push(file.raw)
