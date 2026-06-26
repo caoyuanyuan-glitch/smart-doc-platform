@@ -207,6 +207,7 @@ def _build_context_from_sources(ranked_sources: list, max_chars: int = 8000):
     parts = []
     total = 0
     normalized_sources = []
+    seen_titles = set()
     for item in ranked_sources:
         snippet = item.get("chunk", "")
         title = item.get("title") or "未命名文档"
@@ -215,12 +216,14 @@ def _build_context_from_sources(ranked_sources: list, max_chars: int = 8000):
             break
         parts.append(block)
         total += len(block)
-        normalized_sources.append({
-            "document_id": item.get("document_id"),
-            "title": title,
-            "snippet": snippet[:120],
-            "score": item.get("score", 0),
-        })
+        if title and title not in seen_titles:
+            seen_titles.add(title)
+            normalized_sources.append({
+                "document_id": item.get("document_id"),
+                "title": title,
+                "snippet": snippet[:120],
+                "score": item.get("score", 0),
+            })
     return "\n\n".join(parts), normalized_sources
 
 
@@ -474,7 +477,7 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
 2. 信息不足时明确说明“文档中未找到相关信息”
 3. 回答末尾附上最相关的来源名称或片段编号"""
         messages = [{"role": "user", "content": prompt}]
-        proxy_result = ai_client._call_model(messages, max_tokens=2048)
+        proxy_result = ai_client.chat(messages, max_tokens=2048)
         if proxy_result:
             return {"answer": proxy_result, "source": source_hint}
     except Exception:
@@ -905,7 +908,12 @@ async def get_qa_dashboard(
     yesterday_start = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
     yesterday_end = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
 
-    # ── 概览统计 ──
+    # ── 概览统计（昨日 + 前一日环比）──
+    yesterday_start = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
+    yesterday_end = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
+    day_before_start = yesterday_start - timedelta(days=1)
+    day_before_end = yesterday_start - timedelta(seconds=1)
+
     yesterday_active_users = db.query(func.count(func.distinct(QaSession.user_id))).filter(
         QaSession.created_at >= yesterday_start,
         QaSession.created_at <= yesterday_end,
@@ -914,6 +922,16 @@ async def get_qa_dashboard(
     yesterday_conversations = db.query(func.count(QaSession.id)).filter(
         QaSession.created_at >= yesterday_start,
         QaSession.created_at <= yesterday_end,
+    ).scalar() or 0
+
+    day_before_active_users = db.query(func.count(func.distinct(QaSession.user_id))).filter(
+        QaSession.created_at >= day_before_start,
+        QaSession.created_at <= day_before_end,
+    ).scalar() or 0
+
+    day_before_conversations = db.query(func.count(QaSession.id)).filter(
+        QaSession.created_at >= day_before_start,
+        QaSession.created_at <= day_before_end,
     ).scalar() or 0
 
     # ── 图表数据 ──
@@ -958,14 +976,18 @@ async def get_qa_dashboard(
         QaMessage.created_at,
         QaSession.session_type,
         QaSession.title,
-    ).join(QaSession, QaMessage.session_id == QaSession.id)
+    ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
+        QaMessage.role == "user"
+    )
 
     # 获取用户名映射
     user_map = {}
     if user_name:
         from app.models.user import User
         detail_query = detail_query.join(User, QaSession.user_id == User.id)
-        detail_query = detail_query.filter(User.username.contains(user_name))
+        detail_query = detail_query.filter(
+            (User.username.contains(user_name)) | (User.display_name.contains(user_name))
+        )
         users = db.query(User.id, User.username, User.display_name).all()
         user_map = {u.id: (u.display_name or u.username) for u in users}
     else:
@@ -1025,6 +1047,8 @@ async def get_qa_dashboard(
         uid = session_user_map.get(r.session_id)
         user_name_display = user_map.get(uid, "未知")
         reply = ai_replies.get(r.id)
+        answer_text = reply.content if reply else ""
+        success = bool(answer_text and "未检索到" not in answer_text and "定位到" not in answer_text)
         items.append({
             "id": r.id,
             "session_id": r.session_id,
@@ -1032,9 +1056,10 @@ async def get_qa_dashboard(
             "session_type": r.session_type or "general",
             "session_title": r.title or "",
             "question": r.content,
-            "answer": reply.content if reply else "",
+            "answer": answer_text,
             "sources": r.sources or "[]",
             "rating": r.rating,
+            "success": success,
             "created_at": _to_beijing_iso(r.created_at),
         })
 
@@ -1042,6 +1067,8 @@ async def get_qa_dashboard(
         "overview": {
             "yesterday_active_users": yesterday_active_users,
             "yesterday_conversations": yesterday_conversations,
+            "active_users_trend": yesterday_active_users - day_before_active_users,
+            "conversations_trend": yesterday_conversations - day_before_conversations,
         },
         "charts": {
             "active_users": active_users_chart,

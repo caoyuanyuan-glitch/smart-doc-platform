@@ -174,7 +174,7 @@
               <div class="msg-bubble">{{ msg.content }}</div>
               <div v-if="msg.sources && msg.sources.length" class="msg-sources">
                 <div class="src-label">信息来源：</div>
-                <div v-for="(s, si) in msg.sources" :key="si" class="src-item">
+                <div v-for="(s, si) in uniqSources(msg.sources)" :key="si" class="src-item">
                   <el-icon><Document /></el-icon>
                   <span>《{{ s.title }}》第 {{ s.page }} 页</span>
                   <span v-if="s.content" class="src-quote">"{{ s.content }}"</span>
@@ -266,9 +266,9 @@ const currentFeedbackQuestion = ref('')
 const currentFeedbackAnswer = ref('')
 const currentFeedbackIndex = ref(-1)
 
-function startDrag(e) { dragging.value = true; startX.value = e.clientX; startW.value = leftW.value; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }
+function startDrag(e) { dragging.value = true; startX.value = e.clientX; startW.value = leftW.value; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; const iframe = document.querySelector('.site-iframe'); if (iframe) iframe.style.pointerEvents = 'none' }
 function onDrag(e) { if (!dragging.value) return; leftW.value = Math.max(340, Math.min(startW.value + e.clientX - startX.value, Math.round(window.innerWidth * 0.65))) }
-function stopDrag() { dragging.value = false; document.body.style.cursor = ''; document.body.style.userSelect = '' }
+function stopDrag() { dragging.value = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; const iframe = document.querySelector('.site-iframe'); if (iframe) iframe.style.pointerEvents = '' }
 
 function onFileChange(file) {
   if (file.raw) pendingFiles.value.push(file.raw)
@@ -439,6 +439,17 @@ function copyAll() {
 
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
 
+function uniqSources(arr) {
+  if (!arr || !arr.length) return []
+  const seen = new Set()
+  return arr.filter(s => {
+    const key = (s.title || '') + '_' + (s.page || '')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 function buildHtml() {
   let h = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>说明书问答</title><style>*{box-sizing:border-box}body{font-family:"Microsoft YaHei",sans-serif;max-width:860px;margin:40px auto;padding:0 20px;line-height:1.8;color:#1f2937}h1{font-size:20px;border-bottom:2px solid #2563eb;padding-bottom:10px;margin-bottom:20px}.q{margin-top:28px;padding:10px 14px;background:#eff6ff;border-radius:8px;font-weight:600;color:#1e40af}.a{padding:10px 14px;background:#f8fafc;border-radius:8px;margin:6px 0 16px;border-left:3px solid #2563eb}.src{color:#94a3b8;font-size:12px;margin-top:6px}.src i{font-style:normal;color:#3b82f6}</style></head><body><h1>'+escapeHtml(currentTitle.value)+'</h1>'
   messages.value.forEach(m => {
@@ -446,7 +457,7 @@ function buildHtml() {
     else {
       h += '<div class="a">' + escapeHtml(m.content) + '</div>'
       if (m.sources && m.sources.length) {
-        h += '<div class="src">来源：' + m.sources.map(s => '《'+escapeHtml(s.title||'')+'》第'+(s.page||'?')+'页').join('、') + '</div>'
+        h += '<div class="src">来源：' + uniqSources(m.sources).map(s => '《'+escapeHtml(s.title||'')+'》第'+(s.page||'?')+'页').join('、') + '</div>'
       }
     }
   })
@@ -461,7 +472,7 @@ function handleExport(cmd) {
       if (m.role === 'user') md += '## Q: ' + m.content + '\n\n'
       else {
         md += '**A:** ' + m.content + '\n'
-        if (m.sources && m.sources.length) md += '> 来源：' + m.sources.map(s => '《'+s.title+'》第'+s.page+'页').join('、') + '\n'
+        if (m.sources && m.sources.length) md += '> 来源：' + uniqSources(m.sources).map(s => '《'+s.title+'》第'+s.page+'页').join('、') + '\n'
         md += '\n---\n\n'
       }
     })
@@ -549,7 +560,7 @@ onMounted(loadSessionList)
 .msg-row.user { flex-direction:row-reverse; }
 .msg-avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:16px; }
 .msg-avatar.user { background:#2563eb; color:#fff; }
-.msg-avatar.assistant { background:#f59e0b; color:#fff; }
+.msg-avatar.assistant { background:#409EFF; color:#fff; }
 .msg-body { max-width:72%; }
 .msg-bubble { padding:11px 15px; border-radius:12px; font-size:14px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
 .msg-row.user .msg-bubble { background:#2563eb; color:#fff; border-bottom-right-radius:4px; }

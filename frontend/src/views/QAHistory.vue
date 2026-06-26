@@ -47,7 +47,21 @@
         <template v-if="selectedSession">
           <div class="panel-header">
             <span class="panel-title">{{ selectedSession.title }}</span>
-            <span class="session-time">{{ formatTime(selectedSession.created_at) }}</span>
+            <div class="panel-header-right">
+              <el-dropdown @command="handleExport">
+                <el-button size="small" text :disabled="messages.length === 0">
+                  <el-icon><Download /></el-icon> 导出
+                  <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
+                    <el-dropdown-item command="word">Word (.doc)</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <span class="session-time">{{ formatTime(selectedSession.created_at) }}</span>
+            </div>
           </div>
           <div class="messages-box" ref="msgBox">
             <div
@@ -60,7 +74,7 @@
               <div class="msg-content">{{ msg.content }}</div>
               <div v-if="msg.sources && msg.sources.length" class="msg-sources">
                 <span class="sources-label">参考来源：</span>
-                <template v-for="(s, si) in msg.sources" :key="si">
+                <template v-for="(s, si) in uniqSources(msg.sources)" :key="si">
                   <el-tag size="small" type="info" class="source-tag">{{ s.title || s }}</el-tag>
                 </template>
               </div>
@@ -81,7 +95,7 @@ import { ref, nextTick, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { qaAPI } from '@/api'
-import { ChatDotRound, Delete } from '@element-plus/icons-vue'
+import { ChatDotRound, Delete, Download, ArrowDown } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -153,6 +167,81 @@ async function handleDelete(id) {
   } catch {
     ElMessage.error('删除失败')
   }
+}
+
+function handleExport(format) {
+  if (messages.value.length === 0) return
+  const title = (selectedSession.value?.title || '会话').replace(/[\\/:*?"<>|]/g, '_')
+  if (format === 'md') {
+    downloadFile(buildMarkdown(), `${title}.md`, 'text/markdown')
+  } else if (format === 'word') {
+    downloadFile(buildHtml(), `${title}.doc`, 'application/msword')
+  }
+}
+
+function buildMarkdown() {
+  let md = `# ${selectedSession.value?.title || '问答会话'}\n\n`
+  for (const msg of messages.value) {
+    if (msg.role === 'user') {
+      md += `## Q: ${msg.content}\n\n**AI 回答：**\n`
+    } else if (msg.role === 'assistant') {
+      md += msg.content + '\n'
+      if (msg.sources && msg.sources.length) {
+        md += '\n> 参考来源：' + uniqSources(msg.sources).map(s => s.title || s).join('、') + '\n'
+      }
+      md += '\n---\n\n'
+    }
+  }
+  return md
+}
+
+function buildHtml() {
+  const title = selectedSession.value?.title || '问答会话'
+  let html = `<html><head><meta charset="utf-8"><title>${title}</title>
+<style>body{font-family:"Microsoft YaHei",sans-serif;max-width:800px;margin:40px auto;line-height:1.8}
+h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
+.q{margin-top:24px;font-weight:600;color:#1e40af}.a{background:#f8fafc;padding:12px 16px;border-radius:8px;margin:8px 0}
+.src{color:#94a3b8;font-size:13px}.bar{color:#94a3b8;margin:24px 0;text-align:center}</style></head><body>
+<h1>${escapeHtml(title)}</h1>
+`
+  for (const msg of messages.value) {
+    if (msg.role === 'user') {
+      html += `<div class="q">Q: ${escapeHtml(msg.content)}</div>`
+    } else if (msg.role === 'assistant') {
+      html += `<div class="a">${escapeHtml(msg.content)}</div>`
+      if (msg.sources && msg.sources.length) {
+        html += `<p class="src">参考来源：${escapeHtml(uniqSources(msg.sources).map(s => s.title || s).join('、'))}</p>`
+      }
+      html += '<div class="bar">---</div>'
+    }
+  }
+  html += '</body></html>'
+  return html
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+function uniqSources(arr) {
+  if (!arr || !arr.length) return []
+  const seen = new Set()
+  return arr.filter(s => {
+    const key = typeof s === 'string' ? s : (s.title || '') + '_' + (s.page || '')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function downloadFile(content, filename, mime) {
+  const blob = new Blob(['\uFEFF' + content], { type: mime + ';charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 watch(() => route.path, () => {
@@ -237,6 +326,8 @@ watch(() => route.path, () => {
 }
 
 .no-selection p { font-size: 14px; }
+
+.panel-header-right { display: flex; align-items: center; gap: 8px; }
 
 .panel-header .session-time { font-size: 12px; color: #94a3b8; }
 
