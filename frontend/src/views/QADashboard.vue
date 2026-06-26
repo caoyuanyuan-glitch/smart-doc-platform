@@ -112,9 +112,8 @@
         <el-table-column label="结果输出" min-width="200" prop="answer" show-overflow-tooltip />
         <el-table-column label="执行结果" width="90" align="center">
           <template #default="{ row }">
-            <el-tag v-if="row.rating === 1" size="small" type="success">有帮助</el-tag>
-            <el-tag v-else-if="row.rating === -1" size="small" type="danger">无帮助</el-tag>
-            <span v-else class="result-none">--</span>
+            <el-tag v-if="row.success" size="small" type="success">成功</el-tag>
+            <el-tag v-else size="small" type="danger">失败</el-tag>
           </template>
         </el-table-column>
       </el-table>
@@ -206,7 +205,7 @@ function exportData() {
   let csv = '\uFEFF对话人,对话场域,对话时间,交互形态,用户输入,结果输出,执行结果\n'
   items.value.forEach(row => {
     const type = row.session_type === 'manual' ? '说明书问答' : '知识库问答'
-    const result = row.rating === 1 ? '有帮助' : row.rating === -1 ? '无帮助' : '--'
+    const result = row.success ? '成功' : '失败'
     const safe = s => '"' + (s || '').replace(/"/g, '""') + '"'
     csv += [safe(row.user_name), safe(type), safe(row.created_at), '文本', safe(row.question), safe(row.answer), safe(result)].join(',') + '\n'
   })

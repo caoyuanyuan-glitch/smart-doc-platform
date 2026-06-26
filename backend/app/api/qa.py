@@ -1044,6 +1044,8 @@ async def get_qa_dashboard(
         uid = session_user_map.get(r.session_id)
         user_name_display = user_map.get(uid, "未知")
         reply = ai_replies.get(r.id)
+        answer_text = reply.content if reply else ""
+        success = bool(answer_text and "未检索到" not in answer_text and "定位到" not in answer_text)
         items.append({
             "id": r.id,
             "session_id": r.session_id,
@@ -1051,9 +1053,10 @@ async def get_qa_dashboard(
             "session_type": r.session_type or "general",
             "session_title": r.title or "",
             "question": r.content,
-            "answer": reply.content if reply else "",
+            "answer": answer_text,
             "sources": r.sources or "[]",
             "rating": r.rating,
+            "success": success,
             "created_at": _to_beijing_iso(r.created_at),
         })
 
