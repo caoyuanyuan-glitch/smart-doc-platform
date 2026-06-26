@@ -207,6 +207,7 @@ def _build_context_from_sources(ranked_sources: list, max_chars: int = 8000):
     parts = []
     total = 0
     normalized_sources = []
+    seen_titles = set()
     for item in ranked_sources:
         snippet = item.get("chunk", "")
         title = item.get("title") or "未命名文档"
@@ -215,12 +216,14 @@ def _build_context_from_sources(ranked_sources: list, max_chars: int = 8000):
             break
         parts.append(block)
         total += len(block)
-        normalized_sources.append({
-            "document_id": item.get("document_id"),
-            "title": title,
-            "snippet": snippet[:120],
-            "score": item.get("score", 0),
-        })
+        if title and title not in seen_titles:
+            seen_titles.add(title)
+            normalized_sources.append({
+                "document_id": item.get("document_id"),
+                "title": title,
+                "snippet": snippet[:120],
+                "score": item.get("score", 0),
+            })
     return "\n\n".join(parts), normalized_sources
 
 

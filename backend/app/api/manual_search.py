@@ -344,16 +344,26 @@ async def ask_manual(
 
     return_sources = []
     if not is_fallback and ranked:
-        return_sources = [
-            {"title": s["title"], "page": s["page_num"], "content": s.get("chunk", "")[:150]}
-            for s in ranked[:4]
-        ]
+        seen = set()
+        for s in ranked[:4]:
+            key = f"{s['title']}_{s['page_num']}"
+            if key not in seen:
+                seen.add(key)
+                return_sources.append(
+                    {"title": s["title"], "page": s["page_num"], "content": s.get("chunk", "")[:150]}
+                )
 
-    source_for_db = [{"title": s["title"], "page": s["page_num"]} for s in ranked[:4]]
+    source_for_db = []
+    seen_db = set()
+    for s in ranked[:4]:
+        key = f"{s['title']}_{s['page_num']}"
+        if key not in seen_db:
+            seen_db.add(key)
+            source_for_db.append({"title": s["title"], "page": s["page_num"]})
 
     answer_data = {
         "answer": result["answer"],
-        "sources": [{"title": s["title"], "page": s["page_num"]} for s in ranked[:4]] if not is_fallback else [],
+        "sources": [{"title": s["title"], "page": s["page_num"]} for s in return_sources] if not is_fallback else [],
     }
 
     _save_qa_history(
