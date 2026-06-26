@@ -560,7 +560,7 @@ onMounted(loadSessionList)
 .msg-row.user { flex-direction:row-reverse; }
 .msg-avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:16px; }
 .msg-avatar.user { background:#2563eb; color:#fff; }
-.msg-avatar.assistant { background:#f59e0b; color:#fff; }
+.msg-avatar.assistant { background:#409EFF; color:#fff; }
 .msg-body { max-width:72%; }
 .msg-bubble { padding:11px 15px; border-radius:12px; font-size:14px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
 .msg-row.user .msg-bubble { background:#2563eb; color:#fff; border-bottom-right-radius:4px; }
