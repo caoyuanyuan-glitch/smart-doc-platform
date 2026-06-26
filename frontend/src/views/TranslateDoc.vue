@@ -2,7 +2,7 @@
   <div class="doc-translate-container">
     <div class="page-header">
       <h2 class="page-title">文档翻译</h2>
-      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、XLF、IDML 文档</p>
+      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、IDML 文档</p>
     </div>
 
     <el-card class="config-card config-horizontal" shadow="never">
@@ -32,8 +32,8 @@
         <el-form-item label="AI 模型" v-if="engine !== 'memory'">
           <el-select v-model="model" style="width: 160px">
             <el-option label="Kimi (Moonshot)" value="kimi" />
-            <el-option label="Qwen3.6-Plus" value="qwen" />
             <el-option label="DeepSeek Chat" value="deepseek" />
+            <el-option label="ArkClaw Chat" value="arkclaw" />
           </el-select>
         </el-form-item>
         <el-form-item label="语言">
@@ -82,7 +82,7 @@
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
                 <p class="upload-title">将文件拖到此处，或点击上传</p>
-                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、XLF、IDML 格式</p>
+                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、IDML 格式</p>
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>

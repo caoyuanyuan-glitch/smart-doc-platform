@@ -13,6 +13,7 @@ from app.crud.knowledge import (
 )
 from app.schemas.knowledge import FolderCreate, FolderUpdate, FolderMove, FileMove
 from app.api.auth import get_current_user, get_default_user
+from app.utils.file_utils import read_file_safe
 
 router = APIRouter()
 
@@ -56,9 +57,9 @@ def _preview_excel_file(file_path: str) -> str:
 
 
 def _preview_csv_file(file_path: str) -> str:
-    with open(file_path, "r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.reader(handle)
-        rows = list(reader)
+    content = read_file_safe(file_path)
+    reader = csv.reader(content.splitlines())
+    rows = list(reader)
     return _format_tabular_preview(rows)
 
 
@@ -277,9 +278,11 @@ async def preview_file(file_id: int, db: Session = Depends(get_db)):
     
     # Text-based files - return raw content for syntax highlighting
     if file_type in ["txt", "md", "markdown", "json", "xml", "html", "css", "js", "py", "java", "c", "cpp", "h", "go", "rs"]:
-        with open(file.file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return {"content": content, "type": "text", "file_name": file.filename}
+        try:
+            content = read_file_safe(file.file_path)
+            return {"content": content, "type": "text", "file_name": file.filename}
+        except Exception as e:
+            return {"content": f"文件解析失败: {str(e)}", "type": "error", "file_name": file.filename}
     
     # Images - return direct URL
     elif file_type in ["jpg", "jpeg", "png", "gif", "bmp", "svg", "webp"]:
