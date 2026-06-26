@@ -363,7 +363,7 @@ async def ask_manual(
 
     answer_data = {
         "answer": result["answer"],
-        "sources": [{"title": s["title"], "page": s["page_num"]} for s in return_sources] if not is_fallback else [],
+        "sources": [{"title": s["title"], "page": s["page"]} for s in return_sources] if not is_fallback else [],
     }
 
     _save_qa_history(
