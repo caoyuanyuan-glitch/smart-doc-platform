@@ -2,14 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.crud.rule import create_rule, get_rule, get_rules, update_rule, delete_rule, bulk_create_rules, bulk_delete_rules
+from app.crud.rule import create_rule, get_rule, get_rule_by_no, get_rules, update_rule, delete_rule, bulk_create_rules, bulk_delete_rules
 from app.schemas.rule import Rule, RuleCreate, RuleUpdate
 
 router = APIRouter()
 
 @router.post("/", response_model=Rule)
 async def create_new_rule(rule: RuleCreate, db: Session = Depends(get_db)):
-    existing = get_rule(db, rule.rule_no)
+    existing = get_rule_by_no(db, rule.rule_no)
     if existing:
         raise HTTPException(status_code=400, detail="Rule already exists")
     
