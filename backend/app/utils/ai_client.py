@@ -162,17 +162,17 @@ class AIClient:
             return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
-        # 优先级: MCAI Proxy > Kimi > DeepSeek > ArkClaw > Anthropic Proxy
+        # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Anthropic Proxy
         providers = []
-        if self.mcai_proxy_client:
-            mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
-            providers.append(('MCAI', self.mcai_proxy_client, mcai_model))
         if self.kimi_client:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
         if self.deepseek_client:
             providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
         if self.arkclaw_client:
             providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
+        if self.mcai_proxy_client:
+            mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
+            providers.append(('MCAI', self.mcai_proxy_client, mcai_model))
         if self.proxy_client:
             providers.append(('Proxy', self.proxy_client, self.anthropic_model))
 
