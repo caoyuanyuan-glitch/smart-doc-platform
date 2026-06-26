@@ -982,7 +982,9 @@ async def get_qa_dashboard(
     if user_name:
         from app.models.user import User
         detail_query = detail_query.join(User, QaSession.user_id == User.id)
-        detail_query = detail_query.filter(User.username.contains(user_name))
+        detail_query = detail_query.filter(
+            (User.username.contains(user_name)) | (User.display_name.contains(user_name))
+        )
         users = db.query(User.id, User.username, User.display_name).all()
         user_map = {u.id: (u.display_name or u.username) for u in users}
     else:
