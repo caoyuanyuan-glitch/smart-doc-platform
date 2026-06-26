@@ -13,6 +13,7 @@ from typing import Optional
 from datetime import timedelta, timezone, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Form
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from pydantic import BaseModel
 from app.database import get_db
 from app.models.qa_feedback import QaFeedback
@@ -801,8 +802,10 @@ async def get_qa_sessions(
         return {"sessions": []}
 
     q = db.query(QaSession).filter(QaSession.user_id == user_id)
-    if type in ("general", "doc"):
-        q = q.filter(QaSession.session_type == type)
+    if type == "general":
+        q = q.filter(QaSession.session_type == "general")
+    elif type == "doc":
+        q = q.filter(QaSession.session_type.in_(["doc", "manual"]))
     sessions = q.order_by(QaSession.updated_at.desc()).all()
 
     return {
@@ -879,3 +882,173 @@ async def delete_qa_session(
     db.delete(sess)
     db.commit()
     return {"message": "已删除"}
+
+
+# ─── 问答看板（管理员） ──────────────────────────────
+
+@router.get("/dashboard")
+async def get_qa_dashboard(
+    start_date: str = Query(None, description="起始日期 YYYY-MM-DD"),
+    end_date: str = Query(None, description="结束日期 YYYY-MM-DD"),
+    user_name: str = Query(None, description="筛选用户"),
+    session_type: str = Query(None, description="筛选场域"),
+    rating: int = Query(None, description="筛选评分"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可访问")
+
+    today = datetime.now(BEIJING_TZ).date()
+    yesterday_start = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
+    yesterday_end = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
+
+    # ── 概览统计 ──
+    yesterday_active_users = db.query(func.count(func.distinct(QaSession.user_id))).filter(
+        QaSession.created_at >= yesterday_start,
+        QaSession.created_at <= yesterday_end,
+    ).scalar() or 0
+
+    yesterday_conversations = db.query(func.count(QaSession.id)).filter(
+        QaSession.created_at >= yesterday_start,
+        QaSession.created_at <= yesterday_end,
+    ).scalar() or 0
+
+    # ── 图表数据 ──
+    if start_date and end_date:
+        try:
+            sd = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+            ed = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=BEIJING_TZ)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，应为 YYYY-MM-DD")
+    else:
+        ed = datetime.now(BEIJING_TZ)
+        sd = ed - timedelta(days=29)
+
+    # 按天统计活跃用户
+    daily_users = db.query(
+        func.date(QaSession.created_at).label("d"),
+        func.count(func.distinct(QaSession.user_id)).label("c"),
+    ).filter(
+        QaSession.created_at >= sd,
+        QaSession.created_at <= ed,
+    ).group_by("d").order_by("d").all()
+    active_users_chart = [{"date": str(row.d), "count": row.c} for row in daily_users]
+
+    # 按天统计对话量（user消息数）
+    daily_msgs = db.query(
+        func.date(QaMessage.created_at).label("d"),
+        func.count(QaMessage.id).label("c"),
+    ).filter(
+        QaMessage.role == "user",
+        QaMessage.created_at >= sd,
+        QaMessage.created_at <= ed,
+    ).group_by("d").order_by("d").all()
+    conversations_chart = [{"date": str(row.d), "count": row.c} for row in daily_msgs]
+
+    # ── 明细列表 ──
+    detail_query = db.query(
+        QaMessage.id,
+        QaMessage.session_id,
+        QaMessage.content,
+        QaMessage.sources,
+        QaMessage.rating,
+        QaMessage.created_at,
+        QaSession.session_type,
+        QaSession.title,
+    ).join(QaSession, QaMessage.session_id == QaSession.id)
+
+    # 获取用户名映射
+    user_map = {}
+    if user_name:
+        from app.models.user import User
+        detail_query = detail_query.join(User, QaSession.user_id == User.id)
+        detail_query = detail_query.filter(User.username.contains(user_name))
+        users = db.query(User.id, User.username, User.display_name).all()
+        user_map = {u.id: (u.display_name or u.username) for u in users}
+    else:
+        from app.models.user import User
+        users = db.query(User.id, User.username, User.display_name).all()
+        user_map = {u.id: (u.display_name or u.username) for u in users}
+
+    if session_type:
+        detail_query = detail_query.filter(QaSession.session_type == session_type)
+    if rating is not None:
+        detail_query = detail_query.filter(QaMessage.rating == rating)
+    if start_date and end_date:
+        detail_query = detail_query.filter(QaMessage.created_at >= sd, QaMessage.created_at <= ed)
+
+    total = detail_query.count()
+    records = detail_query.order_by(QaMessage.created_at.desc()).offset(
+        (page - 1) * page_size
+    ).limit(page_size).all()
+
+    # 获取每个 message 对应的 session user_id
+    session_ids = list(set(r.session_id for r in records))
+    session_user_map = {}
+    if session_ids:
+        sessions_with_user = db.query(QaSession.id, QaSession.user_id).filter(
+            QaSession.id.in_(session_ids)
+        ).all()
+        session_user_map = {s.id: s.user_id for s in sessions_with_user}
+
+    # 找到每个用户消息对应的 AI 回复
+    user_msg_ids = [r.id for r in records]
+    ai_replies = {}
+    if user_msg_ids:
+        # 找到每个 user message 之后第一条 assistant message
+        replies = db.query(
+            QaMessage.session_id, QaMessage.id, QaMessage.content, QaMessage.created_at
+        ).filter(
+            QaMessage.role == "assistant",
+            QaMessage.session_id.in_(session_ids),
+        ).order_by(QaMessage.created_at.asc()).all()
+        # 按 session 分组
+        session_replies = {}
+        for r in replies:
+            session_replies.setdefault(r.session_id, []).append(r)
+        # 为每个 user message 匹配最近的 assistant reply
+        for rec in records:
+            session_reps = session_replies.get(rec.session_id, [])
+            best_reply = None
+            for rep in session_reps:
+                if rep.created_at > rec.created_at:
+                    best_reply = rep
+                    break
+            if best_reply:
+                ai_replies[rec.id] = best_reply
+
+    items = []
+    for r in records:
+        uid = session_user_map.get(r.session_id)
+        user_name_display = user_map.get(uid, "未知")
+        reply = ai_replies.get(r.id)
+        items.append({
+            "id": r.id,
+            "session_id": r.session_id,
+            "user_name": user_name_display,
+            "session_type": r.session_type or "general",
+            "session_title": r.title or "",
+            "question": r.content,
+            "answer": reply.content if reply else "",
+            "sources": r.sources or "[]",
+            "rating": r.rating,
+            "created_at": _to_beijing_iso(r.created_at),
+        })
+
+    return {
+        "overview": {
+            "yesterday_active_users": yesterday_active_users,
+            "yesterday_conversations": yesterday_conversations,
+        },
+        "charts": {
+            "active_users": active_users_chart,
+            "conversations": conversations_chart,
+        },
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }

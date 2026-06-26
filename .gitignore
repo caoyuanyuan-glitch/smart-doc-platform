@@ -172,6 +172,7 @@ web/build/
 *.iso
 
 # Project-specific: Uploads
+backend/app/static/manual_uploads/
 backend/static/uploads/*
 !backend/static/uploads/.gitkeep
 backend/static/review_exports/*

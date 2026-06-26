@@ -185,39 +185,33 @@ export const polishAPI = {
 export const qaAPI = {
   ask: (documentId, question) => instance.post(`/qa/${documentId}`, {}, { params: { question } }),
   askGeneral: (question, knowledgeIds = [], sessionId = null) => instance.post('/qa/general', { question, knowledge_ids: knowledgeIds, session_id: sessionId }),
-  askDocs: (question, files, sessionId = null) => {
-    const formData = new FormData()
-    formData.append('question', question)
-    if (sessionId) formData.append('session_id', sessionId)
-    files.forEach(f => formData.append('files', f))
-    return instance.post('/qa/docs/chat', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000
-    })
-  },
-  uploadDocs: (files) => {
-    const formData = new FormData()
-    files.forEach(f => formData.append('files', f))
-    return instance.post('/qa/docs/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-  },
   submitFeedback: (data) => instance.post('/qa/feedback', data),
   getFeedbacks: (skip = 0, limit = 50) => instance.get('/qa/feedback', { params: { skip, limit } }),
   getUnreadFeedbackCount: () => instance.get('/qa/feedback/unread-count'),
   resolveFeedback: (id) => instance.put(`/qa/feedback/${id}/resolve`),
-  previewDoc: (file) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    return instance.post('/qa/docs/preview', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000
-    })
-  },
   getSessions: (type = 'all') => instance.get('/qa/history/sessions', { params: { type } }),
   getSessionDetail: (sessionId) => instance.get(`/qa/history/sessions/${sessionId}`),
-  deleteSession: (sessionId) => instance.delete(`/qa/history/sessions/${sessionId}`)
+  deleteSession: (sessionId) => instance.delete(`/qa/history/sessions/${sessionId}`),
+  getDashboard: (params = {}) => instance.get('/qa/dashboard', { params }),
 }
+
+export const manualAPI = {
+  upload: (files) => {
+    const fd = new FormData()
+    files.forEach(f => fd.append('files', f))
+    return instance.post('/manual/upload', fd)
+  },
+  getUploads: () => instance.get('/manual/uploads'),
+  deleteUpload: (fileId) => instance.delete(`/manual/uploads/${fileId}`),
+  start: (fileIds) => instance.post('/manual/start', { file_ids: fileIds }),
+  ask: (sessionId, question) => instance.post('/manual/ask', { session_id: sessionId, question }),
+  getPreviewUrl: (fileId) => `/api/manual/preview/${fileId}`,
+  getDownloadUrl: (fileId) => `/api/manual/download/${fileId}`,
+  getSessions: () => instance.get('/manual/sessions'),
+  getSessionDetail: (sessionId) => instance.get(`/manual/sessions/${sessionId}`),
+  deleteSession: (sessionId) => instance.delete(`/manual/sessions/${sessionId}`),
+}
+
 
 export const generateAPI = {
   create: (productName, productModel, docType, targetChapter) =>

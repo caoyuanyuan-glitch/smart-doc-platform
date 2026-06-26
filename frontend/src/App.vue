@@ -98,12 +98,13 @@
                 <span>智能问答</span>
               </template>
               <el-menu-item index="/qa">知识库问答</el-menu-item>
-              <el-menu-item index="/qa/docs">文档对话</el-menu-item>
+              <el-menu-item index="/qa/manual">说明书问答</el-menu-item>
               <el-sub-menu index="qa-history-sub" class="qa-history-sub">
                 <template #title><span>历史记录</span></template>
                 <el-menu-item index="/qa/history/general">知识库问答历史</el-menu-item>
-                <el-menu-item index="/qa/history/doc">文档对话历史</el-menu-item>
+                <el-menu-item index="/qa/history/doc">说明书问答历史</el-menu-item>
               </el-sub-menu>
+              <el-menu-item v-if="userStore.isAdmin" index="/qa/dashboard">问答看板</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="translate-sub">
