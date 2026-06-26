@@ -905,7 +905,12 @@ async def get_qa_dashboard(
     yesterday_start = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
     yesterday_end = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
 
-    # ── 概览统计 ──
+    # ── 概览统计（昨日 + 前一日环比）──
+    yesterday_start = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
+    yesterday_end = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
+    day_before_start = yesterday_start - timedelta(days=1)
+    day_before_end = yesterday_start - timedelta(seconds=1)
+
     yesterday_active_users = db.query(func.count(func.distinct(QaSession.user_id))).filter(
         QaSession.created_at >= yesterday_start,
         QaSession.created_at <= yesterday_end,
@@ -914,6 +919,16 @@ async def get_qa_dashboard(
     yesterday_conversations = db.query(func.count(QaSession.id)).filter(
         QaSession.created_at >= yesterday_start,
         QaSession.created_at <= yesterday_end,
+    ).scalar() or 0
+
+    day_before_active_users = db.query(func.count(func.distinct(QaSession.user_id))).filter(
+        QaSession.created_at >= day_before_start,
+        QaSession.created_at <= day_before_end,
+    ).scalar() or 0
+
+    day_before_conversations = db.query(func.count(QaSession.id)).filter(
+        QaSession.created_at >= day_before_start,
+        QaSession.created_at <= day_before_end,
     ).scalar() or 0
 
     # ── 图表数据 ──
@@ -958,7 +973,9 @@ async def get_qa_dashboard(
         QaMessage.created_at,
         QaSession.session_type,
         QaSession.title,
-    ).join(QaSession, QaMessage.session_id == QaSession.id)
+    ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
+        QaMessage.role == "user"
+    )
 
     # 获取用户名映射
     user_map = {}
@@ -1042,6 +1059,8 @@ async def get_qa_dashboard(
         "overview": {
             "yesterday_active_users": yesterday_active_users,
             "yesterday_conversations": yesterday_conversations,
+            "active_users_trend": yesterday_active_users - day_before_active_users,
+            "conversations_trend": yesterday_conversations - day_before_conversations,
         },
         "charts": {
             "active_users": active_users_chart,

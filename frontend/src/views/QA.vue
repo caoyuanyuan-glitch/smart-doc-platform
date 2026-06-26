@@ -153,11 +153,14 @@
 </template>
 
 <script setup>
-import { ref, nextTick, computed, onMounted, inject } from 'vue'
+import { ref, nextTick, computed, onMounted, inject, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { qaAPI, knowledgeAPI } from '@/api'
 import { useUserStore } from '@/store/user'
 import { User, Folder, Microphone, CopyDocument, Download, ArrowDown } from '@element-plus/icons-vue'
+
+const route = useRoute()
 
 const question = ref('')
 const loading = ref(false)
@@ -189,6 +192,10 @@ const userStore = useUserStore()
 const sessionId = ref(null)
 
 onMounted(() => {
+  loadKnowledgeTree()
+})
+
+watch(() => route.path, () => {
   loadKnowledgeTree()
 })
 
