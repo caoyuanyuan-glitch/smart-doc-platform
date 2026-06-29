@@ -302,6 +302,25 @@ def parse_xlsx(file_path):
     except Exception as e:
         raise ValueError(f"XLSX解析失败: {str(e)}")
 
+def parse_xls(file_path):
+    try:
+        import xlrd
+        wb = xlrd.open_workbook(file_path)
+        texts = []
+        for sheet in wb.sheets():
+            texts.append(f"[Sheet: {sheet.name}]")
+            for row_index in range(sheet.nrows):
+                row_texts = []
+                for col_index in range(sheet.ncols):
+                    value = sheet.cell_value(row_index, col_index)
+                    if value not in (None, ''):
+                        row_texts.append(str(value))
+                if row_texts:
+                    texts.append("\t".join(row_texts))
+        return "\n".join(texts)
+    except Exception as e:
+        raise ValueError(f"XLS解析失败: {str(e)}")
+
 def parse_pptx(file_path):
     try:
         text = ""
@@ -376,7 +395,7 @@ def parse_file(file_path):
     elif ext == '.dita':
         return parse_dita(file_path)
     elif ext == '.xls':
-        return parse_xlsx(file_path)
+        return parse_xls(file_path)
     elif ext == '.xlsx':
         return parse_xlsx(file_path)
     elif ext == '.pptx':
