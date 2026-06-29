@@ -263,19 +263,33 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                 next_pending.append(index)
         pending_indexes = next_pending
 
+    if engine == "memory":
+        for index in pending_indexes:
+            translated_texts[index] = texts[index]
+        return translated_texts
+
     if pending_indexes:
         sep = "\n---DOCSEG---\n"
-        pending_texts = [texts[index] for index in pending_indexes]
-        if len(pending_texts) == 1:
-            translated_texts[pending_indexes[0]] = _do_translate(pending_texts[0], engine, model, source_lang, target_lang, db)
-        else:
-            combined = sep.join(pending_texts)
-            translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
-            translated_parts = [part.strip() for part in translated_combined.split(sep)]
-            if len(translated_parts) != len(pending_texts):
-                translated_parts = [_do_translate(text, engine, model, source_lang, target_lang, db) for text in pending_texts]
-            for offset, index in enumerate(pending_indexes):
-                translated_texts[index] = translated_parts[offset]
+        batch_size = 5
+        for batch_start in range(0, len(pending_indexes), batch_size):
+            batch_end = min(batch_start + batch_size, len(pending_indexes))
+            batch_indexes = pending_indexes[batch_start:batch_end]
+            if len(batch_indexes) == 1:
+                translated_texts[batch_indexes[0]] = _do_translate(texts[batch_indexes[0]], engine, model, source_lang, target_lang, db)
+            else:
+                batch_texts = [texts[i] for i in batch_indexes]
+                combined = sep.join(batch_texts)
+                translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+                translated_parts = [part.strip() for part in translated_combined.split(sep)]
+                if len(translated_parts) != len(batch_texts):
+                    for bi, idx in enumerate(batch_indexes):
+                        if bi < len(translated_parts):
+                            translated_texts[idx] = translated_parts[bi]
+                        else:
+                            translated_texts[idx] = _do_translate(texts[idx], engine, model, source_lang, target_lang, db)
+                else:
+                    for bi, idx in enumerate(batch_indexes):
+                        translated_texts[idx] = translated_parts[bi]
 
     return translated_texts
 
@@ -288,7 +302,9 @@ def _filename_looks_non_translatable(filename: str, source_lang: str) -> bool:
         return False
     if source_lang == "zh":
         return True
-    return bool(re.fullmatch(r"[A-Za-z0-9 _\-().\[\]]+", stripped))
+    if source_lang in ("en", "fr", "de", "es"):
+        return False
+    return True
 
 
 def _get_memory_bank():
@@ -628,6 +644,8 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             )
         result = translate_with_ai(text, model, source_lang, target_lang, glossary=glossary)
     if not result:
+        if engine == "memory":
+            return text
         raise HTTPException(status_code=500, detail="翻译失败")
     return result
 
@@ -751,10 +769,19 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
     content_targets = []
     modified_entries = {}
 
+    def _is_meaningful_text(text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        cleaned = re.sub(r'[\d\s.,;:!?\-+*/=()\[\]{}<>@#$%^&|\\/\'"]+', '', stripped)
+        if len(cleaned) < 2:
+            return False
+        return True
+
     with zipfile.ZipFile(in_buf, 'r') as z_in:
         for zinfo in z_in.infolist():
             name = zinfo.filename
-            if not name.endswith(".xml"):
+            if not (name.endswith(".xml") and name.startswith("Stories/")):
                 continue
             raw = z_in.read(zinfo)
             try:
@@ -769,7 +796,7 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
 
             has_text = False
             for elem in content_elems:
-                if isinstance(elem, ET_LXML._Element) and elem.text and elem.text.strip():
+                if isinstance(elem, ET_LXML._Element) and elem.text and _is_meaningful_text(elem.text):
                     texts_to_translate.append(elem.text.strip())
                     content_targets.append(elem)
                     has_text = True
@@ -845,7 +872,9 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
                     text_targets.append(t_elem)
 
     if texts_to_translate:
-        translated_parts = _translate_text_items(texts_to_translate, engine, model, source_lang, target_lang, db)
+        translated_parts = []
+        for text in texts_to_translate:
+            translated_parts.append(_do_translate(text, engine, model, source_lang, target_lang, db))
         for i, t_elem in enumerate(text_targets):
             if i < len(translated_parts):
                 translated = translated_parts[i]
@@ -1108,6 +1137,30 @@ def _translate_markdown(fpath: str, engine: str, model: str, source_lang: str, t
     return translated.encode("utf-8"), [content], [translated]
 
 
+def _looks_like_hallucination(result: str, original: str) -> bool:
+    if not result or not original:
+        return False
+    hallucination_signals = [
+        "翻译规则",
+        "Translation Rules",
+        "Translation begins",
+        "你是一个专业",
+        "请将以下",
+        "原文：",
+        "只输出翻译",
+        "严格将原文",
+        "Only output the translated",
+        "must be strictly translated",
+    ]
+    result_lower = result.lower()
+    for signal in hallucination_signals:
+        if signal.lower() in result_lower:
+            return True
+    if len(result) > max(len(original) * 5, 500):
+        return True
+    return False
+
+
 def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str, glossary=None) -> str:
     model = _normalize_ai_model(model)
     lang_names = {
@@ -1162,6 +1215,9 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
             status_code=500,
             detail=f"AI翻译引擎不可用。当前可用提供商: {available}。请检查 `/api/translation/providers/status`，并确认 KIMI_API_KEY、DEEPSEEK_API_KEY 或 ARKCLAW_API_KEY 已注入当前服务进程。"
         )
+
+    if _looks_like_hallucination(result, content):
+        return content
 
     return result
 

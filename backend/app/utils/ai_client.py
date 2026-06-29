@@ -166,47 +166,80 @@ class AIClient:
     def call_deepseek(self, messages, max_tokens=2048, temperature=0.3):
         if not self.deepseek_client:
             return None
-        try:
-            response = self.deepseek_client.chat.completions.create(
-                model=self.deepseek_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"DeepSeek调用失败: {str(e)}")
-            return None
+        import time
+        max_retries = 3
+        retry_delay = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.deepseek_client.chat.completions.create(
+                    model=self.deepseek_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries:
+                    print(f"DeepSeek 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                print(f"DeepSeek调用失败: {str(e)}")
+                return None
+        return None
 
     def call_arkclaw(self, messages, max_tokens=2048, temperature=0.3):
         if not self.arkclaw_client:
             return None
-        try:
-            response = self.arkclaw_client.chat.completions.create(
-                model=self.arkclaw_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"ArkClaw调用失败: {str(e)}")
-            return None
+        import time
+        max_retries = 3
+        retry_delay = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.arkclaw_client.chat.completions.create(
+                    model=self.arkclaw_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries:
+                    print(f"ArkClaw 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                print(f"ArkClaw调用失败: {str(e)}")
+                return None
+        return None
 
     def call_kimi(self, messages, max_tokens=2048, temperature=0.3):
         if not self.kimi_client:
             return None
-        try:
-            response = self.kimi_client.chat.completions.create(
-                model=self.kimi_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"Kimi调用失败: {str(e)}")
-            return None
+        import time
+        max_retries = 3
+        retry_delay = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.kimi_client.chat.completions.create(
+                    model=self.kimi_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries:
+                    print(f"Kimi 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                print(f"Kimi调用失败: {str(e)}")
+                return None
+        return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
         # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
