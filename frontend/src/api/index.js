@@ -33,6 +33,15 @@ instance.interceptors.response.use(
 
 export { instance }
 
+export function getAPIErrorMessage(error, fallback = '请求失败') {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) return detail.map(item => item.msg || JSON.stringify(item)).join('; ')
+  if (detail) return JSON.stringify(detail)
+  if (error?.response?.status) return `${fallback} (HTTP ${error.response.status})`
+  return error?.message || fallback
+}
+
 export const authAPI = {
   login: (username, password) => {
     const formData = new FormData()
@@ -54,10 +63,13 @@ export const userAPI = {
 }
 
 export const documentAPI = {
-  upload: (file) => {
+  upload: (file, config = {}) => {
     const formData = new FormData()
     formData.append('file', file)
-    return instance.post('/documents/upload/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+    return instance.post('/documents/upload/', formData, {
+      ...config,
+      headers: { ...config.headers, 'Content-Type': 'multipart/form-data' }
+    })
   },
   list: () => instance.get('/documents/'),
   get: (id) => instance.get(`/documents/${id}`),
@@ -69,6 +81,8 @@ export const reviewAPI = {
   get: (id) => instance.get(`/review/${id}`),
   getIssues: (id) => instance.get(`/review/${id}/issues`),
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
+  getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
+  getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
   list: () => instance.get('/review/'),
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),

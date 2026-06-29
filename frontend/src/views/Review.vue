@@ -432,7 +432,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { useRoute } from 'vue-router'
-import { documentAPI, reviewAPI, rulesAPI } from '@/api'
+import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
@@ -669,7 +669,7 @@ async function loadDocuments() {
       }
     })
   } catch (e) {
-    ElMessage.error('加载文档列表失败')
+    ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
   }
 }
 
@@ -679,7 +679,7 @@ async function loadReviews() {
     reviews.value = resp.data || []
     syncReviewsPolling()
   } catch (e) {
-    ElMessage.error('加载任务列表失败')
+    ElMessage.error(`加载任务列表失败: ${getAPIErrorMessage(e)}`)
   }
 }
 
@@ -713,7 +713,7 @@ async function loadRules() {
     const resp = await rulesAPI.list()
     rules.value = resp.data || []
   } catch (e) {
-    ElMessage.error('加载规则列表失败')
+    ElMessage.error(`加载规则列表失败: ${getAPIErrorMessage(e)}`)
   }
 }
 
@@ -807,7 +807,7 @@ async function uploadDocument(options) {
   } catch (error) {
     removeUploadingPlaceholder(tempId)
     options.onError?.(error)
-    ElMessage.error('上传失败，请重试')
+    ElMessage.error(`上传失败: ${getAPIErrorMessage(error)}`)
   } finally {
     setTimeout(() => {
       uploadProgress.value = 0

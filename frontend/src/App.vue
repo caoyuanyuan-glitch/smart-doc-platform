@@ -81,6 +81,7 @@
                 <el-icon><DocumentChecked /></el-icon>
                 <span>文档审核</span>
               </template>
+              <el-menu-item index="/review/dashboard">统计看板</el-menu-item>
               <el-menu-item index="/review">文档管理</el-menu-item>
               <el-menu-item index="/review/tasks">审核任务</el-menu-item>
               <el-menu-item index="/review/rules">规则管理</el-menu-item>
