@@ -62,6 +62,7 @@
 
     <!-- 竞品详情页 -->
     <div v-else-if="currentView === 'detail'" class="competitor-detail">
+      <div v-if="selectedCompetitor" class="detail-content">
       <div class="detail-header">
         <el-button @click="$router.push('/competitor')">
           <el-icon><ArrowLeft /></el-icon>返回列表
@@ -238,6 +239,10 @@
           </el-card>
         </el-col>
       </el-row>
+      </div>
+      <div v-else class="loading-detail">
+        <el-empty description="加载中..." />
+      </div>
     </div>
 
     <!-- 对比历史页面（全局） -->
