@@ -113,6 +113,18 @@
         <p class="feature-desc">上传、下载、删除文档文件，支持多模块调用，管理员权限控制</p>
         <div class="feature-enter">进入 <el-icon><ArrowRight /></el-icon></div>
       </div>
+
+      <div class="feature-card card-competitor" @click="$router.push('/competitor')">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+        </div>
+        <h3 class="feature-title">竞品说明书分析</h3>
+        <p class="feature-desc">管理竞品文档，对比竞品与我方说明书差异，AI生成改进建议</p>
+        <div class="feature-enter">进入 <el-icon><ArrowRight /></el-icon></div>
+      </div>
     </div>
   </div>
 </template>
@@ -225,6 +237,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 .card-convert .feature-icon, .card-convert::before { background: linear-gradient(135deg, #cffafe 0%, #a5f3fc 100%); }
 .card-translate .feature-icon, .card-translate::before { background: linear-gradient(135deg, #fae8ff 0%, #e9d5ff 100%); }
 .card-knowledge .feature-icon, .card-knowledge::before { background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%); }
+.card-competitor .feature-icon, .card-competitor::before { background: linear-gradient(135deg, #fed7aa 0%, #fdba74 100%); }
 
 .feature-title {
   font-size: 18px;
@@ -258,6 +271,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 .card-convert .feature-enter { color: #0891b2; }
 .card-translate .feature-enter { color: #9333ea; }
 .card-knowledge .feature-enter { color: #6366f1; }
+.card-competitor .feature-enter { color: #ea580c; }
 
 @media (max-width: 1024px) {
   .features-grid {

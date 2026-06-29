@@ -167,7 +167,7 @@ def get_compare_tasks(
     skip: int = 0,
     limit: int = 20
 ) -> tuple:
-    """获取对比任务列表"""
+    """获取对比任务列表（指定竞品）"""
     query = db.query(CompetitorCompareTask).filter(
         CompetitorCompareTask.competitor_id == competitor_id
     )
@@ -175,7 +175,7 @@ def get_compare_tasks(
     total = query.count()
     items = query.order_by(CompetitorCompareTask.created_at.desc()).offset(skip).limit(limit).all()
     
-    # 为每个任务添加文档名称
+    # 为每个任务添加文档名称和竞品名称
     for item in items:
         competitor_doc = db.query(CompetitorDocument).filter(
             CompetitorDocument.id == item.competitor_doc_id
@@ -183,8 +183,41 @@ def get_compare_tasks(
         our_doc = db.query(CompetitorDocument).filter(
             CompetitorDocument.id == item.our_doc_id
         ).first()
+        competitor_info = db.query(Competitor).filter(
+            Competitor.id == item.competitor_id
+        ).first()
         item.competitor_doc_name = competitor_doc.file_name if competitor_doc else None
         item.our_doc_name = our_doc.file_name if our_doc else None
+        item.competitor_name = competitor_info.name if competitor_info else None
+    
+    return total, items
+
+
+def get_all_compare_tasks(
+    db: Session,
+    skip: int = 0,
+    limit: int = 20
+) -> tuple:
+    """获取所有对比任务列表（全局）"""
+    query = db.query(CompetitorCompareTask)
+    
+    total = query.count()
+    items = query.order_by(CompetitorCompareTask.created_at.desc()).offset(skip).limit(limit).all()
+    
+    # 为每个任务添加文档名称和竞品名称
+    for item in items:
+        competitor_doc = db.query(CompetitorDocument).filter(
+            CompetitorDocument.id == item.competitor_doc_id
+        ).first()
+        our_doc = db.query(CompetitorDocument).filter(
+            CompetitorDocument.id == item.our_doc_id
+        ).first()
+        competitor_info = db.query(Competitor).filter(
+            Competitor.id == item.competitor_id
+        ).first()
+        item.competitor_doc_name = competitor_doc.file_name if competitor_doc else None
+        item.our_doc_name = our_doc.file_name if our_doc else None
+        item.competitor_name = competitor_info.name if competitor_info else None
     
     return total, items
 

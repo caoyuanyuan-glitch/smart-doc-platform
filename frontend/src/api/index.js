@@ -329,6 +329,7 @@ export const competitorAPI = {
   createCompare: (competitorId, competitorDocId, ourDocId) => 
     instance.post(`/competitor/${competitorId}/compare`, { competitor_doc_id: competitorDocId, our_doc_id: ourDocId }),
   getCompareTasks: (competitorId, params = {}) => instance.get(`/competitor/${competitorId}/compare/tasks`, { params }),
+  getAllCompareTasks: (params = {}) => instance.get('/competitor/compare/tasks', { params }),
   getCompareTask: (competitorId, taskId) => instance.get(`/competitor/${competitorId}/compare/tasks/${taskId}`),
   
   // AI建议

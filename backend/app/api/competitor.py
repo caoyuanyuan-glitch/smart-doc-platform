@@ -18,7 +18,7 @@ from app.schemas.competitor import (
 from app.crud.competitor import (
     get_competitors, get_competitor, create_competitor, update_competitor, delete_competitor,
     get_competitor_documents, get_competitor_document, create_competitor_document, delete_competitor_document,
-    get_compare_tasks, get_compare_task, create_compare_task, update_compare_task
+    get_compare_tasks, get_all_compare_tasks, get_compare_task, create_compare_task, update_compare_task
 )
 from app.utils.doc_parser import compare_documents_by_format
 
@@ -374,6 +374,18 @@ def _process_chapter_similarity(result: dict) -> list:
     return chapter_similarity
 
 
+@router.get("/compare/tasks", response_model=CompetitorCompareTaskListResponse)
+async def list_all_compare_tasks(
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db)
+):
+    """获取所有对比任务列表（全局）"""
+    skip = (page - 1) * page_size
+    total, items = get_all_compare_tasks(db, skip=skip, limit=page_size)
+    return CompetitorCompareTaskListResponse(total=total, items=items)
+
+
 @router.get("/{competitor_id}/compare/tasks", response_model=CompetitorCompareTaskListResponse)
 async def list_compare_tasks(
     competitor_id: int,
@@ -381,7 +393,7 @@ async def list_compare_tasks(
     page_size: int = 20,
     db: Session = Depends(get_db)
 ):
-    """获取对比任务列表"""
+    """获取对比任务列表（指定竞品）"""
     skip = (page - 1) * page_size
     total, items = get_compare_tasks(db, competitor_id, skip=skip, limit=page_size)
     return CompetitorCompareTaskListResponse(total=total, items=items)
