@@ -24,6 +24,7 @@ import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
 import WhiteList from '@/views/WhiteList.vue'
 import Feedback from '@/views/Feedback.vue'
 import Competitor from '@/views/Competitor.vue'
+import WechatArticles from '@/views/WechatArticles.vue'
 
 const routes = [
   {
@@ -213,6 +214,11 @@ const routes = [
     path: '/competitor/:id',
     name: 'CompetitorDetail',
     component: Competitor
+  },
+  {
+    path: '/wechat/articles',
+    name: 'WechatArticles',
+    component: WechatArticles
   }
 ]
 

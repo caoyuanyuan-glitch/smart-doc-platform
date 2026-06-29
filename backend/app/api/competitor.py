@@ -8,17 +8,21 @@ import uuid
 from datetime import datetime
 
 from app.database import get_db
-from app.models.competitor import Competitor, CompetitorDocument, CompetitorCompareTask
+from app.models.competitor import Competitor, CompetitorDocument, CompetitorCompareTask, WechatAccount, WechatArticle
 from app.schemas.competitor import (
     CompetitorCreate, CompetitorUpdate, CompetitorResponse, CompetitorListResponse,
     CompetitorDocumentResponse, CompetitorDocumentListResponse,
     CompetitorCompareCreate, CompetitorCompareTaskResponse, CompetitorCompareTaskListResponse,
-    SuggestionsResponse
+    SuggestionsResponse,
+    WechatAccountCreate, WechatAccountUpdate, WechatAccountResponse, WechatAccountListResponse,
+    WechatArticleCreate, WechatArticleUpdate, WechatArticleResponse, WechatArticleListResponse
 )
 from app.crud.competitor import (
     get_competitors, get_competitor, create_competitor, update_competitor, delete_competitor,
     get_competitor_documents, get_competitor_document, create_competitor_document, delete_competitor_document,
-    get_compare_tasks, get_all_compare_tasks, get_compare_task, create_compare_task, update_compare_task
+    get_compare_tasks, get_all_compare_tasks, get_compare_task, create_compare_task, update_compare_task,
+    get_wechat_accounts, get_wechat_account, create_wechat_account, update_wechat_account, delete_wechat_account,
+    get_wechat_articles, get_wechat_article, create_wechat_article, update_wechat_article, delete_wechat_article
 )
 from app.utils.doc_parser import compare_documents_by_format
 
@@ -802,3 +806,250 @@ def _generate_html_report(
 """
 
     return html
+
+
+# ========== 公众号管理 ==========
+
+@router.get("/{competitor_id}/wechat/accounts", response_model=WechatAccountListResponse)
+async def list_wechat_accounts(
+    competitor_id: int,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db)
+):
+    """获取竞品的公众号列表"""
+    competitor = get_competitor(db, competitor_id)
+    if not competitor:
+        raise HTTPException(status_code=404, detail="竞品不存在")
+    
+    skip = (page - 1) * page_size
+    total, items = get_wechat_accounts(db, competitor_id, skip=skip, limit=page_size)
+    return WechatAccountListResponse(total=total, items=items)
+
+
+@router.post("/{competitor_id}/wechat/accounts", response_model=WechatAccountResponse)
+async def create_wechat_account_item(
+    competitor_id: int,
+    account: WechatAccountCreate,
+    db: Session = Depends(get_db)
+):
+    """创建公众号配置"""
+    competitor = get_competitor(db, competitor_id)
+    if not competitor:
+        raise HTTPException(status_code=404, detail="竞品不存在")
+    
+    return create_wechat_account(
+        db=db,
+        competitor_id=competitor_id,
+        account_name=account.account_name,
+        account_id=account.account_id,
+        description=account.description
+    )
+
+
+@router.put("/{competitor_id}/wechat/accounts/{account_id}", response_model=WechatAccountResponse)
+async def update_wechat_account_item(
+    competitor_id: int,
+    account_id: int,
+    account: WechatAccountUpdate,
+    db: Session = Depends(get_db)
+):
+    """更新公众号配置"""
+    db_account = get_wechat_account(db, account_id)
+    if not db_account or db_account.competitor_id != competitor_id:
+        raise HTTPException(status_code=404, detail="公众号不存在")
+    
+    return update_wechat_account(
+        db=db,
+        account_id=account_id,
+        account_name=account.account_name,
+        account_id_str=account.account_id,
+        description=account.description,
+        is_active=account.is_active
+    )
+
+
+@router.delete("/{competitor_id}/wechat/accounts/{account_id}")
+async def delete_wechat_account_item(
+    competitor_id: int,
+    account_id: int,
+    db: Session = Depends(get_db)
+):
+    """删除公众号配置"""
+    db_account = get_wechat_account(db, account_id)
+    if not db_account or db_account.competitor_id != competitor_id:
+        raise HTTPException(status_code=404, detail="公众号不存在")
+    
+    delete_wechat_account(db, account_id)
+    return {"message": "删除成功"}
+
+
+# ========== 公众号文章管理 ==========
+
+@router.get("/wechat/articles", response_model=WechatArticleListResponse)
+async def list_all_wechat_articles(
+    competitor_id: Optional[int] = None,
+    wechat_account_id: Optional[int] = None,
+    category: Optional[str] = None,
+    keyword: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db)
+):
+    """获取所有公众号文章列表（全局）"""
+    skip = (page - 1) * page_size
+    total, items = get_wechat_articles(
+        db,
+        competitor_id=competitor_id,
+        wechat_account_id=wechat_account_id,
+        category=category,
+        keyword=keyword,
+        skip=skip,
+        limit=page_size
+    )
+    return WechatArticleListResponse(total=total, items=items)
+
+
+@router.get("/{competitor_id}/wechat/articles", response_model=WechatArticleListResponse)
+async def list_competitor_wechat_articles(
+    competitor_id: int,
+    wechat_account_id: Optional[int] = None,
+    category: Optional[str] = None,
+    keyword: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db)
+):
+    """获取竞品的公众号文章列表"""
+    competitor = get_competitor(db, competitor_id)
+    if not competitor:
+        raise HTTPException(status_code=404, detail="竞品不存在")
+    
+    skip = (page - 1) * page_size
+    total, items = get_wechat_articles(
+        db,
+        competitor_id=competitor_id,
+        wechat_account_id=wechat_account_id,
+        category=category,
+        keyword=keyword,
+        skip=skip,
+        limit=page_size
+    )
+    return WechatArticleListResponse(total=total, items=items)
+
+
+@router.post("/{competitor_id}/wechat/articles", response_model=WechatArticleResponse)
+async def create_wechat_article_item(
+    competitor_id: int,
+    article: WechatArticleCreate,
+    db: Session = Depends(get_db)
+):
+    """添加公众号文章（手动添加）"""
+    competitor = get_competitor(db, competitor_id)
+    if not competitor:
+        raise HTTPException(status_code=404, detail="竞品不存在")
+    
+    # 验证公众号存在且属于该竞品
+    account = get_wechat_account(db, article.wechat_account_id)
+    if not account or account.competitor_id != competitor_id:
+        raise HTTPException(status_code=404, detail="公众号不存在或不属于该竞品")
+    
+    return create_wechat_article(
+        db=db,
+        wechat_account_id=article.wechat_account_id,
+        competitor_id=competitor_id,
+        title=article.title,
+        url=article.url,
+        author=article.author,
+        publish_date=article.publish_date,
+        content=article.content,
+        keywords=article.keywords,
+        category=article.category
+    )
+
+
+@router.get("/{competitor_id}/wechat/articles/{article_id}", response_model=WechatArticleResponse)
+async def get_wechat_article_detail(
+    competitor_id: int,
+    article_id: int,
+    db: Session = Depends(get_db)
+):
+    """获取公众号文章详情"""
+    article = get_wechat_article(db, article_id)
+    if not article or article.competitor_id != competitor_id:
+        raise HTTPException(status_code=404, detail="文章不存在")
+    return article
+
+
+@router.put("/{competitor_id}/wechat/articles/{article_id}", response_model=WechatArticleResponse)
+async def update_wechat_article_item(
+    competitor_id: int,
+    article_id: int,
+    article: WechatArticleUpdate,
+    db: Session = Depends(get_db)
+):
+    """更新公众号文章（打标签、分类等）"""
+    db_article = get_wechat_article(db, article_id)
+    if not db_article or db_article.competitor_id != competitor_id:
+        raise HTTPException(status_code=404, detail="文章不存在")
+    
+    return update_wechat_article(
+        db=db,
+        article_id=article_id,
+        tags=article.tags,
+        category=article.category,
+        notes=article.notes
+    )
+
+
+@router.delete("/{competitor_id}/wechat/articles/{article_id}")
+async def delete_wechat_article_item(
+    competitor_id: int,
+    article_id: int,
+    db: Session = Depends(get_db)
+):
+    """删除公众号文章"""
+    article = get_wechat_article(db, article_id)
+    if not article or article.competitor_id != competitor_id:
+        raise HTTPException(status_code=404, detail="文章不存在")
+    
+    delete_wechat_article(db, article_id)
+    return {"message": "删除成功"}
+
+
+@router.post("/{competitor_id}/wechat/articles/{article_id}/summary")
+async def generate_article_summary(
+    competitor_id: int,
+    article_id: int,
+    db: Session = Depends(get_db)
+):
+    """生成AI摘要"""
+    article = get_wechat_article(db, article_id)
+    if not article or article.competitor_id != competitor_id:
+        raise HTTPException(status_code=404, detail="文章不存在")
+    
+    if not article.content:
+        raise HTTPException(status_code=400, detail="文章内容为空，无法生成摘要")
+    
+    # 调用AI生成摘要
+    try:
+        from app.utils.ai_client import AIClient
+        ai_client = AIClient()
+        
+        prompt = f"""请为以下文章生成一段简洁的摘要（不超过200字），突出文章的核心内容和关键信息。
+
+文章标题：{article.title}
+文章内容：
+{article.content[:3000]}
+
+请直接输出摘要内容，不需要其他格式。"""
+        
+        summary = ai_client.chat(prompt)
+        
+        # 更新文章摘要
+        updated_article = update_wechat_article(db, article_id, summary=summary.strip())
+        
+        return {"summary": summary.strip(), "article_id": article_id}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成摘要失败: {str(e)}")

@@ -22,6 +22,52 @@ class Competitor(Base):
     documents = relationship("CompetitorDocument", back_populates="competitor", cascade="all, delete-orphan")
     # 关联对比任务
     compare_tasks = relationship("CompetitorCompareTask", back_populates="competitor", cascade="all, delete-orphan")
+    # 关联公众号
+    wechat_accounts = relationship("WechatAccount", back_populates="competitor", cascade="all, delete-orphan")
+
+
+class WechatAccount(Base):
+    """公众号配置表"""
+    __tablename__ = "wechat_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    competitor_id = Column(Integer, ForeignKey("competitors.id"), nullable=False, comment="所属竞品")
+    account_name = Column(String(100), nullable=False, comment="公众号名称")
+    account_id = Column(String(100), comment="微信号/原始ID")
+    description = Column(Text, comment="公众号简介")
+    is_active = Column(Integer, default=1, comment="是否启用: 1启用 / 0禁用")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+
+    # 关联竞品
+    competitor = relationship("Competitor", back_populates="wechat_accounts")
+    # 关联文章
+    articles = relationship("WechatArticle", back_populates="wechat_account", cascade="all, delete-orphan")
+
+
+class WechatArticle(Base):
+    """公众号文章表"""
+    __tablename__ = "wechat_articles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    wechat_account_id = Column(Integer, ForeignKey("wechat_accounts.id"), nullable=False, comment="所属公众号")
+    competitor_id = Column(Integer, ForeignKey("competitors.id"), nullable=False, comment="所属竞品（方便查询）")
+    title = Column(String(255), nullable=False, comment="文章标题")
+    url = Column(String(500), nullable=False, comment="文章链接")
+    author = Column(String(100), comment="作者")
+    publish_date = Column(DateTime, comment="发布时间")
+    content = Column(Text, comment="文章内容")
+    summary = Column(Text, comment="AI摘要")
+    keywords = Column(String(500), comment="关键词（逗号分隔）")
+    tags = Column(String(500), comment="用户标签（逗号分隔）")
+    category = Column(String(50), comment="文章分类: 产品介绍 / 技术分享 / 行业动态 / 活动推广 / 其他")
+    notes = Column(Text, comment="备注")
+    collected_at = Column(DateTime, default=datetime.utcnow, comment="采集时间")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+
+    # 关联公众号
+    wechat_account = relationship("WechatAccount", back_populates="articles")
 
 
 class CompetitorDocument(Base):

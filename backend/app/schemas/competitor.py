@@ -160,3 +160,96 @@ class SuggestionsResponse(BaseModel):
     """改进建议响应"""
     suggestions: List[SuggestionItem]
     generated_at: datetime
+
+
+# ========== 公众号相关 ==========
+
+class WechatAccountBase(BaseModel):
+    """公众号基础信息"""
+    account_name: str
+    account_id: Optional[str] = None
+    description: Optional[str] = None
+
+
+class WechatAccountCreate(WechatAccountBase):
+    """创建公众号"""
+    pass
+
+
+class WechatAccountUpdate(BaseModel):
+    """更新公众号"""
+    account_name: Optional[str] = None
+    account_id: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[int] = None
+
+
+class WechatAccountResponse(WechatAccountBase):
+    """公众号响应"""
+    id: int
+    competitor_id: int
+    is_active: int
+    article_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class WechatAccountListResponse(BaseModel):
+    """公众号列表响应"""
+    total: int
+    items: List[WechatAccountResponse]
+
+
+# ========== 公众号文章相关 ==========
+
+class WechatArticleBase(BaseModel):
+    """文章基础信息"""
+    title: str
+    url: str
+    author: Optional[str] = None
+    publish_date: Optional[datetime] = None
+    content: Optional[str] = None
+    keywords: Optional[str] = None
+    tags: Optional[str] = None
+    category: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class WechatArticleCreate(WechatArticleBase):
+    """创建文章"""
+    wechat_account_id: int
+
+
+class WechatArticleUpdate(BaseModel):
+    """更新文章"""
+    tags: Optional[str] = None
+    category: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class WechatArticleResponse(WechatArticleBase):
+    """文章响应"""
+    id: int
+    wechat_account_id: int
+    competitor_id: int
+    account_name: Optional[str] = None
+    summary: Optional[str] = None
+    collected_at: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class WechatArticleListResponse(BaseModel):
+    """文章列表响应"""
+    total: int
+    items: List[WechatArticleResponse]
+
+
+class WechatArticleSummaryRequest(BaseModel):
+    """生成摘要请求"""
+    article_id: int

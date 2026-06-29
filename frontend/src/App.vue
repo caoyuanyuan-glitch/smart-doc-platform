@@ -129,6 +129,7 @@
               </template>
               <el-menu-item index="/competitor">竞品管理</el-menu-item>
               <el-menu-item index="/competitor/tasks">对比历史</el-menu-item>
+              <el-menu-item index="/wechat/articles">公众号文章</el-menu-item>
             </el-sub-menu>
 
             <el-menu-item v-if="userStore.isAdmin" index="/users">

@@ -1,7 +1,8 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
-from app.models.competitor import Competitor, CompetitorDocument, CompetitorCompareTask
+from datetime import datetime
+from app.models.competitor import Competitor, CompetitorDocument, CompetitorCompareTask, WechatAccount, WechatArticle
 from app.schemas.competitor import CompetitorCreate, CompetitorUpdate
 
 
@@ -288,3 +289,205 @@ def update_compare_task(
     db.commit()
     db.refresh(db_task)
     return db_task
+
+
+# ========== 公众号 CRUD ==========
+
+def get_wechat_accounts(
+    db: Session,
+    competitor_id: int,
+    skip: int = 0,
+    limit: int = 20
+) -> tuple:
+    """获取公众号列表"""
+    query = db.query(WechatAccount).filter(WechatAccount.competitor_id == competitor_id)
+    total = query.count()
+    items = query.order_by(WechatAccount.created_at.desc()).offset(skip).limit(limit).all()
+    # 为每个公众号添加文章数量
+    for item in items:
+        item.article_count = db.query(func.count(WechatArticle.id)).filter(
+            WechatArticle.wechat_account_id == item.id
+        ).scalar() or 0
+    return total, items
+
+
+def get_wechat_account(db: Session, account_id: int) -> Optional[WechatAccount]:
+    """获取单个公众号"""
+    account = db.query(WechatAccount).filter(WechatAccount.id == account_id).first()
+    if account:
+        account.article_count = db.query(func.count(WechatArticle.id)).filter(
+            WechatArticle.wechat_account_id == account.id
+        ).scalar() or 0
+    return account
+
+
+def create_wechat_account(
+    db: Session,
+    competitor_id: int,
+    account_name: str,
+    account_id: Optional[str] = None,
+    description: Optional[str] = None
+) -> WechatAccount:
+    """创建公众号"""
+    db_account = WechatAccount(
+        competitor_id=competitor_id,
+        account_name=account_name,
+        account_id=account_id,
+        description=description,
+        is_active=1
+    )
+    db.add(db_account)
+    db.commit()
+    db.refresh(db_account)
+    db_account.article_count = 0
+    return db_account
+
+
+def update_wechat_account(
+    db: Session,
+    account_id: int,
+    account_name: Optional[str] = None,
+    account_id_str: Optional[str] = None,
+    description: Optional[str] = None,
+    is_active: Optional[int] = None
+) -> Optional[WechatAccount]:
+    """更新公众号"""
+    db_account = db.query(WechatAccount).filter(WechatAccount.id == account_id).first()
+    if not db_account:
+        return None
+    if account_name:
+        db_account.account_name = account_name
+    if account_id_str:
+        db_account.account_id = account_id_str
+    if description:
+        db_account.description = description
+    if is_active is not None:
+        db_account.is_active = is_active
+    db.commit()
+    db.refresh(db_account)
+    db_account.article_count = db.query(func.count(WechatArticle.id)).filter(
+        WechatArticle.wechat_account_id == db_account.id
+    ).scalar() or 0
+    return db_account
+
+
+def delete_wechat_account(db: Session, account_id: int) -> bool:
+    """删除公众号"""
+    db_account = db.query(WechatAccount).filter(WechatAccount.id == account_id).first()
+    if not db_account:
+        return False
+    db.delete(db_account)
+    db.commit()
+    return True
+
+
+# ========== 公众号文章 CRUD ==========
+
+def get_wechat_articles(
+    db: Session,
+    competitor_id: Optional[int] = None,
+    wechat_account_id: Optional[int] = None,
+    category: Optional[str] = None,
+    keyword: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 20
+) -> tuple:
+    """获取文章列表"""
+    query = db.query(WechatArticle)
+    if competitor_id:
+        query = query.filter(WechatArticle.competitor_id == competitor_id)
+    if wechat_account_id:
+        query = query.filter(WechatArticle.wechat_account_id == wechat_account_id)
+    if category:
+        query = query.filter(WechatArticle.category == category)
+    if keyword:
+        query = query.filter(
+            (WechatArticle.title.contains(keyword)) |
+            (WechatArticle.content.contains(keyword)) |
+            (WechatArticle.keywords.contains(keyword))
+        )
+    total = query.count()
+    items = query.order_by(WechatArticle.publish_date.desc()).offset(skip).limit(limit).all()
+    # 为每篇文章添加公众号名称
+    for item in items:
+        account = db.query(WechatAccount).filter(WechatAccount.id == item.wechat_account_id).first()
+        item.account_name = account.account_name if account else None
+    return total, items
+
+
+def get_wechat_article(db: Session, article_id: int) -> Optional[WechatArticle]:
+    """获取单个文章"""
+    article = db.query(WechatArticle).filter(WechatArticle.id == article_id).first()
+    if article:
+        account = db.query(WechatAccount).filter(WechatAccount.id == article.wechat_account_id).first()
+        article.account_name = account.account_name if account else None
+    return article
+
+
+def create_wechat_article(
+    db: Session,
+    wechat_account_id: int,
+    competitor_id: int,
+    title: str,
+    url: str,
+    author: Optional[str] = None,
+    publish_date: Optional[datetime] = None,
+    content: Optional[str] = None,
+    keywords: Optional[str] = None,
+    category: Optional[str] = None
+) -> WechatArticle:
+    """创建文章"""
+    db_article = WechatArticle(
+        wechat_account_id=wechat_account_id,
+        competitor_id=competitor_id,
+        title=title,
+        url=url,
+        author=author,
+        publish_date=publish_date,
+        content=content,
+        keywords=keywords,
+        category=category
+    )
+    db.add(db_article)
+    db.commit()
+    db.refresh(db_article)
+    account = db.query(WechatAccount).filter(WechatAccount.id == wechat_account_id).first()
+    db_article.account_name = account.account_name if account else None
+    return db_article
+
+
+def update_wechat_article(
+    db: Session,
+    article_id: int,
+    tags: Optional[str] = None,
+    category: Optional[str] = None,
+    notes: Optional[str] = None,
+    summary: Optional[str] = None
+) -> Optional[WechatArticle]:
+    """更新文章"""
+    db_article = db.query(WechatArticle).filter(WechatArticle.id == article_id).first()
+    if not db_article:
+        return None
+    if tags:
+        db_article.tags = tags
+    if category:
+        db_article.category = category
+    if notes:
+        db_article.notes = notes
+    if summary:
+        db_article.summary = summary
+    db.commit()
+    db.refresh(db_article)
+    account = db.query(WechatAccount).filter(WechatAccount.id == db_article.wechat_account_id).first()
+    db_article.account_name = account.account_name if account else None
+    return db_article
+
+
+def delete_wechat_article(db: Session, article_id: int) -> bool:
+    """删除文章"""
+    db_article = db.query(WechatArticle).filter(WechatArticle.id == article_id).first()
+    if not db_article:
+        return False
+    db.delete(db_article)
+    db.commit()
+    return True

@@ -340,5 +340,19 @@ export const competitorAPI = {
   
   // 报告导出
   exportReport: (competitorId, taskId) => 
-    instance.get(`/competitor/${competitorId}/compare/tasks/${taskId}/export`, { responseType: 'blob' })
+    instance.get(`/competitor/${competitorId}/compare/tasks/${taskId}/export`, { responseType: 'blob' }),
+  
+  // 公众号管理
+  getWechatAccounts: (competitorId, params = {}) => instance.get(`/competitor/${competitorId}/wechat/accounts`, { params }),
+  createWechatAccount: (competitorId, data) => instance.post(`/competitor/${competitorId}/wechat/accounts`, data),
+  updateWechatAccount: (competitorId, accountId, data) => instance.put(`/competitor/${competitorId}/wechat/accounts/${accountId}`, data),
+  deleteWechatAccount: (competitorId, accountId) => instance.delete(`/competitor/${competitorId}/wechat/accounts/${accountId}`),
+  
+  // 公众号文章管理
+  getAllWechatArticles: (params = {}) => instance.get('/competitor/wechat/articles', { params }),
+  getWechatArticles: (competitorId, params = {}) => instance.get(`/competitor/${competitorId}/wechat/articles`, { params }),
+  createWechatArticle: (competitorId, data) => instance.post(`/competitor/${competitorId}/wechat/articles`, data),
+  updateWechatArticle: (competitorId, articleId, data) => instance.put(`/competitor/${competitorId}/wechat/articles/${articleId}`, data),
+  deleteWechatArticle: (competitorId, articleId) => instance.delete(`/competitor/${competitorId}/wechat/articles/${articleId}`),
+  generateArticleSummary: (competitorId, articleId) => instance.post(`/competitor/${competitorId}/wechat/articles/${articleId}/summary`)
 }
