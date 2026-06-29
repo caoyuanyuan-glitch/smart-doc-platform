@@ -96,6 +96,7 @@ class CompetitorCompareTaskResponse(BaseModel):
     our_doc_id: int
     competitor_doc_name: Optional[str] = None
     our_doc_name: Optional[str] = None
+    competitor_name: Optional[str] = None
     status: str
     similarity: Optional[float] = None
     result_data: Optional[Any] = None
