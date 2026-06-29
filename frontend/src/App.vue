@@ -122,6 +122,15 @@
               <template #title>知识库管理</template>
             </el-menu-item>
 
+            <el-sub-menu index="competitor-sub">
+              <template #title>
+                <el-icon><TrendCharts /></el-icon>
+                <span>竞品分析</span>
+              </template>
+              <el-menu-item index="/competitor">竞品管理</el-menu-item>
+              <el-menu-item index="/competitor/tasks">对比历史</el-menu-item>
+            </el-sub-menu>
+
             <el-menu-item v-if="userStore.isAdmin" index="/users">
               <el-icon><User /></el-icon>
               <template #title>用户管理</template>
@@ -149,7 +158,7 @@ import { qaAPI } from '@/api'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
   Files, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
-  Edit, Setting, Message
+  Edit, Setting, Message, TrendCharts
 } from '@element-plus/icons-vue'
 
 const router = useRouter()

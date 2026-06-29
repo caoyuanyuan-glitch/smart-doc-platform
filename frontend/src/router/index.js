@@ -23,6 +23,7 @@ import SpellCheck from '@/views/SpellCheck.vue'
 import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
 import WhiteList from '@/views/WhiteList.vue'
 import Feedback from '@/views/Feedback.vue'
+import Competitor from '@/views/Competitor.vue'
 
 const routes = [
   {
@@ -197,6 +198,21 @@ const routes = [
     path: '/feedback',
     name: 'Feedback',
     component: Feedback
+  },
+  {
+    path: '/competitor',
+    name: 'Competitor',
+    component: Competitor
+  },
+  {
+    path: '/competitor/tasks',
+    name: 'CompetitorTasks',
+    component: Competitor
+  },
+  {
+    path: '/competitor/:id',
+    name: 'CompetitorDetail',
+    component: Competitor
   }
 ]
 

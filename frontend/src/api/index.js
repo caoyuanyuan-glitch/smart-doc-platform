@@ -302,3 +302,42 @@ export const knowledgeAPI = {
   moveFile: (fileId, data) => instance.put(`/knowledge/files/${fileId}/move`, data),
   deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`)
 }
+
+export const competitorAPI = {
+  // 竞品管理
+  list: (params = {}) => instance.get('/competitor', { params }),
+  get: (id) => instance.get(`/competitor/${id}`),
+  create: (data) => instance.post('/competitor', data),
+  update: (id, data) => instance.put(`/competitor/${id}`, data),
+  delete: (id) => instance.delete(`/competitor/${id}`),
+  
+  // 文档管理
+  getDocuments: (competitorId) => instance.get(`/competitor/${competitorId}/documents`),
+  uploadDocument: (competitorId, file, docType, version = null, notes = null) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('doc_type', docType)
+    if (version) formData.append('version', version)
+    if (notes) formData.append('notes', notes)
+    return instance.post(`/competitor/${competitorId}/documents`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  deleteDocument: (competitorId, docId) => instance.delete(`/competitor/${competitorId}/documents/${docId}`),
+  
+  // 对比分析
+  createCompare: (competitorId, competitorDocId, ourDocId) => 
+    instance.post(`/competitor/${competitorId}/compare`, { competitor_doc_id: competitorDocId, our_doc_id: ourDocId }),
+  getCompareTasks: (competitorId, params = {}) => instance.get(`/competitor/${competitorId}/compare/tasks`, { params }),
+  getCompareTask: (competitorId, taskId) => instance.get(`/competitor/${competitorId}/compare/tasks/${taskId}`),
+  
+  // AI建议
+  generateSuggestions: (competitorId, taskId) => 
+    instance.post(`/competitor/${competitorId}/compare/tasks/${taskId}/suggest`),
+  getSuggestions: (competitorId, taskId) => 
+    instance.get(`/competitor/${competitorId}/compare/tasks/${taskId}/suggest`),
+  
+  // 报告导出
+  exportReport: (competitorId, taskId) => 
+    instance.get(`/competitor/${competitorId}/compare/tasks/${taskId}/export`, { responseType: 'blob' })
+}

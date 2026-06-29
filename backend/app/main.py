@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search
+from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, competitor
 from app.database import create_tables
 
 app = FastAPI(title="智能技术文档平台", version="1.0.0")
@@ -33,6 +33,7 @@ app.include_router(translation.router, prefix="/api/translation", tags=["AI翻�
 app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识库管理"])
 app.include_router(spell_check.router, prefix="/api/spell-check", tags=["拼写检查"])
 app.include_router(whitelist.router, prefix="/api/whitelist", tags=["白名单管理"])
+app.include_router(competitor.router, prefix="/api/competitor", tags=["竞品说明书分析"])
 
 @app.on_event("startup")
 async def startup_event():
