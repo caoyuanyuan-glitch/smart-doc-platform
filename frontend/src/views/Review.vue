@@ -8,13 +8,13 @@
           class="upload-demo"
           :http-request="uploadDocument"
           :before-upload="beforeUpload"
-          accept=".pdf,.docx,.md,.zip,.txt,.idml"
+          accept=".pdf,.docx,.xlsx,.xls,.md,.zip,.txt,.idml"
           :auto-upload="true"
           :show-file-list="false"
         >
           <el-button type="primary">上传文档</el-button>
           <template #tip>
-            <div class="upload-tip">支持 PDF、DOCX、MD、TXT、IDML 格式，单文件最大 50MB</div>
+            <div class="upload-tip">支持 PDF、DOCX、Excel、MD、TXT、IDML 格式，单文件最大 50MB</div>
           </template>
         </el-upload>
         <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
@@ -186,7 +186,11 @@
         row-key="id"
       >
         <el-table-column type="selection" width="48" />
-        <el-table-column prop="id" label="ID" width="70" />
+        <el-table-column label="ID" width="70">
+          <template #default="scope">
+            {{ formatIssueDisplayId(scope.$index) }}
+          </template>
+        </el-table-column>
         <el-table-column prop="severity" label="级别" width="80">
           <template #default="scope">
             <el-tag size="small" :type="severityTagType(scope.row.severity)" effect="plain">
@@ -222,7 +226,7 @@
         </el-table-column>
       </el-table>
       <div class="dialog-footer">
-        <span>共 {{ filteredDialogIssues.length }} 条 (已选 {{ selectedIssueIds.length }} 条)</span>
+        <span>共 {{ filteredDialogIssues.length }} 条<span v-if="filteredDialogExcelRowCount">，涉及 {{ filteredDialogExcelRowCount }} 行</span> (已选 {{ selectedIssueIds.length }} 条)</span>
         <el-button @click="issueDialogVisible = false">关闭</el-button>
       </div>
     </el-dialog>
@@ -477,6 +481,20 @@ const filteredDialogIssues = computed(() => {
   })
 })
 
+const filteredDialogExcelRowCount = computed(() => {
+  const rows = new Set()
+  for (const issue of filteredDialogIssues.value) {
+    const position = parseMaybeJson(issue.position)
+    if (!position || !position.sheet || !position.row) continue
+    rows.add(`${position.sheet}:${position.row}`)
+  }
+  return rows.size
+})
+
+function formatIssueDisplayId(index) {
+  return String(index + 1).padStart(3, '0')
+}
+
 // 判定状态统计 (按任务ID)
 const judgmentStats = computed(() => {
   const stats = {}
@@ -713,7 +731,7 @@ function formatDateTime(dateStr) {
 }
 
 function beforeUpload(file) {
-  const allowed = ['pdf', 'docx', 'md', 'zip', 'txt', 'idml']
+  const allowed = ['pdf', 'docx', 'xlsx', 'xls', 'md', 'zip', 'txt', 'idml']
   const ext = file.name.split('.').pop().toLowerCase()
   if (!allowed.includes(ext)) {
     ElMessage.error('不支持的文件格式: .' + ext)
@@ -1021,7 +1039,9 @@ th{background:#f8f9fa;font-weight:bold}
 }
 
 function resultButtonLabel(fileType) {
-  return fileType === 'docx' ? '下载Word' : '导出HTML'
+  if (fileType === 'docx') return '下载Word'
+  if (fileType === 'xlsx') return '下载Excel'
+  return '导出HTML'
 }
 
 function parseMaybeJson(value) {
@@ -1283,19 +1303,21 @@ async function downloadReviewResult(row) {
     const res = await reviewAPI.exportResult(row.id)
     const blobType = fileType === 'docx'
       ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      : 'text/html;charset=utf-8'
+      : fileType === 'xlsx'
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'text/html;charset=utf-8'
     const blob = new Blob([res.data], { type: blobType })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
     const baseName = (row.document_name || `task_${row.id}`).replace(/\.[^.]+$/, '')
-    const suffix = fileType === 'docx' ? '.docx' : '.html'
+    const suffix = fileType === 'docx' ? '.docx' : fileType === 'xlsx' ? '.xlsx' : '.html'
     link.download = `${baseName}_审核结果_${new Date().toISOString().slice(0, 10)}${suffix}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
     URL.revokeObjectURL(url)
-    ElMessage.success(fileType === 'docx' ? 'Word审核结果下载成功' : 'HTML审核报告导出成功')
+    ElMessage.success(fileType === 'docx' ? 'Word审核结果下载成功' : fileType === 'xlsx' ? 'Excel审核结果下载成功' : 'HTML审核报告导出成功')
   } catch (err) {
     ElMessage.error('导出失败: ' + (err.response?.data?.detail || err.message))
   }

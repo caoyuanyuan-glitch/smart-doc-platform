@@ -1027,6 +1027,235 @@ def _get_document_upload_path(document):
     return None
 
 
+def _normalize_excel_cell(value):
+    if value is None:
+        return ''
+    return str(value).replace('\r\n', '\n').replace('\r', '\n')
+
+
+def _display_excel_cell(value):
+    return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+
+def _looks_chinese_text(text):
+    return bool(re.search(r'[\u4e00-\u9fff]', str(text or '')))
+
+
+def _looks_english_text(text):
+    return bool(re.search(r'[A-Za-z]', str(text or '')))
+
+
+def _infer_excel_column_mapping(header_values):
+    source_column = 0
+    target_column = 1
+    context_column = -1
+    for index, header in enumerate(header_values):
+        text = str(header or '').lower()
+        if any(key in text for key in ['中文', '原文', 'source', 'cn', 'chinese']) and source_column == 0:
+            source_column = index
+        if any(key in text for key in ['英文', '译文', 'translation', 'target', 'en', 'english']):
+            target_column = index
+        if any(key in text for key in ['备注', '上下文', 'context', 'comment', 'note']):
+            context_column = index
+    if source_column == target_column:
+        target_column = 1 if source_column == 0 else 0
+    return {
+        'source_column': source_column,
+        'target_column': target_column,
+        'context_column': context_column,
+        'header_row': 0,
+    }
+
+
+def _iter_excel_review_rows(file_path):
+    from openpyxl import load_workbook
+
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                continue
+            header = [_normalize_excel_cell(value) for value in rows[0]]
+            mapping = _infer_excel_column_mapping(header)
+            source_col = mapping['source_column']
+            target_col = mapping['target_column']
+            context_col = mapping['context_column']
+            max_col = max(source_col, target_col, context_col)
+            for zero_index, row in enumerate(rows[1:], start=1):
+                if max_col >= len(row):
+                    continue
+                source_text = _normalize_excel_cell(row[source_col] if source_col < len(row) else '')
+                target_text = _normalize_excel_cell(row[target_col] if target_col < len(row) else '')
+                context_text = _normalize_excel_cell(row[context_col] if context_col >= 0 and context_col < len(row) else '')
+                if not source_text.strip() and not target_text.strip() and not context_text.strip():
+                    continue
+                yield {
+                    'sheet': sheet_name,
+                    'row_number': zero_index + 1,
+                    'source_text': source_text,
+                    'target_text': target_text,
+                    'context_text': context_text,
+                    'source_column': source_col + 1,
+                    'target_column': target_col + 1,
+                }
+    finally:
+        wb.close()
+
+
+def _excel_issue(row, issue_type, rule, severity, original_text, suggestion, description, audit_basis, confidence=90):
+    context = f"中文: {_display_excel_cell(row['source_text'])} | 英文: {_display_excel_cell(row['target_text'])}"
+    if row.get('context_text'):
+        context += f" | 备注: {row['context_text']}"
+    return {
+        'severity': severity,
+        'category': issue_type,
+        'rule': rule,
+        'chapter': f"ROW {row['row_number']}",
+        'original_text': original_text,
+        'context': context,
+        'suggestion': suggestion,
+        'description': description,
+        'audit_basis': audit_basis,
+        'confidence': confidence,
+        'source': 'excel',
+        'position': _encode_issue_position_with_meta(
+            0,
+            0,
+            sheet=row['sheet'],
+            row=row['row_number'],
+            source_column=row['source_column'],
+            target_column=row['target_column'],
+        ),
+    }
+
+
+def _run_excel_review_audit(db: Session, document, max_length=30):
+    source_path = _get_document_upload_path(document)
+    if not source_path or not source_path.exists():
+        raise ValueError('原始 Excel 文件不存在')
+
+    issues = []
+    rows = list(_iter_excel_review_rows(source_path))
+    source_to_targets = {}
+    target_to_sources = {}
+    terms = get_terms(db, limit=10000)
+
+    for row in rows:
+        source = row['source_text']
+        target = row['target_text']
+        if source:
+            source_to_targets.setdefault(source.strip(), {}).setdefault(target.strip(), []).append(row['row_number'])
+        if target:
+            target_to_sources.setdefault(target.strip().lower(), {}).setdefault(source.strip(), []).append(row['row_number'])
+
+        if not source:
+            issues.append(_excel_issue(row, '完整性', 'XLS-COMP-001', 'serious', target, '补充中文原文', '中文原文为空，需补充。', 'Excel翻译对照表完整性检查'))
+        if not target:
+            issues.append(_excel_issue(row, '完整性', 'XLS-COMP-002', 'serious', source, '补充英文译文', '英文译文为空，需补充。', 'Excel翻译对照表完整性检查'))
+        if source.strip() and target.strip() and source.strip() == target.strip() and (_looks_chinese_text(source) or _looks_english_text(source)):
+            issues.append(_excel_issue(row, '完整性', 'XLS-COMP-003', 'general', target, '确认是否已完成翻译', '原文与译文完全相同，需确认是否漏翻。', 'Excel翻译对照表完整性检查'))
+
+        if target:
+            target_stripped = target.strip()
+            if len(target_stripped) > max_length:
+                issues.append(_excel_issue(row, '长度过长', 'XLS-LEN-001', 'general', target, f'建议控制在 {max_length} 个字符以内', f'英文长度 {len(target_stripped)} 字符，超出界面显示限制。', 'Excel界面字符串长度检查'))
+            if re.search(r'\s{2,}', target):
+                normalized_target = re.sub(r'\s+', ' ', target).strip()
+                issues.append(_excel_issue(row, '格式问题', 'XLS-FMT-001', 'general', target, f'建议改为 {normalized_target}', '英文译文存在连续空格。', 'Excel界面字符串格式检查'))
+            if target.strip() != target:
+                issues.append(_excel_issue(row, '格式问题', 'XLS-FMT-002', 'general', target, '删除首尾多余空格', '单元格文本首尾存在多余空格。', 'Excel界面字符串格式检查'))
+            if re.search(r'[，。；：！？]', target):
+                issues.append(_excel_issue(row, '格式问题', 'XLS-FMT-003', 'general', target, '英文译文使用英文标点', '英文译文中出现中文标点。', 'Excel界面字符串标点检查'))
+            if len(target_stripped) > 1 and target_stripped.isupper() and re.search(r'[A-Z]', target_stripped):
+                issues.append(_excel_issue(row, '格式问题', 'XLS-FMT-004', 'suggestion', target, target_stripped.title(), '界面字符串通常避免全大写。', 'Excel界面字符串大小写检查'))
+            if re.fullmatch(r'[a-z][a-z ]{2,}', target_stripped) and len(target_stripped.split()) <= 4:
+                issues.append(_excel_issue(row, '格式问题', 'XLS-FMT-005', 'suggestion', target, target_stripped[:1].upper() + target_stripped[1:], '按钮或菜单项建议首字母大写。', 'Excel界面字符串大小写检查'))
+            if re.fullmatch(r'[A-Za-z]:', target_stripped) or re.fullmatch(r'[A-Za-z][A-Za-z ]{1,30}:', target_stripped):
+                issues.append(_excel_issue(row, '格式问题', 'XLS-FMT-006', 'general', target, target_stripped.rstrip(':'), '界面标签不应包含冒号。', 'Excel界面字符串标签格式检查'))
+            replacements = {
+                'Delet': 'Delete',
+                'Sav e': 'Save',
+                'Edite': 'Edit',
+                'C opy': 'Copy',
+                'recieve': 'receive',
+                'teh': 'the',
+                'File is existed': 'File already exists',
+                'Connect failed': 'Connection failed',
+                'Network Connect': 'Network Connection',
+                'Blue Tooth': 'Bluetooth',
+                'Bar Code': 'Barcode',
+                'Exit system': 'Exit the system',
+                'System Setting': 'System Settings',
+                'Press the button': 'Click the button',
+            }
+            for wrong, right in replacements.items():
+                if wrong.lower() in target.lower():
+                    spelling_errors = {'Delet', 'Sav e', 'Edite', 'C opy', 'recieve', 'teh', 'Blue Tooth'}
+                    format_errors = {'Bar Code'}
+                    category = '拼写错误' if wrong in spelling_errors else '格式问题' if wrong in format_errors else '语法错误'
+                    issues.append(_excel_issue(row, category, 'XLS-LANG-001', 'serious', target, f'建议改为 {right}', f'发现常见语言问题：{wrong}', 'Excel界面字符串语言质量检查'))
+            if re.search(r'\binput\b', target, re.IGNORECASE):
+                issues.append(_excel_issue(row, '语法错误', 'XLS-LANG-002', 'serious', target, re.sub(r'\binput\b', 'enter', target, flags=re.IGNORECASE), '界面输入提示建议使用 enter。', '英文技术文档写作风格指南'))
+            if source.startswith('请'):
+                issues.append(_excel_issue(row, '中文风格', 'XLS-CN-STYLE-001', 'suggestion', source, f'建议改为 {source[1:]}', '界面按钮文案建议简洁，避免使用“请”开头。', '中文技术文档写作风格指南'))
+            concise_source_suggestions = {
+                '点击此处进行下一步操作': '下一步',
+                '请确定您是否要执行此操作？': '确定',
+                '请输入您的姓名': '输入您的姓名',
+                '请等待...': '等待...',
+            }
+            if source.strip() in concise_source_suggestions:
+                issues.append(_excel_issue(row, '中文建议', 'XLS-CN-STYLE-002', 'suggestion', source, concise_source_suggestions[source.strip()], '中文界面文案建议更简洁。', '中文技术文档写作风格指南'))
+            if re.search(r'\bPress\b', target, re.IGNORECASE):
+                issues.append(_excel_issue(row, '英文风格', 'XLS-EN-STYLE-001', 'suggestion', target, re.sub(r'\bPress\b', 'Click', target, flags=re.IGNORECASE), '界面操作建议使用 Click。', '英文技术文档写作风格指南'))
+
+        for term in terms:
+            non_standard = str(getattr(term, 'non_standard', '') or '').strip()
+            standard = str(getattr(term, 'standard', '') or '').strip()
+            if non_standard and standard and non_standard in source and standard.lower() not in target.lower():
+                issues.append(_excel_issue(row, '术语不一致', 'XLS-TERM-001', 'serious', f'{source} → {target}', f'{non_standard} 建议译为 {standard}', '译文与术语库标准译法不一致。', '知识库术语库'))
+
+    for source, targets in source_to_targets.items():
+        normalized_targets = {target for target in targets if target}
+        if len(normalized_targets) <= 1:
+            continue
+        target_list = list(normalized_targets)
+        for target, row_numbers in targets.items():
+            for row in [item for item in rows if item['source_text'] == source and item['target_text'] == target]:
+                issues.append(_excel_issue(row, '术语不一致', 'XLS-TERM-002', 'serious', f'{source} → {target}', f'统一译法，当前存在 {", ".join(target_list)}', f'同一中文“{source}”对应多个英文译法。', 'Excel跨行术语一致性检查'))
+
+    equivalent_sources = [
+        ('登录', '登入'),
+    ]
+    rows_by_source = {}
+    for row in rows:
+        rows_by_source.setdefault(row['source_text'].strip(), []).append(row)
+    for left, right in equivalent_sources:
+        left_rows = rows_by_source.get(left, [])
+        right_rows = rows_by_source.get(right, [])
+        if not left_rows or not right_rows:
+            continue
+        left_targets = {row['target_text'].strip() for row in left_rows if row['target_text'].strip()}
+        for row in right_rows:
+            target = row['target_text'].strip()
+            if target and left_targets and target not in left_targets:
+                issues.append(_excel_issue(row, '术语不一致', 'XLS-TERM-003', 'serious', f"{row['source_text']} → {row['target_text']}", f'与“{left}”统一译法，当前基准为 {", ".join(sorted(left_targets))}', f'“{left}”与“{right}”含义相近，英文译法需统一。', 'Excel跨行语义一致性检查'))
+
+    seen_pairs = {}
+    for row in rows:
+        pair = (row['source_text'].strip(), row['target_text'].strip())
+        if not pair[0] and not pair[1]:
+            continue
+        if pair in seen_pairs:
+            issues.append(_excel_issue(row, '完整性', 'XLS-COMP-004', 'general', f'{pair[0]} → {pair[1]}', f'与第 {seen_pairs[pair]} 行重复，请确认是否重复录入', '存在完全重复的中英文组合。', 'Excel翻译对照表重复行检查'))
+        else:
+            seen_pairs[pair] = row['row_number']
+
+    return issues
+
+
 def _select_export_issues(issues):
     visible_issues = _visible_review_issues(issues)
     preferred = [i for i in visible_issues if getattr(i, 'status', None) in (None, '', 'pending', 'confirmed', 'converted_to_rule')]
@@ -2226,6 +2455,66 @@ def _export_review_html_file(review, document, issues):
     return export_path, export_name, "text/html; charset=utf-8"
 
 
+def _excel_issue_position(issue):
+    position = _decode_issue_position(_issue_value(issue, 'position', ''))
+    return str(position.get('sheet', '') or ''), int(position.get('row', 0) or 0)
+
+
+def _export_review_excel(review, document, issues):
+    from openpyxl import load_workbook
+
+    source_path = _get_document_upload_path(document)
+    if not source_path or not source_path.exists():
+        raise HTTPException(status_code=404, detail="原始 Excel 文件不存在")
+
+    REVIEW_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff._-]+", "_", Path(document.filename or f"review_{review.id}").stem).strip("_") or f"review_{review.id}"
+    export_name = f"{safe}_reviewed.xlsx"
+    export_path = REVIEW_EXPORT_DIR / export_name
+    shutil.copyfile(source_path, export_path)
+
+    wb = load_workbook(export_path)
+    issues_by_row = {}
+    for issue in _select_export_issues(issues):
+        sheet_name, row_number = _excel_issue_position(issue)
+        if not sheet_name or row_number <= 0:
+            continue
+        issues_by_row.setdefault((sheet_name, row_number), []).append(issue)
+
+    for ws in wb.worksheets:
+        opinion_col = ws.max_column + 1
+        status_col = opinion_col + 1
+        count_col = status_col + 1
+        ws.cell(row=1, column=opinion_col, value="审核意见")
+        ws.cell(row=1, column=status_col, value="审核状态")
+        ws.cell(row=1, column=count_col, value="问题数量")
+        for row_number in range(2, ws.max_row + 1):
+            row_issues = issues_by_row.get((ws.title, row_number), [])
+            if not row_issues:
+                ws.cell(row=row_number, column=opinion_col, value="—")
+                ws.cell(row=row_number, column=status_col, value="确认无误")
+                ws.cell(row=row_number, column=count_col, value=0)
+                continue
+            opinions = []
+            has_term_issue = False
+            for issue in row_issues:
+                category = _issue_value(issue, 'category', '问题') or '问题'
+                description = _issue_value(issue, 'description', '') or _issue_value(issue, 'original_text', '')
+                suggestion = _format_issue_suggestion(issue)
+                text = f"[{category}] {description}"
+                if suggestion and suggestion != '-':
+                    text += f" → {suggestion}"
+                opinions.append(text)
+                if category == '术语不一致':
+                    has_term_issue = True
+            ws.cell(row=row_number, column=opinion_col, value="\n".join(opinions))
+            ws.cell(row=row_number, column=status_col, value="需确认" if has_term_issue else "待修改")
+            ws.cell(row=row_number, column=count_col, value=len(row_issues))
+
+    wb.save(export_path)
+    return export_path, export_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 def _run_english_heuristic_audit(content, file_type=None):
     issues = []
     seen = set()
@@ -3080,13 +3369,18 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         has_ai_client = ai_client.has_any_client
         print(f"[审核] AI客户端可用: {has_ai_client}, 模式={mode}")
 
+        if document.file_type == 'xlsx':
+            set_progress(review_id, 'running', 'Excel审核', 35, '正在执行 Excel 行级审核...')
+            issues.extend(_run_excel_review_audit(db, document))
+            print(f"[审核] Excel审核发现问题: {len(issues)}个")
+
         if mode in ["rule", "hybrid"]:
             set_progress(review_id, 'running', '规则审核', 15, '正在加载审核规则...')
             rules = get_rules(db)
             print(f"[审核] 加载规则数量: {len(rules)}")
             
             set_progress(review_id, 'running', '规则审核', 25, '正在执行规则匹配...')
-            rule_issues = run_rule_audit(content, rules, knowledge_basis, document.file_type)
+            rule_issues = [] if document.file_type == 'xlsx' else run_rule_audit(content, rules, knowledge_basis, document.file_type)
             if document.file_type == 'pdf':
                 rule_issues = [issue for issue in rule_issues if issue.get('rule') not in {'R011', 'R016', 'R021'}]
             print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
@@ -3094,10 +3388,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             set_progress(review_id, 'running', '术语检查', 35, '正在执行术语检查...')
             terms = get_terms(db)
             print(f"[审核] 加载术语数量: {len(terms)}")
-            term_issues = run_term_check(content, terms)
+            term_issues = [] if document.file_type == 'xlsx' else run_term_check(content, terms)
             print(f"[审核] 术语匹配到问题: {len(term_issues)}个")
 
-            if document_language in ("en", "both"):
+            if document.file_type != 'xlsx' and document_language in ("en", "both"):
                 set_progress(review_id, 'running', '拼写检查', 45, '正在进行拼写和语法检查...')
                 try:
                     spelling_issues = run_spelling_and_grammar_check(content, document.file_type)
@@ -3174,7 +3468,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             issues.extend(candidate_rule_issues)
             print(f"[审核] 规则审核阶段共产出问题数={len(candidate_rule_issues)}")
 
-        if mode in ["ai", "hybrid"] and has_ai_client:
+        if document.file_type != 'xlsx' and mode in ["ai", "hybrid"] and has_ai_client:
             set_progress(review_id, 'running', 'AI智能审核', 65, '正在进行AI深度审核...')
             print(f"[审核] 开始AI智能审核，模式={mode}")
             try:
@@ -3357,6 +3651,8 @@ async def export_review_result(review_id: int, db: Session = Depends(get_db)):
     issues = _visible_review_issues(get_issues(db, review_id=review_id))
     if document.file_type == "docx":
         export_path, export_name, media_type = _export_review_docx(review, document, issues)
+    elif document.file_type == "xlsx":
+        export_path, export_name, media_type = _export_review_excel(review, document, issues)
     else:
         export_path, export_name, media_type = _export_review_html_file(review, document, issues)
 
