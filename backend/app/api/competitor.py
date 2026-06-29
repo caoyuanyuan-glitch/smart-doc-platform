@@ -239,8 +239,7 @@ async def create_compare(
     # 异步执行对比
     background_tasks.add_task(
         _run_compare_task,
-        db, task.id, competitor_doc.file_path, our_doc.file_path,
-        competitor_doc.file_type, our_doc.file_type
+        db, task.id, competitor_doc.file_path, our_doc.file_path
     )
     
     # 添加文档名称
@@ -254,9 +253,7 @@ def _run_compare_task(
     db: Session,
     task_id: int,
     file_a_path: str,
-    file_b_path: str,
-    format_a: str,
-    format_b: str
+    file_b_path: str
 ):
     """执行对比任务（后台任务）"""
     try:
@@ -266,9 +263,7 @@ def _run_compare_task(
         # 调用对比引擎
         result = compare_documents_by_format(
             file_a_path=file_a_path,
-            file_b_path=file_b_path,
-            format_a=format_a,
-            format_b=format_b
+            file_b_path=file_b_path
         )
         
         # 计算总体相似度
