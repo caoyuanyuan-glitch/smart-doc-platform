@@ -249,8 +249,8 @@ async def create_compare(
 def _run_compare_task(
     db: Session,
     task_id: int,
-    doc_a_path: str,
-    doc_b_path: str,
+    file_a_path: str,
+    file_b_path: str,
     format_a: str,
     format_b: str
 ):
@@ -261,8 +261,8 @@ def _run_compare_task(
         
         # 调用对比引擎
         result = compare_documents_by_format(
-            doc_a_path=doc_a_path,
-            doc_b_path=doc_b_path,
+            file_a_path=file_a_path,
+            file_b_path=file_b_path,
             format_a=format_a,
             format_b=format_b
         )
