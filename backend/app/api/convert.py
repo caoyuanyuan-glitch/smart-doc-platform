@@ -52,6 +52,9 @@ def _media_type_for_file(filename):
 _ensure_dir(UPLOAD_DIR)
 _ensure_dir(OUTPUT_DIR)
 
+GENERATED_NODE_VERSION = "A.2"
+GENERATED_TOPIC_BASE = 41000
+
 
 def _get_step_names():
     return ["解析", "结构映射", "内容替换", "验证", "打包"]
@@ -487,6 +490,55 @@ def _reshape_docx_sections(sections):
         idx = next_idx
 
     return grouped
+
+
+def _append_text_block(base_text, extra_text):
+    base_text = (base_text or "").strip()
+    extra_text = (extra_text or "").strip()
+    if base_text and extra_text:
+        return f"{base_text}\n\n{extra_text}"
+    return base_text or extra_text
+
+
+def _postprocess_section_tree(sections):
+    processed = []
+    for sec in sections:
+        current = {
+            "title": sec.get("title", ""),
+            "content": sec.get("content", ""),
+            "sections": _postprocess_section_tree(sec.get("sections", [])),
+        }
+
+        title_key = _normalize_section_key(current["title"])
+        if title_key == "appendix" and current["sections"]:
+            grouped_children = []
+            appendix_parent = None
+            for child in current["sections"]:
+                child_key = _normalize_section_key(child.get("title", ""))
+                if appendix_parent is None and "barcode number and sequence information" in child_key:
+                    appendix_parent = child
+                    grouped_children.append(child)
+                    continue
+                if appendix_parent is not None and child_key.startswith("instructions for"):
+                    appendix_parent.setdefault("sections", []).append(child)
+                    continue
+                grouped_children.append(child)
+            current["sections"] = grouped_children
+
+        if title_key == "cleanup of adapter ligated product" and current["content"] and current["sections"]:
+            target_child = None
+            for child in current["sections"]:
+                child_key = _normalize_section_key(child.get("title", ""))
+                if child_key == title_key:
+                    target_child = child
+                    break
+            if target_child is not None:
+                target_child["content"] = _append_text_block(current["content"], target_child.get("content", ""))
+                current["content"] = ""
+
+        processed.append(current)
+
+    return processed
 
 
 def _extract_images_md(content):
@@ -951,7 +1003,11 @@ def _rewrite_template_frontmatter(frontmatter_xml, topics_output):
 
     rewritten = frontmatter_xml
     used_files = set()
-    title_to_topic = {topic["title"].strip().lower(): topic for topic in topics_output if topic.get("title")}
+    title_to_topic = {
+        topic["title"].strip().lower(): topic
+        for topic in topics_output
+        if topic.get("title") and topic.get("filename")
+    }
 
     for navtitle, topic in title_to_topic.items():
         pattern = re.compile(rf'(<topicref[^>]*navtitle="{re.escape(topic["title"])}"[^>]*href=")([^"]+)(")')
@@ -959,7 +1015,7 @@ def _rewrite_template_frontmatter(frontmatter_xml, topics_output):
             rewritten = pattern.sub(rf'\1{topic["filename"]}\3', rewritten)
             rewritten = re.sub(
                 rf'(<topicref[^>]*navtitle="{re.escape(topic["title"])}"[^>]*cms:placeHolder=")([^"]*)(")',
-                rf'\1{topic["filename"]}\3',
+                rf'\1{_topic_placeholder(topic)}\3',
                 rewritten,
             )
             rewritten = re.sub(
@@ -1050,22 +1106,39 @@ def _build_topic_hierarchy(topics, skipped_files):
     return roots
 
 
+def _topic_uses_dita_file(topic):
+    return bool(topic.get("filename") and not topic.get("is_container_only"))
+
+
+def _generated_topic_code(topic_index):
+    return f"DTO{GENERATED_TOPIC_BASE + topic_index:06d}"
+
+
+def _topic_placeholder(topic, has_children=False):
+    if has_children:
+        return ""
+    filename = topic.get("filename") or ""
+    return os.path.splitext(filename)[0] if filename else ""
+
+
 def _append_topicref_xml(lines, topic, node_id_seq, indent, level_attr, template_name="sDitaTopic"):
     navtitle = _escape_xml_attr(topic["title"])
     node_id = f"PN{next(node_id_seq):03d}"
     ime_soft_type = template_name
+    placeholder = _escape_xml_attr(_topic_placeholder(topic))
     attrs = (
         f'navtitle="{navtitle}" '
         f'xml:lang="zh-CN" id="{node_id}" '
+        f'applicDesc="" '
         f'href="{topic["filename"]}" '
         f'keys="{topic["id"]}" type="topic" '
         f'cms:title="{navtitle}" '
-        f'cms:placeHolder="{topic["filename"]}" '
+        f'cms:placeHolder="{placeholder}" '
         f'cms:nodeType="XML" '
         f'cms:template="{template_name}" '
         f'level="{level_attr}" '
         f'cms:imesofttype="{ime_soft_type}" '
-        f'version="A.1"'
+        f'version="{GENERATED_NODE_VERSION}"'
     )
     lines.append(f'{indent}<topicref {attrs}/>' )
 
@@ -1078,22 +1151,24 @@ def _append_topicref_container_xml(lines, node, node_id_seq, indent, level_attr)
     topic = node["topic"]
     navtitle = _escape_xml_attr(topic["title"])
     node_id = f"PN{next(node_id_seq):03d}"
+    has_children = bool(node.get("children"))
     attrs = [
         f'navtitle="{navtitle}"',
         'xml:lang="zh-CN"',
         f'id="{node_id}"',
+        'applicDesc=""',
         'type="topic"',
         f'level="{level_attr}"',
         'cms:imesofttype="sDitaTopic"',
-        'version="A.1"',
+        f'version="{GENERATED_NODE_VERSION}"',
     ]
 
-    if _topic_has_body(topic):
+    if _topic_uses_dita_file(topic):
         attrs.extend([
             f'href="{topic["filename"]}"',
             f'keys="{topic["id"]}"',
             f'cms:title="{navtitle}"',
-            f'cms:placeHolder="{topic["filename"]}"',
+            f'cms:placeHolder="{_escape_xml_attr(_topic_placeholder(topic, has_children=has_children))}"',
             'cms:nodeType="XML"',
             'cms:template="sDitaTopic"',
         ])
@@ -1129,12 +1204,12 @@ def _append_root_container_xml(lines, node, chapter_seq, node_id_seq, indent, le
     container_tag = "appendix" if topic["title"].strip().lower() == "appendix" else "chapter"
     chapter_id = f"PG{timestamp}_{next(chapter_seq):03d}"
     lines.append(
-        f'{indent}<{container_tag} navtitle="{navtitle}" id="{chapter_id}"'
+        f'{indent}<{container_tag} navtitle="{navtitle}" id="{chapter_id}" applicDesc=""'
         f' cms:lang="zh-CN" cms:type="{container_tag}" cms:title=""'
         f' cms:isTemplet="N"'
-        f' level="{level_attr}" version="A.1">'
+        f' level="{level_attr}" version="{GENERATED_NODE_VERSION}">'
     )
-    if _topic_has_body(topic):
+    if _topic_uses_dita_file(topic):
         root_template = "chapterTopic" if container_tag == "chapter" else "sDitaTopic"
         _append_topicref_xml(lines, topic, node_id_seq, indent + "  ", level_attr + 1, root_template)
     for child in node["children"]:
@@ -1145,11 +1220,49 @@ def _append_root_container_xml(lines, node, chapter_seq, node_id_seq, indent, le
     lines.append(f'{indent}</{container_tag}>')
 
 
+def _append_frontmatter_root_xml(lines, node, node_id_seq, indent, timestamp):
+    frontmatter_id = f"PG{timestamp}_FM"
+    lines.append(
+        f'{indent}<frontmatter navtitle="Preface" id="{frontmatter_id}" applicDesc=""'
+        f' cms:lang="zh-CN" cms:title="" cms:placeHolder="" cms:isTemplet="N"'
+        f' cms:referenceType="" cms:type="frontmatter" cms:outputclass=""'
+        f' cms:descriptioin="" cms:xCoordination="" cms:sourceTag=""'
+        f' cms:referenceMap="" cms:colNumber="2" cms:nodeRemark=""'
+        f' level="1" version="{GENERATED_NODE_VERSION}">'
+    )
+    _append_topicref_xml(lines, node["topic"], node_id_seq, indent + "  ", 2, "sCoverTopic")
+    for child in node["children"]:
+        if child["children"]:
+            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", 2)
+        else:
+            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", 2)
+
+    booklists_id = f"PG{timestamp}_BL"
+    toc_id = f"PG{timestamp}_TOC"
+    lines.append(
+        f'{indent}  <booklists id="{booklists_id}" applicDesc="" cms:lang="zh-CN" cms:title="" cms:placeHolder=""'
+        f' cms:isTemplet="N" cms:referenceType="" cms:type="booklists" cms:outputclass=""'
+        f' cms:descriptioin="" cms:xCoordination="" cms:sourceTag="" cms:referenceMap=""'
+        f' cms:colNumber="2" cms:nodeRemark="" level="2" version="{GENERATED_NODE_VERSION}">'
+    )
+    lines.append(
+        f'{indent}    <toc id="{toc_id}" applicDesc="" cms:lang="zh-CN" cms:title="" cms:placeHolder=""'
+        f' cms:isTemplet="N" cms:referenceType="" cms:type="toc" cms:outputclass=""'
+        f' cms:descriptioin="" cms:xCoordination="" cms:sourceTag="" cms:referenceMap=""'
+        f' cms:colNumber="2" cms:nodeRemark="" level="3" version="{GENERATED_NODE_VERSION}"/>'
+    )
+    lines.append(f'{indent}  </booklists>')
+    lines.append(f'{indent}</frontmatter>')
+
+
 def _append_bookmap_topics(lines, topic_roots, timestamp):
     chapter_seq = iter(range(1, 10000))
     node_id_seq = iter(range(1, 100000))
 
     for root in topic_roots:
+        if _normalize_section_key(root["topic"]["title"]) == "cover":
+            _append_frontmatter_root_xml(lines, root, node_id_seq, "  ", timestamp)
+            continue
         _append_root_container_xml(lines, root, chapter_seq, node_id_seq, "  ", 1, timestamp)
 
 
@@ -1184,6 +1297,8 @@ def _flatten_sections(sections, parent_h1="", level=1):
                 "level": level,
                 "title": title,
                 "content": content,
+                "has_children": bool(children),
+                "child_titles": [child.get("title", "") for child in children],
                 "dita_type": _get_topic_type(title),
             })
 
@@ -1192,6 +1307,16 @@ def _flatten_sections(sections, parent_h1="", level=1):
             result.extend(_flatten_sections(children, new_parent, level + 1))
 
     return result
+
+
+def _should_emit_container_only(section):
+    if not section.get("has_children"):
+        return False
+
+    if (section.get("content") or "").strip():
+        return False
+
+    return int(section.get("level", 1) or 1) <= 1
 
 
 def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_content,
@@ -1234,6 +1359,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             sections = _parse_content(source_format, file_path, source_content)
             if source_format == "docx":
                 sections = _reshape_docx_sections(sections)
+                sections = _postprocess_section_tree(sections)
             images = _extract_images_md(source_content)
 
         _set_progress(20, "解析")
@@ -1324,10 +1450,13 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 slug_counts[slug] = slug_count + 1
                 if slug_count:
                     slug = f"{slug}_{slug_count + 1}"
-                topic_filename = f"{slug}.dita"
-                topic_id = slug
+                topic_id = _generated_topic_code(topic_index)
+                is_container_only = _should_emit_container_only(section)
+                topic_filename = None if is_container_only else f"{topic_id}.dita"
 
-                dita_content = _content_to_dita_xml(title, section["content"], dita_type, topic_id)
+                dita_content = None
+                if topic_filename:
+                    dita_content = _content_to_dita_xml(title, section["content"], dita_type, topic_id)
 
                 topics_output.append({
                     "type": dita_type,
@@ -1336,14 +1465,16 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     "level": section.get("level", 1),
                     "content": dita_content,
                     "raw_content": section["content"],
+                    "is_container_only": is_container_only,
                     "title": title,
                 })
-                conversion_detail.append({
-                    "source_section": title,
-                    "target_type": dita_type,
-                    "topic_file": topic_filename,
-                    "status": "ok",
-                })
+                if topic_filename:
+                    conversion_detail.append({
+                        "source_section": title,
+                        "target_type": dita_type,
+                        "topic_file": topic_filename,
+                        "status": "ok",
+                    })
 
         _set_progress(55, "内容替换")
 
@@ -1395,6 +1526,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         output_name = f"output_{timestamp}"
         output_base = os.path.join(OUTPUT_DIR, output_name)
         _ensure_dir(output_base)
+        written_topics = [topic for topic in topics_output if topic.get("filename") and topic.get("content")]
 
         url_map = _download_images_for_output(images, output_base)
 
@@ -1444,7 +1576,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     with open(tpl_img, "wb") as f:
                         f.write(img_content)
 
-            for topic in topics_output:
+            for topic in written_topics:
                 content = topic["content"]
                 for url, local in url_map.items():
                     content = content.replace(f'href="{url}"', f'href="{local}"')
@@ -1462,7 +1594,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             map_lines = [
                 '<?xml version="1.0" encoding="UTF-8"?>',
                 IME_BOOKMAP_DECL,
-                f'<bookmap xmlns:imeCMS="http://www.megalinkware.com" xmlns:vf="http://www.megalinkware.com" xmlns:cms="http://www.w3.org/ime/cms" imeCMS:imesofttype="PartBookMap" imeCMS:softtype="PartBookMap" xml:lang="zh-CN" id="{map_id}" imeCMS:iba_lang="zh-CN" imeCMS:iba_title="" imeCMS:iba_placeHolder="" imeCMS:iba_isTemplet="N" imeCMS:iba_referenceType="" level="0" version="A.1">',
+                f'<bookmap xmlns:imeCMS="http://www.megalinkware.com" xmlns:vf="http://www.megalinkware.com" xmlns:cms="http://www.w3.org/ime/cms" imeCMS:imesofttype="PartBookMap" imeCMS:softtype="PartBookMap" xml:lang="zh-CN" id="{map_id}" imeCMS:iba_lang="zh-CN" imeCMS:iba_title="" imeCMS:iba_placeHolder="" imeCMS:iba_isTemplet="N" imeCMS:iba_referenceType="" level="0" version="{GENERATED_NODE_VERSION}">',
                 '  <booktitle>',
                 f'    <mainbooktitle>{map_title}</mainbooktitle>',
                 '  </booktitle>',
@@ -1490,7 +1622,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 <metadata>
   <generator>Smart Doc Platform</generator>
   <created>{timestamp}</created>
-  <topics>{len(topics_output)}</topics>
+  <topics>{len(written_topics)}</topics>
   <images>{image_count}</images>
   <source_format>{source_format}</source_format>
   <target_format>{target_format}</target_format>
@@ -1536,7 +1668,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             db, task_id,
             output_zip_path=output_public_path,
             output_size=output_size,
-            topic_count=len(topics_output),
+            topic_count=len(written_topics),
             image_count=image_count,
             verification_report=verification_report,
             conversion_detail=conversion_detail,

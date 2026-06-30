@@ -108,3 +108,20 @@ AI 翻译引擎排查规则
   - 发生 `AI翻译引擎不可用` 时，先检查 `/api/translation/providers/status` 返回的 provider 可用状态
   - 排查重点是当前服务进程是否已注入 `KIMI_API_KEY`，再检查 `DEEPSEEK_API_KEY` 和 `ARKCLAW_API_KEY`
   - 仓库内只保留 `.env.example` 模板，实际服务配置以部署环境注入为准
+
+改动完成后先做本地自检
+- Date: 2026-06-29
+- Context: 用户要求格式转换模块修改完成后先由我自行检查，再交由平台测试
+- Category: 工作流协作
+- Instructions:
+  - 每次完成代码修改后，先执行本地自检并确认结果正常
+  - 自检通过后再通知用户进行平台侧验证
+
+DITA 父子节点兼容规则
+- Date: 2026-06-30
+- Context: Agent 在执行 Word 转 DITA 的 IME 右键报错排查时发现
+- Category: 排错调试
+- Instructions:
+  - DITA 生成时，顶层空父节点可以保留为结构容器
+  - 带子节点的中间父节点必须输出为真实 topic，并生成自己的 `href` 和 `keys`
+  - 若中间父节点被生成为信息结构组件，IME 中其子 topic 可能出现右键加载错误
