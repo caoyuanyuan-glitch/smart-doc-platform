@@ -1300,29 +1300,20 @@ def read_idml(f):
         with zipfile.ZipFile(f, "r") as zf:
             for name in zf.namelist():
                 name_lower = name.lower()
-                # IDML files contain multiple XML files
-                # We process story files and spread files which contain the main text content
-                if name_lower.startswith("mimetype"):
-                    continue
-                if not name_lower.endswith(".xml"):
-                    continue
-                # Skip design map and other metadata files, process story/spread/story_title files
-                if "designmap" in name_lower:
+                if not (name_lower.startswith("stories/") and name_lower.endswith(".xml")):
                     continue
                 try:
                     with zf.open(name) as xml_file:
                         tree = ET.parse(xml_file)
                         root = tree.getroot()
-                        # Extract text content from CharacterData elements
                         for elem in root.iter():
+                            tag = elem.tag.rsplit('}', 1)[-1] if isinstance(elem.tag, str) else ''
+                            if tag != 'Content':
+                                continue
                             if elem.text and elem.text.strip():
                                 text = elem.text.strip()
-                                if len(text) > 1 and not text.startswith("<?xml"):
+                                if len(text) > 1:
                                     buf.append(text)
-                            if elem.tail and elem.tail.strip():
-                                tail_text = elem.tail.strip()
-                                if len(tail_text) > 1:
-                                    buf.append(tail_text)
                 except Exception:
                     continue
         return "\n".join(buf)

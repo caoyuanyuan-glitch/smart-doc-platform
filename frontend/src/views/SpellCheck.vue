@@ -96,6 +96,7 @@
               <el-option label="拼写错误" value="spell"></el-option>
               <el-option label="语法错误" value="grammar"></el-option>
               <el-option label="风格建议" value="style"></el-option>
+              <el-option label="单位格式" value="unit"></el-option>
             </el-select>
             <el-button
               type="success"
@@ -120,8 +121,8 @@
           <el-table-column prop="index" label="序号" width="60" type="index"></el-table-column>
           <el-table-column prop="type" label="类型" width="100">
             <template #default="scope">
-              <el-tag :type="scope.row.type === 'spell' ? 'danger' : (scope.row.type === 'style' ? 'info' : 'warning')">
-                {{ scope.row.type === 'spell' ? '拼写' : (scope.row.type === 'style' ? '风格' : '语法') }}
+              <el-tag :type="getErrorTagType(scope.row.type)">
+                {{ getErrorTypeLabel(scope.row.type) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -152,10 +153,10 @@
                 size="small"
                 type="success"
                 plain
-                :disabled="!scope.row.word"
+                :disabled="!canAddWord(scope.row)"
                 @click="addToDict(scope.row)"
               >
-                添加词典
+                {{ canAddWord(scope.row) ? '添加词典' : '已加入词典' }}
               </el-button>
             </template>
           </el-table-column>
@@ -182,6 +183,7 @@ const checkResult = ref(null)
 const filterType = ref('all')
 const selectedWordRows = ref([])
 const errorsTableRef = ref(null)
+const addedWords = ref([])
 
 // 审核进度
 const progress = ref({
@@ -210,7 +212,7 @@ const filteredErrors = computed(() => {
 const highlightedText = computed(() => {
   if (!checkResult.value) return ''
   let text = checkResult.value.text
-  const errors = checkResult.value.errors
+  const errors = [...(checkResult.value.errors || [])].sort((a, b) => a.start - b.start)
   if (!errors || errors.length === 0) return escapeHtml(text)
 
   let result = ''
@@ -229,7 +231,7 @@ const highlightedText = computed(() => {
       bgColor = '#CCE5FF'
       borderColor = '#93C5FD'
     }
-    result += `<span style="background-color: ${bgColor}; padding: 1px 3px; border-radius: 3px; border-bottom: 2px solid ${borderColor};" title="${err.message}">${problemText}</span>`
+    result += `<span style="background-color: ${bgColor}; padding: 1px 3px; border-radius: 3px; border-bottom: 2px solid ${borderColor};" title="${escapeHtmlAttribute(err.message || '')}">${problemText}</span>`
     lastEnd = err.end
   })
   result += escapeHtml(text.substring(lastEnd))
@@ -240,6 +242,49 @@ function escapeHtml(text) {
   const div = document.createElement('div')
   div.textContent = text
   return div.innerHTML.replace(/\n/g, '<br/>').replace(/\s/g, '&nbsp;')
+}
+
+function escapeHtmlAttribute(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function getErrorTypeLabel(type) {
+  if (type === 'spell') return '拼写'
+  if (type === 'style') return '风格'
+  if (type === 'unit') return '单位'
+  if (type === 'grammar') return '语法'
+  return type || '其他'
+}
+
+function getErrorTagType(type) {
+  if (type === 'spell') return 'danger'
+  if (type === 'style') return 'info'
+  if (type === 'unit') return 'success'
+  return 'warning'
+}
+
+function canAddWord(row) {
+  return !!row.word && !hasWordBeenAdded(row.word)
+}
+
+function normalizeWord(word) {
+  return String(word || '').trim().toLowerCase()
+}
+
+function hasWordBeenAdded(word) {
+  const normalized = normalizeWord(word)
+  return !!normalized && addedWords.value.includes(normalized)
+}
+
+function markWordsAsAdded(words) {
+  const normalizedWords = words.map(normalizeWord).filter(Boolean)
+  if (normalizedWords.length === 0) return
+  addedWords.value = [...new Set([...addedWords.value, ...normalizedWords])]
 }
 
 async function handleFileChange(file) {
@@ -256,7 +301,7 @@ function clearFile() {
 }
 
 function isRowSelectable(row) {
-  return !!row.word
+  return canAddWord(row)
 }
 
 function onSelectionChange(rows) {
@@ -268,6 +313,7 @@ async function startCheck() {
   progress.value = { visible: true, percent: 0, message: '准备中...', detail: '', status: '' }
   checkResult.value = null
   selectedWordRows.value = []
+  addedWords.value = []
 
   try {
     if (fileList.value.length > 0) {
@@ -368,6 +414,7 @@ function clearAll() {
   fileList.value = []
   checkResult.value = null
   selectedWordRows.value = []
+  addedWords.value = []
   progress.value.visible = false
 }
 
@@ -384,6 +431,10 @@ function downloadTemplate() {
 
 async function addToDict(error) {
   const word = error.word
+  if (hasWordBeenAdded(word)) {
+    ElMessage.info(`单词 "${word}" 已在本次结果中加入词典`)
+    return
+  }
   if (!word) {
     ElMessage.warning('该错误无具体单词可加入词典')
     return
@@ -391,10 +442,9 @@ async function addToDict(error) {
   try {
     await request.post('/spell-check/add-word', null, { params: { word } })
     ElMessage.success(`已添加单词 "${word}" 到词典`)
-    // 标记该条已加入词典
-    if (error.rowKey) {
-      error._added = true
-    }
+    markWordsAsAdded([word])
+    selectedWordRows.value = []
+    if (errorsTableRef.value) errorsTableRef.value.clearSelection()
   } catch (error) {
     console.error('添加单词失败:', error)
     ElMessage.error('添加单词失败')
@@ -409,17 +459,18 @@ async function batchAddToDict() {
   }
   try {
     let successCount = 0
+    const successWords = []
     for (const word of words) {
       try {
         await request.post('/spell-check/add-word', null, { params: { word } })
         successCount++
+        successWords.push(word)
       } catch (e) {
         console.error(`添加 ${word} 失败:`, e)
       }
     }
     ElMessage.success(`成功添加 ${successCount}/${words.length} 个单词到词典`)
-    // 标记已添加
-    selectedWordRows.value.forEach(r => { r._added = true })
+    markWordsAsAdded(successWords)
     selectedWordRows.value = []
     if (errorsTableRef.value) errorsTableRef.value.clearSelection()
   } catch (error) {
@@ -431,12 +482,36 @@ async function batchAddToDict() {
 function replaceWord(error, suggestion) {
   if (!checkResult.value) return
   const text = checkResult.value.text
-  const newText = text.substring(0, error.start) + suggestion + text.substring(error.end)
+  const replacement = suggestion ?? ''
+  const originalLength = error.end - error.start
+  const delta = replacement.length - originalLength
+  const targetIndex = Number(String(error.rowKey || '').split('-').pop())
+  const hasValidTargetIndex = Number.isInteger(targetIndex) && targetIndex >= 0
+  const newText = text.substring(0, error.start) + replacement + text.substring(error.end)
   checkResult.value.text = newText
-  checkResult.value.errors = checkResult.value.errors.filter(e => e.start !== error.start)
+  checkResult.value.errors = checkResult.value.errors
+    .filter((item, index) => {
+      if (hasValidTargetIndex) {
+        return index !== targetIndex
+      }
+      return !(item.start === error.start && item.end === error.end && item.type === error.type)
+    })
+    .map((item) => {
+      if (delta !== 0 && item.start >= error.end) {
+        return {
+          ...item,
+          start: item.start + delta,
+          end: item.end + delta
+        }
+      }
+      return item
+    })
+    .sort((a, b) => a.start - b.start)
   checkResult.value.spell_count = checkResult.value.errors.filter(e => e.type === 'spell').length
-  checkResult.value.grammar_count = checkResult.value.errors.filter(e => e.type === 'grammar').length
+  checkResult.value.grammar_count = checkResult.value.errors.length - checkResult.value.spell_count
   checkResult.value.total_count = checkResult.value.errors.length
+  selectedWordRows.value = []
+  if (errorsTableRef.value) errorsTableRef.value.clearSelection()
 }
 
 function exportErrors() {
@@ -444,7 +519,14 @@ function exportErrors() {
   let content = '序号,类型,错误描述,问题单词,建议\n'
   checkResult.value.errors.forEach((err, idx) => {
     const suggestions = err.suggestions ? err.suggestions.join('; ') : ''
-    content += `${idx + 1},${err.type === 'spell' ? '拼写' : '语法'},${err.message},${err.word || ''},${suggestions}\n`
+    const row = [
+      idx + 1,
+      getErrorTypeLabel(err.type),
+      err.message || '',
+      err.word || '',
+      suggestions
+    ].map(escapeCsvField)
+    content += `${row.join(',')}\n`
   })
   const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -453,6 +535,11 @@ function exportErrors() {
   link.download = '拼写检查错误列表.csv'
   link.click()
   URL.revokeObjectURL(url)
+}
+
+function escapeCsvField(value) {
+  const normalized = String(value ?? '')
+  return `"${normalized.replace(/"/g, '""')}"`
 }
 
 const STORAGE_KEY = 'spell_check_history'
@@ -487,6 +574,7 @@ onMounted(() => {
     if (reapply) {
       const data = JSON.parse(reapply)
       checkResult.value = data
+      addedWords.value = []
       sessionStorage.removeItem('spell_check_reapply')
       ElMessage.success(`已重新加载「${data.filename}」的检查结果`)
     }
