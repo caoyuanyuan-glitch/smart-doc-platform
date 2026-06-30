@@ -52,8 +52,8 @@
                   <el-table-column type="index" label="#" width="50" />
                   <el-table-column prop="type" label="类型" width="80">
                     <template #default="errScope">
-                      <el-tag :type="errScope.row.type === 'spell' ? 'danger' : 'warning'" size="small">
-                        {{ errScope.row.type === 'spell' ? '拼写' : '语法' }}
+                      <el-tag :type="getErrorTagType(errScope.row.type)" size="small">
+                        {{ getErrorTypeLabel(errScope.row.type) }}
                       </el-tag>
                     </template>
                   </el-table-column>
@@ -184,6 +184,21 @@ function loadHistory() {
   } finally {
     loading.value = false
   }
+}
+
+function getErrorTypeLabel(type) {
+  if (type === 'spell') return '拼写'
+  if (type === 'style') return '风格'
+  if (type === 'unit') return '单位'
+  if (type === 'grammar') return '语法'
+  return type || '其他'
+}
+
+function getErrorTagType(type) {
+  if (type === 'spell') return 'danger'
+  if (type === 'style') return 'info'
+  if (type === 'unit') return 'success'
+  return 'warning'
 }
 
 async function clearAll() {
