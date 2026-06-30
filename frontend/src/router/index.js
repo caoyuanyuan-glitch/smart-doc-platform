@@ -132,6 +132,21 @@ const routes = [
   {
     path: '/generate',
     name: 'Generate',
+    redirect: '/generate/image-descriptions'
+  },
+  {
+    path: '/generate/image-descriptions',
+    name: 'GenerateImageDescriptions',
+    component: Generate
+  },
+  {
+    path: '/generate/manual-draft',
+    name: 'GenerateManualDraft',
+    component: Generate
+  },
+  {
+    path: '/generate/paragraph',
+    name: 'GenerateParagraph',
     component: Generate
   },
   {

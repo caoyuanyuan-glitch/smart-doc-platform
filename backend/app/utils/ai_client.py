@@ -1,8 +1,11 @@
 import os
 import json
 import re
+import base64
+import mimetypes
 import httpx
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from openai import OpenAI
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -18,6 +21,9 @@ from app.api.review_rules import (
 )
 
 ANTHROPIC_VERSION = "2023-06-01"
+IMAGE_DRAFT_BATCH_SIZE = 2
+IMAGE_DRAFT_MAX_WORKERS = 6
+IMAGE_DRAFT_TOTAL_TIMEOUT = 95
 
 
 def _is_valid_key(val):
@@ -259,6 +265,8 @@ class AIClient:
         if not providers:
             return None
 
+        print(f"[image-steps] providers={', '.join(name for name, _, _ in providers)}")
+
         max_retries = 3
         retry_delay = 2
 
@@ -336,6 +344,52 @@ class AIClient:
         text = str(value or "").strip()
         text = re.sub(r"\s+", " ", text)
         return text[:limit]
+
+    @staticmethod
+    def _format_image_step_text(value, limit=300):
+        text = AIClient._clean_text(value, limit)
+        if re.search(r"[A-Za-z]", text):
+            text = re.sub(r'"([^"\n]{1,80})"', r'**\1**', text)
+            text = re.sub(r'“([^”\n]{1,80})”', r'**\1**', text)
+        return text
+
+    @staticmethod
+    def _extract_step_lines(text):
+        lines = []
+        for line in str(text or "").splitlines():
+            item = re.sub(r"^\s*(?:[-*•]|\d+[.)、]|步骤\s*\d+\s*[：:])\s*", "", line).strip()
+            if item and len(item) >= 6:
+                lines.append(item)
+        return lines
+
+    @staticmethod
+    def _coerce_image_steps(data, raw_text=""):
+        candidates = []
+        if isinstance(data, dict):
+            for key in ("steps", "step", "operation_steps", "rewritten_steps", "instructions", "procedures", "操作步骤"):
+                value = data.get(key)
+                if value:
+                    candidates.append(value)
+            for key in ("content", "text", "result", "answer"):
+                value = data.get(key)
+                if isinstance(value, str):
+                    candidates.extend(AIClient._extract_step_lines(value))
+        elif isinstance(data, list):
+            candidates.append(data)
+        if raw_text:
+            candidates.extend(AIClient._extract_step_lines(raw_text))
+
+        steps = []
+        for item in candidates:
+            if isinstance(item, list):
+                steps.extend([str(step).strip() for step in item if str(step).strip()])
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or item.get("step") or item.get("description")
+                if text:
+                    steps.append(str(text).strip())
+            elif str(item).strip():
+                steps.append(str(item).strip())
+        return steps
 
     def normalize_audit_issues(self, issues, content, source="ai", min_confidence=70):
         normalized = []
@@ -548,6 +602,461 @@ class AIClient:
             return json.loads(result)
         except:
             return {"title": topic, "content": result or "", "sections": [], "word_count": 0}
+
+    @staticmethod
+    def build_image_data_url(raw_bytes, file_name="", content_type=""):
+        mime = content_type or mimetypes.guess_type(file_name or "")[0] or "image/png"
+        return f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
+
+    def _analyze_image_batch_to_draft(self, batch_images, batch_start, total_images, user_prompt=""):
+        image_range = f"第 {batch_start + 1}-{batch_start + len(batch_images)} 张，共 {total_images} 张"
+        draft_instruction = f"""
+你是一名技术文档编写助手，需要基于这一组连续界面截图还原局部操作流程。
+
+当前图片范围：{image_range}
+
+你的任务：
+1. 提取每张图片中的关键信息，只保留对操作理解有帮助的界面元素、按钮、输入框、提示文字和状态变化。
+2. 分析这一组图片之间的局部顺序和依赖关系。
+3. 输出局部操作步骤，步骤必须可执行、连贯、避免空泛描述。
+4. 此阶段只做读图理解和初稿整理，暂时不套用模板或风格指南。
+
+输出严格 JSON：
+{{
+  "summary": "这一组图片内容的总体说明",
+  "relation_summary": "这一组图片之间的逻辑关系与排序依据",
+  "steps": ["步骤1", "步骤2"]
+}}
+
+要求：
+- 只输出 JSON。
+- steps 必须体现清晰顺序。
+- steps 必须直接描述用户动作，适合直接放进操作说明书。
+- steps、summary、relation_summary 必须使用图片主要语言输出。中文图片输出中文，英文图片输出英文。
+- 每个 step 尽量包含界面位置、操作对象、输入动作和结果页面。
+- 如果图片表现的是登录、跳转、按钮点击、软键盘输入等界面流程，按真实操作顺序还原。
+""".strip()
+
+        if user_prompt:
+            draft_instruction += f"\n\n用户补充要求：{user_prompt.strip()}"
+
+        user_content = [{"type": "text", "text": draft_instruction}]
+        for image in batch_images:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": image.get("data_url")}
+            })
+
+        try:
+            response = self.kimi_client.with_options(timeout=35, max_retries=0).chat.completions.create(
+                model=self.kimi_model,
+                messages=[{"role": "user", "content": user_content}],
+                max_tokens=1024,
+                temperature=1,
+            )
+            result = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            if not result:
+                print(f"[Kimi] image batch draft WARNING: {image_range}, empty content, finish_reason={finish_reason}, usage={response.usage}")
+                return None
+        except Exception as e:
+            print(f"Kimi 局部图片初稿失败: {image_range}, {str(e)}")
+            return None
+
+        data = self._extract_json(result, {})
+        if not isinstance(data, dict):
+            print(f"[Kimi] image batch draft WARNING: {image_range}, invalid batch draft json")
+            return None
+
+        steps = data.get("steps") or []
+        if not isinstance(steps, list):
+            steps = [str(steps)] if steps else []
+        steps = [step for step in steps if str(step).strip()]
+        if not steps:
+            print(f"[Kimi] image batch draft WARNING: {image_range}, empty batch draft steps")
+            return None
+
+        return {
+            "summary": self._clean_text(data.get("summary"), 500),
+            "relation_summary": self._clean_text(data.get("relation_summary"), 800),
+            "steps": [self._format_image_step_text(step, 300) for step in steps],
+            "image_range": image_range,
+            "start": batch_start,
+        }
+
+    def _analyze_small_image_set_to_draft(self, images, user_prompt=""):
+        draft_instruction = f"""
+你是一名技术文档编写助手，需要基于少量连续界面截图还原操作流程。
+
+输出严格 JSON：
+{{
+  "summary": "总体说明，不超过 1 句",
+  "relation_summary": "排序依据，不超过 1 句",
+  "steps": ["步骤1", "步骤2"]
+}}
+
+要求：
+- 只输出 JSON。
+- 按图片顺序输出 steps，每张图片最多 2 个步骤。
+- steps 必须描述用户动作和界面结果。
+- steps、summary、relation_summary 必须使用图片主要语言输出。
+- 英文步骤中的界面元素用 **粗体** 包裹。
+""".strip()
+
+        if user_prompt:
+            draft_instruction += f"\n\n用户补充要求：{user_prompt.strip()}"
+
+        user_content = [{"type": "text", "text": draft_instruction}]
+        for image in images:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": image.get("data_url")}
+            })
+
+        try:
+            response = self.kimi_client.with_options(timeout=120, max_retries=0).chat.completions.create(
+                model=self.kimi_model,
+                messages=[{"role": "user", "content": user_content}],
+                max_tokens=4096,
+                temperature=1,
+            )
+            result = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            if not result:
+                print(f"[Kimi] small image draft WARNING: empty content, finish_reason={finish_reason}, usage={response.usage}")
+                return None
+        except Exception as e:
+            print(f"Kimi 少量图片初稿失败: {str(e)}")
+            return None
+
+        data = self._extract_json(result, {})
+        if not isinstance(data, dict):
+            print("[Kimi] small image draft WARNING: invalid json")
+            return None
+
+        steps = data.get("steps") or []
+        if not isinstance(steps, list):
+            steps = [str(steps)] if steps else []
+        steps = [step for step in steps if str(step).strip()]
+        if not steps:
+            print("[Kimi] small image draft WARNING: empty steps")
+            return None
+
+        return {
+            "summary": self._clean_text(data.get("summary"), 500),
+            "relation_summary": self._clean_text(data.get("relation_summary"), 800),
+            "used_style_guide_name": "",
+            "steps": [self._format_image_step_text(step, 300) for step in steps],
+            "model": "kimi-draft",
+        }
+
+    def _refine_image_steps_text(self, draft_data, style_guide_bundle=None, template_reference=None, user_prompt="", timeout=90):
+        refine_instruction = f"""
+你是一名技术文档编辑，需要基于图片分析初稿改写操作步骤。
+
+图片分析初稿 JSON：
+{json.dumps(draft_data, ensure_ascii=False)}
+
+输出严格 JSON：
+{{
+  "summary": "改写后的总体说明",
+  "relation_summary": "流程顺序依据",
+  "used_style_guide_name": "实际使用的风格指南名称",
+  "steps": ["步骤1", "步骤2"]
+}}
+
+要求：
+- 只输出 JSON。
+- 保留初稿中的真实界面对象、按钮、输入内容和流程顺序。
+- steps 必须是非空数组，元素数量与初稿 steps 基本一致；如果无需改写，也要返回按模板/指南调整措辞后的原 steps。
+- steps 必须使用初稿主要语言输出。英文步骤中的界面元素用 **粗体** 包裹，禁止使用引号。
+- 不新增图片中没有出现的对象或动作。
+""".strip()
+
+        if style_guide_bundle and style_guide_bundle.get("guides"):
+            guides = style_guide_bundle["guides"]
+            if style_guide_bundle.get("mode") == "selected":
+                guide = guides[0]
+                refine_instruction += (
+                    f"\n\n写作风格指南\n"
+                    f"请严格遵循以下指南输出操作说明。\n"
+                    f"文件名：{guide.get('name')}\n"
+                    f"语言：{guide.get('language')}\n"
+                    f"内容：\n{guide.get('content')}"
+                )
+            else:
+                guide_blocks = []
+                for guide in guides:
+                    guide_blocks.append(
+                        f"文件名：{guide.get('name')}\n"
+                        f"语言：{guide.get('language')}\n"
+                        f"内容：\n{guide.get('content')}"
+                    )
+                refine_instruction += (
+                    "\n\n候选写作风格指南\n"
+                    "请先判断初稿主要语言，再选择最匹配的一份风格指南执行。"
+                    "中文优先使用中文指南，英文优先使用英文指南。"
+                    "输出 JSON 时，used_style_guide_name 必须填写你实际采用的指南文件名。\n\n"
+                    + "\n\n".join(guide_blocks)
+                )
+
+        if template_reference and template_reference.get("content"):
+            refine_instruction += (
+                f"\n\n模板参考文件\n"
+                f"文件名：{template_reference.get('name')}\n"
+                "当模板中的表达与初稿流程存在相似描述时，优先参考模板中的写法、句式和动作描述。"
+                "保留初稿里的真实对象、按钮、输入内容和页面名称。\n"
+                f"模板内容：\n{template_reference.get('content')}"
+            )
+
+        if user_prompt:
+            refine_instruction += f"\n\n用户补充要求：{user_prompt.strip()}"
+
+        refine_providers = []
+        if self.kimi_client:
+            refine_providers.append(("Kimi", self.kimi_client, self.kimi_model, "kimi"))
+        if self.deepseek_client:
+            refine_providers.append(("DeepSeek", self.deepseek_client, self.deepseek_model, "deepseek"))
+        if self.arkclaw_client:
+            refine_providers.append(("ArkClaw", self.arkclaw_client, self.arkclaw_model, "arkclaw"))
+
+
+
+        for provider_name, client, model, model_key in refine_providers:
+            try:
+                response = client.with_options(timeout=timeout, max_retries=0).chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": refine_instruction}],
+                    max_tokens=2048,
+                    temperature=1,
+                )
+                result = response.choices[0].message.content
+            except Exception as e:
+                print(f"{provider_name} 初稿改写失败: {str(e)}")
+                continue
+
+            data = self._extract_json(result, {})
+            if not isinstance(data, dict):
+                print(f"[{provider_name}] refine WARNING: invalid json")
+                continue
+            steps = self._coerce_image_steps(data, result)
+            if not steps:
+                print(f"[{provider_name}] refine WARNING: empty steps, raw={self._clean_text(result, 300)}")
+                continue
+            return {
+                "summary": self._clean_text(data.get("summary") or draft_data.get("summary"), 500),
+                "relation_summary": self._clean_text(data.get("relation_summary") or draft_data.get("relation_summary"), 800),
+                "used_style_guide_name": self._clean_text(data.get("used_style_guide_name"), 160),
+                "steps": [self._format_image_step_text(step, 300) for step in steps],
+                "model": f"kimi+{model_key}",
+            }
+
+        return None
+
+    def analyze_images_to_steps(self, images, user_prompt="", style_guide_bundle=None, template_reference=None):
+        if not images:
+            return None
+
+        if not self.kimi_client:
+            return None
+
+        should_refine = bool(style_guide_bundle or template_reference or str(user_prompt or "").strip())
+
+        if len(images) <= 4:
+            small_draft = self._analyze_small_image_set_to_draft(images, user_prompt)
+            if small_draft:
+                if not should_refine:
+                    return small_draft
+                refined = self._refine_image_steps_text(
+                    small_draft,
+                    style_guide_bundle=style_guide_bundle,
+                    template_reference=template_reference,
+                    user_prompt=user_prompt,
+                    timeout=90,
+                )
+                return refined or small_draft
+            print("[image-steps] small image draft failed, trying batch draft fallback")
+
+        batches = [
+            (start, images[start:start + IMAGE_DRAFT_BATCH_SIZE])
+            for start in range(0, len(images), IMAGE_DRAFT_BATCH_SIZE)
+        ]
+        print(f"[image-steps] Kimi draft batches={len(batches)}, batch_size={IMAGE_DRAFT_BATCH_SIZE}")
+
+        batch_drafts = []
+        max_workers = min(IMAGE_DRAFT_MAX_WORKERS, len(batches))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        future_map = {
+            executor.submit(
+                self._analyze_image_batch_to_draft,
+                batch_images,
+                start,
+                len(images),
+                user_prompt,
+            ): start
+            for start, batch_images in batches
+        }
+        done, pending = wait(future_map.keys(), timeout=IMAGE_DRAFT_TOTAL_TIMEOUT)
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+        if pending:
+            pending_starts = [future_map[future] + 1 for future in pending]
+            print(f"[image-steps] batch drafts timed out, skipped_starts={pending_starts}")
+
+        for future in done:
+            start = future_map[future]
+            try:
+                draft = future.result()
+            except Exception as e:
+                print(f"[Kimi] image batch draft exception: start={start}, {str(e)}")
+                draft = None
+            if draft:
+                batch_drafts.append(draft)
+
+        if len(batch_drafts) != len(batches):
+            print(f"[image-steps] batch drafts incomplete, expected={len(batches)}, got={len(batch_drafts)}")
+
+        if not batch_drafts:
+            print("[Kimi] image draft failed: no successful batch drafts")
+            return None
+
+        batch_drafts.sort(key=lambda item: item.get("start", 0))
+        draft_data = {
+            "summary": "；".join([item.get("summary") or item.get("image_range") or "" for item in batch_drafts if item.get("summary") or item.get("image_range")]),
+            "relation_summary": "；".join([item.get("relation_summary") or "" for item in batch_drafts if item.get("relation_summary")]),
+            "steps": [step for item in batch_drafts for step in (item.get("steps") or [])],
+            "batch_drafts": batch_drafts,
+        }
+
+        if len(batch_drafts) != len(batches):
+            return {
+                "summary": self._clean_text(draft_data.get("summary"), 500),
+                "relation_summary": self._clean_text(draft_data.get("relation_summary"), 800),
+                "used_style_guide_name": "",
+                "steps": [self._format_image_step_text(step, 300) for step in draft_data.get("steps") or []],
+                "model": "kimi-draft-partial",
+            }
+
+        if not should_refine:
+            return {
+                "summary": self._clean_text(draft_data.get("summary"), 500),
+                "relation_summary": self._clean_text(draft_data.get("relation_summary"), 800),
+                "used_style_guide_name": "",
+                "steps": [self._format_image_step_text(step, 300) for step in draft_data.get("steps") or []],
+                "model": "kimi-draft",
+            }
+
+        refine_instruction = f"""
+你是一名技术文档编辑，需要基于图片分析初稿改写操作步骤。
+
+图片分析初稿 JSON：
+{json.dumps(draft_data, ensure_ascii=False)}
+
+输出严格 JSON：
+{{
+  "summary": "改写后的总体说明",
+  "relation_summary": "流程顺序依据",
+  "used_style_guide_name": "实际使用的风格指南名称",
+  "steps": ["步骤1", "步骤2"]
+}}
+
+要求：
+- 只输出 JSON。
+- 保留初稿中的真实界面对象、按钮、输入内容和流程顺序。
+- steps 必须是非空数组，元素数量与初稿 steps 基本一致；如果无需改写，也要返回按模板/指南调整措辞后的原 steps。
+- steps 必须使用初稿主要语言输出。英文步骤中的界面元素用 **粗体** 包裹，禁止使用引号。
+- 不新增图片中没有出现的对象或动作。
+""".strip()
+
+        if style_guide_bundle and style_guide_bundle.get("guides"):
+            guides = style_guide_bundle["guides"]
+            if style_guide_bundle.get("mode") == "selected":
+                guide = guides[0]
+                refine_instruction += (
+                    f"\n\n写作风格指南\n"
+                    f"请严格遵循以下指南输出操作说明。\n"
+                    f"文件名：{guide.get('name')}\n"
+                    f"语言：{guide.get('language')}\n"
+                    f"内容：\n{guide.get('content')}"
+                )
+            else:
+                guide_blocks = []
+                for guide in guides:
+                    guide_blocks.append(
+                        f"文件名：{guide.get('name')}\n"
+                        f"语言：{guide.get('language')}\n"
+                        f"内容：\n{guide.get('content')}"
+                    )
+                refine_instruction += (
+                    "\n\n候选写作风格指南\n"
+                    "请先判断初稿主要语言，再选择最匹配的一份风格指南执行。"
+                    "中文优先使用中文指南，英文优先使用英文指南。"
+                    "输出 JSON 时，used_style_guide_name 必须填写你实际采用的指南文件名。\n\n"
+                    + "\n\n".join(guide_blocks)
+                )
+
+        if template_reference and template_reference.get("content"):
+            refine_instruction += (
+                f"\n\n模板参考文件\n"
+                f"文件名：{template_reference.get('name')}\n"
+                "当模板中的表达与初稿流程存在相似描述时，优先参考模板中的写法、句式和动作描述。"
+                "保留初稿里的真实对象、按钮、输入内容和页面名称。\n"
+                f"模板内容：\n{template_reference.get('content')}"
+            )
+
+        if user_prompt:
+            refine_instruction += f"\n\n用户补充要求：{user_prompt.strip()}"
+
+        refine_providers = []
+        if self.kimi_client:
+            refine_providers.append(("Kimi", self.kimi_client, self.kimi_model, "kimi"))
+        if self.deepseek_client:
+            refine_providers.append(("DeepSeek", self.deepseek_client, self.deepseek_model, "deepseek"))
+        if self.arkclaw_client:
+            refine_providers.append(("ArkClaw", self.arkclaw_client, self.arkclaw_model, "arkclaw"))
+
+
+        print(f"[image-steps] refine providers={', '.join(name for name, _, _, _ in refine_providers)}")
+
+        for provider_name, client, model, model_key in refine_providers:
+            try:
+                response = client.with_options(timeout=90, max_retries=0).chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": refine_instruction}],
+                    max_tokens=2048,
+                    temperature=1,
+                )
+                result = response.choices[0].message.content
+            except Exception as e:
+                print(f"{provider_name} 初稿改写失败: {str(e)}")
+                continue
+
+            data = self._extract_json(result, {})
+            if not isinstance(data, dict):
+                print(f"[{provider_name}] refine WARNING: invalid json")
+                continue
+            steps = self._coerce_image_steps(data, result)
+            if not steps:
+                print(f"[{provider_name}] refine WARNING: empty steps, raw={self._clean_text(result, 300)}")
+                continue
+            return {
+                "summary": self._clean_text(data.get("summary") or draft_data.get("summary"), 500),
+                "relation_summary": self._clean_text(data.get("relation_summary") or draft_data.get("relation_summary"), 800),
+                "used_style_guide_name": self._clean_text(data.get("used_style_guide_name"), 160),
+                "steps": [self._format_image_step_text(step, 300) for step in steps],
+                "model": f"kimi+{model_key}",
+            }
+
+        print("[image-steps] refine failed, returning Kimi draft")
+        return {
+            "summary": self._clean_text(draft_data.get("summary"), 500),
+            "relation_summary": self._clean_text(draft_data.get("relation_summary"), 800),
+            "used_style_guide_name": "",
+            "steps": [self._format_image_step_text(step, 300) for step in draft_data.get("steps") or []],
+            "model": "kimi-draft",
+        }
 
     def generate_qa_pairs(self, content, count=3):
         prompt = f"""

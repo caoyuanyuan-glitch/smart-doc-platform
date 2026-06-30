@@ -230,7 +230,12 @@ export const manualAPI = {
 
 export const generateAPI = {
   create: (productName, productModel, docType, targetChapter) =>
-    instance.post('/generate/', { product_name: productName, product_model: productModel, doc_type: docType, target_chapter: targetChapter })
+    instance.post('/generate/', { product_name: productName, product_model: productModel, doc_type: docType, target_chapter: targetChapter }),
+  generateImageSteps: (formData) =>
+    instance.post('/generate/image-steps', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 240000
+    })
 }
 
 export const convertAPI = {
