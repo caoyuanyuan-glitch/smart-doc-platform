@@ -65,6 +65,24 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_char_count INTEGER DEFAULT 0"))
 
 
+    try:
+        plr_columns = {col['name'] for col in inspector.get_columns('polish_learning_rules')}
+    except Exception:
+        plr_columns = set()
+
+    if plr_columns:
+        stmts = []
+        if 'rule_name' not in plr_columns:
+            stmts.append("ALTER TABLE polish_learning_rules ADD COLUMN rule_name VARCHAR(128)")
+        if 'engine_key' not in plr_columns:
+            stmts.append("ALTER TABLE polish_learning_rules ADD COLUMN engine_key VARCHAR(64)")
+        if 'description' not in plr_columns:
+            stmts.append("ALTER TABLE polish_learning_rules ADD COLUMN description TEXT")
+        if stmts:
+            with engine.begin() as conn:
+                for s in stmts:
+                    conn.execute(text(s))
+
 def get_db():
     db = SessionLocal()
     try:

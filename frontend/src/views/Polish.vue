@@ -30,8 +30,9 @@
             <div class="form-item">
               <label class="form-label">句式清单文件</label>
               <div class="input-with-button">
-                <el-input v-model="formData.sentenceFile" readonly placeholder="选择知识库中的句式清单文件" />
-                <el-button type="primary" @click="openFilePicker('sentenceFile', 'knowledge')">选择文件</el-button>
+                <el-select v-model="formData.sentenceFileId" class="full-width" placeholder="选择句式清单文件" clearable>
+                  <el-option v-for="f in sentenceFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+                </el-select>
               </div>
             </div>
 
@@ -160,17 +161,17 @@
           <div class="file-select-col">
             <label class="form-label">句式清单文件</label>
             <div class="input-with-button">
-              <el-input v-model="textSentenceFileName" size="small" readonly placeholder="留空则加载全部" />
-              <el-button type="primary" size="small" @click="openTextSentencePicker">选择文件</el-button>
-              <el-button v-if="textSentenceFileId" size="small" @click="clearTextSentenceFile">清除</el-button>
+              <el-select v-model="textSentenceFileId" size="small" class="full-width" placeholder="留空则加载全部" clearable>
+                <el-option v-for="f in sentenceFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+              </el-select>
             </div>
           </div>
           <div class="file-select-col">
             <label class="form-label">术语对照表</label>
             <div class="input-with-button">
-              <el-input v-model="textTerminologyFileName" size="small" readonly placeholder="留空则使用数据库术语" />
-              <el-button type="primary" size="small" @click="openTextTerminologyPicker">选择文件</el-button>
-              <el-button v-if="textTerminologyFileId" size="small" @click="clearTextTerminologyFile">清除</el-button>
+              <el-select v-model="textTerminologyFileId" size="small" class="full-width" placeholder="留空则使用数据库术语" clearable>
+                <el-option v-for="f in termFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+              </el-select>
             </div>
           </div>
         </div>
@@ -347,6 +348,43 @@ const knowledgeTree = ref([])
 const knowledgeTreeList = ref([])
 const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
+
+// ── 下拉框选项 ──
+const sentenceFileOptions = ref([])
+const termFileOptions = ref([])
+
+// ── 加载句式清单 / 术语库下拉选项 ──
+async function loadDropdownOptions() {
+  try {
+    const resp = await knowledgeAPI.getTree()
+    const rawData = resp.data || []
+    const sentenceNode = findNodeByName(rawData, '句式清单')
+    const termNode = findNodeByName(rawData, '术语库')
+    sentenceFileOptions.value = flattenFileOptions(sentenceNode ? [sentenceNode] : [])
+    termFileOptions.value = flattenFileOptions(termNode ? [termNode] : [])
+  } catch (e) {
+    console.warn('加载知识库下拉选项失败', e)
+  }
+}
+
+function flattenFileOptions(nodes) {
+  const result = []
+  function walk(list, prefix = '') {
+    if (!Array.isArray(list)) return
+    list.forEach(node => {
+      const label = prefix ? `${prefix} / ${node.name}` : node.name
+      const files = node.files || []
+      files.forEach(f => {
+        result.push({ id: f.id, name: f.name, label: f.name, groupLabel: label })
+      })
+      if (node.children && node.children.length > 0) {
+        walk(node.children, label)
+      }
+    })
+  }
+  walk(nodes)
+  return result
+}
 
 const originalText = ref('')
 const textSentenceFileName = ref('')
@@ -1112,11 +1150,31 @@ async function loadKnowledgeTree() {
     const resp = await knowledgeAPI.getTree()
     const rawData = resp.data || []
     knowledgeTree.value = flattenTree(rawData)
-    knowledgeTreeList.value = flattenKnowledgeList(rawData)
+    // Filter: only show files from the relevant subtree
+    let filteredData = rawData
+    if (currentPickerField.value === 'sentenceFile' || currentPickerField.value === 'textSentenceFile') {
+      const n = findNodeByName(rawData, '句式清单')
+      filteredData = n ? [n] : rawData
+    } else if (currentPickerField.value === 'textTerminologyFile') {
+      const n = findNodeByName(rawData, '术语库')
+      filteredData = n ? [n] : rawData
+    }
+    knowledgeTreeList.value = flattenKnowledgeList(filteredData)
     selectedKnowledgeFile.value = null
   } catch (e) {
     ElMessage.error('加载知识库失败')
   }
+}
+
+function findNodeByName(nodes, name) {
+  for (const node of nodes) {
+    if (node.name === name) return node
+    if (node.children && node.children.length > 0) {
+      const found = findNodeByName(node.children, name)
+      if (found) return found
+    }
+  }
+  return null
 }
 
 function flattenTree(nodes) {
@@ -1478,6 +1536,7 @@ watch(documentSession, (session) => {
 
 onMounted(async () => {
   loadKnowledgeTree()
+  loadDropdownOptions()
   await loadFeedbackStats()
   await loadDocumentFeedbackStats()
 })
@@ -2008,9 +2067,14 @@ onMounted(async () => {
   align-items: center;
 }
 
-.input-with-button .el-input {
+.input-with-button .el-input,
+.input-with-button .el-select {
   flex: 1;
   min-width: 0;
+}
+
+.full-width {
+  width: 100%;
 }
 
 .button-group {

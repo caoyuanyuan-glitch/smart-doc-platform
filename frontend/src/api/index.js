@@ -323,3 +323,14 @@ export const knowledgeAPI = {
   moveFile: (fileId, data) => instance.put(`/knowledge/files/${fileId}/move`, data),
   deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`)
 }
+
+export const docPolishAPI = {
+  getStandards: () => instance.get('/doc-polish/standards'),
+  detect: (formData) => instance.post('/doc-polish/detect', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 600000
+  }),
+  export: (data) => instance.post('/doc-polish/export', data, {
+    timeout: 600000
+  })
+}
