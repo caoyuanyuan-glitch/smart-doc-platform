@@ -10,7 +10,7 @@ import shutil
 import difflib
 from copy import deepcopy
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, time
 from pathlib import Path
 from app.database import get_db
 from app.crud.document import get_document
@@ -21,6 +21,10 @@ from app.models.term import Term
 from app.crud.audit_basis import get_audit_basis
 from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files, get_file
 from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate
+from app.models.review import Review as ReviewModel
+from app.models.issue import Issue as IssueModel
+from app.models.document import Document as DocumentModel
+from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
 from app.utils.ai_client import ai_client
@@ -3576,6 +3580,177 @@ async def create_review_task(document_id: int, mode: str = "hybrid", background_
         background_tasks.add_task(_run_review_background, review.id, document_id, mode)
     
     return {"review_id": review.id, "status": "running", "message": "审核任务已启动，请轮询进度"}
+
+
+def _dashboard_date_range(time_range='7d', start_date=None, end_date=None):
+    today = datetime.utcnow().date()
+    if time_range == 'custom' and start_date and end_date:
+        try:
+            start = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end = datetime.strptime(end_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail='日期格式应为 YYYY-MM-DD')
+    else:
+        days = {'1d': 1, '7d': 7, '30d': 30, '90d': 90}.get(time_range or '7d', 7)
+        start = today - timedelta(days=days - 1)
+        end = today
+    if end < start:
+        raise HTTPException(status_code=400, detail='结束日期不能早于开始日期')
+    return datetime.combine(start, time.min), datetime.combine(end, time.max)
+
+
+def _dashboard_doc_type_value(doc_type):
+    value = str(doc_type or 'all').lower()
+    if value in {'all', ''}:
+        return None
+    if value == 'excel':
+        return 'xlsx'
+    return value
+
+
+def _dashboard_review_rows(db, start_dt, end_dt, doc_type=None, user_id=None):
+    query = (
+        db.query(ReviewModel, DocumentModel, UserModel)
+        .join(DocumentModel, ReviewModel.document_id == DocumentModel.id)
+        .outerjoin(UserModel, DocumentModel.user_id == UserModel.id)
+        .filter(ReviewModel.created_at >= start_dt, ReviewModel.created_at <= end_dt)
+    )
+    normalized_doc_type = _dashboard_doc_type_value(doc_type)
+    if normalized_doc_type:
+        query = query.filter(DocumentModel.file_type == normalized_doc_type)
+    if user_id not in (None, '', 'all'):
+        try:
+            query = query.filter(DocumentModel.user_id == int(user_id))
+        except (TypeError, ValueError):
+            pass
+    return query.order_by(ReviewModel.created_at.asc()).all()
+
+
+def _dashboard_issue_rows(db, review_ids):
+    if not review_ids:
+        return []
+    return db.query(IssueModel).filter(IssueModel.review_id.in_(review_ids)).all()
+
+
+def _dashboard_pct(count, total):
+    return round(count / total, 4) if total else 0
+
+
+def _dashboard_format_doc_type(file_type):
+    if file_type == 'xlsx':
+        return 'excel'
+    return file_type or 'other'
+
+
+def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_date=None, doc_type='all', user_id='all'):
+    start_dt, end_dt = _dashboard_date_range(time_range, start_date, end_date)
+    rows = _dashboard_review_rows(db, start_dt, end_dt, doc_type, user_id)
+    reviews = [review for review, _, _ in rows]
+    review_ids = [review.id for review in reviews]
+    issues = [issue for issue in _dashboard_issue_rows(db, review_ids) if str(issue.status or '').lower() not in {'false_positive', 'ignored'}]
+    issues_by_review = Counter(issue.review_id for issue in issues)
+    today = datetime.utcnow().date()
+    today_start = datetime.combine(today, time.min)
+    today_end = datetime.combine(today, time.max)
+    completed_reviews = [review for review in reviews if review.status == 'completed']
+
+    date_count = (end_dt.date() - start_dt.date()).days + 1
+    dates = [start_dt.date() + timedelta(days=index) for index in range(date_count)]
+    submitted_by_date = Counter(review.created_at.date() for review in reviews if review.created_at)
+    completed_by_date = Counter(review.created_at.date() for review in completed_reviews if review.created_at)
+    issues_by_date = Counter()
+    completed_ids_by_date = {}
+    for review in completed_reviews:
+        if review.created_at:
+            day = review.created_at.date()
+            completed_ids_by_date.setdefault(day, []).append(review.id)
+            issues_by_date[day] += issues_by_review.get(review.id, 0)
+
+    issue_distribution = []
+    category_counts = Counter(issue.category or '未分类' for issue in issues)
+    for category, count in category_counts.most_common():
+        issue_distribution.append({
+            'type': category,
+            'count': count,
+            'percentage': _dashboard_pct(count, len(issues)),
+        })
+
+    doc_type_stats = {}
+    for review, document, _ in rows:
+        key = _dashboard_format_doc_type(document.file_type)
+        item = doc_type_stats.setdefault(key, {'type': key, 'total': 0, 'passed': 0, 'issues': 0, 'confirm': 0})
+        item['total'] += 1
+        review_issue_count = issues_by_review.get(review.id, 0)
+        has_confirm = any(issue.review_id == review.id and issue.category == '术语不一致' for issue in issues)
+        if review_issue_count == 0:
+            item['passed'] += 1
+        elif has_confirm:
+            item['confirm'] += 1
+        else:
+            item['issues'] += 1
+
+    return {
+        'filters': {
+            'time_range': time_range,
+            'start_date': start_dt.date().isoformat(),
+            'end_date': end_dt.date().isoformat(),
+            'doc_type': doc_type or 'all',
+            'user_id': user_id or 'all',
+        },
+        'kpi': {
+            'today_tasks': len([review for review in reviews if today_start <= review.created_at <= today_end]),
+            'pending_tasks': len([review for review in reviews if review.status in {'pending', 'running'}]),
+            'today_completed': len([review for review in completed_reviews if today_start <= review.created_at <= today_end]),
+            'avg_issues_per_doc': round(len(issues) / len(reviews), 2) if reviews else 0,
+            'avg_review_time': 0,
+        },
+        'trend': {
+            'dates': [day.strftime('%m-%d') for day in dates],
+            'submitted': [submitted_by_date.get(day, 0) for day in dates],
+            'completed': [completed_by_date.get(day, 0) for day in dates],
+            'avg_issues': [round(issues_by_date.get(day, 0) / len(completed_ids_by_date.get(day, [])), 2) if completed_ids_by_date.get(day) else 0 for day in dates],
+        },
+        'issue_distribution': issue_distribution,
+        'doc_type_distribution': list(doc_type_stats.values()),
+        'task_list': [
+            {
+                'review_id': review.id,
+                'document_id': document.id,
+                'document_name': document.filename,
+                'document_type': _dashboard_format_doc_type(document.file_type),
+                'submitted_at': review.created_at.isoformat() if review.created_at else '',
+                'status': review.status,
+                'issue_count': issues_by_review.get(review.id, 0),
+                'priority': '中',
+            }
+            for review, document, _ in sorted(rows, key=lambda item: item[0].created_at or datetime.min, reverse=True)[:50]
+        ],
+    }
+
+
+@router.get("/dashboard/overview")
+async def get_review_dashboard_overview(
+    time_range: str = Query('7d'),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    doc_type: str = Query('all'),
+    project_id: str = Query('all'),
+    user_id: str = Query('all'),
+    db: Session = Depends(get_db),
+):
+    return _build_review_dashboard_payload(db, time_range, start_date, end_date, doc_type, user_id)
+
+
+@router.get("/dashboard/personal")
+async def get_review_dashboard_personal(
+    time_range: str = Query('7d'),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    doc_type: str = Query('all'),
+    user_id: str = Query(1),
+    db: Session = Depends(get_db),
+):
+    return _build_review_dashboard_payload(db, time_range, start_date, end_date, doc_type, user_id)
 
 
 @router.get("/{review_id}", response_model=Review)

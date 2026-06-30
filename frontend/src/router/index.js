@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Login from '@/views/Login.vue'
 import Home from '@/views/Home.vue'
 import Review from '@/views/Review.vue'
+import ReviewDashboard from '@/views/ReviewDashboard.vue'
 import Polish from '@/views/Polish.vue'
 import PolishHistory from '@/views/PolishHistory.vue'
 import QA from '@/views/QA.vue'
@@ -35,6 +36,11 @@ const routes = [
     path: '/',
     name: 'Home',
     component: Home
+  },
+  {
+    path: '/review/dashboard',
+    name: 'ReviewDashboard',
+    component: ReviewDashboard
   },
   {
     path: '/review',
