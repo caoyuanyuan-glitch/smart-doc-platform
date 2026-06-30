@@ -20,6 +20,8 @@ import TranslateDoc from '@/views/TranslateDoc.vue'
 import TranslateStats from '@/views/TranslateStats.vue'
 import Knowledge from '@/views/Knowledge.vue'
 import PolishPreview from '@/views/PolishPreview.vue'
+import DocPolish from '@/views/DocPolish.vue'
+import RulesManage from '@/views/RulesManage.vue'
 import SpellCheck from '@/views/SpellCheck.vue'
 import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
 import WhiteList from '@/views/WhiteList.vue'
@@ -95,6 +97,16 @@ const routes = [
     path: '/polish/preview/:id',
     name: 'PolishPreview',
     component: PolishPreview
+  },
+  {
+    path: '/tools/doc-polish',
+    name: 'DocPolish',
+    component: DocPolish
+  },
+  {
+    path: '/tools/polish-rules',
+    name: 'RulesManage',
+    component: RulesManage
   },
   {
     path: '/qa',

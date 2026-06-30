@@ -21,6 +21,9 @@ from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
 from app.models.polish_feedback import PolishFeedback
 from app.utils.file_utils import read_file_safe as _read_file_safe
+from app.utils.polish_feedback_rules import persist_learning_rules
+from app.utils.polish_rules_engine import apply_all_rules
+from app.crud.polish_learning_rule import get_enabled_engine_keys
 from app.crud.term import bulk_create_terms
 
 router = APIRouter()
@@ -952,17 +955,24 @@ def _apply_skill_polish(
         
         has_changes = False
         
-        if terminology and term_dict:
-            for old_term, new_term in term_dict.items():
-                if old_term in new_line:
-                    new_line = new_line.replace(old_term, new_term)
-                    changes.append(PolishRuleMatch(
-                        rule_name="术语替换",
-                        before=old_term,
-                        after=new_term,
-                        type="terminology"
-                    ))
-                    has_changes = True
+        # ── 应用规则引擎（从 DB 读取启用的规则） ──
+        engine_enabled_rules = get_enabled_engine_keys(db)
+        polished_line, engine_issues = apply_all_rules(
+            new_line,
+            term_dict=term_dict,
+            enabled_rules=engine_enabled_rules,
+            context_text=text
+        )
+        if engine_issues:
+            for issue in engine_issues:
+                changes.append(PolishRuleMatch(
+                    rule_name=issue.get('rule_name', '规则检测'),
+                    before=issue.get('original', ''),
+                    after=issue.get('replacement', ''),
+                    type=issue.get('type', 'format')
+                ))
+            has_changes = True
+        new_line = polished_line
         
         if style_rules:
             new_line, rule_changes = _apply_style_rules(new_line, style_rules)
