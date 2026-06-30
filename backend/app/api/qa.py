@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 import docx2txt
 from typing import Optional
 from datetime import timedelta, timezone, datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -486,6 +487,77 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
     return {"answer": f"根据当前资料，我暂时无法对“{question}”给出高置信度结论。请补充更具体的对象、参数、章节或步骤名称。", "source": source_hint}
 
 
+def _parse_json_array(text: str):
+    if not text:
+        return []
+    text = text.strip()
+    m = re.search(r"\[[\s\S]*\]", text)
+    if not m:
+        return []
+    try:
+        arr = json.loads(m.group(0))
+        if isinstance(arr, list):
+            cleaned = []
+            for item in arr:
+                s = str(item).strip()
+                s = s.strip('"\'""''')
+                if s:
+                    cleaned.append(s)
+            return cleaned
+    except Exception:
+        pass
+    lines = [line.strip().lstrip("0123456789.、- ") for line in text.split("\n") if line.strip()]
+    return [line.strip('"\'""''') for line in lines if len(line) > 3]
+
+
+def _generate_suggestions(context: str = "", question: str = "", answer: str = "", max_count: int = 4, timeout: float = 3.0):
+    if question and answer:
+        prompt = f"""你是一个善于引导对话的助手。根据以下问答内容，以用户的视角生成{max_count}条用户可能想继续追问的问题。
+
+用户刚问了：{question}
+AI的回答摘要：{answer[:2000]}
+
+要求：
+1. 每条问题必须从用户视角出发，使用"我"、"我想知道"、"能帮我"等第一人称语气
+2. 问题要具体、自然，与回答中提到的具体知识点、术语、概念紧密关联
+3. 问题要有吸引力，让人想继续深入了解
+
+请直接返回JSON数组，问题文本不要包含引号：
+["用户视角的问题1", "用户视角的问题2"]"""
+    else:
+        prompt = f"""你是知识库的导读助手。以下是从知识库中抽取的文档片段，请仔细阅读后，找出其中用户最可能关心的具体话题，以用户第一人称生成{max_count}条推荐问题。
+
+知识库文档片段：
+{context[:6000]}
+
+要求：
+1. 问题必须紧密关联文档中提到的具体知识点、术语、概念、规范或产品名称
+2. 在问题中明确提及文档里出现的关键词，让人一看就知道问的是什么
+3. 使用第一人称：我、我想知道、我该如何、为什么我的、能帮我解释一下
+4. 语气自然，像真实用户面对知识库时会提出的问题
+5. 问题文本不要包含任何引号
+
+请直接返回JSON数组，问题文本不要包含引号：
+["提及具体知识点的用户视角问题1", "提及具体知识点的用户视角问题2", "提及具体知识点的用户视角问题3"]"""
+
+    def _call():
+        try:
+            from app.utils.ai_client import ai_client
+            messages = [{"role": "user", "content": prompt}]
+            result = ai_client.chat(messages, max_tokens=512, temperature=0.8)
+            parsed = _parse_json_array(result)
+            return parsed[:max_count] if parsed else []
+        except Exception:
+            return []
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_call)
+            return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        return []
+
+
 # ─── 知识库问答 ────────────────────────────────────────────
 
 @router.post("/general")
@@ -554,7 +626,8 @@ async def ask_general_question(
     response_data = {
         "question": question,
         "answer": result.get("answer", ""),
-        "sources": sources
+        "sources": sources,
+        "suggestions": _generate_suggestions(question=question, answer=result.get("answer", ""), max_count=3, timeout=3.0)
     }
 
     session_id = None
@@ -563,6 +636,86 @@ async def ask_general_question(
     response_data["session_id"] = session_id
 
     return response_data
+
+
+@router.get("/suggestions/initial")
+async def get_initial_suggestions(
+    kb_ids: str = Query("", description="已勾选的知识库ID列表，逗号分隔"),
+    limit: int = Query(4, description="返回数量，默认4，最大8"),
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+):
+    limit = min(max(limit, 1), 8)
+    kb_id_list = [x.strip() for x in kb_ids.split(",") if x.strip()] if kb_ids else []
+
+    if not kb_id_list:
+        return {"code": 0, "data": {"suggestions": [], "refreshable": False}}
+
+    from app.models.knowledge import KnowledgeFile, Folder
+    from app.crud.knowledge import get_folder_files
+
+    def _collect_files_recursive(folder_id):
+        files = []
+        folder = db.query(Folder).filter(Folder.id == folder_id).first()
+        if folder:
+            files.extend(get_folder_files(db, folder_id))
+            for child in folder.children:
+                files.extend(_collect_files_recursive(child.id))
+        return files
+
+    documents = []
+    seen = set()
+    for fid_str in kb_id_list:
+        try:
+            all_files = _collect_files_recursive(int(fid_str))
+            for f in all_files:
+                fid_unique = f.get("id")
+                if fid_unique in seen:
+                    continue
+                seen.add(fid_unique)
+                file_path = f.get("file_path", "")
+                file_name = f.get("name", "")
+                file_type = f.get("file_type", "")
+                if file_path and os.path.exists(file_path):
+                    content = _extract_file_content(file_path, file_type)
+                    if _normalize_text(content):
+                        documents.append({
+                            "document_id": fid_unique,
+                            "title": file_name,
+                            "content": content,
+                        })
+        except Exception:
+            continue
+
+    if not documents:
+        return {"code": 0, "data": {"suggestions": [], "refreshable": False}}
+
+    context_parts = []
+    total_len = 0
+    doc_names = []
+    for doc in documents:
+        title = doc.get("title", "")
+        if title:
+            doc_names.append(title)
+        snippet = doc.get("content", "")[:1500]
+        part = f"### 文档：{title}\n{snippet}\n"
+        if total_len + len(part) > 8000:
+            context_parts.append(part[:8000 - total_len])
+            break
+        context_parts.append(part)
+        total_len += len(part)
+
+    doc_list_str = "\n".join([f"- {n}" for n in doc_names[:10]])
+    context = f"已选知识库包含以下文档：\n{doc_list_str}\n\n详细内容：\n" + "\n".join(context_parts)
+    suggestions = _generate_suggestions(context=context, max_count=limit, timeout=8.0)
+
+    return {
+        "code": 0,
+        "data": {
+            "suggestions": suggestions,
+            "refreshable": len(suggestions) > 0
+        }
+    }
 
 
 # ─── 文档对话 ────────────────────────────────────────────

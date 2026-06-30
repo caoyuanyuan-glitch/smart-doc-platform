@@ -34,6 +34,9 @@
 
       <section class="chat-panel">
         <div class="chat-toolbar">
+          <el-button size="small" text @click="newConversation" :disabled="messages.length <= 1">
+            <el-icon><Plus /></el-icon> 新建会话
+          </el-button>
           <el-button size="small" text @click="copyAll" :disabled="messages.length <= 1">
             <el-icon><CopyDocument /></el-icon> 复制全文
           </el-button>
@@ -65,6 +68,27 @@
               @close="removeTag(label)"
             >{{ label }}</el-tag>
           </div>
+          <div v-if="showInitialSuggestions" class="recommendations">
+            <div v-if="initialSuggestionsLoading" class="recommendations-loading">
+              <span v-for="n in 4" :key="n" class="skeleton-line"></span>
+            </div>
+            <div v-else class="suggestion-list">
+              <div
+                v-for="(q, i) in displaySuggestions"
+                :key="i"
+                class="suggestion-item"
+                @click="clickSuggestion(q)"
+              >
+                <span class="suggestion-dot"></span>
+                <span class="suggestion-text">{{ q }}</span>
+              </div>
+            </div>
+            <span
+              v-if="suggestionsRefreshable && displaySuggestions.length"
+              class="refresh-btn"
+              @click="refreshInitialSuggestions"
+            >换一批</span>
+          </div>
           <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
             <div class="avatar" :class="msg.role">
               <el-icon v-if="msg.role === 'user'"><User /></el-icon>
@@ -95,6 +119,19 @@
                 </div>
                 <el-divider direction="vertical" />
                 <el-button size="small" text type="warning" @click="openFeedbackDialog(i)">内容有误？点此反馈</el-button>
+              </div>
+            </div>
+            <div v-if="msg.role === 'assistant' && i > 0 && msg.suggestions && msg.suggestions.length" class="followup-suggestions">
+              <div class="followup-header">你可能还想问</div>
+              <div
+                v-for="(sug, si) in msg.suggestions"
+                :key="si"
+                class="followup-item"
+                :class="{ 'followup-item--expired': i !== lastAssistantIndex }"
+                @click="i === lastAssistantIndex && clickSuggestion(sug)"
+              >
+                <span class="followup-dot"></span>
+                <span class="followup-text">{{ sug }}</span>
               </div>
             </div>
           </div>
@@ -158,7 +195,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { qaAPI, knowledgeAPI } from '@/api'
 import { useUserStore } from '@/store/user'
-import { User, Folder, Microphone, CopyDocument, Download, ArrowDown } from '@element-plus/icons-vue'
+import { User, Folder, Microphone, CopyDocument, Download, ArrowDown, Plus } from '@element-plus/icons-vue'
 
 const route = useRoute()
 
@@ -178,6 +215,28 @@ const messages = ref([
   { role: 'assistant', content: '您好！我是智能文档助手。请在左侧文件夹树中勾选知识库，然后向我提问。', sources: [], rating: 0 }
 ])
 
+const initialSuggestionsLoading = ref(false)
+const suggestionsRefreshable = ref(false)
+const displaySuggestions = ref([])
+
+const FALLBACK_SUGGESTIONS = [
+  '我想快速上手这份文档，应该从哪里开始读起？',
+  '文档中有哪些容易踩坑的地方需要特别注意？',
+  '这个产品和新手入门流程相比，有哪些关键变化？',
+  '如何判断我的文档质量是否达到了发布标准？'
+]
+
+const showInitialSuggestions = computed(() => {
+  return !messages.value.some(m => m.role === 'user')
+})
+
+const lastAssistantIndex = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'assistant') return i
+  }
+  return -1
+})
+
 const feedbackVisible = ref(false)
 const feedbackText = ref('')
 const currentFeedbackQuestion = ref('')
@@ -191,12 +250,65 @@ const refreshFeedbackCount = inject('refreshFeedbackCount', null)
 const userStore = useUserStore()
 const sessionId = ref(null)
 
+async function fetchInitialSuggestions() {
+  if (!showInitialSuggestions.value) return
+  const ids = checkedIds.value
+  if (!ids.length) {
+    displaySuggestions.value = [...FALLBACK_SUGGESTIONS]
+    suggestionsRefreshable.value = false
+    return
+  }
+  initialSuggestionsLoading.value = true
+  try {
+    const resp = await qaAPI.getInitialSuggestions(ids, 4)
+    const data = resp.data?.data
+    if (data?.suggestions?.length) {
+      displaySuggestions.value = data.suggestions
+      suggestionsRefreshable.value = data.refreshable === true
+    } else {
+      displaySuggestions.value = [...FALLBACK_SUGGESTIONS]
+      suggestionsRefreshable.value = false
+    }
+  } catch {
+    displaySuggestions.value = [...FALLBACK_SUGGESTIONS]
+    suggestionsRefreshable.value = false
+  }
+  initialSuggestionsLoading.value = false
+}
+
+function refreshInitialSuggestions() {
+  fetchInitialSuggestions()
+}
+
+function clickSuggestion(text) {
+  if (loading.value) return
+  sendQuestion(text)
+}
+
+function newConversation() {
+  if (loading.value) return
+  messages.value = [
+    { role: 'assistant', content: '您好！我是智能文档助手。请在左侧文件夹树中勾选知识库，然后向我提问。', sources: [], rating: 0 }
+  ]
+  sessionId.value = null
+  displaySuggestions.value = []
+  fetchInitialSuggestions()
+  nextTick(() => scrollToBottom())
+}
+
 onMounted(() => {
   loadKnowledgeTree()
+  fetchInitialSuggestions()
 })
 
 watch(() => route.path, () => {
   loadKnowledgeTree()
+})
+
+watch(checkedIds, () => {
+  if (showInitialSuggestions.value) {
+    fetchInitialSuggestions()
+  }
 })
 
 async function loadKnowledgeTree() {
@@ -313,14 +425,16 @@ async function sendQuestion(q) {
       role: 'assistant',
       content: data.answer || '知识库中未找到相关信息。',
       sources: data.sources || [],
-      rating: 0
+      rating: 0,
+      suggestions: data.suggestions || []
     })
   } catch (e) {
     messages.value.push({
       role: 'assistant',
       content: '抱歉，查询知识库时出现错误，请稍后重试。',
       sources: [],
-      rating: 0
+      rating: 0,
+      suggestions: []
     })
   }
   loading.value = false
@@ -637,7 +751,88 @@ function scrollToBottom() {
   font-size: 13px; color: #475569; max-height: 120px; overflow-y: auto;
 }
 
+.recommendations {
+  margin-bottom: 12px; margin-top: 4px;
+}
+.recommendations-loading {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.skeleton-line {
+  height: 20px; background: #f0f0f0; border-radius: 4px;
+  width: 80%;
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+.skeleton-line:nth-child(2) { width: 66%; }
+.skeleton-line:nth-child(3) { width: 74%; }
+.skeleton-line:nth-child(4) { width: 56%; }
+@keyframes skeleton-pulse {
+  0%,100% { opacity: 1; } 50% { opacity: 0.4; }
+}
+.suggestion-list {
+  display: flex; flex-direction: column;
+  background: #fff; border-radius: 8px;
+  overflow: hidden;
+}
+.suggestion-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px 14px; cursor: pointer;
+  transition: background 0.15s;
+  border-bottom: 1px solid #f0f0f0;
+}
+.suggestion-item:last-child {
+  border-bottom: none;
+}
+.suggestion-item:hover {
+  background: #f8fafc;
+}
+.suggestion-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #3b82f6; flex-shrink: 0; margin-top: 8px;
+}
+.suggestion-text {
+  font-size: 15px; font-weight: 600; color: #1f2937;
+  line-height: 1.6;
+}
+.refresh-btn {
+  display: inline-block; margin-top: 8px; font-size: 12px; color: #909399;
+  cursor: pointer; user-select: none;
+}
+.refresh-btn:hover { color: #3b82f6; }
+
+.followup-suggestions {
+  padding-left: 46px; margin-top: 16px;
+  border-top: 1px dashed #e5e7eb; padding-top: 12px;
+}
+.followup-header {
+  font-size: 12px; color: #909399; margin-bottom: 8px;
+}
+.followup-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 0; cursor: pointer;
+  transition: color 0.15s;
+}
+.followup-item:hover {
+  color: #3b82f6;
+}
+.followup-item--expired {
+  cursor: default; opacity: 0.4;
+}
+.followup-item--expired:hover {
+  color: inherit;
+}
+.followup-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: #3b82f6; flex-shrink: 0; margin-top: 6px;
+}
+.followup-item--expired .followup-dot {
+  background: #c0c4cc;
+}
+.followup-text {
+  font-size: 13px; color: #1f2937; line-height: 1.6;
+}
+
 @media (max-width: 900px) {
   .qa-layout { grid-template-columns: 1fr; }
+  .followup-suggestions { padding-left: 46px; }
 }
 </style>
