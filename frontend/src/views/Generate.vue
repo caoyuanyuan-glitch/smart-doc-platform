@@ -25,33 +25,17 @@
               :show-file-list="true"
               list-type="picture-card"
               accept="image/*"
+              :limit="MAX_IMAGE_STEP_FILES"
               :on-change="handleImageChange"
               :on-remove="handleImageRemove"
+              :on-preview="handleImagePreview"
+              :on-exceed="handleImageExceed"
             >
               <div class="upload-trigger">
                 <div class="upload-trigger-plus">+</div>
                 <div class="upload-trigger-text">选择图片</div>
               </div>
             </el-upload>
-          </el-form-item>
-          <el-form-item label="模板文件">
-            <input
-              ref="templateFileInputRef"
-              type="file"
-              accept=".txt,.md,.docx,.pdf"
-              class="hidden-file-input"
-              @change="handleTemplateChange"
-            >
-            <el-input
-              :model-value="templateFileName"
-              readonly
-              class="readonly-guide-input template-file-input"
-              placeholder="点击选择模板文件"
-              @click="openTemplateFilePicker"
-            />
-          </el-form-item>
-          <el-form-item label="风格指南">
-            <el-input :model-value="currentStyleGuideName" readonly class="readonly-guide-input" />
           </el-form-item>
           <el-form-item label="补充要求">
             <el-input
@@ -62,8 +46,14 @@
             />
           </el-form-item>
           <el-form-item>
+            <div v-if="imageLoading" class="image-progress-wrap">
+              <el-progress :percentage="imageProgress" :stroke-width="10" striped striped-flow />
+              <span class="image-progress-text">正在生成操作步骤，请稍候</span>
+            </div>
+            <template v-else>
               <el-button type="primary" :loading="imageLoading" :disabled="imageFiles.length === 0" @click="generateImageDescription">提交</el-button>
               <el-button @click="resetImageForm">重置</el-button>
+            </template>
           </el-form-item>
         </el-form>
       </div>
@@ -95,6 +85,10 @@
           </div>
         </div>
       </div>
+
+      <el-dialog v-model="imagePreviewVisible" title="图片预览" width="min(900px, 92vw)">
+        <img v-if="imagePreviewUrl" :src="imagePreviewUrl" class="image-preview-img" alt="图片预览">
+      </el-dialog>
     </div>
 
     <div v-else-if="currentView === 'manual'">
@@ -255,14 +249,15 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { generateAPI, knowledgeAPI } from '@/api'
+import { generateAPI } from '@/api'
 
 const route = useRoute()
 
-const AUTO_GUIDE_TEXT = '当前为自动匹配模式，系统会按图片中的主要语言选择合适的风格指南'
+const MAX_IMAGE_STEP_FILES = 4
+const MAX_RAW_FILE_SIZE = 5 * 1024 * 1024
 
 const viewConfig = {
   image: {
@@ -294,24 +289,55 @@ const currentView = computed(() => {
 const viewMeta = computed(() => viewConfig[currentView.value])
 
 const imageUploadRef = ref(null)
-const templateFileInputRef = ref(null)
 const imageFiles = ref([])
-const templateFile = ref(null)
+const imagePreviewVisible = ref(false)
+const imagePreviewUrl = ref('')
 const imageLoading = ref(false)
-const styleGuideLoading = ref(false)
-const styleGuideOptions = ref([])
-const resolvedStyleGuideName = ref(AUTO_GUIDE_TEXT)
+const imageProgress = ref(0)
+let imageProgressTimer = null
 const imageForm = ref({
-  styleGuideId: 'auto',
   prompt: ''
 })
 const imageResult = ref(null)
 
-const currentStyleGuideName = computed(() => {
-  return resolvedStyleGuideName.value
-})
-
-const templateFileName = computed(() => templateFile.value?.name || '')
+function compressImageFile(file, maxEdge = 900, quality = 0.72) {
+  if (!file?.type?.startsWith('image/')) return Promise.resolve(file)
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      resolve(file)
+    }, 5000)
+    const image = new Image()
+    const objectUrl = URL.createObjectURL(file)
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl)
+      const scale = Math.min(1, maxEdge / Math.max(image.width, image.height))
+      if (scale >= 1) {
+        clearTimeout(timeoutId)
+        resolve(file)
+        return
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(image.width * scale))
+      canvas.height = Math.max(1, Math.round(image.height * scale))
+      const context = canvas.getContext('2d')
+      context.drawImage(image, 0, 0, canvas.width, canvas.height)
+      canvas.toBlob((blob) => {
+        clearTimeout(timeoutId)
+        if (!blob) {
+          resolve(file)
+          return
+        }
+        resolve(new File([blob], file.name, { type: 'image/jpeg', lastModified: file.lastModified }))
+      }, 'image/jpeg', quality)
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      clearTimeout(timeoutId)
+      resolve(file)
+    }
+    image.src = objectUrl
+  })
+}
 
 const manualLoading = ref(false)
 const referenceFiles = ref([])
@@ -339,20 +365,47 @@ const templates = ref([
 ])
 
 function handleImageChange(file, fileList) {
-  imageFiles.value = fileList.map((item) => item.raw || item)
+  if (file.raw && file.raw.size > MAX_RAW_FILE_SIZE) {
+    ElMessage.warning(`${file.name} 文件过大 (${(file.raw.size / 1024 / 1024).toFixed(1)}MB)，当前只支持 ${MAX_RAW_FILE_SIZE / 1024 / 1024}MB 以内的图片，请压缩后重试`)
+    imageUploadRef.value?.handleRemove?.(file)
+    return
+  }
+  if (fileList.length > MAX_IMAGE_STEP_FILES) {
+    ElMessage.warning(`当前最多支持 ${MAX_IMAGE_STEP_FILES} 张图片，请分批处理`)
+  }
+  imageFiles.value = fileList.slice(0, MAX_IMAGE_STEP_FILES).map((item) => item.raw || item)
 }
 
 function handleImageRemove(file, fileList) {
   imageFiles.value = fileList.map((item) => item.raw || item)
 }
 
-function openTemplateFilePicker() {
-  templateFileInputRef.value?.click?.()
+function handleImagePreview(file) {
+  const rawFile = file.raw || file
+  imagePreviewUrl.value = file.url || URL.createObjectURL(rawFile)
+  imagePreviewVisible.value = true
 }
 
-function handleTemplateChange(event) {
-  const nextFile = event?.target?.files?.[0] || null
-  templateFile.value = nextFile
+function handleImageExceed() {
+  ElMessage.warning(`当前最多支持 ${MAX_IMAGE_STEP_FILES} 张图片，请分批处理`)
+}
+
+function startImageProgress() {
+  imageProgress.value = 8
+  if (imageProgressTimer) window.clearInterval(imageProgressTimer)
+  imageProgressTimer = window.setInterval(() => {
+    if (imageProgress.value < 90) {
+      imageProgress.value += imageProgress.value < 60 ? 6 : 2
+    }
+  }, 1200)
+}
+
+function stopImageProgress(done = false) {
+  if (imageProgressTimer) {
+    window.clearInterval(imageProgressTimer)
+    imageProgressTimer = null
+  }
+  imageProgress.value = done ? 100 : 0
 }
 
 async function generateImageDescription() {
@@ -360,17 +413,25 @@ async function generateImageDescription() {
     ElMessage.info('请先上传图片')
     return
   }
+  if (imageFiles.value.length > MAX_IMAGE_STEP_FILES) {
+    ElMessage.warning(`当前最多支持 ${MAX_IMAGE_STEP_FILES} 张图片，请分批处理`)
+    return
+  }
   imageLoading.value = true
+  startImageProgress()
+  imageResult.value = null
   try {
     const formData = new FormData()
-    imageFiles.value.forEach((file) => formData.append('files', file))
-    if (templateFile.value) {
-      formData.append('template_file', templateFile.value)
+    const preparedFiles = await Promise.all(imageFiles.value.map((file) => compressImageFile(file)))
+    const maxCompressed = 2 * 1024 * 1024
+    const oversized = preparedFiles.find((f) => f.size > maxCompressed)
+    if (oversized) {
+      ElMessage.warning(`${oversized.name} 压缩后仍超过 2MB，图片可能过大，建议缩小尺寸后重试`)
+      imageLoading.value = false
+      return
     }
+    preparedFiles.forEach((file) => formData.append('files', file))
     formData.append('prompt', imageForm.value.prompt)
-    if (imageForm.value.styleGuideId !== 'auto') {
-      formData.append('style_guide_id', String(imageForm.value.styleGuideId))
-    }
     const resp = await generateAPI.generateImageSteps(formData)
     const data = resp.data || {}
     if (!(data.steps || []).length) {
@@ -383,12 +444,11 @@ async function generateImageDescription() {
       model: data.model || 'kimi',
       warning: data.warning || ''
     }
-    resolvedStyleGuideName.value = data.used_style_guide_name || AUTO_GUIDE_TEXT
-    clearUploadedImages()
+    stopImageProgress(true)
     ElMessage[data.warning ? 'warning' : 'success'](data.warning ? '当前为兜底结果' : '操作步骤已生成')
   } catch (error) {
-    imageResult.value = buildImageFallback()
-    ElMessage.warning(error?.response?.data?.detail || error?.message || '生成失败，已展示示例结果')
+    stopImageProgress(false)
+    ElMessage.error(error?.response?.data?.detail || error?.message || '生成失败，请查看后端日志')
   } finally {
     imageLoading.value = false
   }
@@ -396,9 +456,7 @@ async function generateImageDescription() {
 
 function resetImageForm() {
   clearUploadedImages()
-  clearTemplateFile()
-  imageForm.value = { styleGuideId: 'auto', prompt: '' }
-  resolvedStyleGuideName.value = AUTO_GUIDE_TEXT
+  imageForm.value = { prompt: '' }
   imageResult.value = null
 }
 
@@ -407,78 +465,9 @@ function clearUploadedImages() {
   imageUploadRef.value?.clearFiles?.()
 }
 
-function clearTemplateFile() {
-  templateFile.value = null
-  if (templateFileInputRef.value) {
-    templateFileInputRef.value.value = ''
-  }
-}
-
-function buildImageFallback() {
-  const steps = imageFiles.value.map((file, index) => `步骤 ${index + 1}：参照 ${file.name} 中展示的状态完成当前操作，并确认进入下一步前所需条件已经满足。`)
-  return {
-    summary: `已基于 ${imageFiles.value.length} 张图片整理操作说明。${imageForm.value.prompt ? `补充要求：${imageForm.value.prompt}` : ''}`,
-    relation_summary: '当前结果按上传顺序组织，并将每张图片视为连续流程中的一个关键节点。',
-    steps,
-    model: 'fallback',
-    warning: '当前环境未接通 Kimi 多模态模型，结果来自本地兜底逻辑，不能作为正式操作说明。'
-  }
-}
-
 function buildImageResultText(result) {
   return (result.steps || []).map((step, index) => `${index + 1}. ${step}`).join('\n')
 }
-
-function inferGuideLanguageLabel(name) {
-  const text = String(name || '').toLowerCase()
-  if (text.includes('英文') || text.includes('english')) return '（英文）'
-  if (text.includes('中文') || text.includes('chinese')) return '（中文）'
-  return ''
-}
-
-function collectFilesRecursively(node, currentPath) {
-  const files = (node.files || []).map((file) => ({
-    id: file.id,
-    label: `${[...currentPath, file.name].join(' / ')}${inferGuideLanguageLabel(file.name)}`
-  }))
-  const children = (node.children || []).flatMap((child) => collectFilesRecursively(child, [...currentPath, child.name]))
-  return [...files, ...children]
-}
-
-function collectStyleGuides(nodes, targetPath, currentPath = []) {
-  const guides = []
-  for (const node of nodes || []) {
-    const nextPath = [...currentPath, node.name]
-    const isTarget = nextPath.length >= targetPath.length
-      && targetPath.every((name, index) => nextPath[nextPath.length - targetPath.length + index] === name)
-    if (isTarget) {
-      guides.push(...collectFilesRecursively(node, nextPath))
-      continue
-    }
-    guides.push(...collectStyleGuides(node.children || [], targetPath, nextPath))
-  }
-  return guides
-}
-
-async function loadStyleGuides() {
-  styleGuideLoading.value = true
-  try {
-    const resp = await knowledgeAPI.getTree()
-    styleGuideOptions.value = collectStyleGuides(resp.data || [], ['写作规范', '写作风格指南'])
-      .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
-  } catch (error) {
-    styleGuideOptions.value = []
-    ElMessage.warning('写作风格指南加载失败，当前保留自动匹配模式')
-  } finally {
-    styleGuideLoading.value = false
-  }
-}
-
-watch(currentView, (view) => {
-  if (view === 'image' && !styleGuideLoading.value && !styleGuideOptions.value.length) {
-    loadStyleGuides()
-  }
-}, { immediate: true })
 
 function handleReferenceChange(file, fileList) {
   referenceFiles.value = fileList.map((item) => item.raw || item)
@@ -667,35 +656,42 @@ function downloadText(fileName, content) {
   gap: 10px;
 }
 
+.image-progress-wrap {
+  width: min(460px, 100%);
+}
+
+.image-progress-text {
+  display: block;
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 13px;
+}
+
 .result-warning {
   margin-bottom: 16px;
 }
 
 .image-upload :deep(.el-upload-list--picture-card) {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, 88px);
+  gap: 10px;
   width: 100%;
   padding-bottom: 0;
 }
 
 .image-upload :deep(.el-upload--picture-card),
 .image-upload :deep(.el-upload-list__item) {
-  width: 120px;
-  min-width: 120px;
-  height: 120px;
+  width: 88px;
+  min-width: 88px;
+  height: 88px;
 }
 
-.hidden-file-input {
-  display: none;
-}
-
-.template-file-input {
-  width: 100%;
-}
-
-.template-file-input :deep(.el-input__wrapper) {
-  cursor: pointer;
+.image-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 72vh;
+  margin: 0 auto;
+  object-fit: contain;
 }
 
 .upload-trigger {
@@ -709,13 +705,13 @@ function downloadText(fileName, content) {
 }
 
 .upload-trigger-plus {
-  font-size: 30px;
+  font-size: 24px;
   line-height: 1;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .upload-trigger-text {
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .form-layout {
@@ -753,15 +749,6 @@ function downloadText(fileName, content) {
   word-break: break-word;
   font-family: inherit;
   margin: 0;
-}
-
-.readonly-guide-input :deep(.el-input__inner) {
-  color: var(--el-text-color-placeholder) !important;
-  -webkit-text-fill-color: var(--el-text-color-placeholder) !important;
-}
-
-.readonly-guide-input :deep(.el-input__wrapper) {
-  color: var(--el-text-color-placeholder) !important;
 }
 
 .step-list li {

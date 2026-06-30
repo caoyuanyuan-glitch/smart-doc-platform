@@ -1,10 +1,14 @@
 import os
 import tempfile
-from typing import List, Optional
+import time
+import uuid
+from io import BytesIO
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from PIL import Image
 
 from app.crud.knowledge import get_file, get_folder_tree
 from app.database import get_db
@@ -13,8 +17,14 @@ from app.utils.file_utils import read_file_safe
 
 router = APIRouter()
 
+DRAFT_CACHE: Dict[str, dict] = {}
+DRAFT_CACHE_MAX = 20
+
 STYLE_GUIDE_PATH = ("写作规范", "写作风格指南")
-STYLE_GUIDE_MAX_CHARS = 4000  # 截断风格指南以避免 prompt 超长
+STYLE_GUIDE_MAX_CHARS = 1500  # 截断风格指南以避免 prompt 超长
+TEMPLATE_MAX_CHARS = 2000
+MODEL_IMAGE_MAX_EDGE = 700
+MODEL_IMAGE_QUALITY = 65
 
 
 class GenerateRequest(BaseModel):
@@ -66,8 +76,20 @@ def _image_steps_fallback(file_names: List[str], prompt: str):
         "steps": steps,
         "used_style_guide_name": "自动匹配未命中具体指南",
         "model": "fallback",
-        "warning": "当前环境未接通 Kimi 多模态模型，结果来自本地兜底逻辑，不能作为正式操作说明。",
+        "warning": "当前多模型图片分析链路未返回有效结果，结果来自本地兜底逻辑，不能作为正式操作说明。",
     }
+
+
+def _prepare_model_image(raw: bytes, content_type: str) -> tuple[bytes, str]:
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            image = image.convert("RGB")
+            image.thumbnail((MODEL_IMAGE_MAX_EDGE, MODEL_IMAGE_MAX_EDGE), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=MODEL_IMAGE_QUALITY, optimize=True)
+            return buffer.getvalue(), "image/jpeg"
+    except Exception:
+        return raw, content_type
 
 
 def _infer_guide_language(name: str) -> str:
@@ -224,7 +246,7 @@ async def _load_template_reference(template_file: Optional[UploadFile]) -> Optio
 
     return {
         "name": template_file.filename or "模板文件",
-        "content": content[:8000],
+        "content": content[:TEMPLATE_MAX_CHARS],
     }
 
 
@@ -293,6 +315,7 @@ async def generate_image_steps(
     style_guide_id: Optional[int] = Form(None),
     db: Session = Depends(get_db),
 ):
+    started_at = time.monotonic()
     valid_images = []
     for index, file in enumerate(files, start=1):
         raw = await file.read()
@@ -312,17 +335,24 @@ async def generate_image_steps(
 
     from app.utils.ai_client import ai_client
 
-    image_entries = [
-        {
+    print(f"[image-steps] request received, images={len(valid_images)}, template={'yes' if template_file and template_file.filename else 'no'}, style_guide_id={style_guide_id or 'auto'}")
+
+    image_entries = []
+    original_size = 0
+    prepared_size = 0
+    for item in valid_images:
+        original_size += len(item["raw"])
+        prepared_raw, prepared_type = _prepare_model_image(item["raw"], item["content_type"])
+        prepared_size += len(prepared_raw)
+        image_entries.append({
             "name": item["name"],
-            "data_url": ai_client.build_image_data_url(item["raw"], item["name"], item["content_type"]),
-        }
-        for item in valid_images
-    ]
-    style_guide_bundle = _load_style_guide_bundle(db, style_guide_id)
+            "data_url": ai_client.build_image_data_url(prepared_raw, item["name"], prepared_type),
+        })
+    style_guide_bundle = _load_style_guide_bundle(db, style_guide_id) if style_guide_id else None
     template_reference = await _load_template_reference(template_file)
 
     try:
+        print(f"[image-steps] prepared images, original={original_size}, prepared={prepared_size}")
         result = ai_client.analyze_images_to_steps(
             image_entries,
             user_prompt=prompt,
@@ -331,17 +361,106 @@ async def generate_image_steps(
         )
         if not result or not result.get("steps"):
             raise RuntimeError("empty image analysis result")
+        elapsed = time.monotonic() - started_at
+        print(f"[image-steps] success, model={result.get('model')}, steps={len(result.get('steps') or [])}, elapsed={elapsed:.1f}s")
+        draft_key = uuid.uuid4().hex
+        DRAFT_CACHE[draft_key] = {
+            "draft": {
+                "summary": result.get("summary") or "",
+                "relation_summary": result.get("relation_summary") or "",
+                "steps": result.get("steps") or [],
+            },
+            "created_at": time.time(),
+        }
+        if len(DRAFT_CACHE) > DRAFT_CACHE_MAX:
+            oldest = sorted(DRAFT_CACHE.keys(), key=lambda k: DRAFT_CACHE[k].get("created_at", 0))[0]
+            del DRAFT_CACHE[oldest]
         return {
             "summary": result.get("summary") or "",
             "relation_summary": result.get("relation_summary") or "",
             "steps": result.get("steps") or [],
             "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, result),
             "model": result.get("model") or "kimi",
+            "draft_key": draft_key,
             "warning": "",
         }
     except Exception as e:
         import traceback
-        print(f"[image-steps] EXCEPTION: {e}")
+        elapsed = time.monotonic() - started_at
+        print(f"[image-steps] fallback: {e}, elapsed={elapsed:.1f}s")
         traceback.print_exc()
         fallback = _image_steps_fallback([item["name"] for item in valid_images], prompt)
         return fallback
+
+
+@router.post("/refine-draft")
+async def refine_draft(
+    draft_key: str = Form(...),
+    template_file: Optional[UploadFile] = File(None),
+    prompt: str = Form(""),
+    style_guide_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+):
+    entry = DRAFT_CACHE.get(draft_key)
+    if not entry:
+        raise HTTPException(status_code=404, detail="初稿已过期，请重新上传图片生成")
+
+    draft = entry["draft"]
+    if not draft.get("steps"):
+        raise HTTPException(status_code=400, detail="缓存的初稿为空，请重新上传图片生成")
+
+    style_guide_bundle = _load_style_guide_bundle(db, style_guide_id) if style_guide_id else None
+    template_reference = await _load_template_reference(template_file)
+
+    if not style_guide_bundle and not template_reference and not str(prompt or "").strip():
+        return {
+            "summary": draft["summary"],
+            "relation_summary": draft["relation_summary"],
+            "steps": draft["steps"],
+            "used_style_guide_name": "",
+            "model": "kimi-draft",
+            "draft_key": draft_key,
+            "warning": "",
+        }
+
+    from app.utils.ai_client import ai_client
+
+    started_at = time.monotonic()
+    refined = ai_client._refine_image_steps_text(
+        draft,
+        style_guide_bundle=style_guide_bundle,
+        template_reference=template_reference,
+        user_prompt=prompt,
+        timeout=90,
+    )
+
+    if refined:
+        entry["draft"] = {
+            "summary": refined.get("summary") or draft.get("summary"),
+            "relation_summary": refined.get("relation_summary") or draft.get("relation_summary"),
+            "steps": refined.get("steps") or draft.get("steps"),
+        }
+        entry["created_at"] = time.time()
+        elapsed = time.monotonic() - started_at
+        print(f"[refine-draft] success, key={draft_key[:8]}..., model={refined.get('model')}, elapsed={elapsed:.1f}s")
+        return {
+            "summary": entry["draft"]["summary"],
+            "relation_summary": entry["draft"]["relation_summary"],
+            "steps": entry["draft"]["steps"],
+            "used_style_guide_name": refined.get("used_style_guide_name") or "",
+            "model": refined.get("model") or "kimi",
+            "draft_key": draft_key,
+            "warning": "",
+        }
+
+    elapsed = time.monotonic() - started_at
+    print(f"[refine-draft] refine failed, returning cached draft, elapsed={elapsed:.1f}s")
+    return {
+        "summary": draft["summary"],
+        "relation_summary": draft["relation_summary"],
+        "steps": draft["steps"],
+        "used_style_guide_name": "",
+        "model": "kimi-draft",
+        "draft_key": draft_key,
+        "warning": "模板/风格指南改写未返回有效步骤，当前展示读图初稿，可更换模板后重试",
+    }

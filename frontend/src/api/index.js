@@ -220,7 +220,7 @@ export const generateAPI = {
   generateImageSteps: (formData) =>
     instance.post('/generate/image-steps', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000
+      timeout: 240000
     })
 }
 
