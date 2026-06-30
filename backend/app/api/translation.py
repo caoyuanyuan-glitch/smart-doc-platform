@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import io
 import csv
@@ -92,10 +92,65 @@ def _normalize_compact_text(value: str) -> str:
     return re.sub(r"[\s\-_,.;:!?()\[\]{}<>/\\|，。；：！？（）【】《》、·•*×]+", "", _normalize_match_text(value))
 
 
+def _text_matches_source_language(text: str, source_lang: str) -> bool:
+    normalized = (text or "").strip()
+    if not normalized:
+        return False
+
+    lang = (source_lang or "").lower()
+    if lang == "zh":
+        return bool(re.search(r"[\u4e00-\u9fff]", normalized))
+    if lang == "ja":
+        return bool(re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", normalized))
+    if lang == "ko":
+        return bool(re.search(r"[\uac00-\ud7af]", normalized))
+    if lang in {"en", "fr", "de", "es", "ru"}:
+        return bool(re.search(r"[A-Za-zÀ-ÖØ-öø-ÿА-Яа-я]", normalized))
+    return bool(re.search(r"\w", normalized, re.UNICODE))
+
+
 def _normalize_memory_lookup_key(value: str) -> str:
     text = _normalize_compact_text(value)
     text = re.sub(r"^[\(（\[]?[0-9一二三四五六七八九十]+[\)）\]]?[、.．:：-]*", "", text)
     return text
+
+
+def _memory_unit_kind(value: str) -> str:
+    text = (value or "").strip()
+    compact = _normalize_memory_lookup_key(text)
+    if not compact:
+        return "empty"
+    if re.search(r"[\n。！？!?；;]", text):
+        return "sentence"
+    if re.search(r"[，,：:]", text) and len(compact) >= 8:
+        return "sentence"
+    if len(compact) >= 12:
+        return "sentence"
+    return "term"
+
+
+def _memory_candidate_eligible(source_text: str, candidate_text: str) -> bool:
+    source_compact = _normalize_memory_lookup_key(source_text)
+    candidate_compact = _normalize_memory_lookup_key(candidate_text)
+    if not source_compact or not candidate_compact:
+        return False
+    if source_compact == candidate_compact:
+        return True
+
+    source_kind = _memory_unit_kind(source_text)
+    candidate_kind = _memory_unit_kind(candidate_text)
+    if source_kind != candidate_kind:
+        return False
+
+    source_len = len(source_compact)
+    candidate_len = len(candidate_compact)
+    shorter = min(source_len, candidate_len)
+    longer = max(source_len, candidate_len)
+    length_ratio = shorter / longer if longer else 0
+
+    if source_kind == "term":
+        return length_ratio >= 0.75 and longer <= max(shorter + 4, shorter * 2)
+    return length_ratio >= 0.65
 
 
 def _memory_similarity(source_text: str, candidate_text: str) -> float:
@@ -116,7 +171,45 @@ def _memory_similarity(source_text: str, candidate_text: str) -> float:
     return max(ratio, compact_ratio)
 
 
-def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.88):
+def _memory_char_match_score(source_text: str, candidate_text: str) -> float:
+    compact_source = _normalize_memory_lookup_key(source_text)
+    compact_candidate = _normalize_memory_lookup_key(candidate_text)
+    if not compact_source or not compact_candidate:
+        return 0.0
+    matched_chars = sum(block.size for block in SequenceMatcher(None, compact_source, compact_candidate).get_matching_blocks())
+    return matched_chars / len(compact_source)
+
+
+def _apply_memory_translation_preserving_unmatched(source_text: str, candidate_source: str, translated_text: str) -> str:
+    source = (source_text or "").strip()
+    candidate = (candidate_source or "").strip()
+    if not source or not candidate:
+        return translated_text
+
+    if source == candidate or _normalize_memory_lookup_key(source) == _normalize_memory_lookup_key(candidate):
+        return translated_text
+    if candidate in source:
+        return source.replace(candidate, translated_text, 1)
+    if source in candidate:
+        return translated_text
+
+    pieces = []
+    inserted_translation = False
+    for tag, source_start, source_end, _, _ in SequenceMatcher(None, source, candidate).get_opcodes():
+        if tag == "equal":
+            if not inserted_translation:
+                pieces.append(translated_text)
+                inserted_translation = True
+            continue
+        if tag in {"insert", "replace"}:
+            pieces.append(source[source_start:source_end])
+
+    if not inserted_translation:
+        pieces.insert(0, translated_text)
+    return "".join(pieces) or translated_text
+
+
+def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.8, preserve_sentence_unmatched: bool = True):
     normalized_source = _normalize_match_text(source_text)
     compact_source = _normalize_memory_lookup_key(source_text)
     if not normalized_source:
@@ -144,10 +237,26 @@ def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.
     best_match = None
     best_score = threshold
     for entry in candidates:
-        score = _memory_similarity(source_text, entry["source_text"])
-        if score > best_score:
+        if not _memory_candidate_eligible(source_text, entry["source_text"]):
+            continue
+        source_kind = _memory_unit_kind(source_text)
+        exact_match = (
+            _normalize_match_text(entry["source_text"]) == normalized_source
+            or (compact_source and _normalize_memory_lookup_key(entry["source_text"]) == compact_source)
+        )
+        if source_kind == "sentence" and not preserve_sentence_unmatched and not exact_match:
+            continue
+        score = max(
+            _memory_similarity(source_text, entry["source_text"]),
+            _memory_char_match_score(source_text, entry["source_text"]),
+        )
+        if score >= best_score:
             best_score = score
-            best_match = entry["translated_text"]
+            best_match = _apply_memory_translation_preserving_unmatched(
+                source_text,
+                entry["source_text"],
+                entry["translated_text"],
+            )
 
     return best_match
 
@@ -175,7 +284,7 @@ def _split_text_for_memory_clauses(text: str):
     return parts or [text]
 
 
-def _translate_by_memory_segments(source_text: str, candidates, threshold: float = 0.9):
+def _translate_by_memory_segments(source_text: str, candidates, threshold: float = 0.8):
     segments = _split_text_for_memory_segments(source_text)
     translated_segments = []
     matched_count = 0
@@ -202,7 +311,7 @@ def _translate_by_memory_segments(source_text: str, candidates, threshold: float
     return "".join(translated_segments), matched_count
 
 
-def _translate_by_memory_clauses(source_text: str, candidates, threshold: float = 0.92):
+def _translate_by_memory_clauses(source_text: str, candidates, threshold: float = 0.8):
     clauses = _split_text_for_memory_clauses(source_text)
     translated_clauses = []
     matched_count = 0
@@ -245,7 +354,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
     pending_indexes = list(range(len(texts)))
 
     if _prefer_memory_first(engine):
-        allow_partial = engine == "memory" or bool(_get_memory_bank() or _get_memory_file_id())
+        allow_partial = engine == "memory"
         next_pending = []
         for index in pending_indexes:
             result, hit = translate_with_memory(
@@ -511,7 +620,7 @@ def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, 
 
 
 def _search_memory_file(db: Session, memory_file_id: int, source_text: str, source_lang: str, target_lang: str,
-                        threshold: float = 0.7):
+                        threshold: float = 0.8, preserve_sentence_unmatched: bool = True):
     if not memory_file_id:
         return None
 
@@ -528,7 +637,7 @@ def _search_memory_file(db: Session, memory_file_id: int, source_text: str, sour
             continue
         candidates.append(entry)
 
-    return _match_memory_candidates(source_text, candidates, threshold=max(threshold, 0.88))
+    return _match_memory_candidates(source_text, candidates, threshold=threshold, preserve_sentence_unmatched=preserve_sentence_unmatched)
 
 
 def _collect_memory_candidates(db: Session, source_lang: str, target_lang: str,
@@ -617,7 +726,6 @@ def _apply_memory_glossary(source_text: str, glossary):
 def _do_translate(text: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> str:
     result = None
     if engine in ["memory", "hybrid"]:
-        prefer_memory_partial = _prefer_memory_first(engine)
         r, hit = translate_with_memory(
             text,
             source_lang,
@@ -625,24 +733,12 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             db,
             bank=_get_memory_bank(),
             memory_file_id=_get_memory_file_id(),
-            allow_partial=prefer_memory_partial,
+            allow_partial=engine == "memory",
         )
         if hit:
             result = r
     if engine in ["ai", "hybrid"] and not result:
-        glossary = []
-        if engine == "hybrid":
-            glossary = _find_memory_glossary(
-                text,
-                _collect_memory_candidates(
-                    db,
-                    source_lang,
-                    target_lang,
-                    bank=_get_memory_bank(),
-                    memory_file_id=_get_memory_file_id(),
-                ),
-            )
-        result = translate_with_ai(text, model, source_lang, target_lang, glossary=glossary)
+        result = translate_with_ai(text, model, source_lang, target_lang)
     if not result:
         if engine == "memory":
             return text
@@ -838,8 +934,10 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
         "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
         "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
         "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+        "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
     }
     DRAWING_NS = PPTX_NS["a"]
+    CHART_NS = PPTX_NS["c"]
 
     for prefix, uri in PPTX_NS.items():
         ET_LXML.register_namespace(prefix, uri)
@@ -855,32 +953,81 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
     xml_roots = {}
     text_targets = []
 
+    def is_translatable_pptx_xml(name: str) -> bool:
+        return (
+            name.startswith("ppt/slides/slide")
+            or name.startswith("ppt/notesSlides/notesSlide")
+            or name.startswith("ppt/diagrams/data")
+            or name.startswith("ppt/diagrams/drawing")
+            or name.startswith("ppt/charts/chart")
+        )
+
+    def collect_text_target(elem):
+        if elem.text and elem.text.strip():
+            stripped = elem.text.strip()
+            if _text_matches_source_language(stripped, source_lang):
+                texts_to_translate.append(stripped)
+                text_targets.append((elem, stripped))
+
+    def preserve_short_fragment(text: str) -> str | None:
+        if (source_lang or "").lower() != "zh":
+            return None
+        compact = _normalize_memory_lookup_key(text)
+        chinese_chars = re.findall(r"[\u4e00-\u9fff]", text or "")
+        if len(chinese_chars) != 1 or compact != chinese_chars[0]:
+            return None
+
+        result, hit = translate_with_memory(
+            text,
+            source_lang,
+            target_lang,
+            db,
+            bank=_get_memory_bank(),
+            memory_file_id=_get_memory_file_id(),
+            allow_partial=False,
+        )
+        return result if hit else text
+
     with zipfile.ZipFile(in_buf, 'r') as z_in:
         for zinfo in z_in.infolist():
             name = zinfo.filename
             if not name.endswith(".xml") or "/_rels/" in name:
                 continue
-            if not (name.startswith("ppt/slides/slide") or name.startswith("ppt/notesSlides/notesSlide")):
+            if not is_translatable_pptx_xml(name):
                 continue
 
             raw = z_in.read(zinfo)
             root = ET_LXML.fromstring(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
             xml_roots[name] = root
             for t_elem in root.iter(f"{{{DRAWING_NS}}}t"):
-                if t_elem.text and t_elem.text.strip():
-                    texts_to_translate.append(t_elem.text.strip())
-                    text_targets.append(t_elem)
+                collect_text_target(t_elem)
+            if name.startswith("ppt/charts/chart"):
+                for v_elem in root.iter(f"{{{CHART_NS}}}v"):
+                    collect_text_target(v_elem)
 
     if texts_to_translate:
-        translated_parts = []
-        for text in texts_to_translate:
-            translated_parts.append(_do_translate(text, engine, model, source_lang, target_lang, db))
-        for i, t_elem in enumerate(text_targets):
+        translated_parts = [None] * len(texts_to_translate)
+        pending_texts = []
+        pending_indexes = []
+        for index, text in enumerate(texts_to_translate):
+            preserved = preserve_short_fragment(text)
+            if preserved is None:
+                pending_texts.append(text)
+                pending_indexes.append(index)
+            else:
+                translated_parts[index] = preserved
+
+        if pending_texts:
+            pending_translations = _translate_text_items(pending_texts, engine, model, source_lang, target_lang, db)
+            for pending_index, translated in zip(pending_indexes, pending_translations):
+                translated_parts[pending_index] = translated
+
+        for i, (t_elem, original_text) in enumerate(text_targets):
             if i < len(translated_parts):
-                translated = translated_parts[i]
+                translated = translated_parts[i] or original_text
                 pptx_original.append(texts_to_translate[i])
                 pptx_translated.append(translated)
-                t_elem.text = translated
+                t_elem.text = (t_elem.text or original_text).replace(original_text, translated, 1)
 
     out_buf = io.BytesIO()
     in_buf.seek(0)
@@ -1227,23 +1374,37 @@ def translate_with_memory(content: str, source_lang: str, target_lang: str,
                           allow_partial: bool = True) -> tuple:
     candidates = _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
 
-    file_result = _search_memory_file(db, memory_file_id, content, source_lang, target_lang)
+    file_result = _search_memory_file(
+        db,
+        memory_file_id,
+        content,
+        source_lang,
+        target_lang,
+        preserve_sentence_unmatched=allow_partial,
+    )
     if file_result:
         return file_result, True
-    memory_result = _match_memory_candidates(content, candidates, threshold=0.88)
+    memory_result = _match_memory_candidates(content, candidates, threshold=0.88, preserve_sentence_unmatched=allow_partial)
     if memory_result:
         return memory_result, True
 
-    segmented_result, matched_segments = _translate_by_memory_segments(content, candidates, threshold=0.9)
+    memory_result = _match_memory_candidates(content, candidates, threshold=0.8, preserve_sentence_unmatched=allow_partial)
+    if memory_result:
+        return memory_result, True
+
+    if not allow_partial:
+        return None, False
+
+    segmented_result, matched_segments = _translate_by_memory_segments(content, candidates, threshold=0.8)
     if segmented_result and matched_segments > 0:
         return segmented_result, True
 
-    clause_result, matched_clauses = _translate_by_memory_clauses(content, candidates, threshold=0.92)
+    clause_result, matched_clauses = _translate_by_memory_clauses(content, candidates, threshold=0.8)
     if clause_result and matched_clauses > 0:
         return clause_result, True
 
     glossary = _find_memory_glossary(content, candidates)
-    if glossary and allow_partial:
+    if glossary:
         if glossary[0].get("full_match"):
             return glossary[0]["translated_text"], True
         replaced_text, replaced = _apply_memory_glossary(content, glossary)
@@ -1716,6 +1877,11 @@ async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
 
     fn = doc.translated_filename or ""
     if fn == "":
+        if doc.created_at and datetime.utcnow() - doc.created_at > timedelta(minutes=10):
+            error_msg = "翻译任务已中断，请重新提交文件翻译"
+            doc.translated_filename = f"ERROR:{error_msg}"
+            db.commit()
+            return {"doc_id": doc_id, "status": "error", "error": error_msg, "original_filename": orig_filename}
         return {"doc_id": doc_id, "status": "processing", "error": None, "original_filename": orig_filename}
     if fn.startswith("ERROR:"):
         return {"doc_id": doc_id, "status": "error", "error": fn[6:], "original_filename": orig_filename}
