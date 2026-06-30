@@ -208,6 +208,7 @@ export const qaAPI = {
   getSessionDetail: (sessionId) => instance.get(`/qa/history/sessions/${sessionId}`),
   deleteSession: (sessionId) => instance.delete(`/qa/history/sessions/${sessionId}`),
   getDashboard: (params = {}) => instance.get('/qa/dashboard', { params }),
+  getInitialSuggestions: (kbIds = [], limit = 4) => instance.get('/qa/suggestions/initial', { params: { kb_ids: kbIds.join(','), limit } }),
 }
 
 export const manualAPI = {
