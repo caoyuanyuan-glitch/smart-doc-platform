@@ -626,6 +626,7 @@ def _extract_template_parts(template_path):
         "manufacturer_xml": "",
         "files": {},        # filename -> content (bytes)
         "image_files": {},  # image/filename -> content (bytes)
+        "language": None,
     }
     try:
         with zipfile.ZipFile(template_path, "r") as zf:
@@ -640,6 +641,8 @@ def _extract_template_parts(template_path):
 
             if not ditamap_content:
                 return result
+
+            result["language"] = _extract_xml_language(ditamap_content)
 
             # Extract frontmatter section
             fm_match = re.search(r'<frontmatter[^>]*>.*?</frontmatter>', ditamap_content, re.DOTALL)
@@ -674,6 +677,82 @@ def _extract_template_parts(template_path):
     return result
 
 
+def _extract_xml_language(xml_text):
+    if not xml_text:
+        return None
+
+    patterns = [
+        r'xml:lang\s*=\s*"([^"]+)"',
+        r'cms:lang\s*=\s*"([^"]+)"',
+        r'imeCMS:iba_lang\s*=\s*"([^"]+)"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, xml_text, re.IGNORECASE)
+        if match:
+            return _normalize_dita_language(match.group(1))
+    return None
+
+
+def _normalize_dita_language(lang):
+    value = (lang or "").strip().lower()
+    if value in {"en", "en-us", "en_us", "english", "英文"}:
+        return "en-US"
+    if value in {"zh", "zh-cn", "zh_cn", "cn", "chinese", "中文"}:
+        return "zh-CN"
+    return None
+
+
+def _parse_language_override(requirements_text):
+    if not requirements_text:
+        return None
+
+    match = re.search(
+        r'(?:xml:lang|lang|language|语言|输出语言|文档语言)\s*[:：=]\s*(zh-cn|zh_cn|zh|cn|中文|en-us|en_us|en|english|英文)',
+        requirements_text,
+        re.IGNORECASE,
+    )
+    if match:
+        return _normalize_dita_language(match.group(1))
+
+    if re.search(r'输出语言.*英文|文档语言.*英文|xml:lang.*en', requirements_text, re.IGNORECASE):
+        return "en-US"
+    if re.search(r'输出语言.*中文|文档语言.*中文|xml:lang.*zh', requirements_text, re.IGNORECASE):
+        return "zh-CN"
+    return None
+
+
+def _detect_dita_language(source_content, template_parts=None, requirements_text="", explicit_language=None):
+    override = _normalize_dita_language(explicit_language) or _parse_language_override(requirements_text)
+    if override:
+        return override
+
+    text = source_content or ""
+    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    alpha_chars = sum(1 for c in text if ('A' <= c <= 'Z') or ('a' <= c <= 'z'))
+    total = chinese_chars + alpha_chars
+
+    if total:
+        if chinese_chars / total >= 0.2:
+            return "zh-CN"
+        if alpha_chars:
+            return "en-US"
+
+    template_lang = (template_parts or {}).get("language") if template_parts else None
+    if template_lang:
+        return template_lang
+    return "zh-CN"
+
+
+def _rewrite_xml_language_attrs(xml_text, dita_lang):
+    if not xml_text or not dita_lang:
+        return xml_text
+
+    rewritten = re.sub(r'xml:lang\s*=\s*"[^"]*"', f'xml:lang="{dita_lang}"', xml_text)
+    rewritten = re.sub(r'cms:lang\s*=\s*"[^"]*"', f'cms:lang="{dita_lang}"', rewritten)
+    rewritten = re.sub(r'imeCMS:iba_lang\s*=\s*"[^"]*"', f'imeCMS:iba_lang="{dita_lang}"', rewritten)
+    return rewritten
+
+
 def _parse_special_requirements(requirements_text):
     parsed = {"reuse_topics": [], "type_overrides": {}, "auto_split": False, "other": []}
     if not requirements_text:
@@ -695,7 +774,7 @@ def _parse_special_requirements(requirements_text):
     return parsed
 
 
-def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, level=2):
+def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, dita_lang, level=2):
     safe_title = section_title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     def _unescape_md(text):
@@ -866,7 +945,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, le
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 {IME_TOPIC_DECL}
-<topic xmlns:cms="http://www.w3.org/ime/cms" xmlns:m="http://www.w3.org/1998/Math/MathML" xml:lang="zh-CN" id="{unique_id}" cms:keys="{topic_id}" cms:title="{safe_title}" cms:placeholder="{topic_id}" cms:number="{topic_id}" cms:imesofttype="{ime_topic_type}" cms:placeHolder="{topic_id}">
+<topic xmlns:cms="http://www.w3.org/ime/cms" xmlns:m="http://www.w3.org/1998/Math/MathML" xml:lang="{dita_lang}" id="{unique_id}" cms:keys="{topic_id}" cms:title="{safe_title}" cms:placeholder="{topic_id}" cms:number="{topic_id}" cms:imesofttype="{ime_topic_type}" cms:placeHolder="{topic_id}">
   <title id="title_{topic_id}">{safe_title}</title>
   <body id="body_{topic_id}" outputclass="pretext">
 {body_content}
@@ -1121,14 +1200,14 @@ def _topic_placeholder(topic, has_children=False):
     return os.path.splitext(filename)[0] if filename else ""
 
 
-def _append_topicref_xml(lines, topic, node_id_seq, indent, level_attr, template_name="sDitaTopic"):
+def _append_topicref_xml(lines, topic, node_id_seq, indent, level_attr, dita_lang, template_name="sDitaTopic"):
     navtitle = _escape_xml_attr(topic["title"])
     node_id = f"PN{next(node_id_seq):03d}"
     ime_soft_type = template_name
     placeholder = _escape_xml_attr(_topic_placeholder(topic))
     attrs = (
         f'navtitle="{navtitle}" '
-        f'xml:lang="zh-CN" id="{node_id}" '
+        f'xml:lang="{dita_lang}" id="{node_id}" '
         f'applicDesc="" '
         f'href="{topic["filename"]}" '
         f'keys="{topic["id"]}" type="topic" '
@@ -1147,14 +1226,14 @@ def _topic_has_body(topic):
     return bool((topic.get("raw_content") or "").strip())
 
 
-def _append_topicref_container_xml(lines, node, node_id_seq, indent, level_attr):
+def _append_topicref_container_xml(lines, node, node_id_seq, indent, level_attr, dita_lang):
     topic = node["topic"]
     navtitle = _escape_xml_attr(topic["title"])
     node_id = f"PN{next(node_id_seq):03d}"
     has_children = bool(node.get("children"))
     attrs = [
         f'navtitle="{navtitle}"',
-        'xml:lang="zh-CN"',
+        f'xml:lang="{dita_lang}"',
         f'id="{node_id}"',
         'applicDesc=""',
         'type="topic"',
@@ -1192,61 +1271,61 @@ def _append_topicref_container_xml(lines, node, node_id_seq, indent, level_attr)
     lines.append(f'{indent}<topicref {joined_attrs}>')
     for child in node["children"]:
         if child["children"]:
-            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", level_attr + 1)
+            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", level_attr + 1, dita_lang)
         else:
-            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", level_attr + 1)
+            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", level_attr + 1, dita_lang)
     lines.append(f'{indent}</topicref>')
 
 
-def _append_root_container_xml(lines, node, chapter_seq, node_id_seq, indent, level_attr, timestamp):
+def _append_root_container_xml(lines, node, chapter_seq, node_id_seq, indent, level_attr, timestamp, dita_lang):
     topic = node["topic"]
     navtitle = _escape_xml_attr(topic["title"])
     container_tag = "appendix" if topic["title"].strip().lower() == "appendix" else "chapter"
     chapter_id = f"PG{timestamp}_{next(chapter_seq):03d}"
     lines.append(
         f'{indent}<{container_tag} navtitle="{navtitle}" id="{chapter_id}" applicDesc=""'
-        f' cms:lang="zh-CN" cms:type="{container_tag}" cms:title=""'
+        f' cms:lang="{dita_lang}" cms:type="{container_tag}" cms:title=""'
         f' cms:isTemplet="N"'
         f' level="{level_attr}" version="{GENERATED_NODE_VERSION}">'
     )
     if _topic_uses_dita_file(topic):
         root_template = "chapterTopic" if container_tag == "chapter" else "sDitaTopic"
-        _append_topicref_xml(lines, topic, node_id_seq, indent + "  ", level_attr + 1, root_template)
+        _append_topicref_xml(lines, topic, node_id_seq, indent + "  ", level_attr + 1, dita_lang, root_template)
     for child in node["children"]:
         if child["children"]:
-            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", level_attr + 1)
+            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", level_attr + 1, dita_lang)
         else:
-            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", level_attr + 1)
+            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", level_attr + 1, dita_lang)
     lines.append(f'{indent}</{container_tag}>')
 
 
-def _append_frontmatter_root_xml(lines, node, node_id_seq, indent, timestamp):
+def _append_frontmatter_root_xml(lines, node, node_id_seq, indent, timestamp, dita_lang):
     frontmatter_id = f"PG{timestamp}_FM"
     lines.append(
         f'{indent}<frontmatter navtitle="Preface" id="{frontmatter_id}" applicDesc=""'
-        f' cms:lang="zh-CN" cms:title="" cms:placeHolder="" cms:isTemplet="N"'
+        f' cms:lang="{dita_lang}" cms:title="" cms:placeHolder="" cms:isTemplet="N"'
         f' cms:referenceType="" cms:type="frontmatter" cms:outputclass=""'
         f' cms:descriptioin="" cms:xCoordination="" cms:sourceTag=""'
         f' cms:referenceMap="" cms:colNumber="2" cms:nodeRemark=""'
         f' level="1" version="{GENERATED_NODE_VERSION}">'
     )
-    _append_topicref_xml(lines, node["topic"], node_id_seq, indent + "  ", 2, "sCoverTopic")
+    _append_topicref_xml(lines, node["topic"], node_id_seq, indent + "  ", 2, dita_lang, "sCoverTopic")
     for child in node["children"]:
         if child["children"]:
-            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", 2)
+            _append_topicref_container_xml(lines, child, node_id_seq, indent + "  ", 2, dita_lang)
         else:
-            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", 2)
+            _append_topicref_xml(lines, child["topic"], node_id_seq, indent + "  ", 2, dita_lang)
 
     booklists_id = f"PG{timestamp}_BL"
     toc_id = f"PG{timestamp}_TOC"
     lines.append(
-        f'{indent}  <booklists id="{booklists_id}" applicDesc="" cms:lang="zh-CN" cms:title="" cms:placeHolder=""'
+        f'{indent}  <booklists id="{booklists_id}" applicDesc="" cms:lang="{dita_lang}" cms:title="" cms:placeHolder=""'
         f' cms:isTemplet="N" cms:referenceType="" cms:type="booklists" cms:outputclass=""'
         f' cms:descriptioin="" cms:xCoordination="" cms:sourceTag="" cms:referenceMap=""'
         f' cms:colNumber="2" cms:nodeRemark="" level="2" version="{GENERATED_NODE_VERSION}">'
     )
     lines.append(
-        f'{indent}    <toc id="{toc_id}" applicDesc="" cms:lang="zh-CN" cms:title="" cms:placeHolder=""'
+        f'{indent}    <toc id="{toc_id}" applicDesc="" cms:lang="{dita_lang}" cms:title="" cms:placeHolder=""'
         f' cms:isTemplet="N" cms:referenceType="" cms:type="toc" cms:outputclass=""'
         f' cms:descriptioin="" cms:xCoordination="" cms:sourceTag="" cms:referenceMap=""'
         f' cms:colNumber="2" cms:nodeRemark="" level="3" version="{GENERATED_NODE_VERSION}"/>'
@@ -1255,15 +1334,15 @@ def _append_frontmatter_root_xml(lines, node, node_id_seq, indent, timestamp):
     lines.append(f'{indent}</frontmatter>')
 
 
-def _append_bookmap_topics(lines, topic_roots, timestamp):
+def _append_bookmap_topics(lines, topic_roots, timestamp, dita_lang):
     chapter_seq = iter(range(1, 10000))
     node_id_seq = iter(range(1, 100000))
 
     for root in topic_roots:
         if _normalize_section_key(root["topic"]["title"]) == "cover":
-            _append_frontmatter_root_xml(lines, root, node_id_seq, "  ", timestamp)
+            _append_frontmatter_root_xml(lines, root, node_id_seq, "  ", timestamp, dita_lang)
             continue
-        _append_root_container_xml(lines, root, chapter_seq, node_id_seq, "  ", 1, timestamp)
+        _append_root_container_xml(lines, root, chapter_seq, node_id_seq, "  ", 1, timestamp, dita_lang)
 
 
 def _derive_map_title(source_format, file_path, sections):
@@ -1320,7 +1399,7 @@ def _should_emit_container_only(section):
 
 
 def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_content,
-                   target_format, template_path, requirements_text):
+                   target_format, template_path, requirements_text, output_language=None):
     """格式转换流水线。
 
     固定行为（不可变）：
@@ -1367,6 +1446,8 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         template_parts = None
         if template_path and os.path.exists(template_path):
             template_parts = _extract_template_parts(template_path)
+
+        dita_lang = _detect_dita_language(source_content, template_parts, requirements_text, output_language)
 
         _set_progress(30, "结构映射")
 
@@ -1456,7 +1537,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 
                 dita_content = None
                 if topic_filename:
-                    dita_content = _content_to_dita_xml(title, section["content"], dita_type, topic_id)
+                    dita_content = _content_to_dita_xml(title, section["content"], dita_type, topic_id, dita_lang)
 
                 topics_output.append({
                     "type": dita_type,
@@ -1505,6 +1586,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             {"name": "结构完整性", "status": "passed"},
             {"name": "模板一致性", "status": template_check_status,
              "detail": template_check_detail},
+            {"name": "语言标记", "status": "passed", "detail": dita_lang},
             {"name": "图片验证", "status": "passed", "detail": f"{image_count}/{image_count}"},
             {"name": "内容完整性", "status": "passed", "detail": content_check_detail},
         ]
@@ -1516,8 +1598,8 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 
         overall = "passed"
         if unmapped:
-            checks[3]["status"] = "warning"
-            checks[3]["detail"] = f"{len(unmapped)}个章节未映射"
+            checks[4]["status"] = "warning"
+            checks[4]["detail"] = f"{len(unmapped)}个章节未映射"
             overall = "warning"
 
         _set_progress(85, "打包")
@@ -1560,6 +1642,8 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 fm_xml, frontmatter_used_files = _rewrite_template_frontmatter(template_parts["frontmatter_xml"], topics_output)
             if template_parts and template_parts.get("manufacturer_xml"):
                 mfg_xml, manufacturer_used_files = _rewrite_template_frontmatter(template_parts["manufacturer_xml"], topics_output)
+            fm_xml = _rewrite_xml_language_attrs(fm_xml, dita_lang)
+            mfg_xml = _rewrite_xml_language_attrs(mfg_xml, dita_lang)
             if template_parts:
                 template_referenced_files = _collect_template_dita_refs(fm_xml, mfg_xml)
 
@@ -1567,6 +1651,12 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 for fname, content in template_parts["files"].items():
                     if template_referenced_files and fname not in template_referenced_files:
                         continue
+                    if fname.lower().endswith((".dita", ".xml", ".ditamap")):
+                        try:
+                            text_content = content.decode("utf-8", errors="ignore")
+                            content = _rewrite_xml_language_attrs(text_content, dita_lang).encode("utf-8")
+                        except Exception:
+                            pass
                     tpl_fname = os.path.join(output_base, fname)
                     with open(tpl_fname, "wb") as f:
                         f.write(content)
@@ -1594,7 +1684,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             map_lines = [
                 '<?xml version="1.0" encoding="UTF-8"?>',
                 IME_BOOKMAP_DECL,
-                f'<bookmap xmlns:imeCMS="http://www.megalinkware.com" xmlns:vf="http://www.megalinkware.com" xmlns:cms="http://www.w3.org/ime/cms" imeCMS:imesofttype="PartBookMap" imeCMS:softtype="PartBookMap" xml:lang="zh-CN" id="{map_id}" imeCMS:iba_lang="zh-CN" imeCMS:iba_title="" imeCMS:iba_placeHolder="" imeCMS:iba_isTemplet="N" imeCMS:iba_referenceType="" level="0" version="{GENERATED_NODE_VERSION}">',
+                f'<bookmap xmlns:imeCMS="http://www.megalinkware.com" xmlns:vf="http://www.megalinkware.com" xmlns:cms="http://www.w3.org/ime/cms" imeCMS:imesofttype="PartBookMap" imeCMS:softtype="PartBookMap" xml:lang="{dita_lang}" id="{map_id}" imeCMS:iba_lang="{dita_lang}" imeCMS:iba_title="" imeCMS:iba_placeHolder="" imeCMS:iba_isTemplet="N" imeCMS:iba_referenceType="" level="0" version="{GENERATED_NODE_VERSION}">',
                 '  <booktitle>',
                 f'    <mainbooktitle>{map_title}</mainbooktitle>',
                 '  </booktitle>',
@@ -1606,7 +1696,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 
             referenced_topic_files = frontmatter_used_files | manufacturer_used_files
             topic_roots = _build_topic_hierarchy(topics_output, referenced_topic_files)
-            _append_bookmap_topics(map_lines, topic_roots, timestamp)
+            _append_bookmap_topics(map_lines, topic_roots, timestamp, dita_lang)
 
             if mfg_xml:
                 for line in mfg_xml.strip().split("\n"):
@@ -1624,6 +1714,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
   <created>{timestamp}</created>
   <topics>{len(written_topics)}</topics>
   <images>{image_count}</images>
+  <language>{dita_lang}</language>
   <source_format>{source_format}</source_format>
   <target_format>{target_format}</target_format>
 </metadata>"""
@@ -1700,6 +1791,7 @@ async def start_conversion(
     target_format: str = Form("dita"),
     template_file: UploadFile = File(None),
     requirements: str = Form(None),
+    output_language: str = Form(None),
     retry_feedback: str = Form(None),
     retry_screenshot: UploadFile = File(None),
     db: Session = Depends(get_db),
@@ -1724,6 +1816,9 @@ async def start_conversion(
         raise HTTPException(status_code=400, detail="DITA 模板文件必须是 ZIP 包")
     if source_format == "docx" and target_format == "csv":
         raise HTTPException(status_code=400, detail="DOCX 当前仅支持转换为 dita 或 markdown")
+    normalized_output_language = _normalize_dita_language(output_language) if output_language else None
+    if output_language and not normalized_output_language:
+        raise HTTPException(status_code=400, detail="输出语言仅支持 en-US 或 zh-CN")
 
     _ensure_dir(UPLOAD_DIR)
     source_path = os.path.join(UPLOAD_DIR, f"src_{int(time.time() * 1000)}_{source_file.filename}")
@@ -1783,7 +1878,7 @@ async def start_conversion(
     thread = threading.Thread(
         target=_run_pipeline,
         args=(task.task_id, None, source_format, source_path, source_content,
-              target_format, template_path, combined_requirements),
+              target_format, template_path, combined_requirements, normalized_output_language),
         daemon=True,
     )
     thread.start()

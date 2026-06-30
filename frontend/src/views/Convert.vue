@@ -161,6 +161,13 @@
             </div>
           </el-form-item>
 
+          <el-form-item v-if="showDitaOptions" label="输出语言">
+            <el-select v-model="outputLanguage" placeholder="自动识别" style="width: 260px;">
+              <el-option v-for="option in outputLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
+            </el-select>
+            <div class="form-tip">建议英文手册显式选择 `English (en-US)`，避免 topic 语言与源文件不一致。</div>
+          </el-form-item>
+
           <el-form-item v-if="showDitaOptions" label="特殊需求">
             <el-input
               v-model="requirements"
@@ -248,6 +255,13 @@ const templateFile = ref(null)
 const templateTree = ref(null)
 const targetFormat = ref('dita')
 const requirements = ref('')
+const outputLanguage = ref('')
+
+const outputLanguageOptions = [
+  { value: 'en-US', label: 'English (en-US)' },
+  { value: 'zh-CN', label: '中文 (zh-CN)' },
+  { value: '', label: '自动识别' },
+]
 
 const sourceExt = computed(() => {
   const name = sourceFile.value?.name || ''
@@ -357,6 +371,10 @@ function getTemplatePayload() {
 
 function getRequirementsPayload() {
   return showDitaOptions.value ? (requirements.value || null) : null
+}
+
+function getOutputLanguagePayload() {
+  return showDitaOptions.value ? (outputLanguage.value || null) : null
 }
 
 function clearTaskState() {
@@ -470,7 +488,8 @@ async function startConvert() {
       sourceFile.value,
       targetFormat.value,
       getTemplatePayload(),
-      getRequirementsPayload()
+      getRequirementsPayload(),
+      getOutputLanguagePayload()
     )
     taskId.value = resp.data.task_id
     ElMessage.success('转换任务已提交')
@@ -633,6 +652,7 @@ async function retryConvert() {
       targetFormat.value,
       getTemplatePayload(),
       getRequirementsPayload(),
+      getOutputLanguagePayload(),
       imeFeedback.value || null,
       imeScreenshot.value || null
     )
@@ -722,6 +742,7 @@ watch(targetFormat, (val) => {
     templateFile.value = null
     templateTree.value = null
     requirements.value = ''
+    outputLanguage.value = ''
     imeFeedback.value = ''
     imeScreenshot.value = null
   }

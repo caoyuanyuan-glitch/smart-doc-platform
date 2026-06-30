@@ -234,12 +234,13 @@ export const generateAPI = {
 }
 
 export const convertAPI = {
-  convert: (sourceFile, targetFormat, templateFile, requirements, retryFeedback, retryScreenshot) => {
+  convert: (sourceFile, targetFormat, templateFile, requirements, outputLanguage, retryFeedback, retryScreenshot) => {
     const formData = new FormData()
     formData.append('source_file', sourceFile)
     formData.append('target_format', targetFormat)
     if (templateFile) formData.append('template_file', templateFile)
     if (requirements) formData.append('requirements', requirements)
+    if (outputLanguage) formData.append('output_language', outputLanguage)
     if (retryFeedback) formData.append('retry_feedback', retryFeedback)
     if (retryScreenshot) formData.append('retry_screenshot', retryScreenshot)
     return instance.post('/convert/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
