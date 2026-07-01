@@ -577,7 +577,7 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def audit_document(self, content, language=None):
+    def audit_document(self, content, language=None, audit_basis=""):
         lang = language or "en"
         is_english = lang in ("en", "both")
 
@@ -600,6 +600,9 @@ IMPORTANT REMINDERS:
 
 Document excerpt:
 {content[:20000]}
+
+Release checklist and review basis:
+{audit_basis[:8000] if audit_basis else 'No additional checklist provided.'}
 
 Output ONLY strict JSON:
 {{
@@ -634,6 +637,9 @@ Return empty issues array if no high-confidence issues found."""
 
 文档内容：
 {content[:20000]}
+
+发布前自检 checklist 和审核依据：
+{audit_basis[:8000] if audit_basis else '未提供额外 checklist。'}
 
 输出要求：
 1. 按JSON格式输出审核结果

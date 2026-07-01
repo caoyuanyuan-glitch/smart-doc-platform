@@ -24,6 +24,7 @@ class Review(BaseModel):
     total_issues: int
     summary: Optional[str] = ""
     created_at: datetime
+    completed_at: Optional[datetime] = None
     progress: Optional[ReviewProgress] = None
 
     class Config:
@@ -43,6 +44,7 @@ class IssueCreate(BaseModel):
     confidence: int = 0
     source: str = "rule"
     position: str = "{}"
+    status: str = "pending"
 
 class Issue(BaseModel):
     id: int

@@ -1,8 +1,8 @@
 <template>
   <div class="review-container">
-    <!-- 文档管理 -->
+    <!-- 开始审核 -->
     <div v-if="currentView === 'documents'">
-      <h2 class="page-title">文档管理</h2>
+      <h2 class="page-title">开始审核</h2>
       <div class="upload-section">
         <el-upload
           class="upload-demo"
@@ -50,7 +50,7 @@
               <span v-else style="color:#999">未审核</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="340">
+          <el-table-column label="操作" width="260">
             <template #default="scope">
               <el-button 
                 size="small" 
@@ -60,21 +60,13 @@
                 {{ docReviewStatus[scope.row.id]?.status === 'running' ? '审核中...' : '开始审核' }}
               </el-button>
               <el-button 
-                size="small" 
-                type="success" 
-                :disabled="!docReviewStatus[scope.row.id]?.review_id || docReviewStatus[scope.row.id]?.status !== 'completed'"
-                @click="downloadReviewResultByDoc(scope.row)"
-              >
-                {{ resultButtonLabel(scope.row.file_type) }}
-              </el-button>
-              <el-button 
                 size="small"
-                type="info"
+                type="primary"
                 plain
                 :disabled="!docReviewStatus[scope.row.id]?.review_id || docReviewStatus[scope.row.id]?.status !== 'completed'"
-                @click="openIssueDialogByDoc(scope.row.id)"
+                @click="goReviewTasks"
               >
-                问题详情
+                去历史任务处理
               </el-button>
               <el-button size="small" type="danger" @click="deleteDocument(scope.row.id)">删除</el-button>
             </template>
@@ -83,9 +75,9 @@
       </div>
     </div>
 
-    <!-- 审核任务 - 行内展开显示报告 -->
+    <!-- 历史审核任务 - 行内展开显示报告 -->
     <div v-if="currentView === 'tasks'">
-      <h2 class="page-title">审核任务</h2>
+      <h2 class="page-title">历史审核任务</h2>
       <div class="table-section">
           <el-table :data="reviews" border>
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
@@ -117,6 +109,7 @@
               <span v-if="judgmentStats[scope.row.id]">
                 <el-tag type="success" size="small" effect="plain" style="margin-right:4px">已确认 {{ judgmentStats[scope.row.id].confirmed }}</el-tag>
                 <el-tag type="info" size="small" effect="plain" style="margin-right:4px">误报 {{ judgmentStats[scope.row.id].false_positive }}</el-tag>
+                <el-tag type="warning" size="small" effect="plain" style="margin-right:4px">补充 {{ judgmentStats[scope.row.id].manual }}</el-tag>
                 <el-tag type="warning" size="small" effect="plain">待审 {{ judgmentStats[scope.row.id].pending }}</el-tag>
               </span>
               <span v-else style="color:#999">-</span>
@@ -135,7 +128,7 @@
               </el-button>
               <el-button 
                 size="small" 
-                :disabled="scope.row.status !== 'completed' || !taskIssues[scope.row.id] || taskIssues[scope.row.id].length === 0" 
+                :disabled="scope.row.status !== 'completed'"
                 @click="batchConfirmAll(scope.row.id)"
               >
                 一键确认
@@ -173,8 +166,19 @@
           <el-option label="建议" value="suggestion" />
         </el-select>
         <span style="margin-left:auto">
+          <el-button size="small" @click="openParsedTextDialog">解析文本</el-button>
+          <el-button size="small" type="warning" plain @click="openManualIssueDialog">补充上报</el-button>
+          <el-upload
+            class="gold-upload"
+            :http-request="compareGoldAnswer"
+            accept=".xlsx,.xls"
+            :show-file-list="false"
+          >
+          <el-button size="small" type="primary" plain>标准答案对比</el-button>
+          </el-upload>
+          <el-button size="small" type="success" plain :disabled="!currentTaskId" @click="batchConfirmAll(currentTaskId)">确认全部待审</el-button>
           <el-button size="small" @click="batchSetStatus('confirmed')">批量确认</el-button>
-          <el-button size="small" @click="batchSetStatus('false_positive')">批量误报</el-button>
+          <el-button size="small" @click="batchSetStatus('false_positive')">批量标记误报</el-button>
         </span>
       </div>
       <el-table
@@ -205,9 +209,9 @@
             <span class="context-cell" v-html="highlightOriginalText(scope.row.context, scope.row.original_text)"></span>
           </template>
         </el-table-column>
-        <el-table-column prop="suggestion" label="建议" min-width="200" show-overflow-tooltip>
+        <el-table-column prop="suggestion" label="建议" min-width="220">
           <template #default="scope">
-            <span class="text-success">{{ scope.row.suggestion || '-' }}</span>
+            <span class="text-success suggestion-wrap">{{ scope.row.suggestion || '-' }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="status" label="判定" width="120">
@@ -217,10 +221,11 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="320" fixed="right">
+        <el-table-column label="操作" width="400" fixed="right">
           <template #default="scope">
             <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
             <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
+            <el-button size="small" type="warning" plain @click="markSimilarIssuesFalsePositive(scope.row)">同类误报</el-button>
             <el-button size="small" type="primary" plain @click="openTransferRuleDialog(scope.row)">转规则库</el-button>
           </template>
         </el-table-column>
@@ -228,6 +233,111 @@
       <div class="dialog-footer">
         <span>共 {{ filteredDialogIssues.length }} 条<span v-if="filteredDialogExcelRowCount">，涉及 {{ filteredDialogExcelRowCount }} 行</span> (已选 {{ selectedIssueIds.length }} 条)</span>
         <el-button @click="issueDialogVisible = false">关闭</el-button>
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="manualIssueDialogVisible" title="补充上报漏检问题" width="620px">
+      <el-form :model="manualIssueForm" label-width="90px">
+        <el-form-item label="严重度">
+          <el-select v-model="manualIssueForm.severity" style="width: 180px">
+            <el-option label="致命" value="fatal" />
+            <el-option label="严重" value="serious" />
+            <el-option label="一般" value="general" />
+            <el-option label="建议" value="suggestion" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="分类">
+          <el-input v-model="manualIssueForm.category" placeholder="如：拼写/用词、格式规范、术语一致性" />
+        </el-form-item>
+        <el-form-item label="章节位置">
+          <el-input v-model="manualIssueForm.chapter" placeholder="如：3.2 Storage Conditions" />
+        </el-form-item>
+        <el-form-item label="问题原文" required>
+          <el-input v-model="manualIssueForm.original_text" type="textarea" :rows="2" placeholder="填写平台漏检的原文片段" />
+        </el-form-item>
+        <el-form-item label="修改建议">
+          <el-input v-model="manualIssueForm.suggestion" type="textarea" :rows="2" placeholder="填写建议修改结果" />
+        </el-form-item>
+        <el-form-item label="问题说明">
+          <el-input v-model="manualIssueForm.description" type="textarea" :rows="3" placeholder="说明为什么需要补充上报" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="manualIssueDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="manualIssueSaving" @click="saveManualIssue">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="parsedTextDialogVisible" title="平台解析文本" width="80%" top="6vh">
+      <div v-loading="parsedTextLoading">
+        <div v-if="parsedTextMeta" class="parsed-text-meta">
+          <el-tag size="small" effect="plain">{{ parsedTextMeta.filename }}</el-tag>
+          <el-tag size="small" effect="plain">字符 {{ parsedTextMeta.char_count }}</el-tag>
+          <el-tag size="small" effect="plain">词数 {{ parsedTextMeta.word_count }}</el-tag>
+          <el-tag v-if="parsedTextMeta.page_count" size="small" effect="plain">页数 {{ parsedTextMeta.page_count }}</el-tag>
+        </div>
+        <el-input v-model="parsedTextContent" type="textarea" :rows="22" readonly />
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="goldCompareDialogVisible" title="标准答案对比" width="90%" top="5vh">
+      <div v-loading="goldCompareLoading">
+        <div v-if="goldCompareResult" class="gold-summary-grid">
+          <div class="gold-summary-card"><div class="gold-label">标准答案</div><div class="gold-value">{{ goldCompareResult.gold_count }}</div></div>
+          <div class="gold-summary-card"><div class="gold-label">平台检出</div><div class="gold-value">{{ goldCompareResult.platform_count }}</div></div>
+          <div class="gold-summary-card"><div class="gold-label">TP</div><div class="gold-value">{{ goldCompareResult.tp }}</div></div>
+          <div class="gold-summary-card"><div class="gold-label">FP</div><div class="gold-value">{{ goldCompareResult.fp }}</div></div>
+          <div class="gold-summary-card"><div class="gold-label">FN</div><div class="gold-value">{{ goldCompareResult.fn }}</div></div>
+          <div class="gold-summary-card"><div class="gold-label">检出率</div><div class="gold-value">{{ percentText(goldCompareResult.recall) }}</div></div>
+          <div class="gold-summary-card"><div class="gold-label">准确率</div><div class="gold-value">{{ percentText(goldCompareResult.precision) }}</div></div>
+          <div class="gold-summary-card"><div class="gold-label">原文不存在</div><div class="gold-value">{{ goldCompareResult.missing_in_parsed_text_count }}</div></div>
+        </div>
+        <el-alert
+          v-if="goldCompareResult && goldCompareResult.missing_in_parsed_text_count > 0"
+          type="warning"
+          show-icon
+          :closable="false"
+          title="部分标准答案错误原文不存在于平台解析文本中，这类项应先排查 PDF 解析输入，再判断规则漏检。"
+          style="margin: 12px 0"
+        />
+        <el-tabs v-if="goldCompareResult" class="gold-tabs">
+          <el-tab-pane :label="`漏检 ${goldCompareResult.missed.length}`">
+            <el-table :data="goldCompareResult.missed" border height="360" size="small">
+              <el-table-column prop="index" label="序号" width="70" />
+              <el-table-column prop="location" label="位置" width="180" show-overflow-tooltip />
+              <el-table-column prop="wrong_text" label="错误内容" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="correct_text" label="正确内容" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="issue_type" label="问题类型" width="120" />
+              <el-table-column label="错误原文存在" width="120">
+                <template #default="scope">
+                  <el-tag size="small" :type="scope.row.wrong_text_exists_in_parsed_text ? 'success' : 'warning'">
+                    {{ scope.row.wrong_text_exists_in_parsed_text ? '存在' : '不存在' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="note" label="备注" min-width="180" show-overflow-tooltip />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane :label="`误报 ${goldCompareResult.false_positive.length}`">
+            <el-table :data="goldCompareResult.false_positive" border height="360" size="small">
+              <el-table-column prop="rule" label="规则" width="110" />
+              <el-table-column prop="category" label="分类" width="120" />
+              <el-table-column prop="original_text" label="原文" min-width="180" show-overflow-tooltip />
+              <el-table-column prop="suggestion" label="建议" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="description" label="说明" min-width="220" show-overflow-tooltip />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane :label="`命中 ${goldCompareResult.matches.length}`">
+            <el-table :data="goldCompareResult.matches" border height="360" size="small">
+              <el-table-column label="标准错误" min-width="180">
+                <template #default="scope">{{ scope.row.gold?.wrong_text }}</template>
+              </el-table-column>
+              <el-table-column label="平台命中" min-width="220">
+                <template #default="scope">{{ scope.row.issues?.map(item => item.original_text).join('；') }}</template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
       </div>
     </el-dialog>
 
@@ -306,6 +416,9 @@
           <el-table-column prop="example" label="示例" width="160" />
           <el-table-column prop="suggestion" label="建议" width="150" />
           <el-table-column prop="audit_basis" label="审核依据" width="180" />
+          <el-table-column prop="language" label="语言" width="100">
+            <template #default="scope">{{ languageLabel(scope.row.language) }}</template>
+          </el-table-column>
           <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom" />
           <el-table-column label="操作" width="180">
             <template #default="scope">
@@ -324,7 +437,7 @@
           <el-form-item label="分类">
             <el-input v-model="ruleForm.category" placeholder="如：标点符号" />
           </el-form-item>
-          <el-form-item label="描述">
+          <el-form-item label="规则描述">
             <el-input v-model="ruleForm.description" placeholder="规则描述" />
           </el-form-item>
           <el-form-item label="正则">
@@ -431,12 +544,13 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
 const route = useRoute()
+const router = useRouter()
 const documents = ref([])
 const reviews = ref([])
 const issues = ref([])
@@ -458,6 +572,16 @@ const currentTaskId = ref(null)
 const issueFilter = reactive({ keyword: '', category: '', status: '', severity: '' })
 const selectedIssueIds = ref([])
 const issueTableRef = ref(null)
+const manualIssueDialogVisible = ref(false)
+const manualIssueSaving = ref(false)
+const manualIssueForm = ref({ severity: 'general', category: '人工补充', chapter: '', original_text: '', suggestion: '', description: '' })
+const parsedTextDialogVisible = ref(false)
+const parsedTextLoading = ref(false)
+const parsedTextMeta = ref(null)
+const parsedTextContent = ref('')
+const goldCompareDialogVisible = ref(false)
+const goldCompareLoading = ref(false)
+const goldCompareResult = ref(null)
 const dialogCategories = computed(() => {
   const set = new Set()
   const list = taskIssues[currentTaskId.value] || []
@@ -495,19 +619,63 @@ function formatIssueDisplayId(index) {
   return String(index + 1).padStart(3, '0')
 }
 
+function percentText(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '0%'
+  return `${(number * 100).toFixed(1)}%`
+}
+
+function resetManualIssueForm() {
+  manualIssueForm.value = { severity: 'general', category: '人工补充', chapter: '', original_text: '', suggestion: '', description: '' }
+}
+
+function openManualIssueDialog() {
+  if (!currentTaskId.value) {
+    ElMessage.warning('请先打开审核任务')
+    return
+  }
+  resetManualIssueForm()
+  manualIssueDialogVisible.value = true
+}
+
+async function saveManualIssue() {
+  if (!currentTaskId.value) {
+    ElMessage.warning('请先打开审核任务')
+    return
+  }
+  if (!manualIssueForm.value.original_text.trim()) {
+    ElMessage.warning('请填写问题原文')
+    return
+  }
+  manualIssueSaving.value = true
+  try {
+    const response = await reviewAPI.createManualIssue(currentTaskId.value, manualIssueForm.value)
+    const created = response.data
+    taskIssues[currentTaskId.value] = [created, ...(taskIssues[currentTaskId.value] || [])]
+    issues.value = [created, ...issues.value]
+    manualIssueDialogVisible.value = false
+    ElMessage.success('已补充上报漏检问题')
+  } catch (error) {
+    ElMessage.error(`补充上报失败: ${getAPIErrorMessage(error)}`)
+  } finally {
+    manualIssueSaving.value = false
+  }
+}
+
 // 判定状态统计 (按任务ID)
 const judgmentStats = computed(() => {
   const stats = {}
   for (const key in taskIssues) {
     const list = taskIssues[key]
-    let confirmed = 0, false_positive = 0, pending = 0
+    let confirmed = 0, false_positive = 0, pending = 0, manual = 0
     for (const i of list) {
       const s = i.status || 'pending'
+      if (i.source === 'manual') manual++
       if (s === 'confirmed') confirmed++
       else if (s === 'false_positive') false_positive++
       else pending++
     }
-    stats[key] = { confirmed, false_positive, pending }
+    stats[key] = { confirmed, false_positive, pending, manual }
   }
   return stats
 })
@@ -523,6 +691,10 @@ const selectedRules = ref([])
 const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
+
+function goReviewTasks() {
+  router.push('/review/tasks')
+}
 const uploadProgress = ref(0)
 const uploadProgressText = ref('')
 let uploadingTempId = 0
@@ -1131,6 +1303,48 @@ async function openIssueDialogByDoc(documentId) {
   }
 }
 
+async function openParsedTextDialog() {
+  if (!currentTaskId.value) {
+    ElMessage.warning('请先打开审核任务')
+    return
+  }
+  parsedTextDialogVisible.value = true
+  parsedTextLoading.value = true
+  try {
+    const response = await reviewAPI.getParsedText(currentTaskId.value)
+    parsedTextMeta.value = response.data || null
+    parsedTextContent.value = response.data?.content || ''
+  } catch (error) {
+    ElMessage.error(`加载解析文本失败: ${getAPIErrorMessage(error)}`)
+  } finally {
+    parsedTextLoading.value = false
+  }
+}
+
+async function compareGoldAnswer(options) {
+  if (!currentTaskId.value) {
+    ElMessage.warning('请先打开审核任务')
+    return
+  }
+  const file = options.file
+  if (!file || !/\.xlsx?$/i.test(file.name || '')) {
+    ElMessage.warning('请上传 Excel 标准答案文件')
+    return
+  }
+  goldCompareDialogVisible.value = true
+  goldCompareLoading.value = true
+  goldCompareResult.value = null
+  try {
+    const response = await reviewAPI.compareGold(currentTaskId.value, file)
+    goldCompareResult.value = response.data
+    ElMessage.success('标准答案对比完成')
+  } catch (error) {
+    ElMessage.error(`标准答案对比失败: ${getAPIErrorMessage(error)}`)
+  } finally {
+    goldCompareLoading.value = false
+  }
+}
+
 async function downloadReviewResultByDoc(document) {
   const status = docReviewStatus[document.id]
   if (!status || !status.review_id) {
@@ -1164,6 +1378,47 @@ function removeLocalIssues(taskId, issueIds) {
   taskIssues[taskId] = (taskIssues[taskId] || []).filter(issue => !removeIds.has(issue.id))
   issues.value = issues.value.filter(issue => !removeIds.has(issue.id))
   selectedIssueIds.value = selectedIssueIds.value.filter(id => !removeIds.has(id))
+}
+
+function normalizeIssueText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+function similarIssueSignature(issue) {
+  return [
+    normalizeIssueText(issue.rule),
+    normalizeIssueText(issue.category),
+    normalizeIssueText(issue.suggestion || issue.description)
+  ].join('|')
+}
+
+async function markSimilarIssuesFalsePositive(issue) {
+  const signature = similarIssueSignature(issue)
+  const similarIssues = filteredDialogIssues.value.filter(item => {
+    const status = item.status || 'pending'
+    return status === 'pending' && similarIssueSignature(item) === signature
+  })
+
+  if (similarIssues.length === 0) {
+    ElMessage.info('没有待处理的同类问题')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(`将 ${similarIssues.length} 条同类问题标记为误报, 是否继续?`, '同类误报', {
+      confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning'
+    })
+  } catch { return }
+
+  try {
+    const ids = similarIssues.map(item => item.id)
+    const judgments = ids.map(id => ({ issue_id: id, status: 'false_positive' }))
+    const res = await reviewAPI.batchJudge(currentTaskId.value, judgments)
+    removeLocalIssues(currentTaskId.value, ids)
+    ElMessage.success(`已标记 ${res.data.updated} 条同类问题为误报`)
+  } catch (err) {
+    ElMessage.error('同类误报失败: ' + (err.response?.data?.detail || err.message))
+  }
 }
 
 function escapeRegexLiteral(text) {
@@ -1255,6 +1510,21 @@ async function batchSetStatus(status) {
 
 // 一键确认所有未判定问题
 async function batchConfirmAll(taskId) {
+  if (!taskId) {
+    ElMessage.warning('请先打开审核任务')
+    return
+  }
+
+  const task = reviews.value.find(r => r.id === taskId)
+  if (task && task.status !== 'completed') {
+    ElMessage.warning('任务完成后才能一键确认')
+    return
+  }
+
+  if (taskIssues[taskId] === undefined) {
+    await loadReviewIssues(taskId)
+  }
+
   const list = taskIssues[taskId] || []
   const pending = list.filter(i => !i.status || i.status === 'pending')
   if (pending.length === 0) {
@@ -1325,6 +1595,10 @@ async function downloadReviewResult(row) {
 
 function onRuleSelectionChange(rows) {
   selectedRules.value = rows.map(row => row.id)
+}
+
+function languageLabel(language) {
+  return { cn: '中文', en: '英文', both: '中英通用' }[language] || language || '-'
 }
 
 function onIssueSelectionChange(rows) {
@@ -1544,15 +1818,56 @@ function highlightIssue(issue) {
 function highlightOriginalText(context, originalText) {
   if (!context && !originalText) return '-'
   
-  let text = context || originalText || ''
+  const text = context || originalText || ''
+  const escapedText = escapeHtml(text)
   
-  if (originalText && text.includes(originalText)) {
-    const escaped = originalText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const regex = new RegExp(`(${escaped})`, 'gi')
-    text = text.replace(regex, '<span class="highlight-problem">$1</span>')
+  if (!originalText) {
+    return escapedText
   }
   
-  return text
+  const exactRegex = new RegExp(`(${escapeRegExp(originalText)})`, 'gi')
+  if (exactRegex.test(text)) {
+    return highlightMatches(text, exactRegex)
+  }
+
+  const compactOriginal = String(originalText).replace(/\s+/g, '')
+  if (compactOriginal.length > 1 && compactOriginal.length <= 80) {
+    const flexiblePattern = compactOriginal.split('').map(escapeRegExp).join('\\s*')
+    const flexibleRegex = new RegExp(`(${flexiblePattern})`, 'gi')
+    if (flexibleRegex.test(text)) {
+      return highlightMatches(text, flexibleRegex)
+    }
+  }
+
+  return escapedText
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function highlightMatches(text, regex) {
+  regex.lastIndex = 0
+  let result = ''
+  let lastIndex = 0
+  for (const match of String(text).matchAll(regex)) {
+    const matchText = match[0]
+    const matchIndex = match.index ?? 0
+    result += escapeHtml(String(text).slice(lastIndex, matchIndex))
+    result += `<span class="highlight-problem">${escapeHtml(matchText)}</span>`
+    lastIndex = matchIndex + matchText.length
+  }
+  result += escapeHtml(String(text).slice(lastIndex))
+  return result
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 onUnmounted(() => {
@@ -1662,6 +1977,14 @@ onUnmounted(() => {
   color: #606266;
   line-height: 1.6;
   word-break: break-all;
+}
+
+.suggestion-wrap {
+  display: block;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
 }
 
 .report-content {
@@ -1827,5 +2150,52 @@ onUnmounted(() => {
   padding: 1px 4px;
   border-radius: 3px;
   border: 1px solid #fbcfe8;
+}
+
+.gold-upload {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.parsed-text-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.gold-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 12px;
+}
+
+.gold-summary-card {
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #f5f7fa;
+  border: 1px solid #ebeef5;
+}
+
+.gold-label {
+  font-size: 12px;
+  color: #909399;
+}
+
+.gold-value {
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 700;
+  color: #303133;
+}
+
+.gold-tabs {
+  margin-top: 12px;
+}
+
+@media (max-width: 900px) {
+  .gold-summary-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
 }
 </style>
