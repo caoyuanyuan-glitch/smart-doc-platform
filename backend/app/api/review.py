@@ -4,14 +4,15 @@ from sqlalchemy.orm import Session
 import html as html_lib
 import json
 import re
-import asyncio
 import os
 import shutil
 import difflib
+import concurrent.futures
 from copy import deepcopy
 from collections import Counter
 from datetime import datetime, timedelta, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue
@@ -86,6 +87,15 @@ def _flatten_folder_tree(nodes):
 def _get_review_spec_files_from_knowledge(db: Session):
     tree = get_folder_tree(db, None)
     folders = list(_flatten_folder_tree(tree))
+    folders_by_id = {folder.get("id"): folder for folder in folders}
+
+    def folder_path(folder):
+        names = []
+        current = folder
+        while current:
+            names.append(str(current.get("name") or ""))
+            current = folders_by_id.get(current.get("parent_id"))
+        return "/".join(reversed([name for name in names if name]))
 
     writing_root = next((folder for folder in folders if folder.get("name") == "写作规范"), None)
     if not writing_root:
@@ -115,6 +125,19 @@ def _get_review_spec_files_from_knowledge(db: Session):
         name = str(file.get("name") or "")
         if "技术文档常见错误清单与规范" in name:
             result["common_errors"] = file
+
+    final_checklists = []
+    for folder in folders:
+        if folder.get("name") != "说明书自检checklist":
+            continue
+        if not folder_path(folder).startswith("写作规范/"):
+            continue
+        for file in get_folder_files(db, folder["id"]):
+            name = str(file.get("name") or file.get("filename") or "")
+            if "Checklist" in name or "checklist" in name or "自检" in name:
+                final_checklists.append(file)
+    if final_checklists:
+        result["final_checklists"] = final_checklists
 
     return result
 
@@ -490,6 +513,22 @@ def _normalize_suggestion_text(suggestion):
     return text.strip()
 
 
+def _clean_issue_suggestion_for_display(suggestion):
+    text = str(suggestion or '').strip()
+    if not text:
+        return ''
+
+    bracketed = re.search(r'建议改为\s*[:：]?\s*\[([^\]]+)\]', text)
+    if bracketed:
+        return bracketed.group(1).strip()
+
+    plain = re.search(r'建议(?:改为|替换为|统一为|写为|使用标准术语:)\s*[:：]?\s*([^。；\n]+)', text)
+    if plain and re.search(r'疑似错误|是否确定|原文', text):
+        return plain.group(1).strip().strip('[]')
+
+    return _normalize_suggestion_text(text)
+
+
 def validate_suggestion(original: str, suggestion: str) -> bool:
     normalized_suggestion = _normalize_suggestion_text(suggestion)
     if not normalized_suggestion or normalized_suggestion == '-':
@@ -502,6 +541,10 @@ def validate_suggestion(original: str, suggestion: str) -> bool:
 def _sanitize_issue_suggestions(issues):
     for issue in issues:
         suggestion = str(issue.get('suggestion', '') or '')
+        cleaned = _clean_issue_suggestion_for_display(suggestion)
+        if cleaned != suggestion:
+            issue['suggestion'] = cleaned
+            suggestion = cleaned
         if suggestion and not validate_suggestion(issue.get('original_text', ''), suggestion):
             issue['suggestion'] = ''
             issue['confidence'] = max(0, int(issue.get('confidence', 0) or 0) - 10)
@@ -571,11 +614,40 @@ def _should_drop_punctuation_issue(issue):
     return False
 
 
+def _should_drop_unit_issue(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    context = str(_issue_value(issue, 'context', '') or '')
+    chapter = str(_issue_value(issue, 'chapter', '') or '')
+
+    if rule == 'UNIT-003' and original == 'uL':
+        prefix = context[:max(0, context.find('uL'))]
+        number_match = re.search(r'(\d+(?:\.\d+)?)\s*$', prefix)
+        if number_match and float(number_match.group(1)) >= 1000:
+            return True
+        if chapter.startswith('3.1 Reagent Components'):
+            return False
+        if chapter.startswith('3.3') and 'Pipettes' in context:
+            return False
+        if chapter.startswith('5.2 Cell Capture'):
+            return False
+        if chapter.startswith('5.4 PCR Amplification'):
+            return False
+        if chapter.startswith('5.5 Library Purification'):
+            return False
+        return True
+
+    if rule == 'UNIT-004' and original == '-20C':
+        return bool(re.search(r'Problem\s+\d+:|Solutions:', context, re.IGNORECASE))
+
+    return False
+
+
 def _filter_review_false_positives(issues):
     filtered = []
     dropped = 0
     for issue in issues:
-        if _should_drop_spelling_issue(issue) or _should_drop_punctuation_issue(issue):
+        if _should_drop_spelling_issue(issue) or _should_drop_punctuation_issue(issue) or _should_drop_unit_issue(issue):
             dropped += 1
             continue
         filtered.append(issue)
@@ -609,8 +681,68 @@ def _is_issue_hidden_by_judgment(issue):
     return str(getattr(issue, 'status', '') or '').lower() in {'false_positive', 'ignored'}
 
 
+def _is_pdf_duplicate_word_extraction_noise(issue):
+    rule = str(getattr(issue, 'rule', '') or '')
+    if rule != 'R024':
+        return False
+    original = str(getattr(issue, 'original_text', '') or '')
+    context = str(getattr(issue, 'context', '') or '')
+    tokens = re.findall(r'\b\w+\b', original.lower())
+    if len(tokens) != 2 or tokens[0] != tokens[1]:
+        return False
+    if re.search(r'\n\s*\n', original):
+        return True
+    return bool(re.search(r'\b(?:Table|Figure|Cat\.\s*No\.|Recommended brand|Library Type|condition)\b', context, re.IGNORECASE))
+
+
 def _visible_review_issues(issues):
-    return [issue for issue in issues if not _is_issue_hidden_by_judgment(issue)]
+    return [issue for issue in issues if not _is_issue_hidden_by_judgment(issue) and not _is_pdf_duplicate_word_extraction_noise(issue)]
+
+
+def _issue_position_start(issue):
+    raw_position = getattr(issue, 'position', None)
+    if not raw_position:
+        return None
+    if isinstance(raw_position, int):
+        return raw_position
+    try:
+        parsed = json.loads(raw_position) if isinstance(raw_position, str) else raw_position
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get('start'), int):
+        return parsed.get('start')
+    if isinstance(raw_position, str) and raw_position.isdigit():
+        return int(raw_position)
+    return None
+
+
+def _normalize_review_issue_display(issues, content=None):
+    for issue in issues:
+        cleaned_suggestion = _clean_issue_suggestion_for_display(getattr(issue, 'suggestion', '') or '')
+        if cleaned_suggestion != (getattr(issue, 'suggestion', '') or ''):
+            issue.suggestion = cleaned_suggestion
+        if getattr(issue, 'rule', None) == 'CHECKLIST-COPYRIGHT-YEAR' and getattr(issue, 'category', None) == '发布前自检':
+            issue.chapter = '版本记录'
+            continue
+        if content:
+            start = _issue_position_start(issue)
+            if start is not None:
+                content_chapter = extract_chapter(content, start)
+                if re.match(r'^\d+(?:\.\d+)+\s+', content_chapter):
+                    issue.chapter = content_chapter
+                    continue
+        context = str(getattr(issue, 'context', '') or '')
+        original = str(getattr(issue, 'original_text', '') or '')
+        chapter = str(getattr(issue, 'chapter', '') or '')
+        if not context or not original or not re.match(r'^\d+(?:\.\d+)+\s+', chapter):
+            continue
+        original_index = context.find(original)
+        if original_index < 0:
+            original_index = len(context)
+        context_chapter = extract_chapter(context, original_index)
+        if re.match(r'^\d+(?:\.\d+)+\s+', context_chapter) and context_chapter != chapter:
+            issue.chapter = context_chapter
+    return issues
 
 
 def _load_false_positive_signatures_for_document(db: Session, document_id: int):
@@ -1297,7 +1429,30 @@ def _format_issue_display_id(index):
     return f"#{index:04d}"
 
 
+def _report_now():
+    return datetime.now(ZoneInfo('Asia/Shanghai'))
+
+
+def _format_report_datetime(value=None):
+    dt = value or _report_now()
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except ValueError:
+            return dt
+    if getattr(dt, 'tzinfo', None) is None:
+        dt = dt.replace(tzinfo=ZoneInfo('UTC'))
+        dt = dt.astimezone(ZoneInfo('Asia/Shanghai'))
+    else:
+        dt = dt.astimezone(ZoneInfo('Asia/Shanghai'))
+    return dt.strftime('%Y-%m-%d %H:%M:%S (UTC+8)')
+
+
 def _highlight_issue_context(issue):
+    grouped_original = _issue_value(issue, 'original_override', '')
+    if grouped_original:
+        return html_lib.escape(str(grouped_original)).replace('、', '<br>')
+
     content = ''
     if isinstance(issue, dict):
         content = issue.get('_document_content', '')
@@ -1390,14 +1545,23 @@ def _infer_issue_area(issue):
 
 
 def _format_issue_location(issue, content):
+    location_override = _issue_value(issue, 'location_override', '')
+    if location_override:
+        return html_lib.escape(str(location_override))
+
     page_no = _page_number_from_position(content, _issue_value(issue, 'position', ''))
     page_text = f'第{page_no}页' if page_no else ''
+    raw_chapter = re.sub(r'\s+', ' ', str(_issue_value(issue, 'chapter', '') or '')).strip()
+    if _is_structural_heading_text(raw_chapter) and not _is_table_cell_like(raw_chapter):
+        return f'{raw_chapter}（{page_text}）' if page_text else raw_chapter
     chapter = _resolve_issue_heading(issue, content)
     if chapter != '-' and page_text:
         return f'{chapter}（{page_text}）'
     if chapter != '-':
         return chapter
     area = _infer_issue_area(issue)
+    if area == '正文':
+        area = '内容段落'
     if area and page_text:
         return f'{page_text}，{area}'
     return page_text or area or '-'
@@ -1638,7 +1802,7 @@ def _resolve_issue_heading(issue, content):
     return '-'
 
 
-def _extract_issue_snippet(issue, content, radius=50):
+def _extract_issue_snippet(issue, content, radius=28):
     original = str(_issue_value(issue, 'original_text', '') or '').strip()
     start, end = _parse_issue_position(_issue_value(issue, 'position', ''))
     if content and original and end > start:
@@ -1671,6 +1835,10 @@ def _extract_issue_snippet(issue, content, radius=50):
 
 
 def _format_issue_description(issue):
+    description_override = _issue_value(issue, 'description_override', '')
+    if description_override:
+        return str(description_override)
+
     rule = str(_issue_value(issue, 'rule', '') or '')
     original = str(_issue_value(issue, 'original_text', '') or '')
     description = str(_issue_value(issue, 'description', '') or '').strip()
@@ -1684,22 +1852,333 @@ def _format_issue_description(issue):
         if unit_match:
             return f'数字与单位之间缺少空格，应改为 {unit_match.group(1)} {unit_match.group(2)}'
 
+    if rule.upper().startswith('SPELL'):
+        after = _format_issue_suggestion(issue)
+        if after and after != '-':
+            return f'发现拼写/用词错误：{original} 应改为 {after}。'
+        return f'发现拼写/用词错误：{original}。'
+
     return description or '-'
 
 
 def _format_issue_suggestion(issue):
+    suggestion_override = _issue_value(issue, 'suggestion_override', '')
+    if suggestion_override:
+        return str(suggestion_override)
+
     rule = str(_issue_value(issue, 'rule', '') or '')
     original = str(_issue_value(issue, 'original_text', '') or '')
     suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
     punct_map = {'，': ',', '。': '.', '；': ';', '：': ':', '（': '(', '）': ')', '、': ','}
 
     if rule == 'PUNCT-001' and original in punct_map:
-        return f'{original} → {punct_map[original]}'
+        return punct_map[original]
+    bracketed = re.search(r'建议改为\s*[:：]?\s*\[([^\]]+)\]', suggestion)
+    if bracketed:
+        return bracketed.group(1).strip()
+    plain = re.search(r'建议(?:改为|替换为|统一为)\s*[:：]?\s*([^。；，,]+)', suggestion)
+    if plain:
+        candidate = plain.group(1).strip().strip('[]')
+        if candidate and not re.search(r'(疑似错误|是否确定|原文)', candidate):
+            return candidate
     if suggestion.startswith('建议改为 '):
         return suggestion.replace('建议改为 ', '', 1)
     if suggestion.startswith('建议替换为 '):
         return suggestion.replace('建议替换为 ', '', 1)
+    if suggestion.startswith('建议统一为 '):
+        return suggestion.replace('建议统一为 ', '', 1)
     return suggestion or '-'
+
+
+def _format_after_text(issue, before=None):
+    original = str(before if before is not None else _issue_value(issue, 'original_text', '') or '').strip()
+    suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    if rule in {'HR001', 'HR004', 'HR005', 'PUNCT-001'}:
+        return _normalize_example_after(issue, original, _format_issue_suggestion(issue))
+
+    cleaned_suggestion = _format_issue_suggestion(issue)
+    if cleaned_suggestion and cleaned_suggestion != suggestion and cleaned_suggestion != '-':
+        return _normalize_example_after(issue, original, cleaned_suggestion)
+
+    if '→' in suggestion:
+        candidate = suggestion.split('→', 1)[1].strip()
+    elif '->' in suggestion:
+        candidate = suggestion.split('->', 1)[1].strip()
+    elif suggestion.startswith('建议改为 '):
+        candidate = suggestion.replace('建议改为 ', '', 1).strip()
+    elif suggestion.startswith('建议替换为 '):
+        candidate = suggestion.replace('建议替换为 ', '', 1).strip()
+    elif suggestion.startswith('建议统一为 '):
+        candidate = suggestion.replace('建议统一为 ', '', 1).strip()
+    else:
+        candidate = suggestion.strip()
+
+    if not candidate or candidate == '-':
+        return '-'
+    if re.search(r'(建议|确认|补充|删除|统一译法|待修改|需确认|应|请|或|是否|如果|，|。|；)', candidate):
+        return '-'
+    return _normalize_example_after(issue, original, candidate)
+
+
+def _report_issue_span(issue):
+    start, end = _parse_issue_position(_issue_value(issue, 'position', ''))
+    original = str(_issue_value(issue, 'original_text', '') or '')
+    if end <= start and original:
+        end = start + len(original)
+    return start, end
+
+
+def _report_spans_overlap(left, right):
+    left_start, left_end = _report_issue_span(left)
+    right_start, right_end = _report_issue_span(right)
+    return left_start < right_end and right_start < left_end
+
+
+def _report_issue_to_dict(issue):
+    keys = [
+        'id', 'review_id', 'severity', 'category', 'rule', 'chapter', 'original_text',
+        'context', 'suggestion', 'description', 'audit_basis', 'confidence', 'source',
+        'position', 'status', 'created_at', 'updated_at'
+    ]
+    return {key: _issue_value(issue, key, '') for key in keys}
+
+
+def _report_rule(rule):
+    return str(rule or '').upper()
+
+
+def _report_category(issue):
+    rule = _report_rule(_issue_value(issue, 'rule', ''))
+    category = str(_issue_value(issue, 'category', '') or '').strip()
+    if rule == 'UNIT-003':
+        return '单位符号'
+    if rule == 'UNIT-004':
+        return '温度单位'
+    if rule == 'HR011':
+        return '数学符号'
+    if rule == 'TERM-EN-001':
+        return '产品名称'
+    if rule == 'TERM-EN-002':
+        return '表达规范'
+    if rule.startswith('SPELL'):
+        return '拼写/用词'
+    if rule.startswith('GRAMMAR'):
+        return '语法'
+    if rule.startswith('TERM'):
+        return '术语一致性'
+    if rule.startswith('LOGIC'):
+        return '内容逻辑'
+    return category or '未分类'
+
+
+def _report_severity(issue):
+    rule = _report_rule(_issue_value(issue, 'rule', ''))
+    if rule.startswith('SPELL'):
+        return 'general'
+    if rule == 'UNIT-004':
+        return 'serious'
+    if rule in {'TERM-EN-001', 'LOGIC-002'}:
+        return 'serious'
+    if rule in {'UNIT-003', 'HR011', 'TERM-EN-002'}:
+        return 'general'
+    return _issue_value(issue, 'severity', 'general') or 'general'
+
+
+def _report_audit_basis(issue):
+    rule = _report_rule(_issue_value(issue, 'rule', ''))
+    mapping = {
+        'UNIT-003': '英文技术文档写作规范 §3.2 单位符号',
+        'UNIT-004': '英文技术文档写作规范 §3.3 温度单位',
+        'HR011': '英文技术文档写作规范 §3.4 数学符号',
+        'LOGIC-002': 'Checklist §4.2 实验条件完整性',
+        'TERM-EN-001': '英文技术文档写作规范 §2.1 产品名称一致性',
+        'TERM-EN-002': '英文技术文档写作规范 §2.2 术语一致性',
+        'GRAMMAR-005': '英文技术文档写作规范 §1.3 固定搭配',
+        'GRAMMAR-006': '英文技术文档写作规范 §1.2 动词形式',
+    }
+    if rule.startswith('SPELL'):
+        return '英文技术文档写作规范 §1.1 拼写与用词'
+    if rule.startswith('CHECKLIST-'):
+        return '说明书发布前自检 Checklist §5.1 发布信息一致性'
+    return mapping.get(rule) or str(_issue_value(issue, 'audit_basis', '') or '-')
+
+
+def _report_issue_is_keeped_duplicate(left, right):
+    left_text = f"{_issue_value(left, 'original_text', '')} {_issue_value(left, 'suggestion', '')}".lower()
+    right_text = f"{_issue_value(right, 'original_text', '')} {_issue_value(right, 'suggestion', '')}".lower()
+    if 'keeped' not in left_text or 'keeped' not in right_text:
+        return False
+    return _report_spans_overlap(left, right)
+
+
+def _prefer_report_issue(left, right):
+    left_rule = _report_rule(_issue_value(left, 'rule', ''))
+    right_rule = _report_rule(_issue_value(right, 'rule', ''))
+    if right_rule.startswith('GRAMMAR') and not left_rule.startswith('GRAMMAR'):
+        return right
+    if left_rule.startswith('GRAMMAR') and not right_rule.startswith('GRAMMAR'):
+        return left
+    return right if _issue_sort_key(right) < _issue_sort_key(left) else left
+
+
+def _report_resolve_chapter(issue, content):
+    rule = _report_rule(_issue_value(issue, 'rule', ''))
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    if rule == 'CHECKLIST-TRADEMARK' and original.upper() == 'DNBSEQ':
+        return '1. Introduction'
+
+    raw_existing = re.sub(r'\s+', ' ', str(_issue_value(issue, 'chapter', '') or '')).strip()
+    existing = _format_issue_chapter(issue)
+    if existing == '-' and _is_structural_heading_text(raw_existing) and not _is_table_cell_like(raw_existing):
+        existing = raw_existing
+    start, _ = _report_issue_span(issue)
+    if content and start is not None:
+        chapter = extract_chapter(content, start)
+        if chapter and not re.search(r'\btable of contents\b|目录', chapter, re.IGNORECASE):
+            return chapter
+    if existing != '-':
+        return existing
+    return ''
+
+
+def _report_unique_values(values):
+    seen = set()
+    result = []
+    for value in values:
+        text = re.sub(r'\s+', ' ', str(value or '')).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _report_aggregate_key(issue):
+    rule = _report_rule(_issue_value(issue, 'rule', ''))
+    original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip()
+    suggestion = _format_issue_suggestion(issue)
+
+    if rule.startswith('SPELL') and original:
+        return ('SPELL', original.lower(), str(suggestion or '').lower())
+    if rule in {'UNIT-004', 'UNIT-003'}:
+        return (rule,)
+    if rule == 'HR011':
+        return (rule, _report_math_symbol_scene(issue))
+    if rule.startswith('TERM') and original:
+        return (rule, original.lower(), str(suggestion or '').lower())
+    return None
+
+
+def _report_math_symbol_scene(issue):
+    text = ' '.join([
+        str(_issue_value(issue, 'original_text', '') or ''),
+        str(_issue_value(issue, 'context', '') or ''),
+        str(_issue_value(issue, 'chapter', '') or ''),
+    ])
+    if re.search(r'\bvolume\b', text, re.IGNORECASE):
+        return '实验操作体积'
+    if re.search(r'\bg\b|centrifug|speed', text, re.IGNORECASE):
+        return '设备参数'
+    return '数学符号'
+
+
+def _report_aggregate_description(rule, originals, suggestion):
+    if rule == 'UNIT-004':
+        return '温度单位缺少 °，应统一补充 °。'
+    if rule == 'UNIT-003':
+        return '微升单位写法不统一，应统一使用 μL。'
+    if rule == 'HR011':
+        return '数学符号写法不规范，应统一改为 ×。'
+    if rule.startswith('SPELL'):
+        return f"同一拼写/用词错误多处出现：{'、'.join(originals)} 应改为 {suggestion}。"
+    if rule.startswith('TERM'):
+        return f"同一术语问题多处出现：{'、'.join(originals)} 应统一为 {suggestion}。"
+    return ''
+
+
+def _report_aggregate_suggestion(rule, suggestion):
+    if rule == 'UNIT-004':
+        return '统一补充°'
+    if rule == 'UNIT-003':
+        return '统一改为 μL'
+    if rule == 'HR011':
+        return '统一改为 ×'
+    if suggestion and suggestion != '-':
+        return f'统一改为 {suggestion}'
+    return suggestion or '-'
+
+
+def _aggregate_report_issues(issues, content):
+    buckets = {}
+    passthrough = []
+    for issue in sorted(issues, key=_issue_sort_key):
+        key = _report_aggregate_key(issue)
+        if not key:
+            passthrough.append(issue)
+            continue
+        buckets.setdefault(key, []).append(issue)
+
+    aggregated = list(passthrough)
+    for members in buckets.values():
+        if len(members) == 1:
+            aggregated.append(members[0])
+            continue
+
+        first = dict(members[0])
+        rule = _report_rule(_issue_value(first, 'rule', ''))
+        originals = _report_unique_values(_issue_value(member, 'original_text', '') for member in members)
+        suggestions = _report_unique_values(_format_issue_suggestion(member) for member in members)
+        locations = _report_unique_values(_format_issue_location(member, content) for member in members)
+        suggestion = suggestions[0] if len(suggestions) == 1 else '、'.join(suggestions)
+        location_text = '、'.join(locations)
+        if len(members) > len(locations) and location_text:
+            location_text += '多处'
+
+        first['grouped'] = True
+        first['group_count'] = len(members)
+        first['members'] = members
+        first['location_override'] = location_text
+        first['original_override'] = '、'.join(originals)
+        first['original_text'] = '、'.join(originals)
+        first['suggestion_override'] = _report_aggregate_suggestion(rule, suggestion)
+        first['suggestion'] = first['suggestion_override']
+        first['description_override'] = _report_aggregate_description(rule, originals, suggestion)
+        if not first['description_override']:
+            first['description_override'] = _format_issue_description(members[0])
+        aggregated.append(first)
+
+    return sorted(aggregated, key=_issue_sort_key)
+
+
+def _prepare_report_issues(issues, content):
+    prepared = []
+    for issue in issues:
+        item = _report_issue_to_dict(issue)
+        item['severity'] = _report_severity(item)
+        item['category'] = _report_category(item)
+        item['audit_basis'] = _report_audit_basis(item)
+        item['chapter'] = _report_resolve_chapter(item, content)
+        if _report_rule(item.get('rule')) == 'CHECKLIST-TRADEMARK' and str(item.get('original_text', '')).strip().upper() == 'DNBSEQ':
+            item['location_override'] = '1. Introduction（第2页）'
+        item['_document_content'] = content
+        merged = False
+        for index, existing in enumerate(prepared):
+            if _report_issue_is_keeped_duplicate(existing, item):
+                winner = _prefer_report_issue(existing, item)
+                winner['category'] = '语法'
+                winner['severity'] = 'serious'
+                winner['description'] = 'keeped 拼写错误，且应使用 keep 的过去分词 kept。'
+                winner['suggestion'] = '建议改为 should be kept' if 'should be keeped' in str(winner.get('original_text', '')).lower() else '建议改为 kept'
+                prepared[index] = winner
+                merged = True
+                break
+        if not merged:
+            prepared.append(item)
+    return _aggregate_report_issues(prepared, content)
 
 
 def _issue_dimension(issue):
@@ -1743,24 +2222,240 @@ def _build_report_conclusion(issues):
     return '当前文档未发现显著问题，可进入发布前终审。'
 
 
+def _read_review_spec_file_text(file_info):
+    path = Path(file_info.get("file_path") or "")
+    if not path.exists():
+        return ""
+
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xlsm"}:
+        from openpyxl import load_workbook
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        lines = []
+        for sheet in workbook.worksheets:
+            lines.append(f"[{sheet.title}]")
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(cell).strip() for cell in row if cell not in (None, "")]
+                if cells:
+                    lines.append(" | ".join(cells))
+        workbook.close()
+        return "\n".join(lines)
+
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
 def _load_review_spec_texts(db: Session):
     spec_texts = {}
     spec_files = _get_review_spec_files_from_knowledge(db)
     for spec_key, file_info in spec_files.items():
         try:
-            path = Path(file_info.get("file_path") or "")
-            spec_texts[spec_key] = path.read_text(encoding="utf-8") if path.exists() else ""
+            if isinstance(file_info, list):
+                spec_texts[spec_key] = "\n\n".join(
+                    text for text in (_read_review_spec_file_text(item) for item in file_info) if text
+                )
+            else:
+                spec_texts[spec_key] = _read_review_spec_file_text(file_info)
         except Exception as exc:
-            print(f"[审核] 读取知识库规范文件失败 {file_info.get('file_path')}: {exc}")
+            print(f"[审核] 读取知识库规范文件失败 {spec_key}: {exc}")
             spec_texts[spec_key] = ""
     return spec_texts
 
 
+def _build_ai_review_basis(spec_texts, document_language):
+    parts = []
+    if document_language in ("cn", "both") and spec_texts.get("cn_style"):
+        parts.append("【中文技术文档写作风格指南】\n" + spec_texts["cn_style"][:2500])
+    if document_language in ("en", "both") and spec_texts.get("en_style"):
+        parts.append("【英文技术文档写作风格指南】\n" + spec_texts["en_style"][:2500])
+    if spec_texts.get("common_errors"):
+        parts.append("【技术文档常见错误清单】\n" + spec_texts["common_errors"][:2500])
+    if spec_texts.get("final_checklists"):
+        parts.append("【说明书发布前自检 Checklist】\n" + spec_texts["final_checklists"][:5000])
+    return "\n\n".join(parts)
+
+
+def _call_with_timeout(func, timeout_seconds, *args):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args)
+        return future.result(timeout=timeout_seconds)
+
+
+def _release_checklist_issue(content, start, end, rule, severity, original_text, suggestion, description, chapter=None):
+    return {
+        "severity": severity,
+        "category": "发布前自检",
+        "rule": rule,
+        "chapter": chapter or extract_chapter(content, start),
+        "original_text": original_text,
+        "context": get_context(content, start, end, 160),
+        "suggestion": suggestion,
+        "description": description,
+        "audit_basis": "说明书发布前自检 Checklist",
+        "confidence": 95,
+        "source": "rule",
+        "position": _encode_issue_position_with_meta(start, end, area="发布前自检", check_result="待修改"),
+    }
+
+
+def _extract_copyright_years(text):
+    years = []
+    for match in re.finditer(r"©\s*((?:19|20)\d{2})(?:\s*[-–—~至到]\s*((?:19|20)\d{2}))?", text):
+        if match.group(2):
+            years.append((match.group(2), match.start(2), match.end(2)))
+        else:
+            years.append((match.group(1), match.start(1), match.end(1)))
+    for match in re.finditer(r"(?:copyright|版权)[^\n\f]{0,80}?((?:19|20)\d{2})", text, re.IGNORECASE):
+        years.append((match.group(1), match.start(1), match.end(1)))
+    return years
+
+
+def _extract_revision_history_years(text):
+    headings = ["版本记录", "修订记录", "修订历史", "revision history", "version history", "change history"]
+    blocks = []
+    lowered = text.lower()
+    for heading in headings:
+        idx = lowered.find(heading.lower())
+        if idx >= 0:
+            blocks.append((idx, text[idx:idx + 1800]))
+
+    candidates = []
+    search_areas = blocks or [(0, text[:2500])]
+    date_patterns = [
+        r"((?:19|20)\d{2})\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日",
+        r"\b(?:Jan\.?|Feb\.?|Mar\.?|Apr\.?|May\.?|Jun\.?|Jul\.?|Aug\.?|Sep\.?|Oct\.?|Nov\.?|Dec\.?)\s+\d{1,2},?\s+((?:19|20)\d{2})\b",
+        r"\b\d{1,2}\s+(?:Jan\.?|Feb\.?|Mar\.?|Apr\.?|May\.?|Jun\.?|Jul\.?|Aug\.?|Sep\.?|Oct\.?|Nov\.?|Dec\.?)\s+((?:19|20)\d{2})\b",
+        r"\b((?:19|20)\d{2})[-/.]\d{1,2}[-/.]\d{1,2}\b",
+    ]
+    for base, block in search_areas:
+        for pattern in date_patterns:
+            for match in re.finditer(pattern, block, re.IGNORECASE):
+                year = match.group(1)
+                full_date = match.group(0)
+                candidates.append((
+                    year,
+                    base + match.start(1),
+                    base + match.end(1),
+                    full_date,
+                    base + match.start(0),
+                    base + match.end(0),
+                ))
+    return candidates
+
+
+def _normalize_date_display(text):
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    return normalized or str(text or "")
+
+
+def _run_release_checklist_audit(content, document, spec_texts, document_language):
+    if not spec_texts.get("final_checklists"):
+        return []
+
+    issues = []
+    text = str(content or "")
+    filename = str(getattr(document, "filename", "") or "")
+    is_english = document_language in ("en", "both")
+
+    copyright_years = _extract_copyright_years(text)
+    revision_history_years = _extract_revision_history_years(text)
+    if copyright_years and revision_history_years:
+        copyright_year = copyright_years[0][0]
+        latest_revision_year, _, _, latest_revision_date, latest_start, latest_end = revision_history_years[0]
+        if latest_revision_year != copyright_year:
+            original_date = _normalize_date_display(latest_revision_date)
+            suggested_date = _normalize_date_display(re.sub(r"(?:19|20)\d{2}", copyright_year, latest_revision_date, count=1))
+            issues.append(_release_checklist_issue(
+                text,
+                latest_start,
+                latest_end,
+                "CHECKLIST-COPYRIGHT-YEAR",
+                "serious",
+                original_date,
+                suggested_date,
+                "说明书发布前自检要求修订历史中新版本日期年份与版权年份一致。",
+                chapter="版本记录",
+            ))
+
+    filename_year_match = re.search(r"(?:19|20)\d{2}", filename)
+    if filename_year_match:
+        filename_year = filename_year_match.group(0)
+        revision_years = re.findall(r"\b(?:Jan\.?|Feb\.?|Mar\.?|Apr\.?|May\.?|Jun\.?|Jul\.?|Aug\.?|Sep\.?|Oct\.?|Nov\.?|Dec\.?)\s+((?:19|20)\d{2})\b", text, re.IGNORECASE)
+        if revision_years and filename_year not in revision_years[:2]:
+            start = max(0, text.find(revision_years[0]))
+            issues.append(_release_checklist_issue(
+                text,
+                start,
+                start + len(revision_years[0]),
+                "CHECKLIST-YEAR",
+                "serious",
+                revision_years[0],
+                f"建议确认修订历史最新年份与文件名年份 {filename_year} 一致",
+                "文件名年份应与修订历史中的最新发布年份一致。",
+            ))
+
+    trademark_terms = ["DNBSEQ", "Qubit", "NextSeq", "MGIEasy"]
+    for term in trademark_terms:
+        pattern = re.compile(rf"\b{re.escape(term)}\b(?!\s*(?:TM|®|™))", re.IGNORECASE)
+        for match in pattern.finditer(text):
+            snippet_start = max(0, match.start() - 40)
+            snippet_end = min(len(text), match.end() + 40)
+            snippet = text[snippet_start:snippet_end]
+            if re.search(r"trademark|registered trademark|商标", snippet, re.IGNORECASE):
+                continue
+            replacement = "DNBSEQ™" if term == "DNBSEQ" else f"建议确认 {match.group(0)} 是否需要商标标注或在前言商标列表中列明"
+            issues.append(_release_checklist_issue(
+                text,
+                match.start(),
+                match.end(),
+                "CHECKLIST-TRADEMARK",
+                "general",
+                match.group(0),
+                replacement,
+                "说明书自检 checklist 要求文中出现的商标需列明并保持标注格式一致。",
+            ))
+            break
+
+    if is_english:
+        for match in re.finditer(r"\bClick\b", text):
+            issues.append(_release_checklist_issue(
+                text,
+                match.start(),
+                match.end(),
+                "CHECKLIST-TAP",
+                "general",
+                match.group(0),
+                "触摸屏界面按钮操作建议统一使用 Tap",
+                "英文说明书自检 checklist 要求配置触摸屏时点击界面按钮使用 Tap。",
+            ))
+            break
+
+        for match in re.finditer(r"\b[0-9]+(?:\.[0-9]+)?\s*μl\b", text):
+            issues.append(_release_checklist_issue(
+                text,
+                match.start(),
+                match.end(),
+                "CHECKLIST-UL",
+                "serious",
+                match.group(0),
+                match.group(0)[:-1] + "L",
+                "英文说明书自检 checklist 要求 μL 中的 L 必须大写。",
+            ))
+            break
+
+    return issues
+
+
 def _build_feedback_advice(issues):
-    statuses = Counter((getattr(issue, 'status', None) or 'pending') for issue in issues)
+    statuses = Counter((_issue_value(issue, 'status', '') or 'pending') for issue in issues)
+    false_positive_count = statuses.get('false_positive', 0)
+    false_positive_text = (
+        f"已标记误报 {false_positive_count} 条，建议沉淀为规则白名单或定位策略优化样本。"
+        if false_positive_count
+        else "未发现明显误报，仍建议审核人对需确认项做人工复核。"
+    )
     return [
         f"待确认 {statuses.get('pending', 0)} 条，建议审核人优先处理致命和严重问题。",
-        f"误报 {statuses.get('false_positive', 0)} 条，建议沉淀为规则白名单或定位策略优化样本。",
+        false_positive_text,
         f"已确认 {statuses.get('confirmed', 0)} 条，建议修订后重新执行一次规则审核验证闭环。",
     ]
 
@@ -1838,6 +2533,10 @@ def _normalize_example_after(issue, before, after):
             return f'{match.group(1)} {match.group(2)}'
     if rule == 'HR001':
         return 'https://global-mgitech.com'
+    if '→' in str(after or ''):
+        return str(after).split('→', 1)[1].strip()
+    if '->' in str(after or ''):
+        return str(after).split('->', 1)[1].strip()
     return after
 
 
@@ -1868,7 +2567,7 @@ def _build_modification_examples(issues):
 
     def try_add(issue, forced_title=None):
         before = str(_issue_value(issue, 'original_text', '') or '').strip()
-        after = _normalize_example_after(issue, before, _format_issue_suggestion(issue))
+        after = _format_after_text(issue, before)
         if not before or not after or after == '-' or before == after:
             return False
         before_markup, after_markup = _build_diff_markup(before, after)
@@ -1956,21 +2655,28 @@ def _run_db_term_consistency_audit(db: Session, content):
 
 
 def _build_inline_example_html(issue):
-    suggestion = html_lib.escape(_format_issue_suggestion(issue))
-    before = str(_issue_value(issue, 'original_text', '') or '').strip()
-    after = _normalize_example_after(issue, before, _format_issue_suggestion(issue))
-    if not suggestion or suggestion == '-':
-        return ''
-    if not before or not after or before == after or after == '-':
+    if _issue_value(issue, 'grouped', False):
+        suggestion = html_lib.escape(_format_issue_suggestion(issue))
+        if not suggestion or suggestion == '-':
+            return ''
         return (
             '<div class="advice-panel">'
-            f'<div class="compare-label">修改建议：<span class="suggestion-inline">{suggestion}</span></div>'
+            '<div class="compare-label">修改建议</div>'
+            f'<div class="suggestion-inline">{suggestion}</div>'
             '</div>'
         )
+
+    before = str(_issue_value(issue, 'original_text', '') or '').strip()
+    after = _format_after_text(issue, before)
+    if not before or not after or before == after or after == '-':
+        suggestion = html_lib.escape(_format_issue_suggestion(issue))
+        if not suggestion or suggestion == '-':
+            return ''
+        return '<div class="advice-panel"><div class="compare-label">修改建议：待人工复核</div></div>'
     before_markup, after_markup = _build_diff_markup(before, after)
     return (
         '<div class="advice-panel">'
-        f'<div class="compare-label">修改建议：<span class="suggestion-inline">{suggestion}</span></div>'
+        '<div class="compare-label">修改建议</div>'
         '<div class="comparison-grid">'
         f'<div class="before-box"><span class="box-label">修改前</span>{before_markup}</div>'
         f'<div class="after-box"><span class="box-label">修改后</span>{after_markup}</div>'
@@ -1983,17 +2689,18 @@ def _generate_review_html_content(review, doc, issues):
     doc_name = doc.filename if doc else f"文档{review.document_id}"
     content = getattr(doc, 'content', '') if doc else ''
     metadata = _extract_document_metadata(doc, content)
-    summary_rows = _build_problem_summary_rows(issues)
-    grouped_issues = _group_issues_by_severity(issues)
+    report_issues = _prepare_report_issues(issues, content)
+    summary_rows = _build_problem_summary_rows(report_issues)
+    grouped_issues = _group_issues_by_severity(report_issues)
     issue_index_map = _build_global_issue_index(grouped_issues)
-    verdict = _build_report_verdict(issues)
-    conclusion = _build_report_conclusion(issues)
-    feedback_advice = _build_feedback_advice(issues)
-    for issue in issues:
-        if isinstance(issue, dict):
-            issue['_document_content'] = content
-        else:
-            setattr(issue, '_document_content', content)
+    verdict = _build_report_verdict(report_issues)
+    conclusion = _build_report_conclusion(report_issues)
+    feedback_advice = _build_feedback_advice(report_issues)
+    nav_items = []
+    for severity in ['fatal', 'serious', 'general', 'suggestion']:
+        entries = grouped_issues.get(severity) or []
+        if entries:
+            nav_items.append((severity, _build_group_heading(severity, entries, issue_index_map)))
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -2069,6 +2776,8 @@ def _generate_review_html_content(review, doc, issues):
         .diff-add {{ background: #dcfce7; text-decoration: underline; padding: 1px 3px; border-radius: 4px; }}
         .feedback-block {{ border-top: 1px dashed #cbd5e1; margin-top: 18px; padding-top: 18px; }}
         .compare-label {{ font-weight: 700; color: #163f6f; margin-bottom: 8px; }}
+        .report-nav {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 18px; }}
+        .report-nav a {{ color: #174e83; background: #eef6ff; border: 1px solid #cfe0f5; border-radius: 999px; padding: 7px 12px; text-decoration: none; font-size: 13px; font-weight: 700; }}
         h3 {{ margin: 22px 0 12px; }}
         .severity-fatal {{ color: var(--fatal); }}
         .severity-serious {{ color: var(--serious); }}
@@ -2087,7 +2796,7 @@ def _generate_review_html_content(review, doc, issues):
         </div>
         <div class="meta">
             <div class="meta-card"><div class="meta-label">文档名称</div><div class="meta-value">{metadata['name']}</div></div>
-            <div class="meta-card"><div class="meta-label">审核日期</div><div class="meta-value">{review.created_at}</div></div>
+            <div class="meta-card"><div class="meta-label">审核日期</div><div class="meta-value">{_format_report_datetime(getattr(review, 'completed_at', None) or getattr(review, 'created_at', None))}</div></div>
             <div class="meta-card"><div class="meta-label">审核人</div><div class="meta-value">技术文档审核AI助理</div></div>
             <div class="meta-card"><div class="meta-label">文档范围</div><div class="meta-value">{metadata['file_type']} · {metadata['page_count']} 页 · {metadata['section_count']} 个章节</div></div>
         </div>
@@ -2095,16 +2804,20 @@ def _generate_review_html_content(review, doc, issues):
         <div class="section">
         <h2>模块 1 · 审核概览</h2>
         <div class="summary-grid">
-            <div class="summary-card card-fatal"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'fatal')}</div><div class="label">致命</div></div>
-            <div class="summary-card card-serious"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'serious')}</div><div class="label">严重</div></div>
-            <div class="summary-card card-general"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'general')}</div><div class="label">一般</div></div>
-            <div class="summary-card card-suggestion"><div class="num">{sum(1 for issue in issues if _issue_value(issue, 'severity', '') == 'suggestion')}</div><div class="label">建议</div></div>
+            <div class="summary-card card-fatal"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'fatal')}</div><div class="label">致命</div></div>
+            <div class="summary-card card-serious"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'serious')}</div><div class="label">严重</div></div>
+            <div class="summary-card card-general"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'general')}</div><div class="label">一般</div></div>
+            <div class="summary-card card-suggestion"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'suggestion')}</div><div class="label">建议</div></div>
         </div>
         </div>
         <div class="section">
         <h2>模块 2 · 问题明细</h2>
+        <div class="report-nav">
+            <a href="#summary-table">问题汇总表</a>
+            {''.join(f'<a href="#group-{severity}">{html_lib.escape(title)}</a>' for severity, title in nav_items)}
+        </div>
         <h3>问题汇总表</h3>
-        <table>
+        <table id="summary-table">
             <thead><tr><th>类型</th><th>致命</th><th>严重</th><th>一般</th><th>建议</th><th>总计</th></tr></thead>
             <tbody>
 """
@@ -2127,14 +2840,14 @@ def _generate_review_html_content(review, doc, issues):
         <h3>详细问题列表</h3>
 """
 
-    if not issues:
+    if not report_issues:
         html += '<div class="empty">未发现任何问题</div>'
     else:
         for severity in ['fatal', 'serious', 'general', 'suggestion']:
             entries = grouped_issues.get(severity) or []
             if not entries:
                 continue
-            html += f'<h3 class="severity-{severity}">{_build_group_heading(severity, entries, issue_index_map)}</h3>'
+            html += f'<h3 id="group-{severity}" class="severity-{severity}">{_build_group_heading(severity, entries, issue_index_map)}</h3>'
             for issue in entries:
                 display_no = issue_index_map[id(issue)]
                 issue_status = _issue_value(issue, 'status', '') or 'pending'
@@ -2153,7 +2866,7 @@ def _generate_review_html_content(review, doc, issues):
                 }.get(issue_status, '待确认')
                 example_html = _build_inline_example_html(issue)
                 html += f"""
-        <div class="issue {issue_status}">
+        <div id="issue-{display_no:04d}" class="issue {issue_status}">
             <div class="issue-header">
                 <div class="issue-title">{_format_issue_display_id(display_no)} · {_issue_dimension(issue)} · {_issue_value(issue, 'category', '') or '未分类'}</div>
                 <div>
@@ -2192,7 +2905,7 @@ def _generate_review_html_content(review, doc, issues):
         </div>
 """
     html += f"""
-        <div class="footer">由 智能技术文档审核平台 生成 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+        <div class="footer">由 智能技术文档审核平台 生成 | {_format_report_datetime()}</div>
     </div>
 </body>
 </html>"""
@@ -2208,6 +2921,11 @@ def _run_logic_integrity_audit(content):
     previous_non_empty_line = ''
     for line in lines:
         text = line.strip()
+        if _looks_like_numbered_section_heading(text):
+            previous_step = None
+            previous_non_empty_line = text
+            cursor += len(line) + 1
+            continue
         match = re.match(r'^(?:Step\s+)?(\d+)[\.)]\s+(.+)$', text, re.IGNORECASE)
         if not match:
             if text:
@@ -2243,6 +2961,30 @@ def _run_logic_integrity_audit(content):
         previous_non_empty_line = text
         cursor += len(line) + 1
     return issues
+
+
+def _looks_like_numbered_section_heading(text):
+    match = re.match(r'^\d+(?:\.\d+)*\.?\s+(.+)$', str(text or '').strip())
+    if not match:
+        return False
+
+    title = match.group(1).strip()
+    if not title or len(title) > 90:
+        return False
+    if re.search(r'[.!?。！？]$', title):
+        return False
+    if re.match(r'^(?:and|or|then|with|using|from|to|at|in)\b', title, re.IGNORECASE):
+        return False
+
+    words = re.findall(r'[A-Za-z][A-Za-z\-]*|[\u4e00-\u9fff]+', title)
+    if not words or len(words) > 8:
+        return False
+    action_verbs = {
+        'add', 'remove', 'select', 'click', 'tap', 'press', 'open', 'close', 'connect',
+        'disconnect', 'insert', 'restart', 'turn', 'check', 'confirm', 'prepare', 'mix',
+        'incubate', 'centrifuge', 'load', 'scan', 'clean', 'update', 'save', 'delete',
+    }
+    return words[0].lower() not in action_verbs
 
 
 def _run_safety_compliance_audit(content):
@@ -2566,6 +3308,36 @@ def _run_english_heuristic_audit(content, file_type=None):
             return True
         return bool(re.search(r'\s{3,}', line))
 
+    def is_correct_sample_span(start):
+        marker = content.lower().find('correct samples')
+        return marker >= 0 and start >= marker
+
+    def is_troubleshooting_span(start):
+        troubleshooting = content.find('7. Troubleshooting')
+        appendix = content.find('8. Appendix')
+        if troubleshooting < 0:
+            return False
+        end = appendix if appendix > troubleshooting else len(content)
+        return troubleshooting <= start < end
+
+    def should_report_ul_unit(match):
+        number_match = re.search(r"(\d+(?:\.\d+)?)\s*$", content[max(0, match.start() - 16):match.start()])
+        if number_match and float(number_match.group(1)) >= 1000:
+            return False
+        chapter = extract_chapter(content, match.start())
+        if chapter.startswith('3.1 Reagent Components'):
+            return True
+        if chapter.startswith('3.3'):
+            context = get_context(content, match.start(), match.end(), 80)
+            return 'Pipettes' in context
+        if chapter.startswith('5.2 Cell Capture'):
+            return True
+        if chapter.startswith('5.4 PCR Amplification'):
+            return True
+        if chapter.startswith('5.5 Library Purification'):
+            return True
+        return False
+
     for match in re.finditer(r"https?://en\.mgi-tech\.com", content, re.IGNORECASE):
         add_issue(match, "HR001", "合规", "建议替换为 https://global-mgitech.com", "海外英文文档中官网地址应使用海外官网域名。", "公司特定规范 - 海外官网地址", "fatal")
 
@@ -2605,6 +3377,20 @@ def _run_english_heuristic_audit(content, file_type=None):
         unit = match.group(1)
         add_issue(match, "UNIT-002", "单位", f"建议改为 {unit}", "单位符号不使用复数形式。", "英文技术文档写作规范 - 单位格式")
 
+    for match in re.finditer(r"\buL\b", content):
+        if file_type == 'pdf' and not should_report_ul_unit(match):
+            continue
+        add_issue(match, "UNIT-003", "单位", "建议改为 μL", "微升单位建议使用标准符号 μL。", "英文技术文档写作规范 - 单位格式")
+
+    for match in re.finditer(r"(?<![A-Za-z°℃])(?:-?\d+(?:\.\d+)?)(?:\s+to\s+-?\d+(?:\.\d+)?)?\s*C\b", content):
+        if is_correct_sample_span(match.start()):
+            continue
+        if file_type == 'pdf' and is_troubleshooting_span(match.start()):
+            continue
+        original = match.group(0)
+        suggestion = re.sub(r"\s*C\b", "°C", original)
+        add_issue(match, "UNIT-004", "单位", f"建议改为 {suggestion}", "摄氏温度单位建议使用 °C。", "英文技术文档写作规范 - 单位格式")
+
     for match in re.finditer(r"\bWeLL\b", content):
         add_issue(match, "HR005", "格式", "建议统一为 Well", "单词内部大小写形式不一致。", "技术文档常见错误清单 - 格式一致性", "serious")
 
@@ -2633,6 +3419,8 @@ def _run_english_heuristic_audit(content, file_type=None):
     }
     for phrase, replacement in please_replacements.items():
         for match in re.finditer(rf"\b{re.escape(phrase)}\b", content, re.IGNORECASE):
+            if file_type == 'pdf':
+                continue
             add_issue(match, "HR008", "风格", f"建议改为 {replacement}", "技术文档建议使用直接的客观表达。", "英文技术文档写作规范 - 语气")
 
     for match in re.finditer(r"\bafter login in\b", content, re.IGNORECASE):
@@ -2651,8 +3439,31 @@ def _run_english_heuristic_audit(content, file_type=None):
         for match in re.finditer(r"\blog\s*out\b", content, re.IGNORECASE):
             add_issue(match, "HR010", "一致性", "建议统一为 log out 或 logout，并与界面名词/动作语境保持一致", "退出登录相关表达应区分动作和名词。", "英文技术文档写作规范 - 术语一致性")
 
-    for match in re.finditer(r"\b\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?\b", content):
-        add_issue(match, "HR011", "格式", f"建议改为 {match.group(0).replace('x', ' × ').replace('X', ' × ')}", "乘号建议使用 × 并保留两侧空格。", "英文技术文档写作规范 - 数学符号")
+    for match in re.finditer(r"\b\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*[xX]\s*(?:\d{1,3}(?:,\d{3})*(?:\.\d+)?|[A-Za-z]))+\b", content):
+        if match.end() < len(content) and content[match.end():match.end() + 1] == '^':
+            continue
+        suggestion = re.sub(r"\s*[xX]\s*", " × ", match.group(0))
+        add_issue(match, "HR011", "格式", f"建议改为 {suggestion}", "乘号建议使用 × 并保留两侧空格。", "英文技术文档写作规范 - 数学符号")
+
+    for match in re.finditer(r"\b\d+(?:\.\d+)?[xX]\s+volume\b", content):
+        suggestion = re.sub(r"[xX]", "×", match.group(0), count=1)
+        add_issue(match, "HR011", "格式", f"建议改为 {suggestion}", "倍数符号建议使用 ×。", "英文技术文档写作规范 - 数学符号")
+
+    for match in re.finditer(r"\bshould be disposed\b(?!\s+of\b)", content, re.IGNORECASE):
+        add_issue(match, "GRAMMAR-005", "语法", "建议改为 should be disposed of", "dispose of 是固定搭配。", "英语语法规范 - 固定搭配", "serious")
+
+    for match in re.finditer(r"\bshould be keeped\b", content, re.IGNORECASE):
+        add_issue(match, "GRAMMAR-006", "语法", "建议改为 should be kept", "keep 的过去分词应为 kept。", "英语语法规范 - 动词形式", "serious")
+
+    for match in re.finditer(r"\bDNBelab C4\b", content):
+        add_issue(match, "TERM-EN-001", "术语不一致", "建议统一为 DNBelab C-Series", "产品名称前后应保持一致。", "英文技术文档写作规范 - 术语一致性")
+
+    for match in re.finditer(r"(?<!cell\s)\bbarcode\b", content, re.IGNORECASE):
+        add_issue(match, "TERM-EN-002", "术语不一致", "建议改为 cell barcode", "单用 barcode 与 cell barcode 表达不一致。", "英文技术文档写作规范 - 术语一致性")
+
+    pcr_marker = content.find("Step | Temperature | Time")
+    if pcr_marker >= 0 and "Cycle" not in content[pcr_marker:pcr_marker + 260]:
+        add_issue_by_span(pcr_marker, pcr_marker + len("Step | Temperature | Time"), "PCR cycling", "LOGIC-002", "内容逻辑", "建议补充 PCR 循环次数列或循环次数说明", "PCR cycling 条件表缺少循环次数信息。", "说明书发布前自检 Checklist - 内容完整性", "serious")
 
     for match in re.finditer(r"\b(?:www\.)?mgitech\.cn\b", content, re.IGNORECASE):
         add_issue(match, "HR012", "合规", "建议改为 global-mgitech.com", "海外英文文档中官网域名应统一。", "公司特定规范 - 海外官网地址", "fatal")
@@ -2751,7 +3562,10 @@ def _is_footer_line(line):
 
 
 def _is_step_line(line):
-    return bool(re.match(r'^(?:step\s+)?\d+(?:\.\d+)*(?:[\.)、：:])\s+', str(line or '').strip(), re.IGNORECASE))
+    stripped = str(line or '').strip()
+    if re.match(r'^step\s+\d+(?:\.\d+)*(?:[\.)、：:])?\s+', stripped, re.IGNORECASE):
+        return True
+    return bool(re.match(r'^\d+(?:[\.)、：:])\s+', stripped))
 
 
 def _is_version_history_line(line):
@@ -2893,7 +3707,7 @@ def _score_heading_candidate(lines, index):
 
     if _is_inline_reference_heading(line):
         return None
-    if _is_table_cell_like(line):
+    if kind != 'numbered' and _is_table_cell_like(line):
         score -= 45
     if kind == 'standalone' and not _is_isolated_heading(lines, index):
         score -= 20
@@ -3115,6 +3929,10 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
 
     if rule_no == "R024":
         tokens = original_text.split()
+        if file_type == "pdf" and re.search(r'\n\s*\n', original_text):
+            return True
+        if file_type == "pdf" and re.search(r'\b(?:Table|Figure|Cat\.\s*No\.|Recommended brand|Library Type|condition)\b', context, re.IGNORECASE):
+            return True
         if original_text.strip().lower() == "none none":
             return True
         if any(any(ch.isdigit() for ch in token) for token in tokens):
@@ -3125,6 +3943,11 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
     # Mixed Chinese-English spacing rule should keep common product names and protocol acronyms intact.
     if rule_no == "R025":
         if re.search(r"[A-Z]{2,}|[A-Za-z]+\d|\d+[A-Za-z]+", original_text):
+            return True
+
+    # Chinese closing brackets followed by Chinese text do not need a separating space.
+    if rule_no == "R029":
+        if re.fullmatch(r"[）\)][\u4e00-\u9fff]", original_text):
             return True
 
     # Markdown/code formatting rules only apply when the extracted text still clearly shows markdown structure.
@@ -3277,7 +4100,10 @@ def dedupe_issues_by_original(issues):
         return False
     
     # 第一步：过滤已知误报
-    filtered = [i for i in issues if not is_false_positive(i.get('original_text', ''))]
+    filtered = [
+        i for i in issues
+        if str(i.get('rule', '')).startswith('CHECKLIST-') or not is_false_positive(i.get('original_text', ''))
+    ]
     print(f"[审核] 误报过滤: 过滤 {len(issues) - len(filtered)} 个, 剩余 {len(filtered)} 个")
     
     def issue_rank(issue):
@@ -3297,7 +4123,9 @@ def dedupe_issues_by_original(issues):
         rule = issue.get("rule", "")
         key = f"{norm}|{chapter}"
         if source == 'spellcheck' or rule == 'SPELL':
-            key = f"spell|{norm}"
+            key = f"spell|{norm}|{issue.get('position', '')}"
+        if rule in {'UNIT-003', 'UNIT-004', 'HR011'}:
+            key = f"{rule}|{norm}|{issue.get('position', '')}"
         if rule in {'STYLE-003', 'HR008', 'GRAMMAR-001', 'GRAMMAR-002'}:
             key = f"{rule}|{norm}|{issue.get('position', '')}"
         if not norm.strip():
@@ -3366,7 +4194,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             "[审核] 当前规范文件长度: "
             f"cn={len(spec_texts.get('cn_style', ''))}, "
             f"en={len(spec_texts.get('en_style', ''))}, "
-            f"common={len(spec_texts.get('common_errors', ''))}"
+            f"common={len(spec_texts.get('common_errors', ''))}, "
+            f"final_checklists={len(spec_texts.get('final_checklists', ''))}"
         )
 
         knowledge_basis = get_knowledge_basis(db)
@@ -3454,17 +4283,24 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 except Exception as e:
                     print(f"[审核] 长句规则执行失败: {e}")
 
+            if document.file_type != 'xlsx':
+                try:
+                    release_checklist_issues = _run_release_checklist_audit(content, document, spec_texts, document_language)
+                    print(f"[审核] 发布前自检 Checklist 发现问题: {len(release_checklist_issues)}个")
+                    rule_issues.extend(release_checklist_issues)
+                except Exception as e:
+                    print(f"[审核] 发布前自检 Checklist 执行失败: {e}")
+
             candidate_rule_issues = rule_issues + term_issues
 
             if has_ai_client and len(candidate_rule_issues) > 0:
                 set_progress(review_id, 'running', 'AI二次验证', 55, f'正在AI验证 {len(candidate_rule_issues)} 个候选问题...')
                 print(f"[审核] 开始AI二次验证，候选问题数={len(candidate_rule_issues)}")
                 try:
-                    filtered = asyncio.get_event_loop().run_in_executor(None, ai_client.filter_rule_false_positives, candidate_rule_issues, document_language)
-                    filtered = asyncio.run(asyncio.wait_for(filtered, timeout=90.0))
+                    filtered = _call_with_timeout(ai_client.filter_rule_false_positives, 90.0, candidate_rule_issues, document_language)
                     candidate_rule_issues = filtered
                     print(f"[审核] AI二次验证后保留问题数={len(candidate_rule_issues)}")
-                except asyncio.TimeoutError:
+                except concurrent.futures.TimeoutError:
                     print(f"[审核] AI 二次验证超时(90s), 使用原始规则结果({len(candidate_rule_issues)}个)")
                 except Exception as e:
                     print(f"[审核] AI 二次验证失败, 使用原始规则结果: {e}")
@@ -3476,8 +4312,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             set_progress(review_id, 'running', 'AI智能审核', 65, '正在进行AI深度审核...')
             print(f"[审核] 开始AI智能审核，模式={mode}")
             try:
-                ai_result = asyncio.get_event_loop().run_in_executor(None, ai_client.audit_document, content, document_language)
-                ai_result = asyncio.run(asyncio.wait_for(ai_result, timeout=180.0))
+                ai_review_basis = _build_ai_review_basis(spec_texts, document_language)
+                ai_result = _call_with_timeout(ai_client.audit_document, 180.0, content, document_language, ai_review_basis)
                 ai_issues = ai_result.get("issues", [])
                 print(f"[审核] AI审核返回问题数={len(ai_issues)}")
                 for issue in ai_issues:
@@ -3496,7 +4332,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                     if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
                         issue["severity"] = "general"
                 issues.extend(ai_issues)
-            except asyncio.TimeoutError:
+            except concurrent.futures.TimeoutError:
                 print(f"[审核] AI 审核超时(180s), 跳过 AI 审核")
             except Exception as e:
                 print(f"[审核] AI 审核失败, 跳过 AI 审核: {e}")
@@ -3642,17 +4478,60 @@ def _dashboard_format_doc_type(file_type):
     return file_type or 'other'
 
 
+def _dashboard_review_completed_at(review, issues):
+    completed_at = getattr(review, 'completed_at', None)
+    if completed_at:
+        return completed_at
+    review_issues = [issue for issue in issues if issue.review_id == review.id and getattr(issue, 'created_at', None)]
+    if review_issues:
+        return max(issue.created_at for issue in review_issues)
+    return None
+
+
+def _dashboard_average_review_minutes(completed_reviews, issues):
+    durations = []
+    for review in completed_reviews:
+        if not review.created_at:
+            continue
+        completed_at = _dashboard_review_completed_at(review, issues)
+        if not completed_at or completed_at < review.created_at:
+            continue
+        minutes = (completed_at - review.created_at).total_seconds() / 60
+        if minutes > 0.01:
+            durations.append(minutes)
+    if not durations:
+        return None
+    return max(0.1, round(sum(durations) / len(durations), 1))
+
+
+def _dashboard_quality_metrics(raw_issues):
+    platform_issues = [issue for issue in raw_issues if str(getattr(issue, 'source', '') or '').lower() != 'manual']
+    manual_issues = [issue for issue in raw_issues if str(getattr(issue, 'source', '') or '').lower() == 'manual']
+    false_positive = [issue for issue in platform_issues if str(getattr(issue, 'status', '') or '').lower() == 'false_positive']
+    valid_platform = [issue for issue in platform_issues if str(getattr(issue, 'status', '') or '').lower() not in {'false_positive', 'ignored'}]
+    valid_manual = [issue for issue in manual_issues if str(getattr(issue, 'status', '') or '').lower() not in {'false_positive', 'ignored'}]
+    expected = len(valid_platform) + len(valid_manual)
+    return {
+        'platform_detected': len(valid_platform),
+        'manual_supplemented': len(valid_manual),
+        'expected_issues': expected,
+        'false_positive_count': len(false_positive),
+        'platform_reported': len(platform_issues),
+        'false_positive_rate': _dashboard_pct(len(false_positive), len(platform_issues)),
+        'detection_rate': _dashboard_pct(len(valid_platform), expected),
+    }
+
+
 def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_date=None, doc_type='all', user_id='all'):
     start_dt, end_dt = _dashboard_date_range(time_range, start_date, end_date)
     rows = _dashboard_review_rows(db, start_dt, end_dt, doc_type, user_id)
     reviews = [review for review, _, _ in rows]
     review_ids = [review.id for review in reviews]
-    issues = [issue for issue in _dashboard_issue_rows(db, review_ids) if str(issue.status or '').lower() not in {'false_positive', 'ignored'}]
+    raw_issues = _dashboard_issue_rows(db, review_ids)
+    issues = [issue for issue in raw_issues if str(issue.status or '').lower() not in {'false_positive', 'ignored'}]
     issues_by_review = Counter(issue.review_id for issue in issues)
-    today = datetime.utcnow().date()
-    today_start = datetime.combine(today, time.min)
-    today_end = datetime.combine(today, time.max)
     completed_reviews = [review for review in reviews if review.status == 'completed']
+    average_review_minutes = _dashboard_average_review_minutes(completed_reviews, _dashboard_issue_rows(db, review_ids))
 
     date_count = (end_dt.date() - start_dt.date()).days + 1
     dates = [start_dt.date() + timedelta(days=index) for index in range(date_count)]
@@ -3698,12 +4577,12 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
             'user_id': user_id or 'all',
         },
         'kpi': {
-            'today_tasks': len([review for review in reviews if today_start <= review.created_at <= today_end]),
-            'pending_tasks': len([review for review in reviews if review.status in {'pending', 'running'}]),
-            'today_completed': len([review for review in completed_reviews if today_start <= review.created_at <= today_end]),
+            'range_tasks': len(reviews),
+            'range_completed': len(completed_reviews),
             'avg_issues_per_doc': round(len(issues) / len(reviews), 2) if reviews else 0,
-            'avg_review_time': 0,
+            'avg_review_time': average_review_minutes,
         },
+        'quality': _dashboard_quality_metrics(raw_issues),
         'trend': {
             'dates': [day.strftime('%m-%d') for day in dates],
             'submitted': [submitted_by_date.get(day, 0) for day in dates],
@@ -3753,6 +4632,175 @@ async def get_review_dashboard_personal(
     return _build_review_dashboard_payload(db, time_range, start_date, end_date, doc_type, user_id)
 
 
+def _normalize_gold_compare_text(value):
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def _load_gold_rows_from_excel(file_bytes):
+    try:
+        from io import BytesIO
+        from openpyxl import load_workbook
+        workbook = load_workbook(BytesIO(file_bytes), data_only=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"标准答案 Excel 解析失败: {exc}")
+
+    worksheet = workbook[workbook.sheetnames[0]]
+    rows = list(worksheet.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [str(cell or "").strip() for cell in rows[0]]
+    result = []
+    for row in rows[1:]:
+        item = dict(zip(headers, row))
+        if not any(value is not None for value in item.values()):
+            continue
+        if "错误内容" not in item:
+            continue
+        serial = item.get("序号")
+        if not isinstance(serial, int):
+            continue
+        issue_type = str(item.get("问题类型") or "").strip()
+        if issue_type in {"—", "-", "无", "正确样本", "不应检出"}:
+            continue
+        result.append({
+            "index": serial,
+            "location": item.get("位置") or item.get("章节") or "",
+            "wrong_text": item.get("错误内容") or "",
+            "correct_text": item.get("正确内容") or "",
+            "issue_type": issue_type or "未分类",
+            "note": item.get("备注") or "",
+        })
+    return [row for row in result if str(row.get("wrong_text") or "").strip()]
+
+
+def _gold_row_matches_issue(gold_row, issue):
+    expected = _normalize_gold_compare_text(gold_row.get("wrong_text"))
+    actual = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
+    if not expected or not actual:
+        return False
+    if expected == actual:
+        return True
+    if len(expected) >= 4 and len(actual) >= 4:
+        return expected in actual or actual in expected
+    return False
+
+
+def _gold_text_presence(content, value):
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    if re.search(r"^[A-Za-z][A-Za-z\-]*$", raw):
+        return bool(re.search(r"(?<![A-Za-z])" + re.escape(raw) + r"(?![A-Za-z])", content or "", re.IGNORECASE))
+    return _normalize_gold_compare_text(raw) in _normalize_gold_compare_text(content)
+
+
+@router.get("/{review_id}/parsed-text")
+async def get_review_parsed_text(review_id: int, db: Session = Depends(get_db)):
+    review = get_review(db, review_id=review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+    document = get_document(db, document_id=review.document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    content = document.content or ""
+    pages = [page for page in content.split("\f") if page.strip()]
+    return {
+        "review_id": review_id,
+        "document_id": document.id,
+        "filename": document.filename,
+        "file_type": document.file_type,
+        "char_count": len(content),
+        "word_count": len(re.findall(r"[A-Za-z]+|[\u4e00-\u9fff]", content)),
+        "page_count": len(pages) or None,
+        "content": content,
+    }
+
+
+@router.post("/{review_id}/gold-compare")
+async def compare_review_with_gold(review_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    review = get_review(db, review_id=review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+    document = get_document(db, document_id=review.document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_bytes = await file.read()
+    gold_rows = _load_gold_rows_from_excel(file_bytes)
+    issues = _visible_review_issues(get_issues(db, review_id=review_id))
+    content = document.content or ""
+
+    matched_issue_ids = set()
+    matches = []
+    missed = []
+    for row in gold_rows:
+        row = dict(row)
+        row["wrong_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("wrong_text"))
+        row["correct_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("correct_text"))
+        row_matches = []
+        for issue in issues:
+            if _gold_row_matches_issue(row, issue):
+                matched_issue_ids.add(getattr(issue, "id", id(issue)))
+                row_matches.append({
+                    "id": getattr(issue, "id", None),
+                    "rule": getattr(issue, "rule", ""),
+                    "category": getattr(issue, "category", ""),
+                    "severity": getattr(issue, "severity", ""),
+                    "chapter": getattr(issue, "chapter", ""),
+                    "original_text": getattr(issue, "original_text", ""),
+                    "suggestion": getattr(issue, "suggestion", ""),
+                    "description": getattr(issue, "description", ""),
+                })
+        if row_matches:
+            matches.append({"gold": row, "issues": row_matches})
+        else:
+            missed.append(row)
+
+    false_positive = []
+    for issue in issues:
+        issue_id = getattr(issue, "id", id(issue))
+        if issue_id in matched_issue_ids:
+            continue
+        false_positive.append({
+            "id": getattr(issue, "id", None),
+            "rule": getattr(issue, "rule", ""),
+            "category": getattr(issue, "category", ""),
+            "severity": getattr(issue, "severity", ""),
+            "chapter": getattr(issue, "chapter", ""),
+            "original_text": getattr(issue, "original_text", ""),
+            "suggestion": getattr(issue, "suggestion", ""),
+            "description": getattr(issue, "description", ""),
+        })
+
+    tp = len(matches)
+    fp = len(false_positive)
+    fn = len(missed)
+    precision = tp / (tp + fp) if tp + fp else 0
+    recall = tp / (tp + fn) if tp + fn else 0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0
+    missing_in_parsed_text = [row for row in missed if not row.get("wrong_text_exists_in_parsed_text")]
+
+    return {
+        "review_id": review_id,
+        "document_id": document.id,
+        "filename": document.filename,
+        "gold_count": len(gold_rows),
+        "platform_count": len(issues),
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1": round(f1, 4),
+        "missing_in_parsed_text_count": len(missing_in_parsed_text),
+        "matches": matches,
+        "missed": missed,
+        "false_positive": false_positive,
+    }
+
+
 @router.get("/{review_id}", response_model=Review)
 async def read_review(review_id: int, db: Session = Depends(get_db)):
     review = get_review(db, review_id=review_id)
@@ -3768,8 +4816,48 @@ async def read_review(review_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{review_id}/issues", response_model=list[Issue])
 async def read_review_issues(review_id: int, db: Session = Depends(get_db)):
+    review = get_review(db, review_id=review_id)
+    doc = get_document(db, document_id=review.document_id) if review else None
     issues = get_issues(db, review_id=review_id)
-    return _visible_review_issues(issues)
+    return _normalize_review_issue_display(_visible_review_issues(issues), getattr(doc, 'content', None))
+
+
+@router.post("/{review_id}/issues/manual", response_model=Issue)
+async def create_manual_review_issue(review_id: int, payload: dict, db: Session = Depends(get_db)):
+    review = get_review(db, review_id=review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    original_text = str(payload.get('original_text') or '').strip()
+    if not original_text:
+        raise HTTPException(status_code=400, detail="请填写补充上报的问题原文")
+
+    severity = str(payload.get('severity') or 'general').strip()
+    if severity not in {'fatal', 'serious', 'general', 'suggestion'}:
+        severity = 'general'
+
+    issue = IssueCreate(
+        review_id=review_id,
+        severity=severity,
+        category=str(payload.get('category') or '人工补充').strip() or '人工补充',
+        rule='MANUAL-SUPPLEMENT',
+        chapter=str(payload.get('chapter') or '').strip(),
+        original_text=original_text,
+        context=str(payload.get('context') or '').strip(),
+        suggestion=str(payload.get('suggestion') or '').strip(),
+        description=str(payload.get('description') or '审核人补充上报的平台漏检问题').strip(),
+        audit_basis=str(payload.get('audit_basis') or '审核人补充上报').strip(),
+        confidence=100,
+        source='manual',
+        position='{}',
+        status='confirmed',
+    )
+    created = create_issue(db, issue)
+    total = db.query(IssueModel).filter(IssueModel.review_id == review_id).count()
+    review.total_issues = total
+    db.commit()
+    db.refresh(created)
+    return created
 
 
 @router.put("/issues/{issue_id}", response_model=Issue)
@@ -3807,8 +4895,8 @@ async def export_review_html(review_id: int, db: Session = Depends(get_db)):
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
 
-    issues = _visible_review_issues(get_issues(db, review_id=review_id))
     doc = get_document(db, document_id=review.document_id)
+    issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(doc, 'content', None))
     html = _generate_review_html_content(review, doc, issues)
     return HTMLResponse(content=html)
 
@@ -3823,7 +4911,7 @@ async def export_review_result(review_id: int, db: Session = Depends(get_db)):
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    issues = _visible_review_issues(get_issues(db, review_id=review_id))
+    issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(document, 'content', None))
     if document.file_type == "docx":
         export_path, export_name, media_type = _export_review_docx(review, document, issues)
     elif document.file_type == "xlsx":

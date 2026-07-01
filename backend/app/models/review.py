@@ -12,3 +12,4 @@ class Review(Base):
     total_issues = Column(Integer, default=0)
     summary = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)

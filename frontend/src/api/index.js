@@ -80,6 +80,13 @@ export const reviewAPI = {
   create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode }, timeout: 300000 }),
   get: (id) => instance.get(`/review/${id}`),
   getIssues: (id) => instance.get(`/review/${id}/issues`),
+  createManualIssue: (id, data) => instance.post(`/review/${id}/issues/manual`, data),
+  getParsedText: (id) => instance.get(`/review/${id}/parsed-text`),
+  compareGold: (id, file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post(`/review/${id}/gold-compare`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+  },
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
   getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
   getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
