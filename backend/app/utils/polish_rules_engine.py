@@ -365,12 +365,15 @@ def apply_all_rules(
                         'reason': f'术语对照表',
                         'rule_name': '术语替换',
                         'type': 'term',
+                        'engine_key': 'termReplace',
                     })
 
     # 规则 2：祈使句规范
     if 'imperativePlease' in enabled_rules:
         imp_issues = detect_imperative_issues(result)
         if imp_issues:
+            for issue in imp_issues:
+                issue['engine_key'] = 'imperativePlease'
             issues.extend(imp_issues)
             result = fix_imperative(result, imp_issues)
 
@@ -378,6 +381,8 @@ def apply_all_rules(
     if 'numberSpace' in enabled_rules:
         num_issues = detect_number_unit_spacing(result)
         if num_issues:
+            for issue in num_issues:
+                issue['engine_key'] = 'numberSpace'
             issues.extend(num_issues)
             result = fix_number_unit_spacing(result, num_issues)
 
@@ -385,6 +390,8 @@ def apply_all_rules(
     if 'cnEnSpace' in enabled_rules:
         cn_issues = detect_cn_en_spacing(result)
         if cn_issues:
+            for issue in cn_issues:
+                issue['engine_key'] = 'cnEnSpace'
             issues.extend(cn_issues)
             result = fix_cn_en_spacing(result, cn_issues)
 
@@ -392,7 +399,60 @@ def apply_all_rules(
     if 'punctuation' in enabled_rules:
         punct_issues = detect_punctuation_issues(result)
         if punct_issues:
+            for issue in punct_issues:
+                issue['engine_key'] = 'punctuation'
             issues.extend(punct_issues)
             result = fix_punctuation(result, punct_issues)
+
+    return result, issues
+
+
+def apply_custom_rules(line: str, rules: list = None) -> tuple:
+    """执行规则管理中配置的非系统规则。"""
+    if not rules:
+        return line, []
+
+    type_map = {
+        'replacement_rule': 'terminology',
+        'forbidden_rule': 'forbidden',
+        'sentence_applicability_rule': 'style',
+        'imperative_rule': 'style',
+        'format_rule': 'format',
+    }
+    replacement_types = {'replacement_rule', 'forbidden_rule'}
+    result = line
+    issues = []
+
+    for rule in rules:
+        pattern = (rule.match_pattern or '').strip()
+        if not pattern:
+            continue
+        replacement = rule.replacement_text or ''
+        before = result
+        matched = False
+
+        try:
+            if rule.rule_type in replacement_types:
+                result, count = re.subn(pattern, replacement, result)
+            else:
+                count = 1 if re.search(pattern, result) else 0
+            matched = count > 0
+        except re.error:
+            if pattern in result:
+                if rule.rule_type in replacement_types:
+                    result = result.replace(pattern, replacement)
+                matched = True
+
+        if matched:
+            issues.append({
+                'original': pattern,
+                'replacement': replacement,
+                'reason': rule.description or rule.rule_name or '自定义规则',
+                'rule_name': rule.rule_name or '自定义规则',
+                'type': type_map.get(rule.rule_type, 'custom'),
+                'rule_id': rule.id,
+                'before': before,
+                'after': result,
+            })
 
     return result, issues

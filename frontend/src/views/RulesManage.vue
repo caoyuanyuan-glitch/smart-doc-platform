@@ -9,26 +9,10 @@
         <div class="rules-actions">
           <el-button type="primary" @click="openAddDialog">添加规则</el-button>
           <el-button :disabled="selection.length === 0" @click="batchDelete">批量删除 ({{ selection.length }})</el-button>
-          <el-dropdown @command="handleExport">
-            <el-button>导出规则<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-<el-dropdown-item command="json">JSON格式导出</el-dropdown-item>
-              <el-dropdown-item command="csv">CSV格式导出</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <el-button @click="handleExport">导出Excel</el-button>
           <el-button @click="triggerImport">导入规则</el-button>
-          <el-dropdown @command="downloadTemplate">
-            <el-button>下载模板<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-<el-dropdown-item command="json">JSON格式模板</el-dropdown-item>
-              <el-dropdown-item command="csv">CSV格式模板</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-          <input ref="importInputRef" type="file" style="display: none" accept=".json,.csv" @change="onFileImport" />
+          <el-button @click="downloadTemplate">下载Excel模板</el-button>
+          <input ref="importInputRef" type="file" style="display: none" accept=".xlsx" @change="onFileImport" />
         </div>
         <div class="rules-filters">
           <el-select v-model="filterType" placeholder="分类" clearable style="width: 160px" @change="fetchRules">
@@ -37,6 +21,8 @@
             <el-option label="术语替换" value="replacement_rule" />
             <el-option label="禁止规则" value="forbidden_rule" />
             <el-option label="句式适用" value="sentence_applicability_rule" />
+            <el-option label="祈使句规则" value="imperative_rule" />
+            <el-option label="格式规则" value="format_rule" />
           </el-select>
           <el-select v-model="filterEnabled" clearable style="width: 120px" @change="fetchRules">
             <el-option label="全部状态" :value="undefined" />
@@ -117,6 +103,8 @@
             <el-option label="术语替换" value="replacement_rule" />
             <el-option label="禁止规则" value="forbidden_rule" />
             <el-option label="句式适用" value="sentence_applicability_rule" />
+            <el-option label="祈使句规则" value="imperative_rule" />
+            <el-option label="格式规则" value="format_rule" />
           </el-select>
         </el-form-item>
         <el-form-item label="匹配模式" required>
@@ -148,7 +136,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown } from '@element-plus/icons-vue'
 
 const API = '/api/polish-rules'
 
@@ -263,67 +250,39 @@ async function toggleRule(id, enabled) {
   catch { ElMessage.error('操作失败'); await fetchRules() }
 }
 
-function handleExport(format) {
+function handleExport() {
   const p = new URLSearchParams()
   if (filterType.value) p.set('rule_type', filterType.value)
-  window.open(`${API}/export/${format}?${p}`, '_blank')
+  window.open(`${API}/export/xlsx?${p}`, '_blank')
 }
 
 function triggerImport() { if (importInputRef.value) { importInputRef.value.value = ''; importInputRef.value.click() } }
 
-function downloadTemplate(format) {
-  const sample = {
-    规则名称: '示例规则名称',
-    规则分类: 'replacement_rule',
-    匹配模式: '待匹配的原文或正则',
-    替换文本: '替换后的文本',
-    说明: '规则说明（可选）。分类可选值: system_rule/系统规则, replacement_rule/术语替换, forbidden_rule/禁止规则, sentence_applicability_rule/句式适用',
-    优先级: 0,
-    是否启用: true,
-  }
-
-  let content, filename, mime
-  if (format === 'json') {
-    content = JSON.stringify([sample], null, 2)
-    filename = '润色规则模板.json'
-    mime = 'application/json'
-  } else {
-    const headers = Object.keys(sample).join(',')
-    const values = Object.values(sample).map(v => {
-      if (typeof v === 'string' && v.includes(',')) return `"${v}"`
-      return String(v)
-    }).join(',')
-    content = '\uFEFF' + headers + '\n' + values
-    filename = '润色规则模板.csv'
-    mime = 'text/csv'
-  }
-
-  const blob = new Blob([content], { type: `${mime};charset=utf-8` })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url)
+function downloadTemplate() {
+  window.open(`${API}/template/xlsx`, '_blank')
 }
 
 async function onFileImport(e) {
   const file = e.target.files?.[0]
   if (!file) return
   const ext = file.name.split('.').pop().toLowerCase()
+  if (ext !== 'xlsx') { ElMessage.warning('仅支持导入 Excel 模板文件'); return }
   const fd = new FormData(); fd.append('file', file)
   try {
     const resp = await fetch(`${API}/import/${ext}`, { method: 'POST', body: fd })
     const data = await resp.json()
     if (data.ok) { ElMessage.success(`导入完成：新增 ${data.created} 条，更新 ${data.updated} 条`); await fetchRules() }
-    else ElMessage.error('导入失败')
-  } catch { ElMessage.error('导入失败') }
+    else ElMessage.error(data.detail || '导入失败')
+  } catch { ElMessage.error('导入失败，请检查文件格式') }
 }
 
 function typeLabel(t) {
-  const m = { system_rule: '系统规则', replacement_rule: '术语替换', forbidden_rule: '禁止规则', sentence_applicability_rule: '句式适用' }
+  const m = { system_rule: '系统规则', replacement_rule: '术语替换', forbidden_rule: '禁止规则', sentence_applicability_rule: '句式适用', imperative_rule: '祈使句规则', format_rule: '格式规则' }
   return m[t] || t
 }
 
 function typeTag(t) {
-  const m = { system_rule: 'primary', replacement_rule: '', forbidden_rule: 'danger', sentence_applicability_rule: 'warning' }
+  const m = { system_rule: 'primary', replacement_rule: '', forbidden_rule: 'danger', sentence_applicability_rule: 'warning', imperative_rule: 'success', format_rule: 'info' }
   return m[t] || ''
 }
 

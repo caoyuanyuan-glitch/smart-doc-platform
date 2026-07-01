@@ -1,3 +1,6 @@
+from collections import Counter
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from app.models.polish_learning_rule import PolishLearningRule
@@ -99,7 +102,7 @@ def import_rules(db: Session, rules_data: list[dict]) -> dict:
     created = 0
     updated = 0
     skipped = 0
-    for item in rules_data:
+    for index, item in enumerate(rules_data):
         existing = get_rule_by_key(db, item.get("rule_key", ""))
         if existing:
             # Update existing
@@ -109,7 +112,7 @@ def import_rules(db: Session, rules_data: list[dict]) -> dict:
             updated += 1
         else:
             # Auto-generate rule_key if not provided
-            rule_key = item.get("rule_key") or f"manual:{item.get('rule_type', '')}:{int(time.time() * 1000)}"
+            rule_key = item.get("rule_key") or f"manual:{item.get('rule_type', '')}:{int(time.time() * 1000)}:{index}"
             db_rule = PolishLearningRule(
                 rule_name=item.get("rule_name"),
                 rule_type=item.get("rule_type", ""),
@@ -134,6 +137,38 @@ def get_enabled_engine_keys(db: Session) -> list:
         .filter(PolishLearningRule.enabled == True)\
         .all()
     return [r.engine_key for r in rules if r.engine_key]
+
+
+def get_enabled_custom_rules(db: Session) -> list:
+    """获取启用的自定义规则，供通用规则引擎执行。"""
+    return db.query(PolishLearningRule)\
+        .filter(PolishLearningRule.enabled == True)\
+        .filter(PolishLearningRule.rule_type != 'system_rule')\
+        .order_by(PolishLearningRule.priority_level.desc(), PolishLearningRule.id.asc())\
+        .all()
+
+
+def record_rule_triggers(db: Session, rule_ids: list[int] = None, engine_keys: list[str] = None) -> None:
+    """按命中次数更新规则触发统计。"""
+    now = datetime.utcnow()
+    changed = False
+
+    for rule_id, count in Counter(rule_ids or []).items():
+        rule = db.query(PolishLearningRule).filter(PolishLearningRule.id == rule_id).first()
+        if rule:
+            rule.trigger_count = (rule.trigger_count or 0) + count
+            rule.last_triggered_at = now
+            changed = True
+
+    for engine_key, count in Counter(engine_keys or []).items():
+        rule = db.query(PolishLearningRule).filter(PolishLearningRule.engine_key == engine_key).first()
+        if rule:
+            rule.trigger_count = (rule.trigger_count or 0) + count
+            rule.last_triggered_at = now
+            changed = True
+
+    if changed:
+        db.commit()
 
 
 def seed_system_rules(db: Session) -> int:
