@@ -80,6 +80,13 @@ export const reviewAPI = {
   create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode }, timeout: 300000 }),
   get: (id) => instance.get(`/review/${id}`),
   getIssues: (id) => instance.get(`/review/${id}/issues`),
+  createManualIssue: (id, data) => instance.post(`/review/${id}/issues/manual`, data),
+  getParsedText: (id) => instance.get(`/review/${id}/parsed-text`),
+  compareGold: (id, file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post(`/review/${id}/gold-compare`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+  },
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
   getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
   getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
@@ -238,6 +245,7 @@ export const manualAPI = {
 export const generateAPI = {
   create: (productName, productModel, docType, targetChapter) =>
     instance.post('/generate/', { product_name: productName, product_model: productModel, doc_type: docType, target_chapter: targetChapter }),
+  continueText: (data) => instance.post('/generate/continue-text', data, { timeout: 180000 }),
   generateImageSteps: (formData) =>
     instance.post('/generate/image-steps', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },

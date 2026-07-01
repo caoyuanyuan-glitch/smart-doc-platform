@@ -39,6 +39,15 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE rules ADD COLUMN language VARCHAR DEFAULT 'both'"))
 
     try:
+        review_columns = {col['name'] for col in inspector.get_columns('reviews')}
+    except Exception:
+        review_columns = set()
+
+    if review_columns and 'completed_at' not in review_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE reviews ADD COLUMN completed_at DATETIME"))
+
+    try:
         compare_columns = {col['name'] for col in inspector.get_columns('compare_tasks')}
     except Exception:
         compare_columns = set()

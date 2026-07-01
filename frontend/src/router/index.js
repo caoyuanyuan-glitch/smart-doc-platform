@@ -102,6 +102,11 @@ const routes = [
     redirect: '/polish/document'
   },
   {
+    path: '/tools/doc-generator',
+    name: 'DocGenerator',
+    component: DocGenerator
+  },
+  {
     path: '/tools/polish-rules',
     name: 'RulesManage',
     component: RulesManage

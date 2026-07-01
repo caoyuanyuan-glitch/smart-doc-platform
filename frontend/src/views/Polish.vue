@@ -1866,6 +1866,11 @@ watch(documentSession, (session) => {
 }, { deep: true, immediate: true })
 
 onMounted(async () => {
+  const pendingPolishText = sessionStorage.getItem('pendingPolishText')
+  if (pendingPolishText) {
+    originalText.value = pendingPolishText
+    sessionStorage.removeItem('pendingPolishText')
+  }
   loadKnowledgeTree()
   loadDropdownOptions()
   await loadFeedbackStats()

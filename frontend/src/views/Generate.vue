@@ -37,6 +37,32 @@
               </div>
             </el-upload>
           </el-form-item>
+          <el-form-item label="选择生成意图">
+            <el-radio-group v-model="imageForm.generationIntent" class="intent-options">
+              <el-radio-button label="product_appearance">产品外观描述</el-radio-button>
+              <el-radio-button label="operation_steps">操作步骤说明</el-radio-button>
+              <el-radio-button label="interface_manual">界面功能说明</el-radio-button>
+              <el-radio-button label="custom">自定义</el-radio-button>
+            </el-radio-group>
+            <el-input
+              v-if="imageForm.generationIntent === 'custom'"
+              v-model="imageForm.customIntent"
+              class="custom-intent-input"
+              placeholder="请输入自定义生成意图"
+            />
+          </el-form-item>
+          <el-form-item label="输出格式">
+            <el-radio-group v-model="imageForm.outputFormat">
+              <el-radio-button label="plain_text">纯文本</el-radio-button>
+              <el-radio-button label="numbered_steps">带编号步骤</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="语言风格">
+            <el-radio-group v-model="imageForm.languageStyle">
+              <el-radio-button label="formal_technical">正式技术文档</el-radio-button>
+              <el-radio-button label="concise">简要说明</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
           <el-form-item label="补充要求">
             <el-input
               v-model="imageForm.prompt"
@@ -63,8 +89,10 @@
           <span>生成结果</span>
           <div class="panel-actions">
             <el-tag size="small" type="info">模型：{{ imageResult.model || 'kimi' }}</el-tag>
-            <el-button size="small" @click="copyText(buildImageResultText(imageResult))">复制</el-button>
-            <el-button size="small" type="primary" @click="downloadText('图片操作步骤.txt', buildImageResultText(imageResult))">下载</el-button>
+            <el-button size="small" @click="toggleImageEdit">{{ imageEditing ? '完成编辑' : '编辑' }}</el-button>
+            <el-button size="small" :loading="imageLoading" @click="regenerateImageDescription">重新生成</el-button>
+            <el-button size="small" @click="copyText(currentImageResultText)">复制</el-button>
+            <el-button size="small" type="primary" @click="saveImageResult">保存</el-button>
           </div>
         </div>
 
@@ -79,8 +107,15 @@
 
         <div class="result-stack">
           <div class="result-block">
-            <ol class="step-list">
-              <li v-for="step in imageResult.steps" :key="step">{{ step }}</li>
+            <el-input
+              v-if="imageEditing"
+              v-model="imageEditText"
+              type="textarea"
+              :rows="10"
+            />
+            <pre v-else-if="imageForm.outputFormat === 'plain_text'">{{ currentImageResultText }}</pre>
+            <ol v-else class="step-list">
+              <li v-for="step in imageResult.steps" :key="step">{{ stripStepNumber(step) }}</li>
             </ol>
           </div>
         </div>
@@ -172,41 +207,47 @@
     <div v-else-if="currentView === 'paragraph'">
       <div class="panel">
         <div class="panel-header">
-          <span>段落文字生成</span>
-          <el-tag type="warning" size="small">适合简介、卖点、使用说明等短内容</el-tag>
+          <span>智能续写</span>
+          <el-tag type="warning" size="small">片段生成完整内容</el-tag>
         </div>
 
-        <el-form :model="paragraphForm" label-width="110px" class="form-layout">
-          <el-form-item label="应用场景">
-            <el-select v-model="paragraphForm.scene" style="width: 100%">
-              <el-option label="产品简介" value="产品简介" />
-              <el-option label="功能亮点" value="功能亮点" />
-              <el-option label="操作步骤" value="操作步骤" />
-              <el-option label="维护保养" value="维护保养" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="文字风格">
-            <el-radio-group v-model="paragraphForm.tone">
-              <el-radio-button label="专业" value="专业" />
-              <el-radio-button label="简洁" value="简洁" />
-              <el-radio-button label="说明式" value="说明式" />
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="关键词">
-            <el-select v-model="paragraphForm.keywords" multiple filterable allow-create default-first-option style="width: 100%" placeholder="输入多个关键词后回车">
-              <el-option v-for="item in paragraphForm.keywords" :key="item" :label="item" :value="item" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="简单描述">
+        <el-form :model="paragraphForm" label-width="130px" class="form-layout continuation-form">
+          <el-form-item label="现有内容">
             <el-input
-              v-model="paragraphForm.prompt"
+              v-model="paragraphForm.sourceText"
               type="textarea"
-              :rows="5"
-              placeholder="例如：突出检测速度快、操作步骤少、适合基层门诊使用"
+              :rows="7"
+              placeholder="例如：将样本放入样本槽中，关闭槽盖。"
+            />
+            <div class="field-hint">已输入 {{ continuationCharCount }} 字</div>
+          </el-form-item>
+          <el-form-item label="续写意图">
+            <el-radio-group v-model="paragraphForm.intent" class="vertical-radio-group">
+              <el-radio label="next_step">续写下一步操作（基于上下文推断）</el-radio>
+              <el-radio label="expand_detail">扩写详细说明（增加参数/注意事项）</el-radio>
+              <el-radio label="safety_warning">补充安全警告（识别风险点）</el-radio>
+              <el-radio label="troubleshooting">补充故障处理（基于操作步骤）</el-radio>
+              <el-radio label="custom">自定义续写</el-radio>
+            </el-radio-group>
+            <el-input
+              v-if="paragraphForm.intent === 'custom'"
+              v-model="paragraphForm.customIntent"
+              class="custom-intent-input"
+              placeholder="请输入自定义续写要求"
             />
           </el-form-item>
+          <el-form-item label="续写长度">
+            <el-radio-group v-model="paragraphForm.length">
+              <el-radio-button label="short">简短（1-2句）</el-radio-button>
+              <el-radio-button label="detailed">详细（1段）</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="续写设置">
+            <el-checkbox v-model="paragraphForm.keepTerminology">保持术语一致（自动使用术语库）</el-checkbox>
+            <el-checkbox v-model="paragraphForm.keepSentenceStyle">保持句式风格（自动匹配句式手册）</el-checkbox>
+          </el-form-item>
           <el-form-item>
-            <el-button type="primary" :loading="paragraphLoading" @click="generateParagraph">生成段落</el-button>
+            <el-button type="primary" :loading="paragraphLoading" @click="generateParagraph">生成续写内容</el-button>
             <el-button @click="resetParagraphForm">重置</el-button>
           </el-form-item>
         </el-form>
@@ -214,14 +255,35 @@
 
       <div v-if="paragraphResult" class="panel">
         <div class="panel-header">
-          <span>生成段落</span>
+          <span>生成结果</span>
           <div class="panel-actions">
-            <el-button size="small" @click="copyText(paragraphResult)">复制</el-button>
-            <el-button size="small" type="primary" @click="downloadText('段落生成结果.txt', paragraphResult)">下载</el-button>
+            <el-tag v-if="paragraphResult.model" size="small" type="info">模型：{{ paragraphResult.model }}</el-tag>
+            <el-button size="small" @click="copyText(currentContinuationText)">复制</el-button>
+            <el-button size="small" type="primary" @click="saveContinuationToDocument">保存到文档</el-button>
           </div>
         </div>
-        <div class="result-block">
-          <pre>{{ paragraphResult }}</pre>
+
+        <div class="result-stack">
+          <div class="result-block continuation-result">
+            <div class="result-label">续写内容</div>
+            <el-input
+              v-if="paragraphEditing"
+              v-model="paragraphEditText"
+              type="textarea"
+              :rows="8"
+            />
+            <pre v-else>{{ paragraphResult.continuation }}</pre>
+          </div>
+          <div class="panel-actions continuation-actions">
+            <el-button type="primary" @click="acceptContinuation">接受并插入</el-button>
+            <el-button :loading="paragraphLoading" @click="generateParagraph">重新生成</el-button>
+            <el-button @click="toggleParagraphEdit">{{ paragraphEditing ? '完成编辑后插入' : '编辑后插入' }}</el-button>
+          </div>
+          <div class="panel-actions continuation-actions">
+            <el-button @click="continueContinuation">继续续写</el-button>
+            <el-button @click="saveContinuationToDocument">保存到文档</el-button>
+            <el-button @click="goToPolish">去润色</el-button>
+          </div>
         </div>
       </div>
     </div>
@@ -250,11 +312,12 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { generateAPI } from '@/api'
 
 const route = useRoute()
+const router = useRouter()
 
 const MAX_IMAGE_STEP_FILES = 4
 const MAX_RAW_FILE_SIZE = 5 * 1024 * 1024
@@ -269,8 +332,8 @@ const viewConfig = {
     desc: '参考现有说明书并结合简单描述，生成一本说明书初稿。'
   },
   paragraph: {
-    title: '段落文字生成',
-    desc: '输入简单描述后快速生成段落内容，适合简介、亮点和说明段落。'
+    title: '智能续写',
+    desc: '输入已有内容片段，基于上下文语义推断并续写完整说明。'
   },
   templates: {
     title: '模板管理',
@@ -296,9 +359,20 @@ const imageLoading = ref(false)
 const imageProgress = ref(0)
 let imageProgressTimer = null
 const imageForm = ref({
+  generationIntent: 'operation_steps',
+  customIntent: '',
+  outputFormat: 'numbered_steps',
+  languageStyle: 'formal_technical',
   prompt: ''
 })
 const imageResult = ref(null)
+const imageEditing = ref(false)
+const imageEditText = ref('')
+
+const currentImageResultText = computed(() => {
+  if (imageEditing.value) return imageEditText.value
+  return buildImageResultText(imageResult.value)
+})
 
 function compressImageFile(file, maxEdge = 900, quality = 0.72) {
   if (!file?.type?.startsWith('image/')) return Promise.resolve(file)
@@ -351,17 +425,27 @@ const manualResult = ref(null)
 
 const paragraphLoading = ref(false)
 const paragraphForm = ref({
-  scene: '产品简介',
-  tone: '专业',
-  keywords: [],
-  prompt: ''
+  sourceText: '',
+  intent: 'next_step',
+  customIntent: '',
+  length: 'short',
+  keepTerminology: true,
+  keepSentenceStyle: true
 })
-const paragraphResult = ref('')
+const paragraphResult = ref(null)
+const paragraphEditing = ref(false)
+const paragraphEditText = ref('')
+
+const continuationCharCount = computed(() => paragraphForm.value.sourceText.length)
+const currentContinuationText = computed(() => {
+  if (!paragraphResult.value) return ''
+  return paragraphEditing.value ? paragraphEditText.value : paragraphResult.value.continuation
+})
 
 const templates = ref([
-  { name: '标准产品说明书模板', type: 'manual', lang: '中文', fields: 15, updated_at: '2025-01-10 10:30', scenes: ['说明书初稿', '段落生成'] },
+  { name: '标准产品说明书模板', type: 'manual', lang: '中文', fields: 15, updated_at: '2025-01-10 10:30', scenes: ['说明书初稿', '智能续写'] },
   { name: '图文描述模板', type: 'image', lang: '中文', fields: 8, updated_at: '2025-01-09 14:20', scenes: ['图片描述生成'] },
-  { name: '技术规格文档模板', type: 'spec', lang: '中英文', fields: 22, updated_at: '2025-01-08 09:15', scenes: ['说明书初稿', '段落生成'] }
+  { name: '技术规格文档模板', type: 'spec', lang: '中英文', fields: 22, updated_at: '2025-01-08 09:15', scenes: ['说明书初稿', '智能续写'] }
 ])
 
 function handleImageChange(file, fileList) {
@@ -432,6 +516,10 @@ async function generateImageDescription() {
     }
     preparedFiles.forEach((file) => formData.append('files', file))
     formData.append('prompt', imageForm.value.prompt)
+    formData.append('generation_intent', imageForm.value.generationIntent)
+    formData.append('custom_intent', imageForm.value.customIntent)
+    formData.append('output_format', imageForm.value.outputFormat)
+    formData.append('language_style', imageForm.value.languageStyle)
     const resp = await generateAPI.generateImageSteps(formData)
     const data = resp.data || {}
     if (!(data.steps || []).length) {
@@ -440,10 +528,12 @@ async function generateImageDescription() {
     imageResult.value = {
       summary: data.summary || '',
       relation_summary: data.relation_summary || '',
-      steps: data.steps || [],
+      steps: normalizeImageSteps(data.steps || []),
       model: data.model || 'kimi',
       warning: data.warning || ''
     }
+    imageEditText.value = buildImageResultText(imageResult.value)
+    imageEditing.value = false
     stopImageProgress(true)
     ElMessage[data.warning ? 'warning' : 'success'](data.warning ? '当前为兜底结果' : '操作步骤已生成')
   } catch (error) {
@@ -456,8 +546,16 @@ async function generateImageDescription() {
 
 function resetImageForm() {
   clearUploadedImages()
-  imageForm.value = { prompt: '' }
+  imageForm.value = {
+    generationIntent: 'operation_steps',
+    customIntent: '',
+    outputFormat: 'numbered_steps',
+    languageStyle: 'formal_technical',
+    prompt: ''
+  }
   imageResult.value = null
+  imageEditing.value = false
+  imageEditText.value = ''
 }
 
 function clearUploadedImages() {
@@ -466,7 +564,80 @@ function clearUploadedImages() {
 }
 
 function buildImageResultText(result) {
-  return (result.steps || []).map((step, index) => `${index + 1}. ${step}`).join('\n')
+  if (!result) return ''
+  const steps = normalizeImageSteps(result.steps || [])
+  if (imageForm.value.outputFormat === 'plain_text') {
+    return steps.join('\n')
+  }
+  return steps.map((step, index) => {
+    const text = String(step || '').trim()
+    return /^\d+[.)、]\s*/.test(text) ? text : `${index + 1}. ${text}`
+  }).join('\n')
+}
+
+function cleanImageResultStep(step) {
+  const raw = String(step || '').trim()
+  if (/^\s*\*{0,2}"?(summary|relation_summary|used_style_guide_name)"?\*{0,2}\s*:/i.test(raw)) {
+    return ''
+  }
+  return raw
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```$/g, '')
+    .replace(/^\s*\*{0,2}"?steps"?\*{0,2}\s*:\s*\[?/i, '')
+    .replace(/^\s*["'`]+|["'`,，]+\s*$/g, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .trim()
+}
+
+function normalizeImageSteps(steps) {
+  return (steps || [])
+    .flatMap((step) => String(step || '').split('\n'))
+    .map(cleanImageResultStep)
+    .filter((step) => step && !/^(\{|\}|\[|\]|\],?)$/.test(step))
+    .filter((step) => !/^(summary|relation_summary|used_style_guide_name|steps)\b/i.test(step))
+}
+
+function parseImageResultText(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:\d+[.)、]|[-*])\s*/, '').trim())
+    .filter(Boolean)
+}
+
+function stripStepNumber(step) {
+  return cleanImageResultStep(step).replace(/^\s*\d+[.)、]\s*/, '')
+}
+
+function toggleImageEdit() {
+  if (!imageResult.value) return
+  if (imageEditing.value) {
+    const steps = parseImageResultText(imageEditText.value)
+    if (!steps.length) {
+      ElMessage.warning('编辑内容不能为空')
+      return
+    }
+    imageResult.value = { ...imageResult.value, steps }
+    imageEditText.value = buildImageResultText(imageResult.value)
+    imageEditing.value = false
+    ElMessage.success('编辑已应用')
+    return
+  }
+  imageEditText.value = buildImageResultText(imageResult.value)
+  imageEditing.value = true
+}
+
+function regenerateImageDescription() {
+  imageEditing.value = false
+  generateImageDescription()
+}
+
+function saveImageResult() {
+  const content = currentImageResultText.value
+  if (!content.trim()) {
+    ElMessage.warning('暂无可保存内容')
+    return
+  }
+  downloadText('图片描述生成结果.txt', content)
 }
 
 function handleReferenceChange(file, fileList) {
@@ -550,42 +721,144 @@ function resetManualForm() {
 }
 
 async function generateParagraph() {
-  if (!paragraphForm.value.prompt) {
-    ElMessage.info('请填写简单描述')
+  if (!paragraphForm.value.sourceText.trim()) {
+    ElMessage.info('请填写现有内容')
+    return
+  }
+  if (paragraphForm.value.intent === 'custom' && !paragraphForm.value.customIntent.trim()) {
+    ElMessage.info('请填写自定义续写要求')
     return
   }
   paragraphLoading.value = true
   try {
-    const resp = await generateAPI.create(
-      paragraphForm.value.scene,
-      paragraphForm.value.tone,
-      '段落生成',
-      paragraphForm.value.prompt
-    )
+    const resp = await generateAPI.continueText({
+      source_text: paragraphForm.value.sourceText,
+      intent: paragraphForm.value.intent,
+      custom_intent: paragraphForm.value.customIntent,
+      length: paragraphForm.value.length,
+      keep_terminology: paragraphForm.value.keepTerminology,
+      keep_sentence_style: paragraphForm.value.keepSentenceStyle
+    })
     const data = resp.data || {}
-    paragraphResult.value = data.content || buildParagraphFallback()
-    ElMessage.success('段落已生成')
+    paragraphResult.value = {
+      source_text: data.source_text || paragraphForm.value.sourceText,
+      continuation: cleanContinuationText(data.continuation || buildParagraphFallback()),
+      used_terminology_files: data.used_terminology_files || [],
+      used_style_guide_name: data.used_style_guide_name || '',
+      model: data.model || 'kimi',
+      warning: data.warning || ''
+    }
+    paragraphEditText.value = paragraphResult.value.continuation
+    paragraphEditing.value = false
+    ElMessage[data.warning ? 'warning' : 'success'](data.warning || '续写内容已生成')
   } catch (error) {
-    paragraphResult.value = buildParagraphFallback()
-    ElMessage.info('接口调用失败，已展示示例段落')
+    paragraphResult.value = {
+      source_text: paragraphForm.value.sourceText,
+      continuation: buildParagraphFallback(),
+      used_terminology_files: [],
+      used_style_guide_name: '',
+      model: 'fallback',
+      warning: '接口调用失败，已展示本地示例续写。'
+    }
+    paragraphEditText.value = paragraphResult.value.continuation
+    paragraphEditing.value = false
+    ElMessage.info('接口调用失败，已展示示例续写')
   } finally {
     paragraphLoading.value = false
   }
 }
 
 function buildParagraphFallback() {
-  const keywords = paragraphForm.value.keywords.length ? `关键词包括${paragraphForm.value.keywords.join('、')}。` : ''
-  return `${paragraphForm.value.scene}建议采用${paragraphForm.value.tone}风格表达，围绕“${paragraphForm.value.prompt}”展开组织。${keywords}生成内容可先概括核心价值，再补充使用方式、性能特点或注意事项，使整段文字更适合直接放入说明书、产品页或培训材料中。`
+  if (paragraphForm.value.intent === 'safety_warning') {
+    return '请确认相关部件已正确放置并保持稳定，避免因安装不到位导致处理失败。操作过程中如发现异常提示，应停止当前流程并按故障处理说明进行检查。'
+  }
+  if (paragraphForm.value.intent === 'troubleshooting') {
+    return '若系统未进入下一步，请检查样本位置、槽盖状态和界面提示信息。确认条件满足后，重新执行当前操作并观察系统反馈。'
+  }
+  if (paragraphForm.value.intent === 'expand_detail') {
+    return '执行该操作前，应确认样本、耗材和设备状态均满足使用要求。完成操作后，观察界面状态变化，并根据提示继续后续流程。'
+  }
+  return '请确认当前操作对象已正确就位，然后点击界面中的开始按钮启动处理流程。系统进入下一步后，按照页面提示继续完成后续操作。'
+}
+
+function cleanContinuationText(text) {
+  return String(text || '')
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```$/g, '')
+    .replace(/^\s*["'`]+|["'`,，]+\s*$/g, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .trim()
+}
+
+function applyContinuationToSource() {
+  if (!paragraphResult.value) return ''
+  const continuation = cleanContinuationText(paragraphEditing.value ? paragraphEditText.value : paragraphResult.value.continuation)
+  paragraphForm.value.sourceText = [paragraphResult.value.source_text, continuation].filter(Boolean).join('\n')
+  paragraphResult.value.source_text = paragraphForm.value.sourceText
+  paragraphResult.value.continuation = continuation
+  paragraphEditText.value = continuation
+  paragraphEditing.value = false
+  return continuation
+}
+
+function acceptContinuation() {
+  const continuation = applyContinuationToSource()
+  if (continuation) {
+    paragraphResult.value = null
+    paragraphEditText.value = ''
+    ElMessage.success('续写内容已插入现有内容')
+  }
+}
+
+function continueContinuation() {
+  acceptContinuation()
+  paragraphResult.value = null
+  generateParagraph()
+}
+
+function toggleParagraphEdit() {
+  if (!paragraphResult.value) return
+  if (paragraphEditing.value) {
+    if (!paragraphEditText.value.trim()) {
+      ElMessage.warning('编辑内容不能为空')
+      return
+    }
+    acceptContinuation()
+    return
+  }
+  paragraphEditText.value = paragraphResult.value.continuation
+  paragraphEditing.value = true
+}
+
+function saveContinuationToDocument() {
+  const content = currentContinuationText.value
+  if (!content.trim()) {
+    ElMessage.warning('暂无可保存内容')
+    return
+  }
+  downloadText('智能续写结果.txt', content)
+}
+
+function goToPolish() {
+  const content = currentContinuationText.value
+  if (content.trim()) {
+    sessionStorage.setItem('pendingPolishText', content)
+  }
+  router.push('/polish')
 }
 
 function resetParagraphForm() {
   paragraphForm.value = {
-    scene: '产品简介',
-    tone: '专业',
-    keywords: [],
-    prompt: ''
+    sourceText: '',
+    intent: 'next_step',
+    customIntent: '',
+    length: 'short',
+    keepTerminology: true,
+    keepSentenceStyle: true
   }
-  paragraphResult.value = ''
+  paragraphResult.value = null
+  paragraphEditing.value = false
+  paragraphEditText.value = ''
 }
 
 function copyText(text) {
@@ -667,6 +940,18 @@ function downloadText(fileName, content) {
   font-size: 13px;
 }
 
+.intent-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.custom-intent-input {
+  display: block;
+  margin-top: 10px;
+  max-width: 520px;
+}
+
 .result-warning {
   margin-bottom: 16px;
 }
@@ -720,6 +1005,36 @@ function downloadText(fileName, content) {
 
 .image-form-layout {
   max-width: 100%;
+}
+
+.continuation-form {
+  max-width: 900px;
+}
+
+.field-hint {
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.vertical-radio-group {
+  display: grid;
+  gap: 10px;
+}
+
+.vertical-radio-group :deep(.el-radio) {
+  margin-right: 0;
+  white-space: normal;
+  line-height: 1.5;
+}
+
+.continuation-result {
+  display: grid;
+  gap: 12px;
+}
+
+.continuation-actions {
+  flex-wrap: wrap;
 }
 
 .result-stack {

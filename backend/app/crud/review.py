@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from app.models.review import Review
 from app.models.issue import Issue
 from app.schemas.review import ReviewCreate, IssueCreate, IssueUpdate
+from datetime import datetime
 
 def create_review(db: Session, review: ReviewCreate):
     db_review = Review(
@@ -28,6 +29,8 @@ def update_review_status(db: Session, review_id: int, status: str, total_issues:
         review.status = status
         review.total_issues = total_issues
         review.summary = summary
+        if status in {"completed", "failed"}:
+            review.completed_at = datetime.utcnow()
         db.commit()
         db.refresh(review)
     return review
@@ -46,7 +49,8 @@ def create_issue(db: Session, issue: IssueCreate):
         audit_basis=issue.audit_basis,
         confidence=issue.confidence,
         source=issue.source,
-        position=issue.position
+        position=issue.position,
+        status=issue.status
     )
     db.add(db_issue)
     db.commit()

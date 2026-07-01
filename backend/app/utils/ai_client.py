@@ -273,13 +273,19 @@ class AIClient:
         for name, client, model in providers:
             for attempt in range(1, max_retries + 1):
                 try:
+                    request_temperature = 1 if name == 'Kimi' else temperature
                     response = client.chat.completions.create(
                         model=model,
                         messages=messages,
                         max_tokens=max_tokens,
-                        temperature=temperature,
+                        temperature=request_temperature,
                     )
-                    return response.choices[0].message.content
+                    choice = response.choices[0]
+                    content = choice.message.content or ""
+                    if content.strip():
+                        return content
+                    print(f"[AI] {name} 返回空内容: finish_reason={getattr(choice, 'finish_reason', '')}")
+                    break
                 except Exception as e:
                     error_str = str(e)
                     if "429" in error_str and attempt < max_retries:
@@ -347,7 +353,8 @@ class AIClient:
 
     @staticmethod
     def _format_image_step_text(value, limit=300):
-        text = AIClient._clean_text(value, limit)
+        text = AIClient._clean_image_step_output(value)
+        text = AIClient._clean_text(text, limit)
         if re.search(r"[A-Za-z]", text):
             text = re.sub(r'"([^"\n]{1,80})"', r'**\1**', text)
             text = re.sub(r'“([^”\n]{1,80})”', r'**\1**', text)
@@ -356,8 +363,21 @@ class AIClient:
     @staticmethod
     def _extract_step_lines(text):
         lines = []
+        in_steps = False
         for line in str(text or "").splitlines():
-            item = re.sub(r"^\s*(?:[-*•]|\d+[.)、]|步骤\s*\d+\s*[：:])\s*", "", line).strip()
+            raw = line.strip()
+            if not raw or raw.startswith("```"):
+                continue
+            if re.match(r'^\*{0,2}"?(?:summary|relation_summary|used_style_guide_name)"?\*{0,2}\s*:', raw, re.I):
+                continue
+            if re.match(r'^\*{0,2}"?steps"?\*{0,2}\s*:', raw, re.I):
+                in_steps = True
+                continue
+            if in_steps and raw in {"[", "]", "],", "}", "},"}:
+                continue
+            item = re.sub(r"^\s*(?:[-*•]|\d+[.)、]|步骤\s*\d+\s*[：:])\s*", "", raw).strip()
+            item = item.strip('"\',，,')
+            item = re.sub(r"\*\*([^*]+)\*\*", r"\1", item)
             if item and len(item) >= 6:
                 lines.append(item)
         return lines
@@ -380,16 +400,38 @@ class AIClient:
             candidates.extend(AIClient._extract_step_lines(raw_text))
 
         steps = []
+        def add_step(value):
+            text = str(value or "").strip()
+            if not text:
+                return
+            if "\n" in text or re.search(r'^\s*```|(?:summary|relation_summary|used_style_guide_name|steps)', text, re.I):
+                steps.extend(AIClient._extract_step_lines(text))
+            else:
+                steps.append(text)
+
         for item in candidates:
             if isinstance(item, list):
-                steps.extend([str(step).strip() for step in item if str(step).strip()])
+                for step in item:
+                    add_step(step)
             elif isinstance(item, dict):
                 text = item.get("text") or item.get("content") or item.get("step") or item.get("description")
                 if text:
-                    steps.append(str(text).strip())
+                    add_step(text)
             elif str(item).strip():
-                steps.append(str(item).strip())
+                add_step(item)
         return steps
+
+    @staticmethod
+    def _clean_image_step_output(step):
+        text = str(step or "").strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"```$", "", text).strip()
+        text = text.strip('"\',，,')
+        if re.match(r'^\*{0,2}"?(?:summary|relation_summary|used_style_guide_name)"?\*{0,2}\s*:', text, re.I):
+            return ""
+        text = re.sub(r'^\*{0,2}"?steps"?\*{0,2}\s*:\s*\[?', "", text, flags=re.I).strip()
+        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+        return text.strip()
 
     def normalize_audit_issues(self, issues, content, source="ai", min_confidence=70):
         normalized = []
@@ -1086,7 +1128,7 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def audit_document(self, content, language=None):
+    def audit_document(self, content, language=None, audit_basis=""):
         lang = language or "en"
         is_english = lang in ("en", "both")
 
@@ -1109,6 +1151,9 @@ IMPORTANT REMINDERS:
 
 Document excerpt:
 {content[:20000]}
+
+Release checklist and review basis:
+{audit_basis[:8000] if audit_basis else 'No additional checklist provided.'}
 
 Output ONLY strict JSON:
 {{
@@ -1143,6 +1188,9 @@ Return empty issues array if no high-confidence issues found."""
 
 文档内容：
 {content[:20000]}
+
+发布前自检 checklist 和审核依据：
+{audit_basis[:8000] if audit_basis else '未提供额外 checklist。'}
 
 输出要求：
 1. 按JSON格式输出审核结果

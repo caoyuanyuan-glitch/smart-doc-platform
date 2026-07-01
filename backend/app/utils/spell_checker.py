@@ -200,10 +200,12 @@ COMMON_MISSPELLINGS = {
     'beleiving': 'believing',
     'beter': 'better',
     'betwen': 'between',
+    'bindind': 'binding',
     'buisness': 'business',
     'calender': 'calendar',
     'carefull': 'careful',
     'carreer': 'career',
+    'calibratation': 'calibration',
     'certifice': 'certified',
     'charater': 'character',
     'charaters': 'characters',
@@ -219,6 +221,7 @@ COMMON_MISSPELLINGS = {
     'compatable': 'compatible',
     'competance': 'competence',
     'competant': 'competent',
+    'complet': 'complete',
     'completly': 'completely',
     'comprable': 'comparable',
     'conceed': 'concede',
@@ -238,6 +241,7 @@ COMMON_MISSPELLINGS = {
     'curiousity': 'curiosity',
     'decribe': 'describe',
     'decribed': 'described',
+    'deteced': 'detected',
     'defination': 'definition',
     'desciption': 'description',
     'descripton': 'description',
@@ -283,6 +287,7 @@ COMMON_MISSPELLINGS = {
     'enviromental': 'environmental',
     'envirument': 'environment',
     'eposide': 'episode',
+    'equipement': 'equipment',
     'equippment': 'equipment',
     'equivelant': 'equivalent',
     'errar': 'error',
@@ -395,6 +400,7 @@ COMMON_MISSPELLINGS = {
     'insitution': 'institution',
     'inspec': 'inspect',
     'inspiration': 'inspiration',
+    'instalation': 'installation',
     'instade': 'instead',
     'insted': 'instead',
     'instiution': 'institution',
@@ -417,6 +423,7 @@ COMMON_MISSPELLINGS = {
     'judgement': 'judgment',
     'juniour': 'junior',
     'justfiy': 'justify',
+    'keeped': 'kept',
     'kindom': 'kingdom',
     'knwo': 'know',
     'leran': 'learn',
@@ -573,6 +580,7 @@ COMMON_MISSPELLINGS = {
     'percieve': 'perceive',
     'percept': 'percept',
     'perfect': 'perfect',
+    'performace': 'performance',
     'perform': 'perform',
     'perfume': 'perfume',
     'perjorative': 'pejorative',
@@ -598,6 +606,7 @@ COMMON_MISSPELLINGS = {
     'pinacle': 'pinnacle',
     'plagarism': 'plagiarism',
     'plane': 'plane',
+    'platfoms': 'platforms',
     'platue': 'plateau',
     'pleadge': 'pledge',
     'pleasent': 'pleasant',
@@ -1396,6 +1405,8 @@ COMMON_MISSPELLINGS = {
     'senior': 'senior',
     'sense': 'sense',
     'sensible': 'sensible',
+    'sensetivity': 'sensitivity',
+    'sensitivty': 'sensitivity',
     'sensitive': 'sensitive',
     'sentence': 'sentence',
     'sentiment': 'sentiment',
@@ -2871,6 +2882,21 @@ COMMON_MISSPELLINGS = {
     'dnblab': 'DNBelab',
 }
 
+FORCED_MISSPELLINGS = {
+    'bindind',
+    'calibratation',
+    'complet',
+    'deteced',
+    'equipement',
+    'instalation',
+    'keeped',
+    'maintainance',
+    'performace',
+    'platfoms',
+    'sensetivity',
+    'sensitivty',
+}
+
 
 def _is_technical_term(word):
     """检查是否是技术文档常用术语"""
@@ -2965,6 +2991,15 @@ def _should_skip_spelling_issue(word, context, file_type=None):
     if is_whitelisted(word) or _is_domain_abbreviation(word) or _is_extraction_artifact(word):
         return True
 
+    if _normalize_for_check(word) == 'equipement' and re.search(r'personal\s+protective\s+equipement\s*\(\s*PPE\s*\)', context or '', re.IGNORECASE):
+        return True
+
+    if _normalize_for_check(word) in FORCED_MISSPELLINGS:
+        return False
+
+    if re.search(r'@|https?://|www\.', context or '', re.IGNORECASE):
+        return True
+
     if re.search(rf'\b{re.escape(word)}\s+[a-z]{{1,2}}\b', context, re.IGNORECASE):
         joined = re.sub(rf'\b{re.escape(word)}\s+([a-z]{{1,2}})\b', lambda match: word + match.group(1), context, flags=re.IGNORECASE)
         if re.search(r'\bsupernatant\b', joined, re.IGNORECASE):
@@ -3003,9 +3038,7 @@ def _build_spelling_context(content, start, end, radius=90):
 
 def _format_spelling_suggestion(word, context, suggestions, certainty='疑似'):
     suggestion_part = '、'.join(str(item) for item in suggestions if item)
-    if suggestion_part:
-        return f"[general] 拼写/用词错误 — 原文：'{context}'，疑似错误：[{word}]，建议改为：[{suggestion_part}]。是否确定：{certainty}。"
-    return f"[general] 拼写/用词错误 — 原文：'{context}'，疑似错误：[{word}]。是否确定：{certainty}。"
+    return suggestion_part
 
 
 def check_spelling(content, min_word_length=3, file_type=None):
@@ -3015,6 +3048,42 @@ def check_spelling(content, min_word_length=3, file_type=None):
     """
     issues = []
     seen_issue_keys = set()
+
+    for typo in FORCED_MISSPELLINGS:
+        correct = COMMON_MISSPELLINGS.get(typo)
+        if not correct:
+            continue
+        normalized = _normalize_for_check(typo)
+        if normalized == _normalize_for_check(correct):
+            continue
+        for match in re.finditer(r'\b' + re.escape(typo) + r'\b', content, re.IGNORECASE):
+            word = match.group(0)
+            if len(word) < min_word_length or is_whitelisted(word):
+                continue
+            if _is_technical_term(word) or _is_domain_abbreviation(word) or _is_extraction_artifact(word):
+                continue
+            context = _build_spelling_context(content, match.start(), match.end())
+            if _should_skip_spelling_issue(word, context, file_type):
+                continue
+            dedupe_key = (normalized, 'spell', match.start())
+            if dedupe_key in seen_issue_keys:
+                continue
+            seen_issue_keys.add(dedupe_key)
+            chapter = _extract_chapter(content, match.start())
+            issues.append({
+                "severity": "serious",
+                "category": "拼写/用词错误",
+                "rule": "SPELL",
+                "chapter": chapter,
+                "original_text": word,
+                "context": context,
+                "suggestion": _format_spelling_suggestion(word, context, [correct], '确定'),
+                "description": f"原文片段：'{context}'；疑似错误词：[{word}]；建议修改词：[{correct}]；是否确定：确定。",
+                "audit_basis": "英文拼写规范",
+                "confidence": 95,
+                "source": "spellcheck",
+                "position": f"{match.start()}-{match.end()}"
+            })
     
     # 提取所有单词
     words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", content)
@@ -3043,7 +3112,7 @@ def check_spelling(content, min_word_length=3, file_type=None):
                 context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
                     continue
-                dedupe_key = (normalized, 'spell')
+                dedupe_key = (normalized, 'spell', match.start())
                 if dedupe_key in seen_issue_keys:
                     continue
                 seen_issue_keys.add(dedupe_key)
