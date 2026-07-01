@@ -24,8 +24,8 @@
         </div>
       </div>
 
-      <div class="doc-layout">
-        <div class="doc-left">
+      <div class="doc-layout" :class="{ 'doc-layout-result-only': docResult }">
+        <div v-if="!docResult" class="doc-left">
           <div class="panel doc-input-panel">
             <div class="form-item">
               <label class="form-label">句式清单文件</label>
@@ -39,8 +39,9 @@
             <div class="form-item">
               <label class="form-label">术语对照表</label>
               <div class="input-with-button">
-                <el-input v-model="formData.terminologyFile" readonly placeholder="选择知识库中的术语对照表" />
-                <el-button type="primary" @click="openFilePicker('terminologyFile', 'knowledge')">选择文件</el-button>
+                <el-select v-model="formData.terminologyFileId" class="full-width" placeholder="留空则使用数据库术语" clearable @change="onDocumentTerminologyChange">
+                  <el-option v-for="f in termFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+                </el-select>
               </div>
             </div>
 
@@ -49,13 +50,6 @@
               <div class="input-with-button">
                 <el-input v-model="formData.sourceFile" readonly placeholder="选择本地文件" />
                 <el-button type="primary" @click="openLocalFilePicker()">选择文件</el-button>
-              </div>
-            </div>
-
-            <div class="form-item">
-              <label class="form-label">输出文件路径</label>
-              <div class="input-with-button">
-                <el-input v-model="formData.outputPath" readonly placeholder="已润色文档（默认）" />
               </div>
             </div>
 
@@ -77,53 +71,94 @@
             <div class="panel-header">
               <span>润色结果</span>
               <div class="panel-actions">
-                <el-tag type="info" size="small">修改 {{ docResult.changes }} 处</el-tag>
-                <el-tag type="success" size="small">已选 {{ acceptedDocChangeCount }} 处</el-tag>
-                <el-button size="small" @click="toggleAllDocumentChanges">{{ allDocumentChangesSelected ? '反选' : '全选' }}</el-button>
                 <el-button size="small" @click="downloadPolishedDoc">下载文档</el-button>
                 <el-button size="small" @click="downloadReport">润色报告</el-button>
-                <el-button type="primary" size="small" :loading="docFeedbackLoading" @click="submitDocumentFeedback">写入平台反馈句式清单</el-button>
+                <el-button type="primary" size="small" :loading="docFeedbackLoading || docDecisionSaving" @click="submitDocumentFeedback">写入平台反馈句式清单</el-button>
               </div>
             </div>
 
-            <div class="doc-result-preview">
-              <div class="result-col-v">
-                <div class="col-title"><span class="dot dot-blue"></span>原文预览</div>
-                <div class="col-content-compact" v-html="highlightedDocOriginalHtml"></div>
+            <div ref="docPreviewRef" class="doc-review-panel">
+              <div class="doc-review-summary">
+                <div class="doc-review-count">共 {{ docResult.changes }} 处问题</div>
+                <div class="doc-review-confirmed">已确认 {{ confirmedDocChangeCount }}/{{ docResult.changes }}</div>
               </div>
-              <div class="result-col-v">
-                <div class="col-title"><span class="dot dot-green"></span>润色预览</div>
-                <div class="col-content-compact" v-html="highlightedDocPolishedHtml"></div>
-              </div>
-            </div>
 
-            <div class="doc-result-table-wrap">
-              <div v-if="docResult.changeDetails?.length" class="doc-change-table-scroll">
-                <table class="doc-change-table">
-                  <thead>
-                    <tr>
-                      <th class="col-index">序号</th>
-                      <th class="col-before">原文</th>
-                      <th class="col-after">润色后</th>
-                      <th class="col-type">修改类型</th>
-                      <th class="col-accepted">是否接受</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(item, index) in docResult.changeDetails" :key="`${index}-${item.before}-${item.after}`">
-                      <td class="col-index">{{ index + 1 }}</td>
-                      <td class="col-before" v-html="renderDiffHtml(item.before, item.after, 'original')"></td>
-                      <td class="col-after" v-html="renderDiffHtml(item.before, item.after, 'polished')"></td>
-                      <td class="col-type">{{ item.typeLabel }}</td>
-                      <td class="col-accepted">
-                        <div><el-checkbox v-model="item.accepted">是</el-checkbox></div>
-                        <div><el-checkbox v-model="item.needCorrection" @change="onCorrectionChecked(index, item)">修正后接受</el-checkbox></div>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+              <div class="doc-review-toolbar">
+                <div class="doc-review-filters">
+                  <span class="filter-label">筛选：</span>
+                  <el-select v-model="docFilterType" size="small" placeholder="全部类型" class="doc-filter-select">
+                    <el-option label="全部类型" value="" />
+                    <el-option v-for="item in docIssueTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
+                  </el-select>
+                  <el-select v-model="docFilterTriggerLevel" size="small" placeholder="全部触发次数" class="doc-filter-select">
+                    <el-option label="全部触发次数" value="" />
+                    <el-option label="高" value="high" />
+                    <el-option label="中" value="medium" />
+                    <el-option label="低" value="low" />
+                  </el-select>
+                </div>
+                <div class="doc-review-bulk-actions">
+                  <el-button size="small" type="success" :loading="docDecisionSaving" @click="acceptAllDocumentIssues">全部接受</el-button>
+                  <el-button size="small" type="danger" plain :loading="docDecisionSaving" @click="rejectAllDocumentIssues">全部拒绝</el-button>
+                </div>
+              </div>
+
+              <div v-if="filteredDocIssues.length" class="doc-issue-list">
+                <div
+                  v-for="issue in filteredDocIssues"
+                  :key="issue.rowKey"
+                  class="doc-issue-card"
+                  :class="{
+                    'is-accepted': issue.status === 'accepted' || issue.status === 'custom',
+                    'is-rejected': issue.status === 'rejected'
+                  }"
+                >
+                  <div class="doc-issue-header">
+                    <div class="doc-issue-title">问题 #{{ issue.displayIndex }}</div>
+                    <div class="doc-issue-meta">
+                      <el-tag size="small" :type="issue.typeTagType">{{ issue.typeLabel }}</el-tag>
+                      <span class="trigger-pill" :class="`trigger-${issue.triggerLevel}`">触发次数 {{ issue.triggerCount }}</span>
+                      <span class="paragraph-pill">段落 #{{ issue.paragraph }}</span>
+                    </div>
+                  </div>
+
+                  <div class="doc-issue-body">
+                    <div class="issue-line">
+                      <span class="issue-label">原文：</span>
+                      <span class="issue-text">{{ issue.before || issue.after }}</span>
+                    </div>
+                    <div class="issue-line">
+                      <span class="issue-label">建议：</span>
+                      <span class="issue-text" v-html="renderIssueSuggestion(issue)"></span>
+                    </div>
+                    <div class="issue-line issue-basis">
+                      <span class="issue-label">依据：</span>
+                      <span>{{ issueBasisText(issue) }}</span>
+                    </div>
+                  </div>
+
+                  <div v-if="issue.editing" class="custom-edit-row">
+                    <el-input v-model="issue.customAfter" size="small" placeholder="输入自定义替换文本" />
+                    <el-button size="small" type="primary" :loading="docDecisionSaving" @click="saveCustomDocumentIssue(issue)">保存</el-button>
+                    <el-button size="small" @click="cancelCustomDocumentIssue(issue)">取消</el-button>
+                  </div>
+
+                  <div class="doc-issue-actions">
+                    <el-button size="small" type="success" plain :disabled="docDecisionSaving" @click="acceptDocumentIssue(issue)">接受</el-button>
+                    <el-button size="small" type="danger" plain :disabled="docDecisionSaving" @click="rejectDocumentIssue(issue)">拒绝</el-button>
+                    <el-button size="small" @click="editDocumentIssue(issue)">自定义</el-button>
+                    <el-tag v-if="issue.status === 'accepted'" size="small" type="success">已接受</el-tag>
+                    <el-tag v-if="issue.status === 'rejected'" size="small" type="danger">已拒绝</el-tag>
+                    <el-tag v-if="issue.status === 'custom'" size="small" type="warning">已自定义</el-tag>
+                  </div>
+                </div>
               </div>
               <div v-else class="doc-change-empty">当前没有可确认的润色结果</div>
+
+              <div class="doc-review-footer">
+                <el-button @click="resetForm">返回</el-button>
+                <el-button type="primary" @click="scrollToDocumentPreview">预览修改</el-button>
+              </div>
             </div>
           </div>
 
@@ -343,6 +378,7 @@ const route = useRoute()
 const polishStore = usePolishStore()
 const { documentDraft, documentSession } = storeToRefs(polishStore)
 const localFileInputRef = ref(null)
+const docPreviewRef = ref(null)
 const filePickerVisible = ref(false)
 const knowledgeTree = ref([])
 const knowledgeTreeList = ref([])
@@ -393,10 +429,13 @@ const textTerminologyFileName = ref('')
 const textTerminologyFileId = ref(null)
 const result = ref(null)
 const docResult = ref(null)
+const docFilterType = ref('')
+const docFilterTriggerLevel = ref('')
 const loading = ref(false)
 const polishProgress = ref(0)
 const polishProgressMsg = ref('')
 const docFeedbackLoading = ref(false)
+const docDecisionSaving = ref(false)
 const docFeedbackStats = ref({ totalDocs: 0, averageAccuracy: 0 })
 // 反馈相关
 const feedbackAccuracy = ref(80)
@@ -961,6 +1000,9 @@ function renderSegmentsHtml(segments) {
 function renderDiffHtml(sourceText, targetText, mode) {
   const displayText = mode === 'original' ? sourceText : targetText
   const otherText = mode === 'original' ? targetText : sourceText
+  if (String(displayText || '').length + String(otherText || '').length > 20000) {
+    return `<div class="result-text-block">${escapeHtml(displayText || '')}</div>`
+  }
   const structuredList = detectLongParagraphList(displayText)
 
   if (structuredList) {
@@ -1014,12 +1056,17 @@ let documentProgressTimer = null
 
 const acceptedDocChangeCount = computed(() => {
   const items = docResult.value?.changeDetails || []
-  return items.filter(item => item.accepted).length
+  return items.filter(item => item.status === 'accepted' || item.status === 'custom').length
+})
+
+const confirmedDocChangeCount = computed(() => {
+  const items = docResult.value?.changeDetails || []
+  return items.filter(item => item.status !== 'pending').length
 })
 
 const allDocumentChangesSelected = computed(() => {
   const items = docResult.value?.changeDetails || []
-  return items.length > 0 && items.every(item => item.accepted)
+  return items.length > 0 && items.every(item => item.status === 'accepted' || item.status === 'custom')
 })
 
 function toggleAllDocumentChanges() {
@@ -1027,14 +1074,179 @@ function toggleAllDocumentChanges() {
   const nextValue = !allDocumentChangesSelected.value
   items.forEach(item => {
     item.accepted = nextValue
+    item.status = nextValue ? 'accepted' : 'pending'
   })
 }
 
+async function persistDocumentDecisions(showMessage = false, resetAfterSubmit = false) {
+  if (!docResult.value || !docResult.value.changeDetails?.length) {
+    ElMessage.warning('当前没有可提交的润色结果')
+    return null
+  }
+
+  const payload = docResult.value.changeDetails.map(item => ({
+    before: item.before,
+    after: item.after,
+    type: item.type,
+    status: item.status,
+    paragraph: item.paragraph,
+    accepted: item.status === 'accepted' || item.status === 'custom'
+  }))
+
+  docDecisionSaving.value = true
+  try {
+    const resp = await polishAPI.submitDocumentFeedback(
+      docResult.value.id,
+      docResult.value.sourceName,
+      payload
+    )
+    const data = resp.data || {}
+    if (docResult.value && data.document_id) {
+      docResult.value.id = data.document_id
+    }
+    if (docResult.value && data.raw_url) {
+      docResult.value.rawUrl = data.raw_url
+    }
+    if (showMessage) {
+      if (data.processed_count > 0) {
+        ElMessage.success(`已写入 ${data.processed_count} 条平台反馈句式`)
+      } else {
+        ElMessage.success('文档反馈已提交，本次没有新增句式写入')
+      }
+    }
+    await loadDocumentFeedbackStats()
+    if (resetAfterSubmit) {
+      resetForm()
+    }
+    return data
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`提交失败：${errorMsg}`)
+    return null
+  } finally {
+    docDecisionSaving.value = false
+  }
+}
+
+async function acceptDocumentIssue(issue) {
+  issue.status = 'accepted'
+  issue.accepted = true
+  issue.editing = false
+  await persistDocumentDecisions()
+}
+
+async function rejectDocumentIssue(issue) {
+  issue.status = 'rejected'
+  issue.accepted = false
+  issue.editing = false
+  await persistDocumentDecisions()
+}
+
+function editDocumentIssue(issue) {
+  issue.customAfter = issue.after
+  issue.editing = true
+}
+
+async function saveCustomDocumentIssue(issue) {
+  const nextValue = String(issue.customAfter || '').trim()
+  if (!nextValue) {
+    ElMessage.warning('请填写自定义替换文本')
+    return
+  }
+  issue.after = nextValue
+  issue.status = 'custom'
+  issue.accepted = true
+  issue.editing = false
+  await persistDocumentDecisions()
+}
+
+function cancelCustomDocumentIssue(issue) {
+  issue.customAfter = issue.after
+  issue.editing = false
+}
+
+async function acceptAllDocumentIssues() {
+  filteredDocIssues.value.forEach(issue => {
+    issue.status = 'accepted'
+    issue.accepted = true
+    issue.editing = false
+  })
+  await persistDocumentDecisions()
+}
+
+async function rejectAllDocumentIssues() {
+  filteredDocIssues.value.forEach(issue => {
+    issue.status = 'rejected'
+    issue.accepted = false
+    issue.editing = false
+  })
+  await persistDocumentDecisions()
+}
+
+function scrollToDocumentPreview() {
+  if (!docResult.value?.id) {
+    ElMessage.warning('暂无可预览的 Word 文件')
+    return
+  }
+  window.open(docResult.value.rawUrl || `/api/polish/${docResult.value.id}/raw`, '_blank')
+}
+
+function renderIssueSuggestion(issue) {
+  const before = String(issue.before || '')
+  const after = String(issue.after || '')
+  if (!after) return ''
+  if (!before || before === after) return escapeHtml(after)
+
+  let prefixLength = 0
+  const maxPrefixLength = Math.min(before.length, after.length)
+  while (prefixLength < maxPrefixLength && before[prefixLength] === after[prefixLength]) {
+    prefixLength += 1
+  }
+
+  let suffixLength = 0
+  const maxSuffixLength = Math.min(before.length - prefixLength, after.length - prefixLength)
+  while (
+    suffixLength < maxSuffixLength &&
+    before[before.length - 1 - suffixLength] === after[after.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1
+  }
+
+  const prefix = after.slice(0, prefixLength)
+  const changed = after.slice(prefixLength, after.length - suffixLength)
+  const suffix = suffixLength > 0 ? after.slice(after.length - suffixLength) : ''
+  if (!changed) return escapeHtml(after)
+  return `${escapeHtml(prefix)}<mark class="mark-after">${escapeHtml(changed)}</mark>${escapeHtml(suffix)}`
+}
+
+const docIssueTypeOptions = [
+  { label: '系统规则', value: 'system_rule' },
+  { label: '术语替换', value: 'replacement_rule' },
+  { label: '禁止规则', value: 'forbidden_rule' },
+  { label: '句式适用', value: 'sentence_applicability_rule' },
+  { label: '祈使句规则', value: 'imperative_rule' },
+  { label: '格式规则', value: 'format_rule' }
+]
+
+const filteredDocIssues = computed(() => {
+  const items = docResult.value?.changeDetails || []
+  return items.filter(item => {
+    if (docFilterType.value && item.filterType !== docFilterType.value) return false
+    if (docFilterTriggerLevel.value && item.triggerLevel !== docFilterTriggerLevel.value) return false
+    return true
+  })
+})
+
 function normalizeChangeType(type) {
   const typeMap = {
-    ai: 'AI',
-    terminology: '术语',
-    terminology_rule: '术语',
+    ai: '系统规则',
+    term: '术语替换',
+    terminology: '术语替换',
+    terminology_rule: '术语替换',
+    forbidden: '禁止规则',
+    forbidden_rule: '禁止规则',
+    imperative: '祈使句规则',
+    imperative_rule: '祈使句规则',
     preferred_sentences: '句式',
     forbidden_words: '禁用词',
     passive_voice: '语态',
@@ -1042,36 +1254,175 @@ function normalizeChangeType(type) {
     informal: '表达',
     sentence_length: '长句',
     pronoun_reference: '指代',
-    format: '格式'
+    style: '句式适用',
+    sentence_applicability_rule: '句式适用',
+    format: '格式规则',
+    punctuation: '格式规则'
   }
   return typeMap[type] || (type ? String(type) : '润色')
 }
 
+function normalizeDocFilterType(type) {
+  const value = String(type || '')
+  if (['term', 'terminology', 'terminology_rule', 'replacement_rule'].includes(value)) return 'replacement_rule'
+  if (['forbidden', 'forbidden_rule', 'forbidden_words'].includes(value)) return 'forbidden_rule'
+  if (['imperative', 'imperative_rule'].includes(value)) return 'imperative_rule'
+  if (['style', 'preferred_sentences', 'sentence_applicability_rule', 'passive_voice', 'double_negative', 'informal', 'sentence_length', 'pronoun_reference'].includes(value)) return 'sentence_applicability_rule'
+  if (['format', 'punctuation', 'format_rule'].includes(value)) return 'format_rule'
+  return 'system_rule'
+}
+
+function getDocTypeTagType(filterType) {
+  const typeMap = {
+    system_rule: 'info',
+    replacement_rule: 'primary',
+    forbidden_rule: 'danger',
+    imperative_rule: 'warning',
+    format_rule: 'info',
+    sentence_applicability_rule: 'success'
+  }
+  return typeMap[filterType] || 'info'
+}
+
+function getTriggerLevel(count) {
+  if (count >= 3) return 'high'
+  if (count >= 2) return 'medium'
+  return 'low'
+}
+
+function buildDocIssueReason(change, index) {
+  if (change.reason) return change.reason
+  if (change.rule_name) return change.rule_name
+  const filterType = normalizeDocFilterType(change.type)
+  if (filterType === 'replacement_rule') return `术语对照表 #${change.rule_id || index + 1}`
+  if (filterType === 'forbidden_rule') return '禁止规则'
+  if (filterType === 'imperative_rule') return '祈使句规则'
+  if (filterType === 'sentence_applicability_rule') return '句式适用规则'
+  if (filterType === 'system_rule') return '系统规则'
+  return '格式规则'
+}
+
+function issueBasisText(issue) {
+  const parts = []
+  parts.push(issue.ruleName || issue.reason || issue.typeLabel || '润色规则')
+  if (issue.type) parts.push(`type=${issue.type}`)
+  if (issue.paragraph) parts.push(`段落 #${issue.paragraph}`)
+  return parts.join(' / ')
+}
+
+function stripTrailingPunctuation(text) {
+  return String(text || '').trim().replace(/[。.!！？?，,;；:：]+$/g, '')
+}
+
+function isLowValueDocChange(item) {
+  const before = String(item.before || '').trim()
+  const after = String(item.after || '').trim()
+  if (!before || !after) return false
+  const beforeCore = stripTrailingPunctuation(before)
+  const afterCore = stripTrailingPunctuation(after)
+  if (beforeCore.length <= 4 && afterCore === `请${beforeCore}`) return true
+  if (beforeCore.startsWith('请') && beforeCore.length <= 4 && afterCore === beforeCore.slice(1)) return true
+  if (item.ruleName && item.ruleName !== '基础规范化') return false
+  if (!['format_rule'].includes(item.filterType)) return false
+  if (beforeCore === afterCore) return true
+  return before.length <= 4 && after.startsWith(before)
+}
+
+function getDocDisplayPriority(filterType) {
+  const priorityMap = {
+    sentence_applicability_rule: 100,
+    replacement_rule: 90,
+    forbidden_rule: 80,
+    imperative_rule: 70,
+    system_rule: 40,
+    format_rule: 10
+  }
+  return priorityMap[filterType] || 30
+}
+
+function dedupeDocIssues(items) {
+  const selected = new Map()
+  const order = []
+  items.forEach(item => {
+    const before = String(item.before || '').replace(/\s+/g, ' ').trim()
+    const after = String(item.after || '').replace(/\s+/g, ' ').trim()
+    const key = before || after
+    if (!key) return
+    const existing = selected.get(key)
+    if (!existing) {
+      selected.set(key, item)
+      order.push(key)
+      return
+    }
+    if (getDocDisplayPriority(item.filterType) > getDocDisplayPriority(existing.filterType)) {
+      selected.set(key, item)
+    }
+  })
+  return order.map(key => selected.get(key)).filter(Boolean)
+}
+
 function normalizeDocumentChanges(changes) {
-  return (changes || []).map((change, index) => {
+  const rawItems = (changes || []).map((change, index) => {
     const before = change.before || change.original || ''
     const after = change.after || change.polished || ''
+    const filterType = normalizeDocFilterType(change.type)
     return {
       rowKey: `${index}-${before}-${after}`,
+      displayIndex: index + 1,
       before,
       after,
       type: change.type || '',
+      ruleName: change.rule_name || '',
+      filterType,
       typeLabel: normalizeChangeType(change.type),
+      typeTagType: getDocTypeTagType(filterType),
+      paragraph: change.paragraph || change.paragraph_index || null,
+      reason: buildDocIssueReason(change, index),
+      status: 'pending',
+      editing: false,
+      customAfter: after,
       accepted: false,
       needCorrection: false
     }
-  }).filter(item => {
+  })
+  const hasPreferredItem = rawItems.some(item => item.filterType !== 'format_rule')
+  const filteredItems = rawItems.filter(item => {
     const before = (item.before || '').replace(/\s+/g, ' ').trim()
     const after = (item.after || '').replace(/\s+/g, ' ').trim()
+    if (hasPreferredItem && item.filterType === 'format_rule') {
+      return false
+    }
     if (!before && !after) {
       return false
     }
+    if (isLowValueDocChange(item)) {
+      return false
+    }
     return before !== after || (!before && after) || (before && !after)
+  })
+
+  const countMap = filteredItems.reduce((acc, item) => {
+    const key = `${item.filterType}:${item.before}:${item.after}`
+    acc[key] = (acc[key] || 0) + 1
+    return acc
+  }, {})
+
+  const visibleItems = dedupeDocIssues(filteredItems)
+
+  return visibleItems.map(item => {
+    const triggerCount = countMap[`${item.filterType}:${item.before}:${item.after}`] || 1
+    return {
+      ...item,
+      triggerCount,
+      triggerLevel: getTriggerLevel(triggerCount)
+    }
   })
 }
 
 function applyDocumentResult(data, fallbackSourceName = '') {
   const normalizedChanges = normalizeDocumentChanges(data?.changes || [])
+  docFilterType.value = ''
+  docFilterTriggerLevel.value = ''
   docResult.value = {
     id: data?.id,
     sourceName: fallbackSourceName || formData.value.sourceFile || data?.download_filename || '',
@@ -1080,9 +1431,15 @@ function applyDocumentResult(data, fallbackSourceName = '') {
     changes: normalizedChanges.length,
     changeDetails: normalizedChanges,
     reportFile: data?.report_file || data?.reportFile,
+    rawUrl: data?.raw_url || (data?.id ? `/api/polish/${data.id}/raw` : ''),
     download_filename: data?.download_filename,
     file_type: data?.file_type
   }
+}
+
+function onDocumentTerminologyChange(fileId) {
+  const selected = termFileOptions.value.find(item => item.id === fileId)
+  formData.value.terminologyFile = selected?.name || ''
 }
 
 function startDocumentProgress() {
@@ -1477,35 +1834,9 @@ async function loadDocumentFeedbackStats() {
 }
 
 async function submitDocumentFeedback() {
-  if (!docResult.value || !docResult.value.changeDetails?.length) {
-    ElMessage.warning('当前没有可提交的润色结果')
-    return
-  }
-
   docFeedbackLoading.value = true
   try {
-    const payload = docResult.value.changeDetails.map(item => ({
-      before: item.before,
-      after: item.after,
-      type: item.type,
-      accepted: item.accepted
-    }))
-    const resp = await polishAPI.submitDocumentFeedback(
-      docResult.value.id,
-      docResult.value.sourceName,
-      payload
-    )
-    const data = resp.data || {}
-    if (data.processed_count > 0) {
-      ElMessage.success(`已写入 ${data.processed_count} 条平台反馈句式`) 
-    } else {
-      ElMessage.success('文档反馈已提交，本次没有新增句式写入')
-    }
-    await loadDocumentFeedbackStats()
-    resetForm()
-  } catch (e) {
-    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
-    ElMessage.error(`提交失败：${errorMsg}`)
+    await persistDocumentDecisions(true, true)
   } finally {
     docFeedbackLoading.value = false
   }
@@ -1705,6 +2036,11 @@ onMounted(async () => {
   flex-direction: column;
 }
 
+.doc-layout-result-only .doc-right {
+  flex: 1 1 100%;
+  width: 100%;
+}
+
 .doc-left {
   margin-top: 2mm;
 }
@@ -1731,7 +2067,7 @@ onMounted(async () => {
   margin-bottom: 0;
   display: flex;
   flex-direction: column;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .doc-result-preview {
@@ -1749,6 +2085,212 @@ onMounted(async () => {
   min-height: 400px;
   max-height: 400px;
   flex: 0 0 400px;
+}
+
+.doc-review-panel {
+  flex: 1;
+  min-height: 0;
+  height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 14px;
+  background: #f8fafc;
+}
+
+.doc-review-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #111827;
+}
+
+.doc-review-count {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.doc-review-confirmed {
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.doc-review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.doc-review-filters,
+.doc-review-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filter-label {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.doc-filter-select {
+  width: 150px;
+}
+
+.doc-issue-list {
+  flex: 1;
+  min-height: 0;
+  height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.doc-issue-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+  transition: opacity 0.2s ease, border-color 0.2s ease;
+}
+
+.doc-issue-card.is-accepted {
+  opacity: 0.62;
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.doc-issue-card.is-rejected {
+  opacity: 0.62;
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.doc-issue-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.doc-issue-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.doc-issue-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.trigger-pill,
+.paragraph-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trigger-high {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.trigger-medium {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.trigger-low {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.paragraph-pill {
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.doc-issue-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #334155;
+}
+
+.issue-line {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.issue-label {
+  flex: 0 0 48px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.issue-text {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.issue-text mark {
+  background: #fef3c7;
+  color: #92400e;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.issue-text .mark-after {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.issue-basis {
+  color: #64748b;
+}
+
+.custom-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.doc-issue-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.doc-review-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 2px;
 }
 
 .doc-change-table-scroll {
@@ -2214,6 +2756,8 @@ onMounted(async () => {
   }
 
   .doc-result-panel,
+  .doc-review-panel,
+  .doc-issue-list,
   .doc-result-table-wrap,
   .doc-change-table-scroll {
     max-height: none;

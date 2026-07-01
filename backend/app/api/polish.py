@@ -11,6 +11,7 @@ import mimetypes
 import re
 import threading
 import datetime
+import logging
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.polished_document import (
@@ -21,12 +22,12 @@ from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
 from app.models.polish_feedback import PolishFeedback
 from app.utils.file_utils import read_file_safe as _read_file_safe
-from app.utils.polish_feedback_rules import persist_learning_rules
-from app.utils.polish_rules_engine import apply_all_rules
-from app.crud.polish_learning_rule import get_enabled_engine_keys
+from app.utils.polish_rules_engine import apply_all_rules, apply_custom_rules
+from app.crud.polish_learning_rule import get_enabled_engine_keys, get_enabled_custom_rules, record_rule_triggers
 from app.crud.term import bulk_create_terms
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # 润色任务进度追踪
 _polish_tasks: dict = {}  # {task_id: {"status", "progress", "message", "result"}}
@@ -728,6 +729,8 @@ class DocumentFeedbackItem(BaseModel):
     after: str = ""
     type: str = ""
     accepted: bool = True
+    status: str = ""
+    paragraph: Optional[int] = None
 
 
 class DocumentFeedbackInput(BaseModel):
@@ -741,6 +744,7 @@ class PolishRuleMatch(BaseModel):
     before: str
     after: str
     type: str
+    paragraph: Optional[int] = None
 
 
 def _normalize_compare_text(text: str) -> str:
@@ -749,7 +753,114 @@ def _normalize_compare_text(text: str) -> str:
     return re.sub(r'\s+', ' ', str(text)).strip()
 
 
-def _build_doc_change_details(original_text: str, polished_text: str, changes: list) -> list[dict]:
+def _strip_doc_trailing_punctuation(text: str) -> str:
+    return re.sub(r'[。.!！？?，,;；:：]+$', '', _normalize_compare_text(text))
+
+
+def _is_low_value_doc_change(before: str, after: str, change_type: str = '', rule_name: str = '') -> bool:
+    before_core = _strip_doc_trailing_punctuation(before)
+    after_core = _strip_doc_trailing_punctuation(after)
+    if not before_core or not after_core:
+        return False
+    if before_core == after_core:
+        return True
+
+    short_limit = 4
+    if len(before_core) <= short_limit and after_core == f'请{before_core}':
+        return True
+    if before_core.startswith('请') and len(before_core) <= short_limit and after_core == before_core[1:]:
+        return True
+
+    normalized_type = str(change_type or '').lower()
+    normalized_rule = str(rule_name or '')
+    is_format_like = normalized_type in {'format', 'punctuation'} or normalized_rule == '基础规范化'
+    if is_format_like and len(before_core) <= short_limit and after_core.startswith(before_core):
+        return True
+    return False
+
+
+def _doc_change_memory_key(before: str, after: str) -> str:
+    return f"{_normalize_compare_text(before)}\u0001{_normalize_compare_text(after)}"
+
+
+def _load_rejected_doc_change_keys(db: Session) -> set[tuple[str, str]]:
+    if db is None:
+        return set()
+    rows = db.query(PolishFeedback.original_text, PolishFeedback.polished_text).filter(
+        PolishFeedback.target == 'document_rejected_change'
+    ).all()
+    return {(_normalize_compare_text(before), _normalize_compare_text(after)) for before, after in rows if before or after}
+
+
+def _is_rejected_doc_change(before: str, after: str, rejected_keys: set[tuple[str, str]] = None) -> bool:
+    if not rejected_keys:
+        return False
+    current_before = _normalize_compare_text(before)
+    current_after = _normalize_compare_text(after)
+    if not current_before or not current_after:
+        return False
+    for rejected_before, rejected_after in rejected_keys:
+        if not rejected_before or not rejected_after:
+            continue
+        before_matches = current_before == rejected_before or current_before.startswith(rejected_before) or rejected_before.startswith(current_before)
+        after_matches = current_after == rejected_after or current_after.startswith(rejected_after) or rejected_after.startswith(current_after)
+        if before_matches and after_matches:
+            return True
+    return False
+
+
+def _doc_change_display_priority(change_type: str) -> int:
+    priority_map = {
+        'style': 100,
+        'preferred_sentences': 100,
+        'sentence_applicability_rule': 100,
+        'terminology': 90,
+        'term': 90,
+        'terminology_rule': 90,
+        'forbidden': 80,
+        'forbidden_rule': 80,
+        'forbidden_words': 80,
+        'imperative': 70,
+        'imperative_rule': 70,
+        'ai': 40,
+        'format': 10,
+        'punctuation': 10,
+    }
+    return priority_map.get(str(change_type or ''), 30)
+
+
+def _is_displayable_doc_change(change_type: str) -> bool:
+    return _doc_change_display_priority(change_type) >= 70
+
+
+def _dedupe_visible_doc_changes(changes: list[dict]) -> list[dict]:
+    selected = {}
+    order = []
+    for item in changes:
+        before = _normalize_compare_text(item.get('before', ''))
+        after = _normalize_compare_text(item.get('after', ''))
+        key = before or after
+        if not key:
+            continue
+        score = _doc_change_display_priority(item.get('type', ''))
+        existing = selected.get(key)
+        if existing is None:
+            selected[key] = item
+            order.append(key)
+            continue
+        existing_score = _doc_change_display_priority(existing.get('type', ''))
+        if score > existing_score:
+            selected[key] = item
+    return [selected[key] for key in order if key in selected]
+
+
+def _pick_visible_doc_changes(changes: list[dict]) -> list[dict]:
+    deduped = _dedupe_visible_doc_changes(changes)
+    preferred = [item for item in deduped if _is_displayable_doc_change(item.get('type', ''))]
+    return preferred if preferred else deduped
+
+
+def _build_doc_change_details(original_text: str, polished_text: str, changes: list, rejected_keys: set[str] = None) -> list[dict]:
     original_lines = [line.strip() for line in (original_text or '').split('\n') if line.strip()]
     polished_lines = [line.strip() for line in (polished_text or '').split('\n') if line.strip()]
 
@@ -769,6 +880,10 @@ def _build_doc_change_details(original_text: str, polished_text: str, changes: l
             after = _protect_model_numbers(after_lines[idx]) if idx < len(after_lines) else ''
             if _normalize_compare_text(before) == _normalize_compare_text(after):
                 continue
+            if _is_low_value_doc_change(before, after, 'ai', ''):
+                continue
+            if _is_rejected_doc_change(before, after, rejected_keys):
+                continue
             diff_rows.append({
                 "before": before,
                 "after": after,
@@ -784,19 +899,26 @@ def _build_doc_change_details(original_text: str, polished_text: str, changes: l
             before = item.get('before', '')
             after = _protect_model_numbers(item.get('after', ''))
             change_type = item.get('type', '')
+            paragraph = item.get('paragraph') or item.get('paragraph_index')
         else:
             before = getattr(item, 'before', '')
             after = _protect_model_numbers(getattr(item, 'after', ''))
             change_type = getattr(item, 'type', '')
+            paragraph = getattr(item, 'paragraph', None)
 
         normalized_before = _normalize_compare_text(before)
         normalized_after = _normalize_compare_text(after)
         if normalized_before == normalized_after:
             continue
+        if _is_low_value_doc_change(before, after, change_type, getattr(item, 'rule_name', '') if not isinstance(item, dict) else item.get('rule_name', '')):
+            continue
+        if _is_rejected_doc_change(before, after, rejected_keys):
+            continue
         normalized_changes.append({
             "before": before,
             "after": after,
-            "type": change_type
+            "type": change_type,
+            "paragraph": paragraph,
         })
 
     for row in diff_rows:
@@ -808,26 +930,32 @@ def _build_doc_change_details(original_text: str, polished_text: str, changes: l
             item_after = _normalize_compare_text(item['after'])
             if item_before and item_before in row_before:
                 matched_type = item['type'] or matched_type
+                row['paragraph'] = item.get('paragraph')
                 break
             if item_after and item_after in row_after:
                 matched_type = item['type'] or matched_type
+                row['paragraph'] = item.get('paragraph')
                 break
         row['type'] = matched_type
 
-    return diff_rows
+    return _pick_visible_doc_changes(diff_rows)
 
 
-def _filter_visible_doc_changes(changes: list) -> list[dict]:
+def _filter_visible_doc_changes(changes: list, rejected_keys: set[str] = None) -> list[dict]:
     visible = []
     for item in changes or []:
         if isinstance(item, dict):
             before = item.get('before', '')
             after = _protect_model_numbers(item.get('after', ''))
             change_type = item.get('type', '')
+            rule_name = item.get('rule_name', '')
+            paragraph = item.get('paragraph') or item.get('paragraph_index')
         else:
             before = getattr(item, 'before', '')
             after = _protect_model_numbers(getattr(item, 'after', ''))
             change_type = getattr(item, 'type', '')
+            rule_name = getattr(item, 'rule_name', '')
+            paragraph = getattr(item, 'paragraph', None)
 
         if _normalize_compare_text(before) == _normalize_compare_text(after):
             continue
@@ -835,12 +963,20 @@ def _filter_visible_doc_changes(changes: list) -> list[dict]:
         if not _normalize_compare_text(before) and not _normalize_compare_text(after):
             continue
 
+        if _is_low_value_doc_change(before, after, change_type, rule_name):
+            continue
+
+        if _is_rejected_doc_change(before, after, rejected_keys):
+            continue
+
         visible.append({
             'before': before,
             'after': after,
-            'type': change_type
+            'type': change_type,
+            'rule_name': rule_name,
+            'paragraph': paragraph,
         })
-    return visible
+    return _pick_visible_doc_changes(visible)
 
 
 
@@ -927,13 +1063,36 @@ def _apply_skill_polish(
         if not any(marker in t for marker in verb_markers):
             return True
         return False
+
+    def _should_show_basic_change(before: str, after: str, change_type: str) -> bool:
+        before_text = (before or '').strip()
+        after_text = (after or '').strip()
+        if not before_text or before_text == after_text:
+            return False
+        if change_type == 'punctuation':
+            return False
+        if len(before_text) <= 4:
+            return False
+        if _is_noun_phrase(before_text):
+            return False
+        before_core = before_text.rstrip('。.!！？?，,;；:：')
+        after_core = after_text.rstrip('。.!！？?，,;；:：')
+        return before_core != after_core
     changes = []
     lines = text.split('\n')
     polished_lines = []
+    triggered_rule_ids = []
+    triggered_engine_keys = []
     
     style_rules = []
     if sentence_guide:
         style_rules = _extract_style_rules(sentence_guide)
+        logger.warning(
+            "polish sentence guide parsed: text_len=%s rules=%s rule_types=%s",
+            len(sentence_guide or ''),
+            len(style_rules),
+            [rule.get('type') for rule in style_rules[:10]],
+        )
     
     term_dict = {}
     # 先解析文件中的术语替换（支持中英文多列表，自动语言过滤）
@@ -949,36 +1108,117 @@ def _apply_skill_polish(
     if db_terminology:
         term_dict.update(db_terminology)
     
+    engine_enabled_rules = get_enabled_engine_keys(db) if db else None
+    if is_title and engine_enabled_rules:
+        engine_enabled_rules = [key for key in engine_enabled_rules if key != 'punctuation']
+    custom_rules = get_enabled_custom_rules(db) if db else []
+
+    def _rule_type(rule) -> str:
+        return str(getattr(rule, 'rule_type', '') or '')
+
+    sentence_custom_rules = [rule for rule in custom_rules if _rule_type(rule) == 'sentence_applicability_rule']
+    term_custom_rules = [rule for rule in custom_rules if _rule_type(rule) == 'replacement_rule']
+    other_custom_rules = [
+        rule for rule in custom_rules
+        if _rule_type(rule) not in {'sentence_applicability_rule', 'replacement_rule'}
+    ]
+
+    term_enabled_rules = None
+    other_engine_rules = None
+    if engine_enabled_rules is not None:
+        term_enabled_rules = [key for key in engine_enabled_rules if key == 'termReplace']
+        other_engine_rules = [key for key in engine_enabled_rules if key != 'termReplace']
+    else:
+        term_enabled_rules = ['termReplace']
+        other_engine_rules = ['imperativePlease', 'numberSpace', 'cnEnSpace', 'punctuation']
+    if is_title:
+        other_engine_rules = [key for key in other_engine_rules if key != 'punctuation']
+
+    def _append_custom_issues(issues: list[dict]):
+        nonlocal has_changes
+        if not issues:
+            return
+        for issue in issues:
+            if issue.get('rule_id'):
+                triggered_rule_ids.append(issue.get('rule_id'))
+            changes.append(PolishRuleMatch(
+                rule_name=issue.get('rule_name', '自定义规则'),
+                before=issue.get('before', issue.get('original', ''))[:80],
+                after=issue.get('after', issue.get('replacement', ''))[:80],
+                type=issue.get('type', 'custom')
+            ))
+        has_changes = True
+
+    def _append_engine_issues(issues: list[dict]):
+        nonlocal has_changes
+        if not issues:
+            return
+        for issue in issues:
+            if issue.get('engine_key'):
+                triggered_engine_keys.append(issue.get('engine_key'))
+            changes.append(PolishRuleMatch(
+                rule_name=issue.get('rule_name', '规则检测'),
+                before=issue.get('original', ''),
+                after=issue.get('replacement', ''),
+                type=issue.get('type', 'format')
+            ))
+        has_changes = True
+
     for line in lines:
         original = line
         new_line = line.strip()
         
         has_changes = False
         
-        # ── 应用规则引擎（从 DB 读取启用的规则） ──
-        engine_enabled_rules = get_enabled_engine_keys(db)
-        polished_line, engine_issues = apply_all_rules(
-            new_line,
-            term_dict=term_dict,
-            enabled_rules=engine_enabled_rules,
-            context_text=text
-        )
-        if engine_issues:
-            for issue in engine_issues:
-                changes.append(PolishRuleMatch(
-                    rule_name=issue.get('rule_name', '规则检测'),
-                    before=issue.get('original', ''),
-                    after=issue.get('replacement', ''),
-                    type=issue.get('type', 'format')
-                ))
-            has_changes = True
-        new_line = polished_line
-        
-        if style_rules:
+        if style_rules and not is_title:
             new_line, rule_changes = _apply_style_rules(new_line, style_rules)
             if rule_changes:
+                logger.warning(
+                    "polish sentence guide matched: before=%r after=%r matches=%s",
+                    original[:120],
+                    new_line[:120],
+                    [change.rule_name for change in rule_changes],
+                )
                 changes.extend(rule_changes)
                 has_changes = True
+
+        if sentence_custom_rules and not is_title:
+            new_line, custom_issues = apply_custom_rules(new_line, sentence_custom_rules)
+            if custom_issues:
+                logger.warning(
+                    "polish sentence custom matched: before=%r after=%r matches=%s",
+                    original[:120],
+                    new_line[:120],
+                    [issue.get('rule_name') for issue in custom_issues],
+                )
+            _append_custom_issues(custom_issues)
+
+        term_line, term_issues = apply_all_rules(
+            new_line,
+            term_dict=term_dict,
+            enabled_rules=term_enabled_rules,
+            context_text=text
+        )
+        _append_engine_issues(term_issues)
+        new_line = term_line
+
+        if term_custom_rules:
+            new_line, custom_issues = apply_custom_rules(new_line, term_custom_rules)
+            _append_custom_issues(custom_issues)
+
+        if other_custom_rules:
+            new_line, custom_issues = apply_custom_rules(new_line, other_custom_rules)
+            _append_custom_issues(custom_issues)
+
+        # ── 应用其余系统规则（从 DB 读取启用的规则） ──
+        polished_line, engine_issues = apply_all_rules(
+            new_line,
+            term_dict={},
+            enabled_rules=other_engine_rules,
+            context_text=text
+        )
+        _append_engine_issues(engine_issues)
+        new_line = polished_line
         
         new_line = re.sub(r'\s+', ' ', new_line)
         new_line = _protect_model_numbers(new_line)
@@ -1005,15 +1245,19 @@ def _apply_skill_polish(
             elif style_rules:
                 change_type = "style"
             
-            changes.append(PolishRuleMatch(
-                rule_name="基础规范化",
-                before=original[:80],
-                after=new_line[:80],
-                type=change_type
-            ))
+            if _should_show_basic_change(original, new_line, change_type):
+                changes.append(PolishRuleMatch(
+                    rule_name="基础规范化",
+                    before=original[:80],
+                    after=new_line[:80],
+                    type=change_type
+                ))
         
         polished_lines.append(new_line)
     
+    if db and (triggered_rule_ids or triggered_engine_keys):
+        record_rule_triggers(db, triggered_rule_ids, triggered_engine_keys)
+
     return '\n'.join(polished_lines), changes
 
 
@@ -1164,10 +1408,6 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                         "sentences": preferred_sentences,
                         "fix": "优先采用用户确认过的句式"
                     })
-    
-    # 如果没有从文件中解析出规则，使用默认规则
-    if not rules:
-        rules = _default_style_rules()
     
     return rules
 
@@ -1707,12 +1947,16 @@ def _polish_docx_with_comments(
     
     author = "技术文档智能润色助手"
     revision_id = 0
+    rejected_change_keys = _load_rejected_doc_change_keys(db)
     
     toc_prefixes = ("TOC", "Table of Contents", "目录")
     
     non_empty_paras = [(idx, para) for idx, para in enumerate(doc.paragraphs) 
                        if para.text and para.text.strip()]
     non_empty_ai_lines = [l.strip() for l in ai_lines if l.strip()] if ai_lines else []
+    if non_empty_ai_lines and len(non_empty_ai_lines) != len(non_empty_paras):
+        # 行数不一致时无法可靠映射到 Word 段落，避免标题/图注错位被覆盖。
+        non_empty_ai_lines = []
     
     for i, (para_idx, para) in enumerate(non_empty_paras):
         original_text = para.text.strip()
@@ -1734,7 +1978,7 @@ def _polish_docx_with_comments(
         # Step 1: AI polish
         intermediate_text = original_text
         para_ai_change = None
-        if i < len(non_empty_ai_lines):
+        if (not is_title) and i < len(non_empty_ai_lines):
             ai_line = non_empty_ai_lines[i]
             if ai_line and ai_line != original_text:
                 intermediate_text = ai_line
@@ -1743,23 +1987,28 @@ def _polish_docx_with_comments(
                 )
         
         # Step 2: Rule polish + 术语替换
-        if para_ai_change:
-            polished_text = intermediate_text
-            para_changes = [para_ai_change]
-        else:
-            polished_text, para_changes = _apply_skill_polish(
-                intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,
-                is_title=is_title, db_terminology=db_terminology
-            )
+        polished_text, rule_changes = _apply_skill_polish(
+            intermediate_text, skill_rules, db, sentence_guide, terminology, requirements,
+            is_title=is_title, db_terminology=db_terminology
+        )
+        para_changes = ([para_ai_change] if para_ai_change else []) + rule_changes
         
         # 最终术语替换（无论 AI 是否已改，确保术语库强制生效）
+        term_changes = []
         if term_dict:
             polished_text, term_changes = _apply_term_only(polished_text, term_dict)
             if term_changes:
                 para_changes.extend(term_changes)
 
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
-            all_changes.extend(para_changes)
+            primary_change = next((change for change in para_changes if change.type != 'ai'), para_changes[0] if para_changes else None)
+            primary_type = primary_change.type if primary_change else ('terminology' if term_changes else 'format')
+            primary_rule = primary_change.rule_name if primary_change else 'Word修订标记'
+            if _is_low_value_doc_change(original_text, polished_text, primary_type, primary_rule):
+                continue
+            if _is_rejected_doc_change(original_text, polished_text, rejected_change_keys):
+                continue
+
             if para_idx >= len(xml_paragraphs):
                 continue
 
@@ -1772,7 +2021,14 @@ def _polish_docx_with_comments(
             now = '2026-06-18T00:00:00Z'
             revision_id += 1
             rid_ins = str(revision_id)
-            _apply_paragraph_revision_xml(p_element, polished_text, author, now, rid_del, rid_ins, w_ns)
+            if _apply_paragraph_revision_xml(p_element, polished_text, author, now, rid_del, rid_ins, w_ns):
+                all_changes.append(PolishRuleMatch(
+                    rule_name=primary_rule,
+                    before=original_text,
+                    after=polished_text,
+                    type=primary_type,
+                    paragraph=para_idx + 1,
+                ))
     
     document_xml = etree.tostring(document_root, xml_declaration=True, encoding='UTF-8')
     _write_revised_docx(docx_path, output_path, document_xml)
@@ -1831,6 +2087,309 @@ def _write_revised_docx(source_docx_path: str, output_docx_path: str, document_x
     finally:
         if os_mod.path.exists(temp_path):
             os_mod.remove(temp_path)
+
+
+def _revision_element_text(element, w_ns: str, text_tags: set[str]) -> str:
+    parts = []
+    for node in element.iter():
+        if _xml_local_name(node) in text_tags:
+            parts.append(node.text or '')
+    return ''.join(parts)
+
+
+def _restore_deleted_runs(del_element, w_ns: str):
+    from copy import deepcopy
+
+    restored = []
+    for run in del_element.findall(f'{{{w_ns}}}r'):
+        cloned = deepcopy(run)
+        for text_element in cloned.findall(f'.//{{{w_ns}}}delText'):
+            text_element.tag = f'{{{w_ns}}}t'
+        restored.append(cloned)
+    return restored
+
+
+def _replace_revision_insert_text(ins_element, text: str, w_ns: str):
+    text_nodes = [node for node in ins_element.iter() if _xml_local_name(node) == 't']
+    if text_nodes:
+        text_nodes[0].text = text
+        if text[:1].isspace() or text[-1:].isspace():
+            text_nodes[0].set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        for node in text_nodes[1:]:
+            node.text = ''
+
+
+def _accepted_revision_runs(ins_element, text: str, w_ns: str):
+    from copy import deepcopy
+    from lxml import etree
+
+    runs = ins_element.findall(f'{{{w_ns}}}r')
+    if runs:
+        cloned = deepcopy(runs[0])
+        for node in list(cloned):
+            if _xml_local_name(node) in {'delText'}:
+                cloned.remove(node)
+        text_nodes = [node for node in cloned.iter() if _xml_local_name(node) == 't']
+        if text_nodes:
+            text_nodes[0].text = text
+            if text[:1].isspace() or text[-1:].isspace():
+                text_nodes[0].set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            for node in text_nodes[1:]:
+                node.text = ''
+        else:
+            text_element = etree.SubElement(cloned, f'{{{w_ns}}}t')
+            text_element.text = text
+        return [cloned]
+
+    run = etree.Element(f'{{{w_ns}}}r')
+    text_element = etree.SubElement(run, f'{{{w_ns}}}t')
+    if text[:1].isspace() or text[-1:].isspace():
+        text_element.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    text_element.text = text
+    return [run]
+
+
+def _paragraph_revision_text(paragraph, w_ns: str) -> str:
+    parts = []
+    for node in paragraph.iter():
+        if _xml_local_name(node) in {'t', 'delText'}:
+            parts.append(node.text or '')
+    return ''.join(parts)
+
+
+def _paragraph_visible_text(paragraph, w_ns: str) -> str:
+    parts = []
+    for node in paragraph.iter():
+        if _xml_local_name(node) == 't':
+            parts.append(node.text or '')
+    return ''.join(parts)
+
+
+def _replace_paragraph_text_xml(paragraph, text: str, w_ns: str):
+    from copy import deepcopy
+    from lxml import etree
+
+    ppr = None
+    for child in list(paragraph):
+        if _xml_local_name(child) == 'pPr':
+            ppr = deepcopy(child)
+            break
+
+    for child in list(paragraph):
+        paragraph.remove(child)
+    if ppr is not None:
+        paragraph.append(ppr)
+
+    run = etree.SubElement(paragraph, f'{{{w_ns}}}r')
+    text_element = etree.SubElement(run, f'{{{w_ns}}}t')
+    if text[:1].isspace() or text[-1:].isspace():
+        text_element.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    text_element.text = text
+
+
+def _target_paragraph_by_index(root, paragraph_index: Optional[int], w_ns: str):
+    if not paragraph_index or paragraph_index < 1:
+        return None
+    paragraphs = root.findall(f'.//{{{w_ns}}}body/{{{w_ns}}}p')
+    index = paragraph_index - 1
+    if index < 0 or index >= len(paragraphs):
+        return None
+    return paragraphs[index]
+
+
+def _text_matches_decision(candidate: str, expected: str) -> bool:
+    candidate_key = _normalize_compare_text(candidate)
+    expected_key = _normalize_compare_text(expected)
+    if not candidate_key or not expected_key:
+        return False
+    return (
+        candidate_key == expected_key or
+        candidate_key.startswith(expected_key) or
+        expected_key.startswith(candidate_key)
+    )
+
+
+def _force_apply_feedback_to_document_xml(root, decisions: list[DocumentFeedbackItem], w_ns: str) -> list[dict]:
+    """最终 XML 兜底：按段落文本强制落地接受/拒绝后的正文。"""
+    applied = []
+    for decision in decisions or []:
+        before = (decision.before or '').strip()
+        after = (decision.after or '').strip()
+        status = (decision.status or '').strip()
+        if not before or not after:
+            continue
+        if decision.accepted:
+            match_text = before
+            target_text = after
+        elif status == 'rejected':
+            match_text = after
+            target_text = before
+        else:
+            continue
+
+        target_paragraph = _target_paragraph_by_index(root, decision.paragraph, w_ns)
+        if target_paragraph is not None:
+            visible_text = _paragraph_visible_text(target_paragraph, w_ns)
+            if _normalize_compare_text(visible_text) != _normalize_compare_text(target_text):
+                _replace_paragraph_text_xml(target_paragraph, target_text, w_ns)
+                applied.append({
+                    'before': before,
+                    'after': target_text,
+                    'type': decision.type,
+                    'rule_name': '用户确认',
+                    'paragraph': decision.paragraph,
+                })
+            continue
+
+        for paragraph in root.findall(f'.//{{{w_ns}}}p'):
+            visible_text = _paragraph_visible_text(paragraph, w_ns)
+            revision_text = _paragraph_revision_text(paragraph, w_ns)
+            if _normalize_compare_text(visible_text) == _normalize_compare_text(target_text):
+                break
+            if _text_matches_decision(visible_text, match_text) or _text_matches_decision(revision_text, match_text):
+                _replace_paragraph_text_xml(paragraph, target_text, w_ns)
+                applied.append({
+                    'before': before,
+                    'after': target_text,
+                    'type': decision.type,
+                    'rule_name': '用户确认',
+                    'paragraph': decision.paragraph,
+                })
+                break
+    return applied
+
+
+def _apply_feedback_plaintext_fallback(docx_path: str, decisions: list[DocumentFeedbackItem], already_applied: list[dict]) -> list[dict]:
+    """兜底写回：按段落文本确认接受/拒绝决策已经落到正文。"""
+    if not docx_path or not os.path.exists(docx_path):
+        return []
+
+    from docx import Document
+
+    pending = []
+    for decision in decisions or []:
+        before = (decision.before or '').strip()
+        after = (decision.after or '').strip()
+        if not before or not after:
+            continue
+        pending.append(decision)
+
+    if not pending:
+        return []
+
+    doc = Document(docx_path)
+    fallback_applied = []
+    changed = False
+    for decision in pending:
+        before = (decision.before or '').strip()
+        after = (decision.after or '').strip()
+        status = (decision.status or '').strip()
+        if decision.accepted:
+            target_text = after
+            match_text = before
+        elif status == 'rejected':
+            target_text = before
+            match_text = after
+        else:
+            continue
+
+        for paragraph in doc.paragraphs:
+            if _normalize_compare_text(paragraph.text) == _normalize_compare_text(target_text):
+                break
+            if _text_matches_decision(paragraph.text, match_text):
+                paragraph.text = target_text
+                fallback_applied.append({
+                    'before': before,
+                    'after': target_text,
+                    'type': decision.type,
+                    'rule_name': '用户确认',
+                })
+                changed = True
+                break
+
+    if changed:
+        doc.save(docx_path)
+    return fallback_applied
+
+
+def _apply_feedback_to_revised_docx(source_docx_path: str, output_docx_path: str, decisions: list[DocumentFeedbackItem]) -> list[dict]:
+    """按用户接受/拒绝/自定义决策重写修订版 DOCX。"""
+    from lxml import etree
+
+    if not source_docx_path or not output_docx_path or not os.path.exists(source_docx_path):
+        return []
+
+    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    root = _read_docx_document_root(source_docx_path)
+    decisions_by_before = {}
+    for item in decisions or []:
+        before_key = _normalize_compare_text(item.before)
+        if not before_key:
+            continue
+        decisions_by_before.setdefault(before_key, []).append(item)
+
+    def _pop_decision(before_text: str):
+        before_key = _normalize_compare_text(before_text)
+        candidates = decisions_by_before.get(before_key)
+        if candidates:
+            return candidates.pop(0)
+        for decision_key, decision_items in decisions_by_before.items():
+            if not decision_items:
+                continue
+            if before_key.startswith(decision_key) or decision_key.startswith(before_key):
+                return decision_items.pop(0)
+        return None
+
+    applied = []
+    for paragraph in root.findall(f'.//{{{w_ns}}}p'):
+        children = list(paragraph)
+        new_children = []
+        index = 0
+        paragraph_replaced = False
+        while index < len(children):
+            current = children[index]
+            next_child = children[index + 1] if index + 1 < len(children) else None
+            if _xml_local_name(current) == 'del' and next_child is not None and _xml_local_name(next_child) == 'ins':
+                before = _revision_element_text(current, w_ns, {'delText'})
+                original_after = _revision_element_text(next_child, w_ns, {'t'})
+                decision = _pop_decision(before)
+                decision_status = (decision.status or '').strip() if decision else ''
+                if decision and decision.accepted and (decision.after or '').strip():
+                    after = (decision.after or '').strip()
+                    _replace_paragraph_text_xml(paragraph, after, w_ns)
+                    paragraph_replaced = True
+                    applied.append({
+                        'before': before,
+                        'after': after or original_after,
+                        'type': decision.type,
+                        'rule_name': '用户确认',
+                        'paragraph': decision.paragraph,
+                    })
+                    break
+                elif decision_status == 'rejected':
+                    new_children.extend(_restore_deleted_runs(current, w_ns))
+                else:
+                    new_children.append(current)
+                    new_children.append(next_child)
+                index += 2
+                continue
+            new_children.append(current)
+            index += 1
+
+        if paragraph_replaced:
+            continue
+
+        if len(new_children) != len(children):
+            for child in list(paragraph):
+                paragraph.remove(child)
+            for child in new_children:
+                paragraph.append(child)
+
+    applied.extend(_force_apply_feedback_to_document_xml(root, decisions, w_ns))
+    document_xml = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
+    _write_revised_docx(source_docx_path, output_docx_path, document_xml)
+    applied.extend(_apply_feedback_plaintext_fallback(output_docx_path, decisions, applied))
+    return applied
 
 
 
@@ -2119,15 +2678,18 @@ async def analyze_file_endpoint(
                 ai_lines=ai_lines,
                 db_terminology=db_terms
             )
+            import shutil
+            shutil.copy2(saved_file_path, f"{saved_file_path}.all-revisions.docx")
             
             from docx import Document
             polished_doc = Document(saved_file_path)
             # 从修订标记版 DOCX 读取润色后文本（<w:delText> 被忽略，仅读 <w:t> 即插入文本）
             preview_text = '\n'.join([p.text for p in polished_doc.paragraphs])
             polished_text = preview_text
-            display_changes = _filter_visible_doc_changes(changes)
+            rejected_change_keys = _load_rejected_doc_change_keys(db)
+            display_changes = _filter_visible_doc_changes(changes, rejected_change_keys)
             if not display_changes:
-                display_changes = _build_doc_change_details(content, polished_text, changes)
+                display_changes = _build_doc_change_details(content, polished_text, changes, rejected_change_keys)
             
             _update_progress(80, "生成润色报告...")
             report_filename = f"【润色报告】{filename.rsplit('.', 1)[0]}.docx"
@@ -2371,7 +2933,7 @@ def submit_document_feedback(
     feedback: DocumentFeedbackInput,
     db: Session = Depends(get_db)
 ):
-    """提交文档润色反馈，将勾选为是的句式写入平台反馈知识库文件。"""
+    """提交文档润色反馈，将接受项写入句式清单并同步修订版 Word。"""
     from sqlalchemy import func
 
     current_user = get_default_user(db)
@@ -2379,7 +2941,29 @@ def submit_document_feedback(
     if total_items == 0:
         raise HTTPException(status_code=400, detail="当前没有可提交的润色结果")
 
+    doc = get_polished_document(db, feedback.document_id) if feedback.document_id else None
+    applied_changes = []
+    if doc and doc.file_type == 'docx' and doc.file_path:
+        import shutil
+
+        source_revision_path = f"{doc.file_path}.all-revisions.docx"
+        if not os.path.exists(source_revision_path) and os.path.exists(doc.file_path):
+            shutil.copy2(doc.file_path, source_revision_path)
+        applied_changes = _apply_feedback_to_revised_docx(source_revision_path, doc.file_path, feedback.items)
+        doc.file_size = os.path.getsize(doc.file_path)
+        doc.polished_content = '\n'.join(item['after'] for item in applied_changes)
+        if doc.report_file_path:
+            _generate_polish_report(
+                doc.report_file_path,
+                feedback.source_filename or doc.name or doc.filename,
+                applied_changes,
+            )
+
     accepted_items = [item for item in feedback.items if item.accepted and (item.after or '').strip()]
+    rejected_items = [
+        item for item in feedback.items
+        if (item.status or '').strip() == 'rejected' and (item.before or '').strip() and (item.after or '').strip()
+    ]
     accepted_lines = []
     seen_lines = set()
     for item in accepted_items:
@@ -2428,6 +3012,25 @@ def submit_document_feedback(
         if feedback_file_id is not None:
             _invalidate_sentence_guide_cache(feedback_file_id)
 
+    rejected_count = 0
+    if rejected_items:
+        existing_rejected = _load_rejected_doc_change_keys(db)
+        for item in rejected_items:
+            key = (_normalize_compare_text(item.before), _normalize_compare_text(item.after))
+            if key in existing_rejected:
+                continue
+            db.add(PolishFeedback(
+                original_text=item.before.strip(),
+                polished_text=item.after.strip(),
+                accuracy=0,
+                corrections=item.type or '',
+                target='document_rejected_change',
+                processed_count=1,
+                created_by=current_user.username if current_user else 'guest'
+            ))
+            existing_rejected.add(key)
+            rejected_count += 1
+
     db.add(PolishFeedback(
         original_text=feedback.source_filename or '',
         polished_text='\n'.join(accepted_lines),
@@ -2445,8 +3048,12 @@ def submit_document_feedback(
 
     return {
         "message": "文档润色反馈已提交",
+        "document_id": doc.id if doc else feedback.document_id,
+        "raw_url": f"/api/polish/{doc.id}/raw" if doc else None,
         "processed_count": processed_count,
         "accepted_count": len(accepted_lines),
+        "rejected_count": rejected_count,
+        "applied_changes": applied_changes,
         "total_count": total_items,
         "feedback_file_id": feedback_file_id,
         "total_docs": total_docs

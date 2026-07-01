@@ -3,7 +3,7 @@ from typing import Optional, Literal
 
 from pydantic import BaseModel
 
-RuleType = Literal["system_rule", "replacement_rule", "forbidden_rule", "sentence_applicability_rule"]
+RuleType = Literal["system_rule", "replacement_rule", "forbidden_rule", "sentence_applicability_rule", "imperative_rule", "format_rule"]
 
 
 class PolishLearningRuleBase(BaseModel):
