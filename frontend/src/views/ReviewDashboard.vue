@@ -28,66 +28,33 @@
       </el-select>
     </div>
 
-    <div class="kpi-grid" v-loading="loading">
-      <div class="kpi-card blue">
-        <div class="kpi-label">今日审核任务数</div>
-        <div class="kpi-value">{{ kpi.today_tasks }}</div>
-        <div class="kpi-desc">当天提交审核</div>
+    <div class="summary-grid" v-loading="loading">
+      <div class="summary-card kpi-card blue">
+        <div class="kpi-label">审核任务数</div>
+        <div class="kpi-value">{{ kpi.range_tasks }}</div>
+        <div class="kpi-desc">当前筛选范围</div>
       </div>
-      <div class="kpi-card orange">
-        <div class="kpi-label">待处理任务</div>
-        <div class="kpi-value">{{ kpi.pending_tasks }}</div>
-        <div class="kpi-desc">待审核/审核中</div>
-      </div>
-      <div class="kpi-card green">
-        <div class="kpi-label">今日完成数</div>
-        <div class="kpi-value">{{ kpi.today_completed }}</div>
-        <div class="kpi-desc">当天完成审核</div>
-      </div>
-      <div class="kpi-card red">
+      <div class="summary-card kpi-card soft-blue">
         <div class="kpi-label">平均问题数/文档</div>
         <div class="kpi-value">{{ kpi.avg_issues_per_doc }}</div>
         <div class="kpi-desc">当前筛选范围</div>
       </div>
-      <div class="kpi-card gray">
-        <div class="kpi-label">平均审核耗时</div>
-        <div class="kpi-value">{{ kpi.avg_review_time }}</div>
-        <div class="kpi-desc">分钟</div>
+      <div class="summary-card quality-card false-rate">
+        <div class="quality-label">误报率</div>
+        <div class="quality-value">{{ percentText(quality.false_positive_rate) }}</div>
+        <div class="quality-desc">误报问题数 {{ quality.false_positive_count }} / 平台上报 {{ quality.platform_reported }}</div>
+      </div>
+      <div class="summary-card quality-card detection-rate">
+        <div class="quality-label">检出率</div>
+        <div class="quality-value">{{ percentText(quality.detection_rate) }}</div>
+        <div class="quality-desc">平台检出 {{ quality.platform_detected }} / 应检出 {{ quality.expected_issues }}</div>
+        <div class="quality-subdesc">补充上报 {{ quality.manual_supplemented }} 条</div>
       </div>
     </div>
 
     <div class="chart-card wide">
-      <div class="section-title">审核任务趋势</div>
-      <v-chart class="chart" :option="trendOption" autoresize />
-    </div>
-
-    <div class="chart-grid">
-      <div class="chart-card">
-        <div class="section-title">问题类型分布</div>
-        <v-chart class="chart" :option="issueOption" autoresize />
-      </div>
-      <div class="chart-card">
-        <div class="section-title">文档类型审核分布</div>
-        <v-chart class="chart" :option="docTypeOption" autoresize />
-      </div>
-    </div>
-
-    <div class="table-card">
-      <div class="section-title">{{ viewMode === 'personal' ? '我的审核任务列表' : '近期审核任务列表' }}</div>
-      <el-table :data="taskList" stripe empty-text="暂无审核任务" size="small">
-        <el-table-column prop="document_name" label="文档名称" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="document_type" label="文档类型" width="100" />
-        <el-table-column prop="submitted_at" label="提交时间" width="170">
-          <template #default="{ row }">{{ formatDate(row.submitted_at) }}</template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="issue_count" label="问题数" width="90" align="center" />
-        <el-table-column prop="priority" label="优先级" width="90" align="center" />
-      </el-table>
+      <div class="section-title">问题类型占比</div>
+      <v-chart class="chart" :option="issueBarOption" autoresize />
     </div>
   </div>
 </template>
@@ -97,69 +64,62 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
-import { LineChart, PieChart, BarChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
+import { BarChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { reviewAPI, getAPIErrorMessage } from '@/api'
 
-use([LineChart, PieChart, BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
+use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
 const loading = ref(false)
 const viewMode = ref('overview')
 const filters = reactive({ time_range: '7d', doc_type: 'all' })
-const kpi = reactive({ today_tasks: 0, pending_tasks: 0, today_completed: 0, avg_issues_per_doc: 0, avg_review_time: 0 })
-const trend = ref({ dates: [], submitted: [], completed: [], avg_issues: [] })
+const kpi = reactive({ range_tasks: 0, avg_issues_per_doc: 0 })
+const quality = reactive({
+  platform_detected: 0,
+  manual_supplemented: 0,
+  expected_issues: 0,
+  false_positive_count: 0,
+  platform_reported: 0,
+  false_positive_rate: 0,
+  detection_rate: 0
+})
 const issueDistribution = ref([])
-const docTypeDistribution = ref([])
-const taskList = ref([])
 let refreshTimer = null
 
-const trendOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  legend: { top: 0 },
-  grid: { left: 45, right: 45, top: 48, bottom: 32 },
-  xAxis: { type: 'category', data: trend.value.dates },
-  yAxis: [{ type: 'value', minInterval: 1 }, { type: 'value' }],
+const issueRows = computed(() => issueDistribution.value
+  .map(item => ({ ...item, percent: Math.round((Number(item.percentage || 0) * 100) * 10) / 10 }))
+  .sort((left, right) => left.percent - right.percent))
+
+const issueBarOption = computed(() => ({
+  tooltip: {
+    trigger: 'axis',
+    axisPointer: { type: 'shadow' },
+    formatter: params => {
+      const item = params?.[0]
+      const row = issueRows.value[item?.dataIndex || 0]
+      return row ? `${row.type}<br/>占比: ${row.percent}%<br/>数量: ${row.count}` : ''
+    }
+  },
+  grid: { left: 45, right: 24, top: 24, bottom: 70 },
+  xAxis: { type: 'category', data: issueRows.value.map(item => item.type), axisLabel: { interval: 0, rotate: 25 } },
+  yAxis: { type: 'value', axisLabel: { formatter: '{value}%' } },
   series: [
-    { name: '提交审核数', type: 'line', smooth: true, data: trend.value.submitted, itemStyle: { color: '#1890ff' } },
-    { name: '完成审核数', type: 'line', smooth: true, data: trend.value.completed, lineStyle: { type: 'dashed' }, itemStyle: { color: '#52c41a' } },
-    { name: '平均问题数/文档', type: 'line', yAxisIndex: 1, smooth: true, data: trend.value.avg_issues, lineStyle: { type: 'dotted' }, itemStyle: { color: '#fa8c16' } }
+    {
+      name: '问题占比',
+      type: 'bar',
+      data: issueRows.value.map(item => item.percent),
+      barMaxWidth: 42,
+      itemStyle: { color: '#2563eb', borderRadius: [4, 4, 0, 0] },
+      label: { show: true, position: 'top', formatter: '{c}%', color: '#303133' }
+    }
   ]
 }))
 
-const issueOption = computed(() => ({
-  tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-  legend: { bottom: 0 },
-  series: [{ type: 'pie', radius: ['45%', '68%'], center: ['50%', '45%'], data: issueDistribution.value.map(item => ({ name: item.type, value: item.count })) }]
-}))
-
-const docTypeOption = computed(() => {
-  const rows = docTypeDistribution.value
-  return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { top: 0 },
-    grid: { left: 45, right: 20, top: 48, bottom: 35 },
-    xAxis: { type: 'category', data: rows.map(item => item.type) },
-    yAxis: { type: 'value', minInterval: 1 },
-    series: [
-      { name: '通过', type: 'bar', stack: 'total', data: rows.map(item => item.passed), itemStyle: { color: '#52c41a' } },
-      { name: '有问题', type: 'bar', stack: 'total', data: rows.map(item => item.issues), itemStyle: { color: '#f5222d' } },
-      { name: '需确认', type: 'bar', stack: 'total', data: rows.map(item => item.confirm), itemStyle: { color: '#faad14' } }
-    ]
-  }
-})
-
-function formatDate(value) {
-  if (!value) return '-'
-  return String(value).replace('T', ' ').slice(0, 16)
-}
-
-function statusText(status) {
-  return { completed: '已完成', running: '审核中', pending: '待处理', failed: '失败' }[status] || status || '-'
-}
-
-function statusType(status) {
-  return { completed: 'success', running: 'warning', pending: 'info', failed: 'danger' }[status] || 'info'
+function percentText(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '0.0%'
+  return `${(number * 100).toFixed(1)}%`
 }
 
 async function loadDashboard() {
@@ -171,10 +131,8 @@ async function loadDashboard() {
       : await reviewAPI.getDashboardOverview(params)
     const data = response.data || {}
     Object.assign(kpi, data.kpi || {})
-    trend.value = data.trend || { dates: [], submitted: [], completed: [], avg_issues: [] }
+    Object.assign(quality, data.quality || {})
     issueDistribution.value = data.issue_distribution || []
-    docTypeDistribution.value = data.doc_type_distribution || []
-    taskList.value = data.task_list || []
   } catch (error) {
     ElMessage.error(`加载审核看板失败: ${getAPIErrorMessage(error)}`)
   } finally {
@@ -199,23 +157,25 @@ onUnmounted(() => {
 .page-head p { margin: 0; color: #8c8c8c; }
 .filter-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin-bottom: 16px; background: #fff; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
 .filter-bar :deep(.el-tabs__header) { margin: 0; }
-.kpi-grid { display: grid; grid-template-columns: repeat(6, minmax(140px, 1fr)); gap: 14px; margin-bottom: 16px; }
-.kpi-card { padding: 18px 16px; border-radius: 14px; color: #fff; min-height: 126px; box-shadow: 0 8px 22px rgba(24,144,255,0.12); }
+.summary-grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 14px; margin-bottom: 16px; }
+.summary-card { min-height: 148px; }
+.kpi-card { padding: 22px 18px; border-radius: 14px; color: #fff; box-shadow: 0 8px 22px rgba(24,144,255,0.12); }
 .kpi-card.blue { background: linear-gradient(135deg, #1890ff, #096dd9); }
-.kpi-card.orange { background: linear-gradient(135deg, #faad14, #d48806); }
-.kpi-card.green { background: linear-gradient(135deg, #52c41a, #389e0d); }
-.kpi-card.red { background: linear-gradient(135deg, #f5222d, #cf1322); }
-.kpi-card.purple { background: linear-gradient(135deg, #722ed1, #531dab); }
-.kpi-card.gray { background: linear-gradient(135deg, #8c8c8c, #595959); }
+.kpi-card.soft-blue { background: linear-gradient(135deg, #38bdf8, #0f766e); }
 .kpi-label { font-size: 13px; opacity: .9; }
 .kpi-value { margin-top: 10px; font-size: 30px; line-height: 1; font-weight: 800; }
 .kpi-desc { margin-top: 12px; font-size: 12px; opacity: .82; }
-.chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }
-.chart-card, .table-card { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+.quality-card { border-radius: 12px; padding: 18px 20px; box-shadow: 0 8px 22px rgba(15,23,42,0.06); border: 1px solid #dfe7f2; background: #fff; }
+.quality-card.false-rate { background: linear-gradient(135deg, #fff7ed, #fff); }
+.quality-card.detection-rate { background: linear-gradient(135deg, #ecfdf5, #fff); }
+.quality-label { color: #64748b; font-size: 13px; font-weight: 700; }
+.quality-value { margin-top: 10px; font-size: 32px; font-weight: 800; color: #1f2937; }
+.quality-desc { margin-top: 10px; color: #475569; font-size: 13px; }
+.quality-subdesc { margin-top: 6px; color: #64748b; font-size: 12px; }
+.chart-card { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
 .chart-card.wide { margin-bottom: 16px; }
 .section-title { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
 .chart { height: 320px; }
-.table-card { margin-top: 16px; }
-@media (max-width: 1200px) { .kpi-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 768px) { .review-dashboard { padding: 16px; } .filter-bar { flex-wrap: wrap; } .kpi-grid, .chart-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .summary-grid { grid-template-columns: repeat(2, minmax(180px, 1fr)); } }
+@media (max-width: 768px) { .review-dashboard { padding: 16px; } .filter-bar { flex-wrap: wrap; } .summary-grid { grid-template-columns: 1fr; } }
 </style>
