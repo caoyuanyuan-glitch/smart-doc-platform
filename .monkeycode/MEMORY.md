@@ -52,12 +52,12 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 格式: `git push origin <branch>`
 
 前后端自验命令
-- Date: 2026-06-24
-- Context: Agent 在执行登录页、历史记录与问答优化任务时发现
+- Date: 2026-07-01
+- Context: Agent 在执行智能润色规则管理任务时校正路径
 - Category: 构建方法
 - Instructions:
-  - 前端构建校验使用 `cd /workspace/frontend && npm run build`
-  - 后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+  - 前端构建校验使用 `cd /workspace/smart-doc-platform/frontend && npm run build`
+  - 后端语法校验使用 `cd /workspace/smart-doc-platform/backend && python3 -m compileall app`
 
 产品型号与编号空格规则
 - Date: 2026-06-24

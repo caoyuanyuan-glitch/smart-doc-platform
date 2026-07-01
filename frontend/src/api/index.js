@@ -201,6 +201,12 @@ export const polishAPI = {
       terminology_file_id: terminologyFileId || null,
       sentence_file_id: sentenceFileId || null
     }),
+  submitDocumentFeedback: (documentId, sourceFilename, items) =>
+    instance.post('/polish/feedback/document', {
+      document_id: documentId || null,
+      source_filename: sourceFilename || '',
+      items: items || []
+    }),
   getFeedbackStats: () => instance.get('/polish/feedback/stats')
 }
 
