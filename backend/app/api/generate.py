@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import time
@@ -21,10 +22,42 @@ DRAFT_CACHE: Dict[str, dict] = {}
 DRAFT_CACHE_MAX = 20
 
 STYLE_GUIDE_PATH = ("写作规范", "写作风格指南")
+TERMINOLOGY_PATH = ("资源库", "术语库")
 STYLE_GUIDE_MAX_CHARS = 1500  # 截断风格指南以避免 prompt 超长
+TERMINOLOGY_MAX_CHARS = 3000
 TEMPLATE_MAX_CHARS = 2000
 MODEL_IMAGE_MAX_EDGE = 700
 MODEL_IMAGE_QUALITY = 65
+
+INTENT_INSTRUCTIONS = {
+    "product_appearance": "生成意图：产品外观描述。重点描述产品整体外观、结构组成、可见部件、布局关系、颜色材质和可识别标识。",
+    "operation_steps": "生成意图：操作步骤说明。重点从图片中识别连续操作步骤，输出可执行动作、点击对象、输入内容和页面跳转结果。",
+    "interface_manual": "生成意图：界面功能说明。重点说明界面区域、功能入口、控件用途、状态提示和用户可执行操作。",
+    "custom": "生成意图：自定义。优先遵循用户在补充要求中说明的生成目标。",
+}
+
+OUTPUT_FORMAT_INSTRUCTIONS = {
+    "plain_text": "输出格式：纯文本。使用自然段组织内容，避免强制编号。",
+    "numbered_steps": "输出格式：带编号步骤。按 1、2、3 的顺序输出步骤，每条步骤表达一个清晰动作或说明点。",
+}
+
+LANGUAGE_STYLE_INSTRUCTIONS = {
+    "formal_technical": "语言风格：正式技术文档。使用规范、客观、可直接进入说明书的表达。",
+    "concise": "语言风格：简要说明。使用简洁句式，保留关键信息，减少背景铺垫。",
+}
+
+CONTINUATION_INTENT_INSTRUCTIONS = {
+    "next_step": "续写意图：续写下一步操作。基于上下文推断下一步可执行动作，重点写清操作对象、动作和结果。",
+    "expand_detail": "续写意图：扩写详细说明。补充参数条件、确认动作、注意事项或状态变化，避免偏离原文主题。",
+    "safety_warning": "续写意图：补充安全警告。识别当前操作中的风险点，输出必要警示和规避措施。",
+    "troubleshooting": "续写意图：补充故障处理。基于当前操作步骤补充异常现象、检查项和恢复操作。",
+    "custom": "续写意图：自定义。严格遵循用户提供的自定义续写要求。",
+}
+
+CONTINUATION_LENGTH_INSTRUCTIONS = {
+    "short": "续写长度：简短，输出 1-2 句。",
+    "detailed": "续写长度：详细，输出 1 个自然段。",
+}
 
 
 class GenerateRequest(BaseModel):
@@ -32,6 +65,15 @@ class GenerateRequest(BaseModel):
     product_model: str
     doc_type: str
     target_chapter: str
+
+
+class ContinueTextRequest(BaseModel):
+    source_text: str
+    intent: str = "next_step"
+    custom_intent: str = ""
+    length: str = "short"
+    keep_terminology: bool = True
+    keep_sentence_style: bool = True
 
 
 def _generate_fallback(product_name: str, product_model: str, doc_type: str, target_chapter: str):
@@ -160,6 +202,25 @@ def _collect_style_guides(node: dict, current_path: List[str]) -> List[dict]:
     return guides
 
 
+def _collect_terminology_files(node: dict, current_path: List[str]) -> List[dict]:
+    files = []
+    for file in node.get("files") or []:
+        file_path = file.get("file_path")
+        if not file_path or not os.path.exists(file_path):
+            continue
+        files.append({
+            "id": file.get("id"),
+            "name": file.get("name") or file.get("filename") or "术语库文件",
+            "file_path": file_path,
+            "path": " / ".join([*current_path, file.get("name") or file.get("filename") or "术语库文件"]),
+        })
+
+    for child in node.get("children") or []:
+        child_name = child.get("name") or ""
+        files.extend(_collect_terminology_files(child, [*current_path, child_name]))
+    return files
+
+
 def _list_style_guide_candidates(db: Session) -> List[dict]:
     candidates: List[dict] = []
 
@@ -174,6 +235,197 @@ def _list_style_guide_candidates(db: Session) -> List[dict]:
 
     walk(get_folder_tree(db, None), [])
     return candidates
+
+
+def _list_terminology_candidates(db: Session) -> List[dict]:
+    candidates: List[dict] = []
+
+    def walk(nodes: List[dict], current_path: List[str]):
+        for node in nodes or []:
+            node_name = node.get("name") or ""
+            next_path = [*current_path, node_name]
+            if len(next_path) >= len(TERMINOLOGY_PATH) and tuple(next_path[-len(TERMINOLOGY_PATH):]) == TERMINOLOGY_PATH:
+                candidates.extend(_collect_terminology_files(node, next_path))
+                continue
+            walk(node.get("children") or [], next_path)
+
+    walk(get_folder_tree(db, None), [])
+    return candidates
+
+
+def _read_reference_file(path: str) -> str:
+    try:
+        return parse_file(path).strip()
+    except Exception:
+        try:
+            return read_file_safe(path).strip()
+        except Exception:
+            return ""
+
+
+def _load_terminology_reference(db: Session, enabled: bool) -> Optional[dict]:
+    if not enabled:
+        return None
+
+    chunks = []
+    used_files = []
+    remaining = TERMINOLOGY_MAX_CHARS
+    for item in _list_terminology_candidates(db):
+        content = _read_reference_file(item["file_path"])
+        if not content:
+            continue
+        block = f"文件：{item['path']}\n{content}"
+        if len(block) > remaining:
+            block = block[:remaining]
+        chunks.append(block)
+        used_files.append(item["path"])
+        remaining -= len(block)
+        if remaining <= 0:
+            break
+
+    if not chunks:
+        return None
+
+    return {
+        "files": used_files,
+        "content": "\n\n".join(chunks),
+    }
+
+
+def _parse_terminology_pairs(content: str) -> dict:
+    terms = {}
+    for raw_line in str(content or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "---" in line:
+            continue
+        if "|" in line:
+            cells = [cell.strip() for cell in line.strip("|").split("|") if cell.strip()]
+        elif "\t" in line:
+            cells = [cell.strip() for cell in line.split("\t") if cell.strip()]
+        elif "," in line:
+            cells = [cell.strip() for cell in line.split(",") if cell.strip()]
+        else:
+            continue
+        if len(cells) < 2:
+            continue
+        lowered = " ".join(cells[:3]).lower()
+        if any(token in lowered for token in ["非标准", "标准", "source", "target", "term"]):
+            continue
+        source, target = cells[0], cells[1]
+        if source and target and source != target and len(source) <= 80 and len(target) <= 80:
+            terms[source] = target
+    return terms
+
+
+def _apply_terminology_reference(result: dict, terminology_reference: Optional[dict]) -> dict:
+    if not terminology_reference:
+        return result
+    terms = _parse_terminology_pairs(terminology_reference.get("content") or "")
+    if not terms:
+        return result
+
+    def replace_terms(text: str) -> str:
+        updated = str(text or "")
+        for source, target in terms.items():
+            updated = updated.replace(source, target)
+        return updated
+
+    next_result = dict(result)
+    next_result["summary"] = replace_terms(next_result.get("summary") or "")
+    next_result["relation_summary"] = replace_terms(next_result.get("relation_summary") or "")
+    next_result["steps"] = [replace_terms(step) for step in (next_result.get("steps") or [])]
+    return next_result
+
+
+def _build_image_generation_prompt(
+    prompt: str,
+    generation_intent: str,
+    custom_intent: str,
+    output_format: str,
+    language_style: str,
+    terminology_reference: Optional[dict],
+) -> str:
+    parts = [
+        INTENT_INSTRUCTIONS.get(generation_intent) or INTENT_INSTRUCTIONS["operation_steps"],
+        OUTPUT_FORMAT_INSTRUCTIONS.get(output_format) or OUTPUT_FORMAT_INSTRUCTIONS["numbered_steps"],
+        LANGUAGE_STYLE_INSTRUCTIONS.get(language_style) or LANGUAGE_STYLE_INSTRUCTIONS["formal_technical"],
+    ]
+    if generation_intent == "custom" and custom_intent.strip():
+        parts.append(f"自定义生成意图：{custom_intent.strip()}")
+    if terminology_reference:
+        parts.append(
+            "术语标准：使用知识库资源库/术语库文件中的术语。系统会在读图后对生成结果执行术语标准化。\n"
+            f"已关联术语库文件：{'; '.join(terminology_reference.get('files') or [])}"
+        )
+    if prompt.strip():
+        parts.append(f"用户补充要求：{prompt.strip()}")
+    return "\n\n".join(parts)
+
+
+def _build_continuation_prompt(
+    request: ContinueTextRequest,
+    terminology_reference: Optional[dict],
+    style_guide_bundle: Optional[dict],
+) -> str:
+    parts = [
+        "你是技术文档智能续写助手。任务是根据现有内容片段续写后续内容，输出可直接插入说明书或操作文档的文本。",
+        CONTINUATION_INTENT_INSTRUCTIONS.get(request.intent) or CONTINUATION_INTENT_INSTRUCTIONS["next_step"],
+        CONTINUATION_LENGTH_INSTRUCTIONS.get(request.length) or CONTINUATION_LENGTH_INSTRUCTIONS["short"],
+        "续写规则：只输出新增续写内容，不重复原文，不输出标题、解释、JSON、Markdown 代码块或字段名。",
+        "语义规则：基于上下文推断合理下一步，不编造具体型号、数值、界面按钮名称或耗材名称。",
+    ]
+    if request.intent == "custom" and request.custom_intent.strip():
+        parts.append(f"自定义续写要求：{request.custom_intent.strip()}")
+    if terminology_reference:
+        terminology_pairs = _parse_terminology_pairs(terminology_reference.get("content") or "")
+        terminology_lines = [
+            f"- {source} -> {target}"
+            for source, target in list(terminology_pairs.items())[:80]
+        ]
+        parts.append(
+            "术语一致性：优先使用知识库资源库/术语库文件中的标准术语。\n"
+            f"已关联术语库文件：{'; '.join(terminology_reference.get('files') or [])}\n"
+            + ("术语对照：\n" + "\n".join(terminology_lines) if terminology_lines else "术语对照：未解析到可用术语对")
+        )
+    if style_guide_bundle and style_guide_bundle.get("guides"):
+        guide_blocks = []
+        for guide in (style_guide_bundle.get("guides") or [])[:2]:
+            guide_blocks.append(f"句式手册：{guide.get('name') or '未命名'}\n{guide.get('content') or ''}")
+        parts.append(
+            "句式风格：匹配句式手册中的推荐模板、动词选择和技术文档表达习惯。\n"
+            + "\n\n".join(guide_blocks)
+        )
+    parts.append(f"现有内容：\n{request.source_text.strip()}")
+    return "\n\n".join(parts)
+
+
+def _clean_continuation_text(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").strip()
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            cleaned = parsed.get("continuation") or parsed.get("content") or parsed.get("text") or cleaned
+    except Exception:
+        pass
+    for prefix in ("续写：", "续写内容：", "continuation:", "content:"):
+        if cleaned.lower().startswith(prefix.lower()):
+            cleaned = cleaned[len(prefix):].strip()
+            break
+    return cleaned.strip().strip('"\',，,')
+
+
+def _continuation_fallback(request: ContinueTextRequest) -> str:
+    if request.intent == "safety_warning":
+        return "请确认相关部件已正确放置并保持稳定，避免因安装不到位导致处理失败。操作过程中如发现异常提示，应停止当前流程并按故障处理说明进行检查。"
+    if request.intent == "troubleshooting":
+        return "若系统未进入下一步，请检查样本位置、槽盖状态和界面提示信息。确认条件满足后，重新执行当前操作并观察系统反馈。"
+    if request.intent == "expand_detail":
+        return "执行该操作前，应确认样本、耗材和设备状态均满足使用要求。完成操作后，观察界面状态变化，并根据提示继续后续流程。"
+    return "请确认当前操作对象已正确就位，然后点击界面中的开始按钮启动处理流程。系统进入下一步后，按照页面提示继续完成后续操作。"
 
 
 def _load_style_guide_bundle(db: Session, style_guide_id: Optional[int]) -> Optional[dict]:
@@ -307,11 +559,60 @@ async def generate_content(request: GenerateRequest):
         }
 
 
+@router.post("/continue-text")
+async def continue_text(request: ContinueTextRequest, db: Session = Depends(get_db)):
+    source_text = request.source_text.strip()
+    if not source_text:
+        raise HTTPException(status_code=400, detail="请填写现有内容")
+    if len(source_text) > 6000:
+        raise HTTPException(status_code=400, detail="现有内容过长，请控制在 6000 字以内")
+    if request.intent == "custom" and not request.custom_intent.strip():
+        raise HTTPException(status_code=400, detail="请填写自定义续写要求")
+
+    terminology_reference = _load_terminology_reference(db, request.keep_terminology)
+    style_guide_bundle = _load_style_guide_bundle(db, None) if request.keep_sentence_style else None
+    prompt = _build_continuation_prompt(request, terminology_reference, style_guide_bundle)
+
+    try:
+        from app.utils.ai_client import ai_client
+
+        result = ai_client.chat([
+            {"role": "system", "content": "你只输出新增续写文本。"},
+            {"role": "user", "content": prompt},
+        ], max_tokens=4096, temperature=0.25)
+        continuation = _clean_continuation_text(result)
+        if not continuation:
+            raise RuntimeError("empty continuation")
+        return {
+            "source_text": source_text,
+            "continuation": continuation,
+            "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
+            "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": [continuation]}) if style_guide_bundle else "",
+            "model": "kimi",
+            "warning": "",
+        }
+    except Exception as e:
+        print(f"[continue-text] fallback: {e}")
+        return {
+            "source_text": source_text,
+            "continuation": _continuation_fallback(request),
+            "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
+            "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": []}) if style_guide_bundle else "",
+            "model": "fallback",
+            "warning": "当前 AI 续写链路未返回有效结果，已展示本地示例续写。",
+        }
+
+
 @router.post("/image-steps")
 async def generate_image_steps(
     files: List[UploadFile] = File(...),
     template_file: Optional[UploadFile] = File(None),
     prompt: str = Form(""),
+    generation_intent: str = Form("operation_steps"),
+    custom_intent: str = Form(""),
+    output_format: str = Form("numbered_steps"),
+    language_style: str = Form("formal_technical"),
+    use_terminology: bool = Form(False),
     style_guide_id: Optional[int] = Form(None),
     db: Session = Depends(get_db),
 ):
@@ -335,7 +636,7 @@ async def generate_image_steps(
 
     from app.utils.ai_client import ai_client
 
-    print(f"[image-steps] request received, images={len(valid_images)}, template={'yes' if template_file and template_file.filename else 'no'}, style_guide_id={style_guide_id or 'auto'}")
+    print(f"[image-steps] request received, images={len(valid_images)}, intent={generation_intent}, output_format={output_format}, terminology={use_terminology}")
 
     image_entries = []
     original_size = 0
@@ -350,17 +651,27 @@ async def generate_image_steps(
         })
     style_guide_bundle = _load_style_guide_bundle(db, style_guide_id) if style_guide_id else None
     template_reference = await _load_template_reference(template_file)
+    terminology_reference = _load_terminology_reference(db, use_terminology)
+    enhanced_prompt = _build_image_generation_prompt(
+        prompt=prompt,
+        generation_intent=generation_intent,
+        custom_intent=custom_intent,
+        output_format=output_format,
+        language_style=language_style,
+        terminology_reference=terminology_reference,
+    )
 
     try:
         print(f"[image-steps] prepared images, original={original_size}, prepared={prepared_size}")
         result = ai_client.analyze_images_to_steps(
             image_entries,
-            user_prompt=prompt,
+            user_prompt=enhanced_prompt,
             style_guide_bundle=style_guide_bundle,
             template_reference=template_reference,
         )
         if not result or not result.get("steps"):
             raise RuntimeError("empty image analysis result")
+        result = _apply_terminology_reference(result, terminology_reference)
         elapsed = time.monotonic() - started_at
         print(f"[image-steps] success, model={result.get('model')}, steps={len(result.get('steps') or [])}, elapsed={elapsed:.1f}s")
         draft_key = uuid.uuid4().hex
@@ -380,6 +691,7 @@ async def generate_image_steps(
             "relation_summary": result.get("relation_summary") or "",
             "steps": result.get("steps") or [],
             "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, result),
+            "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
             "model": result.get("model") or "kimi",
             "draft_key": draft_key,
             "warning": "",
@@ -389,7 +701,7 @@ async def generate_image_steps(
         elapsed = time.monotonic() - started_at
         print(f"[image-steps] fallback: {e}, elapsed={elapsed:.1f}s")
         traceback.print_exc()
-        fallback = _image_steps_fallback([item["name"] for item in valid_images], prompt)
+        fallback = _image_steps_fallback([item["name"] for item in valid_images], enhanced_prompt)
         return fallback
 
 
