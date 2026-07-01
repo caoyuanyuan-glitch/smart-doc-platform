@@ -54,8 +54,8 @@
                 <span>内容生成</span>
               </template>
               <el-menu-item index="/generate/image-descriptions">图片描述生成</el-menu-item>
-              <el-menu-item index="/generate/manual-draft">说明书初稿</el-menu-item>
-              <el-menu-item index="/generate/paragraph">段落文字生成</el-menu-item>
+              <el-menu-item index="/tools/doc-generator">说明书初稿</el-menu-item>
+              <el-menu-item index="/generate/paragraph">智能续写</el-menu-item>
               <el-menu-item index="/generate/templates">模板管理</el-menu-item>
               <el-menu-item index="/terms">术语库</el-menu-item>
             </el-sub-menu>

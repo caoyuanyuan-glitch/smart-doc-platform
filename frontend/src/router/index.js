@@ -21,6 +21,7 @@ import TranslateStats from '@/views/TranslateStats.vue'
 import Knowledge from '@/views/Knowledge.vue'
 import PolishPreview from '@/views/PolishPreview.vue'
 import DocPolish from '@/views/DocPolish.vue'
+import DocGenerator from '@/views/DocGenerator.vue'
 import RulesManage from '@/views/RulesManage.vue'
 import SpellCheck from '@/views/SpellCheck.vue'
 import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
@@ -102,6 +103,11 @@ const routes = [
     path: '/tools/doc-polish',
     name: 'DocPolish',
     component: DocPolish
+  },
+  {
+    path: '/tools/doc-generator',
+    name: 'DocGenerator',
+    component: DocGenerator
   },
   {
     path: '/tools/polish-rules',
