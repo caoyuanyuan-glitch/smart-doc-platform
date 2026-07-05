@@ -85,6 +85,10 @@ def _record_translation_usage(source: str, text: str):
     _get_translation_usage_stats()[f"{source}_char_count"] += len(str(text))
 
 
+def _record_passthrough_usage(text: str):
+    _record_translation_usage("memory", text)
+
+
 def _snapshot_translation_usage_stats():
     stats = _get_translation_usage_stats()
     return {
@@ -93,12 +97,29 @@ def _snapshot_translation_usage_stats():
     }
 
 
+def _normalize_doc_usage_counts(doc):
+    source_char_count = max(0, int(getattr(doc, "source_char_count", 0) or 0))
+    ai_char_count = max(0, int(getattr(doc, "ai_char_count", 0) or 0))
+    memory_char_count = max(0, int(getattr(doc, "memory_char_count", 0) or 0))
+
+    ai_char_count = min(ai_char_count, source_char_count)
+    uncategorized_char_count = max(0, source_char_count - ai_char_count - memory_char_count)
+    memory_char_count = min(source_char_count - ai_char_count, memory_char_count + uncategorized_char_count)
+
+    return {
+        "source_char_count": source_char_count,
+        "ai_char_count": ai_char_count,
+        "memory_char_count": memory_char_count,
+    }
+
+
 def _summarize_docs(docs):
+    normalized_usage = [_normalize_doc_usage_counts(doc) for doc in docs]
     return {
         "doc_count": len(docs),
-        "doc_char_count": sum(d.source_char_count or 0 for d in docs),
-        "ai_char_count": sum(d.ai_char_count or 0 for d in docs),
-        "memory_char_count": sum(d.memory_char_count or 0 for d in docs),
+        "doc_char_count": sum(item["source_char_count"] for item in normalized_usage),
+        "ai_char_count": sum(item["ai_char_count"] for item in normalized_usage),
+        "memory_char_count": sum(item["memory_char_count"] for item in normalized_usage),
     }
 
 
@@ -413,6 +434,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
     if engine == "memory":
         for index in pending_indexes:
             translated_texts[index] = texts[index]
+            _record_passthrough_usage(texts[index])
         return translated_texts
 
     if pending_indexes:
@@ -476,6 +498,7 @@ def _translate_excel_header_footer_text(text: str, engine: str, model: str,
                                         source_lang: str, target_lang: str, db: Session) -> str:
     stripped = (text or "").strip()
     if not stripped or _cell_looks_non_translatable(stripped, source_lang):
+        _record_passthrough_usage(stripped or text)
         return text
 
     markers = []
@@ -828,10 +851,13 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             _record_translation_usage("memory", text)
     if engine in ["ai", "hybrid"] and not result:
         result = translate_with_ai(text, model, source_lang, target_lang)
-        if result:
+        if result == text:
+            _record_passthrough_usage(text)
+        elif result:
             _record_translation_usage("ai", text)
     if not result:
         if engine == "memory":
+            _record_passthrough_usage(text)
             return text
         raise HTTPException(status_code=500, detail="翻译失败")
     return result
@@ -1288,6 +1314,8 @@ def _translate_xlsx(fpath: str, engine: str, model: str, source_lang: str, targe
 
     for cell, original_text, translated_index in cell_entries:
         translated_text = original_text if translated_index is None else translated_texts[translated_index]
+        if translated_index is None:
+            _record_passthrough_usage(original_text)
         all_original.append(original_text)
         all_translated.append(translated_text)
         cell.value = translated_text
@@ -1938,9 +1966,10 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
     text_docs = [d for d in all_docs if d.file_type == "text"]
     file_docs = [d for d in all_docs if d.file_type != "text"]
 
-    text_char_count = sum(d.source_char_count or 0 for d in text_docs)
-    ai_char_count = sum(d.ai_char_count or 0 for d in all_docs)
-    memory_char_count = sum(d.memory_char_count or 0 for d in all_docs)
+    text_char_count = sum(_normalize_doc_usage_counts(doc)["source_char_count"] for doc in text_docs)
+    all_usage = [_normalize_doc_usage_counts(doc) for doc in all_docs]
+    ai_char_count = sum(item["ai_char_count"] for item in all_usage)
+    memory_char_count = sum(item["memory_char_count"] for item in all_usage)
 
     latest_batch_id = (batch_id or "").strip() or None
     if not latest_batch_id:
