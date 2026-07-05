@@ -89,7 +89,8 @@ class AIClient:
         # Proxy 回退客户端（使用 OpenAI 兼容接口）
         mcai_base_url = os.getenv("MCAI_LLM_BASE_URL")
         mcai_api_key = os.getenv("MCAI_LLM_API_KEY")
-        mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
+        self.mcai_model = os.getenv("MCAI_MODEL", os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic"))
+        self.last_chat_errors = []
 
         self.mcai_proxy_client = None
         if mcai_base_url and _is_valid_key(mcai_api_key):
@@ -98,7 +99,7 @@ class AIClient:
                 base_url=mcai_base_url,
                 timeout=timeout,
             )
-            print(f"[AI] MCAI Proxy 已连接, base_url={mcai_base_url}, model={mcai_model}")
+            print(f"[AI] MCAI Proxy 已连接, base_url={mcai_base_url}, model={self.mcai_model}")
 
         proxy_api_key = self.dashscope_api_key or self.proxy_api_key
         proxy_base_url = self.fallback_base_url
@@ -142,17 +143,21 @@ class AIClient:
             "available": self.available_providers(),
         }
 
+    def last_provider_errors(self):
+        return list(self.last_chat_errors)
+
     def resolve_translation_model(self, requested_model=None):
         preferred = []
         requested = (requested_model or "").strip().lower()
-        if requested in {"kimi", "deepseek", "arkclaw"}:
+        supported = ["kimi", "deepseek", "arkclaw", "mcai", "proxy"]
+        if requested in supported:
             preferred.append(requested)
 
         default_provider = (self.default_provider or "").strip().lower()
-        if default_provider in {"kimi", "deepseek", "arkclaw"} and default_provider not in preferred:
+        if default_provider in supported and default_provider not in preferred:
             preferred.append(default_provider)
 
-        for name in ["kimi", "deepseek", "arkclaw"]:
+        for name in supported:
             if name not in preferred:
                 preferred.append(name)
 
@@ -160,6 +165,8 @@ class AIClient:
             "kimi": self.kimi_client is not None,
             "deepseek": self.deepseek_client is not None,
             "arkclaw": self.arkclaw_client is not None,
+            "mcai": self.mcai_proxy_client is not None,
+            "proxy": self.proxy_client is not None,
         }
         for name in preferred:
             if availability.get(name):
@@ -249,6 +256,7 @@ class AIClient:
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
         # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
+        self.last_chat_errors = []
         providers = []
         if self.kimi_client:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
@@ -257,12 +265,12 @@ class AIClient:
         if self.arkclaw_client:
             providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
         if self.mcai_proxy_client:
-            mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
-            providers.append(('MCAI', self.mcai_proxy_client, mcai_model))
+            providers.append(('MCAI', self.mcai_proxy_client, self.mcai_model))
         if self.proxy_client:
             providers.append(('Proxy', self.proxy_client, self.fallback_model))
 
         if not providers:
+            self.last_chat_errors.append("未配置任何可用的 AI provider")
             return None
 
         print(f"[image-steps] providers={', '.join(name for name, _, _ in providers)}")
@@ -284,6 +292,7 @@ class AIClient:
                     content = choice.message.content or ""
                     if content.strip():
                         return content
+                    self.last_chat_errors.append(f"{name}: 返回空内容")
                     print(f"[AI] {name} 返回空内容: finish_reason={getattr(choice, 'finish_reason', '')}")
                     break
                 except Exception as e:
@@ -293,6 +302,7 @@ class AIClient:
                         time.sleep(retry_delay)
                         retry_delay *= 2
                         continue
+                    self.last_chat_errors.append(f"{name}: {error_str[:160]}")
                     print(f"[AI] {name} 调用失败: {error_str[:100]}")
                     break  # 非 429 或重试耗尽，切换下一个 provider
 

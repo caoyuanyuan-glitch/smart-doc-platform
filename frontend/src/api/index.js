@@ -300,7 +300,9 @@ export const translationAPI = {
   getDocs: (skip = 0, limit = 100) => instance.get('/translation/docs', { params: { skip, limit } }),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
   deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
-  getStats: () => instance.get('/translation/stats')
+  getStats: (batchId) => instance.get('/translation/stats', {
+    params: batchId ? { batch_id: batchId } : undefined
+  })
 }
 
 export const knowledgeAPI = {
