@@ -2,13 +2,16 @@ import os
 import re
 import uuid
 import json
+import random
 import base64
+import unicodedata
 import html
 import mimetypes
 import posixpath
 import zipfile
 import xml.etree.ElementTree as ET
 import docx2txt
+import jieba
 from typing import Optional
 from datetime import timedelta, timezone, datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -52,7 +55,7 @@ def _get_user_id_from_token(token: str, db: Session):
     return None
 
 
-def _save_qa_history(db: Session, session_type: str, question: str, answer_data: dict, user_id: int, session_id: Optional[int] = None, sources: list = None):
+def _save_qa_history(db: Session, session_type: str, question: str, answer_data: dict, user_id: int, session_id: Optional[int] = None, sources: list = None, search_hit: int = 0, relevance_score: float = 0.0):
     title = question[:80] + ("..." if len(question) > 80 else "")
     sess = None
     if session_id:
@@ -69,7 +72,9 @@ def _save_qa_history(db: Session, session_type: str, question: str, answer_data:
         session_id=sess.id,
         role="assistant",
         content=answer_data.get("answer", ""),
-        sources=json.dumps(sources or answer_data.get("sources", []), ensure_ascii=False)
+        sources=json.dumps(sources or answer_data.get("sources", []), ensure_ascii=False),
+        search_hit=search_hit,
+        relevance_score=relevance_score,
     ))
     db.commit()
     return sess.id
@@ -82,8 +87,8 @@ class GeneralQAInput(BaseModel):
 
 
 QA_STOPWORDS = {
-    "什么", "怎么", "如何", "多少", "是否", "可以", "一下", "一下子", "一下吗", "呢", "吗", "呀", "啊",
-    "请问", "关于", "这个", "那个", "这些", "那些", "内容", "问题", "知识库", "文档", "资料", "帮我", "告诉我"
+    "呢", "吗", "呀", "啊", "的", "了", "着", "过",
+    "请问", "这个", "那个", "这些", "那些",
 }
 
 
@@ -91,11 +96,40 @@ def _normalize_text(text: str):
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
+_jieba_initialized = False
+
+
+def _ensure_jieba():
+    global _jieba_initialized
+    if not _jieba_initialized:
+        jieba.setLogLevel(20)
+        _jieba_initialized = True
+
+
 def _tokenize(text: str):
+    _ensure_jieba()
+    normalized = _normalize_text(text).lower()
+    tokens = _jieba_cut(normalized)
+    tokens = [t for t in tokens if len(t) >= 2 and t not in QA_STOPWORDS]
+    if not tokens:
+        tokens = [t for t in _jieba_cut(normalized) if len(t) >= 1 and t not in QA_STOPWORDS]
+    return tokens
+
+
+def _jieba_cut(text: str):
+    pure_chinese = re.sub(r"[^\u4e00-\u9fff]+", " ", text)
+    words = []
+    if pure_chinese.strip():
+        words.extend([w for w in jieba.cut(pure_chinese) if w.strip() and len(w.strip()) >= 1])
+    alphanum = re.findall(r"[a-z0-9_\-\.]+", text.lower())
+    words.extend([w for w in alphanum if len(w) >= 2])
+    return words
+
+
+def _quick_tokenize(text: str):
     normalized = _normalize_text(text).lower()
     parts = re.findall(r"[\u4e00-\u9fff]{1,}|[a-z0-9_\-\.]+", normalized)
-    tokens = [p for p in parts if p and p not in QA_STOPWORDS]
-    return tokens
+    return [p for p in parts if p and p not in QA_STOPWORDS]
 
 
 def _char_ngrams(text: str, n: int = 2):
@@ -129,7 +163,7 @@ def _score_chunk(question: str, chunk: str, title: str = ""):
     q_tokens = set(_tokenize(question))
     c_tokens = set(_tokenize(chunk))
     title_tokens = set(_tokenize(title))
-    overlap = len(q_tokens & c_tokens)
+    token_overlap = len(q_tokens & c_tokens)
     title_overlap = len(q_tokens & title_tokens)
 
     q_ngrams = _char_ngrams(question)
@@ -141,7 +175,7 @@ def _score_chunk(question: str, chunk: str, title: str = ""):
         if len(token) >= 2:
             keyword_hits += chunk.lower().count(token)
 
-    score = overlap * 2.8 + title_overlap * 1.6 + min(keyword_hits, 8) * 0.6 + min(ngram_overlap, 24) * 0.12
+    score = token_overlap * 3.5 + title_overlap * 2.0 + min(keyword_hits, 10) * 0.8 + min(ngram_overlap, 30) * 0.25
     return round(score, 4)
 
 
@@ -169,18 +203,13 @@ def _rank_document_chunks(question: str, documents: list, limit: int = 5):
 
 def _needs_clarification(question: str, ranked_sources: list):
     tokens = _tokenize(question)
-    if len(_normalize_text(question)) <= 4 or len(tokens) <= 1:
+    if len(_normalize_text(question)) <= 2:
         return True
     if not ranked_sources:
         return True
     top_score = ranked_sources[0].get("score", 0)
-    if top_score < 1.2:
+    if top_score < 0.5:
         return True
-    if len(ranked_sources) >= 2:
-        second_score = ranked_sources[1].get("score", 0)
-        titles = {item.get("title") for item in ranked_sources[:3] if item.get("title")}
-        if len(titles) > 1 and abs(top_score - second_score) < 0.45:
-            return True
     return False
 
 
@@ -448,13 +477,23 @@ def _build_preview_html(file_path, file_type, text):
     return f'<pre class="doc-preview">{html.escape(text[:10000])}</pre>'
 
 
+def _is_valid_answer(text):
+    if not text or len(text.strip()) < 20:
+        return False
+    short_patterns = ["OK", "ok", "好的", "收到", "明白", "已处理"]
+    stripped = text.strip().strip('"')
+    if stripped in short_patterns:
+        return False
+    return True
+
+
 def _call_ai_qa(question, context, source_titles: Optional[list] = None):
     source_hint = "、".join(source_titles or [])
     try:
         from app.utils.ai_client import ai_client
         enhanced_question = question if not source_hint else f"{question}\n\n优先参考资料：{source_hint}"
         result = ai_client.qa_answer(enhanced_question, context)
-        if result and result.get("answer") and result["answer"] != "文档中未找到相关信息":
+        if result and result.get("answer") and _is_valid_answer(result["answer"]) and result["answer"] != "文档中未找到相关信息":
             return {
                 "answer": result.get("answer", ""),
                 "source": result.get("source", source_hint)
@@ -475,21 +514,38 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
 
 请按照以下要求回答：
 1. 回答必须基于提供的文档片段，禁止编造信息
-2. 信息不足时明确说明“文档中未找到相关信息”
-3. 回答末尾附上最相关的来源名称或片段编号"""
+2. 信息不足时明确说明"文档中未找到相关信息"
+3. 回答末尾附上最相关的来源名称或片段编号
+4. 严格使用文档中的原始术语，不得自行改写成近义词（如文档写"主机"则必须用"主机"，不能写成"主持人"、"电脑"等）
+5. 保持文档中的产品名、型号、参数、单位等专有信息完全不变"""
         messages = [{"role": "user", "content": prompt}]
         proxy_result = ai_client.chat(messages, max_tokens=2048)
-        if proxy_result:
+        if proxy_result and _is_valid_answer(proxy_result):
             return {"answer": proxy_result, "source": source_hint}
     except Exception:
         pass
 
+    snippet_preview = context[:1200].strip()
+    if snippet_preview:
+        return {
+            "answer": f"AI 引擎暂时不可用，以下是文档中与您问题相关的原始内容片段，供参考：\n\n{snippet_preview}",
+            "source": source_hint
+        }
+
     return {"answer": f"根据当前资料，我暂时无法对“{question}”给出高置信度结论。请补充更具体的对象、参数、章节或步骤名称。", "source": source_hint}
+
+
+def _random_hex():
+    return hex(random.getrandbits(32))[2:]
 
 
 def _parse_json_array(text: str):
     if not text:
         return []
+
+    def _clean(s):
+        return ''.join(c for c in s if not unicodedata.category(c).startswith('P')).strip()
+
     text = text.strip()
     m = re.search(r"\[[\s\S]*\]", text)
     if not m:
@@ -499,20 +555,19 @@ def _parse_json_array(text: str):
         if isinstance(arr, list):
             cleaned = []
             for item in arr:
-                s = str(item).strip()
-                s = s.strip('"\'""''')
+                s = _clean(str(item))
                 if s:
                     cleaned.append(s)
             return cleaned
     except Exception:
         pass
     lines = [line.strip().lstrip("0123456789.、- ") for line in text.split("\n") if line.strip()]
-    return [line.strip('"\'""''') for line in lines if len(line) > 3]
+    return [_clean(line) for line in lines if len(line) > 3]
 
 
 def _generate_suggestions(context: str = "", question: str = "", answer: str = "", max_count: int = 4, timeout: float = 3.0):
     if question and answer:
-        prompt = f"""你是一个善于引导对话的助手。根据以下问答内容，以用户的视角生成{max_count}条用户可能想继续追问的问题。
+        prompt = f"""你是一个善于引导对话的助手。根据以下问答内容，以用户的视角生成{max_count}条用户可能想继续追问的问题（本次随机种子：{_random_hex()}）。
 
 用户刚问了：{question}
 AI的回答摘要：{answer[:2000]}
@@ -521,23 +576,25 @@ AI的回答摘要：{answer[:2000]}
 1. 每条问题必须从用户视角出发，使用"我"、"我想知道"、"能帮我"等第一人称语气
 2. 问题要具体、自然，与回答中提到的具体知识点、术语、概念紧密关联
 3. 问题要有吸引力，让人想继续深入了解
+4. 问题尽量多样化，覆盖不同方面
+5. 问题文本中不要包含任何标点符号（如引号、逗号、句号、问号、顿号、书名号等），纯文字即可
 
-请直接返回JSON数组，问题文本不要包含引号：
+请直接返回JSON数组：
 ["用户视角的问题1", "用户视角的问题2"]"""
     else:
-        prompt = f"""你是知识库的导读助手。以下是从知识库中抽取的文档片段，请仔细阅读后，找出其中用户最可能关心的具体话题，以用户第一人称生成{max_count}条推荐问题。
+        prompt = f"""你是知识库的导读助手。以下是从知识库中抽取的文档片段，请仔细阅读后，找出其中用户最可能关心的具体话题，以用户第一人称生成{max_count}条推荐问题（本次随机种子：{_random_hex()}）。
 
 知识库文档片段：
 {context[:6000]}
 
 要求：
 1. 问题必须紧密关联文档中提到的具体知识点、术语、概念、规范或产品名称
-2. 在问题中明确提及文档里出现的关键词，让人一看就知道问的是什么
+2. 问题尽量多样化，覆盖不同方面，避免每次生成相同或相似的问题
 3. 使用第一人称：我、我想知道、我该如何、为什么我的、能帮我解释一下
 4. 语气自然，像真实用户面对知识库时会提出的问题
-5. 问题文本不要包含任何引号
+5. 问题文本中不要包含任何标点符号（如引号、逗号、句号、问号、顿号、书名号、括号等），纯文字即可
 
-请直接返回JSON数组，问题文本不要包含引号：
+请直接返回JSON数组：
 ["提及具体知识点的用户视角问题1", "提及具体知识点的用户视角问题2", "提及具体知识点的用户视角问题3"]"""
 
     def _call():
@@ -614,9 +671,15 @@ async def ask_general_question(
             "source": ""
         }
         sources = []
+        search_hit = 0
+        relevance_score = 0.0
     else:
         ranked_sources = _rank_document_chunks(question, documents)
-        if _needs_clarification(question, ranked_sources):
+        top_score = ranked_sources[0]["score"] if ranked_sources else 0.0
+        needs_clarify = _needs_clarification(question, ranked_sources)
+        search_hit = 1 if (ranked_sources and not needs_clarify) else 0
+        relevance_score = round(top_score, 4)
+        if needs_clarify:
             result = _build_clarification_answer(question, ranked_sources)
             _, sources = _build_context_from_sources(ranked_sources)
         else:
@@ -627,12 +690,12 @@ async def ask_general_question(
         "question": question,
         "answer": result.get("answer", ""),
         "sources": sources,
-        "suggestions": _generate_suggestions(question=question, answer=result.get("answer", ""), max_count=3, timeout=3.0)
+        "suggestions": _generate_suggestions(question=question, answer=result.get("answer", ""), max_count=3, timeout=10.0)
     }
 
     session_id = None
     if user_id:
-        session_id = _save_qa_history(db, "general", question, result, user_id, input_data.session_id, sources)
+        session_id = _save_qa_history(db, "general", question, result, user_id, input_data.session_id, sources, search_hit, relevance_score)
     response_data["session_id"] = session_id
 
     return response_data
@@ -707,7 +770,7 @@ async def get_initial_suggestions(
 
     doc_list_str = "\n".join([f"- {n}" for n in doc_names[:10]])
     context = f"已选知识库包含以下文档：\n{doc_list_str}\n\n详细内容：\n" + "\n".join(context_parts)
-    suggestions = _generate_suggestions(context=context, max_count=limit, timeout=8.0)
+    suggestions = _generate_suggestions(context=context, max_count=limit, timeout=15.0)
 
     return {
         "code": 0,
@@ -764,7 +827,11 @@ async def ask_document_question(
         return {"question": question, "answer": "未能从上传的文件中提取到文字内容，请确认文件格式。", "sources": [], "session_id": None}
 
     ranked_sources = _rank_document_chunks(question, documents)
-    if _needs_clarification(question, ranked_sources):
+    top_score = ranked_sources[0]["score"] if ranked_sources else 0.0
+    needs_clarify = _needs_clarification(question, ranked_sources)
+    search_hit = 1 if (ranked_sources and not needs_clarify) else 0
+    relevance_score = round(top_score, 4)
+    if needs_clarify:
         result = _build_clarification_answer(question, ranked_sources)
         _, sources = _build_context_from_sources(ranked_sources)
     else:
@@ -775,7 +842,7 @@ async def ask_document_question(
 
     new_session_id = None
     if user_id:
-        new_session_id = _save_qa_history(db, "doc", question, result, user_id, session_id, sources)
+        new_session_id = _save_qa_history(db, "doc", question, result, user_id, session_id, sources, search_hit, relevance_score)
 
     return {
         "question": question,
@@ -1046,6 +1113,7 @@ async def delete_qa_session(
 async def get_qa_dashboard(
     start_date: str = Query(None, description="起始日期 YYYY-MM-DD"),
     end_date: str = Query(None, description="结束日期 YYYY-MM-DD"),
+    period: str = Query("yesterday", description="快捷时间范围: today, yesterday, this_week, this_month, last_7_days, last_30_days"),
     user_name: str = Query(None, description="筛选用户"),
     session_type: str = Query(None, description="筛选场域"),
     rating: int = Query(None, description="筛选评分"),
@@ -1057,35 +1125,106 @@ async def get_qa_dashboard(
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可访问")
 
-    today = datetime.now(BEIJING_TZ).date()
-    yesterday_start = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
-    yesterday_end = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
+    now = datetime.now(BEIJING_TZ)
+    today = now.date()
 
-    # ── 概览统计（昨日 + 前一日环比）──
-    yesterday_start = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
-    yesterday_end = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
-    day_before_start = yesterday_start - timedelta(days=1)
-    day_before_end = yesterday_start - timedelta(seconds=1)
+    PERIOD_LABELS = {
+        "today": "今日",
+        "yesterday": "昨日",
+        "this_week": "本周",
+        "this_month": "本月",
+        "last_7_days": "近7天",
+        "last_30_days": "近30天",
+    }
+    COMPARE_LABELS = {
+        "today": "较昨日",
+        "yesterday": "较前一日",
+        "this_week": "较上周",
+        "this_month": "较上月",
+        "last_7_days": "较前7天",
+        "last_30_days": "较前30天",
+    }
 
-    yesterday_active_users = db.query(func.count(func.distinct(QaSession.user_id))).filter(
-        QaSession.created_at >= yesterday_start,
-        QaSession.created_at <= yesterday_end,
-    ).scalar() or 0
+    def _period_range(p: str):
+        if p == "today":
+            s = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ)
+            e = now
+            cs = s - timedelta(days=1)
+            ce = s - timedelta(seconds=1)
+            return s, e, cs, ce
+        elif p == "yesterday":
+            s = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
+            e = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
+            cs = s - timedelta(days=1)
+            ce = s - timedelta(seconds=1)
+            return s, e, cs, ce
+        elif p == "this_week":
+            weekday = today.weekday()
+            s = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=weekday)
+            e = now
+            cs = s - timedelta(days=7)
+            ce = s - timedelta(seconds=1)
+            return s, e, cs, ce
+        elif p == "this_month":
+            s = datetime(today.year, today.month, 1, tzinfo=BEIJING_TZ)
+            e = now
+            if today.month == 1:
+                cs = datetime(today.year - 1, 12, 1, tzinfo=BEIJING_TZ)
+            else:
+                cs = datetime(today.year, today.month - 1, 1, tzinfo=BEIJING_TZ)
+            ce = datetime(today.year, today.month, 1, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
+            return s, e, cs, ce
+        elif p == "last_7_days":
+            s = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=6)
+            e = now
+            cs = s - timedelta(days=7)
+            ce = s - timedelta(seconds=1)
+            return s, e, cs, ce
+        elif p == "last_30_days":
+            s = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=29)
+            e = now
+            cs = s - timedelta(days=30)
+            ce = s - timedelta(seconds=1)
+            return s, e, cs, ce
+        else:
+            s = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(days=1)
+            e = datetime(today.year, today.month, today.day, tzinfo=BEIJING_TZ) - timedelta(seconds=1)
+            cs = s - timedelta(days=1)
+            ce = s - timedelta(seconds=1)
+            return s, e, cs, ce
 
-    yesterday_conversations = db.query(func.count(QaSession.id)).filter(
-        QaSession.created_at >= yesterday_start,
-        QaSession.created_at <= yesterday_end,
-    ).scalar() or 0
+    period_label = PERIOD_LABELS.get(period, "昨日")
+    compare_label = COMPARE_LABELS.get(period, "较前一日")
+    overview_start, overview_end, compare_start, compare_end = _period_range(period)
 
-    day_before_active_users = db.query(func.count(func.distinct(QaSession.user_id))).filter(
-        QaSession.created_at >= day_before_start,
-        QaSession.created_at <= day_before_end,
-    ).scalar() or 0
+    def _count_active_users(s, e):
+        return db.query(func.count(func.distinct(QaSession.user_id))).filter(
+            QaSession.created_at >= s, QaSession.created_at <= e,
+        ).scalar() or 0
 
-    day_before_conversations = db.query(func.count(QaSession.id)).filter(
-        QaSession.created_at >= day_before_start,
-        QaSession.created_at <= day_before_end,
-    ).scalar() or 0
+    def _count_conversations(s, e):
+        return db.query(func.count(QaSession.id)).filter(
+            QaSession.created_at >= s, QaSession.created_at <= e,
+        ).scalar() or 0
+
+    def _get_hit_rate(s, e):
+        total = db.query(func.count(QaMessage.id)).filter(
+            QaMessage.role == "assistant",
+            QaMessage.created_at >= s, QaMessage.created_at <= e,
+        ).scalar() or 0
+        hits = db.query(func.count(QaMessage.id)).filter(
+            QaMessage.role == "assistant",
+            QaMessage.search_hit == 1,
+            QaMessage.created_at >= s, QaMessage.created_at <= e,
+        ).scalar() or 0
+        return round(hits / total * 100, 1) if total > 0 else 0.0
+
+    active_users = _count_active_users(overview_start, overview_end)
+    conversations = _count_conversations(overview_start, overview_end)
+    compare_active_users = _count_active_users(compare_start, compare_end)
+    compare_conversations = _count_conversations(compare_start, compare_end)
+    hit_rate = _get_hit_rate(overview_start, overview_end)
+    compare_hit_rate = _get_hit_rate(compare_start, compare_end)
 
     # ── 图表数据 ──
     if start_date and end_date:
@@ -1098,42 +1237,73 @@ async def get_qa_dashboard(
         ed = datetime.now(BEIJING_TZ)
         sd = ed - timedelta(days=29)
 
-    # 按天统计活跃用户
     daily_users = db.query(
         func.date(QaSession.created_at).label("d"),
         func.count(func.distinct(QaSession.user_id)).label("c"),
     ).filter(
-        QaSession.created_at >= sd,
-        QaSession.created_at <= ed,
+        QaSession.created_at >= sd, QaSession.created_at <= ed,
     ).group_by("d").order_by("d").all()
     active_users_chart = [{"date": str(row.d), "count": row.c} for row in daily_users]
 
-    # 按天统计对话量（user消息数）
     daily_msgs = db.query(
         func.date(QaMessage.created_at).label("d"),
         func.count(QaMessage.id).label("c"),
     ).filter(
         QaMessage.role == "user",
-        QaMessage.created_at >= sd,
-        QaMessage.created_at <= ed,
+        QaMessage.created_at >= sd, QaMessage.created_at <= ed,
     ).group_by("d").order_by("d").all()
     conversations_chart = [{"date": str(row.d), "count": row.c} for row in daily_msgs]
 
+    daily_hits = db.query(
+        func.date(QaMessage.created_at).label("d"),
+        func.count(QaMessage.id).label("total"),
+        func.sum(QaMessage.search_hit).label("hits"),
+    ).filter(
+        QaMessage.role == "assistant",
+        QaMessage.created_at >= sd, QaMessage.created_at <= ed,
+    ).group_by("d").order_by("d").all()
+    hit_rate_chart = []
+    for row in daily_hits:
+        rate = round((row.hits or 0) / row.total * 100, 1) if row.total > 0 else 0.0
+        hit_rate_chart.append({"date": str(row.d), "rate": rate})
+
+    daily_type_hits = db.query(
+        func.date(QaMessage.created_at).label("d"),
+        QaSession.session_type,
+        func.count(QaMessage.id).label("total"),
+        func.sum(QaMessage.search_hit).label("hits"),
+    ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
+        QaMessage.role == "assistant",
+        QaMessage.created_at >= sd, QaMessage.created_at <= ed,
+    ).group_by("d", QaSession.session_type).order_by("d").all()
+
+    def _build_type_hit_chart(daily_rows, stype):
+        result = []
+        idx = 0
+        for row in daily_hits:
+            d = str(row.d)
+            rate = 0.0
+            while idx < len(daily_rows) and str(daily_rows[idx].d) < d:
+                idx += 1
+            if idx < len(daily_rows) and str(daily_rows[idx].d) == d and daily_rows[idx].session_type == stype:
+                r = daily_rows[idx]
+                rate = round((r.hits or 0) / r.total * 100, 1) if r.total > 0 else 0.0
+                idx += 1
+            result.append({"date": d, "rate": rate})
+        return result
+
+    general_hit_rate_chart = _build_type_hit_chart(daily_type_hits, "general")
+    manual_hit_rate_chart = _build_type_hit_chart(daily_type_hits, "manual")
+
     # ── 明细列表 ──
     detail_query = db.query(
-        QaMessage.id,
-        QaMessage.session_id,
-        QaMessage.content,
-        QaMessage.sources,
-        QaMessage.rating,
-        QaMessage.created_at,
-        QaSession.session_type,
-        QaSession.title,
+        QaMessage.id, QaMessage.session_id, QaMessage.content,
+        QaMessage.sources, QaMessage.rating, QaMessage.created_at,
+        QaSession.session_type, QaSession.title,
     ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
         QaMessage.role == "user"
     )
 
-    # 获取用户名映射
     user_map = {}
     if user_name:
         from app.models.user import User
@@ -1160,7 +1330,6 @@ async def get_qa_dashboard(
         (page - 1) * page_size
     ).limit(page_size).all()
 
-    # 获取每个 message 对应的 session user_id
     session_ids = list(set(r.session_id for r in records))
     session_user_map = {}
     if session_ids:
@@ -1169,22 +1338,17 @@ async def get_qa_dashboard(
         ).all()
         session_user_map = {s.id: s.user_id for s in sessions_with_user}
 
-    # 找到每个用户消息对应的 AI 回复
-    user_msg_ids = [r.id for r in records]
     ai_replies = {}
-    if user_msg_ids:
-        # 找到每个 user message 之后第一条 assistant message
+    if session_ids:
         replies = db.query(
-            QaMessage.session_id, QaMessage.id, QaMessage.content, QaMessage.created_at
+            QaMessage.session_id, QaMessage.id, QaMessage.content, QaMessage.created_at, QaMessage.search_hit
         ).filter(
             QaMessage.role == "assistant",
             QaMessage.session_id.in_(session_ids),
         ).order_by(QaMessage.created_at.asc()).all()
-        # 按 session 分组
         session_replies = {}
         for r in replies:
             session_replies.setdefault(r.session_id, []).append(r)
-        # 为每个 user message 匹配最近的 assistant reply
         for rec in records:
             session_reps = session_replies.get(rec.session_id, [])
             best_reply = None
@@ -1201,6 +1365,7 @@ async def get_qa_dashboard(
         user_name_display = user_map.get(uid, "未知")
         reply = ai_replies.get(r.id)
         answer_text = reply.content if reply else ""
+        search_hit_val = bool(reply.search_hit) if reply else False
         success = bool(answer_text and "未检索到" not in answer_text and "定位到" not in answer_text)
         items.append({
             "id": r.id,
@@ -1213,20 +1378,29 @@ async def get_qa_dashboard(
             "sources": r.sources or "[]",
             "rating": r.rating,
             "success": success,
+            "search_hit": search_hit_val,
             "created_at": _to_beijing_iso(r.created_at),
         })
 
     return {
         "overview": {
-            "yesterday_active_users": yesterday_active_users,
-            "yesterday_conversations": yesterday_conversations,
-            "active_users_trend": yesterday_active_users - day_before_active_users,
-            "conversations_trend": yesterday_conversations - day_before_conversations,
+            "active_users": active_users,
+            "conversations": conversations,
+            "active_users_trend": active_users - compare_active_users,
+            "conversations_trend": conversations - compare_conversations,
+            "hit_rate": hit_rate,
+            "hit_rate_trend": round(hit_rate - compare_hit_rate, 1),
+            "period_label": period_label,
+            "compare_label": compare_label,
         },
         "charts": {
             "active_users": active_users_chart,
             "conversations": conversations_chart,
+            "hit_rate": hit_rate_chart,
+            "general_hit_rate": general_hit_rate_chart,
+            "manual_hit_rate": manual_hit_rate_chart,
         },
+        "period": period,
         "items": items,
         "total": total,
         "page": page,

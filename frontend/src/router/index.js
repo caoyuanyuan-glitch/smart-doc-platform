@@ -10,6 +10,7 @@ import QAManual from '@/views/QADoc.vue'
 import QADashboard from '@/views/QADashboard.vue'
 import QAHistory from '@/views/QAHistory.vue'
 import Generate from '@/views/Generate.vue'
+import DocGenerator from '@/views/DocGenerator.vue'
 import Compare from '@/views/Compare.vue'
 import CompareParams from '@/views/CompareParams.vue'
 import Convert from '@/views/Convert.vue'
@@ -25,7 +26,6 @@ import SpellCheck from '@/views/SpellCheck.vue'
 import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
 import WhiteList from '@/views/WhiteList.vue'
 import Feedback from '@/views/Feedback.vue'
-import DocGenerator from '@/views/DocGenerator.vue'
 
 const routes = [
   {

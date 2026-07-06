@@ -75,8 +75,8 @@
               :http-request="handleFileTranslate"
               :show-file-list="true"
               :auto-upload="false"
+              multiple
               ref="fileUploadRef"
-              :on-change="onFileChange"
               accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf,.idml"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
@@ -86,7 +86,7 @@
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
-            <el-button class="upload-submit-btn" type="primary" :loading="translating" @click="submitFileUpload">
+            <el-button class="upload-submit-btn" type="primary" :loading="hasActiveJobs" @click="submitFileUpload">
               <el-icon><Switch /></el-icon>
               上传并翻译
             </el-button>
@@ -104,7 +104,7 @@
             <div v-if="reviewedDocs.length > 0" class="reviewed-doc-hint">已自动排除当前不支持翻译的格式。</div>
             <div v-if="selectedReviewedDoc" class="selected-doc-hint">
               已选择: {{ selectedReviewedDoc.filename }}
-              <el-button type="primary" size="small" :loading="translating" @click="translateReviewedDoc" style="margin-left: 12px">
+              <el-button type="primary" size="small" :loading="hasActiveJobs" @click="translateReviewedDoc" style="margin-left: 12px">
                 翻译此文档
               </el-button>
             </div>
@@ -118,30 +118,44 @@
             <span class="card-header-title">翻译结果</span>
           </template>
 
-          <div v-if="!result && !translating" class="result-empty">
+          <div v-if="translationJobs.length === 0" class="result-empty">
             <el-icon class="empty-icon"><FolderOpened /></el-icon>
-            <p>选择文档并翻译后，可在此下载译文</p>
+            <p>选择一个或多个文档并翻译后，可在此分别下载译文</p>
           </div>
 
-          <div v-if="translating" class="result-loading">
-            <div class="loading-spinner"></div>
-            <p>{{ pollingStatus ? `正在翻译... (${pollingCount}s)` : '正在提交翻译任务...' }}</p>
-          </div>
+          <div v-else class="result-list">
+            <div v-for="job in translationJobs" :key="job.jobKey" class="result-item">
+              <div class="result-item-head">
+                <div>
+                  <div class="result-item-name">{{ job.original_filename }}</div>
+                  <div class="result-item-meta">任务 #{{ job.doc_id || '待提交' }}</div>
+                </div>
+                <el-tag :type="statusTagType(job.status)" effect="plain">
+                  {{ statusLabel(job) }}
+                </el-tag>
+              </div>
 
-          <div v-if="result && !translating" class="result-content">
-            <el-result icon="success" title="翻译完成" :sub-title="`原文件: ${result.original_filename}`">
-              <template #extra>
-                <el-button type="primary" @click="downloadTranslatedFile">
-                  <el-icon><Download /></el-icon>
-                  下载译文 ({{ result.translated_filename || result.original_filename }})
-                </el-button>
-              </template>
-            </el-result>
-          </div>
+              <div v-if="job.status === 'submitting' || job.status === 'processing'" class="result-loading result-loading-inline">
+                <div class="loading-spinner"></div>
+                <p>{{ job.status === 'submitting' ? '正在提交翻译任务...' : `正在翻译... (${job.pollingCount}s)` }}</p>
+              </div>
 
-          <div v-if="pollError" class="result-error">
-            <el-result icon="error" title="翻译失败" :sub-title="pollError">
-            </el-result>
+              <div v-else-if="job.status === 'completed'" class="result-content">
+                <el-result icon="success" title="翻译完成" :sub-title="`原文件: ${job.original_filename}`">
+                  <template #extra>
+                    <el-button type="primary" @click="downloadTranslatedFile(job)">
+                      <el-icon><Download /></el-icon>
+                      下载译文 ({{ job.translated_filename || job.original_filename }})
+                    </el-button>
+                  </template>
+                </el-result>
+              </div>
+
+              <div v-else-if="job.status === 'error'" class="result-error">
+                <el-result icon="error" title="翻译失败" :sub-title="job.error || '翻译过程中发生错误'">
+                </el-result>
+              </div>
+            </div>
           </div>
         </el-card>
       </div>
@@ -149,11 +163,15 @@
   </div>
 </template>
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
+
+const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
+const TRANSLATION_BATCH_EVENT = 'translation-batch-updated'
+const TRANSLATION_STATS_EVENT = 'translation-stats-updated'
 
 const engine = ref('hybrid')
 const model = ref('kimi')
@@ -172,15 +190,12 @@ const memoryFileId = ref(null)
 const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
 const docSource = ref('upload')
-const translating = ref(false)
-const result = ref(null)
-const pollingStatus = ref(false)
-const pollingCount = ref(0)
-const pollError = ref('')
-let pollTimer = null
+const translationJobs = ref([])
+const pollingTimers = new Map()
+const hasActiveJobs = computed(() => translationJobs.value.some(job => job.status === 'submitting' || job.status === 'processing'))
+const currentBatchId = ref('')
 
 const fileUploadRef = ref(null)
-const selectedFile = ref(null)
 
 const reviewedDocs = ref([])
 const reviewedDocsLoading = ref(false)
@@ -191,6 +206,13 @@ const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 onMounted(async () => {
   loadReviewedDocs()
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
+})
+
+onBeforeUnmount(() => {
+  for (const timer of pollingTimers.values()) {
+    clearInterval(timer)
+  }
+  pollingTimers.clear()
 })
 
 async function loadMemoryBanks() {
@@ -252,9 +274,12 @@ async function translateReviewedDoc() {
     ElMessage.error('当前文档格式暂不支持翻译')
     return
   }
-  translating.value = true
-  result.value = null
-  pollError.value = ''
+  const job = createJob(selectedReviewedDoc.value.filename)
+  const batchId = createBatchId()
+  currentBatchId.value = batchId
+  sessionStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
+  localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
+  window.dispatchEvent(new CustomEvent(TRANSLATION_BATCH_EVENT, { detail: { batchId } }))
   try {
     const res = await translationAPI.getDocument(selectedReviewedDoc.value.id)
     const content = res.data.content || ''
@@ -267,20 +292,24 @@ async function translateReviewedDoc() {
     formData.append('source_lang', sourceLang.value)
     formData.append('target_lang', targetLang.value)
     formData.append('memory_bank', memoryBank.value || '')
+    formData.append('batch_id', batchId)
     if (memoryFileId.value != null) {
       formData.append('memory_file_id', String(memoryFileId.value))
     }
     const tres = await translationAPI.translateFile(formData)
-    startPolling(tres.data.doc_id)
+    updateJob(job.jobKey, {
+      doc_id: tres.data.doc_id,
+      original_filename: tres.data.original_filename || job.original_filename,
+      status: 'processing',
+      pollingCount: 0,
+      error: ''
+    })
+    startPolling(job.jobKey, tres.data.doc_id)
   } catch (e) {
-    translating.value = false
-    pollError.value = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
-    ElMessage.error(pollError.value)
+    const error = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
+    updateJob(job.jobKey, { status: 'error', error })
+    ElMessage.error(error)
   }
-}
-
-function onFileChange(file) {
-  selectedFile.value = file
 }
 
 function beforeFileUpload(file) {
@@ -299,13 +328,22 @@ function beforeFileUpload(file) {
 }
 
 function submitFileUpload() {
+  currentBatchId.value = createBatchId()
+  sessionStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, currentBatchId.value)
+  localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, currentBatchId.value)
+  window.dispatchEvent(new CustomEvent(TRANSLATION_BATCH_EVENT, { detail: { batchId: currentBatchId.value } }))
   fileUploadRef.value.submit()
 }
 
 function handleFileTranslate(options) {
-  translating.value = true
-  result.value = null
-  pollError.value = ''
+  const job = createJob(options.file.name)
+  const batchId = currentBatchId.value || createBatchId()
+  if (!currentBatchId.value) {
+    currentBatchId.value = batchId
+    sessionStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
+    localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
+    window.dispatchEvent(new CustomEvent(TRANSLATION_BATCH_EVENT, { detail: { batchId } }))
+  }
   const formData = new FormData()
   formData.append('file', options.file)
   formData.append('engine', engine.value)
@@ -313,69 +351,120 @@ function handleFileTranslate(options) {
   formData.append('source_lang', sourceLang.value)
   formData.append('target_lang', targetLang.value)
   formData.append('memory_bank', memoryBank.value || '')
+  formData.append('batch_id', batchId)
   if (memoryFileId.value != null) {
     formData.append('memory_file_id', String(memoryFileId.value))
   }
 
   translationAPI.translateFile(formData).then(res => {
-    startPolling(res.data.doc_id)
+    updateJob(job.jobKey, {
+      doc_id: res.data.doc_id,
+      original_filename: res.data.original_filename || job.original_filename,
+      status: 'processing',
+      pollingCount: 0,
+      error: ''
+    })
+    startPolling(job.jobKey, res.data.doc_id)
   }).catch(e => {
-    translating.value = false
-    pollError.value = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
-    ElMessage.error(pollError.value)
+    const error = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
+    updateJob(job.jobKey, { status: 'error', error })
+    ElMessage.error(error)
   })
 }
 
-function startPolling(docId) {
-  stopPolling()
-  pollingStatus.value = true
-  pollingCount.value = 0
-  pollError.value = ''
+function createJob(filename) {
+  const job = {
+    jobKey: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    doc_id: null,
+    original_filename: filename,
+    translated_filename: '',
+    download_url: '',
+    status: 'submitting',
+    error: '',
+    pollingCount: 0
+  }
+  translationJobs.value = [job, ...translationJobs.value]
+  return job
+}
 
-  pollTimer = setInterval(async () => {
-    pollingCount.value++
+function createBatchId() {
+  return `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function updateJob(jobKey, patch) {
+  translationJobs.value = translationJobs.value.map(job => job.jobKey === jobKey ? { ...job, ...patch } : job)
+}
+
+function startPolling(jobKey, docId) {
+  stopPolling(jobKey)
+
+  const timer = setInterval(async () => {
+    const currentJob = translationJobs.value.find(job => job.jobKey === jobKey)
+    if (!currentJob) {
+      stopPolling(jobKey)
+      return
+    }
+
+    updateJob(jobKey, { pollingCount: currentJob.pollingCount + 3 })
     try {
       const res = await translationAPI.getFileStatus(docId)
       const statusData = res.data
       if (statusData.status === 'completed') {
-        stopPolling()
-        translating.value = false
-        result.value = {
+        stopPolling(jobKey)
+        updateJob(jobKey, {
           doc_id: docId,
           original_filename: statusData.original_filename || '',
           translated_filename: statusData.translated_filename || '',
-          download_url: statusData.download_url || `/api/translation/download/${docId}`
-        }
+          download_url: statusData.download_url || `/api/translation/download/${docId}`,
+          status: 'completed',
+          error: ''
+        })
+        window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'completed' } }))
         ElMessage.success('文档翻译完成')
       } else if (statusData.status === 'error') {
-        stopPolling()
-        translating.value = false
-        pollError.value = statusData.error || '翻译过程中发生错误'
-        ElMessage.error(pollError.value)
+        stopPolling(jobKey)
+        const error = statusData.error || '翻译过程中发生错误'
+        updateJob(jobKey, { status: 'error', error })
+        window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'error' } }))
+        ElMessage.error(error)
       }
     } catch (e) {
-      stopPolling()
-      translating.value = false
-      pollError.value = '查询翻译状态失败'
-      ElMessage.error(pollError.value)
+      stopPolling(jobKey)
+      updateJob(jobKey, { status: 'error', error: '查询翻译状态失败' })
+      ElMessage.error('查询翻译状态失败')
     }
   }, 3000)
+
+  pollingTimers.set(jobKey, timer)
 }
 
-function stopPolling() {
-  pollingStatus.value = false
-  pollingCount.value = 0
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
+function stopPolling(jobKey) {
+  const timer = pollingTimers.get(jobKey)
+  if (timer) {
+    clearInterval(timer)
+    pollingTimers.delete(jobKey)
   }
 }
 
-function downloadTranslatedFile() {
-  if (!result.value?.download_url) return
+function statusTagType(status) {
+  if (status === 'completed') return 'success'
+  if (status === 'error') return 'danger'
+  return 'info'
+}
+
+function statusLabel(job) {
+  if (job.status === 'submitting') return '提交中'
+  if (job.status === 'processing') return `翻译中 ${job.pollingCount}s`
+  if (job.status === 'completed') return '已完成'
+  if (job.status === 'error') return '失败'
+  return '等待中'
+}
+
+function downloadTranslatedFile(job) {
+  if (!job?.download_url) return
   const link = document.createElement('a')
-  link.href = result.value.download_url
-  link.setAttribute('download', result.value.translated_filename || result.value.original_filename)
+  link.href = job.download_url
+  link.setAttribute('download', job.translated_filename || job.original_filename)
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
@@ -446,6 +535,7 @@ function downloadTranslatedFile() {
   flex: 1;
   display: flex;
   flex-direction: column;
+  gap: 16px;
 }
 
 .config-horizontal {
@@ -590,6 +680,10 @@ function downloadTranslatedFile() {
   color: #6b7280;
 }
 
+.result-loading-inline {
+  padding: 20px;
+}
+
 .loading-spinner {
   width: 36px;
   height: 36px;
@@ -611,6 +705,39 @@ function downloadTranslatedFile() {
 
 .result-error {
   padding: 20px 0;
+}
+
+.result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.result-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fff;
+}
+
+.result-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.result-item-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  word-break: break-all;
+}
+
+.result-item-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 @media (max-width: 1024px) {

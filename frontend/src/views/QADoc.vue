@@ -131,6 +131,13 @@
             <span class="chat-title">{{ currentTitle }}</span>
           </div>
           <div class="chat-hd-right">
+            <div class="ai-status-indicator" v-if="aiStatus" @click="refreshAiStatus">
+              <span class="status-dot" :class="aiStatus.primary_status"></span>
+              <span class="status-text">Kimi</span>
+              <span class="status-latency" v-if="aiStatus.providers?.kimi?.status === 'ok'">{{ aiStatus.providers.kimi.latency_ms }}ms</span>
+              <span class="status-error" v-else-if="aiStatus.providers?.kimi?.status === 'error'">离线</span>
+              <span class="status-refresh-hint">点击刷新</span>
+            </div>
             <el-button size="small" text type="primary" @click="newSession">新建会话</el-button>
           </div>
         </div>
@@ -237,7 +244,7 @@
 import { ref, onMounted, nextTick, inject } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Document, View, Delete, User, CopyDocument, Download, ArrowDown, Close, ChatDotRound } from '@element-plus/icons-vue'
-import { manualAPI, qaAPI } from '@/api/index.js'
+import { manualAPI, qaAPI, instance } from '@/api/index.js'
 
 const leftW = ref(420)
 const dragging = ref(false)
@@ -257,6 +264,7 @@ const question = ref('')
 const loading = ref(false)
 const sessionList = ref([])
 const chatBox = ref(null)
+const aiStatus = ref(null)
 
 const refreshFeedbackCount = inject('refreshFeedbackCount', null)
 
@@ -486,7 +494,23 @@ function handleExport(cmd) {
   }
 }
 
-onMounted(loadSessionList)
+onMounted(() => {
+  loadSessionList()
+  fetchAiStatus()
+})
+
+async function fetchAiStatus() {
+  try {
+    const resp = await instance.get('/system/ai-status')
+    aiStatus.value = resp.data
+  } catch (e) {
+    aiStatus.value = null
+  }
+}
+
+function refreshAiStatus() {
+  fetchAiStatus()
+}
 </script>
 
 <style scoped>
@@ -551,7 +575,19 @@ onMounted(loadSessionList)
 /* 问答 */
 .chat-hd { display:flex; align-items:center; justify-content:space-between; padding:10px 24px; border-bottom:1px solid #e5e7eb; background:#fafbfc; flex-shrink:0; }
 .chat-title { font-weight:600; font-size:14px; }
-.chat-hd-right { display:flex; gap:4px; }
+.chat-hd-right { display:flex; gap:4px; align-items: center; }
+
+.ai-status-indicator { display:flex; align-items:center; gap:5px; cursor:pointer; padding:2px 8px; border-radius:10px; font-size:12px; background:#f0f2f5; }
+.ai-status-indicator:hover { background:#e4e7ec; }
+.status-dot { width:7px; height:7px; border-radius:50%; }
+.status-dot.ok { background:#67c23a; }
+.status-dot.error { background:#f56c6c; }
+.status-dot.unavailable { background:#e6a23c; }
+.status-text { font-weight:600; color:#303133; font-size:11px; }
+.status-latency { color:#909399; font-size:10px; }
+.status-error { color:#f56c6c; font-size:10px; font-weight:600; }
+.status-refresh-hint { color:#c0c4cc; font-size:9px; opacity:0; transition:opacity 0.2s; }
+.ai-status-indicator:hover .status-refresh-hint { opacity:1; }
 .chat-scope { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:8px 24px; border-bottom:1px solid #f1f5f9; background:#fafbfc; flex-shrink:0; }
 .scope-label { font-size:12px; color:#64748b; }
 .chat-tools { display:flex; gap:8px; padding:6px 24px; border-bottom:1px solid #f1f5f9; flex-shrink:0; }

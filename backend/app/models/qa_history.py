@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Float
 from sqlalchemy.orm import relationship
 from app.database import Base
 from datetime import datetime
@@ -26,6 +26,8 @@ class QaMessage(Base):
     content = Column(Text, nullable=False)
     sources = Column(Text, default="[]")
     rating = Column(Integer, default=0)
+    search_hit = Column(Integer, default=0)
+    relevance_score = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("QaSession", back_populates="messages")

@@ -74,6 +74,10 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_char_count INTEGER DEFAULT 0"))
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_char_count INTEGER DEFAULT 0"))
 
+    if translation_doc_columns and 'batch_id' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN batch_id VARCHAR DEFAULT ''"))
+
 
     try:
         plr_columns = {col['name'] for col in inspector.get_columns('polish_learning_rules')}
@@ -88,6 +92,22 @@ def _ensure_legacy_sqlite_columns():
             stmts.append("ALTER TABLE polish_learning_rules ADD COLUMN engine_key VARCHAR(64)")
         if 'description' not in plr_columns:
             stmts.append("ALTER TABLE polish_learning_rules ADD COLUMN description TEXT")
+        if stmts:
+            with engine.begin() as conn:
+                for s in stmts:
+                    conn.execute(text(s))
+
+    try:
+        qa_msg_columns = {col['name'] for col in inspector.get_columns('qa_messages')}
+    except Exception:
+        qa_msg_columns = set()
+
+    if qa_msg_columns:
+        stmts = []
+        if 'search_hit' not in qa_msg_columns:
+            stmts.append("ALTER TABLE qa_messages ADD COLUMN search_hit INTEGER DEFAULT 0")
+        if 'relevance_score' not in qa_msg_columns:
+            stmts.append("ALTER TABLE qa_messages ADD COLUMN relevance_score FLOAT DEFAULT 0.0")
         if stmts:
             with engine.begin() as conn:
                 for s in stmts:

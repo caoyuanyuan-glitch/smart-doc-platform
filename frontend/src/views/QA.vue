@@ -34,6 +34,13 @@
 
       <section class="chat-panel">
         <div class="chat-toolbar">
+          <div class="ai-status-indicator" v-if="aiStatus" @click="refreshAiStatus">
+            <span class="status-dot" :class="aiStatus.primary_status"></span>
+            <span class="status-text">Kimi</span>
+            <span class="status-latency" v-if="aiStatus.providers?.kimi?.status === 'ok'">{{ aiStatus.providers.kimi.latency_ms }}ms</span>
+            <span class="status-error" v-else-if="aiStatus.providers?.kimi?.status === 'error'" title="Kimi 不可用">离线</span>
+            <span class="status-refresh-hint">点击刷新</span>
+          </div>
           <el-button size="small" text @click="newConversation" :disabled="messages.length <= 1">
             <el-icon><Plus /></el-icon> 新建会话
           </el-button>
@@ -80,14 +87,17 @@
                 @click="clickSuggestion(q)"
               >
                 <span class="suggestion-dot"></span>
-                <span class="suggestion-text">{{ q }}</span>
+                <span class="suggestion-text">"{{ stripQuotes(q) }}"</span>
               </div>
             </div>
             <span
               v-if="suggestionsRefreshable && displaySuggestions.length"
               class="refresh-btn"
               @click="refreshInitialSuggestions"
-            >换一批</span>
+            >
+              <el-icon><svg viewBox="0 0 1024 1024" width="12" height="12"><path d="M771.776 794.88A384 384 0 0 1 128 512h64a320 320 0 0 0 555.712 216.448H654.72a32 32 0 0 1 0 64h151.776a32 32 0 0 0 32-32V612.48a32 32 0 0 0-64 0v141.056a31.872 31.872 0 0 1-2.72 41.344zM276.288 229.12A384 384 0 0 1 896 512h-64a320 320 0 0 0-555.712-216.448h93.056a32 32 0 1 1 0 64H213.248a32 32 0 0 1-32-32V180.224a32 32 0 0 1 64 0v93.056a31.904 31.904 0 0 1 31.04-44.16z" fill="currentColor"></path></svg></el-icon>
+              换一批
+            </span>
           </div>
           <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
             <div class="avatar" :class="msg.role">
@@ -131,7 +141,7 @@
                 @click="i === lastAssistantIndex && clickSuggestion(sug)"
               >
                 <span class="followup-dot"></span>
-                <span class="followup-text">{{ sug }}</span>
+                <span class="followup-text">"{{ stripQuotes(sug) }}"</span>
               </div>
             </div>
           </div>
@@ -193,7 +203,7 @@
 import { ref, nextTick, computed, onMounted, inject, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { qaAPI, knowledgeAPI } from '@/api'
+import { qaAPI, knowledgeAPI, instance } from '@/api'
 import { useUserStore } from '@/store/user'
 import { User, Folder, Microphone, CopyDocument, Download, ArrowDown, Plus } from '@element-plus/icons-vue'
 
@@ -201,6 +211,7 @@ const route = useRoute()
 
 const question = ref('')
 const loading = ref(false)
+const aiStatus = ref(null)
 const chatBox = ref(null)
 const treeRef = ref(null)
 const treeData = ref([])
@@ -220,10 +231,10 @@ const suggestionsRefreshable = ref(false)
 const displaySuggestions = ref([])
 
 const FALLBACK_SUGGESTIONS = [
-  '我想快速上手这份文档，应该从哪里开始读起？',
-  '文档中有哪些容易踩坑的地方需要特别注意？',
-  '这个产品和新手入门流程相比，有哪些关键变化？',
-  '如何判断我的文档质量是否达到了发布标准？'
+  '我想快速上手这份文档，应该从哪里开始读起',
+  '文档中有哪些容易踩坑的地方需要特别注意',
+  '这个产品和新手入门流程相比，有哪些关键变化',
+  '如何判断我的文档质量是否达到了发布标准'
 ]
 
 const showInitialSuggestions = computed(() => {
@@ -280,6 +291,10 @@ function refreshInitialSuggestions() {
   fetchInitialSuggestions()
 }
 
+function stripQuotes(text) {
+  return String(text || '').replace(/[\u201c\u201d\u2018\u2019\u201a\u201b\u201e\u201f\u0022\u0027\u0060\u300c\u300d\u300e\u300f\uff02\uff07\u00ab\u00bb]/g, '')
+}
+
 function clickSuggestion(text) {
   if (loading.value) return
   sendQuestion(text)
@@ -299,7 +314,21 @@ function newConversation() {
 onMounted(() => {
   loadKnowledgeTree()
   fetchInitialSuggestions()
+  fetchAiStatus()
 })
+
+async function fetchAiStatus() {
+  try {
+    const resp = await instance.get('/system/ai-status')
+    aiStatus.value = resp.data
+  } catch (e) {
+    aiStatus.value = null
+  }
+}
+
+function refreshAiStatus() {
+  fetchAiStatus()
+}
 
 watch(() => route.path, () => {
   loadKnowledgeTree()
@@ -679,7 +708,40 @@ function scrollToBottom() {
 
 .chat-toolbar {
   display: flex; gap: 8px; padding: 8px 16px;
-  border-bottom: 1px solid #f0f0f0; justify-content: flex-end;
+  border-bottom: 1px solid #f0f0f0; justify-content: space-between;
+  align-items: center;
+}
+
+.ai-status-indicator {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 2px 10px; border-radius: 12px; font-size: 12px;
+  background: #f5f7fa; transition: background 0.2s;
+  user-select: none;
+}
+.ai-status-indicator:hover {
+  background: #e8ecf1;
+}
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.status-dot.ok { background: #67c23a; }
+.status-dot.error { background: #f56c6c; }
+.status-dot.unavailable { background: #e6a23c; }
+.status-text {
+  font-weight: 600; color: #303133;
+}
+.status-latency {
+  color: #909399; font-size: 11px;
+}
+.status-error {
+  color: #f56c6c; font-size: 11px; font-weight: 600;
+}
+.status-refresh-hint {
+  color: #c0c4cc; font-size: 10px; opacity: 0;
+  transition: opacity 0.2s;
+}
+.ai-status-indicator:hover .status-refresh-hint {
+  opacity: 1;
 }
 
 .chat-messages {

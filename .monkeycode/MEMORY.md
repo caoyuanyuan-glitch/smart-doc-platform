@@ -68,12 +68,14 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 编号与标题或术语之间保留空格，例如 `表1 DNBelab-D4RS`、`2.1 RNA`
 
 大模型调用顺序
-- Date: 2026-06-24
-- Context: 用户指定项目内大模型优先级顺序
-- Category: 行为指令
+- Date: 2026-07-03
+- Context: 修复智能问答 AI 引擎不可用，配置 Kimi API Key
+- Category: 环境配置
 - Instructions:
-  - 大模型调用顺序固定为 `Kimi > DeepSeek > ArkClaw`
-  - 项目中移除 `Qwen` 及其 API Key 配置
+  - Kimi API Key 存放在 `/workspace/backend/.env`，新拉分支后需确认该文件存在
+  - `chat()` 调用优先级: Kimi > DeepSeek > ArkClaw > Proxy > MCAI（仅最后备选）
+  - MCAI 代理当前仅返回简短确认词，不可用于生成任务，勿将其置于优先位置
+  - 后端通过 `dotenv.load_dotenv()` 自动加载 `.env`，无需手动 export
 
 审核模块改动范围约束
 - Date: 2026-06-25

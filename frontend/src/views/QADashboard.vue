@@ -3,6 +3,26 @@
     <div class="page-hd">
       <h2>智能问答看板</h2>
       <span class="page-sub">管理员数据分析面板</span>
+      <div class="page-hd-right">
+        <span class="last-updated" v-if="lastUpdatedText">{{ lastUpdatedText }}</span>
+        <el-switch
+          v-model="autoRefresh"
+          size="small"
+          active-text="自动刷新"
+          @change="toggleAutoRefresh"
+        />
+      </div>
+    </div>
+
+    <div class="period-bar">
+      <el-radio-group v-model="period" size="small" @change="onPeriodChange">
+        <el-radio-button value="today">今天</el-radio-button>
+        <el-radio-button value="yesterday">昨天</el-radio-button>
+        <el-radio-button value="this_week">本周</el-radio-button>
+        <el-radio-button value="this_month">本月</el-radio-button>
+        <el-radio-button value="last_7_days">近7天</el-radio-button>
+        <el-radio-button value="last_30_days">近30天</el-radio-button>
+      </el-radio-group>
     </div>
 
     <div class="overview-cards">
@@ -17,16 +37,16 @@
         </div>
         <div class="stat-body">
           <div class="stat-label">
-            <span>昨日活跃用户量</span>
-            <span class="stat-date">截止昨日</span>
+            <span>{{ overview.period_label }}活跃用户量</span>
+            <span class="stat-date">截止{{ overview.period_label }}</span>
           </div>
           <div class="stat-value-row">
-            <span class="stat-value">{{ overview.yesterday_active_users }}</span>
+            <span class="stat-value">{{ overview.active_users }}</span>
             <span class="stat-unit">人</span>
           </div>
           <div class="stat-trend" :class="overview.active_users_trend >= 0 ? 'up' : 'down'">
             <span class="trend-icon">{{ overview.active_users_trend >= 0 ? '↑' : '↓' }}</span>
-            较前一日 {{ overview.active_users_trend >= 0 ? '+' : '' }}{{ overview.active_users_trend }}
+            {{ overview.compare_label }} {{ overview.active_users_trend >= 0 ? '+' : '' }}{{ overview.active_users_trend }}
           </div>
         </div>
       </div>
@@ -40,16 +60,38 @@
         </div>
         <div class="stat-body">
           <div class="stat-label">
-            <span>昨日用户对话量</span>
-            <span class="stat-date">截止昨日</span>
+            <span>{{ overview.period_label }}用户对话量</span>
+            <span class="stat-date">截止{{ overview.period_label }}</span>
           </div>
           <div class="stat-value-row">
-            <span class="stat-value">{{ overview.yesterday_conversations }}</span>
+            <span class="stat-value">{{ overview.conversations }}</span>
             <span class="stat-unit">次</span>
           </div>
           <div class="stat-trend" :class="overview.conversations_trend >= 0 ? 'up' : 'down'">
             <span class="trend-icon">{{ overview.conversations_trend >= 0 ? '↑' : '↓' }}</span>
-            较前一日 {{ overview.conversations_trend >= 0 ? '+' : '' }}{{ overview.conversations_trend }}
+            {{ overview.compare_label }} {{ overview.conversations_trend >= 0 ? '+' : '' }}{{ overview.conversations_trend }}
+          </div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon hit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 6v6l4 2"/>
+          </svg>
+        </div>
+        <div class="stat-body">
+          <div class="stat-label">
+            <span>{{ overview.period_label }}命中率</span>
+            <span class="stat-date">截止{{ overview.period_label }}</span>
+          </div>
+          <div class="stat-value-row">
+            <span class="stat-value">{{ overview.hit_rate }}</span>
+            <span class="stat-unit">%</span>
+          </div>
+          <div class="stat-trend" :class="overview.hit_rate_trend >= 0 ? 'up' : 'down'">
+            <span class="trend-icon">{{ overview.hit_rate_trend >= 0 ? '↑' : '↓' }}</span>
+            {{ overview.compare_label }} {{ overview.hit_rate_trend >= 0 ? '+' : '' }}{{ overview.hit_rate_trend }}%
           </div>
         </div>
       </div>
@@ -63,6 +105,10 @@
       <div class="chart-box">
         <div class="chart-title">用户对话量趋势</div>
         <v-chart ref="chartConv" class="chart" :option="chartConvOption" autoresize />
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">命中率趋势 — 知识库问答 / 说明书问答</div>
+        <v-chart ref="chartHitRate" class="chart" :option="chartHitRateOption" autoresize />
       </div>
     </div>
 
@@ -116,6 +162,12 @@
             <el-tag v-else size="small" type="danger">失败</el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="检索命中" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.search_hit" size="small" type="success">命中</el-tag>
+            <el-tag v-else size="small" type="info">未命中</el-tag>
+          </template>
+        </el-table-column>
       </el-table>
 
       <div class="pagination">
@@ -132,7 +184,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { qaAPI } from '@/api'
 import VChart from 'vue-echarts'
@@ -144,9 +196,13 @@ import { CanvasRenderer } from 'echarts/renderers'
 use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const loading = ref(false)
-const overview = reactive({ yesterday_active_users: 0, yesterday_conversations: 0, active_users_trend: 0, conversations_trend: 0 })
+const period = ref('yesterday')
+const overview = reactive({ active_users: 0, conversations: 0, active_users_trend: 0, conversations_trend: 0, hit_rate: 0, hit_rate_trend: 0, period_label: '昨日', compare_label: '较前一日' })
 const chartUsersData = ref([])
 const chartConvData = ref([])
+const chartHitRateData = ref([])
+const chartGeneralHitRateData = ref([])
+const chartManualHitRateData = ref([])
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
@@ -155,6 +211,20 @@ const dateRange = ref(null)
 const filterUser = ref('')
 const filterType = ref('')
 const filterRating = ref(null)
+const lastUpdated = ref(null)
+const autoRefresh = ref(true)
+let refreshTimer = null
+let silenceNextLoad = false
+
+const lastUpdatedText = computed(() => {
+  if (!lastUpdated.value) return ''
+  const diff = Math.floor((Date.now() - lastUpdated.value.getTime()) / 1000)
+  if (diff < 10) return '刚刚更新'
+  if (diff < 60) return `${diff}秒前更新`
+  const min = Math.floor(diff / 60)
+  if (min < 60) return `${min}分钟前更新`
+  return `${Math.floor(min / 60)}小时前更新`
+})
 
 const chartUsersOption = computed(() => ({
   tooltip: { trigger: 'axis' },
@@ -172,10 +242,24 @@ const chartConvOption = computed(() => ({
   series: [{ type: 'line', data: chartConvData.value.map(d => d.count), smooth: true, areaStyle: { opacity: 0.15 }, lineStyle: { color: '#f59e0b' }, itemStyle: { color: '#f59e0b' } }],
 }))
 
+const chartHitRateOption = computed(() => ({
+  tooltip: { trigger: 'axis', formatter: (params) => {
+    const items = Array.isArray(params) ? params : [params]
+    return items.map(p => `${p.seriesName}: ${p.value}%`).join('<br/>')
+  }},
+  grid: { left: 40, right: 16, top: 16, bottom: 28 },
+  xAxis: { type: 'category', data: chartHitRateData.value.map(d => d.date), axisLabel: { rotate: 30, fontSize: 10 } },
+  yAxis: { type: 'value', max: 100, axisLabel: { formatter: '{value}%' } },
+  series: [
+    { name: '知识库问答', type: 'line', data: chartGeneralHitRateData.value.map(d => d.rate), smooth: true, areaStyle: { opacity: 0.1 }, lineStyle: { color: '#3b82f6' }, itemStyle: { color: '#3b82f6' } },
+    { name: '说明书问答', type: 'line', data: chartManualHitRateData.value.map(d => d.rate), smooth: true, areaStyle: { opacity: 0.1 }, lineStyle: { color: '#f59e0b' }, itemStyle: { color: '#f59e0b' } },
+  ],
+}))
+
 async function loadDashboard() {
-  loading.value = true
+  if (!silenceNextLoad) loading.value = true
   try {
-    const params = { page: page.value, page_size: pageSize.value }
+    const params = { page: page.value, page_size: pageSize.value, period: period.value }
     if (dateRange.value && dateRange.value.length === 2) {
       params.start_date = dateRange.value[0]
       params.end_date = dateRange.value[1]
@@ -189,8 +273,12 @@ async function loadDashboard() {
     Object.assign(overview, data.overview || {})
     chartUsersData.value = data.charts?.active_users || []
     chartConvData.value = data.charts?.conversations || []
+    chartHitRateData.value = data.charts?.hit_rate || []
+    chartGeneralHitRateData.value = data.charts?.general_hit_rate || []
+    chartManualHitRateData.value = data.charts?.manual_hit_rate || []
     items.value = data.items || []
     total.value = data.total || 0
+    lastUpdated.value = new Date()
   } catch (e) {
     if (e.response?.status === 403) {
       ElMessage.error('仅管理员可访问此页面')
@@ -199,15 +287,45 @@ async function loadDashboard() {
     }
   }
   loading.value = false
+  silenceNextLoad = false
+}
+
+function onPeriodChange() {
+  page.value = 1
+  dateRange.value = null
+  loadDashboard()
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh()
+  if (autoRefresh.value) {
+    refreshTimer = setInterval(() => {
+      silenceNextLoad = true
+      loadDashboard()
+    }, 30000)
+  }
+}
+
+function stopAutoRefresh() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
+}
+
+function toggleAutoRefresh() {
+  if (autoRefresh.value) startAutoRefresh()
+  else stopAutoRefresh()
 }
 
 function exportData() {
-  let csv = '\uFEFF对话人,对话场域,对话时间,交互形态,用户输入,结果输出,执行结果\n'
+  let csv = '\uFEFF对话人,对话场域,对话时间,交互形态,用户输入,结果输出,执行结果,检索命中\n'
   items.value.forEach(row => {
     const type = row.session_type === 'manual' ? '说明书问答' : '知识库问答'
     const result = row.success ? '成功' : '失败'
+    const hit = row.search_hit ? '命中' : '未命中'
     const safe = s => '"' + (s || '').replace(/"/g, '""') + '"'
-    csv += [safe(row.user_name), safe(type), safe(row.created_at), '文本', safe(row.question), safe(row.answer), safe(result)].join(',') + '\n'
+    csv += [safe(row.user_name), safe(type), safe(row.created_at), '文本', safe(row.question), safe(row.answer), safe(result), safe(hit)].join(',') + '\n'
   })
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -219,14 +337,25 @@ function exportData() {
   ElMessage.success('导出成功')
 }
 
-onMounted(loadDashboard)
+onMounted(() => {
+  loadDashboard()
+  startAutoRefresh()
+})
+
+onUnmounted(() => {
+  stopAutoRefresh()
+})
 </script>
 
 <style scoped>
 .dashboard-page { padding: 24px; background: #f1f5f9; min-height: 100%; }
-.page-hd { margin-bottom: 24px; }
+.page-hd { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
 .page-hd h2 { margin: 0; font-size: 20px; color: #1e293b; }
 .page-sub { font-size: 13px; color: #94a3b8; }
+.page-hd-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.last-updated { font-size: 12px; color: #94a3b8; white-space: nowrap; }
+
+.period-bar { margin-bottom: 20px; }
 
 .overview-cards { display: flex; gap: 20px; margin-bottom: 24px; }
 .stat-card {
@@ -254,6 +383,7 @@ onMounted(loadDashboard)
 .stat-icon svg { width: 24px; height: 24px; }
 .stat-icon.users { background: #ede9fe; color: #7c3aed; }
 .stat-icon.conv { background: #dbeafe; color: #2563eb; }
+.stat-icon.hit { background: #dcfce7; color: #16a34a; }
 
 .stat-body { flex: 1; min-width: 0; }
 .stat-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; font-size: 13px; color: #64748b; }
