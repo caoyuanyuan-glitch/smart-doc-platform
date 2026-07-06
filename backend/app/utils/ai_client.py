@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+load_dotenv("runtime.env", override=True)
 
 # 完整审核规则（从review_rules模块导入）
 from app.api.review_rules import (
@@ -89,7 +90,7 @@ class AIClient:
         # Proxy 回退客户端（使用 OpenAI 兼容接口）
         mcai_base_url = os.getenv("MCAI_LLM_BASE_URL")
         mcai_api_key = os.getenv("MCAI_LLM_API_KEY")
-        mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
+        self.mcai_model = os.getenv("MCAI_LLM_MODEL") or os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
 
         self.mcai_proxy_client = None
         if mcai_base_url and _is_valid_key(mcai_api_key):
@@ -98,7 +99,7 @@ class AIClient:
                 base_url=mcai_base_url,
                 timeout=timeout,
             )
-            print(f"[AI] MCAI Proxy 已连接, base_url={mcai_base_url}, model={mcai_model}")
+            print(f"[AI] MCAI Proxy 已连接, base_url={mcai_base_url}, model={self.mcai_model}")
 
         proxy_api_key = self.dashscope_api_key or self.proxy_api_key
         proxy_base_url = self.fallback_base_url
@@ -257,8 +258,7 @@ class AIClient:
         if self.arkclaw_client:
             providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
         if self.mcai_proxy_client:
-            mcai_model = os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic")
-            providers.append(('MCAI', self.mcai_proxy_client, mcai_model))
+            providers.append(('MCAI', self.mcai_proxy_client, self.mcai_model))
         if self.proxy_client:
             providers.append(('Proxy', self.proxy_client, self.fallback_model))
 
@@ -453,7 +453,7 @@ class AIClient:
             category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
             rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
             audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
-            confidence = self._normalize_confidence(item.get("confidence"), 0)
+            confidence = self._normalize_confidence(item.get("confidence"), 80 if source == "ai" else 0)
             severity = self._normalize_severity(item.get("severity"), confidence)
 
             if confidence < min_confidence:
@@ -1132,6 +1132,23 @@ class AIClient:
         lang = language or "en"
         is_english = lang in ("en", "both")
 
+        content = content or ""
+        if len(content) > 7000:
+            all_issues = []
+            chunk_size = 6000
+            overlap = 500
+            chunk_index = 1
+            for start in range(0, len(content), chunk_size - overlap):
+                chunk = content[start:start + chunk_size]
+                if not chunk.strip():
+                    continue
+                result = self.audit_document(chunk, language=lang, audit_basis=(audit_basis or "")[:2000])
+                for issue in result.get("issues", []):
+                    issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
+                    all_issues.append(issue)
+                chunk_index += 1
+            return {"issues": all_issues}
+
         # 使用完整的System Prompt模板（包含所有审核规则）
         base_system_prompt = build_system_prompt()
 
@@ -1150,10 +1167,10 @@ IMPORTANT REMINDERS:
             user_prompt = f"""Please review the following English technical document.
 
 Document excerpt:
-{content[:20000]}
+{content[:6500]}
 
 Release checklist and review basis:
-{audit_basis[:8000] if audit_basis else 'No additional checklist provided.'}
+{audit_basis[:2000] if audit_basis else 'No additional checklist provided.'}
 
 Output ONLY strict JSON:
 {{
@@ -1187,10 +1204,10 @@ Return empty issues array if no high-confidence issues found."""
             user_prompt = f"""请审核下面这段中文技术文档。
 
 文档内容：
-{content[:20000]}
+{content[:6500]}
 
 发布前自检 checklist 和审核依据：
-{audit_basis[:8000] if audit_basis else '未提供额外 checklist。'}
+{audit_basis[:2000] if audit_basis else '未提供额外 checklist。'}
 
 输出要求：
 1. 按JSON格式输出审核结果
@@ -1234,7 +1251,7 @@ Return empty issues array if no high-confidence issues found."""
         return {"issues": issues}
 
     # ------------------------------------------------------------------
-    # 规则审核的二次验证 (ArkClaw 过滤误报)
+    # 规则审核的二次验证
     # ------------------------------------------------------------------
     def filter_rule_false_positives(self, candidate_issues, document_language):
         if not candidate_issues:
@@ -1258,19 +1275,20 @@ Candidate issues:
 {sample_text}
 
 Validation principles:
-- Keep only clear, text-supported violations.
+- Mark false_positive=true only when the candidate is clearly and confidently a false positive.
+- Keep text-supported violations.
 - Treat company names, product names, model names, technical abbreviations, addresses, URLs, email addresses, and legal names as valid unless the context proves an error.
-- If context is insufficient, mark invalid.
-- If the item is only a style preference or uncertain inference, mark invalid.
+- If context is insufficient or uncertain, keep it by setting false_positive=false.
+- Style-rule candidates should be kept when the rule text explicitly defines the style requirement.
 
 Return strict JSON only:
 {{
   "items": [
-    {{"index": 1, "valid": true, "confidence": 92, "reason": "short reason"}}
+    {{"index": 1, "false_positive": false, "confidence": 92, "reason": "short reason"}}
   ]
 }}
 
-Only keep items with clear evidence."""
+Only high-confidence false positives may be removed."""
             else:
                 sample_text = "\n".join([
                     f"[{idx+1}] 规则: {c.get('rule','')} | 分类: {c.get('category','')} | 原文: {c.get('original_text','')} | 上下文: {(c.get('context','') or '')[:160]}"
@@ -1282,18 +1300,20 @@ Only keep items with clear evidence."""
 {sample_text}
 
 判断原则：
-- 只保留有明确文本证据的问题。
+- 只有明确且高置信为误报时，才返回 false_positive=true。
+- 有文本证据的问题要保留。
 - 公司名、产品名、型号、地址、网址、邮箱、专有术语、中英混排专有名词默认视为正确，除非上下文明确显示错误。
-- 证据不足、依赖更多上下文、属于可选风格偏好的项，判定为无效。
+- 证据不足或无法判断时，返回 false_positive=false，保留候选项。
+- 如果规则文本已经明确规定该风格要求，保留该候选项。
 
 请严格输出 JSON：
 {{
   "items": [
-    {{"index": 1, "valid": true, "confidence": 92, "reason": "简短理由"}}
+    {{"index": 1, "false_positive": false, "confidence": 92, "reason": "简短理由"}}
   ]
 }}
 
-只有确定为真实问题的项才返回 valid=true。"""
+只有确定为误报的项才返回 false_positive=true。"""
 
             messages = [{"role": "user", "content": prompt}]
             result = self.chat(messages, max_tokens=2500, temperature=0.1)
@@ -1304,10 +1324,10 @@ Only keep items with clear evidence."""
             data = self._extract_json(result, {"items": []})
             items = data.get("items", []) if isinstance(data, dict) else []
             try:
-                valid_map = {
+                false_positive_map = {
                     int(item.get("index", 0)): self._normalize_confidence(item.get("confidence"), 0)
                     for item in items
-                    if isinstance(item, dict) and item.get("valid") is True
+                    if isinstance(item, dict) and item.get("false_positive") is True
                 }
             except Exception as e:
                 print(f"[AI] 过滤误报失败: {e}")
@@ -1315,10 +1335,10 @@ Only keep items with clear evidence."""
                 continue
 
             for idx, issue in enumerate(chunk, 1):
-                confidence = valid_map.get(idx, 0)
-                if confidence >= 75:
-                    issue["confidence"] = max(self._normalize_confidence(issue.get("confidence"), 0), confidence)
-                    filtered.append(issue)
+                false_positive_confidence = false_positive_map.get(idx, 0)
+                if false_positive_confidence >= 90:
+                    continue
+                filtered.append(issue)
 
         return filtered
 

@@ -56,8 +56,8 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Context: Agent 在执行智能润色规则管理任务时校正路径
 - Category: 构建方法
 - Instructions:
-  - 前端构建校验使用 `cd /workspace/smart-doc-platform/frontend && npm run build`
-  - 后端语法校验使用 `cd /workspace/smart-doc-platform/backend && python3 -m compileall app`
+  - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
+  - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
