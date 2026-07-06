@@ -86,20 +86,23 @@ class AIClient:
         if self.kimi_client:
             print(f"[AI] Kimi (Moonshot) 已连接, base_url={self.kimi_base_url}, model={self.kimi_model}")
 
-        # Proxy 回退客户端（使用 OpenAI 兼容接口）
+        # MCAI Proxy 客户端（纯文本响应格式）
         mcai_base_url = os.getenv("MCAI_LLM_BASE_URL")
         mcai_api_key = os.getenv("MCAI_LLM_API_KEY")
-        self.mcai_model = os.getenv("MCAI_MODEL", os.getenv("MCAI_MODEL_PROVIDER_TYPE", "anthropic"))
+        self.mcai_model = os.getenv("MCAI_LLM_MODEL", "monkeycode-pro/deepseek-v4-pro")
+        self.mcai_base_url = (mcai_base_url or "").rstrip("/").replace("/v1", "").replace("/v2", "")
+        self.mcai_api_key = mcai_api_key
+        self.mcai_available = bool(self.mcai_base_url and _is_valid_key(mcai_api_key))
         self.last_chat_errors = []
 
         self.mcai_proxy_client = None
-        if mcai_base_url and _is_valid_key(mcai_api_key):
+        if self.mcai_available:
             self.mcai_proxy_client = OpenAI(
                 api_key=mcai_api_key,
-                base_url=mcai_base_url,
+                base_url=self.mcai_base_url,
                 timeout=timeout,
             )
-            print(f"[AI] MCAI Proxy 已连接, base_url={mcai_base_url}, model={self.mcai_model}")
+            print(f"[AI] MCAI Proxy 已连接, base_url={self.mcai_base_url}, model={self.mcai_model}")
 
         proxy_api_key = self.dashscope_api_key or self.proxy_api_key
         proxy_base_url = self.fallback_base_url
@@ -142,6 +145,85 @@ class AIClient:
             },
             "available": self.available_providers(),
         }
+
+    def health_check(self):
+        results = {}
+        ping_msg = [{"role": "user", "content": "ping"}]
+
+        providers = [
+            ("kimi", self.kimi_client, self.kimi_model),
+            ("deepseek", self.deepseek_client, self.deepseek_model),
+            ("arkclaw", self.arkclaw_client, self.arkclaw_model),
+            ("proxy", self.proxy_client, self.fallback_model),
+        ]
+
+        for name, client, model in providers:
+            if not client:
+                results[name] = {"status": "unavailable", "reason": "no_api_key"}
+                continue
+            try:
+                start = time.time()
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=ping_msg,
+                    max_tokens=5,
+                    temperature=0,
+                )
+                elapsed = round((time.time() - start) * 1000)
+                results[name] = {
+                    "status": "ok",
+                    "model": model,
+                    "latency_ms": elapsed,
+                }
+            except Exception as e:
+                results[name] = {
+                    "status": "error",
+                    "model": model,
+                    "error": str(e)[:200],
+                }
+
+        if self.mcai_available:
+            try:
+                start = time.time()
+                content = self._call_mcai_proxy(ping_msg, max_tokens=5, temperature=0)
+                elapsed = round((time.time() - start) * 1000)
+                results["mcai"] = {
+                    "status": "ok" if content else "error",
+                    "model": self.mcai_model,
+                    "latency_ms": elapsed,
+                }
+            except Exception as e:
+                results["mcai"] = {
+                    "status": "error",
+                    "model": self.mcai_model,
+                    "error": str(e)[:200],
+                }
+        else:
+            results["mcai"] = {"status": "unavailable", "reason": "no_api_key"}
+
+        ok_count = sum(1 for r in results.values() if r.get("status") == "ok")
+        return {
+            "total_providers": len(results),
+            "ok_providers": ok_count,
+            "healthy": ok_count > 0,
+            "primary": "kimi",
+            "primary_status": results.get("kimi", {}).get("status", "unknown"),
+            "providers": results,
+        }
+
+    def warmup(self):
+        print("[AI] 启动预热：检测各 Provider 连通性...")
+        status = self.health_check()
+        for name, r in status.get("providers", {}).items():
+            s = r.get("status", "?")
+            if s == "ok":
+                print(f"  [AI] {name} OK ({r.get('latency_ms', '?')}ms) model={r.get('model', '?')}")
+            elif s == "error":
+                print(f"  [AI] {name} ERROR: {r.get('error', '?')[:80]}")
+            else:
+                print(f"  [AI] {name} UNAVAILABLE: {r.get('reason', '?')}")
+        print(f"[AI] 预热完成：{status['ok_providers']}/{status['total_providers']} 可用")
+        return status
 
     def last_provider_errors(self):
         return list(self.last_chat_errors)
@@ -254,6 +336,49 @@ class AIClient:
                 return None
         return None
 
+    def _call_mcai_proxy(self, messages, max_tokens=2048, temperature=0.3):
+        if not self.mcai_available:
+            return None
+        import time as _time
+        for attempt in range(1, 4):
+            try:
+                headers = {
+                    "Authorization": f"Bearer {self.mcai_api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.mcai_model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                }
+                r = httpx.post(
+                    f"{self.mcai_base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=180.0,
+                )
+                if r.status_code == 200:
+                    content = r.text.strip()
+                    if content:
+                        if content.startswith('"') and content.endswith('"'):
+                            content = json.loads(content)
+                        return content
+                if r.status_code == 429 and attempt < 3:
+                    wait = 2 ** attempt
+                    print(f"[AI] MCAI Proxy 429，等待{wait}s后重试 ({attempt}/3)")
+                    _time.sleep(wait)
+                    continue
+                print(f"[AI] MCAI Proxy 错误: HTTP {r.status_code} {r.text[:100]}")
+                return None
+            except Exception as e:
+                if "429" in str(e) and attempt < 3:
+                    _time.sleep(2 ** attempt)
+                    continue
+                print(f"[AI] MCAI Proxy 调用失败: {str(e)[:100]}")
+                return None
+        return None
+
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
         # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
         self.last_chat_errors = []
@@ -264,51 +389,48 @@ class AIClient:
             providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
         if self.arkclaw_client:
             providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
-        if self.mcai_proxy_client:
-            providers.append(('MCAI', self.mcai_proxy_client, self.mcai_model))
         if self.proxy_client:
             providers.append(('Proxy', self.proxy_client, self.fallback_model))
 
-        if not providers:
-            self.last_chat_errors.append("未配置任何可用的 AI provider")
-            return None
+        if providers:
+            print(f"[AI] providers={', '.join(name for name, _, _ in providers)}")
+            max_retries = 3
+            retry_delay = 2
+            for name, client, model in providers:
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        request_temperature = 1 if name == 'Kimi' else temperature
+                        response = client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=request_temperature,
+                        )
+                        choice = response.choices[0]
+                        content = choice.message.content or ""
+                        if content.strip():
+                            return content
+                        self.last_chat_errors.append(f"{name}: 返回空内容")
+                        print(f"[AI] {name} 返回空内容: finish_reason={getattr(choice, 'finish_reason', '')}")
+                        break
+                    except Exception as e:
+                        error_str = str(e)
+                        if "429" in error_str and attempt < max_retries:
+                            print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
+                        self.last_chat_errors.append(f"{name}: {error_str[:160]}")
+                        print(f"[AI] {name} 调用失败: {error_str[:100]}")
+                        break
 
-        print(f"[image-steps] providers={', '.join(name for name, _, _ in providers)}")
+                if not fallback:
+                    return None
 
-        max_retries = 3
-        retry_delay = 2
-
-        for name, client, model in providers:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    request_temperature = 1 if name == 'Kimi' else temperature
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=request_temperature,
-                    )
-                    choice = response.choices[0]
-                    content = choice.message.content or ""
-                    if content.strip():
-                        return content
-                    self.last_chat_errors.append(f"{name}: 返回空内容")
-                    print(f"[AI] {name} 返回空内容: finish_reason={getattr(choice, 'finish_reason', '')}")
-                    break
-                except Exception as e:
-                    error_str = str(e)
-                    if "429" in error_str and attempt < max_retries:
-                        print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
-                    self.last_chat_errors.append(f"{name}: {error_str[:160]}")
-                    print(f"[AI] {name} 调用失败: {error_str[:100]}")
-                    break  # 非 429 或重试耗尽，切换下一个 provider
-
-            # 当前 provider 全部失败，尝试下一个
-            if not fallback:
-                return None
+        if self.mcai_available:
+            content = self._call_mcai_proxy(messages, max_tokens, temperature)
+            if content and content.strip():
+                return content
 
         return None
 
@@ -609,6 +731,8 @@ class AIClient:
 1. 回答必须基于提供的文档内容，禁止编造信息
 2. 如果文档中没有相关信息，请明确说明"文档中未找到相关信息"
 3. 回答请附带引用来源（章节名或段落位置）
+4. 严格使用文档中的原始术语和专业词汇，不得自行改写成近义词或口语化表达（例如文档写"主机"则必须用"主机"，不能用"主持人"、"电脑"、"设备"等替代）
+5. 保持文档中的产品名称、型号、参数、单位等专有信息完全不变
 
 请以JSON格式输出：
 {{
