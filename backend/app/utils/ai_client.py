@@ -93,6 +93,7 @@ class AIClient:
         self.mcai_base_url = (mcai_base_url or "").rstrip("/").replace("/v1", "").replace("/v2", "")
         self.mcai_api_key = mcai_api_key
         self.mcai_available = bool(self.mcai_base_url and _is_valid_key(mcai_api_key))
+        self.last_chat_errors = []
 
         self.mcai_proxy_client = None
         if self.mcai_available:
@@ -100,7 +101,7 @@ class AIClient:
                 api_key=mcai_api_key,
                 base_url=self.mcai_base_url,
                 timeout=timeout,
-            ) if False else "mcai_text"
+            )
             print(f"[AI] MCAI Proxy 已连接, base_url={self.mcai_base_url}, model={self.mcai_model}")
 
         proxy_api_key = self.dashscope_api_key or self.proxy_api_key
@@ -224,17 +225,21 @@ class AIClient:
         print(f"[AI] 预热完成：{status['ok_providers']}/{status['total_providers']} 可用")
         return status
 
+    def last_provider_errors(self):
+        return list(self.last_chat_errors)
+
     def resolve_translation_model(self, requested_model=None):
         preferred = []
         requested = (requested_model or "").strip().lower()
-        if requested in {"kimi", "deepseek", "arkclaw"}:
+        supported = ["kimi", "deepseek", "arkclaw", "mcai", "proxy"]
+        if requested in supported:
             preferred.append(requested)
 
         default_provider = (self.default_provider or "").strip().lower()
-        if default_provider in {"kimi", "deepseek", "arkclaw"} and default_provider not in preferred:
+        if default_provider in supported and default_provider not in preferred:
             preferred.append(default_provider)
 
-        for name in ["kimi", "deepseek", "arkclaw"]:
+        for name in supported:
             if name not in preferred:
                 preferred.append(name)
 
@@ -242,6 +247,8 @@ class AIClient:
             "kimi": self.kimi_client is not None,
             "deepseek": self.deepseek_client is not None,
             "arkclaw": self.arkclaw_client is not None,
+            "mcai": self.mcai_proxy_client is not None,
+            "proxy": self.proxy_client is not None,
         }
         for name in preferred:
             if availability.get(name):
@@ -373,6 +380,8 @@ class AIClient:
         return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
+        # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
+        self.last_chat_errors = []
         providers = []
         if self.kimi_client:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
@@ -401,6 +410,7 @@ class AIClient:
                         content = choice.message.content or ""
                         if content.strip():
                             return content
+                        self.last_chat_errors.append(f"{name}: 返回空内容")
                         print(f"[AI] {name} 返回空内容: finish_reason={getattr(choice, 'finish_reason', '')}")
                         break
                     except Exception as e:
@@ -410,6 +420,7 @@ class AIClient:
                             time.sleep(retry_delay)
                             retry_delay *= 2
                             continue
+                        self.last_chat_errors.append(f"{name}: {error_str[:160]}")
                         print(f"[AI] {name} 调用失败: {error_str[:100]}")
                         break
 

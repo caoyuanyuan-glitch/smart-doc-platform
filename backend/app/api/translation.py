@@ -50,7 +50,7 @@ _translate_tasks_lock = threading.Lock()
 _thread_locals = threading.local()
 _memory_file_cache = {}
 _memory_file_cache_lock = threading.Lock()
-SUPPORTED_AI_MODELS = {"kimi", "deepseek", "arkclaw"}
+SUPPORTED_AI_MODELS = {"kimi", "deepseek", "arkclaw", "mcai", "proxy"}
 
 
 def _read_text_file_with_fallback(file_path: str) -> str:
@@ -63,6 +63,64 @@ def _normalize_ai_model(model: str) -> str:
         return normalized
     resolved = ai_client.resolve_translation_model(normalized)
     return resolved or "kimi"
+
+
+def _reset_translation_usage_stats():
+    _thread_locals.translation_usage_stats = {"ai_char_count": 0, "memory_char_count": 0}
+
+
+def _get_translation_usage_stats():
+    stats = getattr(_thread_locals, "translation_usage_stats", None)
+    if stats is None:
+        stats = {"ai_char_count": 0, "memory_char_count": 0}
+        _thread_locals.translation_usage_stats = stats
+    return stats
+
+
+def _record_translation_usage(source: str, text: str):
+    if source not in {"ai", "memory"}:
+        return
+    if text is None:
+        return
+    _get_translation_usage_stats()[f"{source}_char_count"] += len(str(text))
+
+
+def _record_passthrough_usage(text: str):
+    _record_translation_usage("memory", text)
+
+
+def _snapshot_translation_usage_stats():
+    stats = _get_translation_usage_stats()
+    return {
+        "ai_char_count": int(stats.get("ai_char_count") or 0),
+        "memory_char_count": int(stats.get("memory_char_count") or 0),
+    }
+
+
+def _normalize_doc_usage_counts(doc):
+    source_char_count = max(0, int(getattr(doc, "source_char_count", 0) or 0))
+    ai_char_count = max(0, int(getattr(doc, "ai_char_count", 0) or 0))
+    memory_char_count = max(0, int(getattr(doc, "memory_char_count", 0) or 0))
+
+    ai_char_count = min(ai_char_count, source_char_count)
+    uncategorized_char_count = max(0, source_char_count - ai_char_count - memory_char_count)
+    memory_char_count = min(source_char_count - ai_char_count, memory_char_count + uncategorized_char_count)
+
+    return {
+        "source_char_count": source_char_count,
+        "ai_char_count": ai_char_count,
+        "memory_char_count": memory_char_count,
+    }
+
+
+def _summarize_docs(docs):
+    normalized_usage = [_normalize_doc_usage_counts(doc) for doc in docs]
+    return {
+        "doc_count": len(docs),
+        "doc_char_count": sum(item["source_char_count"] for item in normalized_usage),
+        "ai_char_count": sum(item["ai_char_count"] for item in normalized_usage),
+        "memory_char_count": sum(item["memory_char_count"] for item in normalized_usage),
+    }
 
 
 def _clone_zipinfo(zinfo: zipfile.ZipInfo) -> zipfile.ZipInfo:
@@ -368,6 +426,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
             )
             if hit:
                 translated_texts[index] = result
+                _record_translation_usage("memory", texts[index])
             else:
                 next_pending.append(index)
         pending_indexes = next_pending
@@ -375,6 +434,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
     if engine == "memory":
         for index in pending_indexes:
             translated_texts[index] = texts[index]
+            _record_passthrough_usage(texts[index])
         return translated_texts
 
     if pending_indexes:
@@ -401,6 +461,57 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                         translated_texts[idx] = translated_parts[bi]
 
     return translated_texts
+
+
+def _cell_looks_non_translatable(text: str, source_lang: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if re.fullmatch(r"[\d\s.\-_/+()]+", stripped):
+        return True
+    if source_lang == "zh" and not re.search(r"[\u4e00-\u9fff]", stripped):
+        return True
+    return False
+
+
+def _sanitize_excel_sheet_title(title: str) -> str:
+    sanitized = re.sub(r"[:\\/?*\[\]]", "_", str(title or "").strip())
+    sanitized = re.sub(r"\s+", " ", sanitized).strip().strip("'")
+    return (sanitized or "Sheet")[:31]
+
+
+def _dedupe_excel_sheet_title(title: str, used_titles) -> str:
+    if title not in used_titles:
+        return title
+
+    base_title = title[:31].rstrip()
+    counter = 2
+    while True:
+        suffix = f" ({counter})"
+        candidate = f"{base_title[:31 - len(suffix)].rstrip()}{suffix}"
+        if candidate not in used_titles:
+            return candidate
+        counter += 1
+
+
+def _translate_excel_header_footer_text(text: str, engine: str, model: str,
+                                        source_lang: str, target_lang: str, db: Session) -> str:
+    stripped = (text or "").strip()
+    if not stripped or _cell_looks_non_translatable(stripped, source_lang):
+        _record_passthrough_usage(stripped or text)
+        return text
+
+    markers = []
+
+    def protect(match):
+        markers.append(match.group(0))
+        return f"__XLSHF{len(markers) - 1}__"
+
+    protected = re.sub(r"&&|&\[[^\]]+\]|&[A-Za-z]", protect, stripped)
+    translated = _do_translate(protected, engine, model, source_lang, target_lang, db)
+    for index, marker in enumerate(markers):
+        translated = translated.replace(f"__XLSHF{index}__", marker)
+    return translated
 
 
 def _filename_looks_non_translatable(filename: str, source_lang: str) -> bool:
@@ -737,10 +848,16 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
         )
         if hit:
             result = r
+            _record_translation_usage("memory", text)
     if engine in ["ai", "hybrid"] and not result:
         result = translate_with_ai(text, model, source_lang, target_lang)
+        if result == text:
+            _record_passthrough_usage(text)
+        elif result:
+            _record_translation_usage("ai", text)
     if not result:
         if engine == "memory":
+            _record_passthrough_usage(text)
             return text
         raise HTTPException(status_code=500, detail="翻译失败")
     return result
@@ -877,7 +994,7 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
     with zipfile.ZipFile(in_buf, 'r') as z_in:
         for zinfo in z_in.infolist():
             name = zinfo.filename
-            if not (name.endswith(".xml") and name.startswith("Stories/")):
+            if not name.endswith(".xml"):
                 continue
             raw = z_in.read(zinfo)
             try:
@@ -957,6 +1074,10 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
         return (
             name.startswith("ppt/slides/slide")
             or name.startswith("ppt/notesSlides/notesSlide")
+            or name.startswith("ppt/slideMasters/slideMaster")
+            or name.startswith("ppt/slideLayouts/slideLayout")
+            or name.startswith("ppt/notesMasters/notesMaster")
+            or name.startswith("ppt/handoutMasters/handoutMaster")
             or name.startswith("ppt/diagrams/data")
             or name.startswith("ppt/diagrams/drawing")
             or name.startswith("ppt/charts/chart")
@@ -986,6 +1107,8 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
             memory_file_id=_get_memory_file_id(),
             allow_partial=False,
         )
+        if hit:
+            _record_translation_usage("memory", text)
         return result if hit else text
 
     with zipfile.ZipFile(in_buf, 'r') as z_in:
@@ -1044,6 +1167,44 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
     return out_buf.read(), pptx_original, pptx_translated
 
 
+def _apply_translated_text_to_docx_paragraph(para, translated: str):
+    runs = para.runs
+    if not runs:
+        return
+    if len(runs) == 1:
+        runs[0].text = translated
+        return
+
+    total_orig = sum(len(r.text or "") for r in runs)
+    if total_orig == 0:
+        runs[0].text = translated
+        for r in runs[1:]:
+            r.text = ""
+        return
+
+    pos = 0
+    for r in runs:
+        orig_len = len(r.text or "")
+        chunk_len = max(1, int(len(translated) * orig_len / total_orig))
+        chunk = translated[pos:pos + chunk_len]
+        r.text = chunk
+        pos += chunk_len
+    if pos < len(translated):
+        runs[-1].text += translated[pos:]
+
+
+def _collect_docx_container_paragraphs(container, paragraphs_to_translate):
+    for para in getattr(container, "paragraphs", []):
+        full_text = para.text
+        if full_text.strip():
+            paragraphs_to_translate.append(para)
+
+    for table in getattr(container, "tables", []):
+        for row in table.rows:
+            for cell in row.cells:
+                _collect_docx_container_paragraphs(cell, paragraphs_to_translate)
+
+
 def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
     """Translate DOCX preserving formatting (paragraphs, runs, tables, headers, footers)."""
     from docx import Document
@@ -1053,19 +1214,27 @@ def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, targe
     all_translated = []
 
     paragraphs_to_translate = []
+    seen_story_parts = set()
 
-    for para in doc.paragraphs:
-        full_text = para.text
-        if full_text.strip():
-            paragraphs_to_translate.append(para)
+    def add_container(container):
+        part_name = str(getattr(getattr(container, "part", None), "partname", ""))
+        if part_name and part_name in seen_story_parts:
+            return
+        if part_name:
+            seen_story_parts.add(part_name)
+        _collect_docx_container_paragraphs(container, paragraphs_to_translate)
 
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    full_text = para.text
-                    if full_text.strip():
-                        paragraphs_to_translate.append(para)
+    add_container(doc)
+    for section in doc.sections:
+        for container in [
+            section.header,
+            section.footer,
+            section.first_page_header,
+            section.first_page_footer,
+            section.even_page_header,
+            section.even_page_footer,
+        ]:
+            add_container(container)
 
     texts = [p.text for p in paragraphs_to_translate]
     if texts:
@@ -1075,27 +1244,7 @@ def _translate_docx(fpath: str, engine: str, model: str, source_lang: str, targe
                 translated = translated_texts[i]
                 all_original.append(texts[i])
                 all_translated.append(translated)
-                runs = para.runs
-                if not runs:
-                    continue
-                if len(runs) == 1:
-                    runs[0].text = translated
-                else:
-                    total_orig = sum(len(r.text or "") for r in runs)
-                    if total_orig == 0:
-                        runs[0].text = translated
-                        for r in runs[1:]:
-                            r.text = ""
-                    else:
-                        pos = 0
-                        for r in runs:
-                            orig_len = len(r.text or "")
-                            chunk_len = max(1, int(len(translated) * orig_len / total_orig))
-                            chunk = translated[pos:pos + chunk_len]
-                            r.text = chunk
-                            pos += chunk_len
-                        if pos < len(translated):
-                            runs[-1].text += translated[pos:]
+                _apply_translated_text_to_docx_paragraph(para, translated)
 
     out_buf = io.BytesIO()
     doc.save(out_buf)
@@ -1110,22 +1259,66 @@ def _translate_xlsx(fpath: str, engine: str, model: str, source_lang: str, targe
     wb = load_workbook(fpath)
     all_original = []
     all_translated = []
-    cells_to_translate = []
+    text_indexes = {}
+    unique_texts = []
+    cell_entries = []
+    used_sheet_titles = set()
+
+    for ws in wb.worksheets:
+        translated_title = ws.title
+        if not _filename_looks_non_translatable(ws.title, source_lang):
+            translated_title = _do_translate(ws.title.strip(), engine, model, source_lang, target_lang, db)
+        translated_title = _sanitize_excel_sheet_title(translated_title)
+        translated_title = _dedupe_excel_sheet_title(translated_title, used_sheet_titles)
+        ws.title = translated_title
+        used_sheet_titles.add(translated_title)
+
+        for header_footer_name in ["oddHeader", "oddFooter", "evenHeader", "evenFooter", "firstHeader", "firstFooter"]:
+            header_footer = getattr(ws, header_footer_name, None)
+            if not header_footer:
+                continue
+            for part_name in ["left", "center", "right"]:
+                part = getattr(header_footer, part_name, None)
+                original_text = getattr(part, "text", None)
+                if not original_text or not str(original_text).strip():
+                    continue
+                translated_text = _translate_excel_header_footer_text(
+                    str(original_text),
+                    engine,
+                    model,
+                    source_lang,
+                    target_lang,
+                    db,
+                )
+                if translated_text != original_text:
+                    part.text = translated_text
+                all_original.append(str(original_text))
+                all_translated.append(str(part.text or translated_text))
 
     for ws in wb.worksheets:
         for row in ws.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str) and cell.value.strip():
-                    cells_to_translate.append(cell)
+                    text = cell.value.strip()
+                    if _cell_looks_non_translatable(text, source_lang):
+                        cell_entries.append((cell, text, None))
+                        continue
+                    if text not in text_indexes:
+                        text_indexes[text] = len(unique_texts)
+                        unique_texts.append(text)
+                    cell_entries.append((cell, text, text_indexes[text]))
 
-    texts = [c.value.strip() for c in cells_to_translate]
-    if texts:
-        translated_texts = _translate_text_items(texts, engine, model, source_lang, target_lang, db)
-        for i, cell in enumerate(cells_to_translate):
-            if i < len(translated_texts):
-                all_original.append(texts[i])
-                all_translated.append(translated_texts[i])
-                cell.value = translated_texts[i]
+    translated_texts = []
+    if unique_texts:
+        translated_texts = _translate_text_items(unique_texts, engine, model, source_lang, target_lang, db)
+
+    for cell, original_text, translated_index in cell_entries:
+        translated_text = original_text if translated_index is None else translated_texts[translated_index]
+        if translated_index is None:
+            _record_passthrough_usage(original_text)
+        all_original.append(original_text)
+        all_translated.append(translated_text)
+        cell.value = translated_text
 
     out_buf = io.BytesIO()
     wb.save(out_buf)
@@ -1358,9 +1551,16 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 
     if result is None:
         available = ", ".join(ai_client.available_providers()) or "none"
+        provider_errors = " | ".join(ai_client.last_provider_errors())
+        detail = (
+            f"AI翻译引擎不可用。当前已配置提供商: {available}。"
+            "请检查 `/api/translation/providers/status`，并确认 KIMI_API_KEY、DEEPSEEK_API_KEY 或 ARKCLAW_API_KEY 已注入当前服务进程。"
+        )
+        if provider_errors:
+            detail += f" 最近调用错误: {provider_errors}"
         raise HTTPException(
             status_code=500,
-            detail=f"AI翻译引擎不可用。当前可用提供商: {available}。请检查 `/api/translation/providers/status`，并确认 KIMI_API_KEY、DEEPSEEK_API_KEY 或 ARKCLAW_API_KEY 已注入当前服务进程。"
+            detail=detail
         )
 
     if _looks_like_hallucination(result, content):
@@ -1455,6 +1655,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
     db = SessionLocal()
     _set_memory_bank(memory_bank)
     _set_memory_file_id(memory_file_id)
+    _reset_translation_usage_stats()
     try:
         with _translate_tasks_lock:
             _translate_tasks[doc_id] = {"status": "processing", "error": None}
@@ -1640,6 +1841,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
 
         doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
         if doc:
+            usage_stats = _snapshot_translation_usage_stats()
             doc.translated_filename = output_filename
             doc.original_content = original_content[:8000]
             doc.translated_content = translated_content[:8000]
@@ -1647,15 +1849,8 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             doc.translated_preview = translated_content[:500] + "..." if len(translated_content) > 500 else translated_content
             total_chars = len(original_content)
             doc.source_char_count = total_chars
-            if engine == "memory":
-                doc.memory_char_count = total_chars
-                doc.ai_char_count = 0
-            elif engine == "ai":
-                doc.ai_char_count = total_chars
-                doc.memory_char_count = 0
-            else:
-                doc.ai_char_count = total_chars
-                doc.memory_char_count = 0
+            doc.ai_char_count = min(total_chars, usage_stats["ai_char_count"])
+            doc.memory_char_count = min(total_chars, usage_stats["memory_char_count"])
             db.commit()
 
         with _translate_tasks_lock:
@@ -1766,23 +1961,50 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
 
 
 @router.get("/stats")
-async def get_translation_stats(db: Session = Depends(get_db)):
+async def get_translation_stats(batch_id: str = Query(None), db: Session = Depends(get_db)):
     all_docs = db.query(TranslationDoc).all()
     text_docs = [d for d in all_docs if d.file_type == "text"]
     file_docs = [d for d in all_docs if d.file_type != "text"]
 
-    text_char_count = sum(d.source_char_count or 0 for d in text_docs)
-    doc_count = len(file_docs)
-    doc_char_count = sum(d.source_char_count or 0 for d in file_docs)
-    ai_char_count = sum(d.ai_char_count or 0 for d in all_docs)
-    memory_char_count = sum(d.memory_char_count or 0 for d in all_docs)
+    text_char_count = sum(_normalize_doc_usage_counts(doc)["source_char_count"] for doc in text_docs)
+    all_usage = [_normalize_doc_usage_counts(doc) for doc in all_docs]
+    ai_char_count = sum(item["ai_char_count"] for item in all_usage)
+    memory_char_count = sum(item["memory_char_count"] for item in all_usage)
+
+    latest_batch_id = (batch_id or "").strip() or None
+    if not latest_batch_id:
+        latest_batch_doc = (
+            db.query(TranslationDoc)
+            .filter(TranslationDoc.file_type != "text", TranslationDoc.batch_id != "")
+            .order_by(TranslationDoc.created_at.desc())
+            .first()
+        )
+        latest_batch_id = latest_batch_doc.batch_id if latest_batch_doc else None
+
+    current_upload = {
+        "batch_id": latest_batch_id,
+        "doc_count": 0,
+        "doc_char_count": 0,
+        "ai_char_count": 0,
+        "memory_char_count": 0,
+    }
+    if latest_batch_id:
+        batch_docs = (
+            db.query(TranslationDoc)
+            .filter(TranslationDoc.file_type != "text", TranslationDoc.batch_id == latest_batch_id)
+            .all()
+        )
+        current_upload = {"batch_id": latest_batch_id, **_summarize_docs(batch_docs)}
+
+    overall_docs = _summarize_docs(file_docs)
 
     return {
         "text_char_count": text_char_count,
-        "doc_count": doc_count,
-        "doc_char_count": doc_char_count,
+        "doc_count": overall_docs["doc_count"],
+        "doc_char_count": overall_docs["doc_char_count"],
         "ai_char_count": ai_char_count,
         "memory_char_count": memory_char_count,
+        "current_upload": current_upload,
     }
 
 
@@ -1800,6 +2022,7 @@ async def translate_file(
     target_lang: str = Form("en"),
     memory_bank: str = Form(""),
     memory_file_id: int = Form(None),
+    batch_id: str = Form(""),
     db: Session = Depends(get_db)
 ):
     model = _normalize_ai_model(model)
@@ -1833,7 +2056,8 @@ async def translate_file(
         translated_content="",
         translated_filename="",
         original_preview="",
-        translated_preview=""
+        translated_preview="",
+        batch_id=(batch_id or "").strip(),
     )
     db.add(doc)
     db.commit()
