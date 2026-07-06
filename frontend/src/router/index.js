@@ -26,7 +26,6 @@ import SpellCheck from '@/views/SpellCheck.vue'
 import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
 import WhiteList from '@/views/WhiteList.vue'
 import Feedback from '@/views/Feedback.vue'
-import DocGenerator from '@/views/DocGenerator.vue'
 
 const routes = [
   {
