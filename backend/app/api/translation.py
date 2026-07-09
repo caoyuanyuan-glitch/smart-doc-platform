@@ -34,7 +34,7 @@ from app.crud.memory import (
 from app.models.knowledge import KnowledgeFile
 from app.models.memory import MemoryBank
 from app.models.translation_doc import TranslationDoc
-from app.utils.document_parser import parse_file
+from app.utils.document_parser import parse_file, parse_xlsx_textual_content
 from app.utils.ai_client import ai_client
 from app.utils.file_utils import read_file_safe
 
@@ -51,6 +51,7 @@ _thread_locals = threading.local()
 _memory_file_cache = {}
 _memory_file_cache_lock = threading.Lock()
 SUPPORTED_AI_MODELS = {"kimi", "deepseek", "arkclaw", "mcai", "proxy"}
+WORD_CONNECTORS = {"-", "_", ".", "/", ":", "+", "'", "’", "%", "#", "&"}
 
 
 def _read_text_file_with_fallback(file_path: str) -> str:
@@ -66,15 +67,77 @@ def _normalize_ai_model(model: str) -> str:
 
 
 def _reset_translation_usage_stats():
-    _thread_locals.translation_usage_stats = {"ai_char_count": 0, "memory_char_count": 0}
+    _thread_locals.translation_usage_stats = {
+        "ai_char_count": 0,
+        "memory_char_count": 0,
+        "ai_word_count": 0,
+        "memory_word_count": 0,
+    }
 
 
 def _get_translation_usage_stats():
     stats = getattr(_thread_locals, "translation_usage_stats", None)
     if stats is None:
-        stats = {"ai_char_count": 0, "memory_char_count": 0}
+        stats = {
+            "ai_char_count": 0,
+            "memory_char_count": 0,
+            "ai_word_count": 0,
+            "memory_word_count": 0,
+        }
         _thread_locals.translation_usage_stats = stats
     return stats
+
+
+def _is_cjk_char(char: str) -> bool:
+    return bool(re.match(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", char))
+
+
+def _is_word_core_char(char: str) -> bool:
+    if not char or char.isspace() or _is_cjk_char(char):
+        return False
+    category = unicodedata.category(char)
+    return category.startswith("L") or category.startswith("N")
+
+
+def _consume_word_token(text: str, start: int) -> int:
+    index = start
+    while index < len(text):
+        current = text[index]
+        if _is_word_core_char(current):
+            index += 1
+            continue
+        if current in WORD_CONNECTORS:
+            prev_char = text[index - 1] if index - 1 >= start else ""
+            next_char = text[index + 1] if index + 1 < len(text) else ""
+            if _is_word_core_char(prev_char) and _is_word_core_char(next_char):
+                index += 1
+                continue
+        break
+    return index
+
+
+def _count_text_units(text: str) -> int:
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    if not normalized.strip():
+        return 0
+
+    count = 0
+    index = 0
+    while index < len(normalized):
+        char = normalized[index]
+        if char.isspace():
+            index += 1
+            continue
+        if _is_cjk_char(char):
+            count += 1
+            index += 1
+            continue
+        if _is_word_core_char(char):
+            index = _consume_word_token(normalized, index)
+            count += 1
+            continue
+        index += 1
+    return count
 
 
 def _record_translation_usage(source: str, text: str):
@@ -82,7 +145,9 @@ def _record_translation_usage(source: str, text: str):
         return
     if text is None:
         return
-    _get_translation_usage_stats()[f"{source}_char_count"] += len(str(text))
+    stats = _get_translation_usage_stats()
+    stats[f"{source}_char_count"] += len(str(text))
+    stats[f"{source}_word_count"] += _count_text_units(text)
 
 
 def _record_passthrough_usage(text: str):
@@ -94,6 +159,84 @@ def _snapshot_translation_usage_stats():
     return {
         "ai_char_count": int(stats.get("ai_char_count") or 0),
         "memory_char_count": int(stats.get("memory_char_count") or 0),
+        "ai_word_count": int(stats.get("ai_word_count") or 0),
+        "memory_word_count": int(stats.get("memory_word_count") or 0),
+    }
+
+
+def _normalize_usage_counts(source_count: int, ai_count: int, memory_count: int):
+    source_count = max(0, int(source_count or 0))
+    ai_count = max(0, int(ai_count or 0))
+    memory_count = max(0, int(memory_count or 0))
+    ai_count = min(ai_count, source_count)
+    uncategorized_count = max(0, source_count - ai_count - memory_count)
+    memory_count = min(source_count - ai_count, memory_count + uncategorized_count)
+    return {
+        "source_count": source_count,
+        "ai_count": ai_count,
+        "memory_count": memory_count,
+    }
+
+
+def _normalize_doc_char_counts(doc):
+    normalized = _normalize_usage_counts(
+        getattr(doc, "source_char_count", 0),
+        getattr(doc, "ai_char_count", 0),
+        getattr(doc, "memory_char_count", 0),
+    )
+    return {
+        "source_char_count": normalized["source_count"],
+        "ai_char_count": normalized["ai_count"],
+        "memory_char_count": normalized["memory_count"],
+    }
+
+
+def _load_doc_source_text(doc) -> str:
+    if getattr(doc, "file_type", "") == "text":
+        return getattr(doc, "original_content", "") or ""
+    filename = (getattr(doc, "filename", "") or "").strip()
+    if not filename:
+        return getattr(doc, "original_content", "") or ""
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.exists(file_path):
+        return getattr(doc, "original_content", "") or ""
+    ext = os.path.splitext(filename)[1].lower()
+    try:
+        if ext in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+            return parse_xlsx_textual_content(file_path)
+        if ext == ".txt":
+            return _read_text_file_with_fallback(file_path)
+        return parse_file(file_path)
+    except Exception:
+        return getattr(doc, "original_content", "") or ""
+
+
+def _normalize_doc_word_counts(doc):
+    stored_source = max(0, int(getattr(doc, "source_word_count", 0) or 0))
+    stored_ai = max(0, int(getattr(doc, "ai_word_count", 0) or 0))
+    stored_memory = max(0, int(getattr(doc, "memory_word_count", 0) or 0))
+    if stored_source or stored_ai or stored_memory:
+        normalized = _normalize_usage_counts(stored_source, stored_ai, stored_memory)
+        return {
+            "source_word_count": normalized["source_count"],
+            "ai_word_count": normalized["ai_count"],
+            "memory_word_count": normalized["memory_count"],
+            "dirty": stored_source != normalized["source_count"] or stored_ai != normalized["ai_count"] or stored_memory != normalized["memory_count"],
+        }
+
+    source_text = _load_doc_source_text(doc)
+    source_word_count = _count_text_units(source_text)
+    legacy = _normalize_doc_char_counts(doc)
+    ai_word_count = 0
+    if source_word_count > 0 and legacy["source_char_count"] > 0:
+        ai_word_count = min(source_word_count, round(source_word_count * legacy["ai_char_count"] / legacy["source_char_count"]))
+    memory_word_count = max(0, source_word_count - ai_word_count)
+    normalized = _normalize_usage_counts(source_word_count, ai_word_count, memory_word_count)
+    return {
+        "source_word_count": normalized["source_count"],
+        "ai_word_count": normalized["ai_count"],
+        "memory_word_count": normalized["memory_count"],
+        "dirty": any([normalized["source_count"], normalized["ai_count"], normalized["memory_count"]]),
     }
 
 
@@ -114,12 +257,12 @@ def _normalize_doc_usage_counts(doc):
 
 
 def _summarize_docs(docs):
-    normalized_usage = [_normalize_doc_usage_counts(doc) for doc in docs]
+    normalized_usage = [_normalize_doc_word_counts(doc) for doc in docs]
     return {
         "doc_count": len(docs),
-        "doc_char_count": sum(item["source_char_count"] for item in normalized_usage),
-        "ai_char_count": sum(item["ai_char_count"] for item in normalized_usage),
-        "memory_char_count": sum(item["memory_char_count"] for item in normalized_usage),
+        "doc_word_count": sum(item["source_word_count"] for item in normalized_usage),
+        "ai_word_count": sum(item["ai_word_count"] for item in normalized_usage),
+        "memory_word_count": sum(item["memory_word_count"] for item in normalized_usage),
     }
 
 
@@ -1848,9 +1991,13 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             doc.original_preview = original_content[:500] + "..." if len(original_content) > 500 else original_content
             doc.translated_preview = translated_content[:500] + "..." if len(translated_content) > 500 else translated_content
             total_chars = len(original_content)
+            total_words = _count_text_units(original_content)
             doc.source_char_count = total_chars
             doc.ai_char_count = min(total_chars, usage_stats["ai_char_count"])
             doc.memory_char_count = min(total_chars, usage_stats["memory_char_count"])
+            doc.source_word_count = total_words
+            doc.ai_word_count = min(total_words, usage_stats["ai_word_count"])
+            doc.memory_word_count = min(total_words, usage_stats["memory_word_count"])
             db.commit()
 
         with _translate_tasks_lock:
@@ -1878,6 +2025,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     _set_memory_bank(req.memory_bank)
     _set_memory_file_id(req.memory_file_id)
     source_char_count = len(req.content)
+    source_word_count = _count_text_units(req.content)
 
     if engine in ["memory", "hybrid"]:
         result, hit = translate_with_memory(
@@ -1905,6 +2053,9 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
                     source_char_count=source_char_count,
                     ai_char_count=0,
                     memory_char_count=source_char_count,
+                    source_word_count=source_word_count,
+                    ai_word_count=0,
+                    memory_word_count=source_word_count,
                 )
                 db.add(doc_record)
                 db.commit()
@@ -1935,6 +2086,8 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
 
     ai_chars = source_char_count if from_ai else 0
     memory_chars = source_char_count if from_memory else 0
+    ai_words = source_word_count if from_ai else 0
+    memory_words = source_word_count if from_memory else 0
     doc_record = TranslationDoc(
         filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
         file_type="text",
@@ -1947,6 +2100,9 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
         source_char_count=source_char_count,
         ai_char_count=ai_chars,
         memory_char_count=memory_chars,
+        source_word_count=source_word_count,
+        ai_word_count=ai_words,
+        memory_word_count=memory_words,
     )
     db.add(doc_record)
     db.commit()
@@ -1963,13 +2119,24 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
 @router.get("/stats")
 async def get_translation_stats(batch_id: str = Query(None), db: Session = Depends(get_db)):
     all_docs = db.query(TranslationDoc).all()
+    docs_updated = False
+    for doc in all_docs:
+        word_counts = _normalize_doc_word_counts(doc)
+        if word_counts["dirty"]:
+            doc.source_word_count = word_counts["source_word_count"]
+            doc.ai_word_count = word_counts["ai_word_count"]
+            doc.memory_word_count = word_counts["memory_word_count"]
+            docs_updated = True
+    if docs_updated:
+        db.commit()
+
     text_docs = [d for d in all_docs if d.file_type == "text"]
     file_docs = [d for d in all_docs if d.file_type != "text"]
 
-    text_char_count = sum(_normalize_doc_usage_counts(doc)["source_char_count"] for doc in text_docs)
-    all_usage = [_normalize_doc_usage_counts(doc) for doc in all_docs]
-    ai_char_count = sum(item["ai_char_count"] for item in all_usage)
-    memory_char_count = sum(item["memory_char_count"] for item in all_usage)
+    text_word_count = sum(_normalize_doc_word_counts(doc)["source_word_count"] for doc in text_docs)
+    all_usage = [_normalize_doc_word_counts(doc) for doc in all_docs]
+    ai_word_count = sum(item["ai_word_count"] for item in all_usage)
+    memory_word_count = sum(item["memory_word_count"] for item in all_usage)
 
     latest_batch_id = (batch_id or "").strip() or None
     if not latest_batch_id:
@@ -1984,9 +2151,9 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
     current_upload = {
         "batch_id": latest_batch_id,
         "doc_count": 0,
-        "doc_char_count": 0,
-        "ai_char_count": 0,
-        "memory_char_count": 0,
+        "doc_word_count": 0,
+        "ai_word_count": 0,
+        "memory_word_count": 0,
     }
     if latest_batch_id:
         batch_docs = (
@@ -1999,11 +2166,11 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
     overall_docs = _summarize_docs(file_docs)
 
     return {
-        "text_char_count": text_char_count,
+        "text_word_count": text_word_count,
         "doc_count": overall_docs["doc_count"],
-        "doc_char_count": overall_docs["doc_char_count"],
-        "ai_char_count": ai_char_count,
-        "memory_char_count": memory_char_count,
+        "doc_word_count": overall_docs["doc_word_count"],
+        "ai_word_count": ai_word_count,
+        "memory_word_count": memory_word_count,
         "current_upload": current_upload,
     }
 

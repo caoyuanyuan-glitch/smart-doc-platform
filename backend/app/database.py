@@ -78,6 +78,12 @@ def _ensure_legacy_sqlite_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN batch_id VARCHAR DEFAULT ''"))
 
+    if translation_doc_columns and 'source_word_count' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN source_word_count INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_word_count INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_word_count INTEGER DEFAULT 0"))
+
 
     try:
         plr_columns = {col['name'] for col in inspector.get_columns('polish_learning_rules')}

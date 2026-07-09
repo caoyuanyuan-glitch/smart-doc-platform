@@ -301,6 +301,72 @@ def parse_xlsx(file_path):
     except Exception as e:
         raise ValueError(f"XLSX解析失败: {str(e)}")
 
+
+def _clean_excel_header_footer_text(text):
+    value = str(text or '').strip()
+    if not value:
+        return ''
+    value = re.sub(r'&\[[^\]]+\]', ' ', value)
+    value = re.sub(r'&[A-Za-z0-9]+', ' ', value)
+    return re.sub(r'\s+', ' ', value).strip()
+
+
+def _extract_excel_header_footer_texts(ws):
+    texts = []
+    for header_footer_name in ['oddHeader', 'oddFooter', 'evenHeader', 'evenFooter', 'firstHeader', 'firstFooter']:
+        header_footer = getattr(ws, header_footer_name, None)
+        if not header_footer:
+            continue
+        for part_name in ['left', 'center', 'right']:
+            part = getattr(header_footer, part_name, None)
+            cleaned = _clean_excel_header_footer_text(getattr(part, 'text', None))
+            if cleaned:
+                texts.append(cleaned)
+    return texts
+
+
+def _extract_drawingml_paragraph_blocks(root):
+    ns = {
+        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+    }
+    texts = []
+    for paragraph in root.findall('.//a:p', ns):
+        runs = [node.text for node in paragraph.findall('.//a:t', ns) if node.text and node.text.strip()]
+        joined = re.sub(r'\s+', ' ', ' '.join(runs)).strip()
+        if joined:
+            texts.append(joined)
+    return texts
+
+
+def parse_xlsx_textual_content(file_path):
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(file_path, data_only=True)
+        texts = []
+        for ws in wb.worksheets:
+            texts.extend(_extract_excel_header_footer_texts(ws))
+            for row in ws.iter_rows():
+                row_texts = []
+                for cell in row:
+                    if isinstance(cell.value, str) and cell.value.strip():
+                        row_texts.append(cell.value.strip())
+                    if getattr(cell, 'comment', None) and str(cell.comment.text or '').strip():
+                        texts.append(str(cell.comment.text).strip())
+                if row_texts:
+                    texts.append("\t".join(row_texts))
+        wb.close()
+
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            for drawing_name in sorted(name for name in zf.namelist() if name.startswith('xl/drawings/') and name.endswith('.xml')):
+                with zf.open(drawing_name) as f:
+                    root = ET.fromstring(f.read())
+                    texts.extend(_extract_drawingml_paragraph_blocks(root))
+
+        return "\n".join(texts).strip()
+    except Exception as e:
+        raise ValueError(f"XLSX文本解析失败: {str(e)}")
+
 def parse_xls(file_path):
     try:
         import xlrd

@@ -21,5 +21,8 @@ class TranslationDoc(Base):
     source_char_count = Column(Integer, default=0)
     ai_char_count = Column(Integer, default=0)
     memory_char_count = Column(Integer, default=0)
+    source_word_count = Column(Integer, default=0)
+    ai_word_count = Column(Integer, default=0)
+    memory_word_count = Column(Integer, default=0)
     batch_id = Column(String, default="", index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
