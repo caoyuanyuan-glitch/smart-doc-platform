@@ -11,17 +11,18 @@
         :auto-upload="false"
         :on-change="handleFileChange"
         :on-remove="handleFileRemove"
+        :limit="1"
         :file-list="fileList"
         accept=".txt,.docx,.xlsx,.pptx,.dita,.md,.idml,.xml,.zip"
         drag
         :show-file-list="true"
       >
         <el-icon class="upload-icon"><UploadFilled /></el-icon>
-        <div class="upload-text">点击或拖拽文件到此处上传</div>
-        <div class="upload-hint">支持 .txt, .docx, .xlsx, .pptx, .dita, .md, .idml, .xml, .zip 格式</div>
+        <div class="upload-text">点击或拖拽单个文件到此处上传</div>
+        <div class="upload-hint">支持 .txt, .docx, .xlsx, .pptx, .dita, .md, .idml, .xml, .zip 格式，每次检查 1 个文件</div>
       </el-upload>
       <div v-if="fileList.length > 0" class="file-info">
-        <el-tag type="info">{{ fileList.length }} 个文件已选择</el-tag>
+        <el-tag type="info">已选择文件: {{ fileList[0]?.name }}</el-tag>
         <el-button size="small" style="margin-left:8px" @click="clearFile">清除文件</el-button>
       </div>
     </div>
@@ -30,9 +31,11 @@
       <el-textarea
         v-model="inputText"
         :rows="8"
-        placeholder="或在此输入文本进行检查..."
+        :disabled="fileList.length > 0"
+        :placeholder="fileList.length > 0 ? '当前已选择文件，请清除文件后再输入文本' : '或在此输入文本进行检查...'"
         class="text-input"
       ></el-textarea>
+      <div class="input-hint">文件检查与文本检查二选一。</div>
     </div>
 
     <div class="button-section">
@@ -47,6 +50,9 @@
       <el-button size="large" @click="downloadTemplate">
         <el-icon><Download /></el-icon>
         词典模板
+      </el-button>
+      <el-button size="large" @click="triggerImportDict" :loading="dictImporting">
+        导入词典
       </el-button>
     </div>
 
@@ -174,7 +180,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Search, Delete, Download } from '@element-plus/icons-vue'
-import { instance as request } from '@/api'
+import { getAPIErrorMessage, instance as request } from '@/api'
 
 const inputText = ref('')
 const fileList = ref([])
@@ -184,6 +190,7 @@ const filterType = ref('all')
 const selectedWordRows = ref([])
 const errorsTableRef = ref(null)
 const addedWords = ref([])
+const dictImporting = ref(false)
 
 // 审核进度
 const progress = ref({
@@ -290,6 +297,7 @@ function markWordsAsAdded(words) {
 async function handleFileChange(file) {
   fileList.value = [file]
   inputText.value = ''
+  ElMessage.info(`当前为单文件检查模式，已选择: ${file.name}`)
 }
 
 function handleFileRemove() {
@@ -298,6 +306,30 @@ function handleFileRemove() {
 
 function clearFile() {
   fileList.value = []
+}
+
+async function triggerImportDict() {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.txt,.dic'
+  input.onchange = async (event) => {
+    const [file] = Array.from(event.target?.files || [])
+    if (!file) return
+    const formData = new FormData()
+    formData.append('file', file)
+    dictImporting.value = true
+    try {
+      const resp = await request.post('/spell-check/import-dict', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+      ElMessage.success(resp.data?.message || '词典导入成功')
+    } catch (error) {
+      ElMessage.error(getAPIErrorMessage(error, '词典导入失败'))
+    } finally {
+      dictImporting.value = false
+    }
+  }
+  input.click()
 }
 
 function isRowSelectable(row) {
@@ -362,7 +394,7 @@ async function startCheck() {
     }
   } catch (error) {
     console.error('检查失败:', error)
-    const errorMsg = error.response?.data?.detail || error.message || '未知错误'
+    const errorMsg = getAPIErrorMessage(error, '检查失败')
     progress.value = { visible: true, percent: 100, message: '检查失败', detail: errorMsg, status: 'exception' }
     setTimeout(() => { progress.value.visible = false }, 3000)
     ElMessage.error('检查失败：' + errorMsg)
@@ -447,7 +479,7 @@ async function addToDict(error) {
     if (errorsTableRef.value) errorsTableRef.value.clearSelection()
   } catch (error) {
     console.error('添加单词失败:', error)
-    ElMessage.error('添加单词失败')
+    ElMessage.error(getAPIErrorMessage(error, '添加单词失败'))
   }
 }
 
@@ -458,24 +490,18 @@ async function batchAddToDict() {
     return
   }
   try {
-    let successCount = 0
-    const successWords = []
-    for (const word of words) {
-      try {
-        await request.post('/spell-check/add-word', null, { params: { word } })
-        successCount++
-        successWords.push(word)
-      } catch (e) {
-        console.error(`添加 ${word} 失败:`, e)
-      }
-    }
+    const results = await Promise.allSettled(
+      words.map((word) => request.post('/spell-check/add-word', null, { params: { word } }))
+    )
+    const successWords = words.filter((_, index) => results[index].status === 'fulfilled')
+    const successCount = successWords.length
     ElMessage.success(`成功添加 ${successCount}/${words.length} 个单词到词典`)
     markWordsAsAdded(successWords)
     selectedWordRows.value = []
     if (errorsTableRef.value) errorsTableRef.value.clearSelection()
   } catch (error) {
     console.error('批量添加失败:', error)
-    ElMessage.error('批量添加失败')
+    ElMessage.error(getAPIErrorMessage(error, '批量添加失败'))
   }
 }
 
@@ -645,6 +671,12 @@ onMounted(() => {
   width: 100%;
   border-radius: 8px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.input-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .button-section {
