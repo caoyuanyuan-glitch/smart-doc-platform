@@ -10,8 +10,8 @@
         <div class="stats-cards">
           <div class="stat-card card-text">
             <div class="stat-label">文本翻译字数</div>
-            <div class="stat-value">{{ stats.text_char_count.toLocaleString() }}</div>
-            <div class="stat-unit">字符</div>
+            <div class="stat-value">{{ stats.text_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
           </div>
           <div class="stat-card card-doc">
             <div class="stat-label">已翻译文档数</div>
@@ -20,13 +20,13 @@
           </div>
           <div class="stat-card card-ai">
             <div class="stat-label">AI大模型翻译字数</div>
-            <div class="stat-value">{{ stats.ai_char_count.toLocaleString() }}</div>
-            <div class="stat-unit">字符</div>
+            <div class="stat-value">{{ stats.ai_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
           </div>
           <div class="stat-card card-memory">
             <div class="stat-label">记忆库匹配字数</div>
-            <div class="stat-value">{{ stats.memory_char_count.toLocaleString() }}</div>
-            <div class="stat-unit">字符</div>
+            <div class="stat-value">{{ stats.memory_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
           </div>
         </div>
         <div class="chart-section" v-if="hasOverallChartData">
@@ -53,18 +53,18 @@
           </div>
           <div class="stat-card card-text">
             <div class="stat-label">本次文档总字数</div>
-            <div class="stat-value">{{ stats.current_upload.doc_char_count.toLocaleString() }}</div>
-            <div class="stat-unit">字符</div>
+            <div class="stat-value">{{ stats.current_upload.doc_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
           </div>
           <div class="stat-card card-ai">
             <div class="stat-label">本次 AI 翻译字数</div>
-            <div class="stat-value">{{ stats.current_upload.ai_char_count.toLocaleString() }}</div>
-            <div class="stat-unit">字符</div>
+            <div class="stat-value">{{ stats.current_upload.ai_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
           </div>
           <div class="stat-card card-memory">
             <div class="stat-label">本次记忆库匹配字数</div>
-            <div class="stat-value">{{ stats.current_upload.memory_char_count.toLocaleString() }}</div>
-            <div class="stat-unit">字符</div>
+            <div class="stat-value">{{ stats.current_upload.memory_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
           </div>
         </div>
         <div class="chart-section" v-if="hasCurrentUploadChartData">
@@ -97,17 +97,17 @@ const TRANSLATION_STATS_EVENT = 'translation-stats-updated'
 use([PieChart, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const stats = ref({
-  text_char_count: 0,
+  text_word_count: 0,
   doc_count: 0,
-  doc_char_count: 0,
-  ai_char_count: 0,
-  memory_char_count: 0,
+  doc_word_count: 0,
+  ai_word_count: 0,
+  memory_word_count: 0,
   current_upload: {
     batch_id: '',
     doc_count: 0,
-    doc_char_count: 0,
-    ai_char_count: 0,
-    memory_char_count: 0
+    doc_word_count: 0,
+    ai_word_count: 0,
+    memory_word_count: 0
   }
 })
 
@@ -115,18 +115,18 @@ const loading = ref(false)
 let refreshTimer = null
 
 const hasOverallChartData = computed(() => {
-  return ((stats.value.ai_char_count || 0) + (stats.value.memory_char_count || 0)) > 0
+  return ((stats.value.ai_word_count || 0) + (stats.value.memory_word_count || 0)) > 0
 })
 
 const hasCurrentUploadChartData = computed(() => {
   const currentUpload = stats.value.current_upload || {}
-  return ((currentUpload.ai_char_count || 0) + (currentUpload.memory_char_count || 0)) > 0
+  return ((currentUpload.ai_word_count || 0) + (currentUpload.memory_word_count || 0)) > 0
 })
 
 const overallPieOption = computed(() => ({
   tooltip: {
     trigger: 'item',
-    formatter: '{b}: {c} 字符 ({d}%)'
+    formatter: '{b}: {c} 字 ({d}%)'
   },
   legend: {
     bottom: 10
@@ -157,12 +157,12 @@ const overallPieOption = computed(() => ({
       },
       data: [
         {
-          value: stats.value.ai_char_count,
+          value: stats.value.ai_word_count,
           name: 'AI大模型翻译',
           itemStyle: { color: '#409EFF' }
         },
         {
-          value: stats.value.memory_char_count,
+          value: stats.value.memory_word_count,
           name: '记忆库匹配',
           itemStyle: { color: '#67C23A' }
         }
@@ -174,7 +174,7 @@ const overallPieOption = computed(() => ({
 const currentUploadPieOption = computed(() => ({
   tooltip: {
     trigger: 'item',
-    formatter: '{b}: {c} 字符 ({d}%)'
+    formatter: '{b}: {c} 字 ({d}%)'
   },
   legend: {
     bottom: 10
@@ -205,12 +205,12 @@ const currentUploadPieOption = computed(() => ({
       },
       data: [
         {
-          value: stats.value.current_upload.ai_char_count,
+          value: stats.value.current_upload.ai_word_count,
           name: 'AI大模型翻译',
           itemStyle: { color: '#409EFF' }
         },
         {
-          value: stats.value.current_upload.memory_char_count,
+          value: stats.value.current_upload.memory_word_count,
           name: '记忆库匹配',
           itemStyle: { color: '#67C23A' }
         }
