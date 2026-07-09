@@ -1306,14 +1306,30 @@ def read_idml(f):
                     with zf.open(name) as xml_file:
                         tree = ET.parse(xml_file)
                         root = tree.getroot()
+                        current_parts = []
+
+                        def flush_line():
+                            if not current_parts:
+                                return
+                            line = "".join(current_parts)
+                            line = re.sub(r"\s+", " ", line).strip()
+                            current_parts.clear()
+                            if line:
+                                buf.append(line)
+
                         for elem in root.iter():
                             tag = elem.tag.rsplit('}', 1)[-1] if isinstance(elem.tag, str) else ''
+                            if tag == 'ParagraphStyleRange':
+                                flush_line()
+                                continue
+                            if tag == 'Br':
+                                flush_line()
+                                continue
                             if tag != 'Content':
                                 continue
-                            if elem.text and elem.text.strip():
-                                text = elem.text.strip()
-                                if len(text) > 1:
-                                    buf.append(text)
+                            if elem.text:
+                                current_parts.append(elem.text)
+                        flush_line()
                 except Exception:
                     continue
         return "\n".join(buf)
@@ -1336,6 +1352,39 @@ def pre_clean_lines(text):
     if 0 < blank < 3:
         res += [""] * blank
     return "\n".join(res)
+
+
+def _iter_docx_blocks(doc):
+    from docx.document import Document as DocxDocumentClass
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    parent = doc.element.body if isinstance(doc, DocxDocumentClass) else doc
+    for child in parent.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, doc)
+
+
+def _extract_text_from_docx_document(doc):
+    parts = []
+    for block in _iter_docx_blocks(doc):
+        rows = getattr(block, "rows", None)
+        if rows is not None:
+            for row in rows:
+                cells = [re.sub(r"\s+", " ", cell.text or "").strip() for cell in row.cells]
+                cells = [cell for cell in cells if cell]
+                if cells:
+                    parts.append("\t".join(cells))
+            continue
+
+        text = re.sub(r"\s+", " ", getattr(block, "text", "") or "").strip()
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def extract_text_from_file(file: UploadFile):
@@ -1372,7 +1421,7 @@ def extract_text_from_file(file: UploadFile):
                         elif name_lower.endswith(".docx"):
                             bio = io.BytesIO(file_content)
                             doc = Document(bio)
-                            doc_text = "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+                            doc_text = _extract_text_from_docx_document(doc)
                             if doc_text.strip():
                                 txt += f"--- {name} ---\n{doc_text}\n\n"
                         elif name_lower.endswith(".xlsx"):
@@ -1413,7 +1462,7 @@ def extract_text_from_file(file: UploadFile):
     elif ext == ".docx":
         bio = io.BytesIO(content)
         doc = Document(bio)
-        return "\n".join(para.text for para in doc.paragraphs)
+        return _extract_text_from_docx_document(doc)
     elif ext == ".xlsx":
         bio = io.BytesIO(content)
         wb = load_workbook(bio, read_only=True)

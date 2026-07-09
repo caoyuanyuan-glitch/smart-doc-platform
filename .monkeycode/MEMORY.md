@@ -56,8 +56,8 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Context: Agent 在执行智能润色规则管理任务时校正路径
 - Category: 构建方法
 - Instructions:
-  - 前端构建校验使用 `cd /workspace/smart-doc-platform/frontend && npm run build`
-  - 后端语法校验使用 `cd /workspace/smart-doc-platform/backend && python3 -m compileall app`
+  - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
+  - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
@@ -68,12 +68,14 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 编号与标题或术语之间保留空格，例如 `表1 DNBelab-D4RS`、`2.1 RNA`
 
 大模型调用顺序
-- Date: 2026-06-24
-- Context: 用户指定项目内大模型优先级顺序
-- Category: 行为指令
+- Date: 2026-07-03
+- Context: 修复智能问答 AI 引擎不可用，配置 Kimi API Key
+- Category: 环境配置
 - Instructions:
-  - 大模型调用顺序固定为 `Kimi > DeepSeek > ArkClaw`
-  - 项目中移除 `Qwen` 及其 API Key 配置
+  - Kimi API Key 存放在 `/workspace/backend/.env`，新拉分支后需确认该文件存在
+  - `chat()` 调用优先级: Kimi > DeepSeek > ArkClaw > Proxy > MCAI（仅最后备选）
+  - MCAI 代理当前仅返回简短确认词，不可用于生成任务，勿将其置于优先位置
+  - 后端通过 `dotenv.load_dotenv()` 自动加载 `.env`，无需手动 export
 
 审核模块改动范围约束
 - Date: 2026-06-25

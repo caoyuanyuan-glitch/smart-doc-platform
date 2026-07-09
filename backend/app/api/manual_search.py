@@ -87,7 +87,7 @@ def _extract_with_pdfplumber(file_path: str) -> Optional[List[dict]]:
         return None
 
 
-def _split_pages_to_chunks(pages: List[dict], chunk_size: int = 400, overlap: int = 80) -> List[dict]:
+def _split_pages_to_chunks(pages: List[dict], chunk_size: int = 600, overlap: int = 150) -> List[dict]:
     chunks = []
     step = max(chunk_size - overlap, 80)
     for page in pages:
@@ -112,24 +112,23 @@ def _score_chunk_with_page(question: str, chunk: dict, title: str) -> float:
     return score
 
 
-def _rank_page_chunks(question: str, documents: List[dict], limit: int = 6) -> List[dict]:
+def _rank_page_chunks(question: str, documents: List[dict], limit: int = 10) -> List[dict]:
     all_chunks = []
     for doc in documents:
         chunks = _split_pages_to_chunks(doc.get("pages", []))
         for ch in chunks:
             score = _score_chunk(question, ch["text"], doc.get("title", ""))
-            if score > 0:
-                all_chunks.append({
-                    "title": doc.get("title", "未知"),
-                    "chunk": ch["text"],
-                    "page_num": ch["page_num"],
-                    "score": score,
-                })
+            all_chunks.append({
+                "title": doc.get("title", "未知"),
+                "chunk": ch["text"],
+                "page_num": ch["page_num"],
+                "score": score,
+            })
     all_chunks.sort(key=lambda x: x["score"], reverse=True)
     return all_chunks[:limit]
 
 
-def _build_context(sources: List[dict], max_chars: int = 6000) -> str:
+def _build_context(sources: List[dict], max_chars: int = 10000) -> str:
     parts = []
     total = 0
     for i, s in enumerate(sources):
@@ -141,12 +140,25 @@ def _build_context(sources: List[dict], max_chars: int = 6000) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def _is_valid_answer(text):
+    if not text or len(text.strip()) < 20:
+        return False
+    short_patterns = ["OK", "ok", "好的", "收到", "明白", "已处理"]
+    stripped = text.strip().strip('"')
+    if stripped in short_patterns:
+        return False
+    return True
+
+
 def _call_ai_with_citations(question: str, context: str, titles: List[str]) -> dict:
-    fallback = "当前已选文档中未检索到相关内容。"
+    if not context.strip():
+        return {"answer": "当前已选文档中未检索到相关内容。", "source": ""}
+
+    title_str = "、".join(titles) if titles else "说明书"
 
     try:
         result = ai_client.qa_answer(question, context)
-        if result and result.get("answer") and result.get("answer") != "文档中未找到相关信息":
+        if result and result.get("answer") and _is_valid_answer(result["answer"]) and result["answer"] != "文档中未找到相关信息":
             return {
                 "answer": result["answer"],
                 "source": result.get("source", ""),
@@ -154,7 +166,35 @@ def _call_ai_with_citations(question: str, context: str, titles: List[str]) -> d
     except Exception:
         pass
 
-    return {"answer": fallback, "source": ""}
+    try:
+        prompt = f"""你是一个技术文档助手。请根据以下说明书内容回答用户问题。
+
+说明书名称：{title_str}
+
+说明书内容片段：
+{context[:6000]}
+
+用户问题：{question}
+
+要求：
+1. 优先基于提供的文档片段回答
+2. 如果片段中有部分相关信息但不够完整，基于已有信息尽量回答，并说明信息可能不完整
+3. 只有在片段与问题完全无关时才说明未找到相关信息
+4. 使用专业、准确的语言回答
+5. 严格使用文档中的原始术语，不得改写替换（如文档写"主机"则必须用"主机"，不能写成"主持人"、"电脑"等）
+6. 保持文档中的产品名、型号、参数、单位等专有信息完全不变"""
+        messages = [{"role": "user", "content": prompt}]
+        fallback_answer = ai_client.chat(messages, max_tokens=2048, temperature=0.3)
+        if _is_valid_answer(fallback_answer):
+            return {"answer": fallback_answer.strip(), "source": title_str}
+    except Exception:
+        pass
+
+    snippet_preview = context[:1500].strip()
+    if snippet_preview:
+        return {"answer": f"AI 引擎暂时不可用，以下是文档中与您问题相关的原始内容片段，供参考：\n\n{snippet_preview}", "source": title_str}
+
+    return {"answer": "当前已选文档中未检索到相关内容。", "source": ""}
 
 
 
@@ -335,12 +375,14 @@ async def ask_manual(
     documents = sess_data.get("documents", [])
     titles = sess_data.get("titles", [])
 
-    ranked = _rank_page_chunks(question, documents, limit=6)
-    context = _build_context(ranked, max_chars=6000)
+    ranked = _rank_page_chunks(question, documents, limit=10)
+    context = _build_context(ranked, max_chars=10000)
     result = _call_ai_with_citations(question, context, titles)
 
     is_fallback = (result.get("answer") == "当前已选文档中未检索到相关内容。"
                    or result.get("answer") == "文档中未找到相关信息")
+    search_hit = 1 if (ranked and not is_fallback) else 0
+    relevance_score = round(ranked[0]["score"], 4) if ranked else 0.0
 
     return_sources = []
     if not is_fallback and ranked:
@@ -369,7 +411,7 @@ async def ask_manual(
     _save_qa_history(
         db=db, session_type="manual", question=question,
         answer_data=answer_data, user_id=user_id, session_id=sess.id,
-        sources=source_for_db,
+        sources=source_for_db, search_hit=search_hit, relevance_score=relevance_score,
     )
 
     return {

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules
+from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system
 from app.database import create_tables
 
 app = FastAPI(title="智能技术文档平台", version="1.0.0")
@@ -34,10 +34,16 @@ app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识库�
 app.include_router(spell_check.router, prefix="/api/spell-check", tags=["拼写检查"])
 app.include_router(whitelist.router, prefix="/api/whitelist", tags=["白名单管理"])
 app.include_router(polish_rules.router, tags=["润色规则管理"])
+app.include_router(system.router, prefix="/api/system", tags=["系统状态"])
 
 @app.on_event("startup")
 async def startup_event():
     create_tables()
+    try:
+        from app.utils.ai_client import ai_client
+        ai_client.warmup()
+    except Exception as e:
+        print(f"[startup] AI 预热失败: {e}")
     try:
         from app.database import SessionLocal
         from app.crud.convert_rule import seed_default_rules

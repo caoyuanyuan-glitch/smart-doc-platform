@@ -240,6 +240,22 @@ def _normalize_doc_word_counts(doc):
     }
 
 
+def _normalize_doc_usage_counts(doc):
+    source_char_count = max(0, int(getattr(doc, "source_char_count", 0) or 0))
+    ai_char_count = max(0, int(getattr(doc, "ai_char_count", 0) or 0))
+    memory_char_count = max(0, int(getattr(doc, "memory_char_count", 0) or 0))
+
+    ai_char_count = min(ai_char_count, source_char_count)
+    uncategorized_char_count = max(0, source_char_count - ai_char_count - memory_char_count)
+    memory_char_count = min(source_char_count - ai_char_count, memory_char_count + uncategorized_char_count)
+
+    return {
+        "source_char_count": source_char_count,
+        "ai_char_count": ai_char_count,
+        "memory_char_count": memory_char_count,
+    }
+
+
 def _summarize_docs(docs):
     normalized_usage = [_normalize_doc_word_counts(doc) for doc in docs]
     return {
