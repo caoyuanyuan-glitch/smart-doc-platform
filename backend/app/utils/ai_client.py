@@ -1296,6 +1296,10 @@ class AIClient:
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
+- Do not rewrite text only for readability, tone, or style. Report only objective violations from the checklist or common-error rules.
+- The correction must preserve the original meaning exactly. Do not change reagent names, supplier/customer roles, product names, legal statements, storage actions, or technical terms unless the provided rules explicitly require that exact replacement.
+- Do not change numeric values, quantities, counts, column/row numbers, temperatures, times, volumes, concentrations, or page references unless the source text itself explicitly proves the number is wrong.
+- Keep one space between numbers and units, including μL, mL, ng, bp, °C, %, ×, and buffer names. Correct missing spaces, but never remove an existing number-unit space.
 - The following are VALID English words (do NOT flag as spelling errors):
   {', '.join(ENGLISH_CORRECT_SPELLINGS[:50])}...
 - British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
@@ -1335,6 +1339,10 @@ Return empty issues array if no high-confidence issues found."""
 
 重要提醒：
 - 只报告有明确文本证据的问题。
+- 不要只为了可读性、语气或风格润色而输出问题。
+- 修改建议必须严格保持原意，不得擅自改变试剂名称、供应方/用户角色、产品名称、合规声明、存储动作或技术术语。
+- 不得擅自改变数字值、数量、列数/行数、温度、时间、体积、浓度或页码；只有原文证据能直接证明数字错误时才可报告。
+- 数字和单位之间必须保留一个空格，包括 μL、mL、ng、bp、°C、%、× 和缓冲液名称；可以补缺失空格，不能删除已有空格。
 - 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
 - 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。"""
 
