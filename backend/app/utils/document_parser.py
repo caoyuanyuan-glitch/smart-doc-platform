@@ -43,6 +43,59 @@ def _merge_pdf_paragraph_lines(text: str) -> str:
     return '\n\n'.join(merged)
 
 
+def _normalize_pdf_extraction_artifacts(text: str) -> str:
+    text = str(text or '')
+    text = re.sub(r'(?<=\s)\|(?=\s)', ' ', text)
+    text = re.sub(r'\b([A-Z])\s+([A-Z])\s+([A-Z])(?:\s+([A-Z]))?\b', lambda m: ''.join(part for part in m.groups() if part), text)
+    text = re.sub(r'\b([A-Za-z])\s+([a-z])\s+([a-z])\s+([a-z])\b', r'\1\2\3\4', text)
+    text = re.sub(r'\b(μ|u)\s+L\b', lambda m: f"{m.group(1)}L", text, flags=re.IGNORECASE)
+    text = re.sub(r'\b([mknpμu])\s+(L|g|m)\b', r'\1\2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?<=\d)\s*(?:℃|°\s*C)\b', ' °C', text)
+    text = re.sub(r'(?<=\d)(μL|uL|mL|ng|mg|g|bp|kb|rpm|min|sec|s|h)\b', r' \1', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b(Cat\.)\s*(No\.)\s*:', r'\1 \2:', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b(PCR|DNB|DNA|RNA)\s+([A-Z]{2,})\b', r'\1 \2', text)
+    return text
+
+
+def _is_toc_dot_line(line: str) -> bool:
+    stripped = str(line or '').strip()
+    return bool(re.match(r'^.{2,80}\s*\.{3,}\s*\d+\s*$', stripped))
+
+
+def _remove_repeated_page_noise(page_texts: list[str]) -> list[str]:
+    if len(page_texts) < 3:
+        return page_texts
+
+    candidates: dict[str, dict[str, int | str]] = {}
+    for page in page_texts:
+        lines = [line.strip() for line in str(page or '').splitlines() if line.strip()]
+        edge_lines = lines[:3] + lines[-3:]
+        for line in edge_lines:
+            compact = re.sub(r'\s+', ' ', line).strip()
+            if not compact or len(compact) > 90:
+                continue
+            if re.search(r'^(?:\d+|page\s+\d+)$', compact, re.IGNORECASE):
+                continue
+            key = compact.lower()
+            entry = candidates.setdefault(key, {'text': compact, 'count': 0})
+            entry['count'] = int(entry['count']) + 1
+
+    repeated = {str(entry['text']) for entry in candidates.values() if int(entry['count']) >= 3}
+    if not repeated:
+        return page_texts
+
+    cleaned_pages = []
+    for page in page_texts:
+        lines = []
+        for line in str(page or '').splitlines():
+            compact = re.sub(r'\s+', ' ', line).strip()
+            if compact in repeated:
+                continue
+            lines.append(line)
+        cleaned_pages.append('\n'.join(lines))
+    return cleaned_pages
+
+
 def clean_pdf_text(text: str) -> str:
     text = str(text or '')
     text = text.replace('\r\n', '\n').replace('\r', '\n')
@@ -50,6 +103,9 @@ def clean_pdf_text(text: str) -> str:
     text = re.sub(r'(?<=\n)\s*y(?=[A-Za-z])', ' ', text)
     text = re.sub(r'(?<=[A-Za-z])\s*-\s*\n\s*(?=[A-Za-z])', '', text)
     text = re.sub(r'[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]', '', text)
+    text = _normalize_pdf_extraction_artifacts(text)
+    text = re.sub(r'\.{4,}', ' ', text)
+    text = '\n'.join(line for line in text.splitlines() if not _is_toc_dot_line(line))
     text = _merge_pdf_paragraph_lines(text)
     text = re.sub(r'\n*\f\n*', '\f', text)
     text = re.sub(r'[ \t]{2,}', ' ', text)
@@ -211,6 +267,7 @@ def parse_pdf(file_path):
     extracted = extract_pdf(file_path)
     page_texts = extracted.get('page_texts', []) or []
     if page_texts:
+        page_texts = _remove_repeated_page_noise(page_texts)
         cleaned_pages = [clean_pdf_text(page_text) for page_text in page_texts if str(page_text or '').strip()]
         return '\f'.join(cleaned_pages)
     return clean_pdf_text(extracted.get('full_text', ''))

@@ -68,14 +68,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 编号与标题或术语之间保留空格，例如 `表1 DNBelab-D4RS`、`2.1 RNA`
 
 大模型调用顺序
-- Date: 2026-07-03
-- Context: 修复智能问答 AI 引擎不可用，配置 Kimi API Key
+- Date: 2026-07-07
+- Context: Agent 在执行审核模块 AI 调用排障时发现
 - Category: 环境配置
 - Instructions:
-  - Kimi API Key 存放在 `/workspace/backend/.env`，新拉分支后需确认该文件存在
-  - `chat()` 调用优先级: Kimi > DeepSeek > ArkClaw > Proxy > MCAI（仅最后备选）
-  - MCAI 代理当前仅返回简短确认词，不可用于生成任务，勿将其置于优先位置
-  - 后端通过 `dotenv.load_dotenv()` 自动加载 `.env`，无需手动 export
+  - 本地后端运行密钥文件使用 `/workspace/backend/runtime.env`，该文件已加入 `.gitignore`，不得提交或输出密钥内容
+  - 审核模块 LLM provider 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
+  - 排查 AI 审核结果异常时，先确认后端启动日志中的 provider 预热状态和审核日志中的 `AI客户端可用`、`providers=`、规范文件长度
 
 审核模块改动范围约束
 - Date: 2026-06-25
