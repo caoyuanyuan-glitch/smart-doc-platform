@@ -285,7 +285,8 @@ export const translationAPI = {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 600000
   }),
-  getFileStatus: (docId) => instance.get(`/translation/translate/file/${docId}/status`),
+  getFileStatus: (docId, params = {}) => instance.get(`/translation/translate/file/${docId}/status`, { params }),
+  cancelFileTranslation: (docId) => instance.post(`/translation/translate/file/${docId}/cancel`),
   getMemoryBanks: () => instance.get('/translation/memory/banks'),
   getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
   getDocument: (id) => instance.get(`/documents/${id}`),
@@ -297,7 +298,13 @@ export const translationAPI = {
   addMemory: (data) => instance.post('/translation/memory', data),
   writeMemoryFileEntry: (data) => instance.post('/translation/memory/file-entry', data),
   deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
-  getDocs: (skip = 0, limit = 100) => instance.get('/translation/docs', { params: { skip, limit } }),
+  getDocs: (skip = 0, limit = 100, batchId = '') => instance.get('/translation/docs', {
+    params: {
+      skip,
+      limit,
+      ...(batchId ? { batch_id: batchId } : {})
+    }
+  }),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
   deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
   getStats: (batchId) => instance.get('/translation/stats', {

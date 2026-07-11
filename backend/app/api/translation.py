@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 import lxml.etree as ET_LXML
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 
 from app.database import get_db, SessionLocal
@@ -50,8 +51,48 @@ _translate_tasks_lock = threading.Lock()
 _thread_locals = threading.local()
 _memory_file_cache = {}
 _memory_file_cache_lock = threading.Lock()
+CANCELED_TRANSLATION_PREFIX = "CANCELED:"
 SUPPORTED_AI_MODELS = {"kimi", "deepseek", "arkclaw", "mcai", "proxy"}
 WORD_CONNECTORS = {"-", "_", ".", "/", ":", "+", "'", "’", "%", "#", "&"}
+LATIN_LANGUAGE_HINTS = {
+    "en": {"the", "and", "for", "with", "from", "this", "that", "step", "open", "close", "page"},
+    "fr": {"le", "la", "les", "des", "une", "pour", "avec", "dans", "sur", "est"},
+    "de": {"der", "die", "das", "und", "mit", "von", "für", "auf", "ist", "nicht"},
+    "es": {"el", "la", "los", "las", "para", "con", "del", "una", "por", "que"},
+}
+LATIN_LANGUAGE_CHAR_HINTS = {
+    "fr": "àâæçéèêëîïôœùûüÿ",
+    "de": "äöüß",
+    "es": "áéíñóúü¿¡",
+}
+
+
+class TranslationCancelled(Exception):
+    pass
+
+
+def _get_translate_task_status(doc_id: int) -> str:
+    with _translate_tasks_lock:
+        task = _translate_tasks.get(doc_id) or {}
+        return str(task.get("status") or "")
+
+
+def _raise_if_translation_cancelled(doc_id: int | None):
+    if doc_id and _get_translate_task_status(doc_id) == "canceled":
+        raise TranslationCancelled("翻译已停止")
+
+
+def _mark_translation_canceled(doc_id: int, db: Session | None = None, message: str = "翻译已停止"):
+    with _translate_tasks_lock:
+        _translate_tasks[doc_id] = {"status": "canceled", "error": message}
+
+    if db is None:
+        return
+
+    doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
+    if doc and not str(doc.translated_filename or "").startswith(CANCELED_TRANSLATION_PREFIX):
+        doc.translated_filename = f"{CANCELED_TRANSLATION_PREFIX}{message[:200]}"
+        db.commit()
 
 
 def _read_text_file_with_fallback(file_path: str) -> str:
@@ -73,6 +114,7 @@ def _reset_translation_usage_stats():
         "ai_word_count": 0,
         "memory_word_count": 0,
     }
+    _thread_locals.memory_candidate_cache = {}
 
 
 def _get_translation_usage_stats():
@@ -162,6 +204,14 @@ def _snapshot_translation_usage_stats():
         "ai_word_count": int(stats.get("ai_word_count") or 0),
         "memory_word_count": int(stats.get("memory_word_count") or 0),
     }
+
+
+def _get_memory_candidate_cache():
+    cache = getattr(_thread_locals, "memory_candidate_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_locals.memory_candidate_cache = cache
+    return cache
 
 
 def _normalize_usage_counts(source_count: int, ai_count: int, memory_count: int):
@@ -308,6 +358,101 @@ def _text_matches_source_language(text: str, source_lang: str) -> bool:
     if lang in {"en", "fr", "de", "es", "ru"}:
         return bool(re.search(r"[A-Za-zÀ-ÖØ-öø-ÿА-Яа-я]", normalized))
     return bool(re.search(r"\w", normalized, re.UNICODE))
+
+
+def _default_source_language_for_target(target_lang: str) -> str:
+    return "en" if (target_lang or "").lower() != "en" else "zh"
+
+
+def _build_language_detection_sample(text: str, max_chars: int = 4000) -> str:
+    lines = []
+    total = 0
+    for raw_line in str(text or "").splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if len(line) < 2:
+            continue
+        if not re.search(r"[A-Za-zÀ-ÖØ-öø-ÿА-Яа-я\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", line):
+            continue
+        lines.append(line)
+        total += len(line)
+        if total >= max_chars:
+            break
+    return "\n".join(lines)[:max_chars]
+
+
+def _detect_latin_language(sample: str, target_lang: str) -> str:
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ']+", sample.lower())
+    if not words:
+        return _default_source_language_for_target(target_lang)
+
+    scores = {lang: 0 for lang in LATIN_LANGUAGE_HINTS}
+    for word in words:
+        for lang, hints in LATIN_LANGUAGE_HINTS.items():
+            if word in hints:
+                scores[lang] += 3
+
+    lowered = sample.lower()
+    for lang, chars in LATIN_LANGUAGE_CHAR_HINTS.items():
+        scores[lang] += sum(lowered.count(ch) for ch in chars) * 2
+
+    best_lang = max(scores, key=scores.get)
+    if scores[best_lang] > 0:
+        return best_lang
+    return "en"
+
+
+def _detect_language_from_text(text: str, target_lang: str = "") -> str:
+    sample = _build_language_detection_sample(text)
+    if not sample:
+        return _default_source_language_for_target(target_lang)
+
+    kana_count = len(re.findall(r"[\u3040-\u30ff]", sample))
+    hangul_count = len(re.findall(r"[\uac00-\ud7af]", sample))
+    cjk_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", sample))
+    cyrillic_count = len(re.findall(r"[А-Яа-яЁё]", sample))
+    latin_count = len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]", sample))
+
+    if hangul_count >= 2:
+        return "ko"
+    if kana_count >= 2:
+        return "ja"
+    if cyrillic_count >= 2:
+        return "ru"
+    if cjk_count >= 2:
+        return "zh"
+    if latin_count >= 2:
+        return _detect_latin_language(sample, target_lang)
+    return _default_source_language_for_target(target_lang)
+
+
+def _extract_text_for_language_detection(file_path: str, ext: str) -> str:
+    ext = (ext or "").lower()
+    if ext in (".xlsx", ".xls"):
+        return parse_xlsx_textual_content(file_path)
+    if ext == ".txt":
+        return _read_text_file_with_fallback(file_path)
+    return parse_file(file_path)
+
+
+def _resolve_source_language(source_lang: str, target_lang: str, text: str = "", file_path: str = "", ext: str = "") -> str:
+    normalized = (source_lang or "").strip().lower()
+    if normalized and normalized != "auto":
+        return normalized
+
+    detected = ""
+    if text:
+        detected = _detect_language_from_text(text, target_lang)
+    elif file_path:
+        try:
+            detected = _detect_language_from_text(_extract_text_for_language_detection(file_path, ext), target_lang)
+        except Exception:
+            detected = ""
+    return detected or _default_source_language_for_target(target_lang)
+
+
+def _ensure_translation_direction(source_lang: str, target_lang: str):
+    if (source_lang or "").lower() == (target_lang or "").lower():
+        raise HTTPException(status_code=400, detail="检测到源语言与目标语言一致，请重新选择目标语言")
 
 
 def _normalize_memory_lookup_key(value: str) -> str:
@@ -581,27 +726,90 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
         return translated_texts
 
     if pending_indexes:
+        duplicate_indexes = {}
+        unique_pending_indexes = []
+        for index in pending_indexes:
+            text = texts[index]
+            if text in duplicate_indexes:
+                duplicate_indexes[text].append(index)
+                continue
+            duplicate_indexes[text] = [index]
+            unique_pending_indexes.append(index)
+
         sep = "\n---DOCSEG---\n"
-        batch_size = 5
-        for batch_start in range(0, len(pending_indexes), batch_size):
-            batch_end = min(batch_start + batch_size, len(pending_indexes))
-            batch_indexes = pending_indexes[batch_start:batch_end]
+        max_batch_items = 80
+        max_batch_chars = 8000
+        batch_groups = []
+        current_group = []
+        current_chars = 0
+
+        for index in unique_pending_indexes:
+            text_len = len(texts[index] or "")
+            estimated_chars = text_len if not current_group else text_len + len(sep)
+            if current_group and (len(current_group) >= max_batch_items or current_chars + estimated_chars > max_batch_chars):
+                batch_groups.append(current_group)
+                current_group = []
+                current_chars = 0
+            current_group.append(index)
+            current_chars += text_len if len(current_group) == 1 else estimated_chars
+
+        if current_group:
+            batch_groups.append(current_group)
+
+        def _translate_ai_batch(batch_indexes):
             if len(batch_indexes) == 1:
-                translated_texts[batch_indexes[0]] = _do_translate(texts[batch_indexes[0]], engine, model, source_lang, target_lang, db)
-            else:
-                batch_texts = [texts[i] for i in batch_indexes]
-                combined = sep.join(batch_texts)
-                translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
-                translated_parts = [part.strip() for part in translated_combined.split(sep)]
-                if len(translated_parts) != len(batch_texts):
-                    for bi, idx in enumerate(batch_indexes):
-                        if bi < len(translated_parts):
-                            translated_texts[idx] = translated_parts[bi]
-                        else:
+                index = batch_indexes[0]
+                return {index: translate_with_ai(texts[index], model, source_lang, target_lang)}
+
+            batch_texts = [texts[i] for i in batch_indexes]
+            combined = sep.join(batch_texts)
+            translated_combined = translate_with_ai(combined, model, source_lang, target_lang)
+            translated_parts = [part.strip() for part in translated_combined.split(sep)]
+            if len(translated_parts) != len(batch_texts):
+                raise ValueError("batched_translation_split_mismatch")
+            return {idx: translated_parts[position] for position, idx in enumerate(batch_indexes)}
+
+        if engine == "ai" and len(batch_groups) > 1:
+            max_workers = min(3, len(batch_groups))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(_translate_ai_batch, batch_indexes): batch_indexes for batch_indexes in batch_groups}
+                for future in as_completed(future_map):
+                    batch_indexes = future_map[future]
+                    try:
+                        batch_results = future.result()
+                        for idx, translated in batch_results.items():
+                            translated_texts[idx] = translated
+                            if translated == texts[idx]:
+                                _record_passthrough_usage(texts[idx])
+                            else:
+                                _record_translation_usage("ai", texts[idx])
+                    except Exception:
+                        for idx in batch_indexes:
                             translated_texts[idx] = _do_translate(texts[idx], engine, model, source_lang, target_lang, db)
+        else:
+            for batch_indexes in batch_groups:
+                if len(batch_indexes) == 1:
+                    translated_texts[batch_indexes[0]] = _do_translate(texts[batch_indexes[0]], engine, model, source_lang, target_lang, db)
                 else:
-                    for bi, idx in enumerate(batch_indexes):
-                        translated_texts[idx] = translated_parts[bi]
+                    try:
+                        batch_texts = [texts[i] for i in batch_indexes]
+                        combined = sep.join(batch_texts)
+                        translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
+                        translated_parts = [part.strip() for part in translated_combined.split(sep)]
+                        if len(translated_parts) != len(batch_texts):
+                            raise ValueError("batched_translation_split_mismatch")
+                        for bi, idx in enumerate(batch_indexes):
+                            translated_texts[idx] = translated_parts[bi]
+                    except Exception:
+                        for idx in batch_indexes:
+                            translated_texts[idx] = _do_translate(texts[idx], engine, model, source_lang, target_lang, db)
+
+        for index in unique_pending_indexes:
+            translated_text = translated_texts[index]
+            if translated_text is None:
+                continue
+            for duplicate_index in duplicate_indexes.get(texts[index], [])[1:]:
+                translated_texts[duplicate_index] = translated_text
 
     return translated_texts
 
@@ -830,6 +1038,101 @@ def _get_cached_memory_file_entries(memory_file: KnowledgeFile):
     return entries
 
 
+def _get_memory_file_candidates(db: Session, memory_file_id: int, source_lang: str, target_lang: str):
+    if not memory_file_id:
+        return []
+
+    cache_key = ("memory_file_candidates", memory_file_id, source_lang, target_lang)
+    cache = _get_memory_candidate_cache()
+    if cache_key in cache:
+        return cache[cache_key]
+
+    memory_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == memory_file_id).first()
+    if not memory_file or not os.path.exists(memory_file.file_path):
+        cache[cache_key] = []
+        return cache[cache_key]
+
+    candidates = []
+    for entry in _get_cached_memory_file_entries(memory_file):
+        entry_source_lang = (entry.get("source_lang") or source_lang).strip()
+        entry_target_lang = (entry.get("target_lang") or target_lang).strip()
+        if entry_source_lang != source_lang or entry_target_lang != target_lang:
+            continue
+        source_text_value = (entry.get("source_text") or "").strip()
+        translated_text_value = (entry.get("translated_text") or "").strip()
+        if not source_text_value or not translated_text_value:
+            continue
+        candidates.append({
+            "source_text": source_text_value,
+            "translated_text": translated_text_value,
+        })
+
+    cache[cache_key] = candidates
+    return candidates
+
+
+def _build_memory_candidate_bundle(candidates):
+    exact_map = {}
+    compact_map = {}
+    for entry in candidates:
+        normalized_source = _normalize_match_text(entry["source_text"])
+        compact_source = _normalize_memory_lookup_key(entry["source_text"])
+        if normalized_source and normalized_source not in exact_map:
+            exact_map[normalized_source] = entry["translated_text"]
+        if compact_source and compact_source not in compact_map:
+            compact_map[compact_source] = entry["translated_text"]
+    return {
+        "entries": candidates,
+        "exact_map": exact_map,
+        "compact_map": compact_map,
+    }
+
+
+def _get_memory_candidate_bundle(db: Session, source_lang: str, target_lang: str,
+                                 bank: str = None, memory_file_id: int = None):
+    cache_key = ("memory_bundle", source_lang, target_lang, bank or "", memory_file_id or 0)
+    cache = _get_memory_candidate_cache()
+    if cache_key in cache:
+        return cache[cache_key]
+
+    bundle = _build_memory_candidate_bundle(
+        _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+    )
+    cache[cache_key] = bundle
+    return bundle
+
+
+def _lookup_memory_exact_match(source_text: str, bundle) -> str | None:
+    normalized_source = _normalize_match_text(source_text)
+    if not normalized_source:
+        return None
+
+    translated = bundle["exact_map"].get(normalized_source)
+    if translated:
+        return translated
+
+    compact_source = _normalize_memory_lookup_key(source_text)
+    if compact_source:
+        translated = bundle["compact_map"].get(compact_source)
+        if translated:
+            return translated
+
+    lines = [line.strip() for line in re.split(r"\n+", source_text or "") if line.strip()]
+    if len(lines) > 1:
+        translated_lines = []
+        for line in lines:
+            line_translated = bundle["exact_map"].get(_normalize_match_text(line))
+            if not line_translated:
+                compact_line = _normalize_memory_lookup_key(line)
+                line_translated = bundle["compact_map"].get(compact_line) if compact_line else None
+            if not line_translated:
+                return None
+            translated_lines.append(line_translated)
+        return "\n".join(translated_lines)
+
+    return None
+
+
 def _invalidate_memory_file_cache(memory_file_id: int):
     with _memory_file_cache_lock:
         stale_keys = [key for key in _memory_file_cache if key[0] == memory_file_id]
@@ -877,48 +1180,32 @@ def _search_memory_file(db: Session, memory_file_id: int, source_text: str, sour
                         threshold: float = 0.8, preserve_sentence_unmatched: bool = True):
     if not memory_file_id:
         return None
-
-    memory_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == memory_file_id).first()
-    if not memory_file or not os.path.exists(memory_file.file_path):
-        return None
-
-    entries = _get_cached_memory_file_entries(memory_file)
-    candidates = []
-    for entry in entries:
-        entry_source_lang = (entry.get("source_lang") or source_lang).strip()
-        entry_target_lang = (entry.get("target_lang") or target_lang).strip()
-        if entry_source_lang != source_lang or entry_target_lang != target_lang:
-            continue
-        candidates.append(entry)
-
+    candidates = _get_memory_file_candidates(db, memory_file_id, source_lang, target_lang)
     return _match_memory_candidates(source_text, candidates, threshold=threshold, preserve_sentence_unmatched=preserve_sentence_unmatched)
 
 
 def _collect_memory_candidates(db: Session, source_lang: str, target_lang: str,
                                bank: str = None, memory_file_id: int = None):
+    cache_key = ("memory_candidates", source_lang, target_lang, bank or "", memory_file_id or 0)
+    cache = _get_memory_candidate_cache()
+    if cache_key in cache:
+        return cache[cache_key]
+
     candidates = []
     seen = set()
 
     if memory_file_id:
-        memory_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == memory_file_id).first()
-        if memory_file and os.path.exists(memory_file.file_path):
-            for entry in _get_cached_memory_file_entries(memory_file):
-                entry_source_lang = (entry.get("source_lang") or source_lang).strip()
-                entry_target_lang = (entry.get("target_lang") or target_lang).strip()
-                if entry_source_lang != source_lang or entry_target_lang != target_lang:
-                    continue
-                source_text_value = (entry.get("source_text") or "").strip()
-                translated_text_value = (entry.get("translated_text") or "").strip()
-                if not source_text_value or not translated_text_value:
-                    continue
-                dedupe_key = (source_text_value, translated_text_value)
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                candidates.append({
-                    "source_text": source_text_value,
-                    "translated_text": translated_text_value,
-                })
+        for entry in _get_memory_file_candidates(db, memory_file_id, source_lang, target_lang):
+            source_text_value = (entry.get("source_text") or "").strip()
+            translated_text_value = (entry.get("translated_text") or "").strip()
+            dedupe_key = (source_text_value, translated_text_value)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            candidates.append({
+                "source_text": source_text_value,
+                "translated_text": translated_text_value,
+            })
 
     query = db.query(MemoryBank).filter(
         MemoryBank.source_lang == source_lang,
@@ -941,6 +1228,7 @@ def _collect_memory_candidates(db: Session, source_lang: str, target_lang: str,
             "translated_text": translated_text_value,
         })
 
+    cache[cache_key] = candidates
     return candidates
 
 
@@ -1644,6 +1932,21 @@ def _looks_like_hallucination(result: str, original: str) -> bool:
     return False
 
 
+def _looks_like_invalid_translation(result: str, original: str, source_lang: str, target_lang: str) -> bool:
+    normalized = str(result or "").strip()
+    source_text = str(original or "").strip()
+    if not normalized:
+        return True
+    if normalized.lower() in {"ok", "okay", "done", "success", "received", "ack"}:
+        return True
+    source_units = _count_text_units(source_text)
+    if len(normalized) <= 3 and len(source_text) >= 20 and source_units >= 4:
+        return True
+    if target_lang == "zh" and re.search(r"[A-Za-z]", source_text) and not re.search(r"[\u4e00-\u9fff]", normalized):
+        return True
+    return False
+
+
 def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str, glossary=None) -> str:
     model = _normalize_ai_model(model)
     lang_names = {
@@ -1664,6 +1967,10 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
         if glossary_pairs:
             glossary_lines = "\n5. 必须优先采用以下术语映射，保持术语译法一致\n\n术语映射：\n" + "\n".join(glossary_pairs) + "\n"
 
+    batch_delimiter_rule = ""
+    if "---DOCSEG---" in content:
+        batch_delimiter_rule = "\n6. 原文中若出现分隔符 ---DOCSEG---，必须在译文中原样保留每一个分隔符，不能翻译、删除、改写或增减。\n"
+
     prompt = f"""你是一个专业的技术文档翻译引擎。请将以下{src_name}文本翻译为{tgt_name}。
 
 翻译规则：
@@ -1672,6 +1979,7 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 3. 使用专业准确的技术术语
 4. 只输出翻译后的{tgt_name}结果，不要添加任何解释、注释或原始文本
 {glossary_lines}
+{batch_delimiter_rule}
 
 原文：
 {content[:8000]}"""
@@ -1709,24 +2017,28 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
     if _looks_like_hallucination(result, content):
         return content
 
+    if _looks_like_invalid_translation(result, content, source_lang, target_lang):
+        raise HTTPException(
+            status_code=500,
+            detail="AI 翻译结果无效，当前提供商返回了非译文内容，请检查可用模型提供商配置。",
+        )
+
     return result
 
 
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
                           db: Session, bank: str = None, memory_file_id: int = None,
                           allow_partial: bool = True) -> tuple:
-    candidates = _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+    bundle = _get_memory_candidate_bundle(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+    candidates = bundle["entries"]
 
-    file_result = _search_memory_file(
-        db,
-        memory_file_id,
-        content,
-        source_lang,
-        target_lang,
-        preserve_sentence_unmatched=allow_partial,
-    )
-    if file_result:
-        return file_result, True
+    exact_match = _lookup_memory_exact_match(content, bundle)
+    if exact_match:
+        return exact_match, True
+
+    if not allow_partial and _memory_unit_kind(content) == "sentence":
+        return None, False
+
     memory_result = _match_memory_candidates(content, candidates, threshold=0.88, preserve_sentence_unmatched=allow_partial)
     if memory_result:
         return memory_result, True
@@ -1802,6 +2114,14 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
     try:
         with _translate_tasks_lock:
             _translate_tasks[doc_id] = {"status": "processing", "error": None}
+
+        source_lang = _resolve_source_language(source_lang, target_lang, file_path=file_path, ext=ext)
+        _ensure_translation_direction(source_lang, target_lang)
+
+        doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
+        if doc and doc.source_lang != source_lang:
+            doc.source_lang = source_lang
+            db.commit()
 
         if not os.path.exists(TRANSLATION_OUTPUT_DIR):
             os.makedirs(TRANSLATION_OUTPUT_DIR, exist_ok=True)
@@ -2024,13 +2344,15 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     engine = req.engine
     _set_memory_bank(req.memory_bank)
     _set_memory_file_id(req.memory_file_id)
+    resolved_source_lang = _resolve_source_language(req.source_lang, req.target_lang, text=req.content)
+    _ensure_translation_direction(resolved_source_lang, req.target_lang)
     source_char_count = len(req.content)
     source_word_count = _count_text_units(req.content)
 
     if engine in ["memory", "hybrid"]:
         result, hit = translate_with_memory(
             req.content,
-            req.source_lang,
+            resolved_source_lang,
             req.target_lang,
             db,
             bank=req.memory_bank,
@@ -2044,7 +2366,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
                 doc_record = TranslationDoc(
                     filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
                     file_type="text",
-                    source_lang=req.source_lang,
+                    source_lang=resolved_source_lang,
                     target_lang=req.target_lang,
                     engine=engine,
                     model=req.model,
@@ -2068,7 +2390,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
                 )
 
     if engine in ["ai", "hybrid"] and not translated:
-        translated = translate_with_ai(req.content, req.model, req.source_lang, req.target_lang)
+        translated = translate_with_ai(req.content, req.model, resolved_source_lang, req.target_lang)
         from_ai = True
 
         if engine == "hybrid":
@@ -2076,7 +2398,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
                 db=db,
                 source_text=req.content,
                 translated_text=translated,
-                source_lang=req.source_lang,
+                source_lang=resolved_source_lang,
                 target_lang=req.target_lang,
                 tags=req.memory_bank or ""
             )
@@ -2091,7 +2413,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     doc_record = TranslationDoc(
         filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
         file_type="text",
-        source_lang=req.source_lang,
+        source_lang=resolved_source_lang,
         target_lang=req.target_lang,
         engine=engine,
         model=req.model,
@@ -2185,7 +2507,7 @@ async def translate_file(
     file: UploadFile = File(...),
     engine: str = Form("hybrid"),
     model: str = Form("kimi"),
-    source_lang: str = Form("zh"),
+    source_lang: str = Form("auto"),
     target_lang: str = Form("en"),
     memory_bank: str = Form(""),
     memory_file_id: int = Form(None),
@@ -2212,10 +2534,13 @@ async def translate_file(
     if ext in UNSUPPORTED_TRANSLATION_EXTENSIONS:
         raise HTTPException(status_code=400, detail="当前文件格式暂不支持文档翻译，请改用 Word、Excel、PPT、PDF、Markdown、TXT 或 XLF 文件")
 
+    resolved_source_lang = _resolve_source_language(source_lang, target_lang, file_path=file_path, ext=ext)
+    _ensure_translation_direction(resolved_source_lang, target_lang)
+
     doc = TranslationDoc(
         filename=filename,
         file_type=ext.replace(".", ""),
-        source_lang=source_lang,
+        source_lang=resolved_source_lang,
         target_lang=target_lang,
         engine=engine,
         model=model if engine != "memory" else "memory",
@@ -2232,7 +2557,7 @@ async def translate_file(
 
     thread = threading.Thread(
         target=_run_translate_thread,
-        args=(doc.id, file_path, ext, filename, engine, model, source_lang, target_lang, memory_bank, memory_file_id),
+        args=(doc.id, file_path, ext, filename, engine, model, resolved_source_lang, target_lang, memory_bank, memory_file_id),
         daemon=True
     )
     thread.start()
@@ -2252,6 +2577,36 @@ async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Document not found")
 
     orig_filename = doc.filename or ""
+    fn = doc.translated_filename or ""
+
+    # Prefer persisted terminal states so stale in-memory task flags cannot keep
+    # the frontend stuck in a perpetual "processing" state.
+    if fn.startswith("ERROR:"):
+        with _translate_tasks_lock:
+            _translate_tasks[doc_id] = {"status": "error", "error": fn[6:]}
+        return {"doc_id": doc_id, "status": "error", "error": fn[6:], "original_filename": orig_filename}
+
+    if fn.startswith(CANCELED_TRANSLATION_PREFIX):
+        cancel_message = fn[len(CANCELED_TRANSLATION_PREFIX):] or "翻译已停止"
+        with _translate_tasks_lock:
+            _translate_tasks[doc_id] = {"status": "canceled", "error": cancel_message}
+        return {"doc_id": doc_id, "status": "canceled", "error": cancel_message, "original_filename": orig_filename}
+
+    if fn:
+        with _translate_tasks_lock:
+            _translate_tasks[doc_id] = {
+                "status": "completed",
+                "error": None,
+                "translated_filename": fn,
+            }
+        return {
+            "doc_id": doc_id,
+            "status": "completed",
+            "translated_filename": fn,
+            "original_filename": orig_filename,
+            "download_url": f"/api/translation/download/{doc_id}",
+            "error": None
+        }
 
     with _translate_tasks_lock:
         task = _translate_tasks.get(doc_id)
@@ -2266,7 +2621,6 @@ async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
             "download_url": f"/api/translation/download/{doc_id}" if task["status"] == "completed" else None,
         }
 
-    fn = doc.translated_filename or ""
     if fn == "":
         if doc.created_at and datetime.utcnow() - doc.created_at > timedelta(minutes=10):
             error_msg = "翻译任务已中断，请重新提交文件翻译"
@@ -2274,17 +2628,33 @@ async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
             db.commit()
             return {"doc_id": doc_id, "status": "error", "error": error_msg, "original_filename": orig_filename}
         return {"doc_id": doc_id, "status": "processing", "error": None, "original_filename": orig_filename}
-    if fn.startswith("ERROR:"):
-        return {"doc_id": doc_id, "status": "error", "error": fn[6:], "original_filename": orig_filename}
+    return {"doc_id": doc_id, "status": "processing", "error": None, "original_filename": orig_filename}
 
-    return {
-        "doc_id": doc_id,
-        "status": "completed",
-        "translated_filename": fn,
-        "original_filename": orig_filename,
-        "download_url": f"/api/translation/download/{doc_id}",
-        "error": None
-    }
+
+@router.post("/translate/file/{doc_id}/cancel")
+async def cancel_translate_file(doc_id: int, db: Session = Depends(get_db)):
+    doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    fn = str(doc.translated_filename or "")
+    if fn.startswith("ERROR:"):
+        return {"doc_id": doc_id, "status": "error", "error": fn[6:], "original_filename": doc.filename or ""}
+    if fn.startswith(CANCELED_TRANSLATION_PREFIX):
+        cancel_message = fn[len(CANCELED_TRANSLATION_PREFIX):] or "翻译已停止"
+        return {"doc_id": doc_id, "status": "canceled", "error": cancel_message, "original_filename": doc.filename or ""}
+    if fn:
+        return {
+            "doc_id": doc_id,
+            "status": "completed",
+            "translated_filename": fn,
+            "original_filename": doc.filename or "",
+            "download_url": f"/api/translation/download/{doc_id}",
+            "error": None,
+        }
+
+    _mark_translation_canceled(doc_id, db)
+    return {"doc_id": doc_id, "status": "canceled", "error": "翻译已停止", "original_filename": doc.filename or ""}
 
 
 @router.get("/download/{doc_id}")
@@ -2425,9 +2795,14 @@ async def remove_memory_entry(entry_id: int, db: Session = Depends(get_db)):
 async def list_translation_docs(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=500),
+    batch_id: str = Query(""),
     db: Session = Depends(get_db)
 ):
-    docs = db.query(TranslationDoc).order_by(TranslationDoc.created_at.desc()).offset(skip).limit(limit).all()
+    query = db.query(TranslationDoc)
+    normalized_batch_id = (batch_id or "").strip()
+    if normalized_batch_id:
+        query = query.filter(TranslationDoc.batch_id == normalized_batch_id)
+    docs = query.order_by(TranslationDoc.created_at.desc()).offset(skip).limit(limit).all()
     return docs
 
 

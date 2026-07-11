@@ -7,7 +7,7 @@ class TranslationRequest(BaseModel):
     content: str
     engine: str = "hybrid"
     model: str = "kimi"
-    source_lang: str = "zh"
+    source_lang: str = "auto"
     target_lang: str = "en"
     memory_bank: Optional[str] = None
     memory_file_id: Optional[int] = None
@@ -62,6 +62,8 @@ class TranslationDocOut(BaseModel):
     translated_preview: str
     original_content: str
     translated_content: str
+    batch_id: str = ""
+    translated_filename: str = ""
     created_at: Optional[datetime] = None
 
     class Config:

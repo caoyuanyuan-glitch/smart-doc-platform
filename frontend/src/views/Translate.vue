@@ -38,6 +38,7 @@
           </el-form-item>
         <el-form-item label="语言">
           <el-select v-model="sourceLang" style="width: 100px">
+            <el-option label="自动" value="auto" />
             <el-option label="中文" value="zh" />
             <el-option label="英文" value="en" />
           </el-select>
@@ -170,10 +171,14 @@ import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const engine = ref('hybrid')
 const model = ref('kimi')
-const sourceLang = ref('zh')
+const sourceLang = ref('auto')
 const targetLang = ref('en')
 
 function swapLanguages() {
+  if (sourceLang.value === 'auto') {
+    ElMessage.info('自动识别模式下只需要选择目标语言')
+    return
+  }
   const tmp = sourceLang.value
   sourceLang.value = targetLang.value
   targetLang.value = tmp
