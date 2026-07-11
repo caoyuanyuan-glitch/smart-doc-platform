@@ -361,6 +361,21 @@ class AIClient:
                 )
                 if r.status_code == 200:
                     content = r.text.strip()
+                    try:
+                        payload = r.json()
+                    except Exception:
+                        payload = None
+                    if isinstance(payload, dict):
+                        choices = payload.get("choices") or []
+                        if choices:
+                            message = choices[0].get("message") or {}
+                            parsed = (message.get("content") or "").strip()
+                            if parsed:
+                                return parsed
+                        for key in ("content", "text", "result", "answer"):
+                            parsed = str(payload.get(key) or "").strip()
+                            if parsed:
+                                return parsed
                     if content:
                         if content.startswith('"') and content.endswith('"'):
                             content = json.loads(content)
@@ -390,8 +405,6 @@ class AIClient:
             providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
         if self.arkclaw_client:
             providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
-        if self.mcai_proxy_client:
-            providers.append(('MCAI', self.mcai_proxy_client, self.mcai_model))
         if self.proxy_client:
             providers.append(('Proxy', self.proxy_client, self.fallback_model))
 

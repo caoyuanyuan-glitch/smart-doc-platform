@@ -38,6 +38,7 @@
         </el-form-item>
         <el-form-item label="语言">
           <el-select v-model="sourceLang" style="width: 100px">
+            <el-option label="自动" value="auto" />
             <el-option label="中文" value="zh" />
             <el-option label="英文" value="en" />
           </el-select>
@@ -138,6 +139,9 @@
               <div v-if="job.status === 'submitting' || job.status === 'processing'" class="result-loading result-loading-inline">
                 <div class="loading-spinner"></div>
                 <p>{{ job.status === 'submitting' ? '正在提交翻译任务...' : `正在翻译... (${job.pollingCount}s)` }}</p>
+                <el-button v-if="job.doc_id && job.status === 'processing'" class="stop-job-btn" type="warning" plain @click="cancelTranslationJob(job)">
+                  停止翻译
+                </el-button>
               </div>
 
               <div v-else-if="job.status === 'completed'" class="result-content">
@@ -153,6 +157,11 @@
 
               <div v-else-if="job.status === 'error'" class="result-error">
                 <el-result icon="error" title="翻译失败" :sub-title="job.error || '翻译过程中发生错误'">
+                </el-result>
+              </div>
+
+              <div v-else-if="job.status === 'canceled'" class="result-error">
+                <el-result icon="warning" title="已停止翻译" :sub-title="job.error || '翻译任务已停止'">
                 </el-result>
               </div>
             </div>
@@ -175,10 +184,14 @@ const TRANSLATION_STATS_EVENT = 'translation-stats-updated'
 
 const engine = ref('hybrid')
 const model = ref('kimi')
-const sourceLang = ref('zh')
+const sourceLang = ref('auto')
 const targetLang = ref('en')
 
 function swapLanguages() {
+  if (sourceLang.value === 'auto') {
+    ElMessage.info('自动识别模式下只需要选择目标语言')
+    return
+  }
   const tmp = sourceLang.value
   sourceLang.value = targetLang.value
   targetLang.value = tmp
@@ -206,6 +219,7 @@ const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 onMounted(async () => {
   loadReviewedDocs()
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
+  await restoreLatestBatchJobs()
 })
 
 onBeforeUnmount(() => {
@@ -387,6 +401,42 @@ function createJob(filename) {
   return job
 }
 
+async function restoreLatestBatchJobs() {
+  const batchId = sessionStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || localStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || ''
+  if (!batchId) return
+
+  currentBatchId.value = batchId
+
+  try {
+    const res = await translationAPI.getDocs(0, 50, batchId)
+    const docs = Array.isArray(res.data) ? res.data : []
+    if (docs.length === 0) return
+
+    translationJobs.value = docs.map((doc) => ({
+      jobKey: `restored-${doc.id}`,
+      doc_id: doc.id,
+      original_filename: doc.filename,
+      translated_filename: doc.translated_filename || '',
+      download_url: doc.translated_filename ? `/api/translation/download/${doc.id}` : '',
+      status: doc.translated_filename
+        ? (String(doc.translated_filename).startsWith('ERROR:') ? 'error' : (String(doc.translated_filename).startsWith('CANCELED:') ? 'canceled' : 'completed'))
+        : 'processing',
+      error: String(doc.translated_filename || '').startsWith('ERROR:')
+        ? String(doc.translated_filename).slice(6)
+        : (String(doc.translated_filename || '').startsWith('CANCELED:') ? String(doc.translated_filename).slice(9) : ''),
+      pollingCount: 0
+    }))
+
+    for (const job of translationJobs.value) {
+      if (job.status === 'processing' && job.doc_id) {
+        startPolling(job.jobKey, job.doc_id)
+      }
+    }
+  } catch (e) {
+    console.error('恢复翻译任务失败', e)
+  }
+}
+
 function createBatchId() {
   return `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -398,7 +448,7 @@ function updateJob(jobKey, patch) {
 function startPolling(jobKey, docId) {
   stopPolling(jobKey)
 
-  const timer = setInterval(async () => {
+  const pollOnce = async () => {
     const currentJob = translationJobs.value.find(job => job.jobKey === jobKey)
     if (!currentJob) {
       stopPolling(jobKey)
@@ -407,7 +457,7 @@ function startPolling(jobKey, docId) {
 
     updateJob(jobKey, { pollingCount: currentJob.pollingCount + 3 })
     try {
-      const res = await translationAPI.getFileStatus(docId)
+      const res = await translationAPI.getFileStatus(docId, { _ts: Date.now() })
       const statusData = res.data
       if (statusData.status === 'completed') {
         stopPolling(jobKey)
@@ -421,20 +471,35 @@ function startPolling(jobKey, docId) {
         })
         window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'completed' } }))
         ElMessage.success('文档翻译完成')
-      } else if (statusData.status === 'error') {
+        return
+      }
+
+      if (statusData.status === 'error') {
         stopPolling(jobKey)
         const error = statusData.error || '翻译过程中发生错误'
         updateJob(jobKey, { status: 'error', error })
         window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'error' } }))
         ElMessage.error(error)
+        return
       }
+
+      if (statusData.status === 'canceled') {
+        stopPolling(jobKey)
+        updateJob(jobKey, { status: 'canceled', error: statusData.error || '翻译任务已停止' })
+        ElMessage.info(statusData.error || '翻译任务已停止')
+        return
+      }
+
+      const timer = window.setTimeout(pollOnce, 3000)
+      pollingTimers.set(jobKey, timer)
     } catch (e) {
       stopPolling(jobKey)
       updateJob(jobKey, { status: 'error', error: '查询翻译状态失败' })
       ElMessage.error('查询翻译状态失败')
     }
-  }, 3000)
+  }
 
+  const timer = window.setTimeout(pollOnce, 3000)
   pollingTimers.set(jobKey, timer)
 }
 
@@ -448,6 +513,7 @@ function stopPolling(jobKey) {
 
 function statusTagType(status) {
   if (status === 'completed') return 'success'
+  if (status === 'canceled') return 'warning'
   if (status === 'error') return 'danger'
   return 'info'
 }
@@ -456,8 +522,27 @@ function statusLabel(job) {
   if (job.status === 'submitting') return '提交中'
   if (job.status === 'processing') return `翻译中 ${job.pollingCount}s`
   if (job.status === 'completed') return '已完成'
+  if (job.status === 'canceled') return '已停止'
   if (job.status === 'error') return '失败'
   return '等待中'
+}
+
+async function cancelTranslationJob(job) {
+  if (!job?.doc_id) return
+
+  try {
+    const res = await translationAPI.cancelFileTranslation(job.doc_id)
+    stopPolling(job.jobKey)
+    updateJob(job.jobKey, {
+      status: res.data.status === 'completed' ? 'completed' : 'canceled',
+      translated_filename: res.data.translated_filename || job.translated_filename,
+      download_url: res.data.download_url || job.download_url,
+      error: res.data.error || '翻译任务已停止'
+    })
+    ElMessage.info(res.data.status === 'completed' ? '翻译已完成，无法停止' : '翻译任务已停止')
+  } catch (e) {
+    ElMessage.error('停止翻译失败')
+  }
 }
 
 function downloadTranslatedFile(job) {
@@ -682,6 +767,10 @@ function downloadTranslatedFile(job) {
 
 .result-loading-inline {
   padding: 20px;
+}
+
+.stop-job-btn {
+  margin-top: 12px;
 }
 
 .loading-spinner {
