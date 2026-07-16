@@ -2,10 +2,9 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
-from dotenv import load_dotenv
+from app.utils.env_loader import load_runtime_env
 
-load_dotenv()
-load_dotenv("runtime.env", override=True)
+load_runtime_env()
 
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 

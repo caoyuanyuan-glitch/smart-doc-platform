@@ -53,6 +53,11 @@ export const authAPI = {
   getMe: () => instance.get('/auth/users/me'),
 }
 
+export const systemAPI = {
+  getAIStatus: () => instance.get('/system/ai-status', { timeout: 70000 }),
+  warmupAI: () => instance.post('/system/ai-warmup', {}, { timeout: 70000 })
+}
+
 export const userAPI = {
   list: (params = {}) => instance.get('/auth/users', { params }),
   create: (data) => instance.post('/auth/users', data),

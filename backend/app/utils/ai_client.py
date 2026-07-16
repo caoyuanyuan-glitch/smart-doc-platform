@@ -7,11 +7,10 @@ import httpx
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from openai import OpenAI
-from dotenv import load_dotenv
 from openai import OpenAI
+from app.utils.env_loader import load_runtime_env
 
-load_dotenv()
-load_dotenv("runtime.env", override=True)
+load_runtime_env()
 
 # 完整审核规则（从review_rules模块导入）
 from app.api.review_rules import (
