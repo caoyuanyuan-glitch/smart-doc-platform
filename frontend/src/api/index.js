@@ -362,7 +362,3 @@ export const docPolishAPI = {
     timeout: 600000
   })
 }
-
-export const systemAPI = {
-  getAIStatus: () => instance.get('/system/ai-status')
-}
