@@ -232,24 +232,23 @@
         </div>
         <div class="content-right">
           <div v-if="result" class="panel result-panel">
-            <div class="panel-header">
-              <span>润色结果</span>
-              <div class="panel-actions">
-                <el-tag type="info" size="small">修改 {{ result.changes }} 处</el-tag>
-                <el-button size="small" @click="copyResult">复制</el-button>
-                <el-button size="small" @click="downloadResult">导出</el-button>
+              <div class="panel-header">
+                <div class="result-header-main">
+                  <span>润色结果</span>
+                  <el-tag size="small" type="success">当前引擎：{{ currentPolishEngine }}</el-tag>
+                </div>
+                <div class="panel-actions">
+                  <el-tag type="info" size="small">修改 {{ result.changes }} 处</el-tag>
+                  <el-button size="small" @click="copyResult">复制</el-button>
+                  <el-button size="small" @click="downloadResult">导出</el-button>
+                </div>
               </div>
-            </div>
-            <div class="result-grid-vertical">
-              <div class="result-col-v">
-                <div class="col-title"><span class="dot dot-blue"></span>原文</div>
-                <div class="col-content col-content-compact" v-html="highlightedOriginalHtml"></div>
+              <div class="result-grid-vertical">
+                <div class="result-col-v">
+                  <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
+                  <div class="col-content col-content-compact" v-html="highlightedPolishedHtml"></div>
+                </div>
               </div>
-              <div class="result-col-v">
-                <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
-                <div class="col-content col-content-compact" v-html="highlightedPolishedHtml"></div>
-              </div>
-            </div>
           </div>
           <div v-else class="panel result-placeholder">
             <div class="panel-header">
@@ -370,7 +369,7 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { polishAPI, knowledgeAPI } from '@/api'
+import { polishAPI, knowledgeAPI, systemAPI } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
 import { usePolishStore } from '@/store/polish'
 
@@ -443,6 +442,7 @@ const feedbackCorrections = ref('')
 const feedbackTarget = ref('terminology')
 const feedbackLoading = ref(false)
 const feedbackStats = ref({ totalCount: 0, averageAccuracy: 0 })
+const currentPolishEngine = ref('检测中')
 
 const feedbackPlaceholder = computed(() => (
   feedbackTarget.value === 'sentence_guide'
@@ -1034,7 +1034,6 @@ function findListItemInOther(itemText, index, otherText) {
   return itemText
 }
 
-const highlightedOriginalHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'original'))
 const highlightedPolishedHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'polished'))
 const highlightedDocOriginalHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'original'))
 const highlightedDocPolishedHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'polished'))
@@ -1821,6 +1820,21 @@ async function loadFeedbackStats() {
   }
 }
 
+async function loadPolishEngineStatus() {
+  try {
+    const resp = await systemAPI.getAIStatus()
+    const providers = resp.data?.providers || {}
+    if (providers.kimi?.status === 'ok') {
+      currentPolishEngine.value = 'Kimi'
+      return
+    }
+    currentPolishEngine.value = '本地润色'
+  } catch (e) {
+    console.error('加载润色引擎状态失败:', e)
+    currentPolishEngine.value = '本地润色'
+  }
+}
+
 async function loadDocumentFeedbackStats() {
   try {
     const resp = await polishAPI.getDocumentFeedbackStats()
@@ -1873,6 +1887,7 @@ onMounted(async () => {
   }
   loadKnowledgeTree()
   loadDropdownOptions()
+  await loadPolishEngineStatus()
   await loadFeedbackStats()
   await loadDocumentFeedbackStats()
 })
@@ -2450,6 +2465,12 @@ onMounted(async () => {
 .result-panel {
   margin-bottom: 0;
   overflow: hidden;
+}
+
+.result-header-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .result-panel .result-grid-vertical {

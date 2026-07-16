@@ -664,6 +664,27 @@ class AIClient:
             result.append(line)
         return '\n'.join(result)
 
+    @staticmethod
+    def _is_invalid_polish_response(source_text, polished_text):
+        candidate = str(polished_text or "").strip()
+        if not candidate:
+            return True
+
+        normalized = re.sub(r"[\s\u3000\.,，。!！\?？:：;；\-—_()（）\[\]{}<>《》\"'`]+", "", candidate).lower()
+        source_normalized = re.sub(r"[\s\u3000\.,，。!！\?？:：;；\-—_()（）\[\]{}<>《》\"'`]+", "", str(source_text or "")).lower()
+
+        ack_like_responses = {
+            "ok", "okay", "yes", "done", "received", "success",
+            "好的", "收到", "明白", "完成", "已完成", "处理完成"
+        }
+        if normalized in ack_like_responses:
+            return True
+
+        if len(normalized) <= 4 and normalized and normalized not in source_normalized:
+            return True
+
+        return False
+
     def polish_text(self, text, style_guide=None, terminology=None):
         system = """你是一位严格的中文技术文档校对员。按以下优先级逐句处理待审核文本：
 
@@ -728,9 +749,17 @@ class AIClient:
         try:
             parsed = json.loads(result)
             if isinstance(parsed, dict) and "polished" in parsed:
+                polished_value = parsed.get("polished")
+                if self._is_invalid_polish_response(text, polished_value):
+                    print(f"[AI] 润色结果无效，回退规则润色: {str(polished_value)[:80]}")
+                    return {"original": text, "polished": text}
                 return parsed
         except:
             pass
+
+        if self._is_invalid_polish_response(text, result):
+            print(f"[AI] 润色结果无效，回退规则润色: {result[:80]}")
+            return {"original": text, "polished": text}
 
         return {"original": text, "polished": result.strip()}
 

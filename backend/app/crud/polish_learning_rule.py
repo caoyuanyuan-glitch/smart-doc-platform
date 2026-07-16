@@ -172,7 +172,7 @@ def record_rule_triggers(db: Session, rule_ids: list[int] = None, engine_keys: l
 
 
 def seed_system_rules(db: Session) -> int:
-    """初始化 5 条系统规则到数据库（使用原始 SQL 避免 FK 约束校验）。已存在则跳过。"""
+    """初始化系统规则到数据库，并默认保持禁用状态。"""
     from sqlalchemy import text
     system_rules = [
         {
@@ -184,7 +184,7 @@ def seed_system_rules(db: Session) -> int:
             "replacement_text": "仅替换明确错误的非标准说法，通用名词不匹配",
             "description": "保守匹配：只替换完整词且明确错误的非标准说法。如'试验台'→'操作台'，不匹配通用名词如'仪器'。",
             "priority_level": 10,
-            "enabled": 1,
+            "enabled": 0,
         },
         {
             "rule_name": "祈使句规范",
@@ -195,7 +195,7 @@ def seed_system_rules(db: Session) -> int:
             "replacement_text": "根据动词分类自动处理'请'字",
             "description": "操作类动词不加'请'（如'点击下一步'），建议类动词加'请'（如'请确认'），警告类保持原样（如'严禁触碰'）。",
             "priority_level": 20,
-            "enabled": 1,
+            "enabled": 0,
         },
         {
             "rule_name": "数字单位空格",
@@ -206,7 +206,7 @@ def seed_system_rules(db: Session) -> int:
             "replacement_text": "在数字和单位之间加空格",
             "description": "数字与单位之间加一个空格：200μL→200 μL，20℃→20 ℃，100rpm→100 rpm。",
             "priority_level": 30,
-            "enabled": 1,
+            "enabled": 0,
         },
         {
             "rule_name": "中英文空格",
@@ -217,7 +217,7 @@ def seed_system_rules(db: Session) -> int:
             "replacement_text": "在中文与英文/数字之间加空格",
             "description": "中文与英文/数字之间加空格：AIO基因→AIO 基因。例外：英文缩写与数字之间不加空格（V1.0保持）。",
             "priority_level": 40,
-            "enabled": 1,
+            "enabled": 0,
         },
         {
             "rule_name": "标点规范",
@@ -228,7 +228,7 @@ def seed_system_rules(db: Session) -> int:
             "replacement_text": "补充缺失的标点符号",
             "description": "句尾缺少标点时补充句号，条件从句后补充逗号（如'如需修改密码可点击'→'如需修改密码，可点击'）。",
             "priority_level": 50,
-            "enabled": 1,
+            "enabled": 0,
         },
     ]
 
@@ -247,6 +247,7 @@ def seed_system_rules(db: Session) -> int:
         db.execute(sql, item)
         created += 1
 
-    if created:
-        db.commit()
+    db.execute(text("UPDATE polish_learning_rules SET enabled = 0 WHERE rule_type = 'system_rule'"))
+
+    db.commit()
     return created
