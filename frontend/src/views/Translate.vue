@@ -201,6 +201,29 @@ const writableMemoryFileTypes = ['xlsx', 'xlsm', 'xltx', 'xltm']
 const writableMemoryLibraryFiles = computed(() => {
   return memoryLibraryFiles.value.filter(file => writableMemoryFileTypes.includes(String(file.fileType || '').toLowerCase()))
 })
+
+function syncWritableMemorySelection(preferredId = null) {
+  const writableFiles = writableMemoryLibraryFiles.value
+  const preferred = preferredId == null || preferredId === ''
+    ? null
+    : writableFiles.find(file => String(file.id) === String(preferredId))
+
+  if (preferred) {
+    memoryWriteFileId.value = preferred.id
+    return
+  }
+
+  const current = memoryWriteFileId.value == null || memoryWriteFileId.value === ''
+    ? null
+    : writableFiles.find(file => String(file.id) === String(memoryWriteFileId.value))
+
+  if (current) {
+    return
+  }
+
+  memoryWriteFileId.value = writableFiles[0]?.id ?? null
+}
+
 const selectedMemoryWriteFile = computed(() => {
   const currentId = memoryWriteFileId.value
   if (currentId == null || currentId === '') {
@@ -229,14 +252,10 @@ async function loadMemoryLibraryFiles() {
   try {
     const res = await knowledgeAPI.getTree()
     memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
-    if (!memoryWriteFileId.value && memoryFileId.value != null) {
-      const matchedFile = memoryLibraryFiles.value.find(file => String(file.id) === String(memoryFileId.value))
-      if (matchedFile && writableMemoryFileTypes.includes(String(matchedFile.fileType || '').toLowerCase())) {
-        memoryWriteFileId.value = matchedFile.id
-      }
-    }
+    syncWritableMemorySelection(memoryFileId.value)
   } catch (e) {
     memoryLibraryFiles.value = []
+    memoryWriteFileId.value = null
   } finally {
     memoryLibraryLoading.value = false
   }
@@ -266,12 +285,7 @@ async function translateText() {
     result.value = res.data
     translatedDraft.value = res.data.translated || ''
     editingResult.value = false
-    if (!memoryWriteFileId.value && memoryFileId.value != null) {
-      const matchedFile = writableMemoryLibraryFiles.value.find(file => String(file.id) === String(memoryFileId.value))
-      if (matchedFile) {
-        memoryWriteFileId.value = matchedFile.id
-      }
-    }
+    syncWritableMemorySelection(memoryFileId.value)
     ElMessage.success('翻译完成')
   } catch (e) {
     ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
