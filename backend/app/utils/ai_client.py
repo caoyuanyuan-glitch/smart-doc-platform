@@ -7,11 +7,10 @@ import httpx
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from openai import OpenAI
-from dotenv import load_dotenv
 from openai import OpenAI
+from app.utils.runtime_config import bootstrap_runtime_env, get_kimi_api_key
 
-load_dotenv()
-load_dotenv("runtime.env", override=True)
+bootstrap_runtime_env()
 
 # 完整审核规则（从review_rules模块导入）
 from app.api.review_rules import (
@@ -52,7 +51,7 @@ class AIClient:
         self.arkclaw_model = os.getenv("ARKCLAW_MODEL", "arkclaw-chat")
 
         # Kimi (Moonshot AI) 配置
-        self.kimi_api_key = os.getenv("KIMI_API_KEY")
+        self.kimi_api_key = get_kimi_api_key()
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
 
