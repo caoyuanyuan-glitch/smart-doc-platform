@@ -7,7 +7,6 @@ import httpx
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from openai import OpenAI
-from openai import OpenAI
 from app.utils.runtime_config import bootstrap_runtime_env, get_kimi_api_key
 
 bootstrap_runtime_env()
