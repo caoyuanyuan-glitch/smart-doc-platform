@@ -5,6 +5,20 @@ function normalizeName(name) {
   return String(name || '').trim().toLowerCase()
 }
 
+function resolveFileType(file) {
+  const explicitType = String(file?.file_type || file?.fileType || file?.type || file?.extension || '').trim().toLowerCase()
+  if (explicitType) {
+    return explicitType.replace(/^\./, '')
+  }
+
+  const filename = String(file?.filename || file?.name || '').trim().toLowerCase()
+  const lastDotIndex = filename.lastIndexOf('.')
+  if (lastDotIndex === -1) {
+    return ''
+  }
+  return filename.slice(lastDotIndex + 1)
+}
+
 function isResourceFolder(name) {
   return RESOURCE_FOLDER_NAMES.includes(normalizeName(name))
 }
@@ -19,7 +33,7 @@ function collectFilesFromFolder(node, path = []) {
     id: file.id,
     name: file.name,
     filename: file.filename,
-    fileType: String(file.file_type || file.fileType || '').toLowerCase(),
+    fileType: resolveFileType(file),
     label: [...currentPath, file.name].join(' / '),
     path: currentPath.join(' / ')
   }))
