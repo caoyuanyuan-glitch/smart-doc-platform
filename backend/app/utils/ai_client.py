@@ -7,10 +7,9 @@ import httpx
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from openai import OpenAI
-from openai import OpenAI
-from app.utils.env_loader import load_runtime_env
+from app.utils.runtime_config import bootstrap_runtime_env, get_kimi_api_key
 
-load_runtime_env()
+bootstrap_runtime_env()
 
 # 完整审核规则（从review_rules模块导入）
 from app.api.review_rules import (
@@ -51,7 +50,7 @@ class AIClient:
         self.arkclaw_model = os.getenv("ARKCLAW_MODEL", "arkclaw-chat")
 
         # Kimi (Moonshot AI) 配置
-        self.kimi_api_key = os.getenv("KIMI_API_KEY")
+        self.kimi_api_key = get_kimi_api_key()
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
 
@@ -164,10 +163,16 @@ class AIClient:
             try:
                 start = time.time()
                 response = client.chat.completions.create(
-                    model=model,
-                    messages=ping_msg,
-                    max_tokens=5,
-                    temperature=0,
+                    **self._build_kimi_request_kwargs(
+                        model=model,
+                        messages=ping_msg,
+                        max_tokens=5,
+                    ) if name == "kimi" else {
+                        "model": model,
+                        "messages": ping_msg,
+                        "max_tokens": 5,
+                        "temperature": 0,
+                    }
                 )
                 elapsed = round((time.time() - start) * 1000)
                 results[name] = {
@@ -319,10 +324,12 @@ class AIClient:
         for attempt in range(1, max_retries + 1):
             try:
                 response = self.kimi_client.chat.completions.create(
-                    model=self.kimi_model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature
+                    **self._build_kimi_request_kwargs(
+                        model=self.kimi_model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -335,6 +342,28 @@ class AIClient:
                 print(f"Kimi调用失败: {str(e)}")
                 return None
         return None
+
+    @staticmethod
+    def _is_kimi_k2_family(model_name):
+        normalized = str(model_name or "").strip().lower()
+        return normalized.startswith("kimi-k2")
+
+    def _build_kimi_request_kwargs(self, model, messages, max_tokens=2048, temperature=1.0, thinking=None, **extra):
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        kwargs.update(extra)
+        if self._is_kimi_k2_family(model):
+            thinking_type = thinking or "enabled"
+            extra_body = dict(kwargs.get("extra_body") or {})
+            extra_body["thinking"] = {"type": thinking_type}
+            kwargs["extra_body"] = extra_body
+            kwargs["temperature"] = 0.6 if thinking_type == "disabled" else 1.0
+        else:
+            kwargs["temperature"] = temperature
+        return kwargs
 
     def _call_mcai_proxy(self, messages, max_tokens=2048, temperature=0.3):
         if not self.mcai_available:
@@ -394,7 +423,7 @@ class AIClient:
                 return None
         return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3):
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None):
         # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
         self.last_chat_errors = []
         providers = []
@@ -414,13 +443,23 @@ class AIClient:
             for name, client, model in providers:
                 for attempt in range(1, max_retries + 1):
                     try:
-                        request_temperature = 1 if name == 'Kimi' else temperature
-                        response = client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            max_tokens=max_tokens,
-                            temperature=request_temperature,
+                        request_kwargs = (
+                            self._build_kimi_request_kwargs(
+                                model=model,
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                thinking=kimi_thinking,
+                            )
+                            if name == 'Kimi'
+                            else {
+                                "model": model,
+                                "messages": messages,
+                                "max_tokens": max_tokens,
+                                "temperature": temperature,
+                            }
                         )
+                        response = client.chat.completions.create(**request_kwargs)
                         choice = response.choices[0]
                         content = choice.message.content or ""
                         if content.strip():
@@ -840,10 +879,12 @@ class AIClient:
 
         try:
             response = self.kimi_client.with_options(timeout=35, max_retries=0).chat.completions.create(
-                model=self.kimi_model,
-                messages=[{"role": "user", "content": user_content}],
-                max_tokens=1024,
-                temperature=1,
+                **self._build_kimi_request_kwargs(
+                    model=self.kimi_model,
+                    messages=[{"role": "user", "content": user_content}],
+                    max_tokens=1024,
+                    thinking="disabled",
+                )
             )
             result = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
@@ -906,10 +947,12 @@ class AIClient:
 
         try:
             response = self.kimi_client.with_options(timeout=120, max_retries=0).chat.completions.create(
-                model=self.kimi_model,
-                messages=[{"role": "user", "content": user_content}],
-                max_tokens=4096,
-                temperature=1,
+                **self._build_kimi_request_kwargs(
+                    model=self.kimi_model,
+                    messages=[{"role": "user", "content": user_content}],
+                    max_tokens=4096,
+                    thinking="disabled",
+                )
             )
             result = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
@@ -1015,12 +1058,22 @@ class AIClient:
 
         for provider_name, client, model, model_key in refine_providers:
             try:
-                response = client.with_options(timeout=timeout, max_retries=0).chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": refine_instruction}],
-                    max_tokens=2048,
-                    temperature=1,
+                request_kwargs = (
+                    self._build_kimi_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": refine_instruction}],
+                        max_tokens=2048,
+                        thinking="disabled",
+                    )
+                    if provider_name == "Kimi"
+                    else {
+                        "model": model,
+                        "messages": [{"role": "user", "content": refine_instruction}],
+                        "max_tokens": 2048,
+                        "temperature": 1,
+                    }
                 )
+                response = client.with_options(timeout=timeout, max_retries=0).chat.completions.create(**request_kwargs)
                 result = response.choices[0].message.content
             except Exception as e:
                 print(f"{provider_name} 初稿改写失败: {str(e)}")
@@ -1213,12 +1266,22 @@ class AIClient:
 
         for provider_name, client, model, model_key in refine_providers:
             try:
-                response = client.with_options(timeout=90, max_retries=0).chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": refine_instruction}],
-                    max_tokens=2048,
-                    temperature=1,
+                request_kwargs = (
+                    self._build_kimi_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": refine_instruction}],
+                        max_tokens=2048,
+                        thinking="disabled",
+                    )
+                    if provider_name == "Kimi"
+                    else {
+                        "model": model,
+                        "messages": [{"role": "user", "content": refine_instruction}],
+                        "max_tokens": 2048,
+                        "temperature": 1,
+                    }
                 )
+                response = client.with_options(timeout=90, max_retries=0).chat.completions.create(**request_kwargs)
                 result = response.choices[0].message.content
             except Exception as e:
                 print(f"{provider_name} 初稿改写失败: {str(e)}")
