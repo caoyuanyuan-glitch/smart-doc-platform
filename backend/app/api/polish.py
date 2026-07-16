@@ -28,6 +28,7 @@ from app.crud.term import bulk_create_terms
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+POLISH_AI_ONLY = True
 
 # 润色任务进度追踪
 _polish_tasks: dict = {}  # {task_id: {"status", "progress", "message", "result"}}
@@ -72,6 +73,10 @@ def _protect_model_numbers(text: str) -> str:
     text = re.sub(r'(?<=(?:表|图)\d)\s*(?=[A-Za-z]{2,})', ' ', text)
     text = re.sub(r'(?<=\d\.\d)\s*(?=[A-Za-z]{2,})', ' ', text)
     return text
+
+
+def _use_ai_only() -> bool:
+    return POLISH_AI_ONLY
 
 
 def _term_column_lang(header: str) -> str:
@@ -406,6 +411,21 @@ def _resolve_terminology(db: Session, terminology_md: str = None, text: str = No
     if merged:
         return merged
     return _load_terms_from_db(db)
+
+
+def _load_terminology_source(db: Session, terminology_id: int = None) -> Optional[str]:
+    """加载术语来源。Excel 返回文件路径，其它文本文件返回文件内容。"""
+    if not terminology_id:
+        return None
+
+    term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == terminology_id).first()
+    if not term_file or not term_file.file_path or not os.path.exists(term_file.file_path):
+        return None
+
+    if term_file.file_path.lower().endswith('.xlsx'):
+        return term_file.file_path
+
+    return _read_file_safe(term_file.file_path)
 
 
 # 句式清单所在知识库文件夹 ID（写作规范 / 句式清单）
@@ -1078,6 +1098,10 @@ def _apply_skill_polish(
         before_core = before_text.rstrip('。.!！？?，,;；:：')
         after_core = after_text.rstrip('。.!！？?，,;；:：')
         return before_core != after_core
+    if _use_ai_only():
+        return text, []
+
+    sentence_only_mode = False
     changes = []
     lines = text.split('\n')
     polished_lines = []
@@ -1096,7 +1120,7 @@ def _apply_skill_polish(
     
     term_dict = {}
     # 先解析文件中的术语替换（支持中英文多列表，自动语言过滤）
-    if terminology:
+    if terminology and not sentence_only_mode:
         try:
             parsed = _parse_terminology(terminology)
             if parsed:
@@ -1105,13 +1129,13 @@ def _apply_skill_polish(
         except Exception:
             pass
     # 合并数据库术语库（优先级高于文件术语）
-    if db_terminology:
+    if db_terminology and not sentence_only_mode:
         term_dict.update(db_terminology)
     
-    engine_enabled_rules = get_enabled_engine_keys(db) if db else None
+    engine_enabled_rules = [] if sentence_only_mode else (get_enabled_engine_keys(db) if db else None)
     if is_title and engine_enabled_rules:
         engine_enabled_rules = [key for key in engine_enabled_rules if key != 'punctuation']
-    custom_rules = get_enabled_custom_rules(db) if db else []
+    custom_rules = [] if sentence_only_mode else (get_enabled_custom_rules(db) if db else [])
 
     def _rule_type(rule) -> str:
         return str(getattr(rule, 'rule_type', '') or '')
@@ -1193,14 +1217,15 @@ def _apply_skill_polish(
                 )
             _append_custom_issues(custom_issues)
 
-        term_line, term_issues = apply_all_rules(
-            new_line,
-            term_dict=term_dict,
-            enabled_rules=term_enabled_rules,
-            context_text=text
-        )
-        _append_engine_issues(term_issues)
-        new_line = term_line
+        if not sentence_only_mode:
+            term_line, term_issues = apply_all_rules(
+                new_line,
+                term_dict=term_dict,
+                enabled_rules=term_enabled_rules,
+                context_text=text
+            )
+            _append_engine_issues(term_issues)
+            new_line = term_line
 
         if term_custom_rules:
             new_line, custom_issues = apply_custom_rules(new_line, term_custom_rules)
@@ -1211,20 +1236,22 @@ def _apply_skill_polish(
             _append_custom_issues(custom_issues)
 
         # ── 应用其余系统规则（从 DB 读取启用的规则） ──
-        polished_line, engine_issues = apply_all_rules(
-            new_line,
-            term_dict={},
-            enabled_rules=other_engine_rules,
-            context_text=text
-        )
-        _append_engine_issues(engine_issues)
-        new_line = polished_line
+        if not sentence_only_mode:
+            polished_line, engine_issues = apply_all_rules(
+                new_line,
+                term_dict={},
+                enabled_rules=other_engine_rules,
+                context_text=text
+            )
+            _append_engine_issues(engine_issues)
+            new_line = polished_line
         
-        new_line = re.sub(r'\s+', ' ', new_line)
-        new_line = _protect_model_numbers(new_line)
+        if not sentence_only_mode:
+            new_line = re.sub(r'\s+', ' ', new_line)
+            new_line = _protect_model_numbers(new_line)
         
         # 标题、表标题、图标题等不加句号，也不做空间距规整
-        if not is_title:
+        if not is_title and not sentence_only_mode:
             if new_line and not new_line.endswith(('。', '.', '！', '!', '？', '?')):
                 if not _is_noun_phrase(new_line):
                     if re.search(r'[\u4e00-\u9fff]', new_line):
@@ -1235,8 +1262,10 @@ def _apply_skill_polish(
             new_line = re.sub(r'([\u4e00-\u9fff])(?!表\d|图\d)([A-Za-z0-9])', r'\1 \2', new_line)
             new_line = re.sub(r'([A-Za-z0-9])([\u4e00-\u9fff])', r'\1 \2', new_line)
             new_line = _protect_model_numbers(new_line)
+        elif sentence_only_mode and not has_changes:
+            new_line = original
         
-        if new_line != original or has_changes:
+        if not sentence_only_mode and (new_line != original or has_changes):
             change_type = "format"
             if '。' in new_line[-2:] and original[-1] not in '。.!！？?':
                 change_type = "punctuation"
@@ -1599,15 +1628,7 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
 @router.post("/text")
 async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depends(get_db)):
     """基础文本润色（自动加载句式清单和术语库）"""
-    import os
-    terminology_md = None
-    if input_data.terminology_id:
-        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
-        if term_file and term_file.file_path and os.path.exists(term_file.file_path):
-            if term_file.file_path.lower().endswith('.xlsx'):
-                terminology_md = term_file.file_path
-            else:
-                terminology_md = _read_file_safe(term_file.file_path)
+    terminology_md = _load_terminology_source(db, input_data.terminology_id)
     sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
     try:
         from app.utils.ai_client import ai_client
@@ -1618,16 +1639,6 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
             terminology=resolved_terminology if resolved_terminology else None
         )
         ai_polished = _protect_model_numbers(result.get("polished", input_data.text))
-        db_terms_for_rule = None if terminology_md else _load_terms_from_db(db)
-        polished, rule_changes = _apply_skill_polish(
-            ai_polished,
-            {},
-            db,
-            sentence_guide,
-            terminology_md,
-            None,
-            db_terminology=db_terms_for_rule if db_terms_for_rule else None
-        )
         changes = []
         if ai_polished != input_data.text:
             changes.append({
@@ -1636,27 +1647,16 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
                 "polished": ai_polished[:200],
                 "type": "ai"
             })
-        changes.extend([c.dict() if hasattr(c, 'dict') else c for c in rule_changes])
         return {
             "original": result.get("original", input_data.text),
-            "polished": polished,
+            "polished": ai_polished,
             "changes": changes
         }
     except Exception:
-        db_terminology = None if terminology_md else _load_terms_from_db(db)
-        polished, changes = _apply_skill_polish(
-            input_data.text,
-            {},
-            None,
-            sentence_guide,
-            terminology_md,
-            None,
-            db_terminology=db_terminology if db_terminology else None
-        )
         return {
             "original": input_data.text,
-            "polished": polished,
-            "changes": [c.dict() if hasattr(c, 'dict') else c for c in changes]
+            "polished": input_data.text,
+            "changes": []
         }
 
 
@@ -1677,43 +1677,29 @@ async def polish_with_skill(
     )
 
     # 加载术语：文件术语优先，否则回退数据库术语
-    terminology_md = None
-    if input_data.terminology_id:
-        term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == input_data.terminology_id).first()
-        if term_file and term_file.file_path and os.path.exists(term_file.file_path):
-            terminology_md = _read_file_safe(term_file.file_path)
-    resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
-
-    # 先执行 AI 润色
+    terminology_md = _load_terminology_source(db, input_data.terminology_id)
     ai_polished = input_data.text
     ai_changes = []
     try:
         from app.utils.ai_client import ai_client
+        resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
         ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
-        if ai_result and ai_result.get("polished") and ai_result["polished"] != input_data.text:
+        if ai_result and ai_result.get("polished"):
             ai_polished = _protect_model_numbers(ai_result["polished"])
-            ai_changes = ai_result.get("changes") or [{"type": "ai", "summary": "AI 根据句式清单完成智能润色"}]
-    except Exception as e:
-        print(f"AI 润色失败(继续使用规则润色): {e}")
-    
-    # 在 AI 润色结果上执行规则润色
-    db_terms_for_rule = None if terminology_md else _load_terms_from_db(db)
-    polished, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology_md, None, db_terminology=db_terms_for_rule)
-    # 合并变更：AI 变更转为 PolishRuleMatch
-    if ai_changes:
-        for ac in ai_changes:
-            if isinstance(ac, dict):
-                changes.insert(0, PolishRuleMatch(
-                    rule_name=ac.get("type", "ai"),
-                    before=ac.get("original", "")[:50],
-                    after=_protect_model_numbers(ac.get("polished", ""))[:50],
-                    type="ai"
-                ))
+            if ai_polished != input_data.text:
+                ai_changes = [{
+                    "rule_name": "ai",
+                    "before": input_data.text[:50],
+                    "after": ai_polished[:50],
+                    "type": "ai"
+                }]
+    except Exception:
+        pass
     
     return {
         "original": input_data.text,
-        "polished": polished,
-        "changes": [c.dict() for c in changes],
+        "polished": ai_polished,
+        "changes": ai_changes,
         "skill_name": "技术文档智能润色",
         "rules_applied": skill_rules.get("rules", {})
     }
@@ -2655,10 +2641,10 @@ async def analyze_file_endpoint(
                 ai_polished = ai_result["polished"]
                 ai_changes = ai_result.get("changes") or [{
                     "type": "ai",
-                    "summary": "AI 根据句式清单完成智能润色"
+                    "summary": "AI 完成润色"
                 }]
         except Exception as e:
-            print(f"AI 润色失败(继续使用规则润色): {e}")
+            print(f"AI 润色失败(返回原文): {e}")
 
         _update_progress(50, "应用修订标记...")
         if is_docx:
@@ -2730,18 +2716,16 @@ async def analyze_file_endpoint(
             _finish_task(result_data)
             return result_data
         else:    
-            _update_progress(70, "规则润色中...")
-            polished_text, changes = _apply_skill_polish(ai_polished, skill_rules, db, sentence_guide, terminology, requirements, db_terminology=db_terms)
-            if ai_changes:
-                for ac in ai_changes:
-                    if isinstance(ac, dict):
-                        changes.insert(0, PolishRuleMatch(
-                            rule_name=ac.get("type", "ai"),
-                            before=ac.get("summary", "")[:50],
-                            after="AI 根据句式清单完成智能润色",
-                            type="ai"
-                        ))
-            
+            _update_progress(70, "整理润色结果...")
+            polished_text = _protect_model_numbers(ai_polished)
+            changes = []
+            if ai_changes and polished_text != content:
+                changes.append(PolishRuleMatch(
+                    rule_name="ai",
+                    before=content[:50],
+                    after=polished_text[:50],
+                    type="ai"
+                ))
             _update_progress(90, "保存结果...")
             if not os.path.exists(UPLOAD_DIR):
                 os.makedirs(UPLOAD_DIR)
@@ -3121,19 +3105,25 @@ async def polish_document(document_id: int, db: Session = Depends(get_db)):
 
     try:
         from app.utils.ai_client import ai_client
-        terminology = _load_terms_from_db(db)
+        terminology = _resolve_terminology(db, text=document.content or "")
         result = ai_client.polish_text(document.content or "", terminology=terminology if terminology else None)
-        changes = result.get("changes") or []
+        polished = _protect_model_numbers(result.get("polished", document.content or ""))
+        changes = []
+        if polished != (document.content or ""):
+            changes.append({"line": 1, "original": (document.content or "")[:80], "polished": polished[:80], "type": "ai"})
         return {
             "document_id": document_id,
             "original": result.get("original", document.content or ""),
-            "polished": result.get("polished", document.content or ""),
+            "polished": polished,
             "changes": changes
         }
     except Exception:
-        fb = _polish_fallback(document.content or "", db_terminology=terminology if terminology else None)
-        fb["document_id"] = document_id
-        return fb
+        return {
+            "document_id": document_id,
+            "original": document.content or "",
+            "polished": document.content or "",
+            "changes": []
+        }
 
 
 def _polish_fallback(text: str, db_terminology: dict = None):
@@ -3141,7 +3131,7 @@ def _polish_fallback(text: str, db_terminology: dict = None):
     return {
         "original": text,
         "polished": polished,
-        "changes": changes or [{"line": 1, "original": text[:80], "polished": polished[:80], "type": "format"}]
+        "changes": changes
     }
 
 

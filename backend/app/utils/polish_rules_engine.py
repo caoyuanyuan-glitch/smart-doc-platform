@@ -419,7 +419,7 @@ def apply_custom_rules(line: str, rules: list = None) -> tuple:
         'imperative_rule': 'style',
         'format_rule': 'format',
     }
-    replacement_types = {'replacement_rule', 'forbidden_rule'}
+    replacement_types = {'replacement_rule', 'forbidden_rule', 'sentence_applicability_rule'}
     result = line
     issues = []
 
@@ -430,22 +430,27 @@ def apply_custom_rules(line: str, rules: list = None) -> tuple:
         replacement = rule.replacement_text or ''
         before = result
         matched = False
+        matched_text = ''
 
         try:
+            search_match = re.search(pattern, result)
+            if search_match:
+                matched_text = search_match.group(0)
             if rule.rule_type in replacement_types:
                 result, count = re.subn(pattern, replacement, result)
             else:
-                count = 1 if re.search(pattern, result) else 0
+                count = 1 if search_match else 0
             matched = count > 0
         except re.error:
             if pattern in result:
+                matched_text = pattern
                 if rule.rule_type in replacement_types:
                     result = result.replace(pattern, replacement)
                 matched = True
 
         if matched:
             issues.append({
-                'original': pattern,
+                'original': matched_text or pattern,
                 'replacement': replacement,
                 'reason': rule.description or rule.rule_name or '自定义规则',
                 'rule_name': rule.rule_name or '自定义规则',
