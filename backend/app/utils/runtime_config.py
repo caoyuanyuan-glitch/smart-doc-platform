@@ -32,8 +32,9 @@ def bootstrap_runtime_env():
     _load_env_file(_BACKEND_DIR / ".env", override=False)
     _load_env_file(_BACKEND_DIR / "runtime.env", override=True)
     _load_env_file(Path("/root/.codingmatrix/smart-doc-runtime.env"), override=False)
+    _load_env_file(Path.home() / ".smart-doc-platform" / "runtime.env", override=True)
 
-    custom_env_file = os.getenv("ENV_FILE")
+    custom_env_file = os.getenv("SMART_DOC_ENV_FILE") or os.getenv("ENV_FILE")
     if _non_empty(custom_env_file):
         _load_env_file(Path(custom_env_file).expanduser(), override=True)
 

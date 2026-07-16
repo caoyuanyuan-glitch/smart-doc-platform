@@ -7,6 +7,36 @@
           <span class="logo">智能技术文档平台</span>
         </div>
         <div class="header-right">
+          <el-popover
+            placement="bottom-end"
+            trigger="click"
+            width="360"
+            popper-class="ai-status-popover"
+          >
+            <template #reference>
+              <button class="ai-status-chip" :class="aiStatusClass" type="button" @click="fetchAIStatus">
+                <span class="ai-status-dot"></span>
+                <span>{{ aiStatusLabel }}</span>
+              </button>
+            </template>
+            <div class="ai-status-panel">
+              <div class="ai-status-title-row">
+                <div>
+                  <div class="ai-status-title">AI 调用状态</div>
+                  <div class="ai-status-subtitle">{{ aiStatusSubtitle }}</div>
+                </div>
+                <el-button size="small" :loading="aiStatusLoading" @click="fetchAIStatus">刷新</el-button>
+              </div>
+              <div v-if="aiStatusError" class="ai-status-error">{{ aiStatusError }}</div>
+              <div v-else class="ai-provider-list">
+                <div v-for="provider in providerRows" :key="provider.name" class="ai-provider-row">
+                  <span class="provider-name">{{ provider.label }}</span>
+                  <span class="provider-state" :class="provider.stateClass">{{ provider.text }}</span>
+                  <span class="provider-meta">{{ provider.meta }}</span>
+                </div>
+              </div>
+            </div>
+          </el-popover>
           <el-badge v-if="userStore.isAdmin" :value="unreadFeedbackCount" :hidden="unreadFeedbackCount === 0" class="feedback-badge">
             <el-icon class="feedback-icon" @click="goToFeedback"><Message /></el-icon>
           </el-badge>
@@ -149,7 +179,7 @@
 import { ref, computed, onMounted, onUnmounted, provide } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
-import { qaAPI } from '@/api'
+import { qaAPI, systemAPI } from '@/api'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
   Files, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
@@ -160,7 +190,19 @@ const router = useRouter()
 const userStore = useUserStore()
 const isCollapsed = ref(false)
 const unreadFeedbackCount = ref(0)
+const aiStatus = ref(null)
+const aiStatusLoading = ref(false)
+const aiStatusError = ref('')
 let feedbackTimer = null
+let aiStatusTimer = null
+
+const providerLabels = {
+  kimi: 'Kimi',
+  deepseek: 'DeepSeek',
+  arkclaw: 'ArkClaw',
+  proxy: 'Proxy',
+  mcai: 'MCAI Proxy'
+}
 
 const activeMenu = computed(() => {
   const path = router.currentRoute.value.path
@@ -185,6 +227,62 @@ function goToFeedback() {
   router.push('/feedback')
 }
 
+const aiStatusClass = computed(() => {
+  if (aiStatusLoading.value && !aiStatus.value) return 'checking'
+  if (aiStatusError.value) return 'offline'
+  if (!aiStatus.value) return 'unknown'
+  if (aiStatus.value.healthy && aiStatus.value.ok_providers > 0) return 'online'
+  if (aiStatus.value.ok_providers > 0) return 'degraded'
+  return 'offline'
+})
+
+const aiStatusLabel = computed(() => {
+  if (aiStatusLoading.value && !aiStatus.value) return 'AI 检测中'
+  if (aiStatusError.value) return 'AI 异常'
+  if (!aiStatus.value) return 'AI 未检测'
+  if (aiStatus.value.healthy && aiStatus.value.ok_providers > 0) return `AI 可用 ${aiStatus.value.ok_providers}/${aiStatus.value.total_providers}`
+  if (aiStatus.value.ok_providers > 0) return `AI 部分可用 ${aiStatus.value.ok_providers}/${aiStatus.value.total_providers}`
+  return 'AI 不可用'
+})
+
+const aiStatusSubtitle = computed(() => {
+  if (aiStatusError.value) return '后端状态接口访问失败'
+  if (!aiStatus.value) return '点击刷新检测 provider'
+  const primary = aiStatus.value.primary || 'kimi'
+  const primaryStatus = aiStatus.value.primary_status || 'unknown'
+  return `主 provider: ${providerLabels[primary] || primary} · ${primaryStatus}`
+})
+
+const providerRows = computed(() => {
+  const providers = aiStatus.value?.providers || {}
+  return Object.entries(providers).map(([name, item]) => {
+    const status = item?.status || 'unknown'
+    const model = item?.model || ''
+    const latency = item?.latency_ms ? `${item.latency_ms}ms` : ''
+    const reason = item?.reason || item?.error || ''
+    return {
+      name,
+      label: providerLabels[name] || name,
+      text: status === 'ok' ? '可用' : status === 'error' ? '异常' : '未配置',
+      stateClass: status === 'ok' ? 'ok' : status === 'error' ? 'error' : 'unavailable',
+      meta: status === 'ok' ? [model, latency].filter(Boolean).join(' · ') : reason
+    }
+  })
+})
+
+async function fetchAIStatus() {
+  aiStatusLoading.value = true
+  aiStatusError.value = ''
+  try {
+    const resp = await systemAPI.getAIStatus()
+    aiStatus.value = resp.data
+  } catch (e) {
+    aiStatusError.value = e?.response?.data?.detail || e?.message || 'AI 状态检测失败'
+  } finally {
+    aiStatusLoading.value = false
+  }
+}
+
 async function fetchUnreadCount() {
   try {
     const resp = await qaAPI.getUnreadFeedbackCount()
@@ -199,12 +297,15 @@ provide('refreshFeedbackCount', fetchUnreadCount)
 onMounted(() => {
   if (userStore.isLoggedIn) {
     fetchUnreadCount()
+    fetchAIStatus()
     feedbackTimer = setInterval(fetchUnreadCount, 30000)
+    aiStatusTimer = setInterval(fetchAIStatus, 120000)
   }
 })
 
 onUnmounted(() => {
   if (feedbackTimer) clearInterval(feedbackTimer)
+  if (aiStatusTimer) clearInterval(aiStatusTimer)
 })
 </script>
 
@@ -253,6 +354,141 @@ body {
   color: rgba(255, 255, 255, 0.9);
   font-size: 14px;
   margin-right: 16px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.ai-status-chip {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  padding: 0 12px;
+  margin-right: 14px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ai-status-chip:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.ai-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  box-shadow: 0 0 0 3px rgba(203, 213, 225, 0.2);
+}
+
+.ai-status-chip.online .ai-status-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.22);
+}
+
+.ai-status-chip.degraded .ai-status-dot,
+.ai-status-chip.checking .ai-status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.24);
+}
+
+.ai-status-chip.offline .ai-status-dot {
+  background: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.24);
+}
+
+.ai-status-panel {
+  color: #0f172a;
+}
+
+.ai-status-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ai-status-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.ai-status-subtitle {
+  margin-top: 3px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.ai-status-error {
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #991b1b;
+  background: #fee2e2;
+  font-size: 13px;
+}
+
+.ai-provider-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-provider-row {
+  display: grid;
+  grid-template-columns: 96px 58px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.provider-name {
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.provider-state {
+  justify-self: start;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-weight: 700;
+}
+
+.provider-state.ok {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.provider-state.error {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.provider-state.unavailable {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.provider-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .logout-btn {
