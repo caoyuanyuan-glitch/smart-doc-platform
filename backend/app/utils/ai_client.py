@@ -12,6 +12,7 @@ from openai import OpenAI
 
 load_dotenv()
 load_dotenv("runtime.env", override=True)
+load_dotenv("/root/.codingmatrix/smart-doc-runtime.env")
 
 # 完整审核规则（从review_rules模块导入）
 from app.api.review_rules import (

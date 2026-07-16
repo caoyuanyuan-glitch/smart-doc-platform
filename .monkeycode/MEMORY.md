@@ -73,6 +73,7 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Category: 环境配置
 - Instructions:
   - 本地后端运行密钥文件使用 `/workspace/backend/runtime.env`，该文件已加入 `.gitignore`，不得提交或输出密钥内容
+  - 密钥持久化备份位于 `/root/.codingmatrix/smart-doc-runtime.env`，每次拉取最新代码或会话重置后，如果 `/workspace/backend/runtime.env` 不存在，执行 `cp /root/.codingmatrix/smart-doc-runtime.env /workspace/backend/runtime.env` 恢复
   - 审核模块 LLM provider 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
   - 排查 AI 审核结果异常时，先确认后端启动日志中的 provider 预热状态和审核日志中的 `AI客户端可用`、`providers=`、规范文件长度
 
