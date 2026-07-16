@@ -214,6 +214,25 @@ def _get_memory_candidate_cache():
     return cache
 
 
+def _clear_memory_candidate_cache(memory_file_id: int | None = None):
+    cache = getattr(_thread_locals, "memory_candidate_cache", None)
+    if cache is None:
+        return
+    if memory_file_id is None:
+        cache.clear()
+        return
+
+    stale_keys = []
+    for key in list(cache.keys()):
+        if not isinstance(key, tuple):
+            stale_keys.append(key)
+            continue
+        if memory_file_id in key:
+            stale_keys.append(key)
+    for key in stale_keys:
+        cache.pop(key, None)
+
+
 def _normalize_usage_counts(source_count: int, ai_count: int, memory_count: int):
     source_count = max(0, int(source_count or 0))
     ai_count = max(0, int(ai_count or 0))
@@ -566,7 +585,7 @@ def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.
         if _normalize_match_text(candidate_source) == normalized_source:
             return entry["translated_text"]
         if compact_source and _normalize_memory_lookup_key(candidate_source) == compact_source:
-            return entry["translated_text"]
+            return _apply_memory_translation_preserving_unmatched(source_text, candidate_source, entry["translated_text"])
 
     lines = [line.strip() for line in re.split(r"\n+", source_text or "") if line.strip()]
     if len(lines) > 1:
@@ -686,6 +705,62 @@ def _translate_by_memory_clauses(source_text: str, candidates, threshold: float 
     if matched_count == 0:
         return None, 0
     return "".join(translated_clauses), matched_count
+
+
+def _split_text_for_hybrid_segments(text: str):
+    segments = []
+    pattern = re.compile(r"([^\n。！？!?；;]+[。！？!?；;]?|\n+)")
+    for piece in pattern.findall(text or ""):
+        if piece:
+            segments.append(piece)
+    return segments or [text]
+
+
+def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang: str, target_lang: str,
+                                       db: Session, bank: str = None, memory_file_id: int = None):
+    segments = _split_text_for_hybrid_segments(source_text)
+    non_empty_segments = [segment for segment in segments if segment and segment.strip()]
+    if len(non_empty_segments) <= 1:
+        return None, False, False
+
+    bundle = _get_memory_candidate_bundle(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+    candidates = bundle["entries"]
+    translated_segments = []
+    memory_used = False
+    ai_used = False
+    matched_segments = 0
+
+    for segment in segments:
+        if not segment or not segment.strip():
+            translated_segments.append(segment)
+            continue
+
+        stripped_segment = segment.strip()
+        trailing = segment[len(segment.rstrip()):]
+        leading_len = len(segment) - len(segment.lstrip())
+        leading = segment[:leading_len]
+
+        matched = _lookup_memory_exact_match(stripped_segment, bundle)
+        if not matched:
+            matched = _match_memory_candidates(stripped_segment, candidates, threshold=0.88, preserve_sentence_unmatched=True)
+        if not matched:
+            matched = _match_memory_candidates(stripped_segment, candidates, threshold=0.8, preserve_sentence_unmatched=True)
+
+        if matched:
+            translated_segments.append(f"{leading}{matched}{trailing}")
+            _record_translation_usage("memory", segment)
+            memory_used = True
+            matched_segments += 1
+            continue
+
+        translated = translate_with_ai(stripped_segment, model, source_lang, target_lang)
+        translated_segments.append(f"{leading}{translated}{trailing}")
+        _record_translation_usage("ai", segment)
+        ai_used = True
+
+    if matched_segments == 0:
+        return None, False, False
+    return "".join(translated_segments), memory_used, ai_used
 
 
 def _prefer_memory_first(engine: str) -> bool:
@@ -1113,9 +1188,28 @@ def _lookup_memory_exact_match(source_text: str, bundle) -> str | None:
 
     compact_source = _normalize_memory_lookup_key(source_text)
     if compact_source:
-        translated = bundle["compact_map"].get(compact_source)
-        if translated:
-            return translated
+        for entry in bundle["entries"]:
+            if _normalize_memory_lookup_key(entry["source_text"]) == compact_source:
+                return _apply_memory_translation_preserving_unmatched(
+                    source_text,
+                    entry["source_text"],
+                    entry["translated_text"],
+                )
+
+    stripped_source = (source_text or "").strip()
+    if compact_source and stripped_source:
+        prefix_match = re.match(r"^[\(（\[]?[0-9一二三四五六七八九十]+[\)）\]]?[、.．:：-]*\s*", stripped_source)
+        if prefix_match and prefix_match.group(0):
+            without_prefix = stripped_source[len(prefix_match.group(0)):].strip()
+            if without_prefix:
+                translated = bundle["exact_map"].get(_normalize_match_text(without_prefix))
+                if translated:
+                    return translated
+                stripped_compact = _normalize_memory_lookup_key(without_prefix)
+                if stripped_compact:
+                    translated = bundle["compact_map"].get(stripped_compact)
+                    if translated:
+                        return f"{prefix_match.group(0)}{translated}" if prefix_match.group(0).strip() else translated
 
     lines = [line.strip() for line in re.split(r"\n+", source_text or "") if line.strip()]
     if len(lines) > 1:
@@ -1138,6 +1232,7 @@ def _invalidate_memory_file_cache(memory_file_id: int):
         stale_keys = [key for key in _memory_file_cache if key[0] == memory_file_id]
         for key in stale_keys:
             _memory_file_cache.pop(key, None)
+    _clear_memory_candidate_cache(memory_file_id)
 
 
 def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, translated_text: str,
@@ -1159,18 +1254,46 @@ def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, 
 
     source_keywords = ["source", "source_text", "sourcetext", "src", "原文", "源文", "text"]
     translated_keywords = ["target", "translated_text", "translatedtext", "translation", "译文", "targettext", "result"]
+    source_lang_keywords = ["sourcelang", "srclang", "源语言"]
+    target_lang_keywords = ["targetlang", "tgtlang", "目标语言"]
     normalized_headers = {
         _normalize_header_key(header): index
         for index, header in enumerate(headers, start=1)
         if _normalize_header_key(header)
     }
 
-    source_column = 1
-    translated_column = 2
+    def resolve_column(keys, fallback_index: int):
+        for key in keys:
+            normalized_key = _normalize_header_key(key)
+            if normalized_key in normalized_headers:
+                return normalized_headers[normalized_key]
+        return fallback_index
+
+    source_column = resolve_column(source_keywords, 1)
+    translated_column = resolve_column(translated_keywords, 2 if source_column != 2 else max(worksheet.max_column + 1, 2))
+    source_lang_column = resolve_column(source_lang_keywords, None)
+    target_lang_column = resolve_column(target_lang_keywords, None)
+
+    source_header_key = _normalize_header_key(headers[source_column - 1]) if source_column - 1 < len(headers) else ""
+    target_header_key = _normalize_header_key(headers[translated_column - 1]) if translated_column - 1 < len(headers) else ""
+
+    if source_header_key in {"zhcn", "zh", "cn", "中文", "chinese"}:
+        source_lang = "zh"
+    elif source_header_key in {"enus", "en", "英文", "english"}:
+        source_lang = "en"
+
+    if target_header_key in {"zhcn", "zh", "cn", "中文", "chinese"}:
+        target_lang = "zh"
+    elif target_header_key in {"enus", "en", "英文", "english"}:
+        target_lang = "en"
 
     next_row = worksheet.max_row + 1 if worksheet.max_row else 2
     worksheet.cell(row=next_row, column=source_column).value = source_text
     worksheet.cell(row=next_row, column=translated_column).value = translated_text
+    if source_lang_column:
+        worksheet.cell(row=next_row, column=source_lang_column).value = source_lang
+    if target_lang_column:
+        worksheet.cell(row=next_row, column=target_lang_column).value = target_lang
 
     workbook.save(memory_file.file_path)
     workbook.close()
@@ -1267,6 +1390,19 @@ def _apply_memory_glossary(source_text: str, glossary):
 
 def _do_translate(text: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> str:
     result = None
+    if engine == "hybrid":
+        hybrid_result, _, _ = _translate_hybrid_with_memory_fill(
+            text,
+            model,
+            source_lang,
+            target_lang,
+            db,
+            bank=_get_memory_bank(),
+            memory_file_id=_get_memory_file_id(),
+        )
+        if hybrid_result is not None:
+            return hybrid_result
+
     if engine in ["memory", "hybrid"]:
         r, hit = translate_with_memory(
             text,
@@ -2338,78 +2474,30 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
 @router.post("/translate", response_model=TranslationResponse)
 async def translate_text(req: TranslationRequest, db: Session = Depends(get_db)):
     req.model = _normalize_ai_model(req.model)
-    translated = None
-    from_memory = False
-    from_ai = False
     engine = req.engine
     _set_memory_bank(req.memory_bank)
     _set_memory_file_id(req.memory_file_id)
+    _reset_translation_usage_stats()
     resolved_source_lang = _resolve_source_language(req.source_lang, req.target_lang, text=req.content)
     _ensure_translation_direction(resolved_source_lang, req.target_lang)
     source_char_count = len(req.content)
     source_word_count = _count_text_units(req.content)
 
-    if engine in ["memory", "hybrid"]:
-        result, hit = translate_with_memory(
-            req.content,
-            resolved_source_lang,
-            req.target_lang,
-            db,
-            bank=req.memory_bank,
-            memory_file_id=req.memory_file_id,
-            allow_partial=req.engine == "memory",
+    translated = _do_translate(req.content, engine, req.model, resolved_source_lang, req.target_lang, db)
+    usage_stats = _snapshot_translation_usage_stats()
+    from_memory = usage_stats["memory_char_count"] > 0
+    from_ai = usage_stats["ai_char_count"] > 0
+
+    if engine == "hybrid" and from_ai and not from_memory:
+        create_memory_entry(
+            db=db,
+            source_text=req.content,
+            translated_text=translated,
+            source_lang=resolved_source_lang,
+            target_lang=req.target_lang,
+            tags=req.memory_bank or ""
         )
-        if hit:
-            translated = result
-            from_memory = True
-            if engine == "memory":
-                doc_record = TranslationDoc(
-                    filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                    file_type="text",
-                    source_lang=resolved_source_lang,
-                    target_lang=req.target_lang,
-                    engine=engine,
-                    model=req.model,
-                    original_content=req.content[:8000],
-                    translated_content=translated[:8000],
-                    source_char_count=source_char_count,
-                    ai_char_count=0,
-                    memory_char_count=source_char_count,
-                    source_word_count=source_word_count,
-                    ai_word_count=0,
-                    memory_word_count=source_word_count,
-                )
-                db.add(doc_record)
-                db.commit()
-                return TranslationResponse(
-                    original=req.content,
-                    translated=translated,
-                    engine_used="memory",
-                    from_memory=True,
-                    from_ai=False
-                )
 
-    if engine in ["ai", "hybrid"] and not translated:
-        translated = translate_with_ai(req.content, req.model, resolved_source_lang, req.target_lang)
-        from_ai = True
-
-        if engine == "hybrid":
-            create_memory_entry(
-                db=db,
-                source_text=req.content,
-                translated_text=translated,
-                source_lang=resolved_source_lang,
-                target_lang=req.target_lang,
-                tags=req.memory_bank or ""
-            )
-
-    if not translated:
-        raise HTTPException(status_code=500, detail="翻译失败，AI和记忆库引擎均未返回结果")
-
-    ai_chars = source_char_count if from_ai else 0
-    memory_chars = source_char_count if from_memory else 0
-    ai_words = source_word_count if from_ai else 0
-    memory_words = source_word_count if from_memory else 0
     doc_record = TranslationDoc(
         filename=f"text_{datetime.now().strftime('%Y%m%d%H%M%S')}",
         file_type="text",
@@ -2420,11 +2508,11 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
         original_content=req.content[:8000],
         translated_content=translated[:8000],
         source_char_count=source_char_count,
-        ai_char_count=ai_chars,
-        memory_char_count=memory_chars,
+        ai_char_count=usage_stats["ai_char_count"],
+        memory_char_count=usage_stats["memory_char_count"],
         source_word_count=source_word_count,
-        ai_word_count=ai_words,
-        memory_word_count=memory_words,
+        ai_word_count=usage_stats["ai_word_count"],
+        memory_word_count=usage_stats["memory_word_count"],
     )
     db.add(doc_record)
     db.commit()
@@ -2432,7 +2520,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     return TranslationResponse(
         original=req.content,
         translated=translated,
-        engine_used=engine,
+        engine_used="memory" if engine == "memory" else engine,
         from_memory=from_memory,
         from_ai=from_ai
     )
@@ -2756,12 +2844,15 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
     if not source_text or not translated_text:
         raise HTTPException(status_code=400, detail="原文和译文不能为空")
 
+    resolved_source_lang = _resolve_source_language(entry.source_lang, entry.target_lang, text=source_text)
+    _ensure_translation_direction(resolved_source_lang, entry.target_lang)
+
     try:
         _append_memory_entry_to_excel(
             memory_file=memory_file,
             source_text=source_text,
             translated_text=translated_text,
-            source_lang=entry.source_lang,
+            source_lang=resolved_source_lang,
             target_lang=entry.target_lang,
         )
         memory_file.file_size = os.path.getsize(memory_file.file_path)

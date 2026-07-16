@@ -86,8 +86,7 @@
             <div class="card-header-row">
               <span class="card-header-title">翻译结果</span>
               <div v-if="result" class="result-meta">
-                <el-tag v-if="result.from_memory" type="success" size="small">来自记忆库</el-tag>
-                <el-tag v-if="result.from_ai" type="warning" size="small">来自AI引擎</el-tag>
+                <el-tag v-if="resultSourceTag" :type="resultSourceTag.type" size="small">{{ resultSourceTag.label }}</el-tag>
               </div>
             </div>
           </template>
@@ -233,6 +232,20 @@ const selectedMemoryWriteFile = computed(() => {
 })
 const canWriteMemory = computed(() => Boolean(selectedMemoryWriteFile.value))
 const currentTranslatedText = computed(() => editingResult.value ? translatedDraft.value : (result.value?.translated || ''))
+const resultSourceTag = computed(() => {
+  const fromMemory = Boolean(result.value?.from_memory)
+  const fromAi = Boolean(result.value?.from_ai)
+  if (fromMemory && fromAi) {
+    return { type: 'info', label: 'AI+记忆库' }
+  }
+  if (fromMemory) {
+    return { type: 'success', label: '来自记忆库' }
+  }
+  if (fromAi) {
+    return { type: 'warning', label: '来自AI引擎' }
+  }
+  return null
+})
 
 onMounted(async () => {
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
