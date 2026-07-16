@@ -399,6 +399,14 @@ def _build_continuation_prompt(
     return "\n\n".join(parts)
 
 
+def _resolve_continuation_max_tokens(length: str) -> int:
+    if length == "short":
+        return 384
+    if length == "detailed":
+        return 1024
+    return 512
+
+
 def _clean_continuation_text(text: str) -> str:
     cleaned = str(text or "").strip()
     if cleaned.startswith("```"):
@@ -579,7 +587,7 @@ async def continue_text(request: ContinueTextRequest, db: Session = Depends(get_
         result = ai_client.chat([
             {"role": "system", "content": "你只输出新增续写文本。"},
             {"role": "user", "content": prompt},
-        ], max_tokens=4096, temperature=0.25)
+        ], max_tokens=_resolve_continuation_max_tokens(request.length), temperature=0.25, kimi_thinking="disabled")
         continuation = _clean_continuation_text(result)
         if not continuation:
             raise RuntimeError("empty continuation")
