@@ -43,6 +43,9 @@ from app.review_engine.layers import count_issue_layers
 _review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "static" / "uploads"
 REVIEW_EXPORT_DIR = Path(__file__).resolve().parents[2] / "static" / "review_exports"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+CYY_HUMAN_REVIEW_BASELINE_PATH = PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json"
+CYY_HUMAN_REVIEW_BASIS_CACHE = None
 
 
 def get_progress(review_id: int):
@@ -979,6 +982,92 @@ def _ai_audit_timeout_seconds(content):
         return 180.0
     chunk_count = max(1, math.ceil(text_length / 5500))
     return float(min(900, max(240, chunk_count * 75)))
+
+
+def _iter_ai_audit_chunks(content, chunk_size=3000, overlap=250):
+    content = content or ''
+    if not content.strip():
+        return []
+    chunks = []
+    step = max(1, chunk_size - overlap)
+    for start in range(0, len(content), step):
+        chunk = content[start:start + chunk_size]
+        if chunk.strip():
+            chunks.append((len(chunks) + 1, start, chunk))
+        if start + chunk_size >= len(content):
+            break
+    return chunks
+
+
+def _review_env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _review_env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _select_ai_audit_chunks(chunks, max_chunks):
+    if max_chunks <= 0 or len(chunks) <= max_chunks:
+        return chunks
+    if max_chunks == 1:
+        return [chunks[0]]
+    indexes = sorted({round(i * (len(chunks) - 1) / (max_chunks - 1)) for i in range(max_chunks)})
+    return [chunks[i] for i in indexes]
+
+
+def _run_ai_deep_review(review_id, content, document_language, ai_review_basis):
+    all_chunks = _iter_ai_audit_chunks(content)
+    chunks = _select_ai_audit_chunks(all_chunks, _review_env_int('REVIEW_AI_MAX_CHUNKS', '1'))
+    if not chunks:
+        return []
+
+    all_issues = []
+    total = len(chunks)
+    chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '12')
+    for index, start, chunk in chunks:
+        progress = 65 + int((index - 1) * 17 / max(total, 1))
+        next_progress = 65 + int(index * 17 / max(total, 1))
+        set_progress(
+            review_id,
+            'running',
+            'AI智能审核',
+            min(82, progress),
+            f'正在进行AI快速增强 ({index}/{total})，规则已覆盖全文...',
+        )
+        print(f"[审核] AI深度审核分块 {index}/{total}, start={start}, length={len(chunk)}, selected={len(chunks)}/{len(all_chunks)}")
+        try:
+            result = _call_with_timeout(
+                ai_client.audit_document,
+                chunk_timeout,
+                chunk,
+                document_language,
+                ai_review_basis,
+                True,
+            )
+            chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
+            for issue in chunk_issues:
+                issue['chapter'] = issue.get('chapter') or f'AI chunk {index}'
+                all_issues.append(issue)
+            print(f"[审核] AI深度审核分块 {index}/{total} 返回问题数={len(chunk_issues)}")
+        except concurrent.futures.TimeoutError:
+            print(f"[审核] AI深度审核分块 {index}/{total} 超时({chunk_timeout:.0f}s), 保留规则审核结果并继续")
+        except Exception as e:
+            print(f"[审核] AI深度审核分块 {index}/{total} 失败: {e}")
+        set_progress(
+            review_id,
+            'running',
+            'AI智能审核',
+            min(82, next_progress),
+            f'AI快速增强已完成 {index}/{total} 个分块...',
+        )
+    return all_issues
 
 
 def _filter_review_false_positives(issues):
@@ -2856,6 +2945,76 @@ def _load_review_spec_texts(db: Session):
     return spec_texts
 
 
+def _compact_basis_text(value, limit=120):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit]
+
+
+def _load_cyy_human_review_basis():
+    global CYY_HUMAN_REVIEW_BASIS_CACHE
+    if CYY_HUMAN_REVIEW_BASIS_CACHE is not None:
+        return CYY_HUMAN_REVIEW_BASIS_CACHE
+
+    CYY_HUMAN_REVIEW_BASIS_CACHE = ""
+    if not CYY_HUMAN_REVIEW_BASELINE_PATH.exists():
+        return ""
+
+    try:
+        payload = json.loads(CYY_HUMAN_REVIEW_BASELINE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[审核] 读取CYY人工审核基线失败: {exc}")
+        return ""
+
+    summary = payload.get("summary") or {}
+    annotations = payload.get("annotations") or []
+    by_category = summary.get("by_category") or {}
+    focus_categories = [
+        "表达与句式",
+        "单位/空格",
+        "术语一致性",
+        "表格/版式",
+        "官网地址",
+        "人工确认项",
+        "版本记录",
+        "字体/版式细节",
+        "标点符号",
+        "图片/对象缺失",
+        "分页与标题边界",
+        "主题结构",
+        "商标声明",
+        "货号写法",
+    ]
+
+    lines = [
+        "【CYY人工审核经验基线】",
+        f"来源: {summary.get('total', len(annotations))} 条人工审核批注的结构化摘要。",
+        "使用要求: 优先关注以下高频问题；只有在当前原文中有明确证据时输出问题；样例用于判断审核偏好，不能凭样例臆造当前文档问题。",
+        "高频关注类别: " + "；".join(
+            f"{category}({by_category.get(category, 0)})"
+            for category in focus_categories
+            if by_category.get(category, 0)
+        ),
+        "典型人工意见样例:",
+    ]
+
+    examples_by_category = {}
+    for item in annotations:
+        category = item.get("category")
+        if category not in focus_categories or category in examples_by_category:
+            continue
+        comment = _compact_basis_text(item.get("comment"), 80)
+        selected = _compact_basis_text(item.get("selected_text"), 90)
+        if comment:
+            examples_by_category[category] = f"- {category}: 人工意见={comment}; 关注文本={selected}"
+        if len(examples_by_category) >= 10:
+            break
+
+    lines.extend(examples_by_category.values())
+    CYY_HUMAN_REVIEW_BASIS_CACHE = "\n".join(line for line in lines if line).strip()
+    print(f"[审核] 已加载CYY人工审核经验基线: {summary.get('total', len(annotations))}条")
+    return CYY_HUMAN_REVIEW_BASIS_CACHE
+
+
 def _build_ai_review_basis(spec_texts, document_language):
     parts = []
     if document_language in ("cn", "both") and spec_texts.get("cn_style"):
@@ -2866,13 +3025,22 @@ def _build_ai_review_basis(spec_texts, document_language):
         parts.append("【技术文档常见错误清单】\n" + spec_texts["common_errors"][:2500])
     if spec_texts.get("final_checklists"):
         parts.append("【说明书发布前自检 Checklist】\n" + spec_texts["final_checklists"][:5000])
+    cyy_basis = _load_cyy_human_review_basis()
+    if cyy_basis:
+        parts.append(cyy_basis[:2500])
     return "\n\n".join(parts)
 
 
 def _call_with_timeout(func, timeout_seconds, *args):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func, *args)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func, *args)
+    try:
         return future.result(timeout=timeout_seconds)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _release_checklist_issue(content, start, end, rule, severity, original_text, suggestion, description, chapter=None):
@@ -5428,9 +5596,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             print(f"[审核] 开始AI智能审核，模式={mode}")
             try:
                 ai_review_basis = _build_ai_review_basis(spec_texts, document_language)
-                ai_timeout = _ai_audit_timeout_seconds(content)
-                ai_result = _call_with_timeout(ai_client.audit_document, ai_timeout, content, document_language, ai_review_basis)
-                ai_issues = ai_result.get("issues", [])
+                ai_issues = _run_ai_deep_review(review_id, content, document_language, ai_review_basis)
                 print(f"[审核] AI审核返回问题数={len(ai_issues)}")
                 for issue in ai_issues:
                     issue["source"] = "ai"
