@@ -29,6 +29,13 @@ def _is_valid_key(val):
     return bool(val) and val and "your-" not in val.lower()
 
 
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _strip_code_fence(text):
     if not text:
         return ""
@@ -53,6 +60,8 @@ class AIClient:
         self.kimi_api_key = get_kimi_api_key()
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
+        self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "20")
+        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "10")
 
         self.proxy_api_key = os.getenv("OPENAI_API_KEY")
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
@@ -423,11 +432,11 @@ class AIClient:
                 return None
         return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None):
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False):
         # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
         self.last_chat_errors = []
         providers = []
-        if self.kimi_client:
+        if self.kimi_client and not skip_kimi:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
         if self.deepseek_client:
             providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
@@ -459,7 +468,11 @@ class AIClient:
                                 "temperature": temperature,
                             }
                         )
-                        response = client.chat.completions.create(**request_kwargs)
+                        call_client = client.with_options(
+                            timeout=self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout,
+                            max_retries=0,
+                        )
+                        response = call_client.chat.completions.create(**request_kwargs)
                         choice = response.choices[0]
                         content = choice.message.content or ""
                         if content.strip():
@@ -1369,7 +1382,7 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def audit_document(self, content, language=None, audit_basis=""):
+    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False):
         lang = language or "en"
         is_english = lang in ("en", "both")
 
@@ -1383,7 +1396,7 @@ class AIClient:
                 chunk = content[start:start + chunk_size]
                 if not chunk.strip():
                     continue
-                result = self.audit_document(chunk, language=lang, audit_basis=(audit_basis or "")[:2000])
+                result = self.audit_document(chunk, language=lang, audit_basis=(audit_basis or "")[:2000], skip_kimi=skip_kimi)
                 for issue in result.get("issues", []):
                     issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
                     all_issues.append(issue)
@@ -1491,7 +1504,7 @@ Return empty issues array if no high-confidence issues found."""
             {"role": "user", "content": user_prompt}
         ]
 
-        result = self.chat(messages, max_tokens=4096, temperature=0.2)
+        result = self.chat(messages, max_tokens=2048, temperature=0.2, skip_kimi=skip_kimi)
         if not result:
             return {"issues": []}
 
