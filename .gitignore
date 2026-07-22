@@ -108,7 +108,6 @@ logs/
 .env
 .env.local
 .env.*.local
-backend/runtime.env
 *.pem
 *.key
 
