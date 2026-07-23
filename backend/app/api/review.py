@@ -39,6 +39,12 @@ from app.review_engine.validation import (
     normalize_noop_compare_text as engine_normalize_noop_compare_text,
 )
 from app.review_engine.layers import count_issue_layers
+from app.review_engine.pipeline import (
+    select_review_issues as pipeline_select_review_issues,
+    sort_key as pipeline_sort_key,
+    suppress_shadowed_ai as pipeline_suppress_shadowed_ai,
+    value_score as pipeline_value_score,
+)
 
 _review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "static" / "uploads"
@@ -216,10 +222,139 @@ def _page_number_from_position(content, position):
     return None
 
 
+def _issue_priority_rank(issue):
+    rule = str(_issue_value(issue, "rule", "") or "").upper()
+    source = str(_issue_value(issue, "source", "") or "").lower()
+    category = str(_issue_value(issue, "category", "") or "")
+    basis = str(_issue_value(issue, "audit_basis", "") or "")
+    text = " ".join([
+        rule,
+        category,
+        str(_issue_value(issue, "description", "") or ""),
+        str(_issue_value(issue, "suggestion", "") or ""),
+        basis,
+    ])
+
+    if rule.startswith("CHECKLIST-") or "发布前自检" in category or "Checklist" in basis:
+        return 0
+    if "CYY" in text or "人工审核" in text:
+        return 1
+    if source == "ai":
+        return 2
+    if any(keyword in text for keyword in ["术语", "版本记录", "表格", "图片", "图号", "结构", "合规", "法规", "物料编码", "默认账号", "默认密码", "重复内容", "官网", "有效期", "使用寿命"]):
+        return 3
+    if rule in {"R029", "R035"}:
+        return 9
+    return 5
+
+
+def _issue_review_value_score(issue):
+    rule = str(_issue_value(issue, "rule", "") or "")
+    rule_upper = rule.upper()
+    source = str(_issue_value(issue, "source", "") or "").lower()
+    severity = str(_issue_value(issue, "severity", "general") or "general").lower()
+    confidence = int(_issue_value(issue, "confidence", 0) or 0)
+    category = str(_issue_value(issue, "category", "") or "")
+    original = re.sub(r"\s+", " ", str(_issue_value(issue, "original_text", "") or "")).strip()
+    suggestion = str(_issue_value(issue, "suggestion", "") or "").strip()
+    description = str(_issue_value(issue, "description", "") or "").strip()
+    basis = str(_issue_value(issue, "audit_basis", "") or "").strip()
+    blob = " ".join([rule, category, original, suggestion, description, basis])
+
+    score = 35
+    score += {"fatal": 35, "serious": 22, "general": 6, "suggestion": 0}.get(severity, 0)
+    if source == "rule":
+        score += 6
+    if source == "ai":
+        score -= 3
+    if confidence >= 95:
+        score += 10
+    elif confidence >= 90:
+        score += 6
+    elif confidence and confidence < 80:
+        score -= 12
+
+    high_value_pattern = re.compile(
+        r"default\s+(?:account|password|username)|credential|password|ip\s+address|\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b|"
+        r"revision\s+history|empty\s+table|missing\s+(?:object|icon|button|step|entry|field)|incomplete\s+sentence|"
+        r"sample\s+(?:information\s+)?have\s+been|trademark|copyright|compliance|to\s+to|"
+        r"默认账号|默认密码|密码|内网|端口|版本记录|空表|缺失|不完整|合规|法规|商标|版权|重复",
+        re.IGNORECASE,
+    )
+    if high_value_pattern.search(blob):
+        score += 30
+
+    if "CYY" in blob or "人工审核" in blob or "发布前自检" in category or "Checklist" in basis:
+        score += 20
+
+    low_value_pattern = re.compile(
+        r"^an?\s+[a-z](?:\s|$)|^\d+(?:arc|cram|fastq|fq|bam|bcl|nvme|ssd|raid)$|"
+        r"^click$|^please\s+contact$|^performing\s+the\s+following\s+steps$|"
+        r"\b(?:nt responds|emplate|analysi|the same pr)\b|括号后请添加空格|建议拆分为多个短句",
+        re.IGNORECASE,
+    )
+    if low_value_pattern.search(original) or low_value_pattern.search(blob):
+        score -= 55
+
+    if rule_upper in {"R029", "R035", "HR009", "TENSE-001", "PUNCT-002", "R002", "R003"}:
+        score -= 35
+    if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not high_value_pattern.search(blob):
+        score -= 15
+    if not original or not suggestion:
+        score -= 25
+
+    return max(0, min(100, score))
+
+
+def _filter_by_issue_value(issues, min_score=45):
+    filtered = []
+    dropped = 0
+    for issue in issues:
+        score = pipeline_value_score(issue)
+        if isinstance(issue, dict):
+            issue["review_value_score"] = score
+        severity = str(_issue_value(issue, "severity", "") or "").lower()
+        threshold = 38 if severity in {"fatal", "serious"} else min_score
+        if score < threshold:
+            dropped += 1
+            continue
+        filtered.append(issue)
+    if dropped:
+        print(f"[审核] 参考价值评分过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个")
+    return filtered
+
+
+def _issue_topic_for_shadow_suppression(issue):
+    text = " ".join([
+        str(_issue_value(issue, "rule", "") or ""),
+        str(_issue_value(issue, "category", "") or ""),
+        str(_issue_value(issue, "original_text", "") or ""),
+        str(_issue_value(issue, "suggestion", "") or ""),
+        str(_issue_value(issue, "description", "") or ""),
+    ])
+    if re.search(r"revision\s+history|版本记录", text, re.IGNORECASE):
+        return "revision"
+    if re.search(r"trademark|DNBSEQ\s*TM|DNBSEQTM|商标", text, re.IGNORECASE):
+        return "trademark"
+    if re.search(r"default\s+(?:account|password|username)|credential|默认账号|默认密码|密码", text, re.IGNORECASE):
+        return "credential"
+    if re.search(r"(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}|ip\s+address|端口", text, re.IGNORECASE):
+        return "network"
+    if re.search(r"ROHS|有害物质的名称及含[有量]信息表|有害物质的名称及含量", text, re.IGNORECASE):
+        return "rohs"
+    return ""
+
+
+def _suppress_shadowed_ai_issues(issues):
+    filtered = pipeline_suppress_shadowed_ai(issues)
+    dropped = len(issues) - len(filtered)
+    if dropped:
+        print(f"[审核] AI重复影子问题过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个")
+    return filtered
+
+
 def _issue_sort_key(issue):
-    severity_rank = {"fatal": 4, "serious": 3, "general": 2, "suggestion": 1}
-    pos_start, _ = _parse_issue_position(_issue_value(issue, "position", ""))
-    return (-severity_rank.get(_issue_value(issue, "severity", "general"), 0), pos_start, _issue_value(issue, "id", 0))
+    return pipeline_sort_key(issue)
 
 
 def _iter_docx_paragraphs(doc):
@@ -316,6 +451,13 @@ def _locate_docx_issue(paragraphs, issue):
     if local_start < 0:
         lowered = text.lower()
         local_start = lowered.find(original_text.lower())
+    if local_start < 0:
+        original_normalized = _normalize_search_text(original_text)
+        text_normalized = _normalize_search_text(text)
+        if text and len(text_normalized) >= 20 and text_normalized in original_normalized:
+            return best_para, para_index, 0, len(text)
+        if text and len(text_normalized) >= 20:
+            return best_para, para_index, 0, len(text)
     if local_start < 0:
         return best_para, para_index, None, None
     return best_para, para_index, local_start, local_start + len(original_text)
@@ -716,8 +858,20 @@ def _normalize_ai_issue_category(issue):
 def _should_drop_known_false_positive_issue(issue):
     original = _normalize_report_text(_issue_value(issue, 'original_text', ''))
     source = str(_issue_value(issue, 'source', '') or '').lower()
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
     suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
+    description = str(_issue_value(issue, 'description', '') or '').strip()
     audit_basis = str(_issue_value(issue, 'audit_basis', '') or '').strip()
+    if rule == 'SAFE-001' and re.search(r'缺少对应中文|双语安全提示', description):
+        return True
+    if rule in {'HR009', 'TENSE-001', 'R036', 'PUNCT-002', 'R002', 'R003'}:
+        return True
+    if rule == 'GRAMMAR-002' and re.fullmatch(r'after\s+login', str(_issue_value(issue, 'original_text', '') or '').strip(), re.IGNORECASE):
+        return True
+    if rule == 'R013' and re.fullmatch(r'\d+(?:[A-Z]{1,4}|[A-Z]+\d*)', str(_issue_value(issue, 'original_text', '') or '').strip()):
+        return True
+    if rule == 'R024' and re.search(r'\bContents\s+Contents\b', str(_issue_value(issue, 'original_text', '') or ''), re.IGNORECASE):
+        return True
     if source == 'ai' and (not suggestion or not audit_basis):
         return True
     if _is_figure_details_sentence_false_positive(issue):
@@ -739,6 +893,26 @@ def _should_drop_known_false_positive_issue(issue):
     if _is_noop_ai_suggestion_issue(issue):
         return True
     return False
+
+
+def _is_high_value_ai_review_issue(issue):
+    if str(_issue_value(issue, 'source', '') or '').lower() != 'ai':
+        return False
+    text = ' '.join([
+        str(_issue_value(issue, 'category', '') or ''),
+        str(_issue_value(issue, 'rule', '') or ''),
+        str(_issue_value(issue, 'original_text', '') or ''),
+        str(_issue_value(issue, 'suggestion', '') or ''),
+        str(_issue_value(issue, 'description', '') or ''),
+        str(_issue_value(issue, 'audit_basis', '') or ''),
+    ])
+    return bool(re.search(
+        r'revision\s+history|empty\s+table|missing|incomplete|not\s+populated|default\s+(?:account|password|username)|'
+        r'password|credential|ip\s+address|url|clinical|diagnostic|compliance|copyright|trademark|'
+        r'目录|索引|交叉引用|引用缺失|空表|缺失|不完整|默认账号|默认密码|密码|合规|法规|版权|商标',
+        text,
+        re.IGNORECASE,
+    ))
 
 
 def _is_low_value_ai_table_style_issue(issue):
@@ -1013,6 +1187,15 @@ def _review_env_int(name, default):
         return int(default)
 
 
+def _review_content_limit(file_type):
+    file_type = str(file_type or '').lower()
+    if file_type == 'pdf':
+        return _review_env_int('REVIEW_PDF_CONTENT_LIMIT', '120000')
+    if file_type in {'docx', 'doc', 'txt', 'md', 'markdown'}:
+        return _review_env_int('REVIEW_TEXT_CONTENT_LIMIT', '120000')
+    return _review_env_int('REVIEW_CONTENT_LIMIT', '120000')
+
+
 def _select_ai_audit_chunks(chunks, max_chunks):
     if max_chunks <= 0 or len(chunks) <= max_chunks:
         return chunks
@@ -1024,13 +1207,13 @@ def _select_ai_audit_chunks(chunks, max_chunks):
 
 def _run_ai_deep_review(review_id, content, document_language, ai_review_basis):
     all_chunks = _iter_ai_audit_chunks(content)
-    chunks = _select_ai_audit_chunks(all_chunks, _review_env_int('REVIEW_AI_MAX_CHUNKS', '1'))
+    chunks = _select_ai_audit_chunks(all_chunks, _review_env_int('REVIEW_AI_MAX_CHUNKS', '8'))
     if not chunks:
         return []
 
     all_issues = []
     total = len(chunks)
-    chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '12')
+    chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
     for index, start, chunk in chunks:
         progress = 65 + int((index - 1) * 17 / max(total, 1))
         next_progress = 65 + int(index * 17 / max(total, 1))
@@ -1085,6 +1268,146 @@ def _filter_review_false_positives(issues):
         filtered.append(issue)
     if dropped:
         print(f'[审核] 拼写白名单最终过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
+    return filtered
+
+
+def _should_drop_low_value_review_issue(issue, rule_counts):
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    source = str(_issue_value(issue, 'source', '') or '').lower()
+    suggestion = str(_issue_value(issue, 'suggestion', '') or '')
+    description = str(_issue_value(issue, 'description', '') or '')
+    original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip()
+    context = re.sub(r'\s+', ' ', str(_issue_value(issue, 'context', '') or '')).strip()
+    severity = str(_issue_value(issue, 'severity', '') or '').lower()
+    category = str(_issue_value(issue, 'category', '') or '')
+    confidence = int(_issue_value(issue, 'confidence', 0) or 0)
+    text = f'{suggestion} {description}'
+
+    if source == 'spellcheck':
+        return True
+
+    if rule == 'TERM-001' and re.fullmatch(r'click', original, re.IGNORECASE) and re.fullmatch(r'tap', suggestion.strip(), re.IGNORECASE):
+        return True
+
+    if rule == 'R013' and re.fullmatch(r'\d+(?:arc|cram|fastq|fq|bam|bcl|nvme|ssd|raid)', original, re.IGNORECASE):
+        return True
+
+    if rule in {'R023', 'GRAMMAR'} and re.fullmatch(r'an?\s+[a-z](?:\s|$).*', original, re.IGNORECASE):
+        return True
+
+    if rule == 'GRAMMAR' and re.fullmatch(r'an\s+fq', original, re.IGNORECASE):
+        return True
+
+    if rule == 'STYLE-003' and re.fullmatch(r'performing\s+the\s+following\s+steps', original, re.IGNORECASE):
+        return True
+
+    if rule == 'GRAMMAR-003' and re.search(r'\bsample\s+(?:information\s+)?have\s+been\b', original, re.IGNORECASE):
+        rule_counts['GRAMMAR_SAMPLE_HAVE_BEEN'] += 1
+        if rule_counts['GRAMMAR_SAMPLE_HAVE_BEEN'] > 2:
+            return True
+
+    if rule == 'R024' and re.search(r'\bto\s+to\b', original, re.IGNORECASE):
+        if re.search(r'\bSwitch\s+to\s+to\s+generate\b', context or original, re.IGNORECASE):
+            return True
+        rule_counts['R024_TO_TO'] += 1
+        if rule_counts['R024_TO_TO'] > 1:
+            return True
+
+    if rule == 'HR008' and re.fullmatch(r'please\s+contact', original, re.IGNORECASE):
+        return True
+
+    if rule == 'R016' and re.fullmatch(r'\d{1,2}/\d{1,2}/\d{1,2}', original):
+        return True
+
+    if source == 'ai' and confidence < 90 and not _is_high_value_ai_review_issue(issue):
+        return True
+
+    if source == 'ai' and re.match(r'^[a-z]elivery\b', original, re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'\b(?:nt responds|emplate|analysi|the same pr)\b', original, re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'\b(?:path\s+fo|The following table describes)\b', original, re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'\[[^\]]*(?:table content|company name|address|contact details)[^\]]*\]', suggestion, re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'\bcheck\s+if\b|是否使用|是否正确', suggestion, re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'^\s*it\s+to\s+edit\b|^\s*When\s+this\s+option\s+is\s+selected,\s+is\s+displayed\b', original, re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'Contents\s+User manual\s+Resource monitoring', original, re.IGNORECASE) and re.search(r'目录|chapter|contents', f'{rule} {category} {suggestion}', re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'^Click\s+(?:it\b|to\s+open\b|on\s+the\s+right\s+side\b)', original, re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'\b(?:Browse|Edit)\b', suggestion) and not re.search(r'\b(?:Browse|Edit)\b', original):
+        return True
+
+    if source == 'ai' and re.match(r'^Tips\b', original, re.IGNORECASE) and re.search(r'formatting\s+artifact|tab', f'{rule} {description} {suggestion}', re.IGNORECASE):
+        return True
+
+    if source == 'ai' and re.search(r'missing\s+object|缺少(?:按钮|图标|对象)|click', f'{rule} {category} {description}', re.IGNORECASE):
+        rule_counts['AI_CLICK_OBJECT'] += 1
+        if rule_counts['AI_CLICK_OBJECT'] > 3:
+            return True
+
+    if source == 'ai' and re.search(r'Before initial use of the device, a\s*$', original, re.IGNORECASE):
+        return True
+
+    if rule == 'R029':
+        return True
+
+    if rule in {'HR009', 'TENSE-001', 'PUNCT-002', 'R002', 'R003'}:
+        return True
+
+    if rule == 'GRAMMAR-002' and re.fullmatch(r'after\s+login', original, re.IGNORECASE):
+        return True
+
+    if rule == 'R024' and re.search(r'\bContents\s+Contents\b', original, re.IGNORECASE):
+        return True
+
+    if rule == 'R036':
+        return True
+
+    if rule == 'R035' or '建议拆分为多个短句' in text:
+        if severity in {'fatal', 'serious'} and len(original) >= 160 and rule_counts[rule] < 2:
+            rule_counts[rule] += 1
+            return False
+        return True
+
+    if rule in {'R006', 'R014', 'R028'}:
+        return True
+
+    return False
+
+
+def _requires_bilingual_safety_labels(content, document_language):
+    if document_language == 'cn':
+        return True
+    if document_language != 'both':
+        return False
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', content or ''))
+    english_words = len(re.findall(r'\b[A-Za-z]{3,}\b', content or ''))
+    return chinese_chars >= 20 and chinese_chars / max(english_words, 1) >= 0.02
+
+
+def _filter_low_value_review_issues(issues):
+    filtered = []
+    dropped = 0
+    rule_counts = defaultdict(int)
+    for issue in issues:
+        if _should_drop_low_value_review_issue(issue, rule_counts):
+            dropped += 1
+            continue
+        filtered.append(issue)
+    if dropped:
+        print(f'[审核] 低价值提示降噪: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
     return filtered
 
 
@@ -1269,10 +1592,18 @@ def _find_best_docx_paragraph(paragraphs, issue):
     for para in paragraphs:
         text = para.text or ''
         normalized = _normalize_search_text(text)
-        if not normalized or original not in normalized:
+        if not normalized:
             continue
 
-        score = 1
+        if original in normalized:
+            score = 1
+        elif len(normalized) >= 20 and normalized in original:
+            score = 1
+        else:
+            matcher = difflib.SequenceMatcher(None, original, normalized)
+            if len(normalized) < 20 or matcher.ratio() < 0.72:
+                continue
+            score = 0
         lowered = text.lower()
         if context_tokens:
             score += sum(1 for token in context_tokens if token and token in lowered)
@@ -1946,9 +2277,11 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
 
 
 def _select_export_issues(issues):
-    visible_issues = _visible_review_issues(issues)
-    preferred = [i for i in visible_issues if getattr(i, 'status', None) in (None, '', 'pending', 'confirmed', 'converted_to_rule')]
-    return sorted(preferred or visible_issues, key=_issue_sort_key)
+    visible_issues = [issue for issue in _visible_review_issues(issues) if not _should_drop_known_false_positive_issue(issue)]
+    selected = pipeline_select_review_issues(visible_issues, status_filter=True)
+    if len(selected) != len(visible_issues):
+        print(f"[审核] 导出统一流水线过滤: 过滤 {len(visible_issues) - len(selected)} 个, 剩余 {len(selected)} 个")
+    return selected
 
 
 def _format_review_mode(mode):
@@ -2496,6 +2829,16 @@ def _format_issue_suggestion(issue):
     suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
     punct_map = {'，': ',', '。': '.', '；': ';', '：': ':', '（': '(', '）': ')', '、': ','}
 
+    source = str(_issue_value(issue, 'source', '') or '').lower()
+    text = ' '.join([
+        str(_issue_value(issue, 'rule', '') or ''),
+        str(_issue_value(issue, 'category', '') or ''),
+        str(_issue_value(issue, 'description', '') or ''),
+    ])
+    if source == 'ai' and re.search(r'missing\s+object|click', text, re.IGNORECASE):
+        if re.search(r'\bclick\s+the\s+icon\b', suggestion, re.IGNORECASE) and not re.search(r'\bicon\b', original, re.IGNORECASE):
+            return '请补充该处需要点击的具体控件名称（按钮、图标或链接），避免只写 click。'
+
     if rule == 'PUNCT-001' and original in punct_map:
         return punct_map[original]
     bracketed = re.search(r'建议改为\s*[:：]?\s*\[([^\]]+)\]', suggestion)
@@ -2814,6 +3157,7 @@ def _aggregate_report_issues(issues, content):
 
 
 def _prepare_report_issues(issues, content):
+    issues = pipeline_select_review_issues(issues, status_filter=True)
     prepared = []
     for issue in issues:
         item = _report_issue_to_dict(issue)
@@ -2856,6 +3200,8 @@ def _should_drop_low_value_ai_report_issue(issue):
     description = str(_issue_value(issue, 'description', '') or '').strip()
     basis = str(_issue_value(issue, 'audit_basis', '') or '').strip()
     suggestion = _format_issue_suggestion(issue)
+    if _is_high_value_ai_review_issue(issue):
+        return False
     if not suggestion or suggestion == '-':
         return True
     if confidence < 90 and (not description or description == '-'):
@@ -3729,6 +4075,132 @@ def _run_logic_integrity_audit(content):
     return issues
 
 
+def _run_chinese_human_baseline_rules(content):
+    issues = []
+    seen = set()
+    normalized = str(content or '').replace('\f', '\n')
+
+    def add_issue(start, end, original_text, rule, category, suggestion, description, audit_basis, severity='general', confidence=92):
+        original_text = re.sub(r'\s+', ' ', str(original_text or '')).strip()
+        if not original_text:
+            return
+        key = (rule, _normalize_search_text(original_text))
+        if key in seen:
+            return
+        seen.add(key)
+        issues.append({
+            'severity': severity,
+            'category': category,
+            'rule': rule,
+            'chapter': extract_chapter(normalized, start),
+            'original_text': original_text[:240],
+            'context': get_context(normalized, start, end, 180),
+            'suggestion': suggestion,
+            'description': description,
+            'audit_basis': audit_basis,
+            'confidence': confidence,
+            'source': 'rule',
+            'position': _encode_issue_position(start, end),
+        })
+
+    for match in re.finditer(r'\b(?:H-020-)?0{2}X{4}-00\b|\b0-00X{4}-00\b', normalized, re.IGNORECASE):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-MATERIAL-001', '物料编码',
+            '请申请并替换为正式物料编码',
+            '文档中仍存在 00XXXX 类物料编码占位符，发布前需要替换为正式编号。',
+            'CYY人工审核经验基线 - 物料编码占位', 'serious', 96,
+        )
+
+    for match in re.finditer(r'日期\s+(?:版本\s+)?20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REVISION-001', '版本记录',
+            '版本记录中的日期按流程要求留空，待正式发布时统一填写',
+            '人工审核意见要求该版本记录日期暂时留空。',
+            'CYY人工审核经验基线 - 版本记录日期', 'general', 90,
+        )
+
+    for phrase in ['如有任何说明书中未提及的维护问题，请及时咨询技术支持。']:
+        first = normalized.find(phrase)
+        second = normalized.find(phrase, first + len(phrase)) if first >= 0 else -1
+        if second >= 0:
+            add_issue(
+                second, second + len(phrase), phrase,
+                'CYY-CN-DUP-001', '重复内容',
+                '建议删除重复出现的句子，保留一处即可',
+                '同一句维护提示在相近位置重复出现。',
+                'CYY人工审核经验基线 - 重复内容', 'general', 94,
+            )
+
+    for match in re.finditer(r'([\u4e00-\u9fff]{2,6})\1', normalized):
+        original = match.group(0)
+        if original in {'测量测量', '检测检测'}:
+            continue
+        add_issue(
+            match.start(), match.end(), original,
+            'CYY-CN-DUP-002', '重复内容',
+            f'建议改为 {match.group(1)}',
+            '连续重复中文词可能是复制或编辑残留。',
+            'CYY人工审核经验基线 - 重复词', 'general', 92,
+        )
+
+    replacements = {
+        'OTC 图': ('OCT 图', 'CYY-CN-TERM-001', '术语拼写', 'OCT 是该产品说明书中的标准术语，OTC 疑似拼写错误。'),
+        '返还软件': ('返回软件', 'CYY-CN-UI-001', '界面文案确认', '界面按钮文案疑似错别字，需要与软件界面核对。'),
+        '有眼（R）': ('右眼（R）', 'CYY-CN-TERM-002', '术语拼写', '左右眼采集语境中 R 对应右眼，当前写作“有眼”疑似错别字。'),
+    }
+    for original, (suggestion, rule, category, description) in replacements.items():
+        start = normalized.find(original)
+        if start >= 0:
+            add_issue(
+                start, start + len(original), original,
+                rule, category, suggestion, description,
+                'CYY人工审核经验基线 - 术语/界面文案', 'general', 94,
+            )
+
+    for match in re.finditer(r'默认用户名\s*[:：]\s*admin\s*[，,、]\s*密码\s*[:：]\s*\d+', normalized, re.IGNORECASE):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PASSWORD-001', '法规/注册确认',
+            '请与资质、产品和项目负责人确认默认账号密码是否需要写入说明书',
+            '默认账号密码属于敏感操作信息，人工审核要求确认是否可公开写明。',
+            'CYY人工审核经验基线 - 默认账号密码确认', 'serious', 93,
+        )
+
+    device_terms = [term for term in ['外部设备', '外接设备', '外围设备'] if term in normalized]
+    if len(device_terms) >= 2:
+        first_positions = [(normalized.find(term), term) for term in device_terms]
+        start, original = min(first_positions)
+        add_issue(
+            start, start + len(original), ' / '.join(device_terms),
+            'CYY-CN-TERM-003', '术语一致性',
+            '建议统一使用同一个术语，例如统一为“外部设备”或按项目术语表确认',
+            '同一概念在全文中出现多个说法，索引和正文术语需要统一。',
+            'CYY人工审核经验基线 - 外部设备术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'\d+(?:\.\d+)?\s*mm\s*/\s*\d+(?:\.\d+)?\s*mm', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-RANGE-001', '范围/数值格式',
+            '请确认该处是否应写为范围、分档精度，或拆分为不同测量项',
+            '两个显示精度之间使用斜杠表达，人工审核要求确认是否为范围或条件分档。',
+            'CYY人工审核经验基线 - 数值范围表达', 'general', 90,
+        )
+
+    for match in re.finditer(r'仅提供电子版说明书', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REG-001', '法规/注册确认',
+            '请与资质确认 NMPA 场景下纸质说明书提供要求',
+            '人工审核意见指出 NMPA 通常提供纸质说明书，需要确认电子版说明书表述是否合规。',
+            'CYY人工审核经验基线 - NMPA说明书提供形式确认', 'serious', 90,
+        )
+
+    return issues
+
+
 def _looks_like_numbered_section_heading(text):
     match = re.match(r'^\d+(?:\.\d+)*\.?\s+(.+)$', str(text or '').strip())
     if not match:
@@ -3753,35 +4225,36 @@ def _looks_like_numbered_section_heading(text):
     return words[0].lower() not in action_verbs
 
 
-def _run_safety_compliance_audit(content):
+def _run_safety_compliance_audit(content, document_language='en'):
     issues = []
     normalized = content.replace('\f', '\n')
     seen = set()
 
-    for match in re.finditer(r'(?im)^\s*(WARNING|CAUTION|DANGER)\b([^\n]*)', normalized):
-        label = match.group(1).upper()
-        line = match.group(0).strip()
-        window = normalized[match.start():match.start() + 120]
-        if re.search(r'警告|注意|危险', window):
-            continue
-        key = ('SAFE-001', match.start())
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-                'severity': 'serious',
-                'category': '安全合规',
-                'rule': 'SAFE-001',
-                'chapter': '',
-                'original_text': line,
-                'context': get_context(normalized, match.start(), match.end(), 120),
-                'suggestion': f'{label}: ... → {label} {"警告" if label == "WARNING" else "注意" if label == "CAUTION" else "危险"}: ...',
-                'description': f'{label} 缺少对应中文警示语，应补充双语安全提示。',
-                'audit_basis': '安全警示应完整传达风险及处置要求。',
-                'confidence': 91,
-                'source': 'rule',
-                'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文'),
-            })
+    if _requires_bilingual_safety_labels(normalized, document_language):
+        for match in re.finditer(r'(?im)^\s*(WARNING|CAUTION|DANGER)\b([^\n]*)', normalized):
+            label = match.group(1).upper()
+            line = match.group(0).strip()
+            window = normalized[match.start():match.start() + 120]
+            if re.search(r'警告|注意|危险', window):
+                continue
+            key = ('SAFE-001', match.start())
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append({
+                    'severity': 'serious',
+                    'category': '安全合规',
+                    'rule': 'SAFE-001',
+                    'chapter': '',
+                    'original_text': line,
+                    'context': get_context(normalized, match.start(), match.end(), 120),
+                    'suggestion': f'{label}: ... → {label} {"警告" if label == "WARNING" else "注意" if label == "CAUTION" else "危险"}: ...',
+                    'description': f'{label} 缺少对应中文警示语，应补充双语安全提示。',
+                    'audit_basis': '安全警示应完整传达风险及处置要求。',
+                    'confidence': 91,
+                    'source': 'rule',
+                    'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文'),
+                })
 
     hazard_pattern = re.compile(r'\b(biohazard|flammable|high voltage|corrosive|laser radiation)\b', re.IGNORECASE)
     for match in hazard_pattern.finditer(normalized):
@@ -3955,7 +4428,8 @@ def _export_review_docx(review, document, issues):
             })
 
     if not comments_data:
-        raise HTTPException(status_code=400, detail="未能在 Word 文档中定位可批注的审核问题")
+        doc.save(str(export_path))
+        return export_path, export_name, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     doc.save(str(export_path))
     _inject_comments_to_docx(str(export_path), comments_data)
@@ -4349,6 +4823,89 @@ def _run_manual_engineering_audit(content, file_type=None):
     if not content:
         return issues
 
+    title_window = content[:1200]
+    for match in re.finditer(r'\bserise\b', title_window, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-NOTICE-001',
+            '标题术语拼写',
+            'series',
+            '产品通知标题中 series 拼写错误，会影响对外发布质量和检索准确性。',
+            '产品通知发布前内容检查 - 标题拼写',
+            'serious',
+            96,
+        )
+
+    for match in re.finditer(r'\b20\d{2}/\d{1,2}/\d{1,2}\b', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-NOTICE-002',
+            '发布日期格式',
+            '建议统一为 YYYY-MM-DD，例如 2026-07-24',
+            '英文对外发布通知中的发布日期建议使用统一、无歧义的 ISO 日期格式。',
+            '产品通知发布前内容检查 - 日期一致性',
+            'general',
+            91,
+        )
+
+    appendix_match = re.search(r'Appendix:\s*Affected\s+Products\s+and\s+Change\s+Details(.+)$', content, re.IGNORECASE | re.DOTALL)
+    if appendix_match:
+        appendix_text = appendix_match.group(1)
+        compact_appendix = re.sub(r'\s+', ' ', appendix_text).strip()
+        missing_fields = []
+        for field in ['Change Details', 'Effective Date', 'Affected Product', 'Product Name']:
+            if not re.search(re.escape(field), compact_appendix, re.IGNORECASE):
+                missing_fields.append(field)
+        if len(compact_appendix) < 300 or len(missing_fields) >= 2:
+            start = appendix_match.start(1)
+            end = min(len(content), start + max(40, len(compact_appendix)))
+            add_issue(
+                start,
+                end,
+                compact_appendix[:180] or appendix_match.group(0)[:180],
+                'DOC-NOTICE-003',
+                '附录信息完整性',
+                '请补充受影响产品表的字段，例如 Product Name、Model/Cat. No.、Change Details、Effective Date，并填写完整条目。',
+                '标题写明 Affected Products and Change Details，但附录内容缺少足够字段或完整变更信息。',
+                '产品通知发布前内容检查 - 受影响产品与变更详情完整性',
+                'serious',
+                92,
+            )
+
+    for match in re.finditer(r'\bDNBSEQ\s*TM\b|\bDNBSEQTM\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', '', match.group(0)),
+            'DOC-TM-001',
+            '商标格式',
+            'DNBSEQ™',
+            'DNBSEQ 商标标识应使用 ™ 符号并保持格式一致，避免写成普通 TM 文本。',
+            '说明书发布前自检 Checklist - 商标标识一致性',
+            'general',
+            93,
+        )
+        break
+
+    revision_match = re.search(r'Revision\s+history\s+Contents\s+Contents\s+User\s+manual', content[:4000], re.IGNORECASE)
+    if revision_match:
+        add_issue(
+            revision_match.start(),
+            revision_match.end(),
+            re.sub(r'\s+', ' ', revision_match.group(0)).strip(),
+            'DOC-REV-001',
+            '版本记录',
+            '请补充当前版本的版本号、发布日期和变更说明，或确认该节是否被解析为正文目录导致内容缺失。',
+            'Revision history 位置未见实际版本记录条目，发布前需要确认版本记录表是否完整。',
+            '说明书发布前自检 Checklist - 版本记录完整性',
+            'serious',
+            92,
+        )
+
     def normalized_block_text(text):
         text = re.sub(r'(?i)\bM\s*a\s*y\b', 'May', str(text or ''))
         text = re.sub(r'(?i)\bJ\s*u\s*n\b', 'Jun', text)
@@ -4383,6 +4940,39 @@ def _run_manual_engineering_audit(content, file_type=None):
             '说明书审核能力补强方案 - 英文微编辑',
             'general',
             confidence,
+        )
+
+    credential_patterns = [
+        r'\bselect\s+the\s+account\s+([A-Za-z][\w-]{2,})\s*,?\s+enter\s+the\s+password\s+([^\s,.;]+)',
+        r'\bdefault\s+account\s*\(\s*username\s*:\s*([^;\s)]+)\s*;\s*password\s*:\s*([^\s)]+)',
+    ]
+    for pattern in credential_patterns:
+        for match in re.finditer(pattern, content, re.IGNORECASE):
+            add_issue(
+                match.start(),
+                match.end(),
+                re.sub(r'\s+', ' ', match.group(0)).strip(),
+                'DOC-SEC-001',
+                '发布前敏感信息确认',
+                '请确认默认账号密码是否允许在对外说明书中明文展示；如需保留，建议补充首次登录后修改密码或按交付配置获取凭据的说明',
+                '文档包含默认账号密码或登录凭据，发布前需要确认披露范围和安全提示。',
+                '说明书发布前自检 Checklist - 敏感运行信息',
+                'serious',
+                94,
+            )
+
+    for match in re.finditer(r'\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-NET-001',
+            '发布前敏感信息确认',
+            '请确认该 IP 地址和端口是否为示例地址；如为示例，建议明确标注 example 或改为占位地址',
+            '文档包含具体内网 IP 地址和端口，发布前需要确认是否可对外公开或应改为示例占位。',
+            '说明书发布前自检 Checklist - 敏感运行信息',
+            'general',
+            91,
         )
 
     title_scope = content[:2500]
@@ -5150,6 +5740,9 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
     if file_type == "pdf" and rule_no in {"R002", "R013", "R036"}:
         return True
 
+    if document_language == "en" and rule_no == "R016":
+        return True
+
     # Numeric punctuation inside decimals, versions, and enumerations is usually valid.
     if rule_no == "R001":
         if re.search(r"\d[\.,]\d", context):
@@ -5177,8 +5770,13 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
     if rule_no == "R013":
         if original_text.endswith('%') or re.fullmatch(r"\d+(?:\.\d+)?[Vv]", original_text):
             return True
+        if re.fullmatch(r"\d+(?:[A-Z]{1,4}|[A-Z]+\d*)", original_text):
+            return True
         if re.search(r"[A-Z]{2,}\d|\d[A-Z]{2,}", original_text):
             return True
+        if re.search(r"\b(?:model|part\s*no\.?|cat\.?\s*no\.?|serial|appliance|system|instrument|device)\b", context, re.IGNORECASE):
+            if re.search(r"[A-Z]*\d+[A-Z0-9-]*", original_text):
+                return True
 
     if rule_no == "R011":
         lowered_context = context.lower()
@@ -5458,12 +6056,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         content = document.content or ""
         if document.file_type == 'pdf':
             content = clean_pdf_text(content)
-        content_limit = 120000 if document.file_type == 'pdf' else 20000
+        original_content_length = len(content)
+        content_limit = _review_content_limit(document.file_type)
         content = content[:content_limit]
         document_language = detect_language(content)
         spec_texts = _load_review_spec_texts(db)
         false_positive_signatures = _load_false_positive_signatures_for_document(db, document_id)
-        print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}字符")
+        print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}/{original_content_length}字符, 上限={content_limit}")
         print(
             "[审核] 当前规范文件长度: "
             f"cn={len(spec_texts.get('cn_style', ''))}, "
@@ -5544,7 +6143,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                     print(f"[审核] 逻辑完整性规则执行失败: {e}")
 
                 try:
-                    safety_issues = _run_safety_compliance_audit(content)
+                    safety_issues = _run_safety_compliance_audit(content, document_language)
                     print(f"[审核] 安全合规规则发现问题: {len(safety_issues)}个")
                     rule_issues.extend(safety_issues)
                 except Exception as e:
@@ -5565,6 +6164,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                     print(f"[审核] 长句规则执行失败: {e}")
 
             if document.file_type != 'xlsx':
+                if document_language in ("cn", "both"):
+                    try:
+                        chinese_baseline_issues = _run_chinese_human_baseline_rules(content)
+                        print(f"[审核] 中文人工基线高置信规则发现问题: {len(chinese_baseline_issues)}个")
+                        rule_issues.extend(chinese_baseline_issues)
+                    except Exception as e:
+                        print(f"[审核] 中文人工基线高置信规则执行失败: {e}")
+
                 try:
                     release_checklist_issues = _run_release_checklist_audit(content, document, spec_texts, document_language)
                     print(f"[审核] 发布前自检 Checklist 发现问题: {len(release_checklist_issues)}个")
@@ -5600,17 +6207,17 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 print(f"[审核] AI审核返回问题数={len(ai_issues)}")
                 for issue in ai_issues:
                     issue["source"] = "ai"
-                    issue.setdefault("severity", "general")
-                    issue.setdefault("category", "其他")
-                    issue.setdefault("original_text", "")
-                    issue.setdefault("context", "")
-                    issue.setdefault("chapter", "")
-                    issue.setdefault("rule", "AI")
-                    issue.setdefault("suggestion", "")
-                    issue.setdefault("description", "")
-                    issue.setdefault("audit_basis", "AI 审核")
-                    issue.setdefault("confidence", 80)
-                    issue.setdefault("position", "")
+                    issue["severity"] = issue.get("severity") or "general"
+                    issue["category"] = issue.get("category") or "其他"
+                    issue["original_text"] = issue.get("original_text") or ""
+                    issue["context"] = issue.get("context") or ""
+                    issue["chapter"] = issue.get("chapter") or ""
+                    issue["rule"] = issue.get("rule") or "AI"
+                    issue["suggestion"] = issue.get("suggestion") or ""
+                    issue["description"] = issue.get("description") or ""
+                    issue["audit_basis"] = issue.get("audit_basis") or "AI 审核（写作风格指南 + 发布前自检 Checklist + CYY人工审核经验基线）"
+                    issue["confidence"] = issue.get("confidence") or 80
+                    issue["position"] = issue.get("position") or ""
                     issue = _normalize_ai_issue_category(issue)
                     if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
                         issue["severity"] = "general"
@@ -5625,6 +6232,12 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         issues = _sanitize_issue_suggestions(issues)
         issues = _filter_review_false_positives(issues)
         issues = _filter_ai_issues_without_document_evidence(issues, content)
+        before_pipeline_count = len(issues)
+        issues = pipeline_select_review_issues(issues)
+        print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+        retained_ai_count = sum(1 for issue in issues if str(issue.get('source', '') or '').lower() == 'ai')
+        if retained_ai_count:
+            print(f"[审核] AI问题最终保留数量={retained_ai_count}")
         if false_positive_signatures:
             before_count = len(issues)
             issues = [issue for issue in issues if not (_issue_judgment_signatures(issue) & false_positive_signatures)]

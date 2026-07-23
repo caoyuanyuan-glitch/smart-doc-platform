@@ -1,54 +1,81 @@
 # 人工批注评测集摘要
 
-- 总条目: 561
+- 总条目: 603
 
 ## 分层统计
 
-- ai_assisted: 288
-- deterministic: 172
-- structural_consistency: 101
+- ai_assisted: 266
+- deterministic: 188
+- structural_consistency: 149
 
 ## 类别统计
 
-- 表达与句式: 150
-- 人工审核其他项: 112
-- 单位/空格: 86
-- 术语一致性: 45
-- 表格/版式: 41
-- 官网地址: 30
+- 表达与句式: 134
+- 人工审核其他项: 101
+- 单位/空格: 78
+- 表格/版式: 52
+- 术语一致性: 43
+- 官网地址: 29
 - 人工确认项: 26
-- 版本记录: 21
+- 图片/对象缺失: 25
+- 中文残留: 22
+- 版本记录: 17
 - 字体/版式细节: 15
-- 标点符号: 11
-- 图片/对象缺失: 6
+- 标点符号: 14
+- 步骤结构: 8
+- 重复内容: 7
 - 分页与标题边界: 5
 - 主题结构: 4
 - 商标声明: 4
 - 货号写法: 4
+- 操作步骤语气: 2
+- 法规/注册确认: 2
+- 表图编号: 2
+- 适用范围/硬件配置: 2
+- 公司主体表述: 1
+- 术语拼写: 1
+- 标题大小写: 1
+- 物料编码: 1
 - 符号规范: 1
+- 结构完整性: 1
+- 范围/数值格式: 1
 
 ## 规则统计
 
-- AI-STYLE-001: 150
-- AI-HUMAN-OTHER: 112
-- DET-SPACE-001: 86
-- STRUCT-TERM-001: 45
-- STRUCT-LAYOUT-001: 41
-- DET-URL-001: 30
+- AI-STYLE-001: 134
+- AI-HUMAN-OTHER: 101
+- DET-SPACE-001: 78
+- STRUCT-LAYOUT-001: 52
+- STRUCT-TERM-001: 43
+- DET-URL-001: 29
 - AI-CHECK-001: 26
-- DET-REVISION-001: 21
+- STRUCT-IMAGE-001: 25
+- DET-CN-001: 22
+- DET-REVISION-001: 17
 - DET-TYPO-001: 15
-- DET-PUNCT-001: 11
-- STRUCT-IMAGE-001: 6
+- DET-PUNCT-001: 14
+- STRUCT-STEP-001: 8
+- STRUCT-DUP-001: 7
 - STRUCT-PAGE-001: 5
 - DET-CATNO-001: 4
 - DET-TRADEMARK-001: 4
 - STRUCT-TOPIC-001: 4
+- AI-PROC-001: 2
+- AI-REG-001: 2
+- STRUCT-FIGTAB-001: 2
+- STRUCT-SCOPE-001: 2
+- AI-COMPANY-001: 1
+- DET-MATERIAL-001: 1
+- DET-RANGE-001: 1
 - DET-SYMBOL-001: 1
+- DET-TERM-SPELL-001: 1
+- DET-TITLE-CASE-001: 1
+- STRUCT-COMPONENT-001: 1
 
 ## 文件统计
 
 - H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf: 106
+- 光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf: 42
 - JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf: 41
 - JB-A09-193 MGIEasy 快速建库杂交捕获应用操作指南自动化操作说明书_RV1.0_SV1.0 reviewed by Yuanyuan.pdf: 38
 - H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1 reviewed by YY.docx: 32

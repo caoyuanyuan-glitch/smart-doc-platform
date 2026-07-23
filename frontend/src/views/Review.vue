@@ -116,7 +116,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="created_at" label="开始时间" width="160" />
-          <el-table-column label="操作" width="360" fixed="right">
+          <el-table-column label="操作" width="460" fixed="right">
             <template #default="scope">
               <el-button 
                 size="small" 
@@ -133,13 +133,22 @@
               >
                 一键确认
               </el-button>
-              <el-button 
-                size="small" 
-                type="success" 
+              <el-button
+                size="small"
+                type="success"
                 :disabled="scope.row.status !== 'completed'"
                 @click="downloadReviewResult(scope.row)"
               >
                 {{ resultButtonLabel(scope.row.document_file_type) }}
+              </el-button>
+              <el-button 
+                size="small" 
+                type="success" 
+                plain
+                :disabled="scope.row.status !== 'completed'"
+                @click="exportReviewHtml(scope.row.id)"
+              >
+                HTML报告
               </el-button>
             </template>
           </el-table-column>
@@ -1211,9 +1220,9 @@ th{background:#f8f9fa;font-weight:bold}
 }
 
 function resultButtonLabel(fileType) {
-  if (fileType === 'docx') return '下载Word'
+  if (fileType === 'docx') return '批注Word'
   if (fileType === 'xlsx') return '下载Excel'
-  return '导出HTML'
+  return '下载结果'
 }
 
 function parseMaybeJson(value) {
@@ -1554,8 +1563,6 @@ async function exportReviewHtml(taskId) {
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    const doc = reviews.value.find(r => r.id === taskId)
-    const name = doc?.document_name || `task_${taskId}`
     link.download = `审核报告_${taskId}_${new Date().toISOString().slice(0, 10)}.html`
     document.body.appendChild(link)
     link.click()

@@ -37,41 +37,49 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
         (r"缺少.*ne384|ne384.*硬件配置|不是还有ne384", "适用范围/硬件配置", "structural_consistency", "STRUCT-SCOPE-001"),
         (r"图片编号|图.*编号|table.*编号|编号.*连续", "表图编号", "structural_consistency", "STRUCT-FIGTAB-001"),
         (r"操作步骤.*祈使句|祈使句", "操作步骤语气", "ai_assisted", "AI-PROC-001"),
-        (r"最新版本记录|版本记录.*最上面", "版本记录", "deterministic", "DET-REVISION-001"),
+        (r"最新版本记录|版本记录.*最上面|日期留空", "版本记录", "deterministic", "DET-REVISION-001"),
         (r"统一大小写|大小写统一", "标题大小写", "deterministic", "DET-TITLE-CASE-001"),
+        (r"物料编码|申请物料编码|0-00x", "物料编码", "deterministic", "DET-MATERIAL-001"),
+        (r"母公司|同名|本公司|长光", "公司主体表述", "ai_assisted", "AI-COMPANY-001"),
+        (r"nmpa|纸质说明书|电子版说明书", "法规/注册确认", "ai_assisted", "AI-REG-001"),
     ]
     for pattern, category, layer, rule in priority_patterns:
         if re.search(pattern, comment_text, re.IGNORECASE):
             return category, layer, rule
 
     structural_patterns = [
-        (r"图片丢失|重新链接图片|重新截屏|重新截图|截图|图丑|image|figure missing", "图片/对象缺失", "STRUCT-IMAGE-001"),
+        (r"图片丢失|重新链接图片|重新截屏|重新截图|截图|图丑|矢量图|图标|icon|image|figure missing", "图片/对象缺失", "STRUCT-IMAGE-001"),
         (r"搞到下一页|跨页|下一页|分页|page break", "分页与标题边界", "STRUCT-PAGE-001"),
         (r"topic|主题|页眉跨行|appendix|附录", "主题结构", "STRUCT-TOPIC-001"),
-        (r"表格|表头|竖线|多了竖线|边框|列宽|行高|均匀分布列|合并单元格|出框|拉大宽度", "表格/版式", "STRUCT-LAYOUT-001"),
-        (r"前文都是|统一|一致|同上|同下|同步修改|这个不是试剂名称", "术语一致性", "STRUCT-TERM-001"),
+        (r"表格|表头|竖线|多了竖线|边框|列宽|行高|均匀分布列|合并单元格|出框|拉大宽度|拉大列宽|调整列宽|溢出单元格|折线|太密集|挪到右边|样式没有设置对", "表格/版式", "STRUCT-LAYOUT-001"),
+        (r"前文都是|统一|一致|同上|同下|同步修改|这个不是试剂名称|平行结构|冒号前面", "术语一致性", "STRUCT-TERM-001"),
+        (r"重复出现|重复了|内容重合|意思重复", "重复内容", "STRUCT-DUP-001"),
+        (r"主机.*其他部件|其他部件没有介绍|组成.*部件", "结构完整性", "STRUCT-COMPONENT-001"),
+        (r"有序列表|不是一个步骤|操作步骤如下|合并到上一步", "步骤结构", "STRUCT-STEP-001"),
     ]
     for pattern, category, rule in structural_patterns:
         if re.search(pattern, text, re.IGNORECASE):
             return category, "structural_consistency", rule
 
     deterministic_patterns = [
-        (r"缺空格|隔开|空格|℃|μl|ml|ng/μl|fmol", "单位/空格", "DET-SPACE-001"),
+        (r"缺空格|隔开|空格|℃|μl|ml|ng/μl|fmol|单位前面加空格", "单位/空格", "DET-SPACE-001"),
         (r"字号|上角标|下角标|公式|蓝色字|字小|粗了|横线|间隙|距离", "字体/版式细节", "DET-TYPO-001"),
         (r"确认.*版本|是不是\d|version|rev\b|版本", "版本记录", "DET-REVISION-001"),
-        (r"标点|句号|逗号|括号", "标点符号", "DET-PUNCT-001"),
+        (r"标点|句号|逗号|括号|缺句号|多余句号|双引号|反向", "标点符号", "DET-PUNCT-001"),
         (r"地址|网址|global-mgitech|官网|封底", "官网地址", "DET-URL-001"),
         (r"货号|cat\.?\s*no", "货号写法", "DET-CATNO-001"),
         (r"trademark|商标声明", "商标声明", "DET-TRADEMARK-001"),
         (r"乘号", "符号规范", "DET-SYMBOL-001"),
+        (r"otc.*oct|oct", "术语拼写", "DET-TERM-SPELL-001"),
+        (r"为什么是/|不是一个范围", "范围/数值格式", "DET-RANGE-001"),
     ]
     for pattern, category, rule in deterministic_patterns:
         if re.search(pattern, text, re.IGNORECASE):
             return category, "deterministic", rule
 
     ai_patterns = [
-        (r"sentence style|语句|表达|措辞|语法|口语化|改为|建议改为|typo|the\b|with\b|that\b|device\b|logging\b|for selecting", "表达与句式", "AI-STYLE-001"),
-        (r"确认|检查|是否|当$", "人工确认项", "AI-CHECK-001"),
+        (r"sentence style|语句|表达|措辞|语法|口语化|改为|建议改为|删了|typo|the\b|with\b|that\b|device\b|logging\b|for selecting", "表达与句式", "AI-STYLE-001"),
+        (r"确认|检查|是否|当$|真是这样写吗|项目组提供|资质|产品经理|项目经理|源头文件也要改|密码", "人工确认项", "AI-CHECK-001"),
     ]
     for pattern, category, rule in ai_patterns:
         if re.search(pattern, text, re.IGNORECASE):
