@@ -28,7 +28,7 @@ from app.crud.term import bulk_create_terms
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-POLISH_AI_ONLY = True
+POLISH_AI_ONLY = False
 
 # 润色任务进度追踪
 _polish_tasks: dict = {}  # {task_id: {"status", "progress", "message", "result"}}
@@ -429,8 +429,8 @@ def _load_terminology_source(db: Session, terminology_id: int = None) -> Optiona
 
 
 # 句式清单所在知识库文件夹 ID（写作规范 / 句式清单）
-SENTENCE_GUIDE_FOLDER_IDS = [3]
-SENTENCE_FEEDBACK_FOLDER_IDS = [20]
+SENTENCE_GUIDE_FOLDER_IDS = [8]
+SENTENCE_FEEDBACK_FOLDER_IDS = [10]
 PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单.md"
 TERMINOLOGY_FEEDBACK_FOLDER_IDS = [21]
 PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME = "平台反馈的术语对照表.md"
@@ -467,14 +467,15 @@ def _build_document_polish_guide(
     parts = []
 
     # 1. 句式清单（优先匹配）
+    # 始终加载通用句式清单作为基础
+    all_guides = _load_sentence_guides(db)
+    if all_guides:
+        parts.append(all_guides)
+    # 用户指定的句式文件附加进来（优先级更高）
     if sentence_file_id and sentence_file_id != DEFAULT_STYLE_GUIDE_ID:
-        sentence_guide = _load_sentence_guides(db, style_guide_id=sentence_file_id)
-        if sentence_guide:
-            parts.append(sentence_guide)
-    elif not sentence_file_id:
-        all_guides = _load_sentence_guides(db)
-        if all_guides:
-            parts.append(all_guides)
+        selected_guide = _load_sentence_guides(db, style_guide_id=sentence_file_id)
+        if selected_guide:
+            parts.append(selected_guide)
 
     # 2. 用户额外的润色要求
     if requirements and requirements.strip():
@@ -505,6 +506,246 @@ def _normalize_sentence_for_match(text: str) -> str:
     if not text:
         return ""
     return re.sub(r'[\s，。！？；：,.!?;:""''()（）【】\[\]<>《》-]+', '', text)
+
+
+def _bigram_set(text: str) -> set:
+    """将文本切分为字符 bigram 集合。"""
+    if len(text) < 2:
+        return {text} if text else set()
+    return {text[i:i+2] for i in range(len(text) - 1)}
+
+
+def _lcs_ratio(a: str, b: str) -> float:
+    """最长公共子序列长度与较长字符串长度之比。"""
+    if not a or not b:
+        return 0.0
+    m, n = len(a), len(b)
+    if m == 0 or n == 0:
+        return 0.0
+    # 使用 1D 数组优化 LCS
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        cur = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if a[i-1] == b[j-1]:
+                cur[j] = prev[j-1] + 1
+            else:
+                cur[j] = max(prev[j], cur[j-1])
+        prev = cur
+    lcs_len = prev[n]
+    return lcs_len / max(m, n)
+
+
+def _sentence_similarity(a: str, b: str) -> float:
+    """
+    计算两个中文句子的相似度（分段匹配）。
+
+    综合 bigram Jaccard 相似度（捕捉局部片段重叠）和
+    LCS 比率（捕捉整体结构相似度），取加权平均。
+    当常规得分不足但存在高重合公共子串时，以子串比例兜底。
+    """
+    if a == b:
+        return 1.0
+    a_norm = _normalize_sentence_for_match(a)
+    b_norm = _normalize_sentence_for_match(b)
+    if not a_norm or not b_norm:
+        return 0.0
+    if a_norm == b_norm:
+        return 1.0
+    # Bigram Jaccard
+    bigrams_a = _bigram_set(a_norm)
+    bigrams_b = _bigram_set(b_norm)
+    intersection = len(bigrams_a & bigrams_b)
+    union = len(bigrams_a | bigrams_b)
+    bigram_score = intersection / union if union > 0 else 0.0
+    # LCS ratio
+    lcs_score = _lcs_ratio(a_norm, b_norm)
+    # 句子结构相似度
+    struct_score = _compare_sentence_structure(a, b)
+    # 语义关键词重叠
+    keyword_score = _compare_semantic_keywords(a, b)
+    # 加权：bigram 0.3 + LCS 0.3 + 结构 0.2 + 关键词 0.2
+    score = 0.3 * bigram_score + 0.3 * lcs_score + 0.2 * struct_score + 0.2 * keyword_score
+    # 高重合子串兜底：常规分不到 0.85 但最长公共子串覆盖 >=75% 时激活
+    if score < 0.85:
+        s = SequenceMatcher(None, a_norm, b_norm)
+        match = s.find_longest_match(0, len(a_norm), 0, len(b_norm))
+        shorter = min(len(a_norm), len(b_norm))
+        substr_ratio = match.size / shorter if shorter > 0 else 0.0
+        if substr_ratio >= 0.75:
+            score = 0.80 + (substr_ratio - 0.75) * 0.8  # 0.80~1.00
+    return min(score, 1.0)
+
+
+# 核心动词列表（技术文档常见操作动词）
+_CORE_VERBS = {
+    '置于', '放置', '安装', '对应', '匹配', '确保', '检查', '设置', '调整',
+    '校准', '测量', '分析', '记录', '保存', '删除', '关闭', '打开', '启动',
+    '停止', '连接', '断开', '输入', '输出', '读取', '写入', '扫描', '点击',
+    '选择', '确认', '取消', '添加', '移除', '插入', '取出', '转移', '等待',
+    '观察', '核对', '撕开', '倒入', '拨至', '装入', '置于', '装填',
+}
+
+# 方位词列表
+_POSITION_WORDS = {'上', '下', '前', '后', '左', '右', '内', '外', '中', '间', '里', '旁', '侧'}
+
+
+def _extract_semantic_keywords(sentence: str) -> list[str]:
+    """提取语义关键词：实体名词 + 核心动词 + 方位词。"""
+    keywords = []
+    text = _normalize_sentence_for_match(sentence)
+    if not text:
+        return keywords
+    # 提取 2-4 字连续中文字符作为名词实体
+    for match in re.finditer(r'[\u4e00-\u9fa5]{2,4}', text):
+        w = match.group()
+        # 过滤纯数字组合和无效片段
+        if w not in ('一个', '一些', '这个', '那个', '每个', '所有', '可以', '需要', '进行'):
+            keywords.append(w)
+    # 提取核心动词
+    for verb in _CORE_VERBS:
+        if verb in text:
+            keywords.append(verb)
+    # 提取方位词
+    for pw in _POSITION_WORDS:
+        if pw in text:
+            keywords.append(pw)
+    return list(set(keywords))
+
+
+def _compare_semantic_keywords(a: str, b: str) -> float:
+    """计算两个句子的语义关键词重叠度。"""
+    kw_a = _extract_semantic_keywords(a)
+    kw_b = _extract_semantic_keywords(b)
+    if not kw_a or not kw_b:
+        return 0.0
+    overlap = len(set(kw_a) & set(kw_b))
+    denominator = max(len(kw_a), len(kw_b))
+    return overlap / denominator if denominator > 0 else 0.0
+
+
+def _extract_sentence_structure(sentence: str) -> dict:
+    """提取中文技术文档句子的主谓宾结构。"""
+    struct = {"verb": "", "subject": "", "object": "", "pattern": ""}
+    text = sentence.strip()
+    # 模式1: "将A置于B上/中" 或 "将A放置于B"
+    m = re.search(r'将(.+?)(置于|放置于|放置在|放入|装到|插入|转移到|拨至|倒[入进])(.+?)([上中下内外]|位置)?', text)
+    if m:
+        struct["verb"] = m.group(2)
+        struct["subject"] = m.group(1)
+        struct["object"] = m.group(3) + (m.group(4) or '')
+        struct["pattern"] = "将X置于Y"
+        return struct
+    # 模式2: "确保A与B一致/对应" 或 "检查A与B匹配"
+    m = re.search(r'(确保|检查|验证|确认)(.+?)(与|和)(.+?)(一致|匹配|对应|对齐|相同)', text)
+    if m:
+        struct["verb"] = m.group(1)
+        struct["subject"] = m.group(2)
+        struct["object"] = m.group(4)
+        struct["pattern"] = "X与Y一致"
+        return struct
+    # 模式3: "用/使用A做B"
+    m = re.search(r'(用|使用|利用|通过)(.+?)(进行|完成|实现|执行)(.+)', text)
+    if m:
+        struct["verb"] = m.group(3)
+        struct["subject"] = m.group(2)
+        struct["object"] = m.group(4)
+        struct["pattern"] = "用X做Y"
+        return struct
+    # 模式4: "待A后，B" 或 "当A时，B"
+    m = re.search(r'(?:待|当|等到)(.+?)(?:后|时|之后)(.+)', text)
+    if m:
+        struct["verb"] = "等待"
+        struct["subject"] = m.group(1)
+        struct["object"] = m.group(2)
+        struct["pattern"] = "待X后做Y"
+        return struct
+    # 模式5: "点击/选择/打开/关闭A"
+    m = re.search(r'(点击|选择|打开|关闭|进入|退出|切换到)(.+)', text)
+    if m:
+        struct["verb"] = m.group(1)
+        struct["object"] = m.group(2)
+        struct["pattern"] = "操作UI元素"
+        return struct
+    return struct
+
+
+def _compare_sentence_structure(a: str, b: str) -> float:
+    """比较两个句子的主谓宾结构相似度。"""
+    sa = _extract_sentence_structure(a)
+    sb = _extract_sentence_structure(b)
+    if not sa["pattern"] or not sb["pattern"]:
+        return 0.5  # 无法提取结构时给中性分数
+    if sa["pattern"] != sb["pattern"]:
+        return 0.0  # 结构模式不同
+    score = 1.0
+    if sa["verb"] and sb["verb"]:
+        if sa["verb"] != sb["verb"]:
+            score -= 0.3
+    return max(score, 0.0)
+
+
+def _generate_sentence_variants(sentence: str) -> list[str]:
+    """为精确匹配生成句子的多种变体。"""
+    variants = [sentence]
+    text = sentence.strip()
+    # 去掉标点
+    no_punct = re.sub(r'[，。！？；：、,.!?;:""''()（）【】\[\]<>《》]+', '', text)
+    variants.append(no_punct)
+    # 统一空格
+    unified = ' '.join(text.split())
+    if unified != text:
+        variants.append(unified)
+    return list(set(variants))
+
+
+# 约束润色器配置
+_CONSTRAINT_TERMINOLOGY = {
+    "机器": "仪器",
+    "推板": "载台",
+    "平置": "水平放置",
+    "探测器": "检测器",
+    "分离柱": "色谱柱",
+    "底线": "基线",
+    "注射": "进样",
+    "滞留时间": "保留时间",
+}
+
+_COLLOQUIAL_PATTERNS = [
+    (r'一下', ''),
+    (r'的话', ''),
+]
+
+_SYNTAX_OPTIMIZATIONS = [
+    (r'要与(.+?)对应', r'确保与\1一致'),
+    (r'(.+?[^：：因])\s*为\s*(.+)', r'\1：\2'),
+]
+
+
+def _apply_constraint_polish(sentence: str) -> str:
+    """对未匹配到句式的句子进行约束润色。"""
+    result = sentence
+    # 术语标准化
+    for non_std, std in _CONSTRAINT_TERMINOLOGY.items():
+        result = result.replace(non_std, std)
+    # 删除口语化冗余
+    for pattern, replacement in _COLLOQUIAL_PATTERNS:
+        result = re.sub(pattern, replacement, result)
+    # 句式优化
+    for pattern, replacement in _SYNTAX_OPTIMIZATIONS:
+        result = re.sub(pattern, replacement, result)
+    return result
+
+
+# 匹配策略配置
+_POLISH_MATCH_CONFIG = {
+    "l2_auto_replace": True,      # L2 模糊匹配自动替换
+    "l3_auto_replace": True,      # L3 语义匹配自动替换
+    "l1_confidence": 1.0,         # L1 精确匹配置信度
+    "l2_min_confidence": 0.85,    # L2 模糊匹配最低置信度
+    "l3_min_confidence": 0.90,    # L3 语义匹配最低置信度
+    "l3_auto_confidence": 0.65,   # L3 普通规则匹配阈值（preferred_sentences）
+}
 
 def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     """加载句式清单内容（带缓存）。
@@ -1191,20 +1432,67 @@ def _apply_skill_polish(
     for line in lines:
         original = line
         new_line = line.strip()
+        # 剥离编号前缀（如 "5. "、"1、"、"3) "），正文独立匹配
+        step_prefix = ""
+        step_match = re.match(r'^(\d+[.、)\s]+)\s*(.+)$', new_line)
+        if step_match:
+            step_prefix = step_match.group(1)
+            new_line = step_match.group(2)
         
         has_changes = False
         
         if style_rules and not is_title:
-            new_line, rule_changes = _apply_style_rules(new_line, style_rules)
-            if rule_changes:
-                logger.warning(
-                    "polish sentence guide matched: before=%r after=%r matches=%s",
-                    original[:120],
-                    new_line[:120],
-                    [change.rule_name for change in rule_changes],
-                )
-                changes.extend(rule_changes)
-                has_changes = True
+            # 拆分子句检测匹配，匹配到后在全文级执行替换以避免子句边界重复
+            clauses = [c.strip() for c in re.split(r'[，。；！？,;!?]+', new_line) if c.strip()]
+            if len(clauses) > 1:
+                # 阶段1: 子句级检测最佳匹配模板
+                best_template = None
+                for clause in clauses:
+                    for rule in style_rules:
+                        if rule["type"] != "preferred_sentences":
+                            continue
+                        tmpl, score, level = _three_tier_match(clause, rule.get("sentences", []))
+                        if tmpl and score >= _POLISH_MATCH_CONFIG["l2_min_confidence"]:
+                            best_template = tmpl
+                            break
+                    if best_template:
+                        break
+                if best_template:
+                    # 阶段2: 全文级替换，避免子句边界处重复
+                    original_before = new_line
+                    new_line = replace_with_context(new_line, best_template)
+                    if new_line != original_before:
+                        changes.append(PolishRuleMatch(
+                            rule_name="句式模板匹配",
+                            before=original_before[:80],
+                            after=new_line[:80],
+                            type="style"
+                        ))
+                        logger.warning(
+                            "polish sentence guide matched: before=%r after=%r template=%r",
+                            original_before[:120],
+                            new_line[:120],
+                            best_template[:80],
+                        )
+                        has_changes = True
+                # 阶段3: 应用非句式规则（禁用词、被动语态、约束润色等）
+                non_tmpl_rules = [r for r in style_rules if r["type"] != "preferred_sentences"]
+                if non_tmpl_rules:
+                    new_line, rule_changes = _apply_style_rules(new_line, non_tmpl_rules)
+                    if rule_changes:
+                        changes.extend(rule_changes)
+                        has_changes = True
+            else:
+                new_line, rule_changes = _apply_style_rules(new_line, style_rules)
+                if rule_changes:
+                    logger.warning(
+                        "polish sentence guide matched: before=%r after=%r matches=%s",
+                        original[:120],
+                        new_line[:120],
+                        [change.rule_name for change in rule_changes],
+                    )
+                    changes.extend(rule_changes)
+                    has_changes = True
 
         if sentence_custom_rules and not is_title:
             new_line, custom_issues = apply_custom_rules(new_line, sentence_custom_rules)
@@ -1282,12 +1570,51 @@ def _apply_skill_polish(
                     type=change_type
                 ))
         
+        if step_prefix and not new_line.startswith(step_prefix):
+            new_line = step_prefix + new_line
         polished_lines.append(new_line)
     
     if db and (triggered_rule_ids or triggered_engine_keys):
         record_rule_triggers(db, triggered_rule_ids, triggered_engine_keys)
 
     return '\n'.join(polished_lines), changes
+
+
+def _parse_table_sentence_templates(section: str) -> list[str]:
+    """从 Markdown 表格中提取句式模板列的内容。
+    
+    优先提取"示例"列（包含真实句子），没有示例列时回退到"句式模板"列。
+    """
+    sentences = []
+    table_blocks = re.findall(r'(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)', section)
+    for block in table_blocks:
+        lines = [l for l in block.strip().split('\n') if l.strip()]
+        if len(lines) < 2:
+            continue
+        header_row = [c.strip() for c in lines[0].strip('|').split('|')]
+        # 优先查找"示例"列（包含真实例句，适合规则匹配）
+        example_col_idx = None
+        template_col_idx = None
+        for i, h in enumerate(header_row):
+            if any(kw in h for kw in ['示例', '例子']):
+                example_col_idx = i
+            if any(kw in h for kw in ['句式模板', '句式', '模板', '句型', '标准句式']):
+                template_col_idx = i
+        # 优先用示例列，回退到模板列，再回退到第二列
+        col_idx = example_col_idx if example_col_idx is not None else template_col_idx
+        if col_idx is None and len(header_row) >= 2:
+            col_idx = 1
+        if col_idx is None:
+            continue
+        for line in lines[2:]:
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            if col_idx < len(cells):
+                val = cells[col_idx].strip().strip('"\'""''').strip()
+                # 去掉 Markdown 转义（\* \_ \- 等）
+                val = re.sub(r'\\([*_\-])', r'\1', val)
+                if val and not re.match(r'^\d+$', val) and val not in ('...', '....'):
+                    sentences.append(val)
+    return sentences
 
 
 def _extract_style_rules(guide_text: str) -> list[dict]:
@@ -1307,7 +1634,10 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
             # 提取列表项作为具体规则
             items = re.findall(r'(?:^|\n)[-*]\s+(.+)', section)
             
-            if not items:
+            # 同时解析 Markdown 表格中的句式模板
+            table_sentences = _parse_table_sentence_templates(section)
+            
+            if not items and not table_sentences:
                 continue
             
             # 判断规则类型
@@ -1430,6 +1760,9 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                     sentence = item.strip().strip('`').strip()
                     if sentence:
                         preferred_sentences.append(sentence)
+                # 如果表格中也有句式模板，合并进来
+                if table_sentences:
+                    preferred_sentences.extend(table_sentences)
                 if preferred_sentences:
                     rules.append({
                         "type": "preferred_sentences",
@@ -1437,6 +1770,15 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                         "sentences": preferred_sentences,
                         "fix": "优先采用用户确认过的句式"
                     })
+            
+            # 表格句式模板：从句式参考表中提取句型（跳过统计表）
+            elif table_sentences and '统计' not in header:
+                rules.append({
+                    "type": "preferred_sentences",
+                    "name": header,
+                    "sentences": table_sentences,
+                    "fix": "采用规范句式"
+                })
     
     return rules
 
@@ -1483,6 +1825,93 @@ def _default_style_rules() -> list[dict]:
     ]
 
 
+def _three_tier_match(sentence: str, templates: list[str]) -> tuple:
+    """
+    三层匹配策略：L1 精确 → L2 模糊 → L3 语义。
+    返回: (best_template, best_score, match_level)
+    """
+    normalized = _normalize_sentence_for_match(sentence)
+    if not normalized:
+        return None, 0.0, "NONE"
+
+    # ===== L1: 精确匹配（含变体） =====
+    variants = _generate_sentence_variants(sentence)
+    for tmpl in templates:
+        tmpl_normalized = _normalize_sentence_for_match(tmpl)
+        if not tmpl_normalized:
+            continue
+        # 检查输入变体 → 模板
+        for variant in variants:
+            var_normalized = _normalize_sentence_for_match(variant)
+            if var_normalized == tmpl_normalized:
+                return tmpl, 1.0, "L1"
+        # 检查输入变体 → 模板变体
+        tmpl_variants = _generate_sentence_variants(tmpl)
+        for tv in tmpl_variants:
+            tv_normalized = _normalize_sentence_for_match(tv)
+            for variant in variants:
+                var_normalized = _normalize_sentence_for_match(variant)
+                if var_normalized == tv_normalized:
+                    return tmpl, 1.0, "L1"
+    
+    # ===== L2: 模糊匹配（bigram+LCS+结构+关键词 高阈值） =====
+    best_tmpl = None
+    best_score = 0.0
+    for tmpl in templates:
+        tmpl_normalized = _normalize_sentence_for_match(tmpl)
+        if not tmpl_normalized:
+            continue
+        contains_match = (
+            normalized in tmpl_normalized or
+            tmpl_normalized in normalized
+        )
+        if contains_match:
+            score = max(0.92, _sentence_similarity(sentence, tmpl))
+        else:
+            score = _sentence_similarity(sentence, tmpl)
+        if score > best_score:
+            best_score = score
+            best_tmpl = tmpl
+    
+    if best_tmpl and best_score >= _POLISH_MATCH_CONFIG["l2_min_confidence"]:
+        return best_tmpl, best_score, "L2"
+    
+    # ===== L3: 语义匹配（低阈值，仅做提示） =====
+    l3_threshold = _POLISH_MATCH_CONFIG["l3_auto_confidence"]
+    if best_tmpl and best_score >= l3_threshold:
+        return best_tmpl, best_score, "L3"
+    
+    return best_tmpl, best_score, "NONE"
+
+
+def replace_with_context(original: str, template: str) -> str:
+    """将原文与模板逐块融合。
+
+    前缀/后缀上下文保留，匹配块之间的内部间隙移除。
+    """
+    s = SequenceMatcher(None, original, template)
+    opcodes = list(s.get_opcodes())
+    # 标记内部 delete 为 replace：位于匹配块之间的原文多余内容应移除
+    for idx, (op, i1, i2, j1, j2) in enumerate(opcodes):
+        if op == 'delete':
+            has_before = any(o[0] in ('equal', 'replace') for o in opcodes[:idx])
+            has_after = any(o[0] in ('equal', 'replace') for o in opcodes[idx+1:])
+            if has_before and has_after:
+                opcodes[idx] = ('replace', i1, i2, j1, j2)
+    chars = list(original)
+    offset = 0
+    for op, i1, i2, j1, j2 in opcodes:
+        if op in ('equal', 'delete'):
+            continue
+        elif op == 'replace':
+            chars[i1 + offset : i2 + offset] = list(template[j1:j2])
+            offset += (j2 - j1) - (i2 - i1)
+        elif op == 'insert':
+            chars[i1 + offset : i1 + offset] = list(template[j1:j2])
+            offset += j2 - j1
+    return ''.join(chars)
+
+
 def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRuleMatch]]:
     """对单句应用句式风格规则"""
     changes = []
@@ -1520,39 +1949,29 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
                         ))
 
         elif rule["type"] == "preferred_sentences":
-            normalized_result = _normalize_sentence_for_match(result)
-            if not normalized_result:
+            best_sentence, best_score, match_level = _three_tier_match(result, rule.get("sentences", []))
+            if not best_sentence:
                 continue
-            best_sentence = None
-            best_score = 0.0
-            for sentence in rule.get("sentences", []):
-                normalized_sentence = _normalize_sentence_for_match(sentence)
-                if not normalized_sentence:
-                    continue
-                if normalized_result == normalized_sentence:
-                    best_sentence = sentence
-                    best_score = 1.0
-                    break
-                contains_match = (
-                    normalized_result in normalized_sentence or
-                    normalized_sentence in normalized_result
-                )
-                score = SequenceMatcher(None, normalized_result, normalized_sentence).ratio()
-                if contains_match:
-                    score = max(score, 0.9)
-                if score > best_score:
-                    best_score = score
-                    best_sentence = sentence
-
-            if best_sentence and best_score >= 0.72 and result.strip() != best_sentence.strip():
+            
+            l3_threshold = _POLISH_MATCH_CONFIG["l3_auto_confidence"]
+            should_replace = (
+                (match_level == "L1" and best_score >= _POLISH_MATCH_CONFIG["l1_confidence"]) or
+                (match_level == "L2" and best_score >= _POLISH_MATCH_CONFIG["l2_min_confidence"]) or
+                (match_level == "L3" and best_score >= l3_threshold)
+            )
+            
+            if should_replace and result.strip() != best_sentence.strip():
                 original = result
-                result = best_sentence.strip()
+                result = replace_with_context(original, best_sentence)
                 changes.append(PolishRuleMatch(
                     rule_name=rule["name"],
                     before=original[:50],
                     after=result[:50],
                     type="style"
                 ))
+            elif should_replace and result.strip() == best_sentence.strip():
+                # 完全匹配无变化，记录为空匹配
+                pass
         
         elif rule["type"] == "passive_voice":
             for pattern, issue in rule["patterns"]:
@@ -1621,6 +2040,18 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
                         after="需明确指代对象",
                         type="style"
                     ))
+    
+    # 约束润色：无匹配时进行术语标准化 + 去口语化
+    if not changes or all(c.type != 'style' for c in changes):
+        polished = _apply_constraint_polish(result)
+        if polished != result:
+            changes.append(PolishRuleMatch(
+                rule_name="约束润色",
+                before=result[:50],
+                after=polished[:50],
+                type="style"
+            ))
+            result = polished
     
     return result, changes
 
