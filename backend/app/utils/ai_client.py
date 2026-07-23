@@ -1411,16 +1411,26 @@ class AIClient:
 
 {base_system_prompt}
 
+REVIEW GOAL:
+- Behave like a human release reviewer, not a grammar checker.
+- Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
+- Ordinary grammar, article usage, punctuation, capitalization, spacing, and style preferences are low value. Report them only when they make an instruction ambiguous, incomplete, or impossible to perform.
+
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
 - Do not rewrite text only for readability, tone, or style. Report only objective violations from the checklist or common-error rules.
+- Do not report extracted text fragments, truncated words, line-break artifacts, or isolated half words as spelling errors.
+- Do not report repeated UI verbs such as click/select/open unless the object is missing and the user cannot know which button, icon, field, menu, or page to use.
+- When a UI object is missing, do not invent a button/icon name such as Browse or Edit unless that exact name is present in the excerpt. Use a generic suggestion such as "click the corresponding icon" when the exact object is not available.
+- Treat visual layout, column width, font size, icon size, image size, crowded tables, and graphic placement as manual review items. Report table or figure issues only when the text evidence proves missing content, wrong numbering, wrong title, or broken reference.
 - The correction must preserve the original meaning exactly. Do not change reagent names, supplier/customer roles, product names, legal statements, storage actions, or technical terms unless the provided rules explicitly require that exact replacement.
 - Do not change numeric values, quantities, counts, column/row numbers, temperatures, times, volumes, concentrations, or page references unless the source text itself explicitly proves the number is wrong.
 - Keep one space between numbers and units, including μL, mL, ng, bp, °C, %, ×, and buffer names. Correct missing spaces, but never remove an existing number-unit space.
 - The following are VALID English words (do NOT flag as spelling errors):
   {', '.join(ENGLISH_CORRECT_SPELLINGS[:50])}...
 - British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
-- Product names, company names, model numbers, and technical abbreviations are VALID unless context proves an error."""
+- Product names, company names, model numbers, and technical abbreviations are VALID unless context proves an error.
+- If the review basis includes CYY human review experience, use it to identify content-level defects. Focus on evidence-backed sentence meaning, revision history, terminology consistency, table content, figure references, page boundary content loss, and topic-structure issues."""
 
             user_prompt = f"""Please review the following English technical document.
 
@@ -1428,14 +1438,14 @@ Document excerpt:
 {content[:6500]}
 
 Release checklist and review basis:
-{audit_basis[:2000] if audit_basis else 'No additional checklist provided.'}
+{audit_basis[:3500] if audit_basis else 'No additional checklist provided.'}
 
 Output ONLY strict JSON:
 {{
   "issues": [
     {{
       "severity": "serious|general|suggestion",
-      "type": "Spelling|Grammar|Punctuation|Terminology|Units|Compliance|Format",
+      "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
@@ -1454,14 +1464,24 @@ Return empty issues array if no high-confidence issues found."""
         else:
             system_prompt = f"""{base_system_prompt}
 
+审核目标：
+- 按人工发布审核的思路检查，不按普通语法校对检查。
+- 优先输出影响发布审批、法规合规、用户操作、信息完整性、术语一致性、表格内容完整性、图文引用、版本记录、默认账号密码、IP/URL 暴露、法律声明的内容问题。
+- 普通语法、冠词、标点、大小写、空格、风格偏好属于低价值问题；只有会导致说明不清、步骤不可执行或合规风险时才输出。
+
 重要提醒：
 - 只报告有明确文本证据的问题。
 - 不要只为了可读性、语气或风格润色而输出问题。
+- 不要把解析残片、截断单词、换行造成的半词识别为拼写错误。
+- 不要反复报告 click/select/open 等普通 UI 动词；只有缺少按钮、图标、字段、菜单或页面对象导致用户无法操作时才报告。
+- UI 对象缺失时，不要凭空猜测 Browse、Edit 等按钮名；只有原文节选中出现该名称时才能写入建议。证据不足时使用“对应图标/按钮”这类泛化建议。
+- 版式外观、列宽、字体大小、图标尺寸、图片尺寸、表格拥挤、图形摆放交由人工审核。只有文本证据能证明内容缺失、编号错误、标题错误或引用断裂时，才报告表格或图片相关问题。
 - 修改建议必须严格保持原意，不得擅自改变试剂名称、供应方/用户角色、产品名称、合规声明、存储动作或技术术语。
 - 不得擅自改变数字值、数量、列数/行数、温度、时间、体积、浓度或页码；只有原文证据能直接证明数字错误时才可报告。
 - 数字和单位之间必须保留一个空格，包括 μL、mL、ng、bp、°C、%、× 和缓冲液名称；可以补缺失空格，不能删除已有空格。
 - 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
-- 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。"""
+- 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。
+- 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。"""
 
             user_prompt = f"""请审核下面这段中文技术文档。
 
@@ -1469,19 +1489,19 @@ Return empty issues array if no high-confidence issues found."""
 {content[:6500]}
 
 发布前自检 checklist 和审核依据：
-{audit_basis[:2000] if audit_basis else '未提供额外 checklist。'}
+{audit_basis[:3500] if audit_basis else '未提供额外 checklist。'}
 
 输出要求：
 1. 按JSON格式输出审核结果
 2. 只报告有明确文本证据的真实问题
-3. 不要报告可选的风格偏好问题
+3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
 
 输出严格JSON：
 {{
   "issues": [
     {{
-      "type": "拼写|语法|标点|术语|单位|合规|格式",
+      "type": "合规|发布风险|操作步骤|信息完整性|术语|表格|图文引用|语法",
       "severity": "serious|general|suggestion",
       "location": "章节名或行号",
       "original": "原文内容",

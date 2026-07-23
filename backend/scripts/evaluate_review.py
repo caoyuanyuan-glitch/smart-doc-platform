@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from app.database import SessionLocal
 from app.models.document import Document
 from app.models.issue import Issue
 from app.models.review import Review
-from app.review_engine.annotation_baseline import evaluate_against_annotations, parse_human_annotation_markdown
+from app.review_engine.annotation_baseline import HumanAnnotation, evaluate_against_annotations, parse_human_annotation_markdown
 from app.review_engine.layers import count_issue_layers
 from app.review_engine.validation import (
     ai_suggestion_changes_numeric_values,
@@ -34,6 +35,27 @@ DEFAULT_MARKERS = [
     "yeast, etc.",
 ]
 
+HIGH_VALUE_RULE_PATTERNS = [
+    r"^DOC-(?:REV|SEC|NET|TM|REG|SCOPE|FIGTAB|PROC|MODEL|URL)",
+    r"^CHECKLIST-",
+    r"^CYY-",
+]
+
+HIGH_VALUE_TEXT_PATTERN = re.compile(
+    r"revision\s+history|版本记录|default\s+(?:account|password|username)|credential|"
+    r"password|ip\s+address|\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b|trademark|DNBSEQ|"
+    r"合规|法规|注册|默认账号|默认密码|密码|商标|物料编码|图片|图标|对象缺失|"
+    r"表格|版式|术语一致|重复内容|操作步骤|不可执行|信息完整|缺失|不完整",
+    re.IGNORECASE,
+)
+
+LOW_VALUE_TEXT_PATTERN = re.compile(
+    r"括号后请添加空格|建议拆分为多个短句|article|冠词|punctuation|标点|capitalization|"
+    r"formatting\s+artifact|tab|click\s+the\s+icon|\[table content\]|check\s+if|"
+    r"\ban\s+fq\b|\bto\s+to\b|after\s+login|Browse|Edit",
+    re.IGNORECASE,
+)
+
 
 def issue_to_dict(issue):
     return {
@@ -52,6 +74,72 @@ def issue_to_dict(issue):
 def contains_marker(issue, marker):
     blob = json.dumps(issue, ensure_ascii=False).lower()
     return marker.lower() in blob
+
+
+def issue_blob(issue):
+    return " ".join(str(issue.get(key, "") or "") for key in [
+        "source", "rule", "category", "severity", "original_text", "suggestion", "description", "audit_basis",
+    ])
+
+
+def is_high_value_issue(issue):
+    rule = str(issue.get("rule", "") or "")
+    if any(re.search(pattern, rule, re.IGNORECASE) for pattern in HIGH_VALUE_RULE_PATTERNS):
+        return True
+    return bool(HIGH_VALUE_TEXT_PATTERN.search(issue_blob(issue)))
+
+
+def is_low_value_noise(issue):
+    if is_high_value_issue(issue):
+        return False
+    blob = issue_blob(issue)
+    rule = str(issue.get("rule", "") or "").upper()
+    source = str(issue.get("source", "") or "").lower()
+    category = str(issue.get("category", "") or "")
+    if source == "spellcheck":
+        return True
+    if rule.startswith(("SPELL", "PUNCT")):
+        return True
+    if rule in {"R029", "R035", "HR009", "R036", "TENSE-001", "PUNCT-002", "R002", "R003"}:
+        return True
+    if re.search(r"普通语法|拼写检查|标点符号|字体/版式细节", category, re.IGNORECASE):
+        return True
+    return bool(LOW_VALUE_TEXT_PATTERN.search(blob))
+
+
+def summarize_effectiveness(issues):
+    high_value = [issue for issue in issues if is_high_value_issue(issue)]
+    low_value = [issue for issue in issues if is_low_value_noise(issue)]
+    categories = {}
+    rules = {}
+    sources = {}
+    for issue in issues:
+        category = issue.get("category") or "-"
+        rule = issue.get("rule") or "-"
+        source = issue.get("source") or "-"
+        categories[category] = categories.get(category, 0) + 1
+        rules[rule] = rules.get(rule, 0) + 1
+        sources[source] = sources.get(source, 0) + 1
+    total = len(issues)
+    return {
+        "high_value_count": len(high_value),
+        "high_value_rate": round(len(high_value) / total, 4) if total else 0,
+        "low_value_noise_count": len(low_value),
+        "low_value_noise_rate": round(len(low_value) / total, 4) if total else 0,
+        "by_source": dict(sorted(sources.items(), key=lambda pair: (-pair[1], pair[0]))),
+        "by_category": dict(sorted(categories.items(), key=lambda pair: (-pair[1], pair[0]))),
+        "top_rules": dict(sorted(rules.items(), key=lambda pair: (-pair[1], pair[0]))[:20]),
+        "high_value_items": high_value[:20],
+        "low_value_noise_items": low_value[:20],
+    }
+
+
+def load_human_annotations(path):
+    baseline_path = Path(path)
+    if baseline_path.suffix.lower() == ".json":
+        payload = json.loads(baseline_path.read_text(encoding="utf-8-sig"))
+        return [HumanAnnotation(**item) for item in payload.get("annotations", [])]
+    return parse_human_annotation_markdown(baseline_path)
 
 
 def evaluate(review_id, markers):
@@ -85,6 +173,7 @@ def evaluate(review_id, markers):
         "review_id": review_id,
         "total": len(issues),
         "layers": count_issue_layers(issues),
+        "effectiveness": summarize_effectiveness(issues),
         "empty_suggestions": len(empty_suggestions),
         "empty_suggestion_items": empty_suggestions[:20],
         "noop_suggestions": len(noop),
@@ -106,7 +195,7 @@ def evaluate_with_human_baseline(review_id, markers, baseline_path):
         document_filename = document.filename if document else ""
     finally:
         db.close()
-    annotations = parse_human_annotation_markdown(baseline_path)
+    annotations = load_human_annotations(baseline_path)
     if document_filename:
         normalized_doc = normalize_filename_for_match(document_filename)
         scoped = [item for item in annotations if normalize_filename_for_match(item.file) in normalized_doc or normalized_doc in normalize_filename_for_match(item.file)]
