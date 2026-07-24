@@ -63,6 +63,12 @@
               <el-radio-button label="concise">简要说明</el-radio-button>
             </el-radio-group>
           </el-form-item>
+          <el-form-item label="选择模板">
+            <el-button @click="templateDialogVisible = true">
+              {{ templateFile ? templateFile.name : '选择模板文件' }}
+            </el-button>
+            <el-button v-if="templateFile" type="danger" plain size="small" style="margin-left: 8px;" @click="clearTemplateFile">清除</el-button>
+          </el-form-item>
           <el-form-item label="补充要求">
             <el-input
               v-model="imageForm.prompt"
@@ -93,6 +99,7 @@
             <el-button size="small" :loading="imageLoading" @click="regenerateImageDescription">重新生成</el-button>
             <el-button size="small" @click="copyText(currentImageResultText)">复制</el-button>
             <el-button size="small" type="primary" @click="saveImageResult">保存</el-button>
+            <el-button v-if="imageResult.draftRaw || imageResult.refinedRaw" size="small" type="warning" @click="debugDialogVisible = true">调试</el-button>
           </div>
         </div>
 
@@ -123,6 +130,60 @@
 
       <el-dialog v-model="imagePreviewVisible" title="图片预览" width="min(900px, 92vw)">
         <img v-if="imagePreviewUrl" :src="imagePreviewUrl" class="image-preview-img" alt="图片预览">
+      </el-dialog>
+
+      <el-dialog v-model="debugDialogVisible" title="调试：模型原始输出" width="min(1100px, 96vw)">
+        <div v-if="imageResult?.templateDebugContent" style="margin-bottom: 20px;">
+          <h4>参考模板文件：{{ imageResult.templateName }}</h4>
+          <pre class="debug-raw-output" style="max-height: 500px;">{{ imageResult.templateDebugContent }}</pre>
+        </div>
+        <div v-if="imageResult?.draftPrompt" style="margin-bottom: 20px;">
+          <h4>初稿提示词 (Kimi Vision Prompt)</h4>
+          <pre class="debug-raw-output">{{ imageResult.draftPrompt }}</pre>
+        </div>
+        <div v-if="imageResult?.draftRaw" style="margin-bottom: 20px;">
+          <h4>初稿原始输出 (Kimi Vision Response)</h4>
+          <pre class="debug-raw-output">{{ imageResult.draftRaw }}</pre>
+        </div>
+        <div v-if="imageResult?.refinedPrompt" style="margin-bottom: 20px;">
+          <h4>润色提示词 (Refine Prompt)</h4>
+          <pre class="debug-raw-output" style="max-height: 600px;">{{ imageResult.refinedPrompt }}</pre>
+        </div>
+        <div v-if="imageResult?.refinedRaw">
+          <h4>润色后原始输出 (Refine Response)</h4>
+          <pre class="debug-raw-output">{{ imageResult.refinedRaw }}</pre>
+        </div>
+        <div v-if="!imageResult?.templateDebugContent && !imageResult?.draftRaw && !imageResult?.refinedRaw && !imageResult?.draftPrompt && !imageResult?.refinedPrompt" style="color: #999;">
+          暂无原始输出数据
+        </div>
+      </el-dialog>
+
+      <el-dialog v-model="templateDialogVisible" title="上传模板文件" width="min(520px, 90vw)">
+        <el-upload
+          ref="templateUploadRef"
+          class="template-dialog-upload"
+          action="#"
+          :auto-upload="false"
+          :show-file-list="false"
+          :limit="1"
+          accept=".txt,.md,.json,.xml,.html,.docx,.pdf"
+          :on-change="handleTemplateDialogChange"
+          :on-exceed="handleTemplateExceed"
+          drag
+        >
+          <div class="upload-drag-area">
+            <div class="upload-drag-icon">+</div>
+            <div class="upload-drag-text">将文件拖到此处，或点击选择</div>
+            <div class="upload-drag-hint">支持 .txt .md .json .xml .html .docx .pdf</div>
+          </div>
+        </el-upload>
+        <div v-if="templateFile" style="margin-top: 12px; padding: 8px 12px; background: #f0f9eb; border-radius: 6px; font-size: 13px; color: #374151;">
+          已选择：{{ templateFile.name }} ({{ (templateFile.size / 1024).toFixed(1) }} KB)
+        </div>
+        <template #footer>
+          <el-button @click="templateDialogVisible = false; templateFile = null">取消</el-button>
+          <el-button type="primary" :disabled="!templateFile" @click="templateDialogVisible = false">确认</el-button>
+        </template>
       </el-dialog>
     </div>
 
@@ -365,9 +426,13 @@ const imageForm = ref({
   languageStyle: 'formal_technical',
   prompt: ''
 })
+const templateFile = ref(null)
 const imageResult = ref(null)
 const imageEditing = ref(false)
 const imageEditText = ref('')
+const debugDialogVisible = ref(false)
+const templateDialogVisible = ref(false)
+const templateUploadRef = ref(null)
 
 const currentImageResultText = computed(() => {
   if (imageEditing.value) return imageEditText.value
@@ -474,6 +539,19 @@ function handleImageExceed() {
   ElMessage.warning(`当前最多支持 ${MAX_IMAGE_STEP_FILES} 张图片，请分批处理`)
 }
 
+function handleTemplateDialogChange(file) {
+  templateFile.value = file.raw
+}
+
+function clearTemplateFile() {
+  templateFile.value = null
+  templateUploadRef.value?.clearFiles?.()
+}
+
+function handleTemplateExceed() {
+  ElMessage.warning('最多只能选择一个模板文件')
+}
+
 function startImageProgress() {
   imageProgress.value = 8
   if (imageProgressTimer) window.clearInterval(imageProgressTimer)
@@ -520,6 +598,9 @@ async function generateImageDescription() {
     formData.append('custom_intent', imageForm.value.customIntent)
     formData.append('output_format', imageForm.value.outputFormat)
     formData.append('language_style', imageForm.value.languageStyle)
+    if (templateFile.value) {
+      formData.append('template_file', templateFile.value)
+    }
     const resp = await generateAPI.generateImageSteps(formData)
     const data = resp.data || {}
     if (!(data.steps || []).length) {
@@ -530,7 +611,14 @@ async function generateImageDescription() {
       relation_summary: data.relation_summary || '',
       steps: normalizeImageSteps(data.steps || []),
       model: data.model || 'kimi',
-      warning: data.warning || ''
+      warning: data.warning || '',
+      draftRaw: data.draft_raw || '',
+      refinedRaw: data.refined_raw || '',
+      draftPrompt: data.draft_prompt || '',
+      refinedPrompt: data.refined_prompt || '',
+      templateName: data.template_name || '',
+      templateContent: data.template_content || '',
+      templateDebugContent: data.template_debug_content || ''
     }
     imageEditText.value = buildImageResultText(imageResult.value)
     imageEditing.value = false
@@ -553,6 +641,7 @@ function resetImageForm() {
     languageStyle: 'formal_technical',
     prompt: ''
   }
+  templateFile.value = null
   imageResult.value = null
   imageEditing.value = false
   imageEditText.value = ''
@@ -1078,6 +1167,42 @@ function downloadText(fileName, content) {
 
 .scene-tag {
   margin-right: 6px;
+}
+
+.debug-raw-output {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 16px;
+  border-radius: 8px;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.upload-drag-area {
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.upload-drag-icon {
+  font-size: 40px;
+  color: #c0c4cc;
+  margin-bottom: 8px;
+}
+
+.upload-drag-text {
+  font-size: 14px;
+  color: #606266;
+  margin-bottom: 4px;
+}
+
+.upload-drag-hint {
+  font-size: 12px;
+  color: #c0c4cc;
 }
 
 @media (max-width: 960px) {

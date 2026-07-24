@@ -494,19 +494,44 @@ async def _load_template_reference(template_file: Optional[UploadFile]) -> Optio
             temp_path = os.path.join(temp_dir, f"template{suffix}")
             with open(temp_path, "wb") as handle:
                 handle.write(raw)
-            content = parse_file(temp_path).strip()
+            raw_content = parse_file(temp_path).strip()
     except Exception:
         try:
-            content = raw.decode("utf-8", errors="replace").strip()
+            raw_content = raw.decode("utf-8", errors="replace").strip()
         except Exception:
             return None
 
-    if not content:
+    if not raw_content:
         return None
+
+    content = raw_content[:TEMPLATE_MAX_CHARS]
+    debug_content = content
+
+    if "\f" in content:
+        pages = content.split("\f")
+        debug_parts = []
+        for idx, page_text in enumerate(pages, start=1):
+            page_clean = page_text.strip()
+            if not page_clean:
+                continue
+            preview = page_clean[:20].replace("\n", " ")
+            debug_parts.append(f"\n--- 第 {idx} 页 ---\n前 20 字预览：{preview}\n\n{page_clean}")
+        if debug_parts:
+            debug_content = "\n".join(debug_parts)
+    else:
+        paragraphs = [p for p in content.split("\n\n") if p.strip()]
+        if len(paragraphs) > 1:
+            debug_parts = []
+            for idx, para in enumerate(paragraphs, start=1):
+                para_clean = para.strip()
+                preview = para_clean[:20].replace("\n", " ")
+                debug_parts.append(f"\n--- 第 {idx} 段 ---\n首 20 字：{preview}\n\n{para_clean}")
+            debug_content = "\n".join(debug_parts)
 
     return {
         "name": template_file.filename or "模板文件",
-        "content": content[:TEMPLATE_MAX_CHARS],
+        "content": content,
+        "debug_content": debug_content,
     }
 
 
@@ -703,6 +728,13 @@ async def generate_image_steps(
             "model": result.get("model") or "kimi",
             "draft_key": draft_key,
             "warning": "",
+            "draft_raw": result.get("draft_raw") or "",
+            "refined_raw": result.get("refined_raw") or "",
+            "draft_prompt": result.get("draft_prompt") or "",
+            "refined_prompt": result.get("refined_prompt") or "",
+            "template_name": template_reference.get("name") if template_reference else "",
+            "template_content": template_reference.get("content") if template_reference else "",
+            "template_debug_content": template_reference.get("debug_content") if template_reference else "",
         }
     except Exception as e:
         import traceback
