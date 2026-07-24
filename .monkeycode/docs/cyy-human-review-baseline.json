@@ -1,49 +1,76 @@
 {
   "summary": {
-    "total": 561,
+    "total": 603,
     "by_layer": {
-      "ai_assisted": 288,
-      "deterministic": 172,
-      "structural_consistency": 101
+      "ai_assisted": 266,
+      "deterministic": 188,
+      "structural_consistency": 149
     },
     "by_category": {
-      "表达与句式": 150,
-      "人工审核其他项": 112,
-      "单位/空格": 86,
-      "术语一致性": 45,
-      "表格/版式": 41,
-      "官网地址": 30,
+      "表达与句式": 134,
+      "人工审核其他项": 101,
+      "单位/空格": 78,
+      "表格/版式": 52,
+      "术语一致性": 43,
+      "官网地址": 29,
       "人工确认项": 26,
-      "版本记录": 21,
+      "图片/对象缺失": 25,
+      "中文残留": 22,
+      "版本记录": 17,
       "字体/版式细节": 15,
-      "标点符号": 11,
-      "图片/对象缺失": 6,
+      "标点符号": 14,
+      "步骤结构": 8,
+      "重复内容": 7,
       "分页与标题边界": 5,
       "主题结构": 4,
       "商标声明": 4,
       "货号写法": 4,
-      "符号规范": 1
+      "操作步骤语气": 2,
+      "法规/注册确认": 2,
+      "表图编号": 2,
+      "适用范围/硬件配置": 2,
+      "公司主体表述": 1,
+      "术语拼写": 1,
+      "标题大小写": 1,
+      "物料编码": 1,
+      "符号规范": 1,
+      "结构完整性": 1,
+      "范围/数值格式": 1
     },
     "by_rule": {
-      "AI-STYLE-001": 150,
-      "AI-HUMAN-OTHER": 112,
-      "DET-SPACE-001": 86,
-      "STRUCT-TERM-001": 45,
-      "STRUCT-LAYOUT-001": 41,
-      "DET-URL-001": 30,
+      "AI-STYLE-001": 134,
+      "AI-HUMAN-OTHER": 101,
+      "DET-SPACE-001": 78,
+      "STRUCT-LAYOUT-001": 52,
+      "STRUCT-TERM-001": 43,
+      "DET-URL-001": 29,
       "AI-CHECK-001": 26,
-      "DET-REVISION-001": 21,
+      "STRUCT-IMAGE-001": 25,
+      "DET-CN-001": 22,
+      "DET-REVISION-001": 17,
       "DET-TYPO-001": 15,
-      "DET-PUNCT-001": 11,
-      "STRUCT-IMAGE-001": 6,
+      "DET-PUNCT-001": 14,
+      "STRUCT-STEP-001": 8,
+      "STRUCT-DUP-001": 7,
       "STRUCT-PAGE-001": 5,
       "DET-CATNO-001": 4,
       "DET-TRADEMARK-001": 4,
       "STRUCT-TOPIC-001": 4,
-      "DET-SYMBOL-001": 1
+      "AI-PROC-001": 2,
+      "AI-REG-001": 2,
+      "STRUCT-FIGTAB-001": 2,
+      "STRUCT-SCOPE-001": 2,
+      "AI-COMPANY-001": 1,
+      "DET-MATERIAL-001": 1,
+      "DET-RANGE-001": 1,
+      "DET-SYMBOL-001": 1,
+      "DET-TERM-SPELL-001": 1,
+      "DET-TITLE-CASE-001": 1,
+      "STRUCT-COMPONENT-001": 1
     },
     "by_file": {
       "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf": 106,
+      "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf": 42,
       "JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf": 41,
       "JB-A09-193 MGIEasy 快速建库杂交捕获应用操作指南自动化操作说明书_RV1.0_SV1.0 reviewed by Yuanyuan.pdf": 38,
       "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1 reviewed by YY.docx": 32,
@@ -272,9 +299,9 @@
       "comment": "两个词隔开一点吧",
       "selected_text": "MDA/消化MSP",
       "context": "准备测序试剂槽 操作步骤如下： 1. 取出试剂槽，标签朝上，竖直向上放置在桌面上。孔位名称如 下图。 MDA/消化MSP",
-      "category": "单位/空格",
-      "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
     },
     {
       "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf",
@@ -668,9 +695,9 @@
       "comment": "类似问题参考中文意见同步修改",
       "selected_text": "1",
       "context": "1",
-      "category": "术语一致性",
-      "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_0305 peered by Tina.pdf",
@@ -1052,9 +1079,9 @@
       "comment": "类似问题参考中文意见",
       "selected_text": "1. M f",
       "context": "rsion Date Description February 2026 1. Modified the figure and description for DNB separation tube strip 2. Added new intended use and applicable sequencing platform 3. Revised the name of the library prep set",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-000999-00 DNBelab-D4RS Fast PCR-FREE FS Library Prep Set V2.0 Instructions for Use_English_RUO_QD_V3.0_20260205 Tina.pdf",
@@ -1088,9 +1115,9 @@
       "comment": "中文写半透明，这里就是透明了",
       "selected_text": "Transparent",
       "context": "aration cartridge A elab-D4RS Sealing B 1 tube/bag×4 el Transparent 1 pcs/bag×4 Separation Tube s / 4 pcs/bag×1",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf",
@@ -1136,9 +1163,9 @@
       "comment": "删了",
       "selected_text": "适配",
       "context": "操作步骤如下： 1. 在测序平台选择界面，点击【适配测序平台】下拉箭头， 序平台。 适配MGISEQ-2000RS 时，测序平台应选【OTHE 适配测序平台 DNBSEQ",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
     },
     {
       "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf",
@@ -1340,9 +1367,9 @@
       "comment": "应该是三个部分",
       "selected_text": "器主要 件两部 和垃圾",
       "context": "组成 本仪器主要由仪器主机、外置扫码器和时空自动化 制软件两部分组成。其中仪器主机由工作平台、机 模块和垃圾桶组成。 各模块详细描述如下： 部件 说明 工作平台 包含仪器工作台面、框架",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "结构完整性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-COMPONENT-001"
     },
     {
       "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf",
@@ -1580,9 +1607,9 @@
       "comment": "类似问题参考中文意见，对照修改",
       "selected_text": "heated lid temperature control A/B/C i",
       "context": "with 75% alcohol. 6. After cleaning, press the latches on both sides of the reaction module to close the heated lid. 7. Select heated lid temperature control A/B/C in sequence, and then click Open door on the right side to open the heated lids of the respective reaction zones. TION Before performing subsequent experiments, ensure that all heated lids in the reaction zones are fully open. A closed lid may result in collision during Stereo‑seq Slide Cassette transfer, potentially resulting in chip breakage.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0127 peered by Tina.pdf",
@@ -1652,9 +1679,9 @@
       "comment": "network port of the 建议跟项目组确认下，中文同步改",
       "selected_text": "e c",
       "context": "Description rt Connects to the CAN communication port of the external electrical box. Connects to the computer.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf",
@@ -2096,9 +2123,9 @@
       "comment": "删了",
       "selected_text": "射到眼",
       "context": "由本公司技术支持装配、保养和维护激光扫码器。 扫码器的激光有可能入射到眼睛，在进行保养和维护时请佩戴具有光阻隔 护和更换台面扫码器时，请确保电源已关闭，防止激光溢出。 的台面扫码器须联系本公司技术支持进行处理，防止造成危害。 按产品使用说明书及维修说明对台面扫码器进行装配、保养或维护，将受 台面扫码器时，如出现任何问题，联系技术支持对其进行检查和维",
-      "category": "人工确认项",
+      "category": "表达与句式",
       "layer": "ai_assisted",
-      "expected_rule": "AI-CHECK-001"
+      "expected_rule": "AI-STYLE-001"
     },
     {
       "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf",
@@ -2204,9 +2231,9 @@
       "comment": "若只能由技术支持完成，那删除操作步骤，只写当出现XXX情况时，或多长周期联系技术支持进行更换。型号也不用列出，以防后续变化。",
       "selected_text": "更换紫外灯灯管 本操作仅可由技术支持进行。 更换周期：检查出异常时。 紫外灯灯管型号：TUV 16W FAM PHILIPS 更换操作步骤如下： 1. 关闭仪器总电源。 2. 打开视窗。手握紫外灯灯管逆时针旋转1/2 圈，取出紫外灯灯管。 3. 装上新紫外灯灯管，顺时针旋转1/2 圈。关闭视窗。 4. 打开仪器电源，测试紫外灯功能是否正常。",
       "context": "3. 装上新电机。关闭视窗。 4. 打开仪器电源，测试电机功能是否正常。 更换紫外灯灯管 本操作仅可由技术支持进行。 更换周期：检查出异常时。 紫外灯灯管型号：TUV 16W FAM PHILIPS 更换操作步骤如下： 1. 关闭仪器总电源。 2. 打开视窗。手握紫外灯灯管逆时针旋转1/2 圈，取出紫外灯灯管。 3. 装上新紫外灯灯管，顺时针旋转1/2 圈。关闭视窗。 4. 打开仪器电源，测试紫外灯功能是否正常。 清理磁盘历史数据 查看磁盘空间，及时将历史数据备份到外部存储设备。",
-      "category": "人工确认项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-CHECK-001"
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
     },
     {
       "file": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf",
@@ -2252,9 +2279,9 @@
       "comment": "同上意见",
       "selected_text": "Structural frame (the left is extraction module, and the right is library preparation module)",
       "context": "of the extraction module 6 Power button from the power sup 7 Cabinet 1 Press the cabinet d 8 Structural frame (the left is extraction module, and the right is library preparation module) Supporting feet Supports the main stability. Put down move the device. 9 Structural frame of the library preparation module Cabinet 2 Contains a built-in w for collecting waste Press the cabinet d 10 Transfer Grips plate consum silicone lids, and te",
-      "category": "术语一致性",
+      "category": "图片/对象缺失",
       "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf",
@@ -2336,9 +2363,9 @@
       "comment": "同中文意见",
       "selected_text": "Replacing the laminar flow hood filter Only the technical support of the manufacturer can perform the operation. Replace once a year or immediately if any abnormality is detected. Filter specification: 488 mm × 657 mm × 46 mm Perform the following steps to replace the linear stage: 1. Power off the device. 2. Remove the top cover of the device, unscrew the filter fixing screws, and take out the filter. 3. Install the new filter and secure it, then attach the top cover of the device. 4. Turn on the device power and check if the laminar flow hood is running properly. Replacing the Z8 axis lead screw linear stage for transferring liquid in the library preparation module Only the technical support of the manufacturer can perform the operation. Replace every five years, or immediately if any abnormality is detected. Motor model: 17E2225S4-199SSAEK5D-130 Perform the following steps to replace the linear stage: 1. Power off the device. 2. Open the door. Remove the linear stage that needs to be replaced. 3. Install a new one. Close the door of the device. 4. Turn on the device power and check if the stage is running properly. Replacing the UV lamp tube Only the technical support of the manufacturer can perform the operation. Replace immediately if any abnormality is detected. UV lamp tube model: TUV 16W FAM PHILIPS Perform the following steps to replace the linear stage:",
       "context": "Replacing the laminar flow hood filter Only the technical support of the manufacturer can perform the operation. Replace once a year or immediately if any abnormality is detected. Filter specification: 488 mm × 657 mm × 46 mm Perform the following steps to replace the linear stage: 1. Power off the device. 2. Remove the top cover of the device, unscrew the filter fixing screws, and take out the filter. 3. Install the new filter and secure it, then attach the top cover of the device. 4. Turn on the device power and check if the laminar flow hood is running properly. Replacing the Z8 axis lead screw linear stage for transferring liquid in the library preparation module Only the technical support of the manufacturer can perform the operation. Replace every five years, or immediately if any abnormality is detected. Motor model: 17E2225S4-199SSAEK5D-130 Perform the following steps to replace the linear stage: 1. Power off the device. 2. Open the door. Remove the linear stage that needs to be replaced. 3. Install a new one. Close the door of the device. 4. Turn on the device power and check if the stage is running properly. Replacing the UV lamp tube Only the technical support of the manufacturer can perform the operation. Replace immediately if any abnormality is detected. UV lamp tube model: TUV 16W FAM PHILIPS Perform the following steps to replace the linear stage: 1. Power off the device. 2. Open the door. Hold the UV lamp tube and rotate it counterclockwise by half a turn to remove the UV lamp tube. 3. Install the new UV lamp tube and rotate it clockwise by half a turn. Close the door of the device.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf",
@@ -2624,9 +2651,9 @@
       "comment": "中文界面字符串样式，下同",
       "selected_text": "STO_25+59+10：进 STO_25+59_noBC：",
       "context": "试剂套装，按下表选择对应的测序方案： 型 测序方案 1.0 STO_25+59+10：进行Barcode 测序。 STO_25+59_noBC：不进行Barcode 测序。",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001239-00 ExploreFree 系列 掌上无线彩色多普勒超声诊断仪产品说明书_中文_MD_WH (2) Tina.pdf",
@@ -2708,9 +2735,9 @@
       "comment": "Click a tab in the area to access the following functions:",
       "selected_text": "Provides Chip, Sequencing, Data Board, Log, and Settings tabs.",
       "context": "Item Description Software icon Click to view the software and hardware version information. Navigation area Provides Chip, Sequencing, Data Board, Log, and Settings tabs. y Chip tab: Click to perform chip QC and view chip- related information. y Sequencing tab: Click to configure sequencing parameters, perform sequencing, and view sequencing data.",
-      "category": "版本记录",
-      "layer": "deterministic",
-      "expected_rule": "DET-REVISION-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf",
@@ -2720,9 +2747,9 @@
       "comment": "缺上角标，以及商标正确性，例如华为公司名称，应该可以搞成中文",
       "selected_text": "本说明书中的所有图片均为示意图，图片内容可能与实物有细微差异，请以购买的仪器为准。 HP 是HP Inc. 在美国和/ 或其他国家（地区）的商标。Lenovo 是Lenovo 在美国和/ 或 其他国家（地区）的商标。英特尔、志强是Intel 公司或其子公司在美国和/ 或其他国家（地区） 的商标。华为是Huawei Technologies Co., Ltd 在中国和/ 或其他国家（地区）的商标。 戴尔是戴尔公司或其子公司的商标。文中涉及的其它名称及商标属于各自所有者资产。 ©基点生物科技（上海）有限公司版权所有。",
       "context": "基点对本说明书不做任何种类的保证，包括（但不限于）用于特定目的的商业性和合理性的 隐含保证。基点已经采取措施，确保本说明书的准确性。但是，基点对遗漏不承担责任，并 保留任何对本说明书和仪器进行改进以提高其可靠性、功能或设计的权利。 本说明书中的所有图片均为示意图，图片内容可能与实物有细微差异，请以购买的仪器为准。 HP 是HP Inc. 在美国和/ 或其他国家（地区）的商标。Lenovo 是Lenovo 在美国和/ 或 其他国家（地区）的商标。英特尔、志强是Intel 公司或其子公司在美国和/ 或其他国家（地区） 的商标。华为是Huawei Technologies Co., Ltd 在中国和/ 或其他国家（地区）的商标。 戴尔是戴尔公司或其子公司的商标。文中涉及的其它名称及商标属于各自所有者资产。 ©2026 基点生物科技（上海）有限公司 版权所有。",
-      "category": "字体/版式细节",
+      "category": "中文残留",
       "layer": "deterministic",
-      "expected_rule": "DET-TYPO-001"
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf",
@@ -2756,9 +2783,9 @@
       "comment": "换成中文标识",
       "selected_text": "WARNING",
       "context": "图 5 贴码位置 WARNING �条形码在低温环境下应不能松脱、开裂。 �如果冻存盒底面非漏空，无法通过扫码验证 �请勿存入未经基点在本存储系统上验证可 �冻存盒条码位置与默认位置不相符时，请与 冻存管 存储系统可支持以下冻存管，设备根据选",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf",
@@ -2936,9 +2963,9 @@
       "comment": "应用icon width字符样式",
       "selected_text": "才可进行 角 进 管理】>",
       "context": "图 14 登录界面 需登录后才可进行操作。 点击右上角 进入登录页面。可通过账号密码或面容识 在【账户管理】>【个人账户】界面录入面容信息。",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf",
@@ -2960,9 +2987,9 @@
       "comment": "改为中文句号，看是否有多余空格",
       "selected_text": "自动关 出. 需先验",
       "context": "提供样本管理模式、虚拟键盘、自动登出时长、存取管关门计时、存 设置功能。存取管关门计时与存取盒关门计时，指在存取管或存取盒 备将冻存盒取出后，自动关闭外门所需的等待时间。 为0 时，账户不自动登出. 提供密码修改功能。需先验证当前密码，新密码不得与当前密码一致 账户将自动登出，需使用新密码重新登录。 供自定义耗材设置、自定义字段设置功能。",
-      "category": "术语一致性",
-      "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf",
@@ -3020,9 +3047,9 @@
       "comment": "模糊，再要一个矢量图 而且跟下面不是一种绿",
       "selected_text": "-",
       "context": "-",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3080,9 +3107,9 @@
       "comment": "跟第三句重复了，中文这句要补上 This equipment is not intended for use in residential environments and may not provide adequate protection to radio reception in such environments.",
       "selected_text": "s.",
       "context": "o not use the device in close proximity to sources of strong ch as unshielded sources of radiated emissions. Radiated curacy of the results. is equipment is designed for use in a PROFESSIONAL VIRONMENT. It is likely to perform incorrectly if used in VIRONMENT. If it is suspected that performance is affect erference, correct operation may be restored by increasing th uipment and the source of the interference.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3272,9 +3299,9 @@
       "comment": "tabs",
       "selected_text": "s.",
       "context": "re icon Click to view software and hardware version infor tion area Provides tabs for Chip, Sequencing, Data Board, Settings. icon Click to exit the software. on area Serves as the operation area for each tab. bar Displays real-time status of USB, network, rema space, and current date and time.",
-      "category": "版本记录",
-      "layer": "deterministic",
-      "expected_rule": "DET-REVISION-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3284,9 +3311,9 @@
       "comment": "s",
       "selected_text": "n o",
       "context": "Displays real-time status of USB, network, remaining disk space, and current date and time. cribes the function of icons in the status bar: wing status:",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3296,9 +3323,9 @@
       "comment": "The network is connected normally",
       "selected_text": "Network connection is active.",
       "context": "USB data transfer has failed. All processes will stop automatically. Network connection is active. Network connection is lost. All processes will stop automatically. Sufficient disk space available (above 2 TB). Remaining disk space shown in real time to the right of the icon.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3308,9 +3335,9 @@
       "comment": "An error has occurred on the network connection",
       "selected_text": "Network connection is lost.",
       "context": "Network connection is active. Network connection is lost. All processes will stop automatically. Sufficient disk space available (above 2 TB). Remaining disk spac shown in real time to the right of the icon. Low disk space (between 0.3 TB and 2 TB). Remaining disk spac shown in real time to the right of the icon. A warning will appear.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3320,9 +3347,9 @@
       "comment": "prompt",
       "selected_text": "warning",
       "context": "ilable (above 2 TB). Remaining disk space is right of the icon. n 0.3 TB and 2 TB). Remaining disk space is right of the icon. A warning will appear. e (below 0.3 TB). Remaining disk space is e right of the icon. Buttons will be disabled automatically.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3332,9 +3359,9 @@
       "comment": "All functions",
       "selected_text": "Buttons",
       "context": "0.3 TB and 2 TB). Remaining disk space is right of the icon. A warning will appear. (below 0.3 TB). Remaining disk space is e right of the icon. Buttons will be disabled utomatically.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3344,9 +3371,9 @@
       "comment": "建议概括下这几个页签的主要功能",
       "selected_text": "Provides tabs for Chip, Sequencing, Data Board, Log, a Settings.",
       "context": "ce: Name Description Software icon Click to view software and hardware version information. Navigation area Provides tabs for Chip, Sequencing, Data Board, Log, and Settings. Logout icon Click to exit the software. Function area Serves as the operation area for each tab. Status bar Displays real-time status of USB, network, remaining disk space, and current date and time.",
-      "category": "版本记录",
-      "layer": "deterministic",
-      "expected_rule": "DET-REVISION-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -3692,9 +3719,9 @@
       "comment": "可以删掉",
       "selected_text": "Tips The system runs a power-on self-test during initial deployment of the control software, workstation restart, or main unit restart. The test checks peripheral connections, firmware version, algorithm services, and remaining disk space in sequence.",
       "context": "1. Click the CycloneMaster control software icon to launch the software. The system will perform a self‑test. Upon successful completion, the Login interface opens automatically. Tips The system runs a power-on self-test during initial deployment of the control software, workstation restart, or main unit restart. The test checks peripheral connections, firmware version, algorithm services, and remaining disk space in sequence. � If the test passes, the system automatically proceeds to the Login interface. � If the test fails, the system displays the cause. For solutions, refer to Troubleshooting on Page 43. After resolving the issue, click Re-self‑test as prompted. If failure persists, contact the technical support. 2. Enter your username and password, and click Login.",
-      "category": "版本记录",
-      "layer": "deterministic",
-      "expected_rule": "DET-REVISION-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0203_peered by leiwy&Tina.pdf",
@@ -4412,9 +4439,9 @@
       "comment": "device 不用多次重复出现产品名称，防止后面有变动又没有改",
       "selected_text": "e G100-E Nanopore Genetic Sequencer",
       "context": "urces. that the laboratory is away from direct sunlight and is well ventilated. It is mended that you refer to the standard of a biosafety level (BSL) 2 laboratory. nstall or operate the G100-E Nanopore Genetic Sequencer in a BSL-3 or higher- oratory. The device cannot provide services in such environments. ommended that laboratory cleanliness meet the standard of ISO 14644-1 Class nditions do not meet operational requirements, engage qualified professionals ade or construct a compliant laboratory under the owner’s supervision. For ns regarding laboratory conditions, contact the technical support.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf",
@@ -4436,9 +4463,9 @@
       "comment": "直接放到这里就不用折线了",
       "selected_text": "oove",
       "context": "nsure that the thermal pad fully contacts the White scale groove stening the buckle",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
     },
     {
       "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf",
@@ -4508,9 +4535,9 @@
       "comment": "改为中文句号，通查",
       "selected_text": "动关 出. 需先验",
       "context": "面容信息可录入或更换。 提供样本管理模式、虚拟键盘、自动登出时长、存取管关门计时、存 设置功能。存取管关门计时与存取盒关门计时，指在存取管或存取盒 备将冻存盒取出后，自动关闭外门所需的等待时间。 为0 时，账户不自动登出. 提供密码修改功能。需先验证当前密码，新密码不得与当前密码一致 账户将自动登出，需使用新密码重新登录。 供自定义耗材设置、自定义字段设置功能。",
-      "category": "术语一致性",
-      "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf",
@@ -4796,9 +4823,9 @@
       "comment": "间隙大了",
       "selected_text": "or storage; Unauthorized alteration or replacement of corresponding labels or icons, or part numbers of components; e.",
       "context": "保修卡 f 12 months the date of acturer. To lly read the he device. is warranty. About the warranty card, we reserve the right of final interpretation. 2) Damages caused by irresistible external forces, such as flood, fire, earthquake, lightning stroke, typhoon, and so on; 3) System error caused by computer virus. Lightning stroke or damages of other power supply systems due to poor grounding of the power supply; Damages due to improper transportation, movement or storage; Unauthorized alteration or replacement of corresponding labels or icons, or part numbers of components; Use of accessories not provided or distributed by us. c. d. e. f. 6. 版本/Vers",
-      "category": "字体/版式细节",
-      "layer": "deterministic",
-      "expected_rule": "DET-TYPO-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "H-020-000362-00 保修卡_中文&英文_KS.pdf",
@@ -5432,9 +5459,9 @@
       "comment": "页码重新调整，1重复出现了",
       "selected_text": "— 1 —",
       "context": "— 1 —",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
     },
     {
       "file": "JB-A09-193 MGIEasy 快速建库杂交捕获应用操作指南自动化操作说明书_RV1.0_SV1.0 reviewed by Yuanyuan.pdf",
@@ -5528,9 +5555,9 @@
       "comment": "我看前面写的都是中文：货号",
       "selected_text": "（Cat. No.：",
       "context": "套装（Cat. No.：940-001194-00）】中取出下表中的所列试剂， ⽂库制备试剂套装（Cat. No.：940-001194-00） 组分信息 管盖颜色 规格及数量 Fast FS Buffer II Fast FS Enzyme II Fast Ligation Buffer 绿色 绿色 红色 1440 μL/支×1 660 μL/支×1 1440 μL/支×1",
-      "category": "单位/空格",
+      "category": "中文残留",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193 MGIEasy 快速建库杂交捕获应用操作指南自动化操作说明书_RV1.0_SV1.0 reviewed by Yuanyuan.pdf",
@@ -5696,9 +5723,9 @@
       "comment": "改为中文句号",
       "selected_text": "L.",
       "context": "pre-PCR 样本进行杂交捕获，取出样本，放置于室温解冻离心 入1000ng-4000ng 的DNA，在此范围内投入最大量的DNA。根据测 入的样本体积X μL. 样本至新的深孔板板中，并加入相应的NF 水，使溶液总体积达到 加好后，标记为【Sample+Human Cot 1】做封膜处理，震荡混匀 于冰上备用。",
-      "category": "单位/空格",
+      "category": "中文残留",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193 MGIEasy 快速建库杂交捕获应用操作指南自动化操作说明书_RV1.0_SV1.0 reviewed by Yuanyuan.pdf",
@@ -5864,9 +5891,9 @@
       "comment": "类似问题参考中文意见同步修改, 这里不再赘述",
       "selected_text": "n 2-M",
       "context": "oftware version is 1.6.1.301 and above. e tomized configuration 2-MGISP-960 platform), includes the followin Table 1-1 Modules & Adapters of 2-MGISP-960 Modules & Adaptor Quantity Position PCR Module 1 Pos9-Pos11 Vortex mixer 1 Pos20",
-      "category": "术语一致性",
-      "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf",
@@ -5912,9 +5939,9 @@
       "comment": "中文没有这个",
       "selected_text": "-",
       "context": "-",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf",
@@ -5924,9 +5951,9 @@
       "comment": "中文有酶切试剂盒",
       "selected_text": "-",
       "context": "9) For further questions, contact technical support:MGI-s 1.7 Principles and Workflow",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf",
@@ -5960,9 +5987,9 @@
       "comment": "这句话是否多余了，中文并没有",
       "selected_text": ". Recommended Starting Amount of",
       "context": "mponents with the reaction efficiency of Fast FS Enzyme II, salts are introduced during sample DNA extraction, the size may be affected. Recommended Starting Amount of r library construction. It is advisable to use only one initial",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf",
@@ -6044,9 +6071,9 @@
       "comment": "这括号是中文字体",
       "selected_text": "（Cat. No.：940-001194-00）",
       "context": "w from the 【MGIEasy Fast FS Library Preparation Kit (Cat. No.: quired. y Preparation Kit V2.0（Cat. No.：940-001194-00） ponent Information Cap Color Specification & Quantity Fast FS Buffer II Fast FS Enzyme II Green Green 1440 μL/Tube×1 660 μL/Tube×1",
-      "category": "单位/空格",
+      "category": "中文残留",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf",
@@ -6236,9 +6263,9 @@
       "comment": "多了中文句号",
       "selected_text": "。",
       "context": "in-walled full-skirt 96-well PCR plate, label it [PCR Enzyme mix], and 6 μL of Dual Barcode PCR Primer Mix to each well (one well per sam placement in Phase 2.。 well plate (MGI, Cat. No.: 1000004644), label it [hyb reagent], and cording to the diagram below: able3-18 Dispensing of Hybridization Reagents (96 RXN)",
-      "category": "单位/空格",
+      "category": "中文残留",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "JB-A09-193MGIEasy Fast Library Preparation and Capture Application Operation Instruction_RV1.0_SV1.0-0112 by Yuanyuan.pdf",
@@ -6332,9 +6359,9 @@
       "comment": "这里乱了 不应该出现中文，并且海外官网地址变了",
       "selected_text": "MGI Website Contact us Company: MGI Tech Co., Ltd. Address: Main Building and Second floor of No.11 Building, Beishan Industrial Zone, Yantian District, 518083, Shenzhen, Guangdong, P.R. China Website: http://en.mgi-tech.com Email: MGI-service@mgi-tech.com 客服电话：4000-688-114 技术支持：MGI-service@mgi-tech.com 网 址：www.mgi-tech.com 官方微信",
       "context": "MGI Website Contact us Company: MGI Tech Co., Ltd. Address: Main Building and Second floor of No.11 Building, Beishan Industrial Zone, Yantian District, 518083, Shenzhen, Guangdong, P.R. China Website: http://en.mgi-tech.com Email: MGI-service@mgi-tech.com 联系我们 生产企业：深圳华大智造科技股份有限公司 生产地址：深圳市盐田区北山工业区综合楼及11 栋2 楼 客服电话：4000-688-114 技术支持：MGI-service@mgi-tech.com 网 址：www.mgi-tech.com 官方微信",
-      "category": "官网地址",
+      "category": "中文残留",
       "layer": "deterministic",
-      "expected_rule": "DET-URL-001"
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6344,9 +6371,9 @@
       "comment": "统一大小写",
       "selected_text": "r h In",
       "context": "action for human metagenom package Instructions : V1.6.1.301 and above n: 6-MGISP-960/9-MGISP-960 SP-960",
-      "category": "术语一致性",
-      "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "category": "标题大小写",
+      "layer": "deterministic",
+      "expected_rule": "DET-TITLE-CASE-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6356,9 +6383,9 @@
       "comment": "不是还有NE384",
       "selected_text": "-",
       "context": "ove -MGISP-960",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "适用范围/硬件配置",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-SCOPE-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6380,9 +6407,9 @@
       "comment": "重复了",
       "selected_text": "GIIS",
       "context": "The process can be roughly divided into two p pretreatment requires the use of MGISP-960. F or MGIISP-NE384 according to the throughpu 1.2 Applicable software version The applicable software version of the manual 1.3 Hardware",
-      "category": "版本记录",
-      "layer": "deterministic",
-      "expected_rule": "DET-REVISION-001"
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6416,9 +6443,9 @@
       "comment": "出现了中文",
       "selected_text": "台， 台，",
       "context": "2 Reference configurations for the MGISTP-7000 cription: Specification Adaptable tube type 7000 V3 Sample rocessing System 台，RUO 15mL Stool collection tu 7000 V4 Sample rocessing System 台，RUO 30mL Stool collection tu ansfer Processing GISTP-7000RS V3 Set，RUO 15mL Stool collection tu ansfer Processing Set，RUO 30mL Stool collection tu",
-      "category": "单位/空格",
+      "category": "中文残留",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DET-CN-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6428,9 +6455,9 @@
       "comment": "缺少NE384的硬件配置",
       "selected_text": "-",
       "context": "plicable reagent kits truction manual is for the MGIEasy stool collection kit (15mL: 940-001644-00, 30mL: 940-001645- Deep-well plate magnetic rack 2 Pos18,Pos19 Temperature control module 1 Pos21",
-      "category": "单位/空格",
-      "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "category": "适用范围/硬件配置",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-SCOPE-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6440,9 +6467,9 @@
       "comment": "图片编号错误，没有连续，全文检查",
       "selected_text": "are: Table 1-1 H Table1-2 H re mixer well plate magnetic ature control modu container",
       "context": "00), you can directly contact the after-sales engineer to change the con MGISP-960 (customized configuration 6-MGISP-960 and configuration following hardware: Table 1-1 Hardware included in 6-MGISP-960 pla Table1-2 Hardware included in 9-MGISP-960 pla Hardware Quantity Vortex mixer 1 Deep-well plate magnetic rack 1 Temperature control module 2 Waste container 1 Hardware Quantity Vortex mixer 1 Deep-well plate magnetic rack 2 Temperature control module 1",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "表图编号",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-FIGTAB-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6512,9 +6539,9 @@
       "comment": "型号有误",
       "selected_text": "MGI-SP960",
       "context": "Chapter 3 Standard workflow of 3.1 Preparing device 3.1.1 MGI-SP960 1) Power on the device of MGISP-960. 2) Double-click the icon of MGISP-960 on the deskto",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6524,9 +6551,9 @@
       "comment": "删了",
       "selected_text": "the device of M",
       "context": "3.1 Preparing device 3.1.1 MGI-SP960 1) Power on the device of MGISP-960. 2) Double-click the icon of MGISP-960 on the desktop. Select Re",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6608,9 +6635,9 @@
       "comment": "操作步骤用祈使句",
       "selected_text": "ollected in e is placed",
       "context": "ling is performed using the MGIEasy Stool Collection Kit (15mL size: 9 1645-00), follow the steps below for mixing: er the sample is collected in the laboratory, it is placed in a mixin ntaining the sample is placed on a multi-tube mixer, 2000rpm, 10min",
-      "category": "单位/空格",
-      "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "category": "操作步骤语气",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-PROC-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6620,9 +6647,9 @@
       "comment": "用一般现在时，祈使句 而不是被动",
       "selected_text": "was",
       "context": "ol collection tube was removed and 1000 μL of the sam ansferred to a 2.2 mL V-type 96-well sample plate prefilled TP-7000 transfer system(The details are shown in the figure b",
-      "category": "单位/空格",
-      "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "category": "操作步骤语气",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-PROC-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package Instructions_SV1.0 Yuanyuan .pdf",
@@ -6680,9 +6707,9 @@
       "comment": "编号不连续，全文通查",
       "selected_text": "表1-1 订 数量 1 1 2 1 表1-2 订",
       "context": "ISP-960（订制化配置）可使用如下配置： 表1-1 订制化配置6-MGISP-960 平台 硬件 数量 位置 振荡器 1 POS20 磁力架 1 POS19 温控模块 2 POS21，POS22 垃圾桶 1 POS24 表1-2 订制化配置9-MGISP-960 平台 硬件 数量 位置 振荡器 1 POS20 磁力架 2 POS18，POS19 温控模块 1 POS21",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "表图编号",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-FIGTAB-001"
     },
     {
       "file": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf",
@@ -6839,6 +6866,510 @@
       "category": "官网地址",
       "layer": "deterministic",
       "expected_rule": "DET-URL-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "1",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "快去申请物料编码",
+      "selected_text": "0-00XXXX-00",
+      "context": "编号：H-020-00XXXX-00",
+      "category": "物料编码",
+      "layer": "deterministic",
+      "expected_rule": "DET-MATERIAL-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "2",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "与母公司同名了，建议改为：本公司，或者统一改为：长光",
+      "selected_text": "华大智造） 对本说明书",
+      "context": "）。说明书版本 1.0，软件版本 V1。 有限公司（以下简称华大智造）的专 织不得全部或部分地对本说明书进行 者为终端用户，说明书作为仪器的一 的个人使用本说明书。 限于）用于特定目的的商业性和合理 的准确性。但是，华大智造对遗漏不 高其可靠性、功能或设计的权利。",
+      "category": "公司主体表述",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-COMPANY-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "3",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "NMPA一般提供纸质说明书，请与资质确认",
+      "selected_text": "。若随产品仅提供电子版说明书，如",
+      "context": "分理解本说明书内容。若随产品仅提供电子版说明书，如 务获取。 的眼科光学相干断层扫描仪产品。 。在操作和维护本仪器前，应充分了解本说明书中的安全 医务人员或技术人员使用，并应严格按照本说明书规定的",
+      "category": "法规/注册确认",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-REG-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "3",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "这里与前面以及安全章节有内容重合，你再调整下",
+      "selected_text": "使用本仪器前，请仔细阅读并充分理解本说明书内容。若随产品仅提供电子版说明书，如 需纸质版说明书，可联系售后服务获取。 本说明书仅适用于华大智造生产的眼科光学相干断层扫描仪产品。 请妥善保管本说明书，以备查阅。在操作和维护本仪器前，应充分了解本说明书中的安全 注意事项及操作要求。 本仪器仅限经过专业培训的专业医务人员或技术人员使用，并应严格按照本说明书规定的 用途和操作方法进行操作。 本仪器的安装与维修应由华大智造授权的专业技术人员进行，公司将提供必要的技术支 持。 华大智造保留对产品技术规格进行修改和完善的权利。如有更新，恕不另行通知。 本说明书最终解释权归长春长光华大智造测序设备有限公司所有。",
+      "context": "声明 使用本仪器前，请仔细阅读并充分理解本说明书内容。若随产品仅提供电子版说明书，如 需纸质版说明书，可联系售后服务获取。 本说明书仅适用于华大智造生产的眼科光学相干断层扫描仪产品。 请妥善保管本说明书，以备查阅。在操作和维护本仪器前，应充分了解本说明书中的安全 注意事项及操作要求。 本仪器仅限经过专业培训的专业医务人员或技术人员使用，并应严格按照本说明书规定的 用途和操作方法进行操作。 本仪器的安装与维修应由华大智造授权的专业技术人员进行，公司将提供必要的技术支 持。 华大智造保留对产品技术规格进行修改和完善的权利。如有更新，恕不另行通知。 本说明书最终解释权归长春长光华大智造测序设备有限公司所有。",
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "4",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "日期留空",
+      "selected_text": "日期 2026 年7 月16 日",
+      "context": "日期 版本 2026 年7 月16 日 1.0",
+      "category": "版本记录",
+      "layer": "deterministic",
+      "expected_rule": "DET-REVISION-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "11",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "重复出现了",
+      "selected_text": "如有任何说明书中未提及的维护问题，请及时咨询技术支持。 本仪器在出厂前已进行验证，如使用过程中发现结果有较大偏差",
+      "context": "确保使用本公司指定或推荐型号的外接设备及耗材。 如有任何说明书中未提及的维护问题，请及时咨询技术支持。 如仪器长期停用，应每三周通电一次，每次通电时长不少于4 h。 如有任何说明书中未提及的维护问题，请及时咨询技术支持。 本仪器在出厂前已进行验证，如使用过程中发现结果有较大偏差，请联系技术支持进行校准。 本仪器用于体外诊断的临床检验分析，分析结果仅作为医生进行临床判断时的辅助，请同时考虑临床 检查结果或其他实验结果。",
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "12",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "近 是复制来的还是自己打字的？如果是复制，那么源头文件也要改",
+      "selected_text": "附件使",
+      "context": "器外壳，将内部部件暴露在外。否则，可能导致电击危险或潜在的光学危 预先设置220V。接通电源前，确保电压选择器设置正确，且供电电压与仪 导致仪器严重损坏。 （如非屏蔽的射频源）附件使用本仪器。否则，可能降低仪器准确性。 ，建议评估电磁环境。 合仪器要求。 保实验室电源插座或UPS（如有）输出端的电压在要求范围内。否则，可 降低。",
+      "category": "人工确认项",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-CHECK-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "14",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "下面三个图标，我们都是不带具体数值的",
+      "selected_text": "-",
+      "context": "禁止推动 表示包装件不得通 温度极限 表示医疗器械可安",
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "16",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "拉大列宽 目前已经溢出单元格",
+      "selected_text": "符号 说 提 提 提 提 【XX】 表",
+      "context": "说明书 本说明书中的图形符号说明如下： 符号 说明 提示操作者按照说明进行操作，如操作不当或不 提示操作者按照说明进行操作，如操作不当或不 提示操作者按照说明进行操作，如操作不当或不 提示操作者按照说明进行操作，强调操作步骤中 【XX】 表示仪器丝印和界面文字",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "19",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "这里是项目组提供的吗？要跟上一段话保持一致。这里只写了主机，那还有其他部件没有介绍",
+      "selected_text": "部件功能说明如下： 名称 眼底成像模块 光学相干断层扫描模块",
+      "context": "眼科光学相干断层扫描仪由扫描主机、显示器、键鼠套装、电脑主机和 （名称：眼科光学相干断层扫描仪操作软件，版本号：V1）组成。其中 像模块和光学相干断层扫描模块。 部件功能说明如下： 名称 说明 眼底成像模块 由照明光路和成像光路组成。负责将光源光 集视网膜放射光至探测器，获取视网膜彩色 光学相干断层扫描模块 由扫描光学元件（振镜、准直镜等）构成。 导向至人眼眼底，收集从视网膜返回的干涉 取眼底断层扫描图像及眼轴长度、角膜厚度 数。 0",
+      "category": "术语一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-TERM-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "20",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "拉大列宽",
+      "selected_text": "序 号",
+      "context": "图 1 前视图 序 号 名称 说明 1 面罩 贴合患者眼周的遮光及 置。 2 颏托 支撑患者下颌，配合面 求上下调节。 3 脚垫 支撑主机，确保仪器放",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "26",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "界面真是这样写吗",
+      "selected_text": "【返还软",
+      "context": "【退到桌面】 关闭系统软件。 点击后系统提示输 退出系统软件。 【返还软件】 返回至软件上一步操作界面。 病人信息录入界面 在检测系统界面点击【数据采集】，进入病人信息",
+      "category": "人工确认项",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-CHECK-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "29",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "挪到右边，这样不用经过1",
+      "selected_text": "2",
+      "context": "1 2",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "30",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "改为竖线，这里太杂乱",
+      "selected_text": "-",
+      "context": "5 6 8 9 10 7",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "30",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "太密集了，搞点折线",
+      "selected_text": "1 2 3",
+      "context": "在检查项界面勾选【OCT 检测】项目后，点击【 进入OCT 检测界面。 1 2 3 4",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "30",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "调整列宽",
+      "selected_text": "区",
+      "context": "2 对比度调节按钮 调节对比度。 3 光源强度调节按钮 调节红外光源亮度。 4 眼底实时图像显示 区 实时显示眼底图像。 5 采集位置选择 按照需求选择采集位置。可选 6 采集模式选择 按照需求选择采集模式。 眼后节包含黄斑检",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "31",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "冒号前面搞成平行结构，目前看来有的是XX按钮，XXX调节，还有字符传",
+      "selected_text": "位移台调节按钮：调整主机上下、左右 【一键校准】：一键完成系统校准。 【采集】：开始采集眼底图像。 焦距、光程、偏振调节：通过滑动条调 EDI、全自动光程、追踪、增强按钮：功 的启用与关闭。 【采集眼位】：切换左眼（L）/有眼（",
+      "context": "项目 说明 左右眼采集任务显 示区 显示相应眼别的采集任务。 采集设置区 位移台调节按钮：调整主机上下、左右及前后位置。 【一键校准】：一键完成系统校准。 【采集】：开始采集眼底图像。 焦距、光程、偏振调节：通过滑动条调整对应成像参数。 EDI、全自动光程、追踪、增强按钮：功能开关，控制对应模式 的启用与关闭。 【采集眼位】：切换左眼（L）/有眼（R）采集。 B 断层扫描图像显 示区 显示B 断层扫描图像（OCT 图像）。 【删除采集】 删除采集到的眼底图像。",
+      "category": "术语一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-TERM-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "32",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "大了点，他们没有提供矢量图吗",
+      "selected_text": "-",
+      "context": "表示容积扫描范围为12 mm 表示青光眼检测三维扫描模式 mm。 表示青光眼检测三维扫描模式 mm。 A 扫描为沿深度方向采集的一维扫描数据，B 扫描为由多 像。",
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "33",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "icon大小为6mm宽，你看看是否超过",
+      "selected_text": "-",
+      "context": "实时显示眼底图像。 可对采集位置、采集模式、扫描模式及图片质量进行选 择。 点击采集模式后方的 按钮，可设置模式参数。 显示相应眼别的采集任务。 位移台调节按钮：调整主机上下、左右及前后位置。 【采集】：开始采集眼底图像。 焦距、光程、偏振调节：通过滑动条调整对应成像参",
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "33",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "平行结构，同上意见",
+      "selected_text": "位移台调节按钮 【采集】：开始 焦距、光程、偏 数。 全自动调焦、光 启用与关闭。 【采集眼位】：",
+      "context": "点击采集模式后方的 按钮，可设置模式参数。 务显示区 显示相应眼别的采集任务。 位移台调节按钮：调整主机上下、左右及前后位置。 【采集】：开始采集眼底图像。 焦距、光程、偏振调节：通过滑动条调整对应成像参 数。 全自动调焦、光程按钮：功能开关，控制对应模式的 启用与关闭。 【采集眼位】：切换左眼（L）/有眼（R）采集。 像显示区 显示B 断层扫描图像（OCT 图像）。",
+      "category": "术语一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-TERM-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "37",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "单位前面加空格",
+      "selected_text": "阳光直射，须通风良 于 1.8m × 2.4m， 通风良好的室内环境",
+      "context": "实验室地面需平整，倾斜度小于1/200；实验桌或地面需满足承重要求。否则， 影响测量精度。 严禁在可燃气体、蒸汽或高浓度氧气环境中使用本仪器。否则，存在引燃风险。 实验室应避免阳光直射，须通风良好。建议参考二级生物安全实验室标准。 安装空间不小于 1.8m × 2.4m，以确保安装便利及病人使用舒适。 设备须安装在通风良好的室内环境，保持散热通风口畅通。否则，可能因热量积 全风险。 确保实验室的空间足够容纳相关配套或外围设备。 确保仪器四周的空间满足仪器散热、线缆使用、开关使用、仪器操作及仪器维护 仪器场地要求如下：",
+      "category": "单位/空格",
+      "layer": "deterministic",
+      "expected_rule": "DET-SPACE-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "38",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "调整列宽",
+      "selected_text": "环境",
+      "context": "参数 软件名称 眼科光学相干断层扫描仪操作 软件 发布版本 V1 软件运行环境 CPU：Intel Core i5 及以 上 硬盘容量：1TB 及以上 内存：32GB 及以上 显卡：NVIDIA GeForce RTX 3060 及以上 显示屏分辨率：1920×1080 像素及以上 操作系统：Windows 11 及 其兼容版本 网络架构 C/S 架构 网络类型 局域网 网络带宽 100 Mbit/s 及以上 硬件接口 USB3.0 接口、RJ45 接口 传输协议 USB 协议、HTTP/HTTPS 文件存储格式 TIFF、JPEG、DCM",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "41",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "删了",
+      "selected_text": "与软件准备",
+      "context": "罩。 开机与软件准备 操作步骤如下： 1. 用电源线将仪器电源的电源适配器接口与电源 如配有UPS 电源，请按照UPS 产品说明进行 仪器可以通过外置电源适配器的电源插头与市",
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "41",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "缺句号",
+      "selected_text": "按钮 ”",
+      "context": "2. 将电源适配器另一端的连接头插入仪器的电源接口。 3. 确保扫描仪主机和计算机均已接通电源。 4. 先按计算机电源按钮开机，再按仪器电源开关，启动仪器。仪 14 页“右视图” 5. 双击计算机桌面软件图标 启动操作软件。 6. 等待软件完成自检流程。自检成功后，系统进入登录界面。",
+      "category": "图片/对象缺失",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-IMAGE-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "42",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "跟资质，产品经理，项目经理确认是否要写明这个",
+      "selected_text": ". 点击登入。 默认用户名：admin，密码：666666。",
+      "context": "操作步骤如下： 1. 输入用户名和密码。 2. 点击登入。 默认用户名：admin，密码：666666。 息录入 可点击操作界面右上角【主页】按钮，返回检测系统界面。",
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "42",
+      "annotation_type": "Stamp",
+      "author": "caoyuanyuan",
+      "comment": "我附上T1+ NMPA说明书的密码相关内容",
+      "selected_text": "-",
+      "context": "制软件 操作步骤如下： 1. 输入用户名和密码。 2. 点击登入。 产品说明书",
+      "category": "法规/注册确认",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-REG-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "42",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "这不是一个步骤，没有啥需要操作的内容。建议合并到上一步，作为普通段落",
+      "selected_text": "至检测主界面。 3. 系统将按照预设顺序自动完成所勾选项目的检测流程，操作人员无需逐项手动操作。",
+      "context": "勾选，操作人员可根据检测需求调整。 2. 点击【开始检测】。若勾选【OCT 检测】，系统弹出OCT 自动检测模式选择窗口，可勾 选【OCT】和 / 或【生物测量】。点击【确认】进入自动检测流程；点击【取消】返回 至检测主界面。 3. 系统将按照预设顺序自动完成所勾选项目的检测流程，操作人员无需逐项手动操作。 手动检测 在检测主界面下方将运行模式切换至手动模式。",
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "43",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "缺少句号",
+      "selected_text": "”",
+      "context": "进入眼底检测界面。 上下位置及对焦镜组位置。也可使用【对位最佳 完成瞳孔对位和焦面调整。 20 页“眼底检测界面” 。 作。复位完成后退回至检测项界面。根据实际需",
+      "category": "标点符号",
+      "layer": "deterministic",
+      "expected_rule": "DET-PUNCT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "43",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "删了，就下面一个动作",
+      "selected_text": "操作步骤如下：",
+      "context": "OCT 检测 操作步骤如下： 在检测项界面勾选【OCT 检测】，点击【开始检测】后进入 生物测量扫描 在OCT 检测界面的【采集位置】选项中选择【生物测量】，",
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "45",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "重复了",
+      "selected_text": "可删除删除或",
+      "context": "，进入结果浏览界面。 信息，点击【查看报告】进入图像浏览界面。该界面展 的【编辑模式】，即可删除删除或生成报告。 进行扫描，可及时观察结构异常变化，有助于早期发 眼后节扫描模式可单独或组合使用。",
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "46",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "这里是否有意思重复了",
+      "selected_text": "ILM–RPE 厚度地形图以彩色编码显示黄斑区 6×6 mm 视网膜厚度，暖色（黄、红）表示较 厚区域，冷色（蓝）表示较薄区域，颜色图例位于图形下方。ILM–RPE 厚度偏差地形图以 彩色编码显示与正常厚度范围的偏差，暖色（红）表示偏厚，冷色（黑）表示偏薄。",
+      "context": "蓝色：临界线（p 值 95%~99%）； 紫色：超出标准（p 值 > 99%）。 ILM–RPE 厚度偏差图为各区域厚度与正常范围对比的偏差结果。 ILM–RPE 厚度地形图以彩色编码显示黄斑区 6×6 mm 视网膜厚度，暖色（黄、红）表示较 厚区域，冷色（蓝）表示较薄区域，颜色图例位于图形下方。ILM–RPE 厚度偏差地形图以 彩色编码显示与正常厚度范围的偏差，暖色（红）表示偏厚，冷色（黑）表示偏薄。 37",
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "49",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "多余句号了",
+      "selected_text": "：。",
+      "context": "视盘区域） 模式同步对黄斑区域和视盘区域进行三维扫描，获取对应区域的组织 面显示以下测量结果：。 厚度时区图、RNFL 厚度象限图、RNFL 厚度分布图； 厚度、ILM-RPE 厚度； 切换查看 GCC 厚度二维分布图与 NFL 厚度二维分布图。",
+      "category": "标点符号",
+      "layer": "deterministic",
+      "expected_rule": "DET-PUNCT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "55",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "OCT",
+      "selected_text": "OTC 图",
+      "context": "像 目标眼底部位超出图 采集范围。 OTC 图像质量差或信号强 度值偏低 成像透镜受到污染。 患者眼睑或睫毛干扰 像采集。 信号图左侧或右侧部分缺 失 成像透镜未正对瞳孔中 心，导致部分扫描光束 能进入眼底。",
+      "category": "术语拼写",
+      "layer": "deterministic",
+      "expected_rule": "DET-TERM-SPELL-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "55",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "反向了，在英文输入法下输入双引号再试试",
+      "selected_text": "查看系统日志，检查 在\"timeout\"或\"fa",
+      "context": "缆未正确连接或接 。 查看相机线缆是否正确连接并牢固，确 保接口无松动。 踪异常或拍照超时 序卡死。 查看系统日志，检查是否存 在\"timeout\"或\"failed\"等错误记录。 复位后重新尝试。 ace 路径下无病 检测数据未成功保 检查workspace 路径是否正确，确 认该路径下是否有病例文件。 确认检测是否已成功保存，若未保存",
+      "category": "标点符号",
+      "layer": "deterministic",
+      "expected_rule": "DET-PUNCT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "55",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "如有操作先后顺序，应该使用有序列表",
+      "selected_text": "指 色 调 位 清 指 起 调整 根 若",
+      "context": "本说明书未提及的其它故障，请联系技术支持。 分析 处理方法 者未正确注视绿色固 目标。 标眼底部位超出图像 集范围。 指导患者在图像采集期间持续注视绿 色固视目标。 调整患者眼位、固视方向或设备采集 位置。 像透镜受到污染。 者眼睑或睫毛干扰图 采集。 清洁成像透镜后重新采集图像。 指导患者充分睁眼。必要时可辅助抬 起患者上眼睑，但应避免压迫眼球。 透镜未正对瞳孔中 导致部分扫描光束未 入眼底。 调整成像透镜，使其正对瞳孔中心。 模块未连接。 根据自检结果检查硬件连接。 若问题仍存在，请联系技术支持。 的账号或密码大小写 。 核对账号与密码（区分大小写）。 线缆未正确连接或接 良。 查看相机线缆是否正确连接并牢固，确 保接口无松动。 查看系统日志，检查是否存",
+      "category": "步骤结构",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-STEP-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "61",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "列宽拉大",
+      "selected_text": "测量范围 显示精度 2 mm~40 mm 0.001 mm/ 0.01 mm .5 mm~10 mm 0.01 mm .2 mm~1.4 mm 0.001 mm",
+      "context": "性能参数 测量项目 测量范围 显示精度 允差 测量重复性 眼轴长度 12 mm~40 mm 0.001 mm/ 0.01 mm ±0.02 mm ≤33 μm 晶状体厚度 0.5 mm~10 mm 0.01 mm ±0.05 mm ＜3% 角膜厚度 0.2 mm~1.4 mm 0.001 mm ±0.002 mm <3% 性能要求",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "61",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "为什么是/，而不是一个范围？",
+      "selected_text": "0.001 mm/ 0.01 mm",
+      "context": "数 测量范围 显示精度 允差 测量重复性 12 mm~40 mm 0.001 mm/ 0.01 mm ±0.02 mm ≤33 μm 0.5 mm~10 mm 0.01 mm ±0.05 mm ＜3% 0.2 mm~1.4 mm 0.001 mm ±0.002 mm <3%",
+      "category": "范围/数值格式",
+      "layer": "deterministic",
+      "expected_rule": "DET-RANGE-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "61",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "回车搞到第二行",
+      "selected_text": "（工作",
+      "context": "光功率（工作距离 处） ±10% ≤3 W ±10% ≤1 mW ±10% ≤ 1 mW",
+      "category": "字体/版式细节",
+      "layer": "deterministic",
+      "expected_rule": "DET-TYPO-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "62",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "回车搞到第二行",
+      "selected_text": "（工作距离",
+      "context": "光功率（工作距离 处） ±10 nm ≤600 μW ±10 nm ≤1500 μW ±20 nm ≤110 μW ±20 nm ≤10 μW",
+      "category": "字体/版式细节",
+      "layer": "deterministic",
+      "expected_rule": "DET-TYPO-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "64",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "调整列宽",
+      "selected_text": "-",
+      "context": "准清单 本仪器符合以下标准： 项目 符合标准 电磁兼容性 YY 9706.102-2021 医用电气设备 第1-2 部分：基本安全和基 能的通用要求并列标准；电磁兼容要求和 安全要求 GB 9706.1-2020 医用电气设备 第1 部分：基本安全和基 能的通用要求 GB/T 7247.1-2024 激光产品的安全 第1 部分：设备分类和 ISO 15004-2:2024 Ophthalmic instruments — Fundamental requirements and t methods — Part 2: Light hazard protection",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "66",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "样式没有设置对，这里应该是表头",
+      "selected_text": "医疗器械注册证编号/产品技术要求编 注册人/生产企业 注册人住所 生产地址 生产许可证编号 售后服务单位/技术支持厂家 技术支持电话 技术支持邮箱",
+      "context": "制造商信息 医疗器械注册证编号/产品技术要求编号 注册人/生产企业 长春长光华大智造测序设备有 注册人住所 长春市经开区自由大路7691 号 一期6 号办公楼 生产地址 长春市经开区自由大路7691 号 一期6 号办公楼 生产许可证编号 售后服务单位/技术支持厂家 长春长光华大智造测序设备有 技术支持电话 4000-688-114 技术支持邮箱 MGI-service@mgi-tech.co",
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-LAYOUT-001"
+    },
+    {
+      "file": "光学相干断层扫描仪产品说明书_中文_IVD (6) peered by Tina.pdf",
+      "page": "70",
+      "annotation_type": "Square",
+      "author": "caoyuanyuan",
+      "comment": "能否统一",
+      "selected_text": "外部设备 2 外接设备 2 外围设备 3 维护 2",
+      "context": "W 外部设备 2 外接设备 2 外围设备 3 维护 2 Y 【眼底检测】 34",
+      "category": "术语一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-TERM-001"
     }
   ]
 }

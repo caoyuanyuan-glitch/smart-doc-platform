@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system
 from app.database import create_tables
+import threading
 
 app = FastAPI(title="智能技术文档平台", version="1.0.0")
 
@@ -41,7 +42,7 @@ async def startup_event():
     create_tables()
     try:
         from app.utils.ai_client import ai_client
-        ai_client.warmup()
+        threading.Thread(target=ai_client.warmup, name="ai-warmup", daemon=True).start()
     except Exception as e:
         print(f"[startup] AI 预热失败: {e}")
     try:

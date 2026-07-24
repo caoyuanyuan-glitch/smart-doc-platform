@@ -140,12 +140,23 @@ def validate_ai_issue_candidate(issue: dict[str, Any], content: str) -> Validati
         return ValidationResult(False, "missing_original_text")
     if not suggestion and not description:
         return ValidationResult(False, "missing_suggestion_and_description")
-    if "此处原文已正确" in combined or "无需修改" in combined:
+    no_issue_pattern = re.compile(
+        r"此处原文已正确|无需修改|no\s+(?:issue|violation|change)\b|no\s+change\s+needed|"
+        r"appears\s+valid|is\s+correct\b|email\s+is\s+correct|verify\s+if\s+this\s+is\s+the\s+correct",
+        re.IGNORECASE,
+    )
+    if no_issue_pattern.search(combined):
         return ValidationResult(False, "explicit_no_change")
     if any(marker in combined for marker in _BASIS_MARKERS):
         return ValidationResult(False, "audit_basis_leak")
     if original not in content_norm:
         return ValidationResult(False, "original_text_not_found")
+    start = content_norm.find(original)
+    end = start + len(original)
+    if original[:1].isalpha() and start > 0 and content_norm[start - 1:start].isalpha():
+        return ValidationResult(False, "truncated_word_fragment")
+    if original[-1:].isalpha() and end < len(content_norm) and content_norm[end:end + 1].isalpha():
+        return ValidationResult(False, "truncated_word_fragment")
     if suggestion and not has_substantive_suggestion(original, suggestion):
         return ValidationResult(False, "noop_suggestion")
     if suggestion and ai_suggestion_violates_number_unit_spacing(original, suggestion):
