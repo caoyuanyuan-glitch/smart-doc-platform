@@ -111,13 +111,13 @@
                     {{ formatDateTime(row.updated_at || row.created_at) }}
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="350" fixed="right" align="center">
+                <el-table-column label="操作" width="480" fixed="right" align="center">
                   <template #default="{ row }">
                     <el-button class="table-action-btn" size="small" @click="handlePreviewFile(row)">
                       <el-icon><View /></el-icon>
                       预览
                     </el-button>
-                    <el-button class="table-action-btn" size="small" @click="handleDownloadFile(row)">
+                    <el-button class="table-action-btn" size="small" :disabled="row.permission === 'read'" @click="handleDownloadFile(row)">
                       <el-icon><Download /></el-icon>
                       下载
                     </el-button>
@@ -127,6 +127,14 @@
                         <path fill="currentColor" d="M906.666667 760.32l-98.986667-98.986667a35.84 35.84 0 0 0-50.773333 50.773334l37.973333 37.973333h-384v-85.333333a35.84 35.84 0 0 0-71.68 0v122.026666a35.84 35.84 0 0 0 35.84 35.84h420.266667l-37.973334 37.973334a35.84 35.84 0 0 0 50.773334 50.773333L906.666667 810.666667a35.84 35.84 0 0 0 0-50.346667z" />
                       </svg>
                       移动
+                    </el-button>
+                    <el-button v-if="isEditableType(row)" class="table-action-btn" size="small" :disabled="row.permission !== 'edit'" type="warning" @click="openEditDialog(row)">
+                      <el-icon><Edit /></el-icon>
+                      编辑
+                    </el-button>
+                    <el-button v-if="userStore.isAdmin" class="table-action-btn" size="small" type="info" @click="openPermissionDialog(row)">
+                      <el-icon><Lock /></el-icon>
+                      权限
                     </el-button>
                     <el-button class="table-action-btn" size="small" type="danger" @click="handleDeleteFile(row)">
                       <el-icon><Delete /></el-icon>
@@ -284,6 +292,60 @@
         <el-button type="primary" :disabled="isMoveConfirmDisabled" @click="confirmMoveTarget">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 文件编辑对话框 -->
+    <el-dialog v-model="editDialogVisible" :title="`编辑：${editFileName}`" width="85%" top="3vh" @closed="closeEditDialog" destroy-on-close>
+      <div v-if="editLoading" class="edit-loading">加载中...</div>
+      <div v-else-if="editError" class="edit-error">{{ editError }}</div>
+      <div v-else class="edit-container">
+        <div v-if="isXlsxEdit" class="edit-hint">提示：以 Tab 分隔展示表格内容，直接编辑后保存即可。</div>
+        <el-input
+          v-model="editContent"
+          type="textarea"
+          :rows="25"
+          class="edit-textarea"
+          placeholder="文件内容加载中..."
+        />
+      </div>
+      <template #footer>
+        <el-button @click="closeEditDialog">取消</el-button>
+        <el-button type="primary" :loading="editSaving" @click="saveEditContent">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 权限管理对话框 -->
+    <el-dialog v-model="permDialogVisible" title="权限管理" width="450px" @closed="closePermDialog">
+      <div v-if="permFile" class="perm-dialog-body">
+        <div class="perm-item">
+          <span class="perm-label">文件名</span>
+          <span class="perm-value">{{ permFile.name }}</span>
+        </div>
+        <div class="perm-item">
+          <span class="perm-label">操作权限</span>
+          <el-select v-model="permPermission" size="small" style="width: 160px">
+            <el-option label="只读" value="read" />
+            <el-option label="编辑" value="edit" />
+            <el-option label="下载" value="download" />
+          </el-select>
+        </div>
+        <div class="perm-item" v-if="permPermission === 'edit'">
+          <span class="perm-label">编辑范围</span>
+          <el-select v-model="permEditScope" size="small" style="width: 160px">
+            <el-option label="所有人" value="all" />
+            <el-option label="上传者" value="owner" />
+            <el-option label="管理员" value="admin" />
+          </el-select>
+        </div>
+        <div class="perm-item" v-if="permPermission !== 'edit'">
+          <span class="perm-label">编辑范围</span>
+          <span class="perm-value perm-disabled">—</span>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="closePermDialog">取消</el-button>
+        <el-button type="primary" :loading="permSaving" @click="savePermission">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -293,13 +355,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Upload, Download, View, Delete, FolderOpened, Document,
-  Plus, ArrowDown, ArrowRight
+  Plus, ArrowDown, ArrowRight, Edit, Lock
 } from '@element-plus/icons-vue'
 import { knowledgeAPI } from '@/api'
+import { useUserStore } from '@/store/user'
 import RecursiveTree from '@/components/RecursiveTree.vue'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 
 // -------- 文件夹树 --------
 const folderTree = ref([])
@@ -413,6 +477,23 @@ const previewContent = ref('')
 const previewType = ref('text')
 const previewFileName = ref('')
 const previewFileUrl = ref('')
+
+// -------- 文件编辑 --------
+const editDialogVisible = ref(false)
+const editContent = ref('')
+const editFileName = ref('')
+const editFileId = ref(null)
+const editLoading = ref(false)
+const editSaving = ref(false)
+const editError = ref('')
+const isXlsxEdit = ref(false)
+
+// -------- 权限管理 --------
+const permDialogVisible = ref(false)
+const permFile = ref(null)
+const permPermission = ref('edit')
+const permEditScope = ref('all')
+const permSaving = ref(false)
 
 const folderId = computed(() => {
   const id = route.params.id
@@ -776,6 +857,95 @@ async function handleDeleteFile(file) {
   }
 }
 
+// -------- 权限管理 --------
+function openPermissionDialog(file) {
+  permFile.value = file
+  permPermission.value = file.permission || 'edit'
+  permEditScope.value = file.edit_scope || 'all'
+  permDialogVisible.value = true
+}
+
+function closePermDialog() {
+  permDialogVisible.value = false
+  permFile.value = null
+  permSaving.value = false
+}
+
+async function savePermission() {
+  if (!permFile.value) return
+  permSaving.value = true
+  try {
+    const data = { permission: permPermission.value }
+    if (permPermission.value === 'edit') {
+      data.edit_scope = permEditScope.value
+    }
+    await knowledgeAPI.updateFilePermission(permFile.value.id, data)
+    permFile.value.permission = permPermission.value
+    permFile.value.edit_scope = permPermission.value === 'edit' ? permEditScope.value : 'all'
+    ElMessage.success('权限更新成功')
+    closePermDialog()
+  } catch (e) {
+    const msg = e.response?.data?.detail || '未知错误'
+    ElMessage.error('权限更新失败：' + msg)
+  } finally {
+    permSaving.value = false
+  }
+}
+
+// -------- 文件编辑 --------
+const EDITABLE_EXTENSIONS = ['.md', '.docx', '.xlsx']
+
+function isEditableType(file) {
+  const name = (file.name || '').toLowerCase()
+  return EDITABLE_EXTENSIONS.some(ext => name.endsWith(ext))
+}
+
+async function openEditDialog(file) {
+  editFileId.value = file.id
+  editFileName.value = file.name
+  editContent.value = ''
+  editError.value = ''
+  editLoading.value = true
+  isXlsxEdit.value = file.name.toLowerCase().endsWith('.xlsx')
+  editDialogVisible.value = true
+
+  try {
+    const res = await knowledgeAPI.getFileContent(file.id)
+    editContent.value = res.data.content || ''
+  } catch (e) {
+    const msg = e.response?.data?.detail || e.message || '未知错误'
+    editError.value = '加载文件内容失败：' + msg
+  } finally {
+    editLoading.value = false
+  }
+}
+
+function closeEditDialog() {
+  editDialogVisible.value = false
+  editFileId.value = null
+  editFileName.value = ''
+  editContent.value = ''
+  editError.value = ''
+  isXlsxEdit.value = false
+  editLoading.value = false
+  editSaving.value = false
+}
+
+async function saveEditContent() {
+  if (!editFileId.value) return
+  editSaving.value = true
+  try {
+    await knowledgeAPI.updateFileContent(editFileId.value, editContent.value)
+    ElMessage.success('保存成功')
+    closeEditDialog()
+  } catch (e) {
+    const msg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error('保存失败：' + msg)
+  } finally {
+    editSaving.value = false
+  }
+}
+
 function closePreview() {
   // 清理预览状态
 }
@@ -1131,5 +1301,69 @@ onMounted(() => {
   color: #6b7280;
   font-size: 16px;
   padding: 40px;
+}
+
+/* 文件编辑 */
+.edit-loading,
+.edit-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  font-size: 15px;
+  color: #6b7280;
+}
+
+.edit-error {
+  color: #ef4444;
+}
+
+.edit-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.edit-hint {
+  font-size: 13px;
+  color: #6b7280;
+  padding: 6px 10px;
+  background: #fef3c7;
+  border-radius: 4px;
+}
+
+.edit-textarea :deep(.el-textarea__inner) {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* 权限管理弹窗 */
+.perm-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.perm-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.perm-label {
+  width: 80px;
+  font-size: 14px;
+  color: #374151;
+  flex-shrink: 0;
+}
+
+.perm-value {
+  font-size: 14px;
+  color: #6b7280;
+}
+
+.perm-value.perm-disabled {
+  color: #d1d5db;
 }
 </style>

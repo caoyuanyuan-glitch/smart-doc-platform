@@ -27,6 +27,8 @@ class KnowledgeFile(Base):
     file_path = Column(String, nullable=False)
     file_size = Column(Float)
     file_type = Column(String)
+    permission = Column(String, default="edit")  # read / edit / download
+    edit_scope = Column(String, default="all")  # admin / owner / all
     created_by = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

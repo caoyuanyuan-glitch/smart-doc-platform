@@ -349,7 +349,10 @@ export const knowledgeAPI = {
   },
   getFile: (fileId) => instance.get(`/knowledge/files/${fileId}`),
   moveFile: (fileId, data) => instance.put(`/knowledge/files/${fileId}/move`, data),
-  deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`)
+  deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`),
+  getFileContent: (fileId) => instance.get(`/knowledge/files/${fileId}/content`),
+  updateFileContent: (fileId, content) => instance.put(`/knowledge/files/${fileId}/content`, { content }),
+  updateFilePermission: (fileId, data) => instance.put(`/knowledge/files/${fileId}/permission`, data)
 }
 
 export const docPolishAPI = {

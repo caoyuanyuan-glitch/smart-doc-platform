@@ -1,19 +1,41 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from typing import Optional
 import os
 import mimetypes
 import docx2txt
 import csv
+import tempfile
 from app.database import get_db
 from app.crud.knowledge import (
     get_folder, get_folder_tree, get_folder_files, get_subfolders, create_folder, update_folder, delete_folder,
     create_file, get_file, delete_file, move_folder, move_file
 )
-from app.schemas.knowledge import FolderCreate, FolderUpdate, FolderMove, FileMove
-from app.api.auth import get_current_user, get_default_user
+from app.schemas.knowledge import FolderCreate, FolderUpdate, FolderMove, FileMove, FileContentRequest, FilePermissionRequest
+from app.models.knowledge import KnowledgeFile
+from app.api.auth import get_current_user, get_default_user, require_admin
 from app.utils.file_utils import read_file_safe
+
+PERMISSION_READ = "read"
+PERMISSION_EDIT = "edit"
+PERMISSION_DOWNLOAD = "download"
+VALID_PERMISSIONS = {PERMISSION_READ, PERMISSION_EDIT, PERMISSION_DOWNLOAD}
+VALID_EDIT_SCOPES = {"admin", "owner", "all"}
+
+def check_download_permission(file):
+    if file.permission == PERMISSION_READ:
+        raise HTTPException(status_code=403, detail="该文件仅限只读，不支持下载")
+
+def check_edit_permission(file, user):
+    if file.permission != PERMISSION_EDIT:
+        raise HTTPException(status_code=403, detail="该文件不支持编辑操作")
+    scope = file.edit_scope or "all"
+    if scope == "admin" and user.role != "admin":
+        raise HTTPException(status_code=403, detail="该文件仅限管理员编辑")
+    if scope == "owner" and user.role != "admin" and user.id != file.created_by:
+        raise HTTPException(status_code=403, detail="该文件仅限上传者和管理员编辑")
 
 router = APIRouter()
 
@@ -228,6 +250,8 @@ async def get_file_info(file_id: int, db: Session = Depends(get_db)):
         "file_size": file.file_size,
         "file_type": file.file_type,
         "folder_id": file.folder_id,
+        "permission": file.permission or "edit",
+        "edit_scope": file.edit_scope or "all",
         "created_at": file.created_at.isoformat() if file.created_at else None
     }
 
@@ -255,6 +279,7 @@ async def download_file(file_id: int, db: Session = Depends(get_db)):
     file = get_file(db, file_id)
     if not file:
         raise HTTPException(status_code=404, detail="文件不存在")
+    check_download_permission(file)
     
     if not os.path.exists(file.file_path):
         raise HTTPException(status_code=404, detail="服务器文件不存在")
@@ -345,6 +370,130 @@ async def get_raw_file(file_id: int, db: Session = Depends(get_db)):
         filename=file.filename,
         media_type=media_type
     )
+
+class FileContentRequest(BaseModel):
+    content: str
+
+@router.get("/files/{file_id}/content")
+async def get_file_content(file_id: int, db: Session = Depends(get_db)):
+    """获取文件可编辑的文本内容"""
+    file = get_file(db, file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if not os.path.exists(file.file_path):
+        raise HTTPException(status_code=404, detail="服务器文件不存在")
+
+    ext = os.path.splitext(file.file_path)[1].lower()
+    try:
+        if ext == '.md':
+            content = read_file_safe(file.file_path)
+        elif ext == '.docx':
+            from docx import Document
+            doc = Document(file.file_path)
+            content = '\n'.join(p.text for p in doc.paragraphs)
+        elif ext == '.xlsx':
+            from openpyxl import load_workbook
+            wb = load_workbook(file.file_path, data_only=True)
+            ws = wb.active
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                rows.append('\t'.join(str(c) if c is not None else '' for c in row))
+            content = '\n'.join(rows)
+            wb.close()
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持编辑的文件类型: {ext}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+
+    return {"filename": file.filename, "content": content, "type": ext}
+
+@router.put("/files/{file_id}/content")
+async def update_file_content(
+    file_id: int,
+    req: FileContentRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """保存编辑后的文件内容"""
+    file = get_file(db, file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    check_edit_permission(file, current_user)
+    if not os.path.exists(file.file_path):
+        raise HTTPException(status_code=404, detail="服务器文件不存在")
+
+    ext = os.path.splitext(file.file_path)[1].lower()
+    try:
+        if ext == '.md':
+            with open(file.file_path, 'w', encoding='utf-8') as f:
+                f.write(req.content)
+        elif ext == '.docx':
+            from docx import Document
+            doc = Document(file.file_path)
+            # 清空现有段落
+            for p in doc.paragraphs:
+                p.clear()
+            # 写入新内容（每行一个段落）
+            lines = req.content.split('\n')
+            # 第一个段落复用，其余追加
+            for i, line in enumerate(lines):
+                if i == 0:
+                    doc.paragraphs[0].text = line
+                else:
+                    doc.add_paragraph(line)
+            # 删除多余的原始段落
+            while len(doc.paragraphs) > len(lines):
+                p = doc.paragraphs[-1]._element
+                p.getparent().remove(p)
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
+                doc.save(tmp.name)
+            os.replace(tmp.name, file.file_path)
+        elif ext == '.xlsx':
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            for row in req.content.split('\n'):
+                cells = row.split('\t')
+                ws.append(cells)
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                wb.save(tmp.name)
+            wb.close()
+            os.replace(tmp.name, file.file_path)
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持编辑的文件类型: {ext}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存文件失败: {str(e)}")
+
+    # 更新文件大小
+    new_size = os.path.getsize(file.file_path) if os.path.exists(file.file_path) else 0
+    db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).update({"file_size": new_size})
+    db.commit()
+
+    return {"message": "保存成功", "file_size": new_size}
+
+@router.put("/files/{file_id}/permission")
+async def update_file_permission(
+    file_id: int,
+    req: FilePermissionRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(require_admin)
+):
+    file = get_file(db, file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if req.permission is not None and req.permission not in VALID_PERMISSIONS:
+        raise HTTPException(status_code=400, detail=f"无效的权限值，合法值：{', '.join(VALID_PERMISSIONS)}")
+    update_data = {}
+    if req.permission is not None:
+        update_data["permission"] = req.permission
+    if req.edit_scope is not None:
+        if req.edit_scope not in VALID_EDIT_SCOPES:
+            raise HTTPException(status_code=400, detail=f"无效的操作者范围，合法值：{', '.join(VALID_EDIT_SCOPES)}")
+        update_data["edit_scope"] = req.edit_scope
+    if update_data:
+        db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).update(update_data)
+        db.commit()
+    return {"message": "权限更新成功", "permission": file.permission, "edit_scope": file.edit_scope}
 
 @router.delete("/files/{file_id}")
 async def delete_file_by_id(
