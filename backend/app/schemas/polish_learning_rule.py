@@ -36,12 +36,12 @@ class PolishLearningRuleUpdate(BaseModel):
 
 class PolishLearningRuleOut(PolishLearningRuleBase):
     id: int
-    trigger_count: int
+    trigger_count: Optional[int] = 0
     last_triggered_at: Optional[datetime] = None
     source_feedback_id: Optional[int] = None
     knowledge_file_id: Optional[int] = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

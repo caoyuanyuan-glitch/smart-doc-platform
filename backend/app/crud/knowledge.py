@@ -26,6 +26,8 @@ def get_folder_tree(db: Session, parent_id: int = None):
                     "file_path": f.file_path,
                     "file_size": f.file_size,
                     "file_type": f.file_type,
+                    "permission": f.permission or "edit",
+                    "edit_scope": f.edit_scope or "all",
                     "folder_id": f.folder_id,
                     "created_by": f.created_by,
                     "created_at": f.created_at,
@@ -53,6 +55,8 @@ def get_folder_files(db: Session, folder_id: int):
             "file_path": f.file_path,
             "file_size": f.file_size,
             "file_type": f.file_type,
+            "permission": f.permission or "edit",
+            "edit_scope": f.edit_scope or "all",
             "folder_id": f.folder_id,
             "created_by": f.created_by,
             "created_by_name": user_map.get(f.created_by, "未知用户") if f.created_by else "未知用户",
@@ -123,6 +127,8 @@ def create_file(db: Session, file: FileCreate, file_path: str, filename: str, fi
         file_path=file_path,
         file_size=file_size,
         file_type=file_type,
+        permission="edit",
+        edit_scope="all",
         created_by=created_by
     )
     db.add(db_file)
