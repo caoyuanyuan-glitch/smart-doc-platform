@@ -595,8 +595,6 @@ class AIClient:
                     candidates.extend(AIClient._extract_step_lines(value))
         elif isinstance(data, list):
             candidates.append(data)
-        if raw_text:
-            candidates.extend(AIClient._extract_step_lines(raw_text))
 
         steps = []
         def add_step(value):
@@ -617,6 +615,11 @@ class AIClient:
                 if text:
                     add_step(text)
             elif str(item).strip():
+                add_step(item)
+
+        if not steps and raw_text:
+            raw_candidates = AIClient._extract_step_lines(raw_text)
+            for item in raw_candidates:
                 add_step(item)
         return steps
 
@@ -956,6 +959,7 @@ class AIClient:
             "steps": [self._format_image_step_text(step, 300) for step in steps],
             "image_range": image_range,
             "start": batch_start,
+            "raw_text": str(result or ""),
         }
 
     def _analyze_small_image_set_to_draft(self, images, user_prompt=""):
@@ -1024,6 +1028,8 @@ class AIClient:
             "used_style_guide_name": "",
             "steps": [self._format_image_step_text(step, 300) for step in steps],
             "model": "kimi-draft",
+            "raw_text": str(result or ""),
+            "prompt_text": draft_instruction,
         }
 
     def _refine_image_steps_text(self, draft_data, style_guide_bundle=None, template_reference=None, user_prompt="", timeout=90):
@@ -1080,8 +1086,9 @@ class AIClient:
             refine_instruction += (
                 f"\n\n模板参考文件\n"
                 f"文件名：{template_reference.get('name')}\n"
-                "当模板中的表达与初稿流程存在相似描述时，优先参考模板中的写法、句式和动作描述。"
-                "保留初稿里的真实对象、按钮、输入内容和页面名称。\n"
+                "当模板中存在与初稿匹配的内容（相同关键词、句式结构、动作描述等）时，必须优先采用模板中的写法、句式和动作描述。"
+                "保留初稿里的真实对象、按钮文本、输入内容和页面名称，只替换句式表达。"
+                "若初稿多处匹配模板不同段落，优先选择匹配度最高（关键词重叠最多、语义最接近）的表达；无法明确判定匹配度时，保留初稿原表达。\n"
                 f"模板内容：\n{template_reference.get('content')}"
             )
 
@@ -1135,6 +1142,8 @@ class AIClient:
                 "used_style_guide_name": self._clean_text(data.get("used_style_guide_name"), 160),
                 "steps": [self._format_image_step_text(step, 300) for step in steps],
                 "model": f"kimi+{model_key}",
+                "raw_text": str(result or ""),
+                "prompt_text": refine_instruction,
             }
 
         return None
@@ -1151,7 +1160,11 @@ class AIClient:
         if len(images) <= 4:
             small_draft = self._analyze_small_image_set_to_draft(images, user_prompt)
             if small_draft:
+                draft_raw = small_draft.pop("raw_text", "")
+                draft_prompt = small_draft.pop("prompt_text", "")
                 if not should_refine:
+                    small_draft["draft_raw"] = draft_raw
+                    small_draft["draft_prompt"] = draft_prompt
                     return small_draft
                 refined = self._refine_image_steps_text(
                     small_draft,
@@ -1160,7 +1173,16 @@ class AIClient:
                     user_prompt=user_prompt,
                     timeout=90,
                 )
-                return refined or small_draft
+                if refined:
+                    refined["draft_raw"] = draft_raw
+                    refined["draft_prompt"] = draft_prompt
+                    refine_raw = refined.pop("raw_text", "")
+                    refined["refined_raw"] = refine_raw
+                    refined["refined_prompt"] = refined.pop("prompt_text", "")
+                    return refined
+                small_draft["draft_raw"] = draft_raw
+                small_draft["draft_prompt"] = draft_prompt
+                return small_draft
             print("[image-steps] small image draft failed, trying batch draft fallback")
 
         batches = [
@@ -1209,6 +1231,7 @@ class AIClient:
             return None
 
         batch_drafts.sort(key=lambda item: item.get("start", 0))
+        batch_raw_texts = [item.pop("raw_text", "") or "" for item in batch_drafts]
         draft_data = {
             "summary": "；".join([item.get("summary") or item.get("image_range") or "" for item in batch_drafts if item.get("summary") or item.get("image_range")]),
             "relation_summary": "；".join([item.get("relation_summary") or "" for item in batch_drafts if item.get("relation_summary")]),
@@ -1223,6 +1246,7 @@ class AIClient:
                 "used_style_guide_name": "",
                 "steps": [self._format_image_step_text(step, 300) for step in draft_data.get("steps") or []],
                 "model": "kimi-draft-partial",
+                "draft_raw": " ||| ".join(batch_raw_texts),
             }
 
         if not should_refine:
@@ -1232,6 +1256,7 @@ class AIClient:
                 "used_style_guide_name": "",
                 "steps": [self._format_image_step_text(step, 300) for step in draft_data.get("steps") or []],
                 "model": "kimi-draft",
+                "draft_raw": " ||| ".join(batch_raw_texts),
             }
 
         refine_instruction = f"""
@@ -1287,8 +1312,9 @@ class AIClient:
             refine_instruction += (
                 f"\n\n模板参考文件\n"
                 f"文件名：{template_reference.get('name')}\n"
-                "当模板中的表达与初稿流程存在相似描述时，优先参考模板中的写法、句式和动作描述。"
-                "保留初稿里的真实对象、按钮、输入内容和页面名称。\n"
+                "当模板中存在与初稿匹配的内容（相同关键词、句式结构、动作描述等）时，必须优先采用模板中的写法、句式和动作描述。"
+                "保留初稿里的真实对象、按钮文本、输入内容和页面名称，只替换句式表达。"
+                "若初稿多处匹配模板不同段落，优先选择匹配度最高（关键词重叠最多、语义最接近）的表达；无法明确判定匹配度时，保留初稿原表达。\n"
                 f"模板内容：\n{template_reference.get('content')}"
             )
 
@@ -1343,6 +1369,8 @@ class AIClient:
                 "used_style_guide_name": self._clean_text(data.get("used_style_guide_name"), 160),
                 "steps": [self._format_image_step_text(step, 300) for step in steps],
                 "model": f"kimi+{model_key}",
+                "draft_raw": " ||| ".join(batch_raw_texts),
+                "refined_raw": str(result or ""),
             }
 
         print("[image-steps] refine failed, returning Kimi draft")
@@ -1352,6 +1380,7 @@ class AIClient:
             "used_style_guide_name": "",
             "steps": [self._format_image_step_text(step, 300) for step in draft_data.get("steps") or []],
             "model": "kimi-draft",
+            "draft_raw": " ||| ".join(batch_raw_texts),
         }
 
     def generate_qa_pairs(self, content, count=3):
