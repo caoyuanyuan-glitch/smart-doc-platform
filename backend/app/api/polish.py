@@ -438,6 +438,7 @@ PLATFORM_FEEDBACK_SENTENCE_RELATIVE_PATH = os.path.join("写作规范", "句式�
 PLATFORM_FEEDBACK_TERMINOLOGY_RELATIVE_PATH = os.path.join("资源库", "术语库", "来自平台反馈", PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME)
 
 # 默认写作风格指南文件 ID（写作规范 / 写作风格指南 / 中文技术文档写作风格指南）
+# 内容已升级为 V2 完整规则体系（术语→句式→风格→微调四层 + 前置指令 + 禁用词）
 DEFAULT_STYLE_GUIDE_ID = 1
 
 
@@ -467,7 +468,6 @@ def _build_document_polish_guide(
     parts = []
 
     # 1. 句式清单（优先匹配）
-    # 始终加载通用句式清单作为基础
     all_guides = _load_sentence_guides(db)
     if all_guides:
         parts.append(all_guides)
@@ -481,7 +481,7 @@ def _build_document_polish_guide(
     if requirements and requirements.strip():
         parts.append(f"## 额外润色要求\n\n{requirements.strip()}")
 
-    # 3. 写作风格指南（句式匹配后再套用风格规范）
+    # 3. 写作风格指南（统一使用 V2 完整规则）
     default_guide = _load_file_content(db, DEFAULT_STYLE_GUIDE_ID)
     if default_guide:
         parts.append(default_guide)
@@ -970,7 +970,6 @@ class TextPolishInput(BaseModel):
 
 class SkillPolishInput(BaseModel):
     text: str
-    skill_id: int = 3
     style_guide_id: int = 1
     terminology_id: Optional[int] = None
 
@@ -1240,27 +1239,6 @@ def _filter_visible_doc_changes(changes: list, rejected_keys: set[str] = None) -
     return _pick_visible_doc_changes(visible)
 
 
-
-# ============================================================
-# 规则引擎：skill 加载、句式风格规则
-# ============================================================
-
-def _load_skill_rules(skill_id: int, db: Session) -> dict:
-    """从知识库加载skill规则"""
-    skill_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == skill_id).first()
-    if not skill_file:
-        return {}
-    
-    content = _read_file_safe(skill_file.file_path)
-    
-    return {
-        "skill_content": content,
-        "rules": {
-            "句式规范化": True,
-            "术语统一": True,
-            "格式规范": True
-        }
-    }
 
 
 def _apply_term_only(text: str, term_dict: dict) -> tuple[str, list[PolishRuleMatch]]:
@@ -2096,28 +2074,31 @@ async def polish_with_skill(
     input_data: SkillPolishInput,
     db: Session = Depends(get_db)
 ):
-    """使用知识库skill进行润色"""
-    # 加载skill规则
-    skill_rules = _load_skill_rules(input_data.skill_id, db)
-    
-    # 构建完整润色指南：写作风格指南 + 句式文件 + 额外要求
-    sentence_guide = _build_document_polish_guide(
-        db,
-        sentence_file_id=input_data.style_guide_id if input_data.style_guide_id != DEFAULT_STYLE_GUIDE_ID else None,
-        requirements=None
-    )
+    """使用内置润色规则进行润色（V2 四层规则体系）"""
+    # 加载默认风格指南（V2 完整规则）
+    sentence_guide = _load_file_content(db, DEFAULT_STYLE_GUIDE_ID)
+    if not sentence_guide:
+        sentence_guide = _build_document_polish_guide(db)
 
     # 加载术语：文件术语优先，否则回退数据库术语
     terminology_md = _load_terminology_source(db, input_data.terminology_id)
-    ai_polished = input_data.text
+
+    # 规则引擎预处理
+    try:
+        from app.utils.instrument_polisher import instrument_polish_engine
+        pre_text = instrument_polish_engine.pre_polish(input_data.text)
+    except Exception:
+        pre_text = input_data.text
+
+    ai_polished = pre_text
     ai_changes = []
     try:
         from app.utils.ai_client import ai_client
-        resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
-        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
+        resolved_terminology = _resolve_terminology(db, terminology_md, pre_text)
+        ai_result = ai_client.polish_text(pre_text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
         if ai_result and ai_result.get("polished"):
             ai_polished = _protect_model_numbers(ai_result["polished"])
-            if ai_polished != input_data.text:
+            if ai_polished != pre_text:
                 ai_changes = [{
                     "rule_name": "ai",
                     "before": input_data.text[:50],
@@ -2126,13 +2107,27 @@ async def polish_with_skill(
                 }]
     except Exception:
         pass
+
+    # 规则引擎后置保护
+    try:
+        if ai_polished != pre_text:
+            protect_result = instrument_polish_engine.post_protect(pre_text, ai_polished)
+            if not protect_result.get("safe"):
+                ai_polished = protect_result.get("suggested", pre_text)
+    except Exception:
+        pass
     
     return {
         "original": input_data.text,
         "polished": ai_polished,
         "changes": ai_changes,
-        "skill_name": "技术文档智能润色",
-        "rules_applied": skill_rules.get("rules", {})
+        "skill_name": "技术文档智能润色 (V2)",
+        "rules_applied": {
+            "术语替换": True,
+            "句式规范": True,
+            "风格规范": True,
+            "微调优化": True
+        }
     }
 
 
@@ -3032,8 +3027,6 @@ async def analyze_file_endpoint(
             raise HTTPException(status_code=400, detail="无法提取文本内容")
 
         _update_progress(15, "加载润色规则...")
-        skill_rules = _load_skill_rules(3, db)
-        
         sentence_guide = _build_document_polish_guide(
             db,
             sentence_file_id=sentence_file_id,
@@ -3061,14 +3054,23 @@ async def analyze_file_endpoint(
 
         db_terms = None if terminology else _load_terms_from_db(db)
 
+        # 规则引擎预处理：AI 润色前先做确定性术语替换 + 标点规范化
+        _update_progress(18, "规则引擎预处理...")
+        try:
+            from app.utils.instrument_polisher import instrument_polish_engine
+            pre_polished = instrument_polish_engine.pre_polish(content)
+        except Exception as e:
+            print(f"规则引擎预处理失败(使用原文): {e}")
+            pre_polished = content
+
         _update_progress(20, "AI 智能润色中...")
-        ai_polished = content
+        ai_polished = pre_polished
         ai_changes = []
         try:
             from app.utils.ai_client import ai_client
-            resolved_terms = _resolve_terminology(db, terminology, content)
-            ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None)
-            if ai_result and ai_result.get("polished") and ai_result["polished"] != content:
+            resolved_terms = _resolve_terminology(db, terminology, pre_polished)
+            ai_result = ai_client.polish_text(pre_polished, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None)
+            if ai_result and ai_result.get("polished") and ai_result["polished"] != pre_polished:
                 ai_polished = ai_result["polished"]
                 ai_changes = ai_result.get("changes") or [{
                     "type": "ai",
@@ -3076,6 +3078,16 @@ async def analyze_file_endpoint(
                 }]
         except Exception as e:
             print(f"AI 润色失败(返回原文): {e}")
+
+        # 规则引擎后置保护：检查 AI 润色是否丢失专有名词
+        try:
+            if ai_polished != pre_polished:
+                protect_result = instrument_polish_engine.post_protect(pre_polished, ai_polished)
+                if not protect_result.get("safe"):
+                    ai_polished = protect_result.get("suggested", pre_polished)
+                    print(f"[POLISH] 规则引擎保护触发: {protect_result.get('reason')}")
+        except Exception:
+            pass
 
         _update_progress(50, "应用修订标记...")
         if is_docx:
