@@ -17,6 +17,16 @@
             <div class="upload-tip">支持 PDF、DOCX、Excel、MD、TXT、IDML 格式，单文件最大 50MB</div>
           </template>
         </el-upload>
+        <div class="review-mode-toolbar">
+          <span class="review-mode-label">审核模式</span>
+          <el-radio-group v-model="reviewMode" size="small">
+            <el-radio-button label="rule">调试</el-radio-button>
+            <el-radio-button label="hybrid">完整</el-radio-button>
+          </el-radio-group>
+          <span class="review-mode-hint">
+            {{ reviewMode === 'rule' ? '调试模式只跑规则层，适合高频回归。' : '完整模式包含 AI 复核，适合最终验收。' }}
+          </span>
+        </div>
         <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
           <el-progress :percentage="uploadProgress" :stroke-width="4" />
           <span class="progress-text">{{ uploadProgressText }}</span>
@@ -700,6 +710,7 @@ const selectedRules = ref([])
 const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
+const reviewMode = ref('rule')
 
 function goReviewTasks() {
   router.push('/review/tasks')
@@ -1004,9 +1015,24 @@ function handleRulesImport(response) {
 
 async function startReview(documentId) {
   try {
-    const response = await reviewAPI.create(documentId, 'hybrid')
+    const response = await reviewAPI.create(documentId, reviewMode.value)
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
+
+    if (response.data.status === 'completed') {
+      await loadReviewIssues(reviewId)
+      await loadReviews()
+      docReviewStatus[documentId] = {
+        review_id: reviewId,
+        status: 'completed',
+        progress: 100,
+        message: statusMessage,
+        summary: JSON.stringify({ total: (taskIssues[reviewId] || []).length, cache_hit: true }),
+        total_issues: (taskIssues[reviewId] || []).length
+      }
+      ElMessage.success(statusMessage)
+      return
+    }
     
     docReviewStatus[documentId] = {
       review_id: reviewId,
@@ -1258,7 +1284,8 @@ function reviewCompletionText(review) {
     ? review.message.match(/(\d+)\s*个问题/)
     : null
   const total = parsed?.total ?? review?.total_issues ?? (matchedTotal ? Number(matchedTotal[1]) : 0)
-  return `审核完成，共 ${total} 个问题`
+  const prefix = parsed?.cache_hit ? '缓存命中，' : ''
+  return `${prefix}审核完成，共 ${total} 个问题`
 }
 
 function reviewStatusText(statusInfo) {
@@ -1912,6 +1939,25 @@ onUnmounted(() => {
   color: #909399;
   font-size: 12px;
   margin-top: 6px;
+}
+
+.review-mode-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.review-mode-label {
+  font-size: 14px;
+  color: #334155;
+  font-weight: 600;
+}
+
+.review-mode-hint {
+  font-size: 13px;
+  color: #64748b;
 }
 
 .progress-section {

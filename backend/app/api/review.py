@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Background
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.orm import Session
 import html as html_lib
+import hashlib
 import json
 import math
 import re
@@ -52,6 +53,13 @@ REVIEW_EXPORT_DIR = Path(__file__).resolve().parents[2] / "static" / "review_exp
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CYY_HUMAN_REVIEW_BASELINE_PATH = PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json"
 CYY_HUMAN_REVIEW_BASIS_CACHE = None
+REVIEW_CACHE_VERSION_FILES = [
+    PROJECT_ROOT / "backend" / "app" / "review_engine" / "rules" / "rules.yaml",
+    PROJECT_ROOT / "backend" / "app" / "review_engine" / "rules" / "categories.yaml",
+    PROJECT_ROOT / "backend" / "app" / "review_engine" / "pipeline.py",
+    PROJECT_ROOT / "backend" / "app" / "utils" / "document_parser.py",
+    Path(__file__).resolve(),
+]
 
 
 def get_progress(review_id: int):
@@ -91,6 +99,44 @@ def _get_active_review_for_document(db: Session, document_id: int):
         if review and review.status == 'running':
             return review
     return None
+
+
+def _review_cache_version():
+    parts = []
+    for path in REVIEW_CACHE_VERSION_FILES:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        parts.append(f"{path.name}:{int(stat.st_mtime)}:{stat.st_size}")
+    raw = "|".join(parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12] if raw else "unknown"
+
+
+def _build_review_cache_key(document, mode: str):
+    content = str(getattr(document, "content", "") or "")
+    content_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()
+    fingerprint = "||".join([
+        str(getattr(document, "id", "") or ""),
+        str(getattr(document, "filename", "") or ""),
+        str(getattr(document, "file_type", "") or ""),
+        str(getattr(document, "file_size", 0) or 0),
+        content_hash,
+        str(mode or "hybrid"),
+        _review_cache_version(),
+    ])
+    return hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()
+
+
+def _find_cached_completed_review(db: Session, document, mode: str):
+    cache_key = _build_review_cache_key(document, mode)
+    for review in get_reviews(db, document_id=document.id, limit=20):
+        if review.status != "completed":
+            continue
+        summary = _load_review_summary(review.summary)
+        if summary.get("cache_key") == cache_key:
+            return review, summary
+    return None, None
 
 router = APIRouter()
 
@@ -6281,6 +6327,9 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
             "language": document_language,
             "layers": layer_counts,
+            "cache_key": _build_review_cache_key(document, mode),
+            "cache_version": _review_cache_version(),
+            "cache_hit": False,
         })
 
         set_progress(review_id, 'completed', '完成', 100, f'审核完成，发现 {len(issues)} 个问题')
@@ -6308,6 +6357,18 @@ async def create_review_task(document_id: int, mode: str = "hybrid", background_
     if active_review:
         set_progress(active_review.id, 'running', '初始化', 0, '已有审核任务正在执行')
         return {"review_id": active_review.id, "status": "running", "message": "已有审核任务正在执行，请轮询进度"}
+
+    cached_review, cached_summary = _find_cached_completed_review(db, document, mode)
+    if cached_review:
+        total = cached_summary.get("total", cached_review.total_issues or 0) if isinstance(cached_summary, dict) else (cached_review.total_issues or 0)
+        message = f"复用缓存结果，共 {total} 个问题"
+        return {
+            "review_id": cached_review.id,
+            "status": "completed",
+            "message": message,
+            "cache_hit": True,
+            "cached_from_review": cached_review.id,
+        }
 
     review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode))
     update_review_status(db, review.id, "running", 0, "审核任务已创建")
