@@ -3,11 +3,12 @@ import json
 import re
 import base64
 import mimetypes
+import threading
 import httpx
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from openai import OpenAI
-from app.utils.runtime_config import bootstrap_runtime_env, get_kimi_api_key
+from app.utils.runtime_config import bootstrap_runtime_env, get_kimi_api_key, get_qwen_api_key
 
 bootstrap_runtime_env()
 
@@ -48,7 +49,10 @@ def _strip_code_fence(text):
 
 class AIClient:
     def __init__(self):
-        self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "kimi")
+        self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "qwen")
+        self.qwen_api_key = get_qwen_api_key()
+        self.qwen_base_url = os.getenv("QWEN_BASE_URL", os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+        self.qwen_model = os.getenv("QWEN_MODEL", os.getenv("DASHSCOPE_MODEL", "qwen-max"))
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
@@ -67,11 +71,18 @@ class AIClient:
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
         self.proxy_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-        self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
         timeout = httpx.Timeout(30.0, read=180.0)
+
+        self.qwen_client = OpenAI(
+            api_key=self.qwen_api_key,
+            base_url=self.qwen_base_url,
+            timeout=timeout,
+        ) if _is_valid_key(self.qwen_api_key) else None
+        if self.qwen_client:
+            print(f"[AI] Qwen 已连接, base_url={self.qwen_base_url}, model={self.qwen_model}")
 
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
@@ -102,6 +113,8 @@ class AIClient:
         self.mcai_api_key = mcai_api_key
         self.mcai_available = bool(self.mcai_base_url and _is_valid_key(mcai_api_key))
         self.last_chat_errors = []
+        self.usage_events = []
+        self.usage_lock = threading.Lock()
 
         self.mcai_proxy_client = None
         if self.mcai_available:
@@ -112,7 +125,7 @@ class AIClient:
             )
             print(f"[AI] MCAI Proxy 已连接, base_url={self.mcai_base_url}, model={self.mcai_model}")
 
-        proxy_api_key = self.dashscope_api_key or self.proxy_api_key
+        proxy_api_key = self.proxy_api_key
         proxy_base_url = self.fallback_base_url
         self.proxy_client = OpenAI(
             api_key=proxy_api_key,
@@ -124,10 +137,12 @@ class AIClient:
 
     @property
     def has_any_client(self):
-        return self.kimi_client is not None or self.arkclaw_client is not None or self.deepseek_client is not None or self.mcai_proxy_client is not None or self.proxy_client is not None
+        return self.qwen_client is not None or self.kimi_client is not None or self.arkclaw_client is not None or self.deepseek_client is not None or self.mcai_proxy_client is not None or self.proxy_client is not None
 
     def available_providers(self):
         providers = []
+        if self.qwen_client:
+            providers.append("qwen")
         if self.kimi_client:
             providers.append("kimi")
         if self.deepseek_client:
@@ -142,9 +157,10 @@ class AIClient:
 
     def provider_status(self):
         return {
-            "default_provider": (self.default_provider or "kimi").strip().lower() or "kimi",
-            "priority": ["kimi", "deepseek", "arkclaw", "mcai", "proxy"],
+            "default_provider": (self.default_provider or "qwen").strip().lower() or "qwen",
+            "priority": ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"],
             "providers": {
+                "qwen": self.qwen_client is not None,
                 "kimi": self.kimi_client is not None,
                 "deepseek": self.deepseek_client is not None,
                 "arkclaw": self.arkclaw_client is not None,
@@ -159,6 +175,7 @@ class AIClient:
         ping_msg = [{"role": "user", "content": "ping"}]
 
         providers = [
+            ("qwen", self.qwen_client, self.qwen_model),
             ("kimi", self.kimi_client, self.kimi_model),
             ("deepseek", self.deepseek_client, self.deepseek_model),
             ("arkclaw", self.arkclaw_client, self.arkclaw_model),
@@ -216,12 +233,13 @@ class AIClient:
             results["mcai"] = {"status": "unavailable", "reason": "no_api_key"}
 
         ok_count = sum(1 for r in results.values() if r.get("status") == "ok")
+        primary = (self.default_provider or "qwen").strip().lower() or "qwen"
         return {
             "total_providers": len(results),
             "ok_providers": ok_count,
             "healthy": ok_count > 0,
-            "primary": "kimi",
-            "primary_status": results.get("kimi", {}).get("status", "unknown"),
+            "primary": primary,
+            "primary_status": results.get(primary, {}).get("status", "unknown"),
             "providers": results,
         }
 
@@ -242,10 +260,143 @@ class AIClient:
     def last_provider_errors(self):
         return list(self.last_chat_errors)
 
+    @staticmethod
+    def _extract_usage_value(usage, key):
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            value = usage.get(key)
+        else:
+            value = getattr(usage, key, None)
+        try:
+            return int(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _record_usage_event(self, provider, model, usage, request_label="", review_id=None, elapsed_ms=None):
+        prompt_tokens = self._extract_usage_value(usage, "prompt_tokens")
+        completion_tokens = self._extract_usage_value(usage, "completion_tokens")
+        total_tokens = self._extract_usage_value(usage, "total_tokens")
+        if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+            total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+        if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+            return
+
+        event = {
+            "timestamp": time.time(),
+            "provider": str(provider or "").lower(),
+            "model": str(model or ""),
+            "request_label": str(request_label or "generic"),
+            "review_id": review_id,
+            "prompt_tokens": prompt_tokens or 0,
+            "completion_tokens": completion_tokens or 0,
+            "total_tokens": total_tokens or 0,
+            "elapsed_ms": int(elapsed_ms) if elapsed_ms is not None else None,
+        }
+        with self.usage_lock:
+            self.usage_events.append(event)
+            if len(self.usage_events) > 200:
+                self.usage_events = self.usage_events[-200:]
+
+        print(
+            f"[AI_USAGE] request={event['request_label']} review_id={review_id} "
+            f"provider={event['provider']} model={event['model']} "
+            f"prompt_tokens={event['prompt_tokens']} completion_tokens={event['completion_tokens']} "
+            f"total_tokens={event['total_tokens']} elapsed_ms={event['elapsed_ms']}"
+        )
+
+    def get_usage_events(self, request_label=None, review_id=None, limit=50):
+        with self.usage_lock:
+            events = list(self.usage_events)
+        if request_label:
+            events = [event for event in events if event.get("request_label") == request_label]
+        if review_id is not None:
+            events = [event for event in events if event.get("review_id") == review_id]
+        return events[-max(1, int(limit)):]
+
+    def summarize_usage_events(self, request_label=None, review_id=None, limit=200):
+        events = self.get_usage_events(request_label=request_label, review_id=review_id, limit=limit)
+        summary = {
+            "calls": len(events),
+            "prompt_tokens": sum(event.get("prompt_tokens", 0) for event in events),
+            "completion_tokens": sum(event.get("completion_tokens", 0) for event in events),
+            "total_tokens": sum(event.get("total_tokens", 0) for event in events),
+            "providers": {},
+        }
+        for event in events:
+            provider = event.get("provider") or "unknown"
+            summary["providers"][provider] = summary["providers"].get(provider, 0) + 1
+        return summary
+
+    def usage_dashboard(self, limit=50):
+        events = self.get_usage_events(limit=limit)
+        totals = {
+            "calls": len(events),
+            "prompt_tokens": sum(event.get("prompt_tokens", 0) for event in events),
+            "completion_tokens": sum(event.get("completion_tokens", 0) for event in events),
+            "total_tokens": sum(event.get("total_tokens", 0) for event in events),
+        }
+
+        by_request = {}
+        by_provider = {}
+        for event in events:
+            request_label = str(event.get("request_label") or "generic")
+            provider = str(event.get("provider") or "unknown")
+
+            if request_label not in by_request:
+                by_request[request_label] = {
+                    "request_label": request_label,
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                }
+            request_item = by_request[request_label]
+            request_item["calls"] += 1
+            request_item["prompt_tokens"] += int(event.get("prompt_tokens", 0) or 0)
+            request_item["completion_tokens"] += int(event.get("completion_tokens", 0) or 0)
+            request_item["total_tokens"] += int(event.get("total_tokens", 0) or 0)
+
+            if provider not in by_provider:
+                by_provider[provider] = {
+                    "provider": provider,
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                }
+            provider_item = by_provider[provider]
+            provider_item["calls"] += 1
+            provider_item["prompt_tokens"] += int(event.get("prompt_tokens", 0) or 0)
+            provider_item["completion_tokens"] += int(event.get("completion_tokens", 0) or 0)
+            provider_item["total_tokens"] += int(event.get("total_tokens", 0) or 0)
+
+        recent_events = []
+        for event in reversed(events):
+            recent_events.append({
+                "timestamp": event.get("timestamp"),
+                "provider": event.get("provider") or "unknown",
+                "model": event.get("model") or "",
+                "request_label": event.get("request_label") or "generic",
+                "review_id": event.get("review_id"),
+                "prompt_tokens": int(event.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(event.get("completion_tokens", 0) or 0),
+                "total_tokens": int(event.get("total_tokens", 0) or 0),
+                "elapsed_ms": event.get("elapsed_ms"),
+            })
+
+        return {
+            "limit": max(1, int(limit)),
+            "totals": totals,
+            "by_request": sorted(by_request.values(), key=lambda item: item["total_tokens"], reverse=True),
+            "by_provider": sorted(by_provider.values(), key=lambda item: item["total_tokens"], reverse=True),
+            "recent_events": recent_events,
+        }
+
     def resolve_translation_model(self, requested_model=None):
         preferred = []
         requested = (requested_model or "").strip().lower()
-        supported = ["kimi", "deepseek", "arkclaw", "mcai", "proxy"]
+        supported = ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"]
         if requested in supported:
             preferred.append(requested)
 
@@ -258,6 +409,7 @@ class AIClient:
                 preferred.append(name)
 
         availability = {
+            "qwen": self.qwen_client is not None,
             "kimi": self.kimi_client is not None,
             "deepseek": self.deepseek_client is not None,
             "arkclaw": self.arkclaw_client is not None,
@@ -272,7 +424,42 @@ class AIClient:
     # ------------------------------------------------------------------
     # 基础 chat 接口
     # ------------------------------------------------------------------
-    def call_deepseek(self, messages, max_tokens=2048, temperature=0.3):
+    def call_qwen(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        if not self.qwen_client:
+            return None
+        import time
+        max_retries = 3
+        retry_delay = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                started_at = time.time()
+                response = self.qwen_client.chat.completions.create(
+                    model=self.qwen_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                self._record_usage_event(
+                    "qwen",
+                    self.qwen_model,
+                    getattr(response, "usage", None),
+                    request_label=request_label,
+                    review_id=review_id,
+                    elapsed_ms=round((time.time() - started_at) * 1000),
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries:
+                    print(f"Qwen 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                print(f"Qwen调用失败: {str(e)}")
+                return None
+        return None
+
+    def call_deepseek(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
         if not self.deepseek_client:
             return None
         import time
@@ -280,11 +467,20 @@ class AIClient:
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
+                started_at = time.time()
                 response = self.deepseek_client.chat.completions.create(
                     model=self.deepseek_model,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature
+                )
+                self._record_usage_event(
+                    "deepseek",
+                    self.deepseek_model,
+                    getattr(response, "usage", None),
+                    request_label=request_label,
+                    review_id=review_id,
+                    elapsed_ms=round((time.time() - started_at) * 1000),
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -298,7 +494,7 @@ class AIClient:
                 return None
         return None
 
-    def call_arkclaw(self, messages, max_tokens=2048, temperature=0.3):
+    def call_arkclaw(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
         if not self.arkclaw_client:
             return None
         import time
@@ -306,11 +502,20 @@ class AIClient:
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
+                started_at = time.time()
                 response = self.arkclaw_client.chat.completions.create(
                     model=self.arkclaw_model,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature
+                )
+                self._record_usage_event(
+                    "arkclaw",
+                    self.arkclaw_model,
+                    getattr(response, "usage", None),
+                    request_label=request_label,
+                    review_id=review_id,
+                    elapsed_ms=round((time.time() - started_at) * 1000),
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -324,7 +529,7 @@ class AIClient:
                 return None
         return None
 
-    def call_kimi(self, messages, max_tokens=2048, temperature=0.3):
+    def call_kimi(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
         if not self.kimi_client:
             return None
         import time
@@ -332,6 +537,7 @@ class AIClient:
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
+                started_at = time.time()
                 response = self.kimi_client.chat.completions.create(
                     **self._build_kimi_request_kwargs(
                         model=self.kimi_model,
@@ -339,6 +545,14 @@ class AIClient:
                         max_tokens=max_tokens,
                         temperature=temperature,
                     )
+                )
+                self._record_usage_event(
+                    "kimi",
+                    self.kimi_model,
+                    getattr(response, "usage", None),
+                    request_label=request_label,
+                    review_id=review_id,
+                    elapsed_ms=round((time.time() - started_at) * 1000),
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -374,12 +588,13 @@ class AIClient:
             kwargs["temperature"] = temperature
         return kwargs
 
-    def _call_mcai_proxy(self, messages, max_tokens=2048, temperature=0.3):
+    def _call_mcai_proxy(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
         if not self.mcai_available:
             return None
         import time as _time
         for attempt in range(1, 4):
             try:
+                started_at = _time.time()
                 headers = {
                     "Authorization": f"Bearer {self.mcai_api_key}",
                     "Content-Type": "application/json",
@@ -403,6 +618,14 @@ class AIClient:
                     except Exception:
                         payload = None
                     if isinstance(payload, dict):
+                        self._record_usage_event(
+                            "mcai",
+                            self.mcai_model,
+                            payload.get("usage"),
+                            request_label=request_label,
+                            review_id=review_id,
+                            elapsed_ms=round((_time.time() - started_at) * 1000),
+                        )
                         choices = payload.get("choices") or []
                         if choices:
                             message = choices[0].get("message") or {}
@@ -432,10 +655,12 @@ class AIClient:
                 return None
         return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False):
-        # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None):
+        # 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
         self.last_chat_errors = []
         providers = []
+        if self.qwen_client:
+            providers.append(('Qwen', self.qwen_client, self.qwen_model))
         if self.kimi_client and not skip_kimi:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
         if self.deepseek_client:
@@ -452,6 +677,7 @@ class AIClient:
             for name, client, model in providers:
                 for attempt in range(1, max_retries + 1):
                     try:
+                        started_at = time.time()
                         request_kwargs = (
                             self._build_kimi_request_kwargs(
                                 model=model,
@@ -473,6 +699,14 @@ class AIClient:
                             max_retries=0,
                         )
                         response = call_client.chat.completions.create(**request_kwargs)
+                        self._record_usage_event(
+                            name,
+                            model,
+                            getattr(response, "usage", None),
+                            request_label=request_label,
+                            review_id=review_id,
+                            elapsed_ms=round((time.time() - started_at) * 1000),
+                        )
                         choice = response.choices[0]
                         content = choice.message.content or ""
                         if content.strip():
@@ -495,7 +729,7 @@ class AIClient:
                     return None
 
         if self.mcai_available:
-            content = self._call_mcai_proxy(messages, max_tokens, temperature)
+            content = self._call_mcai_proxy(messages, max_tokens, temperature, request_label=request_label, review_id=review_id)
             if content and content.strip():
                 return content
 
@@ -739,7 +973,7 @@ class AIClient:
 
         return False
 
-    def polish_text(self, text, style_guide=None, terminology=None):
+    def polish_text(self, text, style_guide=None, terminology=None, request_label="polish.text"):
         system = """你是一位严格的中文技术文档校对员。按以下优先级逐句处理待审核文本：
 
 处理优先级（从高到低）：
@@ -795,7 +1029,7 @@ class AIClient:
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt}
         ]
-        result = self.chat(messages, max_tokens=4096)
+        result = self.chat(messages, max_tokens=4096, request_label=request_label)
 
         if not result:
             return {"original": text, "polished": text}
@@ -817,7 +1051,7 @@ class AIClient:
 
         return {"original": text, "polished": result.strip()}
 
-    def qa_answer(self, question, context):
+    def qa_answer(self, question, context, request_label="qa.answer"):
         prompt = f"""
 基于以下文档内容回答问题：
 
@@ -840,7 +1074,7 @@ class AIClient:
 }}
 """
         messages = [{"role": "user", "content": prompt}]
-        result = self.chat(messages, max_tokens=2048)
+        result = self.chat(messages, max_tokens=2048, request_label=request_label)
 
         try:
             return json.loads(result)
@@ -1411,7 +1645,7 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False):
+    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk"):
         lang = language or "en"
         is_english = lang in ("en", "both")
 
@@ -1425,7 +1659,14 @@ class AIClient:
                 chunk = content[start:start + chunk_size]
                 if not chunk.strip():
                     continue
-                result = self.audit_document(chunk, language=lang, audit_basis=(audit_basis or "")[:2000], skip_kimi=skip_kimi)
+                result = self.audit_document(
+                    chunk,
+                    language=lang,
+                    audit_basis=(audit_basis or "")[:2000],
+                    skip_kimi=skip_kimi,
+                    review_id=review_id,
+                    request_label=request_label,
+                )
                 for issue in result.get("issues", []):
                     issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
                     all_issues.append(issue)
@@ -1553,7 +1794,14 @@ Return empty issues array if no high-confidence issues found."""
             {"role": "user", "content": user_prompt}
         ]
 
-        result = self.chat(messages, max_tokens=2048, temperature=0.2, skip_kimi=skip_kimi)
+        result = self.chat(
+            messages,
+            max_tokens=2048,
+            temperature=0.2,
+            skip_kimi=skip_kimi,
+            request_label=request_label,
+            review_id=review_id,
+        )
         if not result:
             return {"issues": []}
 
@@ -1564,7 +1812,7 @@ Return empty issues array if no high-confidence issues found."""
     # ------------------------------------------------------------------
     # 规则审核的二次验证
     # ------------------------------------------------------------------
-    def filter_rule_false_positives(self, candidate_issues, document_language):
+    def filter_rule_false_positives(self, candidate_issues, document_language, review_id=None, request_label="review.rule_false_positive_filter"):
         if not candidate_issues:
             return []
 
@@ -1627,7 +1875,13 @@ Only high-confidence false positives may be removed."""
 只有确定为误报的项才返回 false_positive=true。"""
 
             messages = [{"role": "user", "content": prompt}]
-            result = self.chat(messages, max_tokens=2500, temperature=0.1)
+            result = self.chat(
+                messages,
+                max_tokens=2500,
+                temperature=0.1,
+                request_label=request_label,
+                review_id=review_id,
+            )
             if not result:
                 filtered.extend(chunk)
                 continue
