@@ -284,6 +284,7 @@ let aiUsageTimer = null
 const providerLabels = {
   qwen: 'Qwen',
   kimi: 'Kimi',
+  qwen: 'Qwen',
   deepseek: 'DeepSeek',
   arkclaw: 'ArkClaw',
   proxy: 'Proxy',

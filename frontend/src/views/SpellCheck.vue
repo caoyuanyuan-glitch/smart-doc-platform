@@ -2,58 +2,127 @@
   <div class="spell-check-container">
     <div class="header-section">
       <h2>拼写检查</h2>
-      <p class="subtitle">检查文档中的英文拼写和语法错误</p>
+      <p class="subtitle">检查文档中的英文拼写、语法、格式和显而易见的低级错误，并进行直接修改</p>
     </div>
 
-    <div class="upload-section">
-      <el-upload
-        class="upload-demo"
-        :auto-upload="false"
-        :on-change="handleFileChange"
-        :on-remove="handleFileRemove"
-        :limit="1"
-        :file-list="fileList"
-        accept=".txt,.docx,.xlsx,.pptx,.dita,.md,.idml,.xml,.zip"
-        drag
-        :show-file-list="true"
-      >
-        <el-icon class="upload-icon"><UploadFilled /></el-icon>
-        <div class="upload-text">点击或拖拽单个文件到此处上传</div>
-        <div class="upload-hint">支持 .txt, .docx, .xlsx, .pptx, .dita, .md, .idml, .xml, .zip 格式，每次检查 1 个文件</div>
-      </el-upload>
-      <div v-if="fileList.length > 0" class="file-info">
-        <el-tag type="info">已选择文件: {{ fileList[0]?.name }}</el-tag>
-        <el-button size="small" style="margin-left:8px" @click="clearFile">清除文件</el-button>
-      </div>
+    <el-tabs v-model="activeTab" class="mode-tabs">
+      <el-tab-pane label="文本检查" name="text" />
+      <el-tab-pane label="文件检查" name="file" />
+    </el-tabs>
+
+    <div class="doc-inline-bar">
+      <span class="doc-inline-label">当前文档</span>
+      <span class="doc-inline-name">{{ activeTab === 'file' ? (fileList[0]?.name || '未加载文件') : '文本输入' }}</span>
+      <span class="doc-inline-hint">
+        {{ activeTab === 'file' ? '支持 .txt / .md / .docx / .xlsx / .pptx / .dita / .zip' : '在右侧粘贴或编辑文本，再点击“一键检查”' }}
+      </span>
     </div>
 
-    <div class="input-section">
-      <el-textarea
-        v-model="inputText"
-        :rows="8"
-        :disabled="fileList.length > 0"
-        :placeholder="fileList.length > 0 ? '当前已选择文件，请清除文件后再输入文本' : '或在此输入文本进行检查...'"
-        class="text-input"
-      ></el-textarea>
-      <div class="input-hint">文件检查与文本检查二选一。</div>
-    </div>
+    <div class="desktop-shell">
+      <aside class="workspace-sidebar">
+        <div class="panel summary-panel">
+          <div class="summary-compact-head">
+            <span class="mini-label summary-title">检查概览</span>
+            <span class="summary-total-inline">{{ checkResult?.total_count || 0 }}</span>
+          </div>
+          <div class="stats-row">
+            <div class="metric-card">
+              <span class="metric-label">总</span>
+              <strong>{{ checkResult?.total_count || 0 }}</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">拼写</span>
+              <strong>{{ checkResult?.spell_count || 0 }}</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">规则</span>
+              <strong>{{ checkResult?.grammar_count || 0 }}</strong>
+            </div>
+          </div>
+        </div>
 
-    <div class="button-section">
-      <el-button type="primary" size="large" @click="startCheck" :loading="loading">
-        <el-icon><Search /></el-icon>
-        开始检查
-      </el-button>
-      <el-button size="large" @click="clearAll">
-        <el-icon><Delete /></el-icon>
-        清空
-      </el-button>
-      <el-button size="large" @click="downloadTemplate">
-        <el-icon><Download /></el-icon>
-        词典模板
-      </el-button>
-      <el-button size="large" @click="triggerImportDict" :loading="dictImporting">
-        导入词典
-      </el-button>
+        <div class="panel issue-panel">
+          <div class="issue-panel-header">
+            <span class="panel-title">当前问题</span>
+            <span class="issue-kind">{{ activeIssue ? getErrorTypeLabel(activeIssue.type) : (checkResult?.total_count === 0 && checkResult ? '处理完成' : '未选中问题') }}</span>
+          </div>
+
+          <div class="issue-snippet">{{ getIssueToken(activeIssue) }}</div>
+
+          <div class="mini-label suggestion-title">修订建议</div>
+          <div class="suggestion-stack">
+            <template v-if="activeIssue && activeIssue.suggestions && activeIssue.suggestions.length">
+              <div v-for="(suggestion, idx) in activeIssue.suggestions.slice(0, 3)" :key="idx" class="suggestion-card">
+                <span class="suggestion-index">方案 {{ idx + 1 }}</span>
+                <span class="suggestion-text">{{ suggestion }}</span>
+                <el-button size="small" @click="replaceWord(activeIssue, suggestion)">应用</el-button>
+              </div>
+            </template>
+            <div v-else class="suggestion-empty">当前问题没有可靠的自动修订方案。可点击下方“编辑”手动写入修订内容。</div>
+          </div>
+
+          <div class="sidebar-actions">
+            <div class="action-row">
+              <el-button size="small" @click="editSuggestion(activeIssue)" :disabled="!activeIssue">编辑</el-button>
+              <el-button size="small" @click="ignoreIssue" :disabled="!activeIssue">忽略</el-button>
+              <el-button size="small" @click="prevIssue" :disabled="!activeIssue">上一处</el-button>
+              <el-button size="small" type="primary" @click="nextIssue" :disabled="!activeIssue">下一处</el-button>
+            </div>
+            <div class="action-row">
+              <el-button size="small" @click="undoLastApply" :disabled="undoStack.length === 0">撤销应用</el-button>
+              <el-button size="small" @click="addToDict(activeIssue)" :disabled="!activeIssue || !canAddWord(activeIssue)">加入白名单</el-button>
+            </div>
+          </div>
+
+          <div class="nav-meta">{{ filteredErrors.length > 0 ? `${currentIssueIndex + 1} / ${filteredErrors.length}` : '0 / 0' }}</div>
+        </div>
+      </aside>
+
+      <section class="workspace-editor panel">
+        <div class="editor-toolbar">
+          <div class="editor-toolbar-left">
+            <el-button v-if="activeTab === 'file'" type="primary" @click="triggerUploadPick">打开文件</el-button>
+            <el-button type="primary" @click="startCheck" :loading="loading">一键检查</el-button>
+            <el-button @click="exportCurrentResult" :disabled="!checkResult?.text">导出结果</el-button>
+            <el-button @click="activeTab === 'file' ? clearFile() : clearAll()">清空{{ activeTab === 'file' ? '文件' : '内容' }}</el-button>
+          </div>
+        </div>
+
+        <div class="editor-header">
+          <span class="editor-title">{{ activeTab === 'file' ? '文档内容' : '原文内容' }}</span>
+          <span class="editor-tip">
+            {{ activeTab === 'file' ? '点击高亮位置可在左侧处理当前问题' : '在这里粘贴或编辑文本，检查后可用左侧面板逐条处理问题' }}
+          </span>
+        </div>
+
+        <div v-if="activeTab === 'file' && !checkResult" class="file-stage">
+          <el-upload
+            ref="uploadRef"
+            class="hidden-upload-input"
+            :auto-upload="false"
+            :on-change="handleFileChange"
+            :on-remove="handleFileRemove"
+            :limit="1"
+            :file-list="fileList"
+            accept=".txt,.docx,.xlsx,.pptx,.dita,.md,.idml,.xml,.zip"
+            :show-file-list="false"
+          />
+        </div>
+
+        <el-input
+          v-if="activeTab === 'text' && !checkResult"
+          ref="textEditorRef"
+          v-model="inputText"
+          type="textarea"
+          :rows="22"
+          placeholder="在这里输入或粘贴文本进行检查..."
+          class="text-editor-area"
+        />
+
+        <div v-if="(activeTab === 'file' || activeTab === 'text') && checkResult" ref="contentBodyRef" class="content-body" @click="handleHighlightClick">
+          <div class="highlighted-text" v-html="highlightedText"></div>
+        </div>
+      </section>
     </div>
 
     <!-- 审核进度 -->
@@ -71,126 +140,25 @@
       <div v-if="progress.detail" class="progress-detail">{{ progress.detail }}</div>
     </div>
 
-    <div v-if="checkResult" class="result-section">
-      <div class="result-header">
-        <div class="result-stats">
-          <el-tag type="danger" size="large">拼写错误: {{ checkResult.spell_count }}</el-tag>
-          <el-tag type="warning" size="large">语法错误: {{ checkResult.grammar_count }}</el-tag>
-          <el-tag type="info" size="large">总计: {{ checkResult.total_count }}</el-tag>
-          <el-tag v-if="checkResult.filename" type="success" size="large">文件: {{ checkResult.filename }}</el-tag>
-        </div>
-        <div class="result-actions">
-          <el-button size="small" @click="exportErrors">导出错误列表</el-button>
-        </div>
-      </div>
-
-      <div class="content-section">
-        <div class="content-header">
-          <span class="content-title">原文内容</span>
-        </div>
-        <div class="content-body">
-          <div class="highlighted-text" v-html="highlightedText"></div>
-        </div>
-      </div>
-
-      <div class="errors-section">
-        <div class="errors-header">
-          <span class="errors-title">错误列表</span>
-          <div class="errors-header-actions">
-            <el-select v-model="filterType" placeholder="筛选类型" size="small" class="filter-select">
-              <el-option label="全部" value="all"></el-option>
-              <el-option label="拼写错误" value="spell"></el-option>
-              <el-option label="语法错误" value="grammar"></el-option>
-              <el-option label="风格建议" value="style"></el-option>
-              <el-option label="单位格式" value="unit"></el-option>
-            </el-select>
-            <el-button
-              type="success"
-              size="small"
-              :disabled="selectedWordRows.length === 0"
-              @click="batchAddToDict"
-            >
-              批量加入词典 ({{ selectedWordRows.length }})
-            </el-button>
-          </div>
-        </div>
-        <el-table
-          :data="filteredErrors"
-          border
-          stripe
-          class="errors-table"
-          @selection-change="onSelectionChange"
-          ref="errorsTableRef"
-          row-key="rowKey"
-        >
-          <el-table-column type="selection" width="48" :selectable="isRowSelectable" />
-          <el-table-column prop="index" label="序号" width="60" type="index"></el-table-column>
-          <el-table-column prop="type" label="类型" width="100">
-            <template #default="scope">
-              <el-tag :type="getErrorTagType(scope.row.type)">
-                {{ getErrorTypeLabel(scope.row.type) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="message" label="错误描述" width="150"></el-table-column>
-          <el-table-column prop="word" label="问题单词" width="150">
-            <template #default="scope">
-              <span v-if="scope.row.word" class="problem-word">{{ scope.row.word }}</span>
-              <span v-else>-</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="suggestions" label="建议" min-width="220">
-            <template #default="scope">
-              <el-button
-                v-for="(suggestion, idx) in scope.row.suggestions"
-                :key="idx"
-                size="small"
-                plain
-                @click="replaceWord(scope.row, suggestion)"
-              >
-                {{ suggestion }}
-              </el-button>
-              <span v-if="!scope.row.suggestions || scope.row.suggestions.length === 0">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="140" fixed="right">
-            <template #default="scope">
-              <el-button
-                size="small"
-                type="success"
-                plain
-                :disabled="!canAddWord(scope.row)"
-                @click="addToDict(scope.row)"
-              >
-                {{ canAddWord(scope.row) ? '添加词典' : '已加入词典' }}
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-    </div>
-
-    <div v-if="!loading && !checkResult && (inputText || fileList.length > 0)" class="empty-tip">
-      <el-empty description="点击「开始检查」按钮进行拼写检查"></el-empty>
-    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { UploadFilled, Search, Delete, Download } from '@element-plus/icons-vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getAPIErrorMessage, instance as request } from '@/api'
 
+const uploadRef = ref(null)
+const contentBodyRef = ref(null)
+const textEditorRef = ref(null)
+const activeTab = ref('text')
 const inputText = ref('')
 const fileList = ref([])
 const loading = ref(false)
 const checkResult = ref(null)
-const filterType = ref('all')
-const selectedWordRows = ref([])
-const errorsTableRef = ref(null)
 const addedWords = ref([])
-const dictImporting = ref(false)
+const undoStack = ref([])
+const currentIssueIndex = ref(0)
 
 // 审核进度
 const progress = ref({
@@ -211,34 +179,50 @@ const errorsWithKey = computed(() => {
 })
 
 const filteredErrors = computed(() => {
-  const errors = errorsWithKey.value
-  if (filterType.value === 'all') return errors
-  return errors.filter(e => e.type === filterType.value)
+  return errorsWithKey.value
+})
+
+const activeIssue = computed(() => filteredErrors.value[currentIssueIndex.value] || null)
+watch(filteredErrors, () => {
+  if (currentIssueIndex.value >= filteredErrors.value.length) {
+    currentIssueIndex.value = filteredErrors.value.length > 0 ? filteredErrors.value.length - 1 : 0
+  }
+})
+
+watch(currentIssueIndex, async () => {
+  await nextTick()
+  syncCurrentIssueView()
+})
+
+watch(activeTab, () => {
+  checkResult.value = null
+  currentIssueIndex.value = 0
+  undoStack.value = []
+  progress.value.visible = false
 })
 
 const highlightedText = computed(() => {
   if (!checkResult.value) return ''
   let text = checkResult.value.text
-  const errors = [...(checkResult.value.errors || [])].sort((a, b) => a.start - b.start)
-  if (!errors || errors.length === 0) return escapeHtml(text)
+  const appliedRanges = [...(checkResult.value.appliedRanges || [])].map(item => ({ ...item, kind: 'applied' }))
+  const errors = [...(checkResult.value.errors || [])].map(item => ({ ...item, kind: 'pending' }))
+  const ranges = [...appliedRanges, ...errors].sort((a, b) => a.start - b.start || (a.kind === 'applied' ? -1 : 1))
+  if (!ranges || ranges.length === 0) return escapeHtml(text)
 
   let result = ''
   let lastEnd = 0
-  errors.forEach(err => {
+  ranges.forEach(err => {
     result += escapeHtml(text.substring(lastEnd, err.start))
     const problemText = escapeHtml(text.substring(err.start, err.end))
-    let bgColor, borderColor
-    if (err.type === 'spell') {
-      bgColor = '#FFF280'
-      borderColor = '#FFD700'
-    } else if (err.type === 'style') {
-      bgColor = '#E0F2FE'
-      borderColor = '#7DD3FC'
-    } else {
-      bgColor = '#CCE5FF'
-      borderColor = '#93C5FD'
-    }
-    result += `<span style="background-color: ${bgColor}; padding: 1px 3px; border-radius: 3px; border-bottom: 2px solid ${borderColor};" title="${escapeHtmlAttribute(err.message || '')}">${problemText}</span>`
+    const isActive = err.kind === 'pending' && filteredErrors.value[currentIssueIndex.value] && filteredErrors.value[currentIssueIndex.value].start === err.start && filteredErrors.value[currentIssueIndex.value].end === err.end && filteredErrors.value[currentIssueIndex.value].type === err.type
+    const bgColor = isActive ? '#FDBA74' : (err.kind === 'applied' ? '#DCFCE7' : '#FFF280')
+    const borderColor = isActive ? '#EA580C' : (err.kind === 'applied' ? '#86EFAC' : '#FACC15')
+    const extraClass = isActive ? ' active-highlight' : ''
+    const issueIndex = err.kind === 'pending'
+      ? filteredErrors.value.findIndex(item => item.start === err.start && item.end === err.end && item.type === err.type)
+      : -1
+    const issueAttr = issueIndex >= 0 ? ` data-issue-index="${issueIndex}"` : ''
+    result += `<span class="highlight-chip${extraClass}"${issueAttr} style="background-color: ${bgColor}; padding: 1px 3px; border-radius: 3px; border-bottom: 2px solid ${borderColor};" title="${escapeHtmlAttribute(err.message || '')}">${problemText}</span>`
     lastEnd = err.end
   })
   result += escapeHtml(text.substring(lastEnd))
@@ -268,13 +252,6 @@ function getErrorTypeLabel(type) {
   return type || '其他'
 }
 
-function getErrorTagType(type) {
-  if (type === 'spell') return 'danger'
-  if (type === 'style') return 'info'
-  if (type === 'unit') return 'success'
-  return 'warning'
-}
-
 function canAddWord(row) {
   return !!row.word && !hasWordBeenAdded(row.word)
 }
@@ -296,8 +273,11 @@ function markWordsAsAdded(words) {
 
 async function handleFileChange(file) {
   fileList.value = [file]
+  checkResult.value = null
+  undoStack.value = []
+  currentIssueIndex.value = 0
   inputText.value = ''
-  ElMessage.info(`当前为单文件检查模式，已选择: ${file.name}`)
+  ElMessage.success(`已选择文件 ${file.name}，请点击“一键检查”继续`)
 }
 
 function handleFileRemove() {
@@ -306,49 +286,141 @@ function handleFileRemove() {
 
 function clearFile() {
   fileList.value = []
+  checkResult.value = null
+  undoStack.value = []
+  currentIssueIndex.value = 0
 }
 
-async function triggerImportDict() {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = '.txt,.dic'
-  input.onchange = async (event) => {
-    const [file] = Array.from(event.target?.files || [])
-    if (!file) return
-    const formData = new FormData()
-    formData.append('file', file)
-    dictImporting.value = true
-    try {
-      const resp = await request.post('/spell-check/import-dict', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
-      ElMessage.success(resp.data?.message || '词典导入成功')
-    } catch (error) {
-      ElMessage.error(getAPIErrorMessage(error, '词典导入失败'))
-    } finally {
-      dictImporting.value = false
-    }
+function triggerUploadPick() {
+  const input = uploadRef.value?.$el?.querySelector('input[type="file"]')
+  if (input) input.click()
+}
+
+function focusIssue(index) {
+  if (index < 0 || index >= filteredErrors.value.length) return
+  currentIssueIndex.value = index
+}
+
+function prevIssue() {
+  if (filteredErrors.value.length === 0) return
+  currentIssueIndex.value = (currentIssueIndex.value - 1 + filteredErrors.value.length) % filteredErrors.value.length
+}
+
+function nextIssue() {
+  if (filteredErrors.value.length === 0) return
+  currentIssueIndex.value = (currentIssueIndex.value + 1) % filteredErrors.value.length
+}
+
+function syncCounts() {
+  if (!checkResult.value) return
+  checkResult.value.spell_count = checkResult.value.errors.filter(e => e.type === 'spell').length
+  checkResult.value.grammar_count = checkResult.value.errors.length - checkResult.value.spell_count
+  checkResult.value.total_count = checkResult.value.errors.length
+}
+
+function syncCurrentIssueIndex() {
+  if (filteredErrors.value.length === 0) {
+    currentIssueIndex.value = 0
+    return
   }
-  input.click()
+  if (currentIssueIndex.value >= filteredErrors.value.length) {
+    currentIssueIndex.value = filteredErrors.value.length - 1
+  }
 }
 
-function isRowSelectable(row) {
-  return canAddWord(row)
+function removeIssue(error) {
+  if (!checkResult.value) return
+  const targetIndex = Number(String(error.rowKey || '').split('-').pop())
+  const hasValidTargetIndex = Number.isInteger(targetIndex) && targetIndex >= 0
+  checkResult.value.errors = checkResult.value.errors.filter((item, index) => {
+    if (hasValidTargetIndex) return index !== targetIndex
+    return !(item.start === error.start && item.end === error.end && item.type === error.type)
+  })
+  syncCounts()
+  syncCurrentIssueIndex()
 }
 
-function onSelectionChange(rows) {
-  selectedWordRows.value = rows
+function ignoreIssue() {
+  if (!activeIssue.value) return
+  pushUndoSnapshot()
+  removeIssue(activeIssue.value)
+  ElMessage.success('已忽略当前问题')
 }
+
+function handleHighlightClick(event) {
+  const target = event.target?.closest?.('[data-issue-index]')
+  if (!target) return
+  const index = Number(target.getAttribute('data-issue-index'))
+  if (Number.isInteger(index) && index >= 0) focusIssue(index)
+}
+
+function scrollToCurrentIssue() {
+  const body = contentBodyRef.value
+  if (!body) return
+  const activeEl = body.querySelector('.active-highlight')
+  if (!activeEl) return
+  activeEl.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+  requestAnimationFrame(() => {
+    activeEl.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+  })
+}
+
+function focusTextSelection() {
+  if (!activeIssue.value) return
+  const textarea = textEditorRef.value?.textarea
+  if (!textarea) return
+  textarea.focus()
+  textarea.setSelectionRange(activeIssue.value.start, activeIssue.value.end)
+}
+
+function syncCurrentIssueView() {
+  if (activeTab.value === 'text' && !checkResult.value) {
+    focusTextSelection()
+    return
+  }
+  scrollToCurrentIssue()
+}
+
+function getIssueDetailText(issue) {
+  if (issue) {
+    return issue.message || '右侧高亮位置对应当前问题。'
+  }
+
+  if (checkResult.value?.total_count === 0 && checkResult.value) {
+    return '所有当前命中问题都已处理完毕。点击下方“导出结果”保存当前正文。'
+  }
+
+  return '在这里处理当前问题：右侧高亮位置会同步当前项，左侧可继续浏览、忽略或手动修改。'
+}
+
+function getIssueToken(issue) {
+  if (issue) {
+    return issue.word || '当前问题'
+  }
+
+  if (checkResult.value?.total_count === 0 && checkResult.value) {
+    return '当前没有剩余问题'
+  }
+
+  return '先点击文档中的高亮问题，或使用“下一处”开始浏览。'
+}
+
 
 async function startCheck() {
   loading.value = true
   progress.value = { visible: true, percent: 0, message: '准备中...', detail: '', status: '' }
   checkResult.value = null
-  selectedWordRows.value = []
   addedWords.value = []
+  currentIssueIndex.value = 0
 
   try {
-    if (fileList.value.length > 0) {
+    if (activeTab.value === 'file') {
+      if (fileList.value.length === 0) {
+        progress.value.visible = false
+        checkResult.value = null
+        ElMessage.warning('请先选择文件')
+        return
+      }
       const file = fileList.value[0]
       const formData = new FormData()
       formData.append('file', file.raw)
@@ -372,8 +444,11 @@ async function startCheck() {
       progress.value = { visible: true, percent: 70, message: '正在分析拼写和语法...', detail: '', status: '' }
       await new Promise(r => setTimeout(r, 200))
 
-      checkResult.value = result
+      checkResult.value = { ...result, appliedRanges: [] }
+      undoStack.value = []
       saveToHistory(result)
+      await nextTick()
+      syncCurrentIssueView()
 
       progress.value = { visible: true, percent: 100, message: '检查完成', detail: `共发现 ${result.total_count} 个问题`, status: 'success' }
       setTimeout(() => { progress.value.visible = false }, 1500)
@@ -381,8 +456,12 @@ async function startCheck() {
     } else if (inputText.value.trim()) {
       progress.value = { visible: true, percent: 30, message: '正在分析拼写和语法...', detail: '', status: '' }
       const resp = await request.post('/spell-check/check', { text: inputText.value })
-      checkResult.value = resp.data
+      checkResult.value = { ...resp.data, appliedRanges: [] }
+      inputText.value = resp.data.text || inputText.value
+      undoStack.value = []
       saveToHistory(resp.data)
+      await nextTick()
+      syncCurrentIssueView()
 
       progress.value = { visible: true, percent: 100, message: '检查完成', detail: `共发现 ${resp.data.total_count} 个问题`, status: 'success' }
       setTimeout(() => { progress.value.visible = false }, 1500)
@@ -445,68 +524,54 @@ function clearAll() {
   inputText.value = ''
   fileList.value = []
   checkResult.value = null
-  selectedWordRows.value = []
   addedWords.value = []
+  currentIssueIndex.value = 0
+  undoStack.value = []
   progress.value.visible = false
-}
-
-function downloadTemplate() {
-  const content = '# 每行一个单词（# 开头为注释）\nDNA\nRNA\nPCR\nng\nul\n'
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = '词典模板.txt'
-  link.click()
-  URL.revokeObjectURL(url)
 }
 
 async function addToDict(error) {
   const word = error.word
   if (hasWordBeenAdded(word)) {
-    ElMessage.info(`单词 "${word}" 已在本次结果中加入词典`)
+    ElMessage.info(`单词 "${word}" 已在本次结果中加入白名单`)
     return
   }
   if (!word) {
-    ElMessage.warning('该错误无具体单词可加入词典')
+    ElMessage.warning('该错误无具体单词可加入白名单')
     return
   }
   try {
     await request.post('/spell-check/add-word', null, { params: { word } })
-    ElMessage.success(`已添加单词 "${word}" 到词典`)
+    ElMessage.success(`已添加单词 "${word}" 到白名单`)
     markWordsAsAdded([word])
-    selectedWordRows.value = []
-    if (errorsTableRef.value) errorsTableRef.value.clearSelection()
   } catch (error) {
     console.error('添加单词失败:', error)
     ElMessage.error(getAPIErrorMessage(error, '添加单词失败'))
   }
 }
 
-async function batchAddToDict() {
-  const words = [...new Set(selectedWordRows.value.map(r => r.word).filter(Boolean))]
-  if (words.length === 0) {
-    ElMessage.warning('请勾选有具体单词的错误项')
-    return
-  }
-  try {
-    const results = await Promise.allSettled(
-      words.map((word) => request.post('/spell-check/add-word', null, { params: { word } }))
-    )
-    const successWords = words.filter((_, index) => results[index].status === 'fulfilled')
-    const successCount = successWords.length
-    ElMessage.success(`成功添加 ${successCount}/${words.length} 个单词到词典`)
-    markWordsAsAdded(successWords)
-    selectedWordRows.value = []
-    if (errorsTableRef.value) errorsTableRef.value.clearSelection()
-  } catch (error) {
-    console.error('批量添加失败:', error)
-    ElMessage.error(getAPIErrorMessage(error, '批量添加失败'))
-  }
+function pushUndoSnapshot() {
+  if (!checkResult.value) return
+  undoStack.value.push(JSON.parse(JSON.stringify(checkResult.value)))
+  if (undoStack.value.length > 20) undoStack.value.shift()
+}
+
+function restoreSnapshot(snapshot) {
+  checkResult.value = JSON.parse(JSON.stringify(snapshot))
+  if (activeTab.value === 'text') inputText.value = checkResult.value?.text || ''
+  syncCurrentIssueIndex()
+}
+
+function undoLastApply() {
+  if (undoStack.value.length === 0) return
+  const snapshot = undoStack.value.pop()
+  restoreSnapshot(snapshot)
+  ElMessage.success('已撤销上次应用')
 }
 
 function replaceWord(error, suggestion) {
   if (!checkResult.value) return
+  pushUndoSnapshot()
   const text = checkResult.value.text
   const replacement = suggestion ?? ''
   const originalLength = error.end - error.start
@@ -515,6 +580,7 @@ function replaceWord(error, suggestion) {
   const hasValidTargetIndex = Number.isInteger(targetIndex) && targetIndex >= 0
   const newText = text.substring(0, error.start) + replacement + text.substring(error.end)
   checkResult.value.text = newText
+  if (activeTab.value === 'text') inputText.value = newText
   checkResult.value.errors = checkResult.value.errors
     .filter((item, index) => {
       if (hasValidTargetIndex) {
@@ -533,39 +599,59 @@ function replaceWord(error, suggestion) {
       return item
     })
     .sort((a, b) => a.start - b.start)
-  checkResult.value.spell_count = checkResult.value.errors.filter(e => e.type === 'spell').length
-  checkResult.value.grammar_count = checkResult.value.errors.length - checkResult.value.spell_count
-  checkResult.value.total_count = checkResult.value.errors.length
-  selectedWordRows.value = []
-  if (errorsTableRef.value) errorsTableRef.value.clearSelection()
+  const nextAppliedRanges = (checkResult.value.appliedRanges || [])
+    .map((item) => {
+      if (item.start >= error.end) {
+        return {
+          ...item,
+          start: item.start + delta,
+          end: item.end + delta
+        }
+      }
+      return item
+    })
+  checkResult.value.appliedRanges = [...nextAppliedRanges, {
+    start: error.start,
+    end: error.start + replacement.length,
+    message: `已应用: ${error.message || ''}`.trim()
+  }]
+  syncCounts()
+  syncCurrentIssueIndex()
 }
 
-function exportErrors() {
-  if (!checkResult.value || !checkResult.value.errors) return
-  let content = '序号,类型,错误描述,问题单词,建议\n'
-  checkResult.value.errors.forEach((err, idx) => {
-    const suggestions = err.suggestions ? err.suggestions.join('; ') : ''
-    const row = [
-      idx + 1,
-      getErrorTypeLabel(err.type),
-      err.message || '',
-      err.word || '',
-      suggestions
-    ].map(escapeCsvField)
-    content += `${row.join(',')}\n`
-  })
-  const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
+async function editSuggestion(error) {
+  if (!checkResult.value) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入替换内容', '编辑建议', {
+      confirmButtonText: '应用',
+      cancelButtonText: '取消',
+      inputValue: error.word || '',
+      closeOnClickModal: false,
+      closeOnPressEscape: true
+    })
+    replaceWord(error, value)
+  } catch (e) {
+    // 取消编辑
+  }
+}
+
+function getExportBaseName() {
+  const filename = checkResult.value?.filename || '拼写检查结果'
+  return String(filename).replace(/\.[^.]+$/, '')
+}
+
+function exportCurrentResult() {
+  if (!checkResult.value?.text) {
+    ElMessage.warning('当前没有可导出的正文')
+    return
+  }
+  const blob = new Blob([checkResult.value.text], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = '拼写检查错误列表.csv'
+  link.download = `${getExportBaseName()}-校对结果.txt`
   link.click()
   URL.revokeObjectURL(url)
-}
-
-function escapeCsvField(value) {
-  const normalized = String(value ?? '')
-  return `"${normalized.replace(/"/g, '""')}"`
 }
 
 const STORAGE_KEY = 'spell_check_history'
@@ -599,8 +685,9 @@ onMounted(() => {
     const reapply = sessionStorage.getItem('spell_check_reapply')
     if (reapply) {
       const data = JSON.parse(reapply)
-      checkResult.value = data
+      checkResult.value = { ...data, appliedRanges: data.appliedRanges || [] }
       addedWords.value = []
+      currentIssueIndex.value = 0
       sessionStorage.removeItem('spell_check_reapply')
       ElMessage.success(`已重新加载「${data.filename}」的检查结果`)
     }
@@ -612,12 +699,16 @@ onMounted(() => {
 
 <style scoped>
 .spell-check-container {
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
+  padding: 8px 4px 24px;
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 28%),
+    linear-gradient(180deg, rgba(255,255,255,0.92), rgba(248,250,252,1));
 }
 
 .header-section {
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 
 .header-section h2 {
@@ -628,61 +719,181 @@ onMounted(() => {
 }
 
 .subtitle {
+  margin: 4px 0 10px;
   font-size: 14px;
   color: #6b7280;
 }
 
-.upload-section {
-  margin-bottom: 16px;
+.doc-inline-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #e2e8f0;
 }
 
-.upload-demo {
-  margin-bottom: 12px;
+.doc-inline-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.doc-inline-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.doc-inline-hint {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.mode-tabs {
+  margin-bottom: 18px;
+}
+
+.desktop-shell {
+  display: grid;
+  grid-template-columns: 328px minmax(0, 1fr);
+  gap: 18px;
+  align-items: stretch;
+  min-height: 780px;
+}
+
+.panel {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+}
+
+.panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.workspace-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 12px;
+  height: 780px;
+}
+
+.hidden-upload-input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .upload-icon {
-  font-size: 48px;
-  color: #3b82f6;
+  font-size: 42px;
+  color: #2563eb;
   margin-bottom: 8px;
 }
 
-.upload-text {
-  font-size: 16px;
-  color: #374151;
-  margin-bottom: 4px;
+.workspace-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 780px;
 }
 
-.upload-hint {
-  font-size: 12px;
-  color: #9ca3af;
+.summary-panel,
+.issue-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.file-info {
-  margin-top: 8px;
+.summary-compact-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.input-section {
-  margin-bottom: 16px;
+.summary-total-inline {
+  font-size: 18px;
+  font-weight: 800;
+  color: #0f172a;
 }
 
-.text-input {
-  width: 100%;
-  border-radius: 8px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-.input-hint {
-  margin-top: 8px;
+.mini-label {
   font-size: 12px;
-  color: #6b7280;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  text-transform: uppercase;
 }
 
-.button-section {
-  margin-bottom: 24px;
+.summary-title,
+.suggestion-title {
+  margin-top: 0;
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.metric-card {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.metric-card strong {
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.issue-panel {
+  min-height: 0;
+  flex: 1;
+}
+
+.issue-panel-header {
+  display: flex;
+  justify-content: space-between;
   gap: 12px;
+  align-items: flex-start;
+}
+
+.issue-kind {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.issue-snippet {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #fff7cc;
+  color: #854d0e;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 .progress-section {
@@ -718,100 +929,193 @@ onMounted(() => {
   margin-top: 6px;
 }
 
-.result-section {
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  padding: 24px;
+.suggestion-stack {
+  display: flex;
+  gap: 8px;
+  flex-direction: column;
 }
 
-.result-header {
+.suggestion-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.suggestion-index {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.suggestion-text {
+  min-width: 0;
+  color: #1f2937;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.suggestion-empty {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #64748b;
+  line-height: 1.6;
+}
+
+.sidebar-actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.action-row:last-child {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.nav-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+  text-align: right;
+}
+
+.editor-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
   gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
 }
 
-.result-stats {
+.editor-toolbar-left {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
-.content-section {
-  margin-bottom: 24px;
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
 }
 
-.content-header {
-  margin-bottom: 12px;
+.editor-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
 }
 
-.content-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: #1f2937;
+.editor-tip {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.file-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.text-editor-area {
+  flex: 1;
+}
+
+:deep(.text-editor-area .el-textarea__inner) {
+  min-height: 620px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.85;
+  padding: 16px 18px;
+  resize: none;
 }
 
 .content-body {
+  flex: 1;
+  width: 100%;
   background: #f9fafb;
-  border-radius: 8px;
-  padding: 16px;
-  max-height: 300px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  padding: 18px;
   overflow-y: auto;
+  scroll-behavior: smooth;
+  min-height: 620px;
 }
 
 .highlighted-text {
   font-size: 14px;
-  line-height: 1.8;
-  color: #374151;
+  line-height: 1.9;
+  color: #334155;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.errors-section {
-  margin-top: 20px;
+:deep(.highlight-chip) {
+  cursor: pointer;
 }
 
-.errors-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-  gap: 8px;
+:deep(.active-highlight) {
+  box-shadow: 0 0 0 3px rgba(234, 88, 12, 0.32);
+  color: #7c2d12;
 }
 
-.errors-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: #1f2937;
+@media (max-width: 1100px) {
+  .desktop-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-sidebar {
+    position: static;
+    height: auto;
+  }
 }
 
-.errors-header-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
+@media (max-width: 768px) {
+  .spell-check-container {
+    padding: 0 0 20px;
+  }
 
-.filter-select {
-  width: 120px;
-}
+  .panel {
+    padding: 14px;
+  }
 
-.errors-table {
-  width: 100%;
-}
+  .stats-row,
+  .action-row,
+  .action-row:last-child,
+  .suggestion-card,
+  .editor-toolbar,
+  .editor-toolbar-left {
+    width: 100%;
+  }
 
-.problem-word {
-  color: #dc2626;
-  font-weight: 600;
-  background: #fef3c7;
-  padding: 1px 4px;
-  border-radius: 3px;
-}
+  .doc-inline-bar,
+  .stats-row,
+  .action-row,
+  .action-row:last-child,
+  .suggestion-card {
+    grid-template-columns: 1fr;
+  }
 
-.empty-tip {
-  margin-top: 40px;
+  :deep(.text-editor-area .el-textarea__inner),
+  .content-body {
+    min-height: 420px;
+  }
 }
 </style>
