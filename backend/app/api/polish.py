@@ -2067,7 +2067,8 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         result = ai_client.polish_text(
             input_data.text,
             style_guide=sentence_guide,
-            terminology=resolved_terminology if resolved_terminology else None
+            terminology=resolved_terminology if resolved_terminology else None,
+            request_label="polish.text",
         )
         ai_polished = _protect_model_numbers(result.get("polished", input_data.text))
         changes = []
@@ -2114,7 +2115,7 @@ async def polish_with_skill(
     try:
         from app.utils.ai_client import ai_client
         resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
-        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
+        ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None, request_label="polish.skill")
         if ai_result and ai_result.get("polished"):
             ai_polished = _protect_model_numbers(ai_result["polished"])
             if ai_polished != input_data.text:
@@ -3067,7 +3068,7 @@ async def analyze_file_endpoint(
         try:
             from app.utils.ai_client import ai_client
             resolved_terms = _resolve_terminology(db, terminology, content)
-            ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None)
+            ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None, request_label="polish.document")
             if ai_result and ai_result.get("polished") and ai_result["polished"] != content:
                 ai_polished = ai_result["polished"]
                 ai_changes = ai_result.get("changes") or [{
@@ -3537,7 +3538,7 @@ async def polish_document(document_id: int, db: Session = Depends(get_db)):
     try:
         from app.utils.ai_client import ai_client
         terminology = _resolve_terminology(db, text=document.content or "")
-        result = ai_client.polish_text(document.content or "", terminology=terminology if terminology else None)
+        result = ai_client.polish_text(document.content or "", terminology=terminology if terminology else None, request_label="polish.document.quick")
         polished = _protect_model_numbers(result.get("polished", document.content or ""))
         changes = []
         if polished != (document.content or ""):

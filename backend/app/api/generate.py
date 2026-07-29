@@ -612,7 +612,7 @@ async def continue_text(request: ContinueTextRequest, db: Session = Depends(get_
         result = ai_client.chat([
             {"role": "system", "content": "你只输出新增续写文本。"},
             {"role": "user", "content": prompt},
-        ], max_tokens=_resolve_continuation_max_tokens(request.length), temperature=0.25, kimi_thinking="disabled")
+        ], max_tokens=_resolve_continuation_max_tokens(request.length), temperature=0.25, kimi_thinking="disabled", request_label="generate.continue_text")
         continuation = _clean_continuation_text(result)
         if not continuation:
             raise RuntimeError("empty continuation")
@@ -621,7 +621,7 @@ async def continue_text(request: ContinueTextRequest, db: Session = Depends(get_
             "continuation": continuation,
             "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
             "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": [continuation]}) if style_guide_bundle else "",
-            "model": "kimi",
+            "model": ai_client.provider_status().get("default_provider") or "ai",
             "warning": "",
         }
     except Exception as e:

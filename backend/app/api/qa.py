@@ -492,7 +492,7 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
     try:
         from app.utils.ai_client import ai_client
         enhanced_question = question if not source_hint else f"{question}\n\n优先参考资料：{source_hint}"
-        result = ai_client.qa_answer(enhanced_question, context)
+        result = ai_client.qa_answer(enhanced_question, context, request_label="qa.answer")
         if result and result.get("answer") and _is_valid_answer(result["answer"]) and result["answer"] != "文档中未找到相关信息":
             return {
                 "answer": result.get("answer", ""),
@@ -519,7 +519,7 @@ def _call_ai_qa(question, context, source_titles: Optional[list] = None):
 4. 严格使用文档中的原始术语，不得自行改写成近义词（如文档写"主机"则必须用"主机"，不能写成"主持人"、"电脑"等）
 5. 保持文档中的产品名、型号、参数、单位等专有信息完全不变"""
         messages = [{"role": "user", "content": prompt}]
-        proxy_result = ai_client.chat(messages, max_tokens=2048)
+        proxy_result = ai_client.chat(messages, max_tokens=2048, request_label="qa.answer.fallback")
         if proxy_result and _is_valid_answer(proxy_result):
             return {"answer": proxy_result, "source": source_hint}
     except Exception:
@@ -601,7 +601,7 @@ AI的回答摘要：{answer[:2000]}
         try:
             from app.utils.ai_client import ai_client
             messages = [{"role": "user", "content": prompt}]
-            result = ai_client.chat(messages, max_tokens=512, temperature=0.8)
+            result = ai_client.chat(messages, max_tokens=512, temperature=0.8, request_label="qa.suggestions")
             parsed = _parse_json_array(result)
             return parsed[:max_count] if parsed else []
         except Exception:

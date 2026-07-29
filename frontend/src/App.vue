@@ -37,6 +37,87 @@
               </div>
             </div>
           </el-popover>
+          <el-popover
+            placement="bottom-end"
+            trigger="click"
+            width="560"
+            popper-class="ai-usage-popover"
+          >
+            <template #reference>
+              <button class="ai-token-chip" type="button" @click="fetchAIUsage">
+                <span>Token</span>
+                <strong>{{ aiUsageTotalLabel }}</strong>
+              </button>
+            </template>
+            <div class="ai-usage-panel">
+              <div class="ai-status-title-row">
+                <div>
+                  <div class="ai-status-title">Token 实时消耗</div>
+                  <div class="ai-status-subtitle">最近 {{ aiUsage.value?.limit || 50 }} 次 AI 调用汇总</div>
+                </div>
+                <el-button size="small" :loading="aiUsageLoading" @click="fetchAIUsage">刷新</el-button>
+              </div>
+              <div v-if="aiUsageError" class="ai-status-error">{{ aiUsageError }}</div>
+              <template v-else>
+                <div class="ai-usage-summary-grid">
+                  <div class="ai-usage-card">
+                    <div class="ai-usage-card-label">总 Token</div>
+                    <div class="ai-usage-card-value">{{ formatNumber(aiUsageTotals.total_tokens) }}</div>
+                  </div>
+                  <div class="ai-usage-card">
+                    <div class="ai-usage-card-label">Prompt</div>
+                    <div class="ai-usage-card-value">{{ formatNumber(aiUsageTotals.prompt_tokens) }}</div>
+                  </div>
+                  <div class="ai-usage-card">
+                    <div class="ai-usage-card-label">Completion</div>
+                    <div class="ai-usage-card-value">{{ formatNumber(aiUsageTotals.completion_tokens) }}</div>
+                  </div>
+                  <div class="ai-usage-card">
+                    <div class="ai-usage-card-label">调用次数</div>
+                    <div class="ai-usage-card-value">{{ formatNumber(aiUsageTotals.calls) }}</div>
+                  </div>
+                </div>
+                <div class="ai-usage-section">
+                  <div class="ai-usage-section-title">按请求类型</div>
+                  <div v-if="!aiUsageByRequest.length" class="ai-usage-empty">暂无 token 记录</div>
+                  <div v-else class="ai-usage-table">
+                    <div v-for="item in aiUsageByRequest" :key="item.request_label" class="ai-usage-row">
+                      <span class="ai-usage-name">{{ item.request_label }}</span>
+                      <span class="ai-usage-meta">{{ formatNumber(item.total_tokens) }} token · {{ item.calls }} 次</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="ai-usage-section">
+                  <div class="ai-usage-section-title">按 Provider</div>
+                  <div v-if="!aiUsageByProvider.length" class="ai-usage-empty">暂无 provider 消耗</div>
+                  <div v-else class="ai-usage-table">
+                    <div v-for="item in aiUsageByProvider" :key="item.provider" class="ai-usage-row">
+                      <span class="ai-usage-name">{{ providerLabels[item.provider] || item.provider }}</span>
+                      <span class="ai-usage-meta">{{ formatNumber(item.total_tokens) }} token · {{ item.calls }} 次</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="ai-usage-section">
+                  <div class="ai-usage-section-title">最近事件</div>
+                  <div v-if="!aiUsageEvents.length" class="ai-usage-empty">暂无最近事件</div>
+                  <div v-else class="ai-usage-events">
+                    <div v-for="(event, index) in aiUsageEvents" :key="`${event.timestamp}-${index}`" class="ai-usage-event-row">
+                      <div class="ai-usage-event-main">
+                        <span class="ai-usage-name">{{ event.request_label }}</span>
+                        <span class="ai-usage-event-provider">{{ providerLabels[event.provider] || event.provider }}</span>
+                      </div>
+                      <div class="ai-usage-event-meta">
+                        <span>{{ formatNumber(event.total_tokens) }} token</span>
+                        <span v-if="event.review_id">review {{ event.review_id }}</span>
+                        <span v-if="event.elapsed_ms">{{ event.elapsed_ms }}ms</span>
+                        <span>{{ formatTimestamp(event.timestamp) }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </el-popover>
           <el-badge v-if="userStore.isAdmin" :value="unreadFeedbackCount" :hidden="unreadFeedbackCount === 0" class="feedback-badge">
             <el-icon class="feedback-icon" @click="goToFeedback"><Message /></el-icon>
           </el-badge>
@@ -193,10 +274,15 @@ const unreadFeedbackCount = ref(0)
 const aiStatus = ref(null)
 const aiStatusLoading = ref(false)
 const aiStatusError = ref('')
+const aiUsage = ref(null)
+const aiUsageLoading = ref(false)
+const aiUsageError = ref('')
 let feedbackTimer = null
 let aiStatusTimer = null
+let aiUsageTimer = null
 
 const providerLabels = {
+  qwen: 'Qwen',
   kimi: 'Kimi',
   deepseek: 'DeepSeek',
   arkclaw: 'ArkClaw',
@@ -205,7 +291,7 @@ const providerLabels = {
 }
 
 const activeMenu = computed(() => {
-  const path = router.currentRoute.value.path
+  const path = router?.currentRoute?.value?.path || '/'
   if (path.startsWith('/knowledge')) return '/knowledge'
   return path
 })
@@ -248,7 +334,7 @@ const aiStatusLabel = computed(() => {
 const aiStatusSubtitle = computed(() => {
   if (aiStatusError.value) return '后端状态接口访问失败'
   if (!aiStatus.value) return '点击刷新检测 provider'
-  const primary = aiStatus.value.primary || 'kimi'
+  const primary = aiStatus.value.primary || 'qwen'
   const primaryStatus = aiStatus.value.primary_status || 'unknown'
   return `主 provider: ${providerLabels[primary] || primary} · ${primaryStatus}`
 })
@@ -270,6 +356,22 @@ const providerRows = computed(() => {
   })
 })
 
+const aiUsageTotals = computed(() => aiUsage.value?.totals || {
+  calls: 0,
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0
+})
+
+const aiUsageByRequest = computed(() => aiUsage.value?.by_request || [])
+const aiUsageByProvider = computed(() => aiUsage.value?.by_provider || [])
+const aiUsageEvents = computed(() => aiUsage.value?.recent_events || [])
+
+const aiUsageTotalLabel = computed(() => {
+  if (aiUsageLoading.value && !aiUsage.value) return '加载中'
+  return formatCompactNumber(aiUsageTotals.value.total_tokens)
+})
+
 async function fetchAIStatus() {
   aiStatusLoading.value = true
   aiStatusError.value = ''
@@ -281,6 +383,38 @@ async function fetchAIStatus() {
   } finally {
     aiStatusLoading.value = false
   }
+}
+
+async function fetchAIUsage() {
+  aiUsageLoading.value = true
+  aiUsageError.value = ''
+  try {
+    const resp = await systemAPI.getAIUsage(50)
+    aiUsage.value = resp.data
+  } catch (e) {
+    aiUsageError.value = e?.response?.data?.detail || e?.message || 'Token 用量获取失败'
+  } finally {
+    aiUsageLoading.value = false
+  }
+}
+
+function formatNumber(value) {
+  return new Intl.NumberFormat('zh-CN').format(Number(value || 0))
+}
+
+function formatCompactNumber(value) {
+  const num = Number(value || 0)
+  if (num >= 10000) {
+    return `${(num / 10000).toFixed(num >= 100000 ? 0 : 1)}w`
+  }
+  return formatNumber(num)
+}
+
+function formatTimestamp(timestamp) {
+  if (!timestamp) return '-'
+  const date = new Date(Number(timestamp) * 1000)
+  if (Number.isNaN(date.getTime())) return '-'
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`
 }
 
 async function fetchUnreadCount() {
@@ -298,14 +432,17 @@ onMounted(() => {
   if (userStore.isLoggedIn) {
     fetchUnreadCount()
     fetchAIStatus()
+    fetchAIUsage()
     feedbackTimer = setInterval(fetchUnreadCount, 30000)
     aiStatusTimer = setInterval(fetchAIStatus, 120000)
+    aiUsageTimer = setInterval(fetchAIUsage, 15000)
   }
 })
 
 onUnmounted(() => {
   if (feedbackTimer) clearInterval(feedbackTimer)
   if (aiStatusTimer) clearInterval(aiStatusTimer)
+  if (aiUsageTimer) clearInterval(aiUsageTimer)
 })
 </script>
 
@@ -381,6 +518,27 @@ body {
 
 .ai-status-chip:hover {
   background: rgba(255, 255, 255, 0.22);
+}
+
+.ai-token-chip {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  padding: 0 12px;
+  margin-right: 14px;
+  color: #fff;
+  background: rgba(15, 23, 42, 0.18);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ai-token-chip:hover {
+  background: rgba(15, 23, 42, 0.28);
 }
 
 .ai-status-dot {
@@ -489,6 +647,113 @@ body {
   color: #64748b;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ai-usage-panel {
+  color: #0f172a;
+}
+
+.ai-usage-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.ai-usage-card {
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.ai-usage-card-label {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.ai-usage-card-value {
+  margin-top: 6px;
+  font-size: 18px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.ai-usage-section {
+  margin-top: 14px;
+}
+
+.ai-usage-section-title {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #1e293b;
+}
+
+.ai-usage-table,
+.ai-usage-events {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-usage-row,
+.ai-usage-event-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.ai-usage-name {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-usage-meta,
+.ai-usage-event-meta {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.ai-usage-event-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-usage-event-provider {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ai-usage-event-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-usage-empty {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .logout-btn {

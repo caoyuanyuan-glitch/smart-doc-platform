@@ -2122,19 +2122,19 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
     messages = [{"role": "user", "content": prompt}]
 
     if model == "kimi":
-        result = ai_client.call_kimi(messages, max_tokens=4096)
+        result = ai_client.call_kimi(messages, max_tokens=4096, request_label="translation.text")
         if result is None:
-            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True, request_label="translation.text.fallback")
     elif model == "deepseek":
-        result = ai_client.call_deepseek(messages, max_tokens=4096)
+        result = ai_client.call_deepseek(messages, max_tokens=4096, request_label="translation.text")
         if result is None:
-            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True, request_label="translation.text.fallback")
     elif model == "arkclaw":
-        result = ai_client.call_arkclaw(messages, max_tokens=4096)
+        result = ai_client.call_arkclaw(messages, max_tokens=4096, request_label="translation.text")
         if result is None:
-            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True, request_label="translation.text.fallback")
     else:
-        result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+        result = ai_client.chat(messages, max_tokens=4096, fallback=True, request_label="translation.text")
 
     if result is None:
         available = ", ".join(ai_client.available_providers()) or "none"
@@ -2222,14 +2222,14 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str, model
     messages = [{"role": "user", "content": prompt}]
     result = None
     if model == "kimi":
-        result = ai_client.call_kimi(messages, max_tokens=500)
+        result = ai_client.call_kimi(messages, max_tokens=500, request_label="translation.filename")
     elif model == "deepseek":
-        result = ai_client.call_deepseek(messages, max_tokens=500)
+        result = ai_client.call_deepseek(messages, max_tokens=500, request_label="translation.filename")
     elif model == "arkclaw":
-        result = ai_client.call_arkclaw(messages, max_tokens=500)
+        result = ai_client.call_arkclaw(messages, max_tokens=500, request_label="translation.filename")
 
     if result is None:
-        result = ai_client.chat(messages, max_tokens=500, fallback=True)
+        result = ai_client.chat(messages, max_tokens=500, fallback=True, request_label="translation.filename.fallback")
 
     if result:
         translated = result.strip().strip('"').strip("'").replace("/", "_").replace("\\", "_").replace(":", "_")
