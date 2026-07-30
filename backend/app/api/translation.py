@@ -52,7 +52,7 @@ _thread_locals = threading.local()
 _memory_file_cache = {}
 _memory_file_cache_lock = threading.Lock()
 CANCELED_TRANSLATION_PREFIX = "CANCELED:"
-SUPPORTED_AI_MODELS = {"kimi", "deepseek", "arkclaw", "mcai", "proxy"}
+SUPPORTED_AI_MODELS = {"qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"}
 WORD_CONNECTORS = {"-", "_", ".", "/", ":", "+", "'", "’", "%", "#", "&"}
 LATIN_LANGUAGE_HINTS = {
     "en": {"the", "and", "for", "with", "from", "this", "that", "step", "open", "close", "page"},
@@ -2125,6 +2125,10 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
         result = ai_client.call_kimi(messages, max_tokens=4096, request_label="translation.text")
         if result is None:
             result = ai_client.chat(messages, max_tokens=4096, fallback=True, request_label="translation.text.fallback")
+    elif model == "qwen":
+        result = ai_client.call_qwen(messages, max_tokens=4096, request_label="translation.text")
+        if result is None:
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True, request_label="translation.text.fallback")
     elif model == "deepseek":
         result = ai_client.call_deepseek(messages, max_tokens=4096, request_label="translation.text")
         if result is None:
@@ -2141,7 +2145,7 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
         provider_errors = " | ".join(ai_client.last_provider_errors())
         detail = (
             f"AI翻译引擎不可用。当前已配置提供商: {available}。"
-            "请检查 `/api/translation/providers/status`，并确认 KIMI_API_KEY、DEEPSEEK_API_KEY 或 ARKCLAW_API_KEY 已注入当前服务进程。"
+            "请检查 `/api/translation/providers/status`，并确认 KIMI_API_KEY、QWEN_API_KEY、DEEPSEEK_API_KEY 或 ARKCLAW_API_KEY 已注入当前服务进程。"
         )
         if provider_errors:
             detail += f" 最近调用错误: {provider_errors}"
@@ -2223,6 +2227,8 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str, model
     result = None
     if model == "kimi":
         result = ai_client.call_kimi(messages, max_tokens=500, request_label="translation.filename")
+    elif model == "qwen":
+        result = ai_client.call_qwen(messages, max_tokens=500, request_label="translation.filename")
     elif model == "deepseek":
         result = ai_client.call_deepseek(messages, max_tokens=500, request_label="translation.filename")
     elif model == "arkclaw":

@@ -5,10 +5,10 @@ import os
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from spellchecker import SpellChecker
 from docx import Document
 from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
+from app.utils.spell_checker import run_spelling_and_grammar_check, spell as runtime_spell
 
 try:
     from pptx import Presentation
@@ -16,8 +16,6 @@ except ModuleNotFoundError:
     Presentation = None
 
 router = APIRouter()
-
-spell_checker = SpellChecker(language='en')
 
 
 def _require_pptx_support():
@@ -42,6 +40,44 @@ EXCLUDE_WORDS = {
     "you", "each", "it", "what", "do"
 }
 FULL_EXCLUDE = ALL_AUX_VERBS | MODAL_VERBS | EXCLUDE_WORDS
+
+LOW_LEVEL_RULES = [
+    {"category": "style", "pattern": r"组份", "message": "常见错别字：建议使用“组分”"},
+    {"category": "style", "pattern": r"污然", "message": "常见错别字：建议使用“污染”"},
+    {"category": "style", "pattern": r"转数", "message": "术语错误：建议使用“转速”"},
+    {"category": "style", "pattern": r"加入至", "message": "表达生硬：建议使用“加入”或“加至”"},
+    {"category": "style", "pattern": r"用于用于", "message": "重复词：建议使用“用于”"},
+    {"category": "style", "pattern": r"否则的话", "message": "口语化表达：建议使用“否则”"},
+    {"category": "style", "pattern": r"非常的重要", "message": "表达错误：建议使用“非常重要”"},
+    {"category": "style", "pattern": r"建议用户", "message": "表达冗余：建议使用“建议”或“请”"},
+    {"category": "style", "pattern": r"仅供科研使用，不得用于临床诊断", "message": "表述冗余：建议使用“仅供科研使用”"},
+    {"category": "style", "pattern": r"注意安全，注意安全事项，确保安全操作", "message": "表述重复：建议使用“注意安全操作”"},
+    {"category": "style", "pattern": r"结果判读：根据说明书中的结果判读方法进行判读", "message": "表述重复：建议使用“结果判读：按说明书方法进行”"},
+    {"category": "unit", "pattern": r"\b\d+\s*(?:ul|uL|Ul|UL)\b", "message": "单位格式错误：建议使用“μL”"},
+    {"category": "unit", "pattern": r"\b\d+μL\b", "message": "单位格式错误：建议使用“10 μL”样式"},
+    {"category": "unit", "pattern": r"\b\d+\s*mins\b", "message": "时间单位格式错误：建议使用“min”"},
+    {"category": "unit", "pattern": r"\b\d+\s*rpm\b", "message": "转速格式错误：建议在数字与 rpm 之间留空格"},
+    {"category": "unit", "pattern": r"\b\d+℃", "message": "温度格式错误：建议使用“°C”并统一空格"},
+    {"category": "unit", "pattern": r"\b\d+\s*度\s*C\b", "message": "温度格式错误：建议使用“°C”并统一空格"},
+    {"category": "unit", "pattern": r"\b\d+(?:mM|mmol/L)\b", "message": "浓度格式错误：建议使用“10 mM”样式"},
+    {"category": "unit", "pattern": r"\bpH\d+(?:\.\d+)?\b", "message": "pH 格式错误：建议使用“pH 8.0”样式"},
+    {"category": "style", "pattern": r"\bOD\d+\b", "message": "格式错误：建议使用“OD 260”样式"},
+    {"category": "style", "pattern": r"\b\d+[xX]\b", "message": "符号格式错误：建议使用乘号“×”"},
+    {"category": "style", "pattern": r"\b[A-Za-z][A-Za-z0-9]*\(", "message": "格式错误：英文缩写与括号之间建议留空格"},
+    {"category": "grammar", "pattern": r"\b[a-zA-Z]\)(?=\S)", "message": "标号后缺少空格"},
+    {"category": "style", "pattern": r"如下:(?=\d)", "message": "标点错误：建议使用中文冒号“：”"},
+    {"category": "style", "pattern": r"强光下!", "message": "中文语境下建议使用“强光下。”"},
+    {"category": "style", "pattern": r"非常重要……", "message": "标点错误：建议使用“非常重要。”"},
+    {"category": "style", "pattern": r"'[^'\n\r\u0000-\u007f]*'", "message": "引号格式不统一：中文内容建议使用双引号"},
+    {"category": "style", "pattern": r"图\d+", "message": "图表编号格式建议统一为“图 1”样式"},
+    {"category": "style", "pattern": r"表\d+", "message": "图表编号格式建议统一为“表 1”样式"},
+    {"category": "style", "pattern": r"RNA extraction kit", "message": "中英文混用：建议使用“RNA 提取试剂盒”", "applies_to": "chinese"},
+    {"category": "style", "pattern": r"\bsample\b", "message": "中英文混用：建议使用“样本”", "applies_to": "chinese"},
+    {"category": "style", "pattern": r"collection tube", "message": "中英文混用：建议使用“收集管”", "applies_to": "chinese"},
+    {"category": "style", "pattern": r"Agarose Gel", "message": "中英文混用：建议使用“琼脂糖凝胶”", "applies_to": "chinese"},
+    {"category": "style", "pattern": r"thermocycler", "message": "中英文混用：建议使用“热循环仪”", "applies_to": "chinese"},
+    {"category": "style", "pattern": r"待补充|\bTBD\b", "message": "存在待补充占位：建议补全正式内容", "suggestions": ["补全正式内容"]},
+]
 
 WHITELIST_PATTERNS = {
     "product": re.compile(r"(MGISP(?:-\d+)?(?:-Smart\s+8)?|DNBSEQ(?:-[Tt]\d+[×xX]?\d+[RSrs]?)?|MGICLab(?:-FZ\d+)?|MGI)", re.IGNORECASE),
@@ -839,373 +875,313 @@ def is_word_in_whitelist(word, text, start, end):
             return True
     return False
 
-def process_text(text):
-    """共享处理函数：对文本进行拼写和语法检查，优化性能"""
-    text = pre_clean_lines(text)
-    temp_err = []
 
-    # --- 拼写检查：预计算唯一错词的建议，避免重复计算 ---
-    word_matches = list(RE_WORDS.finditer(text))
-    all_words_lower = [m.group(0).lower() for m in word_matches]
-    unique_words = list(set(all_words_lower))
+def _parse_issue_position(position):
+    try:
+        start_text, end_text = str(position or '').split('-', 1)
+        start = int(start_text)
+        end = int(end_text)
+        if start < 0 or end < start:
+            raise ValueError
+        return start, end
+    except (ValueError, TypeError, AttributeError):
+        return None, None
 
-    unique_words_to_check = [w for w in unique_words if w not in TECH_TERMS]
-    misspelled_set = spell_checker.unknown(unique_words_to_check)
 
-    suggestion_cache = {}
-    for w in misspelled_set:
-        correction = spell_checker.correction(w)
-        if correction:
-            candidates_list = list(spell_checker.candidates(w) - {correction})[:4]
-            suggestion_cache[w] = [correction] + candidates_list
-        else:
-            suggestion_cache[w] = []
-
-    spell_count = 0
-    for m in word_matches:
-        word = m.group(0)
-        w_low = word.lower()
-        if w_low in suggestion_cache:
-            if is_word_in_whitelist(word, text, m.start(), m.end()):
-                continue
-            if spell_count >= MAX_SPELL_ERRORS:
-                break
-            temp_err.append({
-                "start": m.start(),
-                "end": m.end(),
-                "type": "spell",
-                "severity": "general",
-                "message": "拼写错误",
-                "word": word,
-                "suggestions": suggestion_cache[w_low]
-            })
-            spell_count += 1
-
-    # --- 语法检查：限制数量避免超时，包含 word/建议字段 ---
-    grammar_count = 0
-
-    for m in RE_MULTI_SPACE.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        chunk = text[m.start():m.end()]
-        if not all(c == "\n" for c in chunk):
-            ctx_start = max(0, m.start() - 10)
-            ctx_end = min(len(text), m.end() + 10)
-            problem_text = text[m.start():m.end()]
-            temp_err.append({
-                "start": m.start(),
-                "end": m.end(),
-                "type": "grammar",
-                "severity": "general",
-                "message": "多余空格",
-                "word": problem_text,
-                "context": text[ctx_start:ctx_end],
-                "suggestions": [problem_text.strip()]
-            })
-            grammar_count += 1
-
-    for m in RE_MISSING_SPACE_AFTER_PUNCT.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 10)
-        ctx_end = min(len(text), m.end() + 10)
-        problem_text = text[m.start():m.end()]
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "grammar",
-            "severity": "general",
-            "message": "标点后缺失空格",
-            "word": problem_text,
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [problem_text + " "]
-        })
-        grammar_count += 1
-
-    for m in RE_EXTRA_SPACE_BEFORE_PUNCT.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 10)
-        ctx_end = min(len(text), m.end() + 10)
-        problem_text = text[m.start():m.end()]
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "grammar",
-            "severity": "general",
-            "message": "标点前多余空格",
-            "word": problem_text,
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [problem_text.strip()]
-        })
-        grammar_count += 1
-
-    for m in RE_CASE_ERROR.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        s = m.start() + len(m.group(1))
-        e = m.end()
-        problem_word = text[s:e]
-        if problem_word.lower() in TECH_TERMS:
+def _extract_suggestions(issue):
+    suggestion = str(issue.get('suggestion') or '').strip()
+    if not suggestion:
+        return []
+    parts = re.split(r'[、,;\n]+', suggestion)
+    cleaned = []
+    seen = set()
+    for part in parts:
+        value = part.strip()
+        if not value or value in seen:
             continue
-        fixed_word = problem_word.capitalize() if problem_word else problem_word
-        ctx_start = max(0, m.start() - 10)
-        ctx_end = min(len(text), m.end() + 10)
-        temp_err.append({
-            "start": s,
-            "end": e,
-            "type": "grammar",
-            "severity": "general",
-            "message": "大小写错误",
-            "word": problem_word,
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [fixed_word] if fixed_word != problem_word else []
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned[:5]
+
+
+def _extract_message_suggestions(message):
+    candidates = re.findall(r'“([^”]+)”', str(message or ''))
+    cleaned = []
+    seen = set()
+    for candidate in candidates:
+        value = candidate.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned[:3]
+
+
+def _build_low_level_suggestions(rule, matched_text):
+    explicit = rule.get('suggestions') or []
+    if explicit:
+        return explicit[:3]
+
+    if rule['pattern'] == r'\b\d+\s*(?:ul|uL|Ul|UL)\b':
+        number = re.search(r'\d+', matched_text)
+        return [f"{number.group(0)} μL"] if number else ['μL']
+    if rule['pattern'] == r'\b\d+\s*mins\b':
+        number = re.search(r'\d+', matched_text)
+        return [f"{number.group(0)} min"] if number else ['min']
+    if rule['pattern'] == r'\b\d+\s*rpm\b':
+        return [re.sub(r'(?i)rpm$', ' rpm', matched_text)]
+    if rule['pattern'] == r'\b\d+μL\b':
+        return [re.sub(r'(\d+)μL', r'\1 μL', matched_text)]
+    if rule['pattern'] == r'\b\d+℃':
+        return [matched_text.replace('℃', ' °C')]
+    if rule['pattern'] == r'\b\d+\s*度\s*C\b':
+        number = re.search(r'\d+', matched_text)
+        return [f"{number.group(0)} °C"] if number else []
+    if rule['pattern'] == r'\b\d+(?:mM|mmol/L)\b':
+        return [re.sub(r'^(\d+)', r'\1 ', matched_text)]
+    if rule['pattern'] == r'\bpH\d+(?:\.\d+)?\b':
+        return [matched_text.replace('pH', 'pH ', 1)]
+    if rule['pattern'] == r'\bOD\d+\b':
+        return [matched_text.replace('OD', 'OD ', 1)]
+    if rule['pattern'] == r'\b\d+[xX]\b':
+        return [re.sub(r'[xX]$', '×', matched_text)]
+    if rule['pattern'] == r'\b[A-Za-z][A-Za-z0-9]*\(': 
+        return [matched_text[:-1] + ' (']
+    if rule['pattern'] == r'\b[a-zA-Z]\)(?=\S)':
+        return [matched_text + ' ']
+    if rule['pattern'] == r'如下:(?=\d)':
+        return [matched_text.replace(':', '：', 1)]
+    if rule['pattern'] == r"'[^'\n\r\u0000-\u007f]*'":
+        return [matched_text.replace("'", '"')]
+    if rule['pattern'] == r'图\d+':
+        return [matched_text[0] + ' ' + matched_text[1:]]
+    if rule['pattern'] == r'表\d+':
+        return [matched_text[0] + ' ' + matched_text[1:]]
+
+    message_suggestions = _extract_message_suggestions(rule.get('message'))
+    if message_suggestions:
+        return message_suggestions
+    return []
+
+
+def _append_match_issues(issues, text, pattern, *, category, message, suggestion, source):
+    for match in re.finditer(pattern, text, re.IGNORECASE):
+        issues.append({
+            'severity': 'general',
+            'category': category,
+            'source': source,
+            'original_text': text[match.start():match.end()],
+            'context': text[max(0, match.start() - 60):min(len(text), match.end() + 60)],
+            'description': message,
+            'suggestion': suggestion,
+            'position': f"{match.start()}-{match.end()}",
         })
-        grammar_count += 1
 
-    # --- 中文标点混入英文检测 ---
-    for m in RE_CHINESE_PUNCT.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        problem_text = text[m.start():m.end()]
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "grammar",
-            "severity": "serious",
-            "message": "中文顿号混入英文",
-            "word": problem_text,
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [m.group(1) + "," + m.group(2)]
+
+def _normalize_date_suggestion(matched_text, document_language):
+    parts = re.findall(r'\d+', matched_text)
+    if len(parts) != 3:
+        return '07/27/2026' if document_language == 'english' else '2026-07-27'
+
+    year, month, day = parts
+    if document_language == 'english':
+        return f"{month.zfill(2)}/{day.zfill(2)}/{year.zfill(4)}"
+    return f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}"
+
+
+def _collect_consistency_issues(text, document_language):
+    issues = []
+
+    if 'Cat.No' in text and 'Cat. No.' in text:
+        _append_match_issues(
+            issues,
+            text,
+            r'Cat\.\s?No\.?|Catalog Number',
+            category='style',
+            message='术语格式混用：货号名称请统一使用“Cat. No.”或“Catalog Number”中的一种',
+            suggestion='Cat. No.、Catalog Number',
+            source='consistency_rule',
+        )
+
+    if 'PBMC' in text and '外周血单个核细胞' in text:
+        _append_match_issues(
+            issues,
+            text,
+            r'PBMC|外周血单个核细胞',
+            category='style',
+            message='术语混用：请统一使用“PBMC”或“外周血单个核细胞”中的一种',
+            suggestion='PBMC、外周血单个核细胞',
+            source='consistency_rule',
+        )
+
+    if 'RNA 完整性' in text and 'RNA 质量' in text:
+        _append_match_issues(
+            issues,
+            text,
+            r'RNA\s*完整性|RNA\s*质量',
+            category='style',
+            message='术语混用：请统一使用“RNA 完整性”或“RNA 质量”中的一种',
+            suggestion='RNA 完整性、RNA 质量',
+            source='consistency_rule',
+        )
+
+    numbering_patterns = [r'\b\d+\.', r'\b\d+\)', r'\(\d+\)', r'①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩']
+    for line_match in re.finditer(r'.*', text):
+        line = line_match.group(0)
+        if not line.strip():
+            continue
+        matched_numbering_styles = sum(bool(re.search(pattern, line)) for pattern in numbering_patterns)
+        if matched_numbering_styles < 2:
+            continue
+        line_offset = line_match.start()
+        for pattern in numbering_patterns:
+            for match in re.finditer(pattern, line):
+                issues.append({
+                    'severity': 'general',
+                    'category': 'style',
+                    'source': 'consistency_rule',
+                    'original_text': match.group(0),
+                    'context': line,
+                    'description': '编号格式混用：请统一全文编号层级样式',
+                    'suggestion': '1.',
+                    'position': f"{line_offset + match.start()}-{line_offset + match.end()}",
+                })
+
+    date_patterns = [
+        r'\b\d{4}-\d{2}-\d{2}\b',
+        r'\b\d{4}/\d{2}/\d{2}\b',
+        r'\b\d{4}\.\d{2}\.\d{2}\b',
+    ]
+    matched_date_styles = sum(bool(re.search(pattern, text)) for pattern in date_patterns)
+    if matched_date_styles >= 2:
+        for pattern in date_patterns:
+            for match in re.finditer(pattern, text):
+                matched_text = match.group(0)
+                issues.append({
+                    'severity': 'general',
+                    'category': 'style',
+                    'source': 'consistency_rule',
+                    'original_text': matched_text,
+                    'context': text[max(0, match.start() - 60):min(len(text), match.end() + 60)],
+                    'description': '日期格式混用：请统一全文日期格式',
+                    'suggestion': _normalize_date_suggestion(matched_text, document_language),
+                    'position': f"{match.start()}-{match.end()}",
+                })
+
+    if 'min、分钟、mins' in text or ('分钟' in text and re.search(r'\bmins?\b', text, re.IGNORECASE)):
+        _append_match_issues(
+            issues,
+            text,
+            r'\bmins?\b|分钟',
+            category='style',
+            message='时间单位混用：请统一使用“min”或“分钟”中的一种',
+            suggestion='min、分钟',
+            source='consistency_rule',
+        )
+
+    if re.search(r'\bDNBSEQ\b', text) and re.search(r'\bDNBseq\b', text):
+        _append_match_issues(
+            issues,
+            text,
+            r'\bDNBSEQ\b|\bDNBseq\b',
+            category='style',
+            message='产品名称大小写混用：请统一使用“DNBSEQ”或“DNBseq”中的一种',
+            suggestion='DNBSEQ、DNBseq',
+            source='consistency_rule',
+        )
+
+    return issues
+
+
+def _map_issue_type(issue):
+    source = str(issue.get('source') or '').lower()
+    category = str(issue.get('category') or '')
+    category_lower = category.lower()
+    if source == 'spellcheck' or '拼写' in category:
+        return 'spell'
+    if category_lower == 'unit' or '单位' in category:
+        return 'unit'
+    if category_lower == 'style' or '风格' in category or '格式' in category:
+        return 'style'
+    if category_lower == 'grammar':
+        return 'grammar'
+    return 'grammar'
+
+
+def _build_response(text, issues):
+    errors = []
+    seen = set()
+    for issue in issues:
+        start, end = _parse_issue_position(issue.get('position'))
+        if start is None or end is None or end > len(text):
+            continue
+        issue_type = _map_issue_type(issue)
+        dedupe_key = (start, end, issue_type)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        word = issue.get('original_text') or text[start:end]
+        errors.append({
+            'start': start,
+            'end': end,
+            'type': issue_type,
+            'severity': issue.get('severity') or 'general',
+            'message': issue.get('description') or issue.get('category') or '发现可疑问题',
+            'word': word,
+            'context': issue.get('context') or '',
+            'suggestions': _extract_suggestions(issue),
         })
-        grammar_count += 1
 
-    for m in RE_CHINESE_DOT.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "grammar",
-            "severity": "serious",
-            "message": "中文句号混入英文",
-            "word": text[m.start():m.end()],
-            "context": text[ctx_start:ctx_end],
-            "suggestions": ["."]
-        })
-        grammar_count += 1
-
-    # --- 单位检查 ---
-    for m in RE_MICROLITER.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "unit",
-            "severity": "serious",
-            "message": "微升单位错误",
-            "word": text[m.start():m.end()],
-            "context": text[ctx_start:ctx_end],
-            "suggestions": ["μL"]
-        })
-        grammar_count += 1
-
-    for m in RE_MILLILITER.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "unit",
-            "severity": "serious",
-            "message": "毫升单位错误",
-            "word": text[m.start():m.end()],
-            "context": text[ctx_start:ctx_end],
-            "suggestions": ["mL"]
-        })
-        grammar_count += 1
-
-    for m in RE_TIME_UNIT.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        original = text[m.start():m.end()]
-        suggestion = "min" if original.lower() == "mins" else ("h" if original.lower() == "hs" else "s")
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "unit",
-            "severity": "serious",
-            "message": "时间单位错误",
-            "word": original,
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [suggestion]
-        })
-        grammar_count += 1
-
-    for m in RE_UNIT_CASE.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        original = text[m.start():m.end()]
-        suggestion = original.lower()
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "unit",
-            "severity": "general",
-            "message": "单位大小写错误",
-            "word": original,
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [suggestion]
-        })
-        grammar_count += 1
-
-    for m in RE_NUMBER_UNIT_SPACE.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        original = text[m.start():m.end()]
-        suggestion = original[:-2] + " " + original[-2:]
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "unit",
-            "severity": "general",
-            "message": "数字与单位间缺失空格",
-            "word": original,
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [suggestion]
-        })
-        grammar_count += 1
-
-    # --- 单词拆分检测 ---
-    for m in RE_WORD_SPLIT.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        parts = [g for g in m.groups() if g]
-        combined = "".join(parts)
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "format",
-            "severity": "general",
-            "message": "单词拆分",
-            "word": text[m.start():m.end()],
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [combined]
-        })
-        grammar_count += 1
-
-    # --- 乘号检测 ---
-    for m in RE_MULTIPLY_SYMBOL.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 5)
-        ctx_end = min(len(text), m.end() + 5)
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "format",
-            "severity": "general",
-            "message": "乘号表示",
-            "word": text[m.start():m.end()],
-            "context": text[ctx_start:ctx_end],
-            "suggestions": [m.group(1) + "×" + m.group(2)]
-        })
-        grammar_count += 1
-
-    # --- 官网地址检查 ---
-    for m in RE_OLD_DOMAIN.finditer(text):
-        if grammar_count >= MAX_GRAMMAR_ERRORS:
-            break
-        ctx_start = max(0, m.start() - 10)
-        ctx_end = min(len(text), m.end() + 10)
-        temp_err.append({
-            "start": m.start(),
-            "end": m.end(),
-            "type": "format",
-            "severity": "serious",
-            "message": "官网地址错误",
-            "word": text[m.start():m.end()],
-            "context": text[ctx_start:ctx_end],
-            "suggestions": ["https://global-mgitech.com"]
-        })
-        grammar_count += 1
-
-    # --- 语法错误模式 ---
-    for pattern, msg, suggestion, severity in RE_GRAMMAR_PATTERNS:
-        for m in pattern.finditer(text):
-            if grammar_count >= MAX_GRAMMAR_ERRORS:
-                break
-            ctx_start = max(0, m.start() - 5)
-            ctx_end = min(len(text), m.end() + 5)
-            temp_err.append({
-                "start": m.start(),
-                "end": m.end(),
-                "type": "grammar",
-                "severity": severity,
-                "message": msg,
-                "word": text[m.start():m.end()],
-                "context": text[ctx_start:ctx_end],
-                "suggestions": [suggestion]
-            })
-            grammar_count += 1
-
-    # --- 风格建议 ---
-    for pattern, msg, detail, severity in RE_STYLE_PATTERNS:
-        for m in pattern.finditer(text):
-            if grammar_count >= MAX_GRAMMAR_ERRORS:
-                break
-            ctx_start = max(0, m.start() - 5)
-            ctx_end = min(len(text), m.end() + 5)
-            temp_err.append({
-                "start": m.start(),
-                "end": m.end(),
-                "type": "style",
-                "severity": severity,
-                "message": msg,
-                "word": text[m.start():m.end()],
-                "context": text[ctx_start:ctx_end],
-                "suggestions": []
-            })
-            grammar_count += 1
-
-    run_grammar(text, temp_err)
-
-    temp_err.sort(key=lambda x: x["start"])
-
-    unique_err = []
-    last_s = -1
-    for item in temp_err:
-        if item["start"] != last_s:
-            unique_err.append(item)
-            last_s = item["start"]
-
-    final_spell = sum(1 for item in unique_err if item["type"] == "spell")
-    final_grammar = len(unique_err) - final_spell
-
+    errors.sort(key=lambda item: (item['start'], item['end'], item['type']))
+    spell_count = sum(1 for item in errors if item['type'] == 'spell')
+    grammar_count = len(errors) - spell_count
     return {
-        "errors": unique_err,
-        "spell_count": final_spell,
-        "grammar_count": final_grammar,
-        "total_count": len(unique_err),
-        "text": text
+        'errors': errors,
+        'spell_count': spell_count,
+        'grammar_count': grammar_count,
+        'total_count': len(errors),
+        'text': text,
     }
+
+
+def _detect_document_language(text):
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    english_words = len(re.findall(r'\b[a-zA-Z]{2,}\b', text))
+    if english_words >= 5 and english_words >= max(1, chinese_chars * 2):
+        return 'english'
+    return 'chinese'
+
+
+def _collect_low_level_rule_issues(text, document_language):
+    issues = []
+    for rule in LOW_LEVEL_RULES:
+        applies_to = rule.get('applies_to')
+        if applies_to and applies_to != document_language:
+            continue
+        pattern = re.compile(rule['pattern'], re.IGNORECASE)
+        for match in pattern.finditer(text):
+            matched_text = text[match.start():match.end()]
+            issues.append({
+                'severity': 'general',
+                'category': rule['category'],
+                'source': 'low_level_rule',
+                'original_text': matched_text,
+                'context': text[max(0, match.start() - 50):min(len(text), match.end() + 50)],
+                'description': rule['message'],
+                'suggestion': '、'.join(_build_low_level_suggestions(rule, matched_text)),
+                'position': f"{match.start()}-{match.end()}",
+            })
+    return issues
+
+
+def process_text(text):
+    """共享处理函数：统一走完整规则链并适配前端结果结构"""
+    normalized_text = pre_clean_lines(text)
+    document_language = _detect_document_language(normalized_text)
+    issues = run_spelling_and_grammar_check(normalized_text)
+    issues.extend(_collect_low_level_rule_issues(normalized_text, document_language))
+    issues.extend(_collect_consistency_issues(normalized_text, document_language))
+    return _build_response(normalized_text, issues)
 
 
 def is_noun_singular(word: str) -> bool:
@@ -1519,7 +1495,7 @@ async def add_custom_word(word: str):
     word = word.strip()
     if not word:
         raise HTTPException(status_code=400, detail="单词不能为空")
-    spell_checker.word_frequency.load_words([word])
+    runtime_spell.word_frequency.load_words([word])
     return {"message": f"已添加单词: {word}"}
 
 
@@ -1533,13 +1509,13 @@ async def import_dict(file: UploadFile = File(...)):
         if not line or line.startswith("#"):
             continue
         words_to_add.append(line)
-    spell_checker.word_frequency.load_words(words_to_add)
+    runtime_spell.word_frequency.load_words(words_to_add)
     return {"message": f"成功导入 {len(words_to_add)} 个单词"}
 
 
 @router.get("/export-dict", summary="导出自定义词典")
 async def export_dict():
     words = []
-    for w in spell_checker.word_frequency:
+    for w in runtime_spell.word_frequency:
         words.append(w)
     return {"words": words}

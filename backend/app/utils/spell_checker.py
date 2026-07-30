@@ -111,7 +111,7 @@ SPELLCHECK_WHITELIST = {
         'hamilton', 'eppendorf', 'axygen', 'greiner',
         'dnbseq', 'mgisp', 'mgistp', 'dnv', 'app-d', 'stereomics', 'dipseq',
         'dnase', 'rnase', 'oligodt', 'qubit', 'pcr', 'hsc',
-        'dhs', 'bio', 'one', 'mgi', 'sto', 'sscir', 'dsdna',
+        'dhs', 'bio', 'one', 'mgi', 'sto', 'sscir', 'dsdna', 'pbmc', 'hcl', 'agarose',
         'buffer', 'greiner', 'hamilton', 'mgitech', 'life', 'science',
         'te', 'multi',
     },

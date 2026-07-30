@@ -70,7 +70,6 @@ class AIClient:
         self.proxy_api_key = os.getenv("OPENAI_API_KEY")
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
         self.proxy_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
@@ -656,19 +655,24 @@ class AIClient:
         return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None):
-        # 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
+        # 优先级: DEFAULT_MODEL_PROVIDER 优先，其余按 Qwen > Kimi > DeepSeek > ArkClaw > Proxy
         self.last_chat_errors = []
         providers = []
-        if self.qwen_client:
-            providers.append(('Qwen', self.qwen_client, self.qwen_model))
-        if self.kimi_client and not skip_kimi:
-            providers.append(('Kimi', self.kimi_client, self.kimi_model))
-        if self.deepseek_client:
-            providers.append(('DeepSeek', self.deepseek_client, self.deepseek_model))
-        if self.arkclaw_client:
-            providers.append(('ArkClaw', self.arkclaw_client, self.arkclaw_model))
-        if self.proxy_client:
-            providers.append(('Proxy', self.proxy_client, self.fallback_model))
+        ordered_specs = [
+            ('qwen', 'Qwen', self.qwen_client, self.qwen_model),
+            ('kimi', 'Kimi', self.kimi_client, self.kimi_model),
+            ('deepseek', 'DeepSeek', self.deepseek_client, self.deepseek_model),
+            ('arkclaw', 'ArkClaw', self.arkclaw_client, self.arkclaw_model),
+            ('proxy', 'Proxy', self.proxy_client, self.fallback_model),
+        ]
+        default_provider = (self.default_provider or '').strip().lower()
+        if default_provider:
+            ordered_specs.sort(key=lambda item: 0 if item[0] == default_provider else 1)
+        for provider_key, display_name, client, model in ordered_specs:
+            if provider_key == 'kimi' and skip_kimi:
+                continue
+            if client:
+                providers.append((display_name, client, model))
 
         if providers:
             print(f"[AI] providers={', '.join(name for name, _, _ in providers)}")
