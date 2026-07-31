@@ -48,7 +48,10 @@ def _strip_code_fence(text):
 
 class AIClient:
     def __init__(self):
-        self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "kimi")
+        self.default_provider = os.getenv("DEFAULT_MODEL_PROVIDER", "qwen")
+        self.qwen_api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+        self.qwen_base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.qwen_model = os.getenv("QWEN_MODEL", "qwen-plus")
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
@@ -67,11 +70,18 @@ class AIClient:
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
         self.proxy_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-        self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
         timeout = httpx.Timeout(30.0, read=180.0)
+
+        self.qwen_client = OpenAI(
+            api_key=self.qwen_api_key,
+            base_url=self.qwen_base_url,
+            timeout=timeout,
+        ) if _is_valid_key(self.qwen_api_key) else None
+        if self.qwen_client:
+            print(f"[AI] Qwen 已连接, base_url={self.qwen_base_url}, model={self.qwen_model}")
 
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
@@ -112,7 +122,7 @@ class AIClient:
             )
             print(f"[AI] MCAI Proxy 已连接, base_url={self.mcai_base_url}, model={self.mcai_model}")
 
-        proxy_api_key = self.dashscope_api_key or self.proxy_api_key
+        proxy_api_key = self.proxy_api_key
         proxy_base_url = self.fallback_base_url
         self.proxy_client = OpenAI(
             api_key=proxy_api_key,
@@ -124,10 +134,12 @@ class AIClient:
 
     @property
     def has_any_client(self):
-        return self.kimi_client is not None or self.arkclaw_client is not None or self.deepseek_client is not None or self.mcai_proxy_client is not None or self.proxy_client is not None
+        return self.qwen_client is not None or self.kimi_client is not None or self.arkclaw_client is not None or self.deepseek_client is not None or self.mcai_proxy_client is not None or self.proxy_client is not None
 
     def available_providers(self):
         providers = []
+        if self.qwen_client:
+            providers.append("qwen")
         if self.kimi_client:
             providers.append("kimi")
         if self.deepseek_client:
@@ -142,9 +154,10 @@ class AIClient:
 
     def provider_status(self):
         return {
-            "default_provider": (self.default_provider or "kimi").strip().lower() or "kimi",
-            "priority": ["kimi", "deepseek", "arkclaw", "mcai", "proxy"],
+            "default_provider": (self.default_provider or "qwen").strip().lower() or "qwen",
+            "priority": ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"],
             "providers": {
+                "qwen": self.qwen_client is not None,
                 "kimi": self.kimi_client is not None,
                 "deepseek": self.deepseek_client is not None,
                 "arkclaw": self.arkclaw_client is not None,
@@ -159,6 +172,7 @@ class AIClient:
         ping_msg = [{"role": "user", "content": "ping"}]
 
         providers = [
+            ("qwen", self.qwen_client, self.qwen_model),
             ("kimi", self.kimi_client, self.kimi_model),
             ("deepseek", self.deepseek_client, self.deepseek_model),
             ("arkclaw", self.arkclaw_client, self.arkclaw_model),
@@ -220,8 +234,8 @@ class AIClient:
             "total_providers": len(results),
             "ok_providers": ok_count,
             "healthy": ok_count > 0,
-            "primary": "kimi",
-            "primary_status": results.get("kimi", {}).get("status", "unknown"),
+            "primary": "qwen",
+            "primary_status": results.get("qwen", {}).get("status", "unknown"),
             "providers": results,
         }
 
@@ -245,7 +259,7 @@ class AIClient:
     def resolve_translation_model(self, requested_model=None):
         preferred = []
         requested = (requested_model or "").strip().lower()
-        supported = ["kimi", "deepseek", "arkclaw", "mcai", "proxy"]
+        supported = ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"]
         if requested in supported:
             preferred.append(requested)
 
@@ -258,6 +272,7 @@ class AIClient:
                 preferred.append(name)
 
         availability = {
+            "qwen": self.qwen_client is not None,
             "kimi": self.kimi_client is not None,
             "deepseek": self.deepseek_client is not None,
             "arkclaw": self.arkclaw_client is not None,
@@ -321,6 +336,32 @@ class AIClient:
                     retry_delay *= 2
                     continue
                 print(f"ArkClaw调用失败: {str(e)}")
+                return None
+        return None
+
+    def call_qwen(self, messages, max_tokens=2048, temperature=0.3):
+        if not self.qwen_client:
+            return None
+        import time
+        max_retries = 3
+        retry_delay = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.qwen_client.chat.completions.create(
+                    model=self.qwen_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries:
+                    print(f"Qwen 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                print(f"Qwen调用失败: {str(e)}")
                 return None
         return None
 
@@ -433,9 +474,11 @@ class AIClient:
         return None
 
     def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False):
-        # 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
+        # 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
         self.last_chat_errors = []
         providers = []
+        if self.qwen_client:
+            providers.append(('Qwen', self.qwen_client, self.qwen_model))
         if self.kimi_client and not skip_kimi:
             providers.append(('Kimi', self.kimi_client, self.kimi_model))
         if self.deepseek_client:

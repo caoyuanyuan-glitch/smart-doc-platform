@@ -2121,7 +2121,11 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 {content[:8000]}"""
     messages = [{"role": "user", "content": prompt}]
 
-    if model == "kimi":
+    if model == "qwen":
+        result = ai_client.call_qwen(messages, max_tokens=4096)
+        if result is None:
+            result = ai_client.chat(messages, max_tokens=4096, fallback=True)
+    elif model == "kimi":
         result = ai_client.call_kimi(messages, max_tokens=4096)
         if result is None:
             result = ai_client.chat(messages, max_tokens=4096, fallback=True)
@@ -2141,7 +2145,7 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
         provider_errors = " | ".join(ai_client.last_provider_errors())
         detail = (
             f"AI翻译引擎不可用。当前已配置提供商: {available}。"
-            "请检查 `/api/translation/providers/status`，并确认 KIMI_API_KEY、DEEPSEEK_API_KEY 或 ARKCLAW_API_KEY 已注入当前服务进程。"
+            "请检查 `/api/translation/providers/status`，并确认 QWEN_API_KEY、KIMI_API_KEY、DEEPSEEK_API_KEY 或 ARKCLAW_API_KEY 已注入当前服务进程。"
         )
         if provider_errors:
             detail += f" 最近调用错误: {provider_errors}"
@@ -2221,7 +2225,9 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str, model
     prompt = f'Translate this filename from {src_name} to {tgt_name}. Output ONLY the translated filename, no other text: "{filename}"'
     messages = [{"role": "user", "content": prompt}]
     result = None
-    if model == "kimi":
+    if model == "qwen":
+        result = ai_client.call_qwen(messages, max_tokens=500)
+    elif model == "kimi":
         result = ai_client.call_kimi(messages, max_tokens=500)
     elif model == "deepseek":
         result = ai_client.call_deepseek(messages, max_tokens=500)

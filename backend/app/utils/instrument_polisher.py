@@ -13,6 +13,10 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 
 
+_NUMBER_SPACE_UNITS = r'r/min|kHz|MHz|GHz|kPa|MPa|kVA|mA|mV|kV|kW|MW|kN|min|rpm|bp|mL|μL|µL|uL|μg|µg|mg|ng|kg|μm|µm|mm|cm|°C|℃|Hz|Pa|VA|mM|μM|µM|nM|m|L|g|V|A|W|N|s|h|M'
+_NUMBER_UNIT_PATTERN = re.compile(rf'(\d+\.?\d*)\s*({_NUMBER_SPACE_UNITS})(?![A-Za-z])')
+
+
 class PolishConfig:
     L2_THRESHOLD = 0.85
     L3_THRESHOLD = 0.90
@@ -62,6 +66,19 @@ class InstrumentPolishEngine:
     _EXCLUDE_ACRONYMS = {"PCR", "DNA", "RNA", "CPU", "GPU", "API", "URL", "HTTP", "HTTPS", "FTP", "SSH",
                          "SQL", "JSON", "XML", "HTML", "CSS", "PDF", "CSV", "USB", "LAN", "WAN", "MAC"}
 
+    CRITICAL_LITERAL_PATTERNS = [
+        r'(?:样本制备套件|试剂盒套装|试剂套装|套件|Box|BOX|盒|孔位|孔|通道|板|卡|槽位)\s*[A-Z](?![A-Za-z])',
+    ]
+
+    CRITICAL_LITERAL_PHRASES = (
+        '扫码枪',
+        '二维码',
+        '包装上的二维码',
+        '制备卡包装上的二维码',
+        '制备卡',
+        '样本制备系统',
+    )
+
     @staticmethod
     def extract_proper_nouns(text: str) -> List[str]:
         nouns = []
@@ -78,13 +95,33 @@ class InstrumentPolishEngine:
         return len(lost) > 0, list(lost)
 
     @staticmethod
+    def extract_critical_literals(text: str) -> List[str]:
+        markers = set()
+        raw = str(text or '')
+        if not raw:
+            return []
+
+        compact = re.sub(r'\s+', '', raw)
+        for pattern in InstrumentPolishEngine.CRITICAL_LITERAL_PATTERNS:
+            for match in re.findall(pattern, raw):
+                normalized = re.sub(r'\s+', '', match)
+                if normalized:
+                    markers.add(normalized)
+
+        for phrase in InstrumentPolishEngine.CRITICAL_LITERAL_PHRASES:
+            if phrase in compact:
+                markers.add(phrase)
+        return sorted(markers)
+
+    @staticmethod
     def pre_polish(text: str, extra_terms: Optional[Dict[str, str]] = None) -> str:
         """
         AI 润色前的确定性预处理：
         1. 专有名词占位保护
         2. 术语替换
         3. 标点规范化
-        4. 恢复专有名词
+        4. 数字与单位空格规范
+        5. 恢复专有名词
         """
         if not text or not text.strip():
             return text
@@ -118,17 +155,12 @@ class InstrumentPolishEngine:
         # Step 3: 标点规范化
         text = InstrumentPolishEngine._normalize_punctuation(text)
 
-        # Step 4: 中英文间加空格
-        text = re.sub(r'([\u4e00-\u9fa5])([A-Za-z])', r'\1 \2', text)
-        text = re.sub(r'([A-Za-z])([\u4e00-\u9fa5])', r'\1 \2', text)
-
-        # Step 5: 数字与单位间加空格（角度、百分比除外）
-        text = re.sub(r'(\d)([a-zA-Z℃°]+)', r'\1 \2', text)
-        text = re.sub(r'(\d)\s+(℃|°|%)', r'\1\2', text)
-
-        # Step 6: 恢复专有名词
+        # Step 4: 恢复专有名词
         for i, name in enumerate(protected):
             text = text.replace(f"__PROPER_{i}__", name)
+
+        # Step 5: 数字与单位间加空格
+        text = _NUMBER_UNIT_PATTERN.sub(r'\1 \2', text)
 
         return text
 
@@ -170,6 +202,16 @@ class InstrumentPolishEngine:
                 "safe": False,
                 "reason": f"AI 润色丢失专有名词: {', '.join(lost_nouns)}",
                 "suggested": original  # 回退原文
+            }
+
+        original_literals = set(InstrumentPolishEngine.extract_critical_literals(original))
+        polished_literals = set(InstrumentPolishEngine.extract_critical_literals(polished))
+        if original_literals and not original_literals.issubset(polished_literals):
+            lost_literals = sorted(original_literals - polished_literals)
+            return {
+                "safe": False,
+                "reason": f"AI 润色改动了关键标记: {', '.join(lost_literals)}",
+                "suggested": original
             }
 
         return {"safe": True, "reason": "", "suggested": polished}

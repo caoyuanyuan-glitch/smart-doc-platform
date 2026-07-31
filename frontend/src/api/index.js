@@ -212,7 +212,8 @@ export const polishAPI = {
       source_filename: sourceFilename || '',
       items: items || []
     }),
-  getFeedbackStats: () => instance.get('/polish/feedback/stats')
+  getFeedbackStats: () => instance.get('/polish/feedback/stats'),
+  getDocumentFeedbackStats: () => instance.get('/polish/feedback/document-stats')
 }
 
 export const qaAPI = {

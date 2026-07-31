@@ -7,8 +7,13 @@ def get_folder(db: Session, folder_id: int):
     return db.query(Folder).filter(Folder.id == folder_id).first()
 
 def get_folder_tree(db: Session, parent_id: int = None):
-    folders = db.query(Folder).filter(Folder.parent_id == parent_id).all()
-    result = []
+    folders = db.query(Folder).all()
+    files = db.query(KnowledgeFile).all()
+
+    folder_map = {}
+    children_map = {}
+    file_map = {}
+
     for folder in folders:
         folder_dict = {
             "id": folder.id,
@@ -17,27 +22,43 @@ def get_folder_tree(db: Session, parent_id: int = None):
             "created_by": folder.created_by,
             "created_at": folder.created_at,
             "updated_at": folder.updated_at,
-            "children": get_folder_tree(db, folder.id),
-            "files": [
-                {
-                    "id": f.id,
-                    "name": f.name,
-                    "filename": f.filename,
-                    "file_path": f.file_path,
-                    "file_size": f.file_size,
-                    "file_type": f.file_type,
-                    "permission": f.permission or "edit",
-                    "edit_scope": f.edit_scope or "all",
-                    "folder_id": f.folder_id,
-                    "created_by": f.created_by,
-                    "created_at": f.created_at,
-                    "updated_at": f.updated_at
-                }
-                for f in folder.files
-            ]
+            "children": [],
+            "files": [],
         }
-        result.append(folder_dict)
-    return result
+        folder_map[folder.id] = folder_dict
+        children_map.setdefault(folder.parent_id, []).append(folder.id)
+
+    for f in files:
+        file_map.setdefault(f.folder_id, []).append({
+            "id": f.id,
+            "name": f.name,
+            "filename": f.filename,
+            "file_path": f.file_path,
+            "file_size": f.file_size,
+            "file_type": f.file_type,
+            "permission": f.permission or "edit",
+            "edit_scope": f.edit_scope or "all",
+            "folder_id": f.folder_id,
+            "created_by": f.created_by,
+            "created_at": f.created_at,
+            "updated_at": f.updated_at,
+        })
+
+    def build_nodes(current_parent_id, path_ids=None):
+        result = []
+        current_path = set(path_ids or set())
+        for folder_id in children_map.get(current_parent_id, []):
+            if folder_id in current_path:
+                continue
+            folder_dict = dict(folder_map[folder_id])
+            next_path = set(current_path)
+            next_path.add(folder_id)
+            folder_dict["children"] = build_nodes(folder_id, next_path)
+            folder_dict["files"] = list(file_map.get(folder_id, []))
+            result.append(folder_dict)
+        return result
+
+    return build_nodes(parent_id)
 
 def get_folder_files(db: Session, folder_id: int):
     files = db.query(KnowledgeFile).filter(KnowledgeFile.folder_id == folder_id).all()

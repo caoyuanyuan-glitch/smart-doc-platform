@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import timedelta
 from difflib import SequenceMatcher
+import json
 import os
 import uuid
 import mimetypes
@@ -12,15 +13,17 @@ import re
 import threading
 import datetime
 import logging
+import hashlib
 from app.database import get_db
 from app.crud.document import get_document
 from app.crud.polished_document import (
     get_polished_documents, get_polished_document, create_polished_document, delete_polished_document
 )
-from app.api.auth import get_current_user, get_default_user
+from app.api.auth import get_current_user, get_current_user_optional, get_default_user
 from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
 from app.models.polish_feedback import PolishFeedback
+from app.models.polished_document import PolishedDocument
 from app.utils.file_utils import read_file_safe as _read_file_safe
 from app.utils.polish_rules_engine import apply_all_rules, apply_custom_rules
 from app.crud.polish_learning_rule import get_enabled_engine_keys, get_enabled_custom_rules, record_rule_triggers
@@ -413,6 +416,54 @@ def _resolve_terminology(db: Session, terminology_md: str = None, text: str = No
     return _load_terms_from_db(db)
 
 
+_DOC_AI_MAX_TEXT_LEN = 5000
+_DOC_AI_MAX_GUIDE_LEN = 9000
+_DOC_AI_MAX_TERM_COUNT = 120
+
+
+def _trim_terms_for_ai(term_dict: Optional[dict], text: str, max_items: int = _DOC_AI_MAX_TERM_COUNT) -> Optional[dict]:
+    """仅保留与当前文本相关的部分术语，降低模型上下文体积。"""
+    if not term_dict:
+        return term_dict
+
+    text = text or ""
+    text_lower = text.lower()
+    matched = []
+    remaining = []
+
+    for source, target in term_dict.items():
+        source_text = str(source or "").strip()
+        target_text = str(target or "").strip()
+        if not source_text or not target_text:
+            continue
+        source_lower = source_text.lower()
+        item = (source_text, target_text)
+        if source_text in text or source_lower in text_lower:
+            matched.append(item)
+        else:
+            remaining.append(item)
+
+    selected = matched[:max_items]
+    if len(selected) < max_items:
+        selected.extend(remaining[:max_items - len(selected)])
+    return dict(selected)
+
+
+def _should_skip_document_ai(text: str, style_guide: Optional[str], terminology: Optional[dict]) -> tuple[bool, str]:
+    """文档润色整篇送模前做体积保护，避免 8k 模型直接超限。"""
+    text_len = len(text or "")
+    guide_len = len(style_guide or "")
+    term_count = len(terminology or {})
+
+    if text_len > _DOC_AI_MAX_TEXT_LEN:
+        return True, f"文档正文过长({text_len})"
+    if guide_len > _DOC_AI_MAX_GUIDE_LEN:
+        return True, f"润色规则过长({guide_len})"
+    if term_count > _DOC_AI_MAX_TERM_COUNT:
+        return True, f"术语条目过多({term_count})"
+    return False, ""
+
+
 def _load_terminology_source(db: Session, terminology_id: int = None) -> Optional[str]:
     """加载术语来源。Excel 返回文件路径，其它文本文件返回文件内容。"""
     if not terminology_id:
@@ -436,6 +487,15 @@ TERMINOLOGY_FEEDBACK_FOLDER_IDS = [21]
 PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME = "平台反馈的术语对照表.md"
 PLATFORM_FEEDBACK_SENTENCE_RELATIVE_PATH = os.path.join("写作规范", "句式清单", "来自平台反馈", PLATFORM_FEEDBACK_FILENAME)
 PLATFORM_FEEDBACK_TERMINOLOGY_RELATIVE_PATH = os.path.join("资源库", "术语库", "来自平台反馈", PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME)
+PRIMARY_SENTENCE_GUIDE_FILENAMES = {
+    "DNBelab-D4RS_结构化句式库_操作步骤.md",
+}
+REFERENCE_SENTENCE_GUIDE_FILENAMES = {
+    "句式表达参考手册_建库试剂说明书.md",
+}
+BUNDLED_SENTENCE_GUIDE_RELATIVE_PATHS = [
+    os.path.join("static", "knowledge", "structured_sentence_guide_d4rs_operations.md"),
+]
 
 # 默认写作风格指南文件 ID（写作规范 / 写作风格指南 / 中文技术文档写作风格指南）
 # 内容已升级为 V2 完整规则体系（术语→句式→风格→微调四层 + 前置指令 + 禁用词）
@@ -468,14 +528,15 @@ def _build_document_polish_guide(
     parts = []
 
     # 1. 句式清单（优先匹配）
-    all_guides = _load_sentence_guides(db)
-    if all_guides:
-        parts.append(all_guides)
-    # 用户指定的句式文件附加进来（优先级更高）
-    if sentence_file_id and sentence_file_id != DEFAULT_STYLE_GUIDE_ID:
+    # 显式选择句式库时，仅加载该句式库及平台反馈，避免旧库与新库混用。
+    if sentence_file_id:
         selected_guide = _load_sentence_guides(db, style_guide_id=sentence_file_id)
         if selected_guide:
-            parts.append(selected_guide)
+            parts.append(f"{_CANDIDATE_RECALL_GUIDE_MARKER}\n\n{selected_guide}")
+    else:
+        all_guides = _load_sentence_guides(db)
+        if all_guides:
+            parts.append(f"{_CANDIDATE_RECALL_GUIDE_MARKER}\n\n{all_guides}")
 
     # 2. 用户额外的润色要求
     if requirements and requirements.strip():
@@ -484,14 +545,93 @@ def _build_document_polish_guide(
     # 3. 写作风格指南（统一使用 V2 完整规则）
     default_guide = _load_file_content(db, DEFAULT_STYLE_GUIDE_ID)
     if default_guide:
-        parts.append(default_guide)
+        parts.append(f"{_AI_STYLE_GUIDE_MARKER}\n\n{default_guide}")
 
     return "\n\n".join(parts) if parts else None
+
+
+def _candidate_recall_guide_text(guide_text: str) -> str:
+    value = str(guide_text or '')
+    if not value:
+        return ''
+    if _AI_STYLE_GUIDE_MARKER in value:
+        value = value.split(_AI_STYLE_GUIDE_MARKER, 1)[0]
+    if _CANDIDATE_RECALL_GUIDE_MARKER in value:
+        value = value.split(_CANDIDATE_RECALL_GUIDE_MARKER, 1)[1]
+    return value.strip()
+
+
+def _looks_like_title_or_noun_phrase(text: str) -> bool:
+    value = str(text or '').strip()
+    if not value:
+        return False
+    step_prefix, body = _split_step_prefix(value)
+    if body:
+        value = body
+    normalized = _normalize_sentence_for_match(value)
+    if len(value) <= 4:
+        return True
+    if step_prefix and len(value) <= 12 and len(normalized) <= 8 and not re.search(r'[，。；！？,;!?：:]', value):
+        short_title_suffixes = ('取出', '准备', '加载', '安装', '检查', '设置', '操作', '运行', '启动', '吸取', '扫码', '录入', '取样', '拆封', '开机', '关机')
+        if any(value.endswith(suffix) for suffix in short_title_suffixes):
+            return True
+    if value.endswith(('：', ':')):
+        return True
+    if re.match(r'^[\d一二三四五六七八九十]+[\.、\s]', value):
+        return True
+    verb_markers = [
+        '将', '请', '按', '点击', '选择', '输入', '打开', '关闭',
+        '启动', '停止', '设置', '检查', '确认', '安装', '连接',
+        '使用', '进行', '可以', '需要', '应该', '必须', '确保',
+        '按下', '旋转', '调节', '插入', '取出', '放置', '执行', '访问',
+        '查看', '显示', '支持', '提供', '包含', '通过', '根据',
+        '按照', '用于', '适用于', '分为',
+    ]
+    if _extract_sentence_intent(value).get('actions'):
+        return False
+    return not any(marker in value for marker in verb_markers)
+
+
+def _build_polish_debug_info(
+    sentence_file_id: Optional[int],
+    sentence_file_name: Optional[str],
+    sentence_guide: Optional[str],
+    terminology_file_id: Optional[int],
+    terminology_file_name: Optional[str],
+    skip_ai: bool,
+    skip_reason: str,
+    ai_polished: str,
+    pre_polished: str,
+    total_changes: int,
+    visible_changes: Optional[int] = None,
+    previous_polish_found: bool = False,
+    previous_new_change_count: int = 0,
+):
+    guide_text = sentence_guide or ""
+    return {
+        "sentence_file_id": sentence_file_id,
+        "sentence_file_name": sentence_file_name or "",
+        "sentence_guide_chars": len(guide_text),
+        "sentence_guide_sha1": hashlib.sha1(guide_text.encode("utf-8")).hexdigest()[:12] if guide_text else "",
+        "terminology_file_id": terminology_file_id,
+        "terminology_file_name": terminology_file_name or "",
+        "ai_skipped": skip_ai,
+        "ai_skip_reason": skip_reason or "",
+        "ai_changed": ai_polished != pre_polished,
+        "total_change_count": total_changes,
+        "visible_change_count": visible_changes if visible_changes is not None else total_changes,
+        "previous_polish_found": previous_polish_found,
+        "previous_new_change_count": previous_new_change_count,
+    }
 
 
 # 句式清单缓存
 _sentence_guide_cache: dict = {}
 _term_cache: dict = {}
+_CANDIDATE_RECALL_GUIDE_MARKER = '## 候选召回句式库'
+_AI_STYLE_GUIDE_MARKER = '## 仅供 AI 润色的通用风格指南'
+_STEP_PREFIX_PATTERN = re.compile(r'^((?:\d+[.、)]?)+(?:\s+|(?=[\u4e00-\u9fffA-Za-z(（])))\s*(.+)$')
+_DOC_REVIEW_REFERENCE_CANDIDATE_THRESHOLD = 75
 
 
 def _invalidate_sentence_guide_cache(style_guide_id: Optional[int] = None):
@@ -505,7 +645,179 @@ def _normalize_sentence_for_match(text: str) -> str:
     """去掉空白和常见标点，用于轻量句式相似度匹配。"""
     if not text:
         return ""
+    text = str(text).strip()
+    text = re.sub(r'^[\s*•·\-]+', '', text)
+    text = re.sub(r'\s*[（(][^()（）]*(?:图|表)[^()（）]*[）)]\s*$', '', text)
+    text = _canonicalize_sentence_for_template_match(text)
     return re.sub(r'[\s，。！？；：,.!?;:""''()（）【】\[\]<>《》-]+', '', text)
+
+
+def _split_step_prefix(text: str) -> tuple[str, str]:
+    value = str(text or '').strip()
+    if not value:
+        return '', ''
+    match = _STEP_PREFIX_PATTERN.match(value)
+    if not match:
+        return '', value
+    return match.group(1), (match.group(2) or '').strip()
+
+
+def _split_list_marker_prefix(text: str) -> tuple[str, str]:
+    value = str(text or '')
+    match = re.match(r'^(\s*[*\-•·]+\s*)(.+)$', value)
+    if not match:
+        return '', value.strip()
+    return match.group(1), match.group(2).strip()
+
+
+def _split_notice_prefix(text: str) -> tuple[str, str]:
+    value = str(text or '').strip()
+    match = re.match(r'^((?:请)?注意[：:])\s*(.+)$', value)
+    if not match:
+        return '', value
+    return match.group(1), match.group(2).strip()
+
+
+def _normalize_terminal_sentence_punctuation(text: str) -> str:
+    value = str(text or '').strip()
+    if not value:
+        return value
+    match = re.search(r'([。.!！？?]+)$', value)
+    if not match or len(match.group(1)) <= 1:
+        return value
+    return f"{value[:match.start(1)]}{match.group(1)[-1]}"
+
+
+def _reapply_sentence_prefix(original: str, suggestion: str) -> str:
+    result = str(suggestion or '').strip()
+    if not result:
+        return result
+
+    step_prefix, _ = _split_step_prefix(original)
+    if step_prefix and not result.startswith(step_prefix):
+        result = f'{step_prefix}{result}'
+
+    list_prefix, _ = _split_list_marker_prefix(original)
+    if list_prefix and not result.startswith(list_prefix):
+        result = f'{list_prefix}{result}'
+
+    notice_prefix, _ = _split_notice_prefix(original)
+    if notice_prefix and not result.startswith(notice_prefix):
+        result = f'{notice_prefix}{result}'
+
+    return _normalize_terminal_sentence_punctuation(result)
+
+
+def _normalize_visible_compare_text(text: str) -> str:
+    value = _normalize_compare_text(text)
+    _, value = _split_list_marker_prefix(value)
+    _, value = _split_notice_prefix(value)
+    step_prefix, body = _split_step_prefix(value)
+    if step_prefix and body:
+        value = body
+    return value.strip()
+
+
+def _normalize_document_feedback_key(text: str) -> str:
+    value = str(text or '').strip()
+    if not value:
+        return ''
+    document_match = re.match(r'^document:(\d+)(?::.*)?$', value)
+    if document_match:
+        return f"document:{document_match.group(1)}"
+    value = re.sub(r'^【修订标记版】', '', value)
+    value = re.sub(r'^\[修订标记版\]', '', value)
+    return value.strip()
+
+
+def _build_document_feedback_record_key(document_id: Optional[int], source_filename: str = '') -> str:
+    if document_id:
+        normalized_name = _normalize_document_feedback_key(source_filename)
+        return f"document:{document_id}:{normalized_name}" if normalized_name else f"document:{document_id}"
+    return _normalize_document_feedback_key(source_filename)
+
+
+def _document_feedback_record_aliases(record: PolishFeedback) -> set[str]:
+    raw_key = str(getattr(record, 'original_text', '') or '').strip()
+    normalized_key = _normalize_document_feedback_key(raw_key)
+    aliases = {normalized_key} if normalized_key else set()
+    document_match = re.match(r'^document:(\d+)(?::(.+))?$', raw_key)
+    if document_match:
+        aliases.add(f"document:{document_match.group(1)}")
+        filename_part = _normalize_document_feedback_key(document_match.group(2) or '')
+        if filename_part:
+            aliases.add(filename_part)
+    return {alias for alias in aliases if alias}
+
+
+def _latest_document_feedback_records(records: list[PolishFeedback]) -> list[PolishFeedback]:
+    latest_by_key = {}
+    for record in records or []:
+        aliases = _document_feedback_record_aliases(record)
+        if not aliases:
+            aliases = {f'feedback:{record.id}'}
+
+        previous_records = [latest_by_key.get(alias) for alias in aliases if latest_by_key.get(alias) is not None]
+        latest_record = record
+        for previous in previous_records:
+            if previous is not None and (previous.created_at, previous.id) > (latest_record.created_at, latest_record.id):
+                latest_record = previous
+
+        merged_aliases = set(aliases)
+        for previous in previous_records:
+            if previous is None:
+                continue
+            merged_aliases.update(_document_feedback_record_aliases(previous))
+
+        for alias in merged_aliases:
+            latest_by_key[alias] = latest_record
+
+    unique_records = {}
+    for record in latest_by_key.values():
+        unique_records[record.id] = record
+    return list(unique_records.values())
+
+
+def _document_feedback_stats(records: list[PolishFeedback]) -> dict:
+    latest_records = _latest_document_feedback_records(records)
+    total_submissions = len(latest_records)
+    if total_submissions == 0:
+        return {"total_submissions": 0, "average_accuracy": 0}
+
+    submission_ratios = []
+    for record in latest_records:
+        total_changes = record.processed_count or 0
+        if total_changes <= 0:
+            submission_ratios.append(0)
+            continue
+        submission_ratios.append((record.accuracy or 0) / total_changes)
+
+    average_accuracy = round((sum(submission_ratios) / total_submissions) * 100, 1)
+    return {"total_submissions": total_submissions, "average_accuracy": average_accuracy}
+
+
+def _normalize_polished_document_key(text: str) -> str:
+    return _normalize_document_feedback_key(text)
+
+
+def _find_previous_polished_document(db: Session, filename: str, created_by: Optional[int], file_type: str = 'docx') -> Optional[PolishedDocument]:
+    normalized_name = _normalize_polished_document_key(filename)
+    if not normalized_name:
+        return None
+    query = db.query(PolishedDocument)
+    if file_type:
+        query = query.filter(PolishedDocument.file_type == file_type)
+    if created_by is not None:
+        query = query.filter(PolishedDocument.created_by == created_by)
+    candidates = query.order_by(PolishedDocument.created_at.desc(), PolishedDocument.id.desc()).limit(50).all()
+    for doc in candidates:
+        doc_keys = {
+            _normalize_polished_document_key(doc.name),
+            _normalize_polished_document_key(doc.filename),
+        }
+        if normalized_name in doc_keys:
+            return doc
+    return None
 
 
 def _bigram_set(text: str) -> set:
@@ -536,6 +848,75 @@ def _lcs_ratio(a: str, b: str) -> float:
     return lcs_len / max(m, n)
 
 
+def _split_sentence_clauses(sentence: str) -> list[str]:
+    """按常见中文停顿符号拆分分句，用于长句与模板句的局部对齐。"""
+    if not sentence:
+        return []
+    text = re.sub(r'[。！？；!?;]+', '，', sentence)
+    return [clause.strip() for clause in re.split(r'[，,]+', text) if len(_normalize_sentence_for_match(clause)) >= 2]
+
+
+def _simplify_clause_for_match(sentence: str) -> str:
+    """去掉分句中的弱提示词，保留更有判别力的动作和对象。"""
+    text = _normalize_sentence_for_match(sentence)
+    if not text:
+        return ""
+
+    for pattern in [
+        '请注意', '注意', '请', '需要在', '需要', '需', '是否还有', '是否有', '还有', '以及', '且', '并',
+    ]:
+        text = text.replace(pattern, '')
+
+    text = text.replace('干冰剩余', '剩余干冰')
+    return text
+
+
+def _clause_similarity(a: str, b: str) -> float:
+    """计算分句级相似度，对模板扩写场景做更强的包含判断。"""
+    a_norm = _simplify_clause_for_match(a)
+    b_norm = _simplify_clause_for_match(b)
+    if not a_norm or not b_norm:
+        return 0.0
+    if a_norm == b_norm:
+        return 1.0
+
+    if a_norm in b_norm or b_norm in a_norm:
+        base = max(0.95, _lcs_ratio(a_norm, b_norm))
+    else:
+        bigram_score = 0.0
+        bigrams_a = _bigram_set(a_norm)
+        bigrams_b = _bigram_set(b_norm)
+        union = len(bigrams_a | bigrams_b)
+        if union > 0:
+            bigram_score = len(bigrams_a & bigrams_b) / union
+        base = 0.45 * bigram_score + 0.55 * _lcs_ratio(a_norm, b_norm)
+
+        source_ngrams = set()
+        for n in range(2, min(4, len(a_norm)) + 1):
+            source_ngrams.update(a_norm[i:i+n] for i in range(len(a_norm) - n + 1))
+        if source_ngrams:
+            covered = sum(1 for gram in source_ngrams if gram in b_norm)
+            coverage_score = covered / len(source_ngrams)
+            base = max(base, coverage_score)
+
+    if any(verb in a_norm and verb in b_norm for verb in _CORE_VERBS):
+        base += 0.05
+    return min(base, 1.0)
+
+
+def _clause_alignment_score(a: str, b: str) -> float:
+    """要求源句的每个关键分句都能在模板中找到对应片段。"""
+    clauses_a = _split_sentence_clauses(a)
+    clauses_b = _split_sentence_clauses(b)
+    if not clauses_a or not clauses_b:
+        return 0.0
+
+    best_scores = []
+    for clause_a in clauses_a:
+        best_scores.append(max(_clause_similarity(clause_a, clause_b) for clause_b in clauses_b))
+    return sum(best_scores) / len(best_scores)
+
+
 def _sentence_similarity(a: str, b: str) -> float:
     """
     计算两个中文句子的相似度（分段匹配）。
@@ -564,8 +945,15 @@ def _sentence_similarity(a: str, b: str) -> float:
     struct_score = _compare_sentence_structure(a, b)
     # 语义关键词重叠
     keyword_score = _compare_semantic_keywords(a, b)
+    clause_score = _clause_alignment_score(a, b)
     # 加权：bigram 0.3 + LCS 0.3 + 结构 0.2 + 关键词 0.2
     score = 0.3 * bigram_score + 0.3 * lcs_score + 0.2 * struct_score + 0.2 * keyword_score
+    if clause_score > 0:
+        score = max(score, 0.55 * score + 0.45 * clause_score)
+        if clause_score >= 0.9:
+            score = max(score, 0.88)
+        elif clause_score >= 0.82:
+            score = max(score, 0.84)
     # 高重合子串兜底：常规分不到 0.85 但最长公共子串覆盖 >=75% 时激活
     if score < 0.85:
         s = SequenceMatcher(None, a_norm, b_norm)
@@ -577,40 +965,212 @@ def _sentence_similarity(a: str, b: str) -> float:
     return min(score, 1.0)
 
 
+def _template_replace_guard(sentence: str, template: str, match_level: str, score: float) -> bool:
+    """控制句式模板自动替换，避免弱相关句子误命中。"""
+    if not template:
+        return False
+    sentence_norm = _normalize_sentence_for_match(sentence)
+    template_norm = _normalize_sentence_for_match(template)
+    if sentence_norm and len(sentence_norm) <= 8 and not re.search(r'[，。；！？,;!?]', sentence) and len(template_norm) >= len(sentence_norm) * 2:
+        return False
+    if match_level == 'L1':
+        return True
+
+    clause_score = _clause_alignment_score(sentence, template)
+    keyword_score = _compare_semantic_keywords(sentence, template)
+    structure_score = _compare_sentence_structure(sentence, template)
+    ui_object_score = _ui_action_object_score(sentence, template)
+    structured_score = _structured_match_score(sentence, template)
+    enumeration_score = _enumeration_overlap_score(sentence, template)
+    source_struct = _extract_sentence_structure(sentence)
+    template_struct = _extract_sentence_structure(template)
+    ui_verbs = ('点击', '选择', '打开', '关闭', '进入', '退出', '切换到', '输入')
+
+    if source_struct.get("pattern") == "操作UI元素" and template_struct.get("pattern") == "操作UI元素":
+        if ui_object_score < 0.28:
+            return False
+    if source_struct.get("pattern") == "操作UI元素" and template_struct.get("pattern") != "操作UI元素":
+        if any(verb in template for verb in ui_verbs):
+            return False
+    if _has_conflicting_critical_literals(sentence, template):
+        return False
+    if _has_inconsistent_model_spacing(sentence, template):
+        return False
+    if _looks_like_truncated_template(sentence, template):
+        return False
+
+    if structured_score['source']['conditions'] and structured_score['condition'] < 0.45:
+        return False
+    if structured_score['source']['actions'] and structured_score['action'] < 0.45:
+        return False
+    strong_condition_action = structured_score['condition'] >= 0.9 and structured_score['action'] >= 0.9 and structured_score['total'] >= 0.42
+    if structured_score['source']['pairs'] and structured_score['pair'] < 0.4 and not strong_condition_action:
+        return False
+    if structured_score['source']['objects'] and structured_score['object'] < 0.35:
+        return False
+    if _has_conflicting_action_object_pair(structured_score['source']['pairs'], structured_score['target']['pairs']):
+        return False
+    if _has_conflicting_reference_target(sentence, template):
+        return False
+    if not structured_score['source']['actions'] and len(_extract_enumeration_items(sentence)) >= 2 and enumeration_score < 0.72:
+        return False
+    if len(_extract_action_sequence(structured_score['source']['pairs'])) >= 3 and len(_extract_action_sequence(structured_score['target']['pairs'])) < len(_extract_action_sequence(structured_score['source']['pairs'])):
+        return False
+    if len(_extract_action_sequence(structured_score['source']['pairs'])) >= 2 and structured_score['sequence'] < 0.75 and not strong_condition_action:
+        return False
+    if _extract_action_targets(structured_score['source']['pairs'], '进入') and structured_score['ui_target'] < 0.55:
+        return False
+
+    if match_level == 'L2':
+        return score >= _POLISH_MATCH_CONFIG['l2_min_confidence'] and (
+            structured_score['total'] >= 0.55 or
+            clause_score >= 0.72 or
+            (clause_score >= 0.62 and keyword_score >= 0.18 and structured_score['total'] >= 0.45) or
+            (keyword_score >= 0.3 and structure_score >= 0.5)
+        )
+
+    if match_level == 'L3':
+        return score >= _POLISH_MATCH_CONFIG['l3_auto_confidence'] and (
+            (clause_score >= 0.82 and keyword_score >= 0.18 and structured_score['total'] >= 0.5) or
+            (structured_score['sequence'] >= 1.0 and structured_score['ui_target'] >= 0.9 and structured_score['total'] >= 0.68) or
+            (structured_score['condition'] >= 0.9 and structured_score['action'] >= 0.9 and structured_score['total'] >= 0.42) or
+            (structured_score['total'] >= 0.7 and keyword_score >= 0.35 and structured_score['pair'] >= 0.75)
+        )
+
+    return False
+
+
 # 核心动词列表（技术文档常见操作动词）
 _CORE_VERBS = {
     '置于', '放置', '安装', '对应', '匹配', '确保', '检查', '设置', '调整',
     '校准', '测量', '分析', '记录', '保存', '删除', '关闭', '打开', '启动',
     '停止', '连接', '断开', '输入', '输出', '读取', '写入', '扫描', '点击',
     '选择', '确认', '取消', '添加', '移除', '插入', '取出', '转移', '等待',
-    '观察', '核对', '撕开', '倒入', '拨至', '装入', '置于', '装填',
+    '观察', '核对', '撕开', '倒入', '拨至', '装入', '置于', '装填', '取下',
+    '录入', '进入', '回顾', '冻融', '混样', '见', '解冻', '混匀', '离心',
 }
 
 # 方位词列表
 _POSITION_WORDS = {'上', '下', '前', '后', '左', '右', '内', '外', '中', '间', '里', '旁', '侧'}
+_PRODUCT_NOUN_MARKERS = ('试剂盒套装', '试剂套装', '试剂盒', '试剂', '产品', '文库')
+
+_STRUCTURE_CONDITION_PREFIXES = ('当', '在', '若', '如果', '如', '待', '等到', '完成', '确认', '参数确认')
+_STRUCTURE_CONDITION_SUFFIXES = ('时', '后', '之后', '前', '情况下')
+_STRUCTURE_ACTION_VERBS = tuple(sorted(_CORE_VERBS | {'使用', '需使用', '点击', '检查', '确认', '输入', '进入', '组成', '构成', '包含', '包括'}, key=len, reverse=True))
+_STRUCTURE_OBJECT_STOPWORDS = {'进行', '完成', '实现', '执行', '操作', '处理', '对应', '相关', '界面上', '界面中'}
+_GENERIC_UI_MARKERS = {'按钮', '图标', '弹窗', '窗口', '界面', '页面', '标签', '选项', '菜单'}
+_OBJECT_PREFIX_PATTERNS = ('相对应的', '对应的', '适配的', '适用的', '相关的')
+
+
+def _normalize_product_subject(text: str) -> str:
+    value = _normalize_structure_text(text)
+    if not value:
+        return ''
+    value = re.sub(r'^(本|该)', '', value)
+    compact = re.sub(r'\s+', '', value)
+    if '试剂' in compact and '套装' in compact:
+        return '试剂套装'
+    if '试剂盒' in compact:
+        return '试剂盒'
+    if '试剂' in compact:
+        return '试剂'
+    if '产品' in compact:
+        return '产品'
+    if '文库' in compact:
+        return '文库'
+    return value
+
+
+def _extract_subject_markers(text: str) -> set[str]:
+    markers = set()
+    raw = str(text or '')
+    if not raw:
+        return markers
+    for match in re.findall(r'(?:本|该)?[\u4e00-\u9fffA-Za-z0-9\-\s]{0,40}(?:试剂盒套装|试剂套装|试剂盒|试剂|产品|文库)', raw):
+        normalized = _normalize_product_subject(match)
+        if normalized:
+            markers.add(normalized)
+    return markers
+
+
+def _extract_critical_literal_markers(text: str) -> set[str]:
+    markers = set()
+    raw = str(text or '')
+    if not raw:
+        return markers
+
+    compact = re.sub(r'\s+', '', raw)
+    for match in re.findall(r'(?:样本制备套件|试剂盒套装|试剂套装|套件|Box|BOX|盒|孔位|孔|通道|板|卡|槽位)\s*[A-Z](?![A-Za-z])', raw):
+        normalized = re.sub(r'\s+', '', match)
+        if normalized:
+            markers.add(normalized)
+
+    exact_phrases = (
+        '扫码枪',
+        '二维码',
+        '包装上的二维码',
+        '制备卡包装上的二维码',
+        '制备卡',
+        '样本制备系统',
+    )
+    for phrase in exact_phrases:
+        if phrase in compact:
+            markers.add(phrase)
+
+    return markers
+
+
+def _has_conflicting_critical_literals(sentence: str, template: str) -> bool:
+    source_markers = _extract_critical_literal_markers(sentence)
+    if not source_markers:
+        return False
+    target_markers = _extract_critical_literal_markers(template)
+    return not source_markers.issubset(target_markers)
 
 
 def _extract_semantic_keywords(sentence: str) -> list[str]:
-    """提取语义关键词：实体名词 + 核心动词 + 方位词。"""
-    keywords = []
-    text = _normalize_sentence_for_match(sentence)
-    if not text:
-        return keywords
-    # 提取 2-4 字连续中文字符作为名词实体
-    for match in re.finditer(r'[\u4e00-\u9fa5]{2,4}', text):
-        w = match.group()
-        # 过滤纯数字组合和无效片段
-        if w not in ('一个', '一些', '这个', '那个', '每个', '所有', '可以', '需要', '进行'):
-            keywords.append(w)
-    # 提取核心动词
-    for verb in _CORE_VERBS:
-        if verb in text:
-            keywords.append(verb)
-    # 提取方位词
+    """提取更稳健的语义锚点，避免把连续字片段误当术语。"""
+    raw = str(sentence or '').strip()
+    if not raw:
+        return []
+
+    keywords = set()
+    intent = _extract_sentence_intent(raw)
+    for token in intent.get('conditions', []) + intent.get('actions', []) + intent.get('objects', []):
+        normalized = _normalize_structure_text(token)
+        if len(normalized) >= 2:
+            keywords.add(normalized)
+
+    for token in _extract_result_units(raw) + _extract_additional_units(raw) + _extract_enumeration_items(raw):
+        normalized = _normalize_structure_text(token)
+        if len(normalized) >= 2:
+            keywords.add(normalized)
+
+    for match in re.findall(r'[A-Za-z0-9\-]{1,20}(?:按钮|图标|界面|页面|窗口)|[\u4e00-\u9fffA-Za-z0-9\-]{2,20}?(?:界面|页面|窗口|弹窗|按钮|图标|视频|说明书|指南|仓门|载台|制备卡|样本|试剂|产物|孔|盖板|移液器|油相|水相)', raw):
+        normalized = _normalize_structure_text(match)
+        if len(normalized) >= 2 and normalized not in _GENERIC_UI_MARKERS:
+            keywords.add(normalized)
+
+    for marker in _extract_reference_markers(raw):
+        if len(marker) >= 2:
+            keywords.add(marker)
+
+    for marker in _extract_subject_markers(raw):
+        if len(marker) >= 2:
+            keywords.add(marker)
+
+    for marker in _extract_critical_literal_markers(raw):
+        if len(marker) >= 2:
+            keywords.add(marker)
+
+    for marker in _extract_model_markers(raw).keys():
+        if len(marker) >= 4:
+            keywords.add(marker)
+
     for pw in _POSITION_WORDS:
-        if pw in text:
-            keywords.append(pw)
-    return list(set(keywords))
+        if pw in raw:
+            keywords.add(pw)
+    return list(keywords)
 
 
 def _compare_semantic_keywords(a: str, b: str) -> float:
@@ -624,16 +1184,728 @@ def _compare_semantic_keywords(a: str, b: str) -> float:
     return overlap / denominator if denominator > 0 else 0.0
 
 
+def _normalize_structure_text(text: str) -> str:
+    value = _normalize_sentence_for_match(text)
+    value = re.sub(r'^[\d.]+', '', value)
+    value = re.sub(r'^(请|需|需要|应|应该|必须|可|可以)', '', value)
+    value = re.sub(r'(即可|开始实验|开始操作|完成操作)$', '', value)
+    return value.strip()
+
+
+def _normalize_structure_object(text: str) -> str:
+    value = _normalize_structure_text(text)
+    if not value:
+        return ''
+    value = re.sub(r'^[\d.]+', '', value)
+    value = re.sub(r'^(?:在)?[^，。；]*?(?:时|后)', '', value)
+    value = re.sub(r'^(是否还有|是否有|还有|有无|是否)', '', value)
+    for word in sorted(_STRUCTURE_OBJECT_STOPWORDS, key=len, reverse=True):
+        if value.startswith(word):
+            value = value[len(word):]
+        if value.endswith(word):
+            value = value[:-len(word)]
+    value = re.sub(r'^(对应|相关|界面上|界面中)', '', value)
+    for prefix in _OBJECT_PREFIX_PATTERNS:
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    if re.search(r'(?:^|见)(?:上|下)?表\d*$', value) or re.fullmatch(r'(?:上|下)?表\d*', value):
+        return '表引用'
+    if re.search(r'(?:^|见)(?:上|下)?图\d*$', value) or re.fullmatch(r'(?:上|下)?图\d*', value):
+        return '图引用'
+    value = re.sub(r'(信息|内容)$', '', value)
+    return value.strip()
+
+
+def _is_generic_ui_object(text: str) -> bool:
+    normalized = _normalize_structure_object(text)
+    if not normalized:
+        return False
+    return normalized in _GENERIC_UI_MARKERS or normalized.endswith(tuple(_GENERIC_UI_MARKERS))
+
+
+def _normalize_structure_verb(text: str) -> str:
+    value = _normalize_structure_text(text)
+    verb_aliases = {
+        '观察': '检查',
+        '查看': '检查',
+        '核对': '检查',
+    }
+    return verb_aliases.get(value, value)
+
+
+def _extract_condition_units(sentence: str) -> list[str]:
+    conditions = []
+    for clause in _split_sentence_clauses(sentence):
+        clause_text = clause.strip('，,。；;：: ')
+        normalized = _normalize_structure_text(clause_text)
+        if not normalized:
+            continue
+        if normalized.startswith('在') and not re.search(r'(时|后|之前|前|情况下)$', normalized):
+            continue
+        if any(normalized.startswith(prefix) for prefix in _STRUCTURE_CONDITION_PREFIXES):
+            match = re.match(r'^(.+?(?:时|后|之前|前|情况下))', normalized)
+            conditions.append(match.group(1) if match else normalized)
+            continue
+        if re.search(r'(?:时|后|之前|前|情况下)$', normalized):
+            conditions.append(normalized)
+            continue
+        if any(suffix in normalized for suffix in _STRUCTURE_CONDITION_SUFFIXES) and any(prefix in normalized[:4] for prefix in _STRUCTURE_CONDITION_PREFIXES):
+            match = re.match(r'^(.+?(?:时|后|之前|前|情况下))', normalized)
+            conditions.append(match.group(1) if match else normalized)
+    return list(dict.fromkeys(conditions))
+
+
+def _extract_action_object_units(sentence: str) -> list[dict]:
+    pairs = []
+    seen = set()
+
+    def _append_pair(verb: str, obj: str):
+        verb_norm = _normalize_structure_verb(verb)
+        obj_norm = _normalize_structure_object(obj)
+        if not verb_norm:
+            return
+        key = (verb_norm, obj_norm)
+        if key in seen:
+            return
+        seen.add(key)
+        pairs.append({'verb': verb_norm, 'object': obj_norm})
+
+    struct = _extract_sentence_structure(sentence)
+    if struct.get('verb'):
+        _append_pair(struct.get('verb', ''), struct.get('object', '') or struct.get('subject', ''))
+
+    for clause in _split_sentence_clauses(sentence):
+        clause_text = clause.strip('，,。；;：: ')
+        normalized = _normalize_structure_text(clause_text)
+        if not normalized:
+            continue
+        composition_match = re.search(r'(.+?)由(.+?)(组成|构成|包装组成|包装构成|包装)$', normalized)
+        if composition_match:
+            _append_pair('组成', composition_match.group(2))
+            continue
+        ui_enter_match = re.search(r'(进入)(.+?(?:界面|页面|窗口))', normalized)
+        if ui_enter_match:
+            _append_pair(ui_enter_match.group(1), ui_enter_match.group(2))
+        for verb in _STRUCTURE_ACTION_VERBS:
+            if verb not in normalized:
+                continue
+            before, after = normalized.split(verb, 1)
+            if verb == '确认' and re.search(r'后(点击|进入|选择|打开|关闭|运行|run)', after):
+                continue
+            obj = re.sub(r'^(界面上|界面中|对应|相关)', '', after)
+            obj = re.sub(r'(开始实验|开始操作|即可)$', '', obj)
+            if not _normalize_structure_object(obj):
+                if verb in {'组成', '构成', '包装'}:
+                    continue
+                before_obj = re.sub(r'^[\d.]+', '', before)
+                before_obj = re.sub(r'(完成|确认无误|准备|结束)$', '', before_obj)
+                if before_obj and not before_obj.endswith(('后', '时', '前')):
+                    obj = before_obj
+            _append_pair(verb, obj)
+            break
+    return pairs
+
+
+def _extract_sentence_intent(sentence: str) -> dict:
+    action_pairs = _extract_action_object_units(sentence)
+    return {
+        'conditions': _extract_condition_units(sentence),
+        'actions': [item['verb'] for item in action_pairs if item.get('verb')],
+        'objects': [item['object'] for item in action_pairs if item.get('object')],
+        'pairs': action_pairs,
+    }
+
+
+def _extract_action_sequence(pairs: list[dict]) -> list[str]:
+    sequence = []
+    for pair in pairs or []:
+        verb = pair.get('verb', '')
+        if not verb or verb == '等待':
+            continue
+        if not sequence or sequence[-1] != verb:
+            sequence.append(verb)
+    return sequence
+
+
+def _extract_action_targets(pairs: list[dict], verb: str) -> list[str]:
+    targets = []
+    for pair in pairs or []:
+        if pair.get('verb', '') != verb:
+            continue
+        obj = pair.get('object', '')
+        if obj and obj not in targets:
+            targets.append(obj)
+    return targets
+
+
+def _object_item_count(text: str) -> int:
+    value = _normalize_structure_object(text)
+    if not value:
+        return 0
+    parts = [part for part in re.split(r'[、,，以及和与及]', value) if part]
+    return len(parts) if parts else 0
+
+
+def _extract_enumeration_items(sentence: str) -> list[str]:
+    text = _normalize_sentence_for_match(sentence)
+    if not text:
+        return []
+    if '适用于' in text:
+        text = text.split('适用于', 1)[1]
+    text = re.split(r'[。；;：:]', text, 1)[0]
+    raw_parts = [part.strip() for part in re.split(r'[、,，]', text) if part.strip()]
+    items = []
+    for part in raw_parts:
+        value = re.sub(r'^(以及|和|与|及)', '', part)
+        value = re.sub(r'(等|样本|检测)$', '', value)
+        value = value.strip()
+        if len(value) >= 1:
+            items.append(value)
+    return items
+
+
+def _enumeration_overlap_score(source: str, template: str) -> float:
+    source_items = _extract_enumeration_items(source)
+    template_items = _extract_enumeration_items(template)
+    if len(source_items) < 2 or len(template_items) < 2:
+        return 0.0
+    scores = []
+    for source_item in source_items:
+        best = 0.0
+        for target_item in template_items:
+            if source_item == target_item:
+                best = 1.0
+                break
+            if source_item in target_item or target_item in source_item:
+                best = max(best, 0.92)
+                continue
+            best = max(best, _clause_similarity(source_item, target_item))
+        scores.append(best)
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _normalize_reference_marker(text: str) -> str:
+    value = _normalize_structure_text(text)
+    compact = re.sub(r'\s+', '', value.lower())
+    if re.search(r'(?:上|下)?表\d*', compact):
+        return '表引用'
+    if re.search(r'(?:上|下)?图\d*', compact):
+        return '图引用'
+    value = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff]+', '', value)
+    return value.lower()
+
+
+def _extract_reference_markers(text: str) -> set[str]:
+    markers = set()
+    raw = str(text or '')
+    if not raw:
+        return markers
+
+    for title in re.findall(r'《([^》]+)》', raw):
+        marker = _normalize_reference_marker(title)
+        if len(marker) >= 4:
+            markers.add(marker)
+
+    for code in re.findall(r'[A-Za-z]-?\d{3}-?\d{3,}-?\d{2,}', raw):
+        marker = _normalize_reference_marker(code)
+        if len(marker) >= 6:
+            markers.add(marker)
+
+    for ref in re.findall(r'(?:见)?(?:上|下)?(?:表|图)\s*\d*', raw):
+        marker = _normalize_reference_marker(ref)
+        if marker:
+            markers.add(marker)
+
+    if any(token in raw for token in ('下表', '见表', '表1', '表 1', '见图', '下图', '图1', '图 1')):
+        for token in ('表引用', '图引用'):
+            if token[0] in raw:
+                markers.add(token)
+
+    return markers
+
+
+def _has_conflicting_reference_target(sentence: str, template: str) -> bool:
+    template_markers = _extract_reference_markers(template)
+    if not template_markers:
+        return False
+    source_markers = _extract_reference_markers(sentence)
+    if source_markers & template_markers:
+        return False
+    source_has_reference = any(keyword in sentence for keyword in ('说明书', '操作指南', '参考'))
+    return source_has_reference
+
+
+def _action_sequence_score(source_pairs: list[dict], target_pairs: list[dict]) -> float:
+    source_seq = _extract_action_sequence(source_pairs)
+    target_seq = _extract_action_sequence(target_pairs)
+    if not source_seq or not target_seq:
+        return 0.0
+    if source_seq == target_seq:
+        return 1.0
+    matched = 0
+    cursor = 0
+    for verb in source_seq:
+        for idx in range(cursor, len(target_seq)):
+            if target_seq[idx] == verb:
+                matched += 1
+                cursor = idx + 1
+                break
+    return matched / max(len(source_seq), len(target_seq))
+
+
+def _token_overlap_score(source_tokens: list[str], target_tokens: list[str]) -> float:
+    if not source_tokens or not target_tokens:
+        return 0.0
+    scores = []
+    for source in source_tokens:
+        best = 0.0
+        for target in target_tokens:
+            if not source or not target:
+                continue
+            if source == target:
+                best = 1.0
+                break
+            if source in target or target in source:
+                best = max(best, 0.92)
+                continue
+            best = max(best, _clause_similarity(source, target))
+        scores.append(best)
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _marker_overlap_score(source_markers: set[str], target_markers: set[str]) -> float:
+    if not source_markers or not target_markers:
+        return 0.0
+    intersection = len(source_markers & target_markers)
+    denominator = max(len(source_markers), len(target_markers))
+    return intersection / denominator if denominator > 0 else 0.0
+
+
+def _edit_distance_score(sentence: str, template: str) -> float:
+    source = _normalize_sentence_for_match(sentence)
+    target = _normalize_sentence_for_match(template)
+    if not source or not target:
+        return 0.0
+    if source == target:
+        return 1.0
+    return SequenceMatcher(None, source, target).ratio()
+
+
+def _extract_placeholder_markers(text: str) -> set[str]:
+    markers = set()
+    raw = str(text or '')
+    if not raw:
+        return markers
+    patterns = [
+        r'\{[^{}]{1,40}\}',
+        r'<[^<>]{1,40}>',
+        r'\[[^\[\]]{1,40}\]',
+        r'%\([^)]+\)[a-zA-Z]',
+        r'%[sdif]',
+        r':[A-Za-z_][A-Za-z0-9_]*',
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, raw):
+            normalized = re.sub(r'\s+', '', str(match).lower())
+            if normalized:
+                markers.add(normalized)
+    return markers
+
+
+def _extract_term_anchor_markers(text: str, structured_score: dict = None) -> set[str]:
+    markers = set()
+    raw = str(text or '')
+    if not raw:
+        return markers
+    structured = structured_score['source'] if structured_score and 'source' in structured_score else _extract_sentence_intent(raw)
+    for token in _extract_semantic_keywords(raw):
+        normalized = _normalize_structure_text(token).lower()
+        if normalized:
+            markers.add(normalized)
+    for group in ('conditions', 'actions', 'objects'):
+        for token in structured.get(group, []) or []:
+            normalized = _normalize_structure_text(token).lower()
+            if normalized:
+                markers.add(normalized)
+    for token in _extract_result_units(raw):
+        normalized = _normalize_structure_text(token).lower()
+        if normalized:
+            markers.add(normalized)
+    for token in _extract_enumeration_items(raw):
+        normalized = _normalize_structure_text(token).lower()
+        if normalized:
+            markers.add(normalized)
+    markers.update(_extract_subject_markers(raw))
+    markers.update(_extract_ui_markers(raw))
+    markers.update(_extract_reference_markers(raw))
+    markers.update(_extract_model_markers(raw).keys())
+    return {marker for marker in markers if marker}
+
+
+def _term_anchor_score(sentence: str, template: str, structured_score: dict = None) -> float:
+    source_struct = structured_score or _structured_match_score(sentence, template)
+    source_markers = _extract_term_anchor_markers(sentence, {'source': source_struct.get('source', {})})
+    target_markers = _extract_term_anchor_markers(template, {'source': source_struct.get('target', {})})
+    scores = []
+    if source_markers or target_markers:
+        scores.append(_marker_overlap_score(source_markers, target_markers))
+    ui_score = _marker_overlap_score(_extract_ui_markers(sentence), _extract_ui_markers(template))
+    if _extract_ui_markers(sentence) or _extract_ui_markers(template):
+        scores.append(ui_score)
+    reference_score = _marker_overlap_score(_extract_reference_markers(sentence), _extract_reference_markers(template))
+    if _extract_reference_markers(sentence) or _extract_reference_markers(template):
+        scores.append(reference_score)
+    model_score = _marker_overlap_score(set(_extract_model_markers(sentence).keys()), set(_extract_model_markers(template).keys()))
+    if _extract_model_markers(sentence) or _extract_model_markers(template):
+        scores.append(model_score)
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _number_placeholder_score(sentence: str, template: str) -> float:
+    scores = []
+    source_numbers = _extract_numeric_markers(sentence)
+    target_numbers = _extract_numeric_markers(template)
+    if source_numbers or target_numbers:
+        scores.append(_marker_overlap_score(source_numbers, target_numbers))
+    source_placeholders = _extract_placeholder_markers(sentence)
+    target_placeholders = _extract_placeholder_markers(template)
+    if source_placeholders or target_placeholders:
+        scores.append(_marker_overlap_score(source_placeholders, target_placeholders))
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _context_match_score(sentence: str, template: str, template_metadata=None, structured_score: dict = None) -> float:
+    structured = structured_score or _structured_match_score(sentence, template)
+    source_pairs = structured.get('source', {}).get('pairs', [])
+    target_pairs = structured.get('target', {}).get('pairs', [])
+    scores = []
+    source_conditions = structured.get('source', {}).get('conditions') or []
+    target_conditions = structured.get('target', {}).get('conditions') or []
+    source_sequence = _extract_action_sequence(source_pairs)
+    target_sequence = _extract_action_sequence(target_pairs)
+    source_ui_targets = _extract_action_targets(source_pairs, '进入')
+    target_ui_targets = _extract_action_targets(target_pairs, '进入')
+
+    if source_conditions and target_conditions:
+        scores.append(structured.get('condition', 0.0))
+    if len(source_sequence) >= 2 and len(target_sequence) >= 2:
+        scores.append(structured.get('sequence', 0.0))
+    if source_ui_targets and target_ui_targets:
+        scores.append(structured.get('ui_target', 0.0))
+    if scores and isinstance(template_metadata, dict) and template_metadata.get('total', 0.0) > 0:
+        scores.append(template_metadata.get('total', 0.0))
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _action_object_pair_score(source_pairs: list[dict], target_pairs: list[dict]) -> float:
+    if not source_pairs or not target_pairs:
+        return 0.0
+    scores = []
+    for source in source_pairs:
+        best = 0.0
+        source_verb = source.get('verb', '')
+        source_object = source.get('object', '')
+        for target in target_pairs:
+            target_verb = target.get('verb', '')
+            target_object = target.get('object', '')
+            verb_score = 0.0
+            if source_verb and target_verb:
+                if source_verb == target_verb:
+                    verb_score = 1.0
+                elif source_verb in target_verb or target_verb in source_verb:
+                    verb_score = 0.9
+            object_score = 0.0
+            if source_object and target_object:
+                if source_object == target_object:
+                    object_score = 1.0
+                elif source_object in target_object or target_object in source_object:
+                    object_score = 0.94
+                else:
+                    object_score = max(_clause_similarity(source_object, target_object), _compare_semantic_keywords(source_object, target_object))
+                if _is_generic_ui_object(source_object) or _is_generic_ui_object(target_object):
+                    object_score = min(object_score, 0.35)
+                if object_score < 0.35:
+                    continue
+            elif not source_object:
+                object_score = 0.7
+            if verb_score <= 0:
+                continue
+            pair_score = 0.6 * verb_score + 0.4 * object_score
+            if source_verb == '点击' and (_is_generic_ui_object(source_object) or _is_generic_ui_object(target_object)):
+                pair_score = min(pair_score, 0.45)
+            best = max(best, pair_score)
+        scores.append(best)
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _has_conflicting_action_object_pair(source_pairs: list[dict], target_pairs: list[dict]) -> bool:
+    if not source_pairs or not target_pairs:
+        return False
+    for source in source_pairs:
+        source_verb = source.get('verb', '')
+        source_object = source.get('object', '')
+        if not source_verb or not source_object:
+            continue
+        same_verb_targets = [target for target in target_pairs if target.get('verb', '') == source_verb]
+        if not same_verb_targets:
+            continue
+        source_item_count = _object_item_count(source_object)
+        if source_item_count >= 2:
+            target_item_counts = [_object_item_count(target.get('object', '')) for target in same_verb_targets if target.get('object', '')]
+            if target_item_counts and max(target_item_counts) < source_item_count:
+                return True
+        object_scores = []
+        for target in same_verb_targets:
+            target_object = target.get('object', '')
+            if not target_object:
+                continue
+            if source_verb == '点击' and ('按钮' in source_object or '按钮' in target_object):
+                continue
+            if source_object == target_object:
+                object_scores.append(1.0)
+                continue
+            if source_object in target_object or target_object in source_object:
+                object_scores.append(0.94)
+                continue
+            object_scores.append(max(_clause_similarity(source_object, target_object), _compare_semantic_keywords(source_object, target_object)))
+        if object_scores and max(object_scores) < 0.35:
+            return True
+    return False
+
+
+def _ui_target_score(source_pairs: list[dict], target_pairs: list[dict]) -> float:
+    source_targets = _extract_action_targets(source_pairs, '进入')
+    target_targets = _extract_action_targets(target_pairs, '进入')
+    return _token_overlap_score(source_targets, target_targets)
+
+
+def _structured_match_score(sentence: str, template: str) -> dict:
+    source_intent = _extract_sentence_intent(sentence)
+    template_intent = _extract_sentence_intent(template)
+    condition_score = _token_overlap_score(source_intent['conditions'], template_intent['conditions'])
+    action_score = _token_overlap_score(source_intent['actions'], template_intent['actions'])
+    object_score = _token_overlap_score(source_intent['objects'], template_intent['objects'])
+    pair_score = _action_object_pair_score(source_intent['pairs'], template_intent['pairs'])
+    action_sequence_score = _action_sequence_score(source_intent['pairs'], template_intent['pairs'])
+    ui_target_score = _ui_target_score(source_intent['pairs'], template_intent['pairs'])
+    if any(_is_generic_ui_object(item) for item in source_intent['objects'] + template_intent['objects']):
+        ui_overlap = _marker_overlap_score(_extract_ui_markers(sentence), _extract_ui_markers(template))
+        if ui_overlap <= 0:
+            object_score = min(object_score, 0.35)
+            pair_score = min(pair_score, 0.45)
+    has_signal = any(source_intent[key] for key in ('conditions', 'actions', 'objects'))
+    total = 0.0 if not has_signal else 0.28 * pair_score + 0.18 * condition_score + 0.14 * action_score + 0.1 * object_score + 0.15 * action_sequence_score + 0.15 * ui_target_score
+    return {
+        'total': total,
+        'condition': condition_score,
+        'action': action_score,
+        'object': object_score,
+        'pair': pair_score,
+        'sequence': action_sequence_score,
+        'ui_target': ui_target_score,
+        'source': source_intent,
+        'target': template_intent,
+    }
+
+
+def _extract_numeric_markers(text: str) -> set[str]:
+    markers = set()
+    raw = str(text or '')
+    if not raw:
+        return markers
+    pattern = rf'\d+(?:\.\d+)?\s*(?:{_NUMBER_SPACE_UNITS})?'
+    for match in re.findall(pattern, raw, flags=re.IGNORECASE):
+        normalized = re.sub(r'\s+', '', str(match).lower())
+        if normalized:
+            markers.add(normalized)
+    return markers
+
+
+def _extract_ui_markers(text: str) -> set[str]:
+    markers = set()
+    raw = str(text or '')
+    for match in re.findall(r'【[^】]{1,20}】|[\u4e00-\u9fffA-Za-z0-9\-]{2,20}?(?:界面|页面|窗口|弹窗|按钮|图标|下拉框|下拉箭头|下拉列表|列表)', raw):
+        normalized = _normalize_ui_object(match)
+        if normalized:
+            markers.add(normalized)
+    for pair in _extract_action_object_units(text):
+        verb = pair.get('verb', '')
+        obj = pair.get('object', '')
+        if verb not in {'点击', '选择', '打开', '关闭', '进入', '切换到', '输入', '运行', '启动'}:
+            continue
+        normalized = _normalize_ui_object(obj)
+        if normalized:
+            markers.add(normalized)
+    return markers
+
+
+def _extract_model_markers(text: str) -> dict[str, set[str]]:
+    markers = {}
+    raw = str(text or '')
+    if not raw:
+        return markers
+    for match in re.findall(r'[A-Za-z]+(?:-[A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)*)+', raw):
+        compact = re.sub(r'\s+', '', _protect_model_numbers(match).strip()).lower()
+        if not compact:
+            continue
+        markers.setdefault(compact, set()).add(' '.join(match.split()))
+    return markers
+
+
+def _has_inconsistent_model_spacing(sentence: str, template: str) -> bool:
+    source_markers = _extract_model_markers(sentence)
+    target_markers = _extract_model_markers(template)
+    if not source_markers or not target_markers:
+        return False
+    for key in source_markers.keys() & target_markers.keys():
+        source_forms = source_markers.get(key, set())
+        target_forms = target_markers.get(key, set())
+        if source_forms == target_forms:
+            continue
+        if any(' ' in value for value in source_forms | target_forms):
+            return True
+    return False
+
+
+def _looks_like_truncated_template(sentence: str, template: str) -> bool:
+    sentence_norm = _normalize_sentence_for_match(sentence)
+    template_norm = _normalize_sentence_for_match(template)
+    if not sentence_norm or not template_norm:
+        return False
+    if len(sentence_norm) < 20 or len(template_norm) >= len(sentence_norm):
+        return False
+    if not sentence_norm.startswith(template_norm):
+        return False
+    if len(template_norm) >= int(len(sentence_norm) * 0.9):
+        return False
+    return not re.search(r'[。！？.!?]$', str(template or '').strip())
+
+
+def _source_marker_coverage_ratio(sentence: str, template: str) -> float:
+    source_markers = _extract_candidate_topic_markers(sentence)
+    target_markers = _extract_candidate_topic_markers(template)
+    if not source_markers or not target_markers:
+        return 0.0
+    return len(source_markers & target_markers) / max(len(source_markers), 1)
+
+
+def _has_insufficient_step_coverage(sentence: str, template: str, structured: dict) -> bool:
+    source_clauses = _split_sentence_clauses(sentence)
+    target_clauses = _split_sentence_clauses(template)
+    if len(source_clauses) < 2:
+        return False
+    if len(target_clauses) >= len(source_clauses):
+        return False
+    source_pairs = structured.get('source', {}).get('pairs', [])
+    target_pairs = structured.get('target', {}).get('pairs', [])
+    sequence_score = structured.get('sequence', 0.0)
+    if len(source_pairs) >= 2 and len(target_pairs) < len(source_pairs) and sequence_score < 0.75:
+        return True
+    tail_clauses = source_clauses[len(target_clauses):]
+    if not tail_clauses:
+        tail_clauses = source_clauses[1:]
+    if not tail_clauses:
+        return False
+    best_tail_score = max((_clause_similarity(clause, template) for clause in tail_clauses), default=0.0)
+    return best_tail_score < 0.45
+
+
+def _has_missing_additional_context(sentence: str, template: str) -> bool:
+    source_units = _extract_additional_units(sentence)
+    if not source_units:
+        return False
+    target_units = _extract_additional_units(template)
+    return _token_overlap_score(source_units, target_units) < 0.4
+
+
+def _collect_match_penalties(sentence: str, template: str, structured_score: dict = None) -> dict:
+    structured = structured_score or _structured_match_score(sentence, template)
+    penalty = 0.0
+    reasons = []
+
+    source_numbers = _extract_numeric_markers(sentence)
+    target_numbers = _extract_numeric_markers(template)
+    if source_numbers and target_numbers and not (source_numbers & target_numbers):
+        penalty += 0.2
+        reasons.append('数字/单位不一致')
+
+    source_ui = _extract_ui_markers(sentence)
+    target_ui = _extract_ui_markers(template)
+    if source_ui and target_ui and not (source_ui & target_ui):
+        penalty += 0.15
+        reasons.append('UI 控件不一致')
+
+    source_actions = structured['source'].get('actions', [])
+    target_actions = structured['target'].get('actions', [])
+    if source_actions and target_actions and structured.get('action', 0.0) < 0.5:
+        penalty += 0.12
+        reasons.append('动作不一致')
+
+    source_objects = structured['source'].get('objects', [])
+    target_objects = structured['target'].get('objects', [])
+    if source_objects and target_objects and structured.get('object', 0.0) < 0.45:
+        penalty += 0.18
+        reasons.append('对象不一致')
+
+    if _has_conflicting_action_object_pair(structured['source'].get('pairs', []), structured['target'].get('pairs', [])):
+        penalty += 0.1
+        reasons.append('动作对象冲突')
+
+    if _has_insufficient_step_coverage(sentence, template, structured):
+        penalty += 0.16
+        reasons.append('步骤覆盖不足')
+
+    if _has_missing_additional_context(sentence, template):
+        penalty += 0.08
+        reasons.append('附加信息缺失')
+
+    marker_coverage = _source_marker_coverage_ratio(sentence, template)
+    if (
+        len(_extract_candidate_topic_markers(sentence)) >= 2 and
+        marker_coverage < 0.34 and
+        structured.get('pair', 0.0) < 0.7 and
+        _term_anchor_score(sentence, template, structured) < 0.18 and
+        _context_match_score(sentence, template, None, structured) < 0.25
+    ):
+        penalty += 0.14
+        reasons.append('主题锚点覆盖不足')
+
+    if _has_inconsistent_model_spacing(sentence, template):
+        penalty += 0.22
+        reasons.append('产品型号空格不一致')
+
+    if _looks_like_truncated_template(sentence, template):
+        penalty += 0.28
+        reasons.append('模板疑似残句')
+
+    return {
+        'score_penalty': min(penalty, 0.45),
+        'reasons': reasons,
+    }
+
+
 def _extract_sentence_structure(sentence: str) -> dict:
     """提取中文技术文档句子的主谓宾结构。"""
     struct = {"verb": "", "subject": "", "object": "", "pattern": ""}
     text = sentence.strip()
-    # 模式1: "将A置于B上/中" 或 "将A放置于B"
-    m = re.search(r'将(.+?)(置于|放置于|放置在|放入|装到|插入|转移到|拨至|倒[入进])(.+?)([上中下内外]|位置)?', text)
+    # 模式0: "X由Y组成/构成/包装" 或 "本产品由Y组成"
+    m = re.search(r'(.+?)(?:由)(.+?)(组成|构成|包装组成|包装构成|包装)$', text.rstrip('。；;：: '))
     if m:
+        struct["verb"] = '组成'
+        struct["subject"] = _normalize_product_subject(m.group(1))
+        struct["object"] = m.group(2).strip()
+        struct["pattern"] = "X由Y组成"
+        return struct
+    # 模式1: "将A置于B上/中" 或 "将A放置于B"
+    m = re.search(r'将(.+?)(置于|放置于|放置在|放入|装到|插入|转移到|拨至|倒[入进])([^，。；！？]+)', text)
+    if m:
+        raw_object = m.group(3).strip()
+        object_match = re.match(r'(.+?(?:位置|[上中下内外]))(?:[)）】\].]*)?$', raw_object)
+        if object_match:
+            raw_object = object_match.group(1)
         struct["verb"] = m.group(2)
         struct["subject"] = m.group(1)
-        struct["object"] = m.group(3) + (m.group(4) or '')
+        struct["object"] = raw_object
         struct["pattern"] = "将X置于Y"
         return struct
     # 模式2: "确保A与B一致/对应" 或 "检查A与B匹配"
@@ -685,13 +1957,77 @@ def _compare_sentence_structure(a: str, b: str) -> float:
     return max(score, 0.0)
 
 
+def _normalize_ui_object(text: str) -> str:
+    value = re.sub(r'^[\s，。；：、,.!?;:()（）【】\[\]<>《》]+', '', text or '')
+    value = re.sub(r'[\s，。；：、,.!?;:()（）【】\[\]<>《》]+$', '', value)
+    if any(token in value for token in ('下拉框', '下拉箭头', '下拉列表', '弹出的列表', '弹出列表')):
+        return '下拉控件'
+    bracket_match = re.search(r'【([^】]{1,20})】', value)
+    if bracket_match:
+        return _normalize_sentence_for_match(bracket_match.group(1))
+    specific_matches = [
+        match for match in re.findall(r'[\u4e00-\u9fffA-Za-z0-9\-]{2,20}?(?:界面|页面|窗口|弹窗|按钮|图标|下拉框|下拉箭头|下拉列表|列表)', value)
+        if not re.search(r'(点击|选择|打开|关闭|进入|切换|输入|运行|启动)', match)
+    ]
+    if specific_matches:
+        value = max(specific_matches, key=len)
+    elif re.search(r'(点击|选择|打开|关闭|进入|切换|输入|运行|启动)', value):
+        return ''
+    if value.startswith('在') and value.endswith(('界面', '页面', '窗口')):
+        value = value[1:]
+    normalized = _normalize_sentence_for_match(value)
+    return '' if normalized in _GENERIC_UI_MARKERS else normalized
+
+
+def _ui_action_object_score(sentence: str, template: str) -> float:
+    source_struct = _extract_sentence_structure(sentence)
+    template_struct = _extract_sentence_structure(template)
+    if source_struct.get("pattern") != "操作UI元素":
+        return 1.0
+    if template_struct.get("pattern") != "操作UI元素":
+        return 1.0
+
+    source_object = _normalize_ui_object(source_struct.get("object", ""))
+    template_object = _normalize_ui_object(template_struct.get("object", ""))
+
+    if not template_object:
+        return 0.0
+    if source_struct.get("verb") and template_struct.get("verb") and source_struct.get("verb") != template_struct.get("verb"):
+        return 0.0
+    if not source_object:
+        return 0.0
+
+    return max(
+        _lcs_ratio(source_object, template_object),
+        _compare_semantic_keywords(source_object, template_object),
+    )
+
+
 def _generate_sentence_variants(sentence: str) -> list[str]:
     """为精确匹配生成句子的多种变体。"""
     variants = [sentence]
     text = sentence.strip()
+    text_without_prefix = re.sub(r'^((?:\d+[.、)]?)+(?:\s+|(?=[\u4e00-\u9fffA-Za-z(（])))\s*', '', text)
+    if text_without_prefix and text_without_prefix != text:
+        variants.append(text_without_prefix)
+    canonical = _canonicalize_sentence_for_template_match(text)
+    if canonical and canonical != text:
+        variants.append(canonical)
+    canonical_without_prefix = _canonicalize_sentence_for_template_match(text_without_prefix)
+    if canonical_without_prefix and canonical_without_prefix != canonical:
+        variants.append(canonical_without_prefix)
     # 去掉标点
     no_punct = re.sub(r'[，。！？；：、,.!?;:""''()（）【】\[\]<>《》]+', '', text)
     variants.append(no_punct)
+    canonical_no_punct = re.sub(r'[，。！？；：、,.!?;:""''()（）【】\[\]<>《》]+', '', canonical)
+    if canonical_no_punct and canonical_no_punct != no_punct:
+        variants.append(canonical_no_punct)
+    no_prefix_no_punct = re.sub(r'[，。！？；：、,.!?;:""''()（）【】\[\]<>《》]+', '', text_without_prefix)
+    if no_prefix_no_punct and no_prefix_no_punct != no_punct:
+        variants.append(no_prefix_no_punct)
+    canonical_without_prefix_no_punct = re.sub(r'[，。！？；：、,.!?;:""''()（）【】\[\]<>《》]+', '', canonical_without_prefix)
+    if canonical_without_prefix_no_punct and canonical_without_prefix_no_punct != canonical_no_punct:
+        variants.append(canonical_without_prefix_no_punct)
     # 统一空格
     unified = ' '.join(text.split())
     if unified != text:
@@ -711,6 +2047,25 @@ _CONSTRAINT_TERMINOLOGY = {
     "滞留时间": "保留时间",
 }
 
+_MATCH_CANONICAL_REPLACEMENTS = {
+    "机器推板": "载台",
+    "仪器载台": "载台",
+    "水平放置于": "水平置于",
+    "平置于": "水平置于",
+    "平置在": "水平置于",
+    "放置于": "置于",
+    "放置在": "置于",
+    "机器": "载台",
+    "仪器": "载台",
+}
+
+
+def _canonicalize_sentence_for_template_match(sentence: str) -> str:
+    text = sentence or ''
+    for source, target in sorted(_MATCH_CANONICAL_REPLACEMENTS.items(), key=lambda item: len(item[0]), reverse=True):
+        text = text.replace(source, target)
+    return text
+
 _COLLOQUIAL_PATTERNS = [
     (r'一下', ''),
     (r'的话', ''),
@@ -718,13 +2073,579 @@ _COLLOQUIAL_PATTERNS = [
 
 _SYNTAX_OPTIMIZATIONS = [
     (r'要与(.+?)对应', r'确保与\1一致'),
-    (r'(.+?[^：：因])\s*为\s*(.+)', r'\1：\2'),
 ]
+
+_NUMBER_SPACE_UNITS = r'r/min|kHz|MHz|GHz|kPa|MPa|kVA|mA|mV|kV|kW|MW|kN|min|rpm|bp|mL|μL|µL|uL|μg|µg|mg|ng|kg|μm|µm|mm|cm|°C|℃|Hz|Pa|VA|mM|μM|µM|nM|%|m|L|g|V|A|W|N|s|h|M'
+
+
+def _rewrite_field_style_sentence(sentence: str) -> str:
+    text = (sentence or '').strip()
+    if not text or any(punct in text for punct in '，,；;！？!?'):
+        return sentence
+
+    match = re.match(r'^(?P<left>[^：:。]{1,20}?)\s*为\s*(?P<right>[^。]{1,40})$', text.rstrip('。'))
+    if not match:
+        return sentence
+
+    left = match.group('left').strip()
+    right = match.group('right').strip()
+    if any(left.startswith(prefix) for prefix in ('每', '各', '本', '该', '此', '其', '所有', '全部')):
+        return sentence
+    if left.endswith(('即', '则', '后', '前', '时')):
+        return sentence
+    if any(token in left for token in ('的', '即', '则', '并', '且')):
+        return sentence
+    if any(token in left for token in ('将', '把', '用', '可', '能', '会', '需', '应', '必须', '建议', '禁止', '避免', '用于', '可以', '能够')):
+        return sentence
+    if any(token in left for token in ('如果', '则', '表示', '说明', '是否', '目测', '应', '需', '需要', '必须')):
+        return sentence
+    if re.fullmatch(r'[A-Za-z](?:区)?', left):
+        return sentence
+    if re.search(r'[A-Za-z](?:\s*[,/、]\s*[A-Za-z])+', left):
+        return sentence
+    if any(token in left for token in ('区', '孔', '槽', '位')) and any(token in right for token in ('加载区', '回收区', '样本区', '试剂区')):
+        return sentence
+    if not re.fullmatch(r'[\u4e00-\u9fffA-Za-z0-9()（）【】\[\]<>《》%/\-\s]{1,20}', left):
+        return sentence
+    return f'{left}：{right}'
+
+
+def _extract_trailing_figure_ref(sentence: str) -> tuple[str, str]:
+    text = (sentence or '').strip().rstrip('。.!！？?')
+    match = re.search(r'(\s*[（(][^()（）]*(?:图|表)[^()（）]*[）)])\s*$', text)
+    if not match:
+        return text, ''
+    return text[:match.start()].rstrip(), match.group(1).strip()
+
+
+def _extract_result_units(sentence: str) -> list[str]:
+    results = []
+    raw = str(sentence or '').strip()
+    if not raw:
+        return results
+
+    clauses = _split_sentence_clauses(raw)
+    result_markers = ('确保', '确认', '检查', '验证', '判断', '一致', '对应', '匹配', '对齐', '相同', '稳定', '正常')
+    for clause in clauses:
+        clause_text = clause.strip('，,。；;：: ')
+        normalized = _normalize_structure_text(clause_text)
+        if not normalized:
+            continue
+        if any(marker in normalized for marker in result_markers):
+            results.append(normalized)
+            continue
+        align_match = re.search(r'(.+?)(与|和)(.+?)(一致|对应|匹配|对齐|相同)', normalized)
+        if align_match:
+            results.append(normalized)
+    return list(dict.fromkeys(results))
+
+
+def _extract_additional_units(sentence: str) -> list[str]:
+    results = []
+    raw = str(sentence or '')
+    if not raw:
+        return results
+
+    for match in re.findall(r'[（(][^()（）]*(?:图|表|附录|步骤|页)[^()（）]*[）)]', raw):
+        value = _normalize_structure_text(match)
+        if value:
+            results.append(value)
+    return list(dict.fromkeys(results))
+
+
+def _segment_score_entry(key: str, source_units: list[str], target_units: list[str], score: float) -> dict:
+    source_text = '；'.join(source_units)
+    target_text = '；'.join(target_units)
+    has_source = bool(source_units)
+    has_target = bool(target_units)
+    applicable = has_source or has_target
+    final_score = 0.0 if not applicable else max(0.0, min(score, 1.0))
+
+    if not applicable:
+        reason = '无此分段'
+    elif has_source and not has_target:
+        reason = f'{source_text} -> 未匹配'
+    elif not has_source and has_target:
+        reason = f'无此分段 -> {target_text}'
+    else:
+        reason = f'{source_text} -> {target_text}'
+
+    return {
+        'key': key,
+        'label': _MATCH_SEGMENT_LABELS[key],
+        'weight': int(_MATCH_SEGMENT_WEIGHTS[key] * 100),
+        'score': round(final_score, 4),
+        'percent': int(round(final_score * 100)),
+        'applicable': applicable,
+        'source_text': source_text,
+        'target_text': target_text,
+        'reason': reason,
+    }
+
+
+def _match_band_label(overall_percent: int) -> tuple[str, str]:
+    if overall_percent >= 100:
+        return '100%', '完全匹配'
+    if overall_percent >= 95:
+        return '95%-99%', '高置信度，建议人工确认'
+    if overall_percent >= 85:
+        return '85%-94%', '较高匹配，建议人工确认'
+    if overall_percent >= 75:
+        return '75%-84%', '部分匹配，建议只参考局部表达'
+    if overall_percent >= 50:
+        return '50%-74%', '弱匹配，仅作候选'
+    return '50%以下', '低匹配，默认折叠'
+
+
+def _build_segment_scores(sentence: str, template: str, structured_score: dict = None) -> tuple[dict, float]:
+    structured = structured_score or _structured_match_score(sentence, template)
+    source_struct = structured['source']
+    target_struct = structured['target']
+
+    condition_entry = _segment_score_entry(
+        'condition',
+        source_struct.get('conditions', []),
+        target_struct.get('conditions', []),
+        structured.get('condition', 0.0),
+    )
+
+    action_entry = _segment_score_entry(
+        'action',
+        source_struct.get('actions', []),
+        target_struct.get('actions', []),
+        max(structured.get('action', 0.0), structured.get('pair', 0.0)),
+    )
+
+    object_entry = _segment_score_entry(
+        'object',
+        source_struct.get('objects', []),
+        target_struct.get('objects', []),
+        max(structured.get('object', 0.0), structured.get('pair', 0.0)),
+    )
+
+    result_entry = _segment_score_entry(
+        'result',
+        _extract_result_units(sentence),
+        _extract_result_units(template),
+        _token_overlap_score(_extract_result_units(sentence), _extract_result_units(template)),
+    )
+
+    additional_entry = _segment_score_entry(
+        'additional',
+        _extract_additional_units(sentence),
+        _extract_additional_units(template),
+        _token_overlap_score(_extract_additional_units(sentence), _extract_additional_units(template)),
+    )
+
+    segment_scores = {
+        'condition': condition_entry,
+        'action': action_entry,
+        'object': object_entry,
+        'result': result_entry,
+        'additional': additional_entry,
+    }
+
+    applicable_weight = sum(
+        _MATCH_SEGMENT_WEIGHTS[key]
+        for key in _MATCH_SEGMENT_WEIGHTS
+        if segment_scores[key]['applicable']
+    )
+    structured_overall = 0.0
+    if applicable_weight > 0:
+        structured_overall = sum(
+            segment_scores[key]['score'] * _MATCH_SEGMENT_WEIGHTS[key]
+            for key in _MATCH_SEGMENT_WEIGHTS
+            if segment_scores[key]['applicable']
+        ) / applicable_weight
+
+    return segment_scores, structured_overall
+
+
+def _cat_match_score(sentence: str, template: str, template_metadata=None, structured_score: dict = None) -> dict:
+    source_norm = _normalize_sentence_for_match(sentence)
+    target_norm = _normalize_sentence_for_match(template)
+    if not source_norm or not target_norm:
+        return {
+            'overall_score': 0.0,
+            'overall_percent': 0,
+            'ranking_score': 0.0,
+            'raw_score': 0.0,
+            'display_raw_score': 0.0,
+            'structured_score': 0.0,
+            'edit_distance_score': 0.0,
+            'term_anchor_score': 0.0,
+            'number_placeholder_score': 0.0,
+            'context_score': 0.0,
+            'segment_scores': _empty_segment_scores(),
+            'penalty_reasons': [],
+            'penalty_score': 0.0,
+        }
+
+    if source_norm == target_norm:
+        segment_scores, structured_overall = _build_segment_scores(sentence, template, structured_score or _structured_match_score(sentence, template))
+        return {
+            'overall_score': 1.0,
+            'overall_percent': 100,
+            'ranking_score': 1.0,
+            'raw_score': 1.0,
+            'display_raw_score': 1.0,
+            'structured_score': max(structured_overall, 1.0),
+            'edit_distance_score': 1.0,
+            'term_anchor_score': 1.0,
+            'number_placeholder_score': 1.0,
+            'context_score': 1.0,
+            'segment_scores': segment_scores,
+            'penalty_reasons': [],
+            'penalty_score': 0.0,
+        }
+
+    structured = structured_score or _structured_match_score(sentence, template)
+    segment_scores, structured_overall = _build_segment_scores(sentence, template, structured)
+    edit_distance_score = _edit_distance_score(sentence, template)
+    term_anchor_score = _term_anchor_score(sentence, template, structured)
+    number_placeholder_score = _number_placeholder_score(sentence, template)
+    context_score = _context_match_score(sentence, template, template_metadata, structured)
+
+    raw_score = (
+        _CAT_MATCH_COMPONENT_WEIGHTS['structured'] * structured_overall +
+        _CAT_MATCH_COMPONENT_WEIGHTS['edit_distance'] * edit_distance_score +
+        _CAT_MATCH_COMPONENT_WEIGHTS['term_anchor'] * term_anchor_score +
+        _CAT_MATCH_COMPONENT_WEIGHTS['number_placeholder'] * number_placeholder_score +
+        _CAT_MATCH_COMPONENT_WEIGHTS['context'] * context_score
+    )
+
+    display_weight_total = sum(_CAT_MATCH_COMPONENT_WEIGHTS[key] for key in _CAT_MATCH_DISPLAY_COMPONENTS)
+    display_raw_score = 0.0
+    if display_weight_total > 0:
+        display_raw_score = (
+            _CAT_MATCH_COMPONENT_WEIGHTS['structured'] * structured_overall +
+            _CAT_MATCH_COMPONENT_WEIGHTS['edit_distance'] * edit_distance_score
+        ) / display_weight_total
+
+    penalties = _collect_match_penalties(sentence, template, structured)
+    ranking_score = min(1.0, max(0.0, raw_score - penalties['score_penalty']))
+    overall_score = min(1.0, max(0.0, display_raw_score - penalties['score_penalty']))
+    overall_percent = int(round(overall_score * 100))
+
+    return {
+        'overall_score': round(overall_score, 4),
+        'overall_percent': overall_percent,
+        'ranking_score': round(ranking_score, 4),
+        'raw_score': round(raw_score, 4),
+        'display_raw_score': round(display_raw_score, 4),
+        'structured_score': round(structured_overall, 4),
+        'edit_distance_score': round(edit_distance_score, 4),
+        'term_anchor_score': round(term_anchor_score, 4),
+        'number_placeholder_score': round(number_placeholder_score, 4),
+        'context_score': round(context_score, 4),
+        'segment_scores': segment_scores,
+        'penalty_reasons': penalties['reasons'],
+        'penalty_score': round(penalties['score_penalty'], 4),
+    }
+
+
+def _score_match_segments(sentence: str, template: str) -> dict:
+    cat_score = _cat_match_score(sentence, template)
+    overall_percent = cat_score['overall_percent']
+    band, label = _match_band_label(overall_percent)
+
+    return {
+        'overall_score': cat_score['overall_score'],
+        'overall_percent': overall_percent,
+        'ranking_score': cat_score['ranking_score'],
+        'band': band,
+        'label': label,
+        'raw_score': cat_score['raw_score'],
+        'display_raw_score': cat_score['display_raw_score'],
+        'lexical_score': cat_score['edit_distance_score'],
+        'structured_score': cat_score['structured_score'],
+        'edit_distance_score': cat_score['edit_distance_score'],
+        'term_anchor_score': cat_score['term_anchor_score'],
+        'number_placeholder_score': cat_score['number_placeholder_score'],
+        'context_score': cat_score['context_score'],
+        'segment_scores': cat_score['segment_scores'],
+        'penalty_reasons': cat_score['penalty_reasons'],
+        'penalty_score': cat_score['penalty_score'],
+    }
+
+
+def _build_change_match_detail(before: str, after: str, change_type: str = '', rule_name: str = '', sentence_guide: str = '', is_title: bool = False) -> Optional[dict]:
+    before_text = _normalize_compare_text(before)
+    after_text = _normalize_compare_text(_reapply_sentence_prefix(before, after))
+    if not before_text or not after_text or before_text == after_text:
+        return None
+    if _is_field_style_colon_rewrite(before_text, after_text):
+        return None
+    if _is_short_label_like_text(before_text) or _is_short_label_like_text(after_text):
+        return {
+            'overall_score': 0.0,
+            'overall_percent': 0,
+            'ranking_score': 0.0,
+            'band': '50%以下',
+            'label': '短标签文本，不参与句式匹配',
+            'raw_score': 0.0,
+            'display_raw_score': 0.0,
+            'lexical_score': 0.0,
+            'structured_score': 0.0,
+            'edit_distance_score': 0.0,
+            'term_anchor_score': 0.0,
+            'number_placeholder_score': 0.0,
+            'context_score': 0.0,
+            'segment_scores': _empty_segment_scores('短标签文本'),
+            'penalty_reasons': ['短标签文本'],
+            'penalty_score': 0.0,
+        }
+
+    normalized_type = str(change_type or '').lower()
+    if normalized_type in {'format', 'punctuation'} or rule_name == '基础规范化':
+        return None
+
+    detail = _score_match_segments(before_text, after_text)
+    if sentence_guide and not is_title:
+        candidate_pool = _filter_candidate_templates(before_text, _preferred_entries_from_guide(sentence_guide))
+        candidates = _top_template_candidates(before_text, candidate_pool, limit=8)
+        if candidates:
+            detail['candidates'] = candidates
+    return detail
+
+
+def _empty_segment_scores(reason: str = '未命中模板') -> dict:
+    scores = {}
+    for key in _MATCH_SEGMENT_WEIGHTS:
+        scores[key] = {
+            'key': key,
+            'label': _MATCH_SEGMENT_LABELS[key],
+            'weight': int(_MATCH_SEGMENT_WEIGHTS[key] * 100),
+            'score': 0.0,
+            'percent': 0,
+            'applicable': False,
+            'source_text': '',
+            'target_text': '',
+            'reason': reason,
+        }
+    return scores
+
+
+def _build_sentence_review_detail(
+    sentence: str,
+    suggested_text: str = '',
+    sentence_guide: str = '',
+    change_type: str = '',
+    rule_name: str = '',
+    is_title: bool = False,
+) -> tuple[dict, str]:
+    source_text = _normalize_compare_text(sentence)
+    effective_is_title = bool(is_title or _looks_like_title_or_noun_phrase(sentence))
+    current_suggestion = _normalize_compare_text(_reapply_sentence_prefix(sentence, suggested_text))
+    if current_suggestion and current_suggestion != source_text:
+        if _is_low_value_doc_change(sentence, current_suggestion, change_type, rule_name):
+            current_suggestion = ''
+        if _is_field_style_colon_rewrite(source_text, current_suggestion):
+            current_suggestion = ''
+        if effective_is_title:
+            if _strip_doc_trailing_punctuation(current_suggestion) == _strip_doc_trailing_punctuation(source_text):
+                current_suggestion = ''
+            source_len = len(_normalize_sentence_for_match(source_text))
+            suggestion_len = len(_normalize_sentence_for_match(current_suggestion))
+            if source_len and suggestion_len >= source_len * 2:
+                current_suggestion = ''
+        should_drop_suggestion = _has_conflicting_critical_literals(sentence, current_suggestion)
+        if not should_drop_suggestion:
+            try:
+                from app.utils.instrument_polisher import instrument_polish_engine
+                should_drop_suggestion = not instrument_polish_engine.post_protect(sentence, current_suggestion).get('safe', True)
+            except Exception:
+                should_drop_suggestion = False
+        if should_drop_suggestion:
+            current_suggestion = ''
+    normalized_change_type = str(change_type or '').lower()
+    candidates = []
+    if sentence_guide and not effective_is_title:
+        candidate_pool = _filter_candidate_templates(source_text, _preferred_entries_from_guide(sentence_guide))
+        candidates = _top_template_candidates(source_text, candidate_pool, limit=8)
+
+    detail = None
+    if current_suggestion and current_suggestion != source_text:
+        detail = _build_change_match_detail(source_text, current_suggestion, change_type, rule_name, sentence_guide, is_title=effective_is_title)
+
+    if detail is None and candidates:
+        detail = dict(candidates[0])
+        detail['candidates'] = candidates
+
+    if detail is None:
+        detail = {
+            'overall_score': 0.0,
+            'overall_percent': 0,
+            'band': '50%以下',
+            'label': effective_is_title and '标题/短标签，不参与句式匹配' or '低匹配，建议人工编辑',
+            'segment_scores': _empty_segment_scores(),
+            'candidates': candidates,
+        }
+
+    best_guarded_candidate = next((item for item in candidates if item.get('guard_passed', False)), None)
+    best_manual_candidate = next(
+        (
+            item for item in candidates
+            if not item.get('guard_passed', False) and int(item.get('overall_percent', 0) or 0) >= _DOC_REVIEW_REFERENCE_CANDIDATE_THRESHOLD
+        ),
+        None,
+    )
+    best_reference_candidate = best_guarded_candidate or best_manual_candidate
+    best_candidate_detail = dict(best_reference_candidate) if best_reference_candidate else None
+    current_percent = int(detail.get('overall_percent', 0) or 0)
+    best_candidate_percent = int((best_candidate_detail or {}).get('overall_percent', 0) or 0)
+    should_prefer_candidate = (
+        best_candidate_detail is not None and
+        best_candidate_percent >= 85 and
+        current_percent < 50
+    )
+    if should_prefer_candidate:
+        detail = best_candidate_detail
+        detail['candidates'] = candidates
+
+    candidate_text = ''
+    if best_reference_candidate:
+        candidate_text = _normalize_compare_text(best_reference_candidate.get('candidate_text') or best_reference_candidate.get('template') or '')
+
+    current_is_low_value = bool(current_suggestion) and (
+        normalized_change_type in {'format', 'punctuation'} or
+        _strip_doc_trailing_punctuation(current_suggestion) == _strip_doc_trailing_punctuation(source_text)
+    )
+    if should_prefer_candidate and candidate_text:
+        resolved_suggestion = _reapply_sentence_prefix(sentence, candidate_text)
+    elif current_is_low_value and candidate_text and candidate_text != source_text:
+        resolved_suggestion = _reapply_sentence_prefix(sentence, candidate_text)
+    elif not current_suggestion and best_manual_candidate and candidate_text and candidate_text != source_text:
+        resolved_suggestion = _reapply_sentence_prefix(sentence, candidate_text)
+    else:
+        resolved_suggestion = current_suggestion or _reapply_sentence_prefix(sentence, candidate_text) or source_text
+    auto_applied = detail.get('overall_percent', 0) >= _DOC_REVIEW_AUTO_APPLY_THRESHOLD and resolved_suggestion != source_text
+    detail['suggested_text'] = resolved_suggestion
+    detail['auto_apply_threshold'] = _DOC_REVIEW_AUTO_APPLY_THRESHOLD
+    detail['auto_applied'] = auto_applied
+    detail['review_mode'] = 'auto' if auto_applied else 'manual'
+    detail['has_change'] = resolved_suggestion != source_text
+    return detail, resolved_suggestion
+
+
+def _should_emit_reference_review_change(original_text: str, polished_text: str, review_after: str, change_type: str, rule_name: str) -> bool:
+    suggested = _normalize_compare_text(review_after)
+    source = _normalize_compare_text(original_text)
+    if not suggested or suggested == source:
+        return False
+    polished = _normalize_compare_text(polished_text)
+    if polished == source:
+        return True
+    return _is_low_value_doc_change(original_text, polished_text, change_type, rule_name)
+
+
+def _normalize_ui_button_label(raw: str) -> str:
+    text = (raw or '').strip()
+    normalized = _normalize_sentence_for_match(text)
+    if not normalized:
+        return '按钮'
+
+    if 'run' in text.lower() or '运行' in text:
+        return '运行按钮'
+    if 'start' in text.lower() or '启动' in text:
+        return '启动按钮'
+
+    bracket_match = re.search(r'【([^】]+)】', text)
+    if bracket_match:
+        return f"【{bracket_match.group(1).strip()}】"
+
+    if '下拉箭头' in text:
+        return '下拉箭头'
+    if any(token in text for token in ('界面', '页面', '窗口', '系统')):
+        return text
+    if '按钮' in text:
+        return text
+    if len(normalized) <= 8:
+        return text
+    return '按钮'
+
+
+def _rewrite_ui_navigation_sentence(sentence: str) -> str:
+    core, figure_ref = _extract_trailing_figure_ref(sentence)
+    condition = ''
+    rest = core
+    condition_match = re.match(r'^(?P<condition>[^，。；！？]*?(?:后|时))(?:[，,])?(?P<rest>.+)$', core)
+    if condition_match:
+        condition = condition_match.group('condition').strip('，, ')
+        rest = condition_match.group('rest').strip()
+
+    nav_match = re.search(r'^(?P<prefix>.*?)(?:点击)(?P<button>.*?)(?:[，,])?进入(?P<target>[^，。；！？]+?(?:界面|页面|窗口))$', rest)
+    if not nav_match:
+        return sentence
+
+    target = nav_match.group('target').strip()
+    if not target:
+        return sentence
+
+    prefix = nav_match.group('prefix').strip()
+    button_label = _normalize_ui_button_label(nav_match.group('button'))
+    context_match = re.search(r'(在[^，。；]*?(?:界面|页面|窗口))', prefix)
+    context = context_match.group(1).strip() if context_match else ''
+
+    body = f'{context}点击{button_label}，进入{target}' if context else f'点击{button_label}，进入{target}'
+    if condition:
+        body = f'{condition}，{body}'
+    if figure_ref:
+        body = f'{body}{figure_ref}'
+    return f'{body}。'
+
+
+def _rewrite_ui_run_sentence(sentence: str) -> str:
+    core, figure_ref = _extract_trailing_figure_ref(sentence)
+    condition = ''
+    rest = core
+    condition_match = re.match(r'^(?P<condition>[^，。；！？]*?(?:后|时))(?:[，,])?(?P<rest>.+)$', core)
+    if condition_match:
+        condition = condition_match.group('condition').strip('，, ')
+        rest = condition_match.group('rest').strip()
+
+    run_match = re.search(r'^(?:点击[^，。；！？]*?(?:按钮|按键|】)?[，,])?点击\s*(?P<label>run|Run|RUN|start|Start|START|运行|启动)\s*(?P<tail>开始实验|开始操作)?$', rest)
+    if not run_match:
+        return sentence
+
+    button_label = _normalize_ui_button_label(run_match.group('label'))
+    tail = run_match.group('tail') or '开始操作'
+    body = f'点击{button_label}，{tail}'
+    if condition:
+        body = f'{condition}，{body}'
+    if figure_ref:
+        body = f'{body}{figure_ref}'
+    return f'{body}。'
+
+
+def _apply_safe_structural_rewrite(sentence: str) -> str:
+    for rewriter in (_rewrite_ui_run_sentence, _rewrite_ui_navigation_sentence):
+        rewritten = rewriter(sentence)
+        if rewritten != sentence:
+            return rewritten
+    return sentence
+
+
+def _normalize_operation_sentence_for_match(sentence: str) -> str:
+    raw = str(sentence or '').strip()
+    if not raw:
+        return ''
+
+    normalized = raw
+    normalized = re.sub(r'参数确认无误后(?=点击)', '参数确认无误后，', normalized)
+    normalized = re.sub(r'(?<![，。；！？,;!?])并在弹窗中点击', '，在弹窗中点击', normalized)
+    normalized = re.sub(r'(?<![，。；！？,;!?])后点击', '后，点击', normalized)
+    normalized = re.sub(r'点击\s*(确定|取消|运行|启动)(?![按钮】])', lambda m: f"点击【{m.group(1)}】" if m.group(1) in {'确定', '取消'} else f"点击{m.group(1)}按钮", normalized)
+    normalized = re.sub(r'】(?=开始)', '】，', normalized)
+    normalized = re.sub(r'按钮(?=开始)', '按钮，', normalized)
+    normalized = re.sub(r'(?<![，。；！？,;!?])开始建库', '，开始建库', normalized)
+    normalized = re.sub(r'[，,]{2,}', '，', normalized)
+    return normalized.strip('，, ')
 
 
 def _apply_constraint_polish(sentence: str) -> str:
     """对未匹配到句式的句子进行约束润色。"""
-    result = sentence
+    result = _apply_safe_structural_rewrite(sentence)
     # 术语标准化
     for non_std, std in _CONSTRAINT_TERMINOLOGY.items():
         result = result.replace(non_std, std)
@@ -747,6 +2668,59 @@ _POLISH_MATCH_CONFIG = {
     "l3_auto_confidence": 0.65,   # L3 普通规则匹配阈值（preferred_sentences）
 }
 
+_AI_TEMPLATE_RERANK_LIMIT = 4
+_ai_template_rerank_cache: dict = {}
+
+_CAT_MATCH_COMPONENT_WEIGHTS = {
+    'structured': 0.45,
+    'edit_distance': 0.15,
+    'term_anchor': 0.20,
+    'number_placeholder': 0.15,
+    'context': 0.05,
+}
+
+_CAT_MATCH_DISPLAY_COMPONENTS = ('structured', 'edit_distance')
+
+
+def _is_valid_platform_feedback_sentence(text: str) -> bool:
+    raw = str(text or '').strip()
+    if not raw:
+        return False
+    normalized = _normalize_sentence_for_match(raw)
+    if len(normalized) < 8:
+        return False
+    if any(token in raw for token in ('例如', '不要写成', '此类标签', '此类参数', '句尾不加句号')):
+        return False
+    if re.match(r'^(有效期|存储条件|规格)\s*[：:]', raw):
+        return False
+    if _has_inconsistent_model_spacing(raw, _protect_model_numbers(raw)):
+        return False
+    if len(normalized) >= 18 and not re.search(r'[。！？.!?]$', raw):
+        return False
+    return True
+
+
+def _sanitize_platform_feedback_guide(content: str) -> str:
+    sanitized_lines = []
+    for line in (content or '').splitlines():
+        stripped = line.strip()
+        if stripped.startswith('- '):
+            sentence = stripped[2:].strip()
+            if not _is_valid_platform_feedback_sentence(sentence):
+                continue
+            sanitized_lines.append(f'- {_protect_model_numbers(sentence)}')
+            continue
+        sanitized_lines.append(line)
+    return '\n'.join(sanitized_lines)
+
+
+def _prepare_sentence_guide_content(file_name: str, content: str) -> str:
+    if not content:
+        return ''
+    if (file_name or '').strip() == PLATFORM_FEEDBACK_FILENAME:
+        return _sanitize_platform_feedback_guide(content)
+    return content
+
 def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     """加载句式清单内容（带缓存）。
 
@@ -757,35 +2731,18 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     if cache_key in _sentence_guide_cache:
         return _sentence_guide_cache[cache_key]
 
-    platform_guides = []
-    selected_file_path = None
-    if style_guide_id:
-        selected_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
-        selected_file_path = selected_file.file_path if selected_file else None
-
-    for platform_file in _get_platform_feedback_targets(db, 1):
-        if platform_file and platform_file.file_path and os.path.exists(platform_file.file_path):
-            if selected_file_path and platform_file.file_path == selected_file_path:
-                continue
-            try:
-                content = _read_file_safe(platform_file.file_path)
-                if content.strip():
-                    platform_guides.append(content)
-            except Exception:
-                pass
-
     if style_guide_id:
         style_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == style_guide_id).first()
         if style_file and style_file.file_path and os.path.exists(style_file.file_path):
             try:
-                content = _read_file_safe(style_file.file_path)
+                content = _prepare_sentence_guide_content(style_file.name, _read_file_safe(style_file.file_path))
                 if content.strip():
-                    result = "\n\n".join([content, *platform_guides]) if platform_guides else content
+                    result = content
                     _sentence_guide_cache[cache_key] = result
                     return result
             except Exception as e:
                 print(f"加载句式文件失败 (id={style_guide_id}): {e}")
-        result = "\n\n".join(platform_guides) if platform_guides else None
+        result = None
         _sentence_guide_cache[cache_key] = result
         return result
 
@@ -806,15 +2763,55 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
         KnowledgeFile.file_type == "md"
     ).all()
 
+    def _guide_priority(kf: KnowledgeFile) -> tuple[int, str, int]:
+        name = (kf.name or '').strip()
+        if name in PRIMARY_SENTENCE_GUIDE_FILENAMES:
+            return (0, name, kf.id or 0)
+        if name == PLATFORM_FEEDBACK_FILENAME:
+            return (2, name, kf.id or 0)
+        if name in REFERENCE_SENTENCE_GUIDE_FILENAMES:
+            return (3, name, kf.id or 0)
+        return (1, name, kf.id or 0)
+
+    files.sort(key=_guide_priority)
+
+    loaded_paths = set()
+
     for kf in files:
         if kf.file_path and os.path.exists(kf.file_path):
             try:
-                content = _read_file_safe(kf.file_path)
+                content = _prepare_sentence_guide_content(kf.name, _read_file_safe(kf.file_path))
                 if content.strip():
                     guides.append(content)
+                    loaded_paths.add(kf.file_path)
             except Exception:
                 pass
-    guides.extend(platform_guides)
+
+    for platform_file in _get_platform_feedback_targets(db, 1):
+        if not platform_file or not platform_file.file_path or platform_file.file_path in loaded_paths:
+            continue
+        if not os.path.exists(platform_file.file_path):
+            continue
+        try:
+            content = _prepare_sentence_guide_content(platform_file.name, _read_file_safe(platform_file.file_path))
+            if content.strip():
+                guides.append(content)
+        except Exception:
+            pass
+
+    app_root = os.path.dirname(os.path.dirname(__file__))
+    for relative_path in BUNDLED_SENTENCE_GUIDE_RELATIVE_PATHS:
+        bundled_path = os.path.join(app_root, relative_path)
+        if bundled_path in loaded_paths or not os.path.exists(bundled_path):
+            continue
+        try:
+            content = _prepare_sentence_guide_content(os.path.basename(bundled_path), _read_file_safe(bundled_path))
+            if content.strip():
+                guides.append(content)
+                loaded_paths.add(bundled_path)
+        except Exception:
+            pass
+
     result = "\n\n".join(guides) if guides else None
     _sentence_guide_cache[cache_key] = result
     return result
@@ -1005,6 +3002,27 @@ class PolishRuleMatch(BaseModel):
     after: str
     type: str
     paragraph: Optional[int] = None
+    match_detail: Optional[dict] = None
+
+
+_DOC_REVIEW_AUTO_APPLY_THRESHOLD = 95
+
+
+_MATCH_SEGMENT_WEIGHTS = {
+    "condition": 0.15,
+    "action": 0.30,
+    "object": 0.30,
+    "result": 0.20,
+    "additional": 0.05,
+}
+
+_MATCH_SEGMENT_LABELS = {
+    "condition": "条件段",
+    "action": "动作段",
+    "object": "对象段",
+    "result": "结果/判断段",
+    "additional": "附加信息段",
+}
 
 
 def _normalize_compare_text(text: str) -> str:
@@ -1013,8 +3031,35 @@ def _normalize_compare_text(text: str) -> str:
     return re.sub(r'\s+', ' ', str(text)).strip()
 
 
+def _is_short_label_like_text(text: str) -> bool:
+    value = _normalize_compare_text(text)
+    if not value:
+        return False
+    if re.fullmatch(r'[A-Za-z]\d{1,3}', value):
+        return True
+    if re.fullmatch(r'[A-Za-z]{1,3}', value):
+        return True
+    if re.fullmatch(r'\d{1,3}', value):
+        return True
+    normalized = _normalize_sentence_for_match(value)
+    return len(normalized) <= 3 and not re.search(r'[\u4e00-\u9fff]', value)
+
+
 def _strip_doc_trailing_punctuation(text: str) -> str:
-    return re.sub(r'[。.!！？?，,;；:：]+$', '', _normalize_compare_text(text))
+    return re.sub(r'[。.!！？?，,;；:：]+$', '', _normalize_visible_compare_text(text))
+
+
+def _is_field_style_colon_rewrite(before: str, after: str) -> bool:
+    before_text = _normalize_visible_compare_text(before)
+    after_text = _normalize_visible_compare_text(after)
+    if not before_text or not after_text or before_text == after_text:
+        return False
+    if '为' not in before_text or not re.search(r'[：:]', after_text):
+        return False
+    compact_before = re.sub(r'\s+', '', before_text)
+    compact_after = re.sub(r'\s+', '', after_text)
+    reverted = re.sub(r'[：:]', '为', compact_after)
+    return reverted == compact_before
 
 
 def _is_low_value_doc_change(before: str, after: str, change_type: str = '', rule_name: str = '') -> bool:
@@ -1023,6 +3068,8 @@ def _is_low_value_doc_change(before: str, after: str, change_type: str = '', rul
     if not before_core or not after_core:
         return False
     if before_core == after_core:
+        return True
+    if _is_field_style_colon_rewrite(before, after):
         return True
 
     short_limit = 4
@@ -1037,6 +3084,30 @@ def _is_low_value_doc_change(before: str, after: str, change_type: str = '', rul
     if is_format_like and len(before_core) <= short_limit and after_core.startswith(before_core):
         return True
     return False
+
+
+def _build_visible_change_entry(line: int, original: str, polished: str, change_type: str, rule_name: str = '', sentence_guide: str = '') -> Optional[dict]:
+    visible_polished = _reapply_sentence_prefix(original, polished)
+    if _is_low_value_doc_change(original, visible_polished, change_type, rule_name):
+        return None
+
+    entry = {
+        "line": line,
+        "original": original[:200],
+        "polished": visible_polished[:200],
+        "type": change_type,
+    }
+    if change_type != 'ai':
+        entry["match_detail"] = _build_change_match_detail(original, visible_polished, change_type, rule_name, sentence_guide)
+    return entry
+
+
+def _existing_change_match_detail(item) -> Optional[dict]:
+    if isinstance(item, dict):
+        detail = item.get('match_detail')
+    else:
+        detail = getattr(item, 'match_detail', None)
+    return detail if isinstance(detail, dict) else None
 
 
 def _doc_change_memory_key(before: str, after: str) -> str:
@@ -1120,7 +3191,7 @@ def _pick_visible_doc_changes(changes: list[dict]) -> list[dict]:
     return preferred if preferred else deduped
 
 
-def _build_doc_change_details(original_text: str, polished_text: str, changes: list, rejected_keys: set[str] = None) -> list[dict]:
+def _build_doc_change_details(original_text: str, polished_text: str, changes: list, rejected_keys: set[str] = None, sentence_guide: str = '') -> list[dict]:
     original_lines = [line.strip() for line in (original_text or '').split('\n') if line.strip()]
     polished_lines = [line.strip() for line in (polished_text or '').split('\n') if line.strip()]
 
@@ -1155,6 +3226,7 @@ def _build_doc_change_details(original_text: str, polished_text: str, changes: l
 
     normalized_changes = []
     for item in changes or []:
+        existing_detail = _existing_change_match_detail(item)
         if isinstance(item, dict):
             before = item.get('before', '')
             after = _protect_model_numbers(item.get('after', ''))
@@ -1179,6 +3251,14 @@ def _build_doc_change_details(original_text: str, polished_text: str, changes: l
             "after": after,
             "type": change_type,
             "paragraph": paragraph,
+            "rule_name": getattr(item, 'rule_name', '') if not isinstance(item, dict) else item.get('rule_name', ''),
+            "match_detail": existing_detail or _build_change_match_detail(
+                before,
+                after,
+                change_type,
+                getattr(item, 'rule_name', '') if not isinstance(item, dict) else item.get('rule_name', ''),
+                sentence_guide,
+            ),
         })
 
     for row in diff_rows:
@@ -1191,19 +3271,31 @@ def _build_doc_change_details(original_text: str, polished_text: str, changes: l
             if item_before and item_before in row_before:
                 matched_type = item['type'] or matched_type
                 row['paragraph'] = item.get('paragraph')
+                row['rule_name'] = item.get('rule_name', '')
+                row['match_detail'] = item.get('match_detail')
                 break
             if item_after and item_after in row_after:
                 matched_type = item['type'] or matched_type
                 row['paragraph'] = item.get('paragraph')
+                row['rule_name'] = item.get('rule_name', '')
+                row['match_detail'] = item.get('match_detail')
                 break
         row['type'] = matched_type
+        row['match_detail'] = row.get('match_detail') or _build_change_match_detail(
+            row.get('before', ''),
+            row.get('after', ''),
+            matched_type,
+            row.get('rule_name', ''),
+            sentence_guide,
+        )
 
     return _pick_visible_doc_changes(diff_rows)
 
 
-def _filter_visible_doc_changes(changes: list, rejected_keys: set[str] = None) -> list[dict]:
+def _filter_visible_doc_changes(changes: list, rejected_keys: set[str] = None, sentence_guide: str = '') -> list[dict]:
     visible = []
     for item in changes or []:
+        existing_detail = _existing_change_match_detail(item)
         if isinstance(item, dict):
             before = item.get('before', '')
             after = _protect_model_numbers(item.get('after', ''))
@@ -1235,8 +3327,65 @@ def _filter_visible_doc_changes(changes: list, rejected_keys: set[str] = None) -
             'type': change_type,
             'rule_name': rule_name,
             'paragraph': paragraph,
+            'match_detail': existing_detail or _build_change_match_detail(before, after, change_type, rule_name, sentence_guide),
         })
     return _pick_visible_doc_changes(visible)
+
+
+def _doc_change_pair_key(before: str, after: str) -> tuple[str, str]:
+    return (_normalize_compare_text(before), _normalize_compare_text(after))
+
+
+def _doc_change_before_key(before: str) -> str:
+    return _normalize_compare_text(before)
+
+
+def _build_previous_doc_change_keys(previous_doc: Optional[PolishedDocument], rejected_keys: set[str] = None) -> tuple[set[tuple[str, str]], set[str]]:
+    if previous_doc is None:
+        return set(), set()
+    previous_original = previous_doc.original_content or ''
+    previous_polished = previous_doc.polished_content or ''
+    if not previous_original or not previous_polished:
+        return set(), set()
+    previous_changes = _build_doc_change_details(previous_original, previous_polished, [], rejected_keys, '')
+    pair_keys = {
+        _doc_change_pair_key(item.get('before', ''), item.get('after', ''))
+        for item in previous_changes
+        if _normalize_compare_text(item.get('before', '')) and _normalize_compare_text(item.get('after', ''))
+    }
+    before_keys = {
+        _doc_change_before_key(item.get('before', ''))
+        for item in previous_changes
+        if _normalize_compare_text(item.get('before', '')) and _normalize_compare_text(item.get('after', ''))
+    }
+    if not before_keys:
+        original_lines = {
+            _normalize_compare_text(line)
+            for line in (previous_original or '').split('\n')
+            if _normalize_compare_text(line)
+        }
+        polished_lines = {
+            _normalize_compare_text(line)
+            for line in (previous_polished or '').split('\n')
+            if _normalize_compare_text(line)
+        }
+        before_keys = {
+            line for line in original_lines
+            if line and line not in polished_lines
+        }
+    return pair_keys, before_keys
+
+
+def _mark_new_doc_review_items(review_items: list[dict], previous_change_keys: set[tuple[str, str]], previous_before_keys: set[str]) -> int:
+    new_count = 0
+    for item in review_items or []:
+        change_key = _doc_change_pair_key(item.get('before', ''), item.get('after', ''))
+        before_key = _doc_change_before_key(item.get('before', ''))
+        is_new = bool(before_key) and before_key not in previous_before_keys and change_key not in previous_change_keys
+        item['is_new_since_last_polish'] = is_new
+        if is_new:
+            new_count += 1
+    return new_count
 
 
 
@@ -1294,7 +3443,6 @@ def _apply_skill_polish(
             '将', '请', '按', '点击', '选择', '输入', '打开', '关闭',
             '启动', '停止', '设置', '检查', '确认', '安装', '连接',
             '使用', '进行', '可以', '需要', '应该', '必须', '确保',
-            '是', '为', '有', '在', '可', '会', '能', '要',
             '按下', '旋转', '调节', '插入', '取出', '放置', '点击',
             '执行', '访问', '查看', '显示', '支持', '提供', '包含',
             '通过', '根据', '按照', '用于', '适用于', '分为',
@@ -1373,7 +3521,7 @@ def _apply_skill_polish(
         other_engine_rules = [key for key in engine_enabled_rules if key != 'termReplace']
     else:
         term_enabled_rules = ['termReplace']
-        other_engine_rules = ['imperativePlease', 'numberSpace', 'cnEnSpace', 'punctuation']
+        other_engine_rules = ['imperativePlease', 'numberSpace', 'punctuation']
     if is_title:
         other_engine_rules = [key for key in other_engine_rules if key != 'punctuation']
 
@@ -1412,65 +3560,156 @@ def _apply_skill_polish(
         new_line = line.strip()
         # 剥离编号前缀（如 "5. "、"1、"、"3) "），正文独立匹配
         step_prefix = ""
-        step_match = re.match(r'^(\d+[.、)\s]+)\s*(.+)$', new_line)
+        step_match = re.match(r'^((?:\d+[.、)]?)+(?:\s+|(?=[\u4e00-\u9fffA-Za-z(（])))\s*(.+)$', new_line)
         if step_match:
             step_prefix = step_match.group(1)
             new_line = step_match.group(2)
         
         has_changes = False
+        matched_preferred_sentence = False
+        non_tmpl_rules = [r for r in style_rules if r.get("type") != "preferred_sentences"] if style_rules else []
+        template_match_line = _normalize_operation_sentence_for_match(new_line)
         
         if style_rules and not is_title:
+            preferred_entries = _preferred_entries_for_sentence(template_match_line, sentence_guide)
             # 拆分子句检测匹配，匹配到后在全文级执行替换以避免子句边界重复
             clauses = [c.strip() for c in re.split(r'[，。；！？,;!?]+', new_line) if c.strip()]
+            normalized_clauses = [c.strip() for c in re.split(r'[，。；！？,;!?]+', template_match_line) if c.strip()]
             if len(clauses) > 1:
-                # 阶段1: 子句级检测最佳匹配模板
-                best_template = None
-                for clause in clauses:
-                    for rule in style_rules:
-                        if rule["type"] != "preferred_sentences":
-                            continue
-                        tmpl, score, level = _three_tier_match(clause, rule.get("sentences", []))
-                        if tmpl and score >= _POLISH_MATCH_CONFIG["l2_min_confidence"]:
-                            best_template = tmpl
-                            break
-                    if best_template:
-                        break
-                if best_template:
-                    # 阶段2: 全文级替换，避免子句边界处重复
+                whole_template, whole_score, whole_level = _best_guarded_match(template_match_line, preferred_entries)
+                if whole_template and whole_score >= _POLISH_MATCH_CONFIG["l3_auto_confidence"]:
                     original_before = new_line
-                    new_line = replace_with_context(new_line, best_template)
+                    new_line = replace_with_context(new_line, whole_template)
+                    display_after = _reapply_sentence_prefix(original, new_line)
+                    changes.append(PolishRuleMatch(
+                        rule_name="句式模板匹配",
+                        before=original_before[:80],
+                        after=display_after[:80],
+                        type="style"
+                    ))
+                    logger.warning(
+                        "polish sentence guide matched: before=%r after=%r template=%r score=%s level=%s",
+                        original_before[:120],
+                        new_line[:120],
+                        whole_template[:80],
+                        round(whole_score, 4),
+                        whole_level,
+                    )
+                    matched_preferred_sentence = True
+                    has_changes = True
+                else:
+                    original_before = new_line
+                    clause_parts = re.split(r'([，。；！？,;!?]+)', new_line)
+                    rebuilt_parts = []
+                    clause_matched_templates = []
+                    for index, part in enumerate(clause_parts):
+                        if index % 2 == 1:
+                            rebuilt_parts.append(part)
+                            continue
+                        clause = part.strip()
+                        normalized_clause = normalized_clauses[index // 2] if index // 2 < len(normalized_clauses) else _normalize_operation_sentence_for_match(clause)
+                        if not clause:
+                            rebuilt_parts.append(part)
+                            continue
+                        best_template = None
+                        best_rank = None
+                        clause_templates = _preferred_entries_for_sentence(normalized_clause, sentence_guide, single_clause_only=True)
+                        if clause_templates:
+                            tmpl, score, level = _best_guarded_match(normalized_clause, clause_templates)
+                            if not tmpl:
+                                pass
+                            else:
+                                clause_score = _clause_alignment_score(normalized_clause, tmpl)
+                                keyword_score = _compare_semantic_keywords(normalized_clause, tmpl)
+                                structured_score = _structured_match_score(normalized_clause, tmpl)
+                                rank = (
+                                    score,
+                                    structured_score['pair'],
+                                    structured_score['condition'],
+                                    structured_score['action'],
+                                    clause_score,
+                                    keyword_score,
+                                    len(_normalize_sentence_for_match(tmpl)),
+                                )
+                                if best_rank is None or rank > best_rank:
+                                    best_rank = rank
+                                    best_template = tmpl
+                        replaced_clause = clause
+                        if best_template:
+                            next_separator = clause_parts[index + 1] if index + 1 < len(clause_parts) else ''
+                            replaced_clause = _replace_clause_directly(clause, best_template, next_separator)
+                            clause_matched_templates.append(best_template)
+                            matched_preferred_sentence = True
+                        else:
+                            replaced_clause = _apply_constraint_polish(clause)
+                        rebuilt_parts.append(part.replace(clause, replaced_clause, 1))
+                    new_line = ''.join(rebuilt_parts)
                     if new_line != original_before:
+                        display_after = _reapply_sentence_prefix(original, new_line)
                         changes.append(PolishRuleMatch(
-                            rule_name="句式模板匹配",
+                            rule_name="句式模板匹配" if clause_matched_templates else "约束润色",
                             before=original_before[:80],
-                            after=new_line[:80],
+                            after=display_after[:80],
                             type="style"
                         ))
-                        logger.warning(
-                            "polish sentence guide matched: before=%r after=%r template=%r",
-                            original_before[:120],
-                            new_line[:120],
-                            best_template[:80],
-                        )
+                        if clause_matched_templates:
+                            logger.warning(
+                                "polish sentence guide matched: before=%r after=%r templates=%s",
+                                original_before[:120],
+                                new_line[:120],
+                                [template[:80] for template in clause_matched_templates],
+                            )
                         has_changes = True
-                # 阶段3: 应用非句式规则（禁用词、被动语态、约束润色等）
-                non_tmpl_rules = [r for r in style_rules if r["type"] != "preferred_sentences"]
-                if non_tmpl_rules:
+                    # 阶段3: 应用非句式规则（禁用词、被动语态、约束润色等）
+                    if non_tmpl_rules and not matched_preferred_sentence:
+                        new_line, rule_changes = _apply_style_rules(new_line, non_tmpl_rules)
+                        if rule_changes:
+                            changes.extend(rule_changes)
+                            has_changes = True
+                    if not matched_preferred_sentence and not has_changes:
+                        fallback_line = _apply_constraint_polish(new_line)
+                        if fallback_line != new_line:
+                            changes.append(PolishRuleMatch(
+                                rule_name="约束润色",
+                                before=new_line[:80],
+                                after=fallback_line[:80],
+                                type="style"
+                            ))
+                            new_line = fallback_line
+                            has_changes = True
+            else:
+                whole_template, whole_score, whole_level = _best_guarded_match(template_match_line, preferred_entries)
+                if whole_template and whole_score >= _POLISH_MATCH_CONFIG["l3_auto_confidence"]:
+                    original_before = new_line
+                    new_line = replace_with_context(new_line, whole_template)
+                    display_after = _reapply_sentence_prefix(original, new_line)
+                    changes.append(PolishRuleMatch(
+                        rule_name="句式模板匹配",
+                        before=original_before[:80],
+                        after=display_after[:80],
+                        type="style"
+                    ))
+                    logger.warning(
+                        "polish sentence guide matched: before=%r after=%r template=%r score=%s level=%s",
+                        original_before[:120],
+                        new_line[:120],
+                        whole_template[:80],
+                        round(whole_score, 4),
+                        whole_level,
+                    )
+                    has_changes = True
+                    matched_preferred_sentence = True
+                elif non_tmpl_rules:
                     new_line, rule_changes = _apply_style_rules(new_line, non_tmpl_rules)
                     if rule_changes:
+                        logger.warning(
+                            "polish sentence guide matched: before=%r after=%r matches=%s",
+                            original[:120],
+                            new_line[:120],
+                            [change.rule_name for change in rule_changes],
+                        )
                         changes.extend(rule_changes)
                         has_changes = True
-            else:
-                new_line, rule_changes = _apply_style_rules(new_line, style_rules)
-                if rule_changes:
-                    logger.warning(
-                        "polish sentence guide matched: before=%r after=%r matches=%s",
-                        original[:120],
-                        new_line[:120],
-                        [change.rule_name for change in rule_changes],
-                    )
-                    changes.extend(rule_changes)
-                    has_changes = True
 
         if sentence_custom_rules and not is_title:
             new_line, custom_issues = apply_custom_rules(new_line, sentence_custom_rules)
@@ -1497,12 +3736,12 @@ def _apply_skill_polish(
             new_line, custom_issues = apply_custom_rules(new_line, term_custom_rules)
             _append_custom_issues(custom_issues)
 
-        if other_custom_rules:
+        if other_custom_rules and not matched_preferred_sentence:
             new_line, custom_issues = apply_custom_rules(new_line, other_custom_rules)
             _append_custom_issues(custom_issues)
 
         # ── 应用其余系统规则（从 DB 读取启用的规则） ──
-        if not sentence_only_mode:
+        if not sentence_only_mode and not matched_preferred_sentence:
             polished_line, engine_issues = apply_all_rules(
                 new_line,
                 term_dict={},
@@ -1517,16 +3756,14 @@ def _apply_skill_polish(
             new_line = _protect_model_numbers(new_line)
         
         # 标题、表标题、图标题等不加句号，也不做空间距规整
-        if not is_title and not sentence_only_mode:
+        if not is_title and not sentence_only_mode and not matched_preferred_sentence:
             if new_line and not new_line.endswith(('。', '.', '！', '!', '？', '?')):
                 if not _is_noun_phrase(new_line):
                     if re.search(r'[\u4e00-\u9fff]', new_line):
                         new_line = new_line.rstrip('，,;；;：:') + '。'
                     else:
                         new_line = new_line.rstrip(',,;;::') + '.'
-            new_line = re.sub(r'(\d)([℃%μ])', r'\1 \2', new_line)
-            new_line = re.sub(r'([\u4e00-\u9fff])(?!表\d|图\d)([A-Za-z0-9])', r'\1 \2', new_line)
-            new_line = re.sub(r'([A-Za-z0-9])([\u4e00-\u9fff])', r'\1 \2', new_line)
+            new_line = re.sub(rf'(?<=\d)\s*(?=({_NUMBER_SPACE_UNITS})(?![A-Za-z]))', ' ', new_line)
             new_line = _protect_model_numbers(new_line)
         elif sentence_only_mode and not has_changes:
             new_line = original
@@ -1588,16 +3825,324 @@ def _parse_table_sentence_templates(section: str) -> list[str]:
             cells = [c.strip() for c in line.strip('|').split('|')]
             if col_idx < len(cells):
                 val = cells[col_idx].strip().strip('"\'""''').strip()
-                # 去掉 Markdown 转义（\* \_ \- 等）
-                val = re.sub(r'\\([*_\-])', r'\1', val)
+                # 去掉常见 Markdown 转义，避免模板文本把反斜杠带进最终替换结果。
+                val = re.sub(r'\\([*_\-~()\[\]{}])', r'\1', val)
                 if val and not re.match(r'^\d+$', val) and val not in ('...', '....'):
                     sentences.append(val)
     return sentences
 
 
+def _normalize_template_header(header: str) -> str:
+    value = re.sub(r'[`\s_]+', '', str(header or '').strip().lower())
+    return value.replace('（', '(').replace('）', ')')
+
+
+def _template_header_key(header: str) -> str | None:
+    value = _normalize_template_header(header)
+    mapping = {
+        '模板编号': 'template_id',
+        'templateid': 'template_id',
+        '标准句式': 'template_text',
+        '句式模板': 'template_text',
+        '模板句式': 'template_text',
+        'template_text': 'template_text',
+        'templatetext': 'template_text',
+        'scene': 'scene',
+        '场景': 'scene',
+        '所属章节': 'section',
+        'section': 'section',
+        '来源步骤号': 'source_step',
+        'sourcestep': 'source_step',
+        '句子类型': 'intent_type',
+        'intenttype': 'intent_type',
+        '动作词': 'actions',
+        'actions': 'actions',
+        '核心对象': 'objects',
+        'objects': 'objects',
+        '前置条件': 'conditions',
+        '条件': 'conditions',
+        'conditions': 'conditions',
+        '结果或状态': 'result',
+        '结果': 'result',
+        'result': 'result',
+        '同义表达': 'synonyms',
+        '同义词': 'synonyms',
+        'synonyms': 'synonyms',
+        '是否自动替换': 'auto_apply',
+        'autoapply': 'auto_apply',
+        '守卫说明': 'guard_notes',
+        'guardnotes': 'guard_notes',
+    }
+    return mapping.get(value)
+
+
+def _split_template_metadata_values(value: str) -> list[str]:
+    return [part.strip() for part in re.split(r'[;；\n]+', str(value or '')) if part.strip()]
+
+
+def _parse_template_synonym_pairs(value: str) -> list[tuple[str, str]]:
+    pairs = []
+    for item in _split_template_metadata_values(value):
+        match = re.match(r'(.+?)\s*[=＝]\s*(.+)', item)
+        if not match:
+            continue
+        source = match.group(1).strip()
+        target = match.group(2).strip()
+        if source and target and source != target:
+            pairs.append((source, target))
+    return pairs
+
+
+def _parse_structured_sentence_templates(section: str) -> list[dict]:
+    templates = []
+    table_blocks = re.findall(r'(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)', section)
+    for block in table_blocks:
+        lines = [line for line in block.strip().split('\n') if line.strip()]
+        if len(lines) < 3:
+            continue
+        header_row = [cell.strip() for cell in lines[0].strip('|').split('|')]
+        header_map = {}
+        for idx, header in enumerate(header_row):
+            key = _template_header_key(header)
+            if key and key not in header_map:
+                header_map[key] = idx
+        if 'template_text' not in header_map:
+            continue
+        for line in lines[2:]:
+            cells = [cell.strip() for cell in line.strip('|').split('|')]
+            template_text = cells[header_map['template_text']].strip() if header_map['template_text'] < len(cells) else ''
+            template_text = re.sub(r'\\([*_\-~()\[\]{}])', r'\1', template_text).strip('"\'“”')
+            if not template_text or re.match(r'^\d+$', template_text):
+                continue
+            template = {
+                'template_id': cells[header_map['template_id']].strip() if header_map.get('template_id', -1) < len(cells) and header_map.get('template_id') is not None else '',
+                'template_text': template_text,
+                'scene': cells[header_map['scene']].strip() if header_map.get('scene', -1) < len(cells) and header_map.get('scene') is not None else '',
+                'section': cells[header_map['section']].strip() if header_map.get('section', -1) < len(cells) and header_map.get('section') is not None else '',
+                'source_step': cells[header_map['source_step']].strip() if header_map.get('source_step', -1) < len(cells) and header_map.get('source_step') is not None else '',
+                'intent_type': cells[header_map['intent_type']].strip() if header_map.get('intent_type', -1) < len(cells) and header_map.get('intent_type') is not None else '',
+                'actions': _split_template_metadata_values(cells[header_map['actions']]) if header_map.get('actions', -1) < len(cells) and header_map.get('actions') is not None else [],
+                'objects': _split_template_metadata_values(cells[header_map['objects']]) if header_map.get('objects', -1) < len(cells) and header_map.get('objects') is not None else [],
+                'conditions': _split_template_metadata_values(cells[header_map['conditions']]) if header_map.get('conditions', -1) < len(cells) and header_map.get('conditions') is not None else [],
+                'result': cells[header_map['result']].strip() if header_map.get('result', -1) < len(cells) and header_map.get('result') is not None else '',
+                'synonym_pairs': _parse_template_synonym_pairs(cells[header_map['synonyms']]) if header_map.get('synonyms', -1) < len(cells) and header_map.get('synonyms') is not None else [],
+                'auto_apply': (cells[header_map['auto_apply']].strip().lower() not in {'no', 'false', '0', '否'}) if header_map.get('auto_apply', -1) < len(cells) and header_map.get('auto_apply') is not None else True,
+                'guard_notes': cells[header_map['guard_notes']].strip() if header_map.get('guard_notes', -1) < len(cells) and header_map.get('guard_notes') is not None else '',
+            }
+            templates.append(template)
+    return templates
+
+
+def _template_entry_text(template) -> str:
+    if isinstance(template, dict):
+        return _protect_model_numbers(str(template.get('template_text', '') or '').strip())
+    return _protect_model_numbers(str(template or '').strip())
+
+
+def _template_entry_candidates(template) -> list[str]:
+    text = _template_entry_text(template)
+    if not text:
+        return []
+    if not isinstance(template, dict):
+        return [text]
+    candidates = [text]
+    for source, target in template.get('synonym_pairs', []) or []:
+        new_candidates = []
+        for base in candidates:
+            if target in base:
+                replaced = base.replace(target, source)
+                if replaced and replaced not in candidates and replaced not in new_candidates:
+                    new_candidates.append(replaced)
+        candidates.extend(new_candidates)
+    return candidates
+
+
+def _structured_template_metadata_score(sentence: str, template) -> dict:
+    if not isinstance(template, dict):
+        return {'condition': 0.0, 'action': 0.0, 'object': 0.0, 'total': 0.0}
+    sentence_intent = _extract_sentence_intent(sentence)
+    condition_tokens = [token for token in template.get('conditions', []) if token]
+    action_tokens = [token for token in template.get('actions', []) if token]
+    object_tokens = [token for token in template.get('objects', []) if token]
+    condition_score = _token_overlap_score(sentence_intent.get('conditions', []), condition_tokens) if condition_tokens else 0.0
+    action_score = _token_overlap_score(sentence_intent.get('actions', []), action_tokens) if action_tokens else 0.0
+    object_score = _token_overlap_score(sentence_intent.get('objects', []), object_tokens) if object_tokens else 0.0
+    total = 0.4 * condition_score + 0.25 * action_score + 0.35 * object_score
+    return {
+        'condition': condition_score,
+        'action': action_score,
+        'object': object_score,
+        'total': total,
+    }
+
+
+def _preferred_sentence_entries(rule: dict, single_clause_only: bool = False) -> list:
+    entries = rule.get('templates') or rule.get('sentences') or []
+    if not single_clause_only:
+        return entries
+    filtered = []
+    for entry in entries:
+        if len(_split_sentence_clauses(_template_entry_text(entry))) <= 1:
+            filtered.append(entry)
+    return filtered
+
+
+def _is_candidate_recall_rule(rule: dict) -> bool:
+    if rule.get('type') != 'preferred_sentences':
+        return False
+    if rule.get('templates'):
+        return True
+    return '句子分类汇总' in str(rule.get('name') or '')
+
+
+def _extract_candidate_topic_markers(text: str) -> set[str]:
+    raw = str(text or '')
+    markers = set()
+    if not raw:
+        return markers
+
+    for marker in _extract_reference_markers(raw):
+        if len(marker) >= 3:
+            markers.add(marker)
+    for marker in _extract_model_markers(raw).keys():
+        if len(marker) >= 3:
+            markers.add(marker)
+    for marker in _extract_numeric_markers(raw):
+        if len(marker) >= 2:
+            markers.add(marker)
+    for marker in _extract_ui_markers(raw):
+        if marker and marker not in _GENERIC_UI_MARKERS:
+            markers.add(marker)
+
+    sentence_intent = _extract_sentence_intent(raw)
+    candidate_units = (
+        sentence_intent.get('objects', []) +
+        sentence_intent.get('conditions', []) +
+        _extract_result_units(raw) +
+        _extract_additional_units(raw)
+    )
+    for unit in candidate_units:
+        normalized = _normalize_structure_object(unit)
+        if len(normalized) >= 2 and normalized not in _GENERIC_UI_MARKERS:
+            markers.add(normalized)
+
+    for match in re.findall(r'[\u4e00-\u9fffA-Za-z0-9\-]{2,16}(?:试剂|样本|载台|制备卡|产物|孔|仓门|视频|说明书|界面|按钮|文库|模块|仪器|系统|软件|缓冲液)', raw):
+        normalized = _normalize_structure_text(match)
+        if len(normalized) >= 2 and normalized not in _GENERIC_UI_MARKERS:
+            markers.add(normalized)
+    return markers
+
+
+def _template_topic_markers(template) -> set[str]:
+    markers = _extract_candidate_topic_markers(_template_entry_text(template))
+    if not isinstance(template, dict):
+        return markers
+    for key in ('scene', 'section', 'source_step', 'intent_type', 'result'):
+        normalized = _normalize_structure_text(template.get(key, ''))
+        if len(normalized) >= 2:
+            markers.add(normalized)
+    for key in ('actions', 'objects', 'conditions'):
+        for value in template.get(key, []) or []:
+            normalized = _normalize_structure_text(value)
+            if len(normalized) >= 2 and normalized not in _GENERIC_UI_MARKERS:
+                markers.add(normalized)
+    return markers
+
+
+def _filter_candidate_templates(sentence: str, templates: list) -> list:
+    if not templates:
+        return []
+    _, sentence_body = _split_step_prefix(sentence)
+    source_sentence = sentence_body or sentence
+    if _is_short_label_like_text(source_sentence) or _looks_like_title_or_noun_phrase(source_sentence):
+        return []
+
+    source_markers = _extract_candidate_topic_markers(source_sentence)
+    source_ui_markers = _extract_ui_markers(source_sentence)
+    source_model_markers = set(_extract_model_markers(source_sentence).keys())
+    source_number_markers = _extract_numeric_markers(source_sentence)
+    source_actions = set(_extract_sentence_intent(source_sentence).get('actions', []))
+    ranked = []
+
+    for index, template in enumerate(templates):
+        template_text = _template_entry_text(template)
+        if not template_text:
+            continue
+        template_markers = _template_topic_markers(template)
+        template_actions = set(_extract_sentence_intent(template_text).get('actions', []))
+        marker_overlap = len(source_markers & template_markers)
+        ui_overlap = len(source_ui_markers & _extract_ui_markers(template_text))
+        model_overlap = len(source_model_markers & set(_extract_model_markers(template_text).keys()))
+        number_overlap = len(source_number_markers & _extract_numeric_markers(template_text))
+        action_overlap = len(source_actions & template_actions)
+        score = marker_overlap * 4 + ui_overlap * 3 + model_overlap * 3 + number_overlap * 2 + action_overlap * 2
+        if source_markers and score <= 0 and action_overlap <= 0:
+            continue
+        ranked.append((score, marker_overlap, action_overlap, ui_overlap, -index, template))
+
+    if not ranked:
+        return [] if source_markers else templates[:40]
+
+    if len(ranked) < 24:
+        selected_texts = {_template_entry_text(item[-1]) for item in ranked}
+        fallback_ranked = []
+        for index, template in enumerate(templates):
+            template_text = _template_entry_text(template)
+            if not template_text or template_text in selected_texts:
+                continue
+            template_actions = set(_extract_sentence_intent(template_text).get('actions', []))
+            action_overlap = len(source_actions & template_actions)
+            similarity = _sentence_similarity(source_sentence, template_text)
+            clause_score = _clause_alignment_score(source_sentence, template_text)
+            if similarity < 0.2 and clause_score < 0.3 and action_overlap <= 0:
+                continue
+            fallback_score = similarity * 100 + clause_score * 20 + action_overlap * 6
+            fallback_ranked.append((fallback_score, clause_score, action_overlap, -index, template))
+        fallback_ranked.sort(reverse=True)
+        for fallback in fallback_ranked[:24 - len(ranked)]:
+            ranked.append((fallback[0], 0, fallback[2], 0, fallback[3], fallback[-1]))
+
+    ranked.sort(reverse=True)
+    return [item[-1] for item in ranked[:80]]
+
+
+def _preferred_entries_from_guide(guide_text: str, single_clause_only: bool = False) -> list:
+    entries = []
+    scoped_guide = _candidate_recall_guide_text(guide_text)
+    for rule in _extract_style_rules(scoped_guide):
+        if not _is_candidate_recall_rule(rule):
+            continue
+        entries.extend(_preferred_sentence_entries(rule, single_clause_only=single_clause_only))
+    return entries
+
+
+def _preferred_entries_for_sentence(sentence: str, guide_text: str, single_clause_only: bool = False) -> list:
+    sentence = _normalize_operation_sentence_for_match(sentence)
+    entries = _preferred_entries_from_guide(guide_text, single_clause_only=single_clause_only)
+    return _filter_candidate_templates(sentence, entries)
+
+
 def _extract_style_rules(guide_text: str) -> list[dict]:
     """从句式指南中提取可执行的检测规则，解析 Markdown 内容"""
     rules = []
+
+    def _extract_numbered_sentences(text: str) -> list[str]:
+        sentences = []
+        for line in (text or '').splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            match = re.match(r'^(?:\d+[.)]|[一二三四五六七八九十]+[、.])\s+(.+)$', value)
+            if not match:
+                continue
+            sentence = match.group(1).strip()
+            if len(sentence) < 6:
+                continue
+            if sentence in {'---'}:
+                continue
+            if sentence not in sentences:
+                sentences.append(sentence)
+        return sentences
     
     # 从 guide_text 中解析实际规则，否则使用默认规则
     if guide_text and guide_text.strip():
@@ -1609,11 +4154,14 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                 continue
             header = header_match.group(1).strip()
             
-            # 提取列表项作为具体规则
-            items = re.findall(r'(?:^|\n)[-*]\s+(.+)', section)
+            # 提取列表项作为具体规则，兼容无序列表和编号列表
+            items = re.findall(r'(?:^|\n)(?:[-*]|\d+[.)])\s+(.+)', section)
             
             # 同时解析 Markdown 表格中的句式模板
-            table_sentences = _parse_table_sentence_templates(section)
+            structured_templates = _parse_structured_sentence_templates(section)
+            table_sentences = [template.get('template_text', '') for template in structured_templates if template.get('template_text')]
+            if not table_sentences:
+                table_sentences = _parse_table_sentence_templates(section)
             
             if not items and not table_sentences:
                 continue
@@ -1732,7 +4280,7 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                         "fix": "统一术语"
                     })
 
-            elif any(kw in lower_header for kw in ['用户反馈修正', '推荐句式', '优先句式', '反馈句式']):
+            elif any(kw in lower_header for kw in ['用户反馈修正', '推荐句式', '优先句式', '反馈句式', '句式', '模板', '句型']):
                 preferred_sentences = []
                 for item in items:
                     sentence = item.strip().strip('`').strip()
@@ -1746,6 +4294,7 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                         "type": "preferred_sentences",
                         "name": header,
                         "sentences": preferred_sentences,
+                        "templates": structured_templates or None,
                         "fix": "优先采用用户确认过的句式"
                     })
             
@@ -1755,9 +4304,20 @@ def _extract_style_rules(guide_text: str) -> list[dict]:
                     "type": "preferred_sentences",
                     "name": header,
                     "sentences": table_sentences,
+                    "templates": structured_templates or None,
                     "fix": "采用规范句式"
                 })
     
+    if '句子分类汇总' in (guide_text or ''):
+        numbered_sentences = _extract_numbered_sentences(guide_text)
+        if numbered_sentences:
+            rules.append({
+                "type": "preferred_sentences",
+                "name": "句子分类汇总",
+                "sentences": numbered_sentences,
+                "fix": "优先采用汇总文件中的规范句式"
+            })
+
     return rules
 
 
@@ -1835,20 +4395,29 @@ def _three_tier_match(sentence: str, templates: list[str]) -> tuple:
     # ===== L2: 模糊匹配（bigram+LCS+结构+关键词 高阈值） =====
     best_tmpl = None
     best_score = 0.0
+    best_rank = None
     for tmpl in templates:
         tmpl_normalized = _normalize_sentence_for_match(tmpl)
         if not tmpl_normalized:
             continue
-        contains_match = (
-            normalized in tmpl_normalized or
-            tmpl_normalized in normalized
+        structured_score = _structured_match_score(sentence, tmpl)
+        cat_score = _cat_match_score(sentence, tmpl, structured_score=structured_score)
+        final_score = cat_score.get('ranking_score', cat_score['overall_score'])
+        rank = (
+            final_score,
+            cat_score['term_anchor_score'],
+            cat_score['number_placeholder_score'],
+            cat_score['context_score'],
+            structured_score['ui_target'],
+            structured_score['sequence'],
+            structured_score['pair'],
+            structured_score['condition'],
+            structured_score['action'],
+            len(tmpl_normalized),
         )
-        if contains_match:
-            score = max(0.92, _sentence_similarity(sentence, tmpl))
-        else:
-            score = _sentence_similarity(sentence, tmpl)
-        if score > best_score:
-            best_score = score
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
+            best_score = final_score
             best_tmpl = tmpl
     
     if best_tmpl and best_score >= _POLISH_MATCH_CONFIG["l2_min_confidence"]:
@@ -1860,6 +4429,263 @@ def _three_tier_match(sentence: str, templates: list[str]) -> tuple:
         return best_tmpl, best_score, "L3"
     
     return best_tmpl, best_score, "NONE"
+
+
+def _ai_semantic_rerank_candidates(sentence: str, ranked: list[dict]) -> list[dict]:
+    shortlist = []
+    seen_keys = set()
+    for item in ranked or []:
+        key = (item.get('template', ''), item.get('candidate_text', ''))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        final_score = float(item.get('final_score', 0.0) or 0.0)
+        overall_percent = int(item.get('overall_percent', 0) or 0)
+        if final_score >= 0.1 or overall_percent >= 20:
+            shortlist.append(item)
+        if len(shortlist) >= _AI_TEMPLATE_RERANK_LIMIT:
+            break
+
+    if len(shortlist) < 2:
+        shortlist = []
+        seen_keys.clear()
+        for item in ranked or []:
+            key = (item.get('template', ''), item.get('candidate_text', ''))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            shortlist.append(item)
+            if len(shortlist) >= min(_AI_TEMPLATE_RERANK_LIMIT, 2):
+                break
+
+    if len(shortlist) < 2:
+        return ranked
+
+    cache_key = hashlib.sha1(
+        (
+            _normalize_compare_text(sentence) + '\n' +
+            '\n'.join(f"{item.get('template', '')}\u0001{item.get('candidate_text', '')}" for item in shortlist)
+        ).encode('utf-8')
+    ).hexdigest()
+    cached = _ai_template_rerank_cache.get(cache_key)
+    if cached is None:
+        try:
+            from app.utils.ai_client import ai_client
+        except Exception:
+            ai_client = None
+        if not ai_client or not ai_client.has_any_client:
+            return ranked
+
+        candidates_text = '\n'.join(
+            f"[{index}] 候选句式：{item.get('candidate_text') or item.get('template', '')}"
+            for index, item in enumerate(shortlist, 1)
+        )
+        prompt = f"""你是技术文档句式匹配专家。请根据原句判断下面候选句式的语义匹配度和改写适用性。
+
+原句：
+{sentence}
+
+候选句式：
+{candidates_text}
+
+判断要求：
+- score 取值 0-100，表示候选句式与原句在语义、动作、对象、数字、表图引用上的综合匹配度。
+- recommended=true 表示该候选句式适合直接作为润色建议。
+- 产品名、型号、数字、数量、表图引用、关键对象不能丢失或改错。
+- 仅做轻微空格修正的句子，如果候选句式表达更完整且保留关键事实，可以推荐。
+- 只输出 JSON，不要输出其他文字。
+
+输出格式：
+{{
+  "items": [
+    {{"index": 1, "score": 92, "recommended": true, "reason": "简短理由"}}
+  ]
+}}"""
+        try:
+            result = ai_client.chat([{"role": "user", "content": prompt}], max_tokens=1200, temperature=0.1)
+            parsed = json.loads(re.sub(r'^```[a-zA-Z]*\n?|\n?```$', '', str(result or '').strip())) if result else {"items": []}
+        except Exception:
+            parsed = {"items": []}
+        cached = {}
+        for item in parsed.get('items', []) if isinstance(parsed, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            index = int(item.get('index', 0) or 0)
+            if index < 1 or index > len(shortlist):
+                continue
+            key = (shortlist[index - 1].get('template', ''), shortlist[index - 1].get('candidate_text', ''))
+            score = max(0, min(100, int(item.get('score', 0) or 0)))
+            cached[key] = {
+                'score': score,
+                'recommended': bool(item.get('recommended')),
+                'reason': str(item.get('reason', '') or '').strip(),
+            }
+        _ai_template_rerank_cache[cache_key] = cached
+
+    if not cached:
+        return ranked
+
+    reranked = []
+    for item in ranked:
+        next_item = dict(item)
+        ai_info = cached.get((item.get('template', ''), item.get('candidate_text', '')))
+        base_score = float(item.get('final_score', 0.0) or 0.0)
+        if ai_info:
+            ai_score = round(ai_info['score'] / 100.0, 4)
+            next_item['ai_semantic_score'] = ai_info['score']
+            next_item['ai_semantic_recommended'] = ai_info['recommended']
+            next_item['ai_semantic_reason'] = ai_info['reason']
+            next_item['ai_rank_score'] = round(base_score * 0.7 + ai_score * 0.3, 4)
+        else:
+            next_item['ai_semantic_score'] = None
+            next_item['ai_semantic_recommended'] = False
+            next_item['ai_semantic_reason'] = ''
+            next_item['ai_rank_score'] = round(base_score, 4)
+        reranked.append(next_item)
+
+    reranked.sort(
+        key=lambda item: (
+            item.get('ai_semantic_recommended', False),
+            item.get('guard_passed', False),
+            item.get('ai_rank_score', 0.0),
+            item.get('final_score', 0.0),
+            item.get('overall_score', 0.0),
+            len(_normalize_sentence_for_match(item.get('template', ''))),
+        ),
+        reverse=True,
+    )
+    return reranked
+
+
+def _best_guarded_match(sentence: str, templates: list[str]) -> tuple:
+    ranked = []
+    for template in templates or []:
+        entry_text = _template_entry_text(template)
+        if not entry_text:
+            continue
+        metadata_score = _structured_template_metadata_score(sentence, template)
+        for candidate in _template_entry_candidates(template):
+            matched_template, score, level = _three_tier_match(sentence, [candidate])
+            if not matched_template:
+                continue
+            if not _template_replace_guard(sentence, matched_template, level, score):
+                continue
+            structured_score = _structured_match_score(sentence, matched_template)
+            cat_score = _cat_match_score(sentence, matched_template, template_metadata=metadata_score, structured_score=structured_score)
+            final_score = cat_score.get('ranking_score', cat_score['overall_score'])
+            ranked.append({
+                'template': entry_text,
+                'candidate_text': matched_template,
+                'match_level': level,
+                'guard_passed': True,
+                'final_score': round(final_score, 4),
+                'overall_score': round(cat_score.get('overall_score', 0.0), 4),
+                'term_anchor_score': cat_score['term_anchor_score'],
+                'number_placeholder_score': cat_score['number_placeholder_score'],
+                'context_score': cat_score['context_score'],
+            })
+
+    if not ranked:
+        return None, 0.0, 'NONE'
+
+    ranked = _ai_semantic_rerank_candidates(sentence, ranked)
+    best = ranked[0]
+    return best.get('template'), float(best.get('final_score', 0.0) or 0.0), best.get('match_level', 'NONE')
+
+
+def _top_template_candidates(sentence: str, templates: list, limit: int = 8) -> list[dict]:
+    ranked = []
+    for template in templates or []:
+        entry_text = _template_entry_text(template)
+        if not entry_text:
+            continue
+        metadata_score = _structured_template_metadata_score(sentence, template)
+        best_candidate_score = None
+        best_candidate_detail = None
+        best_candidate_level = 'NONE'
+        best_candidate_guard = False
+        best_candidate_text = entry_text
+
+        for candidate in _template_entry_candidates(template):
+            matched_template, score, level = _three_tier_match(sentence, [candidate])
+            if not matched_template:
+                continue
+            guard_passed = _template_replace_guard(sentence, matched_template, level, score)
+            structured_score = _structured_match_score(sentence, matched_template)
+            cat_score = _cat_match_score(sentence, matched_template, template_metadata=metadata_score, structured_score=structured_score)
+            final_score = cat_score.get('ranking_score', cat_score['overall_score'])
+            if best_candidate_score is None or final_score > best_candidate_score:
+                best_candidate_score = final_score
+                best_candidate_detail = cat_score
+                best_candidate_level = level
+                best_candidate_guard = guard_passed
+                best_candidate_text = matched_template
+
+        if best_candidate_score is None:
+            continue
+
+        detail = dict(best_candidate_detail or _score_match_segments(sentence, best_candidate_text))
+        final_percent = int(round(float(detail.get('overall_score', 0.0) or 0.0) * 100))
+        band, label = _match_band_label(final_percent)
+        detail['overall_score'] = round(float(detail.get('overall_score', 0.0) or 0.0), 4)
+        detail['overall_percent'] = final_percent
+        detail['band'] = band
+        detail['label'] = label
+        detail['match_level'] = best_candidate_level
+        detail['guard_passed'] = best_candidate_guard
+        detail['template'] = entry_text
+        detail['candidate_text'] = best_candidate_text
+        detail['final_score'] = round(best_candidate_score, 4)
+        ranked.append(detail)
+
+    ranked = _ai_semantic_rerank_candidates(sentence, ranked)
+    guarded_ranked = [item for item in ranked if item.get('guard_passed', False)]
+    manual_ranked = [
+        item for item in ranked
+        if not item.get('guard_passed', False) and int(item.get('overall_percent', 0) or 0) >= 15
+    ]
+
+    primary = guarded_ranked[:limit]
+    selected_keys = {
+        (
+            item.get('template', ''),
+            item.get('candidate_text', ''),
+            item.get('match_level', 'NONE'),
+        )
+        for item in primary
+    }
+
+    exploratory = []
+    for item in guarded_ranked:
+        key = (
+            item.get('template', ''),
+            item.get('candidate_text', ''),
+            item.get('match_level', 'NONE'),
+        )
+        if key in selected_keys:
+            continue
+        if item.get('final_score', 0.0) < 0.5:
+            exploratory.append(item)
+            selected_keys.add(key)
+        if len(exploratory) >= 4:
+            break
+
+    manual_candidates = []
+    for item in manual_ranked:
+        key = (
+            item.get('template', ''),
+            item.get('candidate_text', ''),
+            item.get('match_level', 'NONE'),
+        )
+        if key in selected_keys:
+            continue
+        manual_candidates.append(item)
+        selected_keys.add(key)
+        if len(manual_candidates) >= 6:
+            break
+
+    return primary + exploratory + manual_candidates
 
 
 def replace_with_context(original: str, template: str) -> str:
@@ -1888,6 +4714,16 @@ def replace_with_context(original: str, template: str) -> str:
             chars[i1 + offset : i1 + offset] = list(template[j1:j2])
             offset += j2 - j1
     return ''.join(chars)
+
+
+def _replace_clause_directly(clause: str, template: str, next_separator: str = '') -> str:
+    prefix_match = re.match(r'^(\s*[*\-•·]+\s*)', clause or '')
+    prefix = prefix_match.group(1) if prefix_match else ''
+    replaced = (template or '').strip()
+    if next_separator and next_separator[0] in '，,；;' and replaced.endswith(('。', '！', '？', '.', '!', '?', '；', ';')):
+        replaced = replaced[:-1]
+    replaced = _reapply_sentence_prefix(clause, replaced)
+    return f'{prefix}{replaced}' if replaced else clause
 
 
 def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRuleMatch]]:
@@ -1927,18 +4763,11 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
                         ))
 
         elif rule["type"] == "preferred_sentences":
-            best_sentence, best_score, match_level = _three_tier_match(result, rule.get("sentences", []))
+            best_sentence, best_score, match_level = _best_guarded_match(result, _preferred_sentence_entries(rule))
             if not best_sentence:
                 continue
-            
-            l3_threshold = _POLISH_MATCH_CONFIG["l3_auto_confidence"]
-            should_replace = (
-                (match_level == "L1" and best_score >= _POLISH_MATCH_CONFIG["l1_confidence"]) or
-                (match_level == "L2" and best_score >= _POLISH_MATCH_CONFIG["l2_min_confidence"]) or
-                (match_level == "L3" and best_score >= l3_threshold)
-            )
-            
-            if should_replace and result.strip() != best_sentence.strip():
+
+            if result.strip() != best_sentence.strip():
                 original = result
                 result = replace_with_context(original, best_sentence)
                 changes.append(PolishRuleMatch(
@@ -1947,7 +4776,7 @@ def _apply_style_rules(text: str, rules: list[dict]) -> tuple[str, list[PolishRu
                     after=result[:50],
                     type="style"
                 ))
-            elif should_replace and result.strip() == best_sentence.strip():
+            elif result.strip() == best_sentence.strip():
                 # 完全匹配无变化，记录为空匹配
                 pass
         
@@ -2039,34 +4868,56 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
     """基础文本润色（自动加载句式清单和术语库）"""
     terminology_md = _load_terminology_source(db, input_data.terminology_id)
     sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
+    resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
+    ai_polished = input_data.text
     try:
         from app.utils.ai_client import ai_client
-        resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
         result = ai_client.polish_text(
             input_data.text,
             style_guide=sentence_guide,
             terminology=resolved_terminology if resolved_terminology else None
         )
-        ai_polished = _protect_model_numbers(result.get("polished", input_data.text))
-        changes = []
-        if ai_polished != input_data.text:
-            changes.append({
-                "line": 1,
-                "original": input_data.text[:200],
-                "polished": ai_polished[:200],
-                "type": "ai"
-            })
-        return {
-            "original": result.get("original", input_data.text),
-            "polished": ai_polished,
-            "changes": changes
-        }
+        ai_polished = _reapply_sentence_prefix(
+            input_data.text,
+            _protect_model_numbers(result.get("polished", input_data.text))
+        )
     except Exception:
-        return {
-            "original": input_data.text,
-            "polished": input_data.text,
-            "changes": []
-        }
+        pass
+
+    polished_text, rule_changes = _apply_skill_polish(
+        ai_polished,
+        {},
+        db,
+        sentence_guide,
+        terminology_md,
+        None,
+        db_terminology=resolved_terminology if resolved_terminology else None,
+    )
+    changes = []
+    if ai_polished != input_data.text:
+        ai_entry = _build_visible_change_entry(1, input_data.text, ai_polished, "ai", "ai", sentence_guide)
+        if ai_entry:
+            changes.append(ai_entry)
+    for change in rule_changes:
+        entry = _build_visible_change_entry(
+            1,
+            change.before,
+            change.after,
+            change.type,
+            change.rule_name,
+            sentence_guide,
+        )
+        if entry:
+            entry["match_detail"] = change.match_detail or entry.get("match_detail")
+            changes.append(entry)
+    final_polished = _reapply_sentence_prefix(input_data.text, polished_text)
+    if not changes and _is_low_value_doc_change(input_data.text, final_polished, 'style', '基础规范化'):
+        final_polished = input_data.text
+    return {
+        "original": input_data.text,
+        "polished": final_polished,
+        "changes": changes
+    }
 
 
 @router.post("/skill")
@@ -2075,8 +4926,7 @@ async def polish_with_skill(
     db: Session = Depends(get_db)
 ):
     """使用内置润色规则进行润色（V2 四层规则体系）"""
-    # 加载默认风格指南（V2 完整规则）
-    sentence_guide = _load_file_content(db, DEFAULT_STYLE_GUIDE_ID)
+    sentence_guide = _load_sentence_guides(db, style_guide_id=input_data.style_guide_id)
     if not sentence_guide:
         sentence_guide = _build_document_polish_guide(db)
 
@@ -2097,14 +4947,9 @@ async def polish_with_skill(
         resolved_terminology = _resolve_terminology(db, terminology_md, pre_text)
         ai_result = ai_client.polish_text(pre_text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None)
         if ai_result and ai_result.get("polished"):
-            ai_polished = _protect_model_numbers(ai_result["polished"])
+            ai_polished = _reapply_sentence_prefix(pre_text, _protect_model_numbers(ai_result["polished"]))
             if ai_polished != pre_text:
-                ai_changes = [{
-                    "rule_name": "ai",
-                    "before": input_data.text[:50],
-                    "after": ai_polished[:50],
-                    "type": "ai"
-                }]
+                ai_changes = [change for change in [_build_visible_change_entry(1, input_data.text, ai_polished, 'ai', 'ai', sentence_guide)] if change]
     except Exception:
         pass
 
@@ -2116,11 +4961,24 @@ async def polish_with_skill(
                 ai_polished = protect_result.get("suggested", pre_text)
     except Exception:
         pass
+
+    polished_text, rule_changes = _apply_skill_polish(
+        ai_polished,
+        {},
+        db,
+        sentence_guide,
+        terminology_md,
+        None,
+    )
+    all_changes = ai_changes + rule_changes
+    final_polished = _reapply_sentence_prefix(input_data.text, polished_text)
+    if not all_changes and _is_low_value_doc_change(input_data.text, final_polished, 'style', '基础规范化'):
+        final_polished = input_data.text
     
     return {
         "original": input_data.text,
-        "polished": ai_polished,
-        "changes": ai_changes,
+        "polished": final_polished,
+        "changes": all_changes,
         "skill_name": "技术文档智能润色 (V2)",
         "rules_applied": {
             "术语替换": True,
@@ -2152,10 +5010,38 @@ def _read_docx_document_root(docx_path: str):
     return etree.fromstring(document_xml)
 
 
+def _iter_docx_paragraphs_in_order(container):
+    from docx.document import Document as DocxDocument
+    from docx.table import _Cell, Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+
+    if isinstance(container, DocxDocument):
+        parent_elm = container.element.body
+        parent = container
+    elif isinstance(container, _Cell):
+        parent_elm = container._tc
+        parent = container
+    elif isinstance(container, Table):
+        for row in container.rows:
+            for cell in row.cells:
+                yield from _iter_docx_paragraphs_in_order(cell)
+        return
+    else:
+        return
+
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield from _iter_docx_paragraphs_in_order(Table(child, parent))
+
+
 def _is_simple_revision_paragraph(p_element, w_ns: str) -> bool:
     """判断段落是否为纯文本段落，可安全写入修订标记。
-    仅允许单 run 段落，每个 run 必须仅包含 rPr + 单个 t。
-    多 run / 复杂格式段落跳过修订写回，避免 Word 中出现原文误删。"""
+    允许纯文本多 run 段落，每个 run 必须仅包含 rPr + 单个 t。
+    仅跳过包含绘图、域代码等复杂结构的段落。"""
     allowed_children = {'pPr', 'r'}
     allowed_run_children = {'rPr', 't'}
 
@@ -2176,7 +5062,7 @@ def _is_simple_revision_paragraph(p_element, w_ns: str) -> bool:
             if text_child_count != 1:
                 return False
 
-    return run_count == 1
+    return run_count > 0
 
 
 def _extract_run_visible_text(run_element, w_ns: str) -> str:
@@ -2329,7 +5215,7 @@ def _polish_docx_with_comments(
     requirements: str = None,
     ai_lines: list = None,
     db_terminology: dict = None
-) -> list[PolishRuleMatch]:
+) -> tuple[list[PolishRuleMatch], list[dict]]:
     """对 DOCX 文件进行润色，保留排版并添加批注。
     
     ai_lines: AI 预润色后的文本行列表，与原始段落逐行对应。用于句式清单匹配润色。
@@ -2338,18 +5224,19 @@ def _polish_docx_with_comments(
     from lxml import etree
     
     all_changes = []
+    review_items = []
     w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     
     doc = Document(docx_path)
     document_root = _read_docx_document_root(docx_path)
-    xml_paragraphs = document_root.findall(f'.//{{{w_ns}}}body/{{{w_ns}}}p')
+    xml_paragraphs = document_root.findall(f'.//{{{w_ns}}}body//{{{w_ns}}}p')
     
     term_dict = {}
     if terminology:
         try:
             parsed = _parse_terminology(terminology)
             if parsed:
-                all_text = '\n'.join([p.text for p in doc.paragraphs if p.text and p.text.strip()])
+                all_text = '\n'.join([p.text for p in _iter_docx_paragraphs_in_order(doc) if p.text and p.text.strip()])
                 lang = _detect_language(all_text)
                 term_dict = _filter_terms_by_lang(parsed, lang)
         except Exception:
@@ -2363,7 +5250,8 @@ def _polish_docx_with_comments(
     
     toc_prefixes = ("TOC", "Table of Contents", "目录")
     
-    non_empty_paras = [(idx, para) for idx, para in enumerate(doc.paragraphs) 
+    ordered_paragraphs = list(_iter_docx_paragraphs_in_order(doc))
+    non_empty_paras = [(idx, para) for idx, para in enumerate(ordered_paragraphs) 
                        if para.text and para.text.strip()]
     non_empty_ai_lines = [l.strip() for l in ai_lines if l.strip()] if ai_lines else []
     if non_empty_ai_lines and len(non_empty_ai_lines) != len(non_empty_paras):
@@ -2412,8 +5300,39 @@ def _polish_docx_with_comments(
             if term_changes:
                 para_changes.extend(term_changes)
 
+        primary_change = next((change for change in para_changes if change.type != 'ai'), para_changes[0] if para_changes else None)
+        primary_type = primary_change.type if primary_change else ('terminology' if term_changes else 'style')
+        primary_rule = primary_change.rule_name if primary_change else '句式评分'
+
+        review_detail, review_after = _build_sentence_review_detail(
+            original_text,
+            polished_text if polished_text != original_text else '',
+            sentence_guide,
+            primary_type,
+            primary_rule,
+            is_title=is_title,
+        )
+        review_items.append({
+            'before': original_text,
+            'after': review_after,
+            'type': primary_type,
+            'rule_name': primary_rule,
+            'paragraph': para_idx + 1,
+            'is_title': is_title,
+            'match_detail': review_detail,
+        })
+
+        if _should_emit_reference_review_change(original_text, polished_text, review_after, primary_type, primary_rule):
+            all_changes.append(PolishRuleMatch(
+                rule_name=primary_rule,
+                before=original_text,
+                after=review_after,
+                type=primary_type,
+                paragraph=para_idx + 1,
+                match_detail=review_detail,
+            ))
+
         if polished_text != original_text and (para_changes or polished_text.strip() != original_text.strip()):
-            primary_change = next((change for change in para_changes if change.type != 'ai'), para_changes[0] if para_changes else None)
             primary_type = primary_change.type if primary_change else ('terminology' if term_changes else 'format')
             primary_rule = primary_change.rule_name if primary_change else 'Word修订标记'
             if _is_low_value_doc_change(original_text, polished_text, primary_type, primary_rule):
@@ -2421,31 +5340,29 @@ def _polish_docx_with_comments(
             if _is_rejected_doc_change(original_text, polished_text, rejected_change_keys):
                 continue
 
-            if para_idx >= len(xml_paragraphs):
-                continue
+            if para_idx < len(xml_paragraphs):
+                p_element = xml_paragraphs[para_idx]
+                if _is_simple_revision_paragraph(p_element, w_ns):
+                    revision_id += 1
+                    rid_del = str(revision_id)
+                    now = '2026-06-18T00:00:00Z'
+                    revision_id += 1
+                    rid_ins = str(revision_id)
+                    _apply_paragraph_revision_xml(p_element, polished_text, author, now, rid_del, rid_ins, w_ns)
 
-            p_element = xml_paragraphs[para_idx]
-            if not _is_simple_revision_paragraph(p_element, w_ns):
-                continue
-
-            revision_id += 1
-            rid_del = str(revision_id)
-            now = '2026-06-18T00:00:00Z'
-            revision_id += 1
-            rid_ins = str(revision_id)
-            if _apply_paragraph_revision_xml(p_element, polished_text, author, now, rid_del, rid_ins, w_ns):
-                all_changes.append(PolishRuleMatch(
-                    rule_name=primary_rule,
-                    before=original_text,
-                    after=polished_text,
-                    type=primary_type,
-                    paragraph=para_idx + 1,
-                ))
+            all_changes.append(PolishRuleMatch(
+                rule_name=primary_rule,
+                before=original_text,
+                after=polished_text,
+                type=primary_type,
+                paragraph=para_idx + 1,
+                match_detail=review_detail,
+            ))
     
     document_xml = etree.tostring(document_root, xml_declaration=True, encoding='UTF-8')
     _write_revised_docx(docx_path, output_path, document_xml)
     
-    return all_changes
+    return all_changes, review_items
 
 
 def _write_revised_docx(source_docx_path: str, output_docx_path: str, document_xml: bytes):
@@ -2972,7 +5889,7 @@ async def analyze_file_endpoint(
     terminology_file_id: Optional[int] = Form(None),
     requirements: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_user_optional)
 ):
     import tempfile
     import docx2txt
@@ -2993,7 +5910,7 @@ async def analyze_file_endpoint(
             else:
                 _polish_tasks[task_id] = {"status": "done", "progress": 100, "message": "润色完成", "result": result}
     
-    user = get_default_user(db)
+    user = current_user or get_default_user(db)
     temp_path = None
     original_temp_path = None
     try:
@@ -3021,7 +5938,7 @@ async def analyze_file_endpoint(
         elif ext == 'docx':
             from docx import Document
             doc = Document(temp_path)
-            content = '\n'.join([p.text for p in doc.paragraphs])
+            content = '\n'.join([p.text for p in _iter_docx_paragraphs_in_order(doc)])
         
         if content is None or content.strip() == "":
             raise HTTPException(status_code=400, detail="无法提取文本内容")
@@ -3053,6 +5970,7 @@ async def analyze_file_endpoint(
                     print(f"[POLISH] 已加载术语文件: {term_file_name} ({len(terminology or '')} 字节)")
 
         db_terms = None if terminology else _load_terms_from_db(db)
+        skill_rules = {}
 
         # 规则引擎预处理：AI 润色前先做确定性术语替换 + 标点规范化
         _update_progress(18, "规则引擎预处理...")
@@ -3063,21 +5981,39 @@ async def analyze_file_endpoint(
             print(f"规则引擎预处理失败(使用原文): {e}")
             pre_polished = content
 
+        resolved_terms = _resolve_terminology(db, terminology, pre_polished)
+        resolved_terms = _trim_terms_for_ai(resolved_terms, pre_polished)
+
         _update_progress(20, "AI 智能润色中...")
         ai_polished = pre_polished
         ai_changes = []
-        try:
-            from app.utils.ai_client import ai_client
-            resolved_terms = _resolve_terminology(db, terminology, pre_polished)
-            ai_result = ai_client.polish_text(pre_polished, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None)
-            if ai_result and ai_result.get("polished") and ai_result["polished"] != pre_polished:
-                ai_polished = ai_result["polished"]
-                ai_changes = ai_result.get("changes") or [{
-                    "type": "ai",
-                    "summary": "AI 完成润色"
-                }]
-        except Exception as e:
-            print(f"AI 润色失败(返回原文): {e}")
+        skip_ai, skip_reason = _should_skip_document_ai(pre_polished, sentence_guide, resolved_terms)
+        if skip_ai:
+            print(f"[POLISH] 跳过整篇 AI 预润色: {skip_reason}")
+            _update_progress(22, "文档较大，使用规则引擎润色...")
+        else:
+            try:
+                from app.utils.ai_client import ai_client
+                ai_result = ai_client.polish_text(pre_polished, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None)
+                if ai_result and ai_result.get("polished") and ai_result["polished"] != pre_polished:
+                    ai_polished = ai_result["polished"]
+                    ai_changes = ai_result.get("changes") or [{
+                        "type": "ai",
+                        "summary": "AI 完成润色"
+                    }]
+            except Exception as e:
+                print(f"AI 润色失败(返回原文): {e}")
+
+        logger.warning(
+            "[POLISH_DEBUG] sentence_file_id=%s sentence_file_name=%r terminology_file_id=%s terminology_file_name=%r guide_chars=%s ai_skipped=%s ai_changed=%s",
+            sentence_file_id,
+            sentence_file_name,
+            terminology_file_id,
+            term_file_name,
+            len(sentence_guide or ""),
+            skip_ai,
+            ai_polished != pre_polished,
+        )
 
         # 规则引擎后置保护：检查 AI 润色是否丢失专有名词
         try:
@@ -3091,6 +6027,7 @@ async def analyze_file_endpoint(
 
         _update_progress(50, "应用修订标记...")
         if is_docx:
+            previous_doc = _find_previous_polished_document(db, filename, getattr(user, 'id', None), 'docx')
             ai_lines = [l for l in ai_polished.split('\n') if l.strip()] if ai_polished != content else None
             _, date_str = _get_date_subfolder_id(db, None, user.id)
             date_dir = os.path.join(UPLOAD_DIR, date_str)
@@ -3101,7 +6038,7 @@ async def analyze_file_endpoint(
             saved_file_path = os.path.join(date_dir, unique_filename)
             
             _update_progress(60, "生成修订版 DOCX...")
-            changes = _polish_docx_with_comments(
+            changes, review_items = _polish_docx_with_comments(
                 temp_path, saved_file_path, skill_rules, db,
                 sentence_guide, terminology, requirements,
                 ai_lines=ai_lines,
@@ -3113,12 +6050,36 @@ async def analyze_file_endpoint(
             from docx import Document
             polished_doc = Document(saved_file_path)
             # 从修订标记版 DOCX 读取润色后文本（<w:delText> 被忽略，仅读 <w:t> 即插入文本）
-            preview_text = '\n'.join([p.text for p in polished_doc.paragraphs])
+            preview_text = '\n'.join([
+                p.text for p in _iter_docx_paragraphs_in_order(polished_doc)
+            ])
             polished_text = preview_text
             rejected_change_keys = _load_rejected_doc_change_keys(db)
-            display_changes = _filter_visible_doc_changes(changes, rejected_change_keys)
+            display_changes = _filter_visible_doc_changes(changes, rejected_change_keys, sentence_guide)
             if not display_changes:
-                display_changes = _build_doc_change_details(content, polished_text, changes, rejected_change_keys)
+                display_changes = _build_doc_change_details(content, polished_text, changes, rejected_change_keys, sentence_guide)
+            previous_change_keys, previous_before_keys = _build_previous_doc_change_keys(previous_doc, rejected_change_keys)
+            previous_new_change_count = _mark_new_doc_review_items(review_items, previous_change_keys, previous_before_keys) if previous_doc else 0
+            if previous_doc:
+                for item in display_changes:
+                    before_key = _doc_change_before_key(item.get('before', ''))
+                    pair_key = _doc_change_pair_key(item.get('before', ''), item.get('after', ''))
+                    item['is_new_since_last_polish'] = bool(before_key) and before_key not in previous_before_keys and pair_key not in previous_change_keys
+            debug_info = _build_polish_debug_info(
+                sentence_file_id=sentence_file_id,
+                sentence_file_name=sentence_file_name,
+                sentence_guide=sentence_guide,
+                terminology_file_id=terminology_file_id,
+                terminology_file_name=term_file_name,
+                skip_ai=skip_ai,
+                skip_reason=skip_reason,
+                ai_polished=ai_polished,
+                pre_polished=pre_polished,
+                total_changes=len(changes),
+                visible_changes=len(display_changes),
+                previous_polish_found=previous_doc is not None,
+                previous_new_change_count=previous_new_change_count,
+            )
             
             _update_progress(80, "生成润色报告...")
             report_filename = f"【润色报告】{filename.rsplit('.', 1)[0]}.docx"
@@ -3152,9 +6113,11 @@ async def analyze_file_endpoint(
                 "original": content,
                 "polished": polished_text,
                 "changes": display_changes,
+                "review_items": review_items,
                 "report_file": report_filename,
                 "download_filename": unique_filename,
-                "file_type": "docx"
+                "file_type": "docx",
+                "debug_info": debug_info,
             }
             _finish_task(result_data)
             return result_data
@@ -3169,6 +6132,18 @@ async def analyze_file_endpoint(
                     after=polished_text[:50],
                     type="ai"
                 ))
+            debug_info = _build_polish_debug_info(
+                sentence_file_id=sentence_file_id,
+                sentence_file_name=sentence_file_name,
+                sentence_guide=sentence_guide,
+                terminology_file_id=terminology_file_id,
+                terminology_file_name=term_file_name,
+                skip_ai=skip_ai,
+                skip_reason=skip_reason,
+                ai_polished=ai_polished,
+                pre_polished=pre_polished,
+                total_changes=len(changes),
+            )
             _update_progress(90, "保存结果...")
             if not os.path.exists(UPLOAD_DIR):
                 os.makedirs(UPLOAD_DIR)
@@ -3199,7 +6174,8 @@ async def analyze_file_endpoint(
                 "polished": polished_text,
                 "changes": changes,
                 "download_filename": unique_filename,
-                "file_type": ext
+                "file_type": ext,
+                "debug_info": debug_info,
             }
             _finish_task(result_data)
             return result_data
@@ -3402,11 +6378,12 @@ def submit_document_feedback(
 
     processed_count = 0
     feedback_file_id = None
+    source_name = (feedback.source_filename or '').strip() or (doc.name if doc and doc.name else '') or (doc.filename if doc and doc.filename else '') or f"文档{feedback.document_id or ''}".strip()
+    feedback_record_key = _build_document_feedback_record_key(doc.id if doc else feedback.document_id, source_name)
     if accepted_lines:
         target_files = _get_platform_feedback_targets(db, current_user.id if current_user else 1)
         feedback_file_id = target_files[0].id if target_files else None
         timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        source_name = (feedback.source_filename or '').strip() or f"文档{feedback.document_id or ''}".strip()
         new_lines = []
         for file in target_files:
             existing = ""
@@ -3459,7 +6436,7 @@ def submit_document_feedback(
             rejected_count += 1
 
     db.add(PolishFeedback(
-        original_text=feedback.source_filename or '',
+        original_text=feedback_record_key,
         polished_text='\n'.join(accepted_lines),
         accuracy=len(accepted_items),
         corrections='\n'.join(accepted_lines),
@@ -3469,9 +6446,10 @@ def submit_document_feedback(
     ))
     db.commit()
 
-    total_docs = db.query(func.count(PolishFeedback.id)).filter(
+    all_document_feedback = db.query(PolishFeedback).filter(
         PolishFeedback.target == 'document_sentence_guide'
-    ).scalar() or 0
+    ).all()
+    total_docs = len(_latest_document_feedback_records(all_document_feedback))
 
     return {
         "message": "文档润色反馈已提交",
@@ -3503,25 +6481,11 @@ def get_feedback_stats(db: Session = Depends(get_db)):
 
 @router.get("/feedback/document-stats", response_model=None)
 def get_document_feedback_stats(db: Session = Depends(get_db)):
-    """获取文档润色页统计。准确率 = 每次润色(修改条数 / 总润色条数)的平均值。"""
+    """获取文档润色页统计。每个文档仅按最新一次反馈计 1 次提交。"""
     records = db.query(PolishFeedback).filter(
         PolishFeedback.target == 'document_sentence_guide'
     ).all()
-
-    total_docs = len(records)
-    if total_docs == 0:
-        return {"total_docs": 0, "average_accuracy": 0}
-
-    ratios = []
-    for record in records:
-        total_changes = record.processed_count or 0
-        if total_changes <= 0:
-            ratios.append(0)
-            continue
-        ratios.append((record.accuracy or 0) / total_changes)
-
-    average_accuracy = round((sum(ratios) / total_docs) * 100, 1)
-    return {"total_docs": total_docs, "average_accuracy": average_accuracy}
+    return _document_feedback_stats(records)
 
 
 # ============================================================

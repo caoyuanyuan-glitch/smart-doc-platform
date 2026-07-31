@@ -5814,6 +5814,9 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
 
     # Mixed Chinese-English spacing rule should keep common product names and protocol acronyms intact.
     if rule_no == "R025":
+        window = content[max(0, start - 1):min(len(content), end + 1)]
+        if re.search(r"[A-Za-z]{2,}", window):
+            return True
         if re.search(r"[A-Z]{2,}|[A-Za-z]+\d|\d+[A-Za-z]+", original_text):
             return True
 
