@@ -20,6 +20,82 @@ def parse_value(raw):
     return raw
 
 
+def _strip_markdown_markup(text):
+    text = str(text or "").strip()
+    text = re.sub(r'^>\s*', '', text)
+    text = re.sub(r'^(?:[-*+]\s+)', '', text)
+    text = re.sub(r'^#{1,6}\s*', '', text)
+    text = re.sub(r'^\d+[\.、\)]\s*', '', text)
+    text = re.sub(r'\*\*([^*]+?)\*\*', r'\1', text)
+    text = re.sub(r'__([^_]+?)__', r'\1', text)
+    text = text.replace('**', '')
+    text = text.replace('`', '')
+    return text.strip()
+
+
+def _split_markdown_table_rows(text):
+    rows = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith('|') or line.count('|') < 2:
+            continue
+        if re.fullmatch(r'\|[\s\-:\|]+\|?', line):
+            continue
+        cells = [
+            _strip_markdown_markup(cell)
+            for cell in line.strip('|').split('|')
+        ]
+        cells = [cell for cell in cells if cell]
+        if len(cells) >= 2:
+            rows.append(cells)
+    return rows
+
+
+def _extract_list_section_params(text):
+    params = []
+    lines = str(text or "").splitlines()
+    i = 0
+    while i < len(lines):
+        heading = _strip_markdown_markup(lines[i])
+        if heading not in {"适用样本类型", "适用样本"}:
+            i += 1
+            continue
+
+        values = []
+        j = i + 1
+        while j < len(lines):
+            raw_line = lines[j].rstrip()
+            stripped = raw_line.strip()
+            if not stripped:
+                if values:
+                    break
+                j += 1
+                continue
+            if re.match(r'^#{1,6}\s*', stripped):
+                break
+            if re.match(r'^\*\*[^*]+[：:]\*\*', stripped):
+                break
+
+            item = _strip_markdown_markup(stripped)
+            if re.match(r'^(?:[-*+]\s+)', stripped):
+                if item:
+                    values.append(item)
+                j += 1
+                continue
+            if values:
+                break
+            j += 1
+
+        if values:
+            params.append({
+                "name": heading,
+                "value": "、".join(values),
+                "source": "text_section",
+            })
+        i = j
+    return params
+
+
 _COLON_PATTERN = re.compile(
     r'^\s*'
     r'(?:[\d]+[\.\、\)）]\s*)?'          # 可选编号前缀
@@ -116,11 +192,13 @@ def _is_value_like(text):
     has_digit = bool(_NUMERIC_PATTERN.search(text))
     has_unit = bool(_UNIT_PATTERN.search(text.casefold()))
     is_short = len(text) <= 30
+    if re.search(r'[@]|https?://|\bwww\.', text, re.IGNORECASE):
+        return True
     # 值不包含数字且不包含单位时，必须是短文本
     if not has_digit and not has_unit:
-        if len(text) > 15:
+        if len(text) > 40:
             return False
-        if re.search(r'[。，、；]', text):
+        if re.search(r'[。；]', text):
             return False
     if has_digit or has_unit:
         return True
@@ -133,9 +211,25 @@ def extract_params_from_text(text):
     params = []
     seen = set()
 
+    table_rows = _split_markdown_table_rows(text)
+    if table_rows:
+        for p in extract_params_from_table_rows(table_rows):
+            key = p["name"].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            params.append(p)
+
+    for p in _extract_list_section_params(text):
+        key = p["name"].casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        params.append(p)
+
     lines = text.split('\n')
     for line in lines:
-        line = line.strip()
+        line = _strip_markdown_markup(line)
         if not line:
             continue
 
@@ -153,7 +247,7 @@ def extract_params_from_text(text):
         if not m:
             continue
 
-        name = normalize_param_name(m.group(1))
+        name = normalize_param_name(_strip_markdown_markup(m.group(1)))
         value = parse_value(m.group(2).strip())
         if not name or not value:
             continue
@@ -228,8 +322,8 @@ def extract_params_from_table_rows(rows, header_row_idx=0):
             continue
 
         for i in range(len(cells) - 1):
-            name = cells[i]
-            value = cells[i + 1]
+            name = _strip_markdown_markup(cells[i])
+            value = _strip_markdown_markup(cells[i + 1])
 
             if not name or not value:
                 continue
@@ -860,20 +954,9 @@ def _values_equal(v1, v2):
     v2c = v2.strip().casefold()
     if v1c == v2c:
         return True
-
-    nums1 = _NUMERIC_PATTERN.findall(v1)
-    nums2 = _NUMERIC_PATTERN.findall(v2)
-
-    if nums1 and nums2:
-        try:
-            n1 = float(nums1[0])
-            n2 = float(nums2[0])
-            return abs(n1 - n2) < 1e-9
-        except ValueError:
-            pass
-
-    sim = SequenceMatcher(None, v1c, v2c).ratio()
-    return sim >= 0.98
+    v1c = re.sub(r'\s+', ' ', v1c)
+    v2c = re.sub(r'\s+', ' ', v2c)
+    return v1c == v2c
 
 
 def _translate_source(source):

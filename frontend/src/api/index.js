@@ -84,6 +84,16 @@ export const documentAPI = {
 
 export const reviewAPI = {
   create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode }, timeout: 300000 }),
+  compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
+    const formData = new FormData()
+    formData.append('main_file', mainFile)
+    formData.append('mode', mode)
+    referenceFiles.forEach((file) => formData.append('reference_files', file))
+    return instance.post('/review/compare-audit/run', formData, {
+      timeout: 300000,
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
   get: (id) => instance.get(`/review/${id}`),
   getIssues: (id) => instance.get(`/review/${id}/issues`),
   createManualIssue: (id, data) => instance.post(`/review/${id}/issues/manual`, data),
@@ -96,7 +106,7 @@ export const reviewAPI = {
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
   getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
   getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
-  list: () => instance.get('/review/'),
+  list: (params = {}) => instance.get('/review/', { params }),
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),

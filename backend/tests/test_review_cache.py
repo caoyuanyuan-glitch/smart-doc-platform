@@ -93,6 +93,40 @@ def test_list_reviews_batches_document_lookup(monkeypatch):
     assert result[1]["document_file_type"] == "pdf"
 
 
+def test_normalize_review_status_accepts_supported_values():
+    assert review_api._normalize_review_status(None) is None
+    assert review_api._normalize_review_status("all") is None
+    assert review_api._normalize_review_status("RUNNING") == "running"
+
+
+def test_list_reviews_supports_filters(monkeypatch):
+    reviews = [SimpleNamespace(id=8, document_id=21, status="running", summary="", total_issues=0)]
+    documents = [SimpleNamespace(id=21, filename="demo.docx", file_type="docx")]
+    captured = {}
+
+    def fake_query_review_rows(db, document_id=None, status=None, latest_only=False, limit=100):
+        captured.update({
+            "document_id": document_id,
+            "status": status,
+            "latest_only": latest_only,
+            "limit": limit,
+        })
+        return reviews
+
+    monkeypatch.setattr(review_api, "_query_review_rows", fake_query_review_rows)
+    monkeypatch.setattr(review_api, "get_documents_by_ids", lambda db, document_ids: documents)
+    monkeypatch.setattr(review_api, "_reconcile_review_runtime_state", lambda db, review: review)
+    monkeypatch.setattr(review_api, "get_progress", lambda review_id: {"status": "running", "progress": 42, "message": "处理中"})
+
+    result = asyncio.run(
+        review_api.list_reviews(document_id=21, status="running", latest_only=True, limit=25, db=None)
+    )
+
+    assert captured == {"document_id": 21, "status": "running", "latest_only": True, "limit": 25}
+    assert result[0]["document_name"] == "demo.docx"
+    assert result[0]["progress"]["progress"] == 42
+
+
 def test_select_relevant_ai_review_basis_prefers_matching_sections():
     sections = [
         {"label": "通用风格", "text": "【通用风格】\n统一标点和语法。", "priority": 2},

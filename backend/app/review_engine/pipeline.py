@@ -79,6 +79,7 @@ def issue_to_mapping(issue: Any) -> dict[str, Any]:
         "description": issue_value(issue, "description", "") or "",
         "audit_basis": issue_value(issue, "audit_basis", "") or "",
         "confidence": issue_value(issue, "confidence", 0) or 0,
+        "review_value_penalty": issue_value(issue, "review_value_penalty", 0) or 0,
         "position": issue_value(issue, "position", "") or "",
         "chapter": issue_value(issue, "chapter", "") or "",
         "status": issue_value(issue, "status", "") or "",
@@ -141,7 +142,17 @@ def issue_topic(issue: Any) -> str:
 
 def is_high_value(issue: Any) -> bool:
     rule = str(issue_value(issue, "rule", "") or "").upper()
+    category = normalize_text(issue_value(issue, "category", ""))
+    severity = str(issue_value(issue, "severity", "") or "").lower()
     if is_visual_layout_issue(issue):
+        return False
+    if rule.startswith("CYY-CN-UNIT-"):
+        return False
+    if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
+        return False
+    if category in {"Grammar", "Terminology", "操作步骤语气", "英文微编辑", "英文规范"} and severity in {"general", "suggestion"}:
+        return False
+    if rule in {"DOC-PROC-001", "DOC-MICRO-001", "R024"}:
         return False
     if rule.startswith(("DOC-", "CHECKLIST-", "CYY-")):
         return True
@@ -169,10 +180,11 @@ def value_score(issue: Any) -> int:
     category = str(data["category"] or "")
     severity = str(data["severity"] or "general").lower()
     confidence = int(data["confidence"] or 0)
+    penalty = int(data.get("review_value_penalty") or 0)
 
     score = 50
     score += {"fatal": 25, "serious": 18, "general": 6, "suggestion": -8}.get(severity, 0)
-    score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": -20}.get(source, 0)
+    score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 6}.get(source, 0)
     if confidence >= 95:
         score += 10
     elif confidence >= 90:
@@ -181,16 +193,25 @@ def value_score(issue: Any) -> int:
         score -= 12
     if is_high_value(data):
         score += 30
+    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT"}:
+        score += 12
+    if rule.startswith("CYY-CN-UNIT-") or category == "单位格式":
+        score -= 42
+    if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
+        score -= 32
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data):
+        score -= 26
     if LOW_VALUE_PATTERN.search(normalize_text(data["original_text"])) or LOW_VALUE_PATTERN.search(issue_blob(data)):
         score -= 55
     if rule in LOW_VALUE_RULES:
         score -= 45
-    if source == "spellcheck":
-        score -= 40
+    if source == "spellcheck" and not is_high_value(data):
+        score -= 4
     if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not is_high_value(data):
         score -= 20
     if not data["original_text"] or not data["suggestion"]:
         score -= 20
+    score -= penalty
     return max(0, min(100, score))
 
 
@@ -206,7 +227,7 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
     category = normalize_text(data["category"])
 
     if source == "spellcheck":
-        return True
+        return False
     if is_visual_layout_issue(data):
         return True
     if rule in LOW_VALUE_RULES:
@@ -227,13 +248,19 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return counters["R024_TO_TO"] > 1
     if rule in {"HR008", "GRAMMAR-002"} and re.fullmatch(r"(?:please\s+contact|after\s+login)", original, re.IGNORECASE):
         return True
-    if source == "ai" and value_score(data) < 45 and not is_high_value(data):
+    if source == "ai" and value_score(data) < 30 and not is_high_value(data):
         return True
     if source == "ai" and LOW_VALUE_PATTERN.search(issue_blob(data)):
         return True
     if source == "ai" and re.search(r"\[[^\]]*(?:table content|company name|address|contact details)[^\]]*\]", suggestion, re.IGNORECASE):
         return True
     if source == "ai" and category.lower() in {"format", "punctuation"} and re.search(r"space\s+before\s+colon|remove\s+space\s+before\s+colon|punctuation", issue_blob(data), re.IGNORECASE):
+        return True
+    if (rule.startswith("CYY-CN-UNIT-") or category == "单位格式") and str(data["severity"] or "").lower() in {"general", "suggestion"}:
+        return True
+    if rule == "CHECKLIST-TRADEMARK" and str(data["severity"] or "").lower() in {"general", "suggestion"}:
+        return True
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and str(data["severity"] or "").lower() in {"general", "suggestion"} and not is_high_value(data):
         return True
     if source == "ai" and re.search(r"\bcheck\s+if\b|是否使用|是否正确", suggestion, re.IGNORECASE):
         return True
@@ -264,6 +291,7 @@ def normalize_issue(issue: Any) -> Any:
     set_issue_value(issue, "description", data["description"] or "")
     set_issue_value(issue, "audit_basis", data["audit_basis"] or "审核流水线")
     set_issue_value(issue, "confidence", int(data["confidence"] or 0))
+    set_issue_value(issue, "review_value_penalty", int(data.get("review_value_penalty") or 0))
     set_issue_value(issue, "review_value_score", value_score(issue))
     return issue
 
@@ -276,8 +304,10 @@ def dedupe_key(issue: Any) -> str:
     rule = str(data["rule"] or "").upper()
     if topic:
         return f"topic|{topic}|{original[:80]}"
-    if source == "spellcheck" or rule == "SPELL":
-        return f"spell|{original}|{data['position']}"
+    if rule in {"CYY-CN-PLACEHOLDER-001", "CYY-CN-MATERIAL-001"}:
+        return rule
+    if source == "spellcheck" or rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT"}:
+        return f"spell|{rule}|{original}"
     if rule in {"UNIT-003", "UNIT-004", "HR011", "STYLE-003", "HR008", "GRAMMAR-001", "GRAMMAR-002"}:
         return f"{rule}|{original}|{data['position']}"
     return f"{rule}|{original}|{compact_text(data['chapter'])}"

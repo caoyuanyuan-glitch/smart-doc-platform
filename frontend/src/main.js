@@ -30,12 +30,29 @@ function renderBootstrapError(error) {
   `
 }
 
+function isUsefulBootstrapError(error) {
+  if (error instanceof Error) return true
+  if (typeof error === 'string' && error.trim()) return true
+  if (!error || typeof error !== 'object') return false
+  return Boolean(error.message || error.reason || error.filename || error.error)
+}
+
 window.addEventListener('error', (event) => {
-  renderBootstrapError(event.error || event)
+  const payload = event.error || event
+  if (!isUsefulBootstrapError(payload)) {
+    console.warn('Ignored non-fatal window error event', event)
+    return
+  }
+  renderBootstrapError(payload)
 })
 
 window.addEventListener('unhandledrejection', (event) => {
-  renderBootstrapError(event.reason || event)
+  const payload = event.reason || event
+  if (!isUsefulBootstrapError(payload)) {
+    console.warn('Ignored non-fatal unhandledrejection event', event)
+    return
+  }
+  renderBootstrapError(payload)
 })
 
 async function bootstrap() {
