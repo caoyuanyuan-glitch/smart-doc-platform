@@ -103,6 +103,9 @@ TECH_TERMS_WHITELIST = {
     'TE Buffer', 'En-TE', 'En-Beads', 'Bioanalyzer', 'Quant-iT',
     'Tris', 'CSS', 'UDB', 'fmol', 'fragmentase', 'repurification',
     'demultiplexing', 'techsupport', 'sativa', 'barcodes', 'RXN', 'PF',
+    'basecall', 'basecalling', 'basecaller', 'cycler', 'cyclers', 'functionalized',
+    'Nextera', 'TruSeq', 'nanoball', 'nanoballs', 'MDA', 'MSP', 'ATCG', 'Qty',
+    'Bio-Rad', 'usersupplied',
 }
 
 SPELLCHECK_WHITELIST = {
@@ -110,10 +113,10 @@ SPELLCHECK_WHITELIST = {
         'hengyunshan', 'guanggu', 'qingdao', 'shandong',
         'hamilton', 'eppendorf', 'axygen', 'greiner',
         'dnbseq', 'mgisp', 'mgistp', 'dnv', 'app-d', 'stereomics', 'dipseq',
-        'dnase', 'rnase', 'oligodt', 'qubit', 'pcr', 'hsc',
-        'dhs', 'bio', 'one', 'mgi', 'sto', 'sscir', 'dsdna',
+    'dnase', 'rnase', 'oligodt', 'qubit', 'pcr', 'hsc',
+        'dhs', 'bio', 'one', 'mgi', 'sto', 'sscir', 'dsdna', 'pbmc', 'hcl', 'agarose',
         'buffer', 'greiner', 'hamilton', 'mgitech', 'life', 'science',
-        'te', 'multi',
+        'te', 'multi', 'truseq', 'usersupplied',
     },
     'prefix': {'os-', 'app-', 't20-', 'mgisp-', 'dnbseq-'},
     'pattern': [
@@ -2875,6 +2878,8 @@ COMMON_MISSPELLINGS = {
     'genotye': 'genotype',
     'phenotye': 'phenotype',
     'haplotye': 'haplotype',
+    'consumbles': 'consumables',
+    'mixedly': 'mix',
     'purifcation': 'purification',
     'centrifigation': 'centrifugation',
     'electrophresis': 'electrophoresis',
@@ -2904,6 +2909,15 @@ FORCED_MISSPELLINGS = {
     'platfoms',
     'sensetivity',
     'sensitivty',
+    'consumbles',
+    'mixedly',
+}
+
+TERM_VARIANT_CORRECTIONS = {
+    't-regent': 'T-Reagent',
+    'highthroughput': 'high-throughput',
+    'widebore': 'wide-bore',
+    'usersupplied': 'user-supplied',
 }
 
 
@@ -2922,6 +2936,19 @@ def _normalize_for_check(word):
     """标准化单词用于拼写检查"""
     w = word.strip('.')
     return w.lower()
+
+
+def _should_skip_match_word(word):
+    token = str(word or '').strip('.,;:()[]{}"\'').strip()
+    if not token:
+        return True
+    if re.fullmatch(r'[Xx]{3,}', token):
+        return True
+    if re.fullmatch(r'[A-Z]{2,8}', token):
+        return True
+    if re.fullmatch(r'Qty', token):
+        return True
+    return False
 
 
 def _extract_chapter(content, position):
@@ -2986,6 +3013,9 @@ def _looks_like_joined_words(word):
             piece = lowered[start:end]
             if not _is_dictionary_word(piece):
                 continue
+            piece_len = end - start
+            if piece_len > 4 and piece not in _JOINER_SMALL_WORDS:
+                continue
             if can_split(end, parts + 1):
                 memo[key] = True
                 return True
@@ -3009,10 +3039,21 @@ def _should_skip_spelling_issue(word, context, file_type=None):
     if re.search(r'@|https?://|www\.', context or '', re.IGNORECASE):
         return True
 
-    if re.search(rf'\b{re.escape(word)}\s+[a-z]{{1,2}}\b', context, re.IGNORECASE):
-        joined = re.sub(rf'\b{re.escape(word)}\s+([a-z]{{1,2}})\b', lambda match: word + match.group(1), context, flags=re.IGNORECASE)
-        if re.search(r'\bsupernatant\b', joined, re.IGNORECASE):
+    right_fragment_match = re.search(rf'\b{re.escape(word)}\s+([a-z]{{1,6}})\b', context, re.IGNORECASE)
+    if right_fragment_match:
+        joined = f"{word}{right_fragment_match.group(1)}"
+        if _is_dictionary_word(joined) or _is_technical_term(joined) or joined.lower() in COMMON_MISSPELLINGS:
             return True
+
+    left_fragment_match = re.search(rf'\b([a-z]{{1,6}})\s+{re.escape(word)}\b', context, re.IGNORECASE)
+    if left_fragment_match:
+        joined = f"{left_fragment_match.group(1)}{word}"
+        if _is_dictionary_word(joined) or _is_technical_term(joined) or joined.lower() in COMMON_MISSPELLINGS:
+            return True
+
+    normalized = _normalize_for_check(word)
+    if file_type == 'pdf' and len(normalized) <= 4 and normalized not in FORCED_MISSPELLINGS and normalized not in COMMON_MISSPELLINGS:
+        return True
 
     if file_type != 'pdf':
         return False
@@ -3033,10 +3074,7 @@ def _should_skip_spelling_issue(word, context, file_type=None):
         return True
     if re.match(r'^(?:ii|iii|iv|vi)+[a-z]+$', lowered):
         return True
-
-    compact_tokens = re.findall(r'\b[a-z]{8,}\b', context.lower())
-    merged_like_count = sum(1 for token in compact_tokens if _looks_like_joined_words(token))
-    return merged_like_count >= 2
+    return False
 
 
 def _build_spelling_context(content, start, end, radius=90):
@@ -3050,6 +3088,91 @@ def _format_spelling_suggestion(word, context, suggestions, certainty='疑似'):
     return suggestion_part
 
 
+def _find_pdf_split_word_issues(content, seen_issue_keys):
+    issues = []
+    if not content:
+        return issues
+
+    patterns = [
+        re.compile(r'\b([A-Za-z]{2,12})\s+([a-z]{1,2})\b'),
+        re.compile(r'\b([a-z])\s+([a-z]{2,12})\b'),
+    ]
+
+    for pattern in patterns:
+        for match in pattern.finditer(content):
+            original = match.group(0)
+            left = match.group(1)
+            right = match.group(2)
+            joined = f'{left}{right}'
+            normalized_joined = _normalize_for_check(joined)
+
+            if len(joined) < 4 or not joined.isalpha():
+                continue
+            if is_whitelisted(joined) or _is_domain_abbreviation(joined):
+                continue
+            if not (_is_dictionary_word(joined) or normalized_joined in COMMON_MISSPELLINGS or _is_technical_term(joined)):
+                continue
+            if _is_dictionary_word(left) and _is_dictionary_word(right):
+                continue
+
+            context = _build_spelling_context(content, match.start(), match.end())
+            if re.search(r'\b(?:Table|Figure|Chapter|Contents|Cat\.?\s*No\.?|Pos\d+)\b', context, re.IGNORECASE):
+                continue
+
+            dedupe_key = (normalized_joined, 'split-spell', match.start())
+            if dedupe_key in seen_issue_keys:
+                continue
+            seen_issue_keys.add(dedupe_key)
+
+            issues.append({
+                "severity": "serious",
+                "category": "拼写/用词错误",
+                "rule": "SPELL-SPLIT",
+                "chapter": _extract_chapter(content, match.start()),
+                "original_text": original,
+                "context": context,
+                "suggestion": joined,
+                "description": f"原文片段：'{context}'；疑似被空格拆开的单词：[{original}]；建议修改为：[{joined}]。",
+                "audit_basis": "英文拼写规范",
+                "confidence": 92,
+                "source": "spellcheck",
+                "position": f"{match.start()}-{match.end()}"
+            })
+
+    return issues
+
+
+def _find_term_variant_issues(content, seen_issue_keys):
+    issues = []
+    if not content:
+        return issues
+
+    for wrong, correct in TERM_VARIANT_CORRECTIONS.items():
+        for match in re.finditer(r'\b' + re.escape(wrong) + r'\b', content, re.IGNORECASE):
+            original = match.group(0)
+            context = _build_spelling_context(content, match.start(), match.end())
+            dedupe_key = (wrong, 'term-variant', match.start())
+            if dedupe_key in seen_issue_keys:
+                continue
+            seen_issue_keys.add(dedupe_key)
+            issues.append({
+                "severity": "serious",
+                "category": "拼写/用词错误",
+                "rule": "SPELL-TERM",
+                "chapter": _extract_chapter(content, match.start()),
+                "original_text": original,
+                "context": context,
+                "suggestion": correct,
+                "description": f"原文片段：'{context}'；术语写法疑似错误：[{original}]；建议修改为：[{correct}]。",
+                "audit_basis": "术语与英文拼写一致性",
+                "confidence": 94,
+                "source": "spellcheck",
+                "position": f"{match.start()}-{match.end()}"
+            })
+
+    return issues
+
+
 def check_spelling(content, min_word_length=3, file_type=None):
     """
     检查英文文档的拼写错误
@@ -3057,6 +3180,11 @@ def check_spelling(content, min_word_length=3, file_type=None):
     """
     issues = []
     seen_issue_keys = set()
+
+    if file_type == 'pdf':
+        issues.extend(_find_pdf_split_word_issues(content, seen_issue_keys))
+
+    issues.extend(_find_term_variant_issues(content, seen_issue_keys))
 
     for typo in FORCED_MISSPELLINGS:
         correct = COMMON_MISSPELLINGS.get(typo)
@@ -3068,6 +3196,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
         for match in re.finditer(r'\b' + re.escape(typo) + r'\b', content, re.IGNORECASE):
             word = match.group(0)
             if len(word) < min_word_length or is_whitelisted(word):
+                continue
+            if _should_skip_match_word(word):
                 continue
             if _is_technical_term(word) or _is_domain_abbreviation(word) or _is_extraction_artifact(word):
                 continue
@@ -3118,6 +3248,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
             correct = COMMON_MISSPELLINGS[normalized]
             # 找到单词在文档中的位置
             for match in re.finditer(r'\b' + re.escape(word) + r'\b', content, re.IGNORECASE):
+                if _should_skip_match_word(match.group(0)):
+                    continue
                 context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
                     continue
@@ -3148,6 +3280,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
                 continue
             
             for match in re.finditer(r'\b' + re.escape(word) + r'\b', content, re.IGNORECASE):
+                if _should_skip_match_word(match.group(0)):
+                    continue
                 context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
                     continue

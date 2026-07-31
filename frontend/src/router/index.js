@@ -1,31 +1,32 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import Login from '@/views/Login.vue'
-import Home from '@/views/Home.vue'
-import Review from '@/views/Review.vue'
-import ReviewDashboard from '@/views/ReviewDashboard.vue'
-import Polish from '@/views/Polish.vue'
-import PolishHistory from '@/views/PolishHistory.vue'
-import QA from '@/views/QA.vue'
-import QAManual from '@/views/QADoc.vue'
-import QADashboard from '@/views/QADashboard.vue'
-import QAHistory from '@/views/QAHistory.vue'
-import Generate from '@/views/Generate.vue'
-import DocGenerator from '@/views/DocGenerator.vue'
-import Compare from '@/views/Compare.vue'
-import CompareParams from '@/views/CompareParams.vue'
-import Convert from '@/views/Convert.vue'
-import Terms from '@/views/Terms.vue'
-import Users from '@/views/Users.vue'
-import Translate from '@/views/Translate.vue'
-import TranslateDoc from '@/views/TranslateDoc.vue'
-import TranslateStats from '@/views/TranslateStats.vue'
-import Knowledge from '@/views/Knowledge.vue'
-import PolishPreview from '@/views/PolishPreview.vue'
-import RulesManage from '@/views/RulesManage.vue'
-import SpellCheck from '@/views/SpellCheck.vue'
-import SpellCheckHistory from '@/views/SpellCheckHistory.vue'
-import WhiteList from '@/views/WhiteList.vue'
-import Feedback from '@/views/Feedback.vue'
+
+const Login = () => import('@/views/Login.vue')
+const Home = () => import('@/views/Home.vue')
+const Review = () => import('@/views/Review.vue')
+const ReviewDashboard = () => import('@/views/ReviewDashboard.vue')
+const Polish = () => import('@/views/Polish.vue')
+const PolishHistory = () => import('@/views/PolishHistory.vue')
+const QA = () => import('@/views/QA.vue')
+const QAManual = () => import('@/views/QADoc.vue')
+const QADashboard = () => import('@/views/QADashboard.vue')
+const QAHistory = () => import('@/views/QAHistory.vue')
+const Generate = () => import('@/views/Generate.vue')
+const DocGenerator = () => import('@/views/DocGenerator.vue')
+const Compare = () => import('@/views/Compare.vue')
+const CompareParams = () => import('@/views/CompareParams.vue')
+const Convert = () => import('@/views/Convert.vue')
+const Terms = () => import('@/views/Terms.vue')
+const Users = () => import('@/views/Users.vue')
+const Translate = () => import('@/views/Translate.vue')
+const TranslateDoc = () => import('@/views/TranslateDoc.vue')
+const TranslateStats = () => import('@/views/TranslateStats.vue')
+const Knowledge = () => import('@/views/Knowledge.vue')
+const PolishPreview = () => import('@/views/PolishPreview.vue')
+const RulesManage = () => import('@/views/RulesManage.vue')
+const SpellCheck = () => import('@/views/SpellCheck.vue')
+const SpellCheckHistory = () => import('@/views/SpellCheckHistory.vue')
+const WhiteList = () => import('@/views/WhiteList.vue')
+const Feedback = () => import('@/views/Feedback.vue')
 
 const routes = [
   {

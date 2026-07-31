@@ -7,16 +7,17 @@
           <span class="stats-label">准确率</span>
           <span class="stats-value" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.averageAccuracy }}%</span>
           <span class="stats-divider">|</span>
-          <span class="stats-label">共润色</span>
+          <span class="stats-label">共提交</span>
           <span class="stats-count-wrap">
-            <span class="stats-count" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.totalDocs }}</span>
-            <span class="stats-unit">文档</span>
+            <span class="stats-count" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.totalSubmissions }}</span>
+            <span class="stats-unit">次</span>
           </span>
         </div>
         <div v-if="loading" class="polish-progress-float" :class="{ done: polishProgress >= 100 }">
           <div class="progress-float-bar">
             <el-icon class="is-loading" v-if="polishProgress < 100"><Loading /></el-icon>
             <span class="progress-float-text">{{ polishProgressMsg || '润色中...' }}</span>
+            <span v-if="documentProgressEtaText && polishProgress < 100" class="progress-float-eta">预计剩余 {{ documentProgressEtaText }}</span>
           </div>
           <div v-if="polishProgress < 100" class="progress-float-body">
             <el-progress :percentage="polishProgress" :stroke-width="10" />
@@ -77,27 +78,59 @@
               </div>
             </div>
 
-            <div ref="docPreviewRef" class="doc-review-panel">
-              <div class="doc-review-summary">
-                <div class="doc-review-count">共 {{ docResult.changes }} 处问题</div>
-                <div class="doc-review-confirmed">已确认 {{ confirmedDocChangeCount }}/{{ docResult.changes }}</div>
+              <div ref="docPreviewRef" class="doc-review-panel">
+                <div class="doc-review-summary">
+                <div class="doc-review-count">当前筛选 {{ filteredDocIssues.length }} / {{ docResult.changes }} 条，待处理 {{ pendingDocIssueCount }} 条，接口原始 {{ docResult.rawChangeCount }} 条，过滤前 {{ docResult.preFilterChangeCount }} 条</div>
+                <div class="doc-review-summary-actions">
+                  <div class="doc-review-confirmed">已确认 {{ confirmedDocChangeCount }}/{{ docResult.changes }}</div>
+                  <el-button text size="small" @click="docResultExpanded = !docResultExpanded">{{ docResultExpanded ? '收起详情' : '展开详情' }}</el-button>
+                </div>
+                </div>
+
+              <div v-if="docResultExpanded && (docResult.taskId || docResult.debugInfo)" class="doc-review-debug-bar">
+                <span v-if="docResult.processedAt" class="doc-debug-chip">本次生成 {{ docResult.processedAt }}</span>
+                <span v-if="docResult.taskId" class="doc-debug-chip">任务 {{ shortTaskId(docResult.taskId) }}</span>
+                <span v-if="docResult.debugInfo?.sentenceFileName" class="doc-debug-chip">句式 {{ docResult.debugInfo.sentenceFileName }}</span>
+                <span v-if="docResult.debugInfo?.sentenceGuideChars" class="doc-debug-chip">规则 {{ docResult.debugInfo.sentenceGuideChars }} 字</span>
+                <span v-if="docResult.debugInfo?.sentenceGuideSha1" class="doc-debug-chip">指纹 {{ docResult.debugInfo.sentenceGuideSha1 }}</span>
+                <span v-if="docResult.debugInfo" class="doc-debug-chip">整篇AI {{ docResult.debugInfo.aiSkipped ? '已跳过' : '已执行' }}</span>
+                <span v-if="docResult.debugInfo?.aiSkipped && docResult.debugInfo?.aiSkipReason" class="doc-debug-chip">原因 {{ docResult.debugInfo.aiSkipReason }}</span>
+                <span v-if="docResult.rawChangeCount !== undefined" class="doc-debug-chip">原始 {{ docResult.rawChangeCount }}</span>
+                <span v-if="docResult.preFilterChangeCount !== undefined" class="doc-debug-chip">过滤前 {{ docResult.preFilterChangeCount }}</span>
+                <span v-if="docResult.changes !== undefined" class="doc-debug-chip">过滤后 {{ docResult.changes }}</span>
               </div>
 
               <div class="doc-review-toolbar">
                 <div class="doc-review-filters">
-                  <span class="filter-label">筛选：</span>
-                  <el-select v-model="docFilterType" size="small" placeholder="全部类型" class="doc-filter-select">
+                  <el-input
+                    v-model="docKeywordFilter"
+                    size="small"
+                    clearable
+                    placeholder="按关键词搜索"
+                    class="doc-filter-search"
+                  />
+                  <el-button text size="small" @click="docAdvancedFiltersVisible = !docAdvancedFiltersVisible">{{ docAdvancedFiltersVisible ? '收起筛选' : '更多筛选' }}</el-button>
+                  <el-select v-if="docAdvancedFiltersVisible" v-model="docConfidenceFilter" size="small" placeholder="按匹配分" class="doc-filter-select">
+                    <el-option label="全部匹配分" value="all" />
+                    <el-option label="高匹配（95% 及以上）" value="95plus" />
+                    <el-option label="中匹配（75% - 94%）" value="75to94" />
+                    <el-option label="低匹配（75% 以下）" value="below75" />
+                  </el-select>
+                  <el-select v-if="docAdvancedFiltersVisible" v-model="docStatusFilter" size="small" placeholder="按状态" class="doc-filter-select">
+                    <el-option label="全部状态" value="all" />
+                    <el-option label="待处理" value="pending" />
+                    <el-option label="已接受" value="accepted" />
+                    <el-option label="已拒绝" value="rejected" />
+                  </el-select>
+                  <el-select v-if="docAdvancedFiltersVisible" v-model="docFilterType" size="small" placeholder="全部类型" class="doc-filter-select">
                     <el-option label="全部类型" value="" />
                     <el-option v-for="item in docIssueTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
                   </el-select>
-                  <el-select v-model="docFilterTriggerLevel" size="small" placeholder="全部触发次数" class="doc-filter-select">
-                    <el-option label="全部触发次数" value="" />
-                    <el-option label="高" value="high" />
-                    <el-option label="中" value="medium" />
-                    <el-option label="低" value="low" />
-                  </el-select>
                 </div>
                 <div class="doc-review-bulk-actions">
+                  <el-button size="small" :disabled="docDecisionSaving || !filteredDocIssues.length || allFilteredDocIssuesSelected" @click="selectFilteredDocumentIssues">全选当前筛选</el-button>
+                  <el-button size="small" :disabled="docDecisionSaving || selectedDocIssueCount === 0" @click="clearSelectedDocumentIssues">全不选</el-button>
+                  <el-button size="small" :disabled="docDecisionSaving || selectedDocIssueCount === 0" :loading="docDecisionSaving" @click="acceptSelectedDocumentIssues">接受已选{{ selectedDocIssueCount ? ` (${selectedDocIssueCount})` : '' }}</el-button>
                   <el-button size="small" type="success" :loading="docDecisionSaving" @click="acceptAllDocumentIssues">全部接受</el-button>
                   <el-button size="small" type="danger" plain :loading="docDecisionSaving" @click="rejectAllDocumentIssues">全部拒绝</el-button>
                 </div>
@@ -114,36 +147,86 @@
                   }"
                 >
                   <div class="doc-issue-header">
-                    <div class="doc-issue-title">问题 #{{ issue.displayIndex }}</div>
+                    <div class="doc-issue-title-wrap">
+                      <el-checkbox v-model="issue.selected" size="small" />
+                      <span class="doc-issue-title">问题 #{{ issue.displayIndex }}</span>
+                      <span v-if="issueScorePercent(issue) > 0" class="issue-score-inline">综合评分：{{ issueScorePercent(issue) }}%</span>
+                    </div>
                     <div class="doc-issue-meta">
                       <el-tag size="small" :type="issue.typeTagType">{{ issue.typeLabel }}</el-tag>
-                      <span class="trigger-pill" :class="`trigger-${issue.triggerLevel}`">触发次数 {{ issue.triggerCount }}</span>
                       <span class="paragraph-pill">段落 #{{ issue.paragraph }}</span>
                     </div>
                   </div>
 
                   <div class="doc-issue-body">
-                    <div class="issue-line">
-                      <span class="issue-label">原文：</span>
-                      <span class="issue-text">{{ issue.before || issue.after }}</span>
+                    <div class="issue-diff-card">
+                      <div class="issue-diff-row">
+                        <span class="issue-diff-label">原文</span>
+                        <div class="issue-diff-content issue-diff-original" v-html="renderIssueOriginalDiff(issue)"></div>
+                      </div>
+                      <div class="issue-diff-row">
+                        <span class="issue-diff-label">建议</span>
+                        <div class="issue-diff-content issue-diff-suggested" v-html="renderIssueSuggestedDiff(issue)"></div>
+                      </div>
                     </div>
-                    <div class="issue-line">
-                      <span class="issue-label">建议：</span>
-                      <span class="issue-text" v-html="renderIssueSuggestion(issue)"></span>
+
+                    <div v-if="!isIssueCollapsed(issue) && shouldShowCandidateList(issue)" class="issue-candidate-list issue-candidate-list-inline">
+                      <div class="issue-candidate-title">
+                        <span>候选句式</span>
+                        <span class="issue-candidate-count">共 {{ visibleCandidates(issue).length }} 条</span>
+                      </div>
+                      <el-select
+                        v-model="issue.selectedCandidateKeys"
+                        :ref="el => setCandidateSelectRef(issue.rowKey, el)"
+                        multiple
+                        collapse-tags
+                        collapse-tags-tooltip
+                        size="small"
+                        placeholder="选择一个或多个候选句子"
+                        class="issue-candidate-select"
+                        @change="selectCandidateSuggestion(issue, $event)"
+                      >
+                        <el-option
+                          v-for="(candidate, candidateIndex) in visibleCandidates(issue)"
+                          :key="`${issue.rowKey}-candidate-${candidateIndex}`"
+                          :label="candidate.template"
+                          :value="String(candidateIndex)"
+                        >
+                          <div class="issue-candidate-option">
+                            <div class="issue-candidate-option-main">
+                              <div class="issue-candidate-option-head">
+                                <span class="issue-candidate-option-text">{{ candidate.template }}</span>
+                                <span v-if="candidate.aiSemanticScore !== null" class="issue-candidate-ai-badge" :class="candidate.aiSemanticRecommended ? 'is-recommended' : 'is-neutral'">
+                                  {{ aiRecommendationLabel(candidate) }}
+                                </span>
+                              </div>
+                              <span class="issue-candidate-option-meta">{{ candidateSummary(candidate) }}</span>
+                              <span v-if="candidate.aiSemanticScore !== null" class="issue-candidate-option-ai">语义分 {{ candidate.aiSemanticScore }}{{ candidate.aiSemanticReason ? ` · ${candidate.aiSemanticReason}` : '' }}</span>
+                            </div>
+                            <span class="issue-candidate-option-percent">{{ candidate.overallPercent }}%</span>
+                          </div>
+                        </el-option>
+                      </el-select>
                     </div>
-                    <div class="issue-line issue-basis">
-                      <span class="issue-label">依据：</span>
-                      <span>{{ issueBasisText(issue) }}</span>
+
+                    <div v-if="!isIssueCollapsed(issue) && issue.matchDetail && issueHasAiAdvice(issue)" class="issue-match-card">
+                      <div v-if="issueHasAiAdvice(issue)" class="issue-ai-card">
+                        <div class="issue-ai-card-head">
+                          <span class="issue-ai-title">AI 建议</span>
+                          <span v-if="issuePrimaryCandidate(issue)?.aiSemanticScore !== null" class="issue-ai-score">语义分 {{ issuePrimaryCandidate(issue)?.aiSemanticScore }}</span>
+                        </div>
+                        <div class="issue-ai-card-reason">{{ issueAiReasonLabel(issue) }}：{{ issueSelectedCandidateReason(issue) }}</div>
+                      </div>
                     </div>
                   </div>
 
-                  <div v-if="issue.editing" class="custom-edit-row">
+                  <div v-if="!isIssueCollapsed(issue) && issue.editing" class="custom-edit-row">
                     <el-input v-model="issue.customAfter" size="small" placeholder="输入自定义替换文本" />
                     <el-button size="small" type="primary" :loading="docDecisionSaving" @click="saveCustomDocumentIssue(issue)">保存</el-button>
                     <el-button size="small" @click="cancelCustomDocumentIssue(issue)">取消</el-button>
                   </div>
 
-                  <div class="doc-issue-actions">
+                  <div v-if="!isIssueCollapsed(issue)" class="doc-issue-actions">
                     <el-button size="small" type="success" plain :disabled="docDecisionSaving" @click="acceptDocumentIssue(issue)">接受</el-button>
                     <el-button size="small" type="danger" plain :disabled="docDecisionSaving" @click="rejectDocumentIssue(issue)">拒绝</el-button>
                     <el-button size="small" @click="editDocumentIssue(issue)">自定义</el-button>
@@ -376,6 +459,7 @@ import { usePolishStore } from '@/store/polish'
 const route = useRoute()
 const polishStore = usePolishStore()
 const { documentDraft, documentSession } = storeToRefs(polishStore)
+const candidateSelectRefs = new Map()
 const localFileInputRef = ref(null)
 const docPreviewRef = ref(null)
 const filePickerVisible = ref(false)
@@ -383,22 +467,62 @@ const knowledgeTree = ref([])
 const knowledgeTreeList = ref([])
 const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
+const DEFAULT_DOCUMENT_SENTENCE_FILE_ID = 22
+let knowledgeTreePromise = null
 
 // ── 下拉框选项 ──
 const sentenceFileOptions = ref([])
 const termFileOptions = ref([])
 
+function applyDefaultDocumentSentenceFile() {
+  if (formData.value.sentenceFileId) return
+  const preferredFile = sentenceFileOptions.value.find(item => String(item.id) === String(DEFAULT_DOCUMENT_SENTENCE_FILE_ID))
+  if (!preferredFile) return
+  formData.value.sentenceFileId = preferredFile.id
+  formData.value.sentenceFile = preferredFile.name || preferredFile.label || ''
+}
+
 // ── 加载句式清单 / 术语库下拉选项 ──
 async function loadDropdownOptions() {
   try {
-    const resp = await knowledgeAPI.getTree()
-    const rawData = resp.data || []
+    const rawData = await ensureKnowledgeTreeLoaded()
     const sentenceNode = findNodeByName(rawData, '句式清单')
     const termNode = findNodeByName(rawData, '术语库')
     sentenceFileOptions.value = flattenFileOptions(sentenceNode ? [sentenceNode] : [])
     termFileOptions.value = flattenFileOptions(termNode ? [termNode] : [])
+    applyDefaultDocumentSentenceFile()
   } catch (e) {
     console.warn('加载知识库下拉选项失败', e)
+  }
+}
+
+async function ensureKnowledgeTreeLoaded(forceReload = false) {
+  if (!forceReload && knowledgeTree.value.length) {
+    return knowledgeTree.value
+  }
+  if (!forceReload && knowledgeTreePromise) {
+    return knowledgeTreePromise
+  }
+
+  knowledgeTreePromise = (async () => {
+    let lastError = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const resp = await knowledgeAPI.getTree()
+        const rawData = Array.isArray(resp.data) ? resp.data : []
+        knowledgeTree.value = rawData
+        return rawData
+      } catch (error) {
+        lastError = error
+      }
+    }
+    throw lastError
+  })()
+
+  try {
+    return await knowledgeTreePromise
+  } finally {
+    knowledgeTreePromise = null
   }
 }
 
@@ -428,14 +552,19 @@ const textTerminologyFileName = ref('')
 const textTerminologyFileId = ref(null)
 const result = ref(null)
 const docResult = ref(null)
+const docKeywordFilter = ref('')
+const docConfidenceFilter = ref('all')
+const docStatusFilter = ref('all')
 const docFilterType = ref('')
-const docFilterTriggerLevel = ref('')
+const docResultExpanded = ref(false)
+const docAdvancedFiltersVisible = ref(false)
 const loading = ref(false)
 const polishProgress = ref(0)
 const polishProgressMsg = ref('')
+const documentProgressEtaText = ref('')
 const docFeedbackLoading = ref(false)
 const docDecisionSaving = ref(false)
-const docFeedbackStats = ref({ totalDocs: 0, averageAccuracy: 0 })
+const docFeedbackStats = ref({ totalSubmissions: 0, averageAccuracy: 0 })
 // 反馈相关
 const feedbackAccuracy = ref(80)
 const feedbackCorrections = ref('')
@@ -1052,10 +1181,26 @@ const currentView = computed(() => (route.path === '/polish/document' ? 'documen
 
 let pendingLocalFile = null
 let documentProgressTimer = null
+let documentProgressStartedAt = 0
 
 const acceptedDocChangeCount = computed(() => {
   const items = docResult.value?.changeDetails || []
   return items.filter(item => item.status === 'accepted' || item.status === 'custom').length
+})
+
+const autoAppliedDocIssueCount = computed(() => {
+  const items = docResult.value?.changeDetails || []
+  return items.filter(item => item.matchDetail?.autoApplied).length
+})
+
+const actionableDocIssueCount = computed(() => {
+  const items = docResult.value?.changeDetails || []
+  return items.filter(item => item.isActionable).length
+})
+
+const pendingDocIssueCount = computed(() => {
+  const items = docResult.value?.changeDetails || []
+  return items.filter(item => item.status === 'pending').length
 })
 
 const confirmedDocChangeCount = computed(() => {
@@ -1130,6 +1275,7 @@ async function persistDocumentDecisions(showMessage = false, resetAfterSubmit = 
 async function acceptDocumentIssue(issue) {
   issue.status = 'accepted'
   issue.accepted = true
+  issue.selected = false
   issue.editing = false
   await persistDocumentDecisions()
 }
@@ -1137,12 +1283,13 @@ async function acceptDocumentIssue(issue) {
 async function rejectDocumentIssue(issue) {
   issue.status = 'rejected'
   issue.accepted = false
+  issue.selected = false
   issue.editing = false
   await persistDocumentDecisions()
 }
 
 function editDocumentIssue(issue) {
-  issue.customAfter = issue.after
+  issue.customAfter = issue.matchDetail?.suggestedText || issue.after
   issue.editing = true
 }
 
@@ -1153,30 +1300,310 @@ async function saveCustomDocumentIssue(issue) {
     return
   }
   issue.after = nextValue
+  if (issue.matchDetail) {
+    issue.matchDetail.suggestedText = nextValue
+    issue.matchDetail.autoApplied = false
+    issue.matchDetail.reviewMode = 'manual'
+  }
   issue.status = 'custom'
   issue.accepted = true
+  issue.selected = false
   issue.editing = false
   await persistDocumentDecisions()
 }
 
 function cancelCustomDocumentIssue(issue) {
-  issue.customAfter = issue.after
+  issue.customAfter = issue.matchDetail?.suggestedText || issue.after
   issue.editing = false
+}
+
+function candidateText(candidate) {
+  return String(candidate?.candidate_text || candidate?.candidateText || candidate?.template || '').trim()
+}
+
+function splitStepPrefix(text) {
+  const value = String(text || '').trim()
+  if (!value) return ['', '']
+  const match = value.match(/^(\d+(?:[.-]\d+)*[.)]?\s*)(.+)$/u)
+  if (!match) return ['', value]
+  return [match[1], String(match[2] || '').trim()]
+}
+
+function splitListMarkerPrefix(text) {
+  const value = String(text || '')
+  const match = value.match(/^(\s*[*\-•·]+\s*)(.+)$/u)
+  if (!match) return ['', value.trim()]
+  return [match[1], String(match[2] || '').trim()]
+}
+
+function splitNoticePrefix(text) {
+  const value = String(text || '').trim()
+  const match = value.match(/^((?:请)?注意[：:])\s*(.+)$/u)
+  if (!match) return ['', value]
+  return [match[1], String(match[2] || '').trim()]
+}
+
+function reapplySentencePrefix(original, suggestion) {
+  let result = String(suggestion || '').trim()
+  if (!result) return result
+
+  const [stepPrefix] = splitStepPrefix(original)
+  if (stepPrefix && !result.startsWith(stepPrefix)) {
+    result = `${stepPrefix}${result}`
+  }
+
+  const [listPrefix] = splitListMarkerPrefix(original)
+  if (listPrefix && !result.startsWith(listPrefix)) {
+    result = `${listPrefix}${result}`
+  }
+
+  const [noticePrefix] = splitNoticePrefix(original)
+  if (noticePrefix && !result.startsWith(noticePrefix)) {
+    result = `${noticePrefix}${result}`
+  }
+
+  return result
+}
+
+function setCandidateSelectRef(rowKey, el) {
+  if (!rowKey) return
+  if (el) {
+    candidateSelectRefs.set(rowKey, el)
+  } else {
+    candidateSelectRefs.delete(rowKey)
+  }
+}
+
+function combineCandidateTexts(candidates) {
+  return candidates
+    .map(candidateText)
+    .filter(Boolean)
+    .join('')
+    .trim()
+}
+
+function applyCandidateSuggestion(issue, candidates) {
+  const nextValue = reapplySentencePrefix(
+    issue?.before || issue?.after || '',
+    combineCandidateTexts(Array.isArray(candidates) ? candidates : [candidates])
+  )
+  if (!nextValue) return
+  issue.after = nextValue
+  issue.customAfter = nextValue
+  if (issue.matchDetail) {
+    issue.matchDetail.suggestedText = nextValue
+    issue.matchDetail.autoApplied = false
+    issue.matchDetail.reviewMode = 'manual'
+  }
+  issue.status = 'pending'
+  issue.accepted = false
+  issue.editing = false
+}
+
+function selectCandidateSuggestion(issue, selectedKeys) {
+  const candidates = visibleCandidates(issue)
+  const keys = Array.isArray(selectedKeys) ? selectedKeys : [selectedKeys]
+  const normalizedKeys = keys
+    .map(key => Number(key))
+    .filter(index => Number.isInteger(index) && index >= 0 && index < candidates.length)
+  if (!normalizedKeys.length) return
+  const selectedCandidatesList = normalizedKeys.map(index => candidates[index]).filter(Boolean)
+  if (!selectedCandidatesList.length) return
+  issue.selectedCandidateKeys = normalizedKeys.map(index => String(index))
+  applyCandidateSuggestion(issue, selectedCandidatesList)
+  nextTick(() => {
+    candidateSelectRefs.get(issue?.rowKey)?.blur?.()
+  })
+}
+
+function selectedCandidates(issue) {
+  const candidates = visibleCandidates(issue)
+  if (!candidates.length) return []
+  const selectedIndexes = Array.isArray(issue?.selectedCandidateKeys)
+    ? issue.selectedCandidateKeys.map(key => Number(key)).filter(index => Number.isInteger(index) && index >= 0 && index < candidates.length)
+    : []
+  if (selectedIndexes.length) {
+    return selectedIndexes.map(index => candidates[index]).filter(Boolean)
+  }
+  const suggestedText = normalizeCandidateCompareText(issue?.matchDetail?.suggestedText || issue?.after || '')
+  const exactMatch = candidates.find(candidate => {
+    const text = normalizeCandidateCompareText(candidateText(candidate))
+    return text && text === suggestedText
+  })
+  return exactMatch ? [exactMatch] : [candidates[0]]
+}
+
+function issueExactCandidateMatch(issue) {
+  const candidates = Array.isArray(issue?.matchDetail?.candidates) ? issue.matchDetail.candidates : []
+  if (!candidates.length) return null
+  const suggestedText = normalizeCandidateCompareText(issue?.matchDetail?.suggestedText || issue?.after || '')
+  if (!suggestedText) return null
+  return candidates.find(candidate => normalizeCandidateCompareText(candidateText(candidate)) === suggestedText) || null
+}
+
+function candidateLevelLabel(matchLevel) {
+  const labelMap = {
+    L1: '精确召回',
+    L2: '高匹配',
+    L3: '弱匹配',
+    NONE: '候选'
+  }
+  return labelMap[String(matchLevel || 'NONE')] || '候选'
+}
+
+function candidateSummary(candidate) {
+  if (!candidate) return ''
+  const parts = [candidateLevelLabel(candidate.matchLevel)]
+  const segmentLabels = orderedSegmentScores(candidate.segmentScores)
+    .filter(segment => segment?.applicable && Number(segment.percent || 0) >= 80)
+    .slice(0, 2)
+    .map(segment => `${segment.label}${segment.percent}%`)
+  parts.push(...segmentLabels)
+  const penalties = Array.isArray(candidate.penalty_reasons || candidate.penaltyReasons)
+    ? (candidate.penalty_reasons || candidate.penaltyReasons)
+    : []
+  if (penalties.length) {
+    parts.push(penalties[0])
+  } else if (candidate.guardPassed) {
+    parts.push('关键项一致')
+  }
+  return parts.filter(Boolean).join(' / ')
+}
+
+function issueScorePercent(issue) {
+  const matchDetail = issue?.matchDetail || {}
+  const baseSuggestedText = normalizeCandidateCompareText(matchDetail.baseSuggestedText || '')
+  const currentSuggestedText = normalizeCandidateCompareText(matchDetail.suggestedText || issue?.after || '')
+  if (baseSuggestedText && currentSuggestedText === baseSuggestedText) {
+    return Number(matchDetail.baseOverallPercent ?? matchDetail.overallPercent ?? 0)
+  }
+  const matchedCandidate = issueExactCandidateMatch(issue)
+  if (matchedCandidate) {
+    return Number(matchedCandidate.overallPercent || 0)
+  }
+  return 0
+}
+
+function issuePrimaryCandidate(issue) {
+  const candidates = selectedCandidates(issue)
+  if (!candidates.length) return null
+  return candidates.slice().sort((a, b) => {
+    const scoreDiff = Number(b.aiSemanticScore ?? -1) - Number(a.aiSemanticScore ?? -1)
+    if (scoreDiff !== 0) return scoreDiff
+    return Number(b.overallPercent || 0) - Number(a.overallPercent || 0)
+  })[0]
+}
+
+function aiRecommendationLabel(candidate) {
+  const score = Number(candidate?.aiSemanticScore)
+  if (Number.isFinite(score) && score === 0) return '不推荐'
+  return candidate?.aiSemanticRecommended ? 'AI推荐' : 'AI待确认'
+}
+
+function issueSelectedCandidateReason(issue) {
+  if (!Array.isArray(issue?.selectedCandidateKeys) || issue.selectedCandidateKeys.length === 0) {
+    return ''
+  }
+  const reasons = selectedCandidates(issue)
+    .map(candidate => String(candidate?.aiSemanticReason || '').trim())
+    .filter(Boolean)
+  return Array.from(new Set(reasons)).join('；')
+}
+
+function issueHasAiAdvice(issue) {
+  return Boolean(issueSelectedCandidateReason(issue))
+}
+
+function issueAiReasonLabel(issue) {
+  const score = Number(issuePrimaryCandidate(issue)?.aiSemanticScore)
+  if (Number.isFinite(score) && score === 0) return '不推荐理由'
+  return '推荐理由'
+}
+
+function isIssueCollapsed(issue) {
+  return issue?.status === 'accepted' || issue?.status === 'custom'
+}
+
+function normalizeCandidateCompareText(text) {
+  return String(text || '')
+    .replace(/^\s*(?:\d+(?:[.-]\d+)*[.)]?|[A-Za-z][.)]|[（(]?[一二三四五六七八九十]+[)）])\s*/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function shouldShowCandidateList(issue) {
+  const candidates = visibleCandidates(issue)
+  if (!candidates.length) return false
+  const suggestedText = normalizeCandidateCompareText(getIssueSuggestedText(issue))
+  if (!suggestedText) return true
+  return candidates.some(candidate => normalizeCandidateCompareText(candidateText(candidate)) !== suggestedText)
+}
+
+function renderIssueDiffContent(sourceText, targetText, mode) {
+  const diff = buildDiffSegments(sourceText, targetText)
+  const segments = mergeDiffSegments(mode === 'original' ? diff.left : diff.right)
+  const changedClass = mode === 'original' ? 'diff-remove' : 'diff-add'
+  const html = segments.map(segment => {
+    const content = escapeHtml(segment.text)
+    return segment.changed ? `<span class="${changedClass}">${content}</span>` : content
+  }).join('')
+  return `<div class="result-text-block">${html}</div>`
+}
+
+function renderIssueOriginalDiff(issue) {
+  const before = String(issue?.before || issue?.after || '')
+  const after = String(issue?.matchDetail?.suggestedText || issue?.after || '')
+  return renderIssueDiffContent(before, after, 'original')
+}
+
+function renderIssueSuggestedDiff(issue) {
+  const before = String(issue?.before || '')
+  const after = String(issue?.matchDetail?.suggestedText || issue?.after || '')
+  return renderIssueDiffContent(before, after, 'suggested')
 }
 
 async function acceptAllDocumentIssues() {
   filteredDocIssues.value.forEach(issue => {
     issue.status = 'accepted'
     issue.accepted = true
+    issue.selected = false
     issue.editing = false
   })
   await persistDocumentDecisions()
+}
+
+async function acceptSelectedDocumentIssues() {
+  const selectedIssues = filteredDocIssues.value.filter(issue => issue.selected)
+  if (!selectedIssues.length) {
+    ElMessage.warning('请先选择要接受的问题')
+    return
+  }
+  selectedIssues.forEach(issue => {
+    issue.status = 'accepted'
+    issue.accepted = true
+    issue.selected = false
+    issue.editing = false
+  })
+  await persistDocumentDecisions()
+}
+
+function selectFilteredDocumentIssues() {
+  filteredDocIssues.value.forEach(issue => {
+    issue.selected = true
+  })
+}
+
+function clearSelectedDocumentIssues() {
+  filteredDocIssues.value.forEach(issue => {
+    issue.selected = false
+  })
 }
 
 async function rejectAllDocumentIssues() {
   filteredDocIssues.value.forEach(issue => {
     issue.status = 'rejected'
     issue.accepted = false
+    issue.selected = false
     issue.editing = false
   })
   await persistDocumentDecisions()
@@ -1192,7 +1619,7 @@ function scrollToDocumentPreview() {
 
 function renderIssueSuggestion(issue) {
   const before = String(issue.before || '')
-  const after = String(issue.after || '')
+  const after = String(issue.matchDetail?.suggestedText || issue.after || '')
   if (!after) return ''
   if (!before || before === after) return escapeHtml(after)
 
@@ -1218,87 +1645,123 @@ function renderIssueSuggestion(issue) {
   return `${escapeHtml(prefix)}<mark class="mark-after">${escapeHtml(changed)}</mark>${escapeHtml(suffix)}`
 }
 
-const docIssueTypeOptions = [
-  { label: '系统规则', value: 'system_rule' },
-  { label: '术语替换', value: 'replacement_rule' },
-  { label: '禁止规则', value: 'forbidden_rule' },
-  { label: '句式适用', value: 'sentence_applicability_rule' },
-  { label: '祈使句规则', value: 'imperative_rule' },
-  { label: '格式规则', value: 'format_rule' }
-]
+const docIssueTypeOptions = computed(() => {
+  const items = docResult.value?.changeDetails || []
+  const seen = new Set()
+  const options = []
+  for (const item of items) {
+    const value = String(item.type || '')
+    if (!value || seen.has(value)) continue
+    seen.add(value)
+    options.push({ value, label: item.typeLabel || value })
+  }
+  return options
+})
 
 const filteredDocIssues = computed(() => {
   const items = docResult.value?.changeDetails || []
+  const keyword = String(docKeywordFilter.value || '').trim().toLowerCase().replace(/\s+/g, '')
   return items.filter(item => {
+    const confidence = issueScorePercent(item)
+    if (docConfidenceFilter.value === '95plus' && confidence < 95) return false
+    if (docConfidenceFilter.value === '75to94' && (confidence < 75 || confidence >= 95)) return false
+    if (docConfidenceFilter.value === 'below75' && confidence >= 75) return false
+    if (docStatusFilter.value !== 'all' && item.status !== docStatusFilter.value) return false
     if (docFilterType.value && item.filterType !== docFilterType.value) return false
-    if (docFilterTriggerLevel.value && item.triggerLevel !== docFilterTriggerLevel.value) return false
+    if (keyword) {
+      const searchable = [
+        item.before,
+        item.after,
+        item.ruleName,
+        item.reason,
+        item.typeLabel,
+        item.filterType,
+        item.paragraph ? `段落${item.paragraph}` : '',
+        item.matchDetail?.suggestedText,
+        issueBasisText(item),
+      ]
+        .map(value => String(value || '').toLowerCase().replace(/\s+/g, ''))
+        .join(' ')
+      if (!searchable.includes(keyword)) return false
+    }
     return true
   })
+})
+
+const selectedDocIssueCount = computed(() => {
+  return filteredDocIssues.value.filter(item => item.selected).length
+})
+
+const allFilteredDocIssuesSelected = computed(() => {
+  return filteredDocIssues.value.length > 0 && filteredDocIssues.value.every(item => item.selected)
 })
 
 function normalizeChangeType(type) {
   const typeMap = {
     ai: '系统规则',
-    term: '术语替换',
     terminology: '术语替换',
+    term: '术语替换',
+    replacement_rule: '术语替换',
     terminology_rule: '术语替换',
     forbidden: '禁止规则',
     forbidden_rule: '禁止规则',
     imperative: '祈使句规则',
     imperative_rule: '祈使句规则',
-    preferred_sentences: '句式',
-    forbidden_words: '禁用词',
+    preferred_sentences: '句式模板',
+    sentence_applicability_rule: '句式适用',
+    style: '句式',
+    format: '格式',
+    format_rule: '格式',
+    punctuation: '标点',
     passive_voice: '语态',
-    double_negative: '句式',
+    double_negative: '双重否定',
     informal: '表达',
     sentence_length: '长句',
     pronoun_reference: '指代',
-    style: '句式适用',
-    sentence_applicability_rule: '句式适用',
-    format: '格式规则',
-    punctuation: '格式规则'
+    forbidden_words: '禁用词'
   }
   return typeMap[type] || (type ? String(type) : '润色')
 }
 
 function normalizeDocFilterType(type) {
   const value = String(type || '')
-  if (['term', 'terminology', 'terminology_rule', 'replacement_rule'].includes(value)) return 'replacement_rule'
-  if (['forbidden', 'forbidden_rule', 'forbidden_words'].includes(value)) return 'forbidden_rule'
-  if (['imperative', 'imperative_rule'].includes(value)) return 'imperative_rule'
-  if (['style', 'preferred_sentences', 'sentence_applicability_rule', 'passive_voice', 'double_negative', 'informal', 'sentence_length', 'pronoun_reference'].includes(value)) return 'sentence_applicability_rule'
-  if (['format', 'punctuation', 'format_rule'].includes(value)) return 'format_rule'
-  return 'system_rule'
+  return value || 'system_rule'
 }
 
 function getDocTypeTagType(filterType) {
   const typeMap = {
-    system_rule: 'info',
+    ai: 'info',
+    terminology: 'primary',
+    term: 'primary',
     replacement_rule: 'primary',
+    terminology_rule: 'primary',
+    forbidden: 'danger',
     forbidden_rule: 'danger',
+    imperative: 'warning',
     imperative_rule: 'warning',
+    preferred_sentences: 'success',
+    sentence_applicability_rule: 'success',
+    style: 'success',
+    format: 'info',
     format_rule: 'info',
-    sentence_applicability_rule: 'success'
+    punctuation: 'info'
   }
   return typeMap[filterType] || 'info'
-}
-
-function getTriggerLevel(count) {
-  if (count >= 3) return 'high'
-  if (count >= 2) return 'medium'
-  return 'low'
 }
 
 function buildDocIssueReason(change, index) {
   if (change.reason) return change.reason
   if (change.rule_name) return change.rule_name
-  const filterType = normalizeDocFilterType(change.type)
-  if (filterType === 'replacement_rule') return `术语对照表 #${change.rule_id || index + 1}`
-  if (filterType === 'forbidden_rule') return '禁止规则'
-  if (filterType === 'imperative_rule') return '祈使句规则'
-  if (filterType === 'sentence_applicability_rule') return '句式适用规则'
-  if (filterType === 'system_rule') return '系统规则'
-  return '格式规则'
+  const rawType = String(change.type || '')
+  if (rawType === 'terminology' || rawType === 'term' || rawType === 'replacement_rule' || rawType === 'terminology_rule') return `术语规则 #${change.rule_id || index + 1}`
+  if (rawType === 'forbidden' || rawType === 'forbidden_rule' || rawType === 'forbidden_words') return '禁止规则'
+  if (rawType === 'imperative' || rawType === 'imperative_rule') return '祈使句规则'
+  if (rawType === 'preferred_sentences') return '句式模板'
+  if (rawType === 'sentence_applicability_rule') return '句式适用规则'
+  if (rawType === 'style') return '句式规则'
+  if (rawType === 'format' || rawType === 'format_rule' || rawType === 'punctuation') return '格式规则'
+  if (rawType === 'ai') return '系统规则'
+  return rawType ? `规则类型：${rawType}` : '润色规则'
 }
 
 function issueBasisText(issue) {
@@ -1309,8 +1772,52 @@ function issueBasisText(issue) {
   return parts.join(' / ')
 }
 
+function getMatchBandType(band) {
+  if (band === '100%' || band === '95%-99%') return 'success'
+  if (band === '85%-94%') return 'warning'
+  if (band === '75%-84%') return 'info'
+  if (band === '50%-74%') return 'danger'
+  return 'info'
+}
+
+function orderedSegmentScores(segmentScores) {
+  const order = ['condition', 'action', 'object', 'result', 'additional']
+  return order
+    .map(key => segmentScores?.[key])
+    .filter(Boolean)
+}
+
+function visibleCandidates(issue) {
+  const candidates = Array.isArray(issue?.matchDetail?.candidates) ? issue.matchDetail.candidates : []
+  return candidates
+    .slice()
+    .sort((a, b) => Number(b.overallPercent || 0) - Number(a.overallPercent || 0))
+    .filter(candidate => Number(candidate.overallPercent || 0) > 0)
+    .slice(0, 8)
+}
+
+function normalizeCandidate(candidate) {
+  if (!candidate) return null
+  return {
+    ...candidate,
+    overallPercent: candidate.overall_percent ?? candidate.overallPercent ?? 0,
+    matchLevel: candidate.match_level || candidate.matchLevel || 'NONE',
+    guardPassed: Boolean(candidate.guard_passed ?? candidate.guardPassed),
+    segmentScores: candidate.segment_scores || candidate.segmentScores || {},
+    penaltyReasons: Array.isArray(candidate.penalty_reasons) ? candidate.penalty_reasons : (candidate.penaltyReasons || []),
+    aiSemanticScore: candidate.ai_semantic_score ?? candidate.aiSemanticScore ?? null,
+    aiSemanticRecommended: Boolean(candidate.ai_semantic_recommended ?? candidate.aiSemanticRecommended),
+    aiSemanticReason: candidate.ai_semantic_reason || candidate.aiSemanticReason || '',
+    aiRankScore: candidate.ai_rank_score ?? candidate.aiRankScore ?? null,
+  }
+}
+
 function stripTrailingPunctuation(text) {
   return String(text || '').trim().replace(/[。.!！？?，,;；:：]+$/g, '')
+}
+
+function getIssueSuggestedText(item) {
+  return String(item?.matchDetail?.suggestedText || item?.after || '').replace(/\s+/g, ' ').trim()
 }
 
 function isLowValueDocChange(item) {
@@ -1327,44 +1834,88 @@ function isLowValueDocChange(item) {
   return before.length <= 4 && after.startsWith(before)
 }
 
-function getDocDisplayPriority(filterType) {
-  const priorityMap = {
-    sentence_applicability_rule: 100,
-    replacement_rule: 90,
-    forbidden_rule: 80,
-    imperative_rule: 70,
-    system_rule: 40,
-    format_rule: 10
-  }
-  return priorityMap[filterType] || 30
+function looksLikeFragmentText(text) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!value) return false
+  if (/[。！？!?；;]/.test(value)) return false
+  if (value.length <= 8) return true
+  if (value.length > 16) return false
+  const verbMarkers = ['将', '请', '点击', '选择', '输入', '打开', '关闭', '启动', '设置', '检查', '确认', '安装', '连接', '使用', '进行', '显示', '支持', '提供', '包含', '进入']
+  return !verbMarkers.some(marker => value.includes(marker))
 }
 
-function dedupeDocIssues(items) {
-  const selected = new Map()
-  const order = []
-  items.forEach(item => {
-    const before = String(item.before || '').replace(/\s+/g, ' ').trim()
-    const after = String(item.after || '').replace(/\s+/g, ' ').trim()
-    const key = before || after
-    if (!key) return
-    const existing = selected.get(key)
-    if (!existing) {
-      selected.set(key, item)
-      order.push(key)
-      return
-    }
-    if (getDocDisplayPriority(item.filterType) > getDocDisplayPriority(existing.filterType)) {
-      selected.set(key, item)
-    }
-  })
-  return order.map(key => selected.get(key)).filter(Boolean)
+function shouldHideZeroConfidenceFragment(item) {
+  const matchDetail = item.matchDetail || {}
+  const overallPercent = Number(matchDetail.overallPercent || 0)
+  if (overallPercent > 0) return false
+  if (item.status && item.status !== 'pending') return false
+  if (matchDetail.hasChange) return false
+  if ((item.ruleName || '') === '基础规范化') return false
+  const before = String(item.before || '').trim()
+  const after = String(item.after || '').trim()
+  if (!looksLikeFragmentText(before) && !looksLikeFragmentText(after)) return false
+  const candidates = Array.isArray(matchDetail.candidates) ? matchDetail.candidates : []
+  return candidates.length === 0 || candidates.every(candidate => Number(candidate.overallPercent || 0) <= 0)
+}
+
+function shouldHideZeroConfidenceIssue(item) {
+  const matchDetail = item.matchDetail || {}
+  const overallPercent = Number(matchDetail.overallPercent || 0)
+  if (overallPercent > 0) return false
+  if (item.status && item.status !== 'pending') return false
+  const candidates = Array.isArray(matchDetail.candidates) ? matchDetail.candidates : []
+  return candidates.length === 0 || candidates.every(candidate => Number(candidate.overallPercent || 0) <= 0)
+}
+
+function hasVisibleCandidateSuggestions(item) {
+  const candidates = Array.isArray(item?.matchDetail?.candidates) ? item.matchDetail.candidates : []
+  return candidates.some(candidate => Number(candidate.overallPercent || 0) > 0)
+}
+
+function getDocDisplayPriority(filterType) {
+  const priorityMap = {
+    preferred_sentences: 100,
+    sentence_applicability_rule: 95,
+    terminology: 90,
+    term: 90,
+    replacement_rule: 90,
+    terminology_rule: 90,
+    forbidden: 80,
+    forbidden_rule: 80,
+    imperative: 70,
+    imperative_rule: 70,
+    ai: 40,
+    style: 35,
+    format: 10,
+    format_rule: 10,
+    punctuation: 5
+  }
+  return priorityMap[filterType] || 30
 }
 
 function normalizeDocumentChanges(changes) {
   const rawItems = (changes || []).map((change, index) => {
     const before = change.before || change.original || ''
     const after = change.after || change.polished || ''
-    const filterType = normalizeDocFilterType(change.type)
+    const filterType = String(change.type || '')
+    const filterCategory = normalizeDocFilterType(change.type)
+    const matchDetail = change.match_detail ? {
+      ...change.match_detail,
+      overallPercent: change.match_detail.overall_percent ?? change.match_detail.overallPercent ?? 0,
+      segmentScores: change.match_detail.segment_scores || change.match_detail.segmentScores || {},
+      suggestedText: change.match_detail.suggested_text || change.match_detail.suggestedText || after,
+      baseSuggestedText: change.match_detail.suggested_text || change.match_detail.suggestedText || after,
+      baseOverallPercent: change.match_detail.overall_percent ?? change.match_detail.overallPercent ?? 0,
+      autoApplied: false,
+      reviewMode: 'manual',
+      candidates: Array.isArray(change.match_detail.candidates)
+        ? change.match_detail.candidates.map(normalizeCandidate).filter(Boolean)
+        : []
+    } : null
+    const initialAccepted = false
+    const overallPercent = Number(matchDetail?.overallPercent || 0)
+    const hasMeaningfulSuggestion = Boolean(matchDetail?.hasChange)
+    const isActionable = hasMeaningfulSuggestion && overallPercent >= 75
     return {
       rowKey: `${index}-${before}-${after}`,
       displayIndex: index + 1,
@@ -1373,67 +1924,132 @@ function normalizeDocumentChanges(changes) {
       type: change.type || '',
       ruleName: change.rule_name || '',
       filterType,
+      filterCategory,
       typeLabel: normalizeChangeType(change.type),
       typeTagType: getDocTypeTagType(filterType),
       paragraph: change.paragraph || change.paragraph_index || null,
+      isTitle: Boolean(change.is_title || change.isTitle),
+      matchDetail,
+      isActionable,
+      isNewSinceLastPolish: Boolean(change.is_new_since_last_polish ?? change.isNewSinceLastPolish),
       reason: buildDocIssueReason(change, index),
-      status: 'pending',
+      status: initialAccepted ? 'accepted' : 'pending',
       editing: false,
-      customAfter: after,
-      accepted: false,
+      showCandidates: false,
+      showBasis: false,
+      customAfter: matchDetail?.suggestedText || after,
+      selectedCandidateKeys: [],
+      selected: false,
+      accepted: initialAccepted,
       needCorrection: false
     }
   })
-  const hasPreferredItem = rawItems.some(item => item.filterType !== 'format_rule')
+  const hasPreferredItem = rawItems.some(item => item.filterType !== 'format' && item.filterType !== 'format_rule' && item.filterType !== 'punctuation')
   const filteredItems = rawItems.filter(item => {
     const before = (item.before || '').replace(/\s+/g, ' ').trim()
-    const after = (item.after || '').replace(/\s+/g, ' ').trim()
-    if (hasPreferredItem && item.filterType === 'format_rule') {
+    const after = getIssueSuggestedText(item)
+    const isFormatLike = item.filterType === 'format' || item.filterType === 'format_rule' || item.filterType === 'punctuation'
+    if (item.isTitle && !item.matchDetail?.hasChange) {
       return false
     }
-    if (!before && !after) {
+    if (hasPreferredItem && isFormatLike && !hasVisibleCandidateSuggestions(item)) {
+      return false
+    }
+    if (!before && !after && !item.matchDetail) {
       return false
     }
     if (isLowValueDocChange(item)) {
       return false
     }
+    if (shouldHideZeroConfidenceIssue(item)) {
+      return false
+    }
+    if (shouldHideZeroConfidenceFragment(item)) {
+      return false
+    }
+    if (before && after && before === after) {
+      return false
+    }
+    if (item.matchDetail) {
+      return true
+    }
     return before !== after || (!before && after) || (before && !after)
   })
 
-  const countMap = filteredItems.reduce((acc, item) => {
-    const key = `${item.filterType}:${item.before}:${item.after}`
-    acc[key] = (acc[key] || 0) + 1
-    return acc
-  }, {})
-
-  const visibleItems = dedupeDocIssues(filteredItems)
-
-  return visibleItems.map(item => {
-    const triggerCount = countMap[`${item.filterType}:${item.before}:${item.after}`] || 1
-    return {
+  const sortedItems = filteredItems
+    .slice()
+    .sort((a, b) => {
+      const scoreDelta = issueScorePercent(b) - issueScorePercent(a)
+      if (scoreDelta !== 0) return scoreDelta
+      const priorityDelta = getDocDisplayPriority(b.filterType) - getDocDisplayPriority(a.filterType)
+      if (priorityDelta !== 0) return priorityDelta
+      const paragraphDelta = Number(a.paragraph || 0) - Number(b.paragraph || 0)
+      if (paragraphDelta !== 0) return paragraphDelta
+      return String(a.before || '').localeCompare(String(b.before || ''))
+    })
+    .map((item, index) => ({
       ...item,
-      triggerCount,
-      triggerLevel: getTriggerLevel(triggerCount)
-    }
-  })
+      displayIndex: index + 1,
+      triggerCount: 1,
+      triggerLevel: 'low'
+    }))
+
+  return {
+    items: sortedItems,
+    rawChangeCount: Array.isArray(changes) ? changes.length : 0,
+    preFilterChangeCount: rawItems.length,
+  }
 }
 
 function applyDocumentResult(data, fallbackSourceName = '') {
-  const normalizedChanges = normalizeDocumentChanges(data?.changes || [])
+  const normalized = normalizeDocumentChanges(data?.review_items || data?.reviewItems || data?.changes || [])
+  const normalizedChanges = normalized.items
+  docKeywordFilter.value = ''
+  docConfidenceFilter.value = 'all'
+  docStatusFilter.value = 'all'
   docFilterType.value = ''
-  docFilterTriggerLevel.value = ''
+  docResultExpanded.value = false
+  docAdvancedFiltersVisible.value = false
   docResult.value = {
     id: data?.id,
     sourceName: fallbackSourceName || formData.value.sourceFile || data?.download_filename || '',
     original: data?.original || '',
     polished: data?.polished || '',
+    taskId: data?.task_id || null,
+    processedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+    rawChangeCount: normalized.rawChangeCount,
+    preFilterChangeCount: normalized.preFilterChangeCount,
+    totalScored: Array.isArray(data?.review_items || data?.reviewItems) ? (data.review_items || data.reviewItems).length : normalizedChanges.length,
     changes: normalizedChanges.length,
     changeDetails: normalizedChanges,
     reportFile: data?.report_file || data?.reportFile,
     rawUrl: data?.raw_url || (data?.id ? `/api/polish/${data.id}/raw` : ''),
     download_filename: data?.download_filename,
-    file_type: data?.file_type
+    file_type: data?.file_type,
+    debugInfo: data?.debug_info ? {
+      sentenceFileId: data.debug_info.sentence_file_id,
+      sentenceFileName: data.debug_info.sentence_file_name,
+      sentenceGuideChars: data.debug_info.sentence_guide_chars,
+      sentenceGuideSha1: data.debug_info.sentence_guide_sha1,
+      terminologyFileId: data.debug_info.terminology_file_id,
+      terminologyFileName: data.debug_info.terminology_file_name,
+      aiSkipped: data.debug_info.ai_skipped,
+      aiSkipReason: data.debug_info.ai_skip_reason,
+      aiChanged: data.debug_info.ai_changed,
+      totalChangeCount: data.debug_info.total_change_count,
+      visibleChangeCount: data.debug_info.visible_change_count,
+      previousPolishFound: data.debug_info.previous_polish_found,
+      previousNewChangeCount: data.debug_info.previous_new_change_count,
+    } : null
   }
+}
+
+function shortTaskId(taskId) {
+  const value = String(taskId || '').trim()
+  if (!value) {
+    return ''
+  }
+  return value.length > 12 ? value.slice(0, 12) : value
 }
 
 function onDocumentTerminologyChange(fileId) {
@@ -1441,10 +2057,38 @@ function onDocumentTerminologyChange(fileId) {
   formData.value.terminologyFile = selected?.name || ''
 }
 
+function formatRemainingDuration(ms) {
+  const totalSeconds = Math.max(1, Math.ceil(ms / 1000))
+  if (totalSeconds < 60) {
+    return `${totalSeconds}秒`
+  }
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return seconds ? `${minutes}分${seconds}秒` : `${minutes}分`
+}
+
+function updateDocumentProgressEta() {
+  if (!loading.value || !documentProgressStartedAt || polishProgress.value >= 100 || polishProgress.value < 8) {
+    documentProgressEtaText.value = ''
+    return
+  }
+  const elapsed = Date.now() - documentProgressStartedAt
+  if (elapsed < 1500) {
+    documentProgressEtaText.value = ''
+    return
+  }
+  const normalizedProgress = Math.max(0.08, Math.min(polishProgress.value / 100, 0.95))
+  const estimatedTotal = elapsed / normalizedProgress
+  const remaining = Math.max(1000, estimatedTotal - elapsed)
+  documentProgressEtaText.value = formatRemainingDuration(remaining)
+}
+
 function startDocumentProgress() {
   stopDocumentProgress()
+  documentProgressStartedAt = Date.now()
   polishProgress.value = 3
   polishProgressMsg.value = '正在上传文件...'
+  documentProgressEtaText.value = ''
   documentProgressTimer = window.setInterval(() => {
     if (!loading.value) {
       stopDocumentProgress()
@@ -1453,17 +2097,20 @@ function startDocumentProgress() {
     if (polishProgress.value < 25) {
       polishProgress.value += 4
       polishProgressMsg.value = '正在解析文档...'
+      updateDocumentProgressEta()
       return
     }
     if (polishProgress.value < 55) {
       polishProgress.value += 3
       polishProgressMsg.value = '正在加载规则...'
+      updateDocumentProgressEta()
       return
     }
     if (polishProgress.value < 88) {
       polishProgress.value += 2
       polishProgressMsg.value = '正在润色内容...'
     }
+    updateDocumentProgressEta()
   }, 500)
 }
 
@@ -1472,6 +2119,8 @@ function stopDocumentProgress() {
     window.clearInterval(documentProgressTimer)
     documentProgressTimer = null
   }
+  documentProgressStartedAt = 0
+  documentProgressEtaText.value = ''
 }
 
 function openFilePicker(field, type) {
@@ -1503,8 +2152,7 @@ function clearTextTerminologyFile() {
 
 async function loadKnowledgeTree() {
   try {
-    const resp = await knowledgeAPI.getTree()
-    const rawData = resp.data || []
+    const rawData = await ensureKnowledgeTreeLoaded()
     knowledgeTree.value = flattenTree(rawData)
     // Filter: only show files from the relevant subtree
     let filteredData = rawData
@@ -1654,10 +2302,6 @@ async function submitPolish() {
     }
     await nextTick()
     formData.value.sourceFile = ''
-    formData.value.sentenceFile = ''
-    formData.value.sentenceFileId = null
-    formData.value.terminologyFile = ''
-    formData.value.terminologyFileId = null
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
@@ -1673,17 +2317,19 @@ async function submitPolish() {
 
 function resetForm() {
   formData.value = {
-    sentenceFile: '',
+    sentenceFile: formData.value.sentenceFile || '',
     sentenceFileId: null,
-    terminologyFile: '',
-    terminologyFileId: null,
+    terminologyFile: formData.value.terminologyFile || '',
+    terminologyFileId: formData.value.terminologyFileId || null,
     sourceFile: '',
     outputPath: '已润色文档',
     requirements: ''
   }
+  applyDefaultDocumentSentenceFile()
   pendingLocalFile = null
   selectedKnowledgeFile.value = null
   docResult.value = null
+  docKeywordFilter.value = ''
   docFeedbackLoading.value = false
   polishProgress.value = 0
   polishProgressMsg.value = ''
@@ -1839,7 +2485,7 @@ async function loadDocumentFeedbackStats() {
   try {
     const resp = await polishAPI.getDocumentFeedbackStats()
     docFeedbackStats.value = {
-      totalDocs: resp.data.total_docs || 0,
+      totalSubmissions: resp.data.total_submissions || 0,
       averageAccuracy: resp.data.average_accuracy || 0
     }
   } catch (e) {
@@ -1885,7 +2531,6 @@ onMounted(async () => {
     originalText.value = pendingPolishText
     sessionStorage.removeItem('pendingPolishText')
   }
-  loadKnowledgeTree()
   loadDropdownOptions()
   await loadPolishEngineStatus()
   await loadFeedbackStats()
@@ -2128,6 +2773,33 @@ onMounted(async () => {
   color: #111827;
 }
 
+.doc-review-summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.doc-review-debug-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.doc-debug-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .doc-review-count {
   font-size: 16px;
   font-weight: 700;
@@ -2164,6 +2836,10 @@ onMounted(async () => {
   width: 150px;
 }
 
+.doc-filter-search {
+  width: 220px;
+}
+
 .doc-issue-list {
   flex: 1;
   min-height: 0;
@@ -2177,10 +2853,11 @@ onMounted(async () => {
 
 .doc-issue-card {
   border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border-radius: 14px;
   background: #fff;
-  padding: 14px;
+  padding: 16px;
   transition: opacity 0.2s ease, border-color 0.2s ease;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
 }
 
 .doc-issue-card.is-accepted {
@@ -2199,8 +2876,8 @@ onMounted(async () => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
 .doc-issue-title {
@@ -2209,12 +2886,34 @@ onMounted(async () => {
   color: #111827;
 }
 
+.doc-issue-title-wrap {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
 .doc-issue-meta {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.issue-score-inline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 110px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
 }
 
 .trigger-pill,
@@ -2251,7 +2950,7 @@ onMounted(async () => {
 .doc-issue-body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   font-size: 13px;
   line-height: 1.7;
   color: #334155;
@@ -2259,35 +2958,256 @@ onMounted(async () => {
 
 .issue-line {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: flex-start;
 }
 
 .issue-label {
   flex: 0 0 48px;
   color: #64748b;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .issue-text {
   min-width: 0;
+  flex: 1;
   word-break: break-word;
 }
 
-.issue-text mark {
-  background: #fef3c7;
-  color: #92400e;
-  padding: 1px 4px;
-  border-radius: 4px;
+.issue-diff-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+  border-radius: 12px;
+  padding: 12px;
 }
 
-.issue-text .mark-after {
-  background: #dcfce7;
-  color: #166534;
+.issue-diff-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.issue-diff-label {
+  flex: 0 0 40px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.8;
+  text-transform: uppercase;
+}
+
+.issue-diff-content {
+  min-width: 0;
+  flex: 1;
+  word-break: break-word;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.issue-diff-original {
+  color: #475569;
+}
+
+.issue-diff-suggested {
+  color: #0f172a;
+  font-weight: 400;
 }
 
 .issue-basis {
   color: #64748b;
+}
+
+.issue-match-card {
+  border: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #f8fbff, #f8fafc);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.issue-match-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.issue-match-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.issue-ai-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.issue-ai-score {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.issue-candidate-list {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.issue-candidate-list-inline {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.issue-ai-card {
+  margin-top: 12px;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #fff1f2, #fff7ed);
+  padding: 12px;
+}
+
+.issue-ai-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.issue-ai-card-reason {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #7f1d1d;
+}
+
+.issue-candidate-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.issue-candidate-count {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.issue-candidate-select {
+  width: 100%;
+}
+
+.issue-candidate-option {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.issue-candidate-option-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.issue-candidate-option-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.issue-candidate-option-text {
+  min-width: 0;
+  flex: 1;
+  color: #334155;
+  font-weight: 500;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.6;
+}
+
+.issue-candidate-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.issue-candidate-ai-badge.is-recommended {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.issue-candidate-ai-badge.is-neutral {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.issue-candidate-option-meta {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #64748b;
+  white-space: normal;
+}
+
+.issue-candidate-option-ai {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #475569;
+  white-space: normal;
+}
+
+.issue-candidate-option-percent {
+  flex: 0 0 52px;
+  min-width: 52px;
+  color: #2563eb;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  align-self: flex-start;
+}
+
+.issue-diff-content :deep(.diff-add) {
+  background: #fecdd3;
+  color: #7f1d1d;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.issue-diff-content :deep(.diff-remove) {
+  color: #b91c1c;
+  text-decoration: line-through;
+  text-decoration-color: #dc2626;
+  text-decoration-thickness: 2px;
+}
+
+.issue-candidate-empty {
+  border: 1px dashed #cbd5e1;
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .custom-edit-row {
@@ -2302,7 +3222,8 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-top: 12px;
+  margin-top: 14px;
+  padding-top: 2px;
 }
 
 .doc-review-footer {
@@ -2575,6 +3496,12 @@ onMounted(async () => {
 }
 
 .progress-float-text {
+  white-space: nowrap;
+}
+
+.progress-float-eta {
+  color: #64748b;
+  font-weight: 500;
   white-space: nowrap;
 }
 

@@ -3,86 +3,201 @@
     <!-- 开始审核 -->
     <div v-if="currentView === 'documents'">
       <h2 class="page-title">开始审核</h2>
-      <div class="upload-section">
-        <el-upload
-          class="upload-demo"
-          :http-request="uploadDocument"
-          :before-upload="beforeUpload"
-          accept=".pdf,.docx,.xlsx,.xls,.md,.zip,.txt,.idml"
-          :auto-upload="true"
-          :show-file-list="false"
-        >
-          <el-button type="primary">上传文档</el-button>
-          <template #tip>
-            <div class="upload-tip">支持 PDF、DOCX、Excel、MD、TXT、IDML 格式，单文件最大 50MB</div>
-          </template>
-        </el-upload>
-        <div class="review-mode-toolbar">
-          <span class="review-mode-label">审核模式</span>
-          <el-radio-group v-model="reviewMode" size="small">
-            <el-radio-button label="rule">调试</el-radio-button>
-            <el-radio-button label="hybrid">完整</el-radio-button>
-          </el-radio-group>
-          <span class="review-mode-hint">
-            {{ reviewMode === 'rule' ? '调试模式只跑规则层，适合高频回归。' : '完整模式包含 AI 复核，适合最终验收。' }}
-          </span>
-        </div>
-        <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
-          <el-progress :percentage="uploadProgress" :stroke-width="4" />
-          <span class="progress-text">{{ uploadProgressText }}</span>
-        </div>
-      </div>
+      <el-tabs v-model="reviewSubTab" class="review-subtabs">
+        <el-tab-pane label="单文档审核" name="single">
+          <div class="upload-section">
+            <el-upload
+              class="upload-demo"
+              :http-request="uploadDocument"
+              :before-upload="beforeUpload"
+              accept=".pdf,.docx,.xlsx,.xls,.md,.zip,.txt,.idml"
+              :auto-upload="true"
+              :show-file-list="false"
+            >
+              <el-button type="primary">上传文档</el-button>
+              <template #tip>
+                <div class="upload-tip">支持 PDF、DOCX、Excel、MD、TXT、IDML 格式，单文件最大 50MB</div>
+              </template>
+            </el-upload>
+            <div class="review-mode-toolbar">
+              <span class="review-mode-label">审核模式</span>
+              <el-radio-group v-model="reviewMode" size="small">
+                <el-radio-button label="rule">快速审核</el-radio-button>
+                <el-radio-button label="hybrid">完整审核</el-radio-button>
+              </el-radio-group>
+              <span class="review-mode-hint">
+                {{ reviewMode === 'rule' ? '只检查规则问题，速度快。' : '规则问题 + AI 深度检查，结果更全。' }}
+              </span>
+            </div>
+            <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
+              <el-progress :percentage="uploadProgress" :stroke-width="4" />
+              <span class="progress-text">{{ uploadProgressText }}</span>
+            </div>
+          </div>
 
-      <div class="table-section">
-        <h3>文档列表</h3>
-        <el-table :data="documents" border>
-          <el-table-column prop="id" label="ID" width="80" />
-          <el-table-column prop="filename" label="文件名" />
-          <el-table-column prop="file_type" label="类型" width="100" />
-          <el-table-column prop="file_size" label="大小" width="100">
-            <template #default="scope">
-              {{ formatSize(scope.row.file_size) }}
-            </template>
-          </el-table-column>
-          <el-table-column prop="created_at" label="上传时间" width="180" />
-          <el-table-column label="审核状态" width="200">
-            <template #default="scope">
-              <div v-if="docReviewStatus[scope.row.id]">
-                <el-progress 
-                  v-if="docReviewStatus[scope.row.id].progress < 100" 
-                  :percentage="docReviewStatus[scope.row.id].progress" 
-                  :text-inside="true" 
-                  :stroke-width="18"
-                  :status="docReviewStatus[scope.row.id].status === 'failed' ? 'exception' : ''"
-                />
-                <span style="font-size:12px;color:#666">{{ reviewStatusText(docReviewStatus[scope.row.id]) }}</span>
+          <div class="table-section">
+            <h3>文档列表</h3>
+            <el-table :data="documents" border>
+              <el-table-column prop="id" label="ID" width="80" />
+              <el-table-column prop="filename" label="文件名" />
+              <el-table-column prop="file_type" label="类型" width="100" />
+              <el-table-column prop="file_size" label="大小" width="100">
+                <template #default="scope">
+                  {{ formatSize(scope.row.file_size) }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="created_at" label="上传时间" width="180" />
+              <el-table-column label="审核状态" width="200">
+                <template #default="scope">
+                  <div v-if="docReviewStatus[scope.row.id]">
+                    <el-progress
+                      v-if="docReviewStatus[scope.row.id].progress < 100"
+                      :percentage="docReviewStatus[scope.row.id].progress"
+                      :text-inside="true"
+                      :stroke-width="18"
+                      :status="docReviewStatus[scope.row.id].status === 'failed' ? 'exception' : ''"
+                    />
+                    <span style="font-size:12px;color:#666">{{ reviewStatusText(docReviewStatus[scope.row.id]) }}</span>
+                  </div>
+                  <span v-else style="color:#999">未审核</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="260">
+                <template #default="scope">
+                  <el-button
+                    size="small"
+                    :disabled="docReviewStatus[scope.row.id]?.status === 'running'"
+                    @click="startReview(scope.row.id)"
+                  >
+                    {{ docReviewStatus[scope.row.id]?.status === 'running' ? '审核中...' : '开始审核' }}
+                  </el-button>
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :disabled="!docReviewStatus[scope.row.id]?.review_id || docReviewStatus[scope.row.id]?.status !== 'completed'"
+                    @click="goReviewTasks"
+                  >
+                    去历史任务处理
+                  </el-button>
+                  <el-button size="small" type="danger" @click="deleteDocument(scope.row.id)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="对比审核" name="compare">
+          <div class="upload-section compare-audit-section">
+            <div class="compare-upload-grid">
+              <div class="compare-upload-card">
+                <div class="compare-upload-title">主文档</div>
+                <el-upload
+                  :auto-upload="false"
+                  :show-file-list="true"
+                  :limit="1"
+                  accept=".pdf,.docx,.xlsx,.xls,.md,.zip,.txt,.idml"
+                  :on-change="handleCompareMainChange"
+                  :on-remove="clearCompareMainFile"
+                  :file-list="compareMainFileList"
+                >
+                  <el-button type="primary" plain>上传主文档</el-button>
+                </el-upload>
+                <div class="upload-tip">用于产出最终对比审核结果</div>
               </div>
-              <span v-else style="color:#999">未审核</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="260">
-            <template #default="scope">
-              <el-button 
-                size="small" 
-                :disabled="docReviewStatus[scope.row.id]?.status === 'running'"
-                @click="startReview(scope.row.id)"
-              >
-                {{ docReviewStatus[scope.row.id]?.status === 'running' ? '审核中...' : '开始审核' }}
-              </el-button>
-              <el-button 
-                size="small"
-                type="primary"
-                plain
-                :disabled="!docReviewStatus[scope.row.id]?.review_id || docReviewStatus[scope.row.id]?.status !== 'completed'"
-                @click="goReviewTasks"
-              >
-                去历史任务处理
-              </el-button>
-              <el-button size="small" type="danger" @click="deleteDocument(scope.row.id)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
+
+              <div class="compare-upload-card">
+                <div class="compare-upload-title">参考文件</div>
+                <el-upload
+                  :auto-upload="false"
+                  :show-file-list="true"
+                  multiple
+                  accept=".pdf,.docx,.xlsx,.xls,.md,.zip,.txt,.idml"
+                  :on-change="handleCompareReferenceChange"
+                  :on-remove="handleCompareReferenceRemove"
+                  :file-list="compareReferenceFileList"
+                >
+                  <el-button type="primary" plain>上传参考文件</el-button>
+                </el-upload>
+                <div class="upload-tip">至少上传 1 个参考文件；仅检查白名单核心参数与主干流程</div>
+              </div>
+            </div>
+
+            <div class="review-mode-toolbar compare-mode-toolbar">
+              <span class="review-mode-label">对比模式</span>
+              <el-radio-group v-model="compareMode" size="small">
+                <el-radio-button label="both">核心参数 + 主干流程</el-radio-button>
+              </el-radio-group>
+              <span class="review-mode-hint">按属性-值方式识别参数，一致项默认折叠。</span>
+            </div>
+
+            <div class="compare-action-row">
+              <el-button type="primary" :loading="compareSubmitting" @click="startCompareAudit">开始对比审核</el-button>
+            </div>
+          </div>
+
+          <div v-if="compareResult" class="report-section compare-result-section">
+            <h3>对比审核结果</h3>
+            <div class="compare-summary-grid">
+              <div class="compare-summary-card">
+                <div class="gold-label">主文档</div>
+                <div class="compare-summary-name">{{ compareResult.main_document?.filename || '-' }}</div>
+              </div>
+              <div class="compare-summary-card">
+                <div class="gold-label">参考文件数</div>
+                <div class="gold-value">{{ compareResult.summary?.reference_count || 0 }}</div>
+              </div>
+              <div class="compare-summary-card">
+                <div class="gold-label">P0 / P1</div>
+                <div class="gold-value">{{ (compareResult.summary?.p0_count || 0) }} / {{ (compareResult.summary?.p1_count || 0) }}</div>
+              </div>
+              <div class="compare-summary-card">
+                <div class="gold-label">P2 / 一致</div>
+                <div class="gold-value">{{ (compareResult.summary?.p2_count || 0) }} / {{ (compareResult.summary?.match_count || 0) }}</div>
+              </div>
+            </div>
+
+            <div class="compare-result-toolbar">
+              <div class="compare-result-toolbar-text">
+                当前默认只展示差异项，便于直接处理高优先级问题。
+              </div>
+              <el-switch v-model="showCompareConsistent" active-text="显示一致项" inactive-text="隐藏一致项" />
+            </div>
+
+            <div class="compare-result-block">
+              <h4>核心参数差异明细表</h4>
+              <el-table :data="visibleCompareRows" border>
+                <el-table-column prop="dimension" label="检查维度" width="120" />
+                <el-table-column prop="parameter_name" label="参数名称" width="180" />
+                <el-table-column label="主文档（说明书）内容" min-width="240" show-overflow-tooltip>
+                  <template #default="scope">
+                    <span class="compare-main-value" v-html="renderCompareMainValue(scope.row)"></span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="reference_value" label="参照物众数（或少量参照物原值）" min-width="240" show-overflow-tooltip />
+                <el-table-column label="异常说明 / 差异结论" min-width="320">
+                  <template #default="scope">
+                    <div class="compare-conclusion-cell">
+                      <el-tag size="small" :type="compareLevelTagType(scope.row.level)">{{ scope.row.level }}</el-tag>
+                      <span>{{ scope.row.conclusion }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+
+            <el-empty
+              v-if="!visibleCompareRows.length"
+              description="当前筛选条件下没有可展示的差异项"
+            />
+
+            <div v-if="compareResult.review_id" class="report-actions">
+              <el-button type="primary" plain @click="exportReviewHtml(compareResult.review_id)">HTML报告</el-button>
+              <el-button @click="goReviewTasks">查看历史任务</el-button>
+            </div>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
     </div>
 
     <!-- 历史审核任务 - 行内展开显示报告 -->
@@ -94,7 +209,11 @@
           <el-table-column prop="id" label="任务ID" width="80" />
           <el-table-column prop="document_id" label="文档ID" width="80" />
           <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="mode" label="模式" width="80" />
+          <el-table-column label="模式" width="140">
+            <template #default="scope">
+              {{ reviewModeLabel(scope.row.mode) }}
+            </template>
+          </el-table-column>
           <el-table-column prop="status" label="状态" width="90">
             <template #default="scope">
               <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'info'">
@@ -126,7 +245,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="created_at" label="开始时间" width="160" />
-          <el-table-column label="操作" width="460" fixed="right">
+          <el-table-column label="操作" width="360" fixed="right">
             <template #default="scope">
               <el-button 
                 size="small" 
@@ -144,6 +263,7 @@
                 一键确认
               </el-button>
               <el-button
+                v-if="shouldShowDownloadResult(scope.row)"
                 size="small"
                 type="success"
                 :disabled="scope.row.status !== 'completed'"
@@ -185,16 +305,7 @@
           <el-option label="建议" value="suggestion" />
         </el-select>
         <span style="margin-left:auto">
-          <el-button size="small" @click="openParsedTextDialog">解析文本</el-button>
           <el-button size="small" type="warning" plain @click="openManualIssueDialog">补充上报</el-button>
-          <el-upload
-            class="gold-upload"
-            :http-request="compareGoldAnswer"
-            accept=".xlsx,.xls"
-            :show-file-list="false"
-          >
-          <el-button size="small" type="primary" plain>标准答案对比</el-button>
-          </el-upload>
           <el-button size="small" type="success" plain :disabled="!currentTaskId" @click="batchConfirmAll(currentTaskId)">确认全部待审</el-button>
           <el-button size="small" @click="batchSetStatus('confirmed')">批量确认</el-button>
           <el-button size="small" @click="batchSetStatus('false_positive')">批量标记误报</el-button>
@@ -225,27 +336,24 @@
         <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
         <el-table-column label="原文" min-width="450">
           <template #default="scope">
-            <span class="context-cell" v-html="highlightOriginalText(scope.row.context, scope.row.original_text)"></span>
+            <span class="context-cell" v-html="renderIssueContext(scope.row, currentTaskMode)"></span>
           </template>
         </el-table-column>
-        <el-table-column prop="suggestion" label="建议" min-width="220">
+        <el-table-column label="建议" min-width="260" show-overflow-tooltip>
           <template #default="scope">
-            <span class="text-success suggestion-wrap">{{ scope.row.suggestion || '-' }}</span>
+            <span class="suggestion-wrap suggestion-text">{{ issueSuggestionText(scope.row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="判定" width="120">
+        <el-table-column label="处理" min-width="220">
           <template #default="scope">
-            <el-tag size="small" :type="statusTagType(scope.row.status)" effect="plain">
-              {{ statusLabel(scope.row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="400" fixed="right">
-          <template #default="scope">
-            <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
-            <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
-            <el-button size="small" type="warning" plain @click="markSimilarIssuesFalsePositive(scope.row)">同类误报</el-button>
-            <el-button size="small" type="primary" plain @click="openTransferRuleDialog(scope.row)">转规则库</el-button>
+            <div class="issue-action-cell">
+              <div class="issue-inline-actions">
+                <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
+                <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
+                <el-button size="small" type="warning" plain @click="markSimilarIssuesFalsePositive(scope.row)">同类误报</el-button>
+                <el-button size="small" type="primary" plain @click="openTransferRuleDialog(scope.row)">转规则库</el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -544,7 +652,7 @@
               <el-table-column prop="chapter" label="章节" width="180" />
               <el-table-column label="上下文" min-width="500">
                 <template #default="scope">
-                  <span class="context-text" v-html="highlightIssue(scope.row)"></span>
+                  <span class="context-text" v-html="renderIssueContext(scope.row, currentReport?.mode)"></span>
                 </template>
               </el-table-column>
               <el-table-column prop="suggestion" label="建议" min-width="200" />
@@ -581,8 +689,6 @@ const rowFilters = reactive({})
 
 // 文档审核状态 (按文档ID存储)
 const docReviewStatus = reactive({})
-let progressPollingTimers = {}  // 轮询定时器
-const progressPollingFailures = reactive({})
 let reviewsPollingTimer = null
 
 // 问题详情弹窗
@@ -617,7 +723,7 @@ const filteredDialogIssues = computed(() => {
     if (issueFilter.severity && i.severity !== issueFilter.severity) return false
     if (issueFilter.keyword) {
       const k = issueFilter.keyword.toLowerCase()
-      const hay = `${i.original_text || ''} ${i.context || ''} ${i.suggestion || ''}`.toLowerCase()
+      const hay = `${i.original_text || ''} ${i.context || ''} ${issueSuggestionText(i)} ${i.description || ''}`.toLowerCase()
       if (!hay.includes(k)) return false
     }
     return true
@@ -636,6 +742,14 @@ const filteredDialogExcelRowCount = computed(() => {
 
 function formatIssueDisplayId(index) {
   return String(index + 1).padStart(3, '0')
+}
+
+function issueSuggestionText(issue) {
+  const suggestion = String(issue?.suggestion || '').trim()
+  if (suggestion) return suggestion
+  const description = String(issue?.description || '').trim()
+  if (description) return description.replace(/^问题说明[:：]\s*/, '').replace(/^问题[:：]\s*/, '').trim()
+  return '-'
 }
 
 function percentText(value) {
@@ -710,7 +824,29 @@ const selectedRules = ref([])
 const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
-const reviewMode = ref('rule')
+const reviewMode = ref('hybrid')
+const reviewSubTab = ref('single')
+const compareMode = ref('both')
+const compareSubmitting = ref(false)
+const compareResult = ref(null)
+const showCompareConsistent = ref(false)
+const compareMainFile = ref(null)
+const compareMainFileList = ref([])
+const compareReferenceFiles = ref([])
+const compareReferenceFileList = ref([])
+
+const visibleCompareRows = computed(() => {
+  const rows = compareResult.value?.compare_rows || []
+  if (showCompareConsistent.value) return rows
+  return rows.filter((row) => row.level !== '一致')
+})
+
+watch(reviewSubTab, (tab) => {
+  if (tab === 'single') {
+    compareResult.value = null
+    showCompareConsistent.value = false
+  }
+})
 
 function goReviewTasks() {
   router.push('/review/tasks')
@@ -804,62 +940,13 @@ async function loadDocuments() {
   try {
     const [docResp, reviewResp] = await Promise.all([
       documentAPI.list(),
-      reviewAPI.list()
+      reviewAPI.list({ latest_only: true, limit: 500 })
     ])
     const uploadingDocs = documents.value.filter(doc => String(doc.id).startsWith('uploading-'))
     documents.value = [...uploadingDocs, ...(docResp.data || [])]
-    
-    const reviewMap = {}
-    for (const r of reviewResp.data || []) {
-      if (!reviewMap[r.document_id] || r.id > reviewMap[r.document_id].id) {
-        reviewMap[r.document_id] = r
-      }
-    }
-
-    const activeDocIds = new Set()
-    
-    for (const doc of documents.value) {
-      const latestReview = reviewMap[doc.id]
-      const docCreatedAt = new Date(doc.created_at || 0).getTime()
-      const reviewCreatedAt = new Date(latestReview?.created_at || 0).getTime()
-      const hasValidReview = Boolean(latestReview) && (!docCreatedAt || !reviewCreatedAt || reviewCreatedAt >= docCreatedAt)
-
-      if (hasValidReview) {
-        const progressInfo = latestReview.progress || null
-        const progressValue = latestReview.status === 'completed'
-          ? 100
-          : latestReview.status === 'running'
-            ? (progressInfo?.progress || 0)
-            : 0
-        const message = latestReview.status === 'completed'
-          ? reviewCompletionText(latestReview)
-          : latestReview.status === 'failed'
-            ? reviewFailureText(latestReview)
-            : reviewProgressText(progressInfo)
-
-        docReviewStatus[doc.id] = {
-          review_id: latestReview.id,
-          status: latestReview.status,
-          progress: progressValue,
-          message,
-          summary: latestReview.summary,
-          total_issues: latestReview.total_issues
-        }
-        activeDocIds.add(String(doc.id))
-
-        if (latestReview.status === 'running') {
-          startProgressPolling(doc.id, latestReview.id)
-        }
-      } else {
-        delete docReviewStatus[doc.id]
-      }
-    }
-
-    Object.keys(docReviewStatus).forEach((docId) => {
-      if (!activeDocIds.has(String(docId)) && !String(docId).startsWith('uploading-')) {
-        delete docReviewStatus[docId]
-      }
-    })
+    reviews.value = reviewResp.data || []
+    syncDocumentStatusesFromReviews(reviews.value)
+    syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
   }
@@ -867,23 +954,96 @@ async function loadDocuments() {
 
 async function loadReviews() {
   try {
-    const resp = await reviewAPI.list()
+    const resp = await reviewAPI.list({ limit: 500 })
     reviews.value = resp.data || []
+    if (currentView.value === 'documents') {
+      syncDocumentStatusesFromReviews(reviews.value)
+    }
     syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载任务列表失败: ${getAPIErrorMessage(e)}`)
   }
 }
 
+function syncDocumentStatusesFromReviews(reviewList) {
+  const reviewMap = {}
+  for (const review of reviewList || []) {
+    if (!reviewMap[review.document_id] || review.id > reviewMap[review.document_id].id) {
+      reviewMap[review.document_id] = review
+    }
+  }
+
+  const activeDocIds = new Set()
+  for (const doc of documents.value) {
+    const latestReview = reviewMap[doc.id]
+    const docCreatedAt = new Date(doc.created_at || 0).getTime()
+    const reviewCreatedAt = new Date(latestReview?.created_at || 0).getTime()
+    const hasValidReview = Boolean(latestReview) && (!docCreatedAt || !reviewCreatedAt || reviewCreatedAt >= docCreatedAt)
+
+    if (!hasValidReview) {
+      delete docReviewStatus[doc.id]
+      continue
+    }
+
+    const progressInfo = latestReview.progress || null
+    const progressValue = latestReview.status === 'completed'
+      ? 100
+      : latestReview.status === 'running'
+        ? (progressInfo?.progress || 0)
+        : 0
+    const message = latestReview.status === 'completed'
+      ? reviewCompletionText(latestReview)
+      : latestReview.status === 'failed'
+        ? reviewFailureText(latestReview)
+        : reviewProgressText(progressInfo)
+
+    docReviewStatus[doc.id] = {
+      review_id: latestReview.id,
+      status: latestReview.status,
+      progress: progressValue,
+      message,
+      summary: latestReview.summary,
+      total_issues: latestReview.total_issues
+    }
+    activeDocIds.add(String(doc.id))
+  }
+
+  Object.keys(docReviewStatus).forEach((docId) => {
+    if (!activeDocIds.has(String(docId)) && !String(docId).startsWith('uploading-')) {
+      delete docReviewStatus[docId]
+    }
+  })
+}
+
 function syncReviewsPolling() {
   stopReviewsPolling()
-  if (currentView.value !== 'tasks' && currentView.value !== 'reports') return
+  if (currentView.value !== 'documents' && currentView.value !== 'tasks' && currentView.value !== 'reports') return
   if (!reviews.value.some(review => review.status === 'running')) return
 
   reviewsPollingTimer = setInterval(async () => {
     try {
-      const resp = await reviewAPI.list()
-      reviews.value = resp.data || []
+      if (currentView.value === 'documents') {
+        const resp = await reviewAPI.list({ latest_only: true, limit: 500 })
+        reviews.value = resp.data || []
+        syncDocumentStatusesFromReviews(reviews.value)
+      } else {
+        const runningIds = new Set((reviews.value || []).filter(review => review.status === 'running').map(review => review.id))
+        const resp = await reviewAPI.list({ status: 'running', limit: 500 })
+        const runningReviews = resp.data || []
+        const returnedIds = new Set(runningReviews.map(review => review.id))
+        const finishedDuringPolling = [...runningIds].some(reviewId => !returnedIds.has(reviewId))
+
+        if (finishedDuringPolling) {
+          await loadReviews()
+          return
+        }
+
+        const reviewMap = new Map((reviews.value || []).map(review => [review.id, review]))
+        for (const review of runningReviews) {
+          reviewMap.set(review.id, review)
+        }
+        reviews.value = [...reviewMap.values()].sort((left, right) => (right.id || 0) - (left.id || 0))
+      }
       if (!reviews.value.some(review => review.status === 'running')) {
         stopReviewsPolling()
       }
@@ -934,6 +1094,77 @@ function beforeUpload(file) {
     return false
   }
   return true
+}
+
+function validateCompareUpload(file) {
+  return Boolean(file && beforeUpload(file))
+}
+
+function handleCompareMainChange(uploadFile) {
+  const rawFile = uploadFile.raw || uploadFile
+  if (!validateCompareUpload(rawFile)) {
+    compareMainFile.value = null
+    compareMainFileList.value = []
+    return
+  }
+  compareMainFile.value = rawFile
+  compareMainFileList.value = [uploadFile]
+}
+
+function clearCompareMainFile() {
+  compareMainFile.value = null
+  compareMainFileList.value = []
+}
+
+function handleCompareReferenceChange(_uploadFile, uploadFiles) {
+  const validFiles = []
+  const validUploadFiles = []
+  for (const item of uploadFiles) {
+    const rawFile = item.raw || item
+    if (!validateCompareUpload(rawFile)) {
+      continue
+    }
+    validFiles.push(rawFile)
+    validUploadFiles.push(item)
+  }
+  compareReferenceFiles.value = validFiles
+  compareReferenceFileList.value = validUploadFiles
+}
+
+function handleCompareReferenceRemove(_uploadFile, uploadFiles) {
+  compareReferenceFiles.value = uploadFiles.map((item) => item.raw || item).filter(Boolean)
+  compareReferenceFileList.value = [...uploadFiles]
+}
+
+function formatCompareHits(hits = []) {
+  if (!hits.length) return '-'
+  return hits.map((hit) => `第${hit.line_no}行: ${hit.context}`).join(' | ')
+}
+
+async function startCompareAudit() {
+  if (!compareMainFile.value) {
+    ElMessage.warning('请先上传主文档')
+    return
+  }
+  if (!compareReferenceFiles.value.length) {
+    ElMessage.warning('未提供参考文件，无法进行对比')
+    return
+  }
+
+  compareSubmitting.value = true
+  try {
+    const response = await reviewAPI.compareAudit(compareMainFile.value, compareReferenceFiles.value, compareMode.value)
+    showCompareConsistent.value = false
+    compareResult.value = response.data
+    await loadReviews()
+    await loadDocuments()
+    ElMessage.success('对比审核完成')
+  } catch (error) {
+    compareResult.value = null
+    ElMessage.error(`对比审核失败: ${getAPIErrorMessage(error)}`)
+  } finally {
+    compareSubmitting.value = false
+  }
 }
 
 function insertUploadingPlaceholder(file) {
@@ -1040,8 +1271,7 @@ async function startReview(documentId) {
       progress: 0,
       message: statusMessage
     }
-    
-    startProgressPolling(documentId, reviewId)
+    await loadReviews()
   } catch (error) {
     docReviewStatus[documentId] = {
       status: 'failed',
@@ -1050,67 +1280,6 @@ async function startReview(documentId) {
     }
     ElMessage.error('审核失败，请重试: ' + (error.response?.data?.detail || error.message))
   }
-}
-
-function startProgressPolling(documentId, reviewId) {
-  if (progressPollingTimers[documentId]) {
-    clearInterval(progressPollingTimers[documentId])
-  }
-  progressPollingFailures[documentId] = 0
-  
-  progressPollingTimers[documentId] = setInterval(async () => {
-    try {
-      const resp = await reviewAPI.getProgress(reviewId)
-      const progress = resp.data
-      progressPollingFailures[documentId] = 0
-      
-      docReviewStatus[documentId] = {
-        review_id: reviewId,
-        status: progress.status,
-        progress: progress.progress || 0,
-        message: reviewProgressText(progress)
-      }
-      
-      if (progress.status === 'completed' || progress.status === 'failed') {
-        clearInterval(progressPollingTimers[documentId])
-        delete progressPollingTimers[documentId]
-        delete progressPollingFailures[documentId]
-        
-        if (progress.status === 'completed') {
-          await loadReviewIssues(reviewId)
-          await loadReviews()
-          docReviewStatus[documentId] = {
-            review_id: reviewId,
-            status: 'completed',
-            progress: 100,
-            message: progress.message,
-            summary: null,
-            total_issues: (taskIssues[reviewId] || []).length
-          }
-          ElMessage.success(reviewCompletionText({ summary: progress.message, total_issues: (taskIssues[reviewId] || []).length }))
-        } else if (progress.status === 'failed') {
-          ElMessage.error('审核失败: ' + reviewFailureText({ summary: progress.message }))
-        }
-      }
-    } catch (err) {
-      progressPollingFailures[documentId] = (progressPollingFailures[documentId] || 0) + 1
-      console.error('轮询进度失败:', err)
-      if (progressPollingFailures[documentId] >= 3) {
-        clearInterval(progressPollingTimers[documentId])
-        delete progressPollingTimers[documentId]
-        delete progressPollingFailures[documentId]
-        docReviewStatus[documentId] = {
-          review_id: reviewId,
-          status: 'failed',
-          progress: 0,
-          message: '审核状态同步失败，请刷新后重试'
-        }
-        ElMessage.error('审核状态同步失败，请刷新后重试')
-        loadDocuments()
-        loadReviews()
-      }
-    }
-  }, 2000)
 }
 
 async function loadReviewIssues(reviewId) {
@@ -1251,6 +1420,31 @@ function resultButtonLabel(fileType) {
   return '下载结果'
 }
 
+function reviewModeLabel(mode) {
+  return {
+    rule: '快速审核',
+    hybrid: '完整审核',
+    ai: 'AI审核',
+    'compare:both': '对比审核',
+    'compare:numbers': '对比审核',
+    'compare:steps': '对比审核'
+  }[mode] || mode || '-'
+}
+
+function compareLevelTagType(level) {
+  return {
+    P0: 'danger',
+    P1: 'warning',
+    P2: 'info',
+    一致: 'success'
+  }[level] || 'info'
+}
+
+function shouldShowDownloadResult(row) {
+  if (String(row?.mode || '').startsWith('compare:')) return false
+  return String(row?.document_file_type || '').toLowerCase() !== 'md'
+}
+
 function parseMaybeJson(value) {
   if (typeof value !== 'string') return null
   const text = value.trim()
@@ -1280,6 +1474,10 @@ function reviewFailureText(review) {
 
 function reviewCompletionText(review) {
   const parsed = parseMaybeJson(review?.summary ?? review?.message)
+  if (String(review?.mode || '').startsWith('compare:')) {
+    const total = parsed?.total_issue_count ?? review?.total_issues ?? 0
+    return `对比完成，共 ${total} 项差异`
+  }
   const matchedTotal = typeof review?.message === 'string'
     ? review.message.match(/(\d+)\s*个问题/)
     : null
@@ -1835,18 +2033,102 @@ function getSeverityLabel(severity) {
   return labels[severity] || severity
 }
 
-function highlightIssue(issue) {
-  if (!issue.context && !issue.original_text) return '-'
-  
-  let text = issue.context || issue.original_text
-  
-  if (issue.original_text && text.includes(issue.original_text)) {
-    const escaped = issue.original_text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const regex = new RegExp(`(${escaped})`, 'g')
-    text = text.replace(regex, '<span style="color: red; font-weight: bold; background-color: #ffeaea; padding: 1px 3px; border-radius: 2px;">$1</span>')
+function renderIssueContext(issue, mode = '') {
+  if (String(mode || '').startsWith('compare:')) {
+    return renderCompareIssueContext(issue)
   }
-  
-  return text
+  return highlightOriginalText(issue?.context, issue?.original_text)
+}
+
+const currentTaskMode = computed(() => {
+  const currentReview = reviews.value.find(item => item.id === currentTaskId.value)
+  return currentReview?.mode || currentReport.value?.mode || ''
+})
+
+function renderCompareIssueContext(issue) {
+  const parts = parseCompareIssueContext(issue?.context)
+  const diff = buildDiffMarkup(parts.main, parts.reference)
+  return [
+    '<div class="compare-context-block">',
+    `<div class="compare-context-row main"><div class="compare-context-label">主文档</div><div class="compare-context-value">${diff.mainHtml}</div></div>`,
+    `<div class="compare-context-row reference"><div class="compare-context-label">参考文档</div><div class="compare-context-value">${diff.referenceHtml}</div></div>`,
+    '</div>'
+  ].join('')
+}
+
+function parseCompareIssueContext(context) {
+  const text = String(context || '')
+  const mainMatch = text.match(/主文档[：:]\s*([\s\S]*?)(?:\n+参考文件[：:]\s*|$)/)
+  const referenceMatch = text.match(/参考文件[：:]\s*([\s\S]*)$/)
+  return {
+    main: (mainMatch?.[1] || '').trim(),
+    reference: (referenceMatch?.[1] || '').trim()
+  }
+}
+
+function buildDiffMarkup(mainText, referenceText) {
+  const left = String(mainText || '').trim()
+  const right = String(referenceText || '').trim()
+  const prefixLength = commonPrefixLength(left, right)
+  const suffixLength = commonSuffixLength(left, right, prefixLength)
+  return {
+    mainHtml: renderDiffText(left, prefixLength, suffixLength),
+    referenceHtml: renderDiffText(right, prefixLength, suffixLength)
+  }
+}
+
+function renderCompareMainValue(row) {
+  const mainValue = String(row?.main_value || '').trim()
+  const referenceValue = simplifyReferenceValue(row?.reference_value)
+  const diff = buildDiffMarkup(mainValue, referenceValue)
+  return diff.mainHtml
+}
+
+function simplifyReferenceValue(value) {
+  const text = String(value || '').trim()
+  if (!text || text === '-') return ''
+  const noMajority = text.replace(/（众数[^）]*）/g, '').trim()
+  const firstVariant = noMajority.split('；')[0] || noMajority
+  return firstVariant.trim()
+}
+
+function commonPrefixLength(left, right) {
+  const maxLength = Math.min(left.length, right.length)
+  let index = 0
+  while (index < maxLength && left[index] === right[index]) {
+    index += 1
+  }
+  return index
+}
+
+function commonSuffixLength(left, right, prefixLength = 0) {
+  const maxLength = Math.min(left.length, right.length) - prefixLength
+  let count = 0
+  while (
+    count < maxLength &&
+    left[left.length - 1 - count] === right[right.length - 1 - count]
+  ) {
+    count += 1
+  }
+  return count
+}
+
+function renderDiffText(text, prefixLength, suffixLength) {
+  if (!text) {
+    return '<span class="compare-empty">-</span>'
+  }
+  const safePrefix = Math.min(prefixLength, text.length)
+  const maxSuffix = Math.max(0, text.length - safePrefix)
+  const safeSuffix = Math.min(suffixLength, maxSuffix)
+  const diffStart = safePrefix
+  const diffEnd = text.length - safeSuffix
+  const before = text.slice(0, diffStart)
+  const changed = text.slice(diffStart, diffEnd)
+  const after = text.slice(diffEnd)
+  if (!changed && before === text) {
+    return escapeHtml(text)
+  }
+  return `${escapeHtml(before)}${changed ? `<span class="compare-diff-mark">${escapeHtml(changed)}</span>` : ''}${escapeHtml(after)}`
 }
 
 function highlightOriginalText(context, originalText) {
@@ -1905,9 +2187,6 @@ function escapeHtml(text) {
 }
 
 onUnmounted(() => {
-  Object.values(progressPollingTimers).forEach(timer => clearInterval(timer))
-  progressPollingTimers = {}
-  Object.keys(progressPollingFailures).forEach(key => delete progressPollingFailures[key])
   stopReviewsPolling()
 })
 </script>
@@ -1915,6 +2194,10 @@ onUnmounted(() => {
 <style>
 .review-container {
   padding: 20px;
+}
+
+.review-subtabs {
+  margin-top: -4px;
 }
 
 .page-title {
@@ -1958,6 +2241,98 @@ onUnmounted(() => {
 .review-mode-hint {
   font-size: 13px;
   color: #64748b;
+}
+
+.compare-audit-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.compare-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.compare-upload-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 16px;
+  background: #f8fafc;
+}
+
+.compare-upload-title {
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.compare-mode-toolbar {
+  margin-top: 0;
+}
+
+.compare-action-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.compare-result-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.compare-result-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.compare-result-toolbar-text {
+  font-size: 13px;
+  color: #475569;
+}
+
+.compare-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.compare-summary-card {
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.compare-summary-name {
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+  word-break: break-word;
+}
+
+.compare-result-block h4 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: #334155;
+}
+
+.compare-conclusion-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.6;
+}
+
+.compare-main-value {
+  color: #1f2937;
 }
 
 .progress-section {
@@ -2038,6 +2413,24 @@ onUnmounted(() => {
   word-break: break-word;
   overflow-wrap: anywhere;
   line-height: 1.5;
+}
+
+.suggestion-text {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.issue-action-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.issue-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .report-content {
@@ -2196,6 +2589,57 @@ onUnmounted(() => {
   color: #303133;
 }
 
+.compare-context-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.compare-context-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.compare-context-row.reference {
+  border-color: #fecaca;
+}
+
+.compare-context-label {
+  padding-top: 1px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.7;
+  color: #475569;
+}
+
+.compare-context-row.reference .compare-context-label {
+  color: #b42318;
+}
+
+.compare-context-value {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1f2937;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.compare-diff-mark {
+  display: inline;
+  color: #b42318;
+  font-weight: 700;
+}
+
+.compare-empty {
+  color: #98a2b3;
+  font-style: italic;
+}
+
 .highlight-problem {
   color: #dc3545;
   font-weight: bold;
@@ -2247,8 +2691,24 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) {
+  .compare-upload-grid,
+  .compare-summary-grid,
   .gold-summary-grid {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .compare-result-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 640px) {
+  .compare-upload-grid,
+  .compare-summary-grid,
+  .gold-summary-grid,
+  .report-header {
+    grid-template-columns: 1fr;
   }
 }
 </style>

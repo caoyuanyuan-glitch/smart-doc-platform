@@ -74,7 +74,7 @@ def _resolve_secret_value(env_names, file_env_names=(), fallback_files=()):
 
 def apply_ai_secret_aliases():
     secrets_dir = os.getenv("AI_SECRETS_DIR", "").strip()
-    fallback_files = [
+    kimi_fallback_files = [
         _BACKEND_DIR / "runtime.secrets" / "kimi_api_key",
         _BACKEND_DIR / "runtime.secrets" / "moonshot_api_key",
         Path("/run/secrets/kimi_api_key"),
@@ -82,23 +82,50 @@ def apply_ai_secret_aliases():
         Path("/var/run/secrets/kimi_api_key"),
         Path("/var/run/secrets/moonshot_api_key"),
     ]
+    qwen_fallback_files = [
+        _BACKEND_DIR / "runtime.secrets" / "qwen_api_key",
+        _BACKEND_DIR / "runtime.secrets" / "dashscope_api_key",
+        Path("/run/secrets/qwen_api_key"),
+        Path("/run/secrets/dashscope_api_key"),
+        Path("/var/run/secrets/qwen_api_key"),
+        Path("/var/run/secrets/dashscope_api_key"),
+    ]
     if secrets_dir:
         secrets_path = Path(secrets_dir).expanduser()
-        fallback_files = [
+        kimi_fallback_files = [
             secrets_path / "kimi_api_key",
             secrets_path / "moonshot_api_key",
-            *fallback_files,
+            *kimi_fallback_files,
+        ]
+        qwen_fallback_files = [
+            secrets_path / "qwen_api_key",
+            secrets_path / "dashscope_api_key",
+            *qwen_fallback_files,
         ]
 
     kimi_key = _resolve_secret_value(
         env_names=("KIMI_API_KEY", "MOONSHOT_API_KEY"),
         file_env_names=("KIMI_API_KEY_FILE", "MOONSHOT_API_KEY_FILE"),
-        fallback_files=fallback_files,
+        fallback_files=kimi_fallback_files,
     )
     if _configured(kimi_key):
         os.environ["KIMI_API_KEY"] = kimi_key
+
+    qwen_key = _resolve_secret_value(
+        env_names=("QWEN_API_KEY", "DASHSCOPE_API_KEY"),
+        file_env_names=("QWEN_API_KEY_FILE", "DASHSCOPE_API_KEY_FILE"),
+        fallback_files=qwen_fallback_files,
+    )
+    if _configured(qwen_key):
+        os.environ["QWEN_API_KEY"] = qwen_key
+        os.environ.setdefault("DASHSCOPE_API_KEY", qwen_key)
 
 
 def get_kimi_api_key():
     bootstrap_runtime_env()
     return os.getenv("KIMI_API_KEY", "").strip()
+
+
+def get_qwen_api_key():
+    bootstrap_runtime_env()
+    return os.getenv("QWEN_API_KEY", os.getenv("DASHSCOPE_API_KEY", "")).strip()

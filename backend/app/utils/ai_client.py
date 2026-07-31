@@ -1071,7 +1071,6 @@ class AIClient:
                 "revised": revised,
                 "reference": reference,
             })
-
         return normalized
 
     def qa_answer(self, question, context, request_label="qa.answer"):

@@ -46,12 +46,24 @@ LANGUAGE_STYLE_INSTRUCTIONS = {
     "concise": "语言风格：简要说明。使用简洁句式，保留关键信息，减少背景铺垫。",
 }
 
+# ── Leading Words (锚定预训练概念，提升可预测性) ──
+# 每个意图用一个强引导词锚定 agent 行为，避免展开描述产生漂移
+LW_STEP = "步骤"        # 触发：操作序列、执行顺序、编号动作
+LW_WARN = "警示"        # 触发：风险识别、安全提示、规避措施
+LW_FAULT = "排查"       # 触发：异常检查、恢复操作、故障处理
+LW_DETAIL = "参数"      # 触发：补充条件、状态变化、注意事项
+LW_ORGANIZE = "梳理"    # 触发：编号重排、步骤化、结构化
+LW_CUSTOM = "指令"      # 触发：用户自定义要求
+LW_TEMPLATE = "仿写"    # 触发：参照模板结构、章节组织、表达方式
+
 CONTINUATION_INTENT_INSTRUCTIONS = {
-    "next_step": "续写意图：续写下一步操作。基于上下文推断下一步可执行动作，重点写清操作对象、动作和结果。",
-    "expand_detail": "续写意图：扩写详细说明。补充参数条件、确认动作、注意事项或状态变化，避免偏离原文主题。",
-    "safety_warning": "续写意图：补充安全警告。识别当前操作中的风险点，输出必要警示和规避措施。",
-    "troubleshooting": "续写意图：补充故障处理。基于当前操作步骤补充异常现象、检查项和恢复操作。",
-    "custom": "续写意图：自定义。严格遵循用户提供的自定义续写要求。",
+    "next_step": f"[{LW_STEP}] 基于上下文推断可执行的下一步动作。输出格式：操作对象 + 动作 + 预期结果。",
+    "expand_detail": f"[{LW_DETAIL}] 补充操作参数、确认条件、状态变化或注意事项。保持与原文主题一致，不扩展新话题。",
+    "safety_warning": f"[{LW_WARN}] 识别当前操作的风险点，输出具体警示内容和规避措施。每条警示包含：风险场景 + 后果 + 规避动作。",
+    "troubleshooting": f"[{LW_FAULT}] 基于当前操作补充异常现象、检查项和恢复操作。每条包含：异常标志 + 检查步骤 + 恢复动作。",
+    "organize_steps": f"[{LW_ORGANIZE}] 将现有内容整理为 2-3 个带编号的执行步骤。强制要求：① 输出必须全部由编号步骤组成 ② 每行一个步骤，格式严格为「1. 具体动作描述」 ③ 禁止任何前言、解释、总结或额外文字 ④ 必须输出至少 2 个步骤。",
+    "custom": f"[{LW_CUSTOM}] 严格遵循用户提供的自定义续写要求，不添加要求以外的内容。",
+    "template_based": f"[{LW_TEMPLATE}] 参考用户上传的模板文件，沿袭其章节组织方式、句式结构和表达密度，对现有内容进行续写。强制要求：① 输出与现有内容语义连贯 ② 风格、句长、术语密度与模板保持一致 ③ 不复制模板原文，仅借鉴结构与表达方式 ④ 仅输出新增续写文本，不重复原文。",
 }
 
 CONTINUATION_LENGTH_INSTRUCTIONS = {
@@ -74,6 +86,8 @@ class ContinueTextRequest(BaseModel):
     length: str = "short"
     keep_terminology: bool = True
     keep_sentence_style: bool = True
+    # 用于打破可复现性：每次重新生成时由前端递增传入
+    regenerate_seq: int = 0
 
 
 def _generate_fallback(product_name: str, product_model: str, doc_type: str, target_chapter: str):
@@ -317,6 +331,97 @@ def _parse_terminology_pairs(content: str) -> dict:
     return terms
 
 
+def _apply_terminology_to_text(text: str, terminology_reference: Optional[dict]) -> str:
+    """将术语库映射应用到单段文本，替换非标准术语为标准术语。"""
+    if not terminology_reference:
+        return text
+    terms = _parse_terminology_pairs(terminology_reference.get("content") or "")
+    if not terms:
+        return text
+    updated = str(text or "")
+    for source, target in terms.items():
+        updated = updated.replace(source, target)
+    return updated
+
+
+def _compute_quality_score(source_text: str, continuation: str, intent: str) -> dict:
+    """
+    综合质量评分（0-100），覆盖所有续写意图：
+    - AI 腔扣分（slop-scan）
+    - 风格一致性（voice-audit）
+    - 内容长度合理性
+    - 语义相关性（与原文的词汇重叠度）
+    - 结构合理性（按意图检查输出格式）
+    """
+    import re
+
+    score = 100
+    issues = []
+
+    # ── 1. AI 腔检测扣分 ──
+    slop_findings = _slop_scan(continuation)
+    if slop_findings:
+        deduction = min(30, len(slop_findings) * 5)
+        score -= deduction
+        issues.append(f"检测到 {len(slop_findings)} 处 AI 腔表达")
+
+    # ── 2. 风格一致性 ──
+    va = _voice_audit(source_text, continuation)
+    style_score = va["score"]
+    if style_score < 60:
+        score -= 20
+        issues.append("风格与原文偏差较大")
+    elif style_score < 80:
+        score -= 10
+        issues.append("风格与原文有一定偏差")
+
+    # ── 3. 内容长度合理性 ──
+    cont_len = len(continuation.strip())
+    if cont_len < 10:
+        score -= 40
+        issues.append("续写内容过短")
+    elif cont_len < 30:
+        score -= 20
+        issues.append("续写内容偏短")
+    elif cont_len > 500:
+        score -= 15
+        issues.append("续写内容偏长，可能不够精炼")
+
+    # ── 4. 语义相关性（词汇重叠度）──
+    src_chars = set(source_text)
+    cont_chars = set(continuation)
+    if src_chars and cont_chars:
+        overlap = len(src_chars & cont_chars) / max(len(src_chars), 1)
+        if overlap < 0.15 and cont_len > 20:
+            score -= 15
+            issues.append("续写内容与原文关联度较低，可能存在跑题")
+
+    # ── 5. 意图结构检查 ──
+    if intent == "organize_steps":
+        # 检查是否为编号步骤
+        lines = [l.strip() for l in continuation.split("\n") if l.strip()]
+        number_pat = re.compile(r'^[\d]+[.)、]\s*')
+        if not lines or not all(number_pat.match(l) for l in lines):
+            score -= 20
+            issues.append("未输出编号步骤格式")
+        elif len(lines) < 2:
+            score -= 15
+            issues.append("步骤数量不足")
+
+    score = max(0, min(100, round(score)))
+    passed = score >= 70
+
+    return {
+        "score": score,
+        "passed": passed,
+        "threshold": 70,
+        "issues": issues,
+        "slop_count": len(slop_findings),
+        "style_score": style_score,
+        "length": cont_len,
+    }
+
+
 def _apply_terminology_reference(result: dict, terminology_reference: Optional[dict]) -> dict:
     if not terminology_reference:
         return result
@@ -362,40 +467,194 @@ def _build_image_generation_prompt(
     return "\n\n".join(parts)
 
 
+# ── SLOP-SCAN: AI 腔检测模式 (famulare writing-assistant-skills) ──
+# 检测续写结果中的通用/空洞/AI 腔语言，返回标记列表
+SLOP_SCAN_PATTERNS = {
+    "generic_opening": ("通用开头", r"^(首先|第一步|开始之前|需要注意的是|值得一提的是)"),
+    "vague_intensifier": ("模糊修饰", r"(非常|十分|相当|极其|特别|很重要|值得注意的是|需要注意的是)"),
+    "corporate_filler": ("企业套话", r"( seamlessly| seamlessly| robust| robust| transformative| transformative| unlock| harness| leverage| delve| underscore)"),
+    "motivational_filler": ("鸡汤式填充", r"(确保.*成功|为.*保驾护航|助力.*发展|实现.*目标|提升.*体验)"),
+    "fake_symmetry": ("虚假对称", r"(不仅.*而且.*还|一方面.*另一方面|既要.*又要.*还要)"),
+    "stakes_narration": ("意义宣告", r"(这是.*的关键|这一点非常重要|.*的意义在于|.*至关重要)"),
+    "meta_conclusion": ("元结论", r"(综上所述|总之|总而言之|由此可见|因此.*可以得出)"),
+    "low_info_coda": ("低信息收尾", r"(希望以上内容.*有帮助|如有疑问.*请联系|.*请随时.*我们)"),
+    "over_broad_tail": ("过度泛化", r"(在.*领域|对于.*行业|从.*角度来看|.*具有重要意义)"),
+    "absolute_quantifier": ("绝对化表述", r"(唯一|绝对|完全|彻底|始终|永远|必然|肯定)"),
+    "abstract_noun": ("抽象名词堆砌", r"(实现.*的|完成.*的|进行.*的|开展.*的|推进.*的)"),
+    "citation_wave": ("无引用文献波", r"(研究表明|实践证明|数据显示|经验表明|长期以来)"),
+    "passive_voice": ("过度被动", r"被.*所.*"),
+    "empty_transition": ("空转接", r"(此外|另外|除此之外|与此同时|不仅如此)"),
+}
+
+
+def _slop_scan(text: str) -> list:
+    """扫描文本中的 AI 腔（slop），返回检测到的模式列表。"""
+    import re
+    findings = []
+    for key, (label, pattern) in SLOP_SCAN_PATTERNS.items():
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        for m in matches:
+            # 获取匹配上下文（前后各10字）
+            start = max(0, m.start() - 10)
+            end = min(len(text), m.end() + 10)
+            context = text[start:end]
+            findings.append({
+                "type": key,
+                "label": label,
+                "matched": m.group(0),
+                "context": context,
+                "position": m.start(),
+            })
+    # 按位置排序
+    findings.sort(key=lambda x: x["position"])
+    return findings
+
+
+def _voice_audit(source_text: str, continuation: str) -> dict:
+    """
+    风格一致性审计（voice-audit）：对比原文与续写的风格特征。
+    返回风格一致性评分和观察点。
+    """
+    import re
+
+    def extract_features(text: str) -> dict:
+        # 句子长度特征
+        sentences = re.split(r'[。！？\n]', text)
+        sentence_lengths = [len(s.strip()) for s in sentences if s.strip()]
+        avg_len = sum(sentence_lengths) / len(sentence_lengths) if sentence_lengths else 0
+
+        # 标点特征
+        comma_density = text.count('，') / max(len(text), 1)
+        semicolon_count = text.count('；')
+
+        # 人称特征
+        first_person = text.count('我') + text.count('我们')
+        second_person = text.count('你') + text.count('您')
+
+        # 祈使句特征（技术文档常见）
+        imperative = len(re.findall(r'^[请|将|把|按|确认|检查|点击|输入|选择]', text, re.MULTILINE))
+
+        # 数字/编号密度
+        number_density = len(re.findall(r'\d+', text)) / max(len(text), 1)
+
+        return {
+            "avg_sentence_length": round(avg_len, 1),
+            "comma_density": round(comma_density * 100, 2),
+            "semicolon_count": semicolon_count,
+            "first_person": first_person,
+            "second_person": second_person,
+            "imperative_count": imperative,
+            "number_density": round(number_density * 100, 2),
+        }
+
+    src = extract_features(source_text)
+    cont = extract_features(continuation)
+
+    # 计算一致性偏差（越小越一致）
+    deviations = {
+        "sentence_length": abs(src["avg_sentence_length"] - cont["avg_sentence_length"]),
+        "comma_density": abs(src["comma_density"] - cont["comma_density"]),
+        "number_density": abs(src["number_density"] - cont["number_density"]),
+    }
+
+    # 综合一致性评分 (0-100, 100=完全一致)
+    # 句子长度偏差每 5 字扣 5 分，逗号密度每 1% 扣 5 分，数字密度每 1% 扣 3 分
+    score = 100
+    score -= min(25, deviations["sentence_length"] / 5 * 5)
+    score -= min(25, deviations["comma_density"] * 5)
+    score -= min(20, deviations["number_density"] * 3)
+
+    # 祈使句一致性奖励（技术文档应保持祈使语气）
+    if src["imperative_count"] > 0 and cont["imperative_count"] > 0:
+        score += 5
+    elif src["imperative_count"] > 0 and cont["imperative_count"] == 0:
+        score -= 10  # 原文有祈使句，续写却没有 = 风格漂移
+
+    score = max(0, min(100, round(score)))
+
+    observations = []
+    if deviations["sentence_length"] > 10:
+        observations.append(f"句子长度偏差较大（原文 {src['avg_sentence_length']} 字/句 vs 续写 {cont['avg_sentence_length']} 字/句）")
+    if deviations["comma_density"] > 2:
+        observations.append("逗号使用密度与原文不一致")
+    if src["imperative_count"] > 0 and cont["imperative_count"] == 0:
+        observations.append("原文使用祈使语气，续写未保持")
+    if cont["first_person"] > src["first_person"]:
+        observations.append("续写出现第一人称，原文未使用或较少")
+
+    return {
+        "score": score,
+        "source_features": src,
+        "continuation_features": cont,
+        "deviations": {k: round(v, 2) for k, v in deviations.items()},
+        "observations": observations,
+        "status": "consistent" if score >= 80 else "drift" if score >= 60 else "significant_drift",
+    }
+
+
 def _build_continuation_prompt(
     request: ContinueTextRequest,
     terminology_reference: Optional[dict],
     style_guide_bundle: Optional[dict],
+    template_reference: Optional[dict] = None,
 ) -> str:
+    """
+    构建续写 prompt —— 应用 mattpocock Skill 原则：
+    - 正向表述（Positives）替代否定/禁止
+    - Leading Words 锚定行为
+    - 明确的完成标准（Completion Criterion）
+    - 删除 no-op（不支付 token 给默认就遵守的指令）
+    """
     parts = [
-        "你是技术文档智能续写助手。任务是根据现有内容片段续写后续内容，输出可直接插入说明书或操作文档的文本。",
+        "[角色] 技术文档续写助手。",
+        "[任务] 基于现有技术文档片段，生成可直接插入说明书的后续内容。",
         CONTINUATION_INTENT_INSTRUCTIONS.get(request.intent) or CONTINUATION_INTENT_INSTRUCTIONS["next_step"],
         CONTINUATION_LENGTH_INSTRUCTIONS.get(request.length) or CONTINUATION_LENGTH_INSTRUCTIONS["short"],
-        "续写规则：只输出新增续写内容，不重复原文，不输出标题、解释、JSON、Markdown 代码块或字段名。",
-        "语义规则：基于上下文推断合理下一步，不编造具体型号、数值、界面按钮名称或耗材名称。",
+        "[输出标准] 只输出新增续写文本，不重复原文。",
     ]
+
+    if request.intent == "organize_steps":
+        parts.append("[完成标准] 输出必须：① 仅包含编号步骤 ② 每行一个步骤，格式为「1. 动作描述」 ③ 不含前言/解释/总结/额外文字 ④ 步骤按执行顺序排列 ⑤ 至少 2 个步骤。")
+    elif request.intent == "template_based" and template_reference:
+        parts.append(
+            "[完成标准] 输出内容必须满足：① 与上文语义连贯 ② 沿袭模板的章节组织、句式结构与表达密度 "
+            "③ 不复制模板原文，仅借鉴结构与表达方式 ④ 不含标题/解释/JSON/Markdown 代码块。"
+        )
+    else:
+        parts.append("[完成标准] 输出内容必须满足：① 与上文语义连贯 ② 不含标题/解释/JSON/Markdown 代码块 ③ 仅基于上下文合理推断，不引入外部假设。")
+
     if request.intent == "custom" and request.custom_intent.strip():
-        parts.append(f"自定义续写要求：{request.custom_intent.strip()}")
+        parts.append(f"[自定义指令] {request.custom_intent.strip()}")
+
+    if template_reference and template_reference.get("content"):
+        template_name = template_reference.get("name") or "模板文件"
+        parts.append(
+            f"[模板参考] 以下是参考模板《{template_name}》的内容片段，请沿袭其章节组织方式、"
+            f"句式结构与表达密度（不要复制模板原文）：\n{template_reference['content']}"
+        )
+
     if terminology_reference:
         terminology_pairs = _parse_terminology_pairs(terminology_reference.get("content") or "")
         terminology_lines = [
             f"- {source} -> {target}"
             for source, target in list(terminology_pairs.items())[:80]
         ]
-        parts.append(
-            "术语一致性：优先使用知识库资源库/术语库文件中的标准术语。\n"
-            f"已关联术语库文件：{'; '.join(terminology_reference.get('files') or [])}\n"
-            + ("术语对照：\n" + "\n".join(terminology_lines) if terminology_lines else "术语对照：未解析到可用术语对")
-        )
+        if terminology_lines:
+            parts.append(
+                "[术语锚定] 优先使用以下标准术语：\n"
+                + "\n".join(terminology_lines)
+            )
+
     if style_guide_bundle and style_guide_bundle.get("guides"):
         guide_blocks = []
         for guide in (style_guide_bundle.get("guides") or [])[:2]:
-            guide_blocks.append(f"句式手册：{guide.get('name') or '未命名'}\n{guide.get('content') or ''}")
+            guide_blocks.append(f"{guide.get('name') or '未命名'}\n{guide.get('content') or ''}")
         parts.append(
-            "句式风格：匹配句式手册中的推荐模板、动词选择和技术文档表达习惯。\n"
+            "[风格锚定] 匹配以下句式手册的表达习惯：\n"
             + "\n\n".join(guide_blocks)
         )
-    parts.append(f"现有内容：\n{request.source_text.strip()}")
+
+    parts.append(f"[现有内容]\n{request.source_text.strip()}")
     return "\n\n".join(parts)
 
 
@@ -426,6 +685,115 @@ def _clean_continuation_text(text: str) -> str:
     return cleaned.strip().strip('"\',，,')
 
 
+def _ensure_step_format(text: str) -> str:
+    """
+    将输出文本强制转换为编号步骤格式。
+    - 如果已经是步骤格式（行首有编号），直接规范化编号
+    - 否则按句号/换行切分为独立动作，重新编号
+    - 如果只有 1 个步骤，尝试按逗号拆分为多个子步骤
+    """
+    import re
+
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return cleaned
+
+    # 检测是否已经是步骤格式
+    lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
+    number_pattern = re.compile(r'^[\d]+[.)、]\s*')
+
+    # 如果所有非空行都以编号开头 → 只是需要规范化编号
+    if lines and all(number_pattern.match(line) for line in lines):
+        content_lines = [number_pattern.sub('', line).strip() for line in lines]
+        # 如果只有 1 步且内容包含逗号，尝试拆分为子步骤
+        if len(content_lines) == 1:
+            sub_steps = _split_single_step(content_lines[0])
+            if len(sub_steps) > 1:
+                cleaned = "\n".join(sub_steps)
+                lines = sub_steps
+
+        renumbered = []
+        for i, line in enumerate(lines, 1):
+            content = number_pattern.sub('', line).strip()
+            renumbered.append(f"{i}. {content}")
+        return "\n".join(renumbered)
+
+    # 否则：按中文句号、分号、换行切分为独立子句，重新编号
+    clauses = []
+    for line in lines:
+        line = number_pattern.sub('', line).strip()
+        sub_clauses = re.split(r'[。；;]\s*', line)
+        for clause in sub_clauses:
+            clause = clause.strip(' 　')
+            if clause and len(clause) >= 2:
+                if not clause[-1] in '。！？！.':
+                    clause += '。'
+                clauses.append(clause)
+
+    if not clauses:
+        return cleaned
+
+    # 如果只有 1 个子句，尝试进一步拆分
+    if len(clauses) == 1:
+        raw = clauses[0].rstrip('。！？！.')
+        sub_steps = _split_single_step(raw)
+        if len(sub_steps) > 1:
+            steps = []
+            for i, s in enumerate(sub_steps, 1):
+                steps.append(f"{i}. {s}")
+            return "\n".join(steps)
+
+    steps = []
+    for i, clause in enumerate(clauses, 1):
+        steps.append(f"{i}. {clause}")
+
+    return "\n".join(steps)
+
+
+def _split_single_step(text: str) -> list:
+    """
+    将单个长步骤按逗号、顿号拆分为多个子步骤。
+    返回拆分后的子步骤列表（不含编号）。
+    """
+    import re
+    raw = str(text or "").strip().rstrip('。！？！.')
+    if not raw:
+        return [text]
+
+    # 按中文逗号、顿号、英文逗号拆分，但保留完整短语
+    # 启发式：如果文本较长（>20字）且包含逗号，尝试拆分
+    if len(raw) < 15:
+        return [text]
+
+    # 按逗号拆分，过滤太短的片段并重新组合
+    parts = re.split(r'[，,、]\s*', raw)
+    if len(parts) < 2:
+        return [text]
+
+    # 过滤掉太短的部分（<3字），并将其合并到前一部分
+    merged = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) < 3 and merged:
+            merged[-1] = merged[-1].rstrip('。') + '，' + part
+        else:
+            merged.append(part)
+
+    if len(merged) < 2:
+        return [text]
+
+    # 为每个子句补回句号
+    result = []
+    for part in merged:
+        if not part[-1] in '。！？！.':
+            part += '。'
+        result.append(part)
+
+    return result
+
+
 def _continuation_fallback(request: ContinueTextRequest) -> str:
     if request.intent == "safety_warning":
         return "请确认相关部件已正确放置并保持稳定，避免因安装不到位导致处理失败。操作过程中如发现异常提示，应停止当前流程并按故障处理说明进行检查。"
@@ -433,6 +801,8 @@ def _continuation_fallback(request: ContinueTextRequest) -> str:
         return "若系统未进入下一步，请检查样本位置、槽盖状态和界面提示信息。确认条件满足后，重新执行当前操作并观察系统反馈。"
     if request.intent == "expand_detail":
         return "执行该操作前，应确认样本、耗材和设备状态均满足使用要求。完成操作后，观察界面状态变化，并根据提示继续后续流程。"
+    if request.intent == "organize_steps":
+        return "1. 确认样本已正确放置在样本槽中。\n2. 检查槽盖是否完全关闭并锁定。\n3. 在控制界面选择对应的实验流程。\n4. 点击启动按钮开始运行。\n5. 等待实验完成并查看结果。"
     return "请确认当前操作对象已正确就位，然后点击界面中的开始按钮启动处理流程。系统进入下一步后，按照页面提示继续完成后续操作。"
 
 
@@ -593,46 +963,151 @@ async def generate_content(request: GenerateRequest):
 
 
 @router.post("/continue-text")
-async def continue_text(request: ContinueTextRequest, db: Session = Depends(get_db)):
-    source_text = request.source_text.strip()
+async def continue_text(
+    source_text: str = Form(...),
+    intent: str = Form("next_step"),
+    custom_intent: str = Form(""),
+    length: str = Form("short"),
+    keep_terminology: bool = Form(True),
+    keep_sentence_style: bool = Form(True),
+    regenerate_seq: int = Form(0),
+    template_file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+):
+    source_text = source_text.strip()
     if not source_text:
         raise HTTPException(status_code=400, detail="请填写现有内容")
     if len(source_text) > 6000:
         raise HTTPException(status_code=400, detail="现有内容过长，请控制在 6000 字以内")
-    if request.intent == "custom" and not request.custom_intent.strip():
+    if intent == "custom" and not custom_intent.strip():
         raise HTTPException(status_code=400, detail="请填写自定义续写要求")
 
-    terminology_reference = _load_terminology_reference(db, request.keep_terminology)
-    style_guide_bundle = _load_style_guide_bundle(db, None) if request.keep_sentence_style else None
-    prompt = _build_continuation_prompt(request, terminology_reference, style_guide_bundle)
+    template_reference = None
+    if intent == "template_based":
+        if not template_file or not template_file.filename:
+            raise HTTPException(status_code=400, detail="参考模板文件续写需要上传模板文件")
+        template_reference = await _load_template_reference(template_file)
+        if not template_reference:
+            raise HTTPException(status_code=400, detail="无法解析模板文件，请确认文件内容非空且格式受支持（word/pdf/md/txt）")
+
+    # 构造内部 request 对象，复用现有辅助函数
+    request = ContinueTextRequest(
+        source_text=source_text,
+        intent=intent,
+        custom_intent=custom_intent,
+        length=length,
+        keep_terminology=keep_terminology,
+        keep_sentence_style=keep_sentence_style,
+        regenerate_seq=regenerate_seq,
+    )
+
+    terminology_reference = _load_terminology_reference(db, keep_terminology)
+    style_guide_bundle = _load_style_guide_bundle(db, None) if keep_sentence_style else None
+    prompt = _build_continuation_prompt(request, terminology_reference, style_guide_bundle, template_reference)
+
+    base_temperature = 0.25
+    if regenerate_seq > 0:
+        import random
+        temperature = min(0.75, base_temperature + regenerate_seq * 0.1)
+        angle_hint = random.choice([
+            "请从另一个具体动作切入",
+            "请换一个表述方式重写",
+            "请补充更具体的操作细节",
+            "请从不同角度描述",
+            "请使用不同的动词",
+        ])
+        prompt = f"{prompt}\n\n[重写提示 #{regenerate_seq}] {angle_hint}，与之前结果保持不同。"
+    else:
+        temperature = base_temperature
 
     try:
         from app.utils.ai_client import ai_client
 
-        result = ai_client.chat([
-            {"role": "system", "content": "你只输出新增续写文本。"},
-            {"role": "user", "content": prompt},
-        ], max_tokens=_resolve_continuation_max_tokens(request.length), temperature=0.25, kimi_thinking="disabled")
-        continuation = _clean_continuation_text(result)
-        if not continuation:
+        max_attempts = 2
+        best_result = None
+        best_quality = {"score": 0, "passed": False}
+
+        for attempt in range(max_attempts):
+            result = ai_client.chat([
+                {"role": "system", "content": "[任务] 输出新增续写文本，不重复上文。"},
+                {"role": "user", "content": prompt},
+            ], max_tokens=_resolve_continuation_max_tokens(length),
+               temperature=temperature + attempt * 0.15, kimi_thinking="disabled")
+            continuation = _clean_continuation_text(result)
+            if not continuation:
+                continue
+
+            # ── 后处理：意图特定格式化 ──
+            if intent == "organize_steps":
+                continuation = _ensure_step_format(continuation)
+
+            # ── 后处理：术语库强制对齐 ──
+            if terminology_reference:
+                continuation = _apply_terminology_to_text(continuation, terminology_reference)
+
+            # ── 质量评分 ──
+            quality = _compute_quality_score(source_text, continuation, intent)
+
+            if quality["score"] > best_quality["score"]:
+                best_quality = quality
+                best_result = continuation
+
+            if quality["passed"]:
+                break
+
+        if not best_result:
             raise RuntimeError("empty continuation")
+
+        # ── 最终审计（仅记录，不暴露给 UI）──
+        slop_findings = _slop_scan(best_result)
+        voice_audit = _voice_audit(source_text, best_result)
+
         return {
             "source_text": source_text,
-            "continuation": continuation,
+            "continuation": best_result,
             "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
-            "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": [continuation]}) if style_guide_bundle else "",
+            "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": [best_result]}) if style_guide_bundle else "",
+            "used_template_name": template_reference.get("name") if template_reference else "",
             "model": "kimi",
             "warning": "",
+            "audit": {
+                "slop_scan": {
+                    "findings_count": len(slop_findings),
+                    "findings": slop_findings,
+                    "passed": len(slop_findings) == 0,
+                },
+                "voice_audit": voice_audit,
+                "quality_score": best_quality["score"],
+                "quality_passed": best_quality["passed"],
+                "quality_issues": best_quality.get("issues", []),
+            },
         }
     except Exception as e:
         print(f"[continue-text] fallback: {e}")
+        fallback_text = _continuation_fallback(request)
+        if intent == "organize_steps":
+            fallback_text = _ensure_step_format(fallback_text)
+        if terminology_reference:
+            fallback_text = _apply_terminology_to_text(fallback_text, terminology_reference)
         return {
             "source_text": source_text,
-            "continuation": _continuation_fallback(request),
+            "continuation": fallback_text,
             "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
             "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": []}) if style_guide_bundle else "",
+            "used_template_name": template_reference.get("name") if template_reference else "",
             "model": "fallback",
             "warning": "当前 AI 续写链路未返回有效结果，已展示本地示例续写。",
+            "audit": {
+                "slop_scan": {"findings_count": 0, "findings": [], "passed": True},
+                "voice_audit": {
+                    "score": 0,
+                    "status": "fallback",
+                    "observations": ["当前为兜底续写，未执行风格审计"],
+                },
+                "quality_score": 0,
+                "quality_passed": False,
+                "quality_issues": ["当前为兜底续写"],
+            },
         }
 
 

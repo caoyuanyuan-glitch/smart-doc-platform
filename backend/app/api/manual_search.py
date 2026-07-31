@@ -157,7 +157,7 @@ def _call_ai_with_citations(question: str, context: str, titles: List[str]) -> d
     title_str = "、".join(titles) if titles else "说明书"
 
     try:
-        result = ai_client.qa_answer(question, context)
+        result = ai_client.qa_answer(question, context, request_label="manual.qa.answer")
         if result and result.get("answer") and _is_valid_answer(result["answer"]) and result["answer"] != "文档中未找到相关信息":
             return {
                 "answer": result["answer"],
@@ -184,7 +184,7 @@ def _call_ai_with_citations(question: str, context: str, titles: List[str]) -> d
 5. 严格使用文档中的原始术语，不得改写替换（如文档写"主机"则必须用"主机"，不能写成"主持人"、"电脑"等）
 6. 保持文档中的产品名、型号、参数、单位等专有信息完全不变"""
         messages = [{"role": "user", "content": prompt}]
-        fallback_answer = ai_client.chat(messages, max_tokens=2048, temperature=0.3)
+        fallback_answer = ai_client.chat(messages, max_tokens=2048, temperature=0.3, request_label="manual.qa.fallback")
         if _is_valid_answer(fallback_answer):
             return {"answer": fallback_answer.strip(), "source": title_str}
     except Exception:

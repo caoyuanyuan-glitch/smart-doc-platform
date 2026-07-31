@@ -54,6 +54,22 @@ async def get_current_user(
     return user
 
 
+async def get_current_user_optional(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+    except JWTError:
+        return None
+    return user_crud.get_user(db, username=username)
+
+
 async def get_current_active_user(
     current_user: UserOut = Depends(get_current_user),
 ):
