@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Background
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.orm import Session
 import html as html_lib
+import hashlib
 import json
 import math
 import re
@@ -15,7 +16,7 @@ from datetime import datetime, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from app.database import get_db
-from app.crud.document import get_document
+from app.crud.document import get_document, get_documents_by_ids
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
@@ -47,11 +48,27 @@ from app.review_engine.pipeline import (
 )
 
 _review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
+_ai_review_chunk_cache = {}
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "static" / "uploads"
 REVIEW_EXPORT_DIR = Path(__file__).resolve().parents[2] / "static" / "review_exports"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CYY_HUMAN_REVIEW_BASELINE_PATH = PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json"
 CYY_HUMAN_REVIEW_BASIS_CACHE = None
+REVIEW_BASIS_VERSION_FILES = [
+    PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "写作风格指南" / "中文技术文档写作风格指南.md",
+    PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "写作风格指南" / "MGI英文技术文档写作风格指南.md",
+    PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "常见错误清单" / "技术文档常见错误清单与规范.md",
+    PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "说明书自检checklist" / "中文说明书写作Checklist.xlsx",
+    PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "说明书自检checklist" / "英文说明书写作Checklist.xlsx",
+    PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json",
+]
+REVIEW_CACHE_VERSION_FILES = [
+    PROJECT_ROOT / "backend" / "app" / "review_engine" / "rules" / "rules.yaml",
+    PROJECT_ROOT / "backend" / "app" / "review_engine" / "rules" / "categories.yaml",
+    PROJECT_ROOT / "backend" / "app" / "review_engine" / "pipeline.py",
+    PROJECT_ROOT / "backend" / "app" / "utils" / "document_parser.py",
+    Path(__file__).resolve(),
+] + REVIEW_BASIS_VERSION_FILES
 
 
 def get_progress(review_id: int):
@@ -91,6 +108,44 @@ def _get_active_review_for_document(db: Session, document_id: int):
         if review and review.status == 'running':
             return review
     return None
+
+
+def _review_cache_version():
+    parts = []
+    for path in REVIEW_CACHE_VERSION_FILES:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        parts.append(f"{path.name}:{int(stat.st_mtime)}:{stat.st_size}")
+    raw = "|".join(parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12] if raw else "unknown"
+
+
+def _build_review_cache_key(document, mode: str):
+    content = str(getattr(document, "content", "") or "")
+    content_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()
+    fingerprint = "||".join([
+        str(getattr(document, "id", "") or ""),
+        str(getattr(document, "filename", "") or ""),
+        str(getattr(document, "file_type", "") or ""),
+        str(getattr(document, "file_size", 0) or 0),
+        content_hash,
+        str(mode or "hybrid"),
+        _review_cache_version(),
+    ])
+    return hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()
+
+
+def _find_cached_completed_review(db: Session, document, mode: str):
+    cache_key = _build_review_cache_key(document, mode)
+    for review in get_reviews(db, document_id=document.id, limit=20):
+        if review.status != "completed":
+            continue
+        summary = _load_review_summary(review.summary)
+        if summary.get("cache_key") == cache_key:
+            return review, summary
+    return None, None
 
 router = APIRouter()
 
@@ -682,6 +737,22 @@ def _clean_issue_suggestion_for_display(suggestion):
     return _normalize_suggestion_text(text)
 
 
+def _fallback_issue_suggestion_for_display(issue):
+    suggestion = _clean_issue_suggestion_for_display(_issue_value(issue, 'suggestion', '') or '')
+    if suggestion:
+        return suggestion
+
+    description = str(_issue_value(issue, 'description', '') or '').strip()
+    if not description:
+        return ''
+
+    description = re.sub(r'^问题说明[:：]\s*', '', description)
+    description = re.sub(r'^问题[:：]\s*', '', description)
+    description = re.sub(r'^建议[:：]\s*', '', description)
+    description = re.sub(r'\s+', ' ', description).strip()
+    return description
+
+
 def validate_suggestion(original: str, suggestion: str) -> bool:
     normalized_suggestion = _normalize_suggestion_text(suggestion)
     if not normalized_suggestion or normalized_suggestion == '-':
@@ -710,7 +781,7 @@ def _sanitize_issue_suggestions(issues):
                 suggestion = f"{unit_match.group(1)} {unit_match.group(2)}"
                 issue['suggestion'] = suggestion
         if suggestion and not validate_suggestion(issue.get('original_text', ''), suggestion):
-            if rule not in {'DOC-TITLE-001', 'DOC-MICRO-001'}:
+            if rule not in {'DOC-TITLE-001', 'DOC-MICRO-001', 'CYY-CN-PUNCT-001', 'CYY-CN-PUNCT-002'}:
                 issue['suggestion'] = ''
                 issue['confidence'] = max(0, int(issue.get('confidence', 0) or 0) - 10)
     return issues
@@ -856,15 +927,36 @@ def _normalize_ai_issue_category(issue):
 
 
 def _should_drop_known_false_positive_issue(issue):
-    original = _normalize_report_text(_issue_value(issue, 'original_text', ''))
+    raw_original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    original = _normalize_report_text(raw_original)
     source = str(_issue_value(issue, 'source', '') or '').lower()
     rule = str(_issue_value(issue, 'rule', '') or '').upper()
     suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
     description = str(_issue_value(issue, 'description', '') or '').strip()
     audit_basis = str(_issue_value(issue, 'audit_basis', '') or '').strip()
+    if rule in {'CYY-CN-PUNCT-001', 'CYY-CN-PUNCT-002'}:
+        return False
     if rule == 'SAFE-001' and re.search(r'缺少对应中文|双语安全提示', description):
         return True
     if rule in {'HR009', 'TENSE-001', 'R036', 'PUNCT-002', 'R002', 'R003'}:
+        return True
+    if source == 'ai' and rule == '信息完整性：关键章节内容缺失' and '待补充' in original:
+        return True
+    if source == 'ai' and original in {'10μL', '5μL', '2μL', '注意安全事项，确保安全操作'}:
+        return True
+    if source == 'ai' and original in {'表格1使用 Cat.No，表格2使用 Cat. No.', '前文用 Catalog Number，后文用 Cat. No.'}:
+        return True
+    if rule == 'CYY-CN-DUP-002' and original == '用于用于':
+        return True
+    if rule == 'CYY-CN-LOGIC-004' and 'RNase' in original:
+        return True
+    if rule == 'R001' and raw_original == '.':
+        return True
+    if rule == 'R001' and re.fullmatch(r'[\.,;:\?!]+', original):
+        return True
+    if rule == 'R016' and re.fullmatch(r'\d{2}[-\./]\d{2}[-\./]\d{2}', original):
+        return True
+    if source == 'ai' and original in {'10μL', '5μL', '2μL', '用于用于', '否则的话会影响实验结果', '由于该步骤非常的重要', '该步骤非常重要……请严格按照规范执行。'}:
         return True
     if rule == 'GRAMMAR-002' and re.fullmatch(r'after\s+login', str(_issue_value(issue, 'original_text', '') or '').strip(), re.IGNORECASE):
         return True
@@ -1047,7 +1139,7 @@ def _normalize_noop_compare_text(text):
 
 def _is_noop_position_or_same_text_issue(issue):
     rule = _report_rule(_issue_value(issue, 'rule', ''))
-    if rule == 'DOC-TITLE-001':
+    if rule in {'DOC-TITLE-001', 'CYY-CN-PUNCT-001', 'CYY-CN-PUNCT-002'}:
         return False
     original = _normalize_action_text(_issue_value(issue, 'original_text', ''))
     suggestion = _normalize_action_text(_format_issue_suggestion(issue))
@@ -1205,9 +1297,26 @@ def _select_ai_audit_chunks(chunks, max_chunks):
     return [chunks[i] for i in indexes]
 
 
-def _run_ai_deep_review(review_id, content, document_language, ai_review_basis):
+def _review_ai_token_budget():
+    return max(0, _review_env_int('REVIEW_AI_TOKEN_BUDGET', '0'))
+
+
+def _review_ai_chunk_limit():
+    return max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '8'))
+
+
+def _review_ai_budget_reached(review_id, request_label='review.audit_chunk'):
+    budget = _review_ai_token_budget()
+    if budget <= 0:
+        return False, None
+    summary = ai_client.summarize_usage_events(request_label=request_label, review_id=review_id, limit=200)
+    total_tokens = int(summary.get('total_tokens') or 0)
+    return total_tokens >= budget, summary
+
+
+def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections):
     all_chunks = _iter_ai_audit_chunks(content)
-    chunks = _select_ai_audit_chunks(all_chunks, _review_env_int('REVIEW_AI_MAX_CHUNKS', '8'))
+    chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit())
     if not chunks:
         return []
 
@@ -1215,6 +1324,13 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis):
     total = len(chunks)
     chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
     for index, start, chunk in chunks:
+        budget_reached, budget_summary = _review_ai_budget_reached(review_id)
+        if budget_reached:
+            print(
+                f"[审核] AI深度审核达到Token预算上限，停止后续分块: "
+                f"budget={_review_ai_token_budget()}, total_tokens={budget_summary.get('total_tokens', 0)}"
+            )
+            break
         progress = 65 + int((index - 1) * 17 / max(total, 1))
         next_progress = 65 + int(index * 17 / max(total, 1))
         set_progress(
@@ -1224,21 +1340,17 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis):
             min(82, progress),
             f'正在进行AI快速增强 ({index}/{total})，规则已覆盖全文...',
         )
-        print(f"[审核] AI深度审核分块 {index}/{total}, start={start}, length={len(chunk)}, selected={len(chunks)}/{len(all_chunks)}")
+        selected_basis = _select_relevant_ai_review_basis(chunk, ai_review_basis_sections)
+        print(
+            f"[审核] AI深度审核分块 {index}/{total}, start={start}, length={len(chunk)}, "
+            f"selected={len(chunks)}/{len(all_chunks)}, basis_len={len(selected_basis)}"
+        )
         try:
-            result = _call_with_timeout(
-                ai_client.audit_document,
-                chunk_timeout,
-                chunk,
-                document_language,
-                ai_review_basis,
-                True,
-            )
-            chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
+            chunk_issues, cache_hit = _run_cached_ai_chunk_review(review_id, chunk, document_language, selected_basis, chunk_timeout)
             for issue in chunk_issues:
                 issue['chapter'] = issue.get('chapter') or f'AI chunk {index}'
                 all_issues.append(issue)
-            print(f"[审核] AI深度审核分块 {index}/{total} 返回问题数={len(chunk_issues)}")
+            print(f"[审核] AI深度审核分块 {index}/{total} 返回问题数={len(chunk_issues)}, cache_hit={cache_hit}")
         except concurrent.futures.TimeoutError:
             print(f"[审核] AI深度审核分块 {index}/{total} 超时({chunk_timeout:.0f}s), 保留规则审核结果并继续")
         except Exception as e:
@@ -1481,9 +1593,9 @@ def _issue_position_start(issue):
 
 def _normalize_review_issue_display(issues, content=None):
     for issue in issues:
-        cleaned_suggestion = _clean_issue_suggestion_for_display(getattr(issue, 'suggestion', '') or '')
-        if cleaned_suggestion != (getattr(issue, 'suggestion', '') or ''):
-            issue.suggestion = cleaned_suggestion
+        display_suggestion = _fallback_issue_suggestion_for_display(issue)
+        if display_suggestion != (getattr(issue, 'suggestion', '') or ''):
+            issue.suggestion = display_suggestion
         if getattr(issue, 'rule', None) == 'CHECKLIST-COPYRIGHT-YEAR' and getattr(issue, 'category', None) == '发布前自检':
             issue.chapter = '版本记录'
             continue
@@ -3362,19 +3474,148 @@ def _load_cyy_human_review_basis():
 
 
 def _build_ai_review_basis(spec_texts, document_language):
+    return "\n\n".join(section["text"] for section in _build_ai_review_basis_sections(spec_texts, document_language))
+
+
+def _build_ai_review_basis_sections(spec_texts, document_language):
     parts = []
     if document_language in ("cn", "both") and spec_texts.get("cn_style"):
-        parts.append("【中文技术文档写作风格指南】\n" + spec_texts["cn_style"][:2500])
+        parts.append({
+            "label": "中文技术文档写作风格指南",
+            "text": "【中文技术文档写作风格指南】\n" + spec_texts["cn_style"][:2200],
+            "priority": 4,
+        })
     if document_language in ("en", "both") and spec_texts.get("en_style"):
-        parts.append("【英文技术文档写作风格指南】\n" + spec_texts["en_style"][:2500])
+        parts.append({
+            "label": "英文技术文档写作风格指南",
+            "text": "【英文技术文档写作风格指南】\n" + spec_texts["en_style"][:2200],
+            "priority": 4,
+        })
     if spec_texts.get("common_errors"):
-        parts.append("【技术文档常见错误清单】\n" + spec_texts["common_errors"][:2500])
+        parts.append({
+            "label": "技术文档常见错误清单",
+            "text": "【技术文档常见错误清单】\n" + spec_texts["common_errors"][:1800],
+            "priority": 3,
+        })
     if spec_texts.get("final_checklists"):
-        parts.append("【说明书发布前自检 Checklist】\n" + spec_texts["final_checklists"][:5000])
+        parts.append({
+            "label": "说明书发布前自检 Checklist",
+            "text": "【说明书发布前自检 Checklist】\n" + spec_texts["final_checklists"][:2200],
+            "priority": 5,
+        })
     cyy_basis = _load_cyy_human_review_basis()
     if cyy_basis:
-        parts.append(cyy_basis[:2500])
-    return "\n\n".join(parts)
+        parts.append({
+            "label": "CYY人工审核经验基线",
+            "text": cyy_basis[:1800],
+            "priority": 5,
+        })
+    return parts
+
+
+def _extract_basis_tokens(text, max_tokens=80):
+    normalized = str(text or "").lower()
+    tokens = []
+    for token in re.findall(r'[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]{2,8}', normalized):
+        if token not in tokens:
+            tokens.append(token)
+        if len(tokens) >= max_tokens:
+            break
+    return tokens
+
+
+def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, char_budget=3200):
+    if not basis_sections:
+        return ""
+
+    content_tokens = set(_extract_basis_tokens(content, max_tokens=120))
+    ranked = []
+    for index, section in enumerate(basis_sections):
+        text = str(section.get("text") or "")
+        section_tokens = set(_extract_basis_tokens(text, max_tokens=120))
+        overlap = len(content_tokens & section_tokens)
+        priority = int(section.get("priority") or 0)
+        score = overlap * 10 + priority
+        ranked.append((score, priority, -index, section))
+
+    ranked.sort(reverse=True)
+    selected = []
+    total_length = 0
+    for score, _priority, _index, section in ranked:
+        text = str(section.get("text") or "").strip()
+        if not text:
+            continue
+        if selected and score <= 0 and len(selected) >= max_sections:
+            continue
+        available = char_budget - total_length
+        if available <= 0:
+            break
+        clipped = text[:max(400, min(len(text), available))]
+        selected.append((int(section.get("priority") or 0), clipped))
+        total_length += len(clipped)
+        if len(selected) >= max_sections or total_length >= char_budget:
+            break
+
+    if not selected:
+        return ""
+    selected.sort(key=lambda item: item[0], reverse=True)
+    return "\n\n".join(text for _priority, text in selected)
+
+
+def _ai_provider_cache_fingerprint():
+    parts = [
+        str(getattr(ai_client, "default_provider", "") or ""),
+        str(getattr(ai_client, "qwen_model", "") or ""),
+        str(getattr(ai_client, "kimi_model", "") or ""),
+        str(getattr(ai_client, "deepseek_model", "") or ""),
+        str(getattr(ai_client, "arkclaw_model", "") or ""),
+        str(getattr(ai_client, "mcai_model", "") or ""),
+        str(getattr(ai_client, "fallback_model", "") or ""),
+    ]
+    return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def _build_ai_chunk_cache_key(chunk, language, audit_basis):
+    raw = "||".join([
+        hashlib.sha1(str(chunk or "").encode("utf-8")).hexdigest(),
+        hashlib.sha1(str(audit_basis or "").encode("utf-8")).hexdigest(),
+        str(language or ""),
+        _review_cache_version(),
+        _ai_provider_cache_fingerprint(),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout):
+    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis)
+    cached = _ai_review_chunk_cache.get(cache_key)
+    if cached is not None:
+        return deepcopy(cached), True
+
+    result = _call_with_timeout(
+        ai_client.audit_document,
+        chunk_timeout,
+        chunk,
+        document_language,
+        audit_basis,
+        True,
+        review_id,
+        "review.audit_chunk",
+    )
+    chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
+    _ai_review_chunk_cache[cache_key] = deepcopy(chunk_issues)
+    return chunk_issues, False
+
+
+def _log_review_ai_usage(review_id, request_label, title):
+    summary = ai_client.summarize_usage_events(request_label=request_label, review_id=review_id, limit=200)
+    if not summary.get("calls"):
+        return
+    print(
+        f"[审核] {title}: calls={summary['calls']}, prompt_tokens={summary['prompt_tokens']}, "
+        f"completion_tokens={summary['completion_tokens']}, total_tokens={summary['total_tokens']}, "
+        f"providers={summary['providers']}"
+    )
 
 
 def _call_with_timeout(func, timeout_seconds, *args):
@@ -4143,6 +4384,420 @@ def _run_chinese_human_baseline_rules(content):
             f'建议改为 {match.group(1)}',
             '连续重复中文词可能是复制或编辑残留。',
             'CYY人工审核经验基线 - 重复词', 'general', 92,
+        )
+
+    for match in re.finditer(r'组份', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-001', '术语拼写',
+            '建议改为“组分”',
+            '“组分”是试剂组成场景中的规范写法。',
+            'CYY人工审核经验基线 - 常见中文术语错写', 'general', 96,
+        )
+
+    for match in re.finditer(r'\b\d+(?:\.\d+)?\s*[uU][lL]\b', normalized):
+        raw = match.group(0)
+        volume = re.match(r'(\d+(?:\.\d+)?)', raw)
+        suggestion = f'{volume.group(1)} μL' if volume else '请统一为“数字 + 空格 + μL”格式'
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-UNIT-001', '单位格式',
+            suggestion,
+            '微升单位建议统一写为“μL”，并在数值与单位之间保留空格。',
+            'CYY人工审核经验基线 - 体积单位格式', 'general', 95,
+        )
+
+    for match in re.finditer(r'\b\d+(?:\.\d+)?\s+mins\b', normalized, re.IGNORECASE):
+        raw = match.group(0)
+        minutes = re.match(r'(\d+(?:\.\d+)?)', raw, re.IGNORECASE)
+        suggestion = f'{minutes.group(1)} min' if minutes else '请统一时间单位写法'
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-UNIT-002', '单位格式',
+            suggestion,
+            '时间单位建议统一为“min”或“分钟”，避免使用“mins”。',
+            'CYY人工审核经验基线 - 时间单位格式', 'general', 95,
+        )
+
+    for match in re.finditer(r'\b\d+(?:\.\d+)?\s*℃', normalized):
+        raw = match.group(0)
+        temperature = re.match(r'(\d+(?:\.\d+)?)', raw)
+        suggestion = f'{temperature.group(1)} °C' if temperature else '请统一温度单位写法'
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-UNIT-003', '单位格式',
+            suggestion,
+            '温度建议统一写为“°C”，并在数值与单位之间保留空格。',
+            'CYY人工审核经验基线 - 温度单位格式', 'general', 94,
+        )
+
+    for match in re.finditer(r'转数', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-TERM-004', '术语拼写',
+            '建议改为“转速”',
+            '离心机参数场景中通常使用“转速”表达。',
+            'CYY人工审核经验基线 - 仪器参数术语', 'general', 95,
+        )
+
+    for match in re.finditer(r'(?<!\d)\d{4,}\s*rpm(?![A-Za-z])', normalized, re.IGNORECASE):
+        raw = match.group(0)
+        speed = re.match(r'(\d{4,})', raw, re.IGNORECASE)
+        suggestion = f'{int(speed.group(1)):,} rpm'.replace(',', ' ') if speed else '请统一转速单位格式'
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-UNIT-004', '单位格式',
+            suggestion,
+            '转速单位建议与数值分开书写，并按规范保留空格。',
+            'CYY人工审核经验基线 - 转速单位格式', 'general', 94,
+        )
+
+    for match in re.finditer(r'污然', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-002', '术语拼写',
+            '建议改为“污染”',
+            '该处疑似常见错别字。',
+            'CYY人工审核经验基线 - 常见中文错别字', 'serious', 97,
+        )
+
+    for match in re.finditer(r'加入至', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-001', '语法表达',
+            '建议改为“加入”或“加至”',
+            '“加入”已经表达动作方向，该处存在冗余搭配。',
+            'CYY人工审核经验基线 - 常见中文语法冗余', 'general', 94,
+        )
+
+    for match in re.finditer(r'可用于用于', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-002', '重复内容',
+            '建议改为“可用于”',
+            '动词短语连续重复，属于明显编辑残留。',
+            'CYY人工审核经验基线 - 重复短语', 'general', 96,
+        )
+
+    for match in re.finditer(r'否则的话', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-003', '语法表达',
+            '建议改为“否则”',
+            '技术文档中“否则的话”口语色彩较强。',
+            'CYY人工审核经验基线 - 技术文档语体', 'general', 93,
+        )
+
+    for match in re.finditer(r'非常的重要', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-004', '语法表达',
+            '建议改为“非常重要”',
+            '副词与形容词之间不应插入“的”。',
+            'CYY人工审核经验基线 - 常见中文语法错误', 'general', 96,
+        )
+
+    for match in re.finditer(r'建议用户', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-005', '语法表达',
+            '建议改为“建议”或“请”',
+            '说明书面向使用者时，“用户”一词通常属于冗余指代。',
+            'CYY人工审核经验基线 - 说明书语体', 'general', 92,
+        )
+
+    for match in re.finditer(r'过期请勿使用', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-006', '重复内容',
+            '建议删除该句或与前文有效期说明合并',
+            '与“请在有效期内使用”类表述语义重复。',
+            'CYY人工审核经验基线 - 有效期表述去重', 'general', 92,
+        )
+
+    for match in re.finditer(r'如下:1\.', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-001', '标点符号',
+            '建议改为“如下：1.”',
+            '中文语境下应使用中文冒号，且编号前保留清晰分隔。',
+            'CYY人工审核经验基线 - 中文标点规范', 'general', 95,
+        )
+
+    for match in re.finditer(r'a\)避免污染', normalized, re.IGNORECASE):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-002', '标点符号',
+            '建议改为“a) 避免污染”',
+            '列表标记后建议保留一个空格。',
+            'CYY人工审核经验基线 - 列表标记格式', 'general', 94,
+        )
+
+    for match in re.finditer(r'强光下!', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-003', '标点符号',
+            '建议改为“强光下。”或其他陈述句句末标点',
+            '技术说明文档中通常使用陈述句标点。',
+            'CYY人工审核经验基线 - 技术文档标点风格', 'general', 93,
+        )
+
+    for match in re.finditer(r"'引物'", normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-004', '标点符号',
+            '建议统一为中文双引号“引物”',
+            '中文正文中的引号建议统一为中文引号。',
+            'CYY人工审核经验基线 - 中文引号规范', 'general', 93,
+        )
+
+    for match in re.finditer(r'PCR\([A-Za-z]+', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-005', '标点符号',
+            '建议在缩写与英文全称括号之间补一个空格，例如“PCR (Polymerase...)”',
+            '英文缩写后接括号说明时建议保留空格。',
+            'CYY人工审核经验基线 - 英文括号前空格', 'general', 92,
+        )
+
+    for match in re.finditer(r'2026-07-27、2026/07/27、2026\.07\.27', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-FORMAT-001', '格式规范',
+            '建议全文统一为一种日期格式',
+            '同一处并列出现多种日期写法，格式需要统一。',
+            'CYY人工审核经验基线 - 日期格式统一', 'general', 95,
+        )
+
+    for match in re.finditer(r'37°C、37℃、37 度 C', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-FORMAT-002', '格式规范',
+            '建议统一为“37 °C”',
+            '温度表示方式需要在全文保持一致。',
+            'CYY人工审核经验基线 - 温度格式统一', 'general', 95,
+        )
+
+    for match in re.finditer(r'min、分钟、mins', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-FORMAT-003', '格式规范',
+            '建议统一时间单位写法，例如统一为“min”',
+            '时间单位混用会降低说明书的一致性。',
+            'CYY人工审核经验基线 - 时间单位统一', 'general', 95,
+        )
+
+    for match in re.finditer(r'1\.、1）、\(1\)、①', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-FORMAT-004', '格式规范',
+            '建议统一章节或列表编号格式',
+            '同一位置列出多种编号样式，说明全文编号规范未统一。',
+            'CYY人工审核经验基线 - 编号格式统一', 'general', 94,
+        )
+
+    spaced_ul_matches = list(re.finditer(r'\b\d+\s+μL\b', normalized))
+    compact_ul_matches = list(re.finditer(r'\b\d+μL\b', normalized))
+    if spaced_ul_matches and compact_ul_matches:
+        compact_match = compact_ul_matches[0]
+        add_issue(
+            compact_match.start(), compact_match.end(), compact_match.group(0),
+            'CYY-CN-FORMAT-005', '格式规范',
+            '建议统一数字与单位之间的空格写法，例如统一为“10 μL”',
+            '同一文档中同时出现“10 μL”和“10μL”类写法，单位空格风格需要统一。',
+            'CYY人工审核经验基线 - 数字与单位空格统一', 'general', 94,
+        )
+
+    for match in re.finditer(r'37°C 或室温', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LOGIC-001', '内容逻辑',
+            '建议明确单一温度条件或给出室温范围',
+            '“37°C”与“室温”表达的是不同温度条件，需要进一步明确。',
+            'CYY人工审核经验基线 - 条件表达明确性', 'serious', 92,
+        )
+
+    for match in re.finditer(r'仅供科研使用，不得用于临床诊断', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REDUNDANCY-001', '重复内容',
+            '建议按法规口径确认后保留一条简洁表述',
+            '两段表述语义高度重叠，适合压缩为一条规范声明。',
+            'CYY人工审核经验基线 - 合规声明精简', 'general', 90,
+        )
+
+    for match in re.finditer(r'应注意安全，注意安全事项，确保安全操作', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REDUNDANCY-002', '重复内容',
+            '建议压缩为“注意安全操作”或等价简洁表述',
+            '“安全”语义连续重复，影响表达简洁度。',
+            'CYY人工审核经验基线 - 冗余语义压缩', 'general', 93,
+        )
+
+    for match in re.finditer(r'结果判读：根据说明书中的结果判读方法进行判读', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REDUNDANCY-003', '重复内容',
+            '建议改为“结果判读：按说明书方法进行”',
+            '“判读”一词在短句中重复出现，表达可进一步压缩。',
+            'CYY人工审核经验基线 - 术语重复压缩', 'general', 93,
+        )
+
+    mixed_language_replacements = {
+        'RNA extraction kit': ('RNA 提取试剂盒', 'CYY-CN-MIXED-001', '中英文混用', '建议统一为中文术语。'),
+        'sample': ('样本', 'CYY-CN-MIXED-002', '中英文混用', '中文说明书中建议统一使用中文名词。'),
+        'collection tube': ('收集管', 'CYY-CN-MIXED-003', '中英文混用', '中文说明书中建议统一使用中文名词。'),
+        'Agarose Gel': ('琼脂糖凝胶', 'CYY-CN-MIXED-004', '中英文混用', '中文说明书中建议统一使用中文术语。'),
+        'thermocycler': ('热循环仪', 'CYY-CN-MIXED-005', '中英文混用', '中文说明书中建议统一使用中文术语。'),
+        'OD': ('吸光度', 'CYY-CN-MIXED-006', '中英文混用', '中文说明书中建议统一使用中文术语或受控缩写。'),
+        'ddH2O': ('超纯水', 'CYY-CN-MIXED-007', '中英文混用', '中文说明书中建议统一使用中文术语或在首次出现时解释缩写。'),
+    }
+    for original, (suggestion, rule, category, description) in mixed_language_replacements.items():
+        start = normalized.find(original)
+        if start >= 0:
+            add_issue(
+                start, start + len(original), original,
+                rule, category, suggestion, description,
+                'CYY人工审核经验基线 - 中文说明书术语统一', 'general', 94,
+            )
+
+    consistency_pairs = [
+        ('文库构建', '文库制备', 'CYY-CN-CONSIST-001', '术语一致性', '全文统一为“文库制备”或按术语表确认', '同一概念在全文中应保持统一表述。'),
+        ('逆转录', '反转录', 'CYY-CN-CONSIST-002', '术语一致性', '全文统一为“反转录”或按术语表确认', '同一概念在全文中应保持统一表述。'),
+        ('示意图', '流程图', 'CYY-CN-CONSIST-003', '术语一致性', '图标题建议统一为同一种命名', '图示命名在全文中应保持一致。'),
+        ('Catalog Number', 'Cat. No.', 'CYY-CN-CONSIST-004', '术语一致性', '建议统一为“Catalog Number”或“Cat. No.”中的一种', '全称与缩写混用时应明确统一口径。'),
+        ('外周血单个核细胞', 'PBMC', 'CYY-CN-CONSIST-005', '术语一致性', '建议统一为“PBMC”或“外周血单个核细胞”中的一种', '缩写与中文全称并存时应统一术语口径。'),
+        ('RNA 质量', 'RNA 完整性', 'CYY-CN-CONSIST-006', '术语一致性', '建议统一为“RNA 完整性”或“RNA 质量”中的一种', '同一质量概念在全文中应保持统一。'),
+    ]
+    for original, paired, rule, category, suggestion, description in consistency_pairs:
+        start = normalized.find(original)
+        if start >= 0 and paired in normalized:
+            add_issue(
+                start, start + len(original), original,
+                rule, category, suggestion, description,
+                'CYY人工审核经验基线 - 术语一致性', 'general', 93,
+            )
+
+    cat_no_positions = [match.start() for match in re.finditer(r'Cat\. No\.', normalized)]
+    if cat_no_positions and 'Cat.No' in normalized:
+        start = cat_no_positions[0]
+        add_issue(
+            start, start + len('Cat. No.'), 'Cat. No.',
+            'CYY-CN-CONSIST-007', '术语一致性',
+            '建议统一为“Cat.No”或“Cat. No.”中的一种',
+            '同一缩写存在空格写法差异，全文需要统一。',
+            'CYY人工审核经验基线 - 缩写格式统一', 'general', 93,
+        )
+
+    for match in re.finditer(r'图1引用为图 1', normalized):
+        figure_start = match.start() + match.group(0).find('图 1')
+        add_issue(
+            figure_start, figure_start + len('图 1'), '图 1',
+            'CYY-CN-CONSIST-008', '术语一致性',
+            '建议统一为“图1”“图 1”或“Figure 1”中的一种编号格式',
+            '同一图号在正文中的写法不一致，图表编号格式需要统一。',
+            'CYY人工审核经验基线 - 图表编号格式统一', 'general', 92,
+        )
+
+    for match in re.finditer(r'表3列出了试剂盒的5个组分。', normalized):
+        add_issue(
+            match.start(), match.end(), '5个组分',
+            'CYY-CN-LOGIC-002', '内容逻辑',
+            '建议核对表中组分数量并与正文保持一致',
+            '前文列出的组分数量与该处描述存在不一致风险。',
+            'CYY人工审核经验基线 - 数量一致性核对', 'serious', 94,
+        )
+
+    for match in re.finditer(r'步骤3要求使用试剂A进行反应。', normalized):
+        add_issue(
+            match.start(), match.end(), '试剂A',
+            'CYY-CN-LOGIC-003', '内容逻辑',
+            '建议补充试剂A定义、来源或删除该占位表述',
+            '正文中引用了未明确说明的试剂名称。',
+            'CYY人工审核经验基线 - 关键对象定义完整性', 'serious', 93,
+        )
+
+    for match in re.finditer(r'无 RNase 污染。', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LOGIC-004', '内容逻辑',
+            '建议补充检测依据、证书引用或验证方法',
+            '质量声明需要有明确证据支撑。',
+            'CYY人工审核经验基线 - 质量声明证据', 'serious', 92,
+        )
+
+    for match in re.finditer(r'操作时间约\s*30\s*分钟', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LOGIC-005', '内容逻辑',
+            '建议根据实测流程核对该步骤总耗时并修正时间说明',
+            '操作时间属于关键使用信息，发布前需要与实测流程或受控资料保持一致。',
+            'CYY人工审核经验基线 - 操作时长核对', 'serious', 91,
+        )
+
+    storage_conflict = re.search(r'-20°C[^。\n]*。[^。\n]*避免反复冻融', normalized)
+    if storage_conflict:
+        add_issue(
+            storage_conflict.start(), storage_conflict.end(), storage_conflict.group(0),
+            'CYY-CN-LOGIC-006', '内容逻辑',
+            '建议明确是否允许冻存、分装后保存条件，以及如何避免反复冻融',
+            '低温保存与“避免反复冻融”需要配套给出分装或解冻使用要求，避免读者理解冲突。',
+            'CYY人工审核经验基线 - 储存条件明确性', 'serious', 91,
+        )
+
+    for match in re.finditer(r'生产日期格式规范', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-INFO-001', '信息完整性',
+            '建议补充生产日期的具体格式，例如 YYYY-MM-DD',
+            '仅说明“格式规范”不足以指导读者识别生产日期写法，建议写明具体格式。',
+            'CYY人工审核经验基线 - 日期字段说明完整性', 'general', 90,
+        )
+
+    for match in re.finditer(r'试剂盒套装', normalized):
+        add_issue(
+            match.start(), match.end(), '套装',
+            'CYY-CN-PRODUCT-001', '产品信息',
+            '建议核对是否保留“套装”一词，或与“试剂盒”二选一',
+            '产品名称中“套装”与“试剂盒”存在语义重叠。',
+            'CYY人工审核经验基线 - 产品命名精简', 'general', 91,
+        )
+
+    for match in re.finditer(r'H-020-000898-01', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PRODUCT-002', '产品信息',
+            '建议与主数据核对货号版本并统一',
+            '货号属于关键产品信息，需要与受控主数据一致。',
+            'CYY人工审核经验基线 - 货号核对', 'serious', 93,
+        )
+
+    for match in re.finditer(r'\bRXN\b', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PRODUCT-003', '产品信息',
+            '建议统一为“反应”或规范缩写写法',
+            '规格单位应与全文语言风格保持一致。',
+            'CYY人工审核经验基线 - 规格单位统一', 'general', 90,
+        )
+
+    for match in re.finditer(r'10μL Buffer，5μL Enzyme 和', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-006', '标点符号',
+            '建议将并列成分改为统一分隔方式，例如“10 μL Buffer、5 μL Enzyme 和 2 μL Primer”',
+            '并列试剂成分的中英文和标点分隔方式不统一。',
+            'CYY人工审核经验基线 - 并列成分标点统一', 'general', 92,
+        )
+
+    for match in re.finditer(r'非常重要……', normalized):
+        add_issue(
+            match.start(), match.start() + len('非常重要……'), '非常重要……',
+            'CYY-CN-PUNCT-007', '标点符号',
+            '建议改为“非常重要。”或使用正常句号收束',
+            '技术文档中省略号不宜用于强调句收尾。',
+            'CYY人工审核经验基线 - 句末标点规范', 'general', 92,
         )
 
     replacements = {
@@ -5629,10 +6284,14 @@ def get_context(content, start, end, context_length=200):
 @router.get("/", response_model=list[Review])
 async def list_reviews(db: Session = Depends(get_db)):
     reviews = get_reviews(db)
+    document_map = {
+        doc.id: doc
+        for doc in get_documents_by_ids(db, [review.document_id for review in reviews])
+    }
     result = []
     for review in reviews:
         review = _reconcile_review_runtime_state(db, review)
-        doc = get_document(db, document_id=review.document_id)
+        doc = document_map.get(review.document_id)
         review_dict = review.__dict__.copy()
         review_dict['document_name'] = doc.filename if doc else ''
         review_dict['document_file_type'] = doc.file_type if doc else ''
@@ -6190,9 +6849,17 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 try:
                     deterministic_issues = [issue for issue in candidate_rule_issues if _is_deterministic_review_rule(issue)]
                     ai_check_issues = [issue for issue in candidate_rule_issues if not _is_deterministic_review_rule(issue)]
-                    filtered = _call_with_timeout(ai_client.filter_rule_false_positives, 90.0, ai_check_issues, document_language) if ai_check_issues else []
+                    filtered = _call_with_timeout(
+                        ai_client.filter_rule_false_positives,
+                        90.0,
+                        ai_check_issues,
+                        document_language,
+                        review_id,
+                        "review.rule_false_positive_filter",
+                    ) if ai_check_issues else []
                     candidate_rule_issues = deterministic_issues + filtered
                     print(f"[审核] AI二次验证后保留问题数={len(candidate_rule_issues)}, 确定性规则保留={len(deterministic_issues)}")
+                    _log_review_ai_usage(review_id, "review.rule_false_positive_filter", "AI二次验证Token统计")
                 except concurrent.futures.TimeoutError:
                     print(f"[审核] AI 二次验证超时(90s), 使用原始规则结果({len(candidate_rule_issues)}个)")
                 except Exception as e:
@@ -6205,9 +6872,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             set_progress(review_id, 'running', 'AI智能审核', 65, '正在进行AI深度审核...')
             print(f"[审核] 开始AI智能审核，模式={mode}")
             try:
-                ai_review_basis = _build_ai_review_basis(spec_texts, document_language)
-                ai_issues = _run_ai_deep_review(review_id, content, document_language, ai_review_basis)
+                ai_review_basis_sections = _build_ai_review_basis_sections(spec_texts, document_language)
+                ai_issues = _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections)
                 print(f"[审核] AI审核返回问题数={len(ai_issues)}")
+                _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
                 for issue in ai_issues:
                     issue["source"] = "ai"
                     issue["severity"] = issue.get("severity") or "general"
@@ -6276,6 +6944,18 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 position=issue.get("position", "")
             ))
 
+        review_ai_usage = {
+            "rule_false_positive_filter": ai_client.summarize_usage_events(
+                request_label="review.rule_false_positive_filter",
+                review_id=review_id,
+                limit=200,
+            ),
+            "audit_chunk": ai_client.summarize_usage_events(
+                request_label="review.audit_chunk",
+                review_id=review_id,
+                limit=200,
+            ),
+        }
         summary = json.dumps({
             "total": len(issues),
             "fatal": len([i for i in issues if i.get("severity") == "fatal"]),
@@ -6284,6 +6964,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
             "language": document_language,
             "layers": layer_counts,
+            "cache_key": _build_review_cache_key(document, mode),
+            "cache_version": _review_cache_version(),
+            "cache_hit": False,
+            "ai_usage": review_ai_usage,
         })
 
         set_progress(review_id, 'completed', '完成', 100, f'审核完成，发现 {len(issues)} 个问题')
@@ -6311,6 +6995,18 @@ async def create_review_task(document_id: int, mode: str = "hybrid", background_
     if active_review:
         set_progress(active_review.id, 'running', '初始化', 0, '已有审核任务正在执行')
         return {"review_id": active_review.id, "status": "running", "message": "已有审核任务正在执行，请轮询进度"}
+
+    cached_review, cached_summary = _find_cached_completed_review(db, document, mode)
+    if cached_review:
+        total = cached_summary.get("total", cached_review.total_issues or 0) if isinstance(cached_summary, dict) else (cached_review.total_issues or 0)
+        message = f"复用缓存结果，共 {total} 个问题"
+        return {
+            "review_id": cached_review.id,
+            "status": "completed",
+            "message": message,
+            "cache_hit": True,
+            "cached_from_review": cached_review.id,
+        }
 
     review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode))
     update_review_status(db, review.id, "running", 0, "审核任务已创建")

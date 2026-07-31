@@ -18,6 +18,13 @@ def create_document(db: Session, document: DocumentCreate, user_id: int):
 def get_document(db: Session, document_id: int):
     return db.query(Document).filter(Document.id == document_id).first()
 
+
+def get_documents_by_ids(db: Session, document_ids: list[int]):
+    ids = [doc_id for doc_id in document_ids if doc_id is not None]
+    if not ids:
+        return []
+    return db.query(Document).filter(Document.id.in_(ids)).all()
+
 def get_documents(db: Session, user_id: int = None, skip: int = 0, limit: int = 100):
     query = db.query(Document)
     if user_id is not None:

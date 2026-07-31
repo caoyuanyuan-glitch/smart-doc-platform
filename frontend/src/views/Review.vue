@@ -17,6 +17,16 @@
             <div class="upload-tip">支持 PDF、DOCX、Excel、MD、TXT、IDML 格式，单文件最大 50MB</div>
           </template>
         </el-upload>
+        <div class="review-mode-toolbar">
+          <span class="review-mode-label">审核模式</span>
+          <el-radio-group v-model="reviewMode" size="small">
+            <el-radio-button label="rule">调试</el-radio-button>
+            <el-radio-button label="hybrid">完整</el-radio-button>
+          </el-radio-group>
+          <span class="review-mode-hint">
+            {{ reviewMode === 'rule' ? '调试模式只跑规则层，适合高频回归。' : '完整模式包含 AI 复核，适合最终验收。' }}
+          </span>
+        </div>
         <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
           <el-progress :percentage="uploadProgress" :stroke-width="4" />
           <span class="progress-text">{{ uploadProgressText }}</span>
@@ -116,7 +126,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="created_at" label="开始时间" width="160" />
-          <el-table-column label="操作" width="460" fixed="right">
+          <el-table-column label="操作" width="360" fixed="right">
             <template #default="scope">
               <el-button 
                 size="small" 
@@ -134,6 +144,7 @@
                 一键确认
               </el-button>
               <el-button
+                v-if="shouldShowDownloadResult(scope.row)"
                 size="small"
                 type="success"
                 :disabled="scope.row.status !== 'completed'"
@@ -175,16 +186,7 @@
           <el-option label="建议" value="suggestion" />
         </el-select>
         <span style="margin-left:auto">
-          <el-button size="small" @click="openParsedTextDialog">解析文本</el-button>
           <el-button size="small" type="warning" plain @click="openManualIssueDialog">补充上报</el-button>
-          <el-upload
-            class="gold-upload"
-            :http-request="compareGoldAnswer"
-            accept=".xlsx,.xls"
-            :show-file-list="false"
-          >
-          <el-button size="small" type="primary" plain>标准答案对比</el-button>
-          </el-upload>
           <el-button size="small" type="success" plain :disabled="!currentTaskId" @click="batchConfirmAll(currentTaskId)">确认全部待审</el-button>
           <el-button size="small" @click="batchSetStatus('confirmed')">批量确认</el-button>
           <el-button size="small" @click="batchSetStatus('false_positive')">批量标记误报</el-button>
@@ -218,19 +220,12 @@
             <span class="context-cell" v-html="highlightOriginalText(scope.row.context, scope.row.original_text)"></span>
           </template>
         </el-table-column>
-        <el-table-column prop="suggestion" label="建议" min-width="220">
+        <el-table-column label="建议" min-width="260">
           <template #default="scope">
-            <span class="text-success suggestion-wrap">{{ scope.row.suggestion || '-' }}</span>
+            <span class="suggestion-wrap suggestion-text">{{ issueSuggestionText(scope.row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="判定" width="120">
-          <template #default="scope">
-            <el-tag size="small" :type="statusTagType(scope.row.status)" effect="plain">
-              {{ statusLabel(scope.row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="400" fixed="right">
+        <el-table-column label="操作" width="340" fixed="right">
           <template #default="scope">
             <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
             <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
@@ -571,8 +566,6 @@ const rowFilters = reactive({})
 
 // 文档审核状态 (按文档ID存储)
 const docReviewStatus = reactive({})
-let progressPollingTimers = {}  // 轮询定时器
-const progressPollingFailures = reactive({})
 let reviewsPollingTimer = null
 
 // 问题详情弹窗
@@ -607,7 +600,7 @@ const filteredDialogIssues = computed(() => {
     if (issueFilter.severity && i.severity !== issueFilter.severity) return false
     if (issueFilter.keyword) {
       const k = issueFilter.keyword.toLowerCase()
-      const hay = `${i.original_text || ''} ${i.context || ''} ${i.suggestion || ''}`.toLowerCase()
+      const hay = `${i.original_text || ''} ${i.context || ''} ${issueSuggestionText(i)} ${i.description || ''}`.toLowerCase()
       if (!hay.includes(k)) return false
     }
     return true
@@ -626,6 +619,14 @@ const filteredDialogExcelRowCount = computed(() => {
 
 function formatIssueDisplayId(index) {
   return String(index + 1).padStart(3, '0')
+}
+
+function issueSuggestionText(issue) {
+  const suggestion = String(issue?.suggestion || '').trim()
+  if (suggestion) return suggestion
+  const description = String(issue?.description || '').trim()
+  if (description) return description.replace(/^问题说明[:：]\s*/, '').replace(/^问题[:：]\s*/, '').trim()
+  return '-'
 }
 
 function percentText(value) {
@@ -700,6 +701,7 @@ const selectedRules = ref([])
 const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
+const reviewMode = ref('rule')
 
 function goReviewTasks() {
   router.push('/review/tasks')
@@ -797,58 +799,9 @@ async function loadDocuments() {
     ])
     const uploadingDocs = documents.value.filter(doc => String(doc.id).startsWith('uploading-'))
     documents.value = [...uploadingDocs, ...(docResp.data || [])]
-    
-    const reviewMap = {}
-    for (const r of reviewResp.data || []) {
-      if (!reviewMap[r.document_id] || r.id > reviewMap[r.document_id].id) {
-        reviewMap[r.document_id] = r
-      }
-    }
-
-    const activeDocIds = new Set()
-    
-    for (const doc of documents.value) {
-      const latestReview = reviewMap[doc.id]
-      const docCreatedAt = new Date(doc.created_at || 0).getTime()
-      const reviewCreatedAt = new Date(latestReview?.created_at || 0).getTime()
-      const hasValidReview = Boolean(latestReview) && (!docCreatedAt || !reviewCreatedAt || reviewCreatedAt >= docCreatedAt)
-
-      if (hasValidReview) {
-        const progressInfo = latestReview.progress || null
-        const progressValue = latestReview.status === 'completed'
-          ? 100
-          : latestReview.status === 'running'
-            ? (progressInfo?.progress || 0)
-            : 0
-        const message = latestReview.status === 'completed'
-          ? reviewCompletionText(latestReview)
-          : latestReview.status === 'failed'
-            ? reviewFailureText(latestReview)
-            : reviewProgressText(progressInfo)
-
-        docReviewStatus[doc.id] = {
-          review_id: latestReview.id,
-          status: latestReview.status,
-          progress: progressValue,
-          message,
-          summary: latestReview.summary,
-          total_issues: latestReview.total_issues
-        }
-        activeDocIds.add(String(doc.id))
-
-        if (latestReview.status === 'running') {
-          startProgressPolling(doc.id, latestReview.id)
-        }
-      } else {
-        delete docReviewStatus[doc.id]
-      }
-    }
-
-    Object.keys(docReviewStatus).forEach((docId) => {
-      if (!activeDocIds.has(String(docId)) && !String(docId).startsWith('uploading-')) {
-        delete docReviewStatus[docId]
-      }
-    })
+    reviews.value = reviewResp.data || []
+    syncDocumentStatusesFromReviews(reviews.value)
+    syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
   }
@@ -858,21 +811,77 @@ async function loadReviews() {
   try {
     const resp = await reviewAPI.list()
     reviews.value = resp.data || []
+    if (currentView.value === 'documents') {
+      syncDocumentStatusesFromReviews(reviews.value)
+    }
     syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载任务列表失败: ${getAPIErrorMessage(e)}`)
   }
 }
 
+function syncDocumentStatusesFromReviews(reviewList) {
+  const reviewMap = {}
+  for (const review of reviewList || []) {
+    if (!reviewMap[review.document_id] || review.id > reviewMap[review.document_id].id) {
+      reviewMap[review.document_id] = review
+    }
+  }
+
+  const activeDocIds = new Set()
+  for (const doc of documents.value) {
+    const latestReview = reviewMap[doc.id]
+    const docCreatedAt = new Date(doc.created_at || 0).getTime()
+    const reviewCreatedAt = new Date(latestReview?.created_at || 0).getTime()
+    const hasValidReview = Boolean(latestReview) && (!docCreatedAt || !reviewCreatedAt || reviewCreatedAt >= docCreatedAt)
+
+    if (!hasValidReview) {
+      delete docReviewStatus[doc.id]
+      continue
+    }
+
+    const progressInfo = latestReview.progress || null
+    const progressValue = latestReview.status === 'completed'
+      ? 100
+      : latestReview.status === 'running'
+        ? (progressInfo?.progress || 0)
+        : 0
+    const message = latestReview.status === 'completed'
+      ? reviewCompletionText(latestReview)
+      : latestReview.status === 'failed'
+        ? reviewFailureText(latestReview)
+        : reviewProgressText(progressInfo)
+
+    docReviewStatus[doc.id] = {
+      review_id: latestReview.id,
+      status: latestReview.status,
+      progress: progressValue,
+      message,
+      summary: latestReview.summary,
+      total_issues: latestReview.total_issues
+    }
+    activeDocIds.add(String(doc.id))
+  }
+
+  Object.keys(docReviewStatus).forEach((docId) => {
+    if (!activeDocIds.has(String(docId)) && !String(docId).startsWith('uploading-')) {
+      delete docReviewStatus[docId]
+    }
+  })
+}
+
 function syncReviewsPolling() {
   stopReviewsPolling()
-  if (currentView.value !== 'tasks' && currentView.value !== 'reports') return
+  if (currentView.value !== 'documents' && currentView.value !== 'tasks' && currentView.value !== 'reports') return
   if (!reviews.value.some(review => review.status === 'running')) return
 
   reviewsPollingTimer = setInterval(async () => {
     try {
       const resp = await reviewAPI.list()
       reviews.value = resp.data || []
+      if (currentView.value === 'documents') {
+        syncDocumentStatusesFromReviews(reviews.value)
+      }
       if (!reviews.value.some(review => review.status === 'running')) {
         stopReviewsPolling()
       }
@@ -1004,9 +1013,24 @@ function handleRulesImport(response) {
 
 async function startReview(documentId) {
   try {
-    const response = await reviewAPI.create(documentId, 'hybrid')
+    const response = await reviewAPI.create(documentId, reviewMode.value)
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
+
+    if (response.data.status === 'completed') {
+      await loadReviewIssues(reviewId)
+      await loadReviews()
+      docReviewStatus[documentId] = {
+        review_id: reviewId,
+        status: 'completed',
+        progress: 100,
+        message: statusMessage,
+        summary: JSON.stringify({ total: (taskIssues[reviewId] || []).length, cache_hit: true }),
+        total_issues: (taskIssues[reviewId] || []).length
+      }
+      ElMessage.success(statusMessage)
+      return
+    }
     
     docReviewStatus[documentId] = {
       review_id: reviewId,
@@ -1014,8 +1038,7 @@ async function startReview(documentId) {
       progress: 0,
       message: statusMessage
     }
-    
-    startProgressPolling(documentId, reviewId)
+    await loadReviews()
   } catch (error) {
     docReviewStatus[documentId] = {
       status: 'failed',
@@ -1024,67 +1047,6 @@ async function startReview(documentId) {
     }
     ElMessage.error('审核失败，请重试: ' + (error.response?.data?.detail || error.message))
   }
-}
-
-function startProgressPolling(documentId, reviewId) {
-  if (progressPollingTimers[documentId]) {
-    clearInterval(progressPollingTimers[documentId])
-  }
-  progressPollingFailures[documentId] = 0
-  
-  progressPollingTimers[documentId] = setInterval(async () => {
-    try {
-      const resp = await reviewAPI.getProgress(reviewId)
-      const progress = resp.data
-      progressPollingFailures[documentId] = 0
-      
-      docReviewStatus[documentId] = {
-        review_id: reviewId,
-        status: progress.status,
-        progress: progress.progress || 0,
-        message: reviewProgressText(progress)
-      }
-      
-      if (progress.status === 'completed' || progress.status === 'failed') {
-        clearInterval(progressPollingTimers[documentId])
-        delete progressPollingTimers[documentId]
-        delete progressPollingFailures[documentId]
-        
-        if (progress.status === 'completed') {
-          await loadReviewIssues(reviewId)
-          await loadReviews()
-          docReviewStatus[documentId] = {
-            review_id: reviewId,
-            status: 'completed',
-            progress: 100,
-            message: progress.message,
-            summary: null,
-            total_issues: (taskIssues[reviewId] || []).length
-          }
-          ElMessage.success(reviewCompletionText({ summary: progress.message, total_issues: (taskIssues[reviewId] || []).length }))
-        } else if (progress.status === 'failed') {
-          ElMessage.error('审核失败: ' + reviewFailureText({ summary: progress.message }))
-        }
-      }
-    } catch (err) {
-      progressPollingFailures[documentId] = (progressPollingFailures[documentId] || 0) + 1
-      console.error('轮询进度失败:', err)
-      if (progressPollingFailures[documentId] >= 3) {
-        clearInterval(progressPollingTimers[documentId])
-        delete progressPollingTimers[documentId]
-        delete progressPollingFailures[documentId]
-        docReviewStatus[documentId] = {
-          review_id: reviewId,
-          status: 'failed',
-          progress: 0,
-          message: '审核状态同步失败，请刷新后重试'
-        }
-        ElMessage.error('审核状态同步失败，请刷新后重试')
-        loadDocuments()
-        loadReviews()
-      }
-    }
-  }, 2000)
 }
 
 async function loadReviewIssues(reviewId) {
@@ -1225,6 +1187,10 @@ function resultButtonLabel(fileType) {
   return '下载结果'
 }
 
+function shouldShowDownloadResult(row) {
+  return String(row?.document_file_type || '').toLowerCase() !== 'md'
+}
+
 function parseMaybeJson(value) {
   if (typeof value !== 'string') return null
   const text = value.trim()
@@ -1258,7 +1224,8 @@ function reviewCompletionText(review) {
     ? review.message.match(/(\d+)\s*个问题/)
     : null
   const total = parsed?.total ?? review?.total_issues ?? (matchedTotal ? Number(matchedTotal[1]) : 0)
-  return `审核完成，共 ${total} 个问题`
+  const prefix = parsed?.cache_hit ? '缓存命中，' : ''
+  return `${prefix}审核完成，共 ${total} 个问题`
 }
 
 function reviewStatusText(statusInfo) {
@@ -1878,9 +1845,6 @@ function escapeHtml(text) {
 }
 
 onUnmounted(() => {
-  Object.values(progressPollingTimers).forEach(timer => clearInterval(timer))
-  progressPollingTimers = {}
-  Object.keys(progressPollingFailures).forEach(key => delete progressPollingFailures[key])
   stopReviewsPolling()
 })
 </script>
@@ -1912,6 +1876,25 @@ onUnmounted(() => {
   color: #909399;
   font-size: 12px;
   margin-top: 6px;
+}
+
+.review-mode-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.review-mode-label {
+  font-size: 14px;
+  color: #334155;
+  font-weight: 600;
+}
+
+.review-mode-hint {
+  font-size: 13px;
+  color: #64748b;
 }
 
 .progress-section {
@@ -1992,6 +1975,11 @@ onUnmounted(() => {
   word-break: break-word;
   overflow-wrap: anywhere;
   line-height: 1.5;
+}
+
+.suggestion-text {
+  color: #1f2937;
+  font-size: 13px;
 }
 
 .report-content {

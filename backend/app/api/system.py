@@ -12,3 +12,9 @@ async def ai_status():
 @router.post("/ai-warmup")
 async def ai_warmup():
     return ai_client.warmup()
+
+
+@router.get("/ai-usage")
+async def ai_usage(limit: int = 50):
+    safe_limit = max(10, min(int(limit or 50), 200))
+    return ai_client.usage_dashboard(limit=safe_limit)
