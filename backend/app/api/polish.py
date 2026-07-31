@@ -75,6 +75,18 @@ def _protect_model_numbers(text: str) -> str:
     return text
 
 
+def _merge_polish_items(items, fallback_text=""):
+    """将 polish_text 返回的逐句修订数组拼接为润色后全文。"""
+    if not items:
+        return fallback_text
+    merged = "".join(
+        str(item.get("revised") or item.get("original") or "")
+        for item in items
+        if isinstance(item, dict)
+    )
+    return merged or fallback_text
+
+
 def _use_ai_only() -> bool:
     return POLISH_AI_ONLY
 
@@ -2070,7 +2082,7 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
             terminology=resolved_terminology if resolved_terminology else None,
             request_label="polish.text",
         )
-        ai_polished = _protect_model_numbers(result.get("polished", input_data.text))
+        ai_polished = _protect_model_numbers(_merge_polish_items(result, input_data.text))
         changes = []
         if ai_polished != input_data.text:
             changes.append({
@@ -2080,9 +2092,10 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
                 "type": "ai"
             })
         return {
-            "original": result.get("original", input_data.text),
+            "original": input_data.text,
             "polished": ai_polished,
-            "changes": changes
+            "changes": changes,
+            "items": result if isinstance(result, list) else []
         }
     except Exception:
         return {
@@ -2116,8 +2129,8 @@ async def polish_with_skill(
         from app.utils.ai_client import ai_client
         resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
         ai_result = ai_client.polish_text(input_data.text, style_guide=sentence_guide, terminology=resolved_terminology if resolved_terminology else None, request_label="polish.skill")
-        if ai_result and ai_result.get("polished"):
-            ai_polished = _protect_model_numbers(ai_result["polished"])
+        if ai_result:
+            ai_polished = _protect_model_numbers(_merge_polish_items(ai_result, input_data.text))
             if ai_polished != input_data.text:
                 ai_changes = [{
                     "rule_name": "ai",
@@ -3069,9 +3082,10 @@ async def analyze_file_endpoint(
             from app.utils.ai_client import ai_client
             resolved_terms = _resolve_terminology(db, terminology, content)
             ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None, request_label="polish.document")
-            if ai_result and ai_result.get("polished") and ai_result["polished"] != content:
-                ai_polished = ai_result["polished"]
-                ai_changes = ai_result.get("changes") or [{
+            merged_polished = _merge_polish_items(ai_result)
+            if merged_polished and merged_polished != content:
+                ai_polished = merged_polished
+                ai_changes = [{
                     "type": "ai",
                     "summary": "AI 完成润色"
                 }]
@@ -3539,15 +3553,16 @@ async def polish_document(document_id: int, db: Session = Depends(get_db)):
         from app.utils.ai_client import ai_client
         terminology = _resolve_terminology(db, text=document.content or "")
         result = ai_client.polish_text(document.content or "", terminology=terminology if terminology else None, request_label="polish.document.quick")
-        polished = _protect_model_numbers(result.get("polished", document.content or ""))
+        polished = _protect_model_numbers(_merge_polish_items(result, document.content or ""))
         changes = []
         if polished != (document.content or ""):
             changes.append({"line": 1, "original": (document.content or "")[:80], "polished": polished[:80], "type": "ai"})
         return {
             "document_id": document_id,
-            "original": result.get("original", document.content or ""),
+            "original": document.content or "",
             "polished": polished,
-            "changes": changes
+            "changes": changes,
+            "items": result if isinstance(result, list) else []
         }
     except Exception:
         return {

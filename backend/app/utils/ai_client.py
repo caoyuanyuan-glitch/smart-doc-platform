@@ -1001,7 +1001,10 @@ class AIClient:
 - 原句写的是"制备卡"，输出必须是"制备卡"，不得改成示例里的"样本制备卡"
 - 原句没有提到的设备名、试剂名、步骤名，一律不得添加
 
-输出：直接输出改写后的完整文本，无需解释。"""
+输出：以 JSON 数组形式返回，数组中每个 JSON 对象包含三个字段：
+- original：润色前的句子
+- revised：润色后的句子
+- reference：参考的句式模板或规则"""
 
         if terminology:
             term_lines = []
@@ -1036,24 +1039,40 @@ class AIClient:
         result = self.chat(messages, max_tokens=4096, request_label=request_label)
 
         if not result:
-            return {"original": text, "polished": text}
+            return []
+
+        raw = result.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw)
 
         try:
-            parsed = json.loads(result)
-            if isinstance(parsed, dict) and "polished" in parsed:
-                polished_value = parsed.get("polished")
-                if self._is_invalid_polish_response(text, polished_value):
-                    print(f"[AI] 润色结果无效，回退规则润色: {str(polished_value)[:80]}")
-                    return {"original": text, "polished": text}
-                return parsed
-        except:
-            pass
+            parsed = json.loads(raw)
+        except Exception:
+            print(f"[AI] 润色结果解析失败，回退原文: {result[:80]}")
+            return []
 
-        if self._is_invalid_polish_response(text, result):
-            print(f"[AI] 润色结果无效，回退规则润色: {result[:80]}")
-            return {"original": text, "polished": text}
+        if not isinstance(parsed, list):
+            print(f"[AI] 润色结果格式不正确，回退原文: {result[:80]}")
+            return []
 
-        return {"original": text, "polished": result.strip()}
+        normalized = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            original = str(item.get("original") or "").strip()
+            revised = str(item.get("revised") or "").strip()
+            reference = str(item.get("reference") or "").strip()
+            if not original:
+                original = text
+            if not revised or self._is_invalid_polish_response(original, revised):
+                revised = original
+            normalized.append({
+                "original": original,
+                "revised": revised,
+                "reference": reference,
+            })
+
+        return normalized
 
     def qa_answer(self, question, context, request_label="qa.answer"):
         prompt = f"""
