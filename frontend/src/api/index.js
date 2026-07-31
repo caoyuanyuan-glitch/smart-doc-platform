@@ -55,8 +55,7 @@ export const authAPI = {
 
 export const systemAPI = {
   getAIStatus: () => instance.get('/system/ai-status', { timeout: 70000 }),
-  warmupAI: () => instance.post('/system/ai-warmup', {}, { timeout: 70000 }),
-  getAIUsage: (limit = 50) => instance.get('/system/ai-usage', { params: { limit } })
+  warmupAI: () => instance.post('/system/ai-warmup', {}, { timeout: 70000 })
 }
 
 export const userAPI = {
@@ -84,16 +83,6 @@ export const documentAPI = {
 
 export const reviewAPI = {
   create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode }, timeout: 300000 }),
-  compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
-    const formData = new FormData()
-    formData.append('main_file', mainFile)
-    formData.append('mode', mode)
-    referenceFiles.forEach((file) => formData.append('reference_files', file))
-    return instance.post('/review/compare-audit/run', formData, {
-      timeout: 300000,
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-  },
   get: (id) => instance.get(`/review/${id}`),
   getIssues: (id) => instance.get(`/review/${id}/issues`),
   createManualIssue: (id, data) => instance.post(`/review/${id}/issues/manual`, data),
@@ -106,7 +95,7 @@ export const reviewAPI = {
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
   getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
   getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
-  list: (params = {}) => instance.get('/review/', { params }),
+  list: () => instance.get('/review/'),
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),
@@ -161,8 +150,8 @@ export const auditBasisAPI = {
 export const polishAPI = {
   document: (id) => instance.post(`/polish/${id}`),
   text: (text, styleGuideId = null, terminologyId = null) => instance.post('/polish/text', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
-  polishWithSkill: (text, styleGuideId = 1, terminologyId = null) =>
-    instance.post('/polish/skill', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
+  polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
+    instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
@@ -223,8 +212,7 @@ export const polishAPI = {
       source_filename: sourceFilename || '',
       items: items || []
     }),
-  getFeedbackStats: () => instance.get('/polish/feedback/stats'),
-  getDocumentFeedbackStats: () => instance.get('/polish/feedback/document-stats')
+  getFeedbackStats: () => instance.get('/polish/feedback/stats')
 }
 
 export const qaAPI = {
@@ -262,7 +250,11 @@ export const manualAPI = {
 export const generateAPI = {
   create: (productName, productModel, docType, targetChapter) =>
     instance.post('/generate/', { product_name: productName, product_model: productModel, doc_type: docType, target_chapter: targetChapter }),
-  continueText: (data) => instance.post('/generate/continue-text', data, { timeout: 180000 }),
+  continueText: (formData) =>
+    instance.post('/generate/continue-text', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000
+    }),
   generateImageSteps: (formData) =>
     instance.post('/generate/image-steps', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
