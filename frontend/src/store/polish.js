@@ -3,8 +3,8 @@ import { ref, watch } from 'vue'
 import { polishAPI } from '@/api'
 
 export const usePolishStore = defineStore('polish', () => {
-  const DOCUMENT_DRAFT_KEY = 'polish-document-draft'
-  const DOCUMENT_SESSION_KEY = 'polish-document-session'
+  const DOCUMENT_DRAFT_KEY = 'polish-document-draft-v2'
+  const DOCUMENT_SESSION_KEY = 'polish-document-session-v2'
 
   function readSessionValue(key, fallback) {
     if (typeof window === 'undefined') {
@@ -59,6 +59,16 @@ export const usePolishStore = defineStore('polish', () => {
       ...(session || {})
     }
 
+    const restoredResult = restored.result || null
+    if (
+      restoredResult &&
+      restoredResult.file_type === 'docx' &&
+      !Array.isArray(restoredResult.review_items) &&
+      !Array.isArray(restoredResult.reviewItems)
+    ) {
+      return { ...defaultDocumentSession }
+    }
+
     if (restored.loading && !restored.result) {
       return {
         ...restored,
@@ -86,22 +96,37 @@ export const usePolishStore = defineStore('polish', () => {
     const result = session.result
     const original = typeof result.original === 'string' ? result.original.slice(0, 4000) : ''
     const polished = typeof result.polished === 'string' ? result.polished.slice(0, 4000) : ''
-    const changes = Array.isArray(result.changes)
-      ? result.changes.slice(0, 100).map(change => ({
+    const serializeChange = change => ({
           before: change.before || change.original || change.summary || '',
           after: change.after || change.polished || '',
-          type: change.type || ''
-        }))
+          type: change.type || '',
+          match_detail: change.match_detail || null,
+          rule_name: change.rule_name || '',
+          paragraph: change.paragraph || change.paragraph_index || null,
+          is_title: Boolean(change.is_title),
+          is_new_since_last_polish: Boolean(change.is_new_since_last_polish || change.isNewSinceLastPolish),
+        })
+    const changes = Array.isArray(result.changes)
+      ? result.changes.slice(0, 100).map(serializeChange)
+      : []
+    const reviewItemSource = Array.isArray(result.review_items)
+      ? result.review_items
+      : (Array.isArray(result.reviewItems) ? result.reviewItems : [])
+    const reviewItems = reviewItemSource.length
+      ? reviewItemSource.slice(0, 300).map(serializeChange)
       : []
 
     safeSession.result = {
       id: result.id,
+      task_id: result.task_id || result.taskId || null,
       original,
       polished,
       changes,
+      review_items: reviewItems,
       report_file: result.report_file || result.reportFile,
       download_filename: result.download_filename,
-      file_type: result.file_type
+      file_type: result.file_type,
+      debug_info: result.debug_info || null
     }
     return safeSession
   }

@@ -127,11 +127,11 @@ def fix_imperative(line: str, issues: list) -> str:
 # 规则 3：数字单位空格
 # ═══════════════════════════════════════════════
 
-# 常见单位（正则模式）
-_UNIT_TOKENS = r'μL|mL|L|mg|g|kg|mm|cm|m|℃|rpm|r/min|V|kV|A|mA|W|kW|MW|Hz|kHz|MHz|GHz|Pa|kPa|MPa|N|kN|s|min|h|bp|M|mM|μM|nM'
+# 常见单位（长 token 优先，避免 25VA 只命中到 25V）
+_UNIT_TOKENS = r'r/min|kHz|MHz|GHz|kPa|MPa|kVA|mA|mV|kV|kW|MW|kN|min|rpm|bp|mL|μL|µL|uL|μg|µg|mg|ng|kg|μm|µm|mm|cm|°C|℃|Hz|Pa|VA|mM|μM|µM|nM|m|L|g|V|A|W|N|s|h|M'
 
 _NUMBER_UNIT_NO_SPACE = re.compile(
-    r'(\d+\.?\d*)\s*(' + _UNIT_TOKENS + r')'
+    r'(\d+\.?\d*)\s*(' + _UNIT_TOKENS + r')(?![A-Za-z])'
 )
 
 
@@ -339,7 +339,7 @@ def apply_all_rules(
         line: 输入文本行
         term_dict: 术语字典 {非标准: 标准}
         enabled_rules: 启用的规则列表，默认全部启用
-                      ['termReplace', 'imperativePlease', 'numberSpace', 'cnEnSpace', 'punctuation']
+                      ['termReplace', 'imperativePlease', 'numberSpace', 'punctuation']
         context_text: 上下文文本（用于术语替换的上下文判断）
 
     返回:
@@ -347,7 +347,7 @@ def apply_all_rules(
         issues_list: [{original, replacement, reason, rule_name, type}, ...]
     """
     if enabled_rules is None:
-        enabled_rules = ['termReplace', 'imperativePlease', 'numberSpace', 'cnEnSpace', 'punctuation']
+        enabled_rules = ['termReplace', 'imperativePlease', 'numberSpace', 'punctuation']
 
     issues = []
     result = line
@@ -386,16 +386,7 @@ def apply_all_rules(
             issues.extend(num_issues)
             result = fix_number_unit_spacing(result, num_issues)
 
-    # 规则 4：中英文空格
-    if 'cnEnSpace' in enabled_rules:
-        cn_issues = detect_cn_en_spacing(result)
-        if cn_issues:
-            for issue in cn_issues:
-                issue['engine_key'] = 'cnEnSpace'
-            issues.extend(cn_issues)
-            result = fix_cn_en_spacing(result, cn_issues)
-
-    # 规则 5：标点规范
+    # 规则 4：标点规范
     if 'punctuation' in enabled_rules:
         punct_issues = detect_punctuation_issues(result)
         if punct_issues:

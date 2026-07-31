@@ -161,8 +161,8 @@ export const auditBasisAPI = {
 export const polishAPI = {
   document: (id) => instance.post(`/polish/${id}`),
   text: (text, styleGuideId = null, terminologyId = null) => instance.post('/polish/text', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
-  polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
-    instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
+  polishWithSkill: (text, styleGuideId = 1, terminologyId = null) =>
+    instance.post('/polish/skill', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
@@ -223,7 +223,8 @@ export const polishAPI = {
       source_filename: sourceFilename || '',
       items: items || []
     }),
-  getFeedbackStats: () => instance.get('/polish/feedback/stats')
+  getFeedbackStats: () => instance.get('/polish/feedback/stats'),
+  getDocumentFeedbackStats: () => instance.get('/polish/feedback/document-stats')
 }
 
 export const qaAPI = {

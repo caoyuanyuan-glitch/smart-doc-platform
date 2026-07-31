@@ -56,8 +56,9 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Context: Agent 在执行智能润色规则管理任务时校正路径
 - Category: 构建方法
 - Instructions:
-  - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
-  - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+  - 智能润色项目实际路径为 `/workspace/smart-doc-platform`
+  - 当前工作区前端构建校验使用 `cd /workspace/smart-doc-platform/frontend && npm run build`
+  - 当前工作区后端语法校验使用 `cd /workspace/smart-doc-platform/backend && python3 -m compileall app`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
@@ -74,7 +75,7 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - runtime.env 已提交到 Git 仓库，不再依赖外部备份文件恢复
   - 添加新的 API Key 后直接编辑 backend/runtime.env 并 commit 即可
-  - 审核模块 LLM provider 优先级: Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
+  - 审核模块 LLM provider 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
   - 排查 AI 审核结果异常时，先确认后端启动日志中的 provider 预热状态和审核日志中的 `AI客户端可用`、`providers=`、规范文件长度
 
 审核模块改动范围约束
