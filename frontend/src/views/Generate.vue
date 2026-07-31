@@ -266,52 +266,100 @@
     </div>
 
     <div v-else-if="currentView === 'paragraph'">
-      <div class="panel">
-        <div class="panel-header">
-          <span>智能续写</span>
-          <el-tag type="warning" size="small">片段生成完整内容</el-tag>
-        </div>
+      <div class="panel continuation-panel">
+        <div class="continuation-card">
+          <div class="continuation-card-head">
+            <div class="continuation-icon">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a4 4 0 0 1 4 4v2h1a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h1V6a4 4 0 0 1 4-4Z"/>
+                <circle cx="9" cy="15" r="1" fill="currentColor"/>
+                <circle cx="15" cy="15" r="1" fill="currentColor"/>
+                <path d="M9 11h6"/>
+              </svg>
+            </div>
+            <div class="continuation-title-wrap">
+              <span class="continuation-title">智能续写</span>
+              <span class="continuation-subtitle">片段生成完整内容</span>
+            </div>
+          </div>
 
-        <el-form :model="paragraphForm" label-width="130px" class="form-layout continuation-form">
-          <el-form-item label="现有内容">
-            <el-input
-              v-model="paragraphForm.sourceText"
-              type="textarea"
-              :rows="7"
-              placeholder="例如：将样本放入样本槽中，关闭槽盖。"
-            />
-            <div class="field-hint">已输入 {{ continuationCharCount }} 字</div>
-          </el-form-item>
-          <el-form-item label="续写意图">
-            <el-radio-group v-model="paragraphForm.intent" class="vertical-radio-group">
-              <el-radio label="next_step">续写下一步操作（基于上下文推断）</el-radio>
-              <el-radio label="expand_detail">扩写详细说明（增加参数/注意事项）</el-radio>
-              <el-radio label="safety_warning">补充安全警告（识别风险点）</el-radio>
-              <el-radio label="troubleshooting">补充故障处理（基于操作步骤）</el-radio>
-              <el-radio label="custom">自定义续写</el-radio>
-            </el-radio-group>
-            <el-input
-              v-if="paragraphForm.intent === 'custom'"
-              v-model="paragraphForm.customIntent"
-              class="custom-intent-input"
-              placeholder="请输入自定义续写要求"
-            />
-          </el-form-item>
-          <el-form-item label="续写长度">
-            <el-radio-group v-model="paragraphForm.length">
-              <el-radio-button label="short">简短（1-2句）</el-radio-button>
-              <el-radio-button label="detailed">详细（1段）</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="续写设置">
-            <el-checkbox v-model="paragraphForm.keepTerminology">保持术语一致（自动使用术语库）</el-checkbox>
-            <el-checkbox v-model="paragraphForm.keepSentenceStyle">保持句式风格（自动匹配句式手册）</el-checkbox>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :loading="paragraphLoading" @click="generateParagraph">生成续写内容</el-button>
-            <el-button @click="resetParagraphForm">重置</el-button>
-          </el-form-item>
-        </el-form>
+          <el-form :model="paragraphForm" label-width="130px" class="form-layout continuation-form">
+            <el-form-item label="现有内容">
+              <el-input
+                v-model="paragraphForm.sourceText"
+                type="textarea"
+                :rows="7"
+                placeholder="例如：将样本放入样本槽中，关闭槽盖。"
+              />
+              <div class="field-hint">已输入 {{ continuationCharCount }} 字</div>
+            </el-form-item>
+
+            <el-form-item label="续写意图">
+              <el-select
+                v-model="paragraphForm.intent"
+                class="intent-select"
+                placeholder="请选择续写意图"
+              >
+                <el-option
+                  v-for="opt in intentOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <div
+                v-if="paragraphForm.intent === 'custom'"
+                class="custom-intent-wrap"
+              >
+                <el-input
+                  v-model="paragraphForm.customIntent"
+                  placeholder="请输入自定义续写要求"
+                />
+              </div>
+              <div
+                v-if="paragraphForm.intent === 'template_based'"
+                class="template-upload-wrap"
+              >
+                <el-upload
+                  ref="templateFileRef"
+                  class="template-upload"
+                  action="#"
+                  :auto-upload="false"
+                  :limit="1"
+                  :accept="TEMPLATE_ACCEPT"
+                  :show-file-list="true"
+                  :on-change="handleTemplateFileChange"
+                  :on-remove="handleTemplateFileRemove"
+                  :on-exceed="handleTemplateFileExceed"
+                >
+                  <el-button size="small" type="primary">选择模板文件</el-button>
+                  <template #tip>
+                    <div class="el-upload__tip">
+                      支持 Word / PDF / Markdown / TXT 格式，单文件 ≤ 10MB
+                    </div>
+                  </template>
+                </el-upload>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="续写长度">
+              <el-radio-group v-model="paragraphForm.length">
+                <el-radio-button label="short">简短（1-2句）</el-radio-button>
+                <el-radio-button label="detailed">详细（1段）</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+
+            <el-form-item label="续写设置">
+              <el-checkbox v-model="paragraphForm.keepTerminology">保持术语一致（自动使用术语库）</el-checkbox>
+              <el-checkbox v-model="paragraphForm.keepSentenceStyle">保持句式风格（自动匹配句式手册）</el-checkbox>
+            </el-form-item>
+
+            <el-form-item>
+              <el-button type="primary" :loading="paragraphLoading" @click="generateParagraph">生成续写内容</el-button>
+              <el-button @click="resetParagraphForm">重置</el-button>
+            </el-form-item>
+          </el-form>
+        </div>
       </div>
 
       <div v-if="paragraphResult" class="panel">
@@ -335,9 +383,10 @@
             />
             <pre v-else>{{ paragraphResult.continuation }}</pre>
           </div>
+
           <div class="panel-actions continuation-actions">
             <el-button type="primary" @click="acceptContinuation">接受并插入</el-button>
-            <el-button :loading="paragraphLoading" @click="generateParagraph">重新生成</el-button>
+            <el-button :loading="paragraphLoading" @click="regenerateParagraph">重新生成</el-button>
             <el-button @click="toggleParagraphEdit">{{ paragraphEditing ? '完成编辑后插入' : '编辑后插入' }}</el-button>
           </div>
           <div class="panel-actions continuation-actions">
@@ -500,6 +549,45 @@ const paragraphForm = ref({
 const paragraphResult = ref(null)
 const paragraphEditing = ref(false)
 const paragraphEditText = ref('')
+const regenerateSeq = ref(0)
+
+const intentOptions = [
+  { value: 'next_step', label: '续写下一步操作（基于上下文推断）' },
+  { value: 'expand_detail', label: '扩写详细说明（增加参数/注意事项）' },
+  { value: 'safety_warning', label: '补充安全警告（识别风险点）' },
+  { value: 'troubleshooting', label: '补充故障处理（基于操作步骤）' },
+  { value: 'organize_steps', label: '整理为步骤（将内容梳理为编号步骤）' },
+  { value: 'custom', label: '自定义续写' },
+  { value: 'template_based', label: '参考模板文件续写' }
+]
+
+const templateFileRef = ref(null)
+const uploadedTemplateFile = ref(null)
+const TEMPLATE_FILE_MAX_SIZE = 10 * 1024 * 1024
+const TEMPLATE_ACCEPT = '.doc,.docx,.pdf,.md,.markdown,.txt'
+
+function handleTemplateFileChange(file) {
+  const raw = file.raw || file
+  if (raw.size > TEMPLATE_FILE_MAX_SIZE) {
+    ElMessage.warning(`${raw.name} 文件过大 (${(raw.size / 1024 / 1024).toFixed(1)}MB)，模板文件需在 10MB 以内`)
+    templateFileRef.value?.clearFiles?.()
+    return
+  }
+  uploadedTemplateFile.value = raw
+}
+
+function handleTemplateFileRemove() {
+  uploadedTemplateFile.value = null
+}
+
+function handleTemplateFileExceed() {
+  ElMessage.warning('最多只能上传一个模板文件')
+}
+
+function clearUploadedTemplate() {
+  uploadedTemplateFile.value = null
+  templateFileRef.value?.clearFiles?.()
+}
 
 const continuationCharCount = computed(() => paragraphForm.value.sourceText.length)
 const currentContinuationText = computed(() => {
@@ -809,6 +897,12 @@ function resetManualForm() {
   manualResult.value = null
 }
 
+async function regenerateParagraph() {
+  // 累加重写序号，让后端注入温度抖动和角度提示，保证每次结果不同
+  regenerateSeq.value += 1
+  await generateParagraph()
+}
+
 async function generateParagraph() {
   if (!paragraphForm.value.sourceText.trim()) {
     ElMessage.info('请填写现有内容')
@@ -818,24 +912,34 @@ async function generateParagraph() {
     ElMessage.info('请填写自定义续写要求')
     return
   }
+  if (paragraphForm.value.intent === 'template_based' && !uploadedTemplateFile.value) {
+    ElMessage.info('请上传参考模板文件')
+    return
+  }
   paragraphLoading.value = true
   try {
-    const resp = await generateAPI.continueText({
-      source_text: paragraphForm.value.sourceText,
-      intent: paragraphForm.value.intent,
-      custom_intent: paragraphForm.value.customIntent,
-      length: paragraphForm.value.length,
-      keep_terminology: paragraphForm.value.keepTerminology,
-      keep_sentence_style: paragraphForm.value.keepSentenceStyle
-    })
+    const formData = new FormData()
+    formData.append('source_text', paragraphForm.value.sourceText)
+    formData.append('intent', paragraphForm.value.intent)
+    formData.append('custom_intent', paragraphForm.value.customIntent)
+    formData.append('length', paragraphForm.value.length)
+    formData.append('keep_terminology', paragraphForm.value.keepTerminology)
+    formData.append('keep_sentence_style', paragraphForm.value.keepSentenceStyle)
+    formData.append('regenerate_seq', regenerateSeq.value)
+    if (paragraphForm.value.intent === 'template_based' && uploadedTemplateFile.value) {
+      formData.append('template_file', uploadedTemplateFile.value)
+    }
+    const resp = await generateAPI.continueText(formData)
     const data = resp.data || {}
     paragraphResult.value = {
       source_text: data.source_text || paragraphForm.value.sourceText,
       continuation: cleanContinuationText(data.continuation || buildParagraphFallback()),
       used_terminology_files: data.used_terminology_files || [],
       used_style_guide_name: data.used_style_guide_name || '',
+      used_template_name: data.used_template_name || '',
       model: data.model || 'kimi',
-      warning: data.warning || ''
+      warning: data.warning || '',
+      audit: data.audit || null
     }
     paragraphEditText.value = paragraphResult.value.continuation
     paragraphEditing.value = false
@@ -846,6 +950,7 @@ async function generateParagraph() {
       continuation: buildParagraphFallback(),
       used_terminology_files: [],
       used_style_guide_name: '',
+      used_template_name: '',
       model: 'fallback',
       warning: '接口调用失败，已展示本地示例续写。'
     }
@@ -866,6 +971,9 @@ function buildParagraphFallback() {
   }
   if (paragraphForm.value.intent === 'expand_detail') {
     return '执行该操作前，应确认样本、耗材和设备状态均满足使用要求。完成操作后，观察界面状态变化，并根据提示继续后续流程。'
+  }
+  if (paragraphForm.value.intent === 'organize_steps') {
+    return '1. 确认样本已正确放置在样本槽中。\n2. 检查槽盖是否完全关闭并锁定。\n3. 在控制界面选择对应的实验流程。\n4. 点击启动按钮开始运行。\n5. 等待实验完成并查看结果。'
   }
   return '请确认当前操作对象已正确就位，然后点击界面中的开始按钮启动处理流程。系统进入下一步后，按照页面提示继续完成后续操作。'
 }
@@ -948,6 +1056,8 @@ function resetParagraphForm() {
   paragraphResult.value = null
   paragraphEditing.value = false
   paragraphEditText.value = ''
+  regenerateSeq.value = 0
+  clearUploadedTemplate()
 }
 
 function copyText(text) {
@@ -1035,10 +1145,28 @@ function downloadText(fileName, content) {
   gap: 8px;
 }
 
-.custom-intent-input {
-  display: block;
+.custom-intent-wrap {
+  width: 100%;
   margin-top: 10px;
-  max-width: 520px;
+}
+
+.custom-intent-wrap :deep(.el-input) {
+  width: 100%;
+}
+
+.template-upload-wrap {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.template-upload :deep(.el-upload-list) {
+  margin-top: 8px;
+}
+
+.template-upload .el-upload__tip {
+  color: #6b7280;
+  font-size: 12px;
+  margin-top: 4px;
 }
 
 .result-warning {
@@ -1115,6 +1243,59 @@ function downloadText(fileName, content) {
   margin-right: 0;
   white-space: normal;
   line-height: 1.5;
+}
+
+.continuation-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.continuation-card {
+  padding: 28px 28px 8px;
+}
+
+.continuation-card-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.continuation-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+
+.continuation-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.continuation-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.continuation-subtitle {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.intent-select {
+  width: 100%;
+}
+
+.intent-select :deep(.el-select__wrapper) {
+  border-radius: 8px;
 }
 
 .continuation-result {
