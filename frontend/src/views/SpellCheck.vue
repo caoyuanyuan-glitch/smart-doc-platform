@@ -10,11 +10,25 @@
       <el-tab-pane label="文件检查" name="file" />
     </el-tabs>
 
+    <div v-if="progress.visible" class="progress-section">
+      <div class="progress-header">
+        <span class="progress-title">{{ progress.message }}</span>
+        <span class="progress-percent">{{ progress.percent }}%</span>
+      </div>
+      <el-progress
+        :percentage="progress.percent"
+        :status="progress.status"
+        :stroke-width="16"
+        :text-inside="true"
+      />
+      <div v-if="progress.detail" class="progress-detail">{{ progress.detail }}</div>
+    </div>
+
     <div class="doc-inline-bar">
       <span class="doc-inline-label">当前文档</span>
       <span class="doc-inline-name">{{ activeTab === 'file' ? (fileList[0]?.name || '未加载文件') : '文本输入' }}</span>
       <span class="doc-inline-hint">
-        {{ activeTab === 'file' ? '支持 .txt / .md / .docx / .xlsx / .pptx / .dita / .zip' : '在右侧粘贴或编辑文本，再点击“一键检查”' }}
+        {{ activeTab === 'file' ? '支持 .pdf / .txt / .md / .docx / .xlsx / .pptx / .dita / .zip' : '在右侧粘贴或编辑文本，再点击“一键检查”' }}
       </span>
     </div>
 
@@ -43,8 +57,11 @@
 
         <div class="panel issue-panel">
           <div class="issue-panel-header">
-            <span class="panel-title">当前问题</span>
-            <span class="issue-kind">{{ activeIssue ? getErrorTypeLabel(activeIssue.type) : (checkResult?.total_count === 0 && checkResult ? '处理完成' : '未选中问题') }}</span>
+            <div class="issue-header-meta">
+              <span class="panel-title">当前问题</span>
+              <span class="issue-kind">{{ activeIssue ? getErrorTypeLabel(activeIssue.type) : (checkResult?.total_count === 0 && checkResult ? '处理完成' : '未选中问题') }}</span>
+            </div>
+            <span class="nav-meta">{{ filteredErrors.length > 0 ? `${currentIssueIndex + 1} / ${filteredErrors.length}` : '0 / 0' }}</span>
           </div>
 
           <div class="issue-snippet">{{ getIssueToken(activeIssue) }}</div>
@@ -61,20 +78,6 @@
             <div v-else class="suggestion-empty">当前问题没有可靠的自动修订方案。可点击下方“编辑”手动写入修订内容。</div>
           </div>
 
-          <div class="sidebar-actions">
-            <div class="action-row">
-              <el-button size="small" @click="editSuggestion(activeIssue)" :disabled="!activeIssue">编辑</el-button>
-              <el-button size="small" @click="ignoreIssue" :disabled="!activeIssue">忽略</el-button>
-              <el-button size="small" @click="prevIssue" :disabled="!activeIssue">上一处</el-button>
-              <el-button size="small" type="primary" @click="nextIssue" :disabled="!activeIssue">下一处</el-button>
-            </div>
-            <div class="action-row">
-              <el-button size="small" @click="undoLastApply" :disabled="undoStack.length === 0">撤销应用</el-button>
-              <el-button size="small" @click="addToDict(activeIssue)" :disabled="!activeIssue || !canAddWord(activeIssue)">加入白名单</el-button>
-            </div>
-          </div>
-
-          <div class="nav-meta">{{ filteredErrors.length > 0 ? `${currentIssueIndex + 1} / ${filteredErrors.length}` : '0 / 0' }}</div>
         </div>
       </aside>
 
@@ -89,10 +92,20 @@
         </div>
 
         <div class="editor-header">
-          <span class="editor-title">{{ activeTab === 'file' ? '文档内容' : '原文内容' }}</span>
-          <span class="editor-tip">
-            {{ activeTab === 'file' ? '点击高亮位置可在左侧处理当前问题' : '在这里粘贴或编辑文本，检查后可用左侧面板逐条处理问题' }}
-          </span>
+          <div class="editor-header-meta">
+            <span class="editor-title">{{ activeTab === 'file' ? '文档内容' : '原文内容' }}</span>
+            <span class="editor-tip">
+              {{ activeTab === 'file' ? '点击高亮位置可在左侧处理当前问题' : '在这里粘贴或编辑文本，检查后可用左侧面板逐条处理问题' }}
+            </span>
+          </div>
+          <div v-if="checkResult" class="editor-header-actions">
+            <el-button size="small" @click="prevIssue" :disabled="!activeIssue">上一处</el-button>
+            <el-button size="small" type="primary" @click="nextIssue" :disabled="!activeIssue">下一处</el-button>
+            <el-button size="small" @click="undoLastApply" :disabled="undoStack.length === 0">撤销应用</el-button>
+            <el-button size="small" @click="editSuggestion(activeIssue)" :disabled="!activeIssue">编辑</el-button>
+            <el-button size="small" @click="ignoreIssue" :disabled="!activeIssue">忽略</el-button>
+            <el-button size="small" @click="addToDict(activeIssue)" :disabled="!activeIssue || !canAddWord(activeIssue)">加入白名单</el-button>
+          </div>
         </div>
 
         <div v-if="activeTab === 'file' && !checkResult" class="file-stage">
@@ -104,7 +117,7 @@
             :on-remove="handleFileRemove"
             :limit="1"
             :file-list="fileList"
-            accept=".txt,.docx,.xlsx,.pptx,.dita,.md,.idml,.xml,.zip"
+            accept=".pdf,.txt,.docx,.xlsx,.pptx,.dita,.md,.idml,.xml,.zip"
             :show-file-list="false"
           />
         </div>
@@ -119,25 +132,10 @@
           class="text-editor-area"
         />
 
-        <div v-if="(activeTab === 'file' || activeTab === 'text') && checkResult" ref="contentBodyRef" class="content-body" @click="handleHighlightClick">
+        <div v-if="(activeTab === 'file' || activeTab === 'text') && checkResult" ref="contentBodyRef" class="content-body" tabindex="0" @click="handleHighlightClick">
           <div class="highlighted-text" v-html="highlightedText"></div>
         </div>
       </section>
-    </div>
-
-    <!-- 审核进度 -->
-    <div v-if="progress.visible" class="progress-section">
-      <div class="progress-header">
-        <span class="progress-title">{{ progress.message }}</span>
-        <span class="progress-percent">{{ progress.percent }}%</span>
-      </div>
-      <el-progress
-        :percentage="progress.percent"
-        :status="progress.status"
-        :stroke-width="16"
-        :text-inside="true"
-      />
-      <div v-if="progress.detail" class="progress-detail">{{ progress.detail }}</div>
     </div>
 
   </div>
@@ -222,7 +220,7 @@ const highlightedText = computed(() => {
       ? filteredErrors.value.findIndex(item => item.start === err.start && item.end === err.end && item.type === err.type)
       : -1
     const issueAttr = issueIndex >= 0 ? ` data-issue-index="${issueIndex}"` : ''
-    result += `<span class="highlight-chip${extraClass}"${issueAttr} style="background-color: ${bgColor}; padding: 1px 3px; border-radius: 3px; border-bottom: 2px solid ${borderColor};" title="${escapeHtmlAttribute(err.message || '')}">${problemText}</span>`
+    result += `<span class="highlight-chip${extraClass}"${issueAttr} tabindex="-1" style="background-color: ${bgColor}; padding: 1px 3px; border-radius: 3px; border-bottom: 2px solid ${borderColor};" title="${escapeHtmlAttribute(err.message || '')}">${problemText}</span>`
     lastEnd = err.end
   })
   result += escapeHtml(text.substring(lastEnd))
@@ -359,9 +357,11 @@ function scrollToCurrentIssue() {
   if (!body) return
   const activeEl = body.querySelector('.active-highlight')
   if (!activeEl) return
+   body.focus({ preventScroll: true })
   activeEl.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
   requestAnimationFrame(() => {
     activeEl.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+    activeEl.focus({ preventScroll: true })
   })
 }
 
@@ -805,7 +805,8 @@ onMounted(() => {
 .workspace-editor {
   display: flex;
   flex-direction: column;
-  min-height: 780px;
+  height: 780px;
+  overflow: hidden;
 }
 
 .summary-panel,
@@ -876,7 +877,14 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  align-items: flex-start;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.issue-header-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .issue-kind {
@@ -897,11 +905,15 @@ onMounted(() => {
 }
 
 .progress-section {
-  background: #fff;
-  border-radius: 8px;
-  padding: 16px 20px;
-  margin-bottom: 20px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  position: sticky;
+  top: 12px;
+  z-index: 20;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+  border: 1px solid #dbe4ee;
+  border-radius: 14px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
 .progress-header {
@@ -913,8 +925,8 @@ onMounted(() => {
 
 .progress-title {
   font-size: 14px;
-  font-weight: 500;
-  color: #1f2937;
+  font-weight: 700;
+  color: #0f172a;
 }
 
 .progress-percent {
@@ -925,8 +937,9 @@ onMounted(() => {
 
 .progress-detail {
   font-size: 12px;
-  color: #6b7280;
-  margin-top: 6px;
+  color: #64748b;
+  margin-top: 8px;
+  line-height: 1.6;
 }
 
 .suggestion-stack {
@@ -968,28 +981,10 @@ onMounted(() => {
   line-height: 1.6;
 }
 
-.sidebar-actions {
-  margin-top: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.action-row {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.action-row:last-child {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .nav-meta {
-  margin-top: 4px;
   font-size: 12px;
   color: #64748b;
-  text-align: right;
+  white-space: nowrap;
 }
 
 .editor-toolbar {
@@ -1010,10 +1005,31 @@ onMounted(() => {
 .editor-header {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
-  align-items: baseline;
+  gap: 16px;
+  align-items: flex-start;
   margin-bottom: 14px;
   flex-wrap: wrap;
+}
+
+.editor-header-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.editor-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .editor-title {
@@ -1056,7 +1072,7 @@ onMounted(() => {
   padding: 18px;
   overflow-y: auto;
   scroll-behavior: smooth;
-  min-height: 620px;
+  min-height: 0;
 }
 
 .highlighted-text {
@@ -1085,6 +1101,14 @@ onMounted(() => {
     position: static;
     height: auto;
   }
+
+  .progress-section {
+    top: 8px;
+  }
+
+  .workspace-editor {
+    height: auto;
+  }
 }
 
 @media (max-width: 768px) {
@@ -1097,8 +1121,6 @@ onMounted(() => {
   }
 
   .stats-row,
-  .action-row,
-  .action-row:last-child,
   .suggestion-card,
   .editor-toolbar,
   .editor-toolbar-left {
@@ -1107,15 +1129,22 @@ onMounted(() => {
 
   .doc-inline-bar,
   .stats-row,
-  .action-row,
-  .action-row:last-child,
   .suggestion-card {
     grid-template-columns: 1fr;
+  }
+
+  .editor-header-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   :deep(.text-editor-area .el-textarea__inner),
   .content-body {
     min-height: 420px;
+  }
+
+  .workspace-editor {
+    overflow: visible;
   }
 }
 </style>

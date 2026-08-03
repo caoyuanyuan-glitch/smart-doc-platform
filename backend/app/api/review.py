@@ -4142,6 +4142,10 @@ def _generate_compare_review_html_content(review, doc):
     same_rows = [row for row in rows if row.get('level') == '一致']
     filename = html_lib.escape(summary.get('main_filename') or getattr(doc, 'filename', f'文档{review.document_id}'))
     reference_names = '、'.join(summary.get('reference_filenames') or []) or '未提供'
+    reference_columns = summary.get('reference_documents') or [
+        {'filename': name}
+        for name in (summary.get('reference_filenames') or [])
+    ]
     cards = {
         'P0': int(summary.get('p0_count') or 0),
         'P1': int(summary.get('p1_count') or 0),
@@ -4149,20 +4153,68 @@ def _generate_compare_review_html_content(review, doc):
         '一致': int(summary.get('match_count') or 0),
     }
 
-    def _render_compare_rows(items):
-        html_rows = []
-        for row in items:
-            level = html_lib.escape(str(row.get('level') or '-'))
-            html_rows.append(
-                '<tr class="row-{level_class}">'.format(level_class=level.lower())
-                + f'<td>{html_lib.escape(str(row.get("dimension") or "-"))}</td>'
-                + f'<td>{html_lib.escape(str(row.get("parameter_name") or "-"))}</td>'
-                + f'<td>{html_lib.escape(str(row.get("main_value") or "-"))}</td>'
-                + f'<td>{html_lib.escape(str(row.get("reference_value") or "-"))}</td>'
-                + f'<td><span class="level-tag level-{level.lower()}">{level}</span> {html_lib.escape(str(row.get("conclusion") or "-"))}</td>'
-                + '</tr>'
+    def _safe_text(value, default='-'):
+        text = str(value).strip() if value is not None else ''
+        return text or default
+
+    def _short_filename(name, index):
+        text = _safe_text(name, f'参考文件{index + 1}')
+        return text if len(text) <= 28 else f'{text[:25]}...'
+
+    def _render_value_block(title, value, extra_class=''):
+        class_name = f'value-block {extra_class}'.strip()
+        return (
+            f'<div class="{class_name}">'
+            f'<div class="value-title">{html_lib.escape(title)}</div>'
+            f'<div class="value-content">{html_lib.escape(_safe_text(value))}</div>'
+            '</div>'
+        )
+
+    def _render_reference_blocks(reference_items):
+        blocks = []
+        for index, item in enumerate(reference_columns):
+            ref_value = '-'
+            if index < len(reference_items):
+                ref_value = reference_items[index].get('value') or '-'
+            blocks.append(
+                _render_value_block(
+                    f'参考文件 {index + 1} | {_short_filename(item.get("filename"), index)}',
+                    ref_value,
+                )
             )
-        return ''.join(html_rows) or '<tr><td colspan="5">未生成结果</td></tr>'
+        return ''.join(blocks) or '<div class="empty-inline">未提供参考文件</div>'
+
+    def _render_compare_cards(items, empty_text):
+        rendered = []
+        for row in items:
+            level = _safe_text(row.get('level'))
+            rendered.append(
+                '<article class="compare-card">'
+                '<div class="compare-card-head">'
+                f'<div class="compare-card-title">{html_lib.escape(_safe_text(row.get("parameter_name")))}</div>'
+                f'<div class="compare-card-meta">{html_lib.escape(_safe_text(row.get("dimension")))}<span class="level-tag level-{level.lower()}">{html_lib.escape(level)}</span></div>'
+                '</div>'
+                '<div class="compare-card-body">'
+                '<div class="compare-card-col">'
+                f'{_render_value_block("主文档", row.get("main_value"), "main-block")}'
+                '</div>'
+                '<div class="compare-card-col references-col">'
+                f'{_render_reference_blocks(row.get("reference_values") or [])}'
+                '</div>'
+                '</div>'
+                '<div class="compare-card-foot">'
+                f'<div><span class="foot-label">差异结论</span>{html_lib.escape(_safe_text(row.get("conclusion")))}</div>'
+                '</div>'
+                '</article>'
+            )
+        if rendered:
+            return ''.join(rendered)
+        return f'<div class="empty-state">{html_lib.escape(empty_text)}</div>'
+
+    reference_file_list = ''.join(
+        f'<div class="file-item"><span class="file-index">参考文件 {index + 1}</span><span class="file-name">{html_lib.escape(_safe_text(item.get("filename"), f"参考文件{index + 1}"))}</span></div>'
+        for index, item in enumerate(reference_columns)
+    ) or '<div class="empty-state">未提供参考文件</div>'
 
     return f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4172,7 +4224,7 @@ def _generate_compare_review_html_content(review, doc):
   <style>
     * {{ box-sizing: border-box; }}
     body {{ margin: 0; padding: 28px; font-family: 'Microsoft YaHei', Arial, sans-serif; background: #eef3f8; color: #17212f; }}
-    .container {{ max-width: 1240px; margin: 0 auto; background: #fff; border-radius: 24px; overflow: hidden; box-shadow: 0 18px 48px rgba(17, 38, 64, 0.12); }}
+    .container {{ max-width: 1180px; margin: 0 auto; background: #fff; border-radius: 24px; overflow: hidden; box-shadow: 0 18px 48px rgba(17, 38, 64, 0.12); }}
     .hero {{ padding: 34px 40px; background: linear-gradient(135deg, #163c69, #2d6cb0); color: #fff; }}
     .hero h1 {{ margin: 0 0 10px; font-size: 30px; }}
     .hero p {{ margin: 0; opacity: 0.9; line-height: 1.7; }}
@@ -4189,21 +4241,38 @@ def _generate_compare_review_html_content(review, doc):
     .card-p1 {{ background: linear-gradient(135deg, #b45309, #f97316); }}
     .card-p2 {{ background: linear-gradient(135deg, #a16207, #eab308); color: #1f2937; }}
     .card-ok {{ background: linear-gradient(135deg, #166534, #22c55e); }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 14px; }}
-    th, td {{ border: 1px solid #dbe4ee; padding: 12px 14px; text-align: left; vertical-align: top; line-height: 1.6; }}
-    th {{ background: #f7fafc; color: #163c69; }}
-    .row-p0 td {{ background: #fff1f2; }}
-    .row-p1 td {{ background: #fff7ed; }}
-    .row-p2 td {{ background: #fefce8; }}
-    .level-tag {{ display: inline-block; min-width: 34px; margin-right: 8px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; text-align: center; }}
+    .section-panel {{ border: 1px solid #dbe4ee; border-radius: 18px; padding: 18px; background: linear-gradient(180deg, #ffffff, #f8fbff); }}
+    .module-title {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }}
+    .module-title p {{ margin: 0; color: #64748b; line-height: 1.7; }}
+    .file-list {{ display: grid; gap: 10px; margin-top: 14px; }}
+    .file-item {{ display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px; padding: 12px 14px; border: 1px solid #dbe4ee; border-radius: 14px; background: #fff; }}
+    .file-index {{ color: #163c69; font-weight: 700; }}
+    .file-name {{ color: #334155; word-break: break-word; }}
+    .compare-list {{ display: grid; gap: 16px; margin-top: 16px; }}
+    .compare-card {{ border: 1px solid #dbe4ee; border-radius: 18px; background: #fff; overflow: hidden; box-shadow: 0 8px 24px rgba(17, 38, 64, 0.06); }}
+    .compare-card-head {{ padding: 16px 18px; background: linear-gradient(180deg, #f8fbff, #eef5fb); border-bottom: 1px solid #dbe4ee; }}
+    .compare-card-title {{ font-size: 18px; font-weight: 800; color: #163c69; }}
+    .compare-card-meta {{ margin-top: 8px; color: #64748b; font-size: 13px; }}
+    .compare-card-body {{ display: grid; grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.1fr); gap: 14px; padding: 18px; }}
+    .compare-card-col {{ display: grid; gap: 12px; align-content: start; }}
+    .references-col {{ grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }}
+    .value-block {{ border: 1px solid #dbe4ee; border-radius: 14px; padding: 14px; background: #fff; min-height: 100%; }}
+    .main-block {{ background: #fff8f1; border-color: #f7d7b5; }}
+    .value-title {{ font-size: 12px; font-weight: 700; color: #64748b; margin-bottom: 8px; }}
+    .value-content {{ font-size: 14px; line-height: 1.8; color: #17212f; word-break: break-word; white-space: pre-wrap; }}
+    .level-tag {{ display: inline-block; min-width: 34px; margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; text-align: center; }}
     .level-p0 {{ background: #dc2626; color: #fff; }}
     .level-p1 {{ background: #f97316; color: #fff; }}
     .level-p2 {{ background: #facc15; color: #1f2937; }}
     .level-一致 {{ background: #22c55e; color: #fff; }}
+    .compare-card-foot {{ padding: 0 18px 18px; color: #334155; line-height: 1.8; }}
+    .foot-label {{ display: inline-block; margin-right: 10px; font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; }}
     h2 {{ margin: 0 0 12px; color: #163c69; font-size: 20px; }}
     .note {{ color: #64748b; line-height: 1.7; }}
+    .empty-state {{ padding: 18px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #64748b; background: #fff; }}
+    .empty-inline {{ color: #94a3b8; font-size: 13px; }}
     .footer {{ padding: 22px 28px 30px; color: #64748b; font-size: 12px; }}
-    @media (max-width: 920px) {{ .meta, .summary-grid {{ grid-template-columns: 1fr; }} body {{ padding: 16px; }} .hero {{ padding: 28px 22px; }} .section, .footer {{ padding-left: 22px; padding-right: 22px; }} }}
+    @media (max-width: 920px) {{ .meta, .summary-grid, .compare-card-body, .references-col {{ grid-template-columns: 1fr; }} .file-item {{ grid-template-columns: 1fr; }} body {{ padding: 16px; }} .hero {{ padding: 28px 22px; }} .section, .footer {{ padding-left: 22px; padding-right: 22px; }} }}
   </style>
 </head>
 <body>
@@ -4227,23 +4296,32 @@ def _generate_compare_review_html_content(review, doc):
       </div>
     </div>
     <div class="section">
-      <h2>核心参数差异明细表</h2>
-      <table>
-        <thead>
-          <tr><th>检查维度</th><th>参数名称</th><th>主文档（说明书）内容</th><th>参照物众数（或少量参照物原值）</th><th>异常说明 / 差异结论</th></tr>
-        </thead>
-        <tbody>{_render_compare_rows(diff_rows)}</tbody>
-      </table>
+      <h2>参考文档对比模块</h2>
+      <div class="section-panel">
+        <div class="module-title">
+          <div>
+            <p>本模块记录本次比对的主文档、参考文档范围，以及输出结果分布。</p>
+            <p>本次共检查 <strong>{len(rows)}</strong> 个核心参数或主干流程项，其中差异项 <strong>{len(diff_rows)}</strong> 个，一致项 <strong>{len(same_rows)}</strong> 个。</p>
+          </div>
+        </div>
+        <div class="file-list">{reference_file_list}</div>
+      </div>
     </div>
     <div class="section">
-      <h2>一致项</h2>
-      <div class="note">以下字段在主文档与参考文件之间保持一致，可作为复核留痕。</div>
-      <table>
-        <thead>
-          <tr><th>检查维度</th><th>参数名称</th><th>主文档（说明书）内容</th><th>参照物众数（或少量参照物原值）</th><th>异常说明 / 差异结论</th></tr>
-        </thead>
-        <tbody>{_render_compare_rows(same_rows)}</tbody>
-      </table>
+      <h2>参数对比模块</h2>
+      <div class="section-panel">
+        <div class="module-title">
+          <div>
+            <p>每个参数单独展示为一个对比块，先看主文档，再看每份参考文件，最后读取差异结论。</p>
+            <p>优先处理差异项，再复核一致项留痕。</p>
+          </div>
+        </div>
+        <h2 style="font-size:18px; margin-top:0;">差异项</h2>
+        <div class="compare-list">{_render_compare_cards(diff_rows, '本次未发现差异项')}</div>
+        <h2 style="font-size:18px; margin-top:22px;">一致项</h2>
+        <div class="note">以下字段在主文档与参考文件之间保持一致，可作为复核留痕。</div>
+        <div class="compare-list">{_render_compare_cards(same_rows, '当前没有可展示的一致项')}</div>
+      </div>
     </div>
     <div class="footer">Review Task #{review.id}</div>
   </div>
@@ -7709,6 +7787,27 @@ def _reference_value_summary(values):
     }
 
 
+def _reference_detail_summary(items):
+    details = []
+    for item in items or []:
+        filename = str(item.get("filename") or "参考文件").strip()
+        value = _normalize_compare_param_value(item.get("value") or "")
+        if not value:
+            continue
+        details.append(f"{filename}：{value}")
+    return "；".join(details) if details else "-"
+
+
+def _normalize_reference_items(items):
+    normalized = []
+    for item in items or []:
+        normalized.append({
+            "filename": str(item.get("filename") or "参考文件").strip() or "参考文件",
+            "value": _normalize_compare_param_value(item.get("value") or "") or "-",
+        })
+    return normalized
+
+
 def _compare_values_match(value_a, value_b):
     left = _normalize_compare_param_value(value_a)
     right = _normalize_compare_param_value(value_b)
@@ -7738,16 +7837,23 @@ def _build_compare_param_rows(main_doc, reference_docs):
     rows = []
     for field_def in COMPARE_PARAM_DEFINITIONS:
         main_value = _extract_compare_field_value(main_doc.get("params") or [], field_def)
-        reference_values = [
-            _extract_compare_field_value(doc.get("params") or [], field_def)
+        reference_items = _normalize_reference_items([
+            {
+                "filename": doc.get("filename") or "参考文件",
+                "value": _extract_compare_field_value(doc.get("params") or [], field_def),
+            }
             for doc in reference_docs
-        ]
+        ])
+        reference_values = [item.get("value") for item in reference_items]
         reference_summary = _reference_value_summary(reference_values)
         level, conclusion = _resolve_compare_row_level(field_def, main_value, reference_summary)
         rows.append({
             "dimension": field_def["dimension"],
             "parameter_name": field_def["name"],
             "main_value": main_value or "-",
+            "reference_values": reference_items,
+            "reference_summary": reference_summary["display_value"],
+            "reference_detail": _reference_detail_summary(reference_items),
             "reference_value": reference_summary["display_value"],
             "conclusion": conclusion,
             "level": level,
@@ -7818,8 +7924,10 @@ def _build_compare_flow_row(main_doc, reference_docs):
     main_profile = _extract_flow_profile(main_doc.get("text") or "")
     reference_profiles = [_extract_flow_profile(doc.get("text") or "") for doc in reference_docs]
     reference_step_counts = [len(profile.get("steps") or []) for profile in reference_profiles]
-    count_counter = Counter(reference_step_counts)
+    nonzero_reference_step_counts = [count for count in reference_step_counts if count > 0]
+    count_counter = Counter(nonzero_reference_step_counts)
     majority_step_count = count_counter.most_common(1)[0][0] if count_counter else 0
+    valid_reference_count = len(nonzero_reference_step_counts)
 
     signature_counter = Counter()
     signature_labels = {}
@@ -7839,7 +7947,10 @@ def _build_compare_flow_row(main_doc, reference_docs):
     missing_steps = [signature_labels[sig] for sig in majority_signatures if sig not in main_signatures][:3]
 
     main_count = len(main_profile.get("steps") or [])
-    if main_count == 0 and majority_step_count > 0:
+    if reference_profiles and valid_reference_count == 0:
+        level = "P2"
+        conclusion = "参考文件未识别到主干流程步骤，当前无法完成有效比对，请先检查参考文件内容或格式。"
+    elif main_count == 0 and majority_step_count > 0:
         level = "P1"
         conclusion = "主文档未识别到主干流程步骤，请补充“操作流程/实验步骤/操作步骤/注意事项”章节。"
     elif majority_step_count > 0 and abs(main_count - majority_step_count) / majority_step_count > 0.3:
@@ -7857,11 +7968,21 @@ def _build_compare_flow_row(main_doc, reference_docs):
         for profile in reference_profiles
         if (profile.get("sections") or profile.get("steps"))
     ]
+    reference_heading_items = _normalize_reference_items([
+        {
+            "filename": doc.get("filename") or "参考文件",
+            "value": _summarize_flow_profile(profile),
+        }
+        for doc, profile in zip(reference_docs, reference_profiles)
+    ])
     reference_summary = _reference_value_summary(reference_heading_values)
     return {
         "dimension": "操作流程",
         "parameter_name": "主干流程",
         "main_value": _summarize_flow_profile(main_profile),
+        "reference_values": reference_heading_items,
+        "reference_summary": reference_summary["display_value"],
+        "reference_detail": _reference_detail_summary(reference_heading_items),
         "reference_value": reference_summary["display_value"],
         "conclusion": conclusion,
         "level": level,
@@ -7921,6 +8042,10 @@ def _build_compare_issue_payloads(review_id, compare_payload):
         level = row.get("level")
         if level == "一致":
             continue
+        reference_lines = [
+            f"{item.get('filename') or '参考文件'}：{item.get('value') or '-'}"
+            for item in (row.get("reference_values") or [])
+        ]
         payloads.append(IssueCreate(
             review_id=review_id,
             severity=severity_map.get(level, "general"),
@@ -7928,7 +8053,7 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             rule='COMPARE-PARAM' if row.get('kind') == 'parameter' else 'COMPARE-FLOW',
             chapter=str(row.get('dimension') or '对比审核'),
             original_text=str(row.get('parameter_name') or ''),
-            context=f"主文档：{row.get('main_value') or '-'}\n参考文件：{row.get('reference_value') or '-'}",
+            context="\n".join([f"主文档：{row.get('main_value') or '-'}", *reference_lines]),
             suggestion='请以参考文件的稳定版本为准，核对主文档并完成修订。',
             description=str(row.get('conclusion') or '对比审核发现差异'),
             audit_basis='对比审核 - 核心参数差异明细表',
@@ -8010,6 +8135,7 @@ async def compare_audit(
         "compare_rows": compare_payload.get("compare_rows") or [],
         "compare_mode": mode,
         "main_filename": main_doc["filename"],
+        "reference_documents": compare_payload.get("reference_documents") or [],
         "reference_filenames": [doc["filename"] for doc in reference_docs],
         "message": "对比审核完成",
     }
