@@ -610,8 +610,6 @@ def _build_polish_debug_info(
     sentence_guide: Optional[str],
     terminology_file_id: Optional[int],
     terminology_file_name: Optional[str],
-    skip_ai: bool,
-    skip_reason: str,
     ai_polished: str,
     pre_polished: str,
     total_changes: int,
@@ -627,8 +625,6 @@ def _build_polish_debug_info(
         "sentence_guide_sha1": hashlib.sha1(guide_text.encode("utf-8")).hexdigest()[:12] if guide_text else "",
         "terminology_file_id": terminology_file_id,
         "terminology_file_name": terminology_file_name or "",
-        "ai_skipped": skip_ai,
-        "ai_skip_reason": skip_reason or "",
         "ai_changed": ai_polished != pre_polished,
         "total_change_count": total_changes,
         "visible_change_count": visible_changes if visible_changes is not None else total_changes,
@@ -5979,8 +5975,31 @@ async def analyze_file_endpoint(
         try:
             from app.utils.ai_client import ai_client
             resolved_terms = _resolve_terminology(db, terminology, content)
-            ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None, request_label="polish.document")
+#             ai_result = ai_client.polish_text(content, style_guide=sentence_guide, terminology=resolved_terms if resolved_terms else None, request_label="polish.document")
+            ai_result=[
+                        {
+                          "original": "DNBelab-D4RS Fast RNA文库制备试剂盒套装是针对华大智造（MGI）数字化样本制备系统DNBelab-D4RS以及高通量测序平台量身打造的RNA文库制备试剂盒。",
+                          "revised": "DNBelab-D4RS Fast RNA 文库制备试剂盒套装是针对华大智造（MGI）数字化样本制备系统 DNBelab-D4RS 以及高通量测序平台量身打造的 RNA 文库制备试剂盒。",
+                          "reference": "句式模板：...是针对...量身打造的...（示例：本试剂套装是针对华大智造（MGI）数字化样本制备系统DNBelab-D4RS以及高通量测序平台量身打造的WGS文库制备试剂套装。）"
+                        },
+                        {
+                          "original": "本试剂盒可以将50~200 ng total RNA制备成高通量测序平台专用的文库。",
+                          "revised": "本试剂盒可以将50~200 ng total RNA制备成高通量测序平台专用的文库。",
+                          "reference": "句式模板：...可以将...制备成...（示例：本试剂套装搭配DNBelab-D4RS数字化样本制备系统可以将一定质量的gDNA制备成高通量测序平台专用的文库）"
+                        },
+                        {
+                          "original": "本试剂盒利用数字微流控技术结合了DNBelab-D4RS平台使得RNA建库实现完全自动化，同时采用高质量的酶学组成，改进型接头连接技术以及具有强扩增效率的高保真酶，显著提高文库转化率与扩增效率；",
+                          "revised": "本试剂盒利用数字微流控技术，结合 DNBelab-D4RS 平台，实现 RNA 建库完全自动化，同时采用高质量的酶学组成、改进型接头连接技术以及具有强扩增效率的高保真酶，显著提高文库转化率与扩增效率。",
+                          "reference": "句式匹配：功能/原理描述句式，拆分长句并优化表述，标点按规范修正。"
+                        },
+                        {
+                          "original": "试剂盒中提供的所有试剂都经过严格的质量控制和功能验证，最大程度上保证了文库制备的稳定性和重复性。",
+                          "revised": "试剂盒中提供的所有试剂经过严格的质量控制和功能验证，最大程度上保证文库制备的稳定性和重复性。",
+                          "reference": "句式模板：...经过...，保证...（示例：试剂套装中提供的所有试剂经过严格的质量控制和功能验证，保证使用效果。）"
+                        }
+                      ]
             merged_polished = _merge_polish_items(ai_result)
+            print(f"merged_polished:{merged_polished}")
             if merged_polished and merged_polished != content:
                 ai_polished = merged_polished
                 ai_changes = [{
@@ -5991,13 +6010,12 @@ async def analyze_file_endpoint(
             print(f"AI 润色失败(返回原文): {e}")
 
         logger.warning(
-            "[POLISH_DEBUG] sentence_file_id=%s sentence_file_name=%r terminology_file_id=%s terminology_file_name=%r guide_chars=%s ai_skipped=%s ai_changed=%s",
+            "[POLISH_DEBUG] sentence_file_id=%s sentence_file_name=%r terminology_file_id=%s terminology_file_name=%r guide_chars=%s  ai_changed=%s",
             sentence_file_id,
             sentence_file_name,
             terminology_file_id,
             term_file_name,
             len(sentence_guide or ""),
-            skip_ai,
             ai_polished != pre_polished,
         )
 
@@ -6057,8 +6075,7 @@ async def analyze_file_endpoint(
                 sentence_guide=sentence_guide,
                 terminology_file_id=terminology_file_id,
                 terminology_file_name=term_file_name,
-                skip_ai=skip_ai,
-                skip_reason=skip_reason,
+
                 ai_polished=ai_polished,
                 pre_polished=pre_polished,
                 total_changes=len(changes),
@@ -6124,8 +6141,6 @@ async def analyze_file_endpoint(
                 sentence_guide=sentence_guide,
                 terminology_file_id=terminology_file_id,
                 terminology_file_name=term_file_name,
-                skip_ai=skip_ai,
-                skip_reason=skip_reason,
                 ai_polished=ai_polished,
                 pre_polished=pre_polished,
                 total_changes=len(changes),

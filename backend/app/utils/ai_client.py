@@ -55,6 +55,7 @@ class AIClient:
         self.qwen_model = os.getenv("QWEN_MODEL", os.getenv("DASHSCOPE_MODEL", "qwen-max"))
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 
         self.arkclaw_api_key = os.getenv("ARKCLAW_API_KEY")
         self.arkclaw_base_url = os.getenv("ARKCLAW_BASE_URL", "https://api.arkclaw.com/v1")
@@ -64,8 +65,8 @@ class AIClient:
         self.kimi_api_key = get_kimi_api_key()
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
-        self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "20")
-        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "10")
+        self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "900")
+        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "900")
 
         self.proxy_api_key = os.getenv("OPENAI_API_KEY")
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
@@ -73,7 +74,7 @@ class AIClient:
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
-        timeout = httpx.Timeout(30.0, read=180.0)
+        timeout = httpx.Timeout(connect=900.0, read=900.0, write=900.0, pool=900.0)
 
         self.qwen_client = OpenAI(
             api_key=self.qwen_api_key,
@@ -85,7 +86,7 @@ class AIClient:
 
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
-            base_url="https://api.deepseek.com/v1",
+            base_url=self.deepseek_base_url,
             timeout=timeout,
         ) if _is_valid_key(self.deepseek_api_key) else None
 
@@ -658,10 +659,11 @@ class AIClient:
         # 优先级: DEFAULT_MODEL_PROVIDER 优先，其余按 Qwen > Kimi > DeepSeek > ArkClaw > Proxy
         self.last_chat_errors = []
         providers = []
+        print(f"message:{messages}")
         ordered_specs = [
+        ('deepseek', 'DeepSeek', self.deepseek_client, self.deepseek_model),
             ('qwen', 'Qwen', self.qwen_client, self.qwen_model),
             ('kimi', 'Kimi', self.kimi_client, self.kimi_model),
-            ('deepseek', 'DeepSeek', self.deepseek_client, self.deepseek_model),
             ('arkclaw', 'ArkClaw', self.arkclaw_client, self.arkclaw_model),
             ('proxy', 'Proxy', self.proxy_client, self.fallback_model),
         ]
@@ -676,6 +678,7 @@ class AIClient:
 
         if providers:
             print(f"[AI] providers={', '.join(name for name, _, _ in providers)}")
+            started_at = time.time()
             max_retries = 3
             retry_delay = 2
             for name, client, model in providers:
@@ -686,7 +689,7 @@ class AIClient:
                             self._build_kimi_request_kwargs(
                                 model=model,
                                 messages=messages,
-                                max_tokens=max_tokens,
+                                max_tokens=30000,
                                 temperature=temperature,
                                 thinking=kimi_thinking,
                             )
@@ -694,15 +697,20 @@ class AIClient:
                             else {
                                 "model": model,
                                 "messages": messages,
-                                "max_tokens": max_tokens,
+                                "max_tokens": 30000,
                                 "temperature": temperature,
                             }
                         )
+                        print(f"request_kwargs:{request_kwargs}")
+                        print(f"Kimi超时: {self.kimi_chat_timeout}")
+                        print(f"Provider超时: {self.provider_chat_timeout}")
                         call_client = client.with_options(
                             timeout=self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout,
                             max_retries=0,
                         )
                         response = call_client.chat.completions.create(**request_kwargs)
+                        elapsed_ms = round((time.time() - started_at) * 1000)
+                        print(f"[AI] {name} 第 {attempt} 次尝试耗时: {elapsed_ms} ms (成功)")
                         self._record_usage_event(
                             name,
                             model,
@@ -713,12 +721,14 @@ class AIClient:
                         )
                         choice = response.choices[0]
                         content = choice.message.content or ""
+                        print(f"AI回答：{content}")
                         if content.strip():
                             return content
                         self.last_chat_errors.append(f"{name}: 返回空内容")
                         print(f"[AI] {name} 返回空内容: finish_reason={getattr(choice, 'finish_reason', '')}")
                         break
                     except Exception as e:
+                        elapsed_ms = round((time.time() - started_at) * 1000)
                         error_str = str(e)
                         if "429" in error_str and attempt < max_retries:
                             print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
@@ -726,7 +736,7 @@ class AIClient:
                             retry_delay *= 2
                             continue
                         self.last_chat_errors.append(f"{name}: {error_str[:160]}")
-                        print(f"[AI] {name} 调用失败: {error_str[:100]}")
+                        print(f"[AI] {name} 耗时: {elapsed_ms} ms 调用失败: {error_str[:100]}")
                         break
 
                 if not fallback:
@@ -1030,22 +1040,34 @@ class AIClient:
 {text}
 ===== 待审核文本结束 =====
 
-逐句改写，每句保留原文的具体名称和参数。"""
+请对审核文本逐句改写。"""
 
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt}
         ]
-        result = self.chat(messages, max_tokens=4096, request_label=request_label)
+        result = self.chat(messages, max_tokens=30000, request_label=request_label)
 
         if not result:
             return []
 
+        print(f"=== raw result ===")
+        print(repr(result))  # 用 repr 可以看到换行符、特殊字符等
+        print(f"=== raw result end ===")
+        # 2. 打印 result 的类型
+        print(f"result type: {type(result)}")
+        # 3. 如果 result 是多行，逐行打印
+        print(f"=== result lines ===")
+        for i, line in enumerate(result.split('\n')):
+            print(f"line {i}: {repr(line)}")
+        print(f"=== result lines end ===")
         raw = result.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw)
 
         try:
+            print(f"rwa:{raw}")
+            print(f"这里没执行？")
             parsed = json.loads(raw)
         except Exception:
             print(f"[AI] 润色结果解析失败，回退原文: {result[:80]}")
@@ -1071,6 +1093,7 @@ class AIClient:
                 "revised": revised,
                 "reference": reference,
             })
+        print(f"=== normalized：{normalized}")
         return normalized
 
     def qa_answer(self, question, context, request_label="qa.answer"):
