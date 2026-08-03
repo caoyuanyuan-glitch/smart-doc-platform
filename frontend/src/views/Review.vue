@@ -66,7 +66,7 @@
                 <template #default="scope">
                   <el-button
                     size="small"
-                    :disabled="docReviewStatus[scope.row.id]?.status === 'running'"
+                    :disabled="!canStartReview(scope.row)"
                     @click="startReview(scope.row.id)"
                   >
                     {{ docReviewStatus[scope.row.id]?.status === 'running' ? '审核中...' : '开始审核' }}
@@ -166,24 +166,36 @@
 
             <div class="compare-result-block">
               <h4>核心参数差异明细表</h4>
-              <el-table :data="visibleCompareRows" border>
-                <el-table-column prop="dimension" label="检查维度" width="120" />
-                <el-table-column prop="parameter_name" label="参数名称" width="180" />
-                <el-table-column label="主文档（说明书）内容" min-width="240" show-overflow-tooltip>
-                  <template #default="scope">
-                    <span class="compare-main-value" v-html="renderCompareMainValue(scope.row)"></span>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="reference_value" label="参照物众数（或少量参照物原值）" min-width="240" show-overflow-tooltip />
-                <el-table-column label="异常说明 / 差异结论" min-width="320">
-                  <template #default="scope">
-                    <div class="compare-conclusion-cell">
-                      <el-tag size="small" :type="compareLevelTagType(scope.row.level)">{{ scope.row.level }}</el-tag>
-                      <span>{{ scope.row.conclusion }}</span>
-                    </div>
-                  </template>
-                </el-table-column>
-              </el-table>
+              <div class="compare-table-wrap">
+                <el-table :data="visibleCompareRows" border style="width: 100%" :fit="false" class="compare-diff-table">
+                  <el-table-column prop="dimension" label="检查维度" width="120" fixed="left" />
+                  <el-table-column prop="parameter_name" label="参数名称" width="180" fixed="left" />
+                  <el-table-column label="主文档（说明书）内容" width="320" show-overflow-tooltip fixed="left">
+                    <template #default="scope">
+                      <span class="compare-main-value" v-html="renderCompareMainValue(scope.row)"></span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column
+                    v-for="(column, index) in compareReferenceColumns"
+                    :key="`${column.filename || 'reference'}-${index}`"
+                    :label="column.filename || `参考文件${index + 1}`"
+                    width="240"
+                    show-overflow-tooltip
+                  >
+                    <template #default="scope">
+                      <span>{{ renderCompareReferenceValue(scope.row, index) }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="异常说明 / 差异结论" width="320">
+                    <template #default="scope">
+                      <div class="compare-conclusion-cell">
+                        <el-tag size="small" :type="compareLevelTagType(scope.row.level)">{{ scope.row.level }}</el-tag>
+                        <span>{{ scope.row.conclusion }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
             </div>
 
             <el-empty
@@ -841,6 +853,13 @@ const visibleCompareRows = computed(() => {
   return rows.filter((row) => row.level !== '一致')
 })
 
+const compareReferenceColumns = computed(() => {
+  const documents = compareResult.value?.reference_documents || []
+  if (documents.length) return documents
+  const firstRow = compareResult.value?.compare_rows?.[0]
+  return firstRow?.reference_values || []
+})
+
 watch(reviewSubTab, (tab) => {
   if (tab === 'single') {
     compareResult.value = null
@@ -1245,6 +1264,10 @@ function handleRulesImport(response) {
 }
 
 async function startReview(documentId) {
+  if (isTemporaryDocumentId(documentId)) {
+    ElMessage.warning('文档仍在上传处理中，请等待上传完成后再开始审核')
+    return
+  }
   try {
     const response = await reviewAPI.create(documentId, reviewMode.value)
     const reviewId = response.data.review_id
@@ -1276,10 +1299,19 @@ async function startReview(documentId) {
     docReviewStatus[documentId] = {
       status: 'failed',
       progress: 0,
-      message: error.response?.data?.detail || '创建审核任务失败'
+      message: getAPIErrorMessage(error, '创建审核任务失败')
     }
-    ElMessage.error('审核失败，请重试: ' + (error.response?.data?.detail || error.message))
+    ElMessage.error(`审核失败，请重试: ${getAPIErrorMessage(error, '创建审核任务失败')}`)
   }
+}
+
+function isTemporaryDocumentId(documentId) {
+  return String(documentId || '').startsWith('uploading-')
+}
+
+function canStartReview(document) {
+  if (!document || isTemporaryDocumentId(document.id)) return false
+  return docReviewStatus[document.id]?.status !== 'running'
 }
 
 async function loadReviewIssues(reviewId) {
@@ -2046,24 +2078,41 @@ const currentTaskMode = computed(() => {
 })
 
 function renderCompareIssueContext(issue) {
-  const parts = parseCompareIssueContext(issue?.context)
-  const diff = buildDiffMarkup(parts.main, parts.reference)
-  return [
-    '<div class="compare-context-block">',
-    `<div class="compare-context-row main"><div class="compare-context-label">主文档</div><div class="compare-context-value">${diff.mainHtml}</div></div>`,
-    `<div class="compare-context-row reference"><div class="compare-context-label">参考文档</div><div class="compare-context-value">${diff.referenceHtml}</div></div>`,
-    '</div>'
-  ].join('')
+  const entries = parseCompareIssueContext(issue?.context)
+  const mainEntry = entries.find((item) => item.label === '主文档') || { label: '主文档', value: '-' }
+  const referenceEntries = entries.filter((item) => item.label !== '主文档')
+  const baseReference = referenceEntries.find((item) => item.value && item.value !== '-')?.value || ''
+  const mainDiff = buildDiffMarkup(mainEntry.value, baseReference)
+  const rows = [
+    `<div class="compare-context-row main"><div class="compare-context-label">${escapeHtml(mainEntry.label)}</div><div class="compare-context-value">${mainDiff.mainHtml}</div></div>`
+  ]
+  for (const entry of referenceEntries) {
+    const diff = buildDiffMarkup(mainEntry.value, entry.value)
+    rows.push(`<div class="compare-context-row reference"><div class="compare-context-label">${escapeHtml(entry.label)}</div><div class="compare-context-value">${diff.referenceHtml}</div></div>`)
+  }
+  return `<div class="compare-context-block">${rows.join('')}</div>`
 }
 
 function parseCompareIssueContext(context) {
-  const text = String(context || '')
-  const mainMatch = text.match(/主文档[：:]\s*([\s\S]*?)(?:\n+参考文件[：:]\s*|$)/)
-  const referenceMatch = text.match(/参考文件[：:]\s*([\s\S]*)$/)
-  return {
-    main: (mainMatch?.[1] || '').trim(),
-    reference: (referenceMatch?.[1] || '').trim()
+  const lines = String(context || '')
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const entries = []
+  for (const line of lines) {
+    const match = line.match(/^([^：:]+)[：:]\s*([\s\S]*)$/)
+    if (!match) continue
+    entries.push({
+      label: match[1].trim(),
+      value: (match[2] || '').trim() || '-'
+    })
   }
+
+  if (!entries.length) {
+    return [{ label: '主文档', value: String(context || '').trim() || '-' }]
+  }
+  return entries
 }
 
 function buildDiffMarkup(mainText, referenceText) {
@@ -2079,9 +2128,20 @@ function buildDiffMarkup(mainText, referenceText) {
 
 function renderCompareMainValue(row) {
   const mainValue = String(row?.main_value || '').trim()
-  const referenceValue = simplifyReferenceValue(row?.reference_value)
+  const referenceValue = firstCompareReferenceValue(row)
   const diff = buildDiffMarkup(mainValue, referenceValue)
   return diff.mainHtml
+}
+
+function renderCompareReferenceValue(row, index) {
+  const item = row?.reference_values?.[index]
+  return String(item?.value || '-').trim() || '-'
+}
+
+function firstCompareReferenceValue(row) {
+  const firstValue = row?.reference_values?.find((item) => item?.value && item.value !== '-')?.value
+  if (firstValue) return String(firstValue).trim()
+  return simplifyReferenceValue(row?.reference_summary || row?.reference_value)
 }
 
 function simplifyReferenceValue(value) {
@@ -2322,6 +2382,40 @@ onUnmounted(() => {
   margin: 0 0 10px;
   font-size: 14px;
   color: #334155;
+}
+
+.compare-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.compare-table-wrap :deep(.el-table) {
+  min-width: max-content;
+}
+
+.compare-table-wrap :deep(.el-table__header-wrapper),
+.compare-table-wrap :deep(.el-table__body-wrapper),
+.compare-table-wrap :deep(.el-scrollbar__wrap) {
+  overflow-x: visible !important;
+}
+
+.compare-table-wrap :deep(.el-table__fixed),
+.compare-table-wrap :deep(.el-table__fixed-right) {
+  box-shadow: none;
+}
+
+.compare-table-wrap :deep(.el-table__fixed-right::before),
+.compare-table-wrap :deep(.el-table__fixed::before) {
+  background-color: #dbe4ee;
+}
+
+.compare-diff-table :deep(.el-table__inner-wrapper::before) {
+  display: none;
 }
 
 .compare-conclusion-cell {

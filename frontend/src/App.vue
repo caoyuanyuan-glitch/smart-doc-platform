@@ -53,7 +53,7 @@
               <div class="ai-status-title-row">
                 <div>
                   <div class="ai-status-title">Token 实时消耗</div>
-                  <div class="ai-status-subtitle">最近 {{ aiUsage.value?.limit || 50 }} 次 AI 调用汇总</div>
+                  <div class="ai-status-subtitle">最近 {{ aiUsage?.limit || 50 }} 次 AI 调用汇总</div>
                 </div>
                 <el-button size="small" :loading="aiUsageLoading" @click="fetchAIUsage">刷新</el-button>
               </div>

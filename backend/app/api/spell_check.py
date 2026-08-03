@@ -2,6 +2,8 @@ import re
 import zipfile
 import io
 import os
+import tempfile
+from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -9,6 +11,7 @@ from docx import Document
 from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
 from app.utils.spell_checker import run_spelling_and_grammar_check, spell as runtime_spell
+from app.utils.document_parser import parse_file
 
 try:
     from pptx import Presentation
@@ -1458,6 +1461,17 @@ def extract_text_from_file(file: UploadFile):
                 if hasattr(shape, "text"):
                     txt += shape.text + "\n"
         return txt
+    elif ext == ".pdf":
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp_file:
+            temp_file.write(content)
+            temp_path = Path(temp_file.name)
+        try:
+            parsed = parse_file(str(temp_path))
+            if isinstance(parsed, dict):
+                return parsed.get("full_text") or ""
+            return str(parsed or "")
+        finally:
+            temp_path.unlink(missing_ok=True)
     else:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
 
