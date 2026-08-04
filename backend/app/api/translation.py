@@ -9,6 +9,7 @@ import json
 import zipfile
 import tempfile
 import sys
+import time
 import threading
 import xml.etree.ElementTree as ET
 import lxml.etree as ET_LXML
@@ -51,6 +52,7 @@ _translate_tasks_lock = threading.Lock()
 _thread_locals = threading.local()
 _memory_file_cache = {}
 _memory_file_cache_lock = threading.Lock()
+_translate_semaphore = threading.BoundedSemaphore(4)
 CANCELED_TRANSLATION_PREFIX = "CANCELED:"
 SUPPORTED_AI_MODELS = {"qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"}
 WORD_CONNECTORS = {"-", "_", ".", "/", ":", "+", "'", "’", "%", "#", "&"}
@@ -77,6 +79,35 @@ def _get_translate_task_status(doc_id: int) -> str:
         return str(task.get("status") or "")
 
 
+def _persist_translation_status(doc_id: int, status: str, error: str = None):
+    """Persist the task status in the DB so it survives process restarts.
+
+    The in-memory registry is the source of truth while the process is alive;
+    the DB column provides a durable fallback for recovery.
+    """
+    try:
+        db = SessionLocal()
+        try:
+            doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
+            if doc and doc.status != status:
+                doc.status = status
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
+
+
+def _update_translate_task(doc_id: int, status: str, error: str = None, translated_filename: str = None):
+    with _translate_tasks_lock:
+        _translate_tasks[doc_id] = {
+            "status": status,
+            "error": error,
+            "translated_filename": translated_filename or _translate_tasks.get(doc_id, {}).get("translated_filename"),
+        }
+    _persist_translation_status(doc_id, status, error)
+
+
 def _raise_if_translation_cancelled(doc_id: int | None):
     if doc_id and _get_translate_task_status(doc_id) == "canceled":
         raise TranslationCancelled("翻译已停止")
@@ -85,6 +116,7 @@ def _raise_if_translation_cancelled(doc_id: int | None):
 def _mark_translation_canceled(doc_id: int, db: Session | None = None, message: str = "翻译已停止"):
     with _translate_tasks_lock:
         _translate_tasks[doc_id] = {"status": "canceled", "error": message}
+    _persist_translation_status(doc_id, "canceled", message)
 
     if db is None:
         return
@@ -494,16 +526,22 @@ def _memory_unit_kind(value: str) -> str:
     return "term"
 
 
-def _memory_candidate_eligible(source_text: str, candidate_text: str) -> bool:
-    source_compact = _normalize_memory_lookup_key(source_text)
-    candidate_compact = _normalize_memory_lookup_key(candidate_text)
+def _memory_candidate_eligible(source_text: str, candidate_text: str,
+                               source_compact: str = None, candidate_compact: str = None,
+                               source_kind: str = None, candidate_kind: str = None) -> bool:
+    if source_compact is None:
+        source_compact = _normalize_memory_lookup_key(source_text)
+    if candidate_compact is None:
+        candidate_compact = _normalize_memory_lookup_key(candidate_text)
     if not source_compact or not candidate_compact:
         return False
     if source_compact == candidate_compact:
         return True
 
-    source_kind = _memory_unit_kind(source_text)
-    candidate_kind = _memory_unit_kind(candidate_text)
+    if source_kind is None:
+        source_kind = _memory_unit_kind(source_text)
+    if candidate_kind is None:
+        candidate_kind = _memory_unit_kind(candidate_text)
     if source_kind != candidate_kind:
         return False
 
@@ -518,11 +556,13 @@ def _memory_candidate_eligible(source_text: str, candidate_text: str) -> bool:
     return length_ratio >= 0.65
 
 
-def _memory_similarity(source_text: str, candidate_text: str) -> float:
-    normalized_source = _normalize_match_text(source_text)
-    normalized_candidate = _normalize_match_text(candidate_text)
-    compact_source = _normalize_memory_lookup_key(source_text)
-    compact_candidate = _normalize_memory_lookup_key(candidate_text)
+def _memory_similarity(source_text: str, candidate_text: str, source_norm: str = None,
+                       candidate_norm: str = None, source_compact: str = None,
+                       candidate_compact: str = None) -> float:
+    normalized_source = source_norm if source_norm is not None else _normalize_match_text(source_text)
+    normalized_candidate = candidate_norm if candidate_norm is not None else _normalize_match_text(candidate_text)
+    compact_source = source_compact if source_compact is not None else _normalize_memory_lookup_key(source_text)
+    compact_candidate = candidate_compact if candidate_compact is not None else _normalize_memory_lookup_key(candidate_text)
     if not normalized_source or not normalized_candidate:
         return 0.0
     if normalized_source == normalized_candidate or compact_source == compact_candidate:
@@ -536,9 +576,10 @@ def _memory_similarity(source_text: str, candidate_text: str) -> float:
     return max(ratio, compact_ratio)
 
 
-def _memory_char_match_score(source_text: str, candidate_text: str) -> float:
-    compact_source = _normalize_memory_lookup_key(source_text)
-    compact_candidate = _normalize_memory_lookup_key(candidate_text)
+def _memory_char_match_score(source_text: str, candidate_text: str,
+                             source_compact: str = None, candidate_compact: str = None) -> float:
+    compact_source = source_compact if source_compact is not None else _normalize_memory_lookup_key(source_text)
+    compact_candidate = candidate_compact if candidate_compact is not None else _normalize_memory_lookup_key(candidate_text)
     if not compact_source or not compact_candidate:
         return 0.0
     matched_chars = sum(block.size for block in SequenceMatcher(None, compact_source, compact_candidate).get_matching_blocks())
@@ -574,18 +615,20 @@ def _apply_memory_translation_preserving_unmatched(source_text: str, candidate_s
     return "".join(pieces) or translated_text
 
 
-def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.8, preserve_sentence_unmatched: bool = True):
+def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.8, preserve_sentence_unmatched: bool = True,
+                             length_index: dict = None):
     normalized_source = _normalize_match_text(source_text)
     compact_source = _normalize_memory_lookup_key(source_text)
     if not normalized_source:
         return None
 
     for entry in candidates:
-        candidate_source = entry["source_text"]
-        if _normalize_match_text(candidate_source) == normalized_source:
+        candidate_norm = _entry_cached_norm(entry)
+        if candidate_norm == normalized_source:
             return entry["translated_text"]
-        if compact_source and _normalize_memory_lookup_key(candidate_source) == compact_source:
-            return _apply_memory_translation_preserving_unmatched(source_text, candidate_source, entry["translated_text"])
+        candidate_compact = _entry_cached_compact(entry)
+        if compact_source and candidate_compact == compact_source:
+            return _apply_memory_translation_preserving_unmatched(source_text, entry["source_text"], entry["translated_text"])
 
     lines = [line.strip() for line in re.split(r"\n+", source_text or "") if line.strip()]
     if len(lines) > 1:
@@ -599,21 +642,56 @@ def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.
         if translated_lines and len(translated_lines) == len(lines):
             return "\n".join(translated_lines)
 
+    source_kind = _memory_unit_kind(source_text)
+    source_compact_len = len(compact_source)
+
+    if length_index is not None:
+        if source_kind == "term":
+            length_ratio_floor = 0.75
+        else:
+            length_ratio_floor = 0.65
+        eligible_candidates = []
+        min_len = int(source_compact_len * length_ratio_floor)
+        max_len = int(source_compact_len / length_ratio_floor) + 1
+        for length in range(min_len, max_len + 1):
+            bucket = length_index.get(length)
+            if bucket:
+                eligible_candidates.extend(bucket)
+        candidates = eligible_candidates
+
     best_match = None
     best_score = threshold
+    source_charset = frozenset(compact_source) if compact_source else frozenset()
     for entry in candidates:
-        if not _memory_candidate_eligible(source_text, entry["source_text"]):
+        if not _memory_candidate_eligible(source_text, entry["source_text"],
+                                          source_compact=compact_source,
+                                          candidate_compact=_entry_cached_compact(entry),
+                                          source_kind=source_kind,
+                                          candidate_kind=_entry_cached_kind(entry)):
             continue
-        source_kind = _memory_unit_kind(source_text)
+        candidate_norm = _entry_cached_norm(entry)
+        candidate_compact = _entry_cached_compact(entry)
         exact_match = (
-            _normalize_match_text(entry["source_text"]) == normalized_source
-            or (compact_source and _normalize_memory_lookup_key(entry["source_text"]) == compact_source)
+            candidate_norm == normalized_source
+            or (compact_source and candidate_compact == compact_source)
         )
         if source_kind == "sentence" and not preserve_sentence_unmatched and not exact_match:
             continue
+
+        if not exact_match and source_charset and _entry_cached_charset(entry):
+            shorter = min(len(source_charset), len(_entry_cached_charset(entry)))
+            if shorter and len(source_charset & _entry_cached_charset(entry)) / shorter < 0.5:
+                continue
+
+        qr = _sequence_quick_ratio(normalized_source, candidate_norm)
+        if qr < threshold * 0.5:
+            continue
         score = max(
-            _memory_similarity(source_text, entry["source_text"]),
-            _memory_char_match_score(source_text, entry["source_text"]),
+            _memory_similarity(source_text, entry["source_text"],
+                               source_norm=normalized_source, candidate_norm=candidate_norm,
+                               source_compact=compact_source, candidate_compact=candidate_compact),
+            _memory_char_match_score(source_text, entry["source_text"],
+                                     source_compact=compact_source, candidate_compact=candidate_compact),
         )
         if score >= best_score:
             best_score = score
@@ -624,6 +702,48 @@ def _match_memory_candidates(source_text: str, candidates, threshold: float = 0.
             )
 
     return best_match
+
+
+def _sequence_quick_ratio(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    return SequenceMatcher(None, a, b).quick_ratio()
+
+
+def _entry_cached_norm(entry) -> str:
+    norm = entry.get("_norm")
+    if norm is None:
+        norm = _normalize_match_text(entry["source_text"])
+        entry["_norm"] = norm
+    return norm
+
+
+def _entry_cached_compact(entry) -> str:
+    compact = entry.get("_compact")
+    if compact is None:
+        compact = _normalize_memory_lookup_key(entry["source_text"])
+        entry["_compact"] = compact
+        entry["_compact_len"] = len(compact)
+    return compact
+
+
+def _entry_cached_kind(entry) -> str:
+    kind = entry.get("_kind")
+    if kind is None:
+        kind = _memory_unit_kind(entry["source_text"])
+        entry["_kind"] = kind
+    return kind
+
+
+def _entry_cached_charset(entry):
+    charset = entry.get("_charset")
+    if charset is None:
+        compact = _entry_cached_compact(entry)
+        charset = frozenset(compact) if compact else frozenset()
+        entry["_charset"] = charset
+    return charset
 
 
 def _split_text_for_memory_segments(text: str):
@@ -649,7 +769,7 @@ def _split_text_for_memory_clauses(text: str):
     return parts or [text]
 
 
-def _translate_by_memory_segments(source_text: str, candidates, threshold: float = 0.8):
+def _translate_by_memory_segments(source_text: str, candidates, threshold: float = 0.8, length_index: dict = None):
     segments = _split_text_for_memory_segments(source_text)
     translated_segments = []
     matched_count = 0
@@ -664,7 +784,7 @@ def _translate_by_memory_segments(source_text: str, candidates, threshold: float
         leading_len = len(segment) - len(segment.lstrip())
         leading = segment[:leading_len]
 
-        matched = _match_memory_candidates(stripped_segment, candidates, threshold=threshold)
+        matched = _match_memory_candidates(stripped_segment, candidates, threshold=threshold, length_index=length_index)
         if not matched:
             return None, 0
 
@@ -676,7 +796,7 @@ def _translate_by_memory_segments(source_text: str, candidates, threshold: float
     return "".join(translated_segments), matched_count
 
 
-def _translate_by_memory_clauses(source_text: str, candidates, threshold: float = 0.8):
+def _translate_by_memory_clauses(source_text: str, candidates, threshold: float = 0.8, length_index: dict = None):
     clauses = _split_text_for_memory_clauses(source_text)
     translated_clauses = []
     matched_count = 0
@@ -695,7 +815,7 @@ def _translate_by_memory_clauses(source_text: str, candidates, threshold: float 
             suffix = content[-1]
             content = content[:-1].strip()
 
-        matched = _match_memory_candidates(content, candidates, threshold=threshold) if content else None
+        matched = _match_memory_candidates(content, candidates, threshold=threshold, length_index=length_index) if content else None
         if matched:
             translated_clauses.append(f"{prefix}{matched}{suffix}")
             matched_count += 1
@@ -725,6 +845,7 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
 
     bundle = _get_memory_candidate_bundle(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
     candidates = bundle["entries"]
+    length_index = bundle.get("length_index")
     translated_segments = []
     memory_used = False
     ai_used = False
@@ -742,9 +863,9 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
 
         matched = _lookup_memory_exact_match(stripped_segment, bundle)
         if not matched:
-            matched = _match_memory_candidates(stripped_segment, candidates, threshold=0.88, preserve_sentence_unmatched=True)
+            matched = _match_memory_candidates(stripped_segment, candidates, threshold=0.88, preserve_sentence_unmatched=True, length_index=length_index)
         if not matched:
-            matched = _match_memory_candidates(stripped_segment, candidates, threshold=0.8, preserve_sentence_unmatched=True)
+            matched = _match_memory_candidates(stripped_segment, candidates, threshold=0.8, preserve_sentence_unmatched=True, length_index=length_index)
 
         if matched:
             translated_segments.append(f"{leading}{matched}{trailing}")
@@ -753,7 +874,13 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
             matched_segments += 1
             continue
 
-        translated = translate_with_ai(stripped_segment, model, source_lang, target_lang)
+        translated = translate_with_ai(
+            stripped_segment,
+            model,
+            source_lang,
+            target_lang,
+            glossary=_build_ai_glossary(stripped_segment, source_lang, target_lang, db),
+        )
         translated_segments.append(f"{leading}{translated}{trailing}")
         _record_translation_usage("ai", segment)
         ai_used = True
@@ -771,6 +898,8 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
     if not texts:
         return []
 
+    memory_bank = _get_memory_bank()
+    memory_file_id = _get_memory_file_id()
     translated_texts = [None] * len(texts)
     pending_indexes = list(range(len(texts)))
 
@@ -783,8 +912,8 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                 source_lang,
                 target_lang,
                 db,
-                bank=_get_memory_bank(),
-                memory_file_id=_get_memory_file_id(),
+                bank=memory_bank,
+                memory_file_id=memory_file_id,
                 allow_partial=allow_partial,
             )
             if hit:
@@ -834,11 +963,13 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
         def _translate_ai_batch(batch_indexes):
             if len(batch_indexes) == 1:
                 index = batch_indexes[0]
-                return {index: translate_with_ai(texts[index], model, source_lang, target_lang)}
+                glossary = _build_ai_glossary(texts[index], source_lang, target_lang, db, bank=memory_bank, memory_file_id=memory_file_id)
+                return {index: translate_with_ai(texts[index], model, source_lang, target_lang, glossary=glossary)}
 
             batch_texts = [texts[i] for i in batch_indexes]
             combined = sep.join(batch_texts)
-            translated_combined = translate_with_ai(combined, model, source_lang, target_lang)
+            glossary = _build_ai_glossary(combined, source_lang, target_lang, db, bank=memory_bank, memory_file_id=memory_file_id)
+            translated_combined = translate_with_ai(combined, model, source_lang, target_lang, glossary=glossary)
             translated_parts = [part.strip() for part in translated_combined.split(sep)]
             if len(translated_parts) != len(batch_texts):
                 raise ValueError("batched_translation_split_mismatch")
@@ -849,6 +980,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_map = {executor.submit(_translate_ai_batch, batch_indexes): batch_indexes for batch_indexes in batch_groups}
                 for future in as_completed(future_map):
+                    _raise_if_translation_cancelled(_get_translation_doc_id())
                     batch_indexes = future_map[future]
                     try:
                         batch_results = future.result()
@@ -967,6 +1099,14 @@ def _get_memory_file_id():
 
 def _set_memory_file_id(file_id):
     _thread_locals.memory_file_id = file_id
+
+
+def _get_translation_doc_id():
+    return getattr(_thread_locals, 'translation_doc_id', None)
+
+
+def _set_translation_doc_id(doc_id):
+    _thread_locals.translation_doc_id = doc_id
 
 
 def _normalize_header_key(value: str) -> str:
@@ -1149,9 +1289,17 @@ def _get_memory_file_candidates(db: Session, memory_file_id: int, source_lang: s
 def _build_memory_candidate_bundle(candidates):
     exact_map = {}
     compact_map = {}
+    length_index = {}
     for entry in candidates:
         normalized_source = _normalize_match_text(entry["source_text"])
         compact_source = _normalize_memory_lookup_key(entry["source_text"])
+        entry["_norm"] = normalized_source
+        entry["_compact"] = compact_source
+        entry["_kind"] = _memory_unit_kind(entry["source_text"])
+        compact_len = len(compact_source)
+        entry["_compact_len"] = compact_len
+        entry["_charset"] = frozenset(compact_source) if compact_source else frozenset()
+        length_index.setdefault(compact_len, []).append(entry)
         if normalized_source and normalized_source not in exact_map:
             exact_map[normalized_source] = entry["translated_text"]
         if compact_source and compact_source not in compact_map:
@@ -1160,6 +1308,7 @@ def _build_memory_candidate_bundle(candidates):
         "entries": candidates,
         "exact_map": exact_map,
         "compact_map": compact_map,
+        "length_index": length_index,
     }
 
 
@@ -1388,6 +1537,30 @@ def _apply_memory_glossary(source_text: str, glossary):
     return translated, replaced
 
 
+def _build_ai_glossary(text: str, source_lang: str, target_lang: str, db: Session,
+                       bank: str = None, memory_file_id: int = None, max_entries: int = 20):
+    """Build the glossary from memory candidates for AI translation.
+
+    Only applies when a memory bank or memory file is configured; otherwise
+    returns None so the AI prompt stays unchanged. ``bank`` and
+    ``memory_file_id`` may be passed explicitly when running inside worker
+    threads (thread-locals do not propagate across threads).
+    """
+    if bank is None:
+        bank = _get_memory_bank()
+    if memory_file_id is None:
+        memory_file_id = _get_memory_file_id()
+    if not bank and not memory_file_id:
+        return None
+    try:
+        candidates = _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+        if not candidates:
+            return None
+        return _find_memory_glossary(text, candidates, max_entries=max_entries) or None
+    except Exception:
+        return None
+
+
 def _do_translate(text: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> str:
     result = None
     if engine == "hybrid":
@@ -1417,7 +1590,8 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             result = r
             _record_translation_usage("memory", text)
     if engine in ["ai", "hybrid"] and not result:
-        result = translate_with_ai(text, model, source_lang, target_lang)
+        glossary = _build_ai_glossary(text, source_lang, target_lang, db)
+        result = translate_with_ai(text, model, source_lang, target_lang, glossary=glossary)
         if result == text:
             _record_passthrough_usage(text)
         elif result:
@@ -1965,17 +2139,23 @@ def _translate_pdf(fpath: str, engine: str, model: str, source_lang: str, target
                     font_size -= 0.5
 
                 if rc < 0 and final_text:
-                    clipped_text = final_text[: max(1, int(len(final_text) * 0.85))] + "..."
-                    page.insert_textbox(
-                        rect,
-                        clipped_text,
-                        fontname="china-s",
-                        fontsize=5,
-                        color=(0, 0, 0),
-                        align=fitz.TEXT_ALIGN_LEFT,
-                        lineheight=1.05,
-                        overlay=True,
-                    )
+                    ratio = 0.95
+                    while ratio > 0.15:
+                        candidate = final_text[: max(1, int(len(final_text) * ratio))]
+                        with_dots = candidate + ("..." if len(candidate) < len(final_text) else "")
+                        trial = page.insert_textbox(
+                            rect,
+                            with_dots,
+                            fontname="china-s",
+                            fontsize=5,
+                            color=(0, 0, 0),
+                            align=fitz.TEXT_ALIGN_LEFT,
+                            lineheight=1.05,
+                            overlay=True,
+                        )
+                        if trial >= 0:
+                            break
+                        ratio -= 0.05
 
             all_original.append("\n".join(page_original))
             all_translated.append("\n".join(page_translated))
@@ -2044,6 +2224,41 @@ def _translate_markdown(fpath: str, engine: str, model: str, source_lang: str, t
     return translated.encode("utf-8"), [content], [translated]
 
 
+def _looks_like_repetitive_fill(result: str, original: str) -> bool:
+    """Detect models that pad output by repeating the same sentence over and over.
+
+    A faithful translation of repeated source text produces roughly the same
+    number of sentences as the source. Padding inflates the sentence count far
+    beyond the source while collapsing into very few distinct sentences.
+    """
+    result_lower = str(result or "").lower()
+    source_text = str(original or "").lower()
+    if not result_lower or not source_text:
+        return False
+
+    split_pattern = re.compile(r"[。！？!?.;：:，,\n]+")
+    source_sentences = [s.strip() for s in split_pattern.split(source_text) if len(s.strip()) >= 8]
+    result_sentences = [s.strip() for s in split_pattern.split(result_lower) if len(s.strip()) >= 8]
+    if len(result_sentences) < 8 or not source_sentences:
+        return False
+
+    source_count = len(source_sentences)
+    result_count = len(result_sentences)
+    if result_count < source_count * 2.5:
+        return False
+
+    sentence_counts = {}
+    for sentence in result_sentences:
+        sentence_counts[sentence] = sentence_counts.get(sentence, 0) + 1
+    max_repeat = max(sentence_counts.values())
+    if max_repeat < max(5, result_count // 2):
+        return False
+
+    if len(result_lower) > max(len(source_text) * 3, 1500):
+        return True
+    return False
+
+
 def _looks_like_hallucination(result: str, original: str) -> bool:
     if not result or not original:
         return False
@@ -2058,14 +2273,45 @@ def _looks_like_hallucination(result: str, original: str) -> bool:
         "严格将原文",
         "Only output the translated",
         "must be strictly translated",
+        "以下是翻译",
+        "译文如下",
+        "Here is the translation",
+        "Translated text",
+        "翻译结果",
+        "下面是翻译",
     ]
     result_lower = result.lower()
     for signal in hallucination_signals:
         if signal.lower() in result_lower:
             return True
-    if len(result) > max(len(original) * 5, 500):
+    if _looks_like_repetitive_fill(result, original):
         return True
     return False
+
+
+def _looks_like_untranslated(result: str, original: str, source_lang: str, target_lang: str) -> bool:
+    """Detect when the model echoes the original text back without translating."""
+    normalized = str(result or "").strip()
+    source_text = str(original or "").strip()
+    if not normalized or not source_text:
+        return False
+    if (source_lang or "").lower() == (target_lang or "").lower():
+        return False
+
+    if _normalize_match_text(normalized) == _normalize_match_text(source_text):
+        return True
+
+    compact_result = _normalize_compact_text(normalized)
+    compact_source = _normalize_compact_text(source_text)
+    if compact_result and compact_result == compact_source:
+        return True
+
+    source_units = _count_text_units(source_text)
+    if source_units < 4:
+        return False
+
+    ratio = SequenceMatcher(None, _normalize_match_text(normalized), _normalize_match_text(source_text)).ratio()
+    return ratio >= 0.95
 
 
 def _looks_like_invalid_translation(result: str, original: str, source_lang: str, target_lang: str) -> bool:
@@ -2080,10 +2326,71 @@ def _looks_like_invalid_translation(result: str, original: str, source_lang: str
         return True
     if target_lang == "zh" and re.search(r"[A-Za-z]", source_text) and not re.search(r"[\u4e00-\u9fff]", normalized):
         return True
+    if _looks_like_untranslated(normalized, source_text, source_lang, target_lang):
+        return True
     return False
 
 
-def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str, glossary=None) -> str:
+def _split_text_for_ai_chunks(content: str, max_chars: int = 7000) -> list:
+    """Split long content into chunks on paragraph/sentence boundaries.
+
+    Keeps each chunk within max_chars so the AI prompt never truncates the
+    source text. Falls back to hard splits for unbroken long runs.
+    """
+    text = str(content or "")
+    if len(text) <= max_chars:
+        return [text] if text else []
+
+    chunks = []
+    current = []
+    current_len = 0
+
+    def flush():
+        nonlocal current, current_len
+        if current:
+            chunks.append("".join(current))
+        current = []
+        current_len = 0
+
+    lines = re.split(r"(\n+)", text)
+    for piece in lines:
+        piece_len = len(piece)
+        if piece_len > max_chars and not current:
+            window = piece
+            while len(window) > max_chars:
+                cut = _find_chunk_cut(window, max_chars)
+                chunks.append(window[:cut])
+                window = window[cut:]
+            if window:
+                chunks.append(window)
+            continue
+
+        if current and current_len + piece_len > max_chars:
+            flush()
+        current.append(piece)
+        current_len += piece_len
+
+    flush()
+    return chunks
+
+
+def _find_chunk_cut(text: str, max_chars: int) -> int:
+    """Find a safe cut position near the tail of the window (sentence boundary preferred)."""
+    window = text[:max_chars]
+    boundaries = ["\n", "。", "！", "？", "；", ". ", "! ", "? ", "; ", "，", ", "]
+    best = -1
+    best_len = 0
+    for boundary in boundaries:
+        idx = window.rfind(boundary)
+        if idx > best:
+            best = idx
+            best_len = len(boundary)
+    if best >= max_chars * 0.5:
+        return best + best_len
+    return max_chars
+
+
+def _translate_ai_chunk(content: str, model: str, source_lang: str, target_lang: str, glossary=None) -> str:
     model = _normalize_ai_model(model)
     lang_names = {
         "zh": "中文", "en": "英文", "ja": "日文", "ko": "韩文",
@@ -2113,12 +2420,12 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
 1. 必须严格将原文内容翻译为{tgt_name}，输出必须是纯{tgt_name}文本，不得包含{src_name}
 2. 保持原文的段落结构、编号、列表格式完全不变
 3. 使用专业准确的技术术语
-4. 只输出翻译后的{tgt_name}结果，不要添加任何解释、注释或原始文本
+4. 只输出翻译后的{tgt_name}结果，不要添加任何解释、注释或原始文本，严禁重复、填充或扩展原文内容
 {glossary_lines}
 {batch_delimiter_rule}
 
 原文：
-{content[:8000]}"""
+{content}"""
     messages = [{"role": "user", "content": prompt}]
 
     if model == "qwen":
@@ -2155,7 +2462,10 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
         )
 
     if _looks_like_hallucination(result, content):
-        return content
+        raise HTTPException(
+            status_code=500,
+            detail="AI 翻译结果疑似包含提示词或说明性内容（模型幻觉），已中止本次翻译，请重试或切换 AI 模型。",
+        )
 
     if _looks_like_invalid_translation(result, content, source_lang, target_lang):
         raise HTTPException(
@@ -2166,11 +2476,25 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
     return result
 
 
+def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str, glossary=None) -> str:
+    """Translate text via AI, splitting long content into chunks to avoid truncation."""
+    chunks = _split_text_for_ai_chunks(content)
+    if not chunks:
+        return content
+
+    translated_chunks = [
+        _translate_ai_chunk(chunk, model, source_lang, target_lang, glossary=glossary)
+        for chunk in chunks
+    ]
+    return "".join(translated_chunks)
+
+
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
                           db: Session, bank: str = None, memory_file_id: int = None,
                           allow_partial: bool = True) -> tuple:
     bundle = _get_memory_candidate_bundle(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
     candidates = bundle["entries"]
+    length_index = bundle.get("length_index")
 
     exact_match = _lookup_memory_exact_match(content, bundle)
     if exact_match:
@@ -2179,22 +2503,22 @@ def translate_with_memory(content: str, source_lang: str, target_lang: str,
     if not allow_partial and _memory_unit_kind(content) == "sentence":
         return None, False
 
-    memory_result = _match_memory_candidates(content, candidates, threshold=0.88, preserve_sentence_unmatched=allow_partial)
+    memory_result = _match_memory_candidates(content, candidates, threshold=0.88, preserve_sentence_unmatched=allow_partial, length_index=length_index)
     if memory_result:
         return memory_result, True
 
-    memory_result = _match_memory_candidates(content, candidates, threshold=0.8, preserve_sentence_unmatched=allow_partial)
+    memory_result = _match_memory_candidates(content, candidates, threshold=0.8, preserve_sentence_unmatched=allow_partial, length_index=length_index)
     if memory_result:
         return memory_result, True
 
     if not allow_partial:
         return None, False
 
-    segmented_result, matched_segments = _translate_by_memory_segments(content, candidates, threshold=0.8)
+    segmented_result, matched_segments = _translate_by_memory_segments(content, candidates, threshold=0.8, length_index=length_index)
     if segmented_result and matched_segments > 0:
         return segmented_result, True
 
-    clause_result, matched_clauses = _translate_by_memory_clauses(content, candidates, threshold=0.8)
+    clause_result, matched_clauses = _translate_by_memory_clauses(content, candidates, threshold=0.8, length_index=length_index)
     if clause_result and matched_clauses > 0:
         return clause_result, True
 
@@ -2245,6 +2569,57 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str, model
     return filename
 
 
+def _translation_engine_usage(doc) -> dict:
+    """Summarize which engines produced the translation for the status payload.
+
+    Returns e.g. {"ai": true, "memory": false, "label": "AI 引擎",
+    "ai_word_count": 123, "memory_word_count": 0}. The label reflects pure AI,
+    pure memory, or a hybrid of both.
+    """
+    ai_word_count = max(0, int(getattr(doc, "ai_word_count", 0) or 0))
+    memory_word_count = max(0, int(getattr(doc, "memory_word_count", 0) or 0))
+    ai_used = ai_word_count > 0
+    memory_used = memory_word_count > 0
+    if ai_used and memory_used:
+        label = "AI + 记忆库引擎"
+    elif memory_used:
+        label = "记忆库引擎"
+    else:
+        label = "AI 引擎"
+    return {
+        "ai": ai_used,
+        "memory": memory_used,
+        "label": label,
+        "ai_word_count": ai_word_count,
+        "memory_word_count": memory_word_count,
+    }
+
+
+def recover_interrupted_translation_tasks():
+    """Mark in-flight translation tasks as interrupted after a process restart.
+
+    These tasks cannot be resumed because their thread no longer exists; flagging
+    them lets the frontend show a clear error instead of an endless spinner.
+    """
+    try:
+        db = SessionLocal()
+        try:
+            stale = db.query(TranslationDoc).filter(TranslationDoc.status == "processing").all()
+            for doc in stale:
+                if str(doc.translated_filename or ""):
+                    continue
+                error_msg = "翻译任务已中断，请重新提交文件翻译"
+                doc.status = "error"
+                doc.translated_filename = f"ERROR:{error_msg}"
+            if stale:
+                db.commit()
+                print(f"[translation] 已标记 {len(stale)} 个中断的翻译任务")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[translation] 恢复中断任务失败: {e}")
+
+
 def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                           engine: str, model: str, source_lang: str, target_lang: str,
                           memory_bank: str = "", memory_file_id: int = None):
@@ -2252,10 +2627,12 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
     db = SessionLocal()
     _set_memory_bank(memory_bank)
     _set_memory_file_id(memory_file_id)
+    _set_translation_doc_id(doc_id)
     _reset_translation_usage_stats()
     try:
-        with _translate_tasks_lock:
-            _translate_tasks[doc_id] = {"status": "processing", "error": None}
+        _translate_semaphore.acquire()
+        _raise_if_translation_cancelled(doc_id)
+        _update_translate_task(doc_id, "processing")
 
         source_lang = _resolve_source_language(source_lang, target_lang, file_path=file_path, ext=ext)
         _ensure_translation_direction(source_lang, target_lang)
@@ -2462,18 +2839,24 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             doc.memory_word_count = min(total_words, usage_stats["memory_word_count"])
             db.commit()
 
-        with _translate_tasks_lock:
-            _translate_tasks[doc_id] = {"status": "completed", "error": None, "translated_filename": output_filename}
+        _update_translate_task(doc_id, "completed", translated_filename=output_filename)
 
+    except TranslationCancelled as e:
+        cancel_msg = str(e) or "翻译已停止"
+        _update_translate_task(doc_id, "canceled", error=cancel_msg)
+        doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
+        if doc and not str(doc.translated_filename or "").startswith(CANCELED_TRANSLATION_PREFIX):
+            doc.translated_filename = f"{CANCELED_TRANSLATION_PREFIX}{cancel_msg[:200]}"
+            db.commit()
     except Exception as e:
         error_msg = str(e)
         doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
         if doc:
             doc.translated_filename = f"ERROR:{error_msg[:200]}"
             db.commit()
-        with _translate_tasks_lock:
-            _translate_tasks[doc_id] = {"status": "error", "error": error_msg}
+        _update_translate_task(doc_id, "error", error=error_msg)
     finally:
+        _translate_semaphore.release()
         db.close()
 
 
@@ -2519,6 +2902,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
         source_word_count=source_word_count,
         ai_word_count=usage_stats["ai_word_count"],
         memory_word_count=usage_stats["memory_word_count"],
+        status="completed",
     )
     db.add(doc_record)
     db.commit()
@@ -2532,27 +2916,74 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     )
 
 
-@router.get("/stats")
-async def get_translation_stats(batch_id: str = Query(None), db: Session = Depends(get_db)):
-    all_docs = db.query(TranslationDoc).all()
-    docs_updated = False
-    for doc in all_docs:
+_stats_cache = {"ts": 0.0, "payload": None}
+_STATS_CACHE_TTL = 15.0
+
+
+def _fix_legacy_translation_counts(db: Session):
+    """One-time backfill of word counts for legacy docs stored without them.
+
+    Limits the scan to docs that still have a zero word count (the ones that
+    need backfilling) and skips any that are still being processed. Returns
+    True when at least one row was updated.
+    """
+    legacy_docs = (
+        db.query(TranslationDoc)
+        .filter(
+            TranslationDoc.source_word_count == 0,
+            TranslationDoc.source_char_count > 0,
+            TranslationDoc.status != "processing",
+        )
+        .all()
+    )
+    updated = False
+    for doc in legacy_docs:
         word_counts = _normalize_doc_word_counts(doc)
         if word_counts["dirty"]:
             doc.source_word_count = word_counts["source_word_count"]
             doc.ai_word_count = word_counts["ai_word_count"]
             doc.memory_word_count = word_counts["memory_word_count"]
-            docs_updated = True
-    if docs_updated:
+            updated = True
+    if updated:
         db.commit()
+    return updated
 
-    text_docs = [d for d in all_docs if d.file_type == "text"]
-    file_docs = [d for d in all_docs if d.file_type != "text"]
 
-    text_word_count = sum(_normalize_doc_word_counts(doc)["source_word_count"] for doc in text_docs)
-    all_usage = [_normalize_doc_word_counts(doc) for doc in all_docs]
-    ai_word_count = sum(item["ai_word_count"] for item in all_usage)
-    memory_word_count = sum(item["memory_word_count"] for item in all_usage)
+@router.get("/stats")
+async def get_translation_stats(batch_id: str = Query(None), db: Session = Depends(get_db)):
+    now = time.time()
+    cached = _stats_cache["payload"]
+    if cached is not None and (now - _stats_cache["ts"]) < _STATS_CACHE_TTL and cached["batch_id"] == (batch_id or ""):
+        return cached["payload"]
+
+    _fix_legacy_translation_counts(db)
+
+    from sqlalchemy import func as sa_func
+
+    text_row = (
+        db.query(sa_func.coalesce(sa_func.sum(TranslationDoc.source_word_count), 0))
+        .filter(TranslationDoc.file_type == "text")
+        .first()
+    )
+    text_word_count = int(text_row[0] or 0)
+
+    total_row = (
+        db.query(
+            sa_func.coalesce(sa_func.sum(TranslationDoc.source_word_count), 0),
+            sa_func.coalesce(sa_func.sum(TranslationDoc.ai_word_count), 0),
+            sa_func.coalesce(sa_func.sum(TranslationDoc.memory_word_count), 0),
+        )
+        .first()
+    )
+    total_word_count = int(total_row[0] or 0)
+    ai_word_count = int(total_row[1] or 0)
+    memory_word_count = int(total_row[2] or 0)
+
+    file_docs_count = (
+        db.query(sa_func.count(TranslationDoc.id))
+        .filter(TranslationDoc.file_type != "text")
+        .scalar()
+    ) or 0
 
     latest_batch_id = (batch_id or "").strip() or None
     if not latest_batch_id:
@@ -2572,23 +3003,35 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
         "memory_word_count": 0,
     }
     if latest_batch_id:
-        batch_docs = (
-            db.query(TranslationDoc)
+        batch_row = (
+            db.query(
+                sa_func.count(TranslationDoc.id),
+                sa_func.coalesce(sa_func.sum(TranslationDoc.source_word_count), 0),
+                sa_func.coalesce(sa_func.sum(TranslationDoc.ai_word_count), 0),
+                sa_func.coalesce(sa_func.sum(TranslationDoc.memory_word_count), 0),
+            )
             .filter(TranslationDoc.file_type != "text", TranslationDoc.batch_id == latest_batch_id)
-            .all()
+            .first()
         )
-        current_upload = {"batch_id": latest_batch_id, **_summarize_docs(batch_docs)}
+        current_upload = {
+            "batch_id": latest_batch_id,
+            "doc_count": int(batch_row[0] or 0),
+            "doc_word_count": int(batch_row[1] or 0),
+            "ai_word_count": int(batch_row[2] or 0),
+            "memory_word_count": int(batch_row[3] or 0),
+        }
 
-    overall_docs = _summarize_docs(file_docs)
-
-    return {
+    payload = {
         "text_word_count": text_word_count,
-        "doc_count": overall_docs["doc_count"],
-        "doc_word_count": overall_docs["doc_word_count"],
+        "doc_count": file_docs_count,
+        "doc_word_count": total_word_count,
         "ai_word_count": ai_word_count,
         "memory_word_count": memory_word_count,
         "current_upload": current_upload,
     }
+    _stats_cache["ts"] = now
+    _stats_cache["payload"] = {"batch_id": batch_id or "", **payload}
+    return payload
 
 
 @router.get("/providers/status")
@@ -2644,6 +3087,7 @@ async def translate_file(
         original_preview="",
         translated_preview="",
         batch_id=(batch_id or "").strip(),
+        status="processing",
     )
     db.add(doc)
     db.commit()
@@ -2699,7 +3143,8 @@ async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
             "translated_filename": fn,
             "original_filename": orig_filename,
             "download_url": f"/api/translation/download/{doc_id}",
-            "error": None
+            "error": None,
+            "engine_usage": _translation_engine_usage(doc),
         }
 
     with _translate_tasks_lock:
@@ -2713,7 +3158,22 @@ async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
             "translated_filename": task.get("translated_filename", ""),
             "original_filename": orig_filename,
             "download_url": f"/api/translation/download/{doc_id}" if task["status"] == "completed" else None,
+            "engine_usage": _translation_engine_usage(doc) if task["status"] == "completed" else None,
         }
+
+    # Fall back to the persisted DB status (survives process restarts).
+    persisted_status = str(doc.status or "").strip()
+    if persisted_status == "error":
+        return {"doc_id": doc_id, "status": "error", "error": "翻译任务已中断，请重新提交文件翻译", "original_filename": orig_filename}
+    if persisted_status == "canceled":
+        return {"doc_id": doc_id, "status": "canceled", "error": "翻译已停止", "original_filename": orig_filename}
+    if persisted_status == "processing":
+        if doc.created_at and datetime.utcnow() - doc.created_at > timedelta(minutes=30):
+            error_msg = "翻译任务已中断，请重新提交文件翻译"
+            doc.translated_filename = f"ERROR:{error_msg}"
+            db.commit()
+            return {"doc_id": doc_id, "status": "error", "error": error_msg, "original_filename": orig_filename}
+        return {"doc_id": doc_id, "status": "processing", "error": None, "original_filename": orig_filename}
 
     if fn == "":
         if doc.created_at and datetime.utcnow() - doc.created_at > timedelta(minutes=10):
@@ -2900,7 +3360,13 @@ async def list_translation_docs(
     if normalized_batch_id:
         query = query.filter(TranslationDoc.batch_id == normalized_batch_id)
     docs = query.order_by(TranslationDoc.created_at.desc()).offset(skip).limit(limit).all()
-    return docs
+    result = []
+    for doc in docs:
+        out = TranslationDocOut.model_validate(doc)
+        if str(doc.translated_filename or "").startswith("ERROR:") is False and str(doc.translated_filename or "").strip():
+            out.engine_usage = _translation_engine_usage(doc)
+        result.append(out)
+    return result
 
 
 @router.get("/docs/{doc_id}", response_model=TranslationDocOut)
@@ -2908,7 +3374,10 @@ async def get_translation_doc(doc_id: int, db: Session = Depends(get_db)):
     doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Translation doc not found")
-    return doc
+    out = TranslationDocOut.model_validate(doc)
+    if str(doc.translated_filename or "").strip():
+        out.engine_usage = _translation_engine_usage(doc)
+    return out
 
 
 @router.delete("/docs/{doc_id}")
