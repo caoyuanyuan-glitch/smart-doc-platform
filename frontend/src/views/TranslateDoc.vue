@@ -145,6 +145,21 @@
               </div>
 
               <div v-else-if="job.status === 'completed'" class="result-content">
+                <div v-if="job.engine_usage" class="engine-usage-row">
+                  <span class="engine-usage-label">翻译引擎</span>
+                  <el-tag :type="engineUsageTagType(job.engine_usage)" effect="light">
+                    {{ job.engine_usage.label }}
+                  </el-tag>
+                  <span v-if="job.engine_usage.memory && job.engine_usage.ai" class="engine-usage-detail">
+                    AI {{ job.engine_usage.ai_word_count }} 词 / 记忆库 {{ job.engine_usage.memory_word_count }} 词
+                  </span>
+                  <span v-else-if="job.engine_usage.memory" class="engine-usage-detail">
+                    记忆库 {{ job.engine_usage.memory_word_count }} 词
+                  </span>
+                  <span v-else-if="job.engine_usage.ai" class="engine-usage-detail">
+                    AI {{ job.engine_usage.ai_word_count }} 词
+                  </span>
+                </div>
                 <el-result icon="success" title="翻译完成" :sub-title="`原文件: ${job.original_filename}`">
                   <template #extra>
                     <el-button type="primary" @click="downloadTranslatedFile(job)">
@@ -424,6 +439,7 @@ async function restoreLatestBatchJobs() {
       error: String(doc.translated_filename || '').startsWith('ERROR:')
         ? String(doc.translated_filename).slice(6)
         : (String(doc.translated_filename || '').startsWith('CANCELED:') ? String(doc.translated_filename).slice(9) : ''),
+      engine_usage: doc.engine_usage || null,
       pollingCount: 0
     }))
 
@@ -467,7 +483,8 @@ function startPolling(jobKey, docId) {
           translated_filename: statusData.translated_filename || '',
           download_url: statusData.download_url || `/api/translation/download/${docId}`,
           status: 'completed',
-          error: ''
+          error: '',
+          engine_usage: statusData.engine_usage || null
         })
         window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'completed' } }))
         ElMessage.success('文档翻译完成')
@@ -516,6 +533,13 @@ function statusTagType(status) {
   if (status === 'canceled') return 'warning'
   if (status === 'error') return 'danger'
   return 'info'
+}
+
+function engineUsageTagType(usage) {
+  if (!usage) return 'info'
+  if (usage.ai && usage.memory) return 'warning'
+  if (usage.memory) return 'success'
+  return 'primary'
 }
 
 function statusLabel(job) {
@@ -824,9 +848,27 @@ function downloadTranslatedFile(job) {
 }
 
 .result-item-meta {
-  margin-top: 4px;
   font-size: 12px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+
+.engine-usage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.engine-usage-label {
   color: #6b7280;
+  font-size: 12px;
+}
+
+.engine-usage-detail {
+  color: #9ca3af;
+  font-size: 12px;
 }
 
 @media (max-width: 1024px) {

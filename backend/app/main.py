@@ -41,6 +41,11 @@ app.include_router(system.router, prefix="/api/system", tags=["系统状态"])
 async def startup_event():
     create_tables()
     try:
+        from app.api.translation import recover_interrupted_translation_tasks
+        recover_interrupted_translation_tasks()
+    except Exception as e:
+        print(f"[startup] 翻译任务恢复失败: {e}")
+    try:
         from app.utils.ai_client import ai_client
         threading.Thread(target=ai_client.warmup, name="ai-warmup", daemon=True).start()
     except Exception as e:

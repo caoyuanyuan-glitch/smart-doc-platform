@@ -64,6 +64,7 @@ class TranslationDocOut(BaseModel):
     translated_content: str
     batch_id: str = ""
     translated_filename: str = ""
+    engine_usage: Optional[dict] = None
     created_at: Optional[datetime] = None
 
     class Config:

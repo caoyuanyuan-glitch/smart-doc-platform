@@ -83,6 +83,11 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_word_count INTEGER DEFAULT 0"))
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_word_count INTEGER DEFAULT 0"))
 
+    if translation_doc_columns and 'status' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN status VARCHAR DEFAULT ''"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_translation_docs_status ON translation_docs (status)"))
+
 
     try:
         plr_columns = {col['name'] for col in inspector.get_columns('polish_learning_rules')}
