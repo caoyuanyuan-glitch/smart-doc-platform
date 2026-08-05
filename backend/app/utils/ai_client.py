@@ -934,9 +934,94 @@ class AIClient:
                 "confidence": confidence,
                 "source": source,
                 "position": self._clean_text(item.get("position"), 80),
+                "source_models": list(item.get("source_models") or []),
+                "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
             })
 
         return normalized
+
+    @staticmethod
+    def _audit_issue_merge_key(issue):
+        if not isinstance(issue, dict):
+            return ""
+        fields = [
+            str(issue.get("rule") or "").strip().lower(),
+            str(issue.get("category") or "").strip().lower(),
+            str(issue.get("chapter") or "").strip().lower(),
+            str(issue.get("original_text") or "").strip().lower(),
+            str(issue.get("suggestion") or "").strip().lower(),
+        ]
+        return "||".join(fields)
+
+    def _merge_audit_issue_sets(self, primary_issues, secondary_issues, primary_model, secondary_model):
+        merged = []
+        issue_map = {}
+
+        def add_issue(issue, model_name, matched=False):
+            item = dict(issue or {})
+            key = self._audit_issue_merge_key(item)
+            if not key:
+                return
+            existing = issue_map.get(key)
+            if existing is None:
+                item["source_models"] = [model_name] if model_name else []
+                item["consensus_score"] = max(0, min(100, int(item.get("confidence") or 0)))
+                issue_map[key] = item
+                merged.append(item)
+                return
+
+            source_models = list(existing.get("source_models") or [])
+            if model_name and model_name not in source_models:
+                source_models.append(model_name)
+            existing["source_models"] = source_models
+            existing["confidence"] = max(int(existing.get("confidence") or 0), int(item.get("confidence") or 0))
+            if matched:
+                boosted = max(int(existing.get("confidence") or 0) + 8, int(item.get("confidence") or 0) + 8)
+                existing["consensus_score"] = min(100, max(int(existing.get("consensus_score") or 0), boosted))
+            else:
+                existing["consensus_score"] = max(int(existing.get("consensus_score") or 0), int(item.get("confidence") or 0))
+
+            if not existing.get("description") and item.get("description"):
+                existing["description"] = item.get("description")
+            if not existing.get("context") and item.get("context"):
+                existing["context"] = item.get("context")
+            if not existing.get("position") and item.get("position"):
+                existing["position"] = item.get("position")
+
+        for issue in primary_issues or []:
+            add_issue(issue, primary_model)
+
+        for issue in secondary_issues or []:
+            add_issue(issue, secondary_model, matched=True)
+
+        for issue in merged:
+            source_models = list(issue.get("source_models") or [])
+            issue["source_models"] = source_models
+            if len(source_models) >= 2:
+                if issue.get("severity") == "suggestion":
+                    issue["severity"] = "general"
+            elif int(issue.get("confidence") or 0) < 85 and issue.get("severity") == "serious":
+                issue["severity"] = "general"
+        return merged
+
+    def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
+        provider_key = str(provider_key or "").strip().lower()
+        if provider_key == "qwen":
+            result = self.call_qwen(messages, max_tokens=2048, temperature=0.2, request_label=request_label, review_id=review_id)
+        elif provider_key == "deepseek":
+            result = self.call_deepseek(messages, max_tokens=2048, temperature=0.2, request_label=request_label, review_id=review_id)
+        else:
+            result = None
+
+        if not result:
+            return []
+
+        data = self._extract_json(result, {"issues": []})
+        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+        for issue in issues:
+            issue["source_models"] = [provider_key] if provider_key else []
+            issue["consensus_score"] = int(issue.get("confidence") or 0)
+        return issues
 
     # ------------------------------------------------------------------
     # 文档润色
@@ -1649,35 +1734,10 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk"):
+    def build_audit_prompt_payload(self, content, language=None, audit_basis=""):
         lang = language or "en"
         is_english = lang in ("en", "both")
-
         content = content or ""
-        if len(content) > 7000:
-            all_issues = []
-            chunk_size = 6000
-            overlap = 500
-            chunk_index = 1
-            for start in range(0, len(content), chunk_size - overlap):
-                chunk = content[start:start + chunk_size]
-                if not chunk.strip():
-                    continue
-                result = self.audit_document(
-                    chunk,
-                    language=lang,
-                    audit_basis=(audit_basis or "")[:2000],
-                    skip_kimi=skip_kimi,
-                    review_id=review_id,
-                    request_label=request_label,
-                )
-                for issue in result.get("issues", []):
-                    issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
-                    all_issues.append(issue)
-                chunk_index += 1
-            return {"issues": all_issues}
-
-        # 使用完整的System Prompt模板（包含所有审核规则）
         base_system_prompt = build_system_prompt()
 
         if is_english:
@@ -1793,25 +1853,82 @@ Return empty issues array if no high-confidence issues found."""
 
 如果没有高置信度问题，返回空数组。"""
 
+        return {
+            "language": lang,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
+
+    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk"):
+        lang = language or "en"
+        is_english = lang in ("en", "both")
+
+        content = content or ""
+        if len(content) > 7000:
+            all_issues = []
+            chunk_size = 6000
+            overlap = 500
+            chunk_index = 1
+            for start in range(0, len(content), chunk_size - overlap):
+                chunk = content[start:start + chunk_size]
+                if not chunk.strip():
+                    continue
+                result = self.audit_document(
+                    chunk,
+                    language=lang,
+                    audit_basis=(audit_basis or "")[:2000],
+                    skip_kimi=skip_kimi,
+                    review_id=review_id,
+                    request_label=request_label,
+                )
+                for issue in result.get("issues", []):
+                    issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
+                    all_issues.append(issue)
+                chunk_index += 1
+            return {"issues": all_issues}
+
+        prompt_payload = self.build_audit_prompt_payload(content, language=lang, audit_basis=audit_basis)
+        system_prompt = prompt_payload["system_prompt"]
+        user_prompt = prompt_payload["user_prompt"]
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
 
-        result = self.chat(
-            messages,
-            max_tokens=2048,
-            temperature=0.2,
-            skip_kimi=skip_kimi,
-            request_label=request_label,
-            review_id=review_id,
-        )
-        if not result:
+        if self.qwen_client:
+            primary_issues = self._run_provider_audit("qwen", messages, content, request_label=request_label, review_id=review_id)
+        else:
+            result = self.chat(
+                messages,
+                max_tokens=2048,
+                temperature=0.2,
+                skip_kimi=skip_kimi,
+                request_label=request_label,
+                review_id=review_id,
+            )
+            if not result:
+                return {"issues": []}
+            data = self._extract_json(result, {"issues": []})
+            primary_issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+            for issue in primary_issues:
+                issue["source_models"] = ["fallback"]
+                issue["consensus_score"] = int(issue.get("confidence") or 0)
+
+        if not primary_issues and not self.deepseek_client:
             return {"issues": []}
 
-        data = self._extract_json(result, {"issues": []})
-        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
-        return {"issues": issues}
+        secondary_issues = []
+        if self.deepseek_client:
+            secondary_issues = self._run_provider_audit("deepseek", messages, content, request_label=f"{request_label}.deepseek", review_id=review_id)
+
+        if not primary_issues:
+            return {"issues": secondary_issues}
+        if not secondary_issues:
+            return {"issues": primary_issues}
+
+        merged_issues = self._merge_audit_issue_sets(primary_issues, secondary_issues, "qwen", "deepseek")
+        return {"issues": merged_issues}
 
     # ------------------------------------------------------------------
     # 规则审核的二次验证

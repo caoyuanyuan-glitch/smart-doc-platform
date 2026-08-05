@@ -1379,11 +1379,18 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     all_chunks = _iter_ai_audit_chunks(content)
     chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit())
     if not chunks:
-        return []
+        return [], {"enabled": False, "selected_chunk_count": 0, "total_chunk_count": 0, "chunks": []}
 
     all_issues = []
     total = len(chunks)
     chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
+    trace = {
+        "enabled": True,
+        "selected_chunk_count": len(chunks),
+        "total_chunk_count": len(all_chunks),
+        "chunk_timeout_seconds": chunk_timeout,
+        "chunks": [],
+    }
     for index, start, chunk in chunks:
         budget_reached, budget_summary = _review_ai_budget_reached(review_id)
         if budget_reached:
@@ -1391,6 +1398,8 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 f"[审核] AI深度审核达到Token预算上限，停止后续分块: "
                 f"budget={_review_ai_token_budget()}, total_tokens={budget_summary.get('total_tokens', 0)}"
             )
+            trace["budget_reached"] = True
+            trace["budget_summary"] = budget_summary or {}
             break
         progress = 65 + int((index - 1) * 17 / max(total, 1))
         next_progress = 65 + int(index * 17 / max(total, 1))
@@ -1402,6 +1411,17 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f'正在进行AI快速增强 ({index}/{total})，规则已覆盖全文...',
         )
         selected_basis = _select_relevant_ai_review_basis(chunk, ai_review_basis_sections)
+        prompt_payload = ai_client.build_audit_prompt_payload(chunk, language=document_language, audit_basis=selected_basis)
+        basis_labels = _extract_basis_labels_from_text(selected_basis)
+        chunk_trace = {
+            "chunk_index": index,
+            "start": start,
+            "length": len(chunk),
+            "basis_labels": basis_labels,
+            "basis_preview": _compact_prompt_text(selected_basis, 240),
+            "system_prompt_preview": _compact_prompt_text(prompt_payload.get("system_prompt"), 2200),
+            "user_prompt_preview": _compact_prompt_text(prompt_payload.get("user_prompt"), 2200),
+        }
         print(
             f"[审核] AI深度审核分块 {index}/{total}, start={start}, length={len(chunk)}, "
             f"selected={len(chunks)}/{len(all_chunks)}, basis_len={len(selected_basis)}"
@@ -1410,12 +1430,28 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             chunk_issues, cache_hit = _run_cached_ai_chunk_review(review_id, chunk, document_language, selected_basis, chunk_timeout)
             for issue in chunk_issues:
                 issue['chapter'] = issue.get('chapter') or f'AI chunk {index}'
+                _normalize_issue_position_meta(
+                    issue,
+                    chunk_index=index,
+                    chunk_start=start,
+                    source_models=list(issue.get('source_models') or []),
+                    consensus_score=int(issue.get('consensus_score') or 0),
+                    basis_labels=basis_labels,
+                )
                 all_issues.append(issue)
+            chunk_trace["issue_count"] = len(chunk_issues)
+            chunk_trace["cache_hit"] = bool(cache_hit)
             print(f"[审核] AI深度审核分块 {index}/{total} 返回问题数={len(chunk_issues)}, cache_hit={cache_hit}")
         except concurrent.futures.TimeoutError:
+            chunk_trace["status"] = 'timeout'
             print(f"[审核] AI深度审核分块 {index}/{total} 超时({chunk_timeout:.0f}s), 保留规则审核结果并继续")
         except Exception as e:
+            chunk_trace["status"] = 'failed'
+            chunk_trace["error"] = str(e)[:200]
             print(f"[审核] AI深度审核分块 {index}/{total} 失败: {e}")
+        else:
+            chunk_trace["status"] = 'ok'
+        trace["chunks"].append(chunk_trace)
         set_progress(
             review_id,
             'running',
@@ -1423,7 +1459,8 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             min(82, next_progress),
             f'AI快速增强已完成 {index}/{total} 个分块...',
         )
-    return all_issues
+    trace["issue_count"] = len(all_issues)
+    return all_issues, trace
 
 
 def _filter_review_false_positives(issues):
@@ -1704,6 +1741,19 @@ def _normalize_review_issue_display(issues, content=None):
         context_chapter = extract_chapter(context, original_index)
         if re.match(r'^\d+(?:\.\d+)+\s+', context_chapter) and context_chapter != chapter:
             issue.chapter = context_chapter
+        meta = _issue_meta(issue)
+        source_models = meta.get('source_models')
+        if source_models and not getattr(issue, 'source_models', None):
+            issue.source_models = source_models
+        consensus_score = meta.get('consensus_score')
+        if consensus_score not in (None, '') and getattr(issue, 'consensus_score', None) in (None, ''):
+            issue.consensus_score = consensus_score
+        basis_labels = meta.get('basis_labels')
+        if basis_labels and not getattr(issue, 'basis_labels', None):
+            issue.basis_labels = basis_labels
+        chunk_index = meta.get('chunk_index')
+        if chunk_index not in (None, '') and getattr(issue, 'chunk_index', None) in (None, ''):
+            issue.chunk_index = chunk_index
     return issues
 
 
@@ -1777,6 +1827,33 @@ def _load_review_summary(summary_text):
         return json.loads(summary_text)
     except Exception:
         return {}
+
+
+def _compact_prompt_text(text, limit=280):
+    normalized = re.sub(r'\s+', ' ', str(text or '')).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + '...'
+
+
+def _extract_basis_labels_from_text(selected_basis):
+    labels = []
+    for match in re.finditer(r'【([^\n】]+)】', str(selected_basis or '')):
+        label = str(match.group(1) or '').strip()
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _normalize_issue_position_meta(issue, **meta):
+    position = _decode_issue_position(_issue_value(issue, 'position', ''))
+    position.update({key: value for key, value in meta.items() if value not in (None, '', [], {})})
+    _set_issue_value(issue, 'position', json.dumps(position, ensure_ascii=False))
+    return issue
+
+
+def _issue_meta(issue):
+    return _decode_issue_position(_issue_value(issue, 'position', ''))
 
 
 def _find_best_docx_paragraph(paragraphs, issue):
@@ -7163,14 +7240,17 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             issues.extend(candidate_rule_issues)
             print(f"[审核] 规则审核阶段共产出问题数={len(candidate_rule_issues)}")
 
+        ai_review_trace = {"enabled": False, "reason": "not_run"}
+        ai_review_basis_sections = []
         if document.file_type != 'xlsx' and mode in ["ai", "hybrid"] and has_ai_client:
             set_progress(review_id, 'running', 'AI智能审核', 65, '正在进行AI深度审核...')
             print(f"[审核] 开始AI智能审核，模式={mode}")
             try:
                 ai_review_basis_sections = _build_ai_review_basis_sections(spec_texts, document_language)
-                ai_issues = _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections)
+                ai_issues, ai_review_trace = _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections)
                 print(f"[审核] AI审核返回问题数={len(ai_issues)}")
                 _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
+                _log_review_ai_usage(review_id, "review.audit_chunk.deepseek", "AI复审Token统计")
                 for issue in ai_issues:
                     issue["source"] = "ai"
                     issue["severity"] = issue.get("severity") or "general"
@@ -7258,7 +7338,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 review_id=review_id,
                 limit=200,
             ),
+            "audit_chunk_deepseek": ai_client.summarize_usage_events(
+                request_label="review.audit_chunk.deepseek",
+                review_id=review_id,
+                limit=200,
+            ),
         }
+        knowledge_labels = [str(section.get('label') or '') for section in ai_review_basis_sections if str(section.get('label') or '').strip()]
         summary = json.dumps({
             "total": len(issues),
             "fatal": len([i for i in issues if i.get("severity") == "fatal"]),
@@ -7271,6 +7357,12 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             "cache_version": _review_cache_version(),
             "cache_hit": False,
             "ai_usage": review_ai_usage,
+            "ai_review": ai_review_trace,
+            "knowledge_basis": {
+                "enabled": bool(ai_review_basis_sections),
+                "labels": knowledge_labels,
+                "count": len(knowledge_labels),
+            },
         })
 
         set_progress(review_id, 'completed', '完成', 100, f'审核完成，发现 {len(issues)} 个问题')
