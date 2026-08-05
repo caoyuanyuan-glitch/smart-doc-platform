@@ -278,6 +278,12 @@ def parse_docx(file_path):
         text = ""
         for paragraph in doc.paragraphs:
             text += paragraph.text + "\n"
+        # Extract table text — critical for technical documents with spec tables
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                if row_text.strip():
+                    text += row_text + "\n"
         return text.strip()
     except Exception as e:
         raise ValueError(f"DOCX解析失败: {str(e)}")

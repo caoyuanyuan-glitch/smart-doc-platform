@@ -13,6 +13,7 @@ class ReviewProgress(BaseModel):
 class ReviewCreate(BaseModel):
     document_id: int
     mode: str = "hybrid"
+    provider: Optional[str] = None
 
 class Review(BaseModel):
     id: int
@@ -45,6 +46,7 @@ class IssueCreate(BaseModel):
     source: str = "rule"
     position: str = "{}"
     status: str = "pending"
+    providers: Optional[str] = None  # JSON array string: '["qwen","deepseek"]'
 
 class Issue(BaseModel):
     id: int
@@ -62,6 +64,7 @@ class Issue(BaseModel):
     source: str
     status: str
     position: str
+    providers: Optional[str] = None  # JSON array: ["qwen","deepseek"]
 
     class Config:
         orm_mode = True

@@ -8,6 +8,7 @@ class Review(Base):
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(Integer)
     mode = Column(String)
+    provider = Column(String, nullable=True)
     status = Column(String, default="pending")
     total_issues = Column(Integer, default=0)
     summary = Column(Text)

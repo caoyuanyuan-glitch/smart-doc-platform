@@ -146,8 +146,18 @@ def evaluate(review_id, markers):
     db = SessionLocal()
     try:
         issues = [issue_to_dict(issue) for issue in db.query(Issue).filter(Issue.review_id == review_id).all()]
+        review = db.query(Review).filter(Review.id == review_id).first()
+        summary_raw = review.summary if review else "{}"
     finally:
         db.close()
+
+    summary = {}
+    try:
+        summary = json.loads(summary_raw) if isinstance(summary_raw, str) else (summary_raw or {})
+    except Exception:
+        pass
+
+    stage_diagnostics = summary.get("stage_diagnostics", [])
 
     noop = []
     numeric_changed = []
@@ -181,6 +191,7 @@ def evaluate(review_id, markers):
         "numeric_changed": len(numeric_changed),
         "protected_meaning_changed": len(protected_changed),
         "marker_hits": marker_hits,
+        "stage_diagnostics": stage_diagnostics,
     }
     return result
 
@@ -216,12 +227,34 @@ def normalize_filename_for_match(filename):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate review issue quality for a completed review.")
-    parser.add_argument("--review-id", type=int, required=True)
+    parser.add_argument("--review-id", type=int, required=False)
     parser.add_argument("--marker", action="append", default=[])
     parser.add_argument("--human-baseline", help="Markdown file generated from human review annotations")
+    parser.add_argument("--config", help="JSON config file for batch evaluation")
+    parser.add_argument("--consistency-check", action="store_true", help="Check consistency of the same document across runs")
     args = parser.parse_args()
 
     markers = args.marker or DEFAULT_MARKERS
+
+    # Batch evaluation from config file
+    if args.config:
+        results = batch_evaluate_from_config(args.config, markers)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 0 if results.get("summary", {}).get("regressions", 0) == 0 else 1
+
+    # Consistency check mode
+    if args.consistency_check:
+        if not args.review_id:
+            print("ERROR: --review-id is required for --consistency-check", file=sys.stderr)
+            return 2
+        result = run_consistency_check(args.review_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("consistent", True) else 1
+
+    if not args.review_id:
+        print("ERROR: --review-id, --config, or --consistency-check is required", file=sys.stderr)
+        return 2
+
     if args.human_baseline:
         result = evaluate_with_human_baseline(args.review_id, markers, args.human_baseline)
     else:
@@ -235,6 +268,183 @@ def main():
         or any(result["marker_hits"].values())
     )
     return 1 if failed else 0
+
+
+def batch_evaluate_from_config(config_path, markers):
+    """Evaluate multiple reviews from a JSON config file.
+
+    Config format::
+
+        {
+          "documents": [
+            {
+              "name": "test_doc",
+              "review_id": 123,
+              "baseline": "path/to/human_baseline.md",
+              "allowed_misses": ["AI-STYLE-001"],
+              "explicit_false_positives": ["R029"]
+            }
+          ],
+          "thresholds": {
+            "max_noop_rate": 0.05,
+            "max_numeric_change_rate": 0.0,
+            "max_protected_change_rate": 0.0,
+            "min_high_value_rate": 0.3
+          }
+        }
+    """
+    config = json.loads(Path(config_path).read_text(encoding="utf-8-sig"))
+    documents_cfg = config.get("documents", [])
+    thresholds = config.get("thresholds", {})
+
+    results = []
+    summary = {"total": 0, "passed": 0, "failed": 0, "regressions": 0}
+
+    for doc_cfg in documents_cfg:
+        review_id = doc_cfg.get("review_id")
+        if not review_id:
+            continue
+        baseline_path = doc_cfg.get("baseline")
+        if baseline_path:
+            result = evaluate_with_human_baseline(review_id, markers, baseline_path)
+        else:
+            result = evaluate(review_id, markers)
+
+        total = result["total"]
+        noop_rate = result["noop_suggestions"] / max(total, 1)
+        numeric_rate = result["numeric_changed"] / max(total, 1)
+        protected_rate = result["protected_meaning_changed"] / max(total, 1)
+        high_value_rate = result["effectiveness"]["high_value_rate"]
+
+        checks = {
+            "noop_rate_ok": noop_rate <= thresholds.get("max_noop_rate", 0.05),
+            "numeric_rate_ok": numeric_rate <= thresholds.get("max_numeric_change_rate", 0.0),
+            "protected_rate_ok": protected_rate <= thresholds.get("max_protected_change_rate", 0.0),
+            "high_value_rate_ok": high_value_rate >= thresholds.get("min_high_value_rate", 0.3),
+        }
+
+        all_ok = all(checks.values())
+        summary["total"] += 1
+        if all_ok:
+            summary["passed"] += 1
+        else:
+            summary["failed"] += 1
+            summary["regressions"] += 1
+
+        results.append({
+            "name": doc_cfg.get("name", f"review_{review_id}"),
+            "review_id": review_id,
+            "passed": all_ok,
+            "checks": checks,
+            "metrics": {
+                "total": total,
+                "noop_rate": round(noop_rate, 4),
+                "numeric_change_rate": round(numeric_rate, 4),
+                "protected_change_rate": round(protected_rate, 4),
+                "high_value_rate": round(high_value_rate, 4),
+            },
+            "result": result,
+        })
+
+    return {"summary": summary, "results": results}
+
+
+def run_consistency_check(review_id):
+    """Check consistency of review results for the same document across runs.
+
+    Compares formal issue count, rule distribution, and severity distribution
+    against previous completed runs for the same document.
+    """
+    db = SessionLocal()
+    try:
+        current_review = db.query(Review).filter(Review.id == review_id).first()
+        if not current_review:
+            return {"error": "Review not found", "review_id": review_id}
+
+        # Get previous completed reviews for the same document
+        previous = (
+            db.query(Review)
+            .filter(
+                Review.document_id == current_review.document_id,
+                Review.id != review_id,
+                Review.status == "completed",
+            )
+            .order_by(Review.id.desc())
+            .limit(5)
+            .all()
+        )
+
+        if not previous:
+            return {
+                "review_id": review_id,
+                "consistent": True,
+                "message": "No previous reviews to compare against",
+                "current_total": current_review.total_issues or 0,
+            }
+
+        # Compare with the most recent previous run
+        prev = previous[0]
+
+        # Compare issue counts
+        current_total = current_review.total_issues or 0
+        prev_total = prev.total_issues or 0
+        count_delta = abs(current_total - prev_total)
+        count_delta_pct = round(count_delta / max(prev_total, 1) * 100, 1)
+
+        # Compare severity distribution
+        current_severity = _get_severity_distribution(db, review_id)
+        prev_severity = _get_severity_distribution(db, prev.id)
+
+        # Compare rule distribution
+        current_rules = _get_rule_distribution(db, review_id)
+        prev_rules = _get_rule_distribution(db, prev.id)
+
+        # Jaccard similarity of rule sets
+        current_rule_set = set(current_rules.keys())
+        prev_rule_set = set(prev_rules.keys())
+        jaccard = round(len(current_rule_set & prev_rule_set) / max(len(current_rule_set | prev_rule_set), 1), 4)
+
+        is_consistent = jaccard >= 0.5 and count_delta_pct <= 30
+
+        return {
+            "review_id": review_id,
+            "previous_review_id": prev.id,
+            "consistent": is_consistent,
+            "current_total": current_total,
+            "previous_total": prev_total,
+            "count_delta": count_delta,
+            "count_delta_pct": count_delta_pct,
+            "rule_jaccard": jaccard,
+            "severity_comparison": {
+                "current": current_severity,
+                "previous": prev_severity,
+            },
+            "rule_comparison": {
+                "current_top": dict(sorted(current_rules.items(), key=lambda x: -x[1])[:10]),
+                "previous_top": dict(sorted(prev_rules.items(), key=lambda x: -x[1])[:10]),
+            },
+            "previous_runs_compared": len(previous),
+        }
+    finally:
+        db.close()
+
+
+def _get_severity_distribution(db, review_id):
+    issues = db.query(Issue).filter(Issue.review_id == review_id).all()
+    dist = {}
+    for issue in issues:
+        sev = (issue.severity or "general").lower()
+        dist[sev] = dist.get(sev, 0) + 1
+    return dist
+
+
+def _get_rule_distribution(db, review_id):
+    issues = db.query(Issue).filter(Issue.review_id == review_id).all()
+    dist = {}
+    for issue in issues:
+        rule = issue.rule or "UNKNOWN"
+        dist[rule] = dist.get(rule, 0) + 1
+    return dist
 
 
 if __name__ == "__main__":

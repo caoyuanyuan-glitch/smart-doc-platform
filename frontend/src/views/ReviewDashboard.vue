@@ -54,6 +54,71 @@
       </div>
       <v-chart class="chart" :option="issueBarOption" autoresize />
     </div>
+
+    <div class="engine-health-section">
+      <div class="section-title">
+        <span>审核引擎健康度</span>
+        <small>规则迁移状态 &amp; 引擎版本</small>
+      </div>
+      <div class="health-grid">
+        <div class="health-card">
+          <div class="health-label">确定性规则迁移率</div>
+          <div class="health-value" :class="ruleMigration.migration_rate >= 100 ? 'text-green' : 'text-orange'">
+            {{ ruleMigration.migration_rate }}%
+          </div>
+          <div class="health-desc">
+            {{ ruleMigration.migrated }} / {{ ruleMigration.total_rules }} 条规则已实现
+          </div>
+          <el-progress
+            :percentage="ruleMigration.migration_rate"
+            :color="ruleMigration.migration_rate >= 100 ? '#22c55e' : '#f97316'"
+            :stroke-width="8"
+            style="margin-top: 12px"
+          />
+        </div>
+        <div class="health-card">
+          <div class="health-label">规则引擎组数</div>
+          <div class="health-value text-blue">{{ ruleMigration.groups?.length || 0 }}</div>
+          <div class="health-desc">已注册规则分组</div>
+          <el-tag
+            v-for="g in ruleMigration.groups"
+            :key="g.group_id"
+            size="small"
+            :type="g.migrated ? 'success' : 'warning'"
+            style="margin: 4px 4px 0 0"
+          >
+            {{ g.label }} ({{ g.rule_count }})
+          </el-tag>
+        </div>
+        <div class="health-card">
+          <div class="health-label">快速评测</div>
+          <div class="health-value" style="font-size: 16px; margin-top: 16px">
+            <el-select v-model="evalDatasetId" size="small" placeholder="选择评测集" style="width: 200px">
+              <el-option label="确定性规则专项" value="deterministic_rules" />
+              <el-option label="MGIseq 通用" value="mgiseq_general" />
+              <el-option label="AI 一致性" value="ai_consistency" />
+            </el-select>
+          </div>
+          <el-button
+            type="primary"
+            size="small"
+            :loading="evalRunning"
+            @click="runBatchEval"
+            style="margin-top: 12px"
+          >
+            {{ evalRunning ? '评测中...' : '运行评测' }}
+          </el-button>
+          <div v-if="evalResult" style="margin-top: 8px; font-size: 12px">
+            <span :class="evalResult.ci_pass ? 'text-green' : 'text-red'">
+              {{ evalResult.ci_pass ? '通过' : '未通过' }}
+            </span>
+            <span style="margin-left: 8px; color: #94a3b8">
+              {{ evalResult.violations?.length || 0 }} 项违规
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -84,6 +149,18 @@ const quality = reactive({
   detection_rate: 0
 })
 const issueDistribution = ref([])
+
+// Engine health
+const ruleMigration = reactive({
+  total_rules: 0,
+  migrated: 0,
+  migration_rate: 0,
+  groups: [],
+})
+const evalDatasetId = ref('deterministic_rules')
+const evalRunning = ref(false)
+const evalResult = ref(null)
+
 let refreshTimer = null
 
 const issueRows = computed(() => {
@@ -165,8 +242,35 @@ async function loadDashboard() {
 
 onMounted(() => {
   loadDashboard()
+  loadRuleMigration()
   refreshTimer = setInterval(loadDashboard, 5 * 60 * 1000)
 })
+
+async function loadRuleMigration() {
+  try {
+    const response = await reviewAPI.getRuleMigration()
+    Object.assign(ruleMigration, response.data || response)
+  } catch (error) {
+    console.error('加载规则迁移状态失败:', error)
+  }
+}
+
+async function runBatchEval() {
+  if (evalRunning.value) return
+  evalRunning.value = true
+  evalResult.value = null
+  try {
+    const formData = new FormData()
+    formData.append('dataset_id', evalDatasetId.value)
+    formData.append('ci_mode', 'true')
+    const response = await reviewAPI.runBatchEval(formData)
+    evalResult.value = response.data || response
+  } catch (error) {
+    ElMessage.error(`评测失败: ${getAPIErrorMessage(error)}`)
+  } finally {
+    evalRunning.value = false
+  }
+}
 
 onUnmounted(() => {
   if (refreshTimer) clearInterval(refreshTimer)
@@ -199,6 +303,17 @@ onUnmounted(() => {
 .section-title { display: flex; align-items: baseline; gap: 10px; font-size: 16px; font-weight: 700; margin-bottom: 16px; }
 .section-title small { color: #94a3b8; font-size: 12px; font-weight: 500; }
 .chart { height: 360px; }
-@media (max-width: 1100px) { .summary-grid { grid-template-columns: repeat(2, minmax(180px, 1fr)); } }
+.engine-health-section { margin-top: 8px; }
+.health-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.health-card { background: #fff; border-radius: 12px; padding: 20px 22px; box-shadow: 0 1px 8px rgba(15,23,42,0.05); border: 1px solid #e2e8f0; }
+.health-label { color: #64748b; font-size: 13px; font-weight: 700; }
+.health-value { margin-top: 10px; font-size: 28px; font-weight: 900; }
+.health-value.text-green { color: #22c55e; }
+.health-value.text-orange { color: #f97316; }
+.health-value.text-blue { color: #2563eb; }
+.health-desc { margin-top: 6px; color: #94a3b8; font-size: 12px; }
+.text-green { color: #22c55e; }
+.text-red { color: #dc2626; }
+@media (max-width: 1100px) { .summary-grid { grid-template-columns: repeat(2, minmax(180px, 1fr)); } .health-grid { grid-template-columns: 1fr; } }
 @media (max-width: 768px) { .review-dashboard { padding: 16px; } .filter-bar { flex-wrap: wrap; } .summary-grid { grid-template-columns: 1fr; } }
 </style>

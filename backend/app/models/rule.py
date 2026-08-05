@@ -13,5 +13,6 @@ class Rule(Base):
     example = Column(Text)
     suggestion = Column(Text)
     audit_basis = Column(Text)
+    severity = Column(String, default="general")  # fatal, serious, general, suggestion
     language = Column(String, default="both")  # cn, en, both
     created_at = Column(DateTime, default=datetime.utcnow)

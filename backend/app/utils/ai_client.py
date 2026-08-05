@@ -20,6 +20,9 @@ from app.api.review_rules import (
     BRITISH_AMERICAN_SPELLINGS
 )
 
+# 分层提示词构建器
+from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
+
 ANTHROPIC_VERSION = "2023-06-01"
 IMAGE_DRAFT_BATCH_SIZE = 2
 IMAGE_DRAFT_MAX_WORKERS = 6
@@ -737,6 +740,85 @@ class AIClient:
             if content and content.strip():
                 return content
 
+        return None
+
+    def chat_with_provider(self, provider, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        """强制使用指定 provider 调用（不回退）。
+        
+        Args:
+            provider: 'qwen' 或 'deepseek'
+            messages: OpenAI 格式消息列表
+            max_tokens, temperature: 模型参数
+            request_label, review_id: 用量追踪
+        
+        Returns:
+            str or None: 模型回复内容
+        """
+        provider = str(provider or "").strip().lower()
+        
+        provider_map = {
+            "qwen": ("Qwen", self.qwen_client, self.qwen_model),
+            "deepseek": ("DeepSeek", self.deepseek_client, self.deepseek_model),
+            "kimi": ("Kimi", self.kimi_client, self.kimi_model),
+            "arkclaw": ("ArkClaw", self.arkclaw_client, self.arkclaw_model),
+            "proxy": ("Proxy", self.proxy_client, self.fallback_model),
+        }
+        
+        if provider not in provider_map:
+            print(f"[AI] chat_with_provider: unknown provider '{provider}', falling back to default chain")
+            return self.chat(messages, max_tokens=max_tokens, temperature=temperature,
+                           request_label=request_label, review_id=review_id)
+        
+        name, client, model = provider_map[provider]
+        
+        if not client:
+            print(f"[AI] chat_with_provider: {name} not configured, falling back to default chain")
+            return self.chat(messages, max_tokens=max_tokens, temperature=temperature,
+                           request_label=request_label, review_id=review_id)
+        
+        print(f"[AI] chat_with_provider: using {name} ({model})")
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                started_at = time.time()
+                request_kwargs = (
+                    self._build_kimi_request_kwargs(
+                        model=model, messages=messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                    ) if name == "Kimi" else {
+                        "model": model, "messages": messages,
+                        "max_tokens": max_tokens, "temperature": temperature,
+                    }
+                )
+                call_client = client.with_options(
+                    timeout=self.kimi_chat_timeout if name == "Kimi" else self.provider_chat_timeout,
+                    max_retries=0,
+                )
+                response = call_client.chat.completions.create(**request_kwargs)
+                self._record_usage_event(
+                    name, model,
+                    getattr(response, "usage", None),
+                    request_label=request_label,
+                    review_id=review_id,
+                    elapsed_ms=round((time.time() - started_at) * 1000),
+                )
+                content = response.choices[0].message.content or ""
+                if content.strip():
+                    return content
+                print(f"[AI] {name} 返回空内容")
+                break
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries:
+                    print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 重试 ({attempt}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                print(f"[AI] {name} 调用失败: {error_str[:100]}")
+                break
+        
         return None
 
     @staticmethod
@@ -1734,11 +1816,21 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def build_audit_prompt_payload(self, content, language=None, audit_basis=""):
+    def build_audit_prompt_payload(self, content, language=None, audit_basis="", chapter_context=None):
         lang = language or "en"
         is_english = lang in ("en", "both")
         content = content or ""
-        base_system_prompt = build_system_prompt()
+        try:
+            builder = ReviewPromptBuilder(
+                document_type="technical_document",
+                language=lang,
+                chapter_context=chapter_context or {},
+                load_from_db=True,
+            )
+            base_system_prompt = builder.build_audit_system_prompt()
+        except Exception as e:
+            print(f"[ai_client] 分层提示词构建失败，回退到静态规则: {e}")
+            base_system_prompt = build_system_prompt()
 
         if is_english:
             system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.
@@ -1749,6 +1841,13 @@ REVIEW GOAL:
 - Behave like a human release reviewer, not a grammar checker.
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
 - Ordinary grammar, article usage, punctuation, capitalization, spacing, and style preferences are low value. Report them only when they make an instruction ambiguous, incomplete, or impossible to perform.
+
+🚫 FORBIDDEN issue types (reporting any of these is an error):
+- ❌ Single punctuation marks (e.g. "." → "," or ":" → ";")
+- ❌ Single characters or letters (e.g. "a" → "an" with only one char)
+- ❌ Issues where original differs from expected only by one punctuation or space
+- ❌ Pure formatting differences (fullwidth/halfwidth, spacing preferences)
+- ❌ Issues where the original field is shorter than 2 meaningful characters
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
@@ -1764,7 +1863,13 @@ IMPORTANT REMINDERS:
   {', '.join(ENGLISH_CORRECT_SPELLINGS[:50])}...
 - British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
 - Product names, company names, model numbers, and technical abbreviations are VALID unless context proves an error.
-- If the review basis includes CYY human review experience, use it to identify content-level defects. Focus on evidence-backed sentence meaning, revision history, terminology consistency, table content, figure references, page boundary content loss, and topic-structure issues."""
+- If the review basis includes CYY human review experience, use it to identify content-level defects. Focus on evidence-backed sentence meaning, revision history, terminology consistency, table content, figure references, page boundary content loss, and topic-structure issues.
+
+FILENAME CHECKING:
+- When the context prompt provides a document filename, verify it against the document content.
+- Check for: spelling errors in filename, product name mismatch between filename and content, incorrect version/date format in filename, missing or extra spaces/underscores in product names in filename.
+- If the filename contains a product name (e.g. "DNBSEQ-T7"), verify that the same product name appears consistently in the document body.
+- Flag filename issues with type "FilenameError" and rule "FILENAME-001" (spelling), "FILENAME-002" (product mismatch), or "FILENAME-003" (version/date format)."""
 
             user_prompt = f"""Please review the following English technical document.
 
@@ -1774,16 +1879,24 @@ Document excerpt:
 Release checklist and review basis:
 {audit_basis[:3500] if audit_basis else 'No additional checklist provided.'}
 
+Requirements:
+1. Output results in JSON format
+2. Report only issues with clear textual evidence
+3. CYY human review experience baseline is for identifying content issues - report with evidence
+4. Deduplicate: report each error only once per document
+5. If the system prompt provided a document filename, check for filename spelling errors and product name consistency with body content
+
 Output ONLY strict JSON:
 {{
   "issues": [
     {{
       "severity": "serious|general|suggestion",
-      "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar",
+      "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
-      "rule": "which rule is violated"
+      "rule": "which rule is violated",
+      "confidence": 50-100
     }}
   ],
   "summary": {{
@@ -1794,7 +1907,12 @@ Output ONLY strict JSON:
   }}
 }}
 
-Return empty issues array if no high-confidence issues found."""
+Confidence scoring guide:
+- 90-100: Definite error (misspelling, wrong terminology, factual error)
+- 70-89: Likely error (non-standard grammar, inconsistent formatting)
+- 50-69: Uncertain / needs human review (report only if safety or compliance related)
+
+Return empty issues array if no issues with confidence >= 70. Only report confidence 50-69 issues when they affect operational safety or regulatory compliance."""
         else:
             system_prompt = f"""{base_system_prompt}
 
@@ -1803,19 +1921,33 @@ Return empty issues array if no high-confidence issues found."""
 - 优先输出影响发布审批、法规合规、用户操作、信息完整性、术语一致性、表格内容完整性、图文引用、版本记录、默认账号密码、IP/URL 暴露、法律声明的内容问题。
 - 普通语法、冠词、标点、大小写、空格、风格偏好属于低价值问题；只有会导致说明不清、步骤不可执行或合规风险时才输出。
 
+🚫 严禁输出的问题类型（违反即为错误）：
+- ❌ 单个标点符号（如 "。" → "，" 或 "." → ","）
+- ❌ 单个中文字符或英文字母（如 "的" → "地" 且仅有一个字）
+- ❌ 原文与建议仅差一个标点或空格
+- ❌ 纯格式差异（全角/半角标点互换、中英文空格增减）
+- ❌ original 字段长度小于 2 个有意义字符的问题
+
 重要提醒：
 - 只报告有明确文本证据的问题。
 - 不要只为了可读性、语气或风格润色而输出问题。
 - 不要把解析残片、截断单词、换行造成的半词识别为拼写错误。
 - 不要反复报告 click/select/open 等普通 UI 动词；只有缺少按钮、图标、字段、菜单或页面对象导致用户无法操作时才报告。
-- UI 对象缺失时，不要凭空猜测 Browse、Edit 等按钮名；只有原文节选中出现该名称时才能写入建议。证据不足时使用“对应图标/按钮”这类泛化建议。
+- UI 对象缺失时，不要凭空猜测 Browse、Edit 等按钮名；只有原文节选中出现该名称时才能写入建议。证据不足时使用"对应图标/按钮"这类泛化建议。
 - 版式外观、列宽、字体大小、图标尺寸、图片尺寸、表格拥挤、图形摆放交由人工审核。只有文本证据能证明内容缺失、编号错误、标题错误或引用断裂时，才报告表格或图片相关问题。
 - 修改建议必须严格保持原意，不得擅自改变试剂名称、供应方/用户角色、产品名称、合规声明、存储动作或技术术语。
 - 不得擅自改变数字值、数量、列数/行数、温度、时间、体积、浓度或页码；只有原文证据能直接证明数字错误时才可报告。
 - 数字和单位之间必须保留一个空格，包括 μL、mL、ng、bp、°C、%、× 和缓冲液名称；可以补缺失空格，不能删除已有空格。
 - 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
 - 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。
-- 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。"""
+- 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。
+
+文件名检查（当上下文提供了文档文件名时）：
+- 检查文件名是否存在拼写错误。
+- 检查文件名中的产品名称是否与正文一致（如文件名含"DNBSEQ-T7"但正文写"DNBSEQ-T10"则为错误）。
+- 检查文件名中的版本号、日期格式是否规范。
+- 检查文件名中产品名称的拼写、大小写、空格/下划线是否与正文一致。
+- 文件名问题类型标记为 "文件名错误"，规则用 FILENAME-001（拼写）、FILENAME-002（产品名不一致）、FILENAME-003（版本/日期格式）。"""
 
             user_prompt = f"""请审核下面这段中文技术文档。
 
@@ -1830,17 +1962,19 @@ Return empty issues array if no high-confidence issues found."""
 2. 只报告有明确文本证据的真实问题
 3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
+5. 如果系统提示中给出了文档文件名，请检查文件名拼写、产品名与正文一致性
 
 输出严格JSON：
 {{
   "issues": [
     {{
-      "type": "合规|发布风险|操作步骤|信息完整性|术语|表格|图文引用|语法",
+      "type": "合规|发布风险|操作步骤|信息完整性|术语|表格|图文引用|语法|文件名错误",
       "severity": "serious|general|suggestion",
       "location": "章节名或行号",
       "original": "原文内容",
       "expected": "正确写法",
-      "rule": "违反的具体规则"
+      "rule": "违反的具体规则",
+      "confidence": 50-100
     }}
   ],
   "summary": {{
@@ -1851,7 +1985,12 @@ Return empty issues array if no high-confidence issues found."""
   }}
 }}
 
-如果没有高置信度问题，返回空数组。"""
+confidence 评分指南：
+- 90-100：确凿错误（拼写错误、术语用错、事实性错误）
+- 70-89：很可能有误（语法不规范、格式不一致）
+- 50-69：可疑/需人工确认（只有强烈怀疑时才报告，否则不报告）
+
+如果没有高置信度(≥70)问题，返回空数组。50-69的问题只在影响操作安全或法规合规时才报告。"""
 
         return {
             "language": lang,
@@ -1859,9 +1998,8 @@ Return empty issues array if no high-confidence issues found."""
             "user_prompt": user_prompt,
         }
 
-    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk"):
+    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk", chapter_context=None, force_provider=None):
         lang = language or "en"
-        is_english = lang in ("en", "both")
 
         content = content or ""
         if len(content) > 7000:
@@ -1880,6 +2018,8 @@ Return empty issues array if no high-confidence issues found."""
                     skip_kimi=skip_kimi,
                     review_id=review_id,
                     request_label=request_label,
+                    chapter_context=chapter_context,
+                    force_provider=force_provider,
                 )
                 for issue in result.get("issues", []):
                     issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
@@ -1887,7 +2027,12 @@ Return empty issues array if no high-confidence issues found."""
                 chunk_index += 1
             return {"issues": all_issues}
 
-        prompt_payload = self.build_audit_prompt_payload(content, language=lang, audit_basis=audit_basis)
+        prompt_payload = self.build_audit_prompt_payload(
+            content,
+            language=lang,
+            audit_basis=audit_basis,
+            chapter_context=chapter_context,
+        )
         system_prompt = prompt_payload["system_prompt"]
         user_prompt = prompt_payload["user_prompt"]
 
@@ -1895,6 +2040,27 @@ Return empty issues array if no high-confidence issues found."""
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
+
+        if force_provider:
+            forced_issues = self._run_provider_audit(force_provider, messages, content, request_label=request_label, review_id=review_id)
+            if forced_issues:
+                return {"issues": forced_issues}
+            result = self.chat_with_provider(
+                force_provider,
+                messages,
+                max_tokens=2048,
+                temperature=0.2,
+                request_label=request_label,
+                review_id=review_id,
+            )
+            if not result:
+                return {"issues": []}
+            data = self._extract_json(result, {"issues": []})
+            issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+            for issue in issues:
+                issue["source_models"] = [str(force_provider or "")]
+                issue["consensus_score"] = int(issue.get("confidence") or 0)
+            return {"issues": issues}
 
         if self.qwen_client:
             primary_issues = self._run_provider_audit("qwen", messages, content, request_label=request_label, review_id=review_id)
@@ -1933,7 +2099,7 @@ Return empty issues array if no high-confidence issues found."""
     # ------------------------------------------------------------------
     # 规则审核的二次验证
     # ------------------------------------------------------------------
-    def filter_rule_false_positives(self, candidate_issues, document_language, review_id=None, request_label="review.rule_false_positive_filter"):
+    def filter_rule_false_positives(self, candidate_issues, document_language, review_id=None, request_label="review.rule_false_positive_filter", force_provider=None):
         if not candidate_issues:
             return []
 
@@ -1996,13 +2162,20 @@ Only high-confidence false positives may be removed."""
 只有确定为误报的项才返回 false_positive=true。"""
 
             messages = [{"role": "user", "content": prompt}]
-            result = self.chat(
-                messages,
-                max_tokens=2500,
-                temperature=0.1,
-                request_label=request_label,
-                review_id=review_id,
-            )
+            if force_provider:
+                result = self.chat_with_provider(
+                    force_provider, messages,
+                    max_tokens=2500, temperature=0.1,
+                    request_label=request_label, review_id=review_id,
+                )
+            else:
+                result = self.chat(
+                    messages,
+                    max_tokens=2500,
+                    temperature=0.1,
+                    request_label=request_label,
+                    review_id=review_id,
+                )
             if not result:
                 filtered.extend(chunk)
                 continue
