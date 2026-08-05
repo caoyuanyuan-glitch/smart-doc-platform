@@ -82,7 +82,12 @@ export const documentAPI = {
 }
 
 export const reviewAPI = {
-  create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode }, timeout: 300000 }),
+  create: (documentId, mode, provider, providers) => {
+    const params = { mode, timeout: 300000 }
+    if (provider) params.provider = provider
+    if (providers && providers.length > 0) params.providers = providers.join(',')
+    return instance.post(`/review/${documentId}`, {}, { params })
+  },
   compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
     const formData = new FormData()
     formData.append('main_file', mainFile)
@@ -110,7 +115,20 @@ export const reviewAPI = {
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),
   exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' }),
-  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' })
+  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' }),
+  getTraces: (id) => instance.get(`/review/${id}/traces`),
+  getCoverage: (id) => instance.get(`/review/${id}/coverage`),
+  getTerminology: (id) => instance.get(`/review/${id}/terminology`),
+  getSimilarDocs: (id) => instance.get(`/review/${id}/similar-documents`),
+  reindex: (id) => instance.post(`/review/${id}/reindex`),
+  search: (q, limit = 10) => instance.get('/review/search', { params: { q, limit } }),
+  getAggregatedReport: (id) => instance.get(`/review/${id}/aggregated-report`),
+  getRuleMigration: () => instance.get('/review/engine/rule-migration'),
+  runBatchEval: (params) => instance.post('/review/eval/batch', params, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  }),
+  getStageDiagnostics: (id) => instance.get(`/review/${id}/stage-diagnostics`),
+  getProviderStatus: () => instance.get('/review/provider-status'),
 }
 
 export const compareAPI = {

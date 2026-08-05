@@ -7,7 +7,8 @@ from datetime import datetime
 def create_review(db: Session, review: ReviewCreate):
     db_review = Review(
         document_id=review.document_id,
-        mode=review.mode
+        mode=review.mode,
+        provider=review.provider,
     )
     db.add(db_review)
     db.commit()
@@ -50,7 +51,8 @@ def create_issue(db: Session, issue: IssueCreate):
         confidence=issue.confidence,
         source=issue.source,
         position=issue.position,
-        status=issue.status
+        status=issue.status,
+        providers=issue.providers,
     )
     db.add(db_issue)
     db.commit()

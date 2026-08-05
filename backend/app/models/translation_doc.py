@@ -25,5 +25,4 @@ class TranslationDoc(Base):
     ai_word_count = Column(Integer, default=0)
     memory_word_count = Column(Integer, default=0)
     batch_id = Column(String, default="", index=True)
-    status = Column(String, default="", index=True)
     created_at = Column(DateTime, default=datetime.utcnow)

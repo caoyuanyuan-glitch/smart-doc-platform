@@ -37,6 +37,9 @@ def _ensure_legacy_sqlite_columns():
     if rule_columns and 'language' not in rule_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE rules ADD COLUMN language VARCHAR DEFAULT 'both'"))
+    if rule_columns and 'severity' not in rule_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE rules ADD COLUMN severity VARCHAR DEFAULT 'general'"))
 
     try:
         review_columns = {col['name'] for col in inspector.get_columns('reviews')}
@@ -46,6 +49,18 @@ def _ensure_legacy_sqlite_columns():
     if review_columns and 'completed_at' not in review_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE reviews ADD COLUMN completed_at DATETIME"))
+    if review_columns and 'provider' not in review_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE reviews ADD COLUMN provider VARCHAR"))
+
+    try:
+        issue_columns = {col['name'] for col in inspector.get_columns('issues')}
+    except Exception:
+        issue_columns = set()
+
+    if issue_columns and 'providers' not in issue_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE issues ADD COLUMN providers TEXT"))
 
     try:
         compare_columns = {col['name'] for col in inspector.get_columns('compare_tasks')}
@@ -82,11 +97,6 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN source_word_count INTEGER DEFAULT 0"))
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_word_count INTEGER DEFAULT 0"))
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_word_count INTEGER DEFAULT 0"))
-
-    if translation_doc_columns and 'status' not in translation_doc_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN status VARCHAR DEFAULT ''"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_translation_docs_status ON translation_docs (status)"))
 
 
     try:
@@ -131,6 +141,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()
