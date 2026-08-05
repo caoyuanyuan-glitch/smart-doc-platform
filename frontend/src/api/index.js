@@ -42,6 +42,16 @@ export function getAPIErrorMessage(error, fallback = '请求失败') {
   return error?.message || fallback
 }
 
+export function getKnowledgeLoadErrorMessage(error, fallback = '加载知识库失败') {
+  if (error?.code === 'ECONNABORTED') {
+    return '加载知识库超时，请稍后重试'
+  }
+  if (!error?.response) {
+    return '知识库服务不可用，请确认后端服务已启动'
+  }
+  return getAPIErrorMessage(error, fallback)
+}
+
 export const authAPI = {
   login: (username, password) => {
     const formData = new FormData()

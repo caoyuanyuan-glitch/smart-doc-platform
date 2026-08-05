@@ -452,7 +452,7 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { polishAPI, knowledgeAPI, systemAPI } from '@/api'
+import { polishAPI, knowledgeAPI, systemAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
 import { usePolishStore } from '@/store/polish'
 
@@ -2166,7 +2166,7 @@ async function loadKnowledgeTree() {
     knowledgeTreeList.value = flattenKnowledgeList(filteredData)
     selectedKnowledgeFile.value = null
   } catch (e) {
-    ElMessage.error('加载知识库失败')
+    ElMessage.error(getKnowledgeLoadErrorMessage(e))
   }
 }
 

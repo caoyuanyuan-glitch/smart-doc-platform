@@ -175,7 +175,7 @@
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
-import { knowledgeAPI, translationAPI } from '@/api'
+import { knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
@@ -245,6 +245,7 @@ async function loadMemoryLibraryFiles() {
     memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
   } catch (e) {
     memoryLibraryFiles.value = []
+    ElMessage.warning(getKnowledgeLoadErrorMessage(e, '加载记忆库配置失败'))
   } finally {
     memoryLibraryLoading.value = false
   }
