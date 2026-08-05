@@ -167,7 +167,7 @@ def test_run_cached_ai_chunk_review_reuses_cached_result(monkeypatch):
     monkeypatch.setattr(review_api, "_review_cache_version", lambda: "v-cache")
     monkeypatch.setattr(review_api, "_ai_provider_cache_fingerprint", lambda: "provider-a")
 
-    def fake_call_with_timeout(func, timeout_seconds, *args):
+    def fake_call_with_timeout(func, timeout_seconds, *args, **kwargs):
         calls.append((timeout_seconds, args[0], args[2], args[4], args[5]))
         return {"issues": [{"rule": "AI", "original_text": "demo"}]}
 
@@ -206,7 +206,8 @@ def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):
 def test_review_ai_chunk_limit_defaults_to_eight(monkeypatch):
     monkeypatch.delenv("REVIEW_AI_MAX_CHUNKS", raising=False)
 
-    assert review_api._review_ai_chunk_limit() == 8
+    # P0-2: 默认上限已从 8 提升到 32，支持动态计算
+    assert review_api._review_ai_chunk_limit() == 32
 
 
 def test_review_ai_token_budget_defaults_to_zero(monkeypatch):
@@ -225,12 +226,12 @@ def test_run_ai_deep_review_stops_when_budget_reached(monkeypatch):
     usage_state = {"tokens": 0}
 
     monkeypatch.setattr(review_api, "_iter_ai_audit_chunks", lambda content: chunks)
-    monkeypatch.setattr(review_api, "_review_ai_chunk_limit", lambda: 3)
+    monkeypatch.setattr(review_api, "_review_ai_chunk_limit", lambda content_length: 3)
     monkeypatch.setattr(review_api, "_review_ai_token_budget", lambda: 200)
     monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(review_api, "_select_relevant_ai_review_basis", lambda chunk, sections: "basis")
 
-    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout):
+    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None):
         processed.append(chunk)
         usage_state["tokens"] += 120
         return ([{"rule": "AI", "chapter": ""}], False)
@@ -248,10 +249,11 @@ def test_run_ai_deep_review_stops_when_budget_reached(monkeypatch):
         },
     )
 
-    issues = review_api._run_ai_deep_review(9, "demo content", "en", [{"text": "basis"}])
+    issues, chunk_meta = review_api._run_ai_deep_review(9, "demo content", "en", [{"text": "basis"}])
 
     assert processed == ["chunk-1", "chunk-2"]
     assert len(issues) == 2
+    assert len(chunk_meta) == 2  # P0-3: 新增分块元数据返回
 
 
 def test_chinese_human_baseline_rules_cover_common_spellcheck_sample_cases():

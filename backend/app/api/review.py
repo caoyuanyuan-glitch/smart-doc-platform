@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, File, UploadFile, Form
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 import html as html_lib
@@ -8,12 +8,16 @@ import json
 import math
 import re
 import os
+from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
 import shutil
 import difflib
 import concurrent.futures
 from copy import deepcopy
+import asyncio
+import threading
+import time
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from app.database import get_db
@@ -85,6 +89,7 @@ def set_progress(review_id: int, status: str, step: str, progress: int, message:
         'message': message,
         'timestamp': datetime.now().isoformat()
     }
+
 
 
 def _mark_review_as_failed(db: Session, review, message: str):
@@ -202,6 +207,69 @@ def _serialize_review_list_item(db: Session, review, document_map):
     return review_dict
 
 router = APIRouter()
+
+
+@router.get("/{review_id}/progress-stream")
+async def review_progress_stream(review_id: int):
+    """
+    SSE 实时进度推送端点
+
+    替代前端轮询机制，提供审核进度的实时推送。
+    每秒检查一次进度，当审核完成/失败时自动关闭连接。
+    """
+    async def event_generator():
+        last_hash = ""
+        retry_count = 0
+        max_retries = 900  # 15 分钟超时保护
+
+        while retry_count < max_retries:
+            progress = get_progress(review_id)
+            status = progress.get("status", "unknown")
+
+            # 计算内容哈希避免重复推送相同数据
+            raw = json.dumps(progress, sort_keys=True, ensure_ascii=False)
+            current_hash = hashlib.sha1(raw.encode()).hexdigest()
+
+            if current_hash != last_hash:
+                last_hash = current_hash
+                yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
+            else:
+                # 如果状态已终结，发送最后一条并关闭
+                if status in ("completed", "failed", "error"):
+                    yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
+                    break
+
+                # 心跳（每 10 秒发送一次保活）
+                if retry_count % 10 == 0:
+                    yield f": heartbeat\n\n"
+
+            # 状态已终结则关闭连接
+            if status in ("completed", "failed", "error"):
+                # 确保终态数据只发送一次
+                if current_hash != last_hash:
+                    yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
+                break
+
+            # 如果状态是 unknown（可能还没开始），稍等更长时间
+            sleep_time = 2.0 if status == "unknown" else 1.0
+            await asyncio.sleep(sleep_time)
+            retry_count += 1
+
+        # 超时保护
+        if retry_count >= max_retries:
+            progress = get_progress(review_id)
+            yield f"data: {json.dumps({**progress, 'status': 'timeout', 'message': '审核进度推送超时'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # nginx 禁用缓冲
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 def _flatten_folder_tree(nodes):
@@ -897,11 +965,19 @@ def _should_drop_spelling_issue(issue):
 
 def _should_drop_punctuation_issue(issue):
     rule = str(issue.get('rule', '') or '').upper()
+    source = str(issue.get('source', '') or '').lower()
+    original = str(issue.get('original_text', '') or '').strip()
+    context = str(issue.get('context', '') or '')
+    
+    # AI产出的单字符标点问题全部过滤
+    if source == 'ai':
+        meaningful = re.sub(r"[\s.,;:!?()\[\]{}\"'`~@#$%^&*+=|\\<>/，。；：！？…—～（）【】《》""'']", "", original)
+        if len(meaningful) <= 1:
+            return True
+    
     if rule not in {'PUNCT-001', 'HR003', 'PUNCT-002', 'R002'}:
         return False
 
-    original = str(issue.get('original_text', '') or '').strip()
-    context = str(issue.get('context', '') or '')
     if rule == 'R002' and re.search(r'Part\s+No\.?', context, re.IGNORECASE):
         return True
     if original == ':C' and re.search(r'Part\s+No\.?\s*:\s*CSS-\d+', context, re.IGNORECASE):
@@ -1362,8 +1438,18 @@ def _review_ai_token_budget():
     return max(0, _review_env_int('REVIEW_AI_TOKEN_BUDGET', '0'))
 
 
-def _review_ai_chunk_limit():
-    return max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '8'))
+def _review_ai_chunk_limit(total_length=0):
+    """返回AI审核最大分块数。
+    
+    默认32块，支持通过环境变量 REVIEW_AI_MAX_CHUNKS 自定义。
+    根据文档总长度动态计算：短文档直接全覆盖，长文档按比例增加。
+    """
+    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '32'))
+    if total_length <= 0:
+        return env_limit
+    # 每6000字符保证至少一个块采样
+    dynamic_limit = max(1, total_length // 3000)
+    return max(env_limit, dynamic_limit)
 
 
 def _review_ai_budget_reached(review_id, request_label='review.audit_chunk'):
@@ -1375,13 +1461,62 @@ def _review_ai_budget_reached(review_id, request_label='review.audit_chunk'):
     return total_tokens >= budget, summary
 
 
-def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections):
-    all_chunks = _iter_ai_audit_chunks(content)
-    chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit())
+def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections, provider=None, document_name=None):
+    content = content or ''
+    total_length = len(content)
+    
+    # 小文档优化：<3000字符的文档不分块，直接全量审核
+    SMALL_DOC_THRESHOLD = 3000
+    if total_length <= SMALL_DOC_THRESHOLD:
+        print(f"[审核] 小文档 ({total_length} 字符)，使用全量不分块审核模式")
+        selected_basis = _select_relevant_ai_review_basis(content, ai_review_basis_sections)
+        try:
+            all_issues, cache_hit = _run_cached_ai_chunk_review(
+                review_id, content, document_language, selected_basis,
+                _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '30'),  # 小文档给更长超时
+                force_provider=provider, document_name=document_name
+            )
+            for issue in all_issues:
+                issue['chapter'] = issue.get('chapter') or '全文'
+            chunk_meta = [{
+                "chunk_index": 1,
+                "chunk_size": total_length,
+                "parsed_issue_count": len(all_issues),
+                "cache_hit": cache_hit,
+            }]
+            return all_issues, chunk_meta
+        except concurrent.futures.TimeoutError:
+            print(f"[审核] 小文档全量审核超时，回退到分块模式")
+        except Exception as e:
+            print(f"[审核] 小文档全量审核失败 ({e})，回退到分块模式")
+    
+    # 智能分块：优先使用章节感知分块
+    use_smart_chunking = os.getenv('REVIEW_SMART_CHUNKING', '1') == '1'
+    if use_smart_chunking and len(content) > 1000:
+        try:
+            chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)))
+            smart_chunks = chunker.chunk_document(content)
+            if smart_chunks:
+                # 转换为 (index, start, chunk) 格式
+                chunks = [(c.index + 1, c.start, c.content) for c in smart_chunks]
+                all_chunks = chunks
+                print(f"[审核] 智能分块: {len(chunks)} 个章节感知分块, 覆盖 {sum(len(c[2]) for c in chunks)} 字符")
+            else:
+                all_chunks = _iter_ai_audit_chunks(content)
+                chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+        except Exception as e:
+            print(f"[审核] 智能分块失败 ({e}), 回退到滑动窗口分块")
+            all_chunks = _iter_ai_audit_chunks(content)
+            chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+    else:
+        all_chunks = _iter_ai_audit_chunks(content)
+        chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+    
     if not chunks:
-        return []
+        return [], []
 
     all_issues = []
+    chunk_meta = []
     total = len(chunks)
     chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
     for index, start, chunk in chunks:
@@ -1407,15 +1542,34 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f"selected={len(chunks)}/{len(all_chunks)}, basis_len={len(selected_basis)}"
         )
         try:
-            chunk_issues, cache_hit = _run_cached_ai_chunk_review(review_id, chunk, document_language, selected_basis, chunk_timeout)
+            chunk_issues, cache_hit = _run_cached_ai_chunk_review(review_id, chunk, document_language, selected_basis, chunk_timeout, force_provider=provider, document_name=document_name)
             for issue in chunk_issues:
                 issue['chapter'] = issue.get('chapter') or f'AI chunk {index}'
                 all_issues.append(issue)
+            chunk_meta.append({
+                "chunk_index": index,
+                "chunk_size": len(chunk),
+                "parsed_issue_count": len(chunk_issues),
+                "cache_hit": cache_hit,
+            })
             print(f"[审核] AI深度审核分块 {index}/{total} 返回问题数={len(chunk_issues)}, cache_hit={cache_hit}")
         except concurrent.futures.TimeoutError:
             print(f"[审核] AI深度审核分块 {index}/{total} 超时({chunk_timeout:.0f}s), 保留规则审核结果并继续")
+            chunk_meta.append({
+                "chunk_index": index,
+                "chunk_size": len(chunk),
+                "parsed_issue_count": 0,
+                "status": "timeout",
+            })
         except Exception as e:
             print(f"[审核] AI深度审核分块 {index}/{total} 失败: {e}")
+            chunk_meta.append({
+                "chunk_index": index,
+                "chunk_size": len(chunk),
+                "parsed_issue_count": 0,
+                "status": "error",
+                "error_message": str(e)[:200],
+            })
         set_progress(
             review_id,
             'running',
@@ -1423,7 +1577,81 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             min(82, next_progress),
             f'AI快速增强已完成 {index}/{total} 个分块...',
         )
-    return all_issues
+    
+    # ── 跨Chunk去重 ──
+    # 不同分块可能发现同一错误的不同片段，需要合并
+    if len(all_issues) > 1:
+        pre_dedup = len(all_issues)
+        all_issues = _dedup_across_chunks(all_issues)
+        dropped = pre_dedup - len(all_issues)
+        if dropped > 0:
+            print(f"[审核] 跨Chunk去重: 合并 {dropped} 个重复问题, 剩余 {len(all_issues)} 个")
+            chunk_meta.append({
+                "stage": "cross_chunk_dedup",
+                "input_count": pre_dedup,
+                "output_count": len(all_issues),
+                "dropped": dropped,
+            })
+    
+    return all_issues, chunk_meta
+
+
+def _dedup_across_chunks(issues: list) -> list:
+    """跨分块去重：合并不同chunk中发现的同一问题。
+    
+    策略：
+    1. 完全相同 original_text → 合并
+    2. 高度重叠（一个包含另一个且长度比 > 0.7）→ 合并
+    3. 同一规则(rules match) + 原文高度相似(编辑距离 ≤ 2) → 合并
+    4. 合并时保留较高的置信度和严重级别
+    """
+    if len(issues) <= 1:
+        return issues
+    
+    result = []
+    for issue in issues:
+        original = str(issue.get("original_text", "") or "").strip().lower()
+        rule = str(issue.get("rule", "") or "").strip().lower()
+        
+        if not original:
+            result.append(issue)
+            continue
+        
+        matched = False
+        for existing in result:
+            existing_original = str(existing.get("original_text", "") or "").strip().lower()
+            existing_rule = str(existing.get("rule", "") or "").strip().lower()
+            
+            if not existing_original:
+                continue
+            
+            # 策略1: 完全相同
+            if original == existing_original:
+                matched = True
+                break
+            
+            # 策略2: 高度重叠（短文本用编辑距离）
+            len_o = len(original)
+            len_e = len(existing_original)
+            
+            if len_o >= 3 and len_e >= 3:
+                shorter = original if len_o <= len_e else existing_original
+                longer = existing_original if len_o <= len_e else original
+                if shorter in longer and len(shorter) / len(longer) > 0.6:
+                    matched = True
+                    break
+            
+            # 策略3: 同一规则 + 高度相似原文
+            if rule and existing_rule and rule == existing_rule:
+                if len_o <= 10 and len_e <= 10 and abs(len_o - len_e) <= 3:
+                    if _edit_distance(original, existing_original) <= 2:
+                        matched = True
+                        break
+        
+        if not matched:
+            result.append(issue)
+    
+    return result
 
 
 def _filter_review_false_positives(issues):
@@ -3676,11 +3904,18 @@ def _build_ai_chunk_cache_key(chunk, language, audit_basis):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout):
+def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None):
     cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis)
+    if force_provider:
+        cache_key = hashlib.sha1((cache_key + "|provider=" + force_provider).encode("utf-8")).hexdigest()
     cached = _ai_review_chunk_cache.get(cache_key)
     if cached is not None:
         return deepcopy(cached), True
+
+    # 构建文档上下文（包含文件名），让 AI 能检查文件名与内容的一致性
+    chapter_context = {}
+    if document_name:
+        chapter_context["document_name"] = document_name
 
     result = _call_with_timeout(
         ai_client.audit_document,
@@ -3691,6 +3926,8 @@ def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis
         True,
         review_id,
         "review.audit_chunk",
+        chapter_context=chapter_context if chapter_context else None,
+        force_provider=force_provider,
     )
     chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
     _ai_review_chunk_cache[cache_key] = deepcopy(chunk_issues)
@@ -3708,9 +3945,9 @@ def _log_review_ai_usage(review_id, request_label, title):
     )
 
 
-def _call_with_timeout(func, timeout_seconds, *args):
+def _call_with_timeout(func, timeout_seconds, *args, **kwargs):
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(func, *args)
+    future = executor.submit(func, *args, **kwargs)
     try:
         return future.result(timeout=timeout_seconds)
     except concurrent.futures.TimeoutError:
@@ -3786,6 +4023,174 @@ def _extract_revision_history_years(text):
 def _normalize_date_display(text):
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     return normalized or str(text or "")
+
+
+# ── 常见文件名拼写错误映射 ──
+_FILENAME_SPELLING_FIXES = {
+    "serise": "series",
+    "notificaiton": "notification",
+    "notificaton": "notification",
+    "notifcation": "notification",
+    "upgarde": "upgrade",
+    "upgread": "upgrade",
+    "Upgarde": "Upgrade",
+    "Upgread": "Upgrade",
+    "User's": "Users" if False else None,  # 仅用于提示"sesrise"等罕见情况
+    "sesrise": "series",
+    "serise": "series",
+    "notifiction": "notification",
+    "noitification": "notification",
+    "updaet": "update",
+    "verison": "version",
+    "versoin": "version",
+    "docuemnt": "document",
+    "docuement": "document",
+}
+
+
+def _run_filename_audit(filename: str, content: str, document_language: str) -> list:
+    """对文档文件名进行规则化审核。
+    
+    检测项：
+    1. 文件名中的常见拼写错误
+    2. 文件名中产品名与正文内容不一致
+    3. 版本号/日期格式不规范
+    4. 文件名包含可疑字符或格式问题
+    
+    Returns:
+        问题列表，格式与规则审核结果一致
+    """
+    if not filename or not filename.strip():
+        return []
+    
+    issues = []
+    basename = filename.strip()
+    # 去掉扩展名用于分析
+    stem = basename
+    for ext in ['.docx', '.doc', '.pdf', '.md', '.txt', '.xlsx', '.xls', '.pptx', '.ppt']:
+        if stem.lower().endswith(ext):
+            stem = stem[:-len(ext)]
+            break
+    
+    # ── 1. 拼写错误检测 ──
+    for wrong, correct in _FILENAME_SPELLING_FIXES.items():
+        if wrong in basename:
+            issues.append({
+                "severity": "general",
+                "category": "文件名错误",
+                "rule": "FILENAME-001",
+                "chapter": "文件名",
+                "original_text": wrong,
+                "context": f"文件名: {basename}",
+                "suggestion": correct,
+                "description": f"文件名中存在拼写错误：「{wrong}」应为「{correct}」",
+                "audit_basis": "文件名拼写规范",
+                "confidence": 95,
+                "source": "rule",
+                "position": "filename",
+            })
+    
+    # ── 2. 产品名一致性检查 ──
+    # 从文件名提取可能的产品名模式（大写字母+数字+连字符组合，如 DNBSEQ-T7, MGISEQ-2000）
+    # 只匹配含连字符的产品名，避免误匹配整个文件名
+    product_patterns = re.findall(r'[A-Z][A-Za-z0-9]+(?:-[A-Za-z0-9]+)+', stem)
+    # 过滤掉常见非产品名词（如 Notification, Product, Upgrade, User, For）
+    stop_words = {'Notification', 'Product', 'Upgrade', 'Update', 'User', 'Users', 'For', 'Document', 'Notice'}
+    candidate_products = [p for p in product_patterns if p not in stop_words and len(p) >= 3]
+    
+    for product in candidate_products:
+        # 在正文内容中搜索该产品名
+        if product not in content:
+            # 尝试模糊匹配：忽略大小写和空格变体
+            pattern_variants = [
+                product,
+                product.replace('-', ' '),
+                product.replace('-', ''),
+                product.replace(' ', '-'),
+                product.replace(' ', ''),
+            ]
+            found = any(v in content for v in pattern_variants)
+            if not found and len(product) >= 4:
+                issues.append({
+                    "severity": "general",
+                    "category": "文件名错误",
+                    "rule": "FILENAME-002",
+                    "chapter": "文件名",
+                    "original_text": product,
+                    "context": f"文件名: {basename}",
+                    "suggestion": f"确认产品名「{product}」是否与正文一致",
+                    "description": f"文件名中的产品名「{product}」在正文内容中未找到，请确认文件名和内容的产品名是否一致",
+                    "audit_basis": "文件名与内容一致性检查",
+                    "confidence": 70,
+                    "source": "rule",
+                    "position": "filename",
+                })
+    
+    # ── 3. 日期格式检查 ──
+    # 检测 YYYYMMDD 格式（无分隔符）
+    date_pattern_no_sep = re.findall(r'20\d{6}', stem)
+    for date_str in date_pattern_no_sep:
+        # 验证是否为合法日期
+        try:
+            from datetime import datetime
+            datetime.strptime(date_str, '%Y%m%d')
+            issues.append({
+                "severity": "suggestion",
+                "category": "文件名错误",
+                "rule": "FILENAME-003",
+                "chapter": "文件名",
+                "original_text": date_str,
+                "context": f"文件名: {basename}",
+                "suggestion": f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
+                "description": f"文件名中的日期「{date_str}」建议使用 YYYY-MM-DD 格式（如 {date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}）",
+                "audit_basis": "文件名日期格式规范",
+                "confidence": 60,
+                "source": "rule",
+                "position": "filename",
+            })
+        except ValueError:
+            pass  # 不是合法日期，跳过
+    
+    # ── 4. 可疑字符检查 ──
+    # 检查文件名中是否有多余空格（两个连续空格）
+    if '  ' in basename:
+        issues.append({
+            "severity": "suggestion",
+            "category": "文件名错误",
+            "rule": "FILENAME-001",
+            "chapter": "文件名",
+            "original_text": "  ",
+            "context": f"文件名: {basename}",
+            "suggestion": basename.replace('  ', ' '),
+            "description": "文件名中存在连续空格，建议合并为单个空格",
+            "audit_basis": "文件名格式规范",
+            "confidence": 85,
+            "source": "rule",
+            "position": "filename",
+        })
+    
+    # ── 5. 版本号格式检查 ──
+    # 检测 V 开头版本号
+    version_patterns = re.findall(r'[Vv]\d+(?:\.\d+)*', stem)
+    for ver in version_patterns:
+        # 检查是否缺少点号分隔（如 V10 而非 V1.0）
+        if re.match(r'^[Vv]\d{2,}$', ver):
+            issues.append({
+                "severity": "suggestion",
+                "category": "文件名错误",
+                "rule": "FILENAME-003",
+                "chapter": "文件名",
+                "original_text": ver,
+                "context": f"文件名: {basename}",
+                "suggestion": "",
+                "description": f"文件名中的版本号「{ver}」可能缺少分隔符（如应为 V1.0 而非 V10）",
+                "audit_basis": "版本号格式规范",
+                "confidence": 60,
+                "source": "rule",
+                "position": "filename",
+            })
+    
+    return issues
 
 
 def _run_release_checklist_audit(content, document, spec_texts, document_language):
@@ -6843,7 +7248,7 @@ def run_rule_audit(content, rules, knowledge_basis=None, file_type=None):
                                 break
 
                 issues.append({
-                    "severity": "general",
+                    "severity": getattr(rule, 'severity', None) or "general",
                     "category": rule.category or "其他",
                     "rule": rule.rule_no,
                     "chapter": chapter,
@@ -6996,12 +7401,395 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
     return issues
 
 
-def _run_review_background(review_id: int, document_id: int, mode: str):
-    """后台执行审核任务（带进度更新）"""
+def _run_review_via_orchestrator(db, review_id: int, document_id: int, mode: str):
+    """使用新编排器执行审核（REVIEW_USE_ORCHESTRATOR=1 时启用）。
+
+    这是新旧引擎的桥接函数，将现有的文档加载和规则/AI 调用包装到
+    ReviewOrchestrator 的阶段流水线中，同时保持现有 API 兼容。
+    """
+    from app.review_engine.orchestrator import ReviewOrchestrator
+    from app.review_engine.context import DocumentContext
+    from app.review_engine.rules.engine import DeterministicRuleEngine
+
+    document = get_document(db, document_id=document_id)
+    if not document:
+        set_progress(review_id, 'failed', '文档不存在', 0, f'文档ID={document_id}不存在')
+        update_review_status(db, review_id, "failed", 0, "Document not found")
+        return
+
+    content = document.content or ""
+    if document.file_type == 'pdf':
+        content = clean_pdf_text(content)
+    content_limit = _review_content_limit(document.file_type)
+    content = content[:content_limit]
+    document_language = detect_language(content)
+
+    # Build DocumentContext
+    doc_ctx = DocumentContext.from_content(content, language=document_language, file_type=document.file_type)
+
+    # Build progress callback
+    def progress_cb(stage: str, pct: int, msg: str):
+        set_progress(review_id, 'running', stage, pct, msg)
+
+    # Create orchestrator
+    orchestrator = ReviewOrchestrator(on_progress=progress_cb)
+
+    # Stage 1: Deterministic rules (if mode is rule or hybrid)
+    if mode in ("rule", "hybrid"):
+        rules = get_rules(db)
+        terms = get_terms(db)
+        knowledge_basis = get_knowledge_basis(db)
+
+        def rule_stage(result, ctx):
+            rule_issues = run_rule_audit(content, rules, knowledge_basis, document.file_type)
+            if document.file_type == 'pdf':
+                rule_issues = [i for i in rule_issues if i.get('rule') not in {'R011', 'R016', 'R021'}]
+            term_issues = run_term_check(content, terms)
+            result.issues = rule_issues + term_issues
+
+        orchestrator.add_stage("rule_based_audit", rule_stage)
+
+        # New rules engine (parallel)
+        if os.getenv("REVIEW_USE_NEW_RULES", "1") == "1":
+            def new_rule_stage(result, ctx):
+                engine = DeterministicRuleEngine()
+                new_issues = engine.run_all(
+                    content, file_type=document.file_type,
+                    language=document_language,
+                    document_name=getattr(document, 'filename', '') or '',
+                )
+                existing = {(i.get('rule', ''), (i.get('original_text') or '')[:60]) for i in result.issues}
+                for issue in new_issues:
+                    key = (issue.get('rule', ''), (issue.get('original_text') or '')[:60])
+                    if key not in existing:
+                        result.issues.append(issue)
+                        existing.add(key)
+
+            orchestrator.add_stage("new_deterministic_rules", new_rule_stage)
+
+    # Stage 2: Validation / dedup (always)
+    def validate_stage(result, ctx):
+        before = len(result.issues)
+        from app.review_engine.pipeline import pipeline_select_review_issues
+        result.issues = pipeline_select_review_issues(result.issues)
+
+    orchestrator.add_stage("dedup_and_validation", validate_stage)
+
+    # Stage 3: AI deep review (if mode is ai or hybrid)
+    if mode in ("ai", "hybrid") and document.file_type != 'xlsx' and ai_client.has_any_client:
+        def ai_stage(result, ctx):
+            from app.review_engine.ai_candidates import AICandidateEngine
+            engine = AICandidateEngine(ai_client, review_id=review_id, progress_callback=progress_cb)
+            spec_texts = _load_review_spec_texts(db)
+            basis = _build_ai_review_basis(spec_texts, document_language)
+            ai_result = engine.run_review(content, language=document_language, audit_basis=basis, document_ctx=doc_ctx)
+            result.issues.extend(ai_result.issues)
+
+        orchestrator.add_stage("ai_deep_review", ai_stage)
+
+    # Run pipeline
+    run_result = orchestrator.run(review_id, {"document_id": document_id, "mode": mode})
+
+    # Save issues
+    from app.schemas.review import IssueCreate
+    for issue in run_result.issues:
+        create_issue(db=db, issue=IssueCreate(
+            review_id=review_id,
+            severity=issue.get("severity", "general"),
+            category=issue.get("category", ""),
+            rule=issue.get("rule", ""),
+            chapter=issue.get("chapter", ""),
+            original_text=issue.get("original_text", ""),
+            context=issue.get("context", ""),
+            suggestion=issue.get("suggestion", ""),
+            description=issue.get("description", ""),
+            audit_basis=issue.get("audit_basis", ""),
+            confidence=issue.get("confidence", 0),
+            source=issue.get("source", "rule"),
+            position=issue.get("position", ""),
+            providers=issue.get("providers", None),
+        ))
+
+    # Build summary with stage diagnostics
+    issues = run_result.issues
+    summary = json.dumps({
+        "total": len(issues),
+        "fatal": len([i for i in issues if i.get("severity") == "fatal"]),
+        "serious": len([i for i in issues if i.get("severity") == "serious"]),
+        "general": len([i for i in issues if i.get("severity") == "general"]),
+        "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
+        "language": document_language,
+        "stages": [{k: v for k, v in s.__dict__.items() if not k.startswith('_')} for s in run_result.stages],
+    })
+
+    status = "completed"
+    if run_result.fatal or run_result.errors:
+        status = "partial"
+    update_review_status(db, review_id, status, len(issues), summary)
+    set_progress(review_id, 'completed', '审核完成', 100, f'审核完成，共发现 {len(issues)} 个问题')
+    print(f"[审核] 编排器完成: {len(issues)} 个问题, {len(run_result.stages)} 个阶段")
+
+
+def _filter_low_quality_ai_issues(issues: list) -> list:
+    """后处理质量过滤器：过滤AI产出的低价值/噪声问题。
+    
+    过滤规则：
+    1. original_text 为单字符（包括单个标点、单字、单字母）
+    2. original_text 与 expected 完全相同（空问题）
+    3. original_text 为纯标点序列
+    4. 规则名包含"标点"/"punctuation"且original少于3个有意义字符
+    5. confidence < 50 的非交叉验证问题
+    """
+    if not issues:
+        return []
+    
+    filtered = []
+    dropped_count = 0
+    for issue in issues:
+        original = str(issue.get("original_text", "") or "").strip()
+        expected = str(issue.get("expected", "") or "").strip()
+        rule = str(issue.get("rule", "") or "").lower()
+        category = str(issue.get("category", "") or "").lower()
+        issue_type = str(issue.get("type", "") or "").lower()
+        confidence = issue.get("confidence", 0) or 0
+        cross_validated = issue.get("cross_validated", False)
+        
+        # 规则1: 单字符问题（去除空格和标点后）
+        meaningful_chars = re.sub(r"[\s.,;:!?()\[\]{}\"'`~@#$%^&*+=|\\<>/，。；：！？…—～（）【】《》""'']", "", original)
+        if len(meaningful_chars) <= 1:
+            dropped_count += 1
+            continue
+        
+        # 规则2: original == expected（空问题）
+        if original and expected and original == expected:
+            dropped_count += 1
+            continue
+        
+        # 规则3: 纯标点序列
+        if re.match(r"^[\s.,;:!?()\[\]{}\"'`~@#$%^&*+=|\\<>/，。；：！？…—～（）【】《》""'']+$", original):
+            dropped_count += 1
+            continue
+        
+        # 规则4: 标点类规则 + 短文本
+        punctuation_keywords = ["标点", "punctuation", "punct", "punctuation"]
+        if any(kw in rule or kw in category or kw in issue_type for kw in punctuation_keywords):
+            if len(meaningful_chars) < 3:
+                dropped_count += 1
+                continue
+        
+        # 规则5: 低置信度且未被多模型交叉验证
+        if confidence < 50 and not cross_validated:
+            dropped_count += 1
+            continue
+        
+        filtered.append(issue)
+    
+    if dropped_count > 0:
+        print(f"[质量过滤] 共过滤 {dropped_count} 个低质量问题，通过 {len(filtered)} 个")
+    
+    return filtered
+
+
+def _merge_multi_provider_results(all_provider_issues: dict, provider_list: list) -> tuple:
+    """合并多模型审核结果：去重 + 交叉验证标记。
+    
+    Args:
+        all_provider_issues: {provider_name: [issue_dict, ...], ...}
+        provider_list: ['qwen', 'deepseek', ...]
+    
+    Returns:
+        (merged_issues, chunk_meta): 合并后的问题列表和元数据
+    """
+    merged = []
+    
+    for provider, issues in all_provider_issues.items():
+        for issue in issues:
+            # 标记来源 provider
+            issue["_provider"] = provider
+            merged.append(issue)
+    
+    if not merged:
+        return [], []
+    
+    # ── 跨模型去重 ──
+    # 策略：基于 original_text 的 Jaccard 相似度去重
+    # 保留第一个遇到的，并记录所有标记该问题的 provider
+    deduped = []
+    for issue in merged:
+        ot = (issue.get("original_text") or "").strip().lower()
+        if not ot:
+            deduped.append(issue)
+            continue
+        
+        # 检查是否与已有问题重复
+        is_dup = False
+        for existing in deduped:
+            existing_ot = (existing.get("original_text") or "").strip().lower()
+            if not existing_ot:
+                continue
+            # 完全相同 or 高度重叠（一个包含另一个且长度比 > 0.7）
+            if ot == existing_ot:
+                is_dup = True
+            elif len(ot) > 10 and len(existing_ot) > 10:
+                shorter = ot if len(ot) <= len(existing_ot) else existing_ot
+                longer = existing_ot if len(ot) <= len(existing_ot) else ot
+                if shorter in longer and len(shorter) / len(longer) > 0.7:
+                    is_dup = True
+            
+            if is_dup:
+                # 交叉验证：记录该问题也被当前 provider 发现
+                existing_providers = set(existing.get("_providers", [existing.get("_provider")]))
+                existing_providers.add(issue.get("_provider"))
+                existing["_providers"] = sorted(existing_providers)
+                # 提升置信度（多模型交叉验证 +15）
+                existing["confidence"] = min(100, (existing.get("confidence") or 80) + 15)
+                break
+        
+        if not is_dup:
+            issue["_providers"] = [issue.get("_provider")]
+            deduped.append(issue)
+    
+    # 清理临时字段，标准化 providers
+    for issue in deduped:
+        providers = issue.pop("_providers", [issue.pop("_provider", "unknown")])
+        issue["providers"] = json.dumps(providers, ensure_ascii=False)
+        # 多模型交叉验证标记
+        if len(providers) > 1:
+            issue["cross_validated"] = True
+    
+    # ── 后处理质量过滤器 ──
+    pre_filter_count = len(deduped)
+    deduped = _filter_low_quality_ai_issues(deduped)
+    filtered_out = pre_filter_count - len(deduped)
+    if filtered_out > 0:
+        print(f"[质量过滤] 过滤低质量问题 {filtered_out} 个，剩余 {len(deduped)} 个")
+    
+    multi_count = sum(1 for i in deduped if i.get("cross_validated"))
+    single_count = len(deduped) - multi_count
+    print(f"[多模型合并] 总问题={len(deduped)}, 交叉验证(多模型确认)={multi_count}, 单模型={single_count}")
+    
+    chunk_meta = [{
+        "providers": provider_list,
+        "raw_counts": {p: len(all_provider_issues.get(p, [])) for p in provider_list},
+        "merged_count": len(deduped),
+        "cross_validated_count": multi_count,
+        "quality_filtered_count": filtered_out,
+    }]
+    
+    return deduped, chunk_meta
+
+
+def _run_multi_provider_ai_deep_review(review_id: int, content: str, document_language: str,
+                                        ai_review_basis_sections: dict, provider_list: list,
+                                        document_name: str = None) -> tuple:
+    """并发调用多个 AI provider 进行深度审核，合并结果。
+    
+    Args:
+        provider_list: provider 名称列表，如 ['qwen', 'deepseek', 'kimi']
+        document_name: 原始文件名，用于 AI 检查文件名与内容的一致性
+    
+    Returns:
+        (merged_issues, chunk_meta): 去重合并后的问题列表
+    """
+    results = {}
+    errors = []
+    
+    # 使用 ThreadPoolExecutor 并发调用
+    max_workers = min(len(provider_list), 3)  # 最多3个并发
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {}
+        for prov in provider_list:
+            set_progress(review_id, 'running', 'AI智能审核', 68,
+                         f'正在调用 {prov.upper()} 模型审核...')
+            print(f"[多模型] 开始调用 {prov} 模型...")
+            future = executor.submit(
+                _run_single_provider_ai_review,
+                review_id, content, document_language,
+                ai_review_basis_sections, prov, document_name
+            )
+            future_map[future] = prov
+        
+        # 收集结果（带超时）
+        for future in concurrent.futures.as_completed(future_map, timeout=600):
+            prov = future_map[future]
+            try:
+                issues, meta = future.result()
+                results[prov] = issues
+                print(f"[多模型] {prov} 完成，返回 {len(issues)} 个问题")
+            except concurrent.futures.TimeoutError:
+                print(f"[多模型] {prov} 调用超时，跳过")
+                errors.append(f"{prov}: 超时")
+            except Exception as e:
+                print(f"[多模型] {prov} 调用失败: {e}")
+                errors.append(f"{prov}: {e}")
+    
+    if not results:
+        print(f"[多模型] 所有 provider 均失败: {errors}")
+        return [], []
+    
+    # 合并去重
+    merged_issues, chunk_meta = _merge_multi_provider_results(results, list(results.keys()))
+    
+    if errors:
+        print(f"[多模型] 部分 provider 失败: {errors}")
+    
+    return merged_issues, chunk_meta
+
+
+def _run_single_provider_ai_review(review_id: int, content: str, document_language: str,
+                                     ai_review_basis_sections: dict, provider: str,
+                                     document_name: str = None) -> tuple:
+    """对单个 provider 执行 AI 深度审核（异常安全包装）。"""
+    try:
+        issues, chunk_meta = _run_ai_deep_review(
+            review_id, content, document_language,
+            ai_review_basis_sections, provider=provider,
+            document_name=document_name
+        )
+        return (issues or []), chunk_meta
+    except Exception as e:
+        print(f"[单模型] {provider} 审核异常: {e}")
+        return [], []
+
+
+def _run_review_background(review_id: int, document_id: int, mode: str, provider: str = None, provider_list: list = None):
+    """后台执行审核任务（带进度更新）
+    
+    Args:
+        provider: 指定单个 AI provider（向后兼容），如 'qwen'。None 时使用默认回退链。
+        provider_list: 多个 provider 列表，如 ['qwen', 'deepseek']。
+                      当指定多个时，AI深度审核将并发调用，结果去重合并。
+    """
     from app.database import SessionLocal
     db = SessionLocal()
+
+    # ── stage diagnostics tracking ───────────────────────────────
+    _stage_start_times: dict[str, float] = {}
+    _stage_input_counts: dict[str, int] = {}
+    _stage_diagnostics: list[dict[str, Any]] = []
+
+    def _begin_stage(name: str) -> None:
+        _stage_start_times[name] = time.perf_counter()
+
+    def _end_stage(name: str, output_count: int = 0, dropped_count: int = 0, errors: list[str] | None = None) -> None:
+        duration_ms = int((time.perf_counter() - _stage_start_times.get(name, time.perf_counter())) * 1000)
+        input_count = _stage_input_counts.get(name, 0)
+        _stage_diagnostics.append({
+            "stage": name,
+            "input_count": input_count,
+            "output_count": output_count if output_count else input_count,
+            "dropped_count": dropped_count,
+            "duration_ms": duration_ms,
+            "errors": errors or [],
+        })
+
     try:
         set_progress(review_id, 'running', '加载文档', 5, '正在读取文档内容...')
+
+        # ── REVIEW_USE_ORCHESTRATOR 开关：走新编排器路径 ──
+        if os.getenv("REVIEW_USE_ORCHESTRATOR", "0") == "1":
+            _run_review_via_orchestrator(db, review_id, document_id, mode)
+            return
         
         document = get_document(db, document_id=document_id)
         if not document:
@@ -7038,12 +7826,47 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             print(f"[审核] Excel审核发现问题: {len(issues)}个")
 
         if mode in ["rule", "hybrid"]:
+            _begin_stage("document_loading")
+            _stage_input_counts["document_loading"] = len(content)
+            _end_stage("document_loading", output_count=len(content))
+
             set_progress(review_id, 'running', '规则审核', 15, '正在加载审核规则...')
             rules = get_rules(db)
             print(f"[审核] 加载规则数量: {len(rules)}")
+
+            _begin_stage("rule_based_audit")
+            _stage_input_counts["rule_based_audit"] = 0
             
             set_progress(review_id, 'running', '规则审核', 25, '正在执行规则匹配...')
             rule_issues = [] if document.file_type == 'xlsx' else run_rule_audit(content, rules, knowledge_basis, document.file_type)
+
+            # ── 新规则引擎（REVIEW_USE_NEW_RULES=1 时并行运行）──
+            if os.getenv("REVIEW_USE_NEW_RULES", "0") == "1" and document.file_type != 'xlsx':
+                try:
+                    from app.review_engine.rules.engine import DeterministicRuleEngine
+                    engine = DeterministicRuleEngine()
+                    new_rule_issues = engine.run_all(
+                        content,
+                        file_type=document.file_type,
+                        language=document_language,
+                        document_name=getattr(document, 'filename', '') or '',
+                    )
+                    # 去重：按 (rule_id, original_text[:60]) 去重
+                    existing_keys = {
+                        (i.get('rule', ''), (i.get('original_text') or '')[:60].lower())
+                        for i in rule_issues
+                    }
+                    added = 0
+                    for issue in new_rule_issues:
+                        key = (issue.get('rule', ''), (issue.get('original_text') or '')[:60].lower())
+                        if key not in existing_keys:
+                            rule_issues.append(issue)
+                            existing_keys.add(key)
+                            added += 1
+                    print(f"[审核] 新规则引擎产出 {len(new_rule_issues)} 个问题, 去重后新增 {added} 个")
+                except Exception as e:
+                    print(f"[审核] 新规则引擎执行失败: {e}")
+
             if document.file_type == 'pdf':
                 rule_issues = [issue for issue in rule_issues if issue.get('rule') not in {'R011', 'R016', 'R021'}]
             print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
@@ -7136,9 +7959,24 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 except Exception as e:
                     print(f"[审核] 发布前自检 Checklist 执行失败: {e}")
 
+            if document.file_type != 'xlsx':
+                # ── 文件名审核 ──
+                try:
+                    filename_issues = _run_filename_audit(document.filename or '', content, document_language)
+                    if filename_issues:
+                        print(f"[审核] 文件名审核发现问题: {len(filename_issues)}个")
+                        rule_issues.extend(filename_issues)
+                except Exception as e:
+                    print(f"[审核] 文件名审核执行失败: {e}")
+
             candidate_rule_issues = rule_issues + term_issues
 
+            rule_stage_output = len(candidate_rule_issues)
+            _end_stage("rule_based_audit", output_count=rule_stage_output)
+
             if has_ai_client and len(candidate_rule_issues) > 0:
+                _begin_stage("ai_false_positive_filter")
+                _stage_input_counts["ai_false_positive_filter"] = len(candidate_rule_issues)
                 set_progress(review_id, 'running', 'AI二次验证', 55, f'正在AI验证 {len(candidate_rule_issues)} 个候选问题...')
                 print(f"[审核] 开始AI二次验证，候选问题数={len(candidate_rule_issues)}")
                 try:
@@ -7151,6 +7989,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                         document_language,
                         review_id,
                         "review.rule_false_positive_filter",
+                        force_provider=provider,
                     ) if ai_check_issues else []
                     candidate_rule_issues = deterministic_issues + filtered
                     print(f"[审核] AI二次验证后保留问题数={len(candidate_rule_issues)}, 确定性规则保留={len(deterministic_issues)}")
@@ -7160,39 +7999,104 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 except Exception as e:
                     print(f"[审核] AI 二次验证失败, 使用原始规则结果: {e}")
 
+            # AI 过滤阶段结束
+            filter_dropped = rule_stage_output - len(candidate_rule_issues)
+            _end_stage("ai_false_positive_filter", output_count=len(candidate_rule_issues), dropped_count=filter_dropped)
+
             issues.extend(candidate_rule_issues)
             print(f"[审核] 规则审核阶段共产出问题数={len(candidate_rule_issues)}")
 
         if document.file_type != 'xlsx' and mode in ["ai", "hybrid"] and has_ai_client:
-            set_progress(review_id, 'running', 'AI智能审核', 65, '正在进行AI深度审核...')
-            print(f"[审核] 开始AI智能审核，模式={mode}")
-            try:
-                ai_review_basis_sections = _build_ai_review_basis_sections(spec_texts, document_language)
-                ai_issues = _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections)
-                print(f"[审核] AI审核返回问题数={len(ai_issues)}")
-                _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
-                for issue in ai_issues:
-                    issue["source"] = "ai"
-                    issue["severity"] = issue.get("severity") or "general"
-                    issue["category"] = issue.get("category") or "其他"
-                    issue["original_text"] = issue.get("original_text") or ""
-                    issue["context"] = issue.get("context") or ""
-                    issue["chapter"] = issue.get("chapter") or ""
-                    issue["rule"] = issue.get("rule") or "AI"
-                    issue["suggestion"] = issue.get("suggestion") or ""
-                    issue["description"] = issue.get("description") or ""
-                    issue["audit_basis"] = issue.get("audit_basis") or "AI 审核（写作风格指南 + 发布前自检 Checklist + CYY人工审核经验基线）"
-                    issue["confidence"] = issue.get("confidence") or 80
-                    issue["position"] = issue.get("position") or ""
-                    issue = _normalize_ai_issue_category(issue)
-                    if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
-                        issue["severity"] = "general"
-                issues.extend(ai_issues)
-            except concurrent.futures.TimeoutError:
-                print(f"[审核] AI 审核超时({_ai_audit_timeout_seconds(content):.0f}s), 跳过 AI 审核")
-            except Exception as e:
-                print(f"[审核] AI 审核失败, 跳过 AI 审核: {e}")
+            _begin_stage("ai_deep_review")
+            pre_ai_count = len(issues)
+            _stage_input_counts["ai_deep_review"] = pre_ai_count
 
+            # 确定实际使用的 provider 列表
+            actual_providers = provider_list if provider_list else ([provider] if provider else [None])
+            is_multi_provider = len(actual_providers) > 1
+
+            if is_multi_provider:
+                # ── 多模型并发审核 ──
+                set_progress(review_id, 'running', 'AI智能审核', 65,
+                             f'正在并发调用 {len(actual_providers)} 个 AI 模型审核...')
+                print(f"[审核] 多模型并发审核，providers={actual_providers}")
+                ai_issues, ai_chunk_meta = [], []  # 初始化为空
+                try:
+                    ai_issues, ai_chunk_meta = _run_multi_provider_ai_deep_review(
+                        review_id, content, document_language,
+                        _build_ai_review_basis_sections(spec_texts, document_language),
+                        actual_providers,
+                        document_name=document.filename
+                    )
+                except Exception as e:
+                    print(f"[多模型审核失败] {e}")
+                meta_combined = {
+                    "providers": actual_providers,
+                    "total_chunks": sum(len(m.get("chunk_sizes", [])) for m in (ai_chunk_meta or [])),
+                    "total_issue_count": len(ai_issues),
+                }
+                ai_chunk_meta = [meta_combined]
+            else:
+                # ── 单模型审核（原有逻辑）──
+                single_provider = actual_providers[0]
+                set_progress(review_id, 'running', 'AI智能审核', 65,
+                             f'正在使用 {single_provider or "默认"} 模型审核...')
+                print(f"[审核] 单模型审核，provider={single_provider}")
+                ai_issues, ai_chunk_meta = [], []  # 初始化为空
+                try:
+                    ai_issues, ai_chunk_meta = _run_ai_deep_review(
+                        review_id, content, document_language,
+                        _build_ai_review_basis_sections(spec_texts, document_language),
+                        provider=single_provider,
+                        document_name=document.filename
+                    )
+                except concurrent.futures.TimeoutError:
+                    print(f"[审核] AI 审核超时({_ai_audit_timeout_seconds(content):.0f}s)")
+                except Exception as e:
+                    print(f"[审核] AI 审核失败: {e}")
+
+            print(f"[审核] AI审核返回问题数={len(ai_issues)}")
+            _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
+
+            # AI调用追踪
+            try:
+                from app.crud.audit_trace import sync_traces_from_usage_events
+                usage_events = ai_client.get_usage_events(
+                    request_label="review.audit_chunk",
+                    review_id=review_id,
+                    limit=100,
+                )
+                chunk_sizes = [m.get("chunk_size", 0) for m in ai_chunk_meta]
+                issue_counts = [m.get("parsed_issue_count", 0) for m in ai_chunk_meta]
+                if usage_events:
+                    sync_traces_from_usage_events(db, review_id, usage_events, chunk_sizes, issue_counts)
+                    print(f"[审核] AI调用追踪已持久化: {len(usage_events)} 条记录")
+            except Exception as trace_err:
+                print(f"[审核] AI调用追踪持久化失败(非致命): {trace_err}")
+
+            for issue in ai_issues:
+                issue["source"] = "ai"
+                issue["severity"] = issue.get("severity") or "general"
+                issue["category"] = issue.get("category") or "其他"
+                issue["original_text"] = issue.get("original_text") or ""
+                issue["context"] = issue.get("context") or ""
+                issue["chapter"] = issue.get("chapter") or ""
+                issue["rule"] = issue.get("rule") or "AI"
+                issue["suggestion"] = issue.get("suggestion") or ""
+                issue["description"] = issue.get("description") or ""
+                issue["audit_basis"] = issue.get("audit_basis") or "AI 审核（写作风格指南 + 发布前自检 Checklist + CYY人工审核经验基线）"
+                issue["confidence"] = issue.get("confidence") or 80
+                issue["position"] = issue.get("position") or ""
+                issue = _normalize_ai_issue_category(issue)
+                if issue["severity"] not in ("fatal", "serious", "general", "suggestion"):
+                    issue["severity"] = "general"
+            issues.extend(ai_issues)
+
+            ai_new_issues = len(issues) - pre_ai_count
+            _end_stage("ai_deep_review", output_count=len(issues), dropped_count=0)
+
+        _begin_stage("dedup_and_validation")
+        _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
         issues = dedupe_issues_by_original(issues)
         issues = _sanitize_issue_suggestions(issues)
@@ -7204,6 +8108,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         before_pipeline_count = len(issues)
         issues = pipeline_select_review_issues(issues)
         print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+
+        validation_dropped = _stage_input_counts.get("dedup_and_validation", before_pipeline_count) - len(issues)
+        _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
+
         retained_ai_count = sum(1 for issue in issues if str(issue.get('source', '') or '').lower() == 'ai')
         if retained_ai_count:
             print(f"[审核] AI问题最终保留数量={retained_ai_count}")
@@ -7244,7 +8152,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
                 audit_basis=issue.get("audit_basis", ""),
                 confidence=issue.get("confidence", 0),
                 source=issue.get("source", "rule"),
-                position=issue.get("position", "")
+                position=issue.get("position", ""),
+                providers=issue.get("providers", None),
             ))
 
         review_ai_usage = {
@@ -7271,6 +8180,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
             "cache_version": _review_cache_version(),
             "cache_hit": False,
             "ai_usage": review_ai_usage,
+            "stage_diagnostics": _stage_diagnostics,
+            "engine_version": "review-engine-v2",
         })
 
         set_progress(review_id, 'completed', '完成', 100, f'审核完成，发现 {len(issues)} 个问题')
@@ -7285,8 +8196,45 @@ def _run_review_background(review_id: int, document_id: int, mode: str):
         db.close()
 
 
+def _normalize_providers(provider: str = None, providers: str = None) -> list:
+    """将 provider/providers 参数规范化为 provider 列表。
+    
+    Args:
+        provider: 单个 provider 名称（向后兼容）
+        providers: 逗号分隔的多个 provider 名称
+    
+    Returns:
+        list: 去重后的 provider 列表，如 ['qwen', 'deepseek']
+    """
+    result = []
+    if providers:
+        result = [p.strip() for p in providers.split(",") if p.strip()]
+    elif provider:
+        result = [provider.strip()]
+    # 去重并过滤空值
+    seen = set()
+    unique = []
+    for p in result:
+        if p and p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
 @router.post("/{document_id}")
-async def create_review_task(document_id: int, mode: str = "hybrid", background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+async def create_review_task(document_id: int, mode: str = "hybrid",
+                             provider: str = None, providers: str = None,
+                             background_tasks: BackgroundTasks = None,
+                             db: Session = Depends(get_db)):
+    """创建审核任务。
+    
+    Args:
+        provider: 单个 provider（向后兼容），如 'qwen'
+        providers: 多个 provider，逗号分隔，如 'qwen,deepseek,kimi'。
+                   当指定多个时，AI深度审核将并发调用所有模型，结果去重合并。
+    """
+    print(f"[DEBUG create_review_task] provider={provider!r} providers={providers!r} mode={mode!r}")
+
     if mode not in {"rule", "ai", "hybrid"}:
         raise HTTPException(status_code=400, detail="Unsupported review mode")
 
@@ -7299,7 +8247,14 @@ async def create_review_task(document_id: int, mode: str = "hybrid", background_
         set_progress(active_review.id, 'running', '初始化', 0, '已有审核任务正在执行')
         return {"review_id": active_review.id, "status": "running", "message": "已有审核任务正在执行，请轮询进度"}
 
+    # 规范化 providers 列表
+    provider_list = _normalize_providers(provider, providers)
+
     cached_review, cached_summary = _find_cached_completed_review(db, document, mode)
+    # 指定 provider(s) 时不使用通用缓存（不同 provider 结果不同）
+    if cached_review and (provider or providers):
+        cached_review = None
+        cached_summary = None
     if cached_review:
         total = cached_summary.get("total", cached_review.total_issues or 0) if isinstance(cached_summary, dict) else (cached_review.total_issues or 0)
         message = f"复用缓存结果，共 {total} 个问题"
@@ -7311,13 +8266,15 @@ async def create_review_task(document_id: int, mode: str = "hybrid", background_
             "cached_from_review": cached_review.id,
         }
 
-    review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode))
+    # 数据库记录用逗号分隔存储多个 provider
+    db_provider = ",".join(provider_list) if provider_list else provider
+    review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider))
     update_review_status(db, review.id, "running", 0, "审核任务已创建")
     set_progress(review.id, 'running', '初始化', 0, '审核任务已创建')
     
-    # 启动后台审核任务
+    # 启动后台审核任务（传递 provider_list）
     if background_tasks:
-        background_tasks.add_task(_run_review_background, review.id, document_id, mode)
+        background_tasks.add_task(_run_review_background, review.id, document_id, mode, provider, provider_list)
     
     return {"review_id": review.id, "status": "running", "message": "审核任务已启动，请轮询进度"}
 
@@ -7336,7 +8293,7 @@ def _dashboard_date_range(time_range='7d', start_date=None, end_date=None):
         end = today
     if end < start:
         raise HTTPException(status_code=400, detail='结束日期不能早于开始日期')
-    return datetime.combine(start, time.min), datetime.combine(end, time.max)
+    return datetime.combine(start, dt_time.min), datetime.combine(end, dt_time.max)
 
 
 def _dashboard_doc_type_value(doc_type):
@@ -7603,15 +8560,116 @@ def _load_gold_rows_from_excel(file_bytes):
 
 
 def _gold_row_matches_issue(gold_row, issue):
-    expected = _normalize_gold_compare_text(gold_row.get("wrong_text"))
-    actual = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
-    if not expected or not actual:
+    """金标准行与AI issue的匹配判定。
+    
+    匹配策略（按优先级）：
+    1. 归一化后完全一致 → 匹配
+    2. 短文本(2-3字符)：编辑距离 ≤ 1 → 匹配
+    3. 中长文本(≥2字符)：包含关系 → 匹配
+    4. 中等文本(3-10字符)：编辑距离 ≤ 1 且规则/类型相关 → 匹配
+    5. 规则词匹配：金标准的"问题类型"与issue的category/rule有交集 → 弱匹配（需文本也部分匹配）
+    """
+    gold_wrong = _normalize_gold_compare_text(gold_row.get("wrong_text"))
+    issue_original = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
+    
+    if not gold_wrong or not issue_original:
         return False
-    if expected == actual:
+    
+    # 策略1: 完全一致
+    if gold_wrong == issue_original:
         return True
-    if len(expected) >= 4 and len(actual) >= 4:
-        return expected in actual or actual in expected
+    
+    len_gold = len(gold_wrong)
+    len_issue = len(issue_original)
+    
+    # 策略2: 短文本编辑距离匹配（2-3字符的短词，允许1个字符差异）
+    if len_gold <= 3 and len_issue <= 3 and len_gold >= 2 and len_issue >= 2:
+        if _edit_distance(gold_wrong, issue_original) <= 1:
+            return True
+    
+    # 策略3: 包含关系匹配（≥2字符）
+    if len_gold >= 2 and len_issue >= 2:
+        if gold_wrong in issue_original or issue_original in gold_wrong:
+            return True
+    
+    # 策略4: 中等长度文本模糊匹配 + 规则相关性
+    if 3 <= len_gold <= 10 and 3 <= len_issue <= 10:
+        if _edit_distance(gold_wrong, issue_original) <= 1:
+            return True
+    
+    # 策略5: 规则词/类型相关 + 部分文本匹配
+    gold_type = str(gold_row.get("issue_type", "") or "").lower()
+    issue_category = str(_issue_value(issue, "category", "") or "").lower()
+    issue_rule = str(_issue_value(issue, "rule", "") or "").lower()
+    issue_type = str(_issue_value(issue, "type", "") or "").lower()
+    
+    combined_issue_type = f"{issue_category} {issue_rule} {issue_type}"
+    
+    # 规则词模糊匹配（金标准的类型与issue的分类有交集）
+    type_keywords = {
+        "术语": ["术语", "terminology", "term"],
+        "拼写": ["拼写", "spelling", "spell"],
+        "标点": ["标点", "punctuation", "punct"],
+        "语法": ["语法", "grammar"],
+        "合规": ["合规", "compliance", "监管"],
+        "单位": ["单位", "unit"],
+        "格式": ["格式", "format"],
+        "操作": ["操作", "operation", "步骤"],
+        "信息完整性": ["信息完整性", "信息", "completeness"],
+        "表格": ["表格", "table"],
+        "图文引用": ["图文", "figure", "引用", "reference"],
+    }
+    
+    gold_type_clean = re.sub(r"[^\w\u4e00-\u9fff]", "", gold_type)
+    if gold_type_clean:
+        for type_label, keywords in type_keywords.items():
+            if any(kw in gold_type_clean for kw in keywords):
+                if any(kw in combined_issue_type for kw in keywords):
+                    # 类型匹配，检查文本是否有交集
+                    if len_gold >= 2 and len_issue >= 2:
+                        # 至少有一个公共子串长度 >= 2
+                        common_len = _longest_common_substring(gold_wrong, issue_original)
+                        if common_len >= 2:
+                            return True
+                    break
+    
     return False
+
+
+def _edit_distance(s1: str, s2: str) -> int:
+    """计算两个字符串的编辑距离（Levenshtein）。"""
+    if len(s1) < len(s2):
+        return _edit_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    
+    prev = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr = [i + 1]
+        for j, c2 in enumerate(s2):
+            cost = 0 if c1 == c2 else 1
+            curr.append(min(curr[j] + 1, prev[j + 1] + 1, prev[j] + cost))
+        prev = curr
+    return prev[-1]
+
+
+def _longest_common_substring(s1: str, s2: str) -> int:
+    """计算最长公共子串长度。"""
+    if not s1 or not s2:
+        return 0
+    
+    m, n = len(s1), len(s2)
+    max_len = 0
+    # 使用滚动数组优化
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if s1[i - 1] == s2[j - 1]:
+                curr[j] = prev[j - 1] + 1
+                max_len = max(max_len, curr[j])
+        prev = curr
+    return max_len
 
 
 def _gold_text_presence(content, value):
@@ -8182,6 +9240,7 @@ async def get_review_parsed_text(review_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{review_id}/gold-compare")
 async def compare_review_with_gold(review_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    print(f"[DEBUG gold-compare ENTRY] review_id={review_id}")
     review = get_review(db, review_id=review_id)
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
@@ -8191,7 +9250,9 @@ async def compare_review_with_gold(review_id: int, file: UploadFile = File(...),
 
     file_bytes = await file.read()
     gold_rows = _load_gold_rows_from_excel(file_bytes)
+    print(f"[DEBUG gold-compare] review_id={review_id} gold_rows={len(gold_rows)}")
     issues = _visible_review_issues(get_issues(db, review_id=review_id))
+    print(f"[DEBUG gold-compare] issues_count={len(issues)}")
     content = document.content or ""
 
     matched_issue_ids = set()
@@ -8262,6 +9323,44 @@ async def compare_review_with_gold(review_id: int, file: UploadFile = File(...),
         "false_positive": false_positive,
     }
 
+# ── AI Provider Management ────────────────────────────────────────
+
+
+@router.get("/provider-status")
+async def get_provider_status():
+    """获取可用 AI provider 列表和配置信息"""
+    status = ai_client.provider_status()
+    
+    # 构建前端友好的模型列表
+    models = []
+    model_labels = {
+        "qwen": "通义千问 (Qwen)",
+        "deepseek": "DeepSeek",
+        "kimi": "Kimi (Moonshot)",
+        "arkclaw": "ArkClaw",
+        "mcai": "MCAI Proxy",
+        "proxy": "OpenAI Proxy",
+    }
+    for name in status.get("available", []):
+        models.append({
+            "name": name,
+            "label": model_labels.get(name, name),
+            "available": True,
+        })
+    
+    return {
+        "default_provider": status.get("default_provider"),
+        "available_providers": status.get("available"),
+        "provider_models": {
+            "qwen": ai_client.qwen_model,
+            "deepseek": ai_client.deepseek_model,
+            "kimi": ai_client.kimi_model,
+            "arkclaw": ai_client.arkclaw_model,
+            "mcai": ai_client.mcai_model,
+            "proxy": ai_client.fallback_model,
+        },
+        "models": models,
+    }
 
 @router.get("/{review_id}", response_model=Review)
 async def read_review(review_id: int, db: Session = Depends(get_db)):
@@ -8398,3 +9497,511 @@ async def generate_report(review_id: int, db: Session = Depends(get_db)):
     else:
         html_content = _generate_review_html_content(review, document, confirmed_issues)
     return {"content": html_content, "format": "html"}
+
+
+@router.get("/{review_id}/aggregated-report")
+async def get_aggregated_report(review_id: int, db: Session = Depends(get_db)):
+    """获取聚合审核报告（结构化 JSON）
+
+    使用 ReportAggregator 输出展示问题分组、五维质量评分、
+    阶段诊断摘要，供前端报告面板和导出使用。
+    """
+    from app.review_engine.reporting import ReportAggregator
+
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        raise HTTPException(status_code=404, detail="审核任务不存在")
+
+    issues = get_issues(db, review_id=review_id)
+    issue_dicts = [issue_to_dict(i) for i in issues]
+
+    document = get_document(db, document_id=review.document_id)
+    agg = ReportAggregator()
+    report = agg.aggregate(
+        issue_dicts,
+        review_id=review_id,
+        document_title=getattr(document, 'filename', '') or '',
+    )
+
+    summary_raw = _load_review_summary(review.summary)
+    report.stage_diagnostics = {
+        "stages": summary_raw.get("stages", summary_raw.get("stage_diagnostics", [])),
+        "language": summary_raw.get("language", ""),
+    }
+
+    return report.to_dict()
+
+
+@router.get("/{review_id}/traces")
+async def get_review_audit_traces(review_id: int, db: Session = Depends(get_db)):
+    """获取审核任务的AI调用追踪详情"""
+    from app.crud.audit_trace import get_traces_by_review_id
+    traces = get_traces_by_review_id(db, review_id)
+    return {
+        "review_id": review_id,
+        "total_traces": len(traces),
+        "traces": [
+            {
+                "id": t.id,
+                "chunk_index": t.chunk_index,
+                "chunk_size": t.chunk_size,
+                "provider": t.provider,
+                "model": t.model,
+                "prompt_tokens": t.prompt_tokens,
+                "completion_tokens": t.completion_tokens,
+                "total_tokens": t.total_tokens,
+                "latency_ms": t.latency_ms,
+                "status": t.status,
+                "error_message": t.error_message,
+                "parsed_issue_count": t.parsed_issue_count,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in traces
+        ],
+    }
+
+# ── Review Engine: Rule Migration Status ──────────────────────────
+
+@router.get("/engine/rule-migration")
+async def get_rule_migration_status():
+    """获取确定性规则迁移状态
+
+    返回已迁移和待迁移的规则分组，用于跟踪审核引擎重构进度。
+    """
+    from app.review_engine.rules import get_migration_summary
+    return get_migration_summary()
+
+
+@router.get("/{review_id}/stage-diagnostics")
+async def get_stage_diagnostics(review_id: int, db: Session = Depends(get_db)):
+    """获取审核流水线阶段诊断信息
+
+    返回每个阶段的输入/输出/丢弃数量、耗时和错误信息，
+    用于排障、性能分析和历史对比。
+    """
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        raise HTTPException(status_code=404, detail="审核任务不存在")
+
+    summary = _load_review_summary(review.summary)
+    stage_diagnostics = summary.get("stage_diagnostics", [])
+
+    # 计算汇总统计
+    total_duration_ms = sum(s.get("duration_ms", 0) for s in stage_diagnostics)
+    total_dropped = sum(s.get("dropped_count", 0) for s in stage_diagnostics)
+    stage_count = len(stage_diagnostics)
+
+    return {
+        "review_id": review_id,
+        "status": review.status,
+        "total_issues": review.total_issues or 0,
+        "stage_count": stage_count,
+        "total_duration_ms": total_duration_ms,
+        "total_dropped": total_dropped,
+        "stages": stage_diagnostics,
+    }
+
+
+@router.get("/{review_id}/coverage")
+async def get_review_coverage(review_id: int, db: Session = Depends(get_db)):
+    """获取审核覆盖率统计"""
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        raise HTTPException(status_code=404, detail="审核任务不存在")
+
+    # 获取问题列表
+    issues = get_issues(db, review_id=review_id)
+
+    total = len(issues)
+
+    # 1. 严重度分布
+    severity_dist = {}
+    for issue in issues:
+        sev = (issue.severity or "general").lower()
+        severity_dist[sev] = severity_dist.get(sev, 0) + 1
+
+    # 2. 类别分布
+    category_dist = {}
+    for issue in issues:
+        cat = issue.category or "其他"
+        category_dist[cat] = category_dist.get(cat, 0) + 1
+
+    # 3. 规则命中统计
+    rule_hit = {}
+    for issue in issues:
+        rule_name = issue.rule_name or issue.rule or "未分类"
+        rule_hit[rule_name] = rule_hit.get(rule_name, 0) + 1
+
+    # 4. 状态分布
+    status_dist = {}
+    for issue in issues:
+        st = issue.status or "pending"
+        status_dist[st] = status_dist.get(st, 0) + 1
+
+    # 5. 章节分布
+    chapter_dist = {}
+    for issue in issues:
+        loc = issue.location or "未标记位置"
+        chapter = loc.split("节")[0] if "节" in loc else (
+            loc.split("段")[0] if "段" in loc else loc[:30]
+        )
+        chapter_dist[chapter] = chapter_dist.get(chapter, 0) + 1
+
+    # 6. AI调用统计
+    total_tokens = 0
+    total_latency = 0
+    provider_stats = {}
+    from app.crud.audit_trace import get_traces_by_review_id
+    traces = get_traces_by_review_id(db, review_id)
+    for t in traces:
+        total_tokens += t.total_tokens or 0
+        total_latency += t.latency_ms or 0
+        provider_stats[t.provider] = provider_stats.get(t.provider, 0) + 1
+
+    # 7. 审核覆盖质量评分
+    quality_score = _compute_coverage_quality_score(
+        total, severity_dist, status_dist, traces, review
+    )
+
+    # 8. 规则覆盖度
+    from app.crud.rule import get_rules as db_get_rules
+    try:
+        all_rules = db_get_rules(db, skip=0, limit=500)
+        total_available_rules = len(all_rules)
+    except Exception:
+        total_available_rules = 0
+    rules_triggered = len(rule_hit)
+    rule_coverage_pct = round(rules_triggered / max(total_available_rules, 1) * 100, 1)
+
+    return {
+        "review_id": review_id,
+        "document_name": review.document_name,
+        "total_issues": total,
+        "severity_distribution": severity_dist,
+        "category_distribution": category_dist,
+        "rule_hits": dict(sorted(rule_hit.items(), key=lambda x: x[1], reverse=True)[:20]),
+        "rules_triggered": rules_triggered,
+        "total_available_rules": total_available_rules,
+        "rule_coverage_pct": rule_coverage_pct,
+        "status_distribution": status_dist,
+        "chapter_distribution": dict(sorted(chapter_dist.items(), key=lambda x: x[1], reverse=True)[:15]),
+        "ai_stats": {
+            "total_traces": len(traces),
+            "total_tokens": total_tokens,
+            "total_latency_ms": total_latency,
+            "avg_latency_ms": round(total_latency / max(len(traces), 1)),
+            "provider_distribution": provider_stats,
+        },
+        "quality_score": quality_score,
+    }
+
+
+@router.get("/{review_id}/terminology")
+async def get_terminology_analysis(review_id: int, db: Session = Depends(get_db)):
+    """获取术语库匹配率分析（YiCAT 风格）"""
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        raise HTTPException(status_code=404, detail="审核任务不存在")
+
+    # 加载术语库
+    from app.models.term import Term
+    terms = db.query(Term).all()
+    term_dicts = [
+        {'id': t.id, 'non_standard': t.non_standard, 'standard': t.standard, 'category': t.category}
+        for t in terms
+    ]
+
+    # 获取文档内容
+    content = review.content or ''
+    if review.document_id:
+        try:
+            from app.models.document import Document
+            doc = db.query(Document).filter(Document.id == review.document_id).first()
+            if doc and doc.content:
+                content = doc.content
+        except Exception:
+            pass
+
+    # 执行术语匹配分析
+    from app.services.terminology_matcher import analyze_terminology
+    result = analyze_terminology(content, term_dicts, 
+                                  review.document_language or 'both')
+
+    # 获取术语库中未命中的术语列表
+    matched_ids = set(m['term_id'] for m in result['matches'])
+    unmatched_terms = [
+        {'id': t['id'], 'non_standard': t['non_standard'], 'standard': t['standard'], 'category': t['category']}
+        for t in term_dicts if t['id'] not in matched_ids
+    ]
+
+    result['review_id'] = review_id
+    result['document_name'] = review.document_name
+    result['unmatched_terms'] = unmatched_terms[:50]
+
+    return result
+
+
+@router.get("/{review_id}/similar-documents")
+async def search_similar_documents(review_id: int, db: Session = Depends(get_db)):
+    """搜索相似文档（基于全文检索）"""
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        raise HTTPException(status_code=404, detail="审核任务不存在")
+
+    content = review.content or ''
+    if not content:
+        return {"review_id": review_id, "results": [], "count": 0}
+
+    # 使用 FTS 引擎搜索
+    from app.services.fts_search import get_fts_engine
+    try:
+        engine = get_fts_engine()
+        results = engine.search_similar_documents(content[:3000], top_k=10)
+        return {
+            "review_id": review_id,
+            "document_name": review.document_name,
+            "results": [
+                {
+                    "doc_id": r.doc_id,
+                    "title": r.title,
+                    "score": round(r.score, 2),
+                    "snippet": r.snippet,
+                    "highlights": r.highlights,
+                }
+                for r in results
+            ],
+            "count": len(results),
+        }
+    except Exception as e:
+        return {
+            "review_id": review_id,
+            "results": [],
+            "count": 0,
+            "error": str(e),
+        }
+
+
+@router.post("/{review_id}/reindex")
+async def reindex_document(review_id: int, db: Session = Depends(get_db)):
+    """重新索引文档到全文检索"""
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        raise HTTPException(status_code=404, detail="审核任务不存在")
+
+    content = review.content or ''
+    if not content:
+        return {"success": False, "message": "文档内容为空"}
+
+    try:
+        from app.services.fts_search import get_fts_engine
+        engine = get_fts_engine()
+        engine.index_document(
+            doc_id=review.document_id or review_id,
+            content=content,
+            title=review.document_name or '',
+            language=review.document_language or 'unknown',
+            review_id=review_id,
+        )
+        return {"success": True, "message": "文档已重新索引"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.get("/search")
+async def search_reviews(
+    q: str = Query(..., description="搜索关键词"),
+    limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+):
+    """全文搜索审核文档"""
+    try:
+        from app.services.fts_search import get_fts_engine
+        engine = get_fts_engine()
+        results = engine.search(q, limit=limit, offset=offset)
+        return {
+            "query": q,
+            "results": [
+                {
+                    "doc_id": r.doc_id,
+                    "title": r.title,
+                    "score": round(r.score, 2),
+                    "snippet": r.snippet,
+                    "highlights": r.highlights,
+                    "metadata": r.metadata,
+                }
+                for r in results
+            ],
+            "count": len(results),
+        }
+    except Exception as e:
+        return {"query": q, "results": [], "count": 0, "error": str(e)}
+
+
+@router.post("/eval/batch")
+async def run_batch_evaluation(
+    dataset_id: str = Form(None),
+    dataset_path: str = Form(None),
+    ci_mode: bool = Form(False),
+):
+    """批量评测端点
+
+    接收评测集配置，运行多文档确定性规则审核并返回 EvalSuiteResult。
+
+    支持两种模式：
+    - dataset_id: 从默认评测集加载指定数据集
+    - dataset_path: 从指定 JSON 文件加载
+    """
+    import asyncio
+    import json as _json
+
+    if not dataset_id and not dataset_path:
+        raise HTTPException(status_code=400, detail="请提供 dataset_id 或 dataset_path")
+
+    # Load config
+    if dataset_path:
+        config_path = Path(dataset_path)
+        if not config_path.exists():
+            raise HTTPException(status_code=404, detail=f"评测集配置文件不存在: {dataset_path}")
+        config = _json.loads(config_path.read_text(encoding="utf-8"))
+    else:
+        default_path = Path(__file__).resolve().parents[3] / "eval" / "datasets" / "sample_baseline.json"
+        if not default_path.exists():
+            raise HTTPException(status_code=404, detail="默认评测集配置文件不存在")
+        config = _json.loads(default_path.read_text(encoding="utf-8"))
+
+    # Run synchronous eval in thread pool
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, _run_batch_eval_sync, config, dataset_id, ci_mode
+    )
+    return result
+
+
+def _run_batch_eval_sync(config: dict, dataset_id: str | None, ci_mode: bool) -> dict:
+    """Synchronous batch evaluation."""
+    from app.database import SessionLocal
+    from app.review_engine.evaluation import EvaluationRunner
+    from app.review_engine.reporting import ReportAggregator
+    from app.review_engine.orchestrator import ReviewOrchestrator
+    from app.review_engine.rules.engine import DeterministicRuleEngine
+
+    db = SessionLocal()
+    runner = EvaluationRunner()
+    report_agg = ReportAggregator()
+
+    datasets = config.get("datasets", [])
+    if dataset_id:
+        datasets = [d for d in datasets if d["id"] == dataset_id]
+
+    all_results: list[dict] = []
+    violations: list[str] = []
+
+    for ds in datasets:
+        ds_results: list[dict] = []
+        for doc_cfg in ds.get("documents", []):
+            fixture_path = doc_cfg.get("fixture_path", "")
+            file_type = doc_cfg.get("file_type", "txt")
+
+            content = _load_fixture_content(fixture_path)
+            if not content:
+                ds_results.append({"fixture": fixture_path, "status": "skipped", "error": "Fixture not found"})
+                continue
+
+            # Run engine
+            from app.review_engine.orchestrator import ReviewRunResult
+            orch = ReviewOrchestrator()
+
+            def rule_stage(result: ReviewRunResult, ctx: dict) -> None:
+                engine = DeterministicRuleEngine()
+                result.issues = engine.run_all(
+                    content, file_type=file_type,
+                    language=doc_cfg.get("language", "en"),
+                    document_name=fixture_path,
+                )
+
+            orch.add_stage("eval_rules", rule_stage)
+            run_result = orch.run(0, {"content": content})
+
+            # Evaluate
+            baseline_markers = doc_cfg.get("baseline_markers", [])
+            eval_result = runner.evaluate(
+                machine_issues=run_result.issues,
+                human_baseline=baseline_markers,
+                review_id=0,
+            )
+            report = report_agg.aggregate(run_result.issues, review_id=0)
+
+            entry = {
+                "fixture": fixture_path,
+                "total_issues": len(run_result.issues),
+                "detection_rate": round(eval_result.detection_rate, 3),
+                "precision": round(eval_result.precision, 3),
+                "false_positive_rate": round(eval_result.false_positive_rate, 3),
+                "noop_suggestions": eval_result.noop_suggestions,
+                "numeric_changed": eval_result.numeric_changed,
+                "report": report.to_dict(),
+            }
+
+            # CI mode violations
+            if ci_mode:
+                min_i = doc_cfg.get("expected_min_issues")
+                if min_i is not None and len(run_result.issues) < min_i:
+                    violations.append(
+                        f"[{fixture_path}] issues={len(run_result.issues)} < min={min_i}"
+                    )
+
+            ds_results.append(entry)
+
+        all_results.append({
+            "dataset_id": ds["id"],
+            "dataset_name": ds.get("name", ""),
+            "results": ds_results,
+        })
+
+    db.close()
+
+    return {
+        "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "datasets": all_results,
+        "violations": violations,
+        "ci_pass": len(violations) == 0,
+    }
+
+
+def _load_fixture_content(fixture_path: str) -> str:
+    """Load fixture content from project root."""
+    fp = Path(__file__).resolve().parents[3] / fixture_path
+    if fp.exists():
+        return fp.read_text(encoding="utf-8")
+    return ""
+
+
+def _compute_coverage_quality_score(total_issues, severity_dist, status_dist, traces, review):
+    """计算审核覆盖质量评分 (0-100)"""
+    score = 0
+    fatals = severity_dist.get("fatal", 0)
+    serious = severity_dist.get("serious", 0)
+    confirmed = status_dist.get("confirmed", 0)
+    false_pos = status_dist.get("false_positive", 0)
+
+    # 检出问题 (30分)
+    score += min(30, total_issues * 3)
+
+    # 严重度价值 (20分)
+    critical_ratio = (fatals + serious) / max(total_issues, 1)
+    score += min(20, int(critical_ratio * 25))
+
+    # 确认率 (20分)
+    score += int(confirmed / max(total_issues, 1) * 20)
+    score -= int(false_pos / max(total_issues, 1) * 15)
+
+    # AI调用成功率 (15分)
+    if traces:
+        success = sum(1 for t in traces if t.status == "success")
+        score += int(success / len(traces) * 15)
+
+    # 基础分 (15分)
+    if review.status == "completed":
+        score += 15
+
+    return min(100, max(0, score))

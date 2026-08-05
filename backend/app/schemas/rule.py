@@ -9,6 +9,7 @@ class RuleBase(BaseModel):
     example: str = ""
     suggestion: str = ""
     audit_basis: str = ""
+    severity: str = "general"  # fatal, serious, general, suggestion
     language: str = "both"  # cn, en, both
 
 class RuleCreate(RuleBase):
@@ -28,4 +29,5 @@ class RuleUpdate(BaseModel):
     example: str | None = None
     suggestion: str | None = None
     audit_basis: str | None = None
+    severity: str | None = None
     language: str | None = None
