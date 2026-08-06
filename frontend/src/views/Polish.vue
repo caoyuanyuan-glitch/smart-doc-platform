@@ -124,7 +124,7 @@
               </div>
 
               <div v-if="catItems.length" class="cat-item-list">
-                <div v-for="item in catItems" :key="`cat-${item.paragraphIndex}`" class="cat-item-card">
+                <div v-for="item in catItems" :key="`cat-${item.sentenceIndex}`" class="cat-item-card">
                   <div class="cat-item-header">
                     <div>
                       <div class="cat-item-title">句子 #{{ item.sentenceIndex + 1 }} · 段落 #{{ item.sourceParagraphIndex + 1 }}</div>
@@ -150,7 +150,7 @@
                     <el-select v-model="item.selectedCandidateIndex" class="full-width" placeholder="选择候选句式">
                       <el-option
                         v-for="(candidate, candidateIndex) in item.candidates"
-                        :key="`cat-${item.paragraphIndex}-candidate-${candidateIndex}`"
+                        :key="`cat-${item.sentenceIndex}-candidate-${candidateIndex}`"
                         :label="candidate.template_text"
                         :value="candidateIndex"
                       >

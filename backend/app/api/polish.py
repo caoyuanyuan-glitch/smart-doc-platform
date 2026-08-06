@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import timedelta
+from collections import defaultdict
 from difflib import SequenceMatcher
 import json
 import os
@@ -5405,7 +5406,7 @@ _CAT_SEMANTIC_SCORING_PROMPT = """你是语义匹配评分专家。对每个原�
 async def _batch_ai_semantic_score(
     items: list,
     reason_max_chars: int = 15,
-) -> None:
+) -> dict:
     """
     批量调用 AI，对所有有候选的行打语义分 + 给推荐理由。
     直接修改 items 中每个元素的 candidates 列表（in-place）。
@@ -5418,22 +5419,11 @@ async def _batch_ai_semantic_score(
         scored_items.append(item)
 
     if not scored_items:
-        return
-
-    parts = []
-    for i, item in enumerate(scored_items):
-        original = item.original_text if hasattr(item, 'original_text') else item.get('original_text', '')
-        candidates = item.candidates if hasattr(item, 'candidates') else item.get('candidates', [])
-        parts.append(f"[原句{i}] {original}")
-        for j, c in enumerate(candidates):
-            tpl_text = c.get('template_text', '') if isinstance(c, dict) else getattr(c, 'template_text', '')
-            str_score = c.get('string_score', 0) if isinstance(c, dict) else getattr(c, 'string_score', 0)
-            parts.append(f"  候选{j}(字符串匹配度:{str_score:.2f}): {tpl_text}")
-
-    prompt = _CAT_SEMANTIC_SCORING_PROMPT.format(
-        sentences="\n".join(parts),
-        reason_max=reason_max_chars,
-    )
+        return {
+            "status": "skipped",
+            "error": "无候选句子需要评分",
+            "scored_count": 0,
+        }
 
     try:
         from app.utils.ai_client import ai_client
@@ -5447,81 +5437,100 @@ async def _batch_ai_semantic_score(
             "scored_count": 0,
         }
 
-    try:
-        result = ai_client.chat(
-            [{"role": "user", "content": prompt}],
-            max_tokens=2000,
-            temperature=0.1,
-            request_label="polish.cat.semantic_score",
-        )
-    except Exception as e:
-        logger.warning("[CAT_SCORING] AI 调用失败: %s", e)
-        return {
-            "status": "error",
-            "error": str(e),
-            "scored_count": 0,
-        }
-
-    if not result:
-        return {
-            "status": "empty",
-            "error": "AI 未返回评分结果",
-            "scored_count": 0,
-        }
-
-    try:
-        cleaned = re.sub(r'^```[a-zA-Z]*\n?|\n?```$', '', str(result).strip())
-        parsed = json.loads(cleaned)
-    except Exception as e:
-        logger.warning("[CAT_SCORING] JSON 解析失败: %s, raw=%s", e, str(result)[:200])
-        return {
-            "status": "parse_error",
-            "error": str(e),
-            "scored_count": 0,
-        }
-
-    if not isinstance(parsed, list):
-        return {
-            "status": "invalid_payload",
-            "error": "AI 返回结果格式不正确",
-            "scored_count": 0,
-        }
-
+    batch_size = 30
     scored_count = 0
-    for entry in parsed:
-        if not isinstance(entry, dict):
-            continue
-        idx = int(entry.get("sentence_index", -1))
-        if idx < 0 or idx >= len(scored_items):
-            continue
-        item = scored_items[idx]
-        candidates = item.candidates if hasattr(item, 'candidates') else item.get('candidates', [])
+    partial_failure = False
+    last_error = None
 
-        for c_result in entry.get("candidates", []):
-            if not isinstance(c_result, dict):
+    for batch_start in range(0, len(scored_items), batch_size):
+        batch = scored_items[batch_start:batch_start + batch_size]
+        parts = []
+        total_candidates = 0
+        for i, item in enumerate(batch):
+            original = item.original_text if hasattr(item, 'original_text') else item.get('original_text', '')
+            candidates = item.candidates if hasattr(item, 'candidates') else item.get('candidates', [])
+            parts.append(f"[原句{i}] {original}")
+            for j, c in enumerate(candidates):
+                tpl_text = c.get('template_text', '') if isinstance(c, dict) else getattr(c, 'template_text', '')
+                str_score = c.get('string_score', 0) if isinstance(c, dict) else getattr(c, 'string_score', 0)
+                parts.append(f"  候选{j}(字符串匹配度:{str_score:.2f}): {tpl_text}")
+                total_candidates += 1
+
+        prompt = _CAT_SEMANTIC_SCORING_PROMPT.format(
+            sentences="\n".join(parts),
+            reason_max=reason_max_chars,
+        )
+        dynamic_max_tokens = min(max(2000, total_candidates * 100), 32000)
+
+        try:
+            result = ai_client.chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=dynamic_max_tokens,
+                temperature=0.1,
+                request_label="polish.cat.semantic_score",
+            )
+        except Exception as e:
+            partial_failure = True
+            last_error = str(e)
+            logger.warning("[CAT_SCORING] AI 调用失败(batch=%s): %s", batch_start // batch_size, e)
+            continue
+
+        if not result:
+            partial_failure = True
+            last_error = "AI 未返回评分结果"
+            continue
+
+        try:
+            cleaned = re.sub(r'^```[a-zA-Z]*\n?|\n?```$', '', str(result).strip())
+            parsed = json.loads(cleaned)
+        except Exception as e:
+            partial_failure = True
+            last_error = str(e)
+            logger.warning("[CAT_SCORING] JSON 解析失败(batch=%s): %s, raw=%s", batch_start // batch_size, e, str(result)[:200])
+            continue
+
+        if not isinstance(parsed, list):
+            partial_failure = True
+            last_error = "AI 返回结果格式不正确"
+            continue
+
+        for entry in parsed:
+            if not isinstance(entry, dict):
                 continue
-            c_idx = int(c_result.get("index", -1))
-            if c_idx < 0 or c_idx >= len(candidates):
+            idx = int(entry.get("sentence_index", -1))
+            if idx < 0 or idx >= len(batch):
                 continue
-            c = candidates[c_idx]
-            if isinstance(c, dict):
-                c["semantic_score"] = round(
-                    max(0.0, min(1.0, float(c_result.get("semantic_score", 0)))),
-                    4,
-                )
-                c["ai_reason"] = str(c_result.get("reason", "")).strip()[:reason_max_chars]
-            else:
-                c.semantic_score = round(
-                    max(0.0, min(1.0, float(c_result.get("semantic_score", 0)))),
-                    4,
-                )
-                c.ai_reason = str(c_result.get("reason", "")).strip()[:reason_max_chars]
-            scored_count += 1
+            item = batch[idx]
+            candidates = item.candidates if hasattr(item, 'candidates') else item.get('candidates', [])
+
+            for c_result in entry.get("candidates", []):
+                if not isinstance(c_result, dict):
+                    continue
+                c_idx = int(c_result.get("index", -1))
+                if c_idx < 0 or c_idx >= len(candidates):
+                    continue
+                c = candidates[c_idx]
+                score = round(max(0.0, min(1.0, float(c_result.get("semantic_score", 0)))), 4)
+                reason = str(c_result.get("reason", "")).strip()[:reason_max_chars]
+                if isinstance(c, dict):
+                    c["semantic_score"] = score
+                    c["ai_reason"] = reason
+                else:
+                    c.semantic_score = score
+                    c.ai_reason = reason
+                scored_count += 1
+
+    if scored_count > 0:
+        return {
+            "status": "completed",
+            "error": last_error if partial_failure else None,
+            "scored_count": scored_count,
+        }
 
     return {
-        "status": "completed" if scored_count > 0 else "failed",
-        "error": None if scored_count > 0 else "AI 调用完成但未返回有效评分",
-        "scored_count": scored_count,
+        "status": "error" if partial_failure else "failed",
+        "error": last_error or "AI 调用完成但未返回有效评分",
+        "scored_count": 0,
     }
 
 
@@ -5553,7 +5562,9 @@ def _tokenize_cat_text(text: str) -> list[str]:
         import jieba  # type: ignore
         tokens = jieba.lcut(normalized)
     except Exception:
-        tokens = re.findall(r'[A-Za-z0-9]+|[\u4e00-\u9fff]', normalized)
+        chars = re.findall(r'[\u4e00-\u9fff]', normalized)
+        tokens = [chars[i] + chars[i + 1] for i in range(len(chars) - 1)]
+        tokens.extend(re.findall(r'[A-Za-z0-9]+', normalized))
     return [token.strip().lower() for token in tokens if token and token.strip() and token.strip() not in _CAT_STOP_WORDS]
 
 
@@ -5722,7 +5733,7 @@ def _split_cat_sentences(paragraphs: list[str], source_paragraphs: Optional[list
             normalized = re.sub(r'\s+', '', sentence_text)
             if len(normalized) <= 8:
                 continue
-            if not re.search(r'[。！？!?；;]', sentence_text) and len(normalized) < 18:
+            if not re.search(r'[。！？!?；;]', sentence_text) and len(normalized) < 12:
                 continue
             if re.fullmatch(r'[\dA-Za-z\-_.()（）/]+', normalized):
                 continue
@@ -8384,10 +8395,19 @@ async def cat_analyze(
         candidate_recall_guide = _candidate_recall_guide_text(sentence_guide or '')
         guide_entries = _preferred_entries_from_guide(candidate_recall_guide)
         guide_templates = []
+        seen_template_texts = set()
         for e in guide_entries:
-            tpl_text = _template_entry_text(e)
-            if tpl_text:
-                guide_templates.append({"text": tpl_text, "id": str(e.get("id", "")) if isinstance(e, dict) else ""})
+            entry_id = str(e.get("id", "")) if isinstance(e, dict) else ""
+            for candidate_text in [_template_entry_text(e), *(_template_entry_candidates(e) or [])]:
+                normalized_candidate = str(candidate_text or '').strip()
+                if not normalized_candidate or normalized_candidate in seen_template_texts:
+                    continue
+                seen_template_texts.add(normalized_candidate)
+                guide_templates.append({"text": normalized_candidate, "id": entry_id})
+                if len(guide_templates) >= 5000:
+                    break
+            if len(guide_templates) >= 5000:
+                break
 
         if not guide_templates:
             raise HTTPException(status_code=400, detail="句式库为空，请先选择或导入句式库")
@@ -8462,7 +8482,8 @@ async def cat_analyze(
                 "filename": filename,
                 "total_paragraphs": len(items),
                 "content": pre_polished,
-                "paragraph_texts": lines,
+                "paragraph_texts": list(original_lines),
+                "polished_lines": list(lines),
                 "temp_path": temp_path,
                 "resolved_terms": resolved_terms,
                 "user_id": user.id if user else None,
@@ -8520,7 +8541,7 @@ async def cat_apply(
         decisions, db, user, source_filename=request.source_filename or filename,
     )
 
-    paragraph_revisions = {}
+    paragraph_sentence_replacements = defaultdict(list)
     for d in decisions:
         action = d.action
         para_idx = _resolve_cat_paragraph_index(paragraph_texts, d)
@@ -8531,14 +8552,28 @@ async def cat_apply(
         replacement_text = d.accepted_template if action == "accept" else d.modified_text
         if not replacement_text:
             continue
-        original_paragraph = paragraph_revisions.get(para_idx, paragraph_texts[para_idx])
         source_sentence = d.source_sentence_text or d.original_text or ""
-        if source_sentence and source_sentence in original_paragraph:
-            paragraph_revisions[para_idx] = original_paragraph.replace(source_sentence, replacement_text, 1)
-        elif d.original_text and d.original_text in original_paragraph:
-            paragraph_revisions[para_idx] = original_paragraph.replace(d.original_text, replacement_text, 1)
-        else:
-            paragraph_revisions[para_idx] = replacement_text
+        paragraph_sentence_replacements[para_idx].append({
+            "source_sentence": source_sentence,
+            "fallback_sentence": d.original_text or "",
+            "replacement_text": replacement_text,
+        })
+
+    paragraph_revisions = {}
+    for para_idx, replacements in paragraph_sentence_replacements.items():
+        paragraph_text = paragraph_texts[para_idx]
+        updated_text = paragraph_text
+        for replacement in replacements:
+            source_sentence = replacement.get("source_sentence", "")
+            fallback_sentence = replacement.get("fallback_sentence", "")
+            replacement_text = replacement.get("replacement_text", "")
+            if source_sentence and source_sentence in updated_text:
+                updated_text = updated_text.replace(source_sentence, replacement_text, 1)
+                continue
+            if fallback_sentence and fallback_sentence in updated_text:
+                updated_text = updated_text.replace(fallback_sentence, replacement_text, 1)
+        if updated_text.strip() != paragraph_text.strip():
+            paragraph_revisions[para_idx] = updated_text
 
     output_path = None
     applied_changes = []
@@ -8651,7 +8686,7 @@ def cat_get_stats(
 
 @router.get("/cat/download/{download_token}")
 def cat_download_file(download_token: str):
-    payload = _cat_download_cache.get(download_token)
+    payload = _cat_download_cache.pop(download_token, None)
     if not payload:
         raise HTTPException(status_code=404, detail="下载链接已失效")
 
