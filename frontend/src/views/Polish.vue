@@ -113,6 +113,7 @@
               <div v-if="catResult.aiScoringStatus" class="cat-ai-status-banner" :class="catResult.aiScoringStatus">
                 <span class="cat-ai-status-title">AI 评分状态：{{ catAiStatusLabel }}</span>
                 <span v-if="catResult.aiScoringError" class="cat-ai-status-text">{{ catResult.aiScoringError }}</span>
+                <span v-if="catCandidateDebugSummaryText" class="cat-ai-status-text">{{ catCandidateDebugSummaryText }}</span>
               </div>
 
               <div v-if="catApplyResult" class="cat-apply-banner">
@@ -121,6 +122,7 @@
                   <div class="cat-apply-meta">应用 {{ catApplyResult.appliedChangesCount }} 处，准确率 {{ formatCatAccuracyRate(catApplyResult.accuracyRate) }}</div>
                 </div>
                 <div class="cat-apply-actions">
+                  <el-button v-if="catApplyResult.previewUrl" size="small" native-type="button" @click="openCatPreview">查看预览</el-button>
                   <el-button v-if="catApplyResult.reportDownloadUrl" size="small" native-type="button" @click="downloadCatReport">下载润色报告</el-button>
                   <el-button v-if="catApplyResult.downloadUrl" size="small" type="primary" native-type="button" @click="downloadCatResult">下载润色文档</el-button>
                 </div>
@@ -153,6 +155,7 @@
                             <span>匹配率 {{ formatCatCandidateMatchRate(candidate) }}</span>
                             <span>字符串分 {{ formatCatScore(candidate.string_score) }}%</span>
                             <span v-if="candidate.semantic_score !== null && candidate.semantic_score !== undefined">语义分 {{ formatCatScore(candidate.semantic_score) }}%</span>
+                            <span v-if="candidate.needs_review">需确认</span>
                             <span v-if="candidate.ai_reason">{{ candidate.ai_reason }}</span>
                           </div>
                         </div>
@@ -183,6 +186,7 @@
                         <span>匹配率 {{ formatCatCandidateMatchRate(selectedCatCandidate(item)) }}</span>
                         <span>字符串分 {{ formatCatScore(selectedCatCandidate(item)?.string_score) }}%</span>
                         <span v-if="selectedCatCandidate(item)?.semantic_score !== null && selectedCatCandidate(item)?.semantic_score !== undefined">语义分 {{ formatCatScore(selectedCatCandidate(item)?.semantic_score) }}%</span>
+                        <span v-if="selectedCatCandidate(item)?.needs_review">需确认</span>
                         <span v-if="selectedCatCandidate(item)?.ai_reason">{{ selectedCatCandidate(item)?.ai_reason }}</span>
                       </div>
                     </div>
@@ -594,7 +598,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { polishAPI, knowledgeAPI, systemAPI, getAPIErrorMessage, getKnowledgeLoadErrorMessage } from '@/api'
@@ -602,6 +606,7 @@ import { Loading } from '@element-plus/icons-vue'
 import { usePolishStore } from '@/store/polish'
 
 const route = useRoute()
+const router = useRouter()
 const polishStore = usePolishStore()
 const { documentDraft, documentSession } = storeToRefs(polishStore)
 const candidateSelectRefs = new Map()
@@ -615,7 +620,9 @@ const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
 const DEFAULT_DOCUMENT_SENTENCE_FILE_ID = 22
 const CAT_SESSION_KEY = 'polish-cat-session-v1'
+const CAT_SESSION_VERSION = '2026-08-06-cat-match-tighten-2'
 let knowledgeTreePromise = null
+let catSessionPersistTimer = null
 
 // ── 下拉框选项 ──
 const sentenceFileOptions = ref([])
@@ -1428,6 +1435,21 @@ const catAiStatusLabel = computed(() => {
   if (status === 'skipped') return '已跳过，已降级'
   if (status === 'failed' || status === 'error' || status === 'parse_error' || status === 'invalid_payload' || status === 'empty') return '调用失败，已降级'
   return '未知状态'
+})
+
+const catCandidateDebugSummaryText = computed(() => {
+  const summary = catResult.value?.candidateDebugSummary
+  if (!summary) {
+    return ''
+  }
+  const before = Number(summary.totalBeforeFilter || 0)
+  const after = Number(summary.totalAfterFilter || 0)
+  const review = Number(summary.needsReviewCount || 0)
+  const dropped = summary.droppedByReason || {}
+  const topReason = Object.entries(dropped)
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0]
+  const topReasonText = topReason ? `，主要过滤原因 ${topReason[0]} ${topReason[1]} 条` : ''
+  return `候选过滤 ${before} -> ${after}，其中 ${review} 条需确认${topReasonText}`
 })
 
 const confirmedDocChangeCount = computed(() => {
@@ -2530,7 +2552,9 @@ function formatCatAccuracyRate(value) {
 function dedupeCatCandidates(candidates) {
   const bestByText = new Map()
   for (const candidate of candidates || []) {
-    const templateText = String(candidate?.template_text || '').trim()
+    const templateText = String(candidate?.template_text || '')
+      .replace(/\s+/g, '')
+      .replace(/[，。！？!?；;：:、,.\s]+$/g, '')
     if (!templateText) {
       continue
     }
@@ -2694,6 +2718,13 @@ async function submitCatAnalyze() {
     totalParagraphs: data.total_paragraphs || 0,
     totalWithCandidates: data.total_with_candidates || 0,
     templateCoverage: data.template_coverage || 0,
+    resolvedTermCount: data.resolved_term_count || 0,
+    candidateDebugSummary: {
+      totalBeforeFilter: data.candidate_debug_summary?.total_before_filter || 0,
+      totalAfterFilter: data.candidate_debug_summary?.total_after_filter || 0,
+      needsReviewCount: data.candidate_debug_summary?.needs_review_count || 0,
+      droppedByReason: data.candidate_debug_summary?.dropped_by_reason || {}
+    },
     sourceName: pendingLocalFile?.name || formData.value.sourceFile || '',
     aiScoringStatus: data.ai_scoring_status || '',
     aiScoringError: data.ai_scoring_error || ''
@@ -2732,6 +2763,8 @@ async function applyCatSelections() {
       appliedChangesCount: Number.isFinite(data.applied_count) ? data.applied_count : (Array.isArray(data.applied_changes) ? data.applied_changes.length : 0),
       failedCount: Number.isFinite(data.failed_count) ? data.failed_count : 0,
       accuracyRate: data.accuracy?.accuracy_rate ?? null,
+      docId: data.doc_id || null,
+      previewUrl: data.preview_url || '',
       feedback: data.feedback || {}
     }
     if ((data.failed_count || 0) > 0) {
@@ -2771,6 +2804,14 @@ async function downloadCatReport() {
   }
 }
 
+function openCatPreview() {
+  if (!catApplyResult.value?.docId) {
+    ElMessage.warning('当前没有可预览的 CAT 结果')
+    return
+  }
+  router.push({ name: 'PolishPreview', params: { id: catApplyResult.value.docId } })
+}
+
 function readCatSessionSnapshot() {
   if (typeof window === 'undefined') {
     return null
@@ -2799,6 +2840,7 @@ function persistCatSessionSnapshot() {
     return
   }
   const payload = {
+    version: CAT_SESSION_VERSION,
     formData: {
       sentenceFile: formData.value.sentenceFile,
       sentenceFileId: formData.value.sentenceFileId || null,
@@ -2819,9 +2861,23 @@ function persistCatSessionSnapshot() {
   }
 }
 
+function persistCatSessionSnapshotDebounced() {
+  if (catSessionPersistTimer) {
+    window.clearTimeout(catSessionPersistTimer)
+  }
+  catSessionPersistTimer = window.setTimeout(() => {
+    persistCatSessionSnapshot()
+    catSessionPersistTimer = null
+  }, 300)
+}
+
 function restoreCatSessionSnapshot() {
   const snapshot = readCatSessionSnapshot()
   if (!snapshot?.catResult) {
+    return
+  }
+  if (snapshot.version !== CAT_SESSION_VERSION) {
+    clearCatSessionSnapshot()
     return
   }
   const restoredFormData = snapshot.formData || {}
@@ -3100,7 +3156,7 @@ watch(() => formData.value.documentWorkflow, (mode) => {
 watch(
   [() => catResult.value, () => catItems.value, () => catApplyResult.value, () => formData.value.documentWorkflow],
   () => {
-    persistCatSessionSnapshot()
+    persistCatSessionSnapshotDebounced()
   },
   { deep: true }
 )

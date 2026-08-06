@@ -3579,8 +3579,13 @@ class CatCandidate(BaseModel):
     template_id: Optional[str] = None
     string_score: float = 0.0
     semantic_score: Optional[float] = None
+    effective_semantic_score: Optional[float] = None
+    filtered_semantic_score: Optional[float] = None
     ai_reason: Optional[str] = None
     match_tier: str = "reference"
+    needs_review: bool = False
+    review_tags: List[str] = []
+    drop_reason: Optional[str] = None
 
 
 class CatAnalyzeItem(BaseModel):
@@ -3619,7 +3624,7 @@ class CatAnalyzeRequest(BaseModel):
     sentence_file_id: Optional[int] = None
     terminology_file_id: Optional[int] = None
     requirements: Optional[str] = None
-    min_match_threshold: float = 0.30
+    min_match_threshold: float = 0.40
     fuzzy_lower_bound: float = 0.70
     ai_semantic_scoring: bool = True
     ai_reason_max_chars: int = 15
@@ -5570,6 +5575,120 @@ _CAT_STOP_WORDS = set(
     "这 那 这个 那个 这些 那些 其 该 此 本".split()
 )
 
+_CAT_AI_SEMANTIC_SHOW_THRESHOLD = 0.80
+_CAT_AI_SEMANTIC_PENDING_THRESHOLD = 0.70
+
+_CAT_KEYWORD_ENTITY_PATTERNS = [
+    (re.compile(r'\b(?:货号|型号|编号|序列号|No\.?|Part\s*#|CAT\s*#)?\s*[:：]?\s*([A-Za-z0-9\-]{6,})\b', re.IGNORECASE), "编号/货号/型号"),
+    (re.compile(r'(?:套件|试剂盒|Kit|制备套件)\s*([A-Z])\b'), "套件版本"),
+    (re.compile(r'\b[Vv]\s*(\d+(?:\.\d+)*)\b'), "版本号"),
+]
+
+_CAT_KEY_TERM_ANCHOR_GROUPS = {
+    'temperature': (
+        ('室温', re.compile(r'室温')),
+        ('冰上', re.compile(r'冰上')),
+        ('4c', re.compile(r'(?:4\s*[℃°cC]|冷藏)')),
+        ('-20c', re.compile(r'-\s*20\s*[℃°cC]')),
+        ('-80c', re.compile(r'-\s*80\s*[℃°cC]')),
+        ('37c', re.compile(r'37\s*[℃°cC]')),
+        ('65c', re.compile(r'65\s*[℃°cC]')),
+    ),
+    'molecule': (
+        ('totalrna', re.compile(r'total\s*rna', re.IGNORECASE)),
+        ('mrna', re.compile(r'm\s*rna', re.IGNORECASE)),
+        ('rrna', re.compile(r'r\s*rna', re.IGNORECASE)),
+        ('trna', re.compile(r't\s*rna', re.IGNORECASE)),
+        ('cdna', re.compile(r'c\s*dna', re.IGNORECASE)),
+        ('gdna', re.compile(r'g\s*dna', re.IGNORECASE)),
+        ('cfdna', re.compile(r'cf\s*dna', re.IGNORECASE)),
+        ('rna', re.compile(r'(?<![a-z])rna(?![a-z])', re.IGNORECASE)),
+        ('dna', re.compile(r'(?<![a-z])dna(?![a-z])', re.IGNORECASE)),
+    ),
+    'organism': (
+        ('人', re.compile(r'人')),
+        ('鼠', re.compile(r'(?<!小)鼠')),
+        ('小鼠', re.compile(r'小鼠')),
+        ('大肠杆菌', re.compile(r'大肠杆菌')),
+        ('酵母', re.compile(r'酵母')),
+        ('病原微生物', re.compile(r'病原微生物')),
+        ('细菌', re.compile(r'细菌')),
+        ('真菌', re.compile(r'真菌')),
+        ('病毒', re.compile(r'病毒')),
+    ),
+    'workflow': (
+        ('样本', re.compile(r'样本')),
+        ('检测', re.compile(r'检测')),
+        ('建库', re.compile(r'建库|文库制备')),
+        ('提取', re.compile(r'提取')),
+        ('扩增', re.compile(r'扩增')),
+        ('酶切', re.compile(r'酶切')),
+        ('逆转录', re.compile(r'逆转录')),
+        ('纯化', re.compile(r'纯化')),
+    ),
+    'container': (
+        ('试剂套装', re.compile(r'试剂套装')),
+        ('试剂盒', re.compile(r'试剂盒')),
+        ('试剂管', re.compile(r'试剂管')),
+        ('试剂板', re.compile(r'试剂板')),
+        ('制备卡', re.compile(r'制备卡')),
+        ('样本制备卡', re.compile(r'样本制备卡')),
+        ('芯片', re.compile(r'芯片')),
+        ('孔板', re.compile(r'孔板')),
+    ),
+    'condition_action': (
+        ('室温解冻', re.compile(r'室温解冻')),
+        ('冰上解冻', re.compile(r'冰上解冻')),
+        ('常温解冻', re.compile(r'常温解冻')),
+        ('水浴解冻', re.compile(r'水浴解冻')),
+        ('置于冰上', re.compile(r'置于冰上')),
+        ('冰上备用', re.compile(r'冰上备用')),
+        ('室温放置', re.compile(r'室温放置')),
+        ('离心', re.compile(r'离心')),
+        ('混匀', re.compile(r'混匀')),
+    ),
+}
+
+_CAT_NO_CHANGE_REASON_KEYWORDS = (
+    '完全一致',
+    '仅标点差异',
+    '仅标点不同',
+    '无需修改',
+    '无需润色',
+    '表达一致',
+)
+
+_CAT_NEGATIVE_REASON_KEYWORDS = (
+    '错误',
+    '冲突',
+    '背离',
+    '不等价',
+    '不相同',
+    '仅提取',
+    '片段',
+    '缺',
+    '丢失',
+    '缺少',
+    '改变',
+    '不一致',
+    '不推荐',
+    '不建议',
+    'vs',
+)
+
+_CAT_TECH_TERM_PATTERNS = [
+    re.compile(r'pooling', re.IGNORECASE),
+    re.compile(r'测序'),
+    re.compile(r'投入量'),
+    re.compile(r'出库浓度'),
+    re.compile(r'样本'),
+    re.compile(r'制备卡'),
+    re.compile(r'凹口'),
+    re.compile(r'凸出位置'),
+    re.compile(r'仪器载台'),
+    re.compile(r'图\s*\d+'),
+]
+
 
 def _tokenize_cat_text(text: str) -> list[str]:
     normalized = re.sub(r'[^\w\u4e00-\u9fff]+', ' ', str(text or '')).strip()
@@ -5610,8 +5729,8 @@ def _word_set_overlap(a: str, b: str) -> float:
     tokens_b = set(_tokenize_cat_text(b))
     if not tokens_a or not tokens_b:
         return 0.0
-    shorter = min(len(tokens_a), len(tokens_b))
-    return len(tokens_a & tokens_b) / shorter if shorter else 0.0
+    longer = max(len(tokens_a), len(tokens_b))
+    return len(tokens_a & tokens_b) / longer if longer else 0.0
 
 
 def _ngram_similarity(a: str, b: str, n: int = 2) -> float:
@@ -5649,11 +5768,286 @@ def _calc_similarity(a: str, b: str) -> float:
     return round(0.3 * edit_sim + 0.3 * word_ngram_sim + 0.4 * word_overlap, 4)
 
 
+def _extract_critical_entities(text: str) -> dict[str, list[str]]:
+    entities: dict[str, list[str]] = {}
+    value = str(text or '')
+    for pattern, label in _CAT_KEYWORD_ENTITY_PATTERNS:
+        matches = pattern.findall(value)
+        if not matches:
+            continue
+        cleaned = []
+        for matched in matches:
+            if isinstance(matched, tuple):
+                candidate = next((part for part in matched if part), '')
+            else:
+                candidate = matched
+            candidate = str(candidate or '').strip().upper()
+            if candidate:
+                cleaned.append(candidate)
+        if cleaned:
+            entities.setdefault(label, []).extend(cleaned)
+    return entities
+
+
+def _critical_entities_compatible(sentence: str, candidate: str) -> tuple[bool, str]:
+    sentence_entities = _extract_critical_entities(sentence)
+    candidate_entities = _extract_critical_entities(candidate)
+    if not sentence_entities:
+        return True, ''
+    for label, sentence_values in sentence_entities.items():
+        candidate_values = candidate_entities.get(label, [])
+        if not candidate_values:
+            return False, f'{label}缺失'
+        if not (set(sentence_values) & set(candidate_values)):
+            return False, f'{label}不一致'
+    return True, ''
+
+
+def _extract_key_term_anchor_groups(text: str) -> dict[str, set[str]]:
+    raw = str(text or '')
+    grouped: dict[str, set[str]] = {}
+    if not raw:
+        return grouped
+    for group, rules in _CAT_KEY_TERM_ANCHOR_GROUPS.items():
+        values = set()
+        for canonical, pattern in rules:
+            if pattern.search(raw):
+                values.add(canonical)
+        if values:
+            grouped[group] = values
+    return grouped
+
+
+def _key_term_anchor_consistent(sentence: str, template: str) -> tuple[bool, str]:
+    sentence_groups = _extract_key_term_anchor_groups(sentence)
+    template_groups = _extract_key_term_anchor_groups(template)
+    if not sentence_groups or not template_groups:
+        action_object_ok, action_object_reason = _action_object_pairs_compatible(sentence, template)
+        if not action_object_ok:
+            return False, action_object_reason
+        return True, ''
+
+    for group, sentence_values in sentence_groups.items():
+        template_values = template_groups.get(group)
+        if not template_values:
+            continue
+        overlap = _marker_overlap_score(sentence_values, template_values)
+        sentence_only = sentence_values - template_values
+        template_only = template_values - sentence_values
+
+        if group in {'temperature', 'molecule'} and sentence_only and template_only:
+            return False, f'{group}冲突'
+
+        if group in {'container', 'condition_action'} and overlap == 0.0 and sentence_only and template_only:
+            return False, f'{group}冲突'
+
+        if group == 'workflow' and overlap < 0.5 and sentence_only and template_only:
+            return False, 'workflow冲突'
+
+        if group == 'organism':
+            if overlap == 0.0 and sentence_only and template_only:
+                return False, 'organism冲突'
+            if len(sentence_values) >= 2 and len(template_values) >= 2 and overlap < 0.75 and sentence_only and template_only:
+                return False, 'organism冲突'
+
+    action_object_ok, action_object_reason = _action_object_pairs_compatible(sentence, template)
+    if not action_object_ok:
+        return False, action_object_reason
+    return True, ''
+
+
+def _action_object_pairs_compatible(sentence: str, template: str) -> tuple[bool, str]:
+    sentence_pairs = _extract_sentence_intent(sentence).get('pairs', []) or []
+    template_pairs = _extract_sentence_intent(template).get('pairs', []) or []
+    if not sentence_pairs or not template_pairs:
+        return True, ''
+
+    sentence_by_verb: dict[str, set[str]] = defaultdict(set)
+    template_by_verb: dict[str, set[str]] = defaultdict(set)
+    for pair in sentence_pairs:
+        verb = str(pair.get('verb', '') or '').strip()
+        obj = _normalize_structure_object(pair.get('object', '') or '')
+        if verb and obj:
+            sentence_by_verb[verb].add(obj)
+    for pair in template_pairs:
+        verb = str(pair.get('verb', '') or '').strip()
+        obj = _normalize_structure_object(pair.get('object', '') or '')
+        if verb and obj:
+            template_by_verb[verb].add(obj)
+
+    for verb in set(sentence_by_verb) & set(template_by_verb):
+        sentence_objects = sentence_by_verb.get(verb, set())
+        template_objects = template_by_verb.get(verb, set())
+        if not sentence_objects or not template_objects:
+            continue
+        if sentence_objects & template_objects:
+            continue
+        if len(sentence_objects) == 1 and len(template_objects) == 1:
+            return False, f'action_object:{verb}'
+    return True, ''
+
+
+def _candidate_effective_semantic_score(candidate: dict) -> float:
+    semantic_score = candidate.get('semantic_score') if isinstance(candidate, dict) else None
+    if semantic_score is None:
+        semantic_score = candidate.get('string_score', 0.0) if isinstance(candidate, dict) else 0.0
+    return round(max(0.0, min(1.0, float(semantic_score or 0.0))), 4)
+
+
+def _candidate_filtered_semantic_score(original_text: str, candidate: dict) -> float:
+    score = _candidate_effective_semantic_score(candidate)
+    reason = (candidate or {}).get('ai_reason', '') if isinstance(candidate, dict) else ''
+    if _has_negative_reason(reason):
+        score = max(0.0, score - 0.30)
+    tech_overlap = _tech_term_overlap(original_text, str((candidate or {}).get('template_text', '') or ''))
+    tech_term_count = len(_extract_tech_terms(original_text))
+    if tech_term_count >= 2:
+        if tech_overlap < 0.35:
+            score = max(0.0, score - 0.22)
+        elif tech_overlap < 0.60:
+            score = max(0.0, score - 0.10)
+    return round(score, 4)
+
+
+def _apply_cat_terms(text: str, term_dict: Optional[dict]) -> str:
+    value = str(text or '')
+    if not value or not term_dict:
+        return value
+    result = value
+    for old_term, new_term in term_dict.items():
+        old_text = str(old_term or '').strip()
+        new_text = str(new_term or '').strip()
+        if old_text and new_text and old_text in result:
+            result = result.replace(old_text, new_text)
+    return result
+
+
+def _normalize_cat_length_text(text: str) -> str:
+    return re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', str(text or ''))
+
+
+def _is_fragment_candidate(source: str, candidate: str, min_ratio: float = 0.75, max_ratio: float = 1.25) -> bool:
+    source_norm = _normalize_cat_length_text(source)
+    candidate_norm = _normalize_cat_length_text(candidate)
+    if not source_norm or not candidate_norm:
+        return True
+    ratio = len(candidate_norm) / max(len(source_norm), 1)
+    if ratio < min_ratio or ratio > max_ratio:
+        return True
+    if ratio < 0.85 and (candidate_norm in source_norm or source_norm in candidate_norm):
+        return True
+    return False
+
+
+def _is_valid_cat_template(text: str) -> bool:
+    value = str(text or '').strip()
+    if len(_normalize_cat_length_text(value)) < 15:
+        return False
+    return bool(re.search(r'[。！？；!?;]$', value))
+
+
+def _merge_split_templates(templates: list[str]) -> list[str]:
+    merged = []
+    index = 0
+    while index < len(templates or []):
+        current = str(templates[index] or '').strip()
+        if not current:
+            index += 1
+            continue
+
+        if index + 1 < len(templates):
+            next_text = str(templates[index + 1] or '').strip()
+            if next_text and not re.search(r'[。！？；!?;]$', current):
+                joiner = '' if re.search(r'[，,；;：:]$', current) else '，'
+                combined = f'{current}{joiner}{next_text}'.strip()
+                if _is_valid_cat_template(combined):
+                    current_norm = _normalize_cat_length_text(current)
+                    next_norm = _normalize_cat_length_text(next_text)
+                    combined_norm = _normalize_cat_length_text(combined)
+                    if len(combined_norm) > max(len(current_norm), len(next_norm)) + 5:
+                        merged.append(combined)
+                        index += 2
+                        continue
+
+        merged.append(current)
+        index += 1
+    return merged
+
+
+def _has_negative_reason(reason: str) -> bool:
+    normalized_reason = str(reason or '').strip()
+    if not normalized_reason:
+        return False
+    return any(keyword in normalized_reason for keyword in _CAT_NEGATIVE_REASON_KEYWORDS)
+
+
+def _tech_term_overlap(source: str, candidate: str) -> float:
+    source_terms = _extract_tech_terms(source)
+    candidate_terms = _extract_tech_terms(candidate)
+    if not source_terms:
+        return 1.0
+    return len(source_terms & candidate_terms) / max(len(source_terms), 1)
+
+
+def _extract_tech_terms(text: str) -> set[str]:
+    terms = set()
+    for pattern in _CAT_TECH_TERM_PATTERNS:
+        terms.update(match.group(0).lower() for match in pattern.finditer(str(text or '')))
+    return terms
+
+
+def _cat_reason_indicates_no_change(reason: str) -> bool:
+    normalized_reason = str(reason or '').strip()
+    if not normalized_reason:
+        return False
+    return any(keyword in normalized_reason for keyword in _CAT_NO_CHANGE_REASON_KEYWORDS)
+
+
+def _should_keep_cat_candidate(original_text: str, candidate: dict) -> bool:
+    template_text = str((candidate or {}).get('template_text', '') or '').strip()
+    if isinstance(candidate, dict):
+        candidate['review_tags'] = []
+        candidate['drop_reason'] = None
+    if not template_text:
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = 'empty_template'
+        return False
+
+    normalized_original = _normalize_cat_replace_text(original_text)
+    normalized_template = _normalize_cat_replace_text(template_text)
+    if normalized_original and normalized_template == normalized_original:
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = 'exact_duplicate'
+        return False
+
+    if _cat_reason_indicates_no_change((candidate or {}).get('ai_reason', '')):
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = 'ai_no_change'
+        return False
+
+    filtered_score = _candidate_filtered_semantic_score(original_text, candidate)
+    if isinstance(candidate, dict):
+        review_tags = []
+        if _has_negative_reason(candidate.get('ai_reason', '')):
+            review_tags.append('negative_ai_reason')
+        if _tech_term_overlap(original_text, template_text) < 0.6:
+            review_tags.append('tech_term_overlap_low')
+        candidate['filtered_semantic_score'] = filtered_score
+        candidate['needs_review'] = filtered_score < _CAT_AI_SEMANTIC_SHOW_THRESHOLD
+        if candidate['needs_review']:
+            review_tags.append('needs_review')
+        candidate['review_tags'] = review_tags
+        if filtered_score < _CAT_AI_SEMANTIC_PENDING_THRESHOLD:
+            candidate['drop_reason'] = 'low_filtered_score'
+    return filtered_score >= _CAT_AI_SEMANTIC_PENDING_THRESHOLD
+
+
 def _simple_match(
     sentence: str,
     templates: list[dict],
-    min_threshold: float = 0.30,
+    min_threshold: float = 0.40,
     fuzzy_lower: float = 0.70,
+    term_dict: Optional[dict] = None,
 ) -> list[dict]:
     """
     CAT 式简化匹配：编辑距离 + n-gram，返回所有 >= min_threshold 的候选，按匹配度降序。
@@ -5662,14 +6056,41 @@ def _simple_match(
         return []
 
     best_by_template = {}
+    sentence_text = sentence.strip()
+    normalized_sentence_text = _apply_cat_terms(sentence_text, term_dict).strip()
+    normalized_sentence = _normalize_cat_replace_text(sentence_text)
+    sentence_len = len(re.sub(r'\s+', '', normalized_sentence_text or sentence_text))
     for tpl in templates:
         tpl_text = tpl.get("text", "") if isinstance(tpl, dict) else str(tpl)
         tpl_id = tpl.get("id", "") if isinstance(tpl, dict) else ""
         if not tpl_text or not tpl_text.strip():
             continue
+        if not _is_valid_cat_template(tpl_text):
+            continue
+        if normalized_sentence and _normalize_cat_replace_text(tpl_text) == normalized_sentence:
+            continue
 
-        score = _calc_similarity(sentence.strip(), tpl_text.strip())
+        tpl_text = tpl_text.strip()
+        normalized_tpl_text = _apply_cat_terms(tpl_text, term_dict).strip()
+        if _is_fragment_candidate(normalized_sentence_text or sentence_text, normalized_tpl_text or tpl_text):
+            continue
+        score = _calc_similarity(normalized_sentence_text or sentence_text, normalized_tpl_text or tpl_text)
+        tpl_len = len(re.sub(r'\s+', '', normalized_tpl_text or tpl_text))
+        if sentence_len > 0 and tpl_len > 0:
+            len_ratio = min(sentence_len, tpl_len) / max(sentence_len, tpl_len)
+            if len_ratio < 0.15:
+                continue
+            if len_ratio < 0.30:
+                score *= len_ratio / 0.30
         if score < min_threshold:
+            continue
+
+        entity_ok, _ = _critical_entities_compatible(normalized_sentence_text or sentence_text, normalized_tpl_text or tpl_text)
+        if not entity_ok:
+            continue
+
+        anchor_ok, _ = _key_term_anchor_consistent(normalized_sentence_text or sentence_text, normalized_tpl_text or tpl_text)
+        if not anchor_ok:
             continue
 
         if score >= 1.0:
@@ -5685,7 +6106,7 @@ def _simple_match(
             "string_score": round(score, 4),
             "match_tier": tier,
         }
-        dedupe_key = re.sub(r'\s+', ' ', tpl_text).strip()
+        dedupe_key = re.sub(r'\s+', '', re.sub(r'[，。！？!?；;：:、,\.\s]+$', '', tpl_text)).strip()
         existing = best_by_template.get(dedupe_key)
         if existing is None or candidate["string_score"] > existing["string_score"]:
             best_by_template[dedupe_key] = candidate
@@ -5747,15 +6168,23 @@ def _split_cat_sentences(paragraphs: list[str], source_paragraphs: Optional[list
             continue
         if re.fullmatch(r'\d+(?:\.\d+){0,4}[\u4e00-\u9fffA-Za-z（）()\-_/：:、\s]{0,24}', compact_paragraph):
             continue
+        if re.match(r'^(?:表|图)\s*\d+[A-Za-z0-9.\-]*\s*', paragraph_text):
+            continue
+        if _is_short_label_like_text(paragraph_text) or _looks_like_title_or_noun_phrase(paragraph_text):
+            continue
         chunks = re.split(r'(?<=[。！？!?；;])', paragraph_text)
         for chunk in chunks:
             sentence_text = str(chunk or '').strip()
             if not sentence_text:
                 continue
             normalized = re.sub(r'\s+', '', sentence_text)
-            if len(normalized) <= 8:
+            if re.match(r'^(?:表|图)\s*\d+[A-Za-z0-9.\-]*\s*', sentence_text):
                 continue
-            if not re.search(r'[。！？!?；;]', sentence_text) and len(normalized) < 12:
+            if _is_short_label_like_text(sentence_text) or _looks_like_title_or_noun_phrase(sentence_text):
+                continue
+            if len(normalized) <= 12:
+                continue
+            if not re.search(r'[。！？!?；;]', sentence_text) and len(normalized) < 18:
                 continue
             if re.fullmatch(r'[\dA-Za-z\-_.()（）/]+', normalized):
                 continue
@@ -6217,6 +6646,21 @@ def _iter_docx_paragraphs_in_order(container):
             yield Paragraph(child, parent)
         elif isinstance(child, CT_Tbl):
             yield from _iter_docx_paragraphs_in_order(Table(child, parent))
+
+
+def _iter_docx_body_paragraphs(container):
+    """只遍历文档正文段落，跳过表格内容。
+    CAT 分析和写回都基于该顺序，避免表格单元格文本污染候选与索引。"""
+    from docx.document import Document as DocxDocument
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.text.paragraph import CT_P
+
+    if not isinstance(container, DocxDocument):
+        return
+
+    for child in container.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, container)
 
 
 def _is_simple_revision_paragraph(p_element, w_ns: str) -> bool:
@@ -8656,6 +9100,53 @@ def _replace_by_normalized_match(text: str, target: str, replacement: str) -> tu
     return f"{text[:source_start]}{replacement}{text[source_end:]}", True
 
 
+def _normalized_text_index_map(text: str) -> tuple[str, list[int]]:
+    normalized_chars = []
+    index_map = []
+    for index, char in enumerate(str(text or '')):
+        if _CAT_REPLACE_NORMALIZE_PATTERN.match(char):
+            continue
+        normalized_chars.append(char)
+        index_map.append(index)
+    return ''.join(normalized_chars), index_map
+
+
+def _merge_replacement_with_source_tail(source_sentence: str, replacement: str) -> tuple[str, bool]:
+    source_text = str(source_sentence or '')
+    replacement_text = str(replacement or '')
+    if not source_text or not replacement_text:
+        return replacement_text, False
+
+    normalized_source, source_index_map = _normalized_text_index_map(source_text)
+    normalized_replacement, _ = _normalized_text_index_map(replacement_text)
+    if not normalized_source or not normalized_replacement:
+        return replacement_text, False
+    if len(normalized_replacement) >= len(normalized_source):
+        return replacement_text, False
+
+    prefix_len = 0
+    max_prefix = min(len(normalized_source), len(normalized_replacement))
+    while prefix_len < max_prefix and normalized_source[prefix_len] == normalized_replacement[prefix_len]:
+        prefix_len += 1
+
+    if prefix_len < max(6, int(len(normalized_replacement) * 0.7)):
+        return replacement_text, False
+    if prefix_len >= len(normalized_source):
+        return replacement_text, False
+    if prefix_len >= len(source_index_map):
+        return replacement_text, False
+
+    suffix_start = source_index_map[prefix_len]
+    source_suffix = source_text[suffix_start:]
+    if not source_suffix.strip():
+        return replacement_text, False
+
+    merged = replacement_text.rstrip()
+    if merged.endswith(('。', '！', '？', '.', '!', '?', ';', '；')) and source_suffix.startswith(('，', ',', '、', '；', ';', '：', ':')):
+        merged = merged[:-1].rstrip()
+    return f"{merged}{source_suffix}", True
+
+
 def _resolve_cat_paragraph_index(paragraph_texts: list[str], decision: CatDecision) -> Optional[int]:
     candidate_indexes = []
     for raw_index in [decision.source_paragraph_index, decision.paragraph_index]:
@@ -8697,7 +9188,7 @@ async def cat_analyze(
     sentence_file_id: Optional[int] = Form(None),
     terminology_file_id: Optional[int] = Form(None),
     requirements: Optional[str] = Form(None),
-    min_match_threshold: float = Form(0.30),
+    min_match_threshold: float = Form(0.40),
     fuzzy_lower_bound: float = Form(0.70),
     ai_semantic_scoring: bool = Form(True),
     ai_reason_max_chars: int = Form(15),
@@ -8729,7 +9220,7 @@ async def cat_analyze(
         elif ext == 'docx':
             from docx import Document
             doc = Document(temp_path)
-            original_lines = [p.text for p in _iter_docx_paragraphs_in_order(doc)]
+            original_lines = [p.text for p in _iter_docx_body_paragraphs(doc)]
             content = '\n'.join(original_lines)
         else:
             content = _read_file_safe(temp_path)
@@ -8758,11 +9249,15 @@ async def cat_analyze(
         seen_template_texts = set()
         for e in guide_entries:
             entry_id = str(e.get("id", "")) if isinstance(e, dict) else ""
-            for candidate_text in [_template_entry_text(e), *(_template_entry_candidates(e) or [])]:
+            candidate_texts = _merge_split_templates([_template_entry_text(e), *(_template_entry_candidates(e) or [])])
+            for candidate_text in candidate_texts:
                 normalized_candidate = str(candidate_text or '').strip()
-                if not normalized_candidate or normalized_candidate in seen_template_texts:
+                if not _is_valid_cat_template(normalized_candidate):
                     continue
-                seen_template_texts.add(normalized_candidate)
+                dedupe_candidate = re.sub(r'\s+', '', re.sub(r'[，。！？!?；;：:、,\.\s]+$', '', normalized_candidate))
+                if not dedupe_candidate or dedupe_candidate in seen_template_texts:
+                    continue
+                seen_template_texts.add(dedupe_candidate)
                 guide_templates.append({"text": normalized_candidate, "id": entry_id})
                 if len(guide_templates) >= 5000:
                     break
@@ -8806,6 +9301,7 @@ async def cat_analyze(
                 guide_templates,
                 min_threshold=min_match_threshold,
                 fuzzy_lower=fuzzy_lower_bound,
+                term_dict=resolved_terms,
             )
             items.append({
                 "paragraph_index": sentence_item["source_paragraph_index"],
@@ -8814,7 +9310,7 @@ async def cat_analyze(
                 "source_paragraph_text": sentence_item["source_paragraph_text"],
                 "original_text": line_stripped,
                 "has_candidates": len(candidates) > 0,
-                "candidates": candidates[:10],
+                "candidates": candidates[:5],
             })
 
         ai_scoring_status = "skipped"
@@ -8834,6 +9330,38 @@ async def cat_analyze(
                         candidate["semantic_score"] = candidate.get("string_score", 0.0)
                         candidate["ai_reason"] = "AI未启用，使用字符串匹配分"
 
+        candidate_debug_summary = {
+            "total_before_filter": 0,
+            "total_after_filter": 0,
+            "needs_review_count": 0,
+            "dropped_by_reason": {},
+        }
+
+        for item in items:
+            filtered_candidates = []
+            for candidate in item.get("candidates", []):
+                candidate["effective_semantic_score"] = _candidate_effective_semantic_score(candidate)
+                candidate_debug_summary["total_before_filter"] += 1
+                if _should_keep_cat_candidate(item.get("original_text", ""), candidate):
+                    if candidate.get("needs_review"):
+                        candidate_debug_summary["needs_review_count"] += 1
+                    filtered_candidates.append(candidate)
+                else:
+                    drop_reason = str(candidate.get("drop_reason") or "unknown")
+                    candidate_debug_summary["dropped_by_reason"][drop_reason] = candidate_debug_summary["dropped_by_reason"].get(drop_reason, 0) + 1
+            filtered_candidates.sort(
+                key=lambda candidate: (
+                    float(candidate.get("filtered_semantic_score", 0.0) or 0.0),
+                    float(candidate.get("effective_semantic_score", 0.0) or 0.0),
+                    float(candidate.get("semantic_score", 0.0) or 0.0),
+                    float(candidate.get("string_score", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )
+            item["candidates"] = filtered_candidates[:5]
+            item["has_candidates"] = len(item["candidates"]) > 0
+            candidate_debug_summary["total_after_filter"] += len(item["candidates"])
+
         _cleanup_cat_cache()
         analyze_id = str(uuid.uuid4())
         _cat_cache_timestamps[analyze_id] = time.time()
@@ -8848,6 +9376,7 @@ async def cat_analyze(
                 "polished_lines": list(lines),
                 "temp_path": temp_path,
                 "resolved_terms": resolved_terms,
+                "resolved_term_count": len(resolved_terms or {}),
                 "user_id": user.id if user else None,
             },
         }
@@ -8862,6 +9391,8 @@ async def cat_analyze(
             "template_coverage": round(total_with_candidates / total_paragraphs * 100, 1) if total_paragraphs else 0,
             "ai_scoring_status": ai_scoring_status,
             "ai_scoring_error": ai_scoring_error,
+            "resolved_term_count": len(resolved_terms or {}),
+            "candidate_debug_summary": candidate_debug_summary,
             "items": items,
         }
 
@@ -8915,11 +9446,19 @@ async def cat_apply(
         if not replacement_text:
             continue
         source_sentence = d.source_sentence_text or d.original_text or ""
+        normalized_replacement_text = replacement_text
+        replacement_completed_from_source = False
+        if source_sentence:
+            normalized_replacement_text, replacement_completed_from_source = _merge_replacement_with_source_tail(
+                source_sentence,
+                replacement_text,
+            )
         paragraph_sentence_replacements[para_idx].append({
             "source_sentence": source_sentence,
             "fallback_sentence": d.original_text or "",
-            "replacement_text": replacement_text,
+            "replacement_text": normalized_replacement_text,
             "action": action,
+            "replacement_completed_from_source": replacement_completed_from_source,
         })
 
     polished_lines = list(file_info.get("polished_lines") or [])
@@ -8942,13 +9481,16 @@ async def cat_apply(
             source_sentence = replacement.get("source_sentence", "")
             fallback_sentence = replacement.get("fallback_sentence", "")
             replacement_text = replacement.get("replacement_text", "")
+            replacement_completed_from_source = bool(replacement.get("replacement_completed_from_source"))
             matched = False
             if source_sentence and source_sentence in updated_text:
                 updated_text = updated_text.replace(source_sentence, replacement_text, 1)
                 matched = True
             elif source_sentence and source_sentence in updated_polished_text:
-                updated_polished_text = updated_polished_text.replace(source_sentence, replacement_text, 1)
-                updated_text, matched = _replace_by_normalized_match(updated_text, source_sentence, replacement_text)
+                next_text, matched = _replace_by_normalized_match(updated_text, source_sentence, replacement_text)
+                if matched:
+                    updated_text = next_text
+                    updated_polished_text = updated_polished_text.replace(source_sentence, replacement_text, 1)
             elif source_sentence:
                 updated_text, matched = _replace_by_normalized_match(updated_text, source_sentence, replacement_text)
             if not matched and fallback_sentence and fallback_sentence in updated_text:
@@ -8967,6 +9509,8 @@ async def cat_apply(
                     "action": replacement.get("action") or "",
                     "source_sentence": (source_sentence or fallback_sentence or '')[:120],
                 })
+            elif replacement_completed_from_source:
+                logger.info("[CAT_APPLY] 已补回原文尾部: paragraph=%s source=%s", para_idx + 1, (source_sentence or fallback_sentence or '')[:80])
         if updated_text.strip() != paragraph_text.strip():
             paragraph_revisions[para_idx] = updated_text
             paragraph_revision_actions[para_idx] = paragraph_actions
@@ -8986,7 +9530,7 @@ async def cat_apply(
 
             doc = DocxDocument(temp_path)
             w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-            xml_paragraphs = [paragraph._p for paragraph in _iter_docx_paragraphs_in_order(doc)]
+            xml_paragraphs = [paragraph._p for paragraph in _iter_docx_body_paragraphs(doc)]
 
             revision_id = 100
             author = user.username if user else "CAT润色"
@@ -9071,6 +9615,51 @@ async def cat_apply(
         report_download_filename = os.path.basename(report_path)
         _, report_download_url = _register_cat_download_asset(report_path, report_download_filename, "text/html; charset=utf-8")
 
+    doc_id = None
+    preview_url = None
+    if output_path and os.path.exists(output_path):
+        try:
+            import shutil
+
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            persistent_filename = f"{uuid.uuid4()}.docx"
+            persistent_path = os.path.join(UPLOAD_DIR, persistent_filename)
+            shutil.copy2(output_path, persistent_path)
+
+            persistent_report_filename = None
+            persistent_report_path = None
+            if report_path and os.path.exists(report_path):
+                persistent_report_filename = f"{uuid.uuid4()}.html"
+                persistent_report_path = os.path.join(UPLOAD_DIR, persistent_report_filename)
+                shutil.copy2(report_path, persistent_report_path)
+
+            polished_content = ""
+            try:
+                from docx import Document as DocxReader
+
+                polished_doc = DocxReader(persistent_path)
+                polished_content = '\n'.join([p.text for p in _iter_docx_body_paragraphs(polished_doc)])
+            except Exception as preview_error:
+                logger.warning("[CAT_APPLY] 提取预览文本失败: %s", preview_error)
+
+            db_doc = create_polished_document(
+                db=db,
+                name=download_filename or os.path.basename(output_path),
+                filename=persistent_filename,
+                file_path=persistent_path,
+                file_size=os.path.getsize(persistent_path),
+                file_type="docx",
+                original_content='\n'.join(paragraph_texts),
+                polished_content=polished_content,
+                created_by=user.id if user else None,
+                report_filename=persistent_report_filename,
+                report_file_path=persistent_report_path,
+            )
+            doc_id = db_doc.id
+            preview_url = f"/polish/preview/{doc_id}"
+        except Exception as persist_error:
+            logger.error("[CAT_APPLY] 保存预览记录失败: %s", persist_error, exc_info=True)
+
     _cat_analyze_cache.pop(request.analyze_id, None)
     _cat_cache_timestamps.pop(request.analyze_id, None)
 
@@ -9084,8 +9673,10 @@ async def cat_apply(
         "applied_changes": applied_changes,
         "applied_count": len(applied_changes),
         "failed_count": len(failed_replacements),
-        "failed_replacements": failed_replacements[:20],
+        "failed_replacements": failed_replacements,
         "accuracy": accuracy,
+        "doc_id": doc_id,
+        "preview_url": preview_url,
         "feedback": {
             "rejected_saved": rejected_count,
             "modified_saved": modified_count,

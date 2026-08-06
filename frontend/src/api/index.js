@@ -172,7 +172,7 @@ export const polishAPI = {
     })
   },
   catApply: (payload) => instance.post('/polish/cat/apply', payload, { timeout: 600000 }),
-  downloadCatOutput: (downloadUrl, filename = 'cat_polished.docx') => {
+  downloadCatAsset: (downloadUrl, filename = 'cat_asset') => {
     return instance.get(downloadUrl.replace(/^\/api/, ''), {
       responseType: 'blob',
       transformResponse: [(data) => data]
@@ -187,6 +187,7 @@ export const polishAPI = {
       window.URL.revokeObjectURL(url)
     })
   },
+  downloadCatOutput: (downloadUrl, filename = 'cat_polished.docx') => polishAPI.downloadCatAsset(downloadUrl, filename),
   getProgress: (taskId) => instance.get(`/polish/progress/${taskId}`),
   listPolishedDocuments: () => instance.get('/polish/'),
   getPolishedDocument: (id) => instance.get(`/polish/${id}`),

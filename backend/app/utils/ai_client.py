@@ -65,7 +65,7 @@ class AIClient:
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
         self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "20")
-        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "10")
+        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "30")
 
         self.proxy_api_key = os.getenv("OPENAI_API_KEY")
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
@@ -654,7 +654,7 @@ class AIClient:
                 return None
         return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None):
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None, timeout=None):
         # 优先级: DEFAULT_MODEL_PROVIDER 优先，其余按 Qwen > Kimi > DeepSeek > ArkClaw > Proxy
         self.last_chat_errors = []
         providers = []
@@ -698,8 +698,21 @@ class AIClient:
                                 "temperature": temperature,
                             }
                         )
+                        if timeout is not None:
+                            effective_timeout = timeout
+                        elif name == 'Kimi':
+                            effective_timeout = self.kimi_chat_timeout
+                        else:
+                            effective_timeout = self.provider_chat_timeout
+                        if isinstance(effective_timeout, (int, float)):
+                            effective_timeout = httpx.Timeout(
+                                connect=10.0,
+                                read=float(effective_timeout),
+                                write=30.0,
+                                pool=10.0,
+                            )
                         call_client = client.with_options(
-                            timeout=self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout,
+                            timeout=effective_timeout,
                             max_retries=0,
                         )
                         response = call_client.chat.completions.create(**request_kwargs)
