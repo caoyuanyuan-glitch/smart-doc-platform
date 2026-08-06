@@ -87,7 +87,7 @@
                 <div class="panel-actions">
                   <el-tag size="small" type="info">命中 {{ catResult.totalWithCandidates }}/{{ catResult.totalParagraphs }}</el-tag>
                   <el-tag size="small" type="success">覆盖率 {{ catResult.templateCoverage }}%</el-tag>
-                  <el-button type="primary" size="small" :loading="catApplying" @click="applyCatSelections">生成 CAT 润色文档</el-button>
+                  <el-button type="primary" size="small" native-type="button" :loading="catApplying" @click="applyCatSelections">生成 CAT 润色文档</el-button>
                 </div>
               </div>
 
@@ -118,9 +118,12 @@
               <div v-if="catApplyResult" class="cat-apply-banner">
                 <div>
                   <div class="cat-apply-title">CAT 润色文档已生成</div>
-                  <div class="cat-apply-meta">应用 {{ catApplyResult.appliedChangesCount }} 处，准确率 {{ catApplyResult.accuracyRate }}%</div>
+                  <div class="cat-apply-meta">应用 {{ catApplyResult.appliedChangesCount }} 处，准确率 {{ formatCatAccuracyRate(catApplyResult.accuracyRate) }}</div>
                 </div>
-                <el-button v-if="catApplyResult.downloadUrl" size="small" type="primary" @click="downloadCatResult">下载润色文档</el-button>
+                <div class="cat-apply-actions">
+                  <el-button v-if="catApplyResult.reportDownloadUrl" size="small" native-type="button" @click="downloadCatReport">下载润色报告</el-button>
+                  <el-button v-if="catApplyResult.downloadUrl" size="small" type="primary" native-type="button" @click="downloadCatResult">下载润色文档</el-button>
+                </div>
               </div>
 
               <div v-if="catItems.length" class="cat-item-list">
@@ -136,18 +139,8 @@
                   </div>
 
                   <div class="cat-item-section">
-                    <label class="cat-item-label">处理动作</label>
-                    <el-radio-group v-model="item.action" size="small">
-                      <el-radio-button value="pending">待处理</el-radio-button>
-                      <el-radio-button value="accept">接受候选</el-radio-button>
-                      <el-radio-button value="modify">自定义</el-radio-button>
-                      <el-radio-button value="reject">拒绝</el-radio-button>
-                    </el-radio-group>
-                  </div>
-
-                  <div v-if="item.action === 'accept'" class="cat-item-section">
                     <label class="cat-item-label">候选句式</label>
-                    <el-select v-model="item.selectedCandidateIndex" class="full-width" placeholder="选择候选句式">
+                    <el-select v-model="item.selectedCandidateIndex" class="full-width" placeholder="选择候选句式" @change="markCatItemDirty(item)">
                       <el-option
                         v-for="(candidate, candidateIndex) in item.candidates"
                         :key="`cat-${item.sentenceIndex}-candidate-${candidateIndex}`"
@@ -157,6 +150,7 @@
                         <div class="cat-candidate-option">
                           <div class="cat-candidate-text">{{ candidate.template_text }}</div>
                           <div class="cat-candidate-meta">
+                            <span>匹配率 {{ formatCatCandidateMatchRate(candidate) }}</span>
                             <span>字符串分 {{ formatCatScore(candidate.string_score) }}%</span>
                             <span v-if="candidate.semantic_score !== null && candidate.semantic_score !== undefined">语义分 {{ formatCatScore(candidate.semantic_score) }}%</span>
                             <span v-if="candidate.ai_reason">{{ candidate.ai_reason }}</span>
@@ -164,17 +158,29 @@
                         </div>
                       </el-option>
                     </el-select>
+                    <div class="cat-item-inline-actions">
+                      <el-button size="small" type="success" plain native-type="button" @click="saveCatAccept(item)">选择并保存</el-button>
+                      <el-button size="small" plain native-type="button" @click="startCatModifyFromCandidate(item)">基于当前候选修改</el-button>
+                      <span v-if="item.isDraftSaved" class="cat-item-saved-hint">当前候选已暂存</span>
+                    </div>
                   </div>
 
-                  <div v-if="selectedCatCandidate(item)" class="cat-compare-grid">
-                    <div class="cat-compare-card">
-                      <div class="cat-compare-title">原文</div>
-                      <div class="cat-compare-content" v-html="renderDiffHtml(item.originalText, selectedCatCandidate(item)?.template_text || '', 'original')"></div>
-                    </div>
-                    <div class="cat-compare-card is-candidate">
+                  <div class="cat-item-section">
+                    <label class="cat-item-label">处理动作</label>
+                    <el-radio-group v-model="item.action" size="small" @change="handleCatActionChange(item)">
+                      <el-radio-button value="pending">待处理</el-radio-button>
+                      <el-radio-button value="accept">接受候选</el-radio-button>
+                      <el-radio-button value="modify">自定义</el-radio-button>
+                      <el-radio-button value="reject">拒绝</el-radio-button>
+                    </el-radio-group>
+                  </div>
+
+                  <div v-if="selectedCatCandidate(item)" class="cat-compare-grid is-single">
+                    <div class="cat-compare-card is-candidate is-full-width">
                       <div class="cat-compare-title">候选</div>
-                      <div class="cat-compare-content" v-html="renderDiffHtml(item.originalText, selectedCatCandidate(item)?.template_text || '', 'polished')"></div>
+                      <div class="cat-compare-content" v-html="renderCatCandidateDiffHtml(item.originalText, selectedCatCandidate(item)?.template_text || '')"></div>
                       <div class="cat-candidate-meta cat-candidate-meta-inline">
+                        <span>匹配率 {{ formatCatCandidateMatchRate(selectedCatCandidate(item)) }}</span>
                         <span>字符串分 {{ formatCatScore(selectedCatCandidate(item)?.string_score) }}%</span>
                         <span v-if="selectedCatCandidate(item)?.semantic_score !== null && selectedCatCandidate(item)?.semantic_score !== undefined">语义分 {{ formatCatScore(selectedCatCandidate(item)?.semantic_score) }}%</span>
                         <span v-if="selectedCatCandidate(item)?.ai_reason">{{ selectedCatCandidate(item)?.ai_reason }}</span>
@@ -184,11 +190,16 @@
 
                   <div v-if="item.action === 'modify'" class="cat-item-section">
                     <label class="cat-item-label">自定义润色文本</label>
-                    <el-input v-model="item.modifiedText" type="textarea" :rows="3" placeholder="输入你希望写入文档的最终文本" />
+                    <el-input v-model="item.modifiedText" type="textarea" :rows="3" placeholder="输入你希望写入文档的最终文本" @input="markCatItemDirty(item)" />
+                    <div class="cat-item-inline-actions">
+                      <el-button size="small" plain native-type="button" @click="fillCatModifyFromCandidate(item)">用当前候选覆盖</el-button>
+                      <el-button size="small" type="primary" plain native-type="button" @click="saveCatModify(item)">保存自定义</el-button>
+                      <span v-if="item.isDraftSaved" class="cat-item-saved-hint">自定义文本已暂存</span>
+                    </div>
                   </div>
                 </div>
               </div>
-              <div v-else class="doc-change-empty">当前文档没有命中 CAT 候选句式</div>
+              <div v-else class="doc-change-empty">{{ catEmptyStateText() }}</div>
             </div>
 
             <div v-else class="panel result-placeholder doc-result-panel">
@@ -525,7 +536,8 @@
 
     <el-dialog v-model="filePickerVisible" title="从知识库选择文件" width="480px">
       <div class="file-picker-content">
-        <div v-if="knowledgeTreeList.length === 0" class="picker-empty">暂无知识库文件</div>
+        <div v-if="knowledgeTreeLoading" class="picker-empty">正在加载知识库...</div>
+        <div v-else-if="knowledgeTreeList.length === 0" class="picker-empty">暂无知识库文件</div>
         <div v-else class="picker-list">
           <button
             v-for="item in knowledgeTreeList"
@@ -585,7 +597,7 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { polishAPI, knowledgeAPI, systemAPI, getKnowledgeLoadErrorMessage } from '@/api'
+import { polishAPI, knowledgeAPI, systemAPI, getAPIErrorMessage, getKnowledgeLoadErrorMessage } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
 import { usePolishStore } from '@/store/polish'
 
@@ -596,11 +608,13 @@ const candidateSelectRefs = new Map()
 const localFileInputRef = ref(null)
 const docPreviewRef = ref(null)
 const filePickerVisible = ref(false)
+const knowledgeTreeLoading = ref(false)
 const knowledgeTree = ref([])
 const knowledgeTreeList = ref([])
 const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
 const DEFAULT_DOCUMENT_SENTENCE_FILE_ID = 22
+const CAT_SESSION_KEY = 'polish-cat-session-v1'
 let knowledgeTreePromise = null
 
 // ── 下拉框选项 ──
@@ -619,8 +633,8 @@ function applyDefaultDocumentSentenceFile() {
 async function loadDropdownOptions() {
   try {
     const rawData = await ensureKnowledgeTreeLoaded()
-    const sentenceNode = findNodeByName(rawData, '句式清单')
-    const termNode = findNodeByName(rawData, '术语库')
+    const sentenceNode = findKnowledgeNode(rawData, ['句式清单'])
+    const termNode = findKnowledgeNode(rawData, ['术语库'])
     sentenceFileOptions.value = flattenFileOptions(sentenceNode ? [sentenceNode] : [])
     termFileOptions.value = flattenFileOptions(termNode ? [termNode] : [])
     applyDefaultDocumentSentenceFile()
@@ -1261,6 +1275,67 @@ function renderSegmentsHtml(segments) {
       return segment.changed ? `<span class="diff-highlight">${content}</span>` : content
     })
     .join('')
+}
+
+function renderCatCandidateSegmentsHtml(sourceText, targetText) {
+  const diff = buildDiffSegments(sourceText, targetText)
+  const leftSegments = mergeDiffSegments(diff.left)
+  const rightSegments = mergeDiffSegments(diff.right)
+  const html = []
+  let leftIndex = 0
+  let rightIndex = 0
+
+  while (leftIndex < leftSegments.length || rightIndex < rightSegments.length) {
+    const left = leftSegments[leftIndex]
+    const right = rightSegments[rightIndex]
+
+    if (left && right && !left.changed && !right.changed) {
+      html.push(escapeHtml(right.text))
+      leftIndex += 1
+      rightIndex += 1
+      continue
+    }
+
+    if (left?.changed && right?.changed) {
+      html.push(`<span class="diff-remove">${escapeHtml(left.text)}</span>`)
+      html.push(`<span class="diff-add">${escapeHtml(right.text)}</span>`)
+      leftIndex += 1
+      rightIndex += 1
+      continue
+    }
+
+    if (left?.changed) {
+      html.push(`<span class="diff-remove">${escapeHtml(left.text)}</span>`)
+      leftIndex += 1
+      continue
+    }
+
+    if (right?.changed) {
+      html.push(`<span class="diff-add">${escapeHtml(right.text)}</span>`)
+      rightIndex += 1
+      continue
+    }
+
+    if (right) {
+      html.push(escapeHtml(right.text))
+      rightIndex += 1
+      continue
+    }
+
+    if (left) {
+      html.push(escapeHtml(left.text))
+      leftIndex += 1
+    }
+  }
+
+  return html.join('')
+}
+
+function renderCatCandidateDiffHtml(sourceText, targetText) {
+  if (String(sourceText || '').length + String(targetText || '').length > 20000) {
+    return `<div class="result-text-block">${escapeHtml(targetText || '')}</div>`
+  }
+  return `<div class="result-text-block">${renderCatCandidateSegmentsHtml(sourceText, targetText)}</div>`
 }
 
 function renderDiffHtml(sourceText, targetText, mode) {
@@ -2279,9 +2354,9 @@ function stopDocumentProgress() {
 function openFilePicker(field, type) {
   currentPickerField.value = field
   if (type === 'knowledge') {
-    loadKnowledgeTree()
     selectedKnowledgeFile.value = null
     filePickerVisible.value = true
+    loadKnowledgeTree()
   }
 }
 
@@ -2304,30 +2379,35 @@ function clearTextTerminologyFile() {
 }
 
 async function loadKnowledgeTree() {
+  knowledgeTreeLoading.value = true
   try {
     const rawData = await ensureKnowledgeTreeLoaded()
     knowledgeTree.value = flattenTree(rawData)
     // Filter: only show files from the relevant subtree
-    let filteredData = rawData
+    let filteredData = []
     if (currentPickerField.value === 'sentenceFile' || currentPickerField.value === 'textSentenceFile') {
-      const n = findNodeByName(rawData, '句式清单')
-      filteredData = n ? [n] : rawData
+      const n = findKnowledgeNode(rawData, ['句式清单'])
+      filteredData = n ? [n] : []
     } else if (currentPickerField.value === 'textTerminologyFile') {
-      const n = findNodeByName(rawData, '术语库')
-      filteredData = n ? [n] : rawData
+      const n = findKnowledgeNode(rawData, ['术语库'])
+      filteredData = n ? [n] : []
+    } else {
+      filteredData = rawData
     }
     knowledgeTreeList.value = flattenKnowledgeList(filteredData)
     selectedKnowledgeFile.value = null
   } catch (e) {
     ElMessage.error(getKnowledgeLoadErrorMessage(e))
+  } finally {
+    knowledgeTreeLoading.value = false
   }
 }
 
-function findNodeByName(nodes, name) {
+function findKnowledgeNode(nodes, names) {
   for (const node of nodes) {
-    if (node.name === name) return node
+    if (names.includes(node.name)) return node
     if (node.children && node.children.length > 0) {
-      const found = findNodeByName(node.children, name)
+      const found = findKnowledgeNode(node.children, names)
       if (found) return found
     }
   }
@@ -2426,6 +2506,42 @@ function formatCatScore(value) {
   return Math.round(Number(value) * 100)
 }
 
+function catCandidateMatchScore(candidate) {
+  if (!candidate) {
+    return 0
+  }
+  if (candidate.semantic_score !== null && candidate.semantic_score !== undefined && !Number.isNaN(Number(candidate.semantic_score))) {
+    return Number(candidate.semantic_score)
+  }
+  return Number(candidate.string_score || 0)
+}
+
+function formatCatCandidateMatchRate(candidate) {
+  return `${formatCatScore(catCandidateMatchScore(candidate))}%`
+}
+
+function formatCatAccuracyRate(value) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
+    return '待评估'
+  }
+  return `${Number(value)}%`
+}
+
+function dedupeCatCandidates(candidates) {
+  const bestByText = new Map()
+  for (const candidate of candidates || []) {
+    const templateText = String(candidate?.template_text || '').trim()
+    if (!templateText) {
+      continue
+    }
+    const current = bestByText.get(templateText)
+    if (!current || Number(candidate?.string_score || 0) > Number(current?.string_score || 0)) {
+      bestByText.set(templateText, candidate)
+    }
+  }
+  return Array.from(bestByText.values())
+}
+
 function normalizeCatItems(items) {
   return (items || [])
     .filter(item => item?.has_candidates && Array.isArray(item.candidates) && item.candidates.length > 0)
@@ -2435,17 +2551,32 @@ function normalizeCatItems(items) {
       sourceParagraphIndex: item.source_paragraph_index ?? item.paragraph_index ?? 0,
       sourceParagraphText: item.source_paragraph_text || '',
       originalText: item.original_text || '',
-      candidates: item.candidates || [],
+      candidates: dedupeCatCandidates(item.candidates || []),
       selectedCandidateIndex: 0,
       action: 'pending',
-      modifiedText: ''
+      modifiedText: '',
+      isDraftSaved: false
     }))
+}
+
+function catEmptyStateText() {
+  if (!catResult.value) {
+    return '上传文档后，这里会展示命中的句式候选和逐段确认区。'
+  }
+  if ((catResult.value.totalWithCandidates || 0) === 0) {
+    return '本次分析完成，但没有命中可用的 CAT 候选句式。'
+  }
+  if (!catItems.value.length) {
+    return '候选结果已返回，但当前没有可展示的条目。'
+  }
+  return '当前文档没有命中 CAT 候选句式'
 }
 
 function clearCatResult() {
   catResult.value = null
   catItems.value = []
   catApplyResult.value = null
+  clearCatSessionSnapshot()
 }
 
 function selectedCatCandidate(item) {
@@ -2453,6 +2584,61 @@ function selectedCatCandidate(item) {
     return null
   }
   return item.candidates[item.selectedCandidateIndex] || item.candidates[0] || null
+}
+
+function markCatItemDirty(item) {
+  if (!item) {
+    return
+  }
+  item.isDraftSaved = false
+}
+
+function fillCatModifyFromCandidate(item) {
+  if (!item) {
+    return
+  }
+  const candidate = selectedCatCandidate(item)
+  item.modifiedText = String(candidate?.template_text || item.originalText || '').trim()
+  item.action = 'modify'
+  markCatItemDirty(item)
+}
+
+function handleCatActionChange(item) {
+  if (!item) {
+    return
+  }
+  if (item.action === 'modify' && !String(item.modifiedText || '').trim()) {
+    const candidate = selectedCatCandidate(item)
+    item.modifiedText = String(candidate?.template_text || item.originalText || '').trim()
+  }
+  markCatItemDirty(item)
+}
+
+function startCatModifyFromCandidate(item) {
+  fillCatModifyFromCandidate(item)
+}
+
+function saveCatAccept(item) {
+  const candidate = selectedCatCandidate(item)
+  if (!candidate?.template_text) {
+    ElMessage.warning('请先选择一个候选句式')
+    return
+  }
+  item.action = 'accept'
+  item.isDraftSaved = true
+  ElMessage.success('当前候选已暂存')
+}
+
+function saveCatModify(item) {
+  const text = String(item?.modifiedText || '').trim()
+  if (!text) {
+    ElMessage.warning('请先输入自定义润色文本')
+    return
+  }
+  item.modifiedText = text
+  item.action = 'modify'
+  item.isDraftSaved = true
+  ElMessage.success('自定义润色文本已暂存')
 }
 
 function buildCatDecisionPayload() {
@@ -2541,11 +2727,18 @@ async function applyCatSelections() {
       outputFile: data.output_file || '',
       downloadUrl: data.download_url || '',
       downloadFilename: data.download_filename || 'cat_polished.docx',
-      appliedChangesCount: Array.isArray(data.applied_changes) ? data.applied_changes.length : 0,
-      accuracyRate: data.accuracy?.accuracy_rate || 0,
+      reportDownloadUrl: data.report_download_url || '',
+      reportDownloadFilename: data.report_download_filename || 'cat_report.html',
+      appliedChangesCount: Number.isFinite(data.applied_count) ? data.applied_count : (Array.isArray(data.applied_changes) ? data.applied_changes.length : 0),
+      failedCount: Number.isFinite(data.failed_count) ? data.failed_count : 0,
+      accuracyRate: data.accuracy?.accuracy_rate ?? null,
       feedback: data.feedback || {}
     }
-    ElMessage.success('CAT 润色文档已生成')
+    if ((data.failed_count || 0) > 0) {
+      ElMessage.warning(`CAT 润色文档已生成，但 ${data.failed_count} 处替换未能定位原文`)
+    } else {
+      ElMessage.success('CAT 润色文档已生成')
+    }
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`CAT 生成失败：${errorMsg}`)
@@ -2554,12 +2747,92 @@ async function applyCatSelections() {
   }
 }
 
-function downloadCatResult() {
+async function downloadCatResult() {
   if (!catApplyResult.value?.downloadUrl) {
     ElMessage.warning('当前没有可下载的 CAT 输出文件')
     return
   }
-  polishAPI.downloadCatOutput(catApplyResult.value.downloadUrl, catApplyResult.value.downloadFilename)
+  try {
+    await polishAPI.downloadCatOutput(catApplyResult.value.downloadUrl, catApplyResult.value.downloadFilename)
+  } catch (error) {
+    ElMessage.error(`下载润色文档失败：${getAPIErrorMessage(error, '下载失败')}`)
+  }
+}
+
+async function downloadCatReport() {
+  if (!catApplyResult.value?.reportDownloadUrl) {
+    ElMessage.warning('当前没有可下载的润色报告')
+    return
+  }
+  try {
+    await polishAPI.downloadCatAsset(catApplyResult.value.reportDownloadUrl, catApplyResult.value.reportDownloadFilename)
+  } catch (error) {
+    ElMessage.error(`下载润色报告失败：${getAPIErrorMessage(error, '下载失败')}`)
+  }
+}
+
+function readCatSessionSnapshot() {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  try {
+    const raw = window.sessionStorage.getItem(CAT_SESSION_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function clearCatSessionSnapshot() {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.sessionStorage.removeItem(CAT_SESSION_KEY)
+}
+
+function persistCatSessionSnapshot() {
+  if (typeof window === 'undefined') {
+    return
+  }
+  if (!catResult.value || formData.value.documentWorkflow !== 'cat') {
+    clearCatSessionSnapshot()
+    return
+  }
+  const payload = {
+    formData: {
+      sentenceFile: formData.value.sentenceFile,
+      sentenceFileId: formData.value.sentenceFileId || null,
+      terminologyFile: formData.value.terminologyFile,
+      terminologyFileId: formData.value.terminologyFileId || null,
+      sourceFile: formData.value.sourceFile,
+      requirements: formData.value.requirements,
+      documentWorkflow: formData.value.documentWorkflow || 'cat'
+    },
+    catResult: catResult.value,
+    catItems: catItems.value,
+    catApplyResult: catApplyResult.value
+  }
+  try {
+    window.sessionStorage.setItem(CAT_SESSION_KEY, JSON.stringify(payload))
+  } catch {
+    // Ignore storage quota errors and keep current interaction available.
+  }
+}
+
+function restoreCatSessionSnapshot() {
+  const snapshot = readCatSessionSnapshot()
+  if (!snapshot?.catResult) {
+    return
+  }
+  const restoredFormData = snapshot.formData || {}
+  formData.value = {
+    ...formData.value,
+    ...restoredFormData,
+    documentWorkflow: 'cat'
+  }
+  catResult.value = snapshot.catResult || null
+  catItems.value = Array.isArray(snapshot.catItems) ? snapshot.catItems : []
+  catApplyResult.value = snapshot.catApplyResult || null
 }
 
 async function submitPolish() {
@@ -2824,6 +3097,14 @@ watch(() => formData.value.documentWorkflow, (mode) => {
   }
 })
 
+watch(
+  [() => catResult.value, () => catItems.value, () => catApplyResult.value, () => formData.value.documentWorkflow],
+  () => {
+    persistCatSessionSnapshot()
+  },
+  { deep: true }
+)
+
 watch(documentSession, (session) => {
   loading.value = session.loading
   polishProgress.value = session.progress || 0
@@ -2841,6 +3122,7 @@ onMounted(async () => {
     originalText.value = pendingPolishText
     sessionStorage.removeItem('pendingPolishText')
   }
+  restoreCatSessionSnapshot()
   loadDropdownOptions()
   await loadPolishEngineStatus()
   await loadFeedbackStats()
@@ -3038,6 +3320,13 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.cat-apply-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .cat-ai-status-banner {
   margin-bottom: 16px;
   padding: 12px 14px;
@@ -3129,11 +3418,28 @@ onMounted(async () => {
   margin-top: 12px;
 }
 
+.cat-item-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.cat-item-saved-hint {
+  color: #047857;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .cat-compare-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 14px;
+}
+
+.cat-compare-grid.is-single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .cat-compare-card {
@@ -3148,6 +3454,10 @@ onMounted(async () => {
   border-color: #bbf7d0;
 }
 
+.cat-compare-card.is-full-width {
+  width: 100%;
+}
+
 .cat-compare-title {
   padding: 10px 12px;
   font-size: 12px;
@@ -3159,6 +3469,23 @@ onMounted(async () => {
 .cat-compare-content {
   padding: 12px;
   color: #0f172a;
+  line-height: 1.8;
+}
+
+.cat-compare-content :deep(.diff-add) {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.cat-compare-content :deep(.diff-remove) {
+  color: #b91c1c;
+  text-decoration: line-through;
+  text-decoration-color: #dc2626;
+  text-decoration-thickness: 2px;
+  margin-right: 2px;
 }
 
 .cat-candidate-meta-inline {

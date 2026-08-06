@@ -6,7 +6,9 @@ from typing import List, Optional
 from datetime import timedelta
 from collections import defaultdict
 from difflib import SequenceMatcher
+from html import escape as html_escape
 import json
+import asyncio
 import os
 import uuid
 import mimetypes
@@ -5437,7 +5439,7 @@ async def _batch_ai_semantic_score(
             "scored_count": 0,
         }
 
-    batch_size = 30
+    batch_size = 8
     scored_count = 0
     partial_failure = False
     last_error = None
@@ -5460,7 +5462,7 @@ async def _batch_ai_semantic_score(
             sentences="\n".join(parts),
             reason_max=reason_max_chars,
         )
-        dynamic_max_tokens = min(max(2000, total_candidates * 100), 32000)
+        dynamic_max_tokens = min(max(1200, total_candidates * 50), 5000)
 
         try:
             result = ai_client.chat(
@@ -5468,16 +5470,28 @@ async def _batch_ai_semantic_score(
                 max_tokens=dynamic_max_tokens,
                 temperature=0.1,
                 request_label="polish.cat.semantic_score",
+                timeout=90,
             )
         except Exception as e:
             partial_failure = True
             last_error = str(e)
-            logger.warning("[CAT_SCORING] AI 调用失败(batch=%s): %s", batch_start // batch_size, e)
+            logger.warning(
+                "[CAT_SCORING] AI 调用失败(batch=%s, provider_errors=%s): %s",
+                batch_start // batch_size,
+                getattr(ai_client, 'last_chat_errors', []),
+                e,
+            )
             continue
 
         if not result:
             partial_failure = True
-            last_error = "AI 未返回评分结果"
+            provider_errors = getattr(ai_client, 'last_chat_errors', [])
+            last_error = provider_errors[-1] if provider_errors else "AI 未返回评分结果"
+            logger.warning(
+                "[CAT_SCORING] AI 未返回评分结果(batch=%s, provider_errors=%s)",
+                batch_start // batch_size,
+                provider_errors,
+            )
             continue
 
         try:
@@ -5519,6 +5533,9 @@ async def _batch_ai_semantic_score(
                     c.semantic_score = score
                     c.ai_reason = reason
                 scored_count += 1
+
+        if batch_start + batch_size < len(scored_items):
+            await asyncio.sleep(0.5)
 
     if scored_count > 0:
         return {
@@ -5644,7 +5661,7 @@ def _simple_match(
     if not sentence or not sentence.strip() or not templates:
         return []
 
-    results = []
+    best_by_template = {}
     for tpl in templates:
         tpl_text = tpl.get("text", "") if isinstance(tpl, dict) else str(tpl)
         tpl_id = tpl.get("id", "") if isinstance(tpl, dict) else ""
@@ -5662,13 +5679,18 @@ def _simple_match(
         else:
             tier = "reference"
 
-        results.append({
+        candidate = {
             "template_text": tpl_text,
             "template_id": str(tpl_id),
             "string_score": round(score, 4),
             "match_tier": tier,
-        })
+        }
+        dedupe_key = re.sub(r'\s+', ' ', tpl_text).strip()
+        existing = best_by_template.get(dedupe_key)
+        if existing is None or candidate["string_score"] > existing["string_score"]:
+            best_by_template[dedupe_key] = candidate
 
+    results = list(best_by_template.values())
     results.sort(key=lambda x: x["string_score"], reverse=True)
     return results
 
@@ -7883,16 +7905,18 @@ def _cat_calc_file_accuracy(decisions: list, total_paragraphs: int) -> dict:
             modified += 1
 
     decided = accepted + rejected + modified
+    pending = max(0, has_candidates - decided)
     no_match = max(0, total_paragraphs - has_candidates)
 
     def _pct(n, d):
-        return round(n / d * 100, 1) if d > 0 else 0.0
+        return round(n / d * 100, 1) if d > 0 else None
 
     return {
         "total_items": has_candidates,
         "accepted": accepted,
         "rejected": rejected,
         "modified": modified,
+        "pending": pending,
         "no_match": no_match,
         "accuracy_rate": _pct(accepted, decided),
         "rejection_rate": _pct(rejected, decided),
@@ -8294,6 +8318,342 @@ def _parse_corrections(text: str) -> list[tuple[str, str]]:
 
 _cat_analyze_cache: dict = {}
 _cat_download_cache: dict = {}
+_cat_cache_timestamps: dict = {}
+_CAT_CACHE_TTL_SECONDS = 3600
+
+
+def _cleanup_cat_cache() -> None:
+    now = time.time()
+    expired_ids = [
+        analyze_id
+        for analyze_id, created_at in list(_cat_cache_timestamps.items())
+        if now - created_at > _CAT_CACHE_TTL_SECONDS
+    ]
+    for analyze_id in expired_ids:
+        cached = _cat_analyze_cache.pop(analyze_id, None)
+        _cat_cache_timestamps.pop(analyze_id, None)
+        temp_path = ((cached or {}).get("file_info") or {}).get("temp_path")
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                logger.warning("[CAT_CACHE] 清理临时文件失败: %s", temp_path)
+
+
+def _register_cat_download_asset(file_path: str, filename: str = "", media_type: str = "") -> tuple[Optional[str], Optional[str]]:
+    if not file_path or not os.path.exists(file_path):
+        return None, None
+    download_token = str(uuid.uuid4())
+    resolved_filename = filename or os.path.basename(file_path)
+    _cat_download_cache[download_token] = {
+        "path": file_path,
+        "filename": resolved_filename,
+        "media_type": media_type or mimetypes.guess_type(resolved_filename)[0] or "application/octet-stream",
+    }
+    return download_token, f"/api/polish/cat/download/{download_token}"
+
+
+def _generate_cat_html_report(
+    report_path: str,
+    source_filename: str,
+    analyze_id: str,
+    decisions: list,
+    applied_changes: list,
+    accuracy: dict,
+    failed_replacements: Optional[list] = None,
+):
+    generated_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    action_labels = {
+        'accept': '接受候选',
+        'modify': '自定义润色',
+        'reject': '拒绝候选',
+        'pending': '待处理',
+    }
+    action_counts = {key: 0 for key in action_labels}
+    decision_rows = []
+    category_counts = defaultdict(int)
+    category_examples = {}
+    summary_rows = []
+
+    effective_changes = 0
+    total_delta = 0
+
+    for decision in decisions or []:
+        action = str(getattr(decision, 'action', '') or '')
+        if action in action_counts:
+            action_counts[action] += 1
+        replacement_text = ''
+        if action == 'accept':
+            replacement_text = str(getattr(decision, 'accepted_template', '') or '')
+        elif action == 'modify':
+            replacement_text = str(getattr(decision, 'modified_text', '') or '')
+        elif action == 'reject':
+            replacement_text = str(getattr(decision, 'rejected_template', '') or '')
+
+        original_text = str(getattr(decision, 'original_text', '') or '')
+        category = _cat_report_change_category(original_text, replacement_text, action)
+        summary = _cat_report_change_summary(original_text, replacement_text, action)
+        category_counts[category] += 1
+        if replacement_text and category not in category_examples:
+            category_examples[category] = replacement_text[:80]
+        if action in {'accept', 'modify'} and replacement_text:
+            effective_changes += 1
+            total_delta += len(_normalize_cat_replace_text(replacement_text)) - len(_normalize_cat_replace_text(original_text))
+
+        decision_rows.append(
+            f"<tr>"
+            f"<td>{int(getattr(decision, 'sentence_index', 0)) + 1}</td>"
+            f"<td>{int(getattr(decision, 'source_paragraph_index', getattr(decision, 'paragraph_index', 0)) or 0) + 1}</td>"
+            f"<td>{html_escape(action_labels.get(action, action or '未标记'))}</td>"
+            f"<td>{html_escape(category)}</td>"
+            f"<td>{html_escape(original_text)}</td>"
+            f"<td>{html_escape(replacement_text)}</td>"
+            f"<td>{html_escape(summary)}</td>"
+            f"</tr>"
+        )
+
+    sorted_categories = sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))
+    for category, count in sorted_categories[:6]:
+        share = round(count / max(1, len(decisions or [])) * 100, 1)
+        summary_rows.append(
+            f"<tr>"
+            f"<td>{html_escape(category)}</td>"
+            f"<td>{count}</td>"
+            f"<td>{share}%</td>"
+            f"<td>{html_escape(_cat_report_category_description(category))}</td>"
+            f"<td>{html_escape(category_examples.get(category, ''))}</td>"
+            f"</tr>"
+        )
+
+    report_highlights = _cat_report_highlights(action_counts, sorted_categories, effective_changes, total_delta, failed_replacements or [])
+
+    applied_rows = []
+    for index, change in enumerate(applied_changes or [], start=1):
+        applied_rows.append(
+            f"<tr>"
+            f"<td>{index}</td>"
+            f"<td>{html_escape(str(change.get('paragraph', '')))}</td>"
+            f"<td>{html_escape(str(change.get('action', '')))}</td>"
+            f"<td>{html_escape(str(change.get('before', '') or ''))}</td>"
+            f"<td>{html_escape(str(change.get('after', '') or ''))}</td>"
+            f"</tr>"
+        )
+
+    failed_rows = []
+    for index, failure in enumerate(failed_replacements or [], start=1):
+        failed_rows.append(
+            f"<tr>"
+            f"<td>{index}</td>"
+            f"<td>{html_escape(str(failure.get('paragraph', '')))}</td>"
+            f"<td>{html_escape(str(failure.get('action', '')))}</td>"
+            f"<td>{html_escape(str(failure.get('source_sentence', '') or ''))}</td>"
+            f"</tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+  <meta charset=\"UTF-8\" />
+  <title>CAT 润色报告</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; margin: 0; padding: 32px; color: #0f172a; background: #f8fafc; }}
+    .page {{ max-width: 1120px; margin: 0 auto; background: #ffffff; border-radius: 20px; padding: 32px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08); }}
+    h1 {{ margin: 0 0 12px; font-size: 30px; }}
+    h2 {{ margin: 32px 0 12px; font-size: 20px; }}
+    p {{ margin: 6px 0; line-height: 1.7; color: #334155; }}
+    .meta {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 24px; margin-top: 16px; }}
+    .summary {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-top: 24px; }}
+    .insight-list {{ margin: 12px 0 0; padding-left: 20px; color: #334155; line-height: 1.8; }}
+    .card {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px; }}
+    .label {{ display: block; font-size: 12px; color: #64748b; margin-bottom: 6px; }}
+    .value {{ font-size: 24px; font-weight: 700; color: #0f172a; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 12px; table-layout: fixed; }}
+    th, td {{ border: 1px solid #e2e8f0; padding: 10px 12px; text-align: left; vertical-align: top; font-size: 13px; line-height: 1.6; word-break: break-word; }}
+    th {{ background: #f1f5f9; font-weight: 700; }}
+    .note {{ margin-top: 24px; padding: 14px 16px; border-radius: 12px; background: #eff6ff; color: #1e3a8a; }}
+  </style>
+</head>
+<body>
+  <div class=\"page\">
+    <h1>CAT 润色报告</h1>
+    <p>本报告整理本次 CAT 辅助润色的确认结果与实际写回内容，便于归档、复核与二次审校。</p>
+    <div class=\"meta\">
+      <p><strong>原始文件：</strong>{html_escape(source_filename or '')}</p>
+      <p><strong>分析编号：</strong>{html_escape(analyze_id or '')}</p>
+      <p><strong>生成时间：</strong>{generated_at}</p>
+      <p><strong>准确率：</strong>{html_escape('待评估' if (accuracy or {}).get('accuracy_rate') is None else str((accuracy or {}).get('accuracy_rate')) + '%')}</p>
+    </div>
+    <div class=\"summary\">
+      <div class=\"card\"><span class=\"label\">总句子决策</span><span class=\"value\">{len(decisions or [])}</span></div>
+      <div class=\"card\"><span class=\"label\">接受候选</span><span class=\"value\">{action_counts['accept']}</span></div>
+      <div class=\"card\"><span class=\"label\">自定义</span><span class=\"value\">{action_counts['modify']}</span></div>
+      <div class=\"card\"><span class=\"label\">拒绝</span><span class=\"value\">{action_counts['reject']}</span></div>
+      <div class=\"card\"><span class=\"label\">待处理</span><span class=\"value\">{action_counts['pending']}</span></div>
+      <div class=\"card\"><span class=\"label\">实际写回段落</span><span class=\"value\">{len(applied_changes or [])}</span></div>
+    </div>
+
+    <h2>本轮润色特点分析</h2>
+    <ul class=\"insight-list\">
+      {''.join(f'<li>{html_escape(item)}</li>' for item in report_highlights)}
+    </ul>
+
+    <h2>润色句子分类</h2>
+    <table>
+      <thead>
+        <tr><th style=\"width:120px\">类别</th><th style=\"width:70px\">数量</th><th style=\"width:90px\">占比</th><th style=\"width:220px\">特点</th><th>代表句</th></tr>
+      </thead>
+      <tbody>
+        {''.join(summary_rows) if summary_rows else '<tr><td colspan="5">本次没有可分析的润色分类。</td></tr>'}
+      </tbody>
+    </table>
+
+    <h2>已写回文档的润色结果</h2>
+    <table>
+      <thead>
+        <tr><th style=\"width:60px\">序号</th><th style=\"width:90px\">段落</th><th style=\"width:110px\">动作</th><th>修改前</th><th>修改后</th></tr>
+      </thead>
+      <tbody>
+        {''.join(applied_rows) if applied_rows else '<tr><td colspan="5">本次没有写回到文档的修订内容。</td></tr>'}
+      </tbody>
+    </table>
+
+    <h2>逐句确认明细</h2>
+    <table>
+      <thead>
+        <tr><th style=\"width:60px\">句子</th><th style=\"width:60px\">段落</th><th style=\"width:90px\">动作</th><th style=\"width:110px\">类别</th><th>原文</th><th>最终文本</th><th style=\"width:180px\">变化摘要</th></tr>
+      </thead>
+      <tbody>
+        {''.join(decision_rows) if decision_rows else '<tr><td colspan="7">本次没有可用的句子决策记录。</td></tr>'}
+      </tbody>
+    </table>
+
+    <h2>未成功写回的句子</h2>
+    <table>
+      <thead>
+        <tr><th style=\"width:60px\">序号</th><th style=\"width:70px\">段落</th><th style=\"width:90px\">动作</th><th>原句定位信息</th></tr>
+      </thead>
+      <tbody>
+        {''.join(failed_rows) if failed_rows else '<tr><td colspan="4">本次所有需要写回的句子都已完成原文定位。</td></tr>'}
+      </tbody>
+    </table>
+
+    <div class=\"note\">报告中的“实际写回段落”以生成的修订版 DOCX 为准；“逐句确认明细”完整记录用户在 CAT 页面上的接受、自定义、拒绝和待处理状态。</div>
+  </div>
+</body>
+</html>"""
+
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+
+_CAT_REPLACE_NORMALIZE_PATTERN = re.compile(r'[\s\u3000，。；：！？,;:!?]')
+
+
+def _normalize_cat_replace_text(text: str) -> str:
+    return _CAT_REPLACE_NORMALIZE_PATTERN.sub('', str(text or ''))
+
+
+def _cat_report_change_category(before: str, after: str, action: str) -> str:
+    if action == 'reject':
+        return '人工驳回'
+    if action == 'pending':
+        return '待人工确认'
+    if not after:
+        return '未输出结果'
+
+    normalized_before = _normalize_cat_replace_text(before)
+    normalized_after = _normalize_cat_replace_text(after)
+    if before != after and normalized_before == normalized_after:
+        return '标点格式统一'
+    if len(normalized_after) <= max(4, int(len(normalized_before) * 0.85)):
+        return '表达精简'
+    if len(normalized_after) >= max(len(normalized_before) + 6, int(len(normalized_before) * 1.15)):
+        return '信息补全'
+    if re.search(r'(请|应|需|必须|不得|确保)', after) and not re.search(r'(请|应|需|必须|不得|确保)', before):
+        return '操作指令规范'
+    if re.search(r'[A-Za-z]{2,}|[0-9]+', before + after):
+        return '术语措辞统一'
+    return '句式重组'
+
+
+def _cat_report_change_summary(before: str, after: str, action: str) -> str:
+    if action == 'reject':
+        return '本句保留人工判断，未写回候选句式。'
+    if action == 'pending':
+        return '本句仍处于待处理状态。'
+    if not after:
+        return '当前没有形成最终写回文本。'
+
+    before_len = len(_normalize_cat_replace_text(before))
+    after_len = len(_normalize_cat_replace_text(after))
+    delta = after_len - before_len
+    if before != after and before_len == after_len:
+        return '主要调整了标点、空格或版式表达。'
+    if delta < 0:
+        return f'句子净减少 {abs(delta)} 个字符，整体更精简。'
+    if delta > 0:
+        return f'句子净增加 {delta} 个字符，补充了说明信息。'
+    return '保留原意的同时重组了句式表达。'
+
+
+def _cat_report_category_description(category: str) -> str:
+    descriptions = {
+        '表达精简': '压缩冗余措辞，让句子更短、更直接。',
+        '信息补全': '补入限定条件、结果或操作说明。',
+        '操作指令规范': '把动作句改成更规范的说明书表达。',
+        '术语措辞统一': '统一术语、型号、英文缩写或专业措辞。',
+        '标点格式统一': '统一全角半角、停顿和格式写法。',
+        '句式重组': '保持原意，重排语序和结构。',
+        '人工驳回': '用户明确驳回候选句式。',
+        '待人工确认': '本句尚未形成最终决策。',
+        '未输出结果': '没有生成可写回的最终文本。',
+    }
+    return descriptions.get(category, '本类修改体现了本轮润色的主要表达倾向。')
+
+
+def _cat_report_highlights(action_counts: dict, sorted_categories: list, effective_changes: int, total_delta: int, failed_replacements: list) -> list[str]:
+    highlights = []
+    if sorted_categories:
+        top_category, top_count = sorted_categories[0]
+        highlights.append(f'本轮最集中的润色类型是“{top_category}”，共 {top_count} 句。')
+    if effective_changes > 0:
+        direction = '补充信息' if total_delta > 0 else '压缩表达' if total_delta < 0 else '重组句式'
+        highlights.append(f'本轮实际生效的句子共 {effective_changes} 条，整体倾向于{direction}。')
+    if action_counts.get('modify'):
+        highlights.append(f'共有 {action_counts["modify"]} 条句子采用人工自定义，说明模板仍需继续贴近真实写作习惯。')
+    if action_counts.get('reject'):
+        highlights.append(f'共有 {action_counts["reject"]} 条句子被人工驳回，适合回查对应模板的召回条件。')
+    if failed_replacements:
+        highlights.append(f'本轮有 {len(failed_replacements)} 条句子未成功定位原文，生成前建议再次核对原句与候选句。')
+    return highlights or ['本轮没有形成足够的有效润色句子，建议继续补充人工决策后再生成报告。']
+
+
+def _replace_by_normalized_match(text: str, target: str, replacement: str) -> tuple[str, bool]:
+    normalized_text = _normalize_cat_replace_text(text)
+    normalized_target = _normalize_cat_replace_text(target)
+    if not normalized_text or not normalized_target:
+        return text, False
+
+    start = normalized_text.find(normalized_target)
+    if start < 0:
+        return text, False
+
+    index_map = []
+    for index, char in enumerate(str(text or '')):
+        if _CAT_REPLACE_NORMALIZE_PATTERN.match(char):
+            continue
+        index_map.append(index)
+
+    if start >= len(index_map):
+        return text, False
+
+    end = start + len(normalized_target) - 1
+    if end >= len(index_map):
+        return text, False
+
+    source_start = index_map[start]
+    source_end = index_map[end] + 1
+    return f"{text[:source_start]}{replacement}{text[source_end:]}", True
 
 
 def _resolve_cat_paragraph_index(paragraph_texts: list[str], decision: CatDecision) -> Optional[int]:
@@ -8474,7 +8834,9 @@ async def cat_analyze(
                         candidate["semantic_score"] = candidate.get("string_score", 0.0)
                         candidate["ai_reason"] = "AI未启用，使用字符串匹配分"
 
+        _cleanup_cat_cache()
         analyze_id = str(uuid.uuid4())
+        _cat_cache_timestamps[analyze_id] = time.time()
         _cat_analyze_cache[analyze_id] = {
             "items": items,
             "templates": guide_templates,
@@ -8557,25 +8919,60 @@ async def cat_apply(
             "source_sentence": source_sentence,
             "fallback_sentence": d.original_text or "",
             "replacement_text": replacement_text,
+            "action": action,
         })
 
+    polished_lines = list(file_info.get("polished_lines") or [])
     paragraph_revisions = {}
+    paragraph_revision_actions = {}
+    failed_replacements = []
+    applied_accept_count = 0
+    applied_modify_count = 0
     for para_idx, replacements in paragraph_sentence_replacements.items():
         paragraph_text = paragraph_texts[para_idx]
+        polished_text = polished_lines[para_idx] if para_idx < len(polished_lines) else paragraph_text
         updated_text = paragraph_text
+        updated_polished_text = polished_text
+        paragraph_actions = sorted({
+            replacement.get("action")
+            for replacement in replacements
+            if replacement.get("action") in {"accept", "modify"}
+        })
         for replacement in replacements:
             source_sentence = replacement.get("source_sentence", "")
             fallback_sentence = replacement.get("fallback_sentence", "")
             replacement_text = replacement.get("replacement_text", "")
+            matched = False
             if source_sentence and source_sentence in updated_text:
                 updated_text = updated_text.replace(source_sentence, replacement_text, 1)
-                continue
-            if fallback_sentence and fallback_sentence in updated_text:
+                matched = True
+            elif source_sentence and source_sentence in updated_polished_text:
+                updated_polished_text = updated_polished_text.replace(source_sentence, replacement_text, 1)
+                updated_text, matched = _replace_by_normalized_match(updated_text, source_sentence, replacement_text)
+            elif source_sentence:
+                updated_text, matched = _replace_by_normalized_match(updated_text, source_sentence, replacement_text)
+            if not matched and fallback_sentence and fallback_sentence in updated_text:
                 updated_text = updated_text.replace(fallback_sentence, replacement_text, 1)
+                matched = True
+            if not matched and fallback_sentence:
+                updated_text, matched = _replace_by_normalized_match(updated_text, fallback_sentence, replacement_text)
+            if matched:
+                if replacement.get("action") == "accept":
+                    applied_accept_count += 1
+                elif replacement.get("action") == "modify":
+                    applied_modify_count += 1
+            if not matched:
+                failed_replacements.append({
+                    "paragraph": para_idx + 1,
+                    "action": replacement.get("action") or "",
+                    "source_sentence": (source_sentence or fallback_sentence or '')[:120],
+                })
         if updated_text.strip() != paragraph_text.strip():
             paragraph_revisions[para_idx] = updated_text
+            paragraph_revision_actions[para_idx] = paragraph_actions
 
     output_path = None
+    report_path = None
     applied_changes = []
 
     if temp_path.lower().endswith('.docx') and paragraph_revisions:
@@ -8600,6 +8997,7 @@ async def cat_apply(
                     continue
                 p_element = xml_paragraphs[para_idx]
                 original_text = paragraph_texts[para_idx] if para_idx < len(paragraph_texts) else ""
+                paragraph_actions = paragraph_revision_actions.get(para_idx) or ["modify"]
 
                 if original_text.strip() == new_text.strip():
                     continue
@@ -8617,10 +9015,8 @@ async def cat_apply(
                         "paragraph": para_idx + 1,
                         "before": original_text[:200],
                         "after": new_text[:200],
-                        "action": "accept" if any(
-                            d.action == "accept" and d.paragraph_index == para_idx
-                            for d in decisions
-                        ) else "modify",
+                        "action": paragraph_actions[0] if len(paragraph_actions) == 1 else "mixed",
+                        "actions": paragraph_actions,
                     })
 
             document_root = doc.element
@@ -8635,27 +9031,60 @@ async def cat_apply(
 
     total_paragraphs = file_info.get("total_paragraphs", len(cached.get("items", [])))
     accuracy = _cat_calc_file_accuracy(decisions, total_paragraphs)
+    rejected_decisions = sum(1 for d in decisions if getattr(d, "action", "") == "reject")
+    pending_decisions = sum(1 for d in decisions if getattr(d, "action", "") == "pending")
+    effective_decided = applied_accept_count + applied_modify_count + rejected_decisions + len(failed_replacements)
+    accuracy.update({
+        "accepted": applied_accept_count,
+        "modified": applied_modify_count,
+        "rejected": rejected_decisions,
+        "pending": pending_decisions,
+        "failed": len(failed_replacements),
+        "accuracy_rate": round(applied_accept_count / effective_decided * 100, 1) if effective_decided > 0 else None,
+        "rejection_rate": round(rejected_decisions / effective_decided * 100, 1) if effective_decided > 0 else None,
+        "modification_rate": round(applied_modify_count / effective_decided * 100, 1) if effective_decided > 0 else None,
+    })
 
-    download_token = None
+    report_dir = os.path.dirname(temp_path)
+    report_base = os.path.splitext(filename)[0] if filename else "润色文档"
+    report_filename = f"【CAT润色报告】{report_base}.html"
+    report_path = os.path.join(report_dir, report_filename)
+    _generate_cat_html_report(
+        report_path=report_path,
+        source_filename=request.source_filename or filename,
+        analyze_id=request.analyze_id,
+        decisions=decisions,
+        applied_changes=applied_changes,
+        accuracy=accuracy,
+        failed_replacements=failed_replacements,
+    )
+
     download_url = None
     download_filename = None
     if output_path and os.path.exists(output_path):
-        download_token = str(uuid.uuid4())
         download_filename = os.path.basename(output_path)
-        _cat_download_cache[download_token] = {
-            "path": output_path,
-            "filename": download_filename,
-        }
-        download_url = f"/api/polish/cat/download/{download_token}"
+        _, download_url = _register_cat_download_asset(output_path, download_filename)
 
-    del _cat_analyze_cache[request.analyze_id]
+    report_download_url = None
+    report_download_filename = None
+    if report_path and os.path.exists(report_path):
+        report_download_filename = os.path.basename(report_path)
+        _, report_download_url = _register_cat_download_asset(report_path, report_download_filename, "text/html; charset=utf-8")
+
+    _cat_analyze_cache.pop(request.analyze_id, None)
+    _cat_cache_timestamps.pop(request.analyze_id, None)
 
     return {
         "message": "润色完成",
         "output_file": output_path,
         "download_url": download_url,
         "download_filename": download_filename,
+        "report_download_url": report_download_url,
+        "report_download_filename": report_download_filename,
         "applied_changes": applied_changes,
+        "applied_count": len(applied_changes),
+        "failed_count": len(failed_replacements),
+        "failed_replacements": failed_replacements[:20],
         "accuracy": accuracy,
         "feedback": {
             "rejected_saved": rejected_count,
@@ -8699,5 +9128,5 @@ def cat_download_file(download_token: str):
     return FileResponse(
         path=file_path,
         filename=filename,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        media_type=payload.get("media_type") or "application/octet-stream",
     )
