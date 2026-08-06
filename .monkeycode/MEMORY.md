@@ -137,3 +137,12 @@ DITA 父子节点兼容规则
   - Vite 开发代理 `/api` 目标端口使用 `http://localhost:8000`
   - 本项目 README 指定后端开发服务端口为 `8000`
   - 若前端代理指向 `8001`，登录等接口会因代理目标错误而失败
+
+WorkBuddy 联动评审目录约定
+- Date: 2026-08-05
+- Context: 用户要求与 workbuddy 联动，由其输出按轮次带提交号的审查建议
+- Category: 工作流协作
+- Instructions:
+  - workbuddy 审查结果统一写入 `当前工作区/smart-doc-platform/.monkeycode/reviews/`
+  - 文件名使用 `round-001-<commit>.md` 这类按轮次并带提交号的格式
+  - 我处理 review 时以该目录中的最新轮次文件为准

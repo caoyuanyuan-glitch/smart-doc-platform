@@ -59,15 +59,147 @@
               <el-input v-model="formData.requirements" type="textarea" :rows="3" placeholder="请输入额外的润色要求（选填）" />
             </div>
 
+            <div class="form-item">
+              <label class="form-label">处理模式</label>
+              <el-radio-group v-model="formData.documentWorkflow" class="workflow-radio-group">
+                <el-radio-button label="standard" value="standard">标准润色</el-radio-button>
+                <el-radio-button label="cat" value="cat">CAT 辅助润色</el-radio-button>
+              </el-radio-group>
+              <div class="form-helper-text">
+                <span v-if="formData.documentWorkflow === 'cat'">CAT 模式会先抽取候选句式，再逐段确认后生成带修订的文档。</span>
+                <span v-else>标准模式会直接输出整篇润色结果和差异确认列表。</span>
+              </div>
+            </div>
+
             <div class="button-group doc-button-group">
               <el-button @click="resetForm">重置</el-button>
-              <el-button type="primary" :loading="loading" @click="submitPolish">提交</el-button>
+              <el-button type="primary" :loading="loading" @click="submitPolish">{{ formData.documentWorkflow === 'cat' ? '开始 CAT 分析' : '提交' }}</el-button>
             </div>
           </div>
 
         </div>
 
         <div class="doc-right">
+          <template v-if="formData.documentWorkflow === 'cat'">
+            <div v-if="catResult" class="panel doc-result-panel cat-result-panel">
+              <div class="panel-header">
+                <span>CAT 候选结果</span>
+                <div class="panel-actions">
+                  <el-tag size="small" type="info">命中 {{ catResult.totalWithCandidates }}/{{ catResult.totalParagraphs }}</el-tag>
+                  <el-tag size="small" type="success">覆盖率 {{ catResult.templateCoverage }}%</el-tag>
+                  <el-button type="primary" size="small" :loading="catApplying" @click="applyCatSelections">生成 CAT 润色文档</el-button>
+                </div>
+              </div>
+
+              <div class="cat-summary-grid">
+                <div class="cat-summary-card">
+                  <span class="cat-summary-label">候选段落</span>
+                  <strong>{{ catItems.length }}</strong>
+                </div>
+                <div class="cat-summary-card">
+                  <span class="cat-summary-label">待处理</span>
+                  <strong>{{ pendingCatCount }}</strong>
+                </div>
+                <div class="cat-summary-card">
+                  <span class="cat-summary-label">接受</span>
+                  <strong>{{ acceptedCatCount }}</strong>
+                </div>
+                <div class="cat-summary-card">
+                  <span class="cat-summary-label">自定义</span>
+                  <strong>{{ modifiedCatCount }}</strong>
+                </div>
+              </div>
+
+              <div v-if="catResult.aiScoringStatus" class="cat-ai-status-banner" :class="catResult.aiScoringStatus">
+                <span class="cat-ai-status-title">AI 评分状态：{{ catAiStatusLabel }}</span>
+                <span v-if="catResult.aiScoringError" class="cat-ai-status-text">{{ catResult.aiScoringError }}</span>
+              </div>
+
+              <div v-if="catApplyResult" class="cat-apply-banner">
+                <div>
+                  <div class="cat-apply-title">CAT 润色文档已生成</div>
+                  <div class="cat-apply-meta">应用 {{ catApplyResult.appliedChangesCount }} 处，准确率 {{ catApplyResult.accuracyRate }}%</div>
+                </div>
+                <el-button v-if="catApplyResult.downloadUrl" size="small" type="primary" @click="downloadCatResult">下载润色文档</el-button>
+              </div>
+
+              <div v-if="catItems.length" class="cat-item-list">
+                <div v-for="item in catItems" :key="`cat-${item.paragraphIndex}`" class="cat-item-card">
+                  <div class="cat-item-header">
+                    <div>
+                      <div class="cat-item-title">句子 #{{ item.sentenceIndex + 1 }} · 段落 #{{ item.sourceParagraphIndex + 1 }}</div>
+                      <div class="cat-item-original">{{ item.originalText }}</div>
+                    </div>
+                    <el-tag size="small" :type="item.action === 'accept' ? 'success' : item.action === 'modify' ? 'warning' : item.action === 'reject' ? 'danger' : 'info'">
+                      {{ item.action === 'accept' ? '接受' : item.action === 'modify' ? '自定义' : item.action === 'reject' ? '拒绝' : '待处理' }}
+                    </el-tag>
+                  </div>
+
+                  <div class="cat-item-section">
+                    <label class="cat-item-label">处理动作</label>
+                    <el-radio-group v-model="item.action" size="small">
+                      <el-radio-button value="pending">待处理</el-radio-button>
+                      <el-radio-button value="accept">接受候选</el-radio-button>
+                      <el-radio-button value="modify">自定义</el-radio-button>
+                      <el-radio-button value="reject">拒绝</el-radio-button>
+                    </el-radio-group>
+                  </div>
+
+                  <div v-if="item.action === 'accept'" class="cat-item-section">
+                    <label class="cat-item-label">候选句式</label>
+                    <el-select v-model="item.selectedCandidateIndex" class="full-width" placeholder="选择候选句式">
+                      <el-option
+                        v-for="(candidate, candidateIndex) in item.candidates"
+                        :key="`cat-${item.paragraphIndex}-candidate-${candidateIndex}`"
+                        :label="candidate.template_text"
+                        :value="candidateIndex"
+                      >
+                        <div class="cat-candidate-option">
+                          <div class="cat-candidate-text">{{ candidate.template_text }}</div>
+                          <div class="cat-candidate-meta">
+                            <span>字符串分 {{ formatCatScore(candidate.string_score) }}%</span>
+                            <span v-if="candidate.semantic_score !== null && candidate.semantic_score !== undefined">语义分 {{ formatCatScore(candidate.semantic_score) }}%</span>
+                            <span v-if="candidate.ai_reason">{{ candidate.ai_reason }}</span>
+                          </div>
+                        </div>
+                      </el-option>
+                    </el-select>
+                  </div>
+
+                  <div v-if="selectedCatCandidate(item)" class="cat-compare-grid">
+                    <div class="cat-compare-card">
+                      <div class="cat-compare-title">原文</div>
+                      <div class="cat-compare-content" v-html="renderDiffHtml(item.originalText, selectedCatCandidate(item)?.template_text || '', 'original')"></div>
+                    </div>
+                    <div class="cat-compare-card is-candidate">
+                      <div class="cat-compare-title">候选</div>
+                      <div class="cat-compare-content" v-html="renderDiffHtml(item.originalText, selectedCatCandidate(item)?.template_text || '', 'polished')"></div>
+                      <div class="cat-candidate-meta cat-candidate-meta-inline">
+                        <span>字符串分 {{ formatCatScore(selectedCatCandidate(item)?.string_score) }}%</span>
+                        <span v-if="selectedCatCandidate(item)?.semantic_score !== null && selectedCatCandidate(item)?.semantic_score !== undefined">语义分 {{ formatCatScore(selectedCatCandidate(item)?.semantic_score) }}%</span>
+                        <span v-if="selectedCatCandidate(item)?.ai_reason">{{ selectedCatCandidate(item)?.ai_reason }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-if="item.action === 'modify'" class="cat-item-section">
+                    <label class="cat-item-label">自定义润色文本</label>
+                    <el-input v-model="item.modifiedText" type="textarea" :rows="3" placeholder="输入你希望写入文档的最终文本" />
+                  </div>
+                </div>
+              </div>
+              <div v-else class="doc-change-empty">当前文档没有命中 CAT 候选句式</div>
+            </div>
+
+            <div v-else class="panel result-placeholder doc-result-panel">
+              <div class="panel-header">
+                <span>CAT 候选结果</span>
+              </div>
+              <div class="placeholder-text">上传文档后，这里会展示命中的句式候选和逐段确认区。</div>
+            </div>
+          </template>
+
+          <template v-else>
           <div v-if="docResult" class="panel doc-result-panel">
             <div class="panel-header">
               <span>润色结果</span>
@@ -251,6 +383,7 @@
             </div>
             <div class="placeholder-text">提交文档后，这里会展示润色结果和每条修改的确认状态。</div>
           </div>
+          </template>
         </div>
       </div>
     </div>
@@ -552,6 +685,10 @@ const textTerminologyFileName = ref('')
 const textTerminologyFileId = ref(null)
 const result = ref(null)
 const docResult = ref(null)
+const catResult = ref(null)
+const catItems = ref([])
+const catApplying = ref(false)
+const catApplyResult = ref(null)
 const docKeywordFilter = ref('')
 const docConfidenceFilter = ref('all')
 const docStatusFilter = ref('all')
@@ -1174,7 +1311,8 @@ const formData = ref({
   terminologyFileId: documentDraft.value.terminologyFileId || null,
   sourceFile: documentDraft.value.sourceFile || '',
   outputPath: documentDraft.value.outputPath || '已润色文档',
-  requirements: documentDraft.value.requirements || ''
+  requirements: documentDraft.value.requirements || '',
+  documentWorkflow: documentDraft.value.documentWorkflow || 'standard'
 })
 
 const currentView = computed(() => (route.path === '/polish/document' ? 'document' : 'text'))
@@ -1201,6 +1339,20 @@ const actionableDocIssueCount = computed(() => {
 const pendingDocIssueCount = computed(() => {
   const items = docResult.value?.changeDetails || []
   return items.filter(item => item.status === 'pending').length
+})
+
+const pendingCatCount = computed(() => catItems.value.filter(item => item.action === 'pending').length)
+const acceptedCatCount = computed(() => catItems.value.filter(item => item.action === 'accept').length)
+const modifiedCatCount = computed(() => catItems.value.filter(item => item.action === 'modify').length)
+const rejectedCatCount = computed(() => catItems.value.filter(item => item.action === 'reject').length)
+
+const catAiStatusLabel = computed(() => {
+  const status = catResult.value?.aiScoringStatus || ''
+  if (status === 'completed') return '已完成'
+  if (status === 'no_api_key') return '未配置 Key，已降级'
+  if (status === 'skipped') return '已跳过，已降级'
+  if (status === 'failed' || status === 'error' || status === 'parse_error' || status === 'invalid_payload' || status === 'empty') return '调用失败，已降级'
+  return '未知状态'
 })
 
 const confirmedDocChangeCount = computed(() => {
@@ -2004,6 +2156,7 @@ function normalizeDocumentChanges(changes) {
 function applyDocumentResult(data, fallbackSourceName = '') {
   const normalized = normalizeDocumentChanges(data?.review_items || data?.reviewItems || data?.changes || [])
   const normalizedChanges = normalized.items
+  clearCatResult()
   docKeywordFilter.value = ''
   docConfidenceFilter.value = 'all'
   docStatusFilter.value = 'all'
@@ -2266,15 +2419,74 @@ function onLocalFileSelected(event) {
   }
 }
 
-async function submitPolish() {
-  if (!pendingLocalFile) {
-    ElMessage.warning('请选择待润色文件')
-    return
+function formatCatScore(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return 0
   }
-  
-  loading.value = true
-  startDocumentProgress()
-  
+  return Math.round(Number(value) * 100)
+}
+
+function normalizeCatItems(items) {
+  return (items || [])
+    .filter(item => item?.has_candidates && Array.isArray(item.candidates) && item.candidates.length > 0)
+    .map(item => ({
+      paragraphIndex: item.paragraph_index,
+      sentenceIndex: item.sentence_index ?? item.paragraph_index ?? 0,
+      sourceParagraphIndex: item.source_paragraph_index ?? item.paragraph_index ?? 0,
+      sourceParagraphText: item.source_paragraph_text || '',
+      originalText: item.original_text || '',
+      candidates: item.candidates || [],
+      selectedCandidateIndex: 0,
+      action: 'pending',
+      modifiedText: ''
+    }))
+}
+
+function clearCatResult() {
+  catResult.value = null
+  catItems.value = []
+  catApplyResult.value = null
+}
+
+function selectedCatCandidate(item) {
+  if (!item || !Array.isArray(item.candidates) || !item.candidates.length) {
+    return null
+  }
+  return item.candidates[item.selectedCandidateIndex] || item.candidates[0] || null
+}
+
+function buildCatDecisionPayload() {
+  return catItems.value.map(item => {
+    const candidate = selectedCatCandidate(item)
+    const payload = {
+      paragraph_index: item.paragraphIndex,
+      sentence_index: item.sentenceIndex,
+      source_paragraph_index: item.sourceParagraphIndex,
+      source_paragraph_text: item.sourceParagraphText,
+      source_sentence_text: item.originalText,
+      action: item.action,
+      original_text: item.originalText,
+      string_score: candidate?.string_score || 0,
+      semantic_score: candidate?.semantic_score ?? null,
+      ai_reason: candidate?.ai_reason || null
+    }
+
+    if (item.action === 'accept' && candidate) {
+      payload.accepted_template = candidate.template_text || ''
+      payload.accepted_template_id = candidate.template_id || ''
+    }
+    if (item.action === 'modify') {
+      payload.modified_text = String(item.modifiedText || '').trim()
+    }
+    if (item.action === 'reject' && candidate) {
+      payload.rejected_template = candidate.template_text || ''
+      payload.rejected_template_id = candidate.template_id || ''
+    }
+    return payload
+  })
+}
+
+async function submitCatAnalyze() {
   const payload = new FormData()
   payload.append('file', pendingLocalFile)
   if (formData.value.sentenceFileId) {
@@ -2286,15 +2498,102 @@ async function submitPolish() {
   if (formData.value.requirements) {
     payload.append('requirements', formData.value.requirements)
   }
+
+  const resp = await polishAPI.catAnalyze(payload)
+  const data = resp.data || {}
+  docResult.value = null
+  catApplyResult.value = null
+  catResult.value = {
+    analyzeId: data.analyze_id,
+    totalParagraphs: data.total_paragraphs || 0,
+    totalWithCandidates: data.total_with_candidates || 0,
+    templateCoverage: data.template_coverage || 0,
+    sourceName: pendingLocalFile?.name || formData.value.sourceFile || '',
+    aiScoringStatus: data.ai_scoring_status || '',
+    aiScoringError: data.ai_scoring_error || ''
+  }
+  catItems.value = normalizeCatItems(data.items)
+  return data
+}
+
+async function applyCatSelections() {
+  if (!catResult.value?.analyzeId) {
+    ElMessage.warning('请先完成 CAT 分析')
+    return
+  }
+
+  const invalidModified = catItems.value.some(item => item.action === 'modify' && !String(item.modifiedText || '').trim())
+  if (invalidModified) {
+    ElMessage.warning('自定义项需要填写最终文本')
+    return
+  }
+
+  catApplying.value = true
+  try {
+    const payload = {
+      analyze_id: catResult.value.analyzeId,
+      source_filename: catResult.value.sourceName || formData.value.sourceFile || 'cat_polished.docx',
+      decisions: buildCatDecisionPayload()
+    }
+    const resp = await polishAPI.catApply(payload)
+    const data = resp.data || {}
+    catApplyResult.value = {
+      outputFile: data.output_file || '',
+      downloadUrl: data.download_url || '',
+      downloadFilename: data.download_filename || 'cat_polished.docx',
+      appliedChangesCount: Array.isArray(data.applied_changes) ? data.applied_changes.length : 0,
+      accuracyRate: data.accuracy?.accuracy_rate || 0,
+      feedback: data.feedback || {}
+    }
+    ElMessage.success('CAT 润色文档已生成')
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`CAT 生成失败：${errorMsg}`)
+  } finally {
+    catApplying.value = false
+  }
+}
+
+function downloadCatResult() {
+  if (!catApplyResult.value?.downloadUrl) {
+    ElMessage.warning('当前没有可下载的 CAT 输出文件')
+    return
+  }
+  polishAPI.downloadCatOutput(catApplyResult.value.downloadUrl, catApplyResult.value.downloadFilename)
+}
+
+async function submitPolish() {
+  if (!pendingLocalFile) {
+    ElMessage.warning('请选择待润色文件')
+    return
+  }
+  
+  loading.value = true
+  startDocumentProgress()
   
   try {
     const sourceName = pendingLocalFile?.name || formData.value.sourceFile || ''
-    const data = await polishStore.submitDocumentPolish(payload, sourceName)
+    if (formData.value.documentWorkflow === 'cat') {
+      await submitCatAnalyze()
+    } else {
+      const payload = new FormData()
+      payload.append('file', pendingLocalFile)
+      if (formData.value.sentenceFileId) {
+        payload.append('sentence_file_id', formData.value.sentenceFileId)
+      }
+      if (formData.value.terminologyFileId) {
+        payload.append('terminology_file_id', formData.value.terminologyFileId)
+      }
+      if (formData.value.requirements) {
+        payload.append('requirements', formData.value.requirements)
+      }
+      const data = await polishStore.submitDocumentPolish(payload, sourceName)
+      applyDocumentResult(data, sourceName)
+    }
     polishProgress.value = 100
-    polishProgressMsg.value = '润色完成'
+    polishProgressMsg.value = formData.value.documentWorkflow === 'cat' ? 'CAT 分析完成' : '润色完成'
     stopDocumentProgress()
-    applyDocumentResult(data, sourceName)
-    ElMessage.success('润色成功')
+    ElMessage.success(formData.value.documentWorkflow === 'cat' ? 'CAT 分析完成' : '润色成功')
     // 清空已选择的文件
     pendingLocalFile = null
     if (localFileInputRef.value) {
@@ -2323,12 +2622,14 @@ function resetForm() {
     terminologyFileId: formData.value.terminologyFileId || null,
     sourceFile: '',
     outputPath: '已润色文档',
-    requirements: ''
+    requirements: '',
+    documentWorkflow: formData.value.documentWorkflow || 'standard'
   }
   applyDefaultDocumentSentenceFile()
   pendingLocalFile = null
   selectedKnowledgeFile.value = null
   docResult.value = null
+   clearCatResult()
   docKeywordFilter.value = ''
   docFeedbackLoading.value = false
   polishProgress.value = 0
@@ -2510,9 +2811,18 @@ watch(formData, (value) => {
     terminologyFileId: value.terminologyFileId || null,
     sourceFile: value.sourceFile,
     outputPath: value.outputPath,
-    requirements: value.requirements
+    requirements: value.requirements,
+    documentWorkflow: value.documentWorkflow || 'standard'
   })
 }, { deep: true })
+
+watch(() => formData.value.documentWorkflow, (mode) => {
+  if (mode === 'cat') {
+    docResult.value = null
+  } else {
+    clearCatResult()
+  }
+})
 
 watch(documentSession, (session) => {
   loading.value = session.loading
@@ -2670,6 +2980,218 @@ onMounted(async () => {
   border-radius: 12px;
   padding: 20px 24px;
   margin-bottom: 16px;
+}
+
+.workflow-radio-group {
+  display: inline-flex;
+}
+
+.form-helper-text {
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cat-result-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.cat-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.cat-summary-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cat-summary-card strong {
+  font-size: 22px;
+  color: #0f172a;
+}
+
+.cat-summary-label {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.cat-apply-banner {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cat-ai-status-banner {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+}
+
+.cat-ai-status-banner.completed {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.cat-ai-status-banner.no_api_key,
+.cat-ai-status-banner.skipped,
+.cat-ai-status-banner.failed,
+.cat-ai-status-banner.error,
+.cat-ai-status-banner.parse_error,
+.cat-ai-status-banner.invalid_payload,
+.cat-ai-status-banner.empty {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.cat-ai-status-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.cat-ai-status-text {
+  font-size: 12px;
+  color: #475569;
+}
+
+.cat-apply-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.cat-apply-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.cat-item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.cat-item-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fff;
+}
+
+.cat-item-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.cat-item-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 6px;
+}
+
+.cat-item-original {
+  color: #334155;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cat-item-section {
+  margin-top: 12px;
+}
+
+.cat-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.cat-compare-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.cat-compare-card.is-candidate {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.cat-compare-title {
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.cat-compare-content {
+  padding: 12px;
+  color: #0f172a;
+}
+
+.cat-candidate-meta-inline {
+  padding: 0 12px 12px;
+}
+
+.cat-item-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.cat-candidate-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.cat-candidate-text {
+  color: #0f172a;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.cat-candidate-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #64748b;
 }
 
 .doc-layout {
@@ -3726,6 +4248,21 @@ onMounted(async () => {
     align-items: flex-start;
     gap: 12px;
   }
+
+  .cat-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cat-apply-banner,
+  .cat-item-header,
+  .cat-compare-grid {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .cat-compare-grid {
+    display: flex;
+  }
 }
 
 .progress-msg {
@@ -3744,5 +4281,6 @@ onMounted(async () => {
   .polish-container { max-width: 100%; }
   .content-row { flex-direction: column; }
   .feedback-row { flex-direction: column; }
+  .cat-summary-grid { grid-template-columns: 1fr; }
 }
 </style>

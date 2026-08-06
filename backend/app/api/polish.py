@@ -3583,6 +3583,9 @@ class CatCandidate(BaseModel):
 class CatAnalyzeItem(BaseModel):
     """一个段落的匹配结果。"""
     paragraph_index: int = 0
+    sentence_index: int = 0
+    source_paragraph_index: int = 0
+    source_paragraph_text: str = ""
     original_text: str = ""
     has_candidates: bool = False
     candidates: List[CatCandidate] = []
@@ -3591,7 +3594,11 @@ class CatAnalyzeItem(BaseModel):
 class CatDecision(BaseModel):
     """用户对单个段落的决策。"""
     paragraph_index: int = 0
-    action: str = "reject"
+    sentence_index: int = 0
+    source_paragraph_index: Optional[int] = None
+    source_paragraph_text: str = ""
+    source_sentence_text: str = ""
+    action: str = "pending"
     original_text: str = ""
     accepted_template: Optional[str] = None
     accepted_template_id: Optional[str] = None
@@ -3609,8 +3616,8 @@ class CatAnalyzeRequest(BaseModel):
     sentence_file_id: Optional[int] = None
     terminology_file_id: Optional[int] = None
     requirements: Optional[str] = None
-    min_match_threshold: float = 0.50
-    fuzzy_lower_bound: float = 0.85
+    min_match_threshold: float = 0.30
+    fuzzy_lower_bound: float = 0.70
     ai_semantic_scoring: bool = True
     ai_reason_max_chars: int = 15
 
@@ -5434,7 +5441,11 @@ async def _batch_ai_semantic_score(
         ai_client = None
 
     if not ai_client or not ai_client.has_any_client:
-        return
+        return {
+            "status": "no_api_key",
+            "error": "未配置可用的 AI 客户端",
+            "scored_count": 0,
+        }
 
     try:
         result = ai_client.chat(
@@ -5445,21 +5456,38 @@ async def _batch_ai_semantic_score(
         )
     except Exception as e:
         logger.warning("[CAT_SCORING] AI 调用失败: %s", e)
-        return
+        return {
+            "status": "error",
+            "error": str(e),
+            "scored_count": 0,
+        }
 
     if not result:
-        return
+        return {
+            "status": "empty",
+            "error": "AI 未返回评分结果",
+            "scored_count": 0,
+        }
 
     try:
         cleaned = re.sub(r'^```[a-zA-Z]*\n?|\n?```$', '', str(result).strip())
         parsed = json.loads(cleaned)
     except Exception as e:
         logger.warning("[CAT_SCORING] JSON 解析失败: %s, raw=%s", e, str(result)[:200])
-        return
+        return {
+            "status": "parse_error",
+            "error": str(e),
+            "scored_count": 0,
+        }
 
     if not isinstance(parsed, list):
-        return
+        return {
+            "status": "invalid_payload",
+            "error": "AI 返回结果格式不正确",
+            "scored_count": 0,
+        }
 
+    scored_count = 0
     for entry in parsed:
         if not isinstance(entry, dict):
             continue
@@ -5488,6 +5516,13 @@ async def _batch_ai_semantic_score(
                     4,
                 )
                 c.ai_reason = str(c_result.get("reason", "")).strip()[:reason_max_chars]
+            scored_count += 1
+
+    return {
+        "status": "completed" if scored_count > 0 else "failed",
+        "error": None if scored_count > 0 else "AI 调用完成但未返回有效评分",
+        "scored_count": scored_count,
+    }
 
 
 def _normalized_edit_distance(a: str, b: str) -> float:
@@ -5501,6 +5536,54 @@ def _normalized_edit_distance(a: str, b: str) -> float:
     if max_len == 0:
         return 1.0
     return SequenceMatcher(None, a, b).ratio()
+
+
+_CAT_STOP_WORDS = set(
+    "的 了 和 与 在 是 有 对 为 从 向 把 被 让 给 跟 同 以 按 "
+    "请 确保 需要 必须 应 应当 可以 能够 已经 将 会 要 都 也 还 "
+    "这 那 这个 那个 这些 那些 其 该 此 本".split()
+)
+
+
+def _tokenize_cat_text(text: str) -> list[str]:
+    normalized = re.sub(r'[^\w\u4e00-\u9fff]+', ' ', str(text or '')).strip()
+    if not normalized:
+        return []
+    try:
+        import jieba  # type: ignore
+        tokens = jieba.lcut(normalized)
+    except Exception:
+        tokens = re.findall(r'[A-Za-z0-9]+|[\u4e00-\u9fff]', normalized)
+    return [token.strip().lower() for token in tokens if token and token.strip() and token.strip() not in _CAT_STOP_WORDS]
+
+
+def _word_ngram_similarity(a: str, b: str, n: int = 2) -> float:
+    tokens_a = _tokenize_cat_text(a)
+    tokens_b = _tokenize_cat_text(b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    if len(tokens_a) < n or len(tokens_b) < n:
+        set_a = set(tokens_a)
+        set_b = set(tokens_b)
+        union = set_a | set_b
+        return len(set_a & set_b) / len(union) if union else 0.0
+
+    def _word_ngrams(tokens: list[str], size: int) -> set[str]:
+        return {" ".join(tokens[i:i + size]) for i in range(len(tokens) - size + 1)}
+
+    grams_a = _word_ngrams(tokens_a, n)
+    grams_b = _word_ngrams(tokens_b, n)
+    union = grams_a | grams_b
+    return len(grams_a & grams_b) / len(union) if union else 0.0
+
+
+def _word_set_overlap(a: str, b: str) -> float:
+    tokens_a = set(_tokenize_cat_text(a))
+    tokens_b = set(_tokenize_cat_text(b))
+    if not tokens_a or not tokens_b:
+        return 0.0
+    shorter = min(len(tokens_a), len(tokens_b))
+    return len(tokens_a & tokens_b) / shorter if shorter else 0.0
 
 
 def _ngram_similarity(a: str, b: str, n: int = 2) -> float:
@@ -5527,21 +5610,22 @@ def _ngram_similarity(a: str, b: str, n: int = 2) -> float:
 
 def _calc_similarity(a: str, b: str) -> float:
     """
-    综合字符串相似度 = 0.5 × 编辑距离归一化 + 0.5 × n-gram 重合度。
+    综合字符串相似度 = 0.3 × 编辑距离 + 0.3 × 词级 n-gram + 0.4 × 词集合重叠。
     返回 0.0~1.0。
     """
     if not a or not b:
         return 0.0
     edit_sim = _normalized_edit_distance(a, b)
-    ngram_sim = _ngram_similarity(a, b, n=2)
-    return round(0.5 * edit_sim + 0.5 * ngram_sim, 4)
+    word_ngram_sim = _word_ngram_similarity(a, b, n=2)
+    word_overlap = _word_set_overlap(a, b)
+    return round(0.3 * edit_sim + 0.3 * word_ngram_sim + 0.4 * word_overlap, 4)
 
 
 def _simple_match(
     sentence: str,
     templates: list[dict],
-    min_threshold: float = 0.50,
-    fuzzy_lower: float = 0.85,
+    min_threshold: float = 0.30,
+    fuzzy_lower: float = 0.70,
 ) -> list[dict]:
     """
     CAT 式简化匹配：编辑距离 + n-gram，返回所有 >= min_threshold 的候选，按匹配度降序。
@@ -5613,6 +5697,42 @@ def _best_guarded_match(sentence: str, templates: list[str]) -> tuple:
         ranked = _ai_semantic_rerank_candidates(sentence, ranked)
     best = ranked[0]
     return best.get('template'), float(best.get('final_score', 0.0) or 0.0), best.get('match_level', 'NONE')
+
+
+def _split_cat_sentences(paragraphs: list[str], source_paragraphs: Optional[list[str]] = None) -> list[dict]:
+    sentence_items = []
+    for para_idx, raw_paragraph in enumerate(paragraphs or []):
+        paragraph_text = str(raw_paragraph or '').strip()
+        source_raw = raw_paragraph
+        if source_paragraphs and para_idx < len(source_paragraphs):
+            source_raw = source_paragraphs[para_idx]
+        source_paragraph_text = str(source_raw or '').strip()
+        if not paragraph_text:
+            continue
+        compact_paragraph = re.sub(r'\s+', '', paragraph_text)
+        if '\t' in paragraph_text and re.search(r'\t\s*\d+\s*$', paragraph_text):
+            continue
+        if re.fullmatch(r'\d+(?:\.\d+){0,4}[\u4e00-\u9fffA-Za-z（）()\-_/：:、\s]{0,24}', compact_paragraph):
+            continue
+        chunks = re.split(r'(?<=[。！？!?；;])', paragraph_text)
+        for chunk in chunks:
+            sentence_text = str(chunk or '').strip()
+            if not sentence_text:
+                continue
+            normalized = re.sub(r'\s+', '', sentence_text)
+            if len(normalized) <= 8:
+                continue
+            if not re.search(r'[。！？!?；;]', sentence_text) and len(normalized) < 18:
+                continue
+            if re.fullmatch(r'[\dA-Za-z\-_.()（）/]+', normalized):
+                continue
+            sentence_items.append({
+                'sentence_index': len(sentence_items),
+                'source_paragraph_index': para_idx,
+                'source_paragraph_text': source_paragraph_text or paragraph_text,
+                'text': sentence_text,
+            })
+    return sentence_items
 
 
 def _top_template_candidates(sentence: str, templates: list, limit: int = 8) -> list[dict]:
@@ -8162,6 +8282,42 @@ def _parse_corrections(text: str) -> list[tuple[str, str]]:
 
 
 _cat_analyze_cache: dict = {}
+_cat_download_cache: dict = {}
+
+
+def _resolve_cat_paragraph_index(paragraph_texts: list[str], decision: CatDecision) -> Optional[int]:
+    candidate_indexes = []
+    for raw_index in [decision.source_paragraph_index, decision.paragraph_index]:
+        if raw_index is None:
+            continue
+        try:
+            normalized_index = int(raw_index)
+        except Exception:
+            continue
+        if 0 <= normalized_index < len(paragraph_texts):
+            candidate_indexes.append(normalized_index)
+
+    source_paragraph_text = str(getattr(decision, 'source_paragraph_text', '') or '').strip()
+    source_sentence_text = str(getattr(decision, 'source_sentence_text', '') or getattr(decision, 'original_text', '') or '').strip()
+
+    for idx in candidate_indexes:
+        paragraph_text = str(paragraph_texts[idx] or '')
+        if source_paragraph_text and paragraph_text.strip() == source_paragraph_text:
+            return idx
+        if source_sentence_text and source_sentence_text in paragraph_text:
+            return idx
+
+    if source_paragraph_text:
+        for idx, paragraph_text in enumerate(paragraph_texts):
+            if str(paragraph_text or '').strip() == source_paragraph_text:
+                return idx
+
+    if source_sentence_text:
+        for idx, paragraph_text in enumerate(paragraph_texts):
+            if source_sentence_text in str(paragraph_text or ''):
+                return idx
+
+    return candidate_indexes[0] if candidate_indexes else None
 
 
 @router.post("/cat/analyze", response_model=None)
@@ -8170,8 +8326,8 @@ async def cat_analyze(
     sentence_file_id: Optional[int] = Form(None),
     terminology_file_id: Optional[int] = Form(None),
     requirements: Optional[str] = Form(None),
-    min_match_threshold: float = Form(0.50),
-    fuzzy_lower_bound: float = Form(0.85),
+    min_match_threshold: float = Form(0.30),
+    fuzzy_lower_bound: float = Form(0.70),
     ai_semantic_scoring: bool = Form(True),
     ai_reason_max_chars: int = Form(15),
     db: Session = Depends(get_db),
@@ -8195,24 +8351,30 @@ async def cat_analyze(
             tmp.write(content_bytes)
             temp_path = tmp.name
 
+        original_lines = None
         if ext in ['txt', 'md', 'markdown']:
             content = _read_file_safe(temp_path)
+            original_lines = content.split('\n')
         elif ext == 'docx':
             from docx import Document
             doc = Document(temp_path)
-            content = '\n'.join([p.text for p in _iter_docx_paragraphs_in_order(doc)])
+            original_lines = [p.text for p in _iter_docx_paragraphs_in_order(doc)]
+            content = '\n'.join(original_lines)
         else:
             content = _read_file_safe(temp_path)
+            original_lines = content.split('\n')
 
         if not content or not content.strip():
             raise HTTPException(status_code=400, detail="无法提取文本内容")
 
+        line_pre_polish_failed = False
         try:
             from app.utils.instrument_polisher import instrument_polish_engine
             pre_polished = instrument_polish_engine.pre_polish(content)
         except Exception as e:
             logger.warning("[CAT_ANALYZE] 规则预处理失败: %s", e)
             pre_polished = content
+            line_pre_polish_failed = True
 
         sentence_guide = _build_document_polish_guide(
             db,
@@ -8241,11 +8403,24 @@ async def cat_analyze(
         resolved_terms = _resolve_terminology(db, terminology, pre_polished) if terminology else {}
 
         lines = pre_polished.split('\n')
+        if original_lines is None:
+            original_lines = content.split('\n')
+
+        if len(lines) != len(original_lines):
+            if not line_pre_polish_failed:
+                try:
+                    from app.utils.instrument_polisher import instrument_polish_engine
+                    lines = [instrument_polish_engine.pre_polish(line) if line else line for line in original_lines]
+                except Exception as e:
+                    logger.warning("[CAT_ANALYZE] 逐段预处理失败，回退原文段落: %s", e)
+                    lines = list(original_lines)
+            else:
+                lines = list(original_lines)
+
+        sentence_items = _split_cat_sentences(lines, source_paragraphs=original_lines)
         items = []
-        for idx, line in enumerate(lines):
-            line_stripped = line.strip()
-            if not line_stripped or len(line_stripped) <= 4:
-                continue
+        for sentence_item in sentence_items:
+            line_stripped = sentence_item["text"].strip()
             candidates = _simple_match(
                 line_stripped,
                 guide_templates,
@@ -8253,17 +8428,31 @@ async def cat_analyze(
                 fuzzy_lower=fuzzy_lower_bound,
             )
             items.append({
-                "paragraph_index": idx,
+                "paragraph_index": sentence_item["source_paragraph_index"],
+                "sentence_index": sentence_item["sentence_index"],
+                "source_paragraph_index": sentence_item["source_paragraph_index"],
+                "source_paragraph_text": sentence_item["source_paragraph_text"],
                 "original_text": line_stripped,
                 "has_candidates": len(candidates) > 0,
                 "candidates": candidates[:10],
             })
 
+        ai_scoring_status = "skipped"
+        ai_scoring_error = None
         if ai_semantic_scoring:
-            await _batch_ai_semantic_score(
+            ai_score_result = await _batch_ai_semantic_score(
                 items,
                 reason_max_chars=ai_reason_max_chars,
             )
+            ai_scoring_status = (ai_score_result or {}).get("status", "skipped")
+            ai_scoring_error = (ai_score_result or {}).get("error")
+
+        if ai_scoring_status != "completed":
+            for item in items:
+                for candidate in item.get("candidates", []):
+                    if candidate.get("semantic_score") is None:
+                        candidate["semantic_score"] = candidate.get("string_score", 0.0)
+                        candidate["ai_reason"] = "AI未启用，使用字符串匹配分"
 
         analyze_id = str(uuid.uuid4())
         _cat_analyze_cache[analyze_id] = {
@@ -8271,8 +8460,9 @@ async def cat_analyze(
             "templates": guide_templates,
             "file_info": {
                 "filename": filename,
-                "total_paragraphs": len(lines),
+                "total_paragraphs": len(items),
                 "content": pre_polished,
+                "paragraph_texts": lines,
                 "temp_path": temp_path,
                 "resolved_terms": resolved_terms,
                 "user_id": user.id if user else None,
@@ -8280,13 +8470,15 @@ async def cat_analyze(
         }
 
         total_with_candidates = sum(1 for i in items if i["has_candidates"])
-        total_paragraphs = len(lines)
+        total_paragraphs = len(items)
 
         return {
             "analyze_id": analyze_id,
             "total_paragraphs": total_paragraphs,
             "total_with_candidates": total_with_candidates,
             "template_coverage": round(total_with_candidates / total_paragraphs * 100, 1) if total_paragraphs else 0,
+            "ai_scoring_status": ai_scoring_status,
+            "ai_scoring_error": ai_scoring_error,
             "items": items,
         }
 
@@ -8314,12 +8506,12 @@ async def cat_apply(
     file_info = cached["file_info"]
     temp_path = file_info.get("temp_path")
     content = file_info.get("content", "")
+    paragraph_texts = list(file_info.get("paragraph_texts") or content.split('\n'))
     filename = file_info.get("filename", "润色文档.docx")
 
     if not temp_path or not os.path.exists(temp_path):
         raise HTTPException(status_code=404, detail="临时文件已丢失，请重新上传分析")
 
-    lines = content.split('\n')
     decisions = request.decisions
 
     rejected_count = _cat_save_rejected_as_learning(decisions, db, user)
@@ -8328,18 +8520,30 @@ async def cat_apply(
         decisions, db, user, source_filename=request.source_filename or filename,
     )
 
-    revision_map = {}
+    paragraph_revisions = {}
     for d in decisions:
         action = d.action
-        if action == "accept" and d.accepted_template:
-            revision_map[d.paragraph_index] = d.accepted_template
-        elif action == "modify" and d.modified_text:
-            revision_map[d.paragraph_index] = d.modified_text
+        para_idx = _resolve_cat_paragraph_index(paragraph_texts, d)
+        if para_idx is None or para_idx < 0 or para_idx >= len(paragraph_texts):
+            continue
+        if action not in {"accept", "modify"}:
+            continue
+        replacement_text = d.accepted_template if action == "accept" else d.modified_text
+        if not replacement_text:
+            continue
+        original_paragraph = paragraph_revisions.get(para_idx, paragraph_texts[para_idx])
+        source_sentence = d.source_sentence_text or d.original_text or ""
+        if source_sentence and source_sentence in original_paragraph:
+            paragraph_revisions[para_idx] = original_paragraph.replace(source_sentence, replacement_text, 1)
+        elif d.original_text and d.original_text in original_paragraph:
+            paragraph_revisions[para_idx] = original_paragraph.replace(d.original_text, replacement_text, 1)
+        else:
+            paragraph_revisions[para_idx] = replacement_text
 
     output_path = None
     applied_changes = []
 
-    if temp_path.lower().endswith('.docx') and revision_map:
+    if temp_path.lower().endswith('.docx') and paragraph_revisions:
         output_dir = os.path.dirname(temp_path)
         output_filename = f"【润色版】{filename}" if not filename.startswith("【") else filename
         output_path = os.path.join(output_dir, output_filename)
@@ -8350,22 +8554,17 @@ async def cat_apply(
 
             doc = DocxDocument(temp_path)
             w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-
-            document_xml = doc.element.body
-            xml_paragraphs = [
-                child for child in document_xml
-                if child.tag == f'{{{w_ns}}}p'
-            ]
+            xml_paragraphs = [paragraph._p for paragraph in _iter_docx_paragraphs_in_order(doc)]
 
             revision_id = 100
             author = user.username if user else "CAT润色"
             now_str = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-            for para_idx, new_text in revision_map.items():
+            for para_idx, new_text in paragraph_revisions.items():
                 if para_idx >= len(xml_paragraphs):
                     continue
                 p_element = xml_paragraphs[para_idx]
-                original_text = lines[para_idx] if para_idx < len(lines) else ""
+                original_text = paragraph_texts[para_idx] if para_idx < len(paragraph_texts) else ""
 
                 if original_text.strip() == new_text.strip():
                     continue
@@ -8399,14 +8598,28 @@ async def cat_apply(
     else:
         output_path = temp_path
 
-    total_paragraphs = file_info.get("total_paragraphs", len(lines))
+    total_paragraphs = file_info.get("total_paragraphs", len(cached.get("items", [])))
     accuracy = _cat_calc_file_accuracy(decisions, total_paragraphs)
+
+    download_token = None
+    download_url = None
+    download_filename = None
+    if output_path and os.path.exists(output_path):
+        download_token = str(uuid.uuid4())
+        download_filename = os.path.basename(output_path)
+        _cat_download_cache[download_token] = {
+            "path": output_path,
+            "filename": download_filename,
+        }
+        download_url = f"/api/polish/cat/download/{download_token}"
 
     del _cat_analyze_cache[request.analyze_id]
 
     return {
         "message": "润色完成",
         "output_file": output_path,
+        "download_url": download_url,
+        "download_filename": download_filename,
         "applied_changes": applied_changes,
         "accuracy": accuracy,
         "feedback": {
@@ -8434,3 +8647,22 @@ def cat_get_stats(
         "total_with_candidates": total_with_candidates,
         "template_coverage": round(total_with_candidates / total_paragraphs * 100, 1) if total_paragraphs else 0,
     }
+
+
+@router.get("/cat/download/{download_token}")
+def cat_download_file(download_token: str):
+    payload = _cat_download_cache.get(download_token)
+    if not payload:
+        raise HTTPException(status_code=404, detail="下载链接已失效")
+
+    file_path = payload.get("path")
+    filename = payload.get("filename") or "cat_polished.docx"
+    if not file_path or not os.path.exists(file_path):
+        _cat_download_cache.pop(download_token, None)
+        raise HTTPException(status_code=404, detail="输出文件不存在")
+
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )

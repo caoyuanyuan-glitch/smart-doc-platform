@@ -165,6 +165,28 @@ export const polishAPI = {
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
+  catAnalyze: (formData) => {
+    return instance.post('/polish/cat/analyze', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000
+    })
+  },
+  catApply: (payload) => instance.post('/polish/cat/apply', payload, { timeout: 600000 }),
+  downloadCatOutput: (downloadUrl, filename = 'cat_polished.docx') => {
+    return instance.get(downloadUrl.replace(/^\/api/, ''), {
+      responseType: 'blob',
+      transformResponse: [(data) => data]
+    }).then((response) => {
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    })
+  },
   getProgress: (taskId) => instance.get(`/polish/progress/${taskId}`),
   listPolishedDocuments: () => instance.get('/polish/'),
   getPolishedDocument: (id) => instance.get(`/polish/${id}`),
