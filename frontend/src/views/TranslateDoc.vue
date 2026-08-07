@@ -176,11 +176,10 @@ import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
+import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
-const TRANSLATION_BATCH_EVENT = 'translation-batch-updated'
-const TRANSLATION_STATS_EVENT = 'translation-stats-updated'
 
 const engine = ref('hybrid')
 const model = ref('kimi')

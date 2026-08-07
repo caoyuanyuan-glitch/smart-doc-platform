@@ -166,8 +166,8 @@ import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
+import { TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
-
 const engine = ref('hybrid')
 const model = ref('kimi')
 const sourceLang = ref('auto')
@@ -299,6 +299,7 @@ async function translateText() {
     translatedDraft.value = res.data.translated || ''
     editingResult.value = false
     syncWritableMemorySelection(memoryFileId.value)
+    window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT))
     ElMessage.success('翻译完成')
   } catch (e) {
     ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))

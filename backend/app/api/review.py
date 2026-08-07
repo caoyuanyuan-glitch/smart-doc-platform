@@ -4,11 +4,21 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 import html as html_lib
 import hashlib
+import logging
 import json
 import math
 import re
 import os
-from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
+try:
+    from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
+except ImportError as e:
+    logging.getLogger(__name__).warning(
+        "智能分块模块(services.chunker)加载失败，审核将回退到传统分块模式: %s",
+        e,
+    )
+    create_smart_chunker = None
+    CrossChapterConsistencyChecker = None
+    AuditResultMerger = None
 import shutil
 import difflib
 import concurrent.futures
@@ -1507,7 +1517,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             print(f"[审核] 小文档全量审核失败 ({e})，回退到分块模式")
 
     use_smart_chunking = os.getenv('REVIEW_SMART_CHUNKING', '1') == '1'
-    if use_smart_chunking and len(content) > 1000:
+    if use_smart_chunking and create_smart_chunker is not None and len(content) > 1000:
         try:
             chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)))
             smart_chunks = chunker.chunk_document(content)

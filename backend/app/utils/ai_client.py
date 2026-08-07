@@ -2,6 +2,7 @@ import os
 import json
 import re
 import base64
+import logging
 import mimetypes
 import threading
 import httpx
@@ -20,8 +21,15 @@ from app.api.review_rules import (
     BRITISH_AMERICAN_SPELLINGS
 )
 
+logger = logging.getLogger(__name__)
+
 # 分层提示词构建器
-from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
+try:
+    from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
+except ImportError as e:
+    logger.warning("prompt_builder 模块加载失败，审查提示词构建功能不可用: %s", e)
+    ReviewPromptBuilder = None
+    build_review_system_prompt = None
 
 ANTHROPIC_VERSION = "2023-06-01"
 IMAGE_DRAFT_BATCH_SIZE = 2
