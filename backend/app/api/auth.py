@@ -1,4 +1,5 @@
 import re
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -19,9 +20,9 @@ PASSWORD_PATTERN = re.compile(r"^\S{8,32}$")
 VALID_ROLES = {"admin", "writer", "reviewer"}
 VALID_STATUS = {"active", "disabled"}
 
-SECRET_KEY = "your-secret-key-here-change-in-production"
+SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or "smart-doc-dev-secret-change-me"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 LOCKOUT_THRESHOLD = 5
 LOCKOUT_MINUTES = 30
 
