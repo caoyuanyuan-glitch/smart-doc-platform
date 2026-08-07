@@ -36,10 +36,32 @@ Modules
 - ``rules/``             — Deterministic rule implementations (incremental)
 """
 
+import logging
+
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401
-from app.review_engine.context import DocumentContext, TextSpan  # noqa: F401
-from app.review_engine.orchestrator import ReviewOrchestrator, ReviewRunResult  # noqa: F401
-from app.review_engine.ai_candidates import AICandidateEngine, AIReviewResult, ChunkMeta  # noqa: F401
-from app.review_engine.reporting import ReportAggregator, ReviewReport, DisplayIssue  # noqa: F401
-from app.review_engine.evaluation import EvaluationRunner, EvalResult, EvalSuiteResult  # noqa: F401
-from app.review_engine.rules.engine import DeterministicRuleEngine  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
+try:
+    from app.review_engine.context import DocumentContext, TextSpan  # noqa: F401
+    from app.review_engine.orchestrator import ReviewOrchestrator, ReviewRunResult  # noqa: F401
+    from app.review_engine.ai_candidates import AICandidateEngine, AIReviewResult, ChunkMeta  # noqa: F401
+    from app.review_engine.reporting import ReportAggregator, ReviewReport, DisplayIssue  # noqa: F401
+    from app.review_engine.evaluation import EvaluationRunner, EvalResult, EvalSuiteResult  # noqa: F401
+    from app.review_engine.rules.engine import DeterministicRuleEngine  # noqa: F401
+except ImportError as e:
+    logger.warning("review_engine 子模块加载失败: %s", e)
+    DocumentContext = None
+    TextSpan = None
+    ReviewOrchestrator = None
+    ReviewRunResult = None
+    AICandidateEngine = None
+    AIReviewResult = None
+    ChunkMeta = None
+    ReportAggregator = None
+    ReviewReport = None
+    DisplayIssue = None
+    EvaluationRunner = None
+    EvalResult = None
+    EvalSuiteResult = None
+    DeterministicRuleEngine = None

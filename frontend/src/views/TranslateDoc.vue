@@ -145,6 +145,11 @@
               </div>
 
               <div v-else-if="job.status === 'completed'" class="result-content">
+                <div class="result-usage-stats">
+                  <span>总字数 {{ Number(job.source_word_count || 0).toLocaleString() }}</span>
+                  <span>AI {{ Number(job.ai_word_count || 0).toLocaleString() }}</span>
+                  <span>记忆库 {{ Number(job.memory_word_count || 0).toLocaleString() }}</span>
+                </div>
                 <el-result icon="success" title="翻译完成" :sub-title="`原文件: ${job.original_filename}`">
                   <template #extra>
                     <el-button type="primary" @click="downloadTranslatedFile(job)">
@@ -176,11 +181,10 @@ import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI } from '@/api'
+import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 
 const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
-const TRANSLATION_BATCH_EVENT = 'translation-batch-updated'
-const TRANSLATION_STATS_EVENT = 'translation-stats-updated'
 
 const engine = ref('hybrid')
 const model = ref('kimi')
@@ -395,7 +399,10 @@ function createJob(filename) {
     download_url: '',
     status: 'submitting',
     error: '',
-    pollingCount: 0
+    pollingCount: 0,
+    source_word_count: 0,
+    ai_word_count: 0,
+    memory_word_count: 0
   }
   translationJobs.value = [job, ...translationJobs.value]
   return job
@@ -424,7 +431,10 @@ async function restoreLatestBatchJobs() {
       error: String(doc.translated_filename || '').startsWith('ERROR:')
         ? String(doc.translated_filename).slice(6)
         : (String(doc.translated_filename || '').startsWith('CANCELED:') ? String(doc.translated_filename).slice(9) : ''),
-      pollingCount: 0
+      pollingCount: 0,
+      source_word_count: Number(doc.source_word_count || 0),
+      ai_word_count: Number(doc.ai_word_count || 0),
+      memory_word_count: Number(doc.memory_word_count || 0)
     }))
 
     for (const job of translationJobs.value) {
@@ -467,7 +477,10 @@ function startPolling(jobKey, docId) {
           translated_filename: statusData.translated_filename || '',
           download_url: statusData.download_url || `/api/translation/download/${docId}`,
           status: 'completed',
-          error: ''
+          error: '',
+          source_word_count: Number(statusData.source_word_count || 0),
+          ai_word_count: Number(statusData.ai_word_count || 0),
+          memory_word_count: Number(statusData.memory_word_count || 0)
         })
         window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'completed' } }))
         ElMessage.success('文档翻译完成')
@@ -477,7 +490,13 @@ function startPolling(jobKey, docId) {
       if (statusData.status === 'error') {
         stopPolling(jobKey)
         const error = statusData.error || '翻译过程中发生错误'
-        updateJob(jobKey, { status: 'error', error })
+        updateJob(jobKey, {
+          status: 'error',
+          error,
+          source_word_count: Number(statusData.source_word_count || 0),
+          ai_word_count: Number(statusData.ai_word_count || 0),
+          memory_word_count: Number(statusData.memory_word_count || 0)
+        })
         window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'error' } }))
         ElMessage.error(error)
         return
@@ -485,7 +504,13 @@ function startPolling(jobKey, docId) {
 
       if (statusData.status === 'canceled') {
         stopPolling(jobKey)
-        updateJob(jobKey, { status: 'canceled', error: statusData.error || '翻译任务已停止' })
+        updateJob(jobKey, {
+          status: 'canceled',
+          error: statusData.error || '翻译任务已停止',
+          source_word_count: Number(statusData.source_word_count || 0),
+          ai_word_count: Number(statusData.ai_word_count || 0),
+          memory_word_count: Number(statusData.memory_word_count || 0)
+        })
         ElMessage.info(statusData.error || '翻译任务已停止')
         return
       }
@@ -537,7 +562,10 @@ async function cancelTranslationJob(job) {
       status: res.data.status === 'completed' ? 'completed' : 'canceled',
       translated_filename: res.data.translated_filename || job.translated_filename,
       download_url: res.data.download_url || job.download_url,
-      error: res.data.error || '翻译任务已停止'
+      error: res.data.error || '翻译任务已停止',
+      source_word_count: Number(res.data.source_word_count || 0),
+      ai_word_count: Number(res.data.ai_word_count || 0),
+      memory_word_count: Number(res.data.memory_word_count || 0)
     })
     ElMessage.info(res.data.status === 'completed' ? '翻译已完成，无法停止' : '翻译任务已停止')
   } catch (e) {
@@ -827,6 +855,16 @@ function downloadTranslatedFile(job) {
   margin-top: 4px;
   font-size: 12px;
   color: #6b7280;
+}
+
+.result-usage-stats {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #4b5563;
 }
 
 @media (max-width: 1024px) {
