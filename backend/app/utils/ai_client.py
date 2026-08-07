@@ -77,6 +77,7 @@ class AIClient:
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
         self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "20")
         self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "10")
+        self.translation_timeout = _env_float("TRANSLATION_TIMEOUT", "60")
 
         self.proxy_api_key = os.getenv("OPENAI_API_KEY")
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
@@ -125,6 +126,7 @@ class AIClient:
         self.last_chat_errors = []
         self.usage_events = []
         self.usage_lock = threading.Lock()
+        self.disabled_providers = set()
 
         self.mcai_proxy_client = None
         if self.mcai_available:
@@ -151,17 +153,17 @@ class AIClient:
 
     def available_providers(self):
         providers = []
-        if self.qwen_client:
+        if self.qwen_client and "qwen" not in self.disabled_providers:
             providers.append("qwen")
-        if self.kimi_client:
+        if self.kimi_client and "kimi" not in self.disabled_providers:
             providers.append("kimi")
-        if self.deepseek_client:
+        if self.deepseek_client and "deepseek" not in self.disabled_providers:
             providers.append("deepseek")
-        if self.arkclaw_client:
+        if self.arkclaw_client and "arkclaw" not in self.disabled_providers:
             providers.append("arkclaw")
-        if self.mcai_proxy_client:
+        if self.mcai_proxy_client and "mcai" not in self.disabled_providers:
             providers.append("mcai")
-        if self.proxy_client:
+        if self.proxy_client and "proxy" not in self.disabled_providers:
             providers.append("proxy")
         return providers
 
@@ -171,14 +173,21 @@ class AIClient:
             "priority": ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"],
             "providers": {
                 "qwen": self.qwen_client is not None,
-                "kimi": self.kimi_client is not None,
-                "deepseek": self.deepseek_client is not None,
-                "arkclaw": self.arkclaw_client is not None,
-                "mcai": self.mcai_proxy_client is not None,
-                "proxy": self.proxy_client is not None,
+                "kimi": self.kimi_client is not None and "kimi" not in self.disabled_providers,
+                "deepseek": self.deepseek_client is not None and "deepseek" not in self.disabled_providers,
+                "arkclaw": self.arkclaw_client is not None and "arkclaw" not in self.disabled_providers,
+                "mcai": self.mcai_proxy_client is not None and "mcai" not in self.disabled_providers,
+                "proxy": self.proxy_client is not None and "proxy" not in self.disabled_providers,
             },
             "available": self.available_providers(),
         }
+
+    def _disable_provider(self, provider, reason=""):
+        provider = str(provider or "").strip().lower()
+        if not provider or provider in self.disabled_providers:
+            return
+        self.disabled_providers.add(provider)
+        print(f"[AI] provider disabled: {provider} reason={reason[:120]}")
 
     def health_check(self):
         results = {}
@@ -419,12 +428,12 @@ class AIClient:
                 preferred.append(name)
 
         availability = {
-            "qwen": self.qwen_client is not None,
-            "kimi": self.kimi_client is not None,
-            "deepseek": self.deepseek_client is not None,
-            "arkclaw": self.arkclaw_client is not None,
-            "mcai": self.mcai_proxy_client is not None,
-            "proxy": self.proxy_client is not None,
+            "qwen": self.qwen_client is not None and "qwen" not in self.disabled_providers,
+            "kimi": self.kimi_client is not None and "kimi" not in self.disabled_providers,
+            "deepseek": self.deepseek_client is not None and "deepseek" not in self.disabled_providers,
+            "arkclaw": self.arkclaw_client is not None and "arkclaw" not in self.disabled_providers,
+            "mcai": self.mcai_proxy_client is not None and "mcai" not in self.disabled_providers,
+            "proxy": self.proxy_client is not None and "proxy" not in self.disabled_providers,
         }
         for name in preferred:
             if availability.get(name):
@@ -567,6 +576,8 @@ class AIClient:
                 return response.choices[0].message.content
             except Exception as e:
                 error_str = str(e)
+                if any(code in error_str for code in ("401", "incorrect_api_key", "invalid_api_key")):
+                    self._disable_provider("kimi", error_str)
                 if "429" in error_str and attempt < max_retries:
                     print(f"Kimi 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
                     time.sleep(retry_delay)
@@ -665,10 +676,11 @@ class AIClient:
                 return None
         return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None):
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None, excluded_providers=None):
         # 优先级: DEFAULT_MODEL_PROVIDER 优先，其余按 Qwen > Kimi > DeepSeek > ArkClaw > Proxy
         self.last_chat_errors = []
         providers = []
+        excluded = {str(item).strip().lower() for item in (excluded_providers or []) if str(item).strip()}
         ordered_specs = [
             ('qwen', 'Qwen', self.qwen_client, self.qwen_model),
             ('kimi', 'Kimi', self.kimi_client, self.kimi_model),
@@ -682,6 +694,10 @@ class AIClient:
         for provider_key, display_name, client, model in ordered_specs:
             if provider_key == 'kimi' and skip_kimi:
                 continue
+            if provider_key in excluded:
+                continue
+            if provider_key in self.disabled_providers:
+                continue
             if client:
                 providers.append((display_name, client, model))
 
@@ -689,6 +705,7 @@ class AIClient:
             print(f"[AI] providers={', '.join(name for name, _, _ in providers)}")
             max_retries = 3
             retry_delay = 2
+            is_translation_request = str(request_label or "").startswith("translation.")
             for name, client, model in providers:
                 for attempt in range(1, max_retries + 1):
                     try:
@@ -709,10 +726,10 @@ class AIClient:
                                 "temperature": temperature,
                             }
                         )
-                        call_client = client.with_options(
-                            timeout=self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout,
-                            max_retries=0,
-                        )
+                        timeout_value = self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout
+                        if is_translation_request:
+                            timeout_value = max(timeout_value, self.translation_timeout)
+                        call_client = client.with_options(timeout=timeout_value, max_retries=0)
                         response = call_client.chat.completions.create(**request_kwargs)
                         self._record_usage_event(
                             name,
@@ -731,7 +748,12 @@ class AIClient:
                         break
                     except Exception as e:
                         error_str = str(e)
+                        if name == 'Kimi' and any(code in error_str for code in ("401", "incorrect_api_key", "invalid_api_key")):
+                            self._disable_provider("kimi", error_str)
                         if "429" in error_str and attempt < max_retries:
+                            if is_translation_request:
+                                print(f"[AI] {name} 引擎繁忙 (429)，翻译场景直接切换到下一个 Provider")
+                                break
                             print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
                             time.sleep(retry_delay)
                             retry_delay *= 2
@@ -787,6 +809,7 @@ class AIClient:
         print(f"[AI] chat_with_provider: using {name} ({model})")
         max_retries = 3
         retry_delay = 2
+        is_translation_request = str(request_label or "").startswith("translation.")
         
         for attempt in range(1, max_retries + 1):
             try:
@@ -800,10 +823,10 @@ class AIClient:
                         "max_tokens": max_tokens, "temperature": temperature,
                     }
                 )
-                call_client = client.with_options(
-                    timeout=self.kimi_chat_timeout if name == "Kimi" else self.provider_chat_timeout,
-                    max_retries=0,
-                )
+                timeout_value = self.kimi_chat_timeout if name == "Kimi" else self.provider_chat_timeout
+                if is_translation_request:
+                    timeout_value = max(timeout_value, self.translation_timeout)
+                call_client = client.with_options(timeout=timeout_value, max_retries=0)
                 response = call_client.chat.completions.create(**request_kwargs)
                 self._record_usage_event(
                     name, model,
@@ -820,6 +843,9 @@ class AIClient:
             except Exception as e:
                 error_str = str(e)
                 if "429" in error_str and attempt < max_retries:
+                    if is_translation_request:
+                        print(f"[AI] {name} 引擎繁忙 (429)，翻译场景停止重试")
+                        break
                     print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 重试 ({attempt}/{max_retries})")
                     time.sleep(retry_delay)
                     retry_delay *= 2

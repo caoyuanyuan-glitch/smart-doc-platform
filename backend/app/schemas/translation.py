@@ -19,6 +19,9 @@ class TranslationResponse(BaseModel):
     engine_used: str
     from_memory: bool = False
     from_ai: bool = False
+    source_word_count: int = 0
+    ai_word_count: int = 0
+    memory_word_count: int = 0
 
 
 class MemoryEntry(BaseModel):

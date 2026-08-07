@@ -87,6 +87,11 @@
               <span class="card-header-title">翻译结果</span>
               <div v-if="result" class="result-meta">
                 <el-tag v-if="resultSourceTag" :type="resultSourceTag.type" size="small">{{ resultSourceTag.label }}</el-tag>
+                <div class="result-usage-stats">
+                  <span>总字数 {{ Number(result.source_word_count || 0).toLocaleString() }}</span>
+                  <span>AI {{ Number(result.ai_word_count || 0).toLocaleString() }}</span>
+                  <span>记忆库 {{ Number(result.memory_word_count || 0).toLocaleString() }}</span>
+                </div>
               </div>
             </div>
           </template>
@@ -103,6 +108,11 @@
           </div>
 
           <div v-if="result && !translating" class="result-content">
+            <div class="result-usage-stats result-usage-stats-panel">
+              <span>总字数 {{ Number(result.source_word_count || 0).toLocaleString() }}</span>
+              <span>AI {{ Number(result.ai_word_count || 0).toLocaleString() }}</span>
+              <span>记忆库 {{ Number(result.memory_word_count || 0).toLocaleString() }}</span>
+            </div>
             <el-input
               v-if="editingResult"
               v-model="translatedDraft"
@@ -522,7 +532,24 @@ function downloadResult() {
 
 .result-meta {
   display: flex;
-  gap: 6px;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.result-usage-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.result-usage-stats-panel {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .result-empty {
