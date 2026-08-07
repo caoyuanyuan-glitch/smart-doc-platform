@@ -77,6 +77,33 @@
           <p>当前还没有本次上传的文档翻译统计数据</p>
         </div>
       </div>
+
+      <div class="stats-section">
+        <div class="section-header">
+          <h3 class="section-title">最近文本翻译</h3>
+          <span v-if="stats.latest_text_translation" class="section-meta">最新一次</span>
+        </div>
+        <div class="stats-cards batch-cards" v-if="stats.latest_text_translation">
+          <div class="stat-card card-text">
+            <div class="stat-label">文本翻译字数</div>
+            <div class="stat-value">{{ stats.latest_text_translation.source_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
+          </div>
+          <div class="stat-card card-ai">
+            <div class="stat-label">AI 翻译字数</div>
+            <div class="stat-value">{{ stats.latest_text_translation.ai_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
+          </div>
+          <div class="stat-card card-memory">
+            <div class="stat-label">记忆库匹配字数</div>
+            <div class="stat-value">{{ stats.latest_text_translation.memory_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
+          </div>
+        </div>
+        <div class="chart-section empty-chart" v-else>
+          <p>当前还没有文本翻译统计数据</p>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -108,7 +135,8 @@ const stats = ref({
     doc_word_count: 0,
     ai_word_count: 0,
     memory_word_count: 0
-  }
+  },
+  latest_text_translation: null
 })
 
 const loading = ref(false)

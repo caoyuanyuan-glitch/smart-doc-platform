@@ -2581,6 +2581,23 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
 
     overall_docs = _summarize_docs(file_docs)
 
+    latest_text_doc = (
+        db.query(TranslationDoc)
+        .filter(TranslationDoc.file_type == "text")
+        .order_by(TranslationDoc.created_at.desc(), TranslationDoc.id.desc())
+        .first()
+    )
+    if latest_text_doc is not None:
+        latest_text_usage = _normalize_doc_word_counts(latest_text_doc)
+        latest_text_translation = {
+            "source_word_count": latest_text_usage["source_word_count"],
+            "ai_word_count": latest_text_usage["ai_word_count"],
+            "memory_word_count": latest_text_usage["memory_word_count"],
+            "created_at": latest_text_doc.created_at.isoformat() if getattr(latest_text_doc, "created_at", None) else None,
+        }
+    else:
+        latest_text_translation = None
+
     return {
         "text_word_count": text_word_count,
         "doc_count": overall_docs["doc_count"],
@@ -2588,6 +2605,7 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
         "ai_word_count": ai_word_count,
         "memory_word_count": memory_word_count,
         "current_upload": current_upload,
+        "latest_text_translation": latest_text_translation,
     }
 
 
