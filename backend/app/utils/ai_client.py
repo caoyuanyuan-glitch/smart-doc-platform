@@ -1712,7 +1712,7 @@ IMPORTANT REMINDERS:
 - Treat visual layout, column width, font size, icon size, image size, crowded tables, and graphic placement as manual review items. Report table or figure issues only when the text evidence proves missing content, wrong numbering, wrong title, or broken reference.
 - The correction must preserve the original meaning exactly. Do not change reagent names, supplier/customer roles, product names, legal statements, storage actions, or technical terms unless the provided rules explicitly require that exact replacement.
 - Do not change numeric values, quantities, counts, column/row numbers, temperatures, times, volumes, concentrations, or page references unless the source text itself explicitly proves the number is wrong.
-- Keep one space between numbers and units, including μL, mL, ng, bp, °C, %, ×, and buffer names. Correct missing spaces, but never remove an existing number-unit space.
+- Keep one space between numbers and units, including μL, mL, ng, bp, °C, ×, and buffer names. Keep percentages in the compact form such as 75%. Correct missing spaces, but never remove an existing number-unit space.
 - The following are VALID English words (do NOT flag as spelling errors):
   {', '.join(ENGLISH_CORRECT_SPELLINGS[:50])}...
 - British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
@@ -1765,7 +1765,7 @@ Return empty issues array if no high-confidence issues found."""
 - 版式外观、列宽、字体大小、图标尺寸、图片尺寸、表格拥挤、图形摆放交由人工审核。只有文本证据能证明内容缺失、编号错误、标题错误或引用断裂时，才报告表格或图片相关问题。
 - 修改建议必须严格保持原意，不得擅自改变试剂名称、供应方/用户角色、产品名称、合规声明、存储动作或技术术语。
 - 不得擅自改变数字值、数量、列数/行数、温度、时间、体积、浓度或页码；只有原文证据能直接证明数字错误时才可报告。
-- 数字和单位之间必须保留一个空格，包括 μL、mL、ng、bp、°C、%、× 和缓冲液名称；可以补缺失空格，不能删除已有空格。
+- 数字和单位之间必须保留一个空格，包括 μL、mL、ng、bp、°C、× 和缓冲液名称；百分比保持紧凑写法，例如 75%；可以补缺失空格，不能删除已有空格。
 - 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
 - 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。
 - 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。"""

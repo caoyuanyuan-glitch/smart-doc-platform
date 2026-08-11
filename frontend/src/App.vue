@@ -153,6 +153,7 @@
                 <el-icon><MagicStick /></el-icon>
                 <span>智能润色</span>
               </template>
+              <el-menu-item index="/polish/stats">统计面板</el-menu-item>
               <el-menu-item index="/polish">文本润色</el-menu-item>
               <el-menu-item index="/polish/document">文档润色</el-menu-item>
               <el-menu-item index="/tools/polish-rules">润色规则</el-menu-item>
@@ -1038,5 +1039,97 @@ body {
   color: #fff !important;
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
   font-weight: 600;
+}
+
+/* CAT 候选句式下拉框：修复长文本被截断 */
+.cat-candidate-select-popper {
+  min-width: 420px !important;
+  max-width: 760px !important;
+}
+
+.cat-candidate-select-popper .el-select-dropdown__item {
+  max-height: none !important;
+  height: auto !important;
+  min-height: 56px;
+  line-height: 1.5 !important;
+  padding: 8px 12px !important;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  display: flex;
+  align-items: stretch;
+}
+
+.cat-candidate-select-popper .el-select-dropdown__wrap,
+.cat-candidate-select-popper .el-scrollbar__wrap {
+  max-height: 420px;
+  scrollbar-width: thin;
+}
+
+.cat-candidate-select-popper .cat-candidate-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  width: 100%;
+  padding: 2px 0;
+}
+
+.cat-candidate-select-popper .cat-candidate-text {
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.6;
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.cat-candidate-select-popper .cat-candidate-score {
+  font-size: 12px;
+  color: #1d4ed8;
+  font-weight: 700;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.cat-candidate-select-popper .issue-candidate-option {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-text,
+.cat-candidate-select-popper .issue-candidate-option-meta,
+.cat-candidate-select-popper .issue-candidate-option-ai {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-text {
+  color: #334155;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-percent,
+.cat-candidate-select-popper .issue-candidate-ai-badge {
+  white-space: nowrap;
 }
 </style>

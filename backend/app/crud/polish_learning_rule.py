@@ -202,9 +202,9 @@ def seed_system_rules(db: Session) -> int:
             "rule_type": "system_rule",
             "engine_key": "numberSpace",
             "rule_key": "system:numberSpace",
-            "match_pattern": r"\d+\.?\d*\s*(μL|mL|L|℃|rpm|mm|cm|m|kg|g|mg|μg|s|min|h|V|A|W|Hz|%)",
+            "match_pattern": r"\d+\.?\d*\s*(μL|mL|L|℃|rpm|mm|cm|m|kg|g|mg|μg|s|min|h|V|A|W|Hz)",
             "replacement_text": "在数字和单位之间加空格",
-            "description": "数字与单位之间加一个空格：200μL→200 μL，20℃→20 ℃，100rpm→100 rpm。",
+            "description": "数字与单位之间加一个空格：200μL→200 μL，20℃→20 ℃，100rpm→100 rpm。百分比保持紧凑写法，如 75%。",
             "priority_level": 30,
             "enabled": 0,
         },
@@ -224,9 +224,9 @@ def seed_system_rules(db: Session) -> int:
             "rule_type": "system_rule",
             "engine_key": "punctuation",
             "rule_key": "system:punctuation",
-            "match_pattern": "句尾缺标点(.|!|?) | 条件句后缺逗号",
-            "replacement_text": "补充缺失的标点符号",
-            "description": "句尾缺少标点时补充句号，条件从句后补充逗号（如'如需修改密码可点击'→'如需修改密码，可点击'）。",
+            "match_pattern": "正文说明/注意事项/步骤描述中的完整句末缺少终止标点 | 条件句后缺逗号",
+            "replacement_text": "按上下文补充缺失的句末标点或条件逗号",
+            "description": "仅对正文说明、注意事项正文、步骤描述中的完整操作句或限制句补充句号；标题、表头、字段名、列表项名称、短标签保持原样。条件从句后补充逗号（如'如需修改密码可点击'→'如需修改密码，可点击'）。",
             "priority_level": 50,
             "enabled": 0,
         },
@@ -243,6 +243,16 @@ def seed_system_rules(db: Session) -> int:
             {"rk": item["rule_key"]}
         ).fetchone()
         if check:
+            db.execute(
+                text(
+                    "UPDATE polish_learning_rules "
+                    "SET rule_name = :rule_name, rule_type = :rule_type, engine_key = :engine_key, "
+                    "match_pattern = :match_pattern, replacement_text = :replacement_text, "
+                    "description = :description, priority_level = :priority_level "
+                    "WHERE rule_key = :rule_key"
+                ),
+                item,
+            )
             continue
         db.execute(sql, item)
         created += 1

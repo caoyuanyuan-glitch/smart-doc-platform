@@ -5,6 +5,7 @@ const Home = () => import('@/views/Home.vue')
 const Review = () => import('@/views/Review.vue')
 const ReviewDashboard = () => import('@/views/ReviewDashboard.vue')
 const Polish = () => import('@/views/Polish.vue')
+const PolishStats = () => import('@/views/PolishStats.vue')
 const PolishHistory = () => import('@/views/PolishHistory.vue')
 const QA = () => import('@/views/QA.vue')
 const QAManual = () => import('@/views/QADoc.vue')
@@ -78,6 +79,11 @@ const routes = [
     path: '/review/spell-check/whitelist',
     name: 'WhiteList',
     component: WhiteList
+  },
+  {
+    path: '/polish/stats',
+    name: 'PolishStats',
+    component: PolishStats
   },
   {
     path: '/polish',

@@ -29,6 +29,8 @@ from app.models.knowledge import KnowledgeFile, Folder
 from app.models.term import Term
 from app.models.polish_feedback import PolishFeedback
 from app.models.polished_document import PolishedDocument
+from app.models.cat_analysis_session import CatAnalysisSession
+from app.models.cat_decision_record import CatDecisionRecord
 from app.utils.file_utils import read_file_safe as _read_file_safe
 from app.utils.polish_rules_engine import apply_all_rules, apply_custom_rules
 from app.crud.polish_learning_rule import get_enabled_engine_keys, get_enabled_custom_rules, record_rule_triggers
@@ -489,8 +491,18 @@ def _load_terminology_source(db: Session, terminology_id: int = None) -> Optiona
 SENTENCE_GUIDE_FOLDER_IDS = [8]
 SENTENCE_FEEDBACK_FOLDER_IDS = [10]
 PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单.md"
+DOCUMENT_PRODUCT_TYPES = (
+    "建库试剂",
+    "测序试剂",
+    "核酸提取",
+    "测序仪",
+    "自动化",
+    "软件",
+    "超声",
+)
 TERMINOLOGY_FEEDBACK_FOLDER_IDS = [21]
 PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME = "平台反馈的术语对照表.md"
+TERMINOLOGY_FOLDER_IDS = [19]
 PLATFORM_FEEDBACK_SENTENCE_RELATIVE_PATH = os.path.join("写作规范", "句式清单", "来自平台反馈", PLATFORM_FEEDBACK_FILENAME)
 PLATFORM_FEEDBACK_TERMINOLOGY_RELATIVE_PATH = os.path.join("资源库", "术语库", "来自平台反馈", PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME)
 PRIMARY_SENTENCE_GUIDE_FILENAMES = {
@@ -543,7 +555,8 @@ def _read_knowledge_text_content(file_path: str) -> str:
 def _build_document_polish_guide(
     db: Session,
     sentence_file_id: int = None,
-    requirements: str = None
+    requirements: str = None,
+    product_type: Optional[str] = None,
 ) -> str:
     """构建文档润色的完整规则指南。
 
@@ -559,7 +572,7 @@ def _build_document_polish_guide(
         if selected_guide:
             parts.append(f"{_CANDIDATE_RECALL_GUIDE_MARKER}\n\n{selected_guide}")
     else:
-        all_guides = _load_sentence_guides(db)
+        all_guides = _load_sentence_guides(db, product_type=product_type)
         if all_guides:
             parts.append(f"{_CANDIDATE_RECALL_GUIDE_MARKER}\n\n{all_guides}")
 
@@ -756,6 +769,35 @@ def _split_notice_prefix(text: str) -> tuple[str, str]:
     return match.group(1), match.group(2).strip()
 
 
+def _should_add_contextual_terminal_punctuation(text: str) -> bool:
+    value = str(text or '').strip()
+    if not value or value.endswith(('。', '.', '！', '!', '？', '?', '；', ';', '：', ':')):
+        return False
+    if not re.search(r'[\u4e00-\u9fff]', value):
+        return False
+
+    step_prefix, body = _split_step_prefix(value)
+    list_prefix, list_body = _split_list_marker_prefix(body or value)
+    notice_prefix, notice_body = _split_notice_prefix(list_body or body or value)
+    candidate = (notice_body or list_body or body or value).strip()
+    if len(candidate) < 12:
+        return False
+    if not (step_prefix or list_prefix or notice_prefix) and _looks_like_title_or_noun_phrase(value):
+        return False
+    if _looks_like_title_or_noun_phrase(candidate):
+        return False
+
+    sentence_markers = (
+        '应', '应当', '需', '需要', '必须', '请', '避免', '不得', '禁止', '用于', '以便',
+        '可以', '将', '按照', '根据', '确保', '确认', '检查', '点击', '选择', '输入', '打开',
+        '关闭', '安装', '连接', '取出', '放置', '加入', '倒入', '观察', '记录',
+    )
+    has_marker = any(marker in candidate for marker in sentence_markers)
+    has_clause = '，' in candidate or ',' in candidate
+    has_context_prefix = bool(step_prefix or list_prefix or notice_prefix)
+    return has_marker and (has_clause or has_context_prefix)
+
+
 def _normalize_terminal_sentence_punctuation(text: str) -> str:
     value = str(text or '').strip()
     if not value:
@@ -888,6 +930,116 @@ def _document_feedback_stats(records: list[PolishFeedback]) -> dict:
 
     average_accuracy = round((sum(submission_ratios) / total_submissions) * 100, 1)
     return {"total_submissions": total_submissions, "average_accuracy": average_accuracy}
+
+
+def _json_dumps(data) -> Optional[str]:
+    if data is None:
+        return None
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _json_loads(data, default):
+    if data in (None, "", b""):
+        return default
+    if isinstance(data, (dict, list)):
+        return data
+    try:
+        parsed = json.loads(data)
+    except Exception:
+        return default
+    return parsed if parsed is not None else default
+
+
+def _feedback_accuracy_percent(record: PolishFeedback) -> float:
+    denom = record.processed_count if record.processed_count and record.processed_count > 0 else 1
+    return round(min(100.0, (record.accuracy or 0) / denom * 100), 1)
+
+
+def _resolve_sentence_file_name(db: Session, sentence_file_id: Optional[int]) -> Optional[str]:
+    if not sentence_file_id:
+        return None
+    file = db.query(KnowledgeFile).filter(KnowledgeFile.id == sentence_file_id).first()
+    return file.name if file else None
+
+
+def _resolve_sentence_scope_name(db: Session, sentence_file_id: Optional[int], product_type: Optional[str] = None) -> Optional[str]:
+    sentence_file_name = _resolve_sentence_file_name(db, sentence_file_id)
+    if sentence_file_name:
+        return sentence_file_name
+    normalized_product_type = _normalize_document_product_type(product_type)
+    if normalized_product_type:
+        return f"{normalized_product_type}（全部文件）"
+    return None
+
+
+def _resolve_terminology_scope_name(db: Session, terminology_file_id: Optional[int], product_type: Optional[str] = None) -> Optional[str]:
+    if terminology_file_id:
+        file = db.query(KnowledgeFile).filter(KnowledgeFile.id == terminology_file_id).first()
+        if file:
+            return file.name
+    normalized_product_type = _normalize_document_product_type(product_type)
+    if normalized_product_type:
+        return f"{normalized_product_type}（全部文件）"
+    return None
+
+
+def _build_feedback_correction_items(
+    feedback: "FeedbackInput",
+    corrections_pairs: list[tuple[str, str]],
+    raw_lines: list[str],
+) -> list[dict]:
+    items = []
+    if feedback.target == "terminology":
+        for before, after in corrections_pairs:
+            items.append({
+                "before": before,
+                "after": after,
+                "category": _cat_report_change_category(before, after, "modify"),
+            })
+        return items
+
+    baseline = str(feedback.polished_text or feedback.original_text or "").strip()
+    for line in raw_lines:
+        after = str(line or "").strip()
+        if not after:
+            continue
+        items.append({
+            "before": baseline,
+            "after": after,
+            "category": _cat_report_change_category(baseline, after, "modify"),
+        })
+    return items
+
+
+def _summarize_categories(items: list[dict]) -> dict:
+    counts = defaultdict(int)
+    for item in items or []:
+        category = str((item or {}).get("category") or "其他").strip() or "其他"
+        counts[category] += 1
+    return dict(counts)
+
+
+def _category_brief_text(category_counts: dict, limit: int = 3) -> str:
+    rows = sorted((category_counts or {}).items(), key=lambda item: (-int(item[1] or 0), item[0]))
+    return "、".join(f"{name}×{count}" for name, count in rows[:limit])
+
+
+def _normalize_stat_date(value) -> str:
+    if isinstance(value, datetime.datetime):
+        return value.strftime('%Y-%m-%d')
+    text = str(value or '').strip()
+    return text[:10] if len(text) >= 10 else text
+
+
+def _cat_decision_replacement_text(decision) -> str:
+    action = getattr(decision, 'action', '')
+    if action == 'accept':
+        return getattr(decision, 'accepted_template', '') or ''
+    if action == 'modify':
+        return getattr(decision, 'modified_text', '') or ''
+    if action == 'reject':
+        return getattr(decision, 'rejected_template', '') or ''
+    return ''
 
 
 def _normalize_polished_document_key(text: str) -> str:
@@ -2462,7 +2614,7 @@ _SYNTAX_OPTIMIZATIONS = [
     (r'要与(.+?)对应', r'确保与\1一致'),
 ]
 
-_NUMBER_SPACE_UNITS = r'r/min|kHz|MHz|GHz|kPa|MPa|kVA|mA|mV|kV|kW|MW|kN|min|rpm|bp|mL|μL|µL|uL|μg|µg|mg|ng|kg|μm|µm|mm|cm|°C|℃|Hz|Pa|VA|mM|μM|µM|nM|%|m|L|g|V|A|W|N|s|h|M'
+_NUMBER_SPACE_UNITS = r'r/min|kHz|MHz|GHz|kPa|MPa|kVA|mA|mV|kV|kW|MW|kN|min|rpm|bp|mL|μL|µL|uL|μg|µg|mg|ng|kg|μm|µm|mm|cm|°C|℃|Hz|Pa|VA|mM|μM|µM|nM|m|L|g|V|A|W|N|s|h|M'
 
 
 def _rewrite_field_style_sentence(sentence: str) -> str:
@@ -3341,13 +3493,93 @@ def _fallback_guide_entries_from_text(guide_text: str) -> list:
             entries.append(text)
     return entries
 
-def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
+def _normalize_document_product_type(product_type: Optional[str]) -> Optional[str]:
+    value = str(product_type or '').strip()
+    return value if value in DOCUMENT_PRODUCT_TYPES else None
+
+
+def _collect_sentence_guide_folder_ids(db: Session, root_folder_ids: set[int]) -> set[int]:
+    all_folder_ids = set(root_folder_ids)
+    stack = list(root_folder_ids)
+    while stack:
+        fid = stack.pop()
+        subfolders = db.query(Folder).filter(Folder.parent_id == fid).all()
+        for sf in subfolders:
+            if sf.id in all_folder_ids:
+                continue
+            all_folder_ids.add(sf.id)
+            stack.append(sf.id)
+    return all_folder_ids
+
+
+def _resolve_product_root_folder_ids(db: Session, base_folder_ids: set[int], product_type: Optional[str] = None) -> set[int]:
+    normalized_product_type = _normalize_document_product_type(product_type)
+    if not normalized_product_type:
+        return set(base_folder_ids)
+
+    folder_ids = {
+        folder.id
+        for folder in db.query(Folder).filter(
+            Folder.parent_id.in_(base_folder_ids),
+            Folder.name == normalized_product_type,
+        ).all()
+    }
+    return folder_ids
+
+
+def _resolve_sentence_guide_root_folder_ids(db: Session, product_type: Optional[str] = None) -> set[int]:
+    return _resolve_product_root_folder_ids(db, set(SENTENCE_GUIDE_FOLDER_IDS), product_type)
+
+
+def _resolve_terminology_root_folder_ids(db: Session, product_type: Optional[str] = None) -> set[int]:
+    return _resolve_product_root_folder_ids(db, set(TERMINOLOGY_FOLDER_IDS), product_type)
+
+
+def _load_scoped_terminology_source(db: Session, terminology_id: int = None, product_type: Optional[str] = None) -> Optional[str]:
+    source = _load_terminology_source(db, terminology_id)
+    if source or terminology_id:
+        return source
+
+    normalized_product_type = _normalize_document_product_type(product_type)
+    if not normalized_product_type:
+        return None
+
+    root_folder_ids = _resolve_terminology_root_folder_ids(db, normalized_product_type)
+    all_folder_ids = _collect_sentence_guide_folder_ids(db, root_folder_ids)
+    if not all_folder_ids:
+        return None
+
+    files = db.query(KnowledgeFile).filter(KnowledgeFile.folder_id.in_(all_folder_ids)).order_by(KnowledgeFile.id.asc()).all()
+    sources = []
+    loaded_paths = set()
+    for term_file in files:
+        path = str(term_file.file_path or '').strip()
+        if not path or not os.path.exists(path) or path in loaded_paths:
+            continue
+        loaded_paths.add(path)
+        if path.lower().endswith('.xlsx'):
+            sources.append(path)
+        else:
+            content = _read_file_safe(path)
+            if content:
+                sources.append(content)
+
+    return "\n\n".join(part for part in sources if part) if sources else None
+
+
+def _load_sentence_guides(db: Session, style_guide_id: int = None, product_type: Optional[str] = None) -> str:
     """加载句式清单内容（带缓存）。
 
     若指定了 style_guide_id，加载该文件并拼接平台反馈句式清单；
     否则递归加载句式清单文件夹下所有 .md 文件。
     """
-    cache_key = style_guide_id or '__all__'
+    normalized_product_type = _normalize_document_product_type(product_type)
+    if style_guide_id:
+        cache_key = ('file', int(style_guide_id))
+    elif normalized_product_type:
+        cache_key = ('product_type', normalized_product_type)
+    else:
+        cache_key = '__all__'
     if cache_key in _sentence_guide_cache:
         return _sentence_guide_cache[cache_key]
 
@@ -3384,19 +3616,15 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None) -> str:
     # 未指定文件，递归加载句式清单文件夹下所有 .md
     guides = []
     # 一次性收集所有相关文件夹 ID 及其后代
-    all_folder_ids = set(SENTENCE_GUIDE_FOLDER_IDS)
-    stack = list(SENTENCE_GUIDE_FOLDER_IDS)
-    while stack:
-        fid = stack.pop()
-        subfolders = db.query(Folder).filter(Folder.parent_id == fid).all()
-        for sf in subfolders:
-            all_folder_ids.add(sf.id)
-            stack.append(sf.id)
+    root_folder_ids = _resolve_sentence_guide_root_folder_ids(db, normalized_product_type)
+    all_folder_ids = _collect_sentence_guide_folder_ids(db, root_folder_ids)
 
-    files = db.query(KnowledgeFile).filter(
-        KnowledgeFile.folder_id.in_(all_folder_ids),
-        KnowledgeFile.file_type == "md"
-    ).all()
+    files = []
+    if all_folder_ids:
+        files = db.query(KnowledgeFile).filter(
+            KnowledgeFile.folder_id.in_(all_folder_ids),
+            KnowledgeFile.file_type == "md"
+        ).all()
 
     def _guide_priority(kf: KnowledgeFile) -> tuple[int, str, int]:
         name = (kf.name or '').strip()
@@ -3570,10 +3798,9 @@ def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> Kno
 
 
 def _get_platform_feedback_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
-    """返回已有的平台反馈句式清单文件，不执行自动创建。"""
-    return db.query(KnowledgeFile).filter(
-        KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME
-    ).order_by(KnowledgeFile.id.desc()).all()
+    """返回平台反馈句式清单固定主文件。"""
+    primary_file = _ensure_platform_feedback_sentence_file(db, user_id)
+    return [primary_file] if primary_file else []
 
 
 def _get_platform_feedback_terminology_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
@@ -3694,7 +3921,7 @@ class CatAnalyzeRequest(BaseModel):
     sentence_file_id: Optional[int] = None
     terminology_file_id: Optional[int] = None
     requirements: Optional[str] = None
-    min_match_threshold: float = 0.29
+    min_match_threshold: float = 0.34
     fuzzy_lower_bound: float = 0.70
     ai_semantic_scoring: bool = True
     ai_reason_max_chars: int = 15
@@ -3706,6 +3933,8 @@ class CatApplyRequest(BaseModel):
     file_id: Optional[int] = None
     source_filename: str = ""
     decisions: List[CatDecision] = []
+    sentence_file_id: Optional[int] = None
+    sentence_file_name: Optional[str] = None
 
 
 _DOC_REVIEW_AUTO_APPLY_THRESHOLD = 95
@@ -4504,13 +4733,9 @@ def _apply_skill_polish(
             new_line = _protect_model_numbers(new_line)
         
         # 标题、表标题、图标题等不加句号，也不做空间距规整
-        if not is_title and not sentence_only_mode and not matched_preferred_sentence:
-            if new_line and not new_line.endswith(('。', '.', '！', '!', '？', '?')):
-                if not _is_noun_phrase(new_line):
-                    if re.search(r'[\u4e00-\u9fff]', new_line):
-                        new_line = new_line.rstrip('，,;；;：:') + '。'
-                    else:
-                        new_line = new_line.rstrip(',,;;::') + '.'
+        if not is_title and not sentence_only_mode:
+            if _should_add_contextual_terminal_punctuation(new_line):
+                new_line = new_line.rstrip('，,;；：:') + '。'
             new_line = re.sub(rf'(?<=\d)\s*(?=({_NUMBER_SPACE_UNITS})(?![A-Za-z]))', ' ', new_line)
             new_line = _protect_model_numbers(new_line)
         elif sentence_only_mode and not has_changes:
@@ -4839,6 +5064,7 @@ def _filter_candidate_templates(sentence: str, templates: list) -> list:
     source_model_markers = set(_extract_model_markers(source_sentence).keys())
     source_number_markers = _extract_numeric_markers(source_sentence)
     source_actions = set(_extract_sentence_intent(source_sentence).get('actions', []))
+    source_identity_markers = _extract_action_object_identity_markers(source_sentence)
     source_struct = _extract_sentence_structure(source_sentence)
     source_slot_sample_pairs = _extract_slot_sample_pairs(source_sentence)
     slot_sample_mode = len(source_slot_sample_pairs) >= 3
@@ -4859,15 +5085,36 @@ def _filter_candidate_templates(sentence: str, templates: list) -> list:
                 continue
         template_markers = _template_topic_markers(template)
         template_actions = set(_extract_sentence_intent(template_text).get('actions', []))
+        template_identity_markers = _extract_action_object_identity_markers(template_text)
+        if source_identity_markers and template_identity_markers and not (source_identity_markers & template_identity_markers):
+            continue
         marker_overlap = len(source_markers & template_markers)
         ui_overlap = len(source_ui_markers & _extract_ui_markers(template_text))
         model_overlap = len(source_model_markers & set(_extract_model_markers(template_text).keys()))
         number_overlap = len(source_number_markers & _extract_numeric_markers(template_text))
         action_overlap = len(source_actions & template_actions)
-        score = marker_overlap * 4 + ui_overlap * 3 + model_overlap * 3 + number_overlap * 2 + action_overlap * 2 + pair_overlap * 8
-        if source_markers and score <= 0 and action_overlap <= 0:
+        similarity = _sentence_similarity(source_sentence, template_text)
+        clause_score = _clause_alignment_score(source_sentence, template_text)
+        tech_overlap = _tech_term_overlap(source_sentence, template_text)
+        if (
+            source_actions and not template_actions and
+            marker_overlap < 2 and similarity < 0.20 and clause_score < 0.22
+        ):
             continue
-        ranked.append((score, pair_overlap, marker_overlap, action_overlap, ui_overlap, -index, template))
+        score = (
+            marker_overlap * 4 +
+            ui_overlap * 3 +
+            model_overlap * 3 +
+            number_overlap * 2 +
+            action_overlap * 2 +
+            pair_overlap * 8 +
+            similarity * 8 +
+            clause_score * 10 +
+            tech_overlap * 4
+        )
+        if source_markers and score < 1.2 and action_overlap <= 0 and clause_score < 0.18:
+            continue
+        ranked.append((score, clause_score, similarity, pair_overlap, marker_overlap, action_overlap, ui_overlap, -index, template))
 
     if not ranked:
         return [] if source_markers else templates[:40]
@@ -4886,13 +5133,14 @@ def _filter_candidate_templates(sentence: str, templates: list) -> list:
             template_actions = set(_extract_sentence_intent(template_text).get('actions', []))
             action_overlap = len(source_actions & template_actions)
             similarity = _sentence_similarity(source_sentence, template_text)
-            if similarity < 0.12 and action_overlap <= 0:
+            clause_score = _clause_alignment_score(source_sentence, template_text)
+            if similarity < 0.12 and clause_score < 0.15 and action_overlap <= 0:
                 continue
-            fallback_score = similarity * 100 + action_overlap * 6
-            fallback_ranked.append((fallback_score, action_overlap, -index, template))
+            fallback_score = similarity * 100 + clause_score * 15 + action_overlap * 6
+            fallback_ranked.append((fallback_score, clause_score, action_overlap, -index, template))
         fallback_ranked.sort(reverse=True)
         for fallback in fallback_ranked[:24 - len(ranked)]:
-            ranked.append((fallback[0], 0, 0, fallback[1], 0, fallback[2], fallback[-1]))
+            ranked.append((fallback[0], fallback[1], 0, 0, 0, fallback[2], 0, fallback[3], fallback[-1]))
 
     ranked.sort(reverse=True)
     return [item[-1] for item in ranked[:120]]
@@ -4911,11 +5159,17 @@ def _preferred_entries_from_guide(guide_text: str, single_clause_only: bool = Fa
             continue
         structured_entries.extend(_preferred_sentence_entries(rule, single_clause_only=single_clause_only))
     fallback_entries = _fallback_guide_entries_from_text(scoped_guide)
-    entries = list(fallback_entries)
-    seen = set(entries)
+    entries = []
+    seen = set()
     for entry in structured_entries:
         text = _template_entry_text(entry) if isinstance(entry, dict) else str(entry or '').strip()
         if not text or text in seen:
+            continue
+        seen.add(text)
+        entries.append(entry)
+    for entry in fallback_entries:
+        text = _template_entry_text(entry) if isinstance(entry, dict) else str(entry or '').strip()
+        if not text or text in seen or _looks_like_title_or_noun_phrase(text):
             continue
         seen.add(text)
         entries.append(entry)
@@ -4959,6 +5213,9 @@ def _guide_top_template_candidates(sentence: str, guide_text: str, limit: int = 
 
 
 def _preferred_entries_for_sentence(sentence: str, guide_text: str, single_clause_only: bool = False) -> list:
+    candidate_pool = _guide_candidate_pool(sentence, guide_text, single_clause_only=single_clause_only)
+    if candidate_pool:
+        return candidate_pool
     return _preferred_entries_from_guide(guide_text, single_clause_only=single_clause_only)
 
 
@@ -5653,9 +5910,9 @@ _CAT_STOP_WORDS = set(
 
 _CAT_AI_SEMANTIC_SHOW_THRESHOLD = 0.76
 _CAT_AI_SEMANTIC_PENDING_THRESHOLD = 0.64
-_CAT_RULE_ONLY_SHOW_THRESHOLD = 0.62
-_CAT_RULE_ONLY_PENDING_THRESHOLD = 0.42
-_CAT_RULE_ONLY_LEGACY_PENDING_THRESHOLD = 0.46
+_CAT_RULE_ONLY_SHOW_THRESHOLD = 0.65
+_CAT_RULE_ONLY_PENDING_THRESHOLD = 0.50
+_CAT_RULE_ONLY_LEGACY_PENDING_THRESHOLD = 0.54
 
 _CAT_KEYWORD_ENTITY_PATTERNS = [
     (re.compile(r'\b(?:货号|型号|编号|序列号|No\.?|Part\s*#|CAT\s*#)?\s*[:：]?\s*([A-Za-z0-9\-]{6,})\b', re.IGNORECASE), "编号/货号/型号"),
@@ -5971,11 +6228,73 @@ def _action_object_pairs_compatible(sentence: str, template: str) -> tuple[bool,
         template_objects = template_by_verb.get(verb, set())
         if not sentence_objects or not template_objects:
             continue
-        if sentence_objects & template_objects:
+        compatible = False
+        for sentence_object in sentence_objects:
+            for template_object in template_objects:
+                if _same_action_object_compatible(sentence_object, template_object):
+                    compatible = True
+                    break
+            if compatible:
+                break
+        if compatible:
             continue
         if len(sentence_objects) == 1 and len(template_objects) == 1:
             return False, f'action_object:{verb}'
     return True, ''
+
+
+def _normalize_action_object_aliases(text: str) -> str:
+    value = _normalize_structure_object(text)
+    if not value:
+        return ''
+    replacements = {
+        '样本制备系统': '样本制备卡系统',
+        '机器推板': '仪器载台',
+        '机器': '仪器',
+        '推板': '载台',
+        '平置': '水平放置',
+        '对应': '一致',
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    return value
+
+
+def _extract_action_object_identity_markers(text: str) -> set[str]:
+    raw = str(text or '')
+    markers = set()
+    for match in re.findall(r'套件\s*([A-Z])', raw):
+        markers.add(f'kit:{match.upper()}')
+    for match in re.findall(r'\b([A-Z]\d+)\b', raw, flags=re.IGNORECASE):
+        markers.add(re.sub(r'\s+', '', match).upper())
+    return markers
+
+
+def _same_action_object_compatible(source_object: str, template_object: str) -> bool:
+    source_value = _normalize_structure_object(source_object)
+    template_value = _normalize_structure_object(template_object)
+    if not source_value or not template_value:
+        return bool(source_value == template_value)
+    if source_value == template_value:
+        return True
+    if source_value in template_value or template_value in source_value:
+        return True
+
+    source_identity = _extract_action_object_identity_markers(source_value)
+    template_identity = _extract_action_object_identity_markers(template_value)
+    if source_identity and template_identity and not (source_identity & template_identity):
+        return False
+
+    source_alias = _normalize_action_object_aliases(source_value)
+    template_alias = _normalize_action_object_aliases(template_value)
+    if source_alias == template_alias:
+        return True
+    if source_alias in template_alias or template_alias in source_alias:
+        return True
+
+    clause_score = _clause_similarity(source_alias, template_alias)
+    semantic_score = _compare_semantic_keywords(source_alias, template_alias)
+    return max(clause_score, semantic_score) >= 0.42
 
 
 def _candidate_effective_semantic_score(candidate: dict) -> float:
@@ -5989,14 +6308,14 @@ def _candidate_filtered_semantic_score(original_text: str, candidate: dict, ai_s
     score = _candidate_effective_semantic_score(candidate)
     reason = (candidate or {}).get('ai_reason', '') if isinstance(candidate, dict) else ''
     if ai_semantic_active and _has_negative_reason(reason):
-        score = max(0.0, score - 0.18)
+        score = max(0.0, score - 0.22)
     tech_overlap = _tech_term_overlap(original_text, str((candidate or {}).get('template_text', '') or ''))
     tech_term_count = len(_extract_tech_terms(original_text))
     if tech_term_count >= 2:
         if tech_overlap < 0.35:
-            score = max(0.0, score - (0.14 if ai_semantic_active else 0.05))
+            score = max(0.0, score - (0.18 if ai_semantic_active else 0.12))
         elif tech_overlap < 0.60:
-            score = max(0.0, score - (0.06 if ai_semantic_active else 0.02))
+            score = max(0.0, score - (0.08 if ai_semantic_active else 0.05))
     return round(score, 4)
 
 
@@ -6037,15 +6356,119 @@ def _prepare_cat_match_text(text: str, term_dict: Optional[dict] = None) -> str:
     return _apply_cat_surface_rules(_strip_cat_match_prefix(text), term_dict)
 
 
+def _normalize_cat_duplicate_text(text: str) -> str:
+    value = _normalize_visible_compare_text(text)
+    value = value.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+    value = _normalize_terminal_sentence_punctuation(value)
+    return re.sub(r'\s+', ' ', value).strip()
+
+
 def _cat_exact_duplicate(source_text: str, candidate_text: str) -> bool:
-    return str(source_text or '').strip() == str(candidate_text or '').strip()
+    return _normalize_cat_duplicate_text(source_text) == _normalize_cat_duplicate_text(candidate_text)
+
+
+def _extract_ui_destination_markers(text: str) -> set[str]:
+    return {
+        marker for marker in _extract_ui_markers(text)
+        if marker.endswith(('界面', '页面', '窗口'))
+    }
+
+
+def _has_conflicting_ui_destination(sentence: str, template: str) -> bool:
+    source_destinations = _extract_ui_destination_markers(sentence)
+    template_destinations = _extract_ui_destination_markers(template)
+    source_actions = set(_extract_sentence_intent(sentence).get('actions', []))
+    template_actions = set(_extract_sentence_intent(template).get('actions', []))
+    return _has_conflicting_ui_destination_with_markers(
+        source_destinations,
+        template_destinations,
+        source_actions,
+        template_actions,
+    )
+
+
+def _has_conflicting_ui_destination_with_markers(
+    source_destinations: set[str],
+    template_destinations: set[str],
+    source_actions: set[str],
+    template_actions: set[str],
+) -> bool:
+    if not template_destinations:
+        if source_destinations and (source_actions & {'进入', '打开'}) and not (template_actions & {'进入', '打开'}):
+            return True
+        return False
+    if not source_destinations:
+        return True
+    return not bool(source_destinations & template_destinations)
+
+
+def _extract_ui_operation_markers(text: str) -> set[str]:
+    raw = str(text or '')
+    markers = set()
+    if re.search(r'\brun\b', raw, flags=re.IGNORECASE):
+        markers.add('run')
+    for marker, pattern in [
+        ('运行', r'运行'),
+        ('开始实验', r'开始实验'),
+        ('开始建库', r'开始建库'),
+        ('确定', r'确定'),
+        ('登录', r'登录'),
+    ]:
+        if re.search(pattern, raw):
+            markers.add(marker)
+    return markers
+
+
+def _has_missing_ui_operation_markers(sentence: str, template: str) -> bool:
+    source_markers = _extract_ui_operation_markers(sentence)
+    template_markers = _extract_ui_operation_markers(template)
+    return _has_missing_ui_operation_markers_with_markers(source_markers, template_markers)
+
+
+def _has_missing_ui_operation_markers_with_markers(source_markers: set[str], template_markers: set[str]) -> bool:
+    if not source_markers:
+        return False
+    critical_source_markers = source_markers & {'run', '运行', '开始实验', '开始建库', '登录'}
+    if not critical_source_markers:
+        return False
+    return not bool(critical_source_markers & template_markers)
+
+
+def _trim_redundant_cat_suffix(text: str) -> str:
+    value = str(text or '').strip()
+    if not value:
+        return value
+    terminal = ''
+    terminal_match = re.search(r'([。.!！？?；;]+)$', value)
+    if terminal_match:
+        terminal = terminal_match.group(1)
+        value = value[:-len(terminal)].rstrip()
+    match = re.search(r'(和|与|及|并)([^，。；！？,.;:：]{2,12})$', value)
+    if not match:
+        return f'{value}{terminal}' if value else terminal
+    repeated_fragment = match.group(2).strip()
+    if not repeated_fragment:
+        return f'{value}{terminal}' if value else terminal
+    body = value[:-len(match.group(0))]
+    if repeated_fragment in body:
+        value = body.rstrip('，,；;：: ')
+    if value == str(text or '').strip().rstrip(terminal):
+        for fragment_length in range(min(8, len(value) // 2), 1, -1):
+            fragment = value[-fragment_length:]
+            prefix = value[:-fragment_length]
+            if not fragment.strip() or fragment not in prefix:
+                continue
+            if prefix.endswith(('和', '与', '及', '并')):
+                value = prefix[:-1].rstrip('，,；;：: ')
+                break
+    return f'{value}{terminal}' if value else terminal
 
 
 def _normalize_cat_length_text(text: str) -> str:
     return re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', str(text or ''))
 
 
-def _is_fragment_candidate(source: str, candidate: str, min_ratio: float = 0.55, max_ratio: float = 1.9) -> bool:
+def _is_fragment_candidate(source: str, candidate: str, min_ratio: float = 0.65, max_ratio: float = 1.55) -> bool:
     source_norm = _normalize_cat_length_text(source)
     candidate_norm = _normalize_cat_length_text(candidate)
     if not source_norm or not candidate_norm:
@@ -6053,7 +6476,7 @@ def _is_fragment_candidate(source: str, candidate: str, min_ratio: float = 0.55,
     ratio = len(candidate_norm) / max(len(source_norm), 1)
     if ratio < min_ratio or ratio > max_ratio:
         return True
-    if ratio < 0.72 and (candidate_norm in source_norm or source_norm in candidate_norm):
+    if ratio < 0.78 and (candidate_norm in source_norm or source_norm in candidate_norm):
         return True
     return False
 
@@ -6062,7 +6485,11 @@ def _is_valid_cat_template(text: str) -> bool:
     value = str(text or '').strip()
     if len(_normalize_cat_length_text(value)) < 15:
         return False
-    return bool(re.search(r'[。！？；!?;]$', value))
+    if re.search(r'[。！？；!?;]$', value):
+        return True
+    if ('：' in value or ':' in value) and re.search(r'@[A-Za-z0-9.-]+', value):
+        return True
+    return False
 
 
 def _merge_split_templates(templates: list[str]) -> list[str]:
@@ -6099,6 +6526,10 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
     if not source_text or not candidate_text:
         return candidate_text
 
+    anchored_candidate = _merge_generic_subject_with_source(source_text, candidate_text)
+    if anchored_candidate:
+        candidate_text = anchored_candidate
+
     source_terminal_match = re.search(r'([。.!！？?]+)\s*$', source_text)
     source_terminal = source_terminal_match.group(1)[-1] if source_terminal_match else ''
 
@@ -6111,11 +6542,32 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
 
     source_clauses = _split_sentence_clauses(source_core)
     candidate_clauses = _split_sentence_clauses(candidate_core)
+    overall_similarity = _sentence_similarity(source_core, candidate_core)
+    best_clause_similarity = max((_clause_similarity(clause, candidate_core) for clause in source_clauses), default=0.0)
+    action_overlap = len(
+        set(_extract_sentence_intent(source_core).get('actions', [])) &
+        set(_extract_sentence_intent(candidate_core).get('actions', []))
+    )
 
     trailing_figure_ref = candidate_figure_ref or source_figure_ref
 
+    if len(source_clauses) >= 3 and len(candidate_clauses) == 1:
+        trailing_clause_matches = sum(1 for clause in source_clauses[1:] if _clause_similarity(clause, candidate_core) >= 0.5)
+        leading_clause_similarity = _clause_similarity(source_clauses[0], candidate_core) if source_clauses else 0.0
+        if trailing_clause_matches >= 2 and leading_clause_similarity < 0.2 and overall_similarity < 0.55:
+            merged_text = candidate_core
+            if trailing_figure_ref and trailing_figure_ref not in merged_text:
+                merged_text = f'{merged_text}{trailing_figure_ref}'
+            if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
+                merged_text = f'{merged_text}{source_terminal}'
+            return _reapply_sentence_prefix(source_text, merged_text)
+
+    if overall_similarity < 0.3 and best_clause_similarity < 0.38:
+        return _reapply_sentence_prefix(source_text, candidate_text)
+
     if len(source_clauses) <= 1 or len(candidate_clauses) > 1:
         merged_text = replace_with_context(source_core, candidate_core)
+        merged_text = _trim_redundant_cat_suffix(merged_text)
         if trailing_figure_ref and trailing_figure_ref not in merged_text:
             merged_text = f'{merged_text}{trailing_figure_ref}'
         if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
@@ -6137,7 +6589,15 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
             best_index = index
 
     if best_index is None or best_score < 0.45:
+        if len(source_clauses) > 1 and len(candidate_clauses) == 1 and overall_similarity < 0.48 and action_overlap <= 0:
+            merged_text = candidate_core
+            if trailing_figure_ref and trailing_figure_ref not in merged_text:
+                merged_text = f'{merged_text}{trailing_figure_ref}'
+            if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
+                merged_text = f'{merged_text}{source_terminal}'
+            return _reapply_sentence_prefix(source_text, merged_text)
         merged_text = replace_with_context(source_core, candidate_core)
+        merged_text = _trim_redundant_cat_suffix(merged_text)
         if trailing_figure_ref and trailing_figure_ref not in merged_text:
             merged_text = f'{merged_text}{trailing_figure_ref}'
         if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
@@ -6154,11 +6614,55 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
         rebuilt_parts.append(part.replace(clause, _replace_clause_directly(clause, candidate_core, next_separator), 1))
 
     rebuilt_text = ''.join(rebuilt_parts)
+    rebuilt_text = _trim_redundant_cat_suffix(rebuilt_text)
     if trailing_figure_ref and trailing_figure_ref not in rebuilt_text:
         rebuilt_text = f'{rebuilt_text}{trailing_figure_ref}'
     if source_terminal and not re.search(r'[。.!！？?]\s*$', rebuilt_text):
         rebuilt_text = f'{rebuilt_text}{source_terminal}'
     return _reapply_sentence_prefix(source_text, rebuilt_text)
+
+
+def _extract_sentence_subject_predicate(text: str) -> tuple[str, str, str]:
+    value = str(text or '').strip()
+    if not value:
+        return '', '', ''
+    match = re.match(r'^(.{2,40}?)(由|为|是|分为|包括|包含)(.+)$', value)
+    if not match:
+        return '', '', ''
+    subject = match.group(1).strip('，,；;：: ')
+    anchor = match.group(2).strip()
+    predicate = match.group(3).strip()
+    if not subject or not predicate:
+        return '', '', ''
+    return subject, anchor, predicate
+
+
+def _merge_generic_subject_with_source(source_text: str, candidate_text: str) -> str:
+    source_subject, source_anchor, source_predicate = _extract_sentence_subject_predicate(_strip_cat_match_prefix(source_text))
+    candidate_subject, candidate_anchor, candidate_predicate = _extract_sentence_subject_predicate(_strip_cat_match_prefix(candidate_text))
+    if not source_subject or not candidate_subject or source_anchor != candidate_anchor:
+        return ''
+    if len(source_subject) <= len(candidate_subject):
+        return ''
+
+    predicate_similarity = max(
+        _clause_similarity(source_predicate, candidate_predicate),
+        _sentence_similarity(source_predicate, candidate_predicate),
+    )
+    if predicate_similarity < 0.45:
+        return ''
+
+    source_entities = _extract_critical_entities(source_subject)
+    candidate_entities = _extract_critical_entities(candidate_subject)
+    subject_similarity = _sentence_similarity(source_subject, candidate_subject)
+    if not source_entities and subject_similarity >= 0.55:
+        return ''
+    if candidate_entities and source_entities == candidate_entities:
+        return ''
+
+    merged_text = f'{source_subject}{candidate_anchor}{candidate_predicate}'
+    merged_text = _protect_model_numbers(merged_text)
+    return _reapply_sentence_prefix(source_text, merged_text)
 
 
 def _has_negative_reason(reason: str) -> bool:
@@ -6199,6 +6703,16 @@ def _should_keep_cat_candidate(original_text: str, candidate: dict, ai_semantic_
         if isinstance(candidate, dict):
             candidate['drop_reason'] = 'empty_template'
         return False
+
+    if isinstance(candidate, dict) and candidate.get('rule_source') == 'surface_rules':
+        candidate['filtered_semantic_score'] = max(
+            float(candidate.get('effective_semantic_score', 0.0) or 0.0),
+            float(candidate.get('semantic_score', 0.0) or 0.0),
+            0.95,
+        )
+        candidate['needs_review'] = False
+        candidate['review_tags'] = []
+        return True
 
     if _cat_exact_duplicate(original_text, template_text):
         if isinstance(candidate, dict):
@@ -6265,7 +6779,7 @@ def _finalize_simple_match_debug(debug_stats: Optional[dict]) -> dict:
 def _simple_match(
     sentence: str,
     templates: list[dict],
-    min_threshold: float = 0.29,
+    min_threshold: float = 0.34,
     fuzzy_lower: float = 0.70,
     term_dict: Optional[dict] = None,
     source_sentence: Optional[str] = None,
@@ -6288,6 +6802,12 @@ def _simple_match(
     sentence_text = sentence.strip()
     display_source_text = str(source_sentence or sentence_text or '').strip() or sentence_text
     normalized_sentence_text = _prepare_cat_match_text(sentence_text, term_dict).strip()
+    source_match_text = normalized_sentence_text or sentence_text
+    source_intent = _extract_sentence_intent(source_match_text)
+    source_actions = set(source_intent.get('actions', []))
+    source_action_count = len(source_actions)
+    source_destinations = _extract_ui_destination_markers(source_match_text)
+    source_ui_operation_markers = _extract_ui_operation_markers(source_match_text)
     if normalized_sentence_text:
         surface_display_text = _compose_cat_candidate_text(display_source_text, normalized_sentence_text)
         if not _cat_exact_duplicate(display_source_text, surface_display_text):
@@ -6297,12 +6817,14 @@ def _simple_match(
                 "normalized_template_text": normalized_sentence_text,
                 "template_id": "surface_rule",
                 "string_score": 0.98,
+                "semantic_score": 0.95,
+                "effective_semantic_score": 0.95,
                 "match_tier": "surface_rule",
                 "rule_source": "surface_rules",
             }
             if isinstance(debug_stats, dict):
                 debug_stats['surface_rule_candidates'] += 1
-    sentence_len = len(re.sub(r'\s+', '', normalized_sentence_text or sentence_text))
+    sentence_len = len(re.sub(r'\s+', '', source_match_text))
     for tpl in templates or []:
         tpl_text = tpl.get("text", "") if isinstance(tpl, dict) else str(tpl)
         tpl_id = tpl.get("id", "") if isinstance(tpl, dict) else ""
@@ -6316,45 +6838,74 @@ def _simple_match(
             continue
         tpl_text = tpl_text.strip()
         normalized_tpl_match_text = _prepare_cat_match_text(tpl_text, term_dict).strip()
+        raw_tpl_len = len(re.sub(r'\s+', '', normalized_tpl_match_text or tpl_text))
+        if sentence_len > 0 and raw_tpl_len > 0:
+            raw_len_ratio = min(sentence_len, raw_tpl_len) / max(sentence_len, raw_tpl_len)
+            if raw_len_ratio < 0.45:
+                _increment_debug_reason(debug_stats, 'pre_length_window')
+                continue
         display_tpl_text = _compose_cat_candidate_text(display_source_text, normalized_tpl_match_text or tpl_text)
         display_tpl_match_text = _prepare_cat_match_text(display_tpl_text, term_dict).strip() or display_tpl_text
+        template_match_text = normalized_tpl_match_text or tpl_text
+        template_intent = _extract_sentence_intent(template_match_text)
+        template_actions = set(template_intent.get('actions', []))
+        template_destinations = _extract_ui_destination_markers(template_match_text)
+        template_ui_operation_markers = _extract_ui_operation_markers(template_match_text)
         if _cat_exact_duplicate(display_source_text, display_tpl_text):
             _increment_debug_reason(debug_stats, 'exact_duplicate')
             continue
 
-        if _is_fragment_candidate(normalized_sentence_text or sentence_text, display_tpl_match_text):
+        if _is_fragment_candidate(source_match_text, display_tpl_match_text):
             _increment_debug_reason(debug_stats, 'fragment_or_length_window')
             continue
-        score = _calc_similarity(normalized_sentence_text or sentence_text, display_tpl_match_text)
+        score = _calc_similarity(source_match_text, display_tpl_match_text)
+        raw_action_overlap = len(source_actions & template_actions)
+        raw_clause_score = _clause_alignment_score(source_match_text, template_match_text)
+        if source_action_count >= 2 and raw_action_overlap <= 0:
+            if raw_clause_score < 0.32:
+                score *= 0.72
+            elif raw_clause_score < 0.40:
+                score *= 0.85
         tpl_len = len(re.sub(r'\s+', '', display_tpl_match_text))
         len_ratio = 0.0
         if sentence_len > 0 and tpl_len > 0:
             len_ratio = min(sentence_len, tpl_len) / max(sentence_len, tpl_len)
-            if len_ratio < 0.06:
+            if len_ratio < 0.10:
                 _increment_debug_reason(debug_stats, 'length_ratio_too_low')
                 continue
-            if len_ratio < 0.18:
-                score *= max(len_ratio / 0.18, 0.72)
-            elif len_ratio < 0.30:
-                score *= max(0.90, len_ratio / 0.30)
+            if len_ratio < 0.20:
+                score *= max(len_ratio / 0.20, 0.50)
+            elif len_ratio < 0.35:
+                score *= max(len_ratio / 0.35, 0.75)
 
-        effective_threshold = min_threshold
-        if len_ratio >= 0.45:
-            effective_threshold -= 0.02
-        if _tech_term_overlap(normalized_sentence_text or sentence_text, normalized_tpl_match_text or tpl_text) >= 0.6:
-            effective_threshold -= 0.01
-        effective_threshold = max(0.26, round(effective_threshold, 4))
+        effective_threshold = round(min_threshold, 4)
 
         if score < effective_threshold:
             _increment_debug_reason(debug_stats, 'below_threshold')
             continue
 
-        entity_ok, entity_reason = _critical_entities_compatible(normalized_sentence_text or sentence_text, display_tpl_match_text)
+        entity_ok, entity_reason = _critical_entities_compatible(source_match_text, display_tpl_match_text)
         if not entity_ok:
             _increment_debug_reason(debug_stats, f'entity_mismatch:{entity_reason or "other"}')
             continue
 
-        anchor_ok, anchor_reason = _key_term_anchor_consistent(normalized_sentence_text or sentence_text, display_tpl_match_text)
+        if _has_conflicting_ui_destination_with_markers(
+            source_destinations,
+            template_destinations,
+            source_actions,
+            template_actions,
+        ):
+            _increment_debug_reason(debug_stats, 'ui_destination_conflict')
+            continue
+
+        if _has_missing_ui_operation_markers_with_markers(
+            source_ui_operation_markers,
+            template_ui_operation_markers,
+        ):
+            _increment_debug_reason(debug_stats, 'ui_operation_marker_missing')
+            continue
+
+        anchor_ok, anchor_reason = _key_term_anchor_consistent(source_match_text, display_tpl_match_text)
         if not anchor_ok:
             normalized_reason = re.sub(r'\s+', '_', str(anchor_reason or 'other')).strip('_') or 'other'
             _increment_debug_reason(debug_stats, f'anchor_mismatch:{normalized_reason}')
@@ -7867,6 +8418,7 @@ def _generate_polish_report(
 @router.post("/analyze-file")
 async def analyze_file_endpoint(
     file: UploadFile = File(...),
+    product_type: Optional[str] = Form(None),
     sentence_file_id: Optional[int] = Form(None),
     terminology_file_id: Optional[int] = Form(None),
     requirements: Optional[str] = Form(None),
@@ -7929,29 +8481,17 @@ async def analyze_file_endpoint(
         sentence_guide = _build_document_polish_guide(
             db,
             sentence_file_id=sentence_file_id,
-            requirements=requirements
+            requirements=requirements,
+            product_type=product_type,
         )
         candidate_recall_guide = _candidate_recall_guide_text(sentence_guide or '')
         ai_style_guide = _compact_document_ai_style_guide(sentence_guide or '')
-        sentence_file_name = None
-        if sentence_file_id:
-            sf = db.query(KnowledgeFile).filter(KnowledgeFile.id == sentence_file_id).first()
-            if sf:
-                sentence_file_name = sf.name
+        sentence_file_name = _resolve_sentence_scope_name(db, sentence_file_id, product_type)
         
-        terminology = None
-        term_file_name = None
-        if terminology_file_id:
-            term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == terminology_file_id).first()
-            if term_file:
-                term_file_name = term_file.name
-                # Excel 文件直接用路径，Markdown 读文本内容
-                if term_file.file_path and term_file.file_path.lower().endswith('.xlsx'):
-                    terminology = term_file.file_path  # 传路径给 _parse_terminology_xlsx
-                    print(f"[POLISH] 已加载术语Excel: {term_file_name}")
-                else:
-                    terminology = _read_file_safe(term_file.file_path)
-                    print(f"[POLISH] 已加载术语文件: {term_file_name} ({len(terminology or '')} 字节)")
+        terminology = _load_scoped_terminology_source(db, terminology_file_id, product_type)
+        term_file_name = _resolve_terminology_scope_name(db, terminology_file_id, product_type)
+        if terminology and term_file_name:
+            print(f"[POLISH] 已加载术语范围: {term_file_name}")
 
         db_terms = None if terminology else _load_terms_from_db(db)
         skill_rules = {}
@@ -8257,6 +8797,8 @@ def submit_polish_feedback(
     current_user = get_default_user(db)
     corrections_pairs = _parse_corrections(feedback.corrections)
     raw_lines = [line.strip() for line in (feedback.corrections or '').splitlines() if line.strip()]
+    correction_items = _build_feedback_correction_items(feedback, corrections_pairs, raw_lines)
+    polish_session_id = str(uuid.uuid4())
     processed_count = 0
     errors = []
 
@@ -8352,6 +8894,8 @@ def submit_polish_feedback(
         corrections=feedback.corrections,
         target=feedback.target,
         processed_count=processed_count,
+        correction_items=_json_dumps(correction_items),
+        polish_session_id=polish_session_id,
         created_by=current_user.username if current_user else "guest"
     ))
     db.commit()
@@ -8572,7 +9116,7 @@ def _cat_save_modified_to_feedback(
         return 0
 
     timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    source_name = source_filename or "CAT润色"
+    source_name = source_filename or "润色结果"
     new_count = 0
 
     existing = ""
@@ -8673,6 +9217,242 @@ def get_document_feedback_stats(db: Session = Depends(get_db)):
         PolishFeedback.target == 'document_sentence_guide'
     ).all()
     return _document_feedback_stats(records)
+
+
+@router.get("/stats/text", response_model=None)
+def get_polish_text_stats(db: Session = Depends(get_db)):
+    records = db.query(PolishFeedback).filter(
+        PolishFeedback.target.in_(['terminology', 'sentence_guide'])
+    ).order_by(PolishFeedback.created_at.asc(), PolishFeedback.id.asc()).all()
+    if not records:
+        return {
+            "overview": {"total_sessions": 0, "average_accuracy": 0, "total_corrections": 0, "total_accepted": 0},
+            "accuracy_trend": [],
+            "correction_category_pie": [],
+            "category_trend": [],
+            "recent_sessions": []
+        }
+
+    category_counts = defaultdict(int)
+    trend_map = defaultdict(lambda: defaultdict(int))
+    trend_dates = []
+    recent_sessions = []
+    accuracies = []
+    total_corrections = 0
+    total_accepted = 0
+
+    for record in records:
+        items = _json_loads(record.correction_items, [])
+        if not items:
+            if record.target == 'terminology':
+                items = [
+                    {"before": old, "after": new, "category": _cat_report_change_category(old, new, 'modify')}
+                    for old, new in _parse_corrections(record.corrections)
+                ]
+            else:
+                raw_lines = [line.strip() for line in (record.corrections or '').splitlines() if line.strip()]
+                baseline = str(record.polished_text or record.original_text or '').strip()
+                items = [
+                    {"before": baseline, "after": line, "category": _cat_report_change_category(baseline, line, 'modify')}
+                    for line in raw_lines
+                ]
+
+        accuracies.append(_feedback_accuracy_percent(record))
+        total_corrections += len(items)
+        total_accepted += int(record.processed_count or 0)
+        day = _normalize_stat_date(record.created_at)
+        trend_dates.append(day)
+        item_category_counts = defaultdict(int)
+        for item in items:
+            category = str((item or {}).get('category') or '其他').strip() or '其他'
+            category_counts[category] += 1
+            trend_map[day][category] += 1
+            item_category_counts[category] += 1
+
+        recent_sessions.append({
+            "session_id": record.id,
+            "created_at": record.created_at.isoformat() if record.created_at else '',
+            "accuracy": round(_feedback_accuracy_percent(record), 1),
+            "accepted_count": int(record.processed_count or 0),
+            "correction_count": len(items),
+            "corrections_by_category": dict(item_category_counts),
+        })
+
+    top_categories = sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))
+    correction_category_pie = [
+        {"category": category, "count": count, "percentage": round(count / total_corrections * 100, 1) if total_corrections else 0}
+        for category, count in top_categories
+    ]
+    unique_days = sorted(set(trend_dates))[-14:]
+    category_trend = []
+    for day in unique_days:
+        row = {"date": day}
+        for category in [item[0] for item in top_categories[:6]]:
+            row[category] = int(trend_map[day].get(category, 0))
+        category_trend.append(row)
+
+    return {
+        "overview": {
+            "total_sessions": len(records),
+            "average_accuracy": round(sum(accuracies) / len(accuracies), 1),
+            "total_corrections": total_corrections,
+            "total_accepted": total_accepted,
+        },
+        "accuracy_trend": [
+            {
+                "session_id": record.id,
+                "created_at": record.created_at.isoformat() if record.created_at else '',
+                "accuracy": round(_feedback_accuracy_percent(record), 1),
+            }
+            for record in records[-30:]
+        ],
+        "correction_category_pie": correction_category_pie,
+        "category_trend": category_trend,
+        "recent_sessions": list(reversed(recent_sessions[-20:])),
+    }
+
+
+@router.get("/stats/document", response_model=None)
+def get_polish_document_stats(db: Session = Depends(get_db)):
+    sessions = db.query(CatAnalysisSession).order_by(CatAnalysisSession.created_at.asc(), CatAnalysisSession.id.asc()).all()
+    if not sessions:
+        return {
+            "overview": {"total_documents": 0, "total_sessions": 0, "average_accuracy": 0, "total_accepted": 0, "total_modified": 0, "total_rejected": 0, "total_pending": 0},
+            "accuracy_trend": [],
+            "decision_pie": [],
+            "category_distribution": [],
+            "guide_comparison": [],
+            "documents": [],
+        }
+
+    latest_by_doc = {}
+    document_groups = defaultdict(list)
+    guide_groups = defaultdict(list)
+    decision_totals = defaultdict(int)
+    category_totals = defaultdict(int)
+    accuracy_values = []
+    total_accepted = total_modified = total_rejected = total_pending = 0
+
+    for session in sessions:
+        doc_key = session.source_filename or f'文档{session.id}'
+        document_groups[doc_key].append(session)
+        guide_key = session.sentence_file_name or '未指定句式库'
+        guide_groups[guide_key].append(session)
+        latest_by_doc[doc_key] = max(latest_by_doc.get(doc_key, session), session, key=lambda item: (item.created_at or datetime.datetime.min, item.id or 0))
+        if session.accuracy_rate is not None:
+            accuracy_values.append(float(session.accuracy_rate or 0))
+        total_accepted += int(session.accepted or 0)
+        total_modified += int(session.modified or 0)
+        total_rejected += int(session.rejected or 0)
+        total_pending += int(session.pending or 0)
+        decision_totals['接受'] += int(session.accepted or 0)
+        decision_totals['自定义'] += int(session.modified or 0)
+        decision_totals['拒绝'] += int(session.rejected or 0)
+        decision_totals['待处理'] += int(session.pending or 0)
+        for category, count in _json_loads(session.category_summary, {}).items():
+            category_totals[str(category)] += int(count or 0)
+
+    accuracy_trend = [
+        {
+            "analyze_id": session.analyze_id,
+            "source_filename": session.source_filename,
+            "created_at": session.created_at.isoformat() if session.created_at else '',
+            "accuracy_rate": float(session.accuracy_rate or 0),
+        }
+        for session in sessions[-30:]
+    ]
+    decision_pie = [
+        {"action": action, "count": count, "percentage": round(count / max(1, total_accepted + total_modified + total_rejected + total_pending) * 100, 1)}
+        for action, count in decision_totals.items()
+    ]
+    category_distribution = [
+        {"category": category, "count": count, "percentage": round(count / max(1, sum(category_totals.values())) * 100, 1)}
+        for category, count in sorted(category_totals.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    guide_comparison = []
+    for guide_name, guide_sessions in sorted(guide_groups.items(), key=lambda item: (-sum(float(s.accuracy_rate or 0) for s in item[1]) / max(1, len(item[1])), item[0])):
+        doc_names = sorted({session.source_filename for session in guide_sessions if session.source_filename})
+        avg_accuracy = round(sum(float(s.accuracy_rate or 0) for s in guide_sessions) / len(guide_sessions), 1)
+        guide_comparison.append({
+            "sentence_file_name": guide_name if guide_name != '未指定句式库' else None,
+            "session_count": len(guide_sessions),
+            "avg_accuracy": avg_accuracy,
+            "documents": doc_names,
+        })
+
+    documents = []
+    for doc_name, doc_sessions in sorted(document_groups.items(), key=lambda item: item[0]):
+        sorted_sessions = sorted(doc_sessions, key=lambda item: (item.created_at or datetime.datetime.min, item.id or 0))
+        latest_session = sorted_sessions[-1]
+        documents.append({
+            "source_filename": doc_name,
+            "session_count": len(doc_sessions),
+            "latest_accuracy": round(float(latest_session.accuracy_rate or 0), 1),
+            "average_accuracy": round(sum(float(s.accuracy_rate or 0) for s in doc_sessions) / len(doc_sessions), 1),
+            "sentence_file_name": latest_session.sentence_file_name,
+            "latest_session": {
+                "analyze_id": latest_session.analyze_id,
+                "created_at": latest_session.created_at.isoformat() if latest_session.created_at else '',
+                "accepted": int(latest_session.accepted or 0),
+                "modified": int(latest_session.modified or 0),
+                "rejected": int(latest_session.rejected or 0),
+                "pending": int(latest_session.pending or 0),
+                "accuracy_rate": round(float(latest_session.accuracy_rate or 0), 1),
+                "category_summary": _json_loads(latest_session.category_summary, {}),
+            },
+        })
+
+    return {
+        "overview": {
+            "total_documents": len(document_groups),
+            "total_sessions": len(sessions),
+            "average_accuracy": round(sum(accuracy_values) / len(accuracy_values), 1) if accuracy_values else 0,
+            "total_accepted": total_accepted,
+            "total_modified": total_modified,
+            "total_rejected": total_rejected,
+            "total_pending": total_pending,
+        },
+        "accuracy_trend": accuracy_trend,
+        "decision_pie": decision_pie,
+        "category_distribution": category_distribution,
+        "guide_comparison": guide_comparison,
+        "documents": documents,
+    }
+
+
+@router.get("/stats/document/{analyze_id}", response_model=None)
+def get_polish_document_stats_detail(analyze_id: str, db: Session = Depends(get_db)):
+    session_row = db.query(CatAnalysisSession).filter(CatAnalysisSession.analyze_id == analyze_id).first()
+    if not session_row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    decision_rows = db.query(CatDecisionRecord).filter(CatDecisionRecord.analyze_id == analyze_id).order_by(CatDecisionRecord.sentence_index.asc(), CatDecisionRecord.id.asc()).all()
+    return {
+        "session": {
+            "analyze_id": session_row.analyze_id,
+            "source_filename": session_row.source_filename,
+            "sentence_file_name": session_row.sentence_file_name,
+            "created_at": session_row.created_at.isoformat() if session_row.created_at else '',
+            "accuracy_rate": round(float(session_row.accuracy_rate or 0), 1) if session_row.accuracy_rate is not None else None,
+            "accepted": int(session_row.accepted or 0),
+            "modified": int(session_row.modified or 0),
+            "rejected": int(session_row.rejected or 0),
+            "pending": int(session_row.pending or 0),
+            "category_summary": _json_loads(session_row.category_summary, {}),
+        },
+        "decisions": [
+            {
+                "sentence_index": row.sentence_index,
+                "paragraph_index": row.paragraph_index,
+                "action": row.action,
+                "original_text": row.original_text,
+                "replacement_text": row.replacement_text,
+                "category": row.category,
+                "string_score": row.string_score,
+                "semantic_score": row.semantic_score,
+            }
+            for row in decision_rows
+        ],
+    }
 
 
 # ============================================================
@@ -9062,6 +9842,14 @@ def _cleanup_cat_cache() -> None:
             except Exception:
                 logger.warning("[CAT_CACHE] 清理临时文件失败: %s", temp_path)
 
+    expired_download_tokens = [
+        token
+        for token, payload in list(_cat_download_cache.items())
+        if now - float((payload or {}).get("created_at") or 0) > _CAT_CACHE_TTL_SECONDS
+    ]
+    for token in expired_download_tokens:
+        _cat_download_cache.pop(token, None)
+
 
 def _register_cat_download_asset(file_path: str, filename: str = "", media_type: str = "") -> tuple[Optional[str], Optional[str]]:
     if not file_path or not os.path.exists(file_path):
@@ -9072,6 +9860,7 @@ def _register_cat_download_asset(file_path: str, filename: str = "", media_type:
         "path": file_path,
         "filename": resolved_filename,
         "media_type": media_type or mimetypes.guess_type(resolved_filename)[0] or "application/octet-stream",
+        "created_at": time.time(),
     }
     return download_token, f"/api/polish/cat/download/{download_token}"
 
@@ -9152,11 +9941,12 @@ def _generate_cat_html_report(
 
     applied_rows = []
     for index, change in enumerate(applied_changes or [], start=1):
+        action = str(change.get('action', '') or '')
         applied_rows.append(
             f"<tr>"
             f"<td>{index}</td>"
             f"<td>{html_escape(str(change.get('paragraph', '')))}</td>"
-            f"<td>{html_escape(str(change.get('action', '')))}</td>"
+            f"<td>{html_escape(action_labels.get(action, action or '未标记'))}</td>"
             f"<td>{html_escape(str(change.get('before', '') or ''))}</td>"
             f"<td>{html_escape(str(change.get('after', '') or ''))}</td>"
             f"</tr>"
@@ -9177,7 +9967,7 @@ def _generate_cat_html_report(
 <html lang=\"zh-CN\">
 <head>
   <meta charset=\"UTF-8\" />
-  <title>CAT 润色报告</title>
+  <title>润色报告</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; margin: 0; padding: 32px; color: #0f172a; background: #f8fafc; }}
     .page {{ max-width: 1120px; margin: 0 auto; background: #ffffff; border-radius: 20px; padding: 32px; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08); }}
@@ -9198,8 +9988,8 @@ def _generate_cat_html_report(
 </head>
 <body>
   <div class=\"page\">
-    <h1>CAT 润色报告</h1>
-    <p>本报告整理本次 CAT 辅助润色的确认结果与实际写回内容，便于归档、复核与二次审校。</p>
+    <h1>润色报告</h1>
+    <p>本报告整理本次句式辅助润色的确认结果与实际写回内容，便于归档、复核与二次审校。</p>
     <div class=\"meta\">
       <p><strong>原始文件：</strong>{html_escape(source_filename or '')}</p>
       <p><strong>分析编号：</strong>{html_escape(analyze_id or '')}</p>
@@ -9212,7 +10002,7 @@ def _generate_cat_html_report(
       <div class=\"card\"><span class=\"label\">自定义</span><span class=\"value\">{action_counts['modify']}</span></div>
       <div class=\"card\"><span class=\"label\">拒绝</span><span class=\"value\">{action_counts['reject']}</span></div>
       <div class=\"card\"><span class=\"label\">待处理</span><span class=\"value\">{action_counts['pending']}</span></div>
-      <div class=\"card\"><span class=\"label\">实际写回段落</span><span class=\"value\">{len(applied_changes or [])}</span></div>
+      <div class=\"card\"><span class=\"label\">实际写回句子</span><span class=\"value\">{len(applied_changes or [])}</span></div>
     </div>
 
     <h2>本轮润色特点分析</h2>
@@ -9260,7 +10050,7 @@ def _generate_cat_html_report(
       </tbody>
     </table>
 
-    <div class=\"note\">报告中的“实际写回段落”以生成的修订版 DOCX 为准；“逐句确认明细”完整记录用户在 CAT 页面上的接受、自定义、拒绝和待处理状态。</div>
+    <div class=\"note\">报告中的“实际写回段落”以生成的修订版 DOCX 为准；“逐句确认明细”完整记录用户在句式候选页面上的接受、自定义、拒绝和待处理状态。</div>
   </div>
 </body>
 </html>"""
@@ -9472,10 +10262,11 @@ def _cat_decision_key(paragraph_index: Optional[int], sentence_index: Optional[i
 @router.post("/cat/analyze", response_model=None)
 async def cat_analyze(
     file: UploadFile = File(...),
+    product_type: Optional[str] = Form(None),
     sentence_file_id: Optional[int] = Form(None),
     terminology_file_id: Optional[int] = Form(None),
     requirements: Optional[str] = Form(None),
-    min_match_threshold: float = Form(0.29),
+    min_match_threshold: float = Form(0.34),
     fuzzy_lower_bound: float = Form(0.70),
     ai_semantic_scoring: bool = Form(True),
     ai_reason_max_chars: int = Form(15),
@@ -9530,6 +10321,7 @@ async def cat_analyze(
             db,
             sentence_file_id=sentence_file_id,
             requirements=requirements,
+            product_type=product_type,
         )
         candidate_recall_guide = _candidate_recall_guide_text(sentence_guide or '')
         if sentence_file_id and selected_sentence_guide:
@@ -9551,14 +10343,7 @@ async def cat_analyze(
         if not guide_templates:
             raise HTTPException(status_code=400, detail="句式库为空，请先选择或导入句式库")
 
-        terminology = None
-        if terminology_file_id:
-            term_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == terminology_file_id).first()
-            if term_file:
-                if term_file.file_path and term_file.file_path.lower().endswith('.xlsx'):
-                    terminology = term_file.file_path
-                else:
-                    terminology = _read_file_safe(term_file.file_path)
+        terminology = _load_scoped_terminology_source(db, terminology_file_id, product_type)
         resolved_terms = _resolve_terminology(db, terminology, pre_polished) if terminology else {}
 
         lines = pre_polished.split('\n')
@@ -9589,10 +10374,27 @@ async def cat_analyze(
         for sentence_item in sentence_items:
             line_stripped = sentence_item["text"].strip()
             source_line_stripped = str(sentence_item.get("source_sentence_text") or line_stripped).strip()
+            local_entries = _preferred_entries_for_sentence(line_stripped, candidate_recall_guide)
+            local_templates = []
+            local_seen_template_texts = set()
+            for entry in local_entries or []:
+                template_text = _template_entry_text(entry)
+                if not template_text or not _is_valid_cat_template(template_text):
+                    continue
+                dedupe_candidate = re.sub(r'\s+', '', re.sub(r'[，。！？!?；;：:、,\.\s]+$', '', template_text))
+                if not dedupe_candidate or dedupe_candidate in local_seen_template_texts:
+                    continue
+                local_seen_template_texts.add(dedupe_candidate)
+                template_id = str(entry.get("id", "")) if isinstance(entry, dict) else ""
+                local_templates.append({"text": template_text, "id": template_id})
+                if len(local_templates) >= 120:
+                    break
+            if not local_templates:
+                local_templates = guide_templates[:120]
             simple_match_debug = {}
             candidates = _simple_match(
                 line_stripped,
-                guide_templates,
+                local_templates,
                 min_threshold=min_match_threshold,
                 fuzzy_lower=fuzzy_lower_bound,
                 term_dict=resolved_terms,
@@ -9694,6 +10496,8 @@ async def cat_analyze(
                 "resolved_terms": resolved_terms,
                 "resolved_term_count": len(resolved_terms or {}),
                 "user_id": user.id if user else None,
+                "sentence_file_id": sentence_file_id,
+                "sentence_file_name": _resolve_sentence_file_name(db, sentence_file_id),
             },
         }
 
@@ -9796,6 +10600,7 @@ async def cat_apply(
     paragraph_revisions = {}
     paragraph_revision_actions = {}
     failed_replacements = []
+    applied_changes = []
     applied_accept_count = 0
     applied_modify_count = 0
     for para_idx, replacements in paragraph_sentence_replacements.items():
@@ -9827,6 +10632,12 @@ async def cat_apply(
                     applied_accept_count += 1
                 elif replacement.get("action") == "modify":
                     applied_modify_count += 1
+                applied_changes.append({
+                    "paragraph": para_idx + 1,
+                    "before": (source_sentence or fallback_sentence or '')[:200],
+                    "after": replacement_text[:200],
+                    "action": replacement.get("action") or "",
+                })
             if not matched:
                 failed_replacements.append({
                     "paragraph": para_idx + 1,
@@ -9841,7 +10652,6 @@ async def cat_apply(
 
     output_path = None
     report_path = None
-    applied_changes = []
 
     if temp_path.lower().endswith('.docx') and paragraph_revisions:
         output_dir = os.path.dirname(temp_path)
@@ -9857,7 +10667,7 @@ async def cat_apply(
             xml_paragraphs = [paragraph._p for paragraph in _iter_docx_body_paragraphs(doc)]
 
             revision_id = 100
-            author = user.username if user else "CAT润色"
+            author = user.username if user else "润色结果"
             now_str = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
             for para_idx, new_text in paragraph_revisions.items():
@@ -9879,22 +10689,8 @@ async def cat_apply(
                         p_element, new_text, author, now_str,
                         rid_del, rid_ins, w_ns,
                     )
-                    applied_changes.append({
-                        "paragraph": para_idx + 1,
-                        "before": original_text[:200],
-                        "after": new_text[:200],
-                        "action": paragraph_actions[0] if len(paragraph_actions) == 1 else "mixed",
-                        "actions": paragraph_actions,
-                    })
                 else:
                     _replace_paragraph_text_xml(p_element, new_text, w_ns)
-                    applied_changes.append({
-                        "paragraph": para_idx + 1,
-                        "before": original_text[:200],
-                        "after": new_text[:200],
-                        "action": paragraph_actions[0] if len(paragraph_actions) == 1 else "mixed",
-                        "actions": paragraph_actions,
-                    })
 
             document_root = doc.element
             final_xml = etree.tostring(document_root, xml_declaration=True, encoding='UTF-8')
@@ -9922,9 +10718,60 @@ async def cat_apply(
         "modification_rate": round(applied_modify_count / effective_decided * 100, 1) if effective_decided > 0 else None,
     })
 
+    sentence_file_id = request.sentence_file_id or file_info.get("sentence_file_id")
+    sentence_file_name = request.sentence_file_name or file_info.get("sentence_file_name")
+    category_summary = {}
+    decision_records = []
+    for decision in decisions:
+        replacement_text = _cat_decision_replacement_text(decision)
+        category = _cat_report_change_category(
+            getattr(decision, 'original_text', '') or '',
+            replacement_text,
+            getattr(decision, 'action', '') or 'pending',
+        )
+        category_summary[category] = category_summary.get(category, 0) + 1
+        decision_records.append(CatDecisionRecord(
+            analyze_id=request.analyze_id,
+            paragraph_index=getattr(decision, 'paragraph_index', 0),
+            sentence_index=getattr(decision, 'sentence_index', 0),
+            action=getattr(decision, 'action', 'pending') or 'pending',
+            original_text=getattr(decision, 'original_text', '') or '',
+            replacement_text=replacement_text,
+            category=category,
+            string_score=float(getattr(decision, 'string_score', 0.0) or 0.0),
+            semantic_score=getattr(decision, 'semantic_score', None),
+        ))
+
+    db.query(CatDecisionRecord).filter(CatDecisionRecord.analyze_id == request.analyze_id).delete(synchronize_session=False)
+    db.query(CatAnalysisSession).filter(CatAnalysisSession.analyze_id == request.analyze_id).delete(synchronize_session=False)
+    session_row = CatAnalysisSession(
+        analyze_id=request.analyze_id,
+        source_filename=request.source_filename or filename,
+        sentence_file_id=sentence_file_id,
+        sentence_file_name=sentence_file_name,
+        total_paragraphs=total_paragraphs,
+        total_items=len(decisions),
+        accepted=applied_accept_count,
+        rejected=rejected_decisions,
+        modified=applied_modify_count,
+        pending=pending_decisions,
+        accuracy_rate=accuracy.get("accuracy_rate"),
+        rejection_rate=accuracy.get("rejection_rate"),
+        modification_rate=accuracy.get("modification_rate"),
+        template_coverage=accuracy.get("template_coverage"),
+        category_summary=_json_dumps(category_summary),
+        created_by=user.username if user else "guest",
+    )
+    db.add(session_row)
+    db.flush()
+    for record in decision_records:
+        record.session_id = session_row.id
+        db.add(record)
+    db.commit()
+
     report_dir = os.path.dirname(temp_path)
     report_base = os.path.splitext(filename)[0] if filename else "润色文档"
-    report_filename = f"【CAT润色报告】{report_base}.html"
+    report_filename = f"【润色报告】{report_base}.html"
     report_path = os.path.join(report_dir, report_filename)
     _generate_cat_html_report(
         report_path=report_path,
@@ -10039,12 +10886,12 @@ def cat_get_stats(
 
 @router.get("/cat/download/{download_token}")
 def cat_download_file(download_token: str):
-    payload = _cat_download_cache.pop(download_token, None)
+    payload = _cat_download_cache.get(download_token)
     if not payload:
         raise HTTPException(status_code=404, detail="下载链接已失效")
 
     file_path = payload.get("path")
-    filename = payload.get("filename") or "cat_polished.docx"
+    filename = payload.get("filename") or "polished.docx"
     if not file_path or not os.path.exists(file_path):
         _cat_download_cache.pop(download_token, None)
         raise HTTPException(status_code=404, detail="输出文件不存在")

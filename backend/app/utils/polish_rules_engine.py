@@ -10,6 +10,61 @@
 
 import re
 
+
+_TERMINAL_PUNCTUATION = set('。.!！？?；;')
+_SENTENCE_ROLE_MARKERS = (
+    '应', '应当', '需', '需要', '必须', '请', '避免', '不得', '禁止', '用于', '以便',
+    '可以', '可', '将', '按照', '根据', '确保', '确认', '检查', '点击', '选择', '输入',
+    '打开', '关闭', '安装', '连接', '取出', '放置', '加入', '倒入', '观察', '记录',
+)
+
+
+def _split_sentence_role_prefix(text: str) -> tuple[str, str]:
+    value = str(text or '').strip()
+    if not value:
+        return '', ''
+    for pattern in [
+        r'^((?:请)?注意[：:])\s*(.+)$',
+        r'^((?:说明|提示)[：:])\s*(.+)$',
+        r'^(\d+[.、)]\s*)(.+)$',
+        r'^([*\-•·]\s*)(.+)$',
+    ]:
+        match = re.match(pattern, value)
+        if match:
+            return match.group(1), match.group(2).strip()
+    return '', value
+
+
+def _looks_like_contextual_sentence(line: str, context_text: str = '') -> bool:
+    value = str(line or '').strip()
+    if not value:
+        return False
+    if value[-1] in _TERMINAL_PUNCTUATION or value.endswith(('：', ':')):
+        return False
+
+    prefix, body = _split_sentence_role_prefix(value)
+    candidate = body or value
+    if len(candidate) < 12:
+        return False
+    if not re.search(r'[\u4e00-\u9fff]', candidate):
+        return False
+    if re.match(r'^[A-Za-z0-9_\-/（）()]+$', candidate):
+        return False
+
+    has_marker = any(marker in candidate for marker in _SENTENCE_ROLE_MARKERS)
+    has_clause = '，' in candidate or ',' in candidate
+    if prefix and has_marker:
+        return True
+    if has_marker and has_clause:
+        return True
+
+    siblings = [seg.strip() for seg in str(context_text or '').split('\n') if seg.strip()]
+    if len(siblings) >= 2:
+        punctuated_siblings = sum(1 for seg in siblings if seg[-1:] in _TERMINAL_PUNCTUATION)
+        if punctuated_siblings >= max(1, len(siblings) // 2) and has_marker:
+            return True
+    return False
+
 # ═══════════════════════════════════════════════
 # 规则 1：术语替换（保守匹配）
 # ═══════════════════════════════════════════════
@@ -272,7 +327,7 @@ _CONDITIONAL_FIX = re.compile(
 )
 
 
-def detect_punctuation_issues(line: str) -> list:
+def detect_punctuation_issues(line: str, context_text: str = '') -> list:
     """
     检测标点问题：
     1. 句尾缺少标点
@@ -282,7 +337,7 @@ def detect_punctuation_issues(line: str) -> list:
 
     # 1. 句尾缺标点
     stripped = line.rstrip()
-    if stripped and stripped[-1] not in _SENTENCE_END_PUNCTUATION:
+    if stripped and stripped[-1] not in _SENTENCE_END_PUNCTUATION and _looks_like_contextual_sentence(stripped, context_text):
         # 不以标点结尾的中文句子
         issues.append({
             'original': stripped[-1:],
@@ -388,7 +443,7 @@ def apply_all_rules(
 
     # 规则 4：标点规范
     if 'punctuation' in enabled_rules:
-        punct_issues = detect_punctuation_issues(result)
+        punct_issues = detect_punctuation_issues(result, context_text)
         if punct_issues:
             for issue in punct_issues:
                 issue['engine_key'] = 'punctuation'

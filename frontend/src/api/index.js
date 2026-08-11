@@ -402,3 +402,9 @@ export const docPolishAPI = {
     timeout: 600000
   })
 }
+
+export const polishStatsAPI = {
+  getTextStats: () => instance.get('/polish/stats/text'),
+  getDocumentStats: () => instance.get('/polish/stats/document'),
+  getDocumentDetail: (analyzeId) => instance.get(`/polish/stats/document/${analyzeId}`)
+}
