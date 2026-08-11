@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Query
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import os
 import io
+from pathlib import Path
 import csv
 import json
 import zipfile
@@ -46,13 +48,15 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 UPLOAD_DIR = "./static/uploads/translation"
 TRANSLATION_OUTPUT_DIR = "./static/translations"
 UNSUPPORTED_TRANSLATION_EXTENSIONS = {".dita", ".zip"}
-WRITABLE_MEMORY_FILE_TYPES = {"xlsx", "xlsm", "xltx", "xltm"}
+WRITABLE_MEMORY_FILE_TYPES = {"xlsx", "xlsm", "xltx", "xltm", "csv", "tsv"}
 
 _translate_tasks = {}
 _translate_tasks_lock = threading.Lock()
 _thread_locals = threading.local()
 _memory_file_cache = {}
 _memory_file_cache_lock = threading.Lock()
+_translation_stats_cache = {}
+_translation_stats_cache_lock = threading.Lock()
 CANCELED_TRANSLATION_PREFIX = "CANCELED:"
 SUPPORTED_AI_MODELS = {"qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"}
 WORD_CONNECTORS = {"-", "_", ".", "/", ":", "+", "'", "’", "%", "#", "&"}
@@ -67,6 +71,7 @@ LATIN_LANGUAGE_CHAR_HINTS = {
     "de": "äöüß",
     "es": "áéíñóúü¿¡",
 }
+TRANSLATION_STATS_CACHE_TTL_SECONDS = 10
 
 
 class TranslationCancelled(Exception):
@@ -109,6 +114,7 @@ def _mark_translation_canceled(doc_id: int, db: Session | None = None, message: 
     if doc and not str(doc.translated_filename or "").startswith(CANCELED_TRANSLATION_PREFIX):
         doc.translated_filename = f"{CANCELED_TRANSLATION_PREFIX}{message[:200]}"
         db.commit()
+        _clear_translation_stats_cache(doc.batch_id)
 
 
 def _read_text_file_with_fallback(file_path: str) -> str:
@@ -131,6 +137,7 @@ def _reset_translation_usage_stats():
         "memory_word_count": 0,
     }
     _thread_locals.memory_candidate_cache = {}
+    _thread_locals.memory_match_trace = []
 
 
 def _get_translation_usage_stats():
@@ -144,6 +151,40 @@ def _get_translation_usage_stats():
         }
         _thread_locals.translation_usage_stats = stats
     return stats
+
+
+def _append_memory_match_trace(source_text: str, candidate_text: str, reason: str,
+                               score: float | None = None, priority=None):
+    trace = getattr(_thread_locals, "memory_match_trace", None)
+    if trace is None:
+        trace = []
+        _thread_locals.memory_match_trace = trace
+    trace.append({
+        "source_text": str(source_text or "")[:200],
+        "candidate_text": str(candidate_text or "")[:200],
+        "reason": reason,
+        "score": round(float(score), 4) if score is not None else None,
+        "priority": list(priority) if priority is not None else None,
+    })
+
+
+def _get_memory_match_trace():
+    return list(getattr(_thread_locals, "memory_match_trace", []) or [])
+
+
+MEMORY_MATCH_METADATA_TOKEN_RE = re.compile(
+    r"\b(?:english|chinese|bilingual|ruo|ivd|ivdr|nmpa|wh|sz|rk|ars|rs)\b",
+    re.IGNORECASE,
+)
+MEMORY_MATCH_VERSION_TOKEN_RE = re.compile(
+    r"\b(?:v|ver|version)\s*\d+(?:\.\d+)+\b|\b\d+(?:\.\d+){2,}\b",
+    re.IGNORECASE,
+)
+NON_TRANSLATABLE_COUNT_TOKEN_RE = re.compile(
+    r"\b(?:dnbseq|mgiseq|mgidl|mgi|mammoth|dolphin|gplan|cabinet|dm|mm)\b",
+    re.IGNORECASE,
+)
+NON_TRANSLATABLE_CODE_TOKEN_RE = re.compile(r"\b[a-z]*\d[a-z0-9.+_-]*\b", re.IGNORECASE)
 
 
 def _is_cjk_char(char: str) -> bool:
@@ -198,6 +239,47 @@ def _count_text_units(text: str) -> int:
     return count
 
 
+def _strip_memory_match_metadata(value: str) -> str:
+    text = _normalize_match_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"[_/+]+", " ", text)
+    text = MEMORY_MATCH_VERSION_TOKEN_RE.sub(" ", text)
+    text = MEMORY_MATCH_METADATA_TOKEN_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _normalize_metadata_free_compact_text(value: str) -> str:
+    normalized = _strip_memory_match_metadata(value)
+    return "".join(
+        ch for ch in normalized
+        if unicodedata.category(ch).startswith(("L", "N"))
+    )
+
+
+def _normalize_metadata_free_token_sequence(value: str):
+    normalized = _strip_memory_match_metadata(value)
+    return tuple(
+        re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ÿА-Яа-я\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]+", normalized)
+    )
+
+
+def _strip_non_translatable_count_text(value: str) -> str:
+    text = _strip_memory_match_metadata(value)
+    if not text:
+        return ""
+    text = NON_TRANSLATABLE_COUNT_TOKEN_RE.sub(" ", text)
+    text = NON_TRANSLATABLE_CODE_TOKEN_RE.sub(" ", text)
+    text = re.sub(r"\b\d+(?:\.\d+)*\b", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _count_translatable_text_units(text: str) -> int:
+    return _count_text_units(_strip_non_translatable_count_text(text))
+
+
 def _record_translation_usage(source: str, text: str):
     if source not in {"ai", "memory"}:
         return
@@ -205,7 +287,7 @@ def _record_translation_usage(source: str, text: str):
         return
     stats = _get_translation_usage_stats()
     stats[f"{source}_char_count"] += len(str(text))
-    stats[f"{source}_word_count"] += _count_text_units(text)
+    stats[f"{source}_word_count"] += _count_translatable_text_units(text)
 
 
 def _record_passthrough_usage(text: str):
@@ -247,6 +329,40 @@ def _clear_memory_candidate_cache(memory_file_id: int | None = None):
             stale_keys.append(key)
     for key in stale_keys:
         cache.pop(key, None)
+
+
+def _ensure_memory_bank_entry(
+    db: Session,
+    source_text: str,
+    translated_text: str,
+    source_lang: str,
+    target_lang: str,
+    tags: str = "",
+):
+    normalized_source = (source_text or "").strip()
+    normalized_translated = (translated_text or "").strip()
+    normalized_source_lang = (source_lang or "").strip() or "zh"
+    normalized_target_lang = (target_lang or "").strip() or "en"
+    normalized_tags = (tags or "").strip()
+
+    existing = db.query(MemoryBank).filter(
+        MemoryBank.source_text == normalized_source,
+        MemoryBank.translated_text == normalized_translated,
+        MemoryBank.source_lang == normalized_source_lang,
+        MemoryBank.target_lang == normalized_target_lang,
+    ).first()
+    if existing:
+        return existing, False
+
+    entry = MemoryBank(
+        source_text=normalized_source,
+        translated_text=normalized_translated,
+        source_lang=normalized_source_lang,
+        target_lang=normalized_target_lang,
+        tags=normalized_tags,
+    )
+    db.add(entry)
+    return entry, True
 
 
 def _normalize_usage_counts(source_count: int, ai_count: int, memory_count: int):
@@ -310,7 +426,7 @@ def _normalize_doc_word_counts(doc):
         }
 
     source_text = _load_doc_source_text(doc)
-    source_word_count = _count_text_units(source_text)
+    source_word_count = _count_translatable_text_units(source_text)
     legacy = _normalize_doc_char_counts(doc)
     ai_word_count = 0
     if source_word_count > 0 and legacy["source_char_count"] > 0:
@@ -351,6 +467,30 @@ def _summarize_docs(docs):
     }
 
 
+def _build_batch_separator(texts) -> str:
+    combined = "\n".join(str(text or "") for text in texts)
+    token = "[[MC_DOCSEG]]"
+    counter = 1
+    while token in combined:
+        token = f"[[MC_DOCSEG_{counter}]]"
+        counter += 1
+    return f"\n{token}\n"
+
+
+def _split_batched_translation_output(translated_combined: str, separator: str,
+                                      expected_parts: int, error_code: str):
+    token = (separator or "").strip()
+    if not token:
+        raise ValueError(error_code)
+    translated_parts = [
+        part.strip()
+        for part in re.split(rf"\s*{re.escape(token)}\s*", (translated_combined or "").strip())
+    ]
+    if len(translated_parts) != expected_parts:
+        raise ValueError(error_code)
+    return translated_parts
+
+
 def _clone_zipinfo(zinfo: zipfile.ZipInfo) -> zipfile.ZipInfo:
     cloned = zipfile.ZipInfo(filename=zinfo.filename, date_time=zinfo.date_time)
     cloned.compress_type = zinfo.compress_type
@@ -375,7 +515,64 @@ def _normalize_match_text(value: str) -> str:
 
 
 def _normalize_compact_text(value: str) -> str:
-    return re.sub(r"[\s\-_,.;:!?()\[\]{}<>/\\|，。；：！？（）【】《》、·•*×]+", "", _normalize_match_text(value))
+    normalized = _normalize_match_text(value)
+    return "".join(
+        ch for ch in normalized
+        if unicodedata.category(ch).startswith(("L", "N"))
+    )
+
+
+def _normalize_token_sequence(value: str):
+    normalized = _normalize_match_text(value)
+    return tuple(
+        re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ÿА-Яа-я\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]+", normalized)
+    )
+
+
+def _token_subsequence_index(source_tokens, candidate_tokens):
+    if not source_tokens or not candidate_tokens or len(candidate_tokens) > len(source_tokens):
+        return -1
+    window = len(candidate_tokens)
+    for index in range(len(source_tokens) - window + 1):
+        if source_tokens[index:index + window] == candidate_tokens:
+            return index
+    return -1
+
+
+def _contains_candidate_tokens(source_text: str, candidate_text: str) -> bool:
+    source_tokens = _normalize_token_sequence(source_text)
+    candidate_tokens = _normalize_token_sequence(candidate_text)
+    if not source_tokens or not candidate_tokens:
+        return False
+    return _token_subsequence_index(source_tokens, candidate_tokens) >= 0
+
+
+def _token_sequence_contains(container_tokens, candidate_tokens) -> bool:
+    if not container_tokens or not candidate_tokens:
+        return False
+    return _token_subsequence_index(container_tokens, candidate_tokens) >= 0
+
+
+def _memory_candidate_priority(source_text: str, candidate_text: str):
+    source_tokens = _normalize_token_sequence(source_text)
+    candidate_tokens = _normalize_token_sequence(candidate_text)
+    compact_candidate = _normalize_memory_lookup_key(candidate_text)
+    metadata_source_tokens = _normalize_metadata_free_token_sequence(source_text)
+    metadata_candidate_tokens = _normalize_metadata_free_token_sequence(candidate_text)
+    metadata_compact_candidate = _normalize_metadata_free_compact_text(candidate_text)
+    token_coverage = len(candidate_tokens) if _token_sequence_contains(source_tokens, candidate_tokens) else 0
+    metadata_token_coverage = len(metadata_candidate_tokens) if _token_sequence_contains(metadata_source_tokens, metadata_candidate_tokens) else 0
+    char_coverage = _memory_char_match_score(source_text, candidate_text)
+    similarity = _memory_similarity(source_text, candidate_text)
+    return (
+        metadata_token_coverage,
+        token_coverage,
+        char_coverage,
+        similarity,
+        len(metadata_compact_candidate),
+        len(compact_candidate),
+        len(candidate_text or ""),
+    )
 
 
 def _text_matches_source_language(text: str, source_lang: str) -> bool:
@@ -539,9 +736,13 @@ def _memory_similarity(source_text: str, candidate_text: str) -> float:
     normalized_candidate = _normalize_match_text(candidate_text)
     compact_source = _normalize_memory_lookup_key(source_text)
     compact_candidate = _normalize_memory_lookup_key(candidate_text)
+    metadata_source = _strip_memory_match_metadata(source_text)
+    metadata_candidate = _strip_memory_match_metadata(candidate_text)
     if not normalized_source or not normalized_candidate:
         return 0.0
     if normalized_source == normalized_candidate or compact_source == compact_candidate:
+        return 1.0
+    if metadata_source and metadata_candidate and metadata_source == metadata_candidate:
         return 1.0
 
     ratio = SequenceMatcher(None, normalized_source, normalized_candidate).ratio()
@@ -549,16 +750,29 @@ def _memory_similarity(source_text: str, candidate_text: str) -> float:
     if compact_source and compact_candidate and (compact_source in compact_candidate or compact_candidate in compact_source):
         contain_ratio = min(len(compact_source), len(compact_candidate)) / max(len(compact_source), len(compact_candidate))
         compact_ratio = max(compact_ratio, contain_ratio)
-    return max(ratio, compact_ratio)
+    metadata_ratio = SequenceMatcher(None, metadata_source, metadata_candidate).ratio() if metadata_source and metadata_candidate else 0.0
+    metadata_compact_source = _normalize_metadata_free_compact_text(source_text)
+    metadata_compact_candidate = _normalize_metadata_free_compact_text(candidate_text)
+    metadata_compact_ratio = SequenceMatcher(None, metadata_compact_source, metadata_compact_candidate).ratio() if metadata_compact_source and metadata_compact_candidate else 0.0
+    return max(ratio, compact_ratio, metadata_ratio, metadata_compact_ratio)
 
 
 def _memory_char_match_score(source_text: str, candidate_text: str) -> float:
     compact_source = _normalize_memory_lookup_key(source_text)
     compact_candidate = _normalize_memory_lookup_key(candidate_text)
-    if not compact_source or not compact_candidate:
-        return 0.0
-    matched_chars = sum(block.size for block in SequenceMatcher(None, compact_source, compact_candidate).get_matching_blocks())
-    return matched_chars / len(compact_source)
+    best_score = 0.0
+    if compact_source and compact_candidate:
+        matched_chars = sum(block.size for block in SequenceMatcher(None, compact_source, compact_candidate).get_matching_blocks())
+        best_score = matched_chars / len(compact_source)
+
+    metadata_compact_source = _normalize_metadata_free_compact_text(source_text)
+    metadata_compact_candidate = _normalize_metadata_free_compact_text(candidate_text)
+    if metadata_compact_source and metadata_compact_candidate:
+        metadata_chars = sum(
+            block.size for block in SequenceMatcher(None, metadata_compact_source, metadata_compact_candidate).get_matching_blocks()
+        )
+        best_score = max(best_score, metadata_chars / len(metadata_compact_source))
+    return best_score
 
 
 def _trigram_overlap_ratio(set_a, set_b) -> float:
@@ -605,10 +819,27 @@ def _apply_memory_translation_preserving_unmatched(source_text: str, candidate_s
     return "".join(pieces) or translated_text
 
 
+def _apply_memory_translation_by_tokens(source_text: str, candidate_source: str, translated_text: str) -> str:
+    candidate_tokens = _normalize_token_sequence(candidate_source)
+    if len(candidate_tokens) < 2:
+        return _apply_memory_translation_preserving_unmatched(source_text, candidate_source, translated_text)
+
+    separator_pattern = r"(?:[\W_]+)"
+    token_pattern = separator_pattern.join(re.escape(token) for token in candidate_tokens)
+    replaced, count = re.subn(token_pattern, translated_text, source_text or "", count=1, flags=re.IGNORECASE)
+    if count > 0:
+        return replaced
+    return _apply_memory_translation_preserving_unmatched(source_text, candidate_source, translated_text)
+
+
 def _match_memory_candidates(source_text: str, bundle_or_candidates, threshold: float = 0.8, preserve_sentence_unmatched: bool = True):
     bundle = _resolve_memory_bundle(bundle_or_candidates)
     normalized_source = _normalize_match_text(source_text)
     compact_source = _normalize_memory_lookup_key(source_text)
+    source_tokens = _normalize_token_sequence(source_text)
+    metadata_source = _strip_memory_match_metadata(source_text)
+    metadata_compact_source = _normalize_metadata_free_compact_text(source_text)
+    metadata_tokens = _normalize_metadata_free_token_sequence(source_text)
     if not normalized_source:
         return None
 
@@ -617,9 +848,60 @@ def _match_memory_candidates(source_text: str, bundle_or_candidates, threshold: 
         entry = indexed_entry["entry"]
         candidate_source = entry["source_text"]
         if indexed_entry["normalized_source"] == normalized_source:
+            _append_memory_match_trace(source_text, candidate_source, "normalized_exact", score=1.0)
             return entry["translated_text"]
         if compact_source and indexed_entry["compact_source"] == compact_source:
+            _append_memory_match_trace(source_text, candidate_source, "compact_exact", score=1.0)
             return _apply_memory_translation_preserving_unmatched(source_text, candidate_source, entry["translated_text"])
+        candidate_tokens = indexed_entry.get("normalized_tokens") or ()
+        if source_tokens and candidate_tokens and source_tokens == candidate_tokens:
+            _append_memory_match_trace(source_text, candidate_source, "token_exact", score=1.0)
+            return _apply_memory_translation_preserving_unmatched(source_text, candidate_source, entry["translated_text"])
+        if metadata_source and indexed_entry.get("metadata_source") == metadata_source:
+            _append_memory_match_trace(source_text, candidate_source, "metadata_exact", score=1.0)
+            return entry["translated_text"]
+        if metadata_compact_source and indexed_entry.get("metadata_compact_source") == metadata_compact_source:
+            _append_memory_match_trace(source_text, candidate_source, "metadata_compact_exact", score=1.0)
+            return entry["translated_text"]
+        candidate_metadata_tokens = indexed_entry.get("metadata_tokens") or ()
+        if metadata_tokens and candidate_metadata_tokens and metadata_tokens == candidate_metadata_tokens:
+            _append_memory_match_trace(source_text, candidate_source, "metadata_token_exact", score=1.0)
+            return entry["translated_text"]
+
+    token_subsequence_match = None
+    token_subsequence_size = 0
+    for indexed_entry in indexed_entries:
+        candidate_tokens = indexed_entry.get("normalized_tokens") or ()
+        if len(candidate_tokens) < 2:
+            continue
+        token_index = _token_subsequence_index(source_tokens, candidate_tokens)
+        if token_index < 0:
+            continue
+        candidate_compact = indexed_entry["compact_source"]
+        if len(candidate_compact) < 6:
+            continue
+        if len(candidate_tokens) > token_subsequence_size:
+            token_subsequence_match = indexed_entry
+            token_subsequence_size = len(candidate_tokens)
+
+    if token_subsequence_match is not None:
+        entry = token_subsequence_match["entry"]
+        priority = _memory_candidate_priority(source_text, entry["source_text"])
+        _append_memory_match_trace(
+            source_text,
+            entry["source_text"],
+            "token_subsequence",
+            score=max(
+                _memory_similarity(source_text, entry["source_text"]),
+                _memory_char_match_score(source_text, entry["source_text"]),
+            ),
+            priority=priority,
+        )
+        return _apply_memory_translation_by_tokens(
+            source_text,
+            entry["source_text"],
+            entry["translated_text"],
+        )
 
     lines = [line.strip() for line in re.split(r"\n+", source_text or "") if line.strip()]
     if len(lines) > 1:
@@ -653,7 +935,10 @@ def _match_memory_candidates(source_text: str, bundle_or_candidates, threshold: 
             candidate_pool = filtered_pool
 
     best_match = None
+    best_candidate_source = None
+    best_reason = None
     best_score = threshold
+    best_priority = (-1, -1, -1.0, -1.0, -1, -1, -1)
     source_kind = _memory_unit_kind(source_text)
     for indexed_entry in candidate_pool:
         entry = indexed_entry["entry"]
@@ -669,13 +954,20 @@ def _match_memory_candidates(source_text: str, bundle_or_candidates, threshold: 
             _memory_similarity(source_text, entry["source_text"]),
             _memory_char_match_score(source_text, entry["source_text"]),
         )
-        if score >= best_score:
+        priority = _memory_candidate_priority(source_text, entry["source_text"])
+        if score > best_score or (score == best_score and priority > best_priority):
             best_score = score
+            best_priority = priority
+            best_candidate_source = entry["source_text"]
+            best_reason = "similarity_ranked"
             best_match = _apply_memory_translation_preserving_unmatched(
                 source_text,
                 entry["source_text"],
                 entry["translated_text"],
             )
+
+    if best_match is not None and best_candidate_source is not None:
+        _append_memory_match_trace(source_text, best_candidate_source, best_reason, score=best_score, priority=best_priority)
 
     return best_match
 
@@ -787,21 +1079,13 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
     unmatched_segments = []
     unmatched_meta = []
 
-    def _split_batched_translation(translated_combined: str, expected_parts: int):
-        translated_parts = [
-            part.strip() for part in re.split(r"\s*---DOCSEG---\s*", translated_combined or "") if part.strip()
-        ]
-        if len(translated_parts) != expected_parts:
-            raise ValueError("hybrid_batched_translation_split_mismatch")
-        return translated_parts
-
     def _build_unmatched_groups(texts):
         max_batch_items = 24
         max_batch_chars = 3200
         groups = []
         current_group = []
         current_chars = 0
-        separator_chars = len("\n---DOCSEG---\n")
+        separator_chars = len(_build_batch_separator([""]))
 
         for idx, text in enumerate(texts):
             text_len = len(text or "")
@@ -846,24 +1130,49 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
             group_texts = [unmatched_segments[idx] for idx in group]
             batched_translations = None
             if len(group_texts) > 1:
+                separator = _build_batch_separator(group_texts)
                 try:
-                    batched_translations = _split_batched_translation(
-                        translate_with_ai("\n---DOCSEG---\n".join(group_texts), model, source_lang, target_lang),
+                    batched_translations = _split_batched_translation_output(
+                        translate_with_ai(
+                            separator.join(group_texts),
+                            model,
+                            source_lang,
+                            target_lang,
+                            batch_separator=separator,
+                        ),
+                        separator,
                         len(group_texts),
+                        "hybrid_batched_translation_split_mismatch",
                     )
                 except Exception:
                     batched_translations = None
 
             for position, unmatched_index in enumerate(group):
                 segment_index, leading, trailing, original_segment = unmatched_meta[unmatched_index]
-                translated = (
-                    batched_translations[position]
-                    if batched_translations is not None
-                    else translate_with_ai(unmatched_segments[unmatched_index], model, source_lang, target_lang)
-                )
+                try:
+                    translated = (
+                        batched_translations[position]
+                        if batched_translations is not None
+                        else translate_with_ai(unmatched_segments[unmatched_index], model, source_lang, target_lang)
+                    )
+                    _record_translation_usage("ai", original_segment)
+                    ai_used = True
+                except HTTPException:
+                    translated, fallback_hit = translate_with_memory(
+                        unmatched_segments[unmatched_index],
+                        source_lang,
+                        target_lang,
+                        db,
+                        bank=bank,
+                        memory_file_id=memory_file_id,
+                        allow_partial=True,
+                    )
+                    if fallback_hit:
+                        _record_translation_usage("memory", original_segment)
+                        memory_used = True
+                    else:
+                        return None, memory_used, ai_used
                 translated_segments[segment_index] = f"{leading}{translated}{trailing}"
-                _record_translation_usage("ai", original_segment)
-                ai_used = True
 
     if matched_segments == 0:
         return None, False, False
@@ -918,16 +1227,16 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
             duplicate_indexes[text] = [index]
             unique_pending_indexes.append(index)
 
-        sep = "\n---DOCSEG---\n"
         max_batch_items = 80
         max_batch_chars = 8000
         batch_groups = []
         current_group = []
         current_chars = 0
+        separator_chars = len(_build_batch_separator([""]))
 
         for index in unique_pending_indexes:
             text_len = len(texts[index] or "")
-            estimated_chars = text_len if not current_group else text_len + len(sep)
+            estimated_chars = text_len if not current_group else text_len + separator_chars
             if current_group and (len(current_group) >= max_batch_items or current_chars + estimated_chars > max_batch_chars):
                 batch_groups.append(current_group)
                 current_group = []
@@ -944,11 +1253,21 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                 return {index: translate_with_ai(texts[index], model, source_lang, target_lang)}
 
             batch_texts = [texts[i] for i in batch_indexes]
-            combined = sep.join(batch_texts)
-            translated_combined = translate_with_ai(combined, model, source_lang, target_lang)
-            translated_parts = [part.strip() for part in translated_combined.split(sep)]
-            if len(translated_parts) != len(batch_texts):
-                raise ValueError("batched_translation_split_mismatch")
+            separator = _build_batch_separator(batch_texts)
+            combined = separator.join(batch_texts)
+            translated_combined = translate_with_ai(
+                combined,
+                model,
+                source_lang,
+                target_lang,
+                batch_separator=separator,
+            )
+            translated_parts = _split_batched_translation_output(
+                translated_combined,
+                separator,
+                len(batch_texts),
+                "batched_translation_split_mismatch",
+            )
             return {idx: translated_parts[position] for position, idx in enumerate(batch_indexes)}
 
         if engine == "ai" and len(batch_groups) > 1:
@@ -975,11 +1294,15 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                 else:
                     try:
                         batch_texts = [texts[i] for i in batch_indexes]
-                        combined = sep.join(batch_texts)
+                        separator = _build_batch_separator(batch_texts)
+                        combined = separator.join(batch_texts)
                         translated_combined = _do_translate(combined, engine, model, source_lang, target_lang, db)
-                        translated_parts = [part.strip() for part in translated_combined.split(sep)]
-                        if len(translated_parts) != len(batch_texts):
-                            raise ValueError("batched_translation_split_mismatch")
+                        translated_parts = _split_batched_translation_output(
+                            translated_combined,
+                            separator,
+                            len(batch_texts),
+                            "batched_translation_split_mismatch",
+                        )
                         for bi, idx in enumerate(batch_indexes):
                             translated_texts[idx] = translated_parts[bi]
                     except Exception:
@@ -1080,6 +1403,81 @@ def _normalize_header_key(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", str(value or "").strip().lower())
 
 
+def _header_implied_language(header: str) -> str | None:
+    normalized = _normalize_header_key(header)
+    if normalized in {"zhcn", "zh", "cn", "中文", "chinese"}:
+        return "zh"
+    if normalized in {"enus", "en", "英文", "english"}:
+        return "en"
+    if normalized in {"jajp", "ja", "日文", "japanese"}:
+        return "ja"
+    if normalized in {"kokr", "ko", "韩文", "korean"}:
+        return "ko"
+    return None
+
+
+def _resolve_memory_file_columns(headers, fallback_second_column: int = 2):
+    source_keywords = ["source", "source_text", "sourcetext", "src", "原文", "源文", "text"]
+    translated_keywords = ["target", "translated_text", "translatedtext", "translation", "译文", "targettext", "result"]
+    source_lang_keywords = ["sourcelang", "srclang", "源语言"]
+    target_lang_keywords = ["targetlang", "tgtlang", "目标语言"]
+    normalized_headers = {
+        _normalize_header_key(header): index
+        for index, header in enumerate(headers, start=1)
+        if _normalize_header_key(header)
+    }
+
+    def resolve_column(keys, fallback_index: int | None):
+        for key in keys:
+            normalized_key = _normalize_header_key(key)
+            if normalized_key in normalized_headers:
+                return normalized_headers[normalized_key]
+        return fallback_index
+
+    source_column = resolve_column(source_keywords, 1)
+    translated_column = resolve_column(
+        translated_keywords,
+        fallback_second_column if source_column != fallback_second_column else max(len(headers) + 1, fallback_second_column),
+    )
+    source_lang_column = resolve_column(source_lang_keywords, None)
+    target_lang_column = resolve_column(target_lang_keywords, None)
+    return {
+        "source_column": source_column,
+        "translated_column": translated_column,
+        "source_lang_column": source_lang_column,
+        "target_lang_column": target_lang_column,
+        "source_header_lang": _header_implied_language(headers[source_column - 1]) if source_column and source_column - 1 < len(headers) else None,
+        "translated_header_lang": _header_implied_language(headers[translated_column - 1]) if translated_column and translated_column - 1 < len(headers) else None,
+    }
+
+
+def _memory_entry_values_by_column(source_text: str, translated_text: str, source_lang: str, target_lang: str,
+                                   source_header_lang: str | None, translated_header_lang: str | None):
+    source_value = source_text
+    translated_value = translated_text
+    if source_header_lang and translated_header_lang:
+        value_by_lang = {
+            (source_lang or "").strip(): source_text,
+            (target_lang or "").strip(): translated_text,
+        }
+        if source_header_lang in value_by_lang:
+            source_value = value_by_lang[source_header_lang]
+        if translated_header_lang in value_by_lang:
+            translated_value = value_by_lang[translated_header_lang]
+    return source_value, translated_value
+
+
+def _detect_text_encoding(file_path: str) -> str:
+    raw = Path(file_path).read_bytes()
+    for encoding in ["utf-8", "utf-8-sig", "gbk", "gb2312", "gb18030", "latin-1"]:
+        try:
+            raw.decode(encoding)
+            return encoding
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return "utf-8"
+
+
 def _parse_memory_text_entries(raw_text: str):
     entries = []
     delimiters = ["\t", "=>", "->", "→", "|", "｜"]
@@ -1120,14 +1518,41 @@ def _normalize_memory_entry(row: dict):
 
     source_text = pick_value(source_keys)
     translated_text = pick_value(target_keys)
+    bilingual_values = {}
+    for key, value in normalized_row.items():
+        implied_lang = _header_implied_language(key)
+        if implied_lang and value is not None and str(value).strip() != "":
+            bilingual_values[implied_lang] = str(value).strip()
+
+    if (not source_text or not translated_text) and len(bilingual_values) >= 2:
+        if bilingual_values.get("zh") and bilingual_values.get("en"):
+            source_text = bilingual_values["zh"]
+            translated_text = bilingual_values["en"]
+            source_lang = "zh"
+            target_lang = "en"
+        else:
+            ordered_langs = list(bilingual_values.keys())
+            source_lang = ordered_langs[0]
+            target_lang = ordered_langs[1]
+            source_text = bilingual_values[source_lang]
+            translated_text = bilingual_values[target_lang]
+
     if not source_text or not translated_text:
         return None
+
+    source_lang_value = pick_value(source_lang_keys)
+    target_lang_value = pick_value(target_lang_keys)
+    if not source_lang_value and 'source_lang' in locals():
+        source_lang_value = source_lang
+    if not target_lang_value and 'target_lang' in locals():
+        target_lang_value = target_lang
 
     return {
         "source_text": source_text,
         "translated_text": translated_text,
-        "source_lang": pick_value(source_lang_keys),
-        "target_lang": pick_value(target_lang_keys),
+        "source_lang": source_lang_value,
+        "target_lang": target_lang_value,
+        "bilingual_values": bilingual_values,
     }
 
 
@@ -1236,6 +1661,13 @@ def _get_memory_file_candidates(db: Session, memory_file_id: int, source_lang: s
 
     candidates = []
     for entry in _get_cached_memory_file_entries(memory_file):
+        bilingual_values = entry.get("bilingual_values") or {}
+        if bilingual_values.get(source_lang) and bilingual_values.get(target_lang):
+            candidates.append({
+                "source_text": bilingual_values[source_lang],
+                "translated_text": bilingual_values[target_lang],
+            })
+            continue
         entry_source_lang = (entry.get("source_lang") or source_lang).strip()
         entry_target_lang = (entry.get("target_lang") or target_lang).strip()
         if entry_source_lang != source_lang or entry_target_lang != target_lang:
@@ -1256,18 +1688,29 @@ def _get_memory_file_candidates(db: Session, memory_file_id: int, source_lang: s
 def _build_memory_candidate_bundle(candidates):
     exact_map = {}
     compact_map = {}
+    token_map = {}
     indexed_entries = []
     for entry in candidates:
         normalized_source = _normalize_match_text(entry["source_text"])
         compact_source = _normalize_memory_lookup_key(entry["source_text"])
+        normalized_tokens = _normalize_token_sequence(entry["source_text"])
+        metadata_source = _strip_memory_match_metadata(entry["source_text"])
+        metadata_compact_source = _normalize_metadata_free_compact_text(entry["source_text"])
+        metadata_tokens = _normalize_metadata_free_token_sequence(entry["source_text"])
         if normalized_source and normalized_source not in exact_map:
             exact_map[normalized_source] = entry["translated_text"]
         if compact_source and compact_source not in compact_map:
             compact_map[compact_source] = entry["translated_text"]
+        if normalized_tokens and normalized_tokens not in token_map:
+            token_map[normalized_tokens] = entry["translated_text"]
         indexed_entries.append({
             "entry": entry,
             "normalized_source": normalized_source,
             "compact_source": compact_source,
+            "normalized_tokens": normalized_tokens,
+            "metadata_source": metadata_source,
+            "metadata_compact_source": metadata_compact_source,
+            "metadata_tokens": metadata_tokens,
             "compact_len": len(compact_source),
             "trigram_set": set(compact_source[i:i + 3] for i in range(len(compact_source) - 2)) if len(compact_source) >= 3 else set(),
         })
@@ -1275,6 +1718,7 @@ def _build_memory_candidate_bundle(candidates):
         "entries": candidates,
         "exact_map": exact_map,
         "compact_map": compact_map,
+        "token_map": token_map,
         "indexed_entries": indexed_entries,
     }
 
@@ -1295,6 +1739,7 @@ def _get_memory_candidate_bundle(db: Session, source_lang: str, target_lang: str
 
 def _lookup_memory_exact_match(source_text: str, bundle) -> str | None:
     normalized_source = _normalize_match_text(source_text)
+    metadata_source = _strip_memory_match_metadata(source_text)
     if not normalized_source:
         return None
 
@@ -1312,6 +1757,24 @@ def _lookup_memory_exact_match(source_text: str, bundle) -> str | None:
                     entry["source_text"],
                     entry["translated_text"],
                 )
+
+    token_source = _normalize_token_sequence(source_text)
+    if token_source:
+        translated = bundle.get("token_map", {}).get(token_source)
+        if translated:
+            return translated
+
+    metadata_compact_source = _normalize_metadata_free_compact_text(source_text)
+    metadata_token_source = _normalize_metadata_free_token_sequence(source_text)
+    if metadata_source or metadata_compact_source or metadata_token_source:
+        for indexed_entry in bundle.get("indexed_entries", []):
+            entry = indexed_entry["entry"]
+            if metadata_source and indexed_entry.get("metadata_source") == metadata_source:
+                return entry["translated_text"]
+            if metadata_compact_source and indexed_entry.get("metadata_compact_source") == metadata_compact_source:
+                return entry["translated_text"]
+            if metadata_token_source and indexed_entry.get("metadata_tokens") == metadata_token_source:
+                return entry["translated_text"]
 
     stripped_source = (source_text or "").strip()
     if compact_source and stripped_source:
@@ -1369,44 +1832,23 @@ def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, 
         for index, header in enumerate(headers, start=1):
             worksheet.cell(row=1, column=index).value = header
 
-    source_keywords = ["source", "source_text", "sourcetext", "src", "原文", "源文", "text"]
-    translated_keywords = ["target", "translated_text", "translatedtext", "translation", "译文", "targettext", "result"]
-    source_lang_keywords = ["sourcelang", "srclang", "源语言"]
-    target_lang_keywords = ["targetlang", "tgtlang", "目标语言"]
-    normalized_headers = {
-        _normalize_header_key(header): index
-        for index, header in enumerate(headers, start=1)
-        if _normalize_header_key(header)
-    }
-
-    def resolve_column(keys, fallback_index: int):
-        for key in keys:
-            normalized_key = _normalize_header_key(key)
-            if normalized_key in normalized_headers:
-                return normalized_headers[normalized_key]
-        return fallback_index
-
-    source_column = resolve_column(source_keywords, 1)
-    translated_column = resolve_column(translated_keywords, 2 if source_column != 2 else max(worksheet.max_column + 1, 2))
-    source_lang_column = resolve_column(source_lang_keywords, None)
-    target_lang_column = resolve_column(target_lang_keywords, None)
-
-    source_header_key = _normalize_header_key(headers[source_column - 1]) if source_column - 1 < len(headers) else ""
-    target_header_key = _normalize_header_key(headers[translated_column - 1]) if translated_column - 1 < len(headers) else ""
-
-    if source_header_key in {"zhcn", "zh", "cn", "中文", "chinese"}:
-        source_lang = "zh"
-    elif source_header_key in {"enus", "en", "英文", "english"}:
-        source_lang = "en"
-
-    if target_header_key in {"zhcn", "zh", "cn", "中文", "chinese"}:
-        target_lang = "zh"
-    elif target_header_key in {"enus", "en", "英文", "english"}:
-        target_lang = "en"
+    columns = _resolve_memory_file_columns(headers, fallback_second_column=2)
+    source_column = columns["source_column"]
+    translated_column = columns["translated_column"]
+    source_lang_column = columns["source_lang_column"]
+    target_lang_column = columns["target_lang_column"]
+    source_value, translated_value = _memory_entry_values_by_column(
+        source_text,
+        translated_text,
+        source_lang,
+        target_lang,
+        columns["source_header_lang"],
+        columns["translated_header_lang"],
+    )
 
     next_row = worksheet.max_row + 1 if worksheet.max_row else 2
-    worksheet.cell(row=next_row, column=source_column).value = source_text
-    worksheet.cell(row=next_row, column=translated_column).value = translated_text
+    worksheet.cell(row=next_row, column=source_column).value = source_value
+    worksheet.cell(row=next_row, column=translated_column).value = translated_value
     if source_lang_column:
         worksheet.cell(row=next_row, column=source_lang_column).value = source_lang
     if target_lang_column:
@@ -1414,6 +1856,63 @@ def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, 
 
     workbook.save(memory_file.file_path)
     workbook.close()
+
+
+def _append_memory_entry_to_delimited_file(memory_file: KnowledgeFile, source_text: str, translated_text: str,
+                                          source_lang: str, target_lang: str):
+    encoding = _detect_text_encoding(memory_file.file_path)
+    with open(memory_file.file_path, "r", encoding=encoding, newline="") as existing_file:
+        content = existing_file.read()
+
+    sample = content[:2048]
+    delimiter = "\t" if str(memory_file.file_type or "").lower() == "tsv" else None
+    if delimiter is None:
+        try:
+            delimiter = csv.Sniffer().sniff(sample or "zh-CN,en-US\n", delimiters=",\t;|").delimiter
+        except Exception:
+            delimiter = ","
+
+    rows = list(csv.reader(io.StringIO(content), delimiter=delimiter)) if content else []
+    headers = rows[0] if rows else []
+    if not headers:
+        headers = ["source_text", "translated_text"]
+        rows = [headers]
+
+    columns = _resolve_memory_file_columns(headers, fallback_second_column=2)
+    source_value, translated_value = _memory_entry_values_by_column(
+        source_text,
+        translated_text,
+        source_lang,
+        target_lang,
+        columns["source_header_lang"],
+        columns["translated_header_lang"],
+    )
+
+    max_columns = max(
+        len(headers),
+        columns["source_column"] or 0,
+        columns["translated_column"] or 0,
+        columns["source_lang_column"] or 0,
+        columns["target_lang_column"] or 0,
+    )
+    while len(headers) < max_columns:
+        headers.append("")
+    rows[0] = headers
+
+    new_row = [""] * max_columns
+    new_row[(columns["source_column"] or 1) - 1] = source_value
+    new_row[(columns["translated_column"] or 2) - 1] = translated_value
+    if columns["source_lang_column"]:
+        new_row[columns["source_lang_column"] - 1] = source_lang
+    if columns["target_lang_column"]:
+        new_row[columns["target_lang_column"] - 1] = target_lang
+    rows.append(new_row)
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=delimiter, lineterminator="\n")
+    writer.writerows(rows)
+    with open(memory_file.file_path, "w", encoding=encoding, newline="") as existing_file:
+        existing_file.write(output.getvalue())
 
 
 def _search_memory_file(db: Session, memory_file_id: int, source_text: str, source_lang: str, target_lang: str,
@@ -1474,20 +1973,36 @@ def _collect_memory_candidates(db: Session, source_lang: str, target_lang: str,
 
 def _find_memory_glossary(source_text: str, candidates, max_entries: int = 20):
     glossary = []
+    selected_token_sequences = []
     normalized_source = (source_text or "").strip()
     if not normalized_source:
         return glossary
 
     compact_source = _normalize_memory_lookup_key(source_text)
-    for entry in sorted(candidates, key=lambda item: len(item["source_text"]), reverse=True):
+    ranked_candidates = sorted(
+        candidates,
+        key=lambda item: _memory_candidate_priority(source_text, item["source_text"]),
+        reverse=True,
+    )
+    for entry in ranked_candidates:
         source_term = entry["source_text"]
         translated_term = entry["translated_text"]
         normalized_term = _normalize_match_text(source_term)
         compact_term = _normalize_memory_lookup_key(source_term)
+        term_tokens = _normalize_token_sequence(source_term)
         if normalized_term == normalized_source or (compact_term and compact_term == compact_source):
             return [{"source_text": source_term, "translated_text": translated_term, "full_match": True}]
-        if len(source_term) >= 2 and (source_term in source_text or normalized_term in normalized_source or (compact_term and compact_term in compact_source)):
+        if len(source_term) >= 2 and (
+            source_term in source_text
+            or normalized_term in normalized_source
+            or (compact_term and compact_term in compact_source)
+            or _contains_candidate_tokens(source_text, source_term)
+        ):
+            if term_tokens and any(_token_sequence_contains(selected_tokens, term_tokens) for selected_tokens in selected_token_sequences):
+                continue
             glossary.append({"source_text": source_term, "translated_text": translated_term, "full_match": False})
+            if term_tokens:
+                selected_token_sequences.append(term_tokens)
         if len(glossary) >= max_entries:
             break
     return glossary
@@ -1496,11 +2011,20 @@ def _find_memory_glossary(source_text: str, candidates, max_entries: int = 20):
 def _apply_memory_glossary(source_text: str, glossary):
     translated = source_text
     replaced = False
-    for entry in sorted(glossary, key=lambda item: len(item["source_text"]), reverse=True):
+    for entry in sorted(
+        glossary,
+        key=lambda item: (len(_normalize_token_sequence(item["source_text"])), len(_normalize_memory_lookup_key(item["source_text"]))),
+        reverse=True,
+    ):
         source_term = entry["source_text"]
         translated_term = entry["translated_text"]
         if source_term and source_term in translated:
             translated = translated.replace(source_term, translated_term)
+            replaced = True
+            continue
+        replaced_text = _apply_memory_translation_by_tokens(translated, source_term, translated_term)
+        if replaced_text != translated:
+            translated = replaced_text
             replaced = True
     return translated, replaced
 
@@ -1534,7 +2058,26 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             result = r
             _record_translation_usage("memory", text)
     if engine in ["ai", "hybrid"] and not result:
-        result = translate_with_ai(text, model, source_lang, target_lang)
+        ai_error = None
+        try:
+            result = translate_with_ai(text, model, source_lang, target_lang)
+        except HTTPException as exc:
+            ai_error = exc
+            if engine == "hybrid":
+                fallback_result, fallback_hit = translate_with_memory(
+                    text,
+                    source_lang,
+                    target_lang,
+                    db,
+                    bank=_get_memory_bank(),
+                    memory_file_id=_get_memory_file_id(),
+                    allow_partial=True,
+                )
+                if fallback_hit:
+                    result = fallback_result
+                    _record_translation_usage("memory", text)
+            if not result:
+                raise ai_error
         if result == text:
             _record_passthrough_usage(text)
         elif result:
@@ -1655,10 +2198,7 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
     IDML_NS = "http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"
     ET_LXML.register_namespace("idPkg", IDML_NS)
 
-    in_buf = io.BytesIO()
-    with open(fpath, "rb") as f:
-        in_buf.write(f.read())
-    in_buf.seek(0)
+    archive_entries = []
 
     all_original = []
     all_translated = []
@@ -1675,12 +2215,13 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
             return False
         return True
 
-    with zipfile.ZipFile(in_buf, 'r') as z_in:
+    with zipfile.ZipFile(fpath, 'r') as z_in:
         for zinfo in z_in.infolist():
             name = zinfo.filename
+            raw = z_in.read(zinfo)
+            archive_entries.append((_clone_zipinfo(zinfo), raw, name))
             if not name.endswith(".xml"):
                 continue
-            raw = z_in.read(zinfo)
             try:
                 root = ET_LXML.fromstring(raw)
             except Exception:
@@ -1701,7 +2242,14 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
                 modified_entries[name] = root
 
     if not texts_to_translate:
-        return in_buf.read(), [], []
+        out_buf = io.BytesIO()
+        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as z_out:
+            for output_info, raw, name in archive_entries:
+                if name == "mimetype":
+                    output_info.compress_type = zipfile.ZIP_STORED
+                z_out.writestr(output_info, raw)
+        out_buf.seek(0)
+        return out_buf.read(), [], []
 
     translated_parts = _translate_text_items(texts_to_translate, engine, model, source_lang, target_lang, db)
     while len(translated_parts) < len(texts_to_translate):
@@ -1712,18 +2260,13 @@ def _translate_idml(fpath: str, engine: str, model: str, source_lang: str, targe
         content_targets[text_idx].text = translated
 
     out_buf = io.BytesIO()
-    in_buf.seek(0)
-    with zipfile.ZipFile(in_buf, 'r') as z_in:
-        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as z_out:
-            for zinfo in z_in.infolist():
-                raw = z_in.read(zinfo)
-                name = zinfo.filename
-                if name in modified_entries:
-                    raw = ET_LXML.tostring(modified_entries[name], xml_declaration=True, encoding="UTF-8", pretty_print=False)
-                output_info = _clone_zipinfo(zinfo)
-                if name == "mimetype":
-                    output_info.compress_type = zipfile.ZIP_STORED
-                z_out.writestr(output_info, raw)
+    with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as z_out:
+        for output_info, raw, name in archive_entries:
+            if name in modified_entries:
+                raw = ET_LXML.tostring(modified_entries[name], xml_declaration=True, encoding="UTF-8", pretty_print=False)
+            if name == "mimetype":
+                output_info.compress_type = zipfile.ZIP_STORED
+            z_out.writestr(output_info, raw)
     out_buf.seek(0)
 
     return out_buf.read(), all_original, all_translated
@@ -2206,7 +2749,8 @@ def _looks_like_invalid_translation(result: str, original: str, source_lang: str
     return False
 
 
-def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str, glossary=None) -> str:
+def translate_with_ai(content: str, model: str, source_lang: str, target_lang: str,
+                      glossary=None, batch_separator: str = None) -> str:
     model = _normalize_ai_model(model)
     resolved_model = ai_client.resolve_translation_model(model) or model
     lang_names = {
@@ -2228,7 +2772,10 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
             glossary_lines = "\n5. 必须优先采用以下术语映射，保持术语译法一致\n\n术语映射：\n" + "\n".join(glossary_pairs) + "\n"
 
     batch_delimiter_rule = ""
-    if "---DOCSEG---" in content:
+    separator_token = (batch_separator or "").strip()
+    if separator_token:
+        batch_delimiter_rule = f"\n6. 原文中若出现分隔符 {separator_token}，必须在译文中原样保留每一个分隔符，不能翻译、删除、改写或增减。\n"
+    elif "---DOCSEG---" in content:
         batch_delimiter_rule = "\n6. 原文中若出现分隔符 ---DOCSEG---，必须在译文中原样保留每一个分隔符，不能翻译、删除、改写或增减。\n"
 
     prompt = f"""你是一个专业的技术文档翻译引擎。请将以下{src_name}文本翻译为{tgt_name}。
@@ -2288,6 +2835,148 @@ def translate_with_ai(content: str, model: str, source_lang: str, target_lang: s
         )
 
     return result
+
+
+def _clear_translation_stats_cache(batch_id: str | None = None):
+    with _translation_stats_cache_lock:
+        if batch_id is None:
+            _translation_stats_cache.clear()
+            return
+        normalized_batch_id = (batch_id or "").strip()
+        _translation_stats_cache.pop(normalized_batch_id, None)
+        _translation_stats_cache.pop("", None)
+
+
+def _get_cached_translation_stats(batch_id: str | None):
+    normalized_batch_id = (batch_id or "").strip()
+    with _translation_stats_cache_lock:
+        cached = _translation_stats_cache.get(normalized_batch_id)
+    if not cached:
+        return None
+    if datetime.utcnow() - cached["created_at"] > timedelta(seconds=TRANSLATION_STATS_CACHE_TTL_SECONDS):
+        with _translation_stats_cache_lock:
+            _translation_stats_cache.pop(normalized_batch_id, None)
+        return None
+    return cached["payload"]
+
+
+def _set_cached_translation_stats(batch_id: str | None, payload: dict):
+    normalized_batch_id = (batch_id or "").strip()
+    with _translation_stats_cache_lock:
+        _translation_stats_cache[normalized_batch_id] = {
+            "created_at": datetime.utcnow(),
+            "payload": payload,
+        }
+
+
+def _refresh_missing_translation_doc_word_counts(db: Session):
+    docs = (
+        db.query(TranslationDoc)
+        .filter(
+            TranslationDoc.source_word_count == 0,
+            TranslationDoc.ai_word_count == 0,
+            TranslationDoc.memory_word_count == 0,
+            (TranslationDoc.source_char_count > 0)
+            | (TranslationDoc.ai_char_count > 0)
+            | (TranslationDoc.memory_char_count > 0)
+            | (TranslationDoc.original_content != "")
+        )
+        .all()
+    )
+    docs_updated = False
+    for doc in docs:
+        word_counts = _normalize_doc_word_counts(doc)
+        if word_counts["dirty"]:
+            doc.source_word_count = word_counts["source_word_count"]
+            doc.ai_word_count = word_counts["ai_word_count"]
+            doc.memory_word_count = word_counts["memory_word_count"]
+            docs_updated = True
+    if docs_updated:
+        db.commit()
+        _clear_translation_stats_cache()
+
+
+def _query_translation_doc_summary(db: Session, file_type: str | None = None, batch_id: str | None = None):
+    query = db.query(
+        func.count(TranslationDoc.id),
+        func.coalesce(func.sum(TranslationDoc.source_word_count), 0),
+        func.coalesce(func.sum(TranslationDoc.ai_word_count), 0),
+        func.coalesce(func.sum(TranslationDoc.memory_word_count), 0),
+    )
+    if file_type == "text":
+        query = query.filter(TranslationDoc.file_type == "text")
+    elif file_type == "file":
+        query = query.filter(TranslationDoc.file_type != "text")
+    if batch_id:
+        query = query.filter(TranslationDoc.batch_id == batch_id)
+    doc_count, doc_word_count, ai_word_count, memory_word_count = query.one()
+    return {
+        "doc_count": int(doc_count or 0),
+        "doc_word_count": int(doc_word_count or 0),
+        "ai_word_count": int(ai_word_count or 0),
+        "memory_word_count": int(memory_word_count or 0),
+    }
+
+
+def _build_translation_stats_payload(db: Session, batch_id: str | None):
+    _refresh_missing_translation_doc_word_counts(db)
+
+    overall_usage = _query_translation_doc_summary(db)
+    text_usage = _query_translation_doc_summary(db, file_type="text")
+    overall_docs = _query_translation_doc_summary(db, file_type="file")
+
+    latest_batch_id = (batch_id or "").strip() or None
+    if not latest_batch_id:
+        latest_batch_doc = (
+            db.query(TranslationDoc.batch_id)
+            .filter(TranslationDoc.file_type != "text", TranslationDoc.batch_id != "")
+            .order_by(TranslationDoc.created_at.desc(), TranslationDoc.id.desc())
+            .first()
+        )
+        latest_batch_id = latest_batch_doc[0] if latest_batch_doc else None
+
+    current_upload = {
+        "batch_id": latest_batch_id,
+        "doc_count": 0,
+        "doc_word_count": 0,
+        "ai_word_count": 0,
+        "memory_word_count": 0,
+    }
+    if latest_batch_id:
+        current_upload = {
+            "batch_id": latest_batch_id,
+            **_query_translation_doc_summary(db, file_type="file", batch_id=latest_batch_id),
+        }
+
+    latest_text_doc = (
+        db.query(
+            TranslationDoc.source_word_count,
+            TranslationDoc.ai_word_count,
+            TranslationDoc.memory_word_count,
+            TranslationDoc.created_at,
+        )
+        .filter(TranslationDoc.file_type == "text")
+        .order_by(TranslationDoc.created_at.desc(), TranslationDoc.id.desc())
+        .first()
+    )
+    latest_text_translation = None
+    if latest_text_doc is not None:
+        latest_text_translation = {
+            "source_word_count": int(latest_text_doc[0] or 0),
+            "ai_word_count": int(latest_text_doc[1] or 0),
+            "memory_word_count": int(latest_text_doc[2] or 0),
+            "created_at": latest_text_doc[3].isoformat() if latest_text_doc[3] else None,
+        }
+
+    return {
+        "text_word_count": text_usage["doc_word_count"],
+        "doc_count": overall_docs["doc_count"],
+        "doc_word_count": overall_docs["doc_word_count"],
+        "ai_word_count": overall_usage["ai_word_count"],
+        "memory_word_count": overall_usage["memory_word_count"],
+        "current_upload": current_upload,
+        "latest_text_translation": latest_text_translation,
+    }
 
 
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
@@ -2573,7 +3262,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             doc.original_preview = original_content[:500] + "..." if len(original_content) > 500 else original_content
             doc.translated_preview = translated_content[:500] + "..." if len(translated_content) > 500 else translated_content
             total_chars = len(original_content)
-            total_words = _count_text_units(original_content)
+            total_words = _count_translatable_text_units(original_content)
             doc.source_char_count = total_chars
             doc.ai_char_count = min(total_chars, usage_stats["ai_char_count"])
             doc.memory_char_count = min(total_chars, usage_stats["memory_char_count"])
@@ -2581,6 +3270,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             doc.ai_word_count = min(total_words, usage_stats["ai_word_count"])
             doc.memory_word_count = min(total_words, usage_stats["memory_word_count"])
             db.commit()
+            _clear_translation_stats_cache(doc.batch_id)
 
         with _translate_tasks_lock:
             _translate_tasks[doc_id] = {"status": "completed", "error": None, "translated_filename": output_filename}
@@ -2591,6 +3281,7 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
         if doc:
             doc.translated_filename = f"ERROR:{error_msg[:200]}"
             db.commit()
+            _clear_translation_stats_cache(doc.batch_id)
         with _translate_tasks_lock:
             _translate_tasks[doc_id] = {"status": "error", "error": error_msg}
     finally:
@@ -2611,15 +3302,16 @@ async def translate_text(
     resolved_source_lang = _resolve_source_language(req.source_lang, req.target_lang, text=req.content)
     _ensure_translation_direction(resolved_source_lang, req.target_lang)
     source_char_count = len(req.content)
-    source_word_count = _count_text_units(req.content)
+    source_word_count = _count_translatable_text_units(req.content)
 
     translated = _do_translate(req.content, engine, req.model, resolved_source_lang, req.target_lang, db)
     usage_stats = _snapshot_translation_usage_stats()
     from_memory = usage_stats["memory_char_count"] > 0
     from_ai = usage_stats["ai_char_count"] > 0
 
+    memory_bank_created = False
     if engine == "hybrid" and from_ai and not from_memory:
-        create_memory_entry(
+        _, memory_bank_created = _ensure_memory_bank_entry(
             db=db,
             source_text=req.content,
             translated_text=translated,
@@ -2647,6 +3339,9 @@ async def translate_text(
     )
     db.add(doc_record)
     db.commit()
+    _clear_translation_stats_cache()
+    if memory_bank_created:
+        _clear_memory_candidate_cache()
 
     return TranslationResponse(
         original=req.content,
@@ -2666,6 +3361,10 @@ async def get_translation_stats(
     db: Session = Depends(get_db),
     _: UserOut = Depends(require_admin),
 ):
+    cached = _get_cached_translation_stats(batch_id)
+    if cached is not None:
+        return cached
+
     all_docs = db.query(TranslationDoc).all()
     docs_updated = False
     for doc in all_docs:
@@ -2678,71 +3377,14 @@ async def get_translation_stats(
     if docs_updated:
         db.commit()
 
-    text_docs = [d for d in all_docs if d.file_type == "text"]
-    file_docs = [d for d in all_docs if d.file_type != "text"]
-
-    text_word_count = sum(_normalize_doc_word_counts(doc)["source_word_count"] for doc in text_docs)
-    all_usage = [_normalize_doc_word_counts(doc) for doc in all_docs]
-    ai_word_count = sum(item["ai_word_count"] for item in all_usage)
-    memory_word_count = sum(item["memory_word_count"] for item in all_usage)
-
-    latest_batch_id = (batch_id or "").strip() or None
-    if not latest_batch_id:
-        latest_batch_doc = (
-            db.query(TranslationDoc)
-            .filter(TranslationDoc.file_type != "text", TranslationDoc.batch_id != "")
-            .order_by(TranslationDoc.created_at.desc())
-            .first()
-        )
-        latest_batch_id = latest_batch_doc.batch_id if latest_batch_doc else None
-
-    current_upload = {
-        "batch_id": latest_batch_id,
-        "doc_count": 0,
-        "doc_word_count": 0,
-        "ai_word_count": 0,
-        "memory_word_count": 0,
-    }
-    if latest_batch_id:
-        batch_docs = (
-            db.query(TranslationDoc)
-            .filter(TranslationDoc.file_type != "text", TranslationDoc.batch_id == latest_batch_id)
-            .all()
-        )
-        current_upload = {"batch_id": latest_batch_id, **_summarize_docs(batch_docs)}
-
-    overall_docs = _summarize_docs(file_docs)
-
-    latest_text_doc = (
-        db.query(TranslationDoc)
-        .filter(TranslationDoc.file_type == "text")
-        .order_by(TranslationDoc.created_at.desc(), TranslationDoc.id.desc())
-        .first()
-    )
-    if latest_text_doc is not None:
-        latest_text_usage = _normalize_doc_word_counts(latest_text_doc)
-        latest_text_translation = {
-            "source_word_count": latest_text_usage["source_word_count"],
-            "ai_word_count": latest_text_usage["ai_word_count"],
-            "memory_word_count": latest_text_usage["memory_word_count"],
-            "created_at": latest_text_doc.created_at.isoformat() if latest_text_doc.created_at else None,
-        }
-    else:
-        latest_text_translation = None
-    return {
-        "text_word_count": text_word_count,
-        "doc_count": overall_docs["doc_count"],
-        "doc_word_count": overall_docs["doc_word_count"],
-        "ai_word_count": ai_word_count,
-        "memory_word_count": memory_word_count,
-        "current_upload": current_upload,
-        "latest_text_translation": latest_text_translation,
-    }
+    payload = _build_translation_stats_payload(db, batch_id)
+    _set_cached_translation_stats(batch_id, payload)
+    return payload
 
 
 @router.get("/providers/status")
 async def get_translation_provider_status(_: UserOut = Depends(require_admin)):
-    return ai_client.provider_status()
+    return ai_client.provider_status(include_health=True)
 
 
 @router.post("/translate/file")
@@ -2799,6 +3441,7 @@ async def translate_file(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    _clear_translation_stats_cache(doc.batch_id)
 
     thread = threading.Thread(
         target=_run_translate_thread,
@@ -3018,7 +3661,7 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
 
     file_type = str(memory_file.file_type or "").lower()
     if file_type not in WRITABLE_MEMORY_FILE_TYPES:
-        raise HTTPException(status_code=400, detail="当前仅支持写入 Excel 记忆库文件（xlsx、xlsm、xltx、xltm）")
+        raise HTTPException(status_code=400, detail="当前仅支持写入 Excel/CSV/TSV 记忆库文件")
 
     source_text = (entry.source_text or "").strip()
     translated_text = (entry.translated_text or "").strip()
@@ -3028,9 +3671,32 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
     resolved_source_lang = _resolve_source_language(entry.source_lang, entry.target_lang, text=source_text)
     _ensure_translation_direction(resolved_source_lang, entry.target_lang)
 
+    original_file_bytes = b""
     try:
-        _append_memory_entry_to_excel(
-            memory_file=memory_file,
+        with open(memory_file.file_path, "rb") as existing_file:
+            original_file_bytes = existing_file.read()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"读取记忆库源文件失败: {str(exc)}")
+
+    try:
+        if file_type in {"csv", "tsv"}:
+            _append_memory_entry_to_delimited_file(
+                memory_file=memory_file,
+                source_text=source_text,
+                translated_text=translated_text,
+                source_lang=resolved_source_lang,
+                target_lang=entry.target_lang,
+            )
+        else:
+            _append_memory_entry_to_excel(
+                memory_file=memory_file,
+                source_text=source_text,
+                translated_text=translated_text,
+                source_lang=resolved_source_lang,
+                target_lang=entry.target_lang,
+            )
+        _, memory_bank_created = _ensure_memory_bank_entry(
+            db=db,
             source_text=source_text,
             translated_text=translated_text,
             source_lang=resolved_source_lang,
@@ -3040,11 +3706,24 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
         memory_file.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(memory_file)
+        if memory_bank_created:
+            _clear_memory_candidate_cache()
         _invalidate_memory_file_cache(memory_file.id)
     except HTTPException:
+        db.rollback()
+        try:
+            with open(memory_file.file_path, "wb") as existing_file:
+                existing_file.write(original_file_bytes)
+        except OSError:
+            pass
         raise
     except Exception as exc:
         db.rollback()
+        try:
+            with open(memory_file.file_path, "wb") as existing_file:
+                existing_file.write(original_file_bytes)
+        except OSError:
+            pass
         raise HTTPException(status_code=500, detail=f"写入记忆库文件失败: {str(exc)}")
 
     return {
@@ -3052,6 +3731,7 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
         "memory_file_id": memory_file.id,
         "filename": memory_file.filename,
         "file_type": file_type,
+        "saved_to_memory_bank": True,
     }
 
 
@@ -3112,6 +3792,8 @@ async def delete_translation_doc(
     current_user: UserOut = Depends(get_current_active_user),
 ):
     doc = _require_translation_doc_access(db, doc_id, current_user)
+    affected_batch_id = doc.batch_id
     db.delete(doc)
     db.commit()
+    _clear_translation_stats_cache(affected_batch_id)
     return {"message": "Translation doc deleted successfully"}

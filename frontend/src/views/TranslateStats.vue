@@ -119,6 +119,7 @@ import { translationAPI } from '@/api'
 import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 
 const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
+const STATS_CACHE_TTL_MS = 10000
 
 use([PieChart, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
@@ -140,6 +141,8 @@ const stats = ref({
 
 const loading = ref(false)
 let refreshTimer = null
+let lastLoadedAt = 0
+let inflightRequest = null
 
 const hasOverallChartData = computed(() => {
   return ((stats.value.ai_word_count || 0) + (stats.value.memory_word_count || 0)) > 0
@@ -246,26 +249,39 @@ const currentUploadPieOption = computed(() => ({
   ]
 }))
 
-async function loadStats() {
-  loading.value = true
-  try {
-    const batchId = sessionStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || localStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || ''
-    const res = await translationAPI.getStats(batchId)
-    if (res.data) {
-      stats.value = {
-        ...stats.value,
-        ...res.data,
-        current_upload: {
-          ...stats.value.current_upload,
-          ...(res.data.current_upload || {})
-        }
-      }
-    }
-  } catch (e) {
-    console.error('加载统计数据失败', e)
-  } finally {
-    loading.value = false
+async function loadStats(force = false) {
+  if (!force && inflightRequest) {
+    return inflightRequest
   }
+  if (!force && Date.now() - lastLoadedAt < STATS_CACHE_TTL_MS) {
+    return stats.value
+  }
+
+  loading.value = true
+  inflightRequest = (async () => {
+    try {
+      const batchId = sessionStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || localStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || ''
+      const res = await translationAPI.getStats(batchId)
+      if (res.data) {
+        stats.value = {
+          ...stats.value,
+          ...res.data,
+          current_upload: {
+            ...stats.value.current_upload,
+            ...(res.data.current_upload || {})
+          }
+        }
+        lastLoadedAt = Date.now()
+      }
+    } catch (e) {
+      console.error('加载统计数据失败', e)
+    } finally {
+      inflightRequest = null
+      loading.value = false
+    }
+  })()
+
+  return inflightRequest
 }
 
 function handleBatchUpdated(event) {
@@ -274,12 +290,14 @@ function handleBatchUpdated(event) {
     sessionStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
     localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
   }
-  loadStats()
+  lastLoadedAt = 0
+  loadStats(true)
 }
 
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible') {
-    loadStats()
+    lastLoadedAt = 0
+    loadStats(true)
     startPolling()
     return
   }
@@ -300,7 +318,7 @@ function stopPolling() {
 }
 
 onMounted(() => {
-  loadStats()
+  loadStats(true)
   window.addEventListener(TRANSLATION_BATCH_EVENT, handleBatchUpdated)
   window.addEventListener(TRANSLATION_STATS_EVENT, loadStats)
   window.addEventListener('storage', loadStats)

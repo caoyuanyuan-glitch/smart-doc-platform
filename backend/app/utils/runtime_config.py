@@ -110,6 +110,7 @@ def apply_ai_secret_aliases():
     )
     if _configured(kimi_key):
         os.environ["KIMI_API_KEY"] = kimi_key
+        os.environ["MOONSHOT_API_KEY"] = kimi_key
 
     qwen_key = _resolve_secret_value(
         env_names=("QWEN_API_KEY", "DASHSCOPE_API_KEY"),

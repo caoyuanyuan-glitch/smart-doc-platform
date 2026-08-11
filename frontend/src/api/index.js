@@ -322,6 +322,7 @@ export const convertAPI = {
 
 export const translationAPI = {
   translate: (data) => instance.post('/translation/translate', data),
+  getProviderStatus: () => instance.get('/translation/providers/status'),
   translateFile: (formData) => instance.post('/translation/translate/file', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 600000
