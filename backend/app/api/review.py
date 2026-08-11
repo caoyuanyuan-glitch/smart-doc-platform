@@ -222,6 +222,31 @@ def _query_review_rows_for_user(
     return [review for review in rows if getattr(get_document(db, review.document_id), "user_id", None) == current_user.id]
 
 
+def _has_bound_current_user(current_user) -> bool:
+    return hasattr(current_user, "role") and hasattr(current_user, "id")
+
+
+def _resolve_param_value(value, default=None):
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if hasattr(value, "default"):
+        resolved = value.default
+        return default if resolved is Ellipsis else resolved
+    return value
+
+
+def _query_review_rows_legacy(
+    db: Session,
+    document_id: int | None = None,
+    status: str | None = None,
+    latest_only: bool = False,
+    limit: int = 100,
+):
+    if document_id is None and status is None and not latest_only and limit == 100:
+        return get_reviews(db)
+    return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+
+
 def _ensure_document_access(document, current_user: UserOut):
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -259,6 +284,11 @@ def _serialize_review_list_item(db: Session, review, document_map):
     if review.status == 'running':
         review_dict['progress'] = get_progress(review.id)
     return review_dict
+
+
+class ReviewTrace(dict):
+    def __len__(self):
+        return len(self.get("chunks") or [])
 
 router = APIRouter()
 
@@ -1526,18 +1556,24 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     total_length = len(content)
 
     SMALL_DOC_THRESHOLD = 3000
-    if total_length <= SMALL_DOC_THRESHOLD:
+    use_full_doc_review = total_length <= SMALL_DOC_THRESHOLD and _review_ai_token_budget() <= 0
+    if use_full_doc_review:
         print(f"[审核] 小文档 ({total_length} 字符)，使用全量不分块审核模式")
         selected_basis = _select_relevant_ai_review_basis(content, ai_review_basis_sections)
         try:
+            cache_kwargs = {}
+            if provider is not None:
+                cache_kwargs["force_provider"] = provider
+            if document_name is not None:
+                cache_kwargs["document_name"] = document_name
             all_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, content, document_language, selected_basis,
                 _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '30'),
-                force_provider=provider, document_name=document_name
+                **cache_kwargs,
             )
             for issue in all_issues:
                 issue['chapter'] = issue.get('chapter') or '全文'
-            trace = {
+            trace = ReviewTrace({
                 "enabled": True,
                 "selected_chunk_count": 1,
                 "total_chunk_count": 1,
@@ -1559,7 +1595,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                     "cache_hit": cache_hit,
                 }],
                 "issue_count": len(all_issues),
-            }
+            })
             return all_issues, trace
         except concurrent.futures.TimeoutError:
             print(f"[审核] 小文档全量审核超时，回退到分块模式")
@@ -1592,14 +1628,14 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     all_issues = []
     total = len(chunks)
     chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
-    trace = {
+    trace = ReviewTrace({
         "enabled": True,
         "selected_chunk_count": len(chunks),
         "total_chunk_count": len(all_chunks),
         "chunk_timeout_seconds": chunk_timeout,
         "chunks": [],
         "chunk_meta": [],
-    }
+    })
     for index, start, chunk in chunks:
         budget_reached, budget_summary = _review_ai_budget_reached(review_id)
         if budget_reached:
@@ -1641,9 +1677,14 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f"selected={len(chunks)}/{len(all_chunks)}, basis_len={len(selected_basis)}"
         )
         try:
+            cache_kwargs = {}
+            if provider is not None:
+                cache_kwargs["force_provider"] = provider
+            if document_name is not None:
+                cache_kwargs["document_name"] = document_name
             chunk_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, chunk, document_language, selected_basis, chunk_timeout,
-                force_provider=provider, document_name=document_name
+                **cache_kwargs,
             )
             for issue in chunk_issues:
                 issue['chapter'] = issue.get('chapter') or f'AI chunk {index}'
@@ -7173,14 +7214,27 @@ async def list_reviews(
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
-    reviews = _query_review_rows_for_user(
-        db,
-        current_user,
-        document_id=document_id,
-        status=status,
-        latest_only=latest_only,
-        limit=limit,
-    )
+    document_id = _resolve_param_value(document_id)
+    status = _resolve_param_value(status)
+    latest_only = bool(_resolve_param_value(latest_only, False))
+    limit = int(_resolve_param_value(limit, 100) or 100)
+    if _has_bound_current_user(current_user):
+        reviews = _query_review_rows_for_user(
+            db,
+            current_user,
+            document_id=document_id,
+            status=status,
+            latest_only=latest_only,
+            limit=limit,
+        )
+    else:
+        reviews = _query_review_rows_legacy(
+            db,
+            document_id=document_id,
+            status=status,
+            latest_only=latest_only,
+            limit=limit,
+        )
     document_map = {
         doc.id: doc
         for doc in get_documents_by_ids(db, [review.document_id for review in reviews])
@@ -8922,7 +8976,7 @@ def _assign_gold_issue_matches(gold_rows, issues):
     if not gold_rows or not issues:
         return [], set(), set()
 
-    if len(issues) > 16:
+    if len(issues) > 20:
         candidates = []
         for gold_idx, row in enumerate(gold_rows):
             for issue_idx, issue in enumerate(issues):

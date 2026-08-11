@@ -14,7 +14,8 @@ from app.crud.knowledge import (
     create_file, get_file, delete_file, move_folder, move_file
 )
 from app.schemas.knowledge import FolderCreate, FolderUpdate, FolderMove, FileMove, FileContentRequest, FilePermissionRequest
-from app.models.knowledge import KnowledgeFile
+from app.models.knowledge import Folder, KnowledgeFile
+from app.schemas.user import UserOut
 from app.api.auth import get_current_active_user, require_admin
 from app.utils.file_utils import read_file_safe
 
@@ -36,6 +37,96 @@ def check_edit_permission(file, user):
         raise HTTPException(status_code=403, detail="该文件仅限管理员编辑")
     if scope == "owner" and user.role != "admin" and user.id != file.created_by:
         raise HTTPException(status_code=403, detail="该文件仅限上传者和管理员编辑")
+
+
+def _can_access_knowledge_file(file: KnowledgeFile, current_user: UserOut) -> bool:
+    return current_user.role == "admin" or file.created_by == current_user.id
+
+
+def _folder_has_visible_content(folder: Folder, current_user: UserOut) -> bool:
+    if current_user.role == "admin" or folder.created_by == current_user.id:
+        return True
+    for file in folder.files:
+        if _can_access_knowledge_file(file, current_user):
+            return True
+    for child in folder.children:
+        if _folder_has_visible_content(child, current_user):
+            return True
+    return False
+
+
+def _require_knowledge_file_access(db: Session, file_id: int, current_user: UserOut, action: str = "read"):
+    file = get_file(db, file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if not _can_access_knowledge_file(file, current_user):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if action == "download":
+        check_download_permission(file)
+    elif action == "edit":
+        check_edit_permission(file, current_user)
+    return file
+
+
+def _build_visible_tree_nodes(nodes, current_user: UserOut):
+    visible_nodes = []
+    for node in nodes:
+        children = _build_visible_tree_nodes(node.get("children", []), current_user)
+        files = [
+            file for file in node.get("files", [])
+            if current_user.role == "admin" or file.get("created_by") == current_user.id
+        ]
+        if current_user.role == "admin" or node.get("created_by") == current_user.id or children or files:
+            next_node = dict(node)
+            next_node["children"] = children
+            next_node["files"] = files
+            visible_nodes.append(next_node)
+    return visible_nodes
+
+
+def _build_visible_folder_payload(folder: Folder, current_user: UserOut):
+    subfolders = []
+    for child in folder.children:
+        if not _folder_has_visible_content(child, current_user):
+            continue
+        subfolders.append({
+            "id": child.id,
+            "name": child.name,
+            "parent_id": child.parent_id,
+            "created_by": child.created_by,
+            "created_at": child.created_at,
+            "updated_at": child.updated_at,
+        })
+
+    files = []
+    for file in folder.files:
+        if not _can_access_knowledge_file(file, current_user):
+            continue
+        files.append({
+            "id": file.id,
+            "name": file.name,
+            "filename": file.filename,
+            "file_path": file.file_path,
+            "file_size": file.file_size,
+            "file_type": file.file_type,
+            "permission": file.permission or "edit",
+            "edit_scope": file.edit_scope or "all",
+            "folder_id": file.folder_id,
+            "created_by": file.created_by,
+            "created_at": file.created_at,
+            "updated_at": file.updated_at,
+        })
+
+    return {
+        "folder": {
+            "id": folder.id,
+            "name": folder.name,
+            "parent_id": folder.parent_id,
+            "created_at": folder.created_at.isoformat() if folder.created_at else None,
+        },
+        "subfolders": subfolders,
+        "files": files,
+    }
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
@@ -93,28 +184,25 @@ def _collect_descendant_ids(folder):
     return ids
 
 @router.get("/tree")
-async def get_knowledge_tree(db: Session = Depends(get_db)):
+async def get_knowledge_tree(
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     tree = get_folder_tree(db, None)
-    return tree
+    return _build_visible_tree_nodes(tree, current_user)
 
 @router.get("/folders/{folder_id}")
-async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
+async def get_folder_content(
+    folder_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     folder = get_folder(db, folder_id)
     if not folder:
         raise HTTPException(status_code=404, detail="文件夹不存在")
-    
-    files = get_folder_files(db, folder_id)
-    subfolders = get_subfolders(db, folder_id)
-    return {
-        "folder": {
-            "id": folder.id,
-            "name": folder.name,
-            "parent_id": folder.parent_id,
-            "created_at": folder.created_at.isoformat() if folder.created_at else None
-        },
-        "subfolders": subfolders,
-        "files": files
-    }
+    if not _folder_has_visible_content(folder, current_user):
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    return _build_visible_folder_payload(folder, current_user)
 
 @router.post("/folders", response_model=dict)
 async def create_new_folder(
@@ -234,10 +322,12 @@ async def upload_file_to_folder(
     return {"message": "文件上传成功", "id": db_file.id}
 
 @router.get("/files/{file_id}")
-async def get_file_info(file_id: int, db: Session = Depends(get_db)):
-    file = get_file(db, file_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="文件不存在")
+async def get_file_info(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    file = _require_knowledge_file_access(db, file_id, current_user)
     
     return {
         "id": file.id,
@@ -272,11 +362,12 @@ async def move_file_to_target(
     return {"message": "文件移动完成", "id": file_id, "folder_id": file_move.folder_id}
 
 @router.get("/files/{file_id}/download")
-async def download_file(file_id: int, db: Session = Depends(get_db)):
-    file = get_file(db, file_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="文件不存在")
-    check_download_permission(file)
+async def download_file(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    file = _require_knowledge_file_access(db, file_id, current_user, action="download")
     
     if not os.path.exists(file.file_path):
         raise HTTPException(status_code=404, detail="服务器文件不存在")
@@ -288,10 +379,12 @@ async def download_file(file_id: int, db: Session = Depends(get_db)):
     )
 
 @router.get("/files/{file_id}/preview")
-async def preview_file(file_id: int, db: Session = Depends(get_db)):
-    file = get_file(db, file_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="文件不存在")
+async def preview_file(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    file = _require_knowledge_file_access(db, file_id, current_user)
     
     if not os.path.exists(file.file_path):
         raise HTTPException(status_code=404, detail="服务器文件不存在")
@@ -351,11 +444,13 @@ async def preview_file(file_id: int, db: Session = Depends(get_db)):
         return {"content": "此文件类型不支持在线预览，请下载后查看", "type": "unsupported", "file_name": file.filename}
 
 @router.get("/files/{file_id}/raw")
-async def get_raw_file(file_id: int, db: Session = Depends(get_db)):
+async def get_raw_file(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """Return raw file for direct browser preview"""
-    file = get_file(db, file_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="文件不存在")
+    file = _require_knowledge_file_access(db, file_id, current_user)
     
     if not os.path.exists(file.file_path):
         raise HTTPException(status_code=404, detail="服务器文件不存在")
@@ -372,11 +467,13 @@ class FileContentRequest(BaseModel):
     content: str
 
 @router.get("/files/{file_id}/content")
-async def get_file_content(file_id: int, db: Session = Depends(get_db)):
+async def get_file_content(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """获取文件可编辑的文本内容"""
-    file = get_file(db, file_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="文件不存在")
+    file = _require_knowledge_file_access(db, file_id, current_user)
     if not os.path.exists(file.file_path):
         raise HTTPException(status_code=404, detail="服务器文件不存在")
 
@@ -412,10 +509,7 @@ async def update_file_content(
     current_user = Depends(get_current_active_user)
 ):
     """保存编辑后的文件内容"""
-    file = get_file(db, file_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="文件不存在")
-    check_edit_permission(file, current_user)
+    file = _require_knowledge_file_access(db, file_id, current_user, action="edit")
     if not os.path.exists(file.file_path):
         raise HTTPException(status_code=404, detail="服务器文件不存在")
 

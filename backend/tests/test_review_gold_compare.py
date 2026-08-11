@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.api.review import _assign_gold_issue_matches, _gold_issue_match_detail, _parse_gold_serial
 from app.api.auth import _resolve_secret_key
@@ -73,6 +74,37 @@ def test_gold_compare_uses_global_optimal_matching_for_conflicts():
     assert matched_issue == {0, 1}
     assert matched_pairs[0]["issue_idx"] == 1
     assert matched_pairs[1]["issue_idx"] == 0
+
+
+def test_gold_compare_large_issue_sets_keep_optimal_assignment():
+    gold_rows = [{"index": i + 1, "wrong_text": f"Item {i + 1}", "issue_type": "术语"} for i in range(17)]
+    issues = [_issue(100 + i, f"Item {i + 1}") for i in range(17)]
+
+    custom_scores = {
+        (0, 0): 95,
+        (0, 1): 94,
+        (1, 0): 93,
+        (1, 1): 0,
+    }
+
+    def fake_match_detail(row, issue):
+        gold_idx = int(row["index"]) - 1
+        issue_idx = issue.id - 100
+        score = custom_scores.get((gold_idx, issue_idx), 0)
+        return {
+            "score": score,
+            "reason": f"score_{score}",
+            "location_match": False,
+            "location_reason": "mock",
+        }
+
+    with patch("app.api.review._gold_issue_match_detail", side_effect=fake_match_detail):
+        matched_pairs, matched_gold, matched_issue = _assign_gold_issue_matches(gold_rows, issues)
+
+    assert len(matched_pairs) == 2
+    assert matched_gold == {0, 1}
+    assert matched_issue == {0, 1}
+    assert {(item["gold_idx"], item["issue_idx"]) for item in matched_pairs} == {(0, 1), (1, 0)}
 
 
 def test_gold_compare_location_affects_score():
