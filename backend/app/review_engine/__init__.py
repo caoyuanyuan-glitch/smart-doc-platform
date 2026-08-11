@@ -37,8 +37,11 @@ Modules
 """
 
 from importlib import import_module
+import logging
 
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 
 def _optional_import(module_name, *symbols):
@@ -48,6 +51,7 @@ def _optional_import(module_name, *symbols):
         missing_name = exc.name or ""
         if missing_name != module_name and not module_name.startswith(missing_name + "."):
             raise
+        logger.warning("review_engine 子模块加载失败: %s", exc)
         return (None,) * len(symbols)
     return tuple(getattr(module, symbol) for symbol in symbols)
 

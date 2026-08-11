@@ -77,6 +77,33 @@
           <p>当前还没有本次上传的文档翻译统计数据</p>
         </div>
       </div>
+
+      <div class="stats-section">
+        <div class="section-header">
+          <h3 class="section-title">最近文本翻译</h3>
+          <span v-if="stats.latest_text_translation" class="section-meta">最新一次</span>
+        </div>
+        <div class="stats-cards batch-cards" v-if="stats.latest_text_translation">
+          <div class="stat-card card-text">
+            <div class="stat-label">文本翻译字数</div>
+            <div class="stat-value">{{ stats.latest_text_translation.source_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
+          </div>
+          <div class="stat-card card-ai">
+            <div class="stat-label">AI 翻译字数</div>
+            <div class="stat-value">{{ stats.latest_text_translation.ai_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
+          </div>
+          <div class="stat-card card-memory">
+            <div class="stat-label">记忆库匹配字数</div>
+            <div class="stat-value">{{ stats.latest_text_translation.memory_word_count.toLocaleString() }}</div>
+            <div class="stat-unit">字</div>
+          </div>
+        </div>
+        <div class="chart-section empty-chart" v-else>
+          <p>当前还没有文本翻译统计数据</p>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -89,10 +116,9 @@ import { PieChart } from 'echarts/charts'
 import { TitleComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { translationAPI } from '@/api'
+import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 
 const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
-const TRANSLATION_BATCH_EVENT = 'translation-batch-updated'
-const TRANSLATION_STATS_EVENT = 'translation-stats-updated'
 
 use([PieChart, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
@@ -108,7 +134,8 @@ const stats = ref({
     doc_word_count: 0,
     ai_word_count: 0,
     memory_word_count: 0
-  }
+  },
+  latest_text_translation: null
 })
 
 const loading = ref(false)
@@ -225,7 +252,14 @@ async function loadStats() {
     const batchId = sessionStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || localStorage.getItem(TRANSLATION_BATCH_STORAGE_KEY) || ''
     const res = await translationAPI.getStats(batchId)
     if (res.data) {
-      stats.value = res.data
+      stats.value = {
+        ...stats.value,
+        ...res.data,
+        current_upload: {
+          ...stats.value.current_upload,
+          ...(res.data.current_upload || {})
+        }
+      }
     }
   } catch (e) {
     console.error('加载统计数据失败', e)
@@ -246,6 +280,22 @@ function handleBatchUpdated(event) {
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible') {
     loadStats()
+    startPolling()
+    return
+  }
+  stopPolling()
+}
+
+function startPolling() {
+  if (!refreshTimer) {
+    refreshTimer = window.setInterval(loadStats, 30000)
+  }
+}
+
+function stopPolling() {
+  if (refreshTimer) {
+    window.clearInterval(refreshTimer)
+    refreshTimer = null
   }
 }
 
@@ -255,7 +305,7 @@ onMounted(() => {
   window.addEventListener(TRANSLATION_STATS_EVENT, loadStats)
   window.addEventListener('storage', loadStats)
   document.addEventListener('visibilitychange', handleVisibilityChange)
-  refreshTimer = window.setInterval(loadStats, 5000)
+  startPolling()
 })
 
 onBeforeUnmount(() => {
@@ -263,10 +313,7 @@ onBeforeUnmount(() => {
   window.removeEventListener(TRANSLATION_STATS_EVENT, loadStats)
   window.removeEventListener('storage', loadStats)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
-  if (refreshTimer) {
-    window.clearInterval(refreshTimer)
-    refreshTimer = null
-  }
+  stopPolling()
 })
 </script>
 

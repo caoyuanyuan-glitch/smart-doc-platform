@@ -4,6 +4,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 import html as html_lib
 import hashlib
+import logging
 import json
 import math
 import re
@@ -13,26 +14,11 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name not in {"app.services", "app.services.chunker"}:
         raise
-
-    class _FallbackChunk:
-        def __init__(self, index, start, content):
-            self.index = index
-            self.start = start
-            self.content = content
-
-    class _FallbackSmartChunker:
-        def __init__(self, max_chunks=None):
-            self.max_chunks = max_chunks
-
-        def chunk_document(self, content):
-            content = str(content or "")
-            if not content:
-                return []
-            return [_FallbackChunk(index=0, start=0, content=content)]
-
-    def create_smart_chunker(max_chunks=None):
-        return _FallbackSmartChunker(max_chunks=max_chunks)
-
+    logging.getLogger(__name__).warning(
+        "智能分块模块(services.chunker)加载失败，审核将回退到传统分块模式: %s",
+        exc,
+    )
+    create_smart_chunker = None
     CrossChapterConsistencyChecker = None
     AuditResultMerger = None
 import shutil
@@ -1581,7 +1567,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             print(f"[审核] 小文档全量审核失败 ({e})，回退到分块模式")
 
     use_smart_chunking = os.getenv('REVIEW_SMART_CHUNKING', '1') == '1'
-    if use_smart_chunking and len(content) > 1000:
+    if use_smart_chunking and create_smart_chunker is not None and len(content) > 1000:
         try:
             chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)))
             smart_chunks = chunker.chunk_document(content)
