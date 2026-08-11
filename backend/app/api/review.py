@@ -8761,6 +8761,20 @@ def _normalize_gold_compare_text(value):
     return re.sub(r"\s+", "", str(value or "")).lower()
 
 
+def _parse_gold_serial(value):
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_gold_location_text(value):
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[（）()\[\]{}]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
 def _load_gold_rows_from_excel(file_bytes):
     try:
         from io import BytesIO
@@ -8782,8 +8796,9 @@ def _load_gold_rows_from_excel(file_bytes):
             continue
         if "错误内容" not in item:
             continue
-        serial = item.get("序号")
-        if not isinstance(serial, int):
+        serial = _parse_gold_serial(item.get("序号"))
+        if serial is None:
+            print(f"[gold-compare] skip row with invalid serial: {item.get('序号')!r}")
             continue
         issue_type = str(item.get("问题类型") or "").strip()
         if issue_type in {"—", "-", "无", "正确样本", "不应检出"}:
@@ -8846,66 +8861,157 @@ def _gold_type_keyword_match(gold_type, issue):
     return False
 
 
+def _gold_location_match_detail(gold_row, issue):
+    gold_location = _normalize_gold_location_text(gold_row.get("location"))
+    issue_chapter = _normalize_gold_location_text(_issue_value(issue, "chapter", ""))
+
+    if not gold_location:
+        return {"score_delta": 0, "matched": None, "reason": "no_gold_location"}
+    if not issue_chapter:
+        return {"score_delta": 0, "matched": None, "reason": "no_issue_location"}
+    if gold_location == issue_chapter:
+        return {"score_delta": 12, "matched": True, "reason": "exact_location"}
+    if gold_location in issue_chapter or issue_chapter in gold_location:
+        return {"score_delta": 6, "matched": True, "reason": "partial_location"}
+    return {"score_delta": -18, "matched": False, "reason": "location_conflict"}
+
+
 def _gold_issue_match_detail(gold_row, issue):
     gold_wrong = _normalize_gold_compare_text(gold_row.get("wrong_text"))
     issue_original = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
 
     if not gold_wrong or not issue_original:
-        return {"score": 0, "reason": "no_text"}
+        return {"score": 0, "reason": "no_text", "location_match": None, "location_reason": "no_text"}
 
     type_match = _gold_type_keyword_match(gold_row.get("issue_type", ""), issue)
+    location_detail = _gold_location_match_detail(gold_row, issue)
+    base_score = 0
+    reason = "no_match"
 
     if gold_wrong == issue_original:
-        return {"score": 100, "reason": "exact_text"}
+        base_score = 100
+        reason = "exact_text"
 
     len_gold = len(gold_wrong)
     len_issue = len(issue_original)
 
-    if len_gold <= 3 and len_issue <= 3 and len_gold >= 2 and len_issue >= 2:
+    if not base_score and len_gold <= 3 and len_issue <= 3 and len_gold >= 2 and len_issue >= 2:
         if _edit_distance(gold_wrong, issue_original) <= 1:
-            return {"score": 95 if type_match else 90, "reason": "short_edit_distance"}
+            base_score = 95 if type_match else 90
+            reason = "short_edit_distance"
 
-    if len_gold >= 2 and len_issue >= 2:
+    if not base_score and len_gold >= 2 and len_issue >= 2:
         if gold_wrong in issue_original or issue_original in gold_wrong:
-            return {"score": 92 if type_match else 88, "reason": "substring"}
+            base_score = 92 if type_match else 88
+            reason = "substring"
 
-    if 3 <= len_gold <= 10 and 3 <= len_issue <= 10:
+    if not base_score and 3 <= len_gold <= 10 and 3 <= len_issue <= 10:
         if _edit_distance(gold_wrong, issue_original) <= 1:
-            return {"score": 85 if type_match else 78, "reason": "medium_edit_distance"}
+            base_score = 85 if type_match else 78
+            reason = "medium_edit_distance"
 
     common_len = _longest_common_substring(gold_wrong, issue_original)
-    if type_match and common_len >= 2:
-        return {"score": 72, "reason": "type_and_common_substring"}
+    if not base_score and type_match and common_len >= 2:
+        base_score = 72
+        reason = "type_and_common_substring"
 
-    return {"score": 0, "reason": "no_match"}
+    if not base_score:
+        return {
+            "score": 0,
+            "reason": "no_match",
+            "location_match": location_detail["matched"],
+            "location_reason": location_detail["reason"],
+        }
+
+    score = max(0, base_score + int(location_detail["score_delta"]))
+    return {
+        "score": score,
+        "reason": reason,
+        "location_match": location_detail["matched"],
+        "location_reason": location_detail["reason"],
+    }
 
 
 def _assign_gold_issue_matches(gold_rows, issues):
-    candidates = []
-    for gold_idx, row in enumerate(gold_rows):
-        for issue_idx, issue in enumerate(issues):
-            detail = _gold_issue_match_detail(row, issue)
-            if detail["score"] <= 0:
+    if not gold_rows or not issues:
+        return [], set(), set()
+
+    if len(issues) > 16:
+        candidates = []
+        for gold_idx, row in enumerate(gold_rows):
+            for issue_idx, issue in enumerate(issues):
+                detail = _gold_issue_match_detail(row, issue)
+                if detail["score"] <= 0:
+                    continue
+                candidates.append({
+                    "gold_idx": gold_idx,
+                    "issue_idx": issue_idx,
+                    "score": int(detail["score"]),
+                    "reason": detail["reason"],
+                    "location_match": detail["location_match"],
+                    "location_reason": detail["location_reason"],
+                })
+
+        candidates.sort(key=lambda item: (-item["score"], item["gold_idx"], item["issue_idx"]))
+        assigned_gold = set()
+        assigned_issue = set()
+        matched_pairs = []
+        for item in candidates:
+            if item["gold_idx"] in assigned_gold or item["issue_idx"] in assigned_issue:
                 continue
-            candidates.append({
-                "gold_idx": gold_idx,
-                "issue_idx": issue_idx,
-                "score": int(detail["score"]),
-                "reason": detail["reason"],
-            })
+            assigned_gold.add(item["gold_idx"])
+            assigned_issue.add(item["issue_idx"])
+            matched_pairs.append(item)
+        return matched_pairs, assigned_gold, assigned_issue
 
-    candidates.sort(key=lambda item: (-item["score"], item["gold_idx"], item["issue_idx"]))
+    score_matrix = []
+    detail_matrix = []
+    for row in gold_rows:
+        row_scores = []
+        row_details = []
+        for issue in issues:
+            detail = _gold_issue_match_detail(row, issue)
+            row_scores.append(int(detail["score"]))
+            row_details.append(detail)
+        score_matrix.append(row_scores)
+        detail_matrix.append(row_details)
 
-    assigned_gold = set()
-    assigned_issue = set()
-    matched_pairs = []
-    for item in candidates:
-        if item["gold_idx"] in assigned_gold or item["issue_idx"] in assigned_issue:
-            continue
-        assigned_gold.add(item["gold_idx"])
-        assigned_issue.add(item["issue_idx"])
-        matched_pairs.append(item)
+    memo = {}
 
+    def _solve(gold_idx, used_mask):
+        key = (gold_idx, used_mask)
+        if key in memo:
+            return memo[key]
+        if gold_idx >= len(gold_rows):
+            return 0, (), []
+
+        best_score, best_signature, best_pairs = _solve(gold_idx + 1, used_mask)
+        for issue_idx, score in enumerate(score_matrix[gold_idx]):
+            if score <= 0 or used_mask & (1 << issue_idx):
+                continue
+            next_score, next_signature, next_pairs = _solve(gold_idx + 1, used_mask | (1 << issue_idx))
+            total_score = score + next_score
+            candidate_pairs = [
+                {
+                    "gold_idx": gold_idx,
+                    "issue_idx": issue_idx,
+                    "score": score,
+                    "reason": detail_matrix[gold_idx][issue_idx]["reason"],
+                    "location_match": detail_matrix[gold_idx][issue_idx]["location_match"],
+                    "location_reason": detail_matrix[gold_idx][issue_idx]["location_reason"],
+                }
+            ] + next_pairs
+            candidate_signature = tuple((item["gold_idx"], item["issue_idx"], item["score"]) for item in candidate_pairs)
+            if total_score > best_score or (total_score == best_score and candidate_signature < best_signature):
+                best_score, best_signature, best_pairs = total_score, candidate_signature, candidate_pairs
+
+        memo[key] = (best_score, best_signature, best_pairs)
+        return memo[key]
+
+    _, _, matched_pairs = _solve(0, 0)
+    assigned_gold = {item["gold_idx"] for item in matched_pairs}
+    assigned_issue = {item["issue_idx"] for item in matched_pairs}
+    matched_pairs.sort(key=lambda item: item["gold_idx"])
     return matched_pairs, assigned_gold, assigned_issue
 
 
@@ -9549,6 +9655,8 @@ async def compare_review_with_gold(
             "matched_issue_id": issue_summary.get("id"),
             "match_score": pair["score"],
             "match_reason": pair["reason"],
+            "location_match": pair.get("location_match"),
+            "location_reason": pair.get("location_reason"),
         })
 
     missed = [row for idx, row in enumerate(annotated_gold_rows) if idx not in matched_gold_indices]

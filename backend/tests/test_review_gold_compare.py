@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
-from app.api.review import _assign_gold_issue_matches
+from app.api.review import _assign_gold_issue_matches, _gold_issue_match_detail, _parse_gold_serial
+from app.api.auth import _resolve_secret_key
 from app.database import Base
 
 import app.models.audit_trace  # noqa: F401
@@ -51,6 +52,66 @@ def test_gold_compare_prefers_global_one_to_one_assignment():
     assert len(matched_pairs) == 2
     assert matched_gold == {0, 1}
     assert matched_issue == {0, 1}
+
+
+def test_gold_compare_uses_global_optimal_matching_for_conflicts():
+    gold_rows = [
+        {"index": 1, "wrong_text": "Buffer A", "issue_type": "术语", "location": "章节1"},
+        {"index": 2, "wrong_text": "Buffer A", "issue_type": "术语", "location": "章节2"},
+    ]
+    issues = [
+        _issue(31, "Buffer A", category="术语", rule="TERM-001"),
+        _issue(32, "Buffer A", category="术语", rule="TERM-001"),
+    ]
+    issues[0].chapter = "章节2"
+    issues[1].chapter = "章节1"
+
+    matched_pairs, matched_gold, matched_issue = _assign_gold_issue_matches(gold_rows, issues)
+
+    assert len(matched_pairs) == 2
+    assert matched_gold == {0, 1}
+    assert matched_issue == {0, 1}
+    assert matched_pairs[0]["issue_idx"] == 1
+    assert matched_pairs[1]["issue_idx"] == 0
+
+
+def test_gold_compare_location_affects_score():
+    gold_row = {"index": 1, "wrong_text": "Buffer A", "issue_type": "术语", "location": "章节1"}
+    exact_issue = _issue(41, "Buffer A")
+    wrong_issue = _issue(42, "Buffer A")
+    wrong_issue.chapter = "章节9"
+
+    exact_detail = _gold_issue_match_detail(gold_row, exact_issue)
+    wrong_detail = _gold_issue_match_detail(gold_row, wrong_issue)
+
+    assert exact_detail["score"] > wrong_detail["score"]
+    assert exact_detail["location_match"] is True
+    assert wrong_detail["location_match"] is False
+
+
+def test_parse_gold_serial_accepts_int_float_and_string():
+    assert _parse_gold_serial(1) == 1
+    assert _parse_gold_serial(1.0) == 1
+    assert _parse_gold_serial(" 1 ") == 1
+    assert _parse_gold_serial("abc") is None
+
+
+def test_resolve_secret_key_rejects_default_in_production():
+    try:
+        _resolve_secret_key("", environment="production")
+    except RuntimeError as exc:
+        assert "JWT_SECRET_KEY" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError for missing production JWT secret")
+
+
+def test_resolve_secret_key_requires_long_secret_in_production():
+    try:
+        _resolve_secret_key("short-secret", environment="production")
+    except RuntimeError as exc:
+        assert "32" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError for short production JWT secret")
 
 
 def test_audit_trace_model_is_registered():

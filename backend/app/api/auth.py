@@ -20,7 +20,38 @@ PASSWORD_PATTERN = re.compile(r"^\S{8,32}$")
 VALID_ROLES = {"admin", "writer", "reviewer"}
 VALID_STATUS = {"active", "disabled"}
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or "smart-doc-dev-secret-change-me"
+DEFAULT_SECRET_KEY = "smart-doc-dev-secret-change-me"
+
+
+def _normalize_runtime_env(value: str | None) -> str:
+    return str(value or "development").strip().lower()
+
+
+def _is_production_like_env(value: str | None) -> bool:
+    return _normalize_runtime_env(value) in {"prod", "production", "staging"}
+
+
+def _resolve_secret_key(raw_secret: str | None = None, environment: str | None = None) -> str:
+    resolved_secret = str(raw_secret or "").strip()
+    runtime_env = environment if environment is not None else (
+        os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("ENV") or "development"
+    )
+
+    if not resolved_secret:
+        if _is_production_like_env(runtime_env):
+            raise RuntimeError("JWT_SECRET_KEY is required in production-like environments")
+        return DEFAULT_SECRET_KEY
+
+    if _is_production_like_env(runtime_env):
+        if resolved_secret == DEFAULT_SECRET_KEY:
+            raise RuntimeError("JWT secret must not use the default development value in production-like environments")
+        if len(resolved_secret) < 32:
+            raise RuntimeError("JWT secret must be at least 32 characters in production-like environments")
+
+    return resolved_secret
+
+
+SECRET_KEY = _resolve_secret_key(os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY"))
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 LOCKOUT_THRESHOLD = 5
