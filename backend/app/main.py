@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system
 from app.database import create_tables
 import threading
+import os
 
 app = FastAPI(title="智能技术文档平台", version="1.0.0")
 
@@ -68,24 +69,24 @@ async def startup_event():
         print(f"[startup] 转换规则种子初始化失败: {e}")
     try:
         from app.database import SessionLocal
-        from app.crud.user import get_user, create_user_with_details, get_password_hash
+        from app.crud.user import get_user, create_user_with_details
         from app.schemas.user import UserCreateWithDetails
-        db = SessionLocal()
-        admin_user = get_user(db, "admin")
-        if not admin_user:
-            create_user_with_details(db, UserCreateWithDetails(
-                username="admin", password="admin123",
-                display_name="管理员", role="admin", status="active",
-            ))
-            print("[startup] 默认管理员已创建 (admin/admin123)")
+        bootstrap_username = (os.getenv("ADMIN_BOOTSTRAP_USERNAME") or "").strip()
+        bootstrap_password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD") or ""
+        if not bootstrap_username or not bootstrap_password:
+            print("[startup] 未配置管理员引导账号，跳过默认管理员初始化")
         else:
-            admin_user.password_hash = get_password_hash("admin123")
-            admin_user.display_name = "管理员"
-            admin_user.role = "admin"
-            admin_user.status = "active"
-            db.commit()
-            print("[startup] 默认管理员已重置为 admin/admin123")
-        db.close()
+            db = SessionLocal()
+            try:
+                admin_user = get_user(db, bootstrap_username)
+                if not admin_user:
+                    create_user_with_details(db, UserCreateWithDetails(
+                        username=bootstrap_username, password=bootstrap_password,
+                        display_name="管理员", role="admin", status="active",
+                    ))
+                    print(f"[startup] 已创建管理员引导账号: {bootstrap_username}")
+            finally:
+                db.close()
     except Exception as e:
         print(f"[startup] 管理员初始化失败: {e}")
     try:

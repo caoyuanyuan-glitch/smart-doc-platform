@@ -24,12 +24,55 @@ from app.api.review_rules import (
 logger = logging.getLogger(__name__)
 
 # 分层提示词构建器
+PROMPT_BUILDER_FALLBACK_ACTIVE = False
+_prompt_builder_fallback_logged = False
+
 try:
     from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
-except ImportError as e:
-    logger.warning("prompt_builder 模块加载失败，审查提示词构建功能不可用: %s", e)
-    ReviewPromptBuilder = None
-    build_review_system_prompt = None
+except ModuleNotFoundError as exc:
+    if exc.name != "app.utils.prompt_builder":
+        raise
+
+    logger.warning("prompt_builder 模块加载失败，审查提示词构建功能降级: %s", exc)
+
+    PROMPT_BUILDER_FALLBACK_ACTIVE = True
+
+    class ReviewPromptBuilder:
+        def __init__(self, *args, **kwargs):
+            self.chapter_context = kwargs.get("chapter_context") or {}
+            self.document_name = str(
+                kwargs.get("document_name")
+                or kwargs.get("filename")
+                or self.chapter_context.get("document_name")
+                or ""
+            ).strip()
+            self.language = str(kwargs.get("language") or "").strip()
+
+        def build_audit_system_prompt(self):
+            prompt = build_system_prompt()
+            context_lines = []
+
+            if self.document_name:
+                context_lines.append(f"Document filename: {self.document_name}")
+
+            chapter_title = str(self.chapter_context.get("title") or self.chapter_context.get("chapter") or "").strip()
+            if chapter_title:
+                context_lines.append(f"Chapter title: {chapter_title}")
+
+            chapter_summary = str(self.chapter_context.get("summary") or self.chapter_context.get("context") or "").strip()
+            if chapter_summary:
+                context_lines.append(f"Chapter context: {chapter_summary[:500]}")
+
+            if self.language:
+                context_lines.append(f"Review language: {self.language}")
+
+            if not context_lines:
+                return prompt
+
+            return f"{prompt}\n\nAdditional review context:\n- " + "\n- ".join(context_lines)
+
+    def build_review_system_prompt(*args, **kwargs):
+        return ReviewPromptBuilder(*args, **kwargs).build_audit_system_prompt()
 
 ANTHROPIC_VERSION = "2023-06-01"
 IMAGE_DRAFT_BATCH_SIZE = 2
@@ -1850,7 +1893,8 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def build_audit_prompt_payload(self, content, language=None, audit_basis="", chapter_context=None):
+    def build_audit_prompt_payload(self, content, language=None, audit_basis="", chapter_context=None, document_name=None):
+        global _prompt_builder_fallback_logged
         lang = language or "en"
         is_english = lang in ("en", "both")
         content = content or ""
@@ -1858,6 +1902,7 @@ class AIClient:
             builder = ReviewPromptBuilder(
                 document_type="technical_document",
                 language=lang,
+                document_name=document_name,
                 chapter_context=chapter_context or {},
                 load_from_db=True,
             )
@@ -1865,6 +1910,10 @@ class AIClient:
         except Exception as e:
             print(f"[ai_client] 分层提示词构建失败，回退到静态规则: {e}")
             base_system_prompt = build_system_prompt()
+
+        if PROMPT_BUILDER_FALLBACK_ACTIVE and not _prompt_builder_fallback_logged:
+            print("[ai_client] prompt_builder 模块缺失，当前使用保守降级提示词构建")
+            _prompt_builder_fallback_logged = True
 
         if is_english:
             system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.

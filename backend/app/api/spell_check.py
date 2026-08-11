@@ -4,12 +4,13 @@ import io
 import os
 import tempfile
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from docx import Document
 from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
+from app.api.auth import require_admin
 from app.utils.spell_checker import run_spelling_and_grammar_check, spell as runtime_spell
 from app.utils.document_parser import parse_file
 
@@ -18,7 +19,7 @@ try:
 except ModuleNotFoundError:
     Presentation = None
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _require_pptx_support():

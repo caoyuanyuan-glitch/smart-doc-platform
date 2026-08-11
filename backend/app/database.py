@@ -98,6 +98,19 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_word_count INTEGER DEFAULT 0"))
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_word_count INTEGER DEFAULT 0"))
 
+    if translation_doc_columns and 'user_id' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN user_id INTEGER"))
+
+    try:
+        convert_task_columns = {col['name'] for col in inspector.get_columns('convert_tasks')}
+    except Exception:
+        convert_task_columns = set()
+
+    if convert_task_columns and 'user_id' not in convert_task_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE convert_tasks ADD COLUMN user_id INTEGER"))
+
 
     try:
         plr_columns = {col['name'] for col in inspector.get_columns('polish_learning_rules')}
