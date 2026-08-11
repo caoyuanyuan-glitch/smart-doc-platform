@@ -5,9 +5,10 @@ import os
 import json
 import time
 import xml.etree.ElementTree as ET
+from app.api.auth import get_current_active_user
 from app.database import get_db
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads"
 PREVIEW_DIR = "./static/preview"

@@ -12,6 +12,8 @@ import shutil
 import threading
 import xml.etree.ElementTree as ET
 from app.database import get_db
+from app.api.auth import get_current_active_user, require_admin
+from app.schemas.user import UserOut
 from app.crud.convert import (
     create_convert_task, get_convert_task, get_convert_tasks,
     update_convert_task_status, update_convert_task_result, update_convert_task_failed,
@@ -22,13 +24,24 @@ from app.schemas.convert import (
     StepStatus, CheckItem
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads"
 OUTPUT_DIR = "./static/uploads/outputs"
 
 _tasks_lock = threading.Lock()
 _task_store = {}
+
+
+def _require_convert_task_access(db: Session, task_id: str, current_user: UserOut):
+    task = get_convert_task(db, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if current_user.role == "admin":
+        return task
+    if getattr(task, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task
 
 IME_TOPIC_DECL = '<!DOCTYPE topic PUBLIC "-//OASIS//DTD DITA Topic//EN" "topic.dtd">'
 IME_BOOKMAP_DECL = '<!DOCTYPE bookmap PUBLIC "-//OASIS//DTD DITA BookMap//EN" "bookmap.dtd">'
@@ -1795,6 +1808,7 @@ async def start_conversion(
     retry_feedback: str = Form(None),
     retry_screenshot: UploadFile = File(None),
     db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
     if target_format not in ["dita", "markdown", "csv"]:
         raise HTTPException(status_code=400, detail="目标格式仅支持 dita、markdown 或 csv")
@@ -1868,7 +1882,7 @@ async def start_conversion(
         requirements=combined_requirements,
         retry_feedback=retry_feedback,
         retry_screenshot_path=retry_screenshot_path,
-    ))
+    ), user_id=current_user.id)
 
     with _tasks_lock:
         _task_store[task.task_id] = {
@@ -1887,10 +1901,8 @@ async def start_conversion(
 
 
 @router.get("/{task_id}/progress", response_model=ProgressOut)
-async def query_progress(task_id: str, db: Session = Depends(get_db)):
-    task = get_convert_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
+async def query_progress(task_id: str, db: Session = Depends(get_db), current_user: UserOut = Depends(get_current_active_user)):
+    task = _require_convert_task_access(db, task_id, current_user)
 
     steps = []
     step_names = _get_step_names()
@@ -1927,10 +1939,8 @@ async def query_progress(task_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{task_id}/download")
-async def download_zip(task_id: str, db: Session = Depends(get_db)):
-    task = get_convert_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
+async def download_zip(task_id: str, db: Session = Depends(get_db), current_user: UserOut = Depends(get_current_active_user)):
+    task = _require_convert_task_access(db, task_id, current_user)
     if task.status != "completed":
         raise HTTPException(status_code=400, detail="转换尚未完成")
     if not task.output_zip_path:
@@ -1948,10 +1958,8 @@ async def download_zip(task_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{task_id}/report", response_model=ReportOut)
-async def get_report(task_id: str, db: Session = Depends(get_db)):
-    task = get_convert_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
+async def get_report(task_id: str, db: Session = Depends(get_db), current_user: UserOut = Depends(get_current_active_user)):
+    task = _require_convert_task_access(db, task_id, current_user)
     if task.status not in ["completed", "failed"]:
         raise HTTPException(status_code=400, detail="转换尚未完成")
 
@@ -1978,10 +1986,8 @@ async def get_report(task_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{task_id}/detail")
-async def get_detail(task_id: str, db: Session = Depends(get_db)):
-    task = get_convert_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
+async def get_detail(task_id: str, db: Session = Depends(get_db), current_user: UserOut = Depends(get_current_active_user)):
+    task = _require_convert_task_access(db, task_id, current_user)
 
     detail = []
     if task.conversion_detail:
@@ -1990,16 +1996,22 @@ async def get_detail(task_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=list[ConvertTaskOut])
-async def list_tasks(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+async def list_tasks(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     tasks = get_convert_tasks(db, skip=skip, limit=limit)
+    if current_user.role != "admin":
+        tasks = [task for task in tasks if getattr(task, "user_id", None) == current_user.id]
     return tasks
 
 
 @router.delete("/{task_id}")
-async def remove_task(task_id: str, db: Session = Depends(get_db)):
+async def remove_task(task_id: str, db: Session = Depends(get_db), current_user: UserOut = Depends(get_current_active_user)):
+    _require_convert_task_access(db, task_id, current_user)
     task = delete_convert_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
     with _tasks_lock:
         _task_store.pop(task_id, None)
     return {"message": "任务已删除"}
@@ -2008,7 +2020,7 @@ async def remove_task(task_id: str, db: Session = Depends(get_db)):
 # ─── 转换规则库 ─────────────────────────────────────────────
 
 @router.get("/rules", response_model=list)
-async def list_convert_rules(db: Session = Depends(get_db)):
+async def list_convert_rules(db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     from app.crud.convert_rule import get_convert_rules, seed_default_rules
     seed_default_rules(db)
     rules = get_convert_rules(db)
@@ -2031,6 +2043,7 @@ async def create_convert_rule_api(
     description: str = Form(...),
     rule_number: str = Form(None),
     db: Session = Depends(get_db),
+    _: UserOut = Depends(require_admin),
 ):
     from app.crud.convert_rule import create_convert_rule
     from app.schemas.convert_rule import ConvertRuleCreate
@@ -2041,7 +2054,7 @@ async def create_convert_rule_api(
 
 
 @router.put("/rules/{rule_id}", response_model=dict)
-async def toggle_convert_rule_api(rule_id: int, db: Session = Depends(get_db)):
+async def toggle_convert_rule_api(rule_id: int, db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     from app.crud.convert_rule import toggle_convert_rule
     rule = toggle_convert_rule(db, rule_id)
     if not rule:
@@ -2050,7 +2063,7 @@ async def toggle_convert_rule_api(rule_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/rules/{rule_id}", response_model=dict)
-async def delete_convert_rule_api(rule_id: int, db: Session = Depends(get_db)):
+async def delete_convert_rule_api(rule_id: int, db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     from app.crud.convert_rule import delete_convert_rule
     rule = delete_convert_rule(db, rule_id)
     if not rule:
@@ -2062,6 +2075,7 @@ async def delete_convert_rule_api(rule_id: int, db: Session = Depends(get_db)):
 async def bulk_delete_convert_rules_api(
     rule_ids: str = Form(...),
     db: Session = Depends(get_db),
+    _: UserOut = Depends(require_admin),
 ):
     from app.crud.convert_rule import bulk_delete_convert_rules
     ids = [int(x) for x in rule_ids.split(",") if x.strip()]

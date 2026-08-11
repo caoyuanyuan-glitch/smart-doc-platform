@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from app.api.auth import get_current_active_user
 from app.database import get_db
 from app.models.qa_history import QaSession, QaMessage
 from app.api.auth import oauth2_scheme
@@ -20,7 +21,7 @@ from app.api.qa import (
 )
 from app.utils.ai_client import ai_client
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "manual_uploads")

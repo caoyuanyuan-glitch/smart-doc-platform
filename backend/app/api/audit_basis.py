@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
 from sqlalchemy.orm import Session
 import os
+from app.api.auth import require_admin
 from app.database import get_db
 from app.crud.audit_basis import create_audit_basis, get_audit_basis, get_audit_bases, delete_audit_basis
 from app.schemas.audit_basis import AuditBasis, AuditBasisCreate
 from app.utils.document_parser import parse_file, get_file_type
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 UPLOAD_DIR = "./static/uploads"
 
