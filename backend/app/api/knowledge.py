@@ -15,7 +15,7 @@ from app.crud.knowledge import (
 )
 from app.schemas.knowledge import FolderCreate, FolderUpdate, FolderMove, FileMove, FileContentRequest, FilePermissionRequest
 from app.models.knowledge import KnowledgeFile
-from app.api.auth import get_current_user, get_default_user, require_admin
+from app.api.auth import get_current_active_user, require_admin
 from app.utils.file_utils import read_file_safe
 
 PERMISSION_READ = "read"
@@ -37,7 +37,7 @@ def check_edit_permission(file, user):
     if scope == "owner" and user.role != "admin" and user.id != file.created_by:
         raise HTTPException(status_code=403, detail="该文件仅限上传者和管理员编辑")
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
 
@@ -120,10 +120,9 @@ async def get_folder_content(folder_id: int, db: Session = Depends(get_db)):
 async def create_new_folder(
     folder: FolderCreate,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
-    user = get_default_user(db)
-    db_folder = create_folder(db, folder, user.id)
+    db_folder = create_folder(db, folder, current_user.id)
     return {"message": "文件夹创建成功", "id": db_folder.id}
 
 @router.put("/folders/{folder_id}")
@@ -131,7 +130,7 @@ async def update_folder_name(
     folder_id: int,
     folder_update: FolderUpdate,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
     if not folder_update.name:
         raise HTTPException(status_code=400, detail="文件夹名称不能为空")
@@ -148,7 +147,7 @@ async def move_folder_to_target(
     folder_id: int,
     folder_move: FolderMove,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
     folder = get_folder(db, folder_id)
     if not folder:
@@ -174,10 +173,9 @@ async def move_folder_to_target(
 async def delete_folder_by_id(
     folder_id: int,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
-    user = get_default_user(db)
-    if user.role != "admin":
+    if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可删除文件夹和文件")
     
     folder = get_folder(db, folder_id)
@@ -196,9 +194,8 @@ async def upload_file_to_folder(
     folder_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
-    user = get_default_user(db)
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR)
     
@@ -231,7 +228,7 @@ async def upload_file_to_folder(
         filename=file.filename or "unknown",
         file_size=file_size,
         file_type=file_type,
-        created_by=user.id
+        created_by=current_user.id
     )
     
     return {"message": "文件上传成功", "id": db_file.id}
@@ -261,7 +258,7 @@ async def move_file_to_target(
     file_id: int,
     file_move: FileMove,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
     file = get_file(db, file_id)
     if not file:
@@ -412,7 +409,7 @@ async def update_file_content(
     file_id: int,
     req: FileContentRequest,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
     """保存编辑后的文件内容"""
     file = get_file(db, file_id)
@@ -499,14 +496,13 @@ async def update_file_permission(
 async def delete_file_by_id(
     file_id: int,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
-    user = get_default_user(db)
     file = get_file(db, file_id)
     if not file:
         raise HTTPException(status_code=404, detail="文件不存在")
     
-    if user.role != "admin" and file.created_by != user.id:
+    if current_user.role != "admin" and file.created_by != current_user.id:
         raise HTTPException(status_code=403, detail="仅管理员或创建者可删除文件")
     
     if os.path.exists(file.file_path):
@@ -518,7 +514,7 @@ async def delete_file_by_id(
 
 @router.post("/export-seed")
 async def export_knowledge_to_seed(
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_active_user)
 ):
     """将知识库导出到种子目录，用于 Git 提交后团队共享"""
     from seed.knowledge_seed import export_kb_to_seed
