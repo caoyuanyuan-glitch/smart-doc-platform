@@ -36,42 +36,51 @@ Modules
 - ``rules/``             — Deterministic rule implementations (incremental)
 """
 
+from importlib import import_module
+
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401
 
-try:
-    from app.review_engine.context import DocumentContext, TextSpan  # noqa: F401
-except ModuleNotFoundError:
-    DocumentContext = None
-    TextSpan = None
 
-try:
-    from app.review_engine.orchestrator import ReviewOrchestrator, ReviewRunResult  # noqa: F401
-except ModuleNotFoundError:
-    ReviewOrchestrator = None
-    ReviewRunResult = None
+def _optional_import(module_name, *symbols):
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as exc:
+        missing_name = exc.name or ""
+        if missing_name != module_name and not module_name.startswith(missing_name + "."):
+            raise
+        return (None,) * len(symbols)
+    return tuple(getattr(module, symbol) for symbol in symbols)
 
-try:
-    from app.review_engine.ai_candidates import AICandidateEngine, AIReviewResult, ChunkMeta  # noqa: F401
-except ModuleNotFoundError:
-    AICandidateEngine = None
-    AIReviewResult = None
-    ChunkMeta = None
 
-try:
-    from app.review_engine.reporting import ReportAggregator, ReviewReport, DisplayIssue  # noqa: F401
-except ModuleNotFoundError:
-    ReportAggregator = None
-    ReviewReport = None
-    DisplayIssue = None
-
-try:
-    from app.review_engine.evaluation import EvaluationRunner, EvalResult, EvalSuiteResult  # noqa: F401
-except ModuleNotFoundError:
-    EvaluationRunner = None
-    EvalResult = None
-    EvalSuiteResult = None
-
-try:
-    from app.review_engine.rules.engine import DeterministicRuleEngine  # noqa: F401
-except ModuleNotFoundError:
-    DeterministicRuleEngine = None
+DocumentContext, TextSpan = _optional_import(
+    "app.review_engine.context",
+    "DocumentContext",
+    "TextSpan",
+)
+ReviewOrchestrator, ReviewRunResult = _optional_import(
+    "app.review_engine.orchestrator",
+    "ReviewOrchestrator",
+    "ReviewRunResult",
+)
+AICandidateEngine, AIReviewResult, ChunkMeta = _optional_import(
+    "app.review_engine.ai_candidates",
+    "AICandidateEngine",
+    "AIReviewResult",
+    "ChunkMeta",
+)
+ReportAggregator, ReviewReport, DisplayIssue = _optional_import(
+    "app.review_engine.reporting",
+    "ReportAggregator",
+    "ReviewReport",
+    "DisplayIssue",
+)
+EvaluationRunner, EvalResult, EvalSuiteResult = _optional_import(
+    "app.review_engine.evaluation",
+    "EvaluationRunner",
+    "EvalResult",
+    "EvalSuiteResult",
+)
+(DeterministicRuleEngine,) = _optional_import(
+    "app.review_engine.rules.engine",
+    "DeterministicRuleEngine",
+)

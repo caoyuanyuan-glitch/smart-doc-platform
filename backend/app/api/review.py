@@ -10,13 +10,25 @@ import re
 import os
 try:
     from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
-except ModuleNotFoundError:
+except ModuleNotFoundError as exc:
+    if exc.name not in {"app.services", "app.services.chunker"}:
+        raise
+
+    class _FallbackChunk:
+        def __init__(self, index, start, content):
+            self.index = index
+            self.start = start
+            self.content = content
+
     class _FallbackSmartChunker:
         def __init__(self, max_chunks=None):
             self.max_chunks = max_chunks
 
         def chunk_document(self, content):
-            return []
+            content = str(content or "")
+            if not content:
+                return []
+            return [_FallbackChunk(index=0, start=0, content=content)]
 
     def create_smart_chunker(max_chunks=None):
         return _FallbackSmartChunker(max_chunks=max_chunks)
@@ -1622,7 +1634,12 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f'正在进行AI快速增强 ({index}/{total})，规则已覆盖全文...',
         )
         selected_basis = _select_relevant_ai_review_basis(chunk, ai_review_basis_sections)
-        prompt_payload = ai_client.build_audit_prompt_payload(chunk, language=document_language, audit_basis=selected_basis)
+        prompt_payload = ai_client.build_audit_prompt_payload(
+            chunk,
+            language=document_language,
+            audit_basis=selected_basis,
+            document_name=document_name,
+        )
         basis_labels = _extract_basis_labels_from_text(selected_basis)
         chunk_trace = {
             "chunk_index": index,
@@ -8783,52 +8800,28 @@ def _load_gold_rows_from_excel(file_bytes):
 
 
 def _gold_row_matches_issue(gold_row, issue):
-    """金标准行与AI issue的匹配判定。
-    
-    匹配策略（按优先级）：
-    1. 归一化后完全一致 → 匹配
-    2. 短文本(2-3字符)：编辑距离 ≤ 1 → 匹配
-    3. 中长文本(≥2字符)：包含关系 → 匹配
-    4. 中等文本(3-10字符)：编辑距离 ≤ 1 且规则/类型相关 → 匹配
-    5. 规则词匹配：金标准的"问题类型"与issue的category/rule有交集 → 弱匹配（需文本也部分匹配）
-    """
-    gold_wrong = _normalize_gold_compare_text(gold_row.get("wrong_text"))
-    issue_original = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
-    
-    if not gold_wrong or not issue_original:
-        return False
-    
-    # 策略1: 完全一致
-    if gold_wrong == issue_original:
-        return True
-    
-    len_gold = len(gold_wrong)
-    len_issue = len(issue_original)
-    
-    # 策略2: 短文本编辑距离匹配（2-3字符的短词，允许1个字符差异）
-    if len_gold <= 3 and len_issue <= 3 and len_gold >= 2 and len_issue >= 2:
-        if _edit_distance(gold_wrong, issue_original) <= 1:
-            return True
-    
-    # 策略3: 包含关系匹配（≥2字符）
-    if len_gold >= 2 and len_issue >= 2:
-        if gold_wrong in issue_original or issue_original in gold_wrong:
-            return True
-    
-    # 策略4: 中等长度文本模糊匹配 + 规则相关性
-    if 3 <= len_gold <= 10 and 3 <= len_issue <= 10:
-        if _edit_distance(gold_wrong, issue_original) <= 1:
-            return True
-    
-    # 策略5: 规则词/类型相关 + 部分文本匹配
-    gold_type = str(gold_row.get("issue_type", "") or "").lower()
+    return _gold_issue_match_detail(gold_row, issue)["score"] > 0
+
+
+def _gold_issue_summary(issue):
+    return {
+        "id": getattr(issue, "id", None),
+        "rule": getattr(issue, "rule", ""),
+        "category": getattr(issue, "category", ""),
+        "severity": getattr(issue, "severity", ""),
+        "chapter": getattr(issue, "chapter", ""),
+        "original_text": getattr(issue, "original_text", ""),
+        "suggestion": getattr(issue, "suggestion", ""),
+        "description": getattr(issue, "description", ""),
+    }
+
+
+def _gold_type_keyword_match(gold_type, issue):
     issue_category = str(_issue_value(issue, "category", "") or "").lower()
     issue_rule = str(_issue_value(issue, "rule", "") or "").lower()
     issue_type = str(_issue_value(issue, "type", "") or "").lower()
-    
     combined_issue_type = f"{issue_category} {issue_rule} {issue_type}"
-    
-    # 规则词模糊匹配（金标准的类型与issue的分类有交集）
+
     type_keywords = {
         "术语": ["术语", "terminology", "term"],
         "拼写": ["拼写", "spelling", "spell"],
@@ -8842,21 +8835,78 @@ def _gold_row_matches_issue(gold_row, issue):
         "表格": ["表格", "table"],
         "图文引用": ["图文", "figure", "引用", "reference"],
     }
-    
-    gold_type_clean = re.sub(r"[^\w\u4e00-\u9fff]", "", gold_type)
-    if gold_type_clean:
-        for type_label, keywords in type_keywords.items():
-            if any(kw in gold_type_clean for kw in keywords):
-                if any(kw in combined_issue_type for kw in keywords):
-                    # 类型匹配，检查文本是否有交集
-                    if len_gold >= 2 and len_issue >= 2:
-                        # 至少有一个公共子串长度 >= 2
-                        common_len = _longest_common_substring(gold_wrong, issue_original)
-                        if common_len >= 2:
-                            return True
-                    break
-    
+
+    gold_type_clean = re.sub(r"[^\w\u4e00-\u9fff]", "", str(gold_type or "").lower())
+    if not gold_type_clean:
+        return False
+
+    for keywords in type_keywords.values():
+        if any(keyword in gold_type_clean for keyword in keywords):
+            return any(keyword in combined_issue_type for keyword in keywords)
     return False
+
+
+def _gold_issue_match_detail(gold_row, issue):
+    gold_wrong = _normalize_gold_compare_text(gold_row.get("wrong_text"))
+    issue_original = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
+
+    if not gold_wrong or not issue_original:
+        return {"score": 0, "reason": "no_text"}
+
+    type_match = _gold_type_keyword_match(gold_row.get("issue_type", ""), issue)
+
+    if gold_wrong == issue_original:
+        return {"score": 100, "reason": "exact_text"}
+
+    len_gold = len(gold_wrong)
+    len_issue = len(issue_original)
+
+    if len_gold <= 3 and len_issue <= 3 and len_gold >= 2 and len_issue >= 2:
+        if _edit_distance(gold_wrong, issue_original) <= 1:
+            return {"score": 95 if type_match else 90, "reason": "short_edit_distance"}
+
+    if len_gold >= 2 and len_issue >= 2:
+        if gold_wrong in issue_original or issue_original in gold_wrong:
+            return {"score": 92 if type_match else 88, "reason": "substring"}
+
+    if 3 <= len_gold <= 10 and 3 <= len_issue <= 10:
+        if _edit_distance(gold_wrong, issue_original) <= 1:
+            return {"score": 85 if type_match else 78, "reason": "medium_edit_distance"}
+
+    common_len = _longest_common_substring(gold_wrong, issue_original)
+    if type_match and common_len >= 2:
+        return {"score": 72, "reason": "type_and_common_substring"}
+
+    return {"score": 0, "reason": "no_match"}
+
+
+def _assign_gold_issue_matches(gold_rows, issues):
+    candidates = []
+    for gold_idx, row in enumerate(gold_rows):
+        for issue_idx, issue in enumerate(issues):
+            detail = _gold_issue_match_detail(row, issue)
+            if detail["score"] <= 0:
+                continue
+            candidates.append({
+                "gold_idx": gold_idx,
+                "issue_idx": issue_idx,
+                "score": int(detail["score"]),
+                "reason": detail["reason"],
+            })
+
+    candidates.sort(key=lambda item: (-item["score"], item["gold_idx"], item["issue_idx"]))
+
+    assigned_gold = set()
+    assigned_issue = set()
+    matched_pairs = []
+    for item in candidates:
+        if item["gold_idx"] in assigned_gold or item["issue_idx"] in assigned_issue:
+            continue
+        assigned_gold.add(item["gold_idx"])
+        assigned_issue.add(item["issue_idx"])
+        matched_pairs.append(item)
+
+    return matched_pairs, assigned_gold, assigned_issue
 
 
 def _edit_distance(s1: str, s2: str) -> int:
@@ -9478,47 +9528,36 @@ async def compare_review_with_gold(
     print(f"[DEBUG gold-compare] issues_count={len(issues)}")
     content = document.content or ""
 
-    matched_issue_ids = set()
-    matches = []
-    missed = []
+    annotated_gold_rows = []
     for row in gold_rows:
-        row = dict(row)
-        row["wrong_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("wrong_text"))
-        row["correct_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("correct_text"))
-        row_matches = []
-        for issue in issues:
-            if _gold_row_matches_issue(row, issue):
-                matched_issue_ids.add(getattr(issue, "id", id(issue)))
-                row_matches.append({
-                    "id": getattr(issue, "id", None),
-                    "rule": getattr(issue, "rule", ""),
-                    "category": getattr(issue, "category", ""),
-                    "severity": getattr(issue, "severity", ""),
-                    "chapter": getattr(issue, "chapter", ""),
-                    "original_text": getattr(issue, "original_text", ""),
-                    "suggestion": getattr(issue, "suggestion", ""),
-                    "description": getattr(issue, "description", ""),
-                })
-        if row_matches:
-            matches.append({"gold": row, "issues": row_matches})
-        else:
-            missed.append(row)
+        annotated = dict(row)
+        annotated["wrong_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("wrong_text"))
+        annotated["correct_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("correct_text"))
+        annotated_gold_rows.append(annotated)
+
+    matched_pairs, matched_gold_indices, matched_issue_indices = _assign_gold_issue_matches(annotated_gold_rows, issues)
+
+    matches = []
+    for pair in matched_pairs:
+        issue = issues[pair["issue_idx"]]
+        issue_summary = _gold_issue_summary(issue)
+        matches.append({
+            "gold": annotated_gold_rows[pair["gold_idx"]],
+            "issue": issue_summary,
+            "issues": [issue_summary],
+            "matched_gold_id": annotated_gold_rows[pair["gold_idx"]].get("index"),
+            "matched_issue_id": issue_summary.get("id"),
+            "match_score": pair["score"],
+            "match_reason": pair["reason"],
+        })
+
+    missed = [row for idx, row in enumerate(annotated_gold_rows) if idx not in matched_gold_indices]
 
     false_positive = []
-    for issue in issues:
-        issue_id = getattr(issue, "id", id(issue))
-        if issue_id in matched_issue_ids:
+    for issue_idx, issue in enumerate(issues):
+        if issue_idx in matched_issue_indices:
             continue
-        false_positive.append({
-            "id": getattr(issue, "id", None),
-            "rule": getattr(issue, "rule", ""),
-            "category": getattr(issue, "category", ""),
-            "severity": getattr(issue, "severity", ""),
-            "chapter": getattr(issue, "chapter", ""),
-            "original_text": getattr(issue, "original_text", ""),
-            "suggestion": getattr(issue, "suggestion", ""),
-            "description": getattr(issue, "description", ""),
-        })
+        false_positive.append(_gold_issue_summary(issue))
 
     tp = len(matches)
     fp = len(false_positive)
@@ -9754,7 +9793,7 @@ async def get_aggregated_report(
     review, document = _require_review_access(db, review_id, current_user)
 
     issues = get_issues(db, review_id=review_id)
-    issue_dicts = [issue_to_dict(i) for i in issues]
+    issue_dicts = [_report_issue_to_dict(i) for i in issues]
     agg = ReportAggregator()
     report = agg.aggregate(
         issue_dicts,
