@@ -1,12 +1,13 @@
 import re
 import json
 import os
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
+from app.api.auth import require_admin
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 # 白名单存储文件路径
 WHITELIST_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "whitelist.json")

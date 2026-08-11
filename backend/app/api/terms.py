@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.api.auth import require_admin
 from app.crud.term import create_term, get_term, get_terms, update_term, delete_term, bulk_create_terms
 from app.schemas.term import Term, TermCreate, TermUpdate
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 @router.post("/", response_model=Term)
 async def create_new_term(term: TermCreate, db: Session = Depends(get_db)):

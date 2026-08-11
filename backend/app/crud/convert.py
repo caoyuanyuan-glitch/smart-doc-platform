@@ -4,7 +4,7 @@ from app.schemas.convert import ConvertTaskCreate
 import json
 
 
-def create_convert_task(db: Session, task: ConvertTaskCreate) -> ConvertTask:
+def create_convert_task(db: Session, task: ConvertTaskCreate, user_id: int | None = None) -> ConvertTask:
     import time
     task_id = f"conv_{int(time.time() * 1000)}"
     db_task = ConvertTask(
@@ -14,6 +14,7 @@ def create_convert_task(db: Session, task: ConvertTaskCreate) -> ConvertTask:
         target_format=task.target_format,
         template_filename=task.template_filename,
         requirements=task.requirements,
+        user_id=user_id,
         status="processing",
         progress=0,
     )

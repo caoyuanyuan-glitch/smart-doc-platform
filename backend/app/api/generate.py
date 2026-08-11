@@ -11,12 +11,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from PIL import Image
 
+from app.api.auth import get_current_active_user
 from app.crud.knowledge import get_file, get_folder_tree
 from app.database import get_db
 from app.utils.document_parser import parse_file
 from app.utils.file_utils import read_file_safe
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 DRAFT_CACHE: Dict[str, dict] = {}
 DRAFT_CACHE_MAX = 20

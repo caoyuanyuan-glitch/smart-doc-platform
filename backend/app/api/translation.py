@@ -19,6 +19,7 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 
+from app.api.auth import get_current_active_user, require_admin
 from app.database import get_db, SessionLocal
 from app.schemas.translation import (
     TranslationRequest,
@@ -40,8 +41,9 @@ from app.models.translation_doc import TranslationDoc
 from app.utils.document_parser import parse_file, parse_xlsx_textual_content
 from app.utils.ai_client import ai_client
 from app.utils.file_utils import read_file_safe
+from app.schemas.user import UserOut
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads/translation"
 TRANSLATION_OUTPUT_DIR = "./static/translations"
@@ -74,6 +76,20 @@ TRANSLATION_STATS_CACHE_TTL_SECONDS = 10
 
 class TranslationCancelled(Exception):
     pass
+
+
+def _apply_translation_doc_scope(query, current_user: UserOut):
+    if current_user.role == "admin":
+        return query
+    return query.filter(TranslationDoc.user_id == current_user.id)
+
+
+def _require_translation_doc_access(db: Session, doc_id: int, current_user: UserOut):
+    query = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id)
+    doc = _apply_translation_doc_scope(query, current_user).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Translation doc not found")
+    return doc
 
 
 def _get_translate_task_status(doc_id: int) -> str:
@@ -3273,7 +3289,11 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
 
 
 @router.post("/translate", response_model=TranslationResponse)
-async def translate_text(req: TranslationRequest, db: Session = Depends(get_db)):
+async def translate_text(
+    req: TranslationRequest,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     req.model = _normalize_ai_model(req.model)
     engine = req.engine
     _set_memory_bank(req.memory_bank)
@@ -3315,6 +3335,7 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
         source_word_count=source_word_count,
         ai_word_count=usage_stats["ai_word_count"],
         memory_word_count=usage_stats["memory_word_count"],
+        user_id=current_user.id,
     )
     db.add(doc_record)
     db.commit()
@@ -3335,10 +3356,26 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
 
 
 @router.get("/stats")
-async def get_translation_stats(batch_id: str = Query(None), db: Session = Depends(get_db)):
+async def get_translation_stats(
+    batch_id: str = Query(None),
+    db: Session = Depends(get_db),
+    _: UserOut = Depends(require_admin),
+):
     cached = _get_cached_translation_stats(batch_id)
     if cached is not None:
         return cached
+
+    all_docs = db.query(TranslationDoc).all()
+    docs_updated = False
+    for doc in all_docs:
+        word_counts = _normalize_doc_word_counts(doc)
+        if word_counts["dirty"]:
+            doc.source_word_count = word_counts["source_word_count"]
+            doc.ai_word_count = word_counts["ai_word_count"]
+            doc.memory_word_count = word_counts["memory_word_count"]
+            docs_updated = True
+    if docs_updated:
+        db.commit()
 
     payload = _build_translation_stats_payload(db, batch_id)
     _set_cached_translation_stats(batch_id, payload)
@@ -3346,7 +3383,7 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
 
 
 @router.get("/providers/status")
-async def get_translation_provider_status():
+async def get_translation_provider_status(_: UserOut = Depends(require_admin)):
     return ai_client.provider_status(include_health=True)
 
 
@@ -3360,7 +3397,8 @@ async def translate_file(
     memory_bank: str = Form(""),
     memory_file_id: int = Form(None),
     batch_id: str = Form(""),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
     model = _normalize_ai_model(model)
     if not os.path.exists(UPLOAD_DIR):
@@ -3398,6 +3436,7 @@ async def translate_file(
         original_preview="",
         translated_preview="",
         batch_id=(batch_id or "").strip(),
+        user_id=current_user.id,
     )
     db.add(doc)
     db.commit()
@@ -3420,10 +3459,12 @@ async def translate_file(
 
 
 @router.get("/translate/file/{doc_id}/status")
-async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+async def get_translate_file_status(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    doc = _require_translation_doc_access(db, doc_id, current_user)
 
     orig_filename = doc.filename or ""
     fn = doc.translated_filename or ""
@@ -3488,10 +3529,12 @@ async def get_translate_file_status(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/translate/file/{doc_id}/cancel")
-async def cancel_translate_file(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+async def cancel_translate_file(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    doc = _require_translation_doc_access(db, doc_id, current_user)
 
     fn = str(doc.translated_filename or "")
     usage = _normalize_doc_word_counts(doc)
@@ -3524,10 +3567,12 @@ async def cancel_translate_file(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/download/{doc_id}")
-async def download_translated_file(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Translation doc not found")
+async def download_translated_file(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    doc = _require_translation_doc_access(db, doc_id, current_user)
 
     output_filename = doc.translated_filename
     if not output_filename or output_filename.startswith("ERROR:"):
@@ -3553,7 +3598,7 @@ async def download_translated_file(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/reviewed-docs")
-async def get_reviewed_documents(db: Session = Depends(get_db)):
+async def get_reviewed_documents(db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     reviews = get_reviews(db)
     reviewed_doc_ids = set()
     for review in reviews:
@@ -3576,7 +3621,7 @@ async def get_reviewed_documents(db: Session = Depends(get_db)):
 
 
 @router.get("/memory/banks")
-async def get_banks(db: Session = Depends(get_db)):
+async def get_banks(db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     """Return list of distinct memory bank names (tags) available for translation."""
     banks = get_memory_banks(db)
     return {"banks": banks}
@@ -3587,13 +3632,14 @@ async def list_memory_entries(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=500),
     keyword: str = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: UserOut = Depends(require_admin),
 ):
     return get_memory_entries(db, skip=skip, limit=limit, keyword=keyword)
 
 
 @router.post("/memory", response_model=MemoryEntryOut)
-async def add_memory_entry(entry: MemoryEntry, db: Session = Depends(get_db)):
+async def add_memory_entry(entry: MemoryEntry, db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     return create_memory_entry(
         db=db,
         source_text=entry.source_text,
@@ -3605,7 +3651,7 @@ async def add_memory_entry(entry: MemoryEntry, db: Session = Depends(get_db)):
 
 
 @router.post("/memory/file-entry")
-async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Depends(get_db)):
+async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     memory_file = db.query(KnowledgeFile).filter(KnowledgeFile.id == entry.memory_file_id).first()
     if not memory_file:
         raise HTTPException(status_code=404, detail="记忆库文件不存在")
@@ -3690,7 +3736,7 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
 
 
 @router.delete("/memory/{entry_id}")
-async def remove_memory_entry(entry_id: int, db: Session = Depends(get_db)):
+async def remove_memory_entry(entry_id: int, db: Session = Depends(get_db), _: UserOut = Depends(require_admin)):
     entry = delete_memory_entry(db, entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Memory entry not found")
@@ -3702,9 +3748,10 @@ async def list_translation_docs(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=500),
     batch_id: str = Query(""),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
-    query = db.query(TranslationDoc)
+    query = _apply_translation_doc_scope(db.query(TranslationDoc), current_user)
     normalized_batch_id = (batch_id or "").strip()
     if normalized_batch_id:
         query = query.filter(TranslationDoc.batch_id == normalized_batch_id)
@@ -3723,10 +3770,12 @@ async def list_translation_docs(
 
 
 @router.get("/docs/{doc_id}", response_model=TranslationDocOut)
-async def get_translation_doc(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Translation doc not found")
+async def get_translation_doc(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    doc = _require_translation_doc_access(db, doc_id, current_user)
     word_counts = _normalize_doc_word_counts(doc)
     if word_counts["dirty"]:
         doc.source_word_count = word_counts["source_word_count"]
@@ -3737,10 +3786,12 @@ async def get_translation_doc(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/docs/{doc_id}")
-async def delete_translation_doc(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.query(TranslationDoc).filter(TranslationDoc.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Translation doc not found")
+async def delete_translation_doc(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    doc = _require_translation_doc_access(db, doc_id, current_user)
     affected_batch_id = doc.batch_id
     db.delete(doc)
     db.commit()

@@ -5,9 +5,11 @@ import os
 import json
 import time
 import xml.etree.ElementTree as ET
+from app.api.auth import get_current_active_user
+from app.schemas.user import UserOut
 from app.database import get_db
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads"
 PREVIEW_DIR = "./static/preview"
@@ -16,6 +18,26 @@ _MEMORY_TASKS = {}
 _MEMORY_DIFFS = {}
 _MEMORY_NEXT_ID = [1000]
 _MEMORY_FILES = {}  # task_id -> {file_a_path, file_b_path, file_a_name, file_b_name}
+
+
+def _require_compare_task_access(db: Session, task_id: int, current_user: UserOut):
+    memory_task = _MEMORY_TASKS.get(task_id)
+    if memory_task is not None:
+        if current_user.role != "admin" and memory_task.get("user_id") != current_user.id:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return "memory", memory_task
+
+    try:
+        from app.crud.compare import get_compare_task
+        task = get_compare_task(db, task_id=task_id)
+    except Exception:
+        task = None
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if current_user.role != "admin" and getattr(task, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return "db", task
 
 
 def _ensure_upload_dir():
@@ -519,7 +541,7 @@ def _parse_file(file_path: str, filename: str):
         return {"text": text, "segments": [], "structure": [], "type": "text"}
 
 
-def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, group_id=None, file_names=None, db=None):
+def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, user_id: int, group_id=None, file_names=None, db=None):
     task_id = None
     parsed_a = _parse_file(file_a_path, file_a_name)
     parsed_b = _parse_file(file_b_path, file_b_name)
@@ -659,7 +681,7 @@ def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, group
 
     try:
         from app.crud.compare import create_compare_task, update_compare_task, create_compare_diff
-        task = create_compare_task(db, file_a_name, file_b_name, 1, group_id=group_id, file_names=file_names)
+        task = create_compare_task(db, file_a_name, file_b_name, user_id, group_id=group_id, file_names=file_names)
         doc_full_json = json.dumps(doc_full, ensure_ascii=False) if doc_full else ""
         dita_full_json = json.dumps(dita_full, ensure_ascii=False) if dita_full else doc_full_json
         update_compare_task(
@@ -726,7 +748,7 @@ def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, group
             "total_diffs": result["total_diffs"],
             "diff_stats": json.dumps(result["diff_stats"]),
             "status": "completed",
-            "user_id": 1,
+            "user_id": user_id,
             "created_at": int(time.time()),
             "exact_match": result.get("exact_match", 0),
             "n_a": result.get("n_a", 0),
@@ -787,6 +809,7 @@ def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, group
 async def create_compare(
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
     _ensure_upload_dir()
 
@@ -819,6 +842,7 @@ async def create_compare(
         cmp_name = saved_names[i]
         pair_result = _do_single_compare(
             ref_path, cmp_path, ref_name, cmp_name,
+            user_id=current_user.id,
             group_id=group_id, file_names=json.dumps(saved_names, ensure_ascii=False),
             db=db,
         )
@@ -837,13 +861,23 @@ async def create_compare(
 
 
 @router.get("/")
-async def read_compare_tasks(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+async def read_compare_tasks(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     items = []
     
     db_tasks = []
     try:
         from app.crud.compare import get_compare_tasks
-        db_tasks = get_compare_tasks(db, skip=0, limit=1000) or []
+        db_tasks = get_compare_tasks(
+            db,
+            user_id=None if current_user.role == "admin" else current_user.id,
+            skip=0,
+            limit=1000,
+        ) or []
     except Exception:
         pass
     
@@ -863,6 +897,8 @@ async def read_compare_tasks(skip: int = 0, limit: int = 100, db: Session = Depe
 
     mem_list = sorted(_MEMORY_TASKS.values(), key=lambda x: -x["id"])
     for m in mem_list:
+        if current_user.role != "admin" and m.get("user_id") != current_user.id:
+            continue
         exists = any(item["id"] == m["id"] for item in items)
         if not exists:
             items.append({
@@ -883,7 +919,12 @@ async def read_compare_tasks(skip: int = 0, limit: int = 100, db: Session = Depe
 
 
 @router.get("/{task_id}")
-async def read_compare(task_id: int, db: Session = Depends(get_db)):
+async def read_compare(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    source, access_obj = _require_compare_task_access(db, task_id, current_user)
     task_obj = None
     diffs = []
     matched_pairs = []
@@ -892,8 +933,8 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
 
     try:
         from app.crud.compare import get_compare_task, get_compare_diffs
-        task = get_compare_task(db, task_id=task_id)
-        if task:
+        task = access_obj if source == "db" else None
+        if task is not None:
             task_obj = {
                 "id": task.id,
                 "task_type": getattr(task, "task_type", "doc") or "doc",
@@ -931,8 +972,8 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
     except Exception:
         pass
 
-    if task_obj is None and task_id in _MEMORY_TASKS:
-        task_obj = _MEMORY_TASKS[task_id]
+    if task_obj is None and source == "memory":
+        task_obj = access_obj
         diffs = _MEMORY_DIFFS.get(task_id, [])
 
     if task_obj is None:
@@ -1010,16 +1051,22 @@ async def read_compare(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/{task_id}")
-async def delete_compare(task_id: int, db: Session = Depends(get_db)):
+async def delete_compare(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    source, _ = _require_compare_task_access(db, task_id, current_user)
     deleted = False
-    try:
-        from app.crud.compare import delete_compare_task
-        t = delete_compare_task(db, task_id=task_id)
-        if t:
-            deleted = True
-    except Exception:
-        pass
-    if task_id in _MEMORY_TASKS:
+    if source == "db":
+        try:
+            from app.crud.compare import delete_compare_task
+            t = delete_compare_task(db, task_id=task_id)
+            if t:
+                deleted = True
+        except Exception:
+            pass
+    if source == "memory" and task_id in _MEMORY_TASKS:
         _MEMORY_TASKS.pop(task_id, None)
         _MEMORY_DIFFS.pop(task_id, None)
         deleted = True
@@ -1029,10 +1076,15 @@ async def delete_compare(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{task_id}/report")
-async def generate_report(task_id: int, format: str = "html", db: Session = Depends(get_db)):
+async def generate_report(
+    task_id: int,
+    format: str = "html",
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     data = None
     try:
-        data = await read_compare(task_id, db)
+        data = await read_compare(task_id, db, current_user)
     except HTTPException:
         raise
     except Exception:
@@ -1293,13 +1345,20 @@ async def update_config(
 
 
 @router.get("/{task_id}/preview/file")
-async def get_preview_file(task_id: int, side: str = "a", db: Session = Depends(get_db)):
+async def get_preview_file(
+    task_id: int,
+    side: str = "a",
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """
     获取对比任务的PDF预览文件
     side: 'a' 或 'b'
     """
     from fastapi.responses import FileResponse
     import os
+
+    _require_compare_task_access(db, task_id, current_user)
 
     file_path = None
     file_name = None
@@ -1343,10 +1402,16 @@ async def get_preview_file(task_id: int, side: str = "a", db: Session = Depends(
 
 
 @router.get("/{task_id}/preview/info")
-async def get_preview_info(task_id: int, db: Session = Depends(get_db)):
+async def get_preview_info(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """
     获取预览文件信息（是否有PDF预览、文件名等）
     """
+    _require_compare_task_access(db, task_id, current_user)
+
     info = {
         "task_id": task_id,
         "has_preview_a": False,

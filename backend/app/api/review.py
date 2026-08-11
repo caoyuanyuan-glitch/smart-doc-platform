@@ -11,10 +11,12 @@ import re
 import os
 try:
     from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
-except ImportError as e:
+except ModuleNotFoundError as exc:
+    if exc.name not in {"app.services", "app.services.chunker"}:
+        raise
     logging.getLogger(__name__).warning(
         "智能分块模块(services.chunker)加载失败，审核将回退到传统分块模式: %s",
-        e,
+        exc,
     )
     create_smart_chunker = None
     CrossChapterConsistencyChecker = None
@@ -63,6 +65,8 @@ from app.review_engine.pipeline import (
     suppress_shadowed_ai as pipeline_suppress_shadowed_ai,
     value_score as pipeline_value_score,
 )
+from app.api.auth import get_current_active_user, require_admin
+from app.schemas.user import UserOut
 
 _review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
 _ai_review_chunk_cache = {}
@@ -204,6 +208,71 @@ def _query_review_rows(db: Session, document_id: int | None = None, status: str 
     return query.order_by(ReviewModel.id.desc()).limit(normalized_limit).all()
 
 
+def _query_review_rows_for_user(
+    db: Session,
+    current_user: UserOut,
+    document_id: int | None = None,
+    status: str | None = None,
+    latest_only: bool = False,
+    limit: int = 100,
+):
+    rows = _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+    if current_user.role == "admin":
+        return rows
+    return [review for review in rows if getattr(get_document(db, review.document_id), "user_id", None) == current_user.id]
+
+
+def _has_bound_current_user(current_user) -> bool:
+    return hasattr(current_user, "role") and hasattr(current_user, "id")
+
+
+def _resolve_param_value(value, default=None):
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if hasattr(value, "default"):
+        resolved = value.default
+        return default if resolved is Ellipsis else resolved
+    return value
+
+
+def _query_review_rows_legacy(
+    db: Session,
+    document_id: int | None = None,
+    status: str | None = None,
+    latest_only: bool = False,
+    limit: int = 100,
+):
+    if document_id is None and status is None and not latest_only and limit == 100:
+        return get_reviews(db)
+    return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+
+
+def _ensure_document_access(document, current_user: UserOut):
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if current_user.role == "admin":
+        return document
+    if getattr(document, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问该文档")
+    return document
+
+
+def _require_review_access(db: Session, review_id: int, current_user: UserOut):
+    review = get_review(db, review_id=review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+    document = _ensure_document_access(get_document(db, document_id=review.document_id), current_user)
+    return review, document
+
+
+def _require_issue_access(db: Session, issue_id: int, current_user: UserOut):
+    issue = db.query(IssueModel).filter(IssueModel.id == issue_id).first()
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    _require_review_access(db, issue.review_id, current_user)
+    return issue
+
+
 def _serialize_review_list_item(db: Session, review, document_map):
     review = _reconcile_review_runtime_state(db, review)
     doc = document_map.get(review.document_id)
@@ -216,17 +285,28 @@ def _serialize_review_list_item(db: Session, review, document_map):
         review_dict['progress'] = get_progress(review.id)
     return review_dict
 
+
+class ReviewTrace(dict):
+    def __len__(self):
+        return len(self.get("chunks") or [])
+
 router = APIRouter()
 
 
 @router.get("/{review_id}/progress-stream")
-async def review_progress_stream(review_id: int):
+async def review_progress_stream(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """
     SSE 实时进度推送端点
 
     替代前端轮询机制，提供审核进度的实时推送。
     每秒检查一次进度，当审核完成/失败时自动关闭连接。
     """
+    _require_review_access(db, review_id, current_user)
+
     async def event_generator():
         last_hash = ""
         retry_count = 0
@@ -1476,18 +1556,24 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     total_length = len(content)
 
     SMALL_DOC_THRESHOLD = 3000
-    if total_length <= SMALL_DOC_THRESHOLD:
+    use_full_doc_review = total_length <= SMALL_DOC_THRESHOLD and _review_ai_token_budget() <= 0
+    if use_full_doc_review:
         print(f"[审核] 小文档 ({total_length} 字符)，使用全量不分块审核模式")
         selected_basis = _select_relevant_ai_review_basis(content, ai_review_basis_sections)
         try:
+            cache_kwargs = {}
+            if provider is not None:
+                cache_kwargs["force_provider"] = provider
+            if document_name is not None:
+                cache_kwargs["document_name"] = document_name
             all_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, content, document_language, selected_basis,
                 _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '30'),
-                force_provider=provider, document_name=document_name
+                **cache_kwargs,
             )
             for issue in all_issues:
                 issue['chapter'] = issue.get('chapter') or '全文'
-            trace = {
+            trace = ReviewTrace({
                 "enabled": True,
                 "selected_chunk_count": 1,
                 "total_chunk_count": 1,
@@ -1509,7 +1595,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                     "cache_hit": cache_hit,
                 }],
                 "issue_count": len(all_issues),
-            }
+            })
             return all_issues, trace
         except concurrent.futures.TimeoutError:
             print(f"[审核] 小文档全量审核超时，回退到分块模式")
@@ -1542,14 +1628,14 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     all_issues = []
     total = len(chunks)
     chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
-    trace = {
+    trace = ReviewTrace({
         "enabled": True,
         "selected_chunk_count": len(chunks),
         "total_chunk_count": len(all_chunks),
         "chunk_timeout_seconds": chunk_timeout,
         "chunks": [],
         "chunk_meta": [],
-    }
+    })
     for index, start, chunk in chunks:
         budget_reached, budget_summary = _review_ai_budget_reached(review_id)
         if budget_reached:
@@ -1570,7 +1656,12 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f'正在进行AI快速增强 ({index}/{total})，规则已覆盖全文...',
         )
         selected_basis = _select_relevant_ai_review_basis(chunk, ai_review_basis_sections)
-        prompt_payload = ai_client.build_audit_prompt_payload(chunk, language=document_language, audit_basis=selected_basis)
+        prompt_payload = ai_client.build_audit_prompt_payload(
+            chunk,
+            language=document_language,
+            audit_basis=selected_basis,
+            document_name=document_name,
+        )
         basis_labels = _extract_basis_labels_from_text(selected_basis)
         chunk_trace = {
             "chunk_index": index,
@@ -1586,9 +1677,14 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f"selected={len(chunks)}/{len(all_chunks)}, basis_len={len(selected_basis)}"
         )
         try:
+            cache_kwargs = {}
+            if provider is not None:
+                cache_kwargs["force_provider"] = provider
+            if document_name is not None:
+                cache_kwargs["document_name"] = document_name
             chunk_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, chunk, document_language, selected_basis, chunk_timeout,
-                force_provider=provider, document_name=document_name
+                **cache_kwargs,
             )
             for issue in chunk_issues:
                 issue['chapter'] = issue.get('chapter') or f'AI chunk {index}'
@@ -1912,6 +2008,18 @@ def _filter_ai_issues_without_document_evidence(issues, content):
     if dropped:
         print(f'[审核] AI证据兜底过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个, 原因={dropped_by_reason}')
     return filtered
+
+
+def _filter_ai_issues_without_document_evidence_with_reasons(issues, content):
+    filtered, dropped_by_reason = engine_filter_ai_issues_without_document_evidence(issues, content)
+    dropped = sum(dropped_by_reason.values())
+    if dropped:
+        print(f'[审核] AI证据兜底过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个, 原因={dropped_by_reason}')
+    return filtered, dropped_by_reason
+
+
+def _count_ai_issues(items):
+    return sum(1 for issue in items if str(issue.get('source', '') or '').lower() == 'ai')
 
 
 def _issue_judgment_signature(issue):
@@ -7104,8 +7212,29 @@ async def list_reviews(
     latest_only: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
-    reviews = _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+    document_id = _resolve_param_value(document_id)
+    status = _resolve_param_value(status)
+    latest_only = bool(_resolve_param_value(latest_only, False))
+    limit = int(_resolve_param_value(limit, 100) or 100)
+    if _has_bound_current_user(current_user):
+        reviews = _query_review_rows_for_user(
+            db,
+            current_user,
+            document_id=document_id,
+            status=status,
+            latest_only=latest_only,
+            limit=limit,
+        )
+    else:
+        reviews = _query_review_rows_legacy(
+            db,
+            document_id=document_id,
+            status=status,
+            latest_only=latest_only,
+            limit=limit,
+        )
     document_map = {
         doc.id: doc
         for doc in get_documents_by_ids(db, [review.document_id for review in reviews])
@@ -7114,10 +7243,12 @@ async def list_reviews(
 
 
 @router.get("/{review_id}/progress")
-async def get_review_progress(review_id: int, db: Session = Depends(get_db)):
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
+async def get_review_progress(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, _ = _require_review_access(db, review_id, current_user)
 
     review = _reconcile_review_runtime_state(db, review)
     if review.status == 'running':
@@ -8222,15 +8353,27 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
+        ai_filter_diagnostics = {
+            "initial_total": len(issues),
+            "initial_ai": _count_ai_issues(issues),
+        }
         issues = dedupe_issues_by_original(issues)
+        ai_filter_diagnostics["after_dedup_ai"] = _count_ai_issues(issues)
         issues = _sanitize_issue_suggestions(issues)
+        ai_filter_diagnostics["after_sanitize_ai"] = _count_ai_issues(issues)
         issues = _filter_review_false_positives(issues)
+        ai_filter_diagnostics["after_false_positive_ai"] = _count_ai_issues(issues)
         issues = _filter_low_value_review_issues(issues)
-        issues = _filter_ai_issues_without_document_evidence(issues, content)
+        ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
+        issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
+        ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
+        ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
         issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
+        ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
         pre_pipeline_issues = list(issues)
         before_pipeline_count = len(issues)
         issues = pipeline_select_review_issues(issues)
+        ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
         print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
 
         validation_dropped = _stage_input_counts.get("dedup_and_validation", before_pipeline_count) - len(issues)
@@ -8311,6 +8454,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "cache_hit": False,
             "ai_usage": review_ai_usage,
             "ai_review": ai_review_trace,
+            "ai_filter_diagnostics": ai_filter_diagnostics,
             "knowledge_basis": {
                 "enabled": bool(ai_review_basis_sections),
                 "labels": knowledge_labels,
@@ -8361,7 +8505,8 @@ def _normalize_providers(provider: str = None, providers: str = None) -> list:
 async def create_review_task(document_id: int, mode: str = "hybrid",
                              provider: str = None, providers: str = None,
                              background_tasks: BackgroundTasks = None,
-                             db: Session = Depends(get_db)):
+                             db: Session = Depends(get_db),
+                             current_user: UserOut = Depends(get_current_active_user)):
     """创建审核任务。
     
     Args:
@@ -8374,9 +8519,7 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     if mode not in {"rule", "ai", "hybrid"}:
         raise HTTPException(status_code=400, detail="Unsupported review mode")
 
-    document = get_document(db, document_id=document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = _ensure_document_access(get_document(db, document_id=document_id), current_user)
 
     active_review = _get_active_review_for_document(db, document_id)
     if active_review:
@@ -8637,6 +8780,7 @@ async def get_review_dashboard_overview(
     project_id: str = Query('all'),
     user_id: str = Query('all'),
     db: Session = Depends(get_db),
+    _: UserOut = Depends(require_admin),
 ):
     return _build_review_dashboard_payload(db, time_range, start_date, end_date, doc_type, user_id)
 
@@ -8647,14 +8791,28 @@ async def get_review_dashboard_personal(
     start_date: str = Query(None),
     end_date: str = Query(None),
     doc_type: str = Query('all'),
-    user_id: str = Query(1),
     db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
-    return _build_review_dashboard_payload(db, time_range, start_date, end_date, doc_type, user_id)
+    return _build_review_dashboard_payload(db, time_range, start_date, end_date, doc_type, str(current_user.id))
 
 
 def _normalize_gold_compare_text(value):
     return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def _parse_gold_serial(value):
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_gold_location_text(value):
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[（）()\[\]{}]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
 def _load_gold_rows_from_excel(file_bytes):
@@ -8678,8 +8836,9 @@ def _load_gold_rows_from_excel(file_bytes):
             continue
         if "错误内容" not in item:
             continue
-        serial = item.get("序号")
-        if not isinstance(serial, int):
+        serial = _parse_gold_serial(item.get("序号"))
+        if serial is None:
+            print(f"[gold-compare] skip row with invalid serial: {item.get('序号')!r}")
             continue
         issue_type = str(item.get("问题类型") or "").strip()
         if issue_type in {"—", "-", "无", "正确样本", "不应检出"}:
@@ -8696,52 +8855,28 @@ def _load_gold_rows_from_excel(file_bytes):
 
 
 def _gold_row_matches_issue(gold_row, issue):
-    """金标准行与AI issue的匹配判定。
-    
-    匹配策略（按优先级）：
-    1. 归一化后完全一致 → 匹配
-    2. 短文本(2-3字符)：编辑距离 ≤ 1 → 匹配
-    3. 中长文本(≥2字符)：包含关系 → 匹配
-    4. 中等文本(3-10字符)：编辑距离 ≤ 1 且规则/类型相关 → 匹配
-    5. 规则词匹配：金标准的"问题类型"与issue的category/rule有交集 → 弱匹配（需文本也部分匹配）
-    """
-    gold_wrong = _normalize_gold_compare_text(gold_row.get("wrong_text"))
-    issue_original = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
-    
-    if not gold_wrong or not issue_original:
-        return False
-    
-    # 策略1: 完全一致
-    if gold_wrong == issue_original:
-        return True
-    
-    len_gold = len(gold_wrong)
-    len_issue = len(issue_original)
-    
-    # 策略2: 短文本编辑距离匹配（2-3字符的短词，允许1个字符差异）
-    if len_gold <= 3 and len_issue <= 3 and len_gold >= 2 and len_issue >= 2:
-        if _edit_distance(gold_wrong, issue_original) <= 1:
-            return True
-    
-    # 策略3: 包含关系匹配（≥2字符）
-    if len_gold >= 2 and len_issue >= 2:
-        if gold_wrong in issue_original or issue_original in gold_wrong:
-            return True
-    
-    # 策略4: 中等长度文本模糊匹配 + 规则相关性
-    if 3 <= len_gold <= 10 and 3 <= len_issue <= 10:
-        if _edit_distance(gold_wrong, issue_original) <= 1:
-            return True
-    
-    # 策略5: 规则词/类型相关 + 部分文本匹配
-    gold_type = str(gold_row.get("issue_type", "") or "").lower()
+    return _gold_issue_match_detail(gold_row, issue)["score"] > 0
+
+
+def _gold_issue_summary(issue):
+    return {
+        "id": getattr(issue, "id", None),
+        "rule": getattr(issue, "rule", ""),
+        "category": getattr(issue, "category", ""),
+        "severity": getattr(issue, "severity", ""),
+        "chapter": getattr(issue, "chapter", ""),
+        "original_text": getattr(issue, "original_text", ""),
+        "suggestion": getattr(issue, "suggestion", ""),
+        "description": getattr(issue, "description", ""),
+    }
+
+
+def _gold_type_keyword_match(gold_type, issue):
     issue_category = str(_issue_value(issue, "category", "") or "").lower()
     issue_rule = str(_issue_value(issue, "rule", "") or "").lower()
     issue_type = str(_issue_value(issue, "type", "") or "").lower()
-    
     combined_issue_type = f"{issue_category} {issue_rule} {issue_type}"
-    
-    # 规则词模糊匹配（金标准的类型与issue的分类有交集）
+
     type_keywords = {
         "术语": ["术语", "terminology", "term"],
         "拼写": ["拼写", "spelling", "spell"],
@@ -8755,21 +8890,169 @@ def _gold_row_matches_issue(gold_row, issue):
         "表格": ["表格", "table"],
         "图文引用": ["图文", "figure", "引用", "reference"],
     }
-    
-    gold_type_clean = re.sub(r"[^\w\u4e00-\u9fff]", "", gold_type)
-    if gold_type_clean:
-        for type_label, keywords in type_keywords.items():
-            if any(kw in gold_type_clean for kw in keywords):
-                if any(kw in combined_issue_type for kw in keywords):
-                    # 类型匹配，检查文本是否有交集
-                    if len_gold >= 2 and len_issue >= 2:
-                        # 至少有一个公共子串长度 >= 2
-                        common_len = _longest_common_substring(gold_wrong, issue_original)
-                        if common_len >= 2:
-                            return True
-                    break
-    
+
+    gold_type_clean = re.sub(r"[^\w\u4e00-\u9fff]", "", str(gold_type or "").lower())
+    if not gold_type_clean:
+        return False
+
+    for keywords in type_keywords.values():
+        if any(keyword in gold_type_clean for keyword in keywords):
+            return any(keyword in combined_issue_type for keyword in keywords)
     return False
+
+
+def _gold_location_match_detail(gold_row, issue):
+    gold_location = _normalize_gold_location_text(gold_row.get("location"))
+    issue_chapter = _normalize_gold_location_text(_issue_value(issue, "chapter", ""))
+
+    if not gold_location:
+        return {"score_delta": 0, "matched": None, "reason": "no_gold_location"}
+    if not issue_chapter:
+        return {"score_delta": 0, "matched": None, "reason": "no_issue_location"}
+    if gold_location == issue_chapter:
+        return {"score_delta": 12, "matched": True, "reason": "exact_location"}
+    if gold_location in issue_chapter or issue_chapter in gold_location:
+        return {"score_delta": 6, "matched": True, "reason": "partial_location"}
+    return {"score_delta": -18, "matched": False, "reason": "location_conflict"}
+
+
+def _gold_issue_match_detail(gold_row, issue):
+    gold_wrong = _normalize_gold_compare_text(gold_row.get("wrong_text"))
+    issue_original = _normalize_gold_compare_text(_issue_value(issue, "original_text", ""))
+
+    if not gold_wrong or not issue_original:
+        return {"score": 0, "reason": "no_text", "location_match": None, "location_reason": "no_text"}
+
+    type_match = _gold_type_keyword_match(gold_row.get("issue_type", ""), issue)
+    location_detail = _gold_location_match_detail(gold_row, issue)
+    base_score = 0
+    reason = "no_match"
+
+    if gold_wrong == issue_original:
+        base_score = 100
+        reason = "exact_text"
+
+    len_gold = len(gold_wrong)
+    len_issue = len(issue_original)
+
+    if not base_score and len_gold <= 3 and len_issue <= 3 and len_gold >= 2 and len_issue >= 2:
+        if _edit_distance(gold_wrong, issue_original) <= 1:
+            base_score = 95 if type_match else 90
+            reason = "short_edit_distance"
+
+    if not base_score and len_gold >= 2 and len_issue >= 2:
+        if gold_wrong in issue_original or issue_original in gold_wrong:
+            base_score = 92 if type_match else 88
+            reason = "substring"
+
+    if not base_score and 3 <= len_gold <= 10 and 3 <= len_issue <= 10:
+        if _edit_distance(gold_wrong, issue_original) <= 1:
+            base_score = 85 if type_match else 78
+            reason = "medium_edit_distance"
+
+    common_len = _longest_common_substring(gold_wrong, issue_original)
+    if not base_score and type_match and common_len >= 2:
+        base_score = 72
+        reason = "type_and_common_substring"
+
+    if not base_score:
+        return {
+            "score": 0,
+            "reason": "no_match",
+            "location_match": location_detail["matched"],
+            "location_reason": location_detail["reason"],
+        }
+
+    score = max(0, base_score + int(location_detail["score_delta"]))
+    return {
+        "score": score,
+        "reason": reason,
+        "location_match": location_detail["matched"],
+        "location_reason": location_detail["reason"],
+    }
+
+
+def _assign_gold_issue_matches(gold_rows, issues):
+    if not gold_rows or not issues:
+        return [], set(), set()
+
+    if len(issues) > 20:
+        candidates = []
+        for gold_idx, row in enumerate(gold_rows):
+            for issue_idx, issue in enumerate(issues):
+                detail = _gold_issue_match_detail(row, issue)
+                if detail["score"] <= 0:
+                    continue
+                candidates.append({
+                    "gold_idx": gold_idx,
+                    "issue_idx": issue_idx,
+                    "score": int(detail["score"]),
+                    "reason": detail["reason"],
+                    "location_match": detail["location_match"],
+                    "location_reason": detail["location_reason"],
+                })
+
+        candidates.sort(key=lambda item: (-item["score"], item["gold_idx"], item["issue_idx"]))
+        assigned_gold = set()
+        assigned_issue = set()
+        matched_pairs = []
+        for item in candidates:
+            if item["gold_idx"] in assigned_gold or item["issue_idx"] in assigned_issue:
+                continue
+            assigned_gold.add(item["gold_idx"])
+            assigned_issue.add(item["issue_idx"])
+            matched_pairs.append(item)
+        return matched_pairs, assigned_gold, assigned_issue
+
+    score_matrix = []
+    detail_matrix = []
+    for row in gold_rows:
+        row_scores = []
+        row_details = []
+        for issue in issues:
+            detail = _gold_issue_match_detail(row, issue)
+            row_scores.append(int(detail["score"]))
+            row_details.append(detail)
+        score_matrix.append(row_scores)
+        detail_matrix.append(row_details)
+
+    memo = {}
+
+    def _solve(gold_idx, used_mask):
+        key = (gold_idx, used_mask)
+        if key in memo:
+            return memo[key]
+        if gold_idx >= len(gold_rows):
+            return 0, (), []
+
+        best_score, best_signature, best_pairs = _solve(gold_idx + 1, used_mask)
+        for issue_idx, score in enumerate(score_matrix[gold_idx]):
+            if score <= 0 or used_mask & (1 << issue_idx):
+                continue
+            next_score, next_signature, next_pairs = _solve(gold_idx + 1, used_mask | (1 << issue_idx))
+            total_score = score + next_score
+            candidate_pairs = [
+                {
+                    "gold_idx": gold_idx,
+                    "issue_idx": issue_idx,
+                    "score": score,
+                    "reason": detail_matrix[gold_idx][issue_idx]["reason"],
+                    "location_match": detail_matrix[gold_idx][issue_idx]["location_match"],
+                    "location_reason": detail_matrix[gold_idx][issue_idx]["location_reason"],
+                }
+            ] + next_pairs
+            candidate_signature = tuple((item["gold_idx"], item["issue_idx"], item["score"]) for item in candidate_pairs)
+            if total_score > best_score or (total_score == best_score and candidate_signature < best_signature):
+                best_score, best_signature, best_pairs = total_score, candidate_signature, candidate_pairs
+
+        memo[key] = (best_score, best_signature, best_pairs)
+        return memo[key]
+
+    _, _, matched_pairs = _solve(0, 0)
+    assigned_gold = {item["gold_idx"] for item in matched_pairs}
+    assigned_issue = {item["issue_idx"] for item in matched_pairs}
+    matched_pairs.sort(key=lambda item: item["gold_idx"])
+    return matched_pairs, assigned_gold, assigned_issue
 
 
 def _edit_distance(s1: str, s2: str) -> int:
@@ -9266,6 +9549,7 @@ async def compare_audit(
     reference_files: list[UploadFile] = File(default=[]),
     mode: str = Form(default="both"),
     db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
     if not reference_files:
         raise HTTPException(status_code=400, detail="未提供参考文件，无法进行对比")
@@ -9311,7 +9595,7 @@ async def compare_audit(
             content=main_doc["text"],
             preview=(main_doc["text"][:500] + "...") if len(main_doc["text"]) > 500 else main_doc["text"],
         ),
-        user_id=1,
+        user_id=current_user.id,
     )
     document = update_document_status(db, document.id, "ready")
     document = update_document_file_size(db, document.id, int(main_doc.get("file_size") or 0))
@@ -9352,13 +9636,12 @@ async def compare_audit(
 
 
 @router.get("/{review_id}/parsed-text")
-async def get_review_parsed_text(review_id: int, db: Session = Depends(get_db)):
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
-    document = get_document(db, document_id=review.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+async def get_review_parsed_text(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, document = _require_review_access(db, review_id, current_user)
 
     content = document.content or ""
     pages = [page for page in content.split("\f") if page.strip()]
@@ -9375,14 +9658,14 @@ async def get_review_parsed_text(review_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{review_id}/gold-compare")
-async def compare_review_with_gold(review_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def compare_review_with_gold(
+    review_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     print(f"[DEBUG gold-compare ENTRY] review_id={review_id}")
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
-    document = get_document(db, document_id=review.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    review, document = _require_review_access(db, review_id, current_user)
 
     file_bytes = await file.read()
     gold_rows = _load_gold_rows_from_excel(file_bytes)
@@ -9391,47 +9674,38 @@ async def compare_review_with_gold(review_id: int, file: UploadFile = File(...),
     print(f"[DEBUG gold-compare] issues_count={len(issues)}")
     content = document.content or ""
 
-    matched_issue_ids = set()
-    matches = []
-    missed = []
+    annotated_gold_rows = []
     for row in gold_rows:
-        row = dict(row)
-        row["wrong_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("wrong_text"))
-        row["correct_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("correct_text"))
-        row_matches = []
-        for issue in issues:
-            if _gold_row_matches_issue(row, issue):
-                matched_issue_ids.add(getattr(issue, "id", id(issue)))
-                row_matches.append({
-                    "id": getattr(issue, "id", None),
-                    "rule": getattr(issue, "rule", ""),
-                    "category": getattr(issue, "category", ""),
-                    "severity": getattr(issue, "severity", ""),
-                    "chapter": getattr(issue, "chapter", ""),
-                    "original_text": getattr(issue, "original_text", ""),
-                    "suggestion": getattr(issue, "suggestion", ""),
-                    "description": getattr(issue, "description", ""),
-                })
-        if row_matches:
-            matches.append({"gold": row, "issues": row_matches})
-        else:
-            missed.append(row)
+        annotated = dict(row)
+        annotated["wrong_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("wrong_text"))
+        annotated["correct_text_exists_in_parsed_text"] = _gold_text_presence(content, row.get("correct_text"))
+        annotated_gold_rows.append(annotated)
+
+    matched_pairs, matched_gold_indices, matched_issue_indices = _assign_gold_issue_matches(annotated_gold_rows, issues)
+
+    matches = []
+    for pair in matched_pairs:
+        issue = issues[pair["issue_idx"]]
+        issue_summary = _gold_issue_summary(issue)
+        matches.append({
+            "gold": annotated_gold_rows[pair["gold_idx"]],
+            "issue": issue_summary,
+            "issues": [issue_summary],
+            "matched_gold_id": annotated_gold_rows[pair["gold_idx"]].get("index"),
+            "matched_issue_id": issue_summary.get("id"),
+            "match_score": pair["score"],
+            "match_reason": pair["reason"],
+            "location_match": pair.get("location_match"),
+            "location_reason": pair.get("location_reason"),
+        })
+
+    missed = [row for idx, row in enumerate(annotated_gold_rows) if idx not in matched_gold_indices]
 
     false_positive = []
-    for issue in issues:
-        issue_id = getattr(issue, "id", id(issue))
-        if issue_id in matched_issue_ids:
+    for issue_idx, issue in enumerate(issues):
+        if issue_idx in matched_issue_indices:
             continue
-        false_positive.append({
-            "id": getattr(issue, "id", None),
-            "rule": getattr(issue, "rule", ""),
-            "category": getattr(issue, "category", ""),
-            "severity": getattr(issue, "severity", ""),
-            "chapter": getattr(issue, "chapter", ""),
-            "original_text": getattr(issue, "original_text", ""),
-            "suggestion": getattr(issue, "suggestion", ""),
-            "description": getattr(issue, "description", ""),
-        })
+        false_positive.append(_gold_issue_summary(issue))
 
     tp = len(matches)
     fp = len(false_positive)
@@ -9463,7 +9737,7 @@ async def compare_review_with_gold(review_id: int, file: UploadFile = File(...),
 
 
 @router.get("/provider-status")
-async def get_provider_status():
+async def get_provider_status(_: UserOut = Depends(require_admin)):
     """获取可用 AI provider 列表和配置信息"""
     status = ai_client.provider_status()
     
@@ -9499,27 +9773,34 @@ async def get_provider_status():
     }
 
 @router.get("/{review_id}", response_model=Review)
-async def read_review(review_id: int, db: Session = Depends(get_db)):
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
-    doc = get_document(db, document_id=review.document_id)
+async def read_review(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, doc = _require_review_access(db, review_id, current_user)
     return _serialize_review_list_item(db, review, {getattr(doc, 'id', None): doc} if doc else {})
 
 
 @router.get("/{review_id}/issues", response_model=list[Issue])
-async def read_review_issues(review_id: int, db: Session = Depends(get_db)):
-    review = get_review(db, review_id=review_id)
-    doc = get_document(db, document_id=review.document_id) if review else None
+async def read_review_issues(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, doc = _require_review_access(db, review_id, current_user)
     issues = get_issues(db, review_id=review_id)
     return _normalize_review_issue_display(_visible_review_issues(issues), getattr(doc, 'content', None))
 
 
 @router.post("/{review_id}/issues/manual", response_model=Issue)
-async def create_manual_review_issue(review_id: int, payload: dict, db: Session = Depends(get_db)):
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
+async def create_manual_review_issue(
+    review_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, _ = _require_review_access(db, review_id, current_user)
 
     original_text = str(payload.get('original_text') or '').strip()
     if not original_text:
@@ -9554,7 +9835,13 @@ async def create_manual_review_issue(review_id: int, payload: dict, db: Session 
 
 
 @router.put("/issues/{issue_id}", response_model=Issue)
-async def update_issue_status(issue_id: int, issue_update: IssueUpdate, db: Session = Depends(get_db)):
+async def update_issue_status(
+    issue_id: int,
+    issue_update: IssueUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    _require_issue_access(db, issue_id, current_user)
     issue = update_issue(db, issue_id=issue_id, issue_update=issue_update)
     if not issue:
         raise HTTPException(status_code=404, detail="Issue not found")
@@ -9562,8 +9849,14 @@ async def update_issue_status(issue_id: int, issue_update: IssueUpdate, db: Sess
 
 
 @router.post("/{review_id}/judge")
-async def batch_judge_issues(review_id: int, payload: dict, db: Session = Depends(get_db)):
+async def batch_judge_issues(
+    review_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """批量人工判定问题: { 'judgments': [{'issue_id': 1, 'status': 'confirmed'}, ...] }"""
+    _require_review_access(db, review_id, current_user)
     judgments = payload.get("judgments", [])
     updated = 0
     for j in judgments:
@@ -9582,13 +9875,13 @@ async def batch_judge_issues(review_id: int, payload: dict, db: Session = Depend
 
 
 @router.get("/{review_id}/export-html")
-async def export_review_html(review_id: int, db: Session = Depends(get_db)):
+async def export_review_html(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """导出 HTML 报告 (包含所有问题及人工判定状态)"""
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
-
-    doc = get_document(db, document_id=review.document_id)
+    review, doc = _require_review_access(db, review_id, current_user)
     issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(doc, 'content', None))
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html = _generate_compare_review_html_content(review, doc)
@@ -9598,14 +9891,12 @@ async def export_review_html(review_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{review_id}/export-result")
-async def export_review_result(review_id: int, db: Session = Depends(get_db)):
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
-
-    document = get_document(db, document_id=review.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+async def export_review_result(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, document = _require_review_access(db, review_id, current_user)
 
     issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(document, 'content', None))
     if document.file_type == "docx":
@@ -9619,24 +9910,27 @@ async def export_review_result(review_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{review_id}/report")
-async def generate_report(review_id: int, db: Session = Depends(get_db)):
-    review = get_review(db, review_id=review_id)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
+async def generate_report(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, document = _require_review_access(db, review_id, current_user)
 
     issues = _visible_review_issues(get_issues(db, review_id=review_id))
-    confirmed_issues = [i for i in issues if i.status in ["confirmed", "converted_to_rule"]]
-
-    document = get_document(db, document_id=review.document_id)
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html_content = _generate_compare_review_html_content(review, document)
     else:
-        html_content = _generate_review_html_content(review, document, confirmed_issues)
+        html_content = _generate_review_html_content(review, document, issues)
     return {"content": html_content, "format": "html"}
 
 
 @router.get("/{review_id}/aggregated-report")
-async def get_aggregated_report(review_id: int, db: Session = Depends(get_db)):
+async def get_aggregated_report(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """获取聚合审核报告（结构化 JSON）
 
     使用 ReportAggregator 输出展示问题分组、五维质量评分、
@@ -9644,14 +9938,10 @@ async def get_aggregated_report(review_id: int, db: Session = Depends(get_db)):
     """
     from app.review_engine.reporting import ReportAggregator
 
-    review = db.query(Review).filter(Review.id == review_id).first()
-    if not review:
-        raise HTTPException(status_code=404, detail="审核任务不存在")
+    review, document = _require_review_access(db, review_id, current_user)
 
     issues = get_issues(db, review_id=review_id)
-    issue_dicts = [issue_to_dict(i) for i in issues]
-
-    document = get_document(db, document_id=review.document_id)
+    issue_dicts = [_report_issue_to_dict(i) for i in issues]
     agg = ReportAggregator()
     report = agg.aggregate(
         issue_dicts,
@@ -9669,8 +9959,13 @@ async def get_aggregated_report(review_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{review_id}/traces")
-async def get_review_audit_traces(review_id: int, db: Session = Depends(get_db)):
+async def get_review_audit_traces(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(require_admin),
+):
     """获取审核任务的AI调用追踪详情"""
+    _require_review_access(db, review_id, current_user)
     from app.crud.audit_trace import get_traces_by_review_id
     traces = get_traces_by_review_id(db, review_id)
     return {
@@ -9699,7 +9994,7 @@ async def get_review_audit_traces(review_id: int, db: Session = Depends(get_db))
 # ── Review Engine: Rule Migration Status ──────────────────────────
 
 @router.get("/engine/rule-migration")
-async def get_rule_migration_status():
+async def get_rule_migration_status(_: UserOut = Depends(require_admin)):
     """获取确定性规则迁移状态
 
     返回已迁移和待迁移的规则分组，用于跟踪审核引擎重构进度。
@@ -9709,15 +10004,17 @@ async def get_rule_migration_status():
 
 
 @router.get("/{review_id}/stage-diagnostics")
-async def get_stage_diagnostics(review_id: int, db: Session = Depends(get_db)):
+async def get_stage_diagnostics(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """获取审核流水线阶段诊断信息
 
     返回每个阶段的输入/输出/丢弃数量、耗时和错误信息，
     用于排障、性能分析和历史对比。
     """
-    review = db.query(Review).filter(Review.id == review_id).first()
-    if not review:
-        raise HTTPException(status_code=404, detail="审核任务不存在")
+    review, _ = _require_review_access(db, review_id, current_user)
 
     summary = _load_review_summary(review.summary)
     stage_diagnostics = summary.get("stage_diagnostics", [])
@@ -9739,11 +10036,13 @@ async def get_stage_diagnostics(review_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{review_id}/coverage")
-async def get_review_coverage(review_id: int, db: Session = Depends(get_db)):
+async def get_review_coverage(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """获取审核覆盖率统计"""
-    review = db.query(Review).filter(Review.id == review_id).first()
-    if not review:
-        raise HTTPException(status_code=404, detail="审核任务不存在")
+    review, document = _require_review_access(db, review_id, current_user)
 
     # 获取问题列表
     issues = get_issues(db, review_id=review_id)
@@ -9811,7 +10110,7 @@ async def get_review_coverage(review_id: int, db: Session = Depends(get_db)):
 
     return {
         "review_id": review_id,
-        "document_name": review.document_name,
+        "document_name": getattr(document, "filename", ""),
         "total_issues": total,
         "severity_distribution": severity_dist,
         "category_distribution": category_dist,
@@ -9833,11 +10132,13 @@ async def get_review_coverage(review_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{review_id}/terminology")
-async def get_terminology_analysis(review_id: int, db: Session = Depends(get_db)):
+async def get_terminology_analysis(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """获取术语库匹配率分析（YiCAT 风格）"""
-    review = db.query(Review).filter(Review.id == review_id).first()
-    if not review:
-        raise HTTPException(status_code=404, detail="审核任务不存在")
+    review, document = _require_review_access(db, review_id, current_user)
 
     # 加载术语库
     from app.models.term import Term
@@ -9848,20 +10149,12 @@ async def get_terminology_analysis(review_id: int, db: Session = Depends(get_db)
     ]
 
     # 获取文档内容
-    content = review.content or ''
-    if review.document_id:
-        try:
-            from app.models.document import Document
-            doc = db.query(Document).filter(Document.id == review.document_id).first()
-            if doc and doc.content:
-                content = doc.content
-        except Exception:
-            pass
+    content = getattr(document, 'content', '') or ''
 
     # 执行术语匹配分析
     from app.services.terminology_matcher import analyze_terminology
     result = analyze_terminology(content, term_dicts, 
-                                  review.document_language or 'both')
+                                  'both')
 
     # 获取术语库中未命中的术语列表
     matched_ids = set(m['term_id'] for m in result['matches'])
@@ -9871,20 +10164,22 @@ async def get_terminology_analysis(review_id: int, db: Session = Depends(get_db)
     ]
 
     result['review_id'] = review_id
-    result['document_name'] = review.document_name
+    result['document_name'] = getattr(document, 'filename', '')
     result['unmatched_terms'] = unmatched_terms[:50]
 
     return result
 
 
 @router.get("/{review_id}/similar-documents")
-async def search_similar_documents(review_id: int, db: Session = Depends(get_db)):
+async def search_similar_documents(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """搜索相似文档（基于全文检索）"""
-    review = db.query(Review).filter(Review.id == review_id).first()
-    if not review:
-        raise HTTPException(status_code=404, detail="审核任务不存在")
+    review, document = _require_review_access(db, review_id, current_user)
 
-    content = review.content or ''
+    content = getattr(document, 'content', '') or ''
     if not content:
         return {"review_id": review_id, "results": [], "count": 0}
 
@@ -9895,7 +10190,7 @@ async def search_similar_documents(review_id: int, db: Session = Depends(get_db)
         results = engine.search_similar_documents(content[:3000], top_k=10)
         return {
             "review_id": review_id,
-            "document_name": review.document_name,
+            "document_name": getattr(document, 'filename', ''),
             "results": [
                 {
                     "doc_id": r.doc_id,
@@ -9918,13 +10213,15 @@ async def search_similar_documents(review_id: int, db: Session = Depends(get_db)
 
 
 @router.post("/{review_id}/reindex")
-async def reindex_document(review_id: int, db: Session = Depends(get_db)):
+async def reindex_document(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     """重新索引文档到全文检索"""
-    review = db.query(Review).filter(Review.id == review_id).first()
-    if not review:
-        raise HTTPException(status_code=404, detail="审核任务不存在")
+    review, document = _require_review_access(db, review_id, current_user)
 
-    content = review.content or ''
+    content = getattr(document, 'content', '') or ''
     if not content:
         return {"success": False, "message": "文档内容为空"}
 
@@ -9948,6 +10245,7 @@ async def search_reviews(
     q: str = Query(..., description="搜索关键词"),
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
+    _: UserOut = Depends(require_admin),
 ):
     """全文搜索审核文档"""
     try:
@@ -9978,6 +10276,7 @@ async def run_batch_evaluation(
     dataset_id: str = Form(None),
     dataset_path: str = Form(None),
     ci_mode: bool = Form(False),
+    _: UserOut = Depends(require_admin),
 ):
     """批量评测端点
 
@@ -10015,93 +10314,37 @@ async def run_batch_evaluation(
 
 def _run_batch_eval_sync(config: dict, dataset_id: str | None, ci_mode: bool) -> dict:
     """Synchronous batch evaluation."""
-    from app.database import SessionLocal
-    from app.review_engine.evaluation import EvaluationRunner
-    from app.review_engine.reporting import ReportAggregator
-    from app.review_engine.orchestrator import ReviewOrchestrator
-    from app.review_engine.rules.engine import DeterministicRuleEngine
+    import tempfile
+    from scripts.evaluate_review import batch_evaluate_from_config
 
-    db = SessionLocal()
-    runner = EvaluationRunner()
-    report_agg = ReportAggregator()
+    config_payload = dict(config or {})
+    if dataset_id and config_payload.get("datasets"):
+        matched = [dataset for dataset in config_payload.get("datasets", []) if dataset.get("id") == dataset_id]
+        if not matched:
+            raise HTTPException(status_code=404, detail=f"未找到评测集: {dataset_id}")
+        selected = matched[0]
+        config_payload = {
+            "documents": selected.get("documents", []),
+            "thresholds": selected.get("thresholds", config_payload.get("thresholds", {})),
+        }
+    elif dataset_id:
+        raise HTTPException(status_code=400, detail="当前评测配置不支持 dataset_id，请改用 dataset_path")
 
-    datasets = config.get("datasets", [])
-    if dataset_id:
-        datasets = [d for d in datasets if d["id"] == dataset_id]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False) as tmp:
+        json.dump(config_payload, tmp, ensure_ascii=False)
+        temp_path = tmp.name
+    try:
+        result = batch_evaluate_from_config(temp_path, DEFAULT_MARKERS)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
-    all_results: list[dict] = []
-    violations: list[str] = []
-
-    for ds in datasets:
-        ds_results: list[dict] = []
-        for doc_cfg in ds.get("documents", []):
-            fixture_path = doc_cfg.get("fixture_path", "")
-            file_type = doc_cfg.get("file_type", "txt")
-
-            content = _load_fixture_content(fixture_path)
-            if not content:
-                ds_results.append({"fixture": fixture_path, "status": "skipped", "error": "Fixture not found"})
-                continue
-
-            # Run engine
-            from app.review_engine.orchestrator import ReviewRunResult
-            orch = ReviewOrchestrator()
-
-            def rule_stage(result: ReviewRunResult, ctx: dict) -> None:
-                engine = DeterministicRuleEngine()
-                result.issues = engine.run_all(
-                    content, file_type=file_type,
-                    language=doc_cfg.get("language", "en"),
-                    document_name=fixture_path,
-                )
-
-            orch.add_stage("eval_rules", rule_stage)
-            run_result = orch.run(0, {"content": content})
-
-            # Evaluate
-            baseline_markers = doc_cfg.get("baseline_markers", [])
-            eval_result = runner.evaluate(
-                machine_issues=run_result.issues,
-                human_baseline=baseline_markers,
-                review_id=0,
-            )
-            report = report_agg.aggregate(run_result.issues, review_id=0)
-
-            entry = {
-                "fixture": fixture_path,
-                "total_issues": len(run_result.issues),
-                "detection_rate": round(eval_result.detection_rate, 3),
-                "precision": round(eval_result.precision, 3),
-                "false_positive_rate": round(eval_result.false_positive_rate, 3),
-                "noop_suggestions": eval_result.noop_suggestions,
-                "numeric_changed": eval_result.numeric_changed,
-                "report": report.to_dict(),
-            }
-
-            # CI mode violations
-            if ci_mode:
-                min_i = doc_cfg.get("expected_min_issues")
-                if min_i is not None and len(run_result.issues) < min_i:
-                    violations.append(
-                        f"[{fixture_path}] issues={len(run_result.issues)} < min={min_i}"
-                    )
-
-            ds_results.append(entry)
-
-        all_results.append({
-            "dataset_id": ds["id"],
-            "dataset_name": ds.get("name", ""),
-            "results": ds_results,
-        })
-
-    db.close()
-
-    return {
-        "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "datasets": all_results,
-        "violations": violations,
-        "ci_pass": len(violations) == 0,
-    }
+    result["ci_pass"] = result.get("summary", {}).get("regressions", 0) == 0
+    result["ci_mode"] = bool(ci_mode)
+    result["evaluated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    return result
 
 
 def _load_fixture_content(fixture_path: str) -> str:
