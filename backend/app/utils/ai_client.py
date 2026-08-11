@@ -21,7 +21,18 @@ from app.api.review_rules import (
 )
 
 # 分层提示词构建器
-from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
+try:
+    from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
+except ModuleNotFoundError:
+    class ReviewPromptBuilder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def build_audit_system_prompt(self):
+            return build_system_prompt()
+
+    def build_review_system_prompt(*args, **kwargs):
+        return build_system_prompt()
 
 ANTHROPIC_VERSION = "2023-06-01"
 IMAGE_DRAFT_BATCH_SIZE = 2

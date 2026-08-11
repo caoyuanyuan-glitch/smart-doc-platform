@@ -37,9 +37,41 @@ Modules
 """
 
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401
-from app.review_engine.context import DocumentContext, TextSpan  # noqa: F401
-from app.review_engine.orchestrator import ReviewOrchestrator, ReviewRunResult  # noqa: F401
-from app.review_engine.ai_candidates import AICandidateEngine, AIReviewResult, ChunkMeta  # noqa: F401
-from app.review_engine.reporting import ReportAggregator, ReviewReport, DisplayIssue  # noqa: F401
-from app.review_engine.evaluation import EvaluationRunner, EvalResult, EvalSuiteResult  # noqa: F401
-from app.review_engine.rules.engine import DeterministicRuleEngine  # noqa: F401
+
+try:
+    from app.review_engine.context import DocumentContext, TextSpan  # noqa: F401
+except ModuleNotFoundError:
+    DocumentContext = None
+    TextSpan = None
+
+try:
+    from app.review_engine.orchestrator import ReviewOrchestrator, ReviewRunResult  # noqa: F401
+except ModuleNotFoundError:
+    ReviewOrchestrator = None
+    ReviewRunResult = None
+
+try:
+    from app.review_engine.ai_candidates import AICandidateEngine, AIReviewResult, ChunkMeta  # noqa: F401
+except ModuleNotFoundError:
+    AICandidateEngine = None
+    AIReviewResult = None
+    ChunkMeta = None
+
+try:
+    from app.review_engine.reporting import ReportAggregator, ReviewReport, DisplayIssue  # noqa: F401
+except ModuleNotFoundError:
+    ReportAggregator = None
+    ReviewReport = None
+    DisplayIssue = None
+
+try:
+    from app.review_engine.evaluation import EvaluationRunner, EvalResult, EvalSuiteResult  # noqa: F401
+except ModuleNotFoundError:
+    EvaluationRunner = None
+    EvalResult = None
+    EvalSuiteResult = None
+
+try:
+    from app.review_engine.rules.engine import DeterministicRuleEngine  # noqa: F401
+except ModuleNotFoundError:
+    DeterministicRuleEngine = None
