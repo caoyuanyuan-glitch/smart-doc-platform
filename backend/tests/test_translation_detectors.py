@@ -10,13 +10,20 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.api.translation import (  # noqa: E402
+    _apply_memory_glossary,
+    _build_batch_separator,
     _build_memory_candidate_bundle,
+    _count_translatable_text_units,
     _do_translate,
     _ensure_memory_bank_entry,
+    _find_memory_glossary,
+    _get_memory_match_trace,
     _get_translate_task_status,
     _looks_like_hallucination,
     _looks_like_invalid_translation,
+    _match_memory_candidates,
     _mark_translation_canceled,
+    _split_batched_translation_output,
     _thread_locals,
     _translate_tasks,
     _translate_tasks_lock,
@@ -78,6 +85,17 @@ class HybridMemoryFallbackTest(unittest.TestCase):
 
         self.assertEqual(translated, "Open 设置 page")
 
+    def test_hybrid_multi_segment_falls_back_to_memory_when_ai_unavailable(self):
+        bundle = _build_memory_candidate_bundle([
+            {"source_text": "settings", "translated_text": "设置"}
+        ])
+
+        with patch("app.api.translation._get_memory_candidate_bundle", return_value=bundle), \
+             patch("app.api.translation.translate_with_ai", side_effect=HTTPException(status_code=500, detail="AI翻译引擎不可用")):
+            translated = _do_translate("Open settings page.\nClose settings page.", "hybrid", "kimi", "en", "zh", db=None)
+
+        self.assertEqual(translated, "Open 设置 page.\nClose 设置 page.")
+
 
 class EnsureMemoryBankEntryTest(unittest.TestCase):
     def test_creates_new_entry_when_missing(self):
@@ -101,6 +119,143 @@ class EnsureMemoryBankEntryTest(unittest.TestCase):
         self.assertFalse(created)
         self.assertIs(entry, existing)
         db.add.assert_not_called()
+
+
+class MemoryNormalizationTest(unittest.TestCase):
+    def tearDown(self):
+        if hasattr(_thread_locals, "memory_match_trace"):
+            delattr(_thread_locals, "memory_match_trace")
+
+    def test_match_ignores_case_spaces_and_special_characters(self):
+        bundle = _build_memory_candidate_bundle([
+            {"source_text": "Open Settings Page", "translated_text": "打开设置页面"}
+        ])
+
+        matched = _match_memory_candidates("open_settings-(page)", bundle)
+
+        self.assertEqual(matched, "打开设置页面")
+        self.assertEqual(_get_memory_match_trace()[-1]["reason"], "compact_exact")
+
+    def test_match_preserves_symbols_when_candidate_is_embedded(self):
+        bundle = _build_memory_candidate_bundle([
+            {"source_text": "DNBSEQ T7 Gene Sequencer", "translated_text": "DNBSEQ T7 基因测序仪"}
+        ])
+
+        matched = _match_memory_candidates("[DNBSEQ-T7] Gene_Sequencer", bundle)
+
+        self.assertEqual(matched, "DNBSEQ T7 基因测序仪")
+
+    def test_match_hits_embedded_phrase_inside_longer_sentence(self):
+        bundle = _build_memory_candidate_bundle([
+            {"source_text": "open settings page", "translated_text": "打开设置页面"}
+        ])
+
+        matched = _match_memory_candidates("Please open - settings_page now.", bundle)
+
+        self.assertEqual(matched, "Please 打开设置页面 now.")
+
+    def test_match_prefers_longer_embedded_phrase(self):
+        bundle = _build_memory_candidate_bundle([
+            {"source_text": "settings", "translated_text": "设置"},
+            {"source_text": "open settings page", "translated_text": "打开设置页面"}
+        ])
+
+        matched = _match_memory_candidates("Please open settings page now", bundle)
+
+        self.assertEqual(matched, "Please 打开设置页面 now")
+
+    def test_glossary_prefers_longer_phrases_and_replaces_multiple_terms(self):
+        glossary = _find_memory_glossary(
+            "Please open settings page and close settings page.",
+            [
+                {"source_text": "settings", "translated_text": "设置"},
+                {"source_text": "open settings page", "translated_text": "打开设置页面"},
+                {"source_text": "close settings page", "translated_text": "关闭设置页面"},
+            ],
+        )
+
+        translated, replaced = _apply_memory_glossary(
+            "Please open_settings-page and close settings page.",
+            glossary,
+        )
+
+        self.assertTrue(replaced)
+        self.assertEqual(translated, "Please 打开设置页面 and 关闭设置页面.")
+
+    def test_match_prefers_more_specific_candidate_among_similar_terms(self):
+        bundle = _build_memory_candidate_bundle([
+            {"source_text": "gene sequencer", "translated_text": "测序仪"},
+            {"source_text": "DNBSEQ T7 gene sequencer", "translated_text": "DNBSEQ T7 基因测序仪"},
+        ])
+
+        matched = _match_memory_candidates("The DNBSEQ-T7 Gene_Sequencer is ready.", bundle)
+
+        self.assertEqual(matched, "The DNBSEQ T7 基因测序仪 is ready.")
+        trace = _get_memory_match_trace()[-1]
+        self.assertEqual(trace["reason"], "token_subsequence")
+        self.assertEqual(trace["candidate_text"], "DNBSEQ T7 gene sequencer")
+
+    def test_match_ignores_locale_suffix_metadata(self):
+        bundle = _build_memory_candidate_bundle([
+            {
+                "source_text": "DNBSEQ-T7+RS Genetic Sequencer System Guide_Chinese_RUO_WH",
+                "translated_text": "DNBSEQ-T7+RS 基因测序仪系统指南_中文_RUO_WH",
+            }
+        ])
+
+        matched = _match_memory_candidates(
+            "DNBSEQ-T7+RS Genetic Sequencer System Guide_English_RUO_WH",
+            bundle,
+        )
+
+        self.assertEqual(matched, "DNBSEQ-T7+RS 基因测序仪系统指南_中文_RUO_WH")
+        self.assertEqual(_get_memory_match_trace()[-1]["reason"], "metadata_exact")
+
+    def test_match_ignores_version_metadata_variants(self):
+        bundle = _build_memory_candidate_bundle([
+            {
+                "source_text": "Mammoth COOLING Control Board V3.0.0",
+                "translated_text": "Mammoth 冷却控制板 V3.0.0",
+            }
+        ])
+
+        matched = _match_memory_candidates("Mammoth COOLING Control Board V3.0.0.0", bundle)
+
+        self.assertEqual(matched, "Mammoth 冷却控制板 V3.0.0")
+        self.assertEqual(_get_memory_match_trace()[-1]["reason"], "metadata_exact")
+
+
+class TranslationStatisticsTest(unittest.TestCase):
+    def test_count_translatable_text_units_skips_codes_versions_and_locale_tags(self):
+        count = _count_translatable_text_units(
+            "DNBSEQ-T7+RS Genetic Sequencer System Guide_English_RUO_WH V3.0.0"
+        )
+
+        self.assertEqual(count, 4)
+
+
+class BatchedTranslationHelpersTest(unittest.TestCase):
+    def test_build_batch_separator_avoids_existing_marker(self):
+        separator = _build_batch_separator(["alpha [[MC_DOCSEG]] beta", "gamma"])
+
+        self.assertNotEqual(separator.strip(), "[[MC_DOCSEG]]")
+        self.assertNotIn(separator.strip(), "alpha [[MC_DOCSEG]] beta")
+
+    def test_split_batched_translation_output_uses_exact_separator(self):
+        separator = _build_batch_separator(["第一段", "第二段"])
+
+        parts = _split_batched_translation_output(
+            f"译文一{separator}译文二",
+            separator,
+            2,
+            "batch_split_error",
+        )
+
+        self.assertEqual(parts, ["译文一", "译文二"])
+
+    def test_split_batched_translation_output_rejects_missing_separator(self):
+        with self.assertRaises(ValueError):
+            _split_batched_translation_output("only one part", "\n[[MC_DOCSEG]]\n", 2, "batch_split_error")
 
 if __name__ == "__main__":
     unittest.main()
