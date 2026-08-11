@@ -167,20 +167,57 @@ class AIClient:
             providers.append("proxy")
         return providers
 
-    def provider_status(self):
-        return {
-            "default_provider": (self.default_provider or "qwen").strip().lower() or "qwen",
-            "priority": ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"],
-            "providers": {
-                "qwen": self.qwen_client is not None,
-                "kimi": self.kimi_client is not None and "kimi" not in self.disabled_providers,
-                "deepseek": self.deepseek_client is not None and "deepseek" not in self.disabled_providers,
-                "arkclaw": self.arkclaw_client is not None and "arkclaw" not in self.disabled_providers,
-                "mcai": self.mcai_proxy_client is not None and "mcai" not in self.disabled_providers,
-                "proxy": self.proxy_client is not None and "proxy" not in self.disabled_providers,
-            },
-            "available": self.available_providers(),
+    def provider_status(self, include_health=False):
+        default_provider = (self.default_provider or "qwen").strip().lower() or "qwen"
+        configured = {
+            "qwen": self.qwen_client is not None,
+            "kimi": self.kimi_client is not None,
+            "deepseek": self.deepseek_client is not None,
+            "arkclaw": self.arkclaw_client is not None,
+            "mcai": self.mcai_proxy_client is not None,
+            "proxy": self.proxy_client is not None,
         }
+        enabled = {
+            "qwen": configured["qwen"] and "qwen" not in self.disabled_providers,
+            "kimi": configured["kimi"] and "kimi" not in self.disabled_providers,
+            "deepseek": configured["deepseek"] and "deepseek" not in self.disabled_providers,
+            "arkclaw": configured["arkclaw"] and "arkclaw" not in self.disabled_providers,
+            "mcai": configured["mcai"] and "mcai" not in self.disabled_providers,
+            "proxy": configured["proxy"] and "proxy" not in self.disabled_providers,
+        }
+        status = {
+            "default_provider": default_provider,
+            "priority": ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"],
+            "providers": enabled,
+            "configured": configured,
+            "available": [name for name, is_enabled in enabled.items() if is_enabled],
+            "disabled": sorted(self.disabled_providers),
+        }
+        if not include_health:
+            return status
+
+        health = self.health_check()
+        health_providers = health.get("providers", {})
+        available = [name for name, item in health_providers.items() if item.get("status") == "ok"]
+        status["available"] = available
+        status["health"] = {
+            "healthy": bool(health.get("healthy")),
+            "ok_providers": int(health.get("ok_providers") or 0),
+            "total_providers": int(health.get("total_providers") or 0),
+            "primary": health.get("primary") or default_provider,
+            "primary_status": health.get("primary_status") or "unknown",
+            "providers": health_providers,
+        }
+        status["providers"] = {
+            name: {
+                "configured": configured.get(name, False),
+                "enabled": enabled.get(name, False),
+                "healthy": name in available,
+                **(health_providers.get(name) or {}),
+            }
+            for name in status["priority"]
+        }
+        return status
 
     def _disable_provider(self, provider, reason=""):
         provider = str(provider or "").strip().lower()

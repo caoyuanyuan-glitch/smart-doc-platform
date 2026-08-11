@@ -30,26 +30,23 @@
           </el-select>
         </el-form-item>
         <el-form-item label="AI 模型" v-if="engine !== 'memory'">
-          <el-select v-model="model" style="width: 160px">
-            <el-option label="Kimi (Moonshot)" value="kimi" />
-            <el-option label="DeepSeek Chat" value="deepseek" />
-            <el-option label="ArkClaw Chat" value="arkclaw" />
+          <el-select v-model="model" style="width: 180px" :loading="providerLoading">
+            <el-option
+              v-for="option in availableModelOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
           </el-select>
         </el-form-item>
+        <span v-if="engine !== 'memory'" class="model-status-hint">{{ providerHintText }}</span>
         <el-form-item label="语言">
           <el-select v-model="sourceLang" style="width: 100px">
-            <el-option label="自动" value="auto" />
-            <el-option label="中文" value="zh" />
-            <el-option label="英文" value="en" />
+            <el-option v-for="option in sourceLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
           <el-icon class="swap-icon" @click="swapLanguages"><Sort /></el-icon>
           <el-select v-model="targetLang" style="width: 100px">
-            <el-option label="英文" value="en" />
-            <el-option label="中文" value="zh" />
-            <el-option label="日文" value="ja" />
-            <el-option label="韩文" value="ko" />
-            <el-option label="法文" value="fr" />
-            <el-option label="德文" value="de" />
+            <el-option v-for="option in targetLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -183,6 +180,13 @@ import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plu
 import { knowledgeAPI, translationAPI } from '@/api'
 import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
+import {
+  buildAvailableTranslationModels,
+  FALLBACK_TRANSLATION_MODELS,
+  getTranslationProviderHint,
+  TRANSLATION_SOURCE_LANGUAGE_OPTIONS,
+  TRANSLATION_TARGET_LANGUAGE_OPTIONS
+} from '@/utils/translationOptions'
 
 const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
 
@@ -190,6 +194,10 @@ const engine = ref('hybrid')
 const model = ref('kimi')
 const sourceLang = ref('auto')
 const targetLang = ref('en')
+const providerLoading = ref(false)
+const providerStatus = ref(null)
+const sourceLanguageOptions = TRANSLATION_SOURCE_LANGUAGE_OPTIONS
+const targetLanguageOptions = TRANSLATION_TARGET_LANGUAGE_OPTIONS
 
 function swapLanguages() {
   if (sourceLang.value === 'auto') {
@@ -211,6 +219,16 @@ const translationJobs = ref([])
 const pollingTimers = new Map()
 const hasActiveJobs = computed(() => translationJobs.value.some(job => job.status === 'submitting' || job.status === 'processing'))
 const currentBatchId = ref('')
+const availableModelOptions = computed(() => {
+  const options = buildAvailableTranslationModels(providerStatus.value)
+  if (options.length > 0) {
+    return options
+  }
+  return providerStatus.value ? [] : FALLBACK_TRANSLATION_MODELS
+})
+const providerHintText = computed(() => {
+  return getTranslationProviderHint(providerStatus.value, model.value, providerLoading.value)
+})
 
 const fileUploadRef = ref(null)
 
@@ -222,7 +240,7 @@ const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 
 onMounted(async () => {
   loadReviewedDocs()
-  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
+  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
   await restoreLatestBatchJobs()
 })
 
@@ -254,8 +272,33 @@ async function loadMemoryLibraryFiles() {
   }
 }
 
+function syncSelectedModel() {
+  if (engine.value === 'memory') {
+    return
+  }
+  const options = availableModelOptions.value
+  if (options.some((option) => option.value === model.value)) {
+    return
+  }
+  const preferred = String(providerStatus.value?.default_provider || '').trim().toLowerCase()
+  model.value = options.find((option) => option.value === preferred)?.value || options[0]?.value || 'kimi'
+}
+
+async function loadProviders() {
+  providerLoading.value = true
+  try {
+    const res = await translationAPI.getProviderStatus()
+    providerStatus.value = res.data || null
+  } catch (e) {
+    providerStatus.value = null
+  } finally {
+    providerLoading.value = false
+    syncSelectedModel()
+  }
+}
+
 function onEngineChange(val) {
-  // no-op now
+  syncSelectedModel()
 }
 
 function tableRowClassName({ row }) {
@@ -663,6 +706,14 @@ function downloadTranslatedFile(job) {
 
 .config-form-inline :deep(.el-form-item) {
   margin-bottom: 4px;
+}
+
+.model-status-hint {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .swap-icon {

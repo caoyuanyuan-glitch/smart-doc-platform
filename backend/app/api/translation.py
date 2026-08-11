@@ -233,6 +233,40 @@ def _clear_memory_candidate_cache(memory_file_id: int | None = None):
         cache.pop(key, None)
 
 
+def _ensure_memory_bank_entry(
+    db: Session,
+    source_text: str,
+    translated_text: str,
+    source_lang: str,
+    target_lang: str,
+    tags: str = "",
+):
+    normalized_source = (source_text or "").strip()
+    normalized_translated = (translated_text or "").strip()
+    normalized_source_lang = (source_lang or "").strip() or "zh"
+    normalized_target_lang = (target_lang or "").strip() or "en"
+    normalized_tags = (tags or "").strip()
+
+    existing = db.query(MemoryBank).filter(
+        MemoryBank.source_text == normalized_source,
+        MemoryBank.translated_text == normalized_translated,
+        MemoryBank.source_lang == normalized_source_lang,
+        MemoryBank.target_lang == normalized_target_lang,
+    ).first()
+    if existing:
+        return existing, False
+
+    entry = MemoryBank(
+        source_text=normalized_source,
+        translated_text=normalized_translated,
+        source_lang=normalized_source_lang,
+        target_lang=normalized_target_lang,
+        tags=normalized_tags,
+    )
+    db.add(entry)
+    return entry, True
+
+
 def _normalize_usage_counts(source_count: int, ai_count: int, memory_count: int):
     source_count = max(0, int(source_count or 0))
     ai_count = max(0, int(ai_count or 0))
@@ -1518,7 +1552,26 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             result = r
             _record_translation_usage("memory", text)
     if engine in ["ai", "hybrid"] and not result:
-        result = translate_with_ai(text, model, source_lang, target_lang)
+        ai_error = None
+        try:
+            result = translate_with_ai(text, model, source_lang, target_lang)
+        except HTTPException as exc:
+            ai_error = exc
+            if engine == "hybrid":
+                fallback_result, fallback_hit = translate_with_memory(
+                    text,
+                    source_lang,
+                    target_lang,
+                    db,
+                    bank=_get_memory_bank(),
+                    memory_file_id=_get_memory_file_id(),
+                    allow_partial=True,
+                )
+                if fallback_hit:
+                    result = fallback_result
+                    _record_translation_usage("memory", text)
+            if not result:
+                raise ai_error
         if result == text:
             _record_passthrough_usage(text)
         elif result:
@@ -2598,8 +2651,9 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     from_memory = usage_stats["memory_char_count"] > 0
     from_ai = usage_stats["ai_char_count"] > 0
 
+    memory_bank_created = False
     if engine == "hybrid" and from_ai and not from_memory:
-        create_memory_entry(
+        _, memory_bank_created = _ensure_memory_bank_entry(
             db=db,
             source_text=req.content,
             translated_text=translated,
@@ -2626,6 +2680,8 @@ async def translate_text(req: TranslationRequest, db: Session = Depends(get_db))
     )
     db.add(doc_record)
     db.commit()
+    if memory_bank_created:
+        _clear_memory_candidate_cache()
 
     return TranslationResponse(
         original=req.content,
@@ -2717,7 +2773,7 @@ async def get_translation_stats(batch_id: str = Query(None), db: Session = Depen
 
 @router.get("/providers/status")
 async def get_translation_provider_status():
-    return ai_client.provider_status()
+    return ai_client.provider_status(include_health=True)
 
 
 @router.post("/translate/file")
@@ -2994,9 +3050,23 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
     resolved_source_lang = _resolve_source_language(entry.source_lang, entry.target_lang, text=source_text)
     _ensure_translation_direction(resolved_source_lang, entry.target_lang)
 
+    original_file_bytes = b""
+    try:
+        with open(memory_file.file_path, "rb") as existing_file:
+            original_file_bytes = existing_file.read()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"读取记忆库源文件失败: {str(exc)}")
+
     try:
         _append_memory_entry_to_excel(
             memory_file=memory_file,
+            source_text=source_text,
+            translated_text=translated_text,
+            source_lang=resolved_source_lang,
+            target_lang=entry.target_lang,
+        )
+        _, memory_bank_created = _ensure_memory_bank_entry(
+            db=db,
             source_text=source_text,
             translated_text=translated_text,
             source_lang=resolved_source_lang,
@@ -3006,11 +3076,24 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
         memory_file.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(memory_file)
+        if memory_bank_created:
+            _clear_memory_candidate_cache()
         _invalidate_memory_file_cache(memory_file.id)
     except HTTPException:
+        db.rollback()
+        try:
+            with open(memory_file.file_path, "wb") as existing_file:
+                existing_file.write(original_file_bytes)
+        except OSError:
+            pass
         raise
     except Exception as exc:
         db.rollback()
+        try:
+            with open(memory_file.file_path, "wb") as existing_file:
+                existing_file.write(original_file_bytes)
+        except OSError:
+            pass
         raise HTTPException(status_code=500, detail=f"写入记忆库文件失败: {str(exc)}")
 
     return {
@@ -3018,6 +3101,7 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
         "memory_file_id": memory_file.id,
         "filename": memory_file.filename,
         "file_type": file_type,
+        "saved_to_memory_bank": True,
     }
 
 
