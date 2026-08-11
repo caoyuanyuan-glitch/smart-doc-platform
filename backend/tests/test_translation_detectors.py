@@ -1,9 +1,12 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from openpyxl import Workbook, load_workbook
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -11,14 +14,18 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.api.translation import (  # noqa: E402
     _apply_memory_glossary,
+    _append_memory_entry_to_delimited_file,
+    _append_memory_entry_to_excel,
     _build_batch_separator,
     _build_memory_candidate_bundle,
     _count_translatable_text_units,
     _do_translate,
     _ensure_memory_bank_entry,
     _find_memory_glossary,
+    _get_memory_file_candidates,
     _get_memory_match_trace,
     _get_translate_task_status,
+    _load_memory_file_entries,
     _looks_like_hallucination,
     _looks_like_invalid_translation,
     _match_memory_candidates,
@@ -256,6 +263,63 @@ class BatchedTranslationHelpersTest(unittest.TestCase):
     def test_split_batched_translation_output_rejects_missing_separator(self):
         with self.assertRaises(ValueError):
             _split_batched_translation_output("only one part", "\n[[MC_DOCSEG]]\n", 2, "batch_split_error")
+
+
+class MemoryFileWriteTest(unittest.TestCase):
+    def test_append_csv_memory_entry_respects_language_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "memory.csv"
+            csv_path.write_bytes("zh-CN,en-US\n已有译文,Existing Source\n".encode("gb18030"))
+            memory_file = SimpleNamespace(file_path=str(csv_path), file_type="csv")
+
+            _append_memory_entry_to_delimited_file(
+                memory_file,
+                source_text="New Source",
+                translated_text="新增译文",
+                source_lang="en",
+                target_lang="zh",
+            )
+
+            entries = _load_memory_file_entries(str(csv_path), "csv")
+            self.assertTrue(any(item.get("bilingual_values", {}).get("en") == "New Source" and item.get("bilingual_values", {}).get("zh") == "新增译文" for item in entries))
+
+            db = unittest.mock.MagicMock()
+            db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+                id=1,
+                file_path=str(csv_path),
+                file_type="csv",
+                updated_at=None,
+            )
+            candidates = _get_memory_file_candidates(db, 1, "en", "zh")
+            self.assertTrue(any(item["source_text"] == "New Source" and item["translated_text"] == "新增译文" for item in candidates))
+
+            content = csv_path.read_bytes().decode("gb18030")
+            self.assertIn("新增译文,New Source", content)
+
+    def test_append_excel_memory_entry_respects_language_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xlsx_path = Path(tmpdir) / "memory.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.cell(row=1, column=1).value = "zh-CN"
+            ws.cell(row=1, column=2).value = "en-US"
+            wb.save(xlsx_path)
+            wb.close()
+
+            memory_file = SimpleNamespace(file_path=str(xlsx_path), file_type="xlsx")
+            _append_memory_entry_to_excel(
+                memory_file,
+                source_text="New Source",
+                translated_text="新增译文",
+                source_lang="en",
+                target_lang="zh",
+            )
+
+            workbook = load_workbook(xlsx_path, read_only=True, data_only=True)
+            worksheet = workbook.active
+            self.assertEqual(worksheet.cell(row=2, column=1).value, "新增译文")
+            self.assertEqual(worksheet.cell(row=2, column=2).value, "New Source")
+            workbook.close()
 
 if __name__ == "__main__":
     unittest.main()

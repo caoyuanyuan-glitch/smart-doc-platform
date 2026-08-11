@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import os
 import io
+from pathlib import Path
 import csv
 import json
 import zipfile
@@ -45,7 +46,7 @@ router = APIRouter()
 UPLOAD_DIR = "./static/uploads/translation"
 TRANSLATION_OUTPUT_DIR = "./static/translations"
 UNSUPPORTED_TRANSLATION_EXTENSIONS = {".dita", ".zip"}
-WRITABLE_MEMORY_FILE_TYPES = {"xlsx", "xlsm", "xltx", "xltm"}
+WRITABLE_MEMORY_FILE_TYPES = {"xlsx", "xlsm", "xltx", "xltm", "csv", "tsv"}
 
 _translate_tasks = {}
 _translate_tasks_lock = threading.Lock()
@@ -1386,6 +1387,81 @@ def _normalize_header_key(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", str(value or "").strip().lower())
 
 
+def _header_implied_language(header: str) -> str | None:
+    normalized = _normalize_header_key(header)
+    if normalized in {"zhcn", "zh", "cn", "中文", "chinese"}:
+        return "zh"
+    if normalized in {"enus", "en", "英文", "english"}:
+        return "en"
+    if normalized in {"jajp", "ja", "日文", "japanese"}:
+        return "ja"
+    if normalized in {"kokr", "ko", "韩文", "korean"}:
+        return "ko"
+    return None
+
+
+def _resolve_memory_file_columns(headers, fallback_second_column: int = 2):
+    source_keywords = ["source", "source_text", "sourcetext", "src", "原文", "源文", "text"]
+    translated_keywords = ["target", "translated_text", "translatedtext", "translation", "译文", "targettext", "result"]
+    source_lang_keywords = ["sourcelang", "srclang", "源语言"]
+    target_lang_keywords = ["targetlang", "tgtlang", "目标语言"]
+    normalized_headers = {
+        _normalize_header_key(header): index
+        for index, header in enumerate(headers, start=1)
+        if _normalize_header_key(header)
+    }
+
+    def resolve_column(keys, fallback_index: int | None):
+        for key in keys:
+            normalized_key = _normalize_header_key(key)
+            if normalized_key in normalized_headers:
+                return normalized_headers[normalized_key]
+        return fallback_index
+
+    source_column = resolve_column(source_keywords, 1)
+    translated_column = resolve_column(
+        translated_keywords,
+        fallback_second_column if source_column != fallback_second_column else max(len(headers) + 1, fallback_second_column),
+    )
+    source_lang_column = resolve_column(source_lang_keywords, None)
+    target_lang_column = resolve_column(target_lang_keywords, None)
+    return {
+        "source_column": source_column,
+        "translated_column": translated_column,
+        "source_lang_column": source_lang_column,
+        "target_lang_column": target_lang_column,
+        "source_header_lang": _header_implied_language(headers[source_column - 1]) if source_column and source_column - 1 < len(headers) else None,
+        "translated_header_lang": _header_implied_language(headers[translated_column - 1]) if translated_column and translated_column - 1 < len(headers) else None,
+    }
+
+
+def _memory_entry_values_by_column(source_text: str, translated_text: str, source_lang: str, target_lang: str,
+                                   source_header_lang: str | None, translated_header_lang: str | None):
+    source_value = source_text
+    translated_value = translated_text
+    if source_header_lang and translated_header_lang:
+        value_by_lang = {
+            (source_lang or "").strip(): source_text,
+            (target_lang or "").strip(): translated_text,
+        }
+        if source_header_lang in value_by_lang:
+            source_value = value_by_lang[source_header_lang]
+        if translated_header_lang in value_by_lang:
+            translated_value = value_by_lang[translated_header_lang]
+    return source_value, translated_value
+
+
+def _detect_text_encoding(file_path: str) -> str:
+    raw = Path(file_path).read_bytes()
+    for encoding in ["utf-8", "utf-8-sig", "gbk", "gb2312", "gb18030", "latin-1"]:
+        try:
+            raw.decode(encoding)
+            return encoding
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return "utf-8"
+
+
 def _parse_memory_text_entries(raw_text: str):
     entries = []
     delimiters = ["\t", "=>", "->", "→", "|", "｜"]
@@ -1426,14 +1502,41 @@ def _normalize_memory_entry(row: dict):
 
     source_text = pick_value(source_keys)
     translated_text = pick_value(target_keys)
+    bilingual_values = {}
+    for key, value in normalized_row.items():
+        implied_lang = _header_implied_language(key)
+        if implied_lang and value is not None and str(value).strip() != "":
+            bilingual_values[implied_lang] = str(value).strip()
+
+    if (not source_text or not translated_text) and len(bilingual_values) >= 2:
+        if bilingual_values.get("zh") and bilingual_values.get("en"):
+            source_text = bilingual_values["zh"]
+            translated_text = bilingual_values["en"]
+            source_lang = "zh"
+            target_lang = "en"
+        else:
+            ordered_langs = list(bilingual_values.keys())
+            source_lang = ordered_langs[0]
+            target_lang = ordered_langs[1]
+            source_text = bilingual_values[source_lang]
+            translated_text = bilingual_values[target_lang]
+
     if not source_text or not translated_text:
         return None
+
+    source_lang_value = pick_value(source_lang_keys)
+    target_lang_value = pick_value(target_lang_keys)
+    if not source_lang_value and 'source_lang' in locals():
+        source_lang_value = source_lang
+    if not target_lang_value and 'target_lang' in locals():
+        target_lang_value = target_lang
 
     return {
         "source_text": source_text,
         "translated_text": translated_text,
-        "source_lang": pick_value(source_lang_keys),
-        "target_lang": pick_value(target_lang_keys),
+        "source_lang": source_lang_value,
+        "target_lang": target_lang_value,
+        "bilingual_values": bilingual_values,
     }
 
 
@@ -1542,6 +1645,13 @@ def _get_memory_file_candidates(db: Session, memory_file_id: int, source_lang: s
 
     candidates = []
     for entry in _get_cached_memory_file_entries(memory_file):
+        bilingual_values = entry.get("bilingual_values") or {}
+        if bilingual_values.get(source_lang) and bilingual_values.get(target_lang):
+            candidates.append({
+                "source_text": bilingual_values[source_lang],
+                "translated_text": bilingual_values[target_lang],
+            })
+            continue
         entry_source_lang = (entry.get("source_lang") or source_lang).strip()
         entry_target_lang = (entry.get("target_lang") or target_lang).strip()
         if entry_source_lang != source_lang or entry_target_lang != target_lang:
@@ -1706,44 +1816,23 @@ def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, 
         for index, header in enumerate(headers, start=1):
             worksheet.cell(row=1, column=index).value = header
 
-    source_keywords = ["source", "source_text", "sourcetext", "src", "原文", "源文", "text"]
-    translated_keywords = ["target", "translated_text", "translatedtext", "translation", "译文", "targettext", "result"]
-    source_lang_keywords = ["sourcelang", "srclang", "源语言"]
-    target_lang_keywords = ["targetlang", "tgtlang", "目标语言"]
-    normalized_headers = {
-        _normalize_header_key(header): index
-        for index, header in enumerate(headers, start=1)
-        if _normalize_header_key(header)
-    }
-
-    def resolve_column(keys, fallback_index: int):
-        for key in keys:
-            normalized_key = _normalize_header_key(key)
-            if normalized_key in normalized_headers:
-                return normalized_headers[normalized_key]
-        return fallback_index
-
-    source_column = resolve_column(source_keywords, 1)
-    translated_column = resolve_column(translated_keywords, 2 if source_column != 2 else max(worksheet.max_column + 1, 2))
-    source_lang_column = resolve_column(source_lang_keywords, None)
-    target_lang_column = resolve_column(target_lang_keywords, None)
-
-    source_header_key = _normalize_header_key(headers[source_column - 1]) if source_column - 1 < len(headers) else ""
-    target_header_key = _normalize_header_key(headers[translated_column - 1]) if translated_column - 1 < len(headers) else ""
-
-    if source_header_key in {"zhcn", "zh", "cn", "中文", "chinese"}:
-        source_lang = "zh"
-    elif source_header_key in {"enus", "en", "英文", "english"}:
-        source_lang = "en"
-
-    if target_header_key in {"zhcn", "zh", "cn", "中文", "chinese"}:
-        target_lang = "zh"
-    elif target_header_key in {"enus", "en", "英文", "english"}:
-        target_lang = "en"
+    columns = _resolve_memory_file_columns(headers, fallback_second_column=2)
+    source_column = columns["source_column"]
+    translated_column = columns["translated_column"]
+    source_lang_column = columns["source_lang_column"]
+    target_lang_column = columns["target_lang_column"]
+    source_value, translated_value = _memory_entry_values_by_column(
+        source_text,
+        translated_text,
+        source_lang,
+        target_lang,
+        columns["source_header_lang"],
+        columns["translated_header_lang"],
+    )
 
     next_row = worksheet.max_row + 1 if worksheet.max_row else 2
-    worksheet.cell(row=next_row, column=source_column).value = source_text
-    worksheet.cell(row=next_row, column=translated_column).value = translated_text
+    worksheet.cell(row=next_row, column=source_column).value = source_value
+    worksheet.cell(row=next_row, column=translated_column).value = translated_value
     if source_lang_column:
         worksheet.cell(row=next_row, column=source_lang_column).value = source_lang
     if target_lang_column:
@@ -1751,6 +1840,63 @@ def _append_memory_entry_to_excel(memory_file: KnowledgeFile, source_text: str, 
 
     workbook.save(memory_file.file_path)
     workbook.close()
+
+
+def _append_memory_entry_to_delimited_file(memory_file: KnowledgeFile, source_text: str, translated_text: str,
+                                          source_lang: str, target_lang: str):
+    encoding = _detect_text_encoding(memory_file.file_path)
+    with open(memory_file.file_path, "r", encoding=encoding, newline="") as existing_file:
+        content = existing_file.read()
+
+    sample = content[:2048]
+    delimiter = "\t" if str(memory_file.file_type or "").lower() == "tsv" else None
+    if delimiter is None:
+        try:
+            delimiter = csv.Sniffer().sniff(sample or "zh-CN,en-US\n", delimiters=",\t;|").delimiter
+        except Exception:
+            delimiter = ","
+
+    rows = list(csv.reader(io.StringIO(content), delimiter=delimiter)) if content else []
+    headers = rows[0] if rows else []
+    if not headers:
+        headers = ["source_text", "translated_text"]
+        rows = [headers]
+
+    columns = _resolve_memory_file_columns(headers, fallback_second_column=2)
+    source_value, translated_value = _memory_entry_values_by_column(
+        source_text,
+        translated_text,
+        source_lang,
+        target_lang,
+        columns["source_header_lang"],
+        columns["translated_header_lang"],
+    )
+
+    max_columns = max(
+        len(headers),
+        columns["source_column"] or 0,
+        columns["translated_column"] or 0,
+        columns["source_lang_column"] or 0,
+        columns["target_lang_column"] or 0,
+    )
+    while len(headers) < max_columns:
+        headers.append("")
+    rows[0] = headers
+
+    new_row = [""] * max_columns
+    new_row[(columns["source_column"] or 1) - 1] = source_value
+    new_row[(columns["translated_column"] or 2) - 1] = translated_value
+    if columns["source_lang_column"]:
+        new_row[columns["source_lang_column"] - 1] = source_lang
+    if columns["target_lang_column"]:
+        new_row[columns["target_lang_column"] - 1] = target_lang
+    rows.append(new_row)
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=delimiter, lineterminator="\n")
+    writer.writerows(rows)
+    with open(memory_file.file_path, "w", encoding=encoding, newline="") as existing_file:
+        existing_file.write(output.getvalue())
 
 
 def _search_memory_file(db: Session, memory_file_id: int, source_text: str, source_lang: str, target_lang: str,
@@ -3469,7 +3615,7 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
 
     file_type = str(memory_file.file_type or "").lower()
     if file_type not in WRITABLE_MEMORY_FILE_TYPES:
-        raise HTTPException(status_code=400, detail="当前仅支持写入 Excel 记忆库文件（xlsx、xlsm、xltx、xltm）")
+        raise HTTPException(status_code=400, detail="当前仅支持写入 Excel/CSV/TSV 记忆库文件")
 
     source_text = (entry.source_text or "").strip()
     translated_text = (entry.translated_text or "").strip()
@@ -3487,13 +3633,22 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
         raise HTTPException(status_code=500, detail=f"读取记忆库源文件失败: {str(exc)}")
 
     try:
-        _append_memory_entry_to_excel(
-            memory_file=memory_file,
-            source_text=source_text,
-            translated_text=translated_text,
-            source_lang=resolved_source_lang,
-            target_lang=entry.target_lang,
-        )
+        if file_type in {"csv", "tsv"}:
+            _append_memory_entry_to_delimited_file(
+                memory_file=memory_file,
+                source_text=source_text,
+                translated_text=translated_text,
+                source_lang=resolved_source_lang,
+                target_lang=entry.target_lang,
+            )
+        else:
+            _append_memory_entry_to_excel(
+                memory_file=memory_file,
+                source_text=source_text,
+                translated_text=translated_text,
+                source_lang=resolved_source_lang,
+                target_lang=entry.target_lang,
+            )
         _, memory_bank_created = _ensure_memory_bank_entry(
             db=db,
             source_text=source_text,
