@@ -533,7 +533,7 @@ function clearAll() {
 async function addToDict(error) {
   const word = error.word
   if (hasWordBeenAdded(word)) {
-    ElMessage.info(`单词 "${word}" 已在本次结果中加入白名单`)
+    ElMessage.info(`单词 "${word}" 已在白名单中`)
     return
   }
   if (!word) {
@@ -542,8 +542,9 @@ async function addToDict(error) {
   }
   try {
     await request.post('/spell-check/add-word', null, { params: { word } })
-    ElMessage.success(`已添加单词 "${word}" 到白名单`)
+    ElMessage.success(`已添加单词 "${word}" 到白名单，后续文档会生效`)
     markWordsAsAdded([word])
+    await runCheck()
   } catch (error) {
     console.error('添加单词失败:', error)
     ElMessage.error(getAPIErrorMessage(error, '添加单词失败'))
