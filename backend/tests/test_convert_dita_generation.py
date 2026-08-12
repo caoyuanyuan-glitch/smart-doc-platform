@@ -226,6 +226,22 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         self.assertIn('### DNB 加载 (StandardMPS)', markdown)
         self.assertIn('### DNB 加载 (StandardMPS 2.0)', markdown)
 
+    def test_real_docx_markdown_merges_wrapped_sentence_fragments(self):
+        markdown = _docx_to_markdown('/workspace/.monkeycode-tmp-files/8a916735-H-940-001530-00 MGIEasy 全基因组甲基化建库试剂盒使用说明书 3.0 -250317-1.docx')
+        self.assertIn('1. 将样本管瞬时离心，再置于磁力架上静置 2~5 min 至液体澄清，小心吸取 30 μL 上清液至新的 1.5 mL 离心管。', markdown)
+        self.assertNotIn('30 μL 上清液至新的 1.5 mL\n\n离心管。', markdown)
+        self.assertNotIn('30 μL 上清液至新的 1.5 mL\n离心管。', markdown)
+
+    def test_wrapped_sentence_keeps_independent_explanation_line(self):
+        from app.api.convert import _merge_docx_wrapped_paragraphs
+
+        lines = [
+            '1. 将样本管从磁力架上取下，加入 32 μL TE Buffer 进行 DNA 洗脱',
+            '',
+            '也可根据实际需求，适当减少洗脱体积。',
+        ]
+        self.assertEqual(_merge_docx_wrapped_paragraphs(lines), lines)
+
 
 class BookmapTreeTest(unittest.TestCase):
     def test_nested_topics_keep_filenames_and_templates(self):

@@ -271,6 +271,78 @@ def _normalize_docx_text(text):
     return re.sub(r'\s+', ' ', str(text or '')).strip()
 
 
+def _is_plain_docx_text_line(line):
+    stripped = (line or '').strip()
+    return bool(stripped) and not stripped.startswith(('#', '!', '|', '- ', '* ')) and not re.match(r'^\s*\d+[.)、]\s+', stripped)
+
+
+def _is_docx_list_text_line(line):
+    return bool(re.match(r'^\s*\d+[.)、]\s+', (line or '').strip()))
+
+
+def _strip_docx_list_marker(line):
+    return re.sub(r'^\s*\d+[.)、]\s+', '', (line or '').strip())
+
+
+def _should_merge_docx_wrapped_lines(current_line, next_line):
+    current_text = current_line.strip()
+    next_text = next_line.strip()
+    current_content = _strip_docx_list_marker(current_text)
+
+    if not current_content or not next_text or len(next_text) > 18:
+        return False
+    if re.search(r'[。！？.!?；;：:]$', current_content):
+        return False
+    if re.match(r'^(注意|提示|警告|小心|请勿|切勿)[:：]?', next_text):
+        return False
+    if re.match(r'^(也可|可根据|根据|产物|室温|孵育|随后|然后|再|接着)', next_text):
+        return False
+
+    unfinished_patterns = [
+        r'(?:\d+(?:\.\d+)?)\s*(?:μL|uL|mL|mM|nM|bp|kb|g|mg|ng|kg|℃|°C|min|h)$',
+        r'(?:新的|至|到|入|于|为|用)$',
+        r'[（(]$',
+    ]
+    return any(re.search(pattern, current_content) for pattern in unfinished_patterns)
+
+
+def _docx_wrap_joiner(current_text, next_text):
+    if re.search(r'[A-Za-z0-9μu°℃%]$', current_text) and re.match(r'^[\u4e00-\u9fffA-Za-z0-9]', next_text):
+        return ' '
+    return ''
+
+
+def _merge_docx_wrapped_paragraphs(lines):
+    merged = []
+    i = 0
+
+    while i < len(lines):
+        current = lines[i]
+        if (
+            i + 2 < len(lines)
+            and current
+            and not lines[i + 1]
+            and (_is_plain_docx_text_line(current) or _is_docx_list_text_line(current))
+            and _is_plain_docx_text_line(lines[i + 2])
+        ):
+            next_line = lines[i + 2].strip()
+            current_text = current.strip()
+            should_merge = _should_merge_docx_wrapped_lines(current_text, next_line)
+            if should_merge:
+                joiner = _docx_wrap_joiner(current_text, next_line)
+                merged.append(f"{current_text}{joiner}{next_line}")
+                i += 3
+                if i < len(lines) and not lines[i]:
+                    merged.append('')
+                    i += 1
+                continue
+
+        merged.append(current)
+        i += 1
+
+    return merged
+
+
 def _is_docx_toc_number(text):
     return bool(re.fullmatch(r'\d+(?:\.\d+)*', text or ''))
 
@@ -514,6 +586,7 @@ def _docx_to_markdown(file_path):
                 lines.extend(table_lines)
                 lines.append("")
 
+    lines = _merge_docx_wrapped_paragraphs(lines)
     markdown_text = "\n".join(lines)
     markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text).strip()
     return markdown_text
