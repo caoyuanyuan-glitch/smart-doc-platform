@@ -291,7 +291,14 @@ export const generateAPI = {
     instance.post('/generate/image-steps', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 240000
-    })
+    }),
+  templateAnalyze: (formData) =>
+    instance.post('/generate/template-analyze', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 30000
+    }),
+  templateStatus: (jobId) =>
+    instance.get('/generate/template-status', { params: { job_id: jobId }, timeout: 10000 })
 }
 
 export const convertAPI = {
