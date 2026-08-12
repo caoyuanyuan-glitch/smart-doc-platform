@@ -344,6 +344,8 @@ def _should_emit_docx_list_marker(paragraph, text, next_block):
         return False
 
     compact = _normalize_docx_text(text)
+    if _looks_like_docx_heading_text(compact):
+        return False
     if len(compact) <= 20 and not re.search(r'[，。；：:,.()]', compact):
         return False
     if len(compact.split()) <= 6 and not re.search(r'[，。；：:,.()]', compact):
@@ -351,6 +353,23 @@ def _should_emit_docx_list_marker(paragraph, text, next_block):
     if next_block is not None and hasattr(next_block, "rows") and len(compact) <= 40:
         return False
     return True
+
+
+def _looks_like_docx_heading_text(text):
+    compact = _normalize_docx_text(text)
+    if not compact:
+        return False
+    if len(compact) > 80 or len(compact.split()) > 16:
+        return False
+    if re.match(r'^(table|figure|formula|表|图)\s*\d+', compact, re.IGNORECASE):
+        return False
+    if re.match(r'^(试剂|样本|步骤|操作|注意|提示|警告|小心|请勿|切勿)[:：]', compact):
+        return False
+    if re.search(r'[.!?;:：，。；]$', compact):
+        return False
+    if re.match(r'^\d+(?:\.\d+){1,5}\s+\S+', compact):
+        return True
+    return bool(re.match(r'^[\u4e00-\u9fffA-Za-z0-9\-+/ ]+\([^\n]+\)$', compact))
 
 
 def _infer_docx_heading_level(paragraph, text, next_block, style_name):
@@ -373,10 +392,15 @@ def _infer_docx_heading_level(paragraph, text, next_block, style_name):
             fmt == "decimal"
             and len(compact) <= 40
             and len(compact.split()) <= 12
-            and not re.search(r'[，。；：:,.!?()]$', compact)
+            and not re.search(r'[，。；：:,.!?]$', compact)
         )
         if looks_like_heading:
             return min(indent_level + 1, 6)
+
+    if _looks_like_docx_heading_text(compact):
+        if re.match(r'^\d+(?:\.\d+){1,5}\s+\S+', compact):
+            return min(compact.count('.') + 1, 6)
+        return 4
 
     inferred_heading = (
         len(compact) <= 80
@@ -963,19 +987,26 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     table_rows = []
     in_table = False
-    list_lines = []
+    list_items = []
     in_list = False
     list_type = None
 
     def _flush_list():
-        nonlocal in_list, list_lines, list_type
+        nonlocal in_list, list_items, list_type
         if not in_list:
             return ""
         tag = "ul" if list_type == "ul" else "ol"
-        items = "\n".join(f"          <li>{li}</li>" for li in list_lines)
+        rendered_items = []
+        for item in list_items:
+            child_blocks = "\n".join(item["blocks"])
+            if child_blocks:
+                rendered_items.append(f"          <li><p>{item['text']}</p>\n{child_blocks}\n          </li>")
+            else:
+                rendered_items.append(f"          <li>{item['text']}</li>")
+        items = "\n".join(rendered_items)
         result = f"        <{tag}>\n{items}\n        </{tag}>"
         in_list = False
-        list_lines = []
+        list_items = []
         list_type = None
         return result
 
@@ -983,6 +1014,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     pending_table_title = None
     pending_image = None
     skip_next_note_icon_image = False
+
+    def _append_block(xml, default_indent="        "):
+        if in_list and list_items:
+            list_items[-1]["blocks"].append(xml)
+        else:
+            body_parts.append(xml)
+
+    def _append_list_item(text):
+        list_items.append({"text": text, "blocks": []})
 
     def _strip_list_prefix(text):
         return re.sub(r'^\s*(?:[-*+]\s+|\d+[.)、]\s+)', '', text or '').strip()
@@ -1001,11 +1041,14 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if not pending_image:
             return None
         image_xml = (
-            f'        <image href="{_escape_xml_attr(pending_image["href"])}" placement="break">'
-            f'<alt>{pending_image["alt"]}</alt></image>'
+            f'        <image href="{_escape_xml_attr(pending_image["href"])}" placement="break"></image>'
         )
         pending_image = None
         return image_xml
+
+    def _normalize_table_title(text):
+        normalized = _strip_md_bold(_unescape_md((text or '').strip()))
+        return re.sub(r'^(?:表|Table)\s*\d+\s*[:：.．、-]?\s*', '', normalized, flags=re.IGNORECASE).strip()
 
     def _flush_pending_table():
         nonlocal in_table, table_rows, pending_table_title
@@ -1025,7 +1068,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
         cols = max(len(r) for r in table_rows)
         if has_title:
-            title_text = pending_table_title or _strip_tag(prev)
+            title_text = _normalize_table_title(pending_table_title or _strip_tag(prev))
             table_xml = ['        <table>', f'          <title>{title_text}</title>']
         else:
             table_xml = ['        <table>']
@@ -1087,9 +1130,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     for idx, line in enumerate(safe_lines):
         stripped = line.strip()
         if not stripped:
-            result = _flush_list()
-            if result:
-                body_parts.append(result)
+            if in_list:
+                continue
             body_parts.append("")
             continue
 
@@ -1097,23 +1139,23 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if note_xml:
             table_xml = _flush_pending_table()
             if table_xml:
-                body_parts.append(table_xml)
-            result = _flush_list()
-            if result:
-                body_parts.append(result)
+                _append_block(table_xml)
             pending_image = None
             skip_next_note_icon_image = True
-            body_parts.append(note_xml)
+            _append_block(note_xml)
             continue
 
         if re.match(r'^(表|Table)\s*\d+', _unescape_md(stripped), re.IGNORECASE):
             table_xml = _flush_pending_table()
             if table_xml:
-                body_parts.append(table_xml)
+                _append_block(table_xml)
+            if in_list and list_type == "ol" and list_items:
+                pending_table_title = _normalize_table_title(stripped)
+                continue
             result = _flush_list()
             if result:
                 body_parts.append(result)
-            pending_table_title = _strip_md_bold(_unescape_md(stripped))
+            pending_table_title = _normalize_table_title(stripped)
             continue
 
         if in_table and re.match(r'^\|[-:\s|]+\|$', stripped):
@@ -1129,13 +1171,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         else:
             table_xml = _flush_pending_table()
             if table_xml:
-                body_parts.append(table_xml)
+                _append_block(table_xml)
 
         image_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', stripped)
         if image_match:
-            result = _flush_list()
-            if result:
-                body_parts.append(result)
             if skip_next_note_icon_image:
                 skip_next_note_icon_image = False
                 pending_image = None
@@ -1149,33 +1188,27 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             href = image_match.group(2)
             image_xml = _flush_pending_image()
             if image_xml:
-                body_parts.append(image_xml)
+                _append_block(image_xml)
             pending_image = {"alt": alt, "href": href}
             continue
 
         if _is_figure_caption(stripped):
-            result = _flush_list()
-            if result:
-                body_parts.append(result)
             figure_title = _strip_md_bold(_unescape_md(stripped))
             if pending_image:
-                body_parts.append(
-                    f'        <fig><title>{figure_title}</title><image href="{_escape_xml_attr(pending_image["href"])}" placement="break"><alt>{pending_image["alt"]}</alt></image></fig>'
+                _append_block(
+                    f'        <fig><title>{figure_title}</title><image href="{_escape_xml_attr(pending_image["href"])}" placement="break"></image></fig>'
                 )
                 pending_image = None
             else:
-                body_parts.append(f"        <p>{figure_title}</p>")
+                _append_block(f"        <p>{figure_title}</p>")
             continue
 
         if re.match(r'^\s*[-*+]\s+', line):
             note_xml = _consume_note_line(line)
             if note_xml:
-                result = _flush_list()
-                if result:
-                    body_parts.append(result)
                 pending_image = None
                 skip_next_note_icon_image = True
-                body_parts.append(note_xml)
+                _append_block(note_xml)
                 continue
             if not in_list or list_type != "ul":
                 result = _flush_list()
@@ -1187,16 +1220,13 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 in_list = True
                 list_type = "ul"
             item = re.sub(r'^\s*[-*+]\s+', '', line)
-            list_lines.append(_strip_md_bold(_unescape_md(item)))
+            _append_list_item(_strip_md_bold(_unescape_md(item)))
         elif re.match(r'^\s*\d+[.)]\s+', line):
             note_xml = _consume_note_line(line)
             if note_xml:
-                result = _flush_list()
-                if result:
-                    body_parts.append(result)
                 pending_image = None
                 skip_next_note_icon_image = True
-                body_parts.append(note_xml)
+                _append_block(note_xml)
                 continue
             if not in_list or list_type != "ol":
                 result = _flush_list()
@@ -1208,7 +1238,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 in_list = True
                 list_type = "ol"
             item = re.sub(r'^\s*\d+[.)]\s+', '', line)
-            list_lines.append(_strip_md_bold(_unescape_md(item)))
+            _append_list_item(_strip_md_bold(_unescape_md(item)))
         elif re.match(r'^#{1,6}\s+', line):
             result = _flush_list()
             if result:
@@ -1220,13 +1250,16 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             h_text = _unescape_md(re.sub(r'^#{1,6}\s+', '', line))
             body_parts.append(f"        <section><title>{h_text}</title></section>")
         else:
+            clean = _unescape_md(_strip_md_bold(stripped))
+            image_xml = _flush_pending_image()
+            if image_xml:
+                _append_block(image_xml)
+            if in_list and list_type == "ol" and list_items:
+                _append_block(f"        <p>{clean}</p>")
+                continue
             result = _flush_list()
             if result:
                 body_parts.append(result)
-            image_xml = _flush_pending_image()
-            if image_xml:
-                body_parts.append(image_xml)
-            clean = _unescape_md(_strip_md_bold(stripped))
             body_parts.append(f"        <p>{clean}</p>")
 
     result = _flush_list()
@@ -1494,7 +1527,7 @@ def _escape_xml_attr(value):
 
 def _build_topic_hierarchy(topics, skipped_files):
     roots = []
-    stack = []
+    chapter_root = None
 
     for topic in topics:
         if topic["filename"] in skipped_files:
@@ -1502,19 +1535,19 @@ def _build_topic_hierarchy(topics, skipped_files):
 
         node = {
             "topic": topic,
-            "level": max(1, int(topic.get("level", 1) or 1)),
             "children": [],
         }
 
-        while stack and stack[-1]["level"] >= node["level"]:
-            stack.pop()
-
-        if stack:
-            stack[-1]["children"].append(node)
-        else:
+        if _topic_kind_for_section({"level": topic.get("level", 1), "dita_type": topic.get("type")}, topic.get("title", "")) == "chapter":
             roots.append(node)
+            chapter_root = node
+            continue
 
-        stack.append(node)
+        if chapter_root is None:
+            roots.append(node)
+            continue
+
+        chapter_root["children"].append(node)
 
     return roots
 
@@ -1633,7 +1666,16 @@ def _append_root_container_xml(lines, node, chapter_seq, node_id_seq, indent, le
             level_attr + 1,
             dita_lang,
             template_name="chapterTopic",
-            children=node["children"],
+        )
+    for child in node["children"]:
+        _append_topicref_xml(
+            lines,
+            child["topic"],
+            node_id_seq,
+            indent + "  ",
+            level_attr + 1,
+            dita_lang,
+            children=child.get("children"),
         )
     lines.append(f'{indent}</{container_tag}>')
 
