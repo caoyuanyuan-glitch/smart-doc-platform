@@ -189,3 +189,7 @@ backend/app/static/polished/
 
 # Project-specific: Build
 frontend/dist/
+
+# Local secrets (never commit API keys)
+backend/runtime.secrets/
+backend/runtime.env.local
