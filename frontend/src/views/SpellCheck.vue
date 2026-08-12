@@ -542,8 +542,13 @@ async function addToDict(error) {
   }
   try {
     await request.post('/spell-check/add-word', null, { params: { word } })
-    ElMessage.success(`已添加单词 "${word}" 到白名单`)
+    ElMessage.success(`已添加单词 "${word}" 到白名单，后续文档会生效`)
     markWordsAsAdded([word])
+    try {
+      await startCheck()
+    } catch (e) {
+      console.warn('白名单已更新，但重新检查失败:', e)
+    }
   } catch (error) {
     console.error('添加单词失败:', error)
     ElMessage.error(getAPIErrorMessage(error, '添加单词失败'))
