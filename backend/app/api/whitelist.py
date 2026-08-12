@@ -1,19 +1,19 @@
-import re
 import json
 import os
+import copy
+import re
+import tempfile
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from app.api.auth import require_admin
+from app.paths import WHITELIST_FILE
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
-# 白名单存储文件路径
-WHITELIST_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "whitelist.json")
-
 # 确保数据目录存在
-os.makedirs(os.path.dirname(WHITELIST_FILE), exist_ok=True)
+os.makedirs(WHITELIST_FILE.parent, exist_ok=True)
 
 # 默认白名单数据
 DEFAULT_WHITELIST = {
@@ -77,19 +77,34 @@ def load_whitelist():
             with open(WHITELIST_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception:
-            return DEFAULT_WHITELIST.copy()
-    return DEFAULT_WHITELIST.copy()
+            return copy.deepcopy(DEFAULT_WHITELIST)
+    return copy.deepcopy(DEFAULT_WHITELIST)
 
 def save_whitelist(data):
     """保存白名单数据"""
-    with open(WHITELIST_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    fd, temp_path = tempfile.mkstemp(dir=str(WHITELIST_FILE.parent), suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, WHITELIST_FILE)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 def generate_id():
     """生成唯一ID"""
     import time
     import random
     return f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+
+
+def _refresh_spellchecker_whitelist():
+    from app.utils.spell_checker import reload_whitelist_from_disk
+
+    reload_whitelist_from_disk()
 
 class WhitelistItem(BaseModel):
     word: str
@@ -160,6 +175,7 @@ async def add_item(item: WhitelistItem):
     
     data[category_key].append(new_item)
     save_whitelist(data)
+    _refresh_spellchecker_whitelist()
     
     return {"message": "添加成功", "item": new_item}
 
@@ -177,6 +193,7 @@ async def update_item(item_id: str, item: WhitelistItem):
                     "description": item.description or ""
                 }
                 save_whitelist(data)
+                _refresh_spellchecker_whitelist()
                 return {"message": "更新成功", "item": items[i]}
     
     raise HTTPException(status_code=404, detail="条目不存在")
@@ -190,6 +207,7 @@ async def delete_item(item_id: str):
             if item.get("id") == item_id:
                 deleted = items.pop(i)
                 save_whitelist(data)
+                _refresh_spellchecker_whitelist()
                 return {"message": "删除成功", "item": deleted}
     
     raise HTTPException(status_code=404, detail="条目不存在")
@@ -207,6 +225,7 @@ async def batch_delete(item_ids: List[str]):
                     deleted.append(item)
     
     save_whitelist(data)
+    _refresh_spellchecker_whitelist()
     return {"message": f"成功删除 {len(deleted)} 条", "deleted_count": len(deleted)}
 
 @router.post("/import", summary="导入白名单")
@@ -248,6 +267,7 @@ async def import_whitelist(items: List[WhitelistItem]):
             added.append(new_item)
     
     save_whitelist(data)
+    _refresh_spellchecker_whitelist()
     return {"message": f"成功导入 {len(added)} 条", "added_count": len(added), "skipped": len(items) - len(added)}
 
 @router.get("/export", summary="导出白名单")
@@ -257,5 +277,6 @@ async def export_whitelist():
 
 @router.post("/reset", summary="重置白名单为默认")
 async def reset_whitelist():
-    save_whitelist(DEFAULT_WHITELIST.copy())
+    save_whitelist(copy.deepcopy(DEFAULT_WHITELIST))
+    _refresh_spellchecker_whitelist()
     return {"message": "白名单已重置为默认"}

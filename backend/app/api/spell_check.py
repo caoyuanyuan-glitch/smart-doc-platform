@@ -3,6 +3,7 @@ import zipfile
 import io
 import os
 import tempfile
+import threading
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -11,7 +12,8 @@ from docx import Document
 from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
 from app.api.auth import require_admin
-from app.utils.spell_checker import run_spelling_and_grammar_check, spell as runtime_spell
+from app.api import whitelist as whitelist_api
+from app.utils.spell_checker import run_spelling_and_grammar_check, spell as runtime_spell, add_runtime_whitelist_term, add_runtime_whitelist_terms
 from app.utils.document_parser import parse_file
 
 try:
@@ -28,6 +30,7 @@ def _require_pptx_support():
 
 MAX_SPELL_ERRORS = 100
 MAX_GRAMMAR_ERRORS = 200
+_WHITELIST_LOCK = threading.Lock()
 
 SING_VERBS = {"is", "was", "has", "does"}
 PLUR_VERBS = {"are", "were", "have", "do"}
@@ -1178,14 +1181,20 @@ def _collect_low_level_rule_issues(text, document_language):
     return issues
 
 
-def process_text(text):
+def process_text(text, file_type=None):
     """共享处理函数：统一走完整规则链并适配前端结果结构"""
     normalized_text = pre_clean_lines(text)
     document_language = _detect_document_language(normalized_text)
-    issues = run_spelling_and_grammar_check(normalized_text)
+    issues = run_spelling_and_grammar_check(normalized_text, file_type=file_type)
     issues.extend(_collect_low_level_rule_issues(normalized_text, document_language))
     issues.extend(_collect_consistency_issues(normalized_text, document_language))
     return _build_response(normalized_text, issues)
+
+
+def _guess_file_type_from_text(text):
+    if re.search(r'```|`[^`\n]+`|\[[^\]]+\]\([^\)]+\)', text or ''):
+        return 'md'
+    return None
 
 
 def is_noun_singular(word: str) -> bool:
@@ -1485,11 +1494,12 @@ class SpellCheckRequest(BaseModel):
 async def check_spell(request: SpellCheckRequest):
     if not request.text.strip():
         return {"errors": [], "spell_count": 0, "grammar_count": 0, "total_count": 0, "text": ""}
-    return process_text(request.text)
+    return process_text(request.text, file_type=_guess_file_type_from_text(request.text))
 
 
 @router.post("/upload", summary="上传文件并检查拼写语法")
 async def upload_and_check(file: UploadFile = File(...)):
+    ext = os.path.splitext(file.filename or "")[1].lower()
     try:
         text = extract_text_from_file(file)
     except HTTPException as e:
@@ -1500,7 +1510,7 @@ async def upload_and_check(file: UploadFile = File(...)):
     if not text.strip():
         return {"errors": [], "spell_count": 0, "grammar_count": 0, "total_count": 0, "text": "", "filename": file.filename}
 
-    result = process_text(text)
+    result = process_text(text, file_type=ext.lstrip('.'))
     result["filename"] = file.filename
     return result
 
@@ -1510,7 +1520,19 @@ async def add_custom_word(word: str):
     word = word.strip()
     if not word:
         raise HTTPException(status_code=400, detail="单词不能为空")
-    runtime_spell.word_frequency.load_words([word])
+    add_runtime_whitelist_term(word)
+    with _WHITELIST_LOCK:
+        data = whitelist_api.load_whitelist()
+        terms = data.setdefault("terms", [])
+        if not any(str(item.get("word") or "").strip().lower() == word.lower() for item in terms):
+            terms.append({
+                "id": whitelist_api.generate_id(),
+                "word": word,
+                "category": "专业术语",
+                "description": "由拼写检查页面加入"
+            })
+            whitelist_api.save_whitelist(data)
+            whitelist_api._refresh_spellchecker_whitelist()
     return {"message": f"已添加单词: {word}"}
 
 
@@ -1524,7 +1546,7 @@ async def import_dict(file: UploadFile = File(...)):
         if not line or line.startswith("#"):
             continue
         words_to_add.append(line)
-    runtime_spell.word_frequency.load_words(words_to_add)
+    add_runtime_whitelist_terms(words_to_add)
     return {"message": f"成功导入 {len(words_to_add)} 个单词"}
 
 

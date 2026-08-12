@@ -5,6 +5,7 @@
 import re
 from pathlib import Path
 from spellchecker import SpellChecker
+from app.paths import WHITELIST_FILE
 
 # 初始化英文拼写检查器
 spell = SpellChecker(language='en')
@@ -128,6 +129,8 @@ SPELLCHECK_WHITELIST = {
 }
 
 _DICTIONARY_DIR = Path(__file__).resolve().parents[1] / 'dictionary'
+_RUNTIME_WHITELIST_TERMS = set()
+MAX_OCCURRENCES_PER_WORD = 20
 
 
 def _load_dictionary_file(name):
@@ -144,12 +147,36 @@ def _load_dictionary_file(name):
 
 EXTERNAL_TECH_TERMS = _load_dictionary_file('technical_terms.txt')
 EXTERNAL_TRADEMARKS = _load_dictionary_file('trademarks.txt')
-_TECH_TERMS_NORMALIZED = {str(term).lower() for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS}
+
+
+def _load_whitelist_words_from_json():
+    if not WHITELIST_FILE.exists():
+        return set()
+    try:
+        import json
+
+        data = json.loads(WHITELIST_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return set()
+
+    terms = set()
+    for items in (data or {}).values():
+        for item in items or []:
+            word = str(item.get('word') or '').strip()
+            if word:
+                terms.add(word)
+    return terms
+
+
+_TECH_TERMS_NORMALIZED = {
+    str(term).lower()
+    for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS | _load_whitelist_words_from_json()
+}
 
 
 def _load_whitelist_into_dictionary():
     words = set()
-    for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS:
+    for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS | _load_whitelist_words_from_json():
         for piece in re.findall(r"[A-Za-z]+", str(term)):
             if len(piece) >= 2:
                 words.add(piece.lower())
@@ -181,6 +208,8 @@ def _is_protected_technical_token(word: str) -> bool:
     if not lowered:
         return False
     if lowered in _TECH_TERMS_NORMALIZED:
+        return True
+    if lowered in _RUNTIME_WHITELIST_TERMS:
         return True
     if re.fullmatch(r'\d+(?:\.\d+)?[xX]', token):
         return True
@@ -3088,6 +3117,90 @@ def _format_spelling_suggestion(word, context, suggestions, certainty='疑似'):
     return suggestion_part
 
 
+def add_runtime_whitelist_terms(terms):
+    added = []
+    for term in terms or []:
+        token = str(term or '').strip()
+        if not token:
+            continue
+        lowered = token.lower()
+        if lowered in _RUNTIME_WHITELIST_TERMS:
+            continue
+        _RUNTIME_WHITELIST_TERMS.add(lowered)
+        _TECH_TERMS_NORMALIZED.add(lowered)
+        added.append(token)
+
+    if added:
+        spell.word_frequency.load_words(sorted(added))
+    return added
+
+
+def add_runtime_whitelist_term(term):
+    return bool(add_runtime_whitelist_terms([term]))
+
+
+def reload_whitelist_from_disk():
+    words = _load_whitelist_words_from_json()
+    _RUNTIME_WHITELIST_TERMS.clear()
+    for word in words:
+        _RUNTIME_WHITELIST_TERMS.add(str(word).lower())
+    _TECH_TERMS_NORMALIZED.update(_RUNTIME_WHITELIST_TERMS)
+
+    pieces = set()
+    for term in words:
+        for piece in re.findall(r"[A-Za-z]+", str(term)):
+            if len(piece) >= 2:
+                pieces.add(piece.lower())
+    if pieces:
+        spell.word_frequency.load_words(sorted(pieces))
+
+
+def _mask_markdown_noise(content):
+    if not content:
+        return content
+
+    masked = content
+
+    def _replace_with_spaces(match):
+        return ' ' * (match.end() - match.start())
+
+    patterns = [
+        r'```[\s\S]*?```',
+        r'`[^`\n]+`',
+        r'!\[[^\]]*\]\([^\)]+\)',
+        r'\[[^\]]+\]\([^\)]+\)',
+    ]
+    for pattern in patterns:
+        masked = re.sub(pattern, _replace_with_spaces, masked)
+    return masked
+
+
+def _collect_word_matches(content):
+    matches = {}
+    for match in re.finditer(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", content or ''):
+        normalized = _normalize_for_check(match.group(0))
+        matches.setdefault(normalized, []).append(match)
+    return matches
+
+
+def _get_spelling_suggestions(word):
+    normalized = _normalize_for_check(word)
+    suggestions = []
+    seen_lower = set()
+    for candidate in spell.candidates(word) or []:
+        candidate_text = str(candidate or '').strip()
+        if not candidate_text:
+            continue
+        lowered = candidate_text.lower()
+        if lowered == normalized or lowered in seen_lower:
+            continue
+        suggestions.append(candidate_text)
+        seen_lower.add(lowered)
+        if len(suggestions) >= 3:
+            break
+    return suggestions
+
+
 def _find_pdf_split_word_issues(content, seen_issue_keys):
     issues = []
     if not content:
@@ -3224,8 +3337,9 @@ def check_spelling(content, min_word_length=3, file_type=None):
                 "position": f"{match.start()}-{match.end()}"
             })
     
-    # 提取所有单词
-    words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", content)
+    analysis_content = _mask_markdown_noise(content) if file_type == 'md' else content
+    word_matches = _collect_word_matches(analysis_content)
+    words = list(word_matches.keys())
     
     # 使用 spellchecker 检查
     misspelled = spell.unknown(words)
@@ -3246,8 +3360,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
         normalized = _normalize_for_check(word)
         if normalized in COMMON_MISSPELLINGS:
             correct = COMMON_MISSPELLINGS[normalized]
-            # 找到单词在文档中的位置
-            for match in re.finditer(r'\b' + re.escape(word) + r'\b', content, re.IGNORECASE):
+            occurrences = word_matches.get(normalized, [])[:MAX_OCCURRENCES_PER_WORD]
+            for match in occurrences:
                 if _should_skip_match_word(match.group(0)):
                     continue
                 context = _build_spelling_context(content, match.start(), match.end())
@@ -3274,18 +3388,18 @@ def check_spelling(content, min_word_length=3, file_type=None):
                     "position": f"{match.start()}-{match.end()}"
                 })
         else:
-            # 使用 spellchecker 的建议
-            suggestions = list(spell.candidates(word) or [])[:3]
+            suggestions = _get_spelling_suggestions(word)
             if not suggestions:
                 continue
-            
-            for match in re.finditer(r'\b' + re.escape(word) + r'\b', content, re.IGNORECASE):
+
+            occurrences = word_matches.get(normalized, [])[:MAX_OCCURRENCES_PER_WORD]
+            for match in occurrences:
                 if _should_skip_match_word(match.group(0)):
                     continue
                 context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
                     continue
-                dedupe_key = (normalized, 'spell')
+                dedupe_key = (normalized, 'spell', match.start())
                 if dedupe_key in seen_issue_keys:
                     continue
                 seen_issue_keys.add(dedupe_key)
