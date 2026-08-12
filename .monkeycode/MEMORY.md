@@ -31,6 +31,22 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 
 ## 条目
 
+Word 转 DITA 的 note 图标处理规则
+- Date: 2026-08-12
+- Context: 用户补充 IME 平台 note 标签自带提示/警告/小心类图标的验收口径
+- Category: 行为指令
+- Instructions:
+  - 在 Word 转 DITA 的图片完整性校验中，提示、警告、小心等 note 类说明内容配套的小图标不计入“图片不丢失”范围
+  - 若内容已经成功转换为 DITA `note` 标签，可不再输出这类 note 图标图片
+
+Word 转 DITA 的目录处理规则
+- Date: 2026-08-12
+- Context: 用户补充 IME 平台已提供 Booklists/toc 结构
+- Category: 行为指令
+- Instructions:
+  - Word 源文件中的目录内容不需要转换到 DITA 正文中
+  - 验收时不将 Word 目录计入标题结构和内容完整性比对范围
+
 每日启动前拉取最新代码并创建分支
 - Date: 2026-06-17
 - Context: 用户要求每天早上开始跑代码前提醒拉取最新 main 并创建新分支
@@ -52,13 +68,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 格式: `git push origin <branch>`
 
 前后端自验命令
-- Date: 2026-08-11
-- Context: Agent 在执行 AI 翻译模块优化任务时校正当前仓库路径
+- Date: 2026-07-01
+- Context: Agent 在执行智能润色规则管理任务时校正路径
 - Category: 构建方法
 - Instructions:
-  - 当前仓库实际路径为 `/workspace`
-  - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
-  - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+  - 智能润色项目实际路径为 `/workspace/smart-doc-platform`
+  - 当前工作区前端构建校验使用 `cd /workspace/smart-doc-platform/frontend && npm run build`
+  - 当前工作区后端语法校验使用 `cd /workspace/smart-doc-platform/backend && python3 -m compileall app`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
