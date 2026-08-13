@@ -3,6 +3,7 @@ import os
 import copy
 import re
 import tempfile
+import threading
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -11,6 +12,7 @@ from app.api.auth import require_admin
 from app.paths import WHITELIST_FILE
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+_WHITELIST_LOCK = threading.Lock()
 
 # 确保数据目录存在
 os.makedirs(WHITELIST_FILE.parent, exist_ok=True)
@@ -106,6 +108,52 @@ def _refresh_spellchecker_whitelist():
 
     reload_whitelist_from_disk()
 
+
+def add_terms_to_whitelist(words, *, category_key='terms', item_category='专业术语', description='由拼写检查页面加入'):
+    cleaned_words = []
+    seen = set()
+    for word in words or []:
+        token = str(word or '').strip()
+        if not token:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        cleaned_words.append(token)
+
+    if not cleaned_words:
+        return []
+
+    with _WHITELIST_LOCK:
+        data = load_whitelist()
+        items = data.setdefault(category_key, [])
+        existing_words = {str(item.get('word') or '').strip() for item in items}
+        added = []
+        for token in cleaned_words:
+            if token in existing_words:
+                continue
+            new_item = {
+                'id': generate_id(),
+                'word': token,
+                'category': item_category,
+                'description': description,
+            }
+            items.append(new_item)
+            added.append(new_item)
+            existing_words.add(token)
+
+        if added:
+            save_whitelist(data)
+            _refresh_spellchecker_whitelist()
+        return added
+
+
+def _sorted_whitelist_items(items):
+    return sorted(
+        items,
+        key=lambda item: str(item.get("word") or '').casefold()
+    )
+
 class WhitelistItem(BaseModel):
     word: str
     category: str
@@ -121,7 +169,7 @@ def get_all_items():
     for category, items_list in data.items():
         for item in items_list:
             items.append({**item, "category": item.get("category", category)})
-    return items
+    return _sorted_whitelist_items(items)
 
 def get_items_by_category():
     """按分类获取白名单"""
@@ -149,7 +197,7 @@ async def get_categories():
 @router.post("/items", summary="添加白名单条目")
 async def add_item(item: WhitelistItem):
     data = load_whitelist()
-    
+
     # 确定添加到哪个分类
     category_map = {
         "产品名": "products",
@@ -166,13 +214,20 @@ async def add_item(item: WhitelistItem):
     
     category_key = category_map.get(item.category, "terms")
     
+    normalized_word = str(item.word or '').strip()
+    if not normalized_word:
+        raise HTTPException(status_code=400, detail="词条不能为空")
+    existing_words = {str(existing.get("word") or '').strip() for existing in data[category_key]}
+    if normalized_word in existing_words:
+        raise HTTPException(status_code=400, detail="词条已存在")
+
     new_item = {
         "id": generate_id(),
-        "word": item.word,
+        "word": normalized_word,
         "category": item.category,
         "description": item.description or ""
     }
-    
+
     data[category_key].append(new_item)
     save_whitelist(data)
     _refresh_spellchecker_whitelist()
@@ -249,17 +304,21 @@ async def import_whitelist(items: List[WhitelistItem]):
     for item in items:
         category_key = category_map.get(item.category, "terms")
         
+        normalized_word = str(item.word or '').strip()
+        if not normalized_word:
+            continue
+
         # 检查是否已存在
         exists = False
         for existing in data[category_key]:
-            if existing.get("word", "").lower() == item.word.lower():
+            if str(existing.get("word", "")).strip() == normalized_word:
                 exists = True
                 break
         
         if not exists:
             new_item = {
                 "id": generate_id(),
-                "word": item.word,
+                "word": normalized_word,
                 "category": item.category,
                 "description": item.description or ""
             }

@@ -255,7 +255,7 @@ function canAddWord(row) {
 }
 
 function normalizeWord(word) {
-  return String(word || '').trim().toLowerCase()
+  return String(word || '').trim()
 }
 
 function hasWordBeenAdded(word) {
@@ -267,6 +267,21 @@ function markWordsAsAdded(words) {
   const normalizedWords = words.map(normalizeWord).filter(Boolean)
   if (normalizedWords.length === 0) return
   addedWords.value = [...new Set([...addedWords.value, ...normalizedWords])]
+}
+
+function applyWhitelistToCurrentResult(words) {
+  if (!checkResult.value?.errors?.length) return 0
+  const normalizedWords = new Set(words.map(normalizeWord).filter(Boolean))
+  if (normalizedWords.size === 0) return 0
+
+  const beforeCount = checkResult.value.errors.length
+  checkResult.value.errors = checkResult.value.errors.filter((item) => {
+    const itemWord = normalizeWord(item.word)
+    return !normalizedWords.has(itemWord)
+  })
+  syncCounts()
+  syncCurrentIssueIndex()
+  return beforeCount - checkResult.value.errors.length
 }
 
 async function handleFileChange(file) {
@@ -542,12 +557,11 @@ async function addToDict(error) {
   }
   try {
     await request.post('/spell-check/add-word', null, { params: { word } })
-    ElMessage.success(`已添加单词 "${word}" 到白名单，后续文档会生效`)
+    ElMessage.success(`已添加单词 "${word}" 到白名单，后续所有格式会生效`)
     markWordsAsAdded([word])
-    try {
-      await startCheck()
-    } catch (e) {
-      console.warn('白名单已更新，但重新检查失败:', e)
+    const removedCount = applyWhitelistToCurrentResult([word])
+    if (removedCount > 0) {
+      ElMessage.success(`已从当前结果移除 ${removedCount} 处命中`)
     }
   } catch (error) {
     console.error('添加单词失败:', error)

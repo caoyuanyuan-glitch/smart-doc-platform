@@ -168,8 +168,8 @@ def _load_whitelist_words_from_json():
     return terms
 
 
-_TECH_TERMS_NORMALIZED = {
-    str(term).lower()
+_TECH_TERMS_EXACT = {
+    str(term).strip()
     for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS | _load_whitelist_words_from_json()
 }
 
@@ -188,9 +188,9 @@ _load_whitelist_into_dictionary()
 
 def is_whitelisted(word: str) -> bool:
     candidate = str(word or '').strip()
-    lowered = candidate.lower()
     if _is_protected_technical_token(candidate):
         return True
+    lowered = candidate.lower()
     if lowered in SPELLCHECK_WHITELIST['exact']:
         return True
     for prefix in SPELLCHECK_WHITELIST['prefix']:
@@ -204,12 +204,11 @@ def is_whitelisted(word: str) -> bool:
 
 def _is_protected_technical_token(word: str) -> bool:
     token = str(word or '').strip().strip('.,;:()[]{}"\'®™©')
-    lowered = token.lower()
-    if not lowered:
+    if not token:
         return False
-    if lowered in _TECH_TERMS_NORMALIZED:
+    if token in _TECH_TERMS_EXACT:
         return True
-    if lowered in _RUNTIME_WHITELIST_TERMS:
+    if token in _RUNTIME_WHITELIST_TERMS:
         return True
     if re.fullmatch(r'\d+(?:\.\d+)?[xX]', token):
         return True
@@ -3123,11 +3122,10 @@ def add_runtime_whitelist_terms(terms):
         token = str(term or '').strip()
         if not token:
             continue
-        lowered = token.lower()
-        if lowered in _RUNTIME_WHITELIST_TERMS:
+        if token in _RUNTIME_WHITELIST_TERMS:
             continue
-        _RUNTIME_WHITELIST_TERMS.add(lowered)
-        _TECH_TERMS_NORMALIZED.add(lowered)
+        _RUNTIME_WHITELIST_TERMS.add(token)
+        _TECH_TERMS_EXACT.add(token)
         added.append(token)
 
     if added:
@@ -3143,8 +3141,8 @@ def reload_whitelist_from_disk():
     words = _load_whitelist_words_from_json()
     _RUNTIME_WHITELIST_TERMS.clear()
     for word in words:
-        _RUNTIME_WHITELIST_TERMS.add(str(word).lower())
-    _TECH_TERMS_NORMALIZED.update(_RUNTIME_WHITELIST_TERMS)
+        _RUNTIME_WHITELIST_TERMS.add(str(word).strip())
+    _TECH_TERMS_EXACT.update(_RUNTIME_WHITELIST_TERMS)
 
     pieces = set()
     for term in words:
@@ -3431,7 +3429,7 @@ def _is_vowel_sound(word):
     lower = token.lower()
     if re.match(r'^(honest|hour|honor|heir)', lower):
         return True
-    if re.match(r'^(university|universal|user|unit|unique|european|eucalyptus|one|one-step)', lower):
+    if re.match(r'^(university|universal|unified|union|unilateral|user|unit|unique|european|eucalyptus|one|one-step)', lower):
         return False
     if token.isupper() and token[0] in set('AEFHILMNORSX'):
         return True

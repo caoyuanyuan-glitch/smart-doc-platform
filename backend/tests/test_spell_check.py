@@ -79,3 +79,28 @@ def test_runtime_whitelist_term_persists_in_memory_and_dictionary(monkeypatch):
 
     assert spell_checker_utils.add_runtime_whitelist_term("AlphaTool") is True
     assert spell_checker_utils.is_whitelisted("AlphaTool") is True
+
+
+def test_runtime_whitelist_is_case_sensitive(monkeypatch):
+    monkeypatch.setattr(spell_checker_utils.spell.word_frequency, "load_words", lambda words: None)
+
+    spell_checker_utils.add_runtime_whitelist_term("RNAs")
+
+    assert spell_checker_utils.is_whitelisted("RNAs") is True
+    assert spell_checker_utils.is_whitelisted("rnas") is False
+
+
+def test_process_text_appends_legacy_grammar_issues(monkeypatch):
+    monkeypatch.setattr(spell_check_api, "run_spelling_and_grammar_check", lambda content, file_type=None: [])
+    monkeypatch.setattr(spell_check_api, "_collect_low_level_rule_issues", lambda text, document_language: [])
+    monkeypatch.setattr(spell_check_api, "_collect_consistency_issues", lambda text, document_language: [])
+
+    result = spell_check_api.process_text("It indicates that the icon are grayed out.")
+
+    assert any(error["type"] == "grammar" and error["word"] == "are" for error in result["errors"])
+
+
+def test_check_grammar_patterns_keeps_a_unified_phrase_valid():
+    issues = spell_checker_utils.check_grammar_patterns("a unified FOV")
+
+    assert issues == []
