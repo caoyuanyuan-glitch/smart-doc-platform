@@ -238,7 +238,12 @@ function syncWritableMemorySelection(preferredId = null) {
     return
   }
 
-  memoryWriteFileId.value = writableFiles[0]?.id ?? null
+  if (writableFiles.length === 1) {
+    memoryWriteFileId.value = writableFiles[0].id
+    return
+  }
+
+  memoryWriteFileId.value = null
 }
 
 const selectedMemoryWriteFile = computed(() => {
@@ -414,7 +419,8 @@ async function writeToMemoryLibrary() {
       source_lang: sourceLang.value,
       target_lang: targetLang.value
     })
-    ElMessage.success('已写入选中的记忆库 Excel 文件')
+    const targetName = selectedMemoryWriteFile.value?.name || '选中的记忆库 Excel 文件'
+    ElMessage.success(`已写入 ${targetName}`)
   } catch (e) {
     ElMessage.error('写入记忆库失败: ' + (e.response?.data?.detail || e.message))
   } finally {
