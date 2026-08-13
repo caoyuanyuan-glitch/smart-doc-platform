@@ -44,7 +44,7 @@ def _looks_like_contextual_sentence(line: str, context_text: str = '') -> bool:
 
     prefix, body = _split_sentence_role_prefix(value)
     candidate = body or value
-    if len(candidate) < 12:
+    if len(candidate) < 8:
         return False
     if not re.search(r'[\u4e00-\u9fff]', candidate):
         return False
@@ -56,6 +56,12 @@ def _looks_like_contextual_sentence(line: str, context_text: str = '') -> bool:
     if prefix and has_marker:
         return True
     if has_marker and has_clause:
+        return True
+
+    if len(candidate) >= 20:
+        return True
+
+    if has_marker:
         return True
 
     siblings = [seg.strip() for seg in str(context_text or '').split('\n') if seg.strip()]
@@ -84,6 +90,19 @@ def apply_term_replace(line: str, term_dict: dict, context_text: str = "") -> st
         pattern = re.compile(r'(?<!\w)' + re.escape(old_term) + r'(?!\w)')
         if pattern.search(result):
             result = pattern.sub(new_term, result)
+    return result
+
+
+def apply_typo_replace(line: str, typo_dict: dict) -> str:
+    if not typo_dict:
+        return line
+    result = line
+    for wrong, correct in typo_dict.items():
+        if not wrong or not correct:
+            continue
+        pattern = re.compile(r'(?<!\w)' + re.escape(wrong) + r'(?!\w)')
+        if pattern.search(result):
+            result = pattern.sub(correct, result)
     return result
 
 
@@ -384,6 +403,7 @@ def fix_punctuation(line: str, issues: list) -> str:
 def apply_all_rules(
     line: str,
     term_dict: dict = None,
+    typo_dict: dict = None,
     enabled_rules: list = None,
     context_text: str = "",
 ) -> tuple:
@@ -393,6 +413,7 @@ def apply_all_rules(
     参数:
         line: 输入文本行
         term_dict: 术语字典 {非标准: 标准}
+        typo_dict: 错别字字典 {错误: 正确}
         enabled_rules: 启用的规则列表，默认全部启用
                       ['termReplace', 'imperativePlease', 'numberSpace', 'punctuation']
         context_text: 上下文文本（用于术语替换的上下文判断）
@@ -402,7 +423,7 @@ def apply_all_rules(
         issues_list: [{original, replacement, reason, rule_name, type}, ...]
     """
     if enabled_rules is None:
-        enabled_rules = ['termReplace', 'imperativePlease', 'numberSpace', 'punctuation']
+        enabled_rules = ['termReplace', 'typoCheck', 'imperativePlease', 'numberSpace', 'punctuation']
 
     issues = []
     result = line
@@ -421,6 +442,22 @@ def apply_all_rules(
                         'rule_name': '术语替换',
                         'type': 'term',
                         'engine_key': 'termReplace',
+                    })
+
+    # 规则 1.5：错别字替换
+    if 'typoCheck' in enabled_rules and typo_dict:
+        before = result
+        result = apply_typo_replace(result, typo_dict)
+        if result != before:
+            for wrong, correct in typo_dict.items():
+                if wrong in before and correct in result:
+                    issues.append({
+                        'original': wrong,
+                        'replacement': correct,
+                        'reason': '错别字修正',
+                        'rule_name': '错别字修正',
+                        'type': 'typo',
+                        'engine_key': 'typoCheck',
                     })
 
     # 规则 2：祈使句规范
