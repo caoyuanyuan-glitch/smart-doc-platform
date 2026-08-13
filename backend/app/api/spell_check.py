@@ -3,7 +3,6 @@ import zipfile
 import io
 import os
 import tempfile
-import threading
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -30,7 +29,6 @@ def _require_pptx_support():
 
 MAX_SPELL_ERRORS = 100
 MAX_GRAMMAR_ERRORS = 200
-_WHITELIST_LOCK = threading.Lock()
 
 SING_VERBS = {"is", "was", "has", "does"}
 PLUR_VERBS = {"are", "were", "have", "do"}
@@ -1151,6 +1149,26 @@ def _build_response(text, issues):
     }
 
 
+def _append_legacy_grammar_issues(text, issues):
+    legacy_errors = []
+    run_grammar(text, legacy_errors)
+    for error in legacy_errors:
+        start = error.get('start')
+        end = error.get('end')
+        if not isinstance(start, int) or not isinstance(end, int) or end > len(text):
+            continue
+        issues.append({
+            'severity': error.get('severity') or 'general',
+            'category': 'grammar',
+            'source': 'legacy_grammar_rule',
+            'original_text': text[start:end],
+            'context': text[max(0, start - 50):min(len(text), end + 50)],
+            'description': error.get('message') or '主谓不一致',
+            'suggestion': '',
+            'position': f'{start}-{end}',
+        })
+
+
 def _detect_document_language(text):
     chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
     english_words = len(re.findall(r'\b[a-zA-Z]{2,}\b', text))
@@ -1186,6 +1204,7 @@ def process_text(text, file_type=None):
     normalized_text = pre_clean_lines(text)
     document_language = _detect_document_language(normalized_text)
     issues = run_spelling_and_grammar_check(normalized_text, file_type=file_type)
+    _append_legacy_grammar_issues(normalized_text, issues)
     issues.extend(_collect_low_level_rule_issues(normalized_text, document_language))
     issues.extend(_collect_consistency_issues(normalized_text, document_language))
     return _build_response(normalized_text, issues)
@@ -1520,19 +1539,8 @@ async def add_custom_word(word: str):
     word = word.strip()
     if not word:
         raise HTTPException(status_code=400, detail="单词不能为空")
+    whitelist_api.add_terms_to_whitelist([word], item_category='专业术语', description='由拼写检查页面加入')
     add_runtime_whitelist_term(word)
-    with _WHITELIST_LOCK:
-        data = whitelist_api.load_whitelist()
-        terms = data.setdefault("terms", [])
-        if not any(str(item.get("word") or "").strip().lower() == word.lower() for item in terms):
-            terms.append({
-                "id": whitelist_api.generate_id(),
-                "word": word,
-                "category": "专业术语",
-                "description": "由拼写检查页面加入"
-            })
-            whitelist_api.save_whitelist(data)
-            whitelist_api._refresh_spellchecker_whitelist()
     return {"message": f"已添加单词: {word}"}
 
 
@@ -1546,6 +1554,7 @@ async def import_dict(file: UploadFile = File(...)):
         if not line or line.startswith("#"):
             continue
         words_to_add.append(line)
+    whitelist_api.add_terms_to_whitelist(words_to_add, item_category='专业术语', description='由词典导入')
     add_runtime_whitelist_terms(words_to_add)
     return {"message": f"成功导入 {len(words_to_add)} 个单词"}
 
