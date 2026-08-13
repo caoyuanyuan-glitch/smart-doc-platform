@@ -6,6 +6,8 @@ const Review = () => import('@/views/Review.vue')
 const ReviewDashboard = () => import('@/views/ReviewDashboard.vue')
 const Polish = () => import('@/views/Polish.vue')
 const PolishStats = () => import('@/views/PolishStats.vue')
+const PolishTextSessions = () => import('@/views/PolishTextSessions.vue')
+const PolishDocumentSessions = () => import('@/views/PolishDocumentSessions.vue')
 const PolishHistory = () => import('@/views/PolishHistory.vue')
 const QA = () => import('@/views/QA.vue')
 const QAManual = () => import('@/views/QADoc.vue')
@@ -84,6 +86,16 @@ const routes = [
     path: '/polish/stats',
     name: 'PolishStats',
     component: PolishStats
+  },
+  {
+    path: '/polish/stats/text-sessions',
+    name: 'PolishTextSessions',
+    component: PolishTextSessions
+  },
+  {
+    path: '/polish/stats/document-sessions',
+    name: 'PolishDocumentSessions',
+    component: PolishDocumentSessions
   },
   {
     path: '/polish',

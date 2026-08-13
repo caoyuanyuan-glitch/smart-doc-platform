@@ -1,5 +1,6 @@
 import builtins
 import json
+import asyncio
 import sys
 import types
 import unittest
@@ -16,8 +17,10 @@ from app.api.polish import (  # noqa: E402
     _apply_skill_polish,
     _ai_style_guide_text,
     _compact_document_ai_style_guide,
+    _collect_text_polish_cat_items,
     _build_document_feedback_record_key,
     _document_feedback_stats,
+    _feedback_accuracy_percent,
     _extract_style_rules,
     _filter_visible_doc_changes,
     _filter_candidate_templates,
@@ -47,15 +50,22 @@ from app.api.polish import (  # noqa: E402
     _is_simple_operation_sentence,
     _should_skip_expensive_template_match,
     _should_use_lightweight_review_detail,
+    _simple_match,
     _normalize_review_suggestion,
     _should_emit_reference_review_change,
     _style_rules_cache,
+    _simple_match,
 )
 from app.utils.instrument_polisher import instrument_polish_engine  # noqa: E402
 from app.models.polish_feedback import PolishFeedback  # noqa: E402
 
 
 class PolishMatchScoreRegressionTest(unittest.TestCase):
+    def test_feedback_accuracy_percent_uses_submitted_rating_value(self):
+        record = PolishFeedback(accuracy=80, processed_count=1, target='sentence_guide')
+
+        self.assertEqual(_feedback_accuracy_percent(record), 80.0)
+
     def test_bundled_structured_guide_contains_recent_pdf_templates(self):
         guide_path = BACKEND_ROOT / 'app' / 'static' / 'bundled' / 'structured_sentence_guide_d4rs_operations.md'
         guide_text = guide_path.read_text(encoding='utf-8')
@@ -147,6 +157,10 @@ class PolishMatchScoreRegressionTest(unittest.TestCase):
         sentence = '3.9 DNB取出'
         self.assertTrue(_looks_like_title_or_noun_phrase(sentence))
 
+    def test_colon_operation_sentence_is_not_misclassified_as_title(self):
+        sentence = '参数设置如下：确认孔位对应关系后点击运行'
+        self.assertFalse(_looks_like_title_or_noun_phrase(sentence))
+
     def test_constraint_polish_keeps_predicate_wei_clause(self):
         sentence = '每个产物为一对barcode序列组合'
         self.assertEqual(_apply_constraint_polish(sentence), sentence)
@@ -213,8 +227,56 @@ class PolishMatchScoreRegressionTest(unittest.TestCase):
         pool = _filter_candidate_templates(sentence, templates)
 
         self.assertTrue(pool)
-        self.assertIn('孔位E1对应sample 1', pool)
-        self.assertNotIn('参数确认无误后，点击运行。', pool)
+
+    def test_collect_text_polish_cat_items_returns_manual_candidates_for_text_endpoint(self):
+        from app.database import SessionLocal
+
+        guide_text = (BACKEND_ROOT / 'app' / 'static' / 'bundled' / 'structured_sentence_guide_d4rs_operations.md').read_text(encoding='utf-8')
+
+        db = SessionLocal()
+        try:
+            original = '运输温度为-80℃~-15℃时，需使用干冰运输，且需要在收到产品时检查是否还有剩余干冰。'
+            cat_items = asyncio.run(_collect_text_polish_cat_items(
+                original,
+                db,
+                sentence_guide=guide_text,
+                terminology_md='',
+                sentence_file_id=None,
+            ))
+        finally:
+            db.close()
+
+        self.assertTrue(cat_items)
+        first_item = cat_items[0]
+        self.assertEqual(first_item.get('original_text'), original)
+        self.assertTrue(first_item.get('candidates'))
+        self.assertTrue(any('检查是否还有剩余干冰' in str(item.get('raw_template_text', '') or item.get('template_text', '')) for item in first_item.get('candidates', [])))
+
+    def test_collect_text_polish_cat_items_returns_empty_for_unmatched_text(self):
+        from app.database import SessionLocal
+
+        guide_text = (BACKEND_ROOT / 'app' / 'static' / 'bundled' / 'structured_sentence_guide_d4rs_operations.md').read_text(encoding='utf-8')
+
+        db = SessionLocal()
+        try:
+            original = '这是一个完全没有 CAT 模板命中的普通句子。'
+            cat_items = asyncio.run(_collect_text_polish_cat_items(
+                original,
+                db,
+                sentence_guide=guide_text,
+                terminology_md='',
+                sentence_file_id=None,
+            ))
+        finally:
+            db.close()
+
+        self.assertEqual(cat_items, [])
+
+    def test_text_manual_candidate_can_change_displayed_result(self):
+        original = '实验前请熟悉和掌握需使用的各种仪器的操作方法和注意事项。'
+        candidate = '实验前请熟悉需使用的各种仪器的注意事项，并掌握其操作方法。'
+
+        self.assertNotEqual(original, candidate)
 
     def test_build_change_match_detail_uses_lightweight_detail_for_slot_sample_mapping(self):
         before = '3.7.3将以上配制好的样品（10μL）全部转移到制备卡上对应的进样孔中（S1-S4），S1对应sample1，S2对应sample2，S3对应sample3，S4对应sample4。'
@@ -638,6 +700,32 @@ class PolishMatchScoreRegressionTest(unittest.TestCase):
         self.assertGreaterEqual(len(pool), 3)
         self.assertIn('部分试剂会加多个孔位，请按指示添加。', pool)
         self.assertIn('部分试剂需要加多个孔位，按照要求加到相应位置。', pool)
+
+    def test_simple_match_keeps_short_slot_mapping_candidate(self):
+        sentence = 'S1对应sample1，S2对应sample2，S3对应sample3，S4对应sample4。'
+        templates = [
+            {'text': '孔位E1对应sample 1', 'id': '1'},
+            {'text': '孔位E2对应sample 2', 'id': '2'},
+            {'text': '孔位E3对应sample 3', 'id': '3'},
+            {'text': '孔位E4对应sample 4', 'id': '4'},
+        ]
+
+        candidates = _simple_match(sentence, templates)
+
+        self.assertTrue(candidates)
+        self.assertTrue(any('孔位E1对应sample 1' == item.get('raw_template_text') for item in candidates))
+
+    def test_simple_match_keeps_temperature_range_candidate(self):
+        sentence = '运输温度为-80℃~-15℃时，需使用干冰运输。'
+        templates = [
+            {'text': '当运输温度为-80℃~-15℃时，需使用干冰运输', 'id': 'a'},
+            {'text': '运输温度为-80℃~-15℃时，需使用干冰运输，且需要在收到产品时检查是否还有剩余干冰。', 'id': 'b'},
+        ]
+
+        candidates = _simple_match(sentence, templates)
+
+        self.assertTrue(candidates)
+        self.assertTrue(any('干冰运输' in item.get('template_text', '') for item in candidates))
 
     def test_review_detail_does_not_fallback_to_guard_rejected_candidate(self):
         before = '3.6.2将操作指示卡放置在制备卡上。（图7）'

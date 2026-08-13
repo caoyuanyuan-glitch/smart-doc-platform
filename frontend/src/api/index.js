@@ -159,7 +159,12 @@ export const auditBasisAPI = {
 
 export const polishAPI = {
   document: (id) => instance.post(`/polish/${id}`),
-  text: (text, styleGuideId = null, terminologyId = null) => instance.post('/polish/text', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
+  text: ({ text, productType = '', styleGuideId = null, terminologyId = null }, config = {}) => instance.post('/polish/text', {
+    text,
+    product_type: productType || null,
+    style_guide_id: styleGuideId,
+    terminology_id: terminologyId
+  }, config),
   polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
     instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
   analyzeFile: (formData) => {
@@ -406,5 +411,7 @@ export const docPolishAPI = {
 export const polishStatsAPI = {
   getTextStats: () => instance.get('/polish/stats/text'),
   getDocumentStats: () => instance.get('/polish/stats/document'),
+  getTextSessions: (params = {}) => instance.get('/polish/stats/text/sessions', { params }),
+  getDocumentSessions: (params = {}) => instance.get('/polish/stats/document/sessions', { params }),
   getDocumentDetail: (analyzeId) => instance.get(`/polish/stats/document/${analyzeId}`)
 }
