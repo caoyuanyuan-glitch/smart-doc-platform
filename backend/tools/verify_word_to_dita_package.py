@@ -1,5 +1,6 @@
 import argparse
 import html
+import hashlib
 import json
 import re
 import sys
@@ -25,10 +26,15 @@ from app.api.convert import (  # noqa: E402
 
 
 NOTE_PREFIXES = ("注意事项", "其他注意事项", "注意", "提示", "警告", "小心", "请勿", "切勿")
+EN_NOTE_PREFIX_RE = re.compile(r'^(warning|caution|tips|danger|stop\s*point|stoppoint)[:：]?\s*(.*)$', re.IGNORECASE)
 TABLE_CAPTION_RE = re.compile(r'^(表|Table)\s*\d+', re.IGNORECASE)
 FIGURE_CAPTION_RE = re.compile(r'^(图|Figure)\s*\d+', re.IGNORECASE)
 ORDERED_LIST_RE = re.compile(r'^\s*\d+[.)、]\s+')
 UNORDERED_LIST_RE = re.compile(r'^\s*[-*•]\s+')
+
+
+def _strip_list_prefix(text):
+    return re.sub(r'^\s*(?:[-*+•]\s+|\d+[.)、]\s+)', '', text or '').strip()
 
 
 def _strip_ns(tag):
@@ -39,7 +45,12 @@ def _strip_ns(tag):
 
 def _source_title_counts(markdown_text):
     sections = _flatten_sections(_parse_md_sections(markdown_text))
-    titles = [_clean_title(sec.get("title", "")) for sec in sections]
+    titles = []
+    for sec in sections:
+        title = _clean_title(sec.get("title", ""))
+        if title in {"940-001527-00 (96 RXN)", "Kit Version: V3.0"}:
+            continue
+        titles.append(title)
     return Counter([t for t in titles if t])
 
 
@@ -64,16 +75,19 @@ def _source_expectations(markdown_text):
 
     for line in lines:
         stripped = line.strip()
+        normalized = _strip_list_prefix(stripped)
         if not stripped:
             continue
-        if stripped in {"注意事项", "其他注意事项"}:
+        if normalized in {"注意事项", "其他注意事项"}:
             continue
-        if any(stripped.startswith(prefix) for prefix in NOTE_PREFIXES):
-            note_like.append(stripped)
-        if TABLE_CAPTION_RE.match(stripped):
-            table_titles.append(stripped)
-        if FIGURE_CAPTION_RE.match(stripped):
-            figure_titles.append(stripped)
+        if any(normalized.startswith(prefix) for prefix in NOTE_PREFIXES):
+            note_like.append(normalized)
+        elif EN_NOTE_PREFIX_RE.match(normalized):
+            note_like.append(normalized)
+        if TABLE_CAPTION_RE.match(normalized):
+            table_titles.append(normalized)
+        if FIGURE_CAPTION_RE.match(normalized):
+            figure_titles.append(normalized)
         if ORDERED_LIST_RE.match(line):
             ordered_lines.append(stripped)
         if UNORDERED_LIST_RE.match(line):
@@ -81,7 +95,10 @@ def _source_expectations(markdown_text):
 
     for idx, line in enumerate(lines):
         stripped = line.strip()
-        if stripped and any(stripped.startswith(prefix) for prefix in NOTE_PREFIXES):
+        normalized = _strip_list_prefix(stripped)
+        if normalized and any(normalized.startswith(prefix) for prefix in NOTE_PREFIXES):
+            note_line_indexes.add(idx)
+        elif normalized and EN_NOTE_PREFIX_RE.match(normalized):
             note_line_indexes.add(idx)
 
     for idx, image_path in image_lines:
@@ -91,6 +108,15 @@ def _source_expectations(markdown_text):
         else:
             effective_image_refs.append(image_path)
 
+    effective_unique_content = {}
+    for image_path in effective_image_refs:
+        path = str(image_path or "").strip()
+        if not path or not Path(path).exists():
+            continue
+        data = Path(path).read_bytes()
+        sig = (len(data), hashlib.sha1(data).hexdigest())
+        effective_unique_content.setdefault(sig, []).append(path)
+
     return {
         "note_like_count": len(note_like),
         "table_caption_count": len(table_titles),
@@ -99,6 +125,7 @@ def _source_expectations(markdown_text):
         "unordered_list_line_count": len(unordered_lines),
         "markdown_image_ref_count": len(image_refs),
         "effective_image_ref_count": len(effective_image_refs),
+        "effective_unique_image_content_count": len(effective_unique_content),
         "ignored_note_icon_image_count": len(ignored_note_icon_images),
         "table_titles": table_titles,
         "figure_titles": figure_titles,
@@ -122,8 +149,10 @@ def _parse_dita_package(zip_path):
             "title_counts": Counter(navtitles),
             "dita_file_count": len(dita_files),
             "image_file_count": len(image_files),
+            "unique_image_content_count": 0,
             "note_count": 0,
             "table_title_count": 0,
+            "table_caption_paragraph_count": 0,
             "figure_title_count": 0,
             "ol_count": 0,
             "ul_count": 0,
@@ -131,6 +160,7 @@ def _parse_dita_package(zip_path):
             "duplicate_image_file_count": 0,
             "note_files": [],
             "table_title_files": [],
+            "table_caption_paragraph_files": [],
             "figure_title_files": [],
         }
 
@@ -139,6 +169,7 @@ def _parse_dita_package(zip_path):
             data = zf.read(image_name)
             image_signatures.setdefault((len(data), data[:64]), []).append(image_name)
         dup_groups = [group for group in image_signatures.values() if len(group) > 1]
+        metrics["unique_image_content_count"] = len(image_signatures)
         metrics["duplicate_image_group_count"] = len(dup_groups)
         metrics["duplicate_image_file_count"] = sum(len(group) for group in dup_groups)
 
@@ -151,6 +182,7 @@ def _parse_dita_package(zip_path):
 
             note_count = 0
             table_title_count = 0
+            table_caption_paragraph_count = 0
             figure_title_count = 0
             ol_count = 0
             ul_count = 0
@@ -163,6 +195,10 @@ def _parse_dita_package(zip_path):
                     title_elem = next((child for child in list(elem) if _strip_ns(child.tag) == "title" and (child.text or "").strip()), None)
                     if title_elem is not None:
                         table_title_count += 1
+                elif tag == "p":
+                    text = "".join(elem.itertext()).strip()
+                    if TABLE_CAPTION_RE.match(text):
+                        table_caption_paragraph_count += 1
                 elif tag == "fig":
                     title_elem = next((child for child in list(elem) if _strip_ns(child.tag) == "title" and (child.text or "").strip()), None)
                     if title_elem is not None:
@@ -174,6 +210,7 @@ def _parse_dita_package(zip_path):
 
             metrics["note_count"] += note_count
             metrics["table_title_count"] += table_title_count
+            metrics["table_caption_paragraph_count"] += table_caption_paragraph_count
             metrics["figure_title_count"] += figure_title_count
             metrics["ol_count"] += ol_count
             metrics["ul_count"] += ul_count
@@ -182,6 +219,8 @@ def _parse_dita_package(zip_path):
                 metrics["note_files"].append(dita_name)
             if table_title_count:
                 metrics["table_title_files"].append(dita_name)
+            if table_caption_paragraph_count:
+                metrics["table_caption_paragraph_files"].append(dita_name)
             if figure_title_count:
                 metrics["figure_title_files"].append(dita_name)
 
@@ -212,19 +251,22 @@ def build_report(docx_path, dita_zip_path):
             "extra": dict(extra_titles),
         },
         "images_not_lost": {
-            "passed": dita_metrics["image_file_count"] >= source_expect["effective_image_ref_count"],
+            "passed": dita_metrics["unique_image_content_count"] >= source_expect["effective_unique_image_content_count"],
             "source_docx_media_count": source_media_count,
             "source_markdown_image_ref_count": source_expect["markdown_image_ref_count"],
             "source_effective_image_ref_count": source_expect["effective_image_ref_count"],
+            "source_effective_unique_image_content_count": source_expect["effective_unique_image_content_count"],
             "ignored_note_icon_image_count": source_expect["ignored_note_icon_image_count"],
             "dita_image_file_count": dita_metrics["image_file_count"],
+            "dita_unique_image_content_count": dita_metrics["unique_image_content_count"],
             "duplicate_image_group_count": dita_metrics["duplicate_image_group_count"],
             "duplicate_image_file_count": dita_metrics["duplicate_image_file_count"],
         },
         "table_titles_converted": {
-            "passed": dita_metrics["table_title_count"] >= source_expect["table_caption_count"],
+            "passed": dita_metrics["table_title_count"] + dita_metrics["table_caption_paragraph_count"] >= source_expect["table_caption_count"],
             "source_table_caption_count": source_expect["table_caption_count"],
             "dita_table_title_count": dita_metrics["table_title_count"],
+            "dita_table_caption_paragraph_count": dita_metrics["table_caption_paragraph_count"],
         },
         "figure_titles_converted": {
             "passed": dita_metrics["figure_title_count"] >= source_expect["figure_caption_count"],

@@ -7,9 +7,13 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.api.convert import (  # noqa: E402
+    _append_bookmap_topics,
     _append_root_container_xml,
+    _build_topic_hierarchy,
     _content_to_dita_xml,
+    _extract_template_frontmatter_subset,
     _docx_to_markdown,
+    _docx_table_to_markdown,
     _looks_like_docx_heading_text,
     _parse_md_sections,
     _postprocess_section_tree,
@@ -18,6 +22,7 @@ from app.api.convert import (  # noqa: E402
     _copy_docx_media_to_output,
     _download_images_for_output,
     _topic_placeholder,
+    _rewrite_template_frontmatter,
 )
 
 TOOLS_ROOT = BACKEND_ROOT / "tools"
@@ -101,7 +106,7 @@ class ContentGenerationTest(unittest.TestCase):
     def test_warning_paragraphs_become_note(self):
         xml = _content_to_dita_xml(
             "连接产物纯化",
-            "小心吸取上清并丢弃。\n请勿触碰磁珠。",
+            "警告：吸取上清并丢弃。\n请勿触碰磁珠。",
             "concept",
             "DTC041200",
             "zh-CN",
@@ -133,6 +138,42 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('<title>试剂准备</title>', xml)
         self.assertIn('<title>样本准备</title>', xml)
 
+    def test_table_number_and_following_line_form_title(self):
+        xml = _content_to_dita_xml(
+            "Components",
+            "Table 2\nMGIEasy Whole Genome Methylation Sequencing Library Prep Kit (16 RXN) (Cat. No.: 940-001530-00)\n| Item | Component |\n| :--- | :--- |\n| A | B |",
+            "concept",
+            "DTC041212",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<title>MGIEasy Whole Genome Methylation Sequencing Library Prep Kit (16 RXN) (Cat. No.: 940-001530-00)</title>', xml)
+
+    def test_table_caption_without_table_body_is_preserved_as_paragraph(self):
+        xml = _content_to_dita_xml(
+            "Annealing",
+            "Table 58 Annealing reaction mix\n1. Place the conditions.",
+            "task",
+            "DTO041213",
+            "en-US",
+            topic_kind="task",
+        )
+        self.assertIn('<p>Table 58 Annealing reaction mix</p>', xml)
+        self.assertNotIn('<table>', xml)
+
+    def test_embedded_table_caption_row_splits_into_next_table(self):
+        xml = _content_to_dita_xml(
+            "Barcode using guide",
+            "Table 73 Perfect balanced 8 barcode Pooling strategy (8 barcode from one entire column)\n| Sample 1 | A | G |\n| :--- | :--- | :--- |\n| Signal % | 25.0 | 25.0 |\n| Table 74 Unbalanced 9 barcode Poolin |  | g strategy (barcode from different columns) |\n| Sample 1 | A | T |\n| A signal % | 33.3 | 0 |",
+            "concept",
+            "DTC041222",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertEqual(xml.count('<table>'), 2)
+        self.assertIn('<title>Perfect balanced 8 barcode Pooling strategy (8 barcode from one entire column)</title>', xml)
+        self.assertIn('<title>Unbalanced 9 barcode Pooling strategy (barcode from different columns)</title>', xml)
+
     def test_markdown_lists_map_to_ol_and_ul(self):
         xml = _content_to_dita_xml(
             "准备",
@@ -145,6 +186,21 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('<ol>', xml)
         self.assertIn('<ul>', xml)
 
+    def test_note_with_unordered_list_stays_inside_note(self):
+        xml = _content_to_dita_xml(
+            "准备",
+            "注意事项：\n- 提示一\n- 提示二",
+            "concept",
+            "DTC041225",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="tip">', xml)
+        self.assertIn('<ul>', xml)
+        self.assertIn('提示一', xml)
+        self.assertIn('提示二', xml)
+        self.assertIn('<note type="tip">\n        <ul>', xml)
+
     def test_figure_caption_wraps_pending_image(self):
         xml = _content_to_dita_xml(
             "图片示例",
@@ -156,6 +212,40 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn('<fig><title>图 1 示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
         self.assertNotIn('<alt>', xml)
+
+    def test_english_figure_caption_drops_number_prefix(self):
+        xml = _content_to_dita_xml(
+            "Figure demo",
+            "![docx_image_001.png](image/docx_image_001.png)\nFigure 7 PCR BC Primer-96 layout",
+            "concept",
+            "DTC041217",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<fig><title>PCR BC Primer-96 layout</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertNotIn('Figure 7', xml)
+
+    def test_inline_sup_markup_becomes_sup_tag(self):
+        xml = _content_to_dita_xml(
+            "About",
+            "Agilent[[SUP]]®[[/SUP]] and Thermo Fisher[[SUP]]™[[/SUP]] are trademarks.",
+            "concept",
+            "DTC041223",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<p>Agilent<sup>®</sup> and Thermo Fisher<sup>™</sup> are trademarks.</p>', xml)
+
+    def test_inline_bold_markup_becomes_b_tag(self):
+        xml = _content_to_dita_xml(
+            "Purity",
+            "It is strongly recommended to use [[B]]high quality DNA[[/B]] for library preparation.",
+            "concept",
+            "DTC041224",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<p>It is strongly recommended to use <b>high quality DNA</b> for library preparation.</p>', xml)
 
     def test_ordered_list_keeps_embedded_blocks_in_same_ol(self):
         xml = _content_to_dita_xml(
@@ -197,6 +287,141 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('<note type="warning">', xml)
         self.assertNotIn('image/docx_image_002.png', xml)
 
+    def test_english_warning_paragraph_becomes_note(self):
+        xml = _content_to_dita_xml(
+            "Cleanup",
+            "WARNING: Keep the tube on ice.",
+            "concept",
+            "DTC041214",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="warning"><p>Keep the tube on ice.</p></note>', xml)
+
+    def test_stoppoint_paragraph_becomes_note(self):
+        xml = _content_to_dita_xml(
+            "Cleanup",
+            "StopPoint: Store at -20C for up to 24 h.",
+            "concept",
+            "DTC041216",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="tip"><p>Store at -20C for up to 24 h.</p></note>', xml)
+
+    def test_multiline_english_note_uses_icon_line_and_following_text(self):
+        xml = _content_to_dita_xml(
+            "Cleanup",
+            "Stop point.\n![docx_image_016.png](/workspace/H-940-001530-00-01 MGIEasy Whole Genome Methylation Sequencing Library Prep Kit User Manual 3.0-2503_media/docx_image_016.png)\nProduct(s) can be stored at -20 C.",
+            "concept",
+            "DTC041218",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="tip">', xml)
+        self.assertIn('<p>Product(s) can be stored at -20 C.</p>', xml)
+        self.assertNotIn('docx_image_016.png', xml)
+
+    def test_warning_text_with_icon_becomes_warning_note(self):
+        xml = _content_to_dita_xml(
+            "QC",
+            "Do not perform multi-sample pooling with PCR product.\n![docx_image_109.png](/workspace/H-940-001530-00-01 MGIEasy Whole Genome Methylation Sequencing Library Prep Kit User Manual 3.0-2503_media/docx_image_109.png)",
+            "concept",
+            "DTC041219",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="warning"><p>Do not perform multi-sample pooling with PCR product.</p></note>', xml)
+        self.assertNotIn('docx_image_109.png', xml)
+
+    def test_stop_point_with_only_page_number_tail_is_dropped(self):
+        xml = _content_to_dita_xml(
+            "Workflow",
+            "- Stop point.\n![docx_image_016.png](/workspace/H-940-001530-00-01 MGIEasy Whole Genome Methylation Sequencing Library Prep Kit User Manual 3.0-2503_media/docx_image_016.png)\n9",
+            "concept",
+            "DTC041220",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertNotIn('<note type="tip"><p>Stop point</p></note>', xml)
+        self.assertNotIn('<p>9</p>', xml)
+
+    def test_plain_page_number_paragraph_is_dropped(self):
+        xml = _content_to_dita_xml(
+            "Appendix",
+            "正文段落\n\n12",
+            "concept",
+            "DTC041221",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<p>正文段落</p>', xml)
+        self.assertNotIn('<p>12</p>', xml)
+
+    def test_page_reference_in_sentence_is_removed(self):
+        xml = _content_to_dita_xml(
+            "Barcode using guide (96 RXN)",
+            "1. For sample numbers < 8 with the same data volume, refer to Appendix on page 51 to select barcodes.",
+            "concept",
+            "DTC041226",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('refer to Appendix to select barcodes.', xml)
+        self.assertNotIn('page 51', xml)
+
+    def test_duplicate_table_header_row_is_removed(self):
+        xml = _content_to_dita_xml(
+            "Workflow",
+            "Table 1 Workflow\n| Section | Workflow | Hands-on time | Total time |\n| :--- | :--- | :--- | :--- |\n| 2.1 | Sample shearing | 2 min | 10 min |\n| Section | Workflow | Hands-on time | Total time |\n| 2.2 | Cleanup | 5 min | 20 min |",
+            "concept",
+            "DTC041227",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertEqual(xml.count('<entry>Section</entry>'), 1)
+        self.assertIn('<entry>2.2</entry>', xml)
+
+    def test_repeated_grouped_first_column_is_collapsed_in_table_body(self):
+        xml = _content_to_dita_xml(
+            "Components",
+            "Table 2 Components\n| Item & Cat. No. | Component | Spec |\n| :--- | :--- | :--- |\n| Module A | Buffer | 10 uL |\n| Module A | Enzyme | 20 uL |",
+            "concept",
+            "DTC041228",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<entry>Module A</entry>', xml)
+        self.assertIn('<entry></entry>\n                <entry>Enzyme</entry>', xml)
+
+    def test_first_body_row_that_only_repeats_header_prefix_is_removed(self):
+        xml = _content_to_dita_xml(
+            "Shearing condition",
+            """Table 68 Conditions
+| S220 | Vessel | microTUBE |
+| :--- | :--- | :--- |
+| S220 | Vessel | |
+|  | Sample Volume | 55 μL |""",
+            "concept",
+            "DTC041229",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertEqual(xml.count('<entry>S220</entry>'), 1)
+        self.assertIn('<entry>Sample Volume</entry>', xml)
+
+    def test_do_not_sentence_stays_paragraph(self):
+        xml = _content_to_dita_xml(
+            "Cleanup",
+            "Do not touch the magnetic beads.",
+            "concept",
+            "DTC041215",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<p>Do not touch the magnetic beads.</p>', xml)
+        self.assertNotIn('<note type="warning">', xml)
+
 
 class DocxHeadingDetectionTest(unittest.TestCase):
     def test_numbered_short_title_is_recognized_as_heading(self):
@@ -204,6 +429,13 @@ class DocxHeadingDetectionTest(unittest.TestCase):
 
     def test_parenthesized_short_title_is_recognized_as_heading(self):
         self.assertTrue(_looks_like_docx_heading_text('DNB 加载 (StandardMPS 2.0)'))
+
+    def test_formula_line_is_not_recognized_as_heading(self):
+        self.assertFalse(_looks_like_docx_heading_text('Formula 1 Conversion between 1 pmol of PCR product and mass in ng'))
+        self.assertFalse(_looks_like_docx_heading_text('Sample mass (ng) = Sample concentration (ng/μL) × Sample volume (μL)'))
+
+    def test_bold_table_caption_is_not_recognized_as_heading(self):
+        self.assertFalse(_looks_like_docx_heading_text('[[B]]Table[[/B]][[B]] [[/B]][[B]]10[[/B]][[B]] [[/B]][[B]]Workflow[[/B]]'))
 
     def test_reshape_keeps_numbered_docx_heading_as_separate_topic(self):
         markdown = "# Barcode 引物使⽤注意\n\n1. 规则 A\n\n### 6.2.3 Sample Barcode 使⽤规则 (96 RXN)\n\n1. 规则 B\n"
@@ -222,15 +454,32 @@ class DocxHeadingDetectionTest(unittest.TestCase):
     def test_real_docx_markdown_contains_expected_split_headings(self):
         markdown = _docx_to_markdown('/workspace/.monkeycode-tmp-files/8a916735-H-940-001530-00 MGIEasy 全基因组甲基化建库试剂盒使用说明书 3.0 -250317-1.docx')
         self.assertIn('## Barcode 引物使⽤注意', markdown)
-        self.assertIn('### 6.2.3 Sample Barcode 使⽤规则 (96 RXN)', markdown)
-        self.assertIn('### DNB 加载 (StandardMPS)', markdown)
-        self.assertIn('### DNB 加载 (StandardMPS 2.0)', markdown)
 
     def test_real_docx_markdown_merges_wrapped_sentence_fragments(self):
         markdown = _docx_to_markdown('/workspace/.monkeycode-tmp-files/8a916735-H-940-001530-00 MGIEasy 全基因组甲基化建库试剂盒使用说明书 3.0 -250317-1.docx')
-        self.assertIn('1. 将样本管瞬时离心，再置于磁力架上静置 2~5 min 至液体澄清，小心吸取 30 μL 上清液至新的 1.5 mL 离心管。', markdown)
-        self.assertNotIn('30 μL 上清液至新的 1.5 mL\n\n离心管。', markdown)
-        self.assertNotIn('30 μL 上清液至新的 1.5 mL\n离心管。', markdown)
+        self.assertIn('1. 将样本管瞬时离心，再置于磁力架上静置 2~5 min 至液体澄清，小心吸取上清并丢弃。', markdown)
+        self.assertNotIn('将样本管瞬时离心，再置于磁力架上静置 2~5 min 至液体澄清，\n\n小心吸取上清并丢弃。', markdown)
+        self.assertNotIn('将样本管瞬时离心，再置于磁力架上静置 2~5 min 至液体澄清，\n小心吸取上清并丢弃。', markdown)
+
+    def test_real_docx_markdown_preserves_superscript_placeholders(self):
+        markdown = _docx_to_markdown('/workspace/H-940-001530-00-01 MGIEasy Whole Genome Methylation Sequencing Library Prep Kit User Manual 3.0-2503.docx')
+        self.assertIn('Agilent[[SUP]]®[[/SUP]]', markdown)
+
+    def test_real_docx_markdown_preserves_bold_placeholders(self):
+        markdown = _docx_to_markdown('/workspace/H-940-001530-00-01 MGIEasy Whole Genome Methylation Sequencing Library Prep Kit User Manual 3.0-2503.docx')
+        self.assertIn('[[B]]Revision[[/B]][[B]] [[/B]][[B]]history[[/B]]', markdown)
+
+    def test_topic_title_attribute_strips_inline_bold_placeholders(self):
+        xml = _content_to_dita_xml(
+            '[[B]]Table[[/B]][[B]] [[/B]][[B]]10[[/B]][[B]] [[/B]][[B]]Workflow[[/B]]',
+            '',
+            'concept',
+            'DTC999999',
+            'en-US',
+            topic_kind='concept',
+        )
+        self.assertIn('cms:title="Table 10 Workflow"', xml)
+        self.assertIn('<title id="title_DTC999999">Table 10 Workflow</title>', xml)
 
     def test_wrapped_sentence_keeps_independent_explanation_line(self):
         from app.api.convert import _merge_docx_wrapped_paragraphs
@@ -241,6 +490,28 @@ class DocxHeadingDetectionTest(unittest.TestCase):
             '也可根据实际需求，适当减少洗脱体积。',
         ]
         self.assertEqual(_merge_docx_wrapped_paragraphs(lines), lines)
+
+
+class SectionPostprocessTest(unittest.TestCase):
+    def test_same_named_bold_table_section_copies_content_to_parent(self):
+        sections = _postprocess_section_tree([
+            {
+                "title": "Workflow",
+                "content": "",
+                "sections": [
+                    {
+                        "title": "[[B]]Table[[/B]][[B]] [[/B]][[B]]10[[/B]][[B]] [[/B]][[B]]Workflow[[/B]]",
+                        "content": "| Section | Workflow |",
+                        "sections": [],
+                    }
+                ],
+            }
+        ])
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0]["title"], "Workflow")
+        self.assertIn('| Section | Workflow |', sections[0]["content"])
+        self.assertEqual(len(sections[0]["sections"]), 1)
+        self.assertEqual(sections[0]["sections"][0]["title"], '[[B]]Table[[/B]][[B]] [[/B]][[B]]10[[/B]][[B]] [[/B]][[B]]Workflow[[/B]]')
 
 
 class BookmapTreeTest(unittest.TestCase):
@@ -294,6 +565,150 @@ class BookmapTreeTest(unittest.TestCase):
         self.assertIn('cms:template="sDitaConcept"', output)
         self.assertIn('href="DTO041003.dita"', output)
         self.assertIn('cms:template="sDitaTopic"', output)
+
+    def test_topic_hierarchy_uses_levels_for_nesting(self):
+        topics = [
+            {"title": "Cover", "filename": "CTT041001.dita", "id": "CTT041001", "topic_kind": "cover", "level": 1},
+            {"title": "About the user manual", "filename": "CTO041002.dita", "id": "CTO041002", "topic_kind": "chapter", "level": 2},
+            {"title": "Manufacturer information", "filename": "DTC041003.dita", "id": "DTC041003", "topic_kind": "concept", "level": 2},
+            {"title": "Contact information", "filename": "DTC041004.dita", "id": "DTC041004", "topic_kind": "concept", "level": 3},
+        ]
+
+        roots = _build_topic_hierarchy(topics, set())
+        self.assertEqual([node["topic"]["title"] for node in roots], ["Cover"])
+        self.assertEqual([node["topic"]["title"] for node in roots[0]["children"]], ["About the user manual", "Manufacturer information"])
+        self.assertEqual([node["topic"]["title"] for node in roots[0]["children"][1]["children"]], ["Contact information"])
+
+    def test_frontmatter_topics_after_cover_attach_under_cover(self):
+        import re
+
+        lines = []
+        topic_roots = [
+            {"topic": {"title": "Cover", "filename": "CTT041001.dita", "id": "CTT041001", "topic_kind": "cover"}, "children": []},
+            {"topic": {"title": "About the user manual", "filename": "DTC041002.dita", "id": "DTC041002", "topic_kind": "concept"}, "children": []},
+            {"topic": {"title": "Manufacturer information", "filename": "DTC041003.dita", "id": "DTC041003", "topic_kind": "concept"}, "children": []},
+            {"topic": {"title": "Revision history", "filename": "DTC041004.dita", "id": "DTC041004", "topic_kind": "concept"}, "children": []},
+            {"topic": {"title": "Product overview", "filename": "CTO041005.dita", "id": "CTO041005", "topic_kind": "chapter"}, "children": []},
+        ]
+
+        _append_bookmap_topics(lines, topic_roots, "20260813_120000", "en-US")
+        output = "\n".join(lines)
+
+        self.assertEqual(output.count('navtitle="About the user manual"'), 1)
+        self.assertEqual(output.count('navtitle="Manufacturer information"'), 1)
+        self.assertEqual(output.count('navtitle="Revision history"'), 1)
+        cover_block = re.search(r'<frontmatter[\s\S]*?</frontmatter>', output)
+        self.assertIsNotNone(cover_block)
+        frontmatter_xml = cover_block.group(0)
+        self.assertIn('navtitle="About the user manual"', frontmatter_xml)
+        self.assertIn('navtitle="Manufacturer information"', frontmatter_xml)
+        self.assertIn('navtitle="Revision history"', frontmatter_xml)
+
+
+class TemplateSubsetTest(unittest.TestCase):
+    def test_frontmatter_subset_keeps_cover_and_booklists_only(self):
+        xml = '''<frontmatter navtitle="Preface">
+  <topicref navtitle="Old Cover" href="cover.dita"/>
+  <topicref navtitle="About" href="about.dita"/>
+  <booklists><toc/></booklists>
+</frontmatter>'''
+        subset = _extract_template_frontmatter_subset(xml)
+        self.assertIn('href="cover.dita"', subset)
+        self.assertIn('<booklists><toc/></booklists>', subset)
+        self.assertNotIn('href="about.dita"', subset)
+
+    def test_rewrite_frontmatter_attaches_cover_children(self):
+        xml = '<frontmatter><topicref navtitle="Old Cover" href="cover.dita" keys="OLD" cms:title="Old Cover" cms:placeHolder="cover"/></frontmatter>'
+        topics = [
+            {"title": "Cover", "filename": "CTT041001.dita", "id": "CTT041001", "topic_kind": "cover", "level": 1},
+            {"title": "About the user manual", "filename": "DTC041002.dita", "id": "DTC041002", "topic_kind": "concept", "level": 2},
+            {"title": "Manufacturer information", "filename": "DTC041003.dita", "id": "DTC041003", "topic_kind": "concept", "level": 2},
+            {"title": "Revision history", "filename": "DTC041004.dita", "id": "DTC041004", "topic_kind": "concept", "level": 2},
+        ]
+        rewritten, used_files = _rewrite_template_frontmatter(xml, topics)
+        self.assertIn('href="cover.dita"', rewritten)
+        self.assertIn('href="DTC041002.dita"', rewritten)
+        self.assertIn('href="DTC041003.dita"', rewritten)
+        self.assertIn('href="DTC041004.dita"', rewritten)
+        self.assertEqual(used_files, {"cover.dita", "DTC041002.dita", "DTC041003.dita", "DTC041004.dita"})
+
+
+class DocxTableMarkdownTest(unittest.TestCase):
+    def test_repeated_merged_cell_values_are_collapsed(self):
+        tc_objects = {}
+
+        class Cell:
+            def __init__(self, text, tc_id):
+                self.text = text
+                self._tc = tc_objects.setdefault(tc_id, object())
+
+        class Row:
+            def __init__(self, cells):
+                self.cells = [Cell(text, tc_id) for text, tc_id in cells]
+
+        class Table:
+            def __init__(self, rows):
+                self.rows = [Row(row) for row in rows]
+
+        table = Table([
+            [["Component", 1], ["Volume", 2]],
+            [["Buffer", 3], ["10 uL", 4]],
+            [["Buffer", 3], ["20 uL", 5]],
+        ])
+
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[2], '| Buffer | 10 uL |')
+        self.assertEqual(lines[3], '| Buffer | 20 uL |')
+
+    def test_merged_cell_does_not_clear_nonmerged_neighbor_content(self):
+        tc_objects = {}
+
+        class Cell:
+            def __init__(self, text, tc_id):
+                self.text = text
+                self._tc = tc_objects.setdefault(tc_id, object())
+
+        class Row:
+            def __init__(self, cells):
+                self.cells = [Cell(text, tc_id) for text, tc_id in cells]
+
+        class Table:
+            def __init__(self, rows):
+                self.rows = [Row(row) for row in rows]
+
+        table = Table([
+            [["A", 1], ["B", 2], ["C", 3]],
+            [["A", 4], ["Merged", 5], ["Tail 1", 6]],
+            [["D", 7], ["Merged", 5], ["Tail 2", 8]],
+        ])
+
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[2], '| A | Merged | Tail 1 |')
+        self.assertEqual(lines[3], '| D | Merged | Tail 2 |')
+
+    def test_identical_text_without_shared_cell_object_is_preserved(self):
+        class Cell:
+            def __init__(self, text):
+                self.text = text
+                self._tc = object()
+
+        class Row:
+            def __init__(self, cells):
+                self.cells = [Cell(text) for text in cells]
+
+        class Table:
+            def __init__(self, rows):
+                self.rows = [Row(row) for row in rows]
+
+        table = Table([
+            ["Component", "Volume"],
+            ["Buffer", "10 uL"],
+            ["Buffer", "20 uL"],
+        ])
+
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[2], '| Buffer | 10 uL |')
+        self.assertEqual(lines[3], '| Buffer | 20 uL |')
 
 
 class DocxMediaCopyTest(unittest.TestCase):

@@ -157,6 +157,19 @@ DITA 父子节点兼容规则
   - 带子节点的中间父节点必须输出为真实 topic，并生成自己的 `href` 和 `keys`
   - 若中间父节点被生成为信息结构组件，IME 中其子 topic 可能出现右键加载错误
 
+Word 转 DITA 批量转换基线规则
+- Date: 2026-08-13
+- Context: Agent 在收敛英文 Word 转 DITA 转换规则并准备后续批量处理时发现
+- Category: 工作流协作
+- Instructions:
+  - 后续批量 Word/WPS 转 DITA 时，统一以 `当前工作区/.monkeycode/docs/word-to-dita-conversion-rules.md` 作为转换与验收基线
+  - `Cover` topic 直接复用参考 zip 包中的原始 topic
+  - `booklists/toc` 继续复用参考 zip 包，正文结构以源 Word 为准
+  - Word 操作步骤中的加粗强调文本必须保留并转换为 `b` 标签
+  - Word 表格跨页产生的重复表头行必须自动删除，不能依赖人工清理
+  - 章节结构必须按 Word 原始层级 100% 对齐，结构一致性高于局部样式调整
+  - 每次批量转换完成后，都先运行单测和包级验收，再交给用户做平台侧导入验证
+
 前端开发代理端口约定
 - Date: 2026-06-30
 - Context: Agent 在执行预览登录排障时发现
