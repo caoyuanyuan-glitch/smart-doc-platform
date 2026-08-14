@@ -79,6 +79,7 @@ def _load_typo_dict(db: Session) -> dict:
             if wrong and correct and wrong != correct:
                 typo_dict[wrong] = correct
     except Exception:
+        logger.exception("加载错别字规则失败")
         typo_dict = {}
 
     if not typo_dict:
@@ -1014,6 +1015,25 @@ def _build_document_feedback_lookup(records: list[PolishFeedback]) -> dict[str, 
         for alias in _document_feedback_record_aliases(record):
             latest_by_alias[alias] = record
     return latest_by_alias
+
+
+def _build_document_feedback_lookup_for_source_names(db: Session, source_names: list[str]) -> dict[str, PolishFeedback]:
+    normalized_names = [
+        _normalize_document_feedback_key(name)
+        for name in source_names
+        if str(name or '').strip()
+    ]
+    normalized_names = [name for name in normalized_names if name]
+    if not normalized_names:
+        return {}
+
+    from sqlalchemy import or_
+
+    conditions = [PolishFeedback.original_text.contains(name) for name in normalized_names]
+    records = db.query(PolishFeedback).filter(
+        PolishFeedback.target == 'document_sentence_guide'
+    ).filter(or_(*conditions)).all()
+    return _build_document_feedback_lookup(records)
 
 
 def _resolve_sentence_file_name(db: Session, sentence_file_id: Optional[int]) -> Optional[str]:
@@ -9771,10 +9791,10 @@ def get_polish_document_session_details(
     total = query.count()
     sessions = query.order_by(CatAnalysisSession.created_at.desc(), CatAnalysisSession.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
-    document_feedback_records = db.query(PolishFeedback).filter(
-        PolishFeedback.target == 'document_sentence_guide'
-    ).all()
-    feedback_lookup = _build_document_feedback_lookup(document_feedback_records)
+    feedback_lookup = _build_document_feedback_lookup_for_source_names(
+        db,
+        [session.source_filename or '' for session in sessions],
+    )
 
     items = []
     for session in sessions:
