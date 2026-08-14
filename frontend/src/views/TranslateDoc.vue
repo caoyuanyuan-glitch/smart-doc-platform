@@ -177,7 +177,7 @@
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
-import { knowledgeAPI, translationAPI } from '@/api'
+import { getBlobErrorMessage, knowledgeAPI, translationAPI } from '@/api'
 import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 import {
@@ -618,12 +618,11 @@ async function cancelTranslationJob(job) {
 
 function downloadTranslatedFile(job) {
   if (!job?.download_url) return
-  const link = document.createElement('a')
-  link.href = job.download_url
-  link.setAttribute('download', job.translated_filename || job.original_filename)
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
+  translationAPI.downloadTranslatedDoc(job.doc_id, job.translated_filename || job.original_filename)
+    .catch(async (error) => {
+      const message = await getBlobErrorMessage(error, '下载译文失败')
+      ElMessage.error(message)
+    })
 }
 </script>
 
