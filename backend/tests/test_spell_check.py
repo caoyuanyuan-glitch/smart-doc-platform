@@ -75,15 +75,11 @@ def test_markdown_noise_masker_removes_code_and_links():
 
 
 def test_runtime_whitelist_term_persists_in_memory_and_dictionary(monkeypatch):
-    monkeypatch.setattr(spell_checker_utils.spell.word_frequency, "load_words", lambda words: None)
-
     assert spell_checker_utils.add_runtime_whitelist_term("AlphaTool") is True
     assert spell_checker_utils.is_whitelisted("AlphaTool") is True
 
 
 def test_runtime_whitelist_is_case_sensitive(monkeypatch):
-    monkeypatch.setattr(spell_checker_utils.spell.word_frequency, "load_words", lambda words: None)
-
     spell_checker_utils.add_runtime_whitelist_term("RNAs")
 
     assert spell_checker_utils.is_whitelisted("RNAs") is True
@@ -104,3 +100,22 @@ def test_check_grammar_patterns_keeps_a_unified_phrase_valid():
     issues = spell_checker_utils.check_grammar_patterns("a unified FOV")
 
     assert issues == []
+
+
+def test_find_term_variant_issues_skips_when_correct_form_exists_in_document():
+    issues = spell_checker_utils._find_term_variant_issues(
+        "The High-throughput workflow is supported. Another note mentions highthroughput only in OCR text.",
+        set(),
+    )
+
+    assert all(issue["original_text"].lower() != "highthroughput" for issue in issues)
+
+
+def test_has_correct_term_variant_in_document_matches_hyphenated_pdf_form():
+    content = "Use the wide-\nbore pipette for transfer."
+
+    assert spell_checker_utils._has_correct_term_variant_in_document(content, "wide-bore") is True
+
+
+def test_should_skip_spelling_issue_skips_mixedly_false_positive():
+    assert spell_checker_utils._should_skip_spelling_issue("mixedly", "Samples were mixedly distributed.", file_type="pdf") is True

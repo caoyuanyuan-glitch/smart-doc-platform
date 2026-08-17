@@ -2907,7 +2907,6 @@ COMMON_MISSPELLINGS = {
     'phenotye': 'phenotype',
     'haplotye': 'haplotype',
     'consumbles': 'consumables',
-    'mixedly': 'mix',
     'purifcation': 'purification',
     'centrifigation': 'centrifugation',
     'electrophresis': 'electrophoresis',
@@ -2938,7 +2937,6 @@ FORCED_MISSPELLINGS = {
     'sensetivity',
     'sensitivty',
     'consumbles',
-    'mixedly',
 }
 
 TERM_VARIANT_CORRECTIONS = {
@@ -3058,6 +3056,9 @@ def _should_skip_spelling_issue(word, context, file_type=None):
     if is_whitelisted(word) or _is_domain_abbreviation(word) or _is_extraction_artifact(word):
         return True
 
+    if _normalize_for_check(word) == 'mixedly':
+        return True
+
     if _normalize_for_check(word) == 'equipement' and re.search(r'personal\s+protective\s+equipement\s*\(\s*PPE\s*\)', context or '', re.IGNORECASE):
         return True
 
@@ -3109,6 +3110,27 @@ def _build_spelling_context(content, start, end, radius=90):
     context_start = max(0, start - radius)
     context_end = min(len(content), end + radius)
     return re.sub(r'\s+', ' ', content[context_start:context_end]).strip()
+
+
+def _normalize_compact_letters(text):
+    return re.sub(r'[^a-z]', '', str(text or '').lower())
+
+
+def _has_correct_term_variant_in_document(content, correct):
+    compact_correct = _normalize_compact_letters(correct)
+    if not compact_correct:
+        return False
+
+    content_text = str(content or '')
+    if compact_correct in _normalize_compact_letters(content_text):
+        return True
+
+    pieces = [piece for piece in re.split(r'[-\s]+', str(correct or '')) if piece]
+    if len(pieces) >= 2:
+        flex = r'[-\s\u00ad]*'.join(re.escape(piece) for piece in pieces)
+        if re.search(flex, content_text, re.IGNORECASE):
+            return True
+    return False
 
 
 def _format_spelling_suggestion(word, context, suggestions, certainty='疑似'):
@@ -3259,6 +3281,8 @@ def _find_term_variant_issues(content, seen_issue_keys):
         return issues
 
     for wrong, correct in TERM_VARIANT_CORRECTIONS.items():
+        if _has_correct_term_variant_in_document(content, correct):
+            continue
         for match in re.finditer(r'\b' + re.escape(wrong) + r'\b', content, re.IGNORECASE):
             original = match.group(0)
             context = _build_spelling_context(content, match.start(), match.end())

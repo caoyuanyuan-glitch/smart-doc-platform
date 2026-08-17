@@ -1,5 +1,6 @@
 import html
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.review_engine.models import ValidationResult
@@ -96,7 +97,20 @@ def ai_suggestion_changes_protected_meaning(original: Any, suggestion: Any) -> b
     suggestion = normalize_report_text(suggestion)
     if ai_suggestion_changes_numeric_values(original, suggestion):
         return True
+    if "scientific research" in original and "clinical diagnosis" in original and re.search(r"\b(?:ruo|research\s+use\s+only)\b", suggestion, re.IGNORECASE):
+        return True
+    if re.search(r"\bdnb\b", original, re.IGNORECASE) and re.search(r"\bdna\s+nanoball", suggestion, re.IGNORECASE):
+        return True
+    if re.search(r"\bdnb\b", original, re.IGNORECASE) and re.search(r"\bdnbs\b|\bdnb\s+solution\b", suggestion, re.IGNORECASE):
+        return True
+    if "instructions for use" in original:
+        if "instructions for use" not in suggestion:
+            return True
+        if re.search(r"\bifu\b|\bmanual\b|\binstruction\s+manual\b", suggestion, re.IGNORECASE):
+            return True
     if re.search(r"\bplate\b", original, re.IGNORECASE) and re.search(r"\badapter\s+plate\b", suggestion, re.IGNORECASE) and "adapter plate" not in original:
+        return True
+    if "contact the technical support" in original and re.search(r"\bdefault\s+credentials\b|\bauthorized\s+login\b", suggestion, re.IGNORECASE):
         return True
     protected_replacements = [
         ("user-supplied", "supplier provided"),
@@ -123,6 +137,90 @@ def ai_suggestion_changes_protected_meaning(original: Any, suggestion: Any) -> b
         added_terms = suggestion_terms - original_terms
         if changed_terms and added_terms and len(changed_terms | added_terms) >= 2:
             return True
+    return False
+
+
+def ai_suggestion_is_low_value_english_rewrite(original: Any, suggestion: Any) -> bool:
+    original_text = normalize_report_text(original)
+    suggestion_text = normalize_report_text(suggestion)
+    if not original_text or not suggestion_text:
+        return False
+
+    def _strip_articles(text: str) -> list[str]:
+        return [token for token in re.findall(r"[a-z0-9]+", text.lower()) if token not in {"a", "an", "the"}]
+
+    original_tokens = _strip_articles(original_text)
+    suggestion_tokens = _strip_articles(suggestion_text)
+    if original_tokens and original_tokens == suggestion_tokens:
+        return True
+
+    original_token_set = {token for token in original_tokens if len(token) > 1}
+    suggestion_token_set = {token for token in suggestion_tokens if len(token) > 1}
+    filler_tokens = {
+        "across",
+        "and",
+        "appears",
+        "as",
+        "at",
+        "by",
+        "column",
+        "during",
+        "from",
+        "in",
+        "into",
+        "of",
+        "on",
+        "per",
+        "remains",
+        "securely",
+        "surface",
+        "to",
+        "unit",
+        "upon",
+        "with",
+        "without",
+    }
+    if original_token_set and suggestion_token_set:
+        overlap = original_token_set & suggestion_token_set
+        union = original_token_set | suggestion_token_set
+        added = {token for token in (suggestion_token_set - original_token_set) if token not in filler_tokens}
+        removed = {token for token in (original_token_set - suggestion_token_set) if token not in filler_tokens}
+        if len(overlap) / max(len(union), 1) >= 0.6 and len(added | removed) <= 3:
+            return True
+
+    compact_original = " ".join(original_tokens)
+    compact_suggestion = " ".join(suggestion_tokens)
+    if compact_original and compact_suggestion:
+        ratio = SequenceMatcher(None, compact_original, compact_suggestion).ratio()
+        if ratio >= 0.72 and len((original_token_set ^ suggestion_token_set) - filler_tokens) <= 4:
+            return True
+
+    if original_text.startswith("ensure that ") and suggestion_text.startswith("ensure that "):
+        shared = set(original_tokens) & set(suggestion_tokens)
+        total = max(len(set(original_tokens)), len(set(suggestion_tokens)), 1)
+        if len(shared) / total >= 0.85:
+            return True
+
+    return False
+
+
+def ai_suggestion_is_speculative_completion(original: Any, suggestion: Any) -> bool:
+    original_text = normalize_report_text(original)
+    suggestion_text = normalize_report_text(suggestion)
+    if not original_text or not suggestion_text:
+        return False
+    if suggestion_text == original_text:
+        return False
+    if not suggestion_text.startswith(original_text):
+        return False
+
+    trailing_fragment = re.search(r"\b(?:of|to|with|for|by|into|from|been|is|are|was|were)$", original_text)
+    if trailing_fragment and len(suggestion_text) >= len(original_text) + 8:
+        return True
+
+    if len(original_text) <= 40 and len(suggestion_text) >= len(original_text) * 2:
+        return True
+
     return False
 
 
@@ -163,6 +261,10 @@ def validate_ai_issue_candidate(issue: dict[str, Any], content: str) -> Validati
         return ValidationResult(False, "number_unit_spacing_regression")
     if suggestion and ai_suggestion_changes_protected_meaning(original, suggestion):
         return ValidationResult(False, "protected_meaning_changed")
+    if suggestion and ai_suggestion_is_speculative_completion(original, suggestion):
+        return ValidationResult(False, "speculative_completion")
+    if suggestion and ai_suggestion_is_low_value_english_rewrite(original, suggestion):
+        return ValidationResult(False, "low_value_english_rewrite")
     return ValidationResult(True, "accepted")
 
 

@@ -3,6 +3,8 @@ import asyncio
 from types import SimpleNamespace
 
 from app.api import review as review_api
+from app.review_engine import pipeline as review_pipeline
+from app.review_engine import validation as review_validation
 
 
 def test_build_review_cache_key_changes_with_mode(monkeypatch):
@@ -216,6 +218,260 @@ def test_run_cached_ai_chunk_review_reuses_cached_result(monkeypatch):
     assert first == second
     assert len(calls) == 1
     assert calls[0] == (18, "chunk-a", "basis-a", 88, "review.audit_chunk")
+
+
+def test_pipeline_filters_single_char_punctuation_rule_issue():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "EXT-R013",
+            "category": "格式错误",
+            "severity": "general",
+            "original_text": ".",
+            "suggestion": "文档中标点符号使用必须符合规范",
+            "description": "单字符标点噪声",
+            "audit_basis": "标点规范",
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
+
+
+def test_pipeline_keeps_serious_real_spelling_issue():
+    issues = [
+        {
+            "source": "spellcheck",
+            "rule": "SPELL",
+            "category": "拼写/用词错误",
+            "severity": "serious",
+            "original_text": "consumbles",
+            "suggestion": "consumables",
+            "description": "拼写错误",
+            "audit_basis": "英文拼写规范",
+            "confidence": 96,
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert len(selected) == 1
+    assert selected[0]["original_text"] == "consumbles"
+
+
+def test_should_drop_unicode_equivalent_issue_accepts_mu_variants():
+    issue = {
+        "original_text": "20 µL",
+        "suggestion": "20 μL",
+    }
+
+    assert review_api._should_drop_unicode_equivalent_issue(issue) is True
+
+
+def test_run_logic_integrity_audit_skips_mixed_separator_false_positive():
+    content = "4) Load sample\n12. Secondary heading\n"
+
+    issues = review_api._run_logic_integrity_audit(content)
+
+    assert not any(issue.get("rule") == "LOGIC-001" for issue in issues)
+
+
+def test_dedupe_issues_by_original_prefers_spellcheck_over_ai():
+    ai_issue = {
+        "severity": "serious",
+        "category": "语法",
+        "rule": "AI-GRAMMAR",
+        "chapter": "Section 1",
+        "original_text": "Reviewing parameters",
+        "source": "ai",
+        "confidence": 95,
+        "position": "10-30",
+    }
+    spell_issue = {
+        "severity": "general",
+        "category": "拼写/用词错误",
+        "rule": "SPELL",
+        "chapter": "Section 1",
+        "original_text": "Reviewing parameters",
+        "source": "spellcheck",
+        "confidence": 80,
+        "position": "10-30",
+    }
+
+    deduped = review_api.dedupe_issues_by_original([ai_issue, spell_issue])
+
+    assert len(deduped) == 1
+    assert deduped[0]["source"] == "spellcheck"
+
+
+def test_validate_ai_issue_candidate_rejects_ruo_template_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "WARNING This product is intended only for scientific research and should not be used for clinical diagnosis.",
+        "suggestion": "WARNING: This product is for research use only (RUO) and is not intended for clinical diagnostic use.",
+        "description": "",
+        "rule": "Compliance",
+        "chapter": "Warnings",
+        "audit_basis": "basis",
+    }
+    content = issue["original_text"]
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_dnb_expansion_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "The device adopts the advanced DNB and the core technology of combinatorial probe-anchor synthesis (cPAS)",
+        "suggestion": "The system uses DNA Nanoballs (DNBs) and the core technology of combinatorial probe-anchor synthesis (cPAS)",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "Introduction",
+        "audit_basis": "basis",
+    }
+    content = issue["original_text"]
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_article_only_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "ensure that proper protections for personnel and device are implemented to avoid contamination by sequencing reagents.",
+        "suggestion": "Ensure that proper protections for personnel and the device are implemented to avoid contamination by sequencing reagents.",
+        "description": "",
+        "rule": "Operation",
+        "chapter": "CAUTION",
+        "audit_basis": "basis",
+    }
+    content = issue["original_text"]
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "low_value_english_rewrite"
+
+
+def test_validate_ai_issue_candidate_rejects_dnb_solution_expansion_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "DNB 102",
+        "suggestion": "DNB solution 102",
+        "description": "",
+        "rule": "Table",
+        "chapter": "Table 3",
+        "audit_basis": "basis",
+    }
+    content = "Table 3 includes DNB 102 in the component list."
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_speculative_completion():
+    issue = {
+        "source": "ai",
+        "original_text": "Add 34 µL of",
+        "suggestion": "Add 34 µL of DNB loading mixture.",
+        "description": "",
+        "rule": "Operation",
+        "chapter": "Step 5",
+        "audit_basis": "basis",
+    }
+    content = "Then add 34 µL of to the tube for the next step."
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "speculative_completion"
+
+
+def test_validate_ai_issue_candidate_rejects_high_overlap_style_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "Data output (GB/flow cell)",
+        "suggestion": "Data output (GB per flow cell)",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "Specifications",
+        "audit_basis": "basis",
+    }
+    content = "The specification table contains Data output (GB/flow cell)."
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "low_value_english_rewrite"
+
+
+def test_validate_ai_issue_candidate_rejects_support_policy_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "For the username and password, contact the technical support.",
+        "suggestion": "Default credentials are not provided. Contact technical support to obtain authorized login credentials.",
+        "description": "",
+        "rule": "Operation",
+        "chapter": "Login",
+        "audit_basis": "basis",
+    }
+    content = issue["original_text"]
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_instructions_for_use_semantic_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "The instructions for use are provided in the package.",
+        "suggestion": "The IFU is provided in the package.",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "Introduction",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_run_english_heuristic_audit_detects_this_instructions_grammar_issue():
+    issues = review_api._run_english_heuristic_audit(
+        "This instructions for use describes how to perform sequencing.",
+        file_type="pdf",
+    )
+
+    assert any(issue.get("rule") == "GRAMMAR-007" for issue in issues)
+
+
+def test_run_english_heuristic_audit_keeps_official_global_site():
+    issues = review_api._run_english_heuristic_audit(
+        "For more information, visit https://global-mgitech.com/ for the latest manuals.",
+        file_type="pdf",
+    )
+
+    assert not any(issue.get("rule") in {"HR001", "HR012"} for issue in issues)
+
+
+def test_review_ai_chunk_timeout_seconds_uses_higher_default_for_large_chunks(monkeypatch):
+    monkeypatch.delenv("REVIEW_AI_CHUNK_TIMEOUT", raising=False)
+
+    timeout = review_api._review_ai_chunk_timeout_seconds("A" * 3000)
+
+    assert timeout == 35.0
 
 
 def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):
@@ -507,6 +763,61 @@ def test_known_false_positive_filter_drops_placeholder_and_duplicate_ai_items():
     assert review_api._should_drop_known_false_positive_issue(ai_placeholder) is True
     assert review_api._should_drop_known_false_positive_issue(ai_duplicate) is True
     assert review_api._should_drop_known_false_positive_issue(rule_duplicate) is True
+
+
+def test_known_false_positive_filter_drops_official_global_site_issue():
+    issue = {
+        'original_text': 'https://global-mgitech.com/',
+        'rule': 'HR001',
+        'source': 'rule',
+        'description': '海外官网地址应统一。',
+        'suggestion': '建议替换为 https://global-mgitech.com/',
+        'audit_basis': '公司特定规范 - 海外官网地址',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_should_drop_punctuation_issue_drops_generic_single_punctuation_noise():
+    issue = {
+        'original_text': '。',
+        'rule': 'PUNCT-001',
+        'source': 'rule',
+        'suggestion': '文档中标点符号使用必须符合规范，不得遗漏必要的标点（逗号、句号等）',
+        'description': '英文文档中不应混入全角或中文标点。',
+        'context': 'Overview。',
+    }
+
+    assert review_api._should_drop_punctuation_issue(issue) is True
+
+
+def test_prepare_report_issues_filters_generic_punctuation_noise_before_aggregation():
+    issues = [
+        {
+            'original_text': '。',
+            'rule': 'PUNCT-001',
+            'source': 'rule',
+            'suggestion': '文档中标点符号使用必须符合规范，不得遗漏必要的标点（逗号、句号等）',
+            'description': '英文文档中不应混入全角或中文标点。',
+            'context': 'Overview。',
+            'position': '10-11',
+            'status': 'open',
+        },
+        {
+            'original_text': '，',
+            'rule': 'PUNCT-001',
+            'source': 'rule',
+            'suggestion': '文档中标点符号使用必须符合规范，不得遗漏必要的标点（逗号、句号等）',
+            'description': '英文文档中不应混入全角或中文标点。',
+            'context': 'Scope，',
+            'position': '20-21',
+            'status': 'open',
+        },
+    ]
+
+    prepared = review_api._prepare_report_issues(issues, 'Overview。 Scope，')
+
+    assert prepared == []
 
 
 def test_normalize_review_issue_display_falls_back_to_description_when_suggestion_missing():

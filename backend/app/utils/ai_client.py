@@ -49,7 +49,6 @@ except ModuleNotFoundError as exc:
             self.language = str(kwargs.get("language") or "").strip()
 
         def build_audit_system_prompt(self):
-            prompt = build_system_prompt()
             context_lines = []
 
             if self.document_name:
@@ -65,6 +64,13 @@ except ModuleNotFoundError as exc:
 
             if self.language:
                 context_lines.append(f"Review language: {self.language}")
+
+            if str(self.language or "").lower().startswith("en"):
+                if not context_lines:
+                    return ""
+                return "Additional review context:\n- " + "\n- ".join(context_lines)
+
+            prompt = build_system_prompt()
 
             if not context_lines:
                 return prompt
@@ -1946,17 +1952,16 @@ class AIClient:
             base_system_prompt = builder.build_audit_system_prompt()
         except Exception as e:
             print(f"[ai_client] 分层提示词构建失败，回退到静态规则: {e}")
-            base_system_prompt = build_system_prompt()
+            base_system_prompt = "" if is_english else build_system_prompt()
 
         if PROMPT_BUILDER_FALLBACK_ACTIVE and not _prompt_builder_fallback_logged:
             print("[ai_client] prompt_builder 模块缺失，当前使用保守降级提示词构建")
             _prompt_builder_fallback_logged = True
 
         if is_english:
+            context_block = f"\n\n{base_system_prompt}" if base_system_prompt.strip() else ""
             system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.
-
-{base_system_prompt}
-
+{context_block}
 REVIEW GOAL:
 - Behave like a human release reviewer, not a grammar checker.
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
@@ -1968,6 +1973,11 @@ REVIEW GOAL:
 - ❌ Issues where original differs from expected only by one punctuation or space
 - ❌ Pure formatting differences (fullwidth/halfwidth, spacing preferences)
 - ❌ Issues where the original field is shorter than 2 meaningful characters
+- ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
+- ❌ Rewriting compliance / legal / regulatory statements, product names, or warning text to a more standard template, unless the document text itself proves an objective error
+- ❌ Suggesting to expand a well-known abbreviation (e.g. DNB → DNA Nanoball) unless this is the first occurrence in the document and no definition exists anywhere in the document
+- ❌ Gerund vs noun form differences in figure captions or UI labels (e.g. Reviewing parameters vs Review parameters) unless the same UI element uses both forms inconsistently within the same context
+- ❌ Adding/removing articles (a/an/the) when the meaning is unambiguous and the sentence remains grammatical
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
@@ -2047,6 +2057,11 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 - ❌ 原文与建议仅差一个标点或空格
 - ❌ 纯格式差异（全角/半角标点互换、中英文空格增减）
 - ❌ original 字段长度小于 2 个有意义字符的问题
+- ❌ Unicode 等价字符差异，例如 µ(U+00B5) 与 μ(U+03BC)、全角与半角数字、U+2212 减号与 U+002D 连字符，在视觉呈现一致时不得报错
+- ❌ 仅为了更标准而改写合规、法律、法规声明、产品名称、警告文本；只有原文能证明存在客观错误时才允许报告
+- ❌ 要求展开公认缩写，例如 DNB → DNA Nanoball；只有全文第一次出现且全文其他位置都没有定义时才允许报告
+- ❌ 图注或 UI 标签中动名词与名词形式差异，例如 Reviewing parameters 与 Review parameters；只有同一对象在同一上下文内前后不一致时才允许报告
+- ❌ 在句义明确且句子仍然成立时，仅因冠词 a/an/the 的增删而报错
 
 重要提醒：
 - 只报告有明确文本证据的问题。
@@ -2122,30 +2137,7 @@ confidence 评分指南：
         lang = language or "en"
 
         content = content or ""
-        if len(content) > 7000:
-            all_issues = []
-            chunk_size = 6000
-            overlap = 500
-            chunk_index = 1
-            for start in range(0, len(content), chunk_size - overlap):
-                chunk = content[start:start + chunk_size]
-                if not chunk.strip():
-                    continue
-                result = self.audit_document(
-                    chunk,
-                    language=lang,
-                    audit_basis=(audit_basis or "")[:2000],
-                    skip_kimi=skip_kimi,
-                    review_id=review_id,
-                    request_label=request_label,
-                    chapter_context=chapter_context,
-                    force_provider=force_provider,
-                )
-                for issue in result.get("issues", []):
-                    issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
-                    all_issues.append(issue)
-                chunk_index += 1
-            return {"issues": all_issues}
+        # 上层审核流程已做滑动窗口分块，这里保持单次模型调用，避免二次分块打散上下文。
 
         prompt_payload = self.build_audit_prompt_payload(
             content,

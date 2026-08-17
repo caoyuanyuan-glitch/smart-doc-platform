@@ -9,6 +9,7 @@ import json
 import math
 import re
 import os
+import unicodedata
 try:
     from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
 except ModuleNotFoundError as exc:
@@ -74,7 +75,6 @@ UPLOAD_DIR = Path(__file__).resolve().parents[2] / "static" / "uploads"
 REVIEW_EXPORT_DIR = Path(__file__).resolve().parents[2] / "static" / "review_exports"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CYY_HUMAN_REVIEW_BASELINE_PATH = PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json"
-CYY_HUMAN_REVIEW_BASIS_CACHE = None
 CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = None
 REVIEW_BASIS_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "写作风格指南" / "中文技术文档写作风格指南.md",
@@ -1059,11 +1059,18 @@ def _should_drop_punctuation_issue(issue):
     source = str(issue.get('source', '') or '').lower()
     original = str(issue.get('original_text', '') or '').strip()
     context = str(issue.get('context', '') or '')
+    suggestion = str(issue.get('suggestion', '') or '').strip()
+    description = str(issue.get('description', '') or '').strip()
     
     # AI产出的单字符标点问题全部过滤
     if source == 'ai':
         meaningful = re.sub(r"[\s.,;:!?()\[\]{}\"'`~@#$%^&*+=|\\<>/，。；：！？…—～（）【】《》""'']", "", original)
         if len(meaningful) <= 1:
+            return True
+
+    if re.fullmatch(r'[\W_]+', original or '', re.UNICODE) and len(original) <= 3:
+        generic_punctuation_hint = ' '.join([suggestion, description])
+        if re.search(r'标点符号使用必须符合规范|不得遗漏必要的标点|对应的半角英文标点|punctuation', generic_punctuation_hint, re.IGNORECASE):
             return True
     
     if rule not in {'PUNCT-001', 'HR003', 'PUNCT-002', 'R002'}:
@@ -1199,6 +1206,8 @@ def _should_drop_known_false_positive_issue(issue):
     if _is_intentionally_blank_page_false_positive(issue):
         return True
     if _is_complete_genomics_url_false_positive(issue):
+        return True
+    if _is_official_global_site_false_positive(issue):
         return True
     if _is_zh_en_spacing_false_positive(issue):
         return True
@@ -1430,6 +1439,18 @@ def _is_complete_genomics_url_false_positive(issue):
     return bool(re.search(r'https?://www\.CompleteGenomics\.com', text, re.IGNORECASE))
 
 
+def _is_official_global_site_false_positive(issue):
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
+    context = str(_issue_value(issue, 'context', '') or '').strip()
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    if rule not in {'HR001', 'HR012'}:
+        return False
+    official_pattern = re.compile(r'(?:https?://)?(?:www\.)?global-mgitech\.com/?', re.IGNORECASE)
+    text = ' '.join([original, suggestion, context])
+    return bool(official_pattern.search(text) and official_pattern.fullmatch(original))
+
+
 def _is_figure_details_sentence_false_positive(issue):
     figure_sentence = 'the details are shown in the figure below'
     original = _normalize_report_text(_issue_value(issue, 'original_text', ''))
@@ -1476,6 +1497,16 @@ def _ai_audit_timeout_seconds(content):
         return 180.0
     chunk_count = max(1, math.ceil(text_length / 5500))
     return float(min(900, max(240, chunk_count * 75)))
+
+
+def _review_ai_chunk_timeout_seconds(chunk):
+    chunk_length = len(chunk or '')
+    base = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '35')
+    if chunk_length >= 2500:
+        return max(base, 35.0)
+    if chunk_length >= 1500:
+        return max(base, 28.0)
+    return max(base, 22.0)
 
 
 def _iter_ai_audit_chunks(content, chunk_size=3000, overlap=250):
@@ -1628,12 +1659,11 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
 
     all_issues = []
     total = len(chunks)
-    chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
     trace = ReviewTrace({
         "enabled": True,
         "selected_chunk_count": len(chunks),
         "total_chunk_count": len(all_chunks),
-        "chunk_timeout_seconds": chunk_timeout,
+        "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '35'),
         "chunks": [],
         "chunk_meta": [],
     })
@@ -1677,6 +1707,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f"[审核] AI深度审核分块 {index}/{total}, start={start}, length={len(chunk)}, "
             f"selected={len(chunks)}/{len(all_chunks)}, basis_len={len(selected_basis)}"
         )
+        chunk_timeout = _review_ai_chunk_timeout_seconds(chunk)
         try:
             cache_kwargs = {}
             if provider is not None:
@@ -1828,6 +1859,7 @@ def _filter_review_false_positives(issues):
             or _should_drop_punctuation_issue(issue)
             or _should_drop_unit_issue(issue)
             or _should_drop_known_false_positive_issue(issue)
+            or _should_drop_unicode_equivalent_issue(issue)
         ):
             dropped += 1
             continue
@@ -3772,6 +3804,8 @@ def _aggregate_report_issues(issues, content):
         if len(members) == 1:
             aggregated.append(members[0])
             continue
+        if all(_should_drop_punctuation_issue(member) for member in members):
+            continue
 
         first = dict(members[0])
         rule = _report_rule(_issue_value(first, 'rule', ''))
@@ -3808,6 +3842,8 @@ def _prepare_report_issues(issues, content):
     prepared = []
     for issue in issues:
         item = _report_issue_to_dict(issue)
+        if _should_drop_punctuation_issue(item):
+            continue
         if _should_drop_known_false_positive_issue(item):
             continue
         item['severity'] = _report_severity(item)
@@ -3943,26 +3979,6 @@ def _compact_basis_text(value, limit=120):
     return text[:limit]
 
 
-def _load_cyy_human_review_basis():
-    global CYY_HUMAN_REVIEW_BASIS_CACHE
-    if CYY_HUMAN_REVIEW_BASIS_CACHE is not None:
-        return CYY_HUMAN_REVIEW_BASIS_CACHE
-
-    sections = _load_cyy_human_review_basis_sections()
-    if not sections:
-        CYY_HUMAN_REVIEW_BASIS_CACHE = ""
-        return ""
-
-    summary_section = next((section for section in sections if section.get("label") == "CYY人工审核经验基线摘要"), None)
-    example_sections = [section for section in sections if section.get("label") != "CYY人工审核经验基线摘要"]
-    lines = []
-    if summary_section and summary_section.get("text"):
-        lines.append(str(summary_section.get("text") or "").strip())
-    lines.extend(str(section.get("text") or "").strip() for section in example_sections[:3] if section.get("text"))
-    CYY_HUMAN_REVIEW_BASIS_CACHE = "\n\n".join(line for line in lines if line).strip()
-    return CYY_HUMAN_REVIEW_BASIS_CACHE
-
-
 def _load_cyy_human_review_basis_sections():
     global CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
     if CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE is not None:
@@ -4026,23 +4042,16 @@ def _load_cyy_human_review_basis_sections():
         if category not in focus_categories or category in examples_by_category:
             continue
         comment = _compact_basis_text(item.get("comment"), 80)
-        selected = _compact_basis_text(item.get("selected_text"), 90)
-        context = _compact_basis_text(item.get("context"), 110)
         if comment:
             category_count = int(by_category.get(category, 0) or 0)
             category_lines = [
                 f"【CYY人工审核经验基线 - {category}】",
-                f"该类人工问题出现 {category_count} 次。",
-                f"人工意见: {comment}",
+                f"该类人工问题出现 {category_count} 次。典型模式: {comment}",
             ]
-            if selected:
-                category_lines.append(f"关注文本: {selected}")
-            if context:
-                category_lines.append(f"上下文示例: {context}")
             sections.append({
                 "label": f"CYY人工审核经验基线-{category}",
                 "text": "\n".join(category_lines),
-                "priority": 5 if category_count >= 20 else 4,
+                "priority": 3 if category_count >= 20 else 2,
             })
             examples_by_category[category] = True
 
@@ -4086,14 +4095,64 @@ def _build_ai_review_basis_sections(spec_texts, document_language):
     return parts
 
 
+_BASIS_STOPWORDS_EN = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can",
+    "use", "using", "used", "this", "that", "with", "from", "into", "your",
+    "manual", "system", "document", "section", "step", "should", "will",
+    "may", "must", "when", "after", "before", "then", "than", "also",
+    "only", "each", "other", "such", "which", "while", "where", "what",
+    "have", "has", "had", "been", "being", "does", "did", "do", "shall",
+    "would", "could", "more", "most", "some", "these", "those", "there",
+    "their", "them", "they", "his", "her", "its", "our", "who", "whom",
+    "whose", "about", "above", "below", "between", "during", "through",
+    "under", "upon", "within", "without", "make", "made", "ensure",
+    "provide", "please", "per", "via", "etc", "eg", "ie", "one", "two",
+    "three", "first", "second", "new", "old", "up", "down", "out", "off",
+    "over", "again", "once",
+})
+
+_BASIS_STOPWORDS_CN = frozenset({
+    "的", "了", "是", "在", "和", "与", "或", "及", "等", "为", "对", "由",
+    "从", "到", "于", "中", "上", "下", "内", "外", "将", "应", "可", "须",
+    "需", "请", "本", "该", "此", "其", "它", "被", "把", "让", "向", "以",
+    "按", "通过", "进行", "使用", "用于", "说明", "文档", "内容", "步骤",
+    "系统", "设备", "产品", "用户", "操作", "要求", "建议", "需要", "可以",
+    "应该", "必须", "不要", "注意", "警告", "如果", "当", "时", "后", "前",
+})
+
+
 def _extract_basis_tokens(text, max_tokens=80):
     normalized = str(text or "").lower()
     tokens = []
-    for token in re.findall(r'[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]{2,8}', normalized):
-        if token not in tokens:
-            tokens.append(token)
+    seen = set()
+    for token in re.findall(r'[a-z][a-z0-9_-]{2,}', normalized):
+        if token in _BASIS_STOPWORDS_EN or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
         if len(tokens) >= max_tokens:
-            break
+            return tokens
+    try:
+        import jieba
+
+        for word in jieba.cut(str(text or "")):
+            word = word.strip()
+            if len(word) < 2:
+                continue
+            if word in _BASIS_STOPWORDS_CN or word in _BASIS_STOPWORDS_EN or word in seen:
+                continue
+            seen.add(word)
+            tokens.append(word)
+            if len(tokens) >= max_tokens:
+                break
+    except Exception:
+        for token in re.findall(r'[\u4e00-\u9fff]{2,8}', normalized):
+            if token in _BASIS_STOPWORDS_CN or token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+            if len(tokens) >= max_tokens:
+                break
     return tokens
 
 
@@ -4102,37 +4161,73 @@ def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, ch
         return ""
 
     content_tokens = set(_extract_basis_tokens(content, max_tokens=120))
-    ranked = []
+    min_relevance = 0.05
+    summary_entry = None
+    other_ranked = []
     for index, section in enumerate(basis_sections):
+        label = str(section.get("label") or "")
         text = str(section.get("text") or "")
         section_tokens = set(_extract_basis_tokens(text, max_tokens=120))
         overlap = len(content_tokens & section_tokens)
+        relevance = overlap / max(len(section_tokens), 1)
         priority = int(section.get("priority") or 0)
-        score = overlap * 10 + priority
-        ranked.append((score, priority, -index, section))
+        is_summary = "摘要" in label or "summary" in label.lower()
+        is_cyy_example = label.startswith("CYY人工审核经验基线-")
+        if is_summary:
+            summary_entry = (section, text, priority)
+        else:
+            other_ranked.append((relevance, priority, -index, is_cyy_example, section, text))
 
-    ranked.sort(reverse=True)
     selected = []
     total_length = 0
-    for score, _priority, _index, section in ranked:
-        text = str(section.get("text") or "").strip()
+
+    if summary_entry and summary_entry[1].strip():
+        summary_text = summary_entry[1].strip()
+        selected.append((summary_entry[0], summary_text))
+        total_length += len(summary_text)
+
+    other_ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    cyy_selected = 0
+    for relevance, _priority, _index, is_cyy_example, section, text in other_ranked:
+        text = text.strip()
         if not text:
             continue
-        if selected and score <= 0 and len(selected) >= max_sections:
+        if relevance < min_relevance:
+            continue
+        if is_cyy_example and cyy_selected >= 1:
             continue
         available = char_budget - total_length
         if available <= 0:
             break
-        clipped = text[:max(400, min(len(text), available))]
-        selected.append((int(section.get("priority") or 0), clipped))
+        clipped = text[:min(len(text), available)]
+        selected.append((section, clipped))
         total_length += len(clipped)
+        if is_cyy_example:
+            cyy_selected += 1
         if len(selected) >= max_sections or total_length >= char_budget:
             break
 
     if not selected:
         return ""
-    selected.sort(key=lambda item: item[0], reverse=True)
-    return "\n\n".join(text for _priority, text in selected)
+    lines = []
+    for section, text in selected:
+        label = str(section.get("label") or "审核依据")
+        lines.append(f"## {label}\n{text}")
+    return "\n\n".join(lines)
+
+
+def _unicode_equivalent(text):
+    normalized = str(text or "").replace("\u00b5", "\u03bc")
+    normalized = normalized.replace("\u2212", "-")
+    return unicodedata.normalize("NFKC", normalized)
+
+
+def _should_drop_unicode_equivalent_issue(issue):
+    original = str(issue.get("original_text", "") or "")
+    suggestion = str(issue.get("suggestion", "") or "")
+    if not original or not suggestion:
+        return False
+    return _unicode_equivalent(original) == _unicode_equivalent(suggestion)
 
 
 def _ai_provider_cache_fingerprint():
@@ -5214,27 +5309,47 @@ def _run_logic_integrity_audit(content):
     seen = set()
     lines = content.replace('\f', '\n').splitlines()
     previous_step = None
+    main_separator = None
     cursor = 0
     previous_non_empty_line = ''
     for line in lines:
         text = line.strip()
         if _looks_like_numbered_section_heading(text):
             previous_step = None
+            main_separator = None
             previous_non_empty_line = text
             cursor += len(line) + 1
             continue
-        match = re.match(r'^(?:Step\s+)?(\d+)[\.)]\s+(.+)$', text, re.IGNORECASE)
+        match = re.match(r'^(\s*)(?:Step\s+)?(\d+)([\.)])\s+(.+)$', line, re.IGNORECASE)
         if not match:
             if text:
                 previous_non_empty_line = text
             cursor += len(line) + 1
             continue
-        current = int(match.group(1))
+        indent = len(match.group(1))
+        current = int(match.group(2))
+        separator = match.group(3)
+        if indent >= 2:
+            previous_non_empty_line = text
+            cursor += len(line) + 1
+            continue
+        if main_separator is None:
+            main_separator = separator
+        elif separator != main_separator:
+            previous_non_empty_line = text
+            cursor += len(line) + 1
+            continue
         if re.search(r'\b(?:table|figure|fig\.?|section|chapter)\s*$', previous_non_empty_line, re.IGNORECASE):
             previous_non_empty_line = text
             cursor += len(line) + 1
             continue
-        if previous_step is not None and current - previous_step > 1:
+        if (
+            previous_step is not None
+            and current > previous_step
+            and current - previous_step > 1
+            and previous_step in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+            and current <= 20
+        ):
             key = ('LOGIC-001', current)
             if key in seen:
                 continue
@@ -6200,6 +6315,7 @@ def _run_english_heuristic_audit(content, file_type=None):
         return False
 
     official_global_site = 'https://global-mgitech.com/'
+    official_global_site_pattern = re.compile(r"(?<![A-Za-z0-9.-])(?:https?://)?(?:www\.)?global-mgitech\.com/?(?![A-Za-z0-9.-])", re.IGNORECASE)
     outdated_site_pattern = re.compile(r"(?<![A-Za-z0-9.-])(?:https?://)?(?:www\.)?(?:en\.mgi-tech\.com|global-mgi\.com|global\.mgi-tech\.com)(?![A-Za-z0-9.-])", re.IGNORECASE)
     for match in outdated_site_pattern.finditer(content):
         add_issue(match, "HR001", "合规", f"建议替换为 {official_global_site}", "英文资料中的海外官网地址应使用官网 English 入口域名。", "公司特定规范 - 海外官网地址", "fatal")
@@ -6293,6 +6409,17 @@ def _run_english_heuristic_audit(content, file_type=None):
 
     for match in re.finditer(r"\bmake\s+total\s+volume\b", content, re.IGNORECASE):
         add_issue(match, "GRAMMAR-004", "语法", "建议改为 make a total volume 或 make the total volume", "total volume 前建议添加冠词。", "英语语法规范 - 冠词")
+
+    for match in re.finditer(r"\bThis\s+instructions\s+for\s+use\s+describes\b", content, re.IGNORECASE):
+        add_issue(
+            match,
+            "GRAMMAR-007",
+            "语法",
+            "建议改为 These instructions for use describe",
+            "instructions 为复数名词，谓语和指示代词应保持一致。",
+            "英语语法规范 - 主谓一致",
+            "serious",
+        )
 
     please_replacements = {
         'please contact': 'contact technical support',
@@ -6394,6 +6521,8 @@ def _run_english_heuristic_audit(content, file_type=None):
         add_issue(match, 'STYLE-003', '风格', '建议改为 Perform the following steps', '祈使句建议直接使用动词原形。', '技术文档句式规范', 'general')
 
     for match in re.finditer(r"[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09]", content):
+        if official_global_site_pattern.search(get_context(content, match.start(), match.end(), 40)):
+            continue
         add_issue(match, 'PUNCT-001', '标点符号', '建议改为对应的半角英文标点', '英文文档中不应混入全角或中文标点。', '英文标点规范', 'serious')
 
     if file_type != 'pdf':
@@ -7619,23 +7748,23 @@ def dedupe_issues_by_original(issues):
     print(f"[审核] 误报过滤: 过滤 {len(issues) - len(filtered)} 个, 剩余 {len(filtered)} 个")
     
     def issue_rank(issue):
-        source = issue.get("source", "")
+        source = str(issue.get("source", "") or "").lower()
         severity = issue.get("severity", "general")
         confidence = issue.get("confidence", 0) or 0
         severity_rank = {"fatal": 4, "serious": 3, "general": 2, "suggestion": 1}.get(severity, 0)
-        source_rank = {"rule": 3, "term": 2, "ai": 1}.get(source, 0)
-        return (severity_rank, source_rank, confidence)
+        source_rank = {"rule": 4, "spellcheck": 3, "term": 2, "ai": 1}.get(source, 0)
+        return (source_rank, severity_rank, confidence)
+
+    def _norm_chapter(chapter):
+        return re.sub(r'\s+', '', str(chapter or '')).lower()[:60]
 
     # 第二步：去重（优先按原文+章节聚合，避免规则与 AI 对同一问题重复上报）
     seen = {}
     for issue in filtered:
         norm = re.sub(r"\s+", "", str(issue.get("original_text", ""))).lower()
-        chapter = issue.get("chapter", "")
-        source = issue.get("source", "")
-        rule = issue.get("rule", "")
+        chapter = _norm_chapter(issue.get("chapter", ""))
+        rule = str(issue.get("rule", "") or "")
         key = f"{norm}|{chapter}"
-        if source == 'spellcheck' or rule == 'SPELL':
-            key = f"spell|{norm}|{issue.get('position', '')}"
         if rule in {'UNIT-003', 'UNIT-004', 'HR011'}:
             key = f"{rule}|{norm}|{issue.get('position', '')}"
         if rule in {'STYLE-003', 'HR008', 'GRAMMAR-001', 'GRAMMAR-002'}:
@@ -8422,14 +8551,18 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         if retained_ai_count:
             print(f"[审核] AI问题最终保留数量={retained_ai_count}")
         if len(issues) < 3 and len(content or '') > 10000 and pre_pipeline_issues:
-            fallback_candidates = [issue for issue in pre_pipeline_issues if str(issue.get('original_text', '') or '').strip()]
+            fallback_candidates = [
+                issue for issue in pre_pipeline_issues
+                if str(issue.get('original_text', '') or '').strip()
+                and str(issue.get('source', '') or '').lower() in ('rule', 'spellcheck', 'term')
+            ]
             fallback_candidates = sorted(
                 fallback_candidates,
                 key=lambda item: (-pipeline_value_score(item), pipeline_sort_key(item)),
             )
             if fallback_candidates:
                 issues = fallback_candidates[: min(5, len(fallback_candidates))]
-                print(f"[审核] 召回下限保护: 长文问题数过少，回退保留 {len(issues)} 个高分问题")
+                print(f"[审核] 召回下限保护(仅确定性来源): 回退保留 {len(issues)} 个")
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")

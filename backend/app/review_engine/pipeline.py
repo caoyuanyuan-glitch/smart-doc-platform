@@ -225,12 +225,17 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
     description = normalize_text(data["description"])
     context = normalize_text(data["context"])
     category = normalize_text(data["category"])
+    severity = str(data["severity"] or "general").lower()
 
     if source == "spellcheck":
         return False
+    if severity in {"general", "suggestion"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE) and len(original) <= 3:
+        return True
     if is_visual_layout_issue(data):
         return True
     if rule in LOW_VALUE_RULES:
+        return True
+    if rule in {"EXT-R011", "EXT-R013"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE):
         return True
     if rule == "TERM-001" and re.fullmatch(r"click", original, re.IGNORECASE) and re.fullmatch(r"tap", suggestion, re.IGNORECASE):
         return True
