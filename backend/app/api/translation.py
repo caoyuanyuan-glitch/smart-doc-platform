@@ -3404,7 +3404,7 @@ async def get_translation_stats(
 
 
 @router.get("/providers/status")
-async def get_translation_provider_status(_: UserOut = Depends(require_admin)):
+async def get_translation_provider_status(_: UserOut = Depends(get_current_active_user)):
     return ai_client.provider_status(include_health=True)
 
 
