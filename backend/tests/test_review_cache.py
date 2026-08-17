@@ -160,6 +160,41 @@ def test_build_ai_review_basis_sections_include_english_and_common_error_specs()
     assert "技术文档常见错误清单" in labels
 
 
+def test_build_ai_review_basis_sections_include_structured_cyy_sections(monkeypatch):
+    monkeypatch.setattr(
+        review_api,
+        "_load_cyy_human_review_basis_sections",
+        lambda: [
+            {"label": "CYY人工审核经验基线摘要", "text": "【CYY人工审核经验基线摘要】\n总览", "priority": 5},
+            {"label": "CYY人工审核经验基线-步骤结构", "text": "【CYY人工审核经验基线 - 步骤结构】\n关注步骤缺失", "priority": 5},
+        ],
+    )
+
+    sections = review_api._build_ai_review_basis_sections({}, "cn")
+    labels = [section["label"] for section in sections]
+
+    assert "CYY人工审核经验基线摘要" in labels
+    assert "CYY人工审核经验基线-步骤结构" in labels
+
+
+def test_select_relevant_ai_review_basis_prefers_matching_cyy_category_sections():
+    sections = [
+        {"label": "CYY人工审核经验基线摘要", "text": "【CYY人工审核经验基线摘要】\n关注高频问题。", "priority": 5},
+        {"label": "CYY人工审核经验基线-步骤结构", "text": "【CYY人工审核经验基线 - 步骤结构】\n步骤编号跳号、步骤缺失、操作不可执行。", "priority": 5},
+        {"label": "CYY人工审核经验基线-版本记录", "text": "【CYY人工审核经验基线 - 版本记录】\nrevision history 版本记录 日期。", "priority": 4},
+    ]
+
+    selected = review_api._select_relevant_ai_review_basis(
+        "步骤3之后直接跳到步骤5，导致操作步骤缺失。",
+        sections,
+        max_sections=2,
+        char_budget=500,
+    )
+
+    assert "步骤结构" in selected
+    assert "操作不可执行" in selected
+
+
 def test_run_cached_ai_chunk_review_reuses_cached_result(monkeypatch):
     review_api._ai_review_chunk_cache.clear()
     calls = []

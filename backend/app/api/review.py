@@ -75,6 +75,7 @@ REVIEW_EXPORT_DIR = Path(__file__).resolve().parents[2] / "static" / "review_exp
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CYY_HUMAN_REVIEW_BASELINE_PATH = PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json"
 CYY_HUMAN_REVIEW_BASIS_CACHE = None
+CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = None
 REVIEW_BASIS_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "写作风格指南" / "中文技术文档写作风格指南.md",
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "写作风格指南" / "MGI英文技术文档写作风格指南.md",
@@ -3947,38 +3948,64 @@ def _load_cyy_human_review_basis():
     if CYY_HUMAN_REVIEW_BASIS_CACHE is not None:
         return CYY_HUMAN_REVIEW_BASIS_CACHE
 
-    CYY_HUMAN_REVIEW_BASIS_CACHE = ""
-    if not CYY_HUMAN_REVIEW_BASELINE_PATH.exists():
+    sections = _load_cyy_human_review_basis_sections()
+    if not sections:
+        CYY_HUMAN_REVIEW_BASIS_CACHE = ""
         return ""
+
+    summary_section = next((section for section in sections if section.get("label") == "CYY人工审核经验基线摘要"), None)
+    example_sections = [section for section in sections if section.get("label") != "CYY人工审核经验基线摘要"]
+    lines = []
+    if summary_section and summary_section.get("text"):
+        lines.append(str(summary_section.get("text") or "").strip())
+    lines.extend(str(section.get("text") or "").strip() for section in example_sections[:3] if section.get("text"))
+    CYY_HUMAN_REVIEW_BASIS_CACHE = "\n\n".join(line for line in lines if line).strip()
+    return CYY_HUMAN_REVIEW_BASIS_CACHE
+
+
+def _load_cyy_human_review_basis_sections():
+    global CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
+    if CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE is not None:
+        return CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
+
+    CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = []
+    if not CYY_HUMAN_REVIEW_BASELINE_PATH.exists():
+        return []
 
     try:
         payload = json.loads(CYY_HUMAN_REVIEW_BASELINE_PATH.read_text(encoding="utf-8"))
     except Exception as exc:
         print(f"[审核] 读取CYY人工审核基线失败: {exc}")
-        return ""
+        return []
 
     summary = payload.get("summary") or {}
     annotations = payload.get("annotations") or []
     by_category = summary.get("by_category") or {}
     focus_categories = [
         "表达与句式",
+        "人工审核其他项",
         "单位/空格",
+        "步骤结构",
+        "重复内容",
         "术语一致性",
         "表格/版式",
         "官网地址",
         "人工确认项",
+        "中文残留",
         "版本记录",
-        "字体/版式细节",
-        "标点符号",
         "图片/对象缺失",
         "分页与标题边界",
         "主题结构",
         "商标声明",
         "货号写法",
+        "法规/注册确认",
+        "表图编号",
+        "结构完整性",
     ]
 
-    lines = [
-        "【CYY人工审核经验基线】",
+    sections = []
+    summary_lines = [
+        "【CYY人工审核经验基线摘要】",
         f"来源: {summary.get('total', len(annotations))} 条人工审核批注的结构化摘要。",
         "使用要求: 优先关注以下高频问题；只有在当前原文中有明确证据时输出问题；样例用于判断审核偏好，不能凭样例臆造当前文档问题。",
         "高频关注类别: " + "；".join(
@@ -3986,8 +4013,12 @@ def _load_cyy_human_review_basis():
             for category in focus_categories
             if by_category.get(category, 0)
         ),
-        "典型人工意见样例:",
     ]
+    sections.append({
+        "label": "CYY人工审核经验基线摘要",
+        "text": "\n".join(line for line in summary_lines if line),
+        "priority": 5,
+    })
 
     examples_by_category = {}
     for item in annotations:
@@ -3996,15 +4027,29 @@ def _load_cyy_human_review_basis():
             continue
         comment = _compact_basis_text(item.get("comment"), 80)
         selected = _compact_basis_text(item.get("selected_text"), 90)
+        context = _compact_basis_text(item.get("context"), 110)
         if comment:
-            examples_by_category[category] = f"- {category}: 人工意见={comment}; 关注文本={selected}"
-        if len(examples_by_category) >= 10:
-            break
+            category_count = int(by_category.get(category, 0) or 0)
+            category_lines = [
+                f"【CYY人工审核经验基线 - {category}】",
+                f"该类人工问题出现 {category_count} 次。",
+                f"人工意见: {comment}",
+            ]
+            if selected:
+                category_lines.append(f"关注文本: {selected}")
+            if context:
+                category_lines.append(f"上下文示例: {context}")
+            sections.append({
+                "label": f"CYY人工审核经验基线-{category}",
+                "text": "\n".join(category_lines),
+                "priority": 5 if category_count >= 20 else 4,
+            })
+            examples_by_category[category] = True
 
-    lines.extend(examples_by_category.values())
-    CYY_HUMAN_REVIEW_BASIS_CACHE = "\n".join(line for line in lines if line).strip()
+    sections.sort(key=lambda item: (int(item.get("priority") or 0), len(str(item.get("text") or ""))), reverse=True)
+    CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = sections
     print(f"[审核] 已加载CYY人工审核经验基线: {summary.get('total', len(annotations))}条")
-    return CYY_HUMAN_REVIEW_BASIS_CACHE
+    return CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
 
 
 def _build_ai_review_basis(spec_texts, document_language):
@@ -4037,13 +4082,7 @@ def _build_ai_review_basis_sections(spec_texts, document_language):
             "text": "【说明书发布前自检 Checklist】\n" + spec_texts["final_checklists"][:2200],
             "priority": 5,
         })
-    cyy_basis = _load_cyy_human_review_basis()
-    if cyy_basis:
-        parts.append({
-            "label": "CYY人工审核经验基线",
-            "text": cyy_basis[:1800],
-            "priority": 5,
-        })
+    parts.extend(_load_cyy_human_review_basis_sections())
     return parts
 
 
