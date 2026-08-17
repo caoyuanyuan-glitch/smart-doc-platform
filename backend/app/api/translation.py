@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import os
 import io
+import shutil
 from pathlib import Path
 import csv
 import json
@@ -363,6 +364,26 @@ def _ensure_memory_bank_entry(
     )
     db.add(entry)
     return entry, True
+
+
+def _build_memory_seed_file_path(memory_file: KnowledgeFile, seed_root: Path | None = None) -> Path:
+    seed_root = Path(seed_root or Path(__file__).resolve().parents[2] / "seed" / "knowledge")
+    folder_names = []
+    folder = getattr(memory_file, "folder", None)
+    while folder:
+        folder_name = (getattr(folder, "name", "") or "").strip()
+        if folder_name:
+            folder_names.append(folder_name)
+        folder = getattr(folder, "parent", None)
+    folder_path = seed_root.joinpath(*reversed(folder_names)) if folder_names else seed_root
+    return folder_path / (memory_file.name or Path(memory_file.file_path).name)
+
+
+def _sync_memory_file_to_seed(memory_file: KnowledgeFile, seed_root: Path | None = None) -> Path:
+    seed_file_path = _build_memory_seed_file_path(memory_file, seed_root=seed_root)
+    seed_file_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(memory_file.file_path, seed_file_path)
+    return seed_file_path
 
 
 def _normalize_usage_counts(source_count: int, ai_count: int, memory_count: int):
@@ -3678,6 +3699,16 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"读取记忆库源文件失败: {str(exc)}")
 
+    seed_file_path = _build_memory_seed_file_path(memory_file)
+    seed_file_existed = seed_file_path.exists()
+    seed_original_bytes = b""
+    if seed_file_existed:
+        try:
+            with open(seed_file_path, "rb") as seed_file:
+                seed_original_bytes = seed_file.read()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"读取记忆库 seed 文件失败: {str(exc)}")
+
     try:
         if file_type in {"csv", "tsv"}:
             _append_memory_entry_to_delimited_file(
@@ -3695,6 +3726,7 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
                 source_lang=resolved_source_lang,
                 target_lang=entry.target_lang,
             )
+        _sync_memory_file_to_seed(memory_file)
         _, memory_bank_created = _ensure_memory_bank_entry(
             db=db,
             source_text=source_text,
@@ -3716,12 +3748,28 @@ async def add_memory_file_entry(entry: MemoryFileEntryRequest, db: Session = Dep
                 existing_file.write(original_file_bytes)
         except OSError:
             pass
+        try:
+            if seed_file_existed:
+                with open(seed_file_path, "wb") as seed_file:
+                    seed_file.write(seed_original_bytes)
+            elif seed_file_path.exists():
+                seed_file_path.unlink()
+        except OSError:
+            pass
         raise
     except Exception as exc:
         db.rollback()
         try:
             with open(memory_file.file_path, "wb") as existing_file:
                 existing_file.write(original_file_bytes)
+        except OSError:
+            pass
+        try:
+            if seed_file_existed:
+                with open(seed_file_path, "wb") as seed_file:
+                    seed_file.write(seed_original_bytes)
+            elif seed_file_path.exists():
+                seed_file_path.unlink()
         except OSError:
             pass
         raise HTTPException(status_code=500, detail=f"写入记忆库文件失败: {str(exc)}")
