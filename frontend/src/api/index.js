@@ -42,6 +42,44 @@ export function getAPIErrorMessage(error, fallback = '请求失败') {
   return error?.message || fallback
 }
 
+function triggerBlobDownload(data, filename, mimeType = 'application/octet-stream') {
+  const url = window.URL.createObjectURL(new Blob([data], { type: mimeType }))
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', filename)
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+function downloadBlob(url, filename, options = {}) {
+  return instance.get(url, {
+    responseType: 'blob',
+    transformResponse: [(data) => data],
+    ...options
+  }).then((response) => {
+    triggerBlobDownload(response.data, filename)
+    return response
+  })
+}
+
+export async function getBlobErrorMessage(error, fallback = '下载失败') {
+  const detail = error?.response?.data
+  if (detail instanceof Blob) {
+    try {
+      const text = await detail.text()
+      const parsed = JSON.parse(text)
+      if (typeof parsed?.detail === 'string' && parsed.detail.trim()) {
+        return parsed.detail
+      }
+    } catch {
+      return error?.message || fallback
+    }
+  }
+  return getAPIErrorMessage(error, fallback)
+}
+
 export const authAPI = {
   login: (username, password) => {
     const formData = new FormData()
@@ -196,36 +234,8 @@ export const polishAPI = {
     return instance.post('/polish/upload', formData)
   },
   previewPolishedFile: (id) => instance.get(`/polish/${id}/preview`),
-  downloadPolishedFile: (id, filename) => {
-    return instance.get(`/polish/${id}/download`, {
-      responseType: 'blob',
-      transformResponse: [(data) => data]
-    }).then((response) => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', filename)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.URL.revokeObjectURL(url)
-    })
-  },
-  downloadPolishedReport: (id, filename = '润色报告.docx') => {
-    return instance.get(`/polish/${id}/download-report`, {
-      responseType: 'blob',
-      transformResponse: [(data) => data]
-    }).then((response) => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', filename)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.URL.revokeObjectURL(url)
-    })
-  },
+  downloadPolishedFile: (id, filename) => downloadBlob(`/polish/${id}/download`, filename),
+  downloadPolishedReport: (id, filename = '润色报告.docx') => downloadBlob(`/polish/${id}/download-report`, filename),
   deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
   batchDeletePolishedDocuments: (ids) => instance.delete('/polish/batch', { data: { ids } }),
   submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
@@ -354,6 +364,7 @@ export const translationAPI = {
       ...(batchId ? { batch_id: batchId } : {})
     }
   }),
+  downloadTranslatedDoc: (id, filename) => downloadBlob(`/translation/download/${id}`, filename),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
   deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
   getStats: (batchId) => instance.get('/translation/stats', {
@@ -376,21 +387,7 @@ export const knowledgeAPI = {
     })
   },
   previewFile: (fileId) => instance.get(`/knowledge/files/${fileId}/preview`),
-  downloadFile: (fileId, filename) => {
-    return instance.get(`/knowledge/files/${fileId}/download`, {
-      responseType: 'blob',
-      transformResponse: [(data) => data]
-    }).then((response) => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', filename)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.URL.revokeObjectURL(url)
-    })
-  },
+  downloadFile: (fileId, filename) => downloadBlob(`/knowledge/files/${fileId}/download`, filename),
   getFile: (fileId) => instance.get(`/knowledge/files/${fileId}`),
   moveFile: (fileId, data) => instance.put(`/knowledge/files/${fileId}/move`, data),
   deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`),
