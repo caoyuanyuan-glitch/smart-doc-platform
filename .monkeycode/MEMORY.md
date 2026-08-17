@@ -31,6 +31,34 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 
 ## 条目
 
+Word 转 DITA 的 note 图标处理规则
+- Date: 2026-08-12
+- Context: 用户补充 IME 平台 note 标签自带提示/警告/小心类图标的验收口径
+- Category: 行为指令
+- Instructions:
+  - 在 Word 转 DITA 的图片完整性校验中，提示、警告、小心等 note 类说明内容配套的小图标不计入“图片不丢失”范围
+  - 若内容已经成功转换为 DITA `note` 标签，可不再输出这类 note 图标图片
+
+Word 转 DITA 的目录处理规则
+- Date: 2026-08-12
+- Context: 用户补充 IME 平台已提供 Booklists/toc 结构
+- Category: 行为指令
+- Instructions:
+  - Word 源文件中的目录内容不需要转换到 DITA 正文中
+  - 验收时不将 Word 目录计入标题结构和内容完整性比对范围
+
+Word 转 DITA 的步骤与图片输出规则
+- Date: 2026-08-12
+- Context: 用户补充 IME 导入测试时对步骤连续性、note 和图片标签的要求
+- Category: 行为指令
+- Instructions:
+  - 有序步骤列表转换到 DITA 时，需要保持 `ol` 连续，不因图片、表格或 note 中断
+  - 步骤下方的图片、表格、note 内容应放在对应步骤项下，而不是拆成多个独立 `ol`
+  - 提示、警告、小心等内容只保留 `note` 文本，不输出图标图片
+  - 图片输出不需要 `alt` 标签
+  - 表格标题只保留名称内容，去掉 `表 13`、`Table 13` 这类编号前缀，IME 样式会自动补序号
+  - Word 中因排版产生的多余回车，需要在转换时自动识别并合并，避免把同一句内容截断成两句
+
 每日启动前拉取最新代码并创建分支
 - Date: 2026-06-17
 - Context: 用户要求每天早上开始跑代码前提醒拉取最新 main 并创建新分支
@@ -52,13 +80,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 格式: `git push origin <branch>`
 
 前后端自验命令
-- Date: 2026-08-11
-- Context: Agent 在执行 AI 翻译模块优化任务时校正当前仓库路径
+- Date: 2026-07-01
+- Context: Agent 在执行智能润色规则管理任务时校正路径
 - Category: 构建方法
 - Instructions:
-  - 当前仓库实际路径为 `/workspace`
-  - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
-  - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+  - 智能润色项目实际路径为 `/workspace/smart-doc-platform`
+  - 当前工作区前端构建校验使用 `cd /workspace/smart-doc-platform/frontend && npm run build`
+  - 当前工作区后端语法校验使用 `cd /workspace/smart-doc-platform/backend && python3 -m compileall app`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
@@ -128,6 +156,19 @@ DITA 父子节点兼容规则
   - DITA 生成时，顶层空父节点可以保留为结构容器
   - 带子节点的中间父节点必须输出为真实 topic，并生成自己的 `href` 和 `keys`
   - 若中间父节点被生成为信息结构组件，IME 中其子 topic 可能出现右键加载错误
+
+Word 转 DITA 批量转换基线规则
+- Date: 2026-08-13
+- Context: Agent 在收敛英文 Word 转 DITA 转换规则并准备后续批量处理时发现
+- Category: 工作流协作
+- Instructions:
+  - 后续批量 Word/WPS 转 DITA 时，统一以 `当前工作区/.monkeycode/docs/word-to-dita-conversion-rules.md` 作为转换与验收基线
+  - `Cover` topic 直接复用参考 zip 包中的原始 topic
+  - `booklists/toc` 继续复用参考 zip 包，正文结构以源 Word 为准
+  - Word 操作步骤中的加粗强调文本必须保留并转换为 `b` 标签
+  - Word 表格跨页产生的重复表头行必须自动删除，不能依赖人工清理
+  - 章节结构必须按 Word 原始层级 100% 对齐，结构一致性高于局部样式调整
+  - 每次批量转换完成后，都先运行单测和包级验收，再交给用户做平台侧导入验证
 
 前端开发代理端口约定
 - Date: 2026-06-30
