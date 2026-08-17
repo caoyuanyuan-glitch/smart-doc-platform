@@ -1443,12 +1443,8 @@ def _is_official_global_site_false_positive(issue):
     original = str(_issue_value(issue, 'original_text', '') or '').strip()
     suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
     context = str(_issue_value(issue, 'context', '') or '').strip()
-    rule = str(_issue_value(issue, 'rule', '') or '').upper()
-    if rule not in {'HR001', 'HR012'}:
-        return False
-    official_pattern = re.compile(r'(?:https?://)?(?:www\.)?global-mgitech\.com/?', re.IGNORECASE)
-    text = ' '.join([original, suggestion, context])
-    return bool(official_pattern.search(text) and official_pattern.fullmatch(original))
+    official_pattern = re.compile(r'(?<![\w-])(?:https?://)?(?:www\.)?global-mgitech\.com(?:/|$|\s|[?&#])', re.IGNORECASE)
+    return bool(official_pattern.search(original) or official_pattern.search(context))
 
 
 def _is_figure_details_sentence_false_positive(issue):
@@ -3979,6 +3975,14 @@ def _compact_basis_text(value, limit=120):
     return text[:limit]
 
 
+def _build_cyy_basis_section_text(category, category_count):
+    return "\n".join([
+        f"【CYY人工审核经验基线 - {category}】",
+        f"该类人工问题出现 {category_count} 次。",
+        "优先关注该类问题的证据充分性与上下文一致性。",
+    ])
+
+
 def _load_cyy_human_review_basis_sections():
     global CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
     if CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE is not None:
@@ -4044,13 +4048,9 @@ def _load_cyy_human_review_basis_sections():
         comment = _compact_basis_text(item.get("comment"), 80)
         if comment:
             category_count = int(by_category.get(category, 0) or 0)
-            category_lines = [
-                f"【CYY人工审核经验基线 - {category}】",
-                f"该类人工问题出现 {category_count} 次。典型模式: {comment}",
-            ]
             sections.append({
                 "label": f"CYY人工审核经验基线-{category}",
-                "text": "\n".join(category_lines),
+                "text": _build_cyy_basis_section_text(category, category_count),
                 "priority": 3 if category_count >= 20 else 2,
             })
             examples_by_category[category] = True
@@ -6315,7 +6315,7 @@ def _run_english_heuristic_audit(content, file_type=None):
         return False
 
     official_global_site = 'https://global-mgitech.com/'
-    official_global_site_pattern = re.compile(r"(?<![A-Za-z0-9.-])(?:https?://)?(?:www\.)?global-mgitech\.com/?(?![A-Za-z0-9.-])", re.IGNORECASE)
+    official_global_site_pattern = re.compile(r"(?<![\w-])(?:https?://)?(?:www\.)?global-mgitech\.com(?:/|$|\s|[?&#])", re.IGNORECASE)
     outdated_site_pattern = re.compile(r"(?<![A-Za-z0-9.-])(?:https?://)?(?:www\.)?(?:en\.mgi-tech\.com|global-mgi\.com|global\.mgi-tech\.com)(?![A-Za-z0-9.-])", re.IGNORECASE)
     for match in outdated_site_pattern.finditer(content):
         add_issue(match, "HR001", "合规", f"建议替换为 {official_global_site}", "英文资料中的海外官网地址应使用官网 English 入口域名。", "公司特定规范 - 海外官网地址", "fatal")
@@ -7503,7 +7503,7 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
     if rule_no in _DISABLED_RULES_FOR_REVIEW:
         return True
 
-    if file_type == "pdf" and rule_no in {"R002", "R013", "R036"}:
+    if file_type == "pdf" and rule_no in {"R002", "R013", "R036", "EXT-R002", "EXT-R013", "EXT-R036"}:
         return True
 
     if document_language == "en" and rule_no == "R016":
@@ -7758,13 +7758,19 @@ def dedupe_issues_by_original(issues):
     def _norm_chapter(chapter):
         return re.sub(r'\s+', '', str(chapter or '')).lower()[:60]
 
+    def _norm_suggestion(issue):
+        return re.sub(r'\s+', ' ', str(issue.get('suggestion', '') or '')).strip().lower()
+
     # 第二步：去重（优先按原文+章节聚合，避免规则与 AI 对同一问题重复上报）
     seen = {}
     for issue in filtered:
         norm = re.sub(r"\s+", "", str(issue.get("original_text", ""))).lower()
         chapter = _norm_chapter(issue.get("chapter", ""))
         rule = str(issue.get("rule", "") or "")
+        suggestion = _norm_suggestion(issue)
         key = f"{norm}|{chapter}"
+        if suggestion:
+            key = f"{norm}|{suggestion}"
         if rule in {'UNIT-003', 'UNIT-004', 'HR011'}:
             key = f"{rule}|{norm}|{issue.get('position', '')}"
         if rule in {'STYLE-003', 'HR008', 'GRAMMAR-001', 'GRAMMAR-002'}:

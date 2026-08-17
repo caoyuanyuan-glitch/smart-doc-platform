@@ -623,6 +623,7 @@
         @selection-change="onIssueSelectionChange"
         ref="issueTableRef"
         row-key="id"
+        class="issue-detail-table"
       >
         <el-table-column type="selection" width="48" />
         <el-table-column label="ID" width="70">
@@ -669,10 +670,11 @@
             <span class="context-cell" v-html="renderIssueContext(scope.row, currentTaskMode)"></span>
           </template>
         </el-table-column>
-        <el-table-column label="建议" min-width="260" show-overflow-tooltip>
+        <el-table-column label="建议" min-width="340" class-name="suggestion-column">
           <template #default="scope">
             <div class="suggestion-wrap">
-              <div class="suggestion-summary">{{ issueSuggestionSummary(scope.row) }}</div>
+              <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
+              <div v-if="issueSuggestionSummary(scope.row)" class="suggestion-summary">{{ issueSuggestionSummary(scope.row) }}</div>
               <div
                 v-if="issueSuggestionDiffHtml(scope.row)"
                 class="suggestion-diff"
@@ -1143,9 +1145,64 @@ function formatIssueDisplayId(index) {
 function issueSuggestionText(issue) {
   const suggestion = String(issue?.suggestion || '').trim()
   if (suggestion) return suggestion
-  const description = String(issue?.description || '').trim()
-  if (description) return description.replace(/^问题说明[:：]\s*/, '').replace(/^问题[:：]\s*/, '').trim()
+  const description = normalizeIssueDescription(issue)
+  if (description) return description
   return '-'
+}
+
+function issueSuggestionFullText(issue) {
+  const suggestion = String(issue?.suggestion || '').trim()
+  const description = normalizeIssueDescription(issue)
+  if (suggestion && description && description !== suggestion) {
+    return `${suggestion}\n\n说明：${description}`
+  }
+  return suggestion || description || '-'
+}
+
+function normalizeIssueDescription(issue) {
+  return String(issue?.description || '')
+    .trim()
+    .replace(/^问题说明[:：]\s*/, '')
+    .replace(/^问题[:：]\s*/, '')
+    .replace(/\s+/g, ' ')
+}
+
+function compactSuggestionText(text, limit = 36) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
+}
+
+function categoryProblemLabel(category) {
+  const text = String(category || '').trim()
+  if (!text) return ''
+  if (/语法|主谓|时态|单复数/.test(text)) return '语法问题'
+  if (/逻辑|步骤结构|操作步骤/.test(text)) return '操作步骤逻辑问题'
+  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
+  if (/拼写/.test(text)) return '拼写问题'
+  if (/标点|空格|格式/.test(text)) return '标点/格式问题'
+  if (/合规|法规|注册/.test(text)) return '合规表述问题'
+  if (/重复/.test(text)) return '重复内容问题'
+  if (/结构/.test(text)) return '结构完整性问题'
+  return `${text}问题`
+}
+
+function descriptionProblemLabel(description) {
+  const text = String(description || '').trim()
+  if (!text) return ''
+  if (/主谓一致|describe[s]?\b|describes\b|单数|复数|时态|grammar/i.test(text)) return '语法问题'
+  if (/跳号|跳到|编号|步骤|流程连续|逻辑/i.test(text)) return '操作步骤逻辑问题'
+  if (/拼写|misspell|typo/i.test(text)) return '拼写问题'
+  if (/术语|写法|统一|term/i.test(text)) return '术语一致性问题'
+  if (/标点|空格|格式|punctuation|spacing/i.test(text)) return '标点/格式问题'
+  if (/合规|法规|注册|ruo|compliance/i.test(text)) return '合规表述问题'
+  if (/重复|冗余/i.test(text)) return '重复内容问题'
+  return ''
+}
+
+function issueProblemLabel(issue) {
+  const description = normalizeIssueDescription(issue)
+  return descriptionProblemLabel(description) || categoryProblemLabel(issue?.category)
 }
 
 function escapeSuggestionHtml(text) {
@@ -1155,12 +1212,6 @@ function escapeSuggestionHtml(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
-}
-
-function summarizeText(text, limit = 42) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
-  if (!normalized) return '-'
-  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
 }
 
 function extractSuggestionReplacement(issue) {
@@ -1208,15 +1259,58 @@ function buildSuggestionDiffMarkup(before, after) {
   `
 }
 
-function issueSuggestionSummary(issue) {
+function describeSuggestionChange(original, replacement) {
+  const before = String(original || '').trim()
+  const after = String(replacement || '').trim()
+  if (!before || !after || before === after) return ''
+
+  let prefix = 0
+  const maxPrefix = Math.min(before.length, after.length)
+  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1
+
+  let suffix = 0
+  const maxSuffix = Math.min(before.length - prefix, after.length - prefix)
+  while (
+    suffix < maxSuffix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+
+  const removed = before.slice(prefix, before.length - suffix || before.length).trim()
+  const added = after.slice(prefix, after.length - suffix || after.length).trim()
+  if (removed && added) {
+    if (removed.length <= 24 && added.length <= 32) {
+      return `将“${removed}”改为“${added}”`
+    }
+    return `将相关表述改为“${compactSuggestionText(added)}”`
+  }
+  if (!removed && added) {
+    return `补充“${compactSuggestionText(added)}”`
+  }
+  if (removed && !added) {
+    return `删除“${compactSuggestionText(removed)}”`
+  }
+  return `建议改为“${compactSuggestionText(after)}”`
+}
+
+function issueSuggestionOverview(issue) {
+  const problemLabel = issueProblemLabel(issue)
+  if (problemLabel) return problemLabel
+
+  const suggestion = String(issue?.suggestion || '').trim()
   const replacement = extractSuggestionReplacement(issue)
   const original = String(issue?.original_text || '').trim()
   if (replacement && original && replacement !== original) {
-    return summarizeText(`改为“${replacement}”`)
+    return '该处表述需要修改。'
   }
-  const description = String(issue?.description || '').trim().replace(/^问题说明[:：]\s*/, '').replace(/^问题[:：]\s*/, '').trim()
-  if (description) return summarizeText(description)
-  return summarizeText(issueSuggestionText(issue))
+  if (suggestion) return '建议按下方修改。'
+  return '该处需要处理。'
+}
+
+function issueSuggestionSummary(issue) {
+  if (issueSuggestionDiffHtml(issue)) return ''
+  return issueSuggestionFullText(issue)
 }
 
 function issueSuggestionDiffHtml(issue) {
@@ -3275,17 +3369,35 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+.issue-detail-table :deep(.el-table__cell) {
+  vertical-align: top;
+}
+
+.issue-detail-table :deep(.suggestion-column .cell) {
+  overflow: visible;
+  white-space: normal;
+}
+
 .suggestion-summary {
-  color: #1f2937;
+  margin-top: 4px;
+  color: #475467;
   font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.suggestion-overview {
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
 }
 
 .suggestion-diff {
   margin-top: 6px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: #f8fafc;
-  border: 1px solid #e5e7eb;
+  background: #fcfcfd;
+  border: 1px solid #eaecf0;
   font-size: 12px;
   color: #4b5563;
 }
@@ -3307,16 +3419,18 @@ onUnmounted(() => {
 
 .diff-remove {
   color: #b42318;
-  background: #fee4e2;
+  background: #fef3f2;
   border-radius: 4px;
   padding: 0 2px;
+  text-decoration: line-through;
 }
 
 .diff-add {
-  color: #027a48;
-  background: #dcfae6;
+  color: #b42318;
+  background: #fff1f3;
   border-radius: 4px;
   padding: 0 2px;
+  font-weight: 600;
 }
 
 .issue-action-cell {
@@ -3630,12 +3744,12 @@ onUnmounted(() => {
 }
 
 .highlight-problem {
-  color: #dc3545;
-  font-weight: bold;
-  background-color: #fef0f0;
+  color: #1f2937;
+  font-weight: 500;
+  background-color: #fff4cc;
   padding: 1px 4px;
   border-radius: 3px;
-  border: 1px solid #fbcfe8;
+  border: 1px solid #f5e0a3;
 }
 
 .gold-upload {

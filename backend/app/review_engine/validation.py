@@ -15,6 +15,25 @@ _BASIS_MARKERS = (
     "海外官网地址变化",
 )
 
+_AGGRESSIVE_TEMPLATE_WORDS = frozenset({
+    "ruo", "patient", "management", "diagnostic", "purposes", "intended",
+    "verified", "verify", "corresponding", "appropriate", "properly",
+    "seated", "underside", "center", "printed", "label", "remains",
+    "remain", "quality", "first", "repeat", "disconnection", "gentle",
+    "heard", "cracking", "carefully", "ensure", "clinical", "any",
+})
+
+_MEANINGFUL_LOCAL_REWRITE_PAIRS = {
+    frozenset({"this", "these"}),
+    frozenset({"that", "those"}),
+    frozenset({"is", "are"}),
+    frozenset({"was", "were"}),
+    frozenset({"has", "have"}),
+    frozenset({"does", "do"}),
+    frozenset({"describe", "describes"}),
+    frozenset({"click", "tap"}),
+}
+
 
 def issue_value(issue: dict[str, Any], key: str, default: Any = "") -> Any:
     return issue.get(key, default) if isinstance(issue, dict) else getattr(issue, key, default)
@@ -30,6 +49,11 @@ def normalize_action_text(text: Any) -> str:
     text = text.strip('`"“”‘’[]()（） ')
     text = re.sub(r"\s+", " ", text)
     return text.lower()
+
+
+def _strip_leading_bullet_marker(text: Any) -> str:
+    normalized = normalize_report_text(text)
+    return re.sub(r"^(?:[y•·*\-]|\(?[a-z0-9]\)|[a-z0-9][\)\.])\s+", "", normalized, count=1)
 
 
 def normalize_noop_compare_text(text: Any) -> str:
@@ -112,6 +136,25 @@ def ai_suggestion_changes_protected_meaning(original: Any, suggestion: Any) -> b
         return True
     if "contact the technical support" in original and re.search(r"\bdefault\s+credentials\b|\bauthorized\s+login\b", suggestion, re.IGNORECASE):
         return True
+    if "split barcode" in original and re.search(r"\byes\b.+\bselected\s+by\s+default\b|\bselected\s+by\s+default\b", suggestion, re.IGNORECASE):
+        return True
+    if "automatically filled in" in original and re.search(r"\bprevents?\s+proceeding\b|\bdisplays?\s+an\s+error\b|\bfails?\s+validation\b|\binvalid\s+or\s+expired\b", suggestion, re.IGNORECASE):
+        return True
+    if "local regulations and safety standards" in original and re.search(r"\bbiosafety\b|\bhazardous\s+waste\b|\binstitutional\b|\bnational\b|\bliquid/solid\s+waste\b|\bgenerated\s+during\s+sequencing\b|\blaboratory\s+safety\s+standards\b", suggestion, re.IGNORECASE):
+        return True
+    if "app library" in original and "app libraries" in suggestion:
+        return True
+    if "mixedly use" in original and re.search(r"\bmix(?:ed|ing)?\b", suggestion, re.IGNORECASE):
+        return True
+    if "do not centrifuge, vortex, or shake the tube" in original and re.search(r"\bshear\b|\baggregate\s+dnbs\b", suggestion, re.IGNORECASE):
+        return True
+    if "choose scheme interface" in original:
+        if "choose scheme interface" not in suggestion:
+            return True
+        if "selected type" in original and "selected type" not in suggestion:
+            return True
+        if re.search(r"\bassay\s+type\b", suggestion, re.IGNORECASE):
+            return True
     protected_replacements = [
         ("user-supplied", "supplier provided"),
         ("place at rt", "store at rt"),
@@ -144,6 +187,8 @@ def ai_suggestion_is_low_value_english_rewrite(original: Any, suggestion: Any) -
     original_text = normalize_report_text(original)
     suggestion_text = normalize_report_text(suggestion)
     if not original_text or not suggestion_text:
+        return False
+    if _is_localized_meaningful_english_fix(original_text, suggestion_text):
         return False
 
     def _strip_articles(text: str) -> list[str]:
@@ -204,6 +249,85 @@ def ai_suggestion_is_low_value_english_rewrite(original: Any, suggestion: Any) -
     return False
 
 
+def _is_localized_meaningful_english_fix(original: Any, suggestion: Any) -> bool:
+    original_tokens = re.findall(r"[a-z0-9']+", normalize_report_text(original))
+    suggestion_tokens = re.findall(r"[a-z0-9']+", normalize_report_text(suggestion))
+    original_set = {token for token in original_tokens if token not in {"a", "an", "the"}}
+    suggestion_set = {token for token in suggestion_tokens if token not in {"a", "an", "the"}}
+    added = suggestion_set - original_set
+    removed = original_set - suggestion_set
+    if not added or not removed or len(added) != len(removed) or len(added) > 2:
+        return False
+
+    remaining_removed = set(removed)
+    for added_token in added:
+        matched = None
+        for removed_token in remaining_removed:
+            if _tokens_look_like_meaningful_fix_pair(removed_token, added_token):
+                matched = removed_token
+                break
+        if matched is None:
+            return False
+        remaining_removed.remove(matched)
+    return True
+
+
+def _tokens_look_like_meaningful_fix_pair(left: str, right: str) -> bool:
+    if not left or not right or left == right:
+        return False
+    if frozenset({left, right}) in _MEANINGFUL_LOCAL_REWRITE_PAIRS:
+        return True
+    if left.rstrip("s") == right.rstrip("s") and abs(len(left) - len(right)) <= 2:
+        return True
+    if len(left) > 3 and len(right) > 3 and SequenceMatcher(None, left, right).ratio() >= 0.72:
+        return True
+    return False
+
+
+def ai_suggestion_is_aggressive_rewrite(original: Any, suggestion: Any) -> bool:
+    original_text = normalize_report_text(original)
+    suggestion_text = normalize_report_text(suggestion)
+    if not original_text or not suggestion_text or original_text == suggestion_text:
+        return False
+    if _is_localized_meaningful_english_fix(original_text, suggestion_text):
+        return False
+
+    def _tokens(text: str) -> set[str]:
+        return {token for token in re.findall(r"[a-z][a-z0-9']*", text.lower()) if len(token) > 1}
+
+    original_tokens = _tokens(original_text)
+    suggestion_tokens = _tokens(suggestion_text)
+    union = original_tokens | suggestion_tokens
+    if not union:
+        return False
+
+    intersection = original_tokens & suggestion_tokens
+    jaccard = len(intersection) / len(union)
+    len_ratio = len(suggestion_text) / max(len(original_text), 1)
+    diff_tokens = original_tokens ^ suggestion_tokens
+    added = suggestion_tokens - original_tokens
+    removed = original_tokens - suggestion_tokens
+
+    if jaccard < 0.5 and 0.55 <= len_ratio <= 1.9:
+        return True
+    if jaccard < 0.55 and len_ratio < 0.72:
+        return True
+
+    template_hits = sum(1 for token in added if token in _AGGRESSIVE_TEMPLATE_WORDS)
+    if len(diff_tokens) >= 5 and template_hits >= 1 and jaccard < 0.9:
+        paired = 0
+        for added_token in added:
+            for removed_token in removed:
+                if _tokens_look_like_meaningful_fix_pair(removed_token, added_token):
+                    paired += 1
+                    break
+        if paired >= len(added):
+            return False
+        return True
+
+    return False
+
+
 def ai_suggestion_is_speculative_completion(original: Any, suggestion: Any) -> bool:
     original_text = normalize_report_text(original)
     suggestion_text = normalize_report_text(suggestion)
@@ -211,14 +335,19 @@ def ai_suggestion_is_speculative_completion(original: Any, suggestion: Any) -> b
         return False
     if suggestion_text == original_text:
         return False
-    if not suggestion_text.startswith(original_text):
+    stripped_original = _strip_leading_bullet_marker(original_text)
+    stripped_suggestion = _strip_leading_bullet_marker(suggestion_text)
+    if not suggestion_text.startswith(original_text) and not stripped_suggestion.startswith(stripped_original):
         return False
 
-    trailing_fragment = re.search(r"\b(?:of|to|with|for|by|into|from|been|is|are|was|were)$", original_text)
-    if trailing_fragment and len(suggestion_text) >= len(original_text) + 8:
+    baseline_original = stripped_original if stripped_suggestion.startswith(stripped_original) else original_text
+    baseline_suggestion = stripped_suggestion if stripped_suggestion.startswith(stripped_original) else suggestion_text
+
+    trailing_fragment = re.search(r"\b(?:of|to|with|for|by|into|from|been|is|are|was|were)$", baseline_original)
+    if trailing_fragment and len(baseline_suggestion) >= len(baseline_original) + 8:
         return True
 
-    if len(original_text) <= 40 and len(suggestion_text) >= len(original_text) * 2:
+    if len(baseline_original) <= 40 and len(baseline_suggestion) >= len(baseline_original) * 2:
         return True
 
     return False
@@ -261,6 +390,10 @@ def validate_ai_issue_candidate(issue: dict[str, Any], content: str) -> Validati
         return ValidationResult(False, "number_unit_spacing_regression")
     if suggestion and ai_suggestion_changes_protected_meaning(original, suggestion):
         return ValidationResult(False, "protected_meaning_changed")
+    if original == "reagent" and suggestion == "reagents" and "equipment, reagent, and consumbles" in content_norm:
+        return ValidationResult(False, "protected_meaning_changed")
+    if suggestion and ai_suggestion_is_aggressive_rewrite(original, suggestion):
+        return ValidationResult(False, "aggressive_rewrite")
     if suggestion and ai_suggestion_is_speculative_completion(original, suggestion):
         return ValidationResult(False, "speculative_completion")
     if suggestion and ai_suggestion_is_low_value_english_rewrite(original, suggestion):

@@ -1,5 +1,6 @@
 import json
 import asyncio
+import re
 from types import SimpleNamespace
 
 from app.api import review as review_api
@@ -179,6 +180,29 @@ def test_build_ai_review_basis_sections_include_structured_cyy_sections(monkeypa
     assert "CYY人工审核经验基线-步骤结构" in labels
 
 
+def test_load_cyy_human_review_basis_sections_omits_comment_details(monkeypatch):
+    review_api.CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = None
+    monkeypatch.setattr(
+        review_api,
+        "CYY_HUMAN_REVIEW_BASELINE_PATH",
+        SimpleNamespace(
+            exists=lambda: True,
+            read_text=lambda encoding="utf-8": json.dumps(
+                {
+                    "summary": {"total": 2, "by_category": {"步骤结构": 2}},
+                    "annotations": [{"category": "步骤结构", "comment": "步骤3之后直接跳到步骤5"}],
+                },
+                ensure_ascii=False,
+            ),
+        ),
+    )
+
+    sections = review_api._load_cyy_human_review_basis_sections()
+
+    assert any(section["label"] == "CYY人工审核经验基线-步骤结构" for section in sections)
+    assert all("步骤3之后直接跳到步骤5" not in section["text"] for section in sections)
+
+
 def test_select_relevant_ai_review_basis_prefers_matching_cyy_category_sections():
     sections = [
         {"label": "CYY人工审核经验基线摘要", "text": "【CYY人工审核经验基线摘要】\n关注高频问题。", "priority": 5},
@@ -305,6 +329,36 @@ def test_dedupe_issues_by_original_prefers_spellcheck_over_ai():
     assert deduped[0]["source"] == "spellcheck"
 
 
+def test_dedupe_issues_by_original_prefers_spellcheck_when_chapter_differs_but_suggestion_matches():
+    ai_issue = {
+        "severity": "general",
+        "category": "Terminology",
+        "rule": "AI-TERM",
+        "chapter": "Section 2.2 User-supplied equipment, reagent, and consumbles",
+        "original_text": "consumbles",
+        "suggestion": "consumables",
+        "source": "ai",
+        "confidence": 100,
+        "position": "2898-2908",
+    }
+    spell_issue = {
+        "severity": "general",
+        "category": "拼写/用词错误",
+        "rule": "SPELL",
+        "chapter": "2.2 User-supplied equipment, reagent, and",
+        "original_text": "consumbles",
+        "suggestion": "consumables",
+        "source": "spellcheck",
+        "confidence": 95,
+        "position": "2898-2908",
+    }
+
+    deduped = review_api.dedupe_issues_by_original([ai_issue, spell_issue])
+
+    assert len(deduped) == 1
+    assert deduped[0]["source"] == "spellcheck"
+
+
 def test_validate_ai_issue_candidate_rejects_ruo_template_rewrite():
     issue = {
         "source": "ai",
@@ -395,6 +449,71 @@ def test_validate_ai_issue_candidate_rejects_speculative_completion():
     assert result.reason == "speculative_completion"
 
 
+def test_validate_ai_issue_candidate_rejects_speculative_completion_with_bullet_prefix():
+    issue = {
+        "source": "ai",
+        "original_text": "y If a reagent cartridge has been",
+        "suggestion": "If a reagent cartridge has been thawed and the signal protein mixture has been added into the MSP well according to Preparing the reagent cartridge on Page 18, but it cannot be used in time, store it at room temperature and use it within 2 hours.",
+        "description": "",
+        "rule": "Completeness",
+        "chapter": "Storage",
+        "audit_basis": "basis",
+    }
+    content = "y If a reagent cartridge has been"
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "speculative_completion"
+
+
+def test_aggressive_rewrite_blocks_template_rewrites():
+    assert review_validation.ai_suggestion_is_aggressive_rewrite(
+        "This reagent set is for research use only, and cannot be used for clinical diagnosis.",
+        "This reagent set is for research use only (RUO) and is not intended for clinical diagnosis, patient management, or any diagnostic purposes.",
+    ) is True
+    assert review_validation.ai_suggestion_is_aggressive_rewrite(
+        "This product is for research use only. Please read the instructions for use of the product carefully before use.",
+        "This product is for research use only (RUO).",
+    ) is True
+    assert review_validation.ai_suggestion_is_aggressive_rewrite(
+        "The reagent cartridge is completely thawed when there is no sound of cracked ice during shaking.",
+        "The reagent cartridge is completely thawed when no sound of cracking ice is heard during gentle shaking.",
+    ) is True
+
+
+def test_aggressive_rewrite_passes_local_fixes():
+    assert review_validation.ai_suggestion_is_aggressive_rewrite(
+        "This instructions for use describes how to perform sequencing",
+        "These instructions for use describe how to perform sequencing",
+    ) is False
+    assert review_validation.ai_suggestion_is_aggressive_rewrite(
+        "Disgestive Buffer 250 uL per tube",
+        "Digestive Buffer 250 uL per tube",
+    ) is False
+    assert review_validation.ai_suggestion_is_aggressive_rewrite(
+        "click OK, The device begins unloading",
+        "Tap OK, The device begins unloading",
+    ) is False
+
+
+def test_validate_ai_issue_candidate_accepts_local_grammar_fix():
+    issue = {
+        "source": "ai",
+        "original_text": "This instructions for use describes how to perform sequencing",
+        "suggestion": "These instructions for use describe how to perform sequencing",
+        "description": "",
+        "rule": "Grammar",
+        "chapter": "Introduction",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is True
+    assert result.reason == "accepted"
+
+
 def test_validate_ai_issue_candidate_rejects_high_overlap_style_rewrite():
     issue = {
         "source": "ai",
@@ -439,6 +558,143 @@ def test_validate_ai_issue_candidate_rejects_instructions_for_use_semantic_rewri
         "description": "",
         "rule": "Terminology",
         "chapter": "Introduction",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_mixedly_use_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "Do not mixedly use the MDA T-Regent from different models of reagent kits.",
+        "suggestion": "Do not mix the MDA T-Reagent from different reagent kit models.",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "Tips",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_app_library_pluralization_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "For App library",
+        "suggestion": "For App libraries",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "4.4 Quantifying DNBs",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_choose_scheme_semantic_rewrite():
+    issue = {
+        "source": "ai",
+        "original_text": "y The recipe you selected should be consistent with the selected type in the Choose scheme interface.",
+        "suggestion": "The recipe you selected must match the assay type selected in the Choose scheme interface.",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "Tips",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_local_regulations_compliance_expansion():
+    issue = {
+        "source": "ai",
+        "original_text": "y Dispose of the flow cell, reagent cartridge, waste, waste container, and PCR tube in accordance with local regulations and safety standards.",
+        "suggestion": "Dispose of the flow cell, reagent cartridge, waste, waste container, and PCR tube in accordance with applicable local, national, and institutional biosafety and hazardous waste regulations.",
+        "description": "",
+        "rule": "Compliance",
+        "chapter": "7.7 Removing the flow cell, reagent cartridge, and waste container",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_split_barcode_default_value_expansion():
+    issue = {
+        "source": "ai",
+        "original_text": "If the selected recipe includes the barcode length, you need to select whether to split barcode.",
+        "suggestion": "If the selected recipe includes a barcode, select whether to split the barcode. 'Yes' is selected by default.",
+        "description": "",
+        "rule": "Clarity",
+        "chapter": "step 5",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_flow_cell_validation_logic_expansion():
+    issue = {
+        "source": "ai",
+        "original_text": "Scan the QR code on the plastic package of the sequencing flow cell. Flow cell ID, Throughput, and Expiration date are automatically filled in.",
+        "suggestion": "Scan the QR code on the plastic package of the sequencing flow cell. Flow cell ID, Throughput, and Expiration date are automatically filled in. If the flow cell ID is invalid or expired, the system displays an error and prevents proceeding.",
+        "description": "",
+        "rule": "Completeness",
+        "chapter": "step 7.3, item 1",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_reagent_pluralization_inside_faulty_title():
+    issue = {
+        "source": "ai",
+        "original_text": "reagent",
+        "suggestion": "reagents",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "2.2 User-supplied equipment, reagent, and consumbles",
+        "audit_basis": "basis",
+    }
+    content = "2.2 User-supplied equipment, reagent, and consumbles"
+
+    result = review_validation.validate_ai_issue_candidate(issue, content)
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
+def test_validate_ai_issue_candidate_rejects_dnb_rationale_completion():
+    issue = {
+        "source": "ai",
+        "original_text": "Do not centrifuge, vortex, or shake the tube.",
+        "suggestion": "Do not centrifuge, vortex, or shake the tube — these actions may shear or aggregate DNBs.",
+        "description": "",
+        "rule": "Completeness",
+        "chapter": "Tips under Step 3",
         "audit_basis": "basis",
     }
 
@@ -768,14 +1024,22 @@ def test_known_false_positive_filter_drops_placeholder_and_duplicate_ai_items():
 def test_known_false_positive_filter_drops_official_global_site_issue():
     issue = {
         'original_text': 'https://global-mgitech.com/',
-        'rule': 'HR001',
-        'source': 'rule',
+        'rule': 'EXT-R005',
+        'source': 'ai',
         'description': '海外官网地址应统一。',
         'suggestion': '建议替换为 https://global-mgitech.com/',
         'audit_basis': '公司特定规范 - 海外官网地址',
+        'context': 'For more information, visit https://global-mgitech.com/ for the latest manuals.',
     }
 
     assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_should_skip_rule_match_skips_ext_r013_for_pdf():
+    rule = SimpleNamespace(rule_no="EXT-R013")
+    match = next(re.finditer(r"\.", "Overview."))
+
+    assert review_api._should_skip_rule_match(rule, match, "Overview.", "en", file_type="pdf") is True
 
 
 def test_should_drop_punctuation_issue_drops_generic_single_punctuation_noise():

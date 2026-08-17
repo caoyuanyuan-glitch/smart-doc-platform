@@ -119,3 +119,7 @@ def test_has_correct_term_variant_in_document_matches_hyphenated_pdf_form():
 
 def test_should_skip_spelling_issue_skips_mixedly_false_positive():
     assert spell_checker_utils._should_skip_spelling_issue("mixedly", "Samples were mixedly distributed.", file_type="pdf") is True
+
+
+def test_should_skip_spelling_issue_skips_nonfiltered_technical_term():
+    assert spell_checker_utils._should_skip_spelling_issue("nonfiltered", "Use nonfiltered pipette tips for transfer.", file_type="pdf") is True

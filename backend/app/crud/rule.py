@@ -30,6 +30,9 @@ def _convert_rule_content_to_regex(rule_content: str) -> str:
     content = rule_content.strip()
     patterns = []
 
+    if "标点符号" in content and ("遗漏" in content or "缺少" in content):
+        patterns.append(r"(?<![.!?。！？])(?:[A-Za-z][^.!?。！？\n]{2,})$")
+
     # 预定义的规则→正则映射（基于29条种子规则手工整理）
     RULE_PATTERN_MAP = {
         "仅可交互UI元素": r"【[^】]*】|（[^）]*设置[^）]*）",
@@ -52,6 +55,8 @@ def _convert_rule_content_to_regex(rule_content: str) -> str:
 
     # 匹配规则映射表
     for keyword, pattern in RULE_PATTERN_MAP.items():
+        if keyword == "标点符号" and patterns:
+            continue
         if keyword in content:
             patterns.append(pattern)
 

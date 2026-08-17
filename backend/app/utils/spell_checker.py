@@ -106,7 +106,7 @@ TECH_TERMS_WHITELIST = {
     'demultiplexing', 'techsupport', 'sativa', 'barcodes', 'RXN', 'PF',
     'basecall', 'basecalling', 'basecaller', 'cycler', 'cyclers', 'functionalized',
     'Nextera', 'TruSeq', 'nanoball', 'nanoballs', 'MDA', 'MSP', 'ATCG', 'Qty',
-    'Bio-Rad', 'usersupplied',
+    'Bio-Rad', 'usersupplied', 'nonfiltered', 'non-filtered', 'de-bore', 'wide-bore',
 }
 
 SPELLCHECK_WHITELIST = {

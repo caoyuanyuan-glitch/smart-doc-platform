@@ -1219,7 +1219,7 @@ class AIClient:
             return []
 
         data = self._extract_json(result, {"issues": []})
-        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
         for issue in issues:
             issue["source_models"] = [provider_key] if provider_key else []
             issue["consensus_score"] = int(issue.get("confidence") or 0)
@@ -2168,7 +2168,7 @@ confidence 评分指南：
             if not result:
                 return {"issues": []}
             data = self._extract_json(result, {"issues": []})
-            issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+            issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
             for issue in issues:
                 issue["source_models"] = [str(force_provider or "")]
                 issue["consensus_score"] = int(issue.get("confidence") or 0)
@@ -2188,7 +2188,7 @@ confidence 评分指南：
             if not result:
                 return {"issues": []}
             data = self._extract_json(result, {"issues": []})
-            primary_issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+            primary_issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
             for issue in primary_issues:
                 issue["source_models"] = ["fallback"]
                 issue["consensus_score"] = int(issue.get("confidence") or 0)
