@@ -251,11 +251,22 @@ function getErrorTypeLabel(type) {
 }
 
 function canAddWord(row) {
-  return !!row.word && !hasWordBeenAdded(row.word)
+  const word = getOriginalIssueWord(row)
+  return !!word && !hasWordBeenAdded(word)
 }
 
 function normalizeWord(word) {
   return String(word || '').trim()
+}
+
+function getOriginalIssueWord(issue) {
+  const text = checkResult.value?.text || ''
+  const start = issue?.start
+  const end = issue?.end
+  if (Number.isInteger(start) && Number.isInteger(end) && start >= 0 && end > start && end <= text.length) {
+    return text.substring(start, end)
+  }
+  return normalizeWord(issue?.word)
 }
 
 function hasWordBeenAdded(word) {
@@ -410,7 +421,7 @@ function getIssueDetailText(issue) {
 
 function getIssueToken(issue) {
   if (issue) {
-    return issue.word || '当前问题'
+    return getOriginalIssueWord(issue) || '当前问题'
   }
 
   if (checkResult.value?.total_count === 0 && checkResult.value) {
@@ -546,7 +557,7 @@ function clearAll() {
 }
 
 async function addToDict(error) {
-  const word = error.word
+  const word = getOriginalIssueWord(error)
   if (hasWordBeenAdded(word)) {
     ElMessage.info(`单词 "${word}" 已在本次结果中加入白名单`)
     return

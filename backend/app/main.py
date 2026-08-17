@@ -71,22 +71,19 @@ async def startup_event():
         from app.database import SessionLocal
         from app.crud.user import get_user, create_user_with_details
         from app.schemas.user import UserCreateWithDetails
-        bootstrap_username = (os.getenv("ADMIN_BOOTSTRAP_USERNAME") or "").strip()
-        bootstrap_password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD") or ""
-        if not bootstrap_username or not bootstrap_password:
-            print("[startup] 未配置管理员引导账号，跳过默认管理员初始化")
-        else:
-            db = SessionLocal()
-            try:
-                admin_user = get_user(db, bootstrap_username)
-                if not admin_user:
-                    create_user_with_details(db, UserCreateWithDetails(
-                        username=bootstrap_username, password=bootstrap_password,
-                        display_name="管理员", role="admin", status="active",
-                    ))
-                    print(f"[startup] 已创建管理员引导账号: {bootstrap_username}")
-            finally:
-                db.close()
+        bootstrap_username = (os.getenv("ADMIN_BOOTSTRAP_USERNAME") or "admin").strip()
+        bootstrap_password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD") or "admin123"
+        db = SessionLocal()
+        try:
+            admin_user = get_user(db, bootstrap_username)
+            if not admin_user:
+                create_user_with_details(db, UserCreateWithDetails(
+                    username=bootstrap_username, password=bootstrap_password,
+                    display_name="管理员", role="admin", status="active",
+                ))
+                print(f"[startup] 已创建管理员引导账号: {bootstrap_username}")
+        finally:
+            db.close()
     except Exception as e:
         print(f"[startup] 管理员初始化失败: {e}")
     try:
