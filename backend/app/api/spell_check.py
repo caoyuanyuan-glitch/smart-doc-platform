@@ -12,7 +12,9 @@ from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
 from app.api.auth import require_admin
 from app.api import whitelist as whitelist_api
-from app.utils.spell_checker import run_spelling_and_grammar_check, spell as runtime_spell, add_runtime_whitelist_term, add_runtime_whitelist_terms
+from app.utils import spell_checker as spell_checker_utils
+from app.utils.grammar_engine import check_grammar_with_languagetool
+from app.utils.spell_checker import run_spelling_and_grammar_check, add_runtime_whitelist_term, add_runtime_whitelist_terms, get_exact_whitelist_snapshot
 from app.utils.document_parser import parse_file
 
 try:
@@ -85,12 +87,12 @@ LOW_LEVEL_RULES = [
 ]
 
 WHITELIST_PATTERNS = {
-    "product": re.compile(r"(MGISP(?:-\d+)?(?:-Smart\s+8)?|DNBSEQ(?:-[Tt]\d+[×xX]?\d+[RSrs]?)?|MGICLab(?:-FZ\d+)?|MGI)", re.IGNORECASE),
-    "brand": re.compile(r"(Qubit|Eppendorf|HamiLton|Hamilton|Invitrogen|Thermo\s+Fisher\s+Scientific|BMG\s+LABTECH|AXYGEN|Greiner\s+Bio-One|Fluostar\s+Omega)", re.IGNORECASE),
+    "product": re.compile(r"(MGISP(?:-\d+)?(?:-Smart\s+8)?|DNBSEQ(?:-[Tt]\d+[×xX]?\d+[RSrs]?)?|MGICLab(?:-FZ\d+)?|MGI)"),
+    "brand": re.compile(r"(Qubit|Eppendorf|HamiLton|Hamilton|Invitrogen|Thermo\s+Fisher\s+Scientific|BMG\s+LABTECH|AXYGEN|Greiner\s+Bio-One|Fluostar\s+Omega)"),
     "document_id": re.compile(r"(JB-\w+-\d+|V\d+\.\d+(?:\.\d+)*|940-\d{6}-\d{2})"),
-    "term": re.compile(r"(ssCir|dsDNA|PCR|RCR|DNB|DIPSEQ|OliGreen|MPC2000|ALPS\s+50V|Pos\d+~?Pos\d+|wfex|sp960)", re.IGNORECASE),
+    "term": re.compile(r"(ssCir|dsDNA|PCR|RCR|DNB|DIPSEQ|OliGreen|MPC2000|ALPS\s+50V|Pos\d+~?Pos\d+|wfex|sp960)"),
     "domain": re.compile(r"(mgi-tech\.com|global-mgitech\.com|MGI-service@mgi-tech\.com)"),
-    "scientific": re.compile(r"(E\.\s*coli|in\s+situ|in\s+vitro|in\s+vivo|et\s+al\.)", re.IGNORECASE),
+    "scientific": re.compile(r"(E\.\s*coli|in\s+situ|in\s+vitro|in\s+vivo|et\s+al\.)"),
     "element": re.compile(r"(H|He|Li|Be|B|C|N|O|F|Ne|Na|Mg|Al|Si|P|S|Cl|Ar|K|Ca|Sc|Ti|V|Cr|Mn|Fe|Co|Ni|Cu|Zn|Ga|Ge|As|Se|Br|Kr|Rb|Sr|Y|Zr|Nb|Mo|Tc|Ru|Rh|Pd|Ag|Cd|In|Sn|Sb|Te|I|Xe|Cs|Ba|La|Ce|Pr|Nd|Pm|Sm|Eu|Gd|Tb|Dy|Ho|Er|Tm|Yb|Lu|Hf|Ta|W|Re|Os|Ir|Pt|Au|Hg|Tl|Pb|Bi|Po|At|Rn|Fr|Ra|Ac|Th|Pa|U|Np|Pu|Am|Cm|Bk|Cf|Es|Fm|Md|No|Lr)"),
 }
 
@@ -1199,12 +1201,25 @@ def _collect_low_level_rule_issues(text, document_language):
     return issues
 
 
+def _append_languagetool_issues(text, issues, document_language):
+    if document_language != 'english':
+        return
+    issues.extend(
+        check_grammar_with_languagetool(
+            text,
+            lang='en-US',
+            exact_whitelist=get_exact_whitelist_snapshot(),
+        )
+    )
+
+
 def process_text(text, file_type=None):
     """共享处理函数：统一走完整规则链并适配前端结果结构"""
     normalized_text = pre_clean_lines(text)
     document_language = _detect_document_language(normalized_text)
     issues = run_spelling_and_grammar_check(normalized_text, file_type=file_type)
     _append_legacy_grammar_issues(normalized_text, issues)
+    _append_languagetool_issues(normalized_text, issues, document_language)
     issues.extend(_collect_low_level_rule_issues(normalized_text, document_language))
     issues.extend(_collect_consistency_issues(normalized_text, document_language))
     return _build_response(normalized_text, issues)
@@ -1562,6 +1577,6 @@ async def import_dict(file: UploadFile = File(...)):
 @router.get("/export-dict", summary="导出自定义词典")
 async def export_dict():
     words = []
-    for w in runtime_spell.word_frequency:
+    for w in spell_checker_utils.spell.word_frequency:
         words.append(w)
     return {"words": words}

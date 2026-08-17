@@ -2,6 +2,16 @@ from app.api import whitelist as whitelist_api
 from app.utils import spell_checker as spell_checker_utils
 
 
+class _FakeWordFrequency:
+    def load_words(self, words):
+        return None
+
+
+class _FakeSpellWithWordFrequency:
+    def __init__(self):
+        self.word_frequency = _FakeWordFrequency()
+
+
 def test_add_terms_to_whitelist_refreshes_runtime_spellcheck(monkeypatch):
     saved = {}
 
@@ -17,7 +27,7 @@ def test_add_terms_to_whitelist_refreshes_runtime_spellcheck(monkeypatch):
 
 
 def test_runtime_whitelist_terms_apply_to_spellcheck_across_formats(monkeypatch):
-    monkeypatch.setattr(spell_checker_utils.spell.word_frequency, "load_words", lambda words: None)
+    monkeypatch.setattr(spell_checker_utils, "spell", _FakeSpellWithWordFrequency())
 
     spell_checker_utils.add_runtime_whitelist_terms(["Oligo"])
 
@@ -66,3 +76,26 @@ def test_import_whitelist_preserves_case_sensitive_duplicates(monkeypatch):
 
     assert result["added_count"] == 1
     assert saved["data"]["terms"][-1]["word"] == "rnas"
+
+
+def test_batch_delete_returns_actual_deleted_count(monkeypatch):
+    saved = {}
+
+    monkeypatch.setattr(whitelist_api, "load_whitelist", lambda: {
+        "terms": [
+            {"id": "1", "word": "Alpha", "category": "专业术语", "description": ""},
+            {"id": "2", "word": "Beta", "category": "专业术语", "description": ""},
+        ],
+        "brands": [
+            {"id": "3", "word": "Gamma", "category": "品牌名", "description": ""},
+        ],
+    })
+    monkeypatch.setattr(whitelist_api, "save_whitelist", lambda data: saved.setdefault("data", data))
+    monkeypatch.setattr(whitelist_api, "_refresh_spellchecker_whitelist", lambda: saved.setdefault("refreshed", True))
+
+    result = __import__('asyncio').run(whitelist_api.batch_delete(["2", "3", "404"]))
+
+    assert result["deleted_count"] == 2
+    assert result["message"] == "成功删除 2 条"
+    assert [item["id"] for item in saved["data"]["terms"]] == ["1"]
+    assert saved["data"]["brands"] == []
