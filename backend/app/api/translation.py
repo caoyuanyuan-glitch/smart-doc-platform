@@ -42,6 +42,7 @@ from app.models.translation_doc import TranslationDoc
 from app.utils.document_parser import parse_file, parse_xlsx_textual_content
 from app.utils.ai_client import ai_client
 from app.utils.file_utils import read_file_safe
+from app.utils.runtime_paths import runtime_memory_seed_dir
 from app.schemas.user import UserOut
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
@@ -367,7 +368,7 @@ def _ensure_memory_bank_entry(
 
 
 def _build_memory_seed_file_path(memory_file: KnowledgeFile, seed_root: Path | None = None) -> Path:
-    seed_root = Path(seed_root or Path(__file__).resolve().parents[2] / "seed" / "knowledge")
+    seed_root = Path(seed_root or runtime_memory_seed_dir())
     folder_names = []
     folder = getattr(memory_file, "folder", None)
     while folder:

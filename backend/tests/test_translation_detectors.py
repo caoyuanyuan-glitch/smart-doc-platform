@@ -37,6 +37,7 @@ from app.api.translation import (  # noqa: E402
     _translate_tasks_lock,
     _sync_memory_file_to_seed,
 )
+from app.utils.runtime_paths import runtime_memory_seed_dir  # noqa: E402
 
 
 class HallucinationTest(unittest.TestCase):
@@ -155,6 +156,10 @@ class MemorySeedSyncTest(unittest.TestCase):
             self.assertTrue(seed_file_path.exists())
             self.assertEqual(seed_file_path.read_bytes(), b"seed-content")
             self.assertEqual(seed_file_path, tmp_path / "seed" / "资源库" / "记忆库" / "AI翻译语料写入Excel.xlsx")
+
+    def test_runtime_memory_seed_dir_is_shared_location(self):
+        shared_dir = runtime_memory_seed_dir()
+        self.assertIn(".smart-doc-platform", str(shared_dir))
 
 
 class MemoryNormalizationTest(unittest.TestCase):
