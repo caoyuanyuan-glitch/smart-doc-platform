@@ -14,6 +14,7 @@ const Generate = () => import('@/views/Generate.vue')
 const DocGenerator = () => import('@/views/DocGenerator.vue')
 const Compare = () => import('@/views/Compare.vue')
 const CompareParams = () => import('@/views/CompareParams.vue')
+const Competitor = () => import('@/views/Competitor.vue')
 const Convert = () => import('@/views/Convert.vue')
 const Terms = () => import('@/views/Terms.vue')
 const Users = () => import('@/views/Users.vue')
@@ -185,6 +186,16 @@ const routes = [
     path: '/compare/params',
     name: 'CompareParams',
     component: CompareParams
+  },
+  {
+    path: '/competitor',
+    name: 'Competitor',
+    component: Competitor
+  },
+  {
+    path: '/competitor/tasks',
+    name: 'CompetitorTasks',
+    component: Competitor
   },
   {
     path: '/convert',
