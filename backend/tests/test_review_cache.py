@@ -299,6 +299,7 @@ def test_run_excel_review_audit_covers_manual_excel_findings(tmp_path, monkeypat
     ws.append(["中文", "英文"])
     ws.append(["系统设置", "System Settings"])
     ws.append(["长按3s启动", "Press and hold for 3s to start"])
+    ws.append(["锁屏时间", "Lock Screen Timeout Period"])
     ws.append(["时间日期   ", "Date&Time"])
     ws.append(["目标速度-", "Target Speed"])
     ws.append(["目标角度-", "Traget Angle"])
@@ -317,6 +318,7 @@ def test_run_excel_review_audit_covers_manual_excel_findings(tmp_path, monkeypat
 
     original_texts = {issue["original_text"] for issue in issues}
     rules = {issue["rule"] for issue in issues}
+    pair_002_issue = next(issue for issue in issues if issue["rule"] == "XLS-PAIR-002")
 
     assert "System Settings" not in original_texts
     assert "Press and hold for 3s to start" not in original_texts
@@ -324,6 +326,7 @@ def test_run_excel_review_audit_covers_manual_excel_findings(tmp_path, monkeypat
     assert "Confirm to start firmware upgrade?" in original_texts
     assert "Confirm to end aging test?" in original_texts
     assert "Confirm to clear aging count?" in original_texts
+    assert pair_002_issue["suggestion"] == "建议改为 Screen Timeout"
     assert "XLS-CN-FMT-001" in rules
     assert "XLS-CN-FMT-002" in rules
     assert "XLS-PUNCT-001" in rules

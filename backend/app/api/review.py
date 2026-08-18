@@ -2837,7 +2837,7 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
     terms = get_terms(db, limit=10000)
     semantic_pair_suggestions = {
         ('语言设置', 'Language'): ('suggestion', 'XLS-PAIR-001', '语义对等', '建议统一为“语言 / Language”或“Language Settings”', '中文“语言设置”对应英文“Language”缺少“设置”语义。', 'Excel中英语义对等检查'),
-        ('锁屏时间', 'Lock Screen Timeout Period'): ('suggestion', 'XLS-PAIR-002', '语义对等', '建议中文改为“锁屏超时时间”，或英文调整为更贴近“锁屏时间”的表达', '英文包含 Timeout（超时）语义，当前中文未体现。', 'Excel中英语义对等检查'),
+        ('锁屏时间', 'Lock Screen Timeout Period'): ('suggestion', 'XLS-PAIR-002', '语义对等', '建议改为 Screen Timeout', '英文表达偏长，建议简化为更常见的界面文案。', 'Excel中英语义对等检查'),
         ('日志信息', 'Logs'): ('suggestion', 'XLS-PAIR-003', '语义对等', '建议统一为“日志 / Logs”或补齐中英结构对应关系', '中文“日志信息”与英文“Logs”结构不完全对等。', 'Excel中英语义对等检查'),
         ('时间日期', 'Date&Time'): ('general', 'XLS-PAIR-004', '语义对等', '建议统一为“日期时间 / Date&Time”', '中英词序不一致，建议统一术语表达。', 'Excel中英语义对等检查'),
     }

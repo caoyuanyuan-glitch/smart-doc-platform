@@ -155,3 +155,11 @@ Word 转 DITA 批量转换基线规则
   - 后端测试需显式设置 `PYTHONPATH=/workspace/backend`，否则 `app` 包无法导入
   - 审核模块相关回归命令可直接使用 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py`
   - 当前环境若缺少测试依赖，先安装 `backend/requirements.txt`，并补装 `pytest` 与 `httpx`
+
+审核历史任务保留规则
+- Date: 2026-08-18
+- Context: 用户要求合并代码后继续保留历史审核任务
+- Category: 环境配置
+- Instructions:
+  - 审核模块默认数据库路径需优先复用项目现有的 `当前工作区/backend/app.db`
+  - 合并代码、重启预览服务或切换分支后，历史审核任务列表需要保持可见
