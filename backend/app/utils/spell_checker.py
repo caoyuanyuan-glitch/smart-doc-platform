@@ -3,6 +3,7 @@
 类似于 Word 的拼写/语法校对功能
 """
 import re
+import threading
 from pathlib import Path
 from spellchecker import SpellChecker
 from app.paths import WHITELIST_FILE
@@ -130,6 +131,7 @@ SPELLCHECK_WHITELIST = {
 
 _DICTIONARY_DIR = Path(__file__).resolve().parents[1] / 'dictionary'
 _RUNTIME_WHITELIST_TERMS = set()
+_WHITELIST_LOCK = threading.RLock()
 MAX_OCCURRENCES_PER_WORD = 20
 
 
@@ -168,33 +170,52 @@ def _load_whitelist_words_from_json():
     return terms
 
 
-_TECH_TERMS_EXACT = {
-    str(term).strip()
-    for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS | _load_whitelist_words_from_json()
-}
+def _build_exact_whitelist_terms(runtime_terms=None):
+    exact_terms = set()
+    for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS | set(runtime_terms or set()):
+        token = str(term or '').strip()
+        if token:
+            exact_terms.add(token)
+    return exact_terms
 
 
-def _load_whitelist_into_dictionary():
+def _collect_dictionary_words(terms):
     words = set()
-    for term in TECH_TERMS_WHITELIST | EXTERNAL_TECH_TERMS | EXTERNAL_TRADEMARKS | _load_whitelist_words_from_json():
+    for term in terms or set():
         for piece in re.findall(r"[A-Za-z]+", str(term)):
             if len(piece) >= 2:
                 words.add(piece.lower())
-    spell.word_frequency.load_words(sorted(words))
+    return words
 
 
-_load_whitelist_into_dictionary()
+_TECH_TERMS_EXACT = _build_exact_whitelist_terms(_load_whitelist_words_from_json())
+
+
+def _load_whitelist_into_dictionary(terms=None, *, reset=False):
+    global spell
+    if reset:
+        spell = SpellChecker(language='en')
+    words = _collect_dictionary_words(terms if terms is not None else _TECH_TERMS_EXACT)
+    if words:
+        spell.word_frequency.load_words(sorted(words))
+
+
+_load_whitelist_into_dictionary(_TECH_TERMS_EXACT, reset=True)
+
+
+def get_exact_whitelist_snapshot():
+    with _WHITELIST_LOCK:
+        return set(_TECH_TERMS_EXACT)
 
 
 def is_whitelisted(word: str) -> bool:
     candidate = str(word or '').strip()
     if _is_protected_technical_token(candidate):
         return True
-    lowered = candidate.lower()
-    if lowered in SPELLCHECK_WHITELIST['exact']:
+    if candidate in SPELLCHECK_WHITELIST['exact']:
         return True
     for prefix in SPELLCHECK_WHITELIST['prefix']:
-        if lowered.startswith(prefix):
+        if candidate.startswith(prefix):
             return True
     for pattern, _ in SPELLCHECK_WHITELIST['pattern']:
         if re.match(pattern, candidate):
@@ -206,10 +227,11 @@ def _is_protected_technical_token(word: str) -> bool:
     token = str(word or '').strip().strip('.,;:()[]{}"\'®™©')
     if not token:
         return False
-    if token in _TECH_TERMS_EXACT:
-        return True
-    if token in _RUNTIME_WHITELIST_TERMS:
-        return True
+    with _WHITELIST_LOCK:
+        if token in _TECH_TERMS_EXACT:
+            return True
+        if token in _RUNTIME_WHITELIST_TERMS:
+            return True
     if re.fullmatch(r'\d+(?:\.\d+)?[xX]', token):
         return True
     if re.fullmatch(r'(?:step|table|figure)\s*\d+', token, re.IGNORECASE):
@@ -3140,15 +3162,16 @@ def _format_spelling_suggestion(word, context, suggestions, certainty='疑似'):
 
 def add_runtime_whitelist_terms(terms):
     added = []
-    for term in terms or []:
-        token = str(term or '').strip()
-        if not token:
-            continue
-        if token in _RUNTIME_WHITELIST_TERMS:
-            continue
-        _RUNTIME_WHITELIST_TERMS.add(token)
-        _TECH_TERMS_EXACT.add(token)
-        added.append(token)
+    with _WHITELIST_LOCK:
+        for term in terms or []:
+            token = str(term or '').strip()
+            if not token:
+                continue
+            if token in _RUNTIME_WHITELIST_TERMS:
+                continue
+            _RUNTIME_WHITELIST_TERMS.add(token)
+            _TECH_TERMS_EXACT.add(token)
+            added.append(token)
 
     if added:
         spell.word_frequency.load_words(sorted(added))
@@ -3160,19 +3183,17 @@ def add_runtime_whitelist_term(term):
 
 
 def reload_whitelist_from_disk():
-    words = _load_whitelist_words_from_json()
-    _RUNTIME_WHITELIST_TERMS.clear()
-    for word in words:
-        _RUNTIME_WHITELIST_TERMS.add(str(word).strip())
-    _TECH_TERMS_EXACT.update(_RUNTIME_WHITELIST_TERMS)
-
-    pieces = set()
-    for term in words:
-        for piece in re.findall(r"[A-Za-z]+", str(term)):
-            if len(piece) >= 2:
-                pieces.add(piece.lower())
-    if pieces:
-        spell.word_frequency.load_words(sorted(pieces))
+    words = {
+        str(word or '').strip()
+        for word in _load_whitelist_words_from_json()
+        if str(word or '').strip()
+    }
+    with _WHITELIST_LOCK:
+        _RUNTIME_WHITELIST_TERMS.clear()
+        _RUNTIME_WHITELIST_TERMS.update(words)
+        _TECH_TERMS_EXACT.clear()
+        _TECH_TERMS_EXACT.update(_build_exact_whitelist_terms(_RUNTIME_WHITELIST_TERMS))
+        _load_whitelist_into_dictionary(_TECH_TERMS_EXACT, reset=True)
 
 
 def _mask_markdown_noise(content):
@@ -3384,7 +3405,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
             correct = COMMON_MISSPELLINGS[normalized]
             occurrences = word_matches.get(normalized, [])[:MAX_OCCURRENCES_PER_WORD]
             for match in occurrences:
-                if _should_skip_match_word(match.group(0)):
+                original_word = match.group(0)
+                if _should_skip_match_word(original_word):
                     continue
                 context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
@@ -3400,10 +3422,10 @@ def check_spelling(content, min_word_length=3, file_type=None):
                     "category": "拼写/用词错误",
                     "rule": "SPELL",
                     "chapter": chapter,
-                    "original_text": word,
+                    "original_text": original_word,
                     "context": context,
-                    "suggestion": _format_spelling_suggestion(word, context, [correct], '确定'),
-                    "description": f"原文片段：'{context}'；疑似错误词：[{word}]；建议修改词：[{correct}]；是否确定：确定。",
+                    "suggestion": _format_spelling_suggestion(original_word, context, [correct], '确定'),
+                    "description": f"原文片段：'{context}'；疑似错误词：[{original_word}]；建议修改词：[{correct}]；是否确定：确定。",
                     "audit_basis": "英文拼写规范",
                     "confidence": 95,
                     "source": "spellcheck",
@@ -3416,7 +3438,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
 
             occurrences = word_matches.get(normalized, [])[:MAX_OCCURRENCES_PER_WORD]
             for match in occurrences:
-                if _should_skip_match_word(match.group(0)):
+                original_word = match.group(0)
+                if _should_skip_match_word(original_word):
                     continue
                 context = _build_spelling_context(content, match.start(), match.end())
                 if _should_skip_spelling_issue(word, context, file_type):
@@ -3432,10 +3455,10 @@ def check_spelling(content, min_word_length=3, file_type=None):
                     "category": "拼写/用词错误",
                     "rule": "SPELL",
                     "chapter": chapter,
-                    "original_text": word,
+                    "original_text": original_word,
                     "context": context,
-                    "suggestion": _format_spelling_suggestion(word, context, suggestions, '疑似'),
-                    "description": f"原文片段：'{context}'；疑似错误词：[{word}]；建议修改词：[{', '.join(suggestions)}]；是否确定：疑似。",
+                    "suggestion": _format_spelling_suggestion(original_word, context, suggestions, '疑似'),
+                    "description": f"原文片段：'{context}'；疑似错误词：[{original_word}]；建议修改词：[{', '.join(suggestions)}]；是否确定：疑似。",
                     "audit_basis": "英文拼写规范",
                     "confidence": 80,
                     "source": "spellcheck",

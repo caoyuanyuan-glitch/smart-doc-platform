@@ -270,18 +270,16 @@ async def delete_item(item_id: str):
 @router.post("/items/batch-delete", summary="批量删除白名单条目")
 async def batch_delete(item_ids: List[str]):
     data = load_whitelist()
-    deleted = []
+    deleted_count = 0
     
     for category_key, items in data.items():
+        original_count = len(items)
         items[:] = [item for item in items if item.get("id") not in item_ids]
-        for item_id in item_ids:
-            for item in items:
-                if item.get("id") == item_id and item not in deleted:
-                    deleted.append(item)
+        deleted_count += original_count - len(items)
     
     save_whitelist(data)
     _refresh_spellchecker_whitelist()
-    return {"message": f"成功删除 {len(deleted)} 条", "deleted_count": len(deleted)}
+    return {"message": f"成功删除 {deleted_count} 条", "deleted_count": deleted_count}
 
 @router.post("/import", summary="导入白名单")
 async def import_whitelist(items: List[WhitelistItem]):

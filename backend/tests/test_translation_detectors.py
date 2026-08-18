@@ -18,6 +18,7 @@ from app.api.translation import (  # noqa: E402
     _append_memory_entry_to_excel,
     _build_batch_separator,
     _build_memory_candidate_bundle,
+    _build_memory_seed_file_path,
     _count_translatable_text_units,
     _do_translate,
     _ensure_memory_bank_entry,
@@ -34,7 +35,9 @@ from app.api.translation import (  # noqa: E402
     _thread_locals,
     _translate_tasks,
     _translate_tasks_lock,
+    _sync_memory_file_to_seed,
 )
+from app.utils.runtime_paths import runtime_memory_seed_dir  # noqa: E402
 
 
 class HallucinationTest(unittest.TestCase):
@@ -126,6 +129,37 @@ class EnsureMemoryBankEntryTest(unittest.TestCase):
         self.assertFalse(created)
         self.assertIs(entry, existing)
         db.add.assert_not_called()
+
+
+class MemorySeedSyncTest(unittest.TestCase):
+    def test_build_seed_path_preserves_folder_structure(self):
+        root = SimpleNamespace(name="资源库", parent=None)
+        child = SimpleNamespace(name="记忆库", parent=root)
+        memory_file = SimpleNamespace(file_path="/tmp/source.xlsx", name="AI翻译语料写入Excel.xlsx", folder=child)
+
+        seed_path = _build_memory_seed_file_path(memory_file, seed_root=Path("/tmp/seed-root"))
+
+        self.assertEqual(seed_path, Path("/tmp/seed-root/资源库/记忆库/AI翻译语料写入Excel.xlsx"))
+
+    def test_sync_memory_file_to_seed_copies_content(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_path = tmp_path / "source.xlsx"
+            source_path.write_bytes(b"seed-content")
+
+            root = SimpleNamespace(name="资源库", parent=None)
+            child = SimpleNamespace(name="记忆库", parent=root)
+            memory_file = SimpleNamespace(file_path=str(source_path), name="AI翻译语料写入Excel.xlsx", folder=child)
+
+            seed_file_path = _sync_memory_file_to_seed(memory_file, seed_root=tmp_path / "seed")
+
+            self.assertTrue(seed_file_path.exists())
+            self.assertEqual(seed_file_path.read_bytes(), b"seed-content")
+            self.assertEqual(seed_file_path, tmp_path / "seed" / "资源库" / "记忆库" / "AI翻译语料写入Excel.xlsx")
+
+    def test_runtime_memory_seed_dir_is_shared_location(self):
+        shared_dir = runtime_memory_seed_dir()
+        self.assertIn(".smart-doc-platform", str(shared_dir))
 
 
 class MemoryNormalizationTest(unittest.TestCase):

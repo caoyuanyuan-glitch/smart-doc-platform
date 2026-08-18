@@ -233,6 +233,24 @@ class AIClient:
             providers.append("proxy")
         return providers
 
+    def _provider_priority(self):
+        ordered = ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"]
+        default_provider = (self.default_provider or "").strip().lower()
+        if default_provider in ordered:
+            ordered = [default_provider] + [name for name in ordered if name != default_provider]
+        return ordered
+
+    def _select_primary_provider(self, provider_results=None):
+        priority = self._provider_priority()
+        if provider_results:
+            for name in priority:
+                if (provider_results.get(name) or {}).get("status") == "ok":
+                    return name
+        for name in priority:
+            if name in self.available_providers():
+                return name
+        return priority[0] if priority else "qwen"
+
     def provider_status(self, include_health=False):
         default_provider = (self.default_provider or "qwen").strip().lower() or "qwen"
         configured = {
@@ -253,7 +271,7 @@ class AIClient:
         }
         status = {
             "default_provider": default_provider,
-            "priority": ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"],
+            "priority": self._provider_priority(),
             "providers": enabled,
             "configured": configured,
             "available": [name for name, is_enabled in enabled.items() if is_enabled],
@@ -355,11 +373,12 @@ class AIClient:
             results["mcai"] = {"status": "unavailable", "reason": "no_api_key"}
 
         ok_count = sum(1 for r in results.values() if r.get("status") == "ok")
-        primary = (self.default_provider or "qwen").strip().lower() or "qwen"
+        primary = self._select_primary_provider(results)
         return {
             "total_providers": len(results),
             "ok_providers": ok_count,
             "healthy": ok_count > 0,
+            "preferred": (self.default_provider or "qwen").strip().lower() or "qwen",
             "primary": primary,
             "primary_status": results.get(primary, {}).get("status", "unknown"),
             "providers": results,
