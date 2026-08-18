@@ -148,6 +148,15 @@
               <template #title>首页</template>
             </el-menu-item>
 
+            <el-sub-menu index="competitor-sub">
+              <template #title>
+                <el-icon><DataAnalysis /></el-icon>
+                <span>竞品分析</span>
+              </template>
+              <el-menu-item index="/competitor">上传分析</el-menu-item>
+              <el-menu-item index="/competitor/tasks">历史任务</el-menu-item>
+            </el-sub-menu>
+
             <el-sub-menu index="polish-sub">
               <template #title>
                 <el-icon><MagicStick /></el-icon>
@@ -179,15 +188,6 @@
               <el-menu-item index="/compare">对比上传</el-menu-item>
               <el-menu-item index="/compare/params">参数对比</el-menu-item>
               <el-menu-item index="/compare/tasks">历史任务</el-menu-item>
-            </el-sub-menu>
-
-            <el-sub-menu index="competitor-sub">
-              <template #title>
-                <el-icon><DataAnalysis /></el-icon>
-                <span>竞品分析</span>
-              </template>
-              <el-menu-item index="/competitor">上传分析</el-menu-item>
-              <el-menu-item index="/competitor/tasks">历史任务</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="convert-sub">
