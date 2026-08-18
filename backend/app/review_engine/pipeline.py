@@ -168,7 +168,7 @@ def is_visual_layout_issue(issue: Any) -> bool:
     blob = issue_blob(data)
     if category in {"表格/版式", "图片/对象缺失", "字体/版式细节"}:
         return True
-    if rule in {"STRUCT-LAYOUT-001", "STRUCT-IMAGE-001", "DET-TYPO-001"}:
+    if rule in {"STRUCT-LAYOUT-001", "STRUCT-IMAGE-001", "DET-TYPO-001", "EXT-R015", "EXT-R017", "EXT-R018"}:
         return True
     return bool(VISUAL_LAYOUT_PATTERN.search(blob))
 

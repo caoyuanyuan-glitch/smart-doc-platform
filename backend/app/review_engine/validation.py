@@ -121,6 +121,8 @@ def ai_suggestion_changes_protected_meaning(original: Any, suggestion: Any) -> b
     suggestion = normalize_report_text(suggestion)
     if ai_suggestion_changes_numeric_values(original, suggestion):
         return True
+    if "系统内部已有" in original and re.search(r"外部系统|本平台内", suggestion):
+        return True
     if "scientific research" in original and "clinical diagnosis" in original and re.search(r"\b(?:ruo|research\s+use\s+only)\b", suggestion, re.IGNORECASE):
         return True
     if re.search(r"\bdnb\b", original, re.IGNORECASE) and re.search(r"\bdna\s+nanoball", suggestion, re.IGNORECASE):
@@ -264,6 +266,40 @@ def ai_suggestion_is_low_value_english_rewrite(original: Any, suggestion: Any) -
     return False
 
 
+def ai_suggestion_is_low_value_cn_term_swap(original: Any, suggestion: Any) -> bool:
+    original_text = normalize_report_text(original)
+    suggestion_text = normalize_report_text(suggestion)
+    if not original_text or not suggestion_text:
+        return False
+
+    low_value_pairs = [
+        ("窗口", "对话框"),
+    ]
+    for left, right in low_value_pairs:
+        if left in original_text and right in suggestion_text:
+            collapsed_original = original_text.replace(left, "")
+            collapsed_suggestion = suggestion_text.replace(right, "")
+            if collapsed_original == collapsed_suggestion:
+                return True
+    return False
+
+
+def ai_issue_is_low_value_ui_bracket_labeling(issue: dict[str, Any], original: str, suggestion: str, description: str) -> bool:
+    issue_blob = " ".join([
+        normalize_report_text(issue_value(issue, "rule", "")),
+        normalize_report_text(issue_value(issue, "category", "")),
+        description,
+        suggestion,
+    ])
+    if not re.search(r"ui元素未按规范标注|缺少.?按钮.?二字|未说明其为按钮|button label|button word", issue_blob, re.IGNORECASE):
+        return False
+    if not re.search(r"(?:点击|单击|双击)【[^】]{1,24}】(?:[，,。；;\s]|$)", original):
+        return False
+    if re.search(r"【[^】]+】行的|【[^】]+】列的|【[^】]+】栏的|后方的\s*【|右侧的\s*【", original):
+        return False
+    return True
+
+
 def _is_localized_meaningful_english_fix(original: Any, suggestion: Any) -> bool:
     original_tokens = re.findall(r"[a-z0-9']+", normalize_report_text(original))
     suggestion_tokens = re.findall(r"[a-z0-9']+", normalize_report_text(suggestion))
@@ -369,13 +405,21 @@ def ai_suggestion_is_speculative_completion(original: Any, suggestion: Any) -> b
 
 
 def ai_issue_is_visual_control_ambiguity(issue: dict[str, Any], original: str, suggestion: str, description: str) -> bool:
+    if re.search(r"点击\s*[，,。]", original) and re.search(r"点击【[^】]+】", suggestion):
+        return True
+
     issue_blob = " ".join([
         normalize_report_text(issue_value(issue, "rule", "")),
         normalize_report_text(issue_value(issue, "category", "")),
         description,
         suggestion,
     ])
-    if not re.search(r"missing\s+(?:specific\s+)?(?:object|icon|button)|缺少.*?(?:按钮|图标|对象)|控件名称|click", issue_blob, re.IGNORECASE):
+    if not re.search(
+        r"missing\s+(?:specific\s+)?(?:object|icon|button)|缺少.*?(?:按钮|图标|对象)|"
+        r"(?:ui|交互元素).{0,12}缺失|图标丢失|ocr|控件名称|click|空白按钮|无语义|未指明具体按钮",
+        issue_blob,
+        re.IGNORECASE,
+    ):
         return False
 
     evidence_text = " ".join([
@@ -383,10 +427,20 @@ def ai_issue_is_visual_control_ambiguity(issue: dict[str, Any], original: str, s
         normalize_report_text(issue_value(issue, "context", "")),
     ])
     if not re.search(r"\b(?:icon|button|toolbar|menu)\b|图标|按钮|工具栏|菜单", evidence_text, re.IGNORECASE):
-        return False
+        if not re.search(r"点击\s*[，,。]|栏目?的文\s|右侧的文\s|【操作】[栏列]的\s", evidence_text):
+            return False
 
     if re.search(r"【[^】]+】行的", evidence_text):
         return False
+
+    if re.search(r"点击\s*[，,。]", original):
+        return True
+
+    if re.search(r"栏目?的文\s|右侧的文\s", evidence_text):
+        return True
+
+    if re.search(r"【操作】[栏列]的\s", evidence_text):
+        return True
 
     return True
 
@@ -434,8 +488,12 @@ def validate_ai_issue_candidate(issue: dict[str, Any], content: str) -> Validati
         return ValidationResult(False, "aggressive_rewrite")
     if suggestion and ai_suggestion_is_speculative_completion(original, suggestion):
         return ValidationResult(False, "speculative_completion")
+    if ai_issue_is_low_value_ui_bracket_labeling(issue, original, suggestion, description):
+        return ValidationResult(False, "low_value_ui_bracket_labeling")
     if ai_issue_is_visual_control_ambiguity(issue, original, suggestion, description):
         return ValidationResult(False, "visual_control_ambiguity")
+    if suggestion and ai_suggestion_is_low_value_cn_term_swap(original, suggestion):
+        return ValidationResult(False, "low_value_cn_term_swap")
     if suggestion and ai_suggestion_is_low_value_english_rewrite(original, suggestion):
         return ValidationResult(False, "low_value_english_rewrite")
     return ValidationResult(True, "accepted")

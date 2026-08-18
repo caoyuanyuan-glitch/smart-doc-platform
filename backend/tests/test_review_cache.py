@@ -353,6 +353,39 @@ def test_select_relevant_ai_review_basis_prefers_matching_sections():
     assert "revision history" in selected
 
 
+def test_extract_basis_tokens_filters_stopwords_and_noise():
+    tokens = review_api._extract_basis_tokens(
+        "请检查这个页面的相关问题，并确认 revision history 与 copyright year 是否一致。",
+        max_tokens=20,
+    )
+
+    assert "revision" in tokens
+    assert "history" in tokens
+    assert "copyright" in tokens
+    assert "请" not in tokens
+    assert "相关" not in tokens
+    assert "问题" not in tokens
+
+
+def test_select_relevant_ai_review_basis_keeps_summary_first_and_only_when_irrelevant():
+    sections = [
+        {"label": "CYY人工审核经验基线摘要", "text": "【CYY人工审核经验基线摘要】\n关注高频问题。", "priority": 5},
+        {"label": "版本记录", "text": "【版本记录】\nrevision history copyright year version history", "priority": 5},
+        {"label": "术语", "text": "【术语】\n术语一致性与缩略语。", "priority": 3},
+    ]
+
+    selected = review_api._select_relevant_ai_review_basis(
+        "完全不相关的机械噪声字段 abc xyz",
+        sections,
+        max_sections=3,
+        char_budget=500,
+    )
+
+    assert selected.startswith("## CYY人工审核经验基线摘要")
+    assert "## 版本记录" not in selected
+    assert "## 术语" not in selected
+
+
 def test_build_ai_review_basis_sections_include_english_and_common_error_specs():
     sections = review_api._build_ai_review_basis_sections(
         {
@@ -424,6 +457,132 @@ def test_select_relevant_ai_review_basis_prefers_matching_cyy_category_sections(
 
     assert "步骤结构" in selected
     assert "操作不可执行" in selected
+
+
+def test_select_relevant_ai_review_basis_limits_cyy_sections():
+    sections = [
+        {"label": "CYY人工审核经验基线摘要", "text": "【CYY人工审核经验基线摘要】\n总览。", "priority": 5},
+        {"label": "CYY人工审核经验基线-步骤结构", "text": "【CYY人工审核经验基线 - 步骤结构】\n步骤编号跳号、步骤缺失。", "priority": 5},
+        {"label": "CYY人工审核经验基线-术语一致性", "text": "【CYY人工审核经验基线 - 术语一致性】\n术语混用、字段命名不一致。", "priority": 5},
+        {"label": "版本记录", "text": "【版本记录】\nrevision history date version", "priority": 4},
+    ]
+
+    selected = review_api._select_relevant_ai_review_basis(
+        "步骤5之后跳到步骤7，术语名称也前后不一致。",
+        sections,
+        max_sections=4,
+        char_budget=800,
+    )
+
+    assert selected.count("## CYY人工审核经验基线-") <= 2
+
+
+def test_build_ai_review_basis_respects_char_budget(monkeypatch):
+    monkeypatch.setenv("REVIEW_AI_BASIS_CHAR_BUDGET", "80")
+
+    basis = review_api._build_ai_review_basis(
+        {
+            "en_style": "A" * 120,
+            "common_errors": "B" * 120,
+        },
+        "both",
+    )
+
+    assert len(basis) <= 80
+
+
+def test_review_recall_floor_env_defaults_disabled(monkeypatch):
+    monkeypatch.delenv("REVIEW_RECALL_FLOOR", raising=False)
+    assert review_api._review_env_bool("REVIEW_RECALL_FLOOR", False) is False
+
+    monkeypatch.setenv("REVIEW_RECALL_FLOOR", "1")
+    assert review_api._review_env_bool("REVIEW_RECALL_FLOOR", False) is True
+
+
+def test_finalize_review_issues_defaults_to_pipeline_only(monkeypatch):
+    monkeypatch.delenv("REVIEW_USE_LEGACY_POST_FILTERS", raising=False)
+    monkeypatch.delenv("REVIEW_RECALL_FLOOR", raising=False)
+
+    calls = []
+
+    monkeypatch.setattr(review_api, "dedupe_issues_by_original", lambda issues: list(issues))
+    monkeypatch.setattr(review_api, "_sanitize_issue_suggestions", lambda issues: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_filter_ai_issues_without_document_evidence_with_reasons",
+        lambda issues, content: (list(issues), {"missing_evidence": 1}),
+    )
+    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+
+    def fake_false_positive(issues):
+        calls.append("false_positive")
+        return issues
+
+    def fake_low_value(issues):
+        calls.append("low_value")
+        return issues
+
+    def fake_pipeline(issues, *args, **kwargs):
+        calls.append("pipeline")
+        return list(issues)
+
+    monkeypatch.setattr(review_api, "_filter_review_false_positives", fake_false_positive)
+    monkeypatch.setattr(review_api, "_filter_low_value_review_issues", fake_low_value)
+    monkeypatch.setattr(review_api, "pipeline_select_review_issues", fake_pipeline)
+
+    issues, diagnostics = review_api._finalize_review_issues(
+        [{"source": "ai", "rule": "AI", "original_text": "demo", "suggestion": "fix", "severity": "general"}],
+        "demo content",
+        set(),
+    )
+
+    assert len(issues) == 1
+    assert calls == ["pipeline"]
+    assert diagnostics["legacy_post_filters_enabled"] is False
+    assert diagnostics["recall_floor_enabled"] is False
+    assert diagnostics["document_evidence_drop_reasons"] == {"missing_evidence": 1}
+
+
+def test_finalize_review_issues_can_enable_legacy_post_filters(monkeypatch):
+    monkeypatch.setenv("REVIEW_USE_LEGACY_POST_FILTERS", "1")
+    monkeypatch.delenv("REVIEW_RECALL_FLOOR", raising=False)
+
+    calls = []
+
+    monkeypatch.setattr(review_api, "dedupe_issues_by_original", lambda issues: list(issues))
+    monkeypatch.setattr(review_api, "_sanitize_issue_suggestions", lambda issues: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_filter_ai_issues_without_document_evidence_with_reasons",
+        lambda issues, content: (list(issues), {}),
+    )
+    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+
+    def fake_false_positive(issues):
+        calls.append("false_positive")
+        return list(issues)
+
+    def fake_low_value(issues):
+        calls.append("low_value")
+        return list(issues)
+
+    def fake_pipeline(issues, *args, **kwargs):
+        calls.append("pipeline")
+        return list(issues)
+
+    monkeypatch.setattr(review_api, "_filter_review_false_positives", fake_false_positive)
+    monkeypatch.setattr(review_api, "_filter_low_value_review_issues", fake_low_value)
+    monkeypatch.setattr(review_api, "pipeline_select_review_issues", fake_pipeline)
+
+    issues, diagnostics = review_api._finalize_review_issues(
+        [{"source": "ai", "rule": "AI", "original_text": "demo", "suggestion": "fix", "severity": "general"}],
+        "demo content",
+        set(),
+    )
+
+    assert len(issues) == 1
+    assert calls == ["false_positive", "low_value", "pipeline"]
+    assert diagnostics["legacy_post_filters_enabled"] is True
 
 
 def test_run_cached_ai_chunk_review_reuses_cached_result(monkeypatch):
@@ -692,6 +851,23 @@ def test_validate_ai_issue_candidate_rejects_speculative_completion_with_bullet_
     assert result.reason == "speculative_completion"
 
 
+def test_validate_ai_issue_candidate_rejects_unsupported_cn_source_expansion():
+    issue = {
+        "source": "ai",
+        "original_text": "系统可同步系统内部已有的实验耗材、试剂等物料，同时支持手动新增普通物料。",
+        "suggestion": "系统可同步外部系统或本平台内已有的实验耗材、试剂等物料，同时支持手动新增普通物料。",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "Q&A章节（页码70）",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "protected_meaning_changed"
+
+
 def test_aggressive_rewrite_blocks_template_rewrites():
     assert review_validation.ai_suggestion_is_aggressive_rewrite(
         "This reagent set is for research use only, and cannot be used for clinical diagnosis.",
@@ -772,6 +948,23 @@ def test_validate_ai_issue_candidate_rejects_high_overlap_style_rewrite():
 
     assert result.accepted is False
     assert result.reason == "low_value_english_rewrite"
+
+
+def test_validate_ai_issue_candidate_rejects_low_value_cn_term_swap():
+    issue = {
+        "source": "ai",
+        "original_text": "点击【导出物料】，弹出【选择文件保存位置】窗口。",
+        "suggestion": "点击【导出物料】，弹出【选择文件保存位置】对话框。",
+        "description": "",
+        "rule": "Terminology",
+        "chapter": "批量导出物料编码",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "low_value_cn_term_swap"
 
 
 def test_validate_ai_issue_candidate_rejects_support_policy_rewrite():
@@ -984,6 +1177,96 @@ def test_validate_ai_issue_candidate_rejects_visual_button_gap_from_pdf_text_los
     assert result.reason == "visual_control_ambiguity"
 
 
+def test_validate_ai_issue_candidate_rejects_visual_blank_click_from_pdf_text_loss():
+    issue = {
+        "source": "ai",
+        "original_text": "在登录界面，点击 ，弹出服务器和机构设置界面窗口。",
+        "suggestion": "在登录界面，点击【设置】或对应齿轮图标，弹出服务器和机构设置界面窗口。",
+        "description": "UI交互元素完全缺失，疑似图标丢失。",
+        "rule": "Operation",
+        "category": "操作步骤",
+        "chapter": "设置服务器地址和机构代码",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "visual_control_ambiguity"
+
+
+def test_validate_ai_issue_candidate_rejects_visual_blank_click_with_blank_button_reasoning():
+    issue = {
+        "source": "ai",
+        "original_text": "点击 ，弹出结项确认对话框。",
+        "suggestion": "点击【查询】，弹出结项确认对话框。",
+        "description": "",
+        "rule": "空白按钮无语义，未指明具体按钮，关键操作不可执行。",
+        "category": "图文引用",
+        "chapter": "项目结项",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "visual_control_ambiguity"
+
+
+def test_validate_ai_issue_candidate_rejects_blank_click_with_guessed_button_name():
+    issue = {
+        "source": "ai",
+        "original_text": "在界面右上角查询区域，输入流程编号或名称，点击 ，查询目标流程。",
+        "suggestion": "在界面右上角查询区域，输入流程编号或名称，点击【查询】，查询目标流程。",
+        "description": "",
+        "rule": "UI交互元素必须明确标注按钮名称。",
+        "category": "图文引用",
+        "chapter": "审核项目",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "visual_control_ambiguity"
+
+
+def test_validate_ai_issue_candidate_rejects_visual_ocr_artifact_text_loss():
+    issue = {
+        "source": "ai",
+        "original_text": "（可选）点击目标物料大类/物料小类【操作】栏目的文 ，对字典值进行多语言翻译。",
+        "suggestion": "（可选）点击目标物料大类/物料小类【操作】栏的【翻译】，对字典值进行多语言翻译。",
+        "description": "UI交互元素缺失，原文疑似 OCR 识别残片。",
+        "rule": "Operation",
+        "category": "操作步骤",
+        "chapter": "管理物料分类",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "visual_control_ambiguity"
+
+
+def test_validate_ai_issue_candidate_rejects_low_value_ui_bracket_labeling():
+    issue = {
+        "source": "ai",
+        "original_text": "点击【设计耗材】，进入实验室器具定制界面。",
+        "suggestion": "点击【设计耗材】按钮，进入实验室器具定制界面。",
+        "description": "UI元素未按规范标注：'【设计耗材】' 作为可点击按钮，但未说明其为按钮。",
+        "rule": "Operation",
+        "category": "操作步骤",
+        "chapter": "实验室器具定制",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "low_value_ui_bracket_labeling"
+
+
 def test_validate_ai_issue_candidate_keeps_true_missing_ui_object_issue():
     issue = {
         "source": "ai",
@@ -1001,6 +1284,43 @@ def test_validate_ai_issue_candidate_keeps_true_missing_ui_object_issue():
 
     assert result.accepted is True
     assert result.reason == "accepted"
+
+
+def test_validate_ai_issue_candidate_rejects_operation_column_blank_icon_issue():
+    issue = {
+        "source": "ai",
+        "original_text": "点击【操作】列的 ，禁用该物料编码。",
+        "suggestion": "点击【操作】列的【禁用】，禁用该物料编码。",
+        "description": "UI交互元素缺失，疑似操作列图标在 PDF 文本中丢失。",
+        "rule": "Operation",
+        "category": "术语",
+        "chapter": "启用/禁用物料状态",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is False
+    assert result.reason == "visual_control_ambiguity"
+
+
+def test_pipeline_filters_visual_layout_external_rule_issue():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "EXT-R018",
+            "category": "格式错误",
+            "severity": "suggestion",
+            "original_text": "说明书中",
+            "suggestion": "说明书中图片和图注需左对齐",
+            "description": "说明书中图片和图注需左对齐",
+            "audit_basis": "飞书多维表格 - 技术文档评审规则库",
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
 
 
 def test_run_english_heuristic_audit_detects_this_instructions_grammar_issue():
@@ -1053,6 +1373,19 @@ def test_review_ai_chunk_limit_defaults_to_ten(monkeypatch):
     monkeypatch.delenv("REVIEW_AI_MAX_CHUNKS", raising=False)
 
     assert review_api._review_ai_chunk_limit() == 10
+
+
+def test_review_ai_chunk_limit_uses_dynamic_value_under_budget(monkeypatch):
+    monkeypatch.delenv("REVIEW_AI_MAX_CHUNKS", raising=False)
+
+    assert review_api._review_ai_chunk_limit(9000) == 2
+    assert review_api._review_ai_chunk_limit(26000) == 5
+
+
+def test_review_ai_chunk_limit_caps_long_documents_by_env_budget(monkeypatch):
+    monkeypatch.setenv("REVIEW_AI_MAX_CHUNKS", "6")
+
+    assert review_api._review_ai_chunk_limit(40000) == 6
 
 
 def test_review_ai_token_budget_defaults_to_zero(monkeypatch):
@@ -1336,6 +1669,35 @@ def test_chinese_human_baseline_rules_detect_adjacent_duplicate_steps():
     issues = review_api._run_chinese_human_baseline_rules(content)
     assert any(issue["rule"] == "CYY-CN-STRUCT-001" for issue in issues)
     assert any("步骤 15 和步骤 16" in issue["suggestion"] for issue in issues if issue["rule"] == "CYY-CN-STRUCT-001")
+
+
+def test_chinese_human_baseline_rules_skip_adjacent_steps_with_different_actions_or_targets():
+    content = (
+        "1. 按需修改字典值code、字典值名称及颜色。"
+        "2. 点击【添加】，按需填写字典值code 及字典值名称，并设置标签颜色。"
+        "3. 点击【物料大类】右侧的【添加】，按需填写字典值code 及名称。"
+        "4. 点击【物料小类】右侧的【添加】，按需填写字典值code 及名称，为对应大类添加小类。"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-STRUCT-001" for issue in issues)
+
+
+def test_chinese_human_baseline_rules_skip_cross_section_step_capture():
+    content = (
+        "1. 点击弹窗中的【立即更新】，系统开始下载最新版本安装包。\n"
+        "2. 下载完成后，在弹出的界面点击【立即安装】。\n"
+        "3. 平台关闭并弹出安装窗口，在窗口中点击【Install】。安装完成后，点击【Finish】，完成更新。\n"
+        "17\n更新系统\n非强制更新\n"
+        "1) 在弹窗中点击【稍后再说】。\n"
+        "2) 在导航栏，点击 ，进入设置界面。默认进入账号与安全界面。\n"
+        "3) 点击【通用设置】>【检查更新】，系统将检查版本。\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-STRUCT-001" and "【Install】" in issue["original_text"] for issue in issues)
 
 
 def test_known_false_positive_filter_drops_placeholder_and_duplicate_ai_items():

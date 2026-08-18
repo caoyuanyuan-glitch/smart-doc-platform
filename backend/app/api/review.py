@@ -1536,6 +1536,11 @@ def _review_env_int(name, default):
         return int(default)
 
 
+def _review_env_bool(name, default=False):
+    value = str(os.getenv(name, '1' if default else '0')).strip().lower()
+    return value in {'1', 'true', 'yes', 'on'}
+
+
 def _review_content_limit(file_type):
     file_type = str(file_type or '').lower()
     if file_type == 'pdf':
@@ -1562,14 +1567,14 @@ def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
     
     默认10块，支持通过环境变量 REVIEW_AI_MAX_CHUNKS 自定义。
-    根据文档总长度动态计算：短文档直接全覆盖，长文档按比例增加。
+    根据文档总长度动态计算采样块数，并以环境预算作为上限。
     """
     env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '10'))
     if total_length <= 0:
         return env_limit
-    # 每6000字符保证至少一个块采样
-    dynamic_limit = max(1, total_length // 3000)
-    return max(env_limit, dynamic_limit)
+    # 每 6000 字符约采样 1 块，长文档仍受环境预算约束。
+    dynamic_limit = max(1, (total_length + 5999) // 6000)
+    return min(env_limit, dynamic_limit)
 
 
 def _review_ai_budget_reached(review_id, request_label='review.audit_chunk'):
@@ -2051,6 +2056,60 @@ def _filter_ai_issues_without_document_evidence_with_reasons(issues, content):
 
 def _count_ai_issues(items):
     return sum(1 for issue in items if str(issue.get('source', '') or '').lower() == 'ai')
+
+
+def _finalize_review_issues(issues, content, false_positive_signatures):
+    ai_filter_diagnostics = {
+        "initial_total": len(issues),
+        "initial_ai": _count_ai_issues(issues),
+    }
+    issues = dedupe_issues_by_original(issues)
+    ai_filter_diagnostics["after_dedup_ai"] = _count_ai_issues(issues)
+    issues = _sanitize_issue_suggestions(issues)
+    ai_filter_diagnostics["after_sanitize_ai"] = _count_ai_issues(issues)
+
+    use_legacy_post_filters = _review_env_bool('REVIEW_USE_LEGACY_POST_FILTERS', False)
+    ai_filter_diagnostics["legacy_post_filters_enabled"] = use_legacy_post_filters
+    if use_legacy_post_filters:
+        issues = _filter_review_false_positives(issues)
+        ai_filter_diagnostics["after_false_positive_ai"] = _count_ai_issues(issues)
+        issues = _filter_low_value_review_issues(issues)
+        ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
+
+    issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
+    ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
+    ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
+    issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
+    ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
+
+    pre_pipeline_issues = list(issues)
+    before_pipeline_count = len(issues)
+    issues = pipeline_select_review_issues(issues)
+    ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
+    print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+
+    recall_floor_enabled = _review_env_bool('REVIEW_RECALL_FLOOR', False)
+    ai_filter_diagnostics["recall_floor_enabled"] = recall_floor_enabled
+    if recall_floor_enabled and len(issues) < 3 and len(content or '') > 10000 and pre_pipeline_issues:
+        fallback_candidates = [
+            issue for issue in pre_pipeline_issues
+            if str(issue.get('original_text', '') or '').strip()
+            and str(issue.get('source', '') or '').lower() in ('rule', 'spellcheck', 'term')
+        ]
+        fallback_candidates = sorted(
+            fallback_candidates,
+            key=lambda item: (-pipeline_value_score(item), pipeline_sort_key(item)),
+        )
+        if fallback_candidates:
+            issues = fallback_candidates[: min(5, len(fallback_candidates))]
+            ai_filter_diagnostics["recall_floor_applied"] = True
+            print(f"[审核] 召回下限保护(仅确定性来源): 回退保留 {len(issues)} 个")
+        else:
+            ai_filter_diagnostics["recall_floor_applied"] = False
+    else:
+        ai_filter_diagnostics["recall_floor_applied"] = False
+
+    return issues, ai_filter_diagnostics
 
 
 def _issue_judgment_signature(issue):
@@ -4095,7 +4154,22 @@ def _load_cyy_human_review_basis_sections():
 
 
 def _build_ai_review_basis(spec_texts, document_language):
-    return "\n\n".join(section["text"] for section in _build_ai_review_basis_sections(spec_texts, document_language))
+    char_budget = max(1, _review_env_int('REVIEW_AI_BASIS_CHAR_BUDGET', '4200'))
+    selected = []
+    total_length = 0
+    for section in _build_ai_review_basis_sections(spec_texts, document_language):
+        text = str(section.get("text") or "").strip()
+        if not text:
+            continue
+        available = char_budget - total_length
+        if available <= 0:
+            break
+        clipped = text[:available].rstrip()
+        if not clipped:
+            continue
+        selected.append(clipped)
+        total_length += len(clipped)
+    return "\n\n".join(selected)
 
 
 def _build_ai_review_basis_sections(spec_texts, document_language):
@@ -4151,7 +4225,32 @@ _BASIS_STOPWORDS_CN = frozenset({
     "按", "通过", "进行", "使用", "用于", "说明", "文档", "内容", "步骤",
     "系统", "设备", "产品", "用户", "操作", "要求", "建议", "需要", "可以",
     "应该", "必须", "不要", "注意", "警告", "如果", "当", "时", "后", "前",
+    "一个", "一种", "一些", "这个", "那个", "这些", "那些", "相关", "问题",
+    "检查", "确认", "是否", "以及", "还有", "并且", "或者", "已经", "没有",
+    "需要", "进行", "处理", "情况", "页面", "界面", "功能", "字段", "按钮",
 })
+
+
+_BASIS_NOISE_PATTERNS = (
+    re.compile(r'^\d+$'),
+    re.compile(r'^[a-z]{1,2}$'),
+    re.compile(r'^[\W_]+$', re.UNICODE),
+)
+
+
+def _is_basis_noise_token(token):
+    token = str(token or '').strip().lower()
+    if not token:
+        return True
+    if any(pattern.match(token) for pattern in _BASIS_NOISE_PATTERNS):
+        return True
+    if token in _BASIS_STOPWORDS_EN or token in _BASIS_STOPWORDS_CN:
+        return True
+    if len(token) <= 1:
+        return True
+    if re.fullmatch(r'[a-z]+', token) and len(token) <= 2:
+        return True
+    return False
 
 
 def _extract_basis_tokens(text, max_tokens=80):
@@ -4159,7 +4258,7 @@ def _extract_basis_tokens(text, max_tokens=80):
     tokens = []
     seen = set()
     for token in re.findall(r'[a-z][a-z0-9_-]{2,}', normalized):
-        if token in _BASIS_STOPWORDS_EN or token in seen:
+        if token in seen or _is_basis_noise_token(token):
             continue
         seen.add(token)
         tokens.append(token)
@@ -4170,9 +4269,7 @@ def _extract_basis_tokens(text, max_tokens=80):
 
         for word in jieba.cut(str(text or "")):
             word = word.strip()
-            if len(word) < 2:
-                continue
-            if word in _BASIS_STOPWORDS_CN or word in _BASIS_STOPWORDS_EN or word in seen:
+            if len(word) < 2 or _is_basis_noise_token(word) or word in seen:
                 continue
             seen.add(word)
             tokens.append(word)
@@ -4180,7 +4277,7 @@ def _extract_basis_tokens(text, max_tokens=80):
                 break
     except Exception:
         for token in re.findall(r'[\u4e00-\u9fff]{2,8}', normalized):
-            if token in _BASIS_STOPWORDS_CN or token in seen:
+            if token in seen or _is_basis_noise_token(token):
                 continue
             seen.add(token)
             tokens.append(token)
@@ -4194,7 +4291,7 @@ def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, ch
         return ""
 
     content_tokens = set(_extract_basis_tokens(content, max_tokens=120))
-    min_relevance = 0.05
+    min_relevance = 0.08
     summary_entry = None
     other_ranked = []
     for index, section in enumerate(basis_sections):
@@ -4202,14 +4299,16 @@ def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, ch
         text = str(section.get("text") or "")
         section_tokens = set(_extract_basis_tokens(text, max_tokens=120))
         overlap = len(content_tokens & section_tokens)
-        relevance = overlap / max(len(section_tokens), 1)
+        token_hit_ratio = overlap / max(len(section_tokens), 1)
+        coverage_ratio = overlap / max(len(content_tokens), 1) if content_tokens else 0
+        relevance = (token_hit_ratio * 0.6) + (coverage_ratio * 0.4)
         priority = int(section.get("priority") or 0)
         is_summary = "摘要" in label or "summary" in label.lower()
         is_cyy_example = label.startswith("CYY人工审核经验基线-")
         if is_summary:
             summary_entry = (section, text, priority)
         else:
-            other_ranked.append((relevance, priority, -index, is_cyy_example, section, text))
+            other_ranked.append((relevance, overlap, priority, -index, is_cyy_example, section, text))
 
     selected = []
     total_length = 0
@@ -4219,15 +4318,16 @@ def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, ch
         selected.append((summary_entry[0], summary_text))
         total_length += len(summary_text)
 
-    other_ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    other_ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
     cyy_selected = 0
-    for relevance, _priority, _index, is_cyy_example, section, text in other_ranked:
+    cyy_budget = 1 if max_sections <= 3 else max(1, min(2, max_sections - 2))
+    for relevance, _overlap, _priority, _index, is_cyy_example, section, text in other_ranked:
         text = text.strip()
         if not text:
             continue
         if relevance < min_relevance:
             continue
-        if is_cyy_example and cyy_selected >= 1:
+        if is_cyy_example and cyy_selected >= cyy_budget:
             continue
         available = char_budget - total_length
         if available <= 0:
@@ -6009,6 +6109,14 @@ def _run_chinese_human_baseline_rules(content):
         current_norm = re.sub(r'\s+|[，。,.;；：:、“”‘’()（）【】<>《》\-]', '', current_text)
         next_norm = re.sub(r'\s+|[，。,.;；：:、“”‘’()（）【】<>《》\-]', '', next_text)
         if min(len(current_norm), len(next_norm)) < 16:
+            continue
+        if len(re.findall(r'(?<!\d)\d{1,2}[.)、]\s', current_text)) > 1 or len(re.findall(r'(?<!\d)\d{1,2}[.)、]\s', next_text)) > 1:
+            continue
+        if ('修改' in current_text and '添加' in next_text) or ('添加' in current_text and '修改' in next_text):
+            continue
+        current_labels = {label for label in re.findall(r'【([^】]+)】', current_text) if label not in {'添加', '保存', '确认', '下一步'}}
+        next_labels = {label for label in re.findall(r'【([^】]+)】', next_text) if label not in {'添加', '保存', '确认', '下一步'}}
+        if current_labels and next_labels and current_labels != next_labels:
             continue
         ratio = difflib.SequenceMatcher(None, current_norm, next_norm).ratio()
         shared_tail = len(os.path.commonprefix([current_norm[::-1], next_norm[::-1]]))
@@ -8808,48 +8916,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
-        ai_filter_diagnostics = {
-            "initial_total": len(issues),
-            "initial_ai": _count_ai_issues(issues),
-        }
-        issues = dedupe_issues_by_original(issues)
-        ai_filter_diagnostics["after_dedup_ai"] = _count_ai_issues(issues)
-        issues = _sanitize_issue_suggestions(issues)
-        ai_filter_diagnostics["after_sanitize_ai"] = _count_ai_issues(issues)
-        issues = _filter_review_false_positives(issues)
-        ai_filter_diagnostics["after_false_positive_ai"] = _count_ai_issues(issues)
-        issues = _filter_low_value_review_issues(issues)
-        ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
-        issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
-        ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
-        ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
-        issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
-        ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
-        pre_pipeline_issues = list(issues)
-        before_pipeline_count = len(issues)
-        issues = pipeline_select_review_issues(issues)
-        ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
-        print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+        issues, ai_filter_diagnostics = _finalize_review_issues(issues, content, false_positive_signatures)
 
-        validation_dropped = _stage_input_counts.get("dedup_and_validation", before_pipeline_count) - len(issues)
+        validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
 
         retained_ai_count = sum(1 for issue in issues if str(issue.get('source', '') or '').lower() == 'ai')
         if retained_ai_count:
             print(f"[审核] AI问题最终保留数量={retained_ai_count}")
-        if len(issues) < 3 and len(content or '') > 10000 and pre_pipeline_issues:
-            fallback_candidates = [
-                issue for issue in pre_pipeline_issues
-                if str(issue.get('original_text', '') or '').strip()
-                and str(issue.get('source', '') or '').lower() in ('rule', 'spellcheck', 'term')
-            ]
-            fallback_candidates = sorted(
-                fallback_candidates,
-                key=lambda item: (-pipeline_value_score(item), pipeline_sort_key(item)),
-            )
-            if fallback_candidates:
-                issues = fallback_candidates[: min(5, len(fallback_candidates))]
-                print(f"[审核] 召回下限保护(仅确定性来源): 回退保留 {len(issues)} 个")
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
