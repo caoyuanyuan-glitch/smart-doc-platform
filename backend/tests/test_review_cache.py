@@ -4,6 +4,8 @@ import re
 from types import SimpleNamespace
 
 from app.api import review as review_api
+from app.api import review_rules
+from app.crud import rule as crud_rule
 from app.review_engine import pipeline as review_pipeline
 from app.review_engine import validation as review_validation
 
@@ -28,6 +30,9 @@ def test_review_cache_version_tracks_review_basis_files():
     for path in review_api.REVIEW_BASIS_VERSION_FILES:
         assert path in review_api.REVIEW_CACHE_VERSION_FILES
 
+    assert review_api.PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py" in review_api.REVIEW_CACHE_VERSION_FILES
+    assert review_api.PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json" in review_api.REVIEW_CACHE_VERSION_FILES
+
 
 def test_find_cached_completed_review_matches_cache_key(monkeypatch):
     expected_key = "cache-key-1"
@@ -51,6 +56,83 @@ def test_find_cached_completed_review_matches_cache_key(monkeypatch):
 
     assert review.id == 12
     assert summary["total"] == 3
+
+
+def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
+    payload = {
+        "source": "外部评审规则库",
+        "export_date": "2026-08-17",
+        "rules": [{
+            "rule_id": "R013",
+            "rule_content": "标点符号使用必须符合规范",
+            "category": "格式",
+            "severity": "一般",
+            "applicable_scenarios": ["PDF"],
+        }],
+    }
+    existing = SimpleNamespace(
+        rule_no="EXT-R013",
+        category="旧分类",
+        description="旧规则",
+        regex="old-regex",
+        example="old-example",
+        suggestion="old-suggestion",
+        audit_basis="old-basis",
+        severity="serious",
+        language="cn",
+    )
+    commits = []
+    db = SimpleNamespace(add=lambda item: None, commit=lambda: commits.append(True))
+
+    monkeypatch.setattr(
+        crud_rule,
+        "REVIEW_RULE_LIBRARY_SEED_PATH",
+        SimpleNamespace(
+            exists=lambda: True,
+            read_text=lambda encoding="utf-8": json.dumps(payload, ensure_ascii=False),
+        ),
+    )
+    monkeypatch.setattr(crud_rule, "get_rule_by_no", lambda db_obj, rule_no: existing if rule_no == "EXT-R013" else None)
+
+    changed = crud_rule.seed_external_review_rules(db)
+
+    assert changed == 1
+    assert existing.description == "标点符号使用必须符合规范"
+    assert existing.regex == "(?!)"
+    assert existing.severity == "general"
+    assert existing.language == "both"
+    assert commits == [True]
+
+
+def test_convert_rule_content_to_regex_disables_ui_bracket_semantic_rule():
+    regex = crud_rule._convert_rule_content_to_regex(
+        "仅可交互UI元素（按钮、菜单、输入框、选项等）使用【】标注，界面名称/标题（如主界面、测序界面等）不使用【】"
+    )
+
+    assert regex == "(?!)"
+
+
+def test_convert_rule_content_to_regex_disables_quote_semantic_rule():
+    regex = crud_rule._convert_rule_content_to_regex(
+        "文档中所有需要使用引号的场景统一使用双引号，不得混用单引号"
+    )
+
+    assert regex == "(?!)"
+
+
+def test_review_rules_do_not_hardcode_single_quote_or_screen_name_as_errors():
+    punctuation_patterns = {rule["pattern"] for rule in review_rules.CHINESE_PUNCTUATION_RULES}
+    terminology_patterns = {rule["pattern"] for rule in review_rules.CHINESE_TERMINOLOGY_RULES}
+
+    assert r"[\u2018\u2019]" not in punctuation_patterns
+    assert r"【测序界面】" not in terminology_patterns
+
+
+def test_system_prompt_keeps_ui_bracket_guidance_without_forcing_screen_names():
+    prompt = review_rules.SYSTEM_PROMPT_TEMPLATE
+
+    assert "仅按钮、菜单、输入框、选项等可交互UI元素使用【】标注；界面名称和标题保持原文写法" in prompt
+    assert "单引号仅在明确影响语义或格式规范时报告" in prompt
 
 
 def test_find_cached_completed_review_skips_non_completed(monkeypatch):
@@ -255,6 +337,26 @@ def test_pipeline_filters_single_char_punctuation_rule_issue():
             "suggestion": "文档中标点符号使用必须符合规范",
             "description": "单字符标点噪声",
             "audit_basis": "标点规范",
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
+
+
+def test_pipeline_filters_quote_rule_without_quote_evidence():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "EXT-R011",
+            "category": "格式错误",
+            "severity": "general",
+            "original_text": "不能",
+            "context": "A 不能。盘点状态下的物料将被系统锁定。",
+            "suggestion": "文档中所有需要使用引号的场景统一使用双引号，不得混用单引号",
+            "description": "文档中所有需要使用引号的场景统一使用双引号，不得混用单引号",
+            "audit_basis": "引号规范",
         }
     ]
 
@@ -514,6 +616,23 @@ def test_validate_ai_issue_candidate_accepts_local_grammar_fix():
     assert result.reason == "accepted"
 
 
+def test_validate_ai_issue_candidate_accepts_digestive_spelling_fix():
+    issue = {
+        "source": "ai",
+        "original_text": "Disgestive Buffer 250 uL per tube",
+        "suggestion": "Digestive Buffer 250 uL per tube",
+        "description": "",
+        "rule": "Spelling",
+        "chapter": "Reagents",
+        "audit_basis": "basis",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["original_text"])
+
+    assert result.accepted is True
+    assert result.reason == "accepted"
+
+
 def test_validate_ai_issue_candidate_rejects_high_overlap_style_rewrite():
     issue = {
         "source": "ai",
@@ -750,11 +869,10 @@ def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):
     assert "total_tokens=150" in output
 
 
-def test_review_ai_chunk_limit_defaults_to_eight(monkeypatch):
+def test_review_ai_chunk_limit_defaults_to_ten(monkeypatch):
     monkeypatch.delenv("REVIEW_AI_MAX_CHUNKS", raising=False)
 
-    # P0-2: 默认上限已从 8 提升到 32，支持动态计算
-    assert review_api._review_ai_chunk_limit() == 32
+    assert review_api._review_ai_chunk_limit() == 10
 
 
 def test_review_ai_token_budget_defaults_to_zero(monkeypatch):

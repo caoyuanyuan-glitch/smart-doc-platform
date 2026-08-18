@@ -1,3 +1,4 @@
+from app.utils import ai_client as ai_client_module
 from app.utils.ai_client import AIClient
 
 
@@ -163,3 +164,23 @@ def test_audit_document_does_not_rechunk_large_content(monkeypatch):
 
     assert result == {"issues": []}
     assert captured == [("qwen", 9000, "review.audit_chunk", 7)]
+
+
+def test_provider_limits_default_to_single_retry_and_45s_read_timeout(monkeypatch):
+    monkeypatch.delenv("AI_PROVIDER_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("AI_PROVIDER_READ_TIMEOUT", raising=False)
+
+    timeout = ai_client_module._provider_http_timeout()
+
+    assert ai_client_module._provider_max_attempts() == 2
+    assert timeout.read == 45.0
+
+
+def test_provider_limits_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("AI_PROVIDER_READ_TIMEOUT", "20")
+
+    timeout = ai_client_module._provider_http_timeout()
+
+    assert ai_client_module._provider_max_attempts() == 4
+    assert timeout.read == 20.0

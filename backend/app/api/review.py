@@ -86,8 +86,10 @@ REVIEW_BASIS_VERSION_FILES = [
 ]
 REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "app" / "review_engine" / "pipeline.py",
+    PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "document_parser.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "spell_checker.py",
+    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json",
     Path(__file__).resolve(),
 ] + REVIEW_BASIS_VERSION_FILES
 
@@ -1559,10 +1561,10 @@ def _review_ai_token_budget():
 def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
     
-    默认32块，支持通过环境变量 REVIEW_AI_MAX_CHUNKS 自定义。
+    默认10块，支持通过环境变量 REVIEW_AI_MAX_CHUNKS 自定义。
     根据文档总长度动态计算：短文档直接全覆盖，长文档按比例增加。
     """
-    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '32'))
+    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '10'))
     if total_length <= 0:
         return env_limit
     # 每6000字符保证至少一个块采样

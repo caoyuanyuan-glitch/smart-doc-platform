@@ -235,6 +235,8 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return True
     if rule in LOW_VALUE_RULES:
         return True
+    if rule == "EXT-R011" and not re.search(r"['\"“”‘’]", f"{original} {context}"):
+        return True
     if rule in {"EXT-R011", "EXT-R013"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE):
         return True
     if rule == "TERM-001" and re.fullmatch(r"click", original, re.IGNORECASE) and re.fullmatch(r"tap", suggestion, re.IGNORECASE):

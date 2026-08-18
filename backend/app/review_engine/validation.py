@@ -178,6 +178,21 @@ def ai_suggestion_changes_protected_meaning(original: Any, suggestion: Any) -> b
         suggestion_terms = set(re.findall(r"[a-z][a-z0-9-]{2,}", suggestion.lower()))
         changed_terms = original_terms - suggestion_terms
         added_terms = suggestion_terms - original_terms
+        if changed_terms and added_terms and len(changed_terms) == len(added_terms):
+            remaining_changed = set(changed_terms)
+            paired = 0
+            for added_term in added_terms:
+                matched = None
+                for changed_term in remaining_changed:
+                    if _tokens_look_like_meaningful_fix_pair(changed_term, added_term):
+                        matched = changed_term
+                        break
+                if matched is None:
+                    break
+                remaining_changed.remove(matched)
+                paired += 1
+            if paired == len(added_terms):
+                return False
         if changed_terms and added_terms and len(changed_terms | added_terms) >= 2:
             return True
     return False

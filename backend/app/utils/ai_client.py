@@ -97,6 +97,23 @@ def _env_float(name, default):
         return float(default)
 
 
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _provider_max_attempts():
+    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
+
+
+def _provider_http_timeout():
+    connect_timeout = max(1.0, _env_float("AI_PROVIDER_CONNECT_TIMEOUT", "30"))
+    read_timeout = max(5.0, _env_float("AI_PROVIDER_READ_TIMEOUT", "45"))
+    return httpx.Timeout(connect_timeout, read=read_timeout)
+
+
 def _strip_code_fence(text):
     if not text:
         return ""
@@ -134,7 +151,7 @@ class AIClient:
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
-        timeout = httpx.Timeout(30.0, read=180.0)
+        timeout = _provider_http_timeout()
 
         self.qwen_client = OpenAI(
             api_key=self.qwen_api_key,
@@ -533,7 +550,7 @@ class AIClient:
         if not self.qwen_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -568,7 +585,7 @@ class AIClient:
         if not self.deepseek_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -603,7 +620,7 @@ class AIClient:
         if not self.arkclaw_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -638,7 +655,7 @@ class AIClient:
         if not self.kimi_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -699,7 +716,8 @@ class AIClient:
         if not self.mcai_available:
             return None
         import time as _time
-        for attempt in range(1, 4):
+        max_attempts = _provider_max_attempts()
+        for attempt in range(1, max_attempts + 1):
             try:
                 started_at = _time.time()
                 headers = {
@@ -716,7 +734,7 @@ class AIClient:
                     f"{self.mcai_base_url}/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=180.0,
+                    timeout=max(5.0, _env_float("AI_PROVIDER_READ_TIMEOUT", "45")),
                 )
                 if r.status_code == 200:
                     content = r.text.strip()
@@ -747,15 +765,15 @@ class AIClient:
                         if content.startswith('"') and content.endswith('"'):
                             content = json.loads(content)
                         return content
-                if r.status_code == 429 and attempt < 3:
+                if r.status_code == 429 and attempt < max_attempts:
                     wait = 2 ** attempt
-                    print(f"[AI] MCAI Proxy 429，等待{wait}s后重试 ({attempt}/3)")
+                    print(f"[AI] MCAI Proxy 429，等待{wait}s后重试 ({attempt}/{max_attempts})")
                     _time.sleep(wait)
                     continue
                 print(f"[AI] MCAI Proxy 错误: HTTP {r.status_code} {r.text[:100]}")
                 return None
             except Exception as e:
-                if "429" in str(e) and attempt < 3:
+                if "429" in str(e) and attempt < max_attempts:
                     _time.sleep(2 ** attempt)
                     continue
                 print(f"[AI] MCAI Proxy 调用失败: {str(e)[:100]}")
@@ -789,7 +807,7 @@ class AIClient:
 
         if providers:
             print(f"[AI] providers={', '.join(name for name, _, _ in providers)}")
-            max_retries = 3
+            max_retries = _provider_max_attempts()
             retry_delay = 2
             is_translation_request = str(request_label or "").startswith("translation.")
             for name, client, model in providers:
@@ -893,7 +911,7 @@ class AIClient:
                            request_label=request_label, review_id=review_id)
         
         print(f"[AI] chat_with_provider: using {name} ({model})")
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         is_translation_request = str(request_label or "").startswith("translation.")
         

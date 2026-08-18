@@ -30,12 +30,17 @@ def _convert_rule_content_to_regex(rule_content: str) -> str:
     content = rule_content.strip()
     patterns = []
 
-    if "标点符号" in content and ("遗漏" in content or "缺少" in content):
-        patterns.append(r"(?<![.!?。！？])(?:[A-Za-z][^.!?。！？\n]{2,})$")
+    if "标点符号" in content:
+        return r"(?!)"
+
+    if "仅可交互UI元素" in content:
+        return r"(?!)"
+
+    if "统一使用双引号" in content and "单引号" in content:
+        return r"(?!)"
 
     # 预定义的规则→正则映射（基于29条种子规则手工整理）
     RULE_PATTERN_MAP = {
-        "仅可交互UI元素": r"【[^】]*】|（[^）]*设置[^）]*）",
         "公司官网地址": r"https?://[^\s]+mgi[^\s]*",
         "多余的(空格|空行)": r"[ ]{2,}|\n{3,}",
         "双引号": r"[\'\"](.*?)[\'\"]",
@@ -45,7 +50,6 @@ def _convert_rule_content_to_regex(rule_content: str) -> str:
         "错别字.*避免.*不避免": r"不避免",
         "成语": r"周而复始|恰如其分|千丝万缕|不言而喻|一目了然|举足轻重",
         "文言化": r"未尽事宜|鉴于|据此|兹",
-        "标点符号": r"[。，！？；：、\"\"''（）【】《》…—\-,.!?;:\"'()]",
         "引号": r"[\'\"]{2,}|[\u201c\u201d\u2018\u2019]",
         "同义表述": r"(?:点击|轻触|按|按压|长按|双击)",
         "术语.*不一致": r"(?:试剂盒|试剂|样本|标本)",
@@ -82,6 +86,7 @@ def seed_external_review_rules(db: Session):
     source = payload.get("source", "外部评审规则库")
     export_date = payload.get("export_date", "")
     created = 0
+    updated = 0
 
     for item in payload.get("rules", []):
         original_rule_id = str(item.get("rule_id", "")).strip()
@@ -89,9 +94,6 @@ def seed_external_review_rules(db: Session):
             continue
 
         rule_no = f"EXT-{original_rule_id}"
-        if get_rule_by_no(db, rule_no):
-            continue
-
         rule_content = item.get("rule_content") or ""
         category = item.get("category") or "其他"
         chinese_severity = item.get("severity", "一般")
@@ -101,22 +103,45 @@ def seed_external_review_rules(db: Session):
         # 将规则内容转为可执行的正则表达式
         regex = _convert_rule_content_to_regex(rule_content)
 
+        example = f"来源: {source} | 适用场景: {scenarios}"
+        audit_basis = f"{source}{' | 导出日期: ' + export_date if export_date else ''}"
+        existing = get_rule_by_no(db, rule_no)
+        if existing:
+            changed = False
+            updates = {
+                "category": category,
+                "description": rule_content,
+                "regex": regex,
+                "example": example,
+                "suggestion": rule_content,
+                "audit_basis": audit_basis,
+                "severity": severity,
+                "language": "both",
+            }
+            for field, value in updates.items():
+                if getattr(existing, field) != value:
+                    setattr(existing, field, value)
+                    changed = True
+            if changed:
+                updated += 1
+            continue
+
         db.add(Rule(
             rule_no=rule_no,
             category=category,
             description=rule_content,
             regex=regex,
-            example=f"来源: {source} | 适用场景: {scenarios}",
+            example=example,
             suggestion=rule_content,
-            audit_basis=f"{source}{' | 导出日期: ' + export_date if export_date else ''}",
+            audit_basis=audit_basis,
             severity=severity,
             language="both",
         ))
         created += 1
 
-    if created:
+    if created or updated:
         db.commit()
-    return created
+    return created + updated
 
 def create_rule(db: Session, rule: RuleCreate):
     db_rule = Rule(
