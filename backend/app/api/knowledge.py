@@ -18,6 +18,7 @@ from app.models.knowledge import Folder, KnowledgeFile
 from app.schemas.user import UserOut
 from app.api.auth import get_current_active_user, require_admin
 from app.utils.file_utils import read_file_safe
+from app.utils.runtime_paths import runtime_knowledge_dir
 
 PERMISSION_READ = "read"
 PERMISSION_EDIT = "edit"
@@ -130,7 +131,7 @@ def _build_visible_folder_payload(folder: Folder, current_user: UserOut):
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
+UPLOAD_DIR = str(runtime_knowledge_dir())
 
 
 def _format_tabular_preview(rows, max_rows: int = 20, max_columns: int = 12) -> str:

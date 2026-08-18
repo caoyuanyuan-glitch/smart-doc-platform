@@ -7,9 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models.knowledge import Folder, KnowledgeFile
+from app.utils.runtime_paths import repo_seed_dir, runtime_knowledge_dir, runtime_memory_seed_dir
 
-SEED_DIR = Path(__file__).parent / "knowledge"
-TARGET_DIR = Path(__file__).parent.parent / "app" / "static" / "knowledge"
+SEED_DIR = repo_seed_dir()
+TARGET_DIR = runtime_knowledge_dir()
+RUNTIME_MEMORY_SEED_DIR = runtime_memory_seed_dir()
 SUPPORTED_SEED_FILE_TYPES = {
     ".csv",
     ".doc",
@@ -29,6 +31,7 @@ def seed_knowledge_base():
     """增量同步：种子目录中的文件夹/文件如在 DB 中不存在则创建，已存在则跳过。"""
     db = SessionLocal()
     try:
+        _merge_runtime_memory_seed_into_repo_seed()
         created = _sync_from_seed(db, SEED_DIR, parent_id=None, parent_path="")
         if created:
             db.commit()
@@ -41,6 +44,18 @@ def seed_knowledge_base():
         raise
     finally:
         db.close()
+
+
+def _merge_runtime_memory_seed_into_repo_seed():
+    if not RUNTIME_MEMORY_SEED_DIR.exists():
+        return
+    for source in sorted(RUNTIME_MEMORY_SEED_DIR.rglob("*")):
+        if source.is_dir():
+            continue
+        relative_path = source.relative_to(RUNTIME_MEMORY_SEED_DIR)
+        target = SEED_DIR / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _sync_from_seed(db: Session, current_dir: Path, parent_id: int | None, parent_path: str) -> int:
