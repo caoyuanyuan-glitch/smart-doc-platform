@@ -823,6 +823,63 @@ def test_validate_ai_issue_candidate_rejects_dnb_rationale_completion():
     assert result.reason == "protected_meaning_changed"
 
 
+def test_validate_ai_issue_candidate_rejects_visual_icon_gap_from_pdf_text_loss():
+    issue = {
+        "source": "ai",
+        "original_text": "双击计算机桌面软件图标 启动操作软件。",
+        "suggestion": "请补充需要双击的具体软件图标名称，避免仅写图标。",
+        "description": "操作步骤缺少具体图标对象，用户无法确定点击哪个图标。",
+        "rule": "Completeness",
+        "category": "操作步骤",
+        "chapter": "开机与软件准备",
+        "audit_basis": "basis",
+        "context": "4. 先按计算机电源按钮开机，再按仪器电源开关，启动仪器。5. 双击计算机桌面软件图标 启动操作软件。6. 等待软件完成自检流程。",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["context"])
+
+    assert result.accepted is False
+    assert result.reason == "visual_control_ambiguity"
+
+
+def test_validate_ai_issue_candidate_rejects_visual_button_gap_from_pdf_text_loss():
+    issue = {
+        "source": "ai",
+        "original_text": "点击采集模式后方的 按钮，可设置模式参数。",
+        "suggestion": "请补充该按钮或图标的具体名称，避免用户无法定位。",
+        "description": "操作步骤缺少具体按钮对象。",
+        "rule": "Completeness",
+        "category": "操作步骤",
+        "chapter": "采集模式",
+        "audit_basis": "basis",
+        "context": "实时显示眼底图像。点击采集模式后方的 按钮，可设置模式参数。显示相应眼别的采集任务。",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["context"])
+
+    assert result.accepted is False
+    assert result.reason == "visual_control_ambiguity"
+
+
+def test_validate_ai_issue_candidate_keeps_true_missing_ui_object_issue():
+    issue = {
+        "source": "ai",
+        "original_text": "点击【仓库标签】行的,弹出仓库标签编辑窗口。",
+        "suggestion": "点击【仓库标签】行末【操作】栏的【编辑】图标，弹出仓库标签编辑窗口。",
+        "description": "操作步骤缺少具体操作对象，无法确定点击位置。",
+        "rule": "Completeness",
+        "category": "操作步骤",
+        "chapter": "仓库标签",
+        "audit_basis": "basis",
+        "context": "字典管理 > 仓库标签。点击【仓库标签】行的,弹出仓库标签编辑窗口。",
+    }
+
+    result = review_validation.validate_ai_issue_candidate(issue, issue["context"])
+
+    assert result.accepted is True
+    assert result.reason == "accepted"
+
+
 def test_run_english_heuristic_audit_detects_this_instructions_grammar_issue():
     issues = review_api._run_english_heuristic_audit(
         "This instructions for use describes how to perform sequencing.",
@@ -1106,6 +1163,56 @@ def test_chinese_human_baseline_rules_cover_spacing_figure_and_info_completeness
         "CYY-CN-LOGIC-006",
         "CYY-CN-INFO-001",
     }.issubset(rules)
+
+
+def test_chinese_human_baseline_rules_cover_alpha_lab_manual_gaps():
+    content = (
+        "需先选择标准计量单位，再选择包装单位及转化系数。例如：标准计量单位选‘个’，包装单位选‘箱’且转换系数设为10。"
+        "首次登录前点击【图标】打开弹窗确认服务地址和机构。具体操作，参考第31页‘设置服务器地址和机构代码’。"
+        "在左侧菜单栏点击【系统管理】。其余步骤写为在左侧导航栏点击【角色管理】。"
+        "Q：如何区分同步物料与自增物料？A：系统支持手动新增普通物料。"
+        "图59图注为修改密码界面，正文步骤均写为重置密码。"
+        "处理器：X86 架构，8核及以上。默认安装在C盘，可点击【Browse】可选择目标安装目录。"
+        "按照界面指引，拖拽αLab Studio 软件图标到右侧的Application 文件夹进行安装。安装完成后，点击【Install】开始安装系统，点击【Finish】完成安装。"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+    originals = {issue["original_text"] for issue in issues}
+    rules = {issue["rule"] for issue in issues}
+
+    assert {
+        "转化系数",
+        "服务地址",
+        "左侧菜单栏",
+        "自增物料",
+        "修改密码界面",
+        "X86 架构",
+        "可点击【Browse】可选择",
+    }.issubset(originals)
+    assert any("【Install】" in issue["original_text"] and "【Finish】" in issue["original_text"] for issue in issues)
+    assert {
+        "CYY-CN-CONSIST-009",
+        "CYY-CN-CONSIST-010",
+        "CYY-CN-CONSIST-011",
+        "CYY-CN-CONSIST-012",
+        "CYY-CN-CONSIST-013",
+        "CYY-CN-TERM-005",
+        "CYY-CN-GRAMMAR-007",
+        "CYY-CN-LOGIC-007",
+    }.issubset(rules)
+
+
+def test_chinese_human_baseline_rules_detect_adjacent_duplicate_steps():
+    content = (
+        "14. 核对入库信息。"
+        "15. 在入库定位界面右侧选择目标库位，左侧填写待分配物料数量，点击【保存】，回到入库定位页签。"
+        "16. 在入库定位界面左侧填写待分配物料数量，点击【保存】，回到入库定位页签。"
+        "17. 继续下一步操作。"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+    assert any(issue["rule"] == "CYY-CN-STRUCT-001" for issue in issues)
+    assert any("步骤 15 和步骤 16" in issue["suggestion"] for issue in issues if issue["rule"] == "CYY-CN-STRUCT-001")
 
 
 def test_known_false_positive_filter_drops_placeholder_and_duplicate_ai_items():

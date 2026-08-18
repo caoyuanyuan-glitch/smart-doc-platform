@@ -368,6 +368,29 @@ def ai_suggestion_is_speculative_completion(original: Any, suggestion: Any) -> b
     return False
 
 
+def ai_issue_is_visual_control_ambiguity(issue: dict[str, Any], original: str, suggestion: str, description: str) -> bool:
+    issue_blob = " ".join([
+        normalize_report_text(issue_value(issue, "rule", "")),
+        normalize_report_text(issue_value(issue, "category", "")),
+        description,
+        suggestion,
+    ])
+    if not re.search(r"missing\s+(?:specific\s+)?(?:object|icon|button)|缺少.*?(?:按钮|图标|对象)|控件名称|click", issue_blob, re.IGNORECASE):
+        return False
+
+    evidence_text = " ".join([
+        original,
+        normalize_report_text(issue_value(issue, "context", "")),
+    ])
+    if not re.search(r"\b(?:icon|button|toolbar|menu)\b|图标|按钮|工具栏|菜单", evidence_text, re.IGNORECASE):
+        return False
+
+    if re.search(r"【[^】]+】行的", evidence_text):
+        return False
+
+    return True
+
+
 def validate_ai_issue_candidate(issue: dict[str, Any], content: str) -> ValidationResult:
     original = normalize_report_text(issue_value(issue, "original_text", ""))
     suggestion = normalize_report_text(issue_value(issue, "suggestion", ""))
@@ -411,6 +434,8 @@ def validate_ai_issue_candidate(issue: dict[str, Any], content: str) -> Validati
         return ValidationResult(False, "aggressive_rewrite")
     if suggestion and ai_suggestion_is_speculative_completion(original, suggestion):
         return ValidationResult(False, "speculative_completion")
+    if ai_issue_is_visual_control_ambiguity(issue, original, suggestion, description):
+        return ValidationResult(False, "visual_control_ambiguity")
     if suggestion and ai_suggestion_is_low_value_english_rewrite(original, suggestion):
         return ValidationResult(False, "low_value_english_rewrite")
     return ValidationResult(True, "accepted")

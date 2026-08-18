@@ -5748,6 +5748,11 @@ def _run_chinese_human_baseline_rules(content):
         ('Catalog Number', 'Cat. No.', 'CYY-CN-CONSIST-004', '术语一致性', '建议统一为“Catalog Number”或“Cat. No.”中的一种', '全称与缩写混用时应明确统一口径。'),
         ('外周血单个核细胞', 'PBMC', 'CYY-CN-CONSIST-005', '术语一致性', '建议统一为“PBMC”或“外周血单个核细胞”中的一种', '缩写与中文全称并存时应统一术语口径。'),
         ('RNA 质量', 'RNA 完整性', 'CYY-CN-CONSIST-006', '术语一致性', '建议统一为“RNA 完整性”或“RNA 质量”中的一种', '同一质量概念在全文中应保持统一。'),
+        ('转化系数', '转换系数', 'CYY-CN-CONSIST-009', '术语一致性', '建议统一为“转换系数”或与界面实际文案保持一致', '同一字段名称在同一文档中应保持统一。'),
+        ('服务地址', '服务器地址', 'CYY-CN-CONSIST-010', '术语一致性', '建议统一为“服务器地址”或按界面实际文案确认', '同一配置项名称在正文和交叉引用中应保持一致。'),
+        ('左侧菜单栏', '左侧导航栏', 'CYY-CN-CONSIST-011', '术语一致性', '建议统一为“左侧导航栏”或按界面设计规范确认', '同一界面区域名称在全文中应保持统一。'),
+        ('自增物料', '手动新增普通物料', 'CYY-CN-CONSIST-012', '术语一致性', '建议统一为“手动新增物料”或明确“自增物料”的定义', '问题与答案中的物料术语应前后呼应。'),
+        ('修改密码界面', '重置密码', 'CYY-CN-CONSIST-013', '术语一致性', '建议统一为“重置密码界面”或按界面标题核实后统一', '图注名称与正文功能名称应保持一致。'),
     ]
     for original, paired, rule, category, suggestion, description in consistency_pairs:
         start = normalized.find(original)
@@ -5777,6 +5782,37 @@ def _run_chinese_human_baseline_rules(content):
             '建议统一为“图1”“图 1”或“Figure 1”中的一种编号格式',
             '同一图号在正文中的写法不一致，图表编号格式需要统一。',
             'CYY人工审核经验基线 - 图表编号格式统一', 'general', 92,
+        )
+
+    for match in re.finditer(r'X86\s*架构', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-TERM-005', '术语一致性',
+            '建议统一为“x86 架构”',
+            '处理器架构名称通常使用小写 x86。',
+            'CYY人工审核经验基线 - 英文大小写统一', 'general', 90,
+        )
+
+    for match in re.finditer(r'可点击【Browse】可选择', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-007', '表达与句式',
+            '建议改为“点击【Browse】可选择目标安装目录”或“可点击【Browse】选择目标安装目录”',
+            '同一句中“可…可…”重复，影响语句通顺。',
+            'CYY人工审核经验基线 - 中文步骤句式简化', 'general', 91,
+        )
+
+    mac_install_conflict = re.search(
+        r'拖拽αLab\s*Studio\s*软件图标到右侧的Application\s*文件夹进行安装[^。]*。[^。]*【Install】[^。]*【Finish】',
+        normalized,
+    )
+    if mac_install_conflict:
+        add_issue(
+            mac_install_conflict.start(), mac_install_conflict.end(), mac_install_conflict.group(0),
+            'CYY-CN-LOGIC-007', '内容逻辑',
+            '建议核对 MacOS 安装流程；若为拖拽安装，应删除【Install】【Finish】向导式步骤',
+            'MacOS 拖拽安装与 Windows 安装向导式按钮同时出现，流程逻辑存在冲突。',
+            'CYY人工审核经验基线 - 跨平台安装流程一致性', 'serious', 94,
         )
 
     for match in re.finditer(r'表3列出了试剂盒的5个组分。', normalized):
@@ -5931,6 +5967,33 @@ def _run_chinese_human_baseline_rules(content):
             '人工审核意见指出 NMPA 通常提供纸质说明书，需要确认电子版说明书表述是否合规。',
             'CYY人工审核经验基线 - NMPA说明书提供形式确认', 'serious', 90,
         )
+
+    step_pattern = re.compile(r'(?<!\d)(\d{1,2})[.、]\s*(.+?)(?=(?:\s*\d{1,2}[.、]\s)|$)', re.S)
+    step_rows = [(int(match.group(1)), match.start(), match.group(2).strip()) for match in step_pattern.finditer(content)]
+    for index in range(len(step_rows) - 1):
+        current_no, current_start, current_text = step_rows[index]
+        next_no, next_start, next_text = step_rows[index + 1]
+        if next_no != current_no + 1:
+            continue
+        current_norm = re.sub(r'\s+|[，。,.;；：:、“”‘’()（）【】<>《》\-]', '', current_text)
+        next_norm = re.sub(r'\s+|[，。,.;；：:、“”‘’()（）【】<>《》\-]', '', next_text)
+        if min(len(current_norm), len(next_norm)) < 16:
+            continue
+        ratio = difflib.SequenceMatcher(None, current_norm, next_norm).ratio()
+        shared_tail = len(os.path.commonprefix([current_norm[::-1], next_norm[::-1]]))
+        if current_norm in next_norm or next_norm in current_norm or ratio >= 0.68 or shared_tail >= 14:
+            add_issue(
+                next_start,
+                min(len(content), next_start + len(next_text)),
+                f'{next_no}. {next_text}',
+                'CYY-CN-STRUCT-001',
+                '步骤结构',
+                f'建议核对步骤 {current_no} 和步骤 {next_no} 是否重复；如为同一动作，请合并或明确差异',
+                '相邻步骤文本高度重复，可能存在复制残留或步骤拆分不当。',
+                'CYY人工审核经验基线 - 相邻步骤重复检查',
+                'general',
+                89,
+            )
 
     return issues
 

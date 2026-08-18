@@ -246,7 +246,6 @@
           <el-table :data="reviews" border>
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
           <el-table-column prop="id" label="任务ID" width="80" />
-          <el-table-column prop="document_id" label="文档ID" width="80" />
           <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
           <el-table-column label="模式" width="140">
             <template #default="scope">
@@ -283,7 +282,11 @@
               <span v-else style="color:#999">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="created_at" label="开始时间" width="160" />
+          <el-table-column label="开始时间" width="180">
+            <template #default="scope">
+              {{ formatDateTime(scope.row.created_at) }}
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="360" fixed="right">
             <template #default="scope">
               <el-button 
@@ -1836,8 +1839,20 @@ function formatSize(size) {
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleString('zh-CN')
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(dateStr)
+    ? dateStr
+    : `${dateStr}Z`
+  const date = new Date(normalized)
+  if (Number.isNaN(date.getTime())) return String(dateStr).replace('T', ' ').slice(0, 19)
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date).replace(/\//g, '-')
 }
 
 function beforeUpload(file) {
