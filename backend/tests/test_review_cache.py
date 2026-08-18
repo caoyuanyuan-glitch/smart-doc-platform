@@ -212,6 +212,126 @@ def test_list_reviews_supports_filters(monkeypatch):
     assert result[0]["progress"]["progress"] == 42
 
 
+def test_export_review_excel_appends_red_opinion_columns(tmp_path, monkeypatch):
+    from openpyxl import Workbook, load_workbook
+
+    upload_dir = tmp_path / "uploads"
+    export_dir = tmp_path / "exports"
+    upload_dir.mkdir()
+    export_dir.mkdir()
+
+    workbook_path = upload_dir / "demo.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["中文", "英文"])
+    ws.append(["保存", "Save"])
+    wb.save(workbook_path)
+
+    monkeypatch.setattr(review_api, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(review_api, "REVIEW_EXPORT_DIR", export_dir)
+    monkeypatch.setattr(review_api, "_select_export_issues", lambda payload: payload)
+
+    document = SimpleNamespace(filename="demo.xlsx")
+    review = SimpleNamespace(id=18)
+    issues = [{
+        "severity": "general",
+        "category": "格式问题",
+        "rule": "XLS-FMT-001",
+        "description": "英文译文存在连续空格。",
+        "suggestion": "建议改为 Save",
+        "status": "pending",
+        "source": "excel",
+        "confidence": 95,
+        "position": review_api._encode_issue_position_with_meta(0, 0, sheet="Sheet1", row=2, source_column=1, target_column=2),
+    }]
+
+    export_path, _, _ = review_api._export_review_excel(review, document, issues)
+
+    exported = load_workbook(export_path)
+    ws = exported["Sheet1"]
+    assert ws.cell(row=1, column=3).value == "审核意见"
+    assert ws.cell(row=2, column=3).value == "[格式问题] 英文译文存在连续空格。 → Save"
+    assert ws.cell(row=2, column=3).font.color.type == "rgb"
+    assert ws.cell(row=2, column=3).font.color.rgb.endswith("FF0000")
+    assert ws.cell(row=2, column=4).value == "待修改"
+    assert ws.cell(row=2, column=5).value == 1
+
+
+def test_generate_excel_review_html_content_groups_rows(monkeypatch):
+    monkeypatch.setattr(review_api, "_format_report_datetime", lambda value=None: "2026-08-18 12:00:00 (UTC+8)")
+    monkeypatch.setattr(review_api, "_select_export_issues", lambda payload: payload)
+    review = SimpleNamespace(id=16, document_id=8, created_at=None, completed_at=None)
+    document = SimpleNamespace(filename="demo.xlsx", file_type="xlsx")
+    issues = [
+        {
+            "severity": "serious",
+            "category": "完整性",
+            "rule": "XLS-COMP-002",
+            "description": "英文译文为空，需补充。",
+            "suggestion": "补充英文译文",
+            "context": "中文: 保存 | 英文: ",
+            "status": "pending",
+            "source": "excel",
+            "confidence": 95,
+            "position": review_api._encode_issue_position_with_meta(0, 0, sheet="Sheet1", row=2, source_column=1, target_column=2),
+        }
+    ]
+
+    html = review_api._generate_excel_review_html_content(review, document, issues)
+
+    assert "Excel 审核报告" in html
+    assert "Sheet1 / 第 2 行" in html
+    assert "英文译文为空，需补充。 → 补充英文译文" in html
+    assert "命中行数" in html
+
+
+def test_run_excel_review_audit_covers_manual_excel_findings(tmp_path, monkeypatch):
+    from openpyxl import Workbook
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    workbook_path = upload_dir / "manual-gap.xlsx"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["中文", "英文"])
+    ws.append(["系统设置", "System Settings"])
+    ws.append(["长按3s启动", "Press and hold for 3s to start"])
+    ws.append(["时间日期   ", "Date&Time"])
+    ws.append(["目标速度-", "Target Speed"])
+    ws.append(["目标角度-", "Traget Angle"])
+    ws.append(["错误信息", "Error message"])
+    ws.append(["确认恢复出厂设置", "Confirm factory reset?"])
+    ws.append(["确认固件升级", "Confirm to start firmware upgrade?"])
+    ws.append(["确认结束老化测试", "Confirm to end aging test?"])
+    ws.append(["确认清除老化次数", "Confirm to clear aging count?"])
+    ws.append(["语言设置", "Language"])
+    wb.save(workbook_path)
+
+    monkeypatch.setattr(review_api, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(review_api, "get_terms", lambda db, limit=10000: [])
+
+    issues = review_api._run_excel_review_audit(None, SimpleNamespace(filename="manual-gap.xlsx"))
+
+    original_texts = {issue["original_text"] for issue in issues}
+    rules = {issue["rule"] for issue in issues}
+
+    assert "System Settings" not in original_texts
+    assert "Press and hold for 3s to start" not in original_texts
+    assert "Traget Angle" in original_texts
+    assert "Confirm to start firmware upgrade?" in original_texts
+    assert "Confirm to end aging test?" in original_texts
+    assert "Confirm to clear aging count?" in original_texts
+    assert "XLS-CN-FMT-001" in rules
+    assert "XLS-CN-FMT-002" in rules
+    assert "XLS-PUNCT-001" in rules
+    assert "XLS-PAIR-001" in rules
+    assert "XLS-EN-STYLE-002" in rules
+    assert "XLS-LANG-003" in rules
+
+
 def test_select_relevant_ai_review_basis_prefers_matching_sections():
     sections = [
         {"label": "通用风格", "text": "【通用风格】\n统一标点和语法。", "priority": 2},

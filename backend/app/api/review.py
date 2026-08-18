@@ -2835,14 +2835,26 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
     source_to_targets = {}
     target_to_sources = {}
     terms = get_terms(db, limit=10000)
+    semantic_pair_suggestions = {
+        ('语言设置', 'Language'): ('suggestion', 'XLS-PAIR-001', '语义对等', '建议统一为“语言 / Language”或“Language Settings”', '中文“语言设置”对应英文“Language”缺少“设置”语义。', 'Excel中英语义对等检查'),
+        ('锁屏时间', 'Lock Screen Timeout Period'): ('suggestion', 'XLS-PAIR-002', '语义对等', '建议中文改为“锁屏超时时间”，或英文调整为更贴近“锁屏时间”的表达', '英文包含 Timeout（超时）语义，当前中文未体现。', 'Excel中英语义对等检查'),
+        ('日志信息', 'Logs'): ('suggestion', 'XLS-PAIR-003', '语义对等', '建议统一为“日志 / Logs”或补齐中英结构对应关系', '中文“日志信息”与英文“Logs”结构不完全对等。', 'Excel中英语义对等检查'),
+        ('时间日期', 'Date&Time'): ('general', 'XLS-PAIR-004', '语义对等', '建议统一为“日期时间 / Date&Time”', '中英词序不一致，建议统一术语表达。', 'Excel中英语义对等检查'),
+    }
+    confirm_to_suggestions = {
+        'Confirm to start firmware upgrade?': 'Confirm firmware upgrade?',
+        'Confirm to end aging test?': 'End aging test?',
+        'Confirm to clear aging count?': 'Clear aging count?',
+    }
 
     for row in rows:
         source = row['source_text']
         target = row['target_text']
+        source_stripped = source.strip()
         if source:
-            source_to_targets.setdefault(source.strip(), {}).setdefault(target.strip(), []).append(row['row_number'])
+            source_to_targets.setdefault(source_stripped, {}).setdefault(target.strip(), []).append(row['row_number'])
         if target:
-            target_to_sources.setdefault(target.strip().lower(), {}).setdefault(source.strip(), []).append(row['row_number'])
+            target_to_sources.setdefault(target.strip().lower(), {}).setdefault(source_stripped, []).append(row['row_number'])
 
         if not source:
             issues.append(_excel_issue(row, '完整性', 'XLS-COMP-001', 'serious', target, '补充中文原文', '中文原文为空，需补充。', 'Excel翻译对照表完整性检查'))
@@ -2850,6 +2862,21 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
             issues.append(_excel_issue(row, '完整性', 'XLS-COMP-002', 'serious', source, '补充英文译文', '英文译文为空，需补充。', 'Excel翻译对照表完整性检查'))
         if source.strip() and target.strip() and source.strip() == target.strip() and (_looks_chinese_text(source) or _looks_english_text(source)):
             issues.append(_excel_issue(row, '完整性', 'XLS-COMP-003', 'general', target, '确认是否已完成翻译', '原文与译文完全相同，需确认是否漏翻。', 'Excel翻译对照表完整性检查'))
+
+        if source:
+            if source != source_stripped:
+                issues.append(_excel_issue(row, '格式问题', 'XLS-CN-FMT-001', 'general', source, f'建议改为 {source_stripped}', '中文原文首尾存在多余空格。', 'Excel中文界面字符串格式检查'))
+            if source_stripped.endswith('-'):
+                issues.append(_excel_issue(row, '格式问题', 'XLS-CN-FMT-002', 'serious', source, f'建议改为 {source_stripped.rstrip("-")}', '中文原文尾部存在疑似残留连字符。', 'Excel中文界面字符串格式检查'))
+
+        if source_stripped and target.strip():
+            pair_rule = semantic_pair_suggestions.get((source_stripped, target.strip()))
+            if pair_rule:
+                severity, rule, category, suggestion, description, basis = pair_rule
+                issues.append(_excel_issue(row, category, rule, severity, f'{source_stripped} → {target.strip()}', suggestion, description, basis))
+
+        if source_stripped and target.strip().endswith('?') and not re.search(r'[？?]$', source_stripped):
+            issues.append(_excel_issue(row, '标点对等', 'XLS-PUNCT-001', 'suggestion', f'{source_stripped} → {target.strip()}', f'建议中文改为 {source_stripped}？', '英文为疑问句，中文建议补齐问号保持标点对等。', 'Excel中英标点对等检查'))
 
         if target:
             target_stripped = target.strip()
@@ -2881,15 +2908,16 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
                 'Blue Tooth': 'Bluetooth',
                 'Bar Code': 'Barcode',
                 'Exit system': 'Exit the system',
-                'System Setting': 'System Settings',
-                'Press the button': 'Click the button',
+                'Traget': 'Target',
             }
             for wrong, right in replacements.items():
                 if wrong.lower() in target.lower():
-                    spelling_errors = {'Delet', 'Sav e', 'Edite', 'C opy', 'recieve', 'teh', 'Blue Tooth'}
+                    spelling_errors = {'Delet', 'Sav e', 'Edite', 'C opy', 'recieve', 'teh', 'Blue Tooth', 'Traget'}
                     format_errors = {'Bar Code'}
                     category = '拼写错误' if wrong in spelling_errors else '格式问题' if wrong in format_errors else '语法错误'
                     issues.append(_excel_issue(row, category, 'XLS-LANG-001', 'serious', target, f'建议改为 {right}', f'发现常见语言问题：{wrong}', 'Excel界面字符串语言质量检查'))
+            if target_stripped == 'Error message':
+                issues.append(_excel_issue(row, '英文风格', 'XLS-EN-STYLE-002', 'general', target, '建议改为 Error Message', '标题式大小写建议与同类界面项保持一致。', 'Excel界面字符串大小写一致性检查'))
             if re.search(r'\binput\b', target, re.IGNORECASE):
                 issues.append(_excel_issue(row, '语法错误', 'XLS-LANG-002', 'serious', target, re.sub(r'\binput\b', 'enter', target, flags=re.IGNORECASE), '界面输入提示建议使用 enter。', '英文技术文档写作风格指南'))
             if source.startswith('请'):
@@ -2902,8 +2930,11 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
             }
             if source.strip() in concise_source_suggestions:
                 issues.append(_excel_issue(row, '中文建议', 'XLS-CN-STYLE-002', 'suggestion', source, concise_source_suggestions[source.strip()], '中文界面文案建议更简洁。', '中文技术文档写作风格指南'))
-            if re.search(r'\bPress\b', target, re.IGNORECASE):
+            if re.search(r'\bPress\b', target, re.IGNORECASE) and not re.search(r'\bpress and hold\b', target, re.IGNORECASE):
                 issues.append(_excel_issue(row, '英文风格', 'XLS-EN-STYLE-001', 'suggestion', target, re.sub(r'\bPress\b', 'Click', target, flags=re.IGNORECASE), '界面操作建议使用 Click。', '英文技术文档写作风格指南'))
+            confirm_to_suggestion = confirm_to_suggestions.get(target_stripped)
+            if confirm_to_suggestion:
+                issues.append(_excel_issue(row, '语法错误', 'XLS-LANG-003', 'serious', target, f'建议改为 {confirm_to_suggestion}', '英文存在 Confirm to ... 结构，表达不自然。', 'Excel界面字符串语言质量检查'))
 
         for term in terms:
             non_standard = str(getattr(term, 'non_standard', '') or '').strip()
@@ -6237,7 +6268,10 @@ def _export_review_html_file(review, document, issues):
     REVIEW_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     export_name = _build_review_export_filename(document.filename if document else "review", review.id, ".html")
     export_path = REVIEW_EXPORT_DIR / export_name
-    html = _generate_review_html_content(review, document, issues)
+    if getattr(document, 'file_type', '') == 'xlsx':
+        html = _generate_excel_review_html_content(review, document, issues)
+    else:
+        html = _generate_review_html_content(review, document, issues)
     export_path.write_text(html, encoding="utf-8")
     return export_path, export_name, "text/html; charset=utf-8"
 
@@ -6247,8 +6281,185 @@ def _excel_issue_position(issue):
     return str(position.get('sheet', '') or ''), int(position.get('row', 0) or 0)
 
 
+def _excel_issue_sort_key(issue):
+    severity_order = {'fatal': 0, 'serious': 1, 'general': 2, 'suggestion': 3}
+    severity = str(_issue_value(issue, 'severity', 'general') or 'general').lower()
+    return severity_order.get(severity, 9), str(_issue_value(issue, 'category', '') or ''), str(_issue_value(issue, 'rule', '') or '')
+
+
+def _build_excel_row_export_payload(row_issues):
+    opinions = []
+    has_term_issue = False
+    for issue in sorted(row_issues, key=_excel_issue_sort_key):
+        category = _issue_value(issue, 'category', '问题') or '问题'
+        description = _issue_value(issue, 'description', '') or _issue_value(issue, 'original_text', '')
+        suggestion = _format_issue_suggestion(issue)
+        text = f"[{category}] {description}"
+        if suggestion and suggestion != '-':
+            text += f" → {suggestion}"
+        opinions.append(text)
+        if category == '术语不一致':
+            has_term_issue = True
+    return {
+        'opinions': opinions,
+        'status': '需确认' if has_term_issue else '待修改',
+        'count': len(row_issues),
+    }
+
+
+def _collect_excel_issue_rows(issues):
+    grouped = defaultdict(list)
+    for issue in _select_export_issues(issues):
+        sheet_name, row_number = _excel_issue_position(issue)
+        if not sheet_name or row_number <= 0:
+            continue
+        grouped[(sheet_name, row_number)].append(issue)
+
+    rows = []
+    for (sheet_name, row_number), row_issues in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        sorted_issues = sorted(row_issues, key=_excel_issue_sort_key)
+        payload = _build_excel_row_export_payload(sorted_issues)
+        rows.append({
+            'sheet': sheet_name,
+            'row_number': row_number,
+            'issues': sorted_issues,
+            'opinions': payload['opinions'],
+            'status': payload['status'],
+            'count': payload['count'],
+            'context': _issue_value(sorted_issues[0], 'context', '') or '-',
+            'highest_severity': _format_issue_severity(_issue_value(sorted_issues[0], 'severity', 'general')),
+        })
+    return rows
+
+
+def _generate_excel_review_html_content(review, document, issues):
+    doc_name = getattr(document, 'filename', '') or f"文档{review.document_id}"
+    rows = _collect_excel_issue_rows(issues)
+    selected_issues = [issue for row in rows for issue in row['issues']]
+    severity_counts = Counter(str(_issue_value(issue, 'severity', 'general') or 'general') for issue in selected_issues)
+    sheet_count = len({row['sheet'] for row in rows})
+    row_cards = []
+    for index, row in enumerate(rows, start=1):
+        opinion_html = ''.join(f"<li>{html_lib.escape(opinion)}</li>" for opinion in row['opinions'])
+        issue_html = ''.join(
+            (
+                "<tr>"
+                f"<td>{html_lib.escape(_format_issue_severity(_issue_value(issue, 'severity', 'general')))}</td>"
+                f"<td>{html_lib.escape(str(_issue_value(issue, 'category', '-') or '-'))}</td>"
+                f"<td>{html_lib.escape(str(_issue_value(issue, 'description', '-') or '-'))}</td>"
+                f"<td>{html_lib.escape(_format_issue_suggestion(issue))}</td>"
+                "</tr>"
+            )
+            for issue in row['issues']
+        )
+        row_cards.append(f"""
+        <section class="row-card">
+          <div class="row-head">
+            <div>
+              <div class="row-index">#{index:03d}</div>
+              <h3>{html_lib.escape(row['sheet'])} / 第 {row['row_number']} 行</h3>
+            </div>
+            <div class="row-meta">
+              <span>{html_lib.escape(row['highest_severity'])}</span>
+              <span>{row['count']} 条问题</span>
+              <span>{html_lib.escape(row['status'])}</span>
+            </div>
+          </div>
+          <div class="context-box">{html_lib.escape(str(row['context'] or '-'))}</div>
+          <div class="opinion-box">
+            <div class="box-title">审核意见</div>
+            <ul>{opinion_html}</ul>
+          </div>
+          <table>
+            <thead>
+              <tr><th>级别</th><th>分类</th><th>问题说明</th><th>修改建议</th></tr>
+            </thead>
+            <tbody>{issue_html}</tbody>
+          </table>
+        </section>
+        """)
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Excel 审核报告 - {html_lib.escape(doc_name)}</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; padding: 24px; font-family: 'Microsoft YaHei', Arial, sans-serif; background: #edf3f8; color: #1f2937; }}
+    .container {{ max-width: 1180px; margin: 0 auto; background: #fff; border-radius: 24px; overflow: hidden; box-shadow: 0 18px 50px rgba(18, 39, 69, 0.12); }}
+    .hero {{ padding: 34px 38px 40px; background: linear-gradient(135deg, #153f70, #2f76c9); color: #fff; }}
+    .hero h1 {{ margin: 0 0 10px; font-size: 30px; }}
+    .hero p {{ margin: 0; max-width: 780px; line-height: 1.75; color: rgba(255,255,255,0.84); }}
+    .meta {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: -22px 32px 0; padding: 14px; background: rgba(255,255,255,0.96); border: 1px solid #d8e4f2; border-radius: 20px; }}
+    .meta-card {{ background: linear-gradient(180deg, #ffffff, #f8fbff); border: 1px solid #e2eaf5; border-radius: 16px; padding: 14px 16px; }}
+    .meta-label {{ font-size: 12px; color: #64748b; margin-bottom: 8px; }}
+    .meta-value {{ font-weight: 700; line-height: 1.5; }}
+    .section {{ padding: 28px 32px 0; }}
+    .summary-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
+    .summary-card {{ border-radius: 18px; padding: 18px 14px; color: #fff; text-align: center; }}
+    .summary-card .num {{ font-size: 28px; font-weight: 800; }}
+    .summary-card .label {{ margin-top: 6px; font-size: 13px; }}
+    .fatal {{ background: linear-gradient(135deg, #b91c1c, #ef4444); }}
+    .serious {{ background: linear-gradient(135deg, #d97706, #f59e0b); }}
+    .general {{ background: linear-gradient(135deg, #4b5563, #6b7280); }}
+    .suggestion {{ background: linear-gradient(135deg, #15803d, #22c55e); }}
+    .intro {{ padding: 18px 20px; border: 1px solid #dbe4ee; border-radius: 18px; background: linear-gradient(180deg, #f8fbff, #f1f6fc); line-height: 1.8; color: #334155; }}
+    .rows {{ display: grid; gap: 16px; padding-bottom: 32px; }}
+    .row-card {{ border: 1px solid #dbe4ee; border-radius: 20px; padding: 18px; background: #fff; box-shadow: 0 8px 24px rgba(17, 38, 64, 0.06); }}
+    .row-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }}
+    .row-head h3 {{ margin: 4px 0 0; color: #163c69; font-size: 20px; }}
+    .row-index {{ color: #64748b; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }}
+    .row-meta {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .row-meta span {{ display: inline-block; padding: 6px 10px; border-radius: 999px; background: #eef5fb; color: #163c69; font-size: 12px; font-weight: 700; }}
+    .context-box {{ padding: 12px 14px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }}
+    .opinion-box {{ margin-top: 12px; padding: 14px 16px; border-radius: 14px; border: 1px solid #fecaca; background: #fff5f5; }}
+    .box-title {{ color: #b91c1c; font-weight: 800; margin-bottom: 8px; }}
+    .opinion-box ul {{ margin: 0; padding-left: 20px; color: #b91c1c; line-height: 1.8; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 14px; }}
+    th, td {{ border: 1px solid #e7edf5; padding: 12px 14px; text-align: left; vertical-align: top; }}
+    th {{ background: #f6f9fd; color: #163f6f; }}
+    .empty {{ padding: 28px; border: 1px dashed #cbd5e1; border-radius: 16px; text-align: center; color: #64748b; background: #fff; }}
+    .footer {{ padding: 0 32px 28px; color: #64748b; font-size: 12px; }}
+    @media (max-width: 920px) {{ .meta, .summary-grid {{ grid-template-columns: 1fr; }} .row-head {{ flex-direction: column; }} body {{ padding: 16px; }} .hero {{ padding: 28px 22px 36px; }} .section, .footer {{ padding-left: 22px; padding-right: 22px; }} .meta {{ margin: -20px 22px 0; }} }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>Excel 审核报告</h1>
+      <p>本报告按工作表和行号汇总 Excel 审核问题，便于直接回写译文对照表并执行逐行修订。</p>
+    </div>
+    <div class="meta">
+      <div class="meta-card"><div class="meta-label">文档名称</div><div class="meta-value">{html_lib.escape(doc_name)}</div></div>
+      <div class="meta-card"><div class="meta-label">审核时间</div><div class="meta-value">{_format_report_datetime(getattr(review, 'completed_at', None) or getattr(review, 'created_at', None))}</div></div>
+      <div class="meta-card"><div class="meta-label">工作表数量</div><div class="meta-value">{sheet_count}</div></div>
+      <div class="meta-card"><div class="meta-label">命中行数</div><div class="meta-value">{len(rows)}</div></div>
+    </div>
+    <div class="section">
+      <div class="summary-grid">
+        <div class="summary-card fatal"><div class="num">{severity_counts.get('fatal', 0)}</div><div class="label">致命问题</div></div>
+        <div class="summary-card serious"><div class="num">{severity_counts.get('serious', 0)}</div><div class="label">严重问题</div></div>
+        <div class="summary-card general"><div class="num">{severity_counts.get('general', 0)}</div><div class="label">一般问题</div></div>
+        <div class="summary-card suggestion"><div class="num">{severity_counts.get('suggestion', 0)}</div><div class="label">建议项</div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="intro">Excel 导出文件会在原始正文右侧追加“审核意见 / 审核状态 / 问题数量”三列，其中“审核意见”使用红色字体并开启自动换行。HTML 报告与导出文件使用同一套行级问题汇总逻辑。</div>
+    </div>
+    <div class="section">
+      <div class="rows">{''.join(row_cards) if row_cards else '<div class="empty">当前没有可导出的 Excel 审核问题。</div>'}</div>
+    </div>
+    <div class="footer">Review Task #{review.id}</div>
+  </div>
+</body>
+</html>"""
+
+
 def _export_review_excel(review, document, issues):
     from openpyxl import load_workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     source_path = _get_document_upload_path(document)
     if not source_path or not source_path.exists():
@@ -6261,12 +6472,14 @@ def _export_review_excel(review, document, issues):
     shutil.copyfile(source_path, export_path)
 
     wb = load_workbook(export_path)
-    issues_by_row = {}
-    for issue in _select_export_issues(issues):
-        sheet_name, row_number = _excel_issue_position(issue)
-        if not sheet_name or row_number <= 0:
-            continue
-        issues_by_row.setdefault((sheet_name, row_number), []).append(issue)
+    issues_by_row = {
+        (row['sheet'], row['row_number']): row
+        for row in _collect_excel_issue_rows(issues)
+    }
+    header_fill = PatternFill("solid", fgColor="E8F1FF")
+    header_font = Font(bold=True)
+    opinion_font = Font(color="FF0000")
+    top_wrap_alignment = Alignment(vertical="top", wrap_text=True)
 
     for ws in wb.worksheets:
         opinion_col = ws.max_column + 1
@@ -6275,28 +6488,31 @@ def _export_review_excel(review, document, issues):
         ws.cell(row=1, column=opinion_col, value="审核意见")
         ws.cell(row=1, column=status_col, value="审核状态")
         ws.cell(row=1, column=count_col, value="问题数量")
+        for column in (opinion_col, status_col, count_col):
+            header_cell = ws.cell(row=1, column=column)
+            header_cell.font = header_font
+            header_cell.fill = header_fill
+            header_cell.alignment = top_wrap_alignment
+        ws.column_dimensions[get_column_letter(opinion_col)].width = 60
+        ws.column_dimensions[get_column_letter(status_col)].width = 14
+        ws.column_dimensions[get_column_letter(count_col)].width = 10
         for row_number in range(2, ws.max_row + 1):
-            row_issues = issues_by_row.get((ws.title, row_number), [])
-            if not row_issues:
-                ws.cell(row=row_number, column=opinion_col, value="—")
-                ws.cell(row=row_number, column=status_col, value="确认无误")
-                ws.cell(row=row_number, column=count_col, value=0)
+            row_payload = issues_by_row.get((ws.title, row_number))
+            opinion_cell = ws.cell(row=row_number, column=opinion_col)
+            status_cell = ws.cell(row=row_number, column=status_col)
+            count_cell = ws.cell(row=row_number, column=count_col)
+            opinion_cell.alignment = top_wrap_alignment
+            status_cell.alignment = top_wrap_alignment
+            count_cell.alignment = top_wrap_alignment
+            if not row_payload:
+                opinion_cell.value = "—"
+                status_cell.value = "确认无误"
+                count_cell.value = 0
                 continue
-            opinions = []
-            has_term_issue = False
-            for issue in row_issues:
-                category = _issue_value(issue, 'category', '问题') or '问题'
-                description = _issue_value(issue, 'description', '') or _issue_value(issue, 'original_text', '')
-                suggestion = _format_issue_suggestion(issue)
-                text = f"[{category}] {description}"
-                if suggestion and suggestion != '-':
-                    text += f" → {suggestion}"
-                opinions.append(text)
-                if category == '术语不一致':
-                    has_term_issue = True
-            ws.cell(row=row_number, column=opinion_col, value="\n".join(opinions))
-            ws.cell(row=row_number, column=status_col, value="需确认" if has_term_issue else "待修改")
-            ws.cell(row=row_number, column=count_col, value=len(row_issues))
+            opinion_cell.value = "\n".join(row_payload['opinions'])
+            opinion_cell.font = opinion_font
+            status_cell.value = row_payload['status']
+            count_cell.value = row_payload['count']
 
     wb.save(export_path)
     return export_path, export_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -10128,6 +10344,8 @@ async def export_review_html(
     issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(doc, 'content', None))
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html = _generate_compare_review_html_content(review, doc)
+    elif getattr(doc, 'file_type', '') == 'xlsx':
+        html = _generate_excel_review_html_content(review, doc, issues)
     else:
         html = _generate_review_html_content(review, doc, issues)
     return HTMLResponse(content=html)
@@ -10163,6 +10381,8 @@ async def generate_report(
     issues = _visible_review_issues(get_issues(db, review_id=review_id))
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html_content = _generate_compare_review_html_content(review, document)
+    elif getattr(document, 'file_type', '') == 'xlsx':
+        html_content = _generate_excel_review_html_content(review, document, issues)
     else:
         html_content = _generate_review_html_content(review, document, issues)
     return {"content": html_content, "format": "html"}
