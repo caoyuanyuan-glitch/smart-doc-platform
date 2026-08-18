@@ -189,6 +189,21 @@ export const compareAPI = {
   getPreviewFileUrl: (id, side) => `/api/compare/${id}/preview/file?side=${side}`,
 }
 
+export const competitorAPI = {
+  create: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/competitor/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000
+    })
+  },
+  list: (params = {}) => instance.get('/competitor/', { params }),
+  get: (id) => instance.get(`/competitor/${id}`),
+  delete: (id) => instance.delete(`/competitor/${id}`),
+  getReport: (id) => instance.get(`/competitor/${id}/report`, { params: { format: 'md' } }),
+}
+
 export const rulesAPI = {
   list: () => instance.get('/rules/'),
   create: (rule) => instance.post('/rules/', rule),

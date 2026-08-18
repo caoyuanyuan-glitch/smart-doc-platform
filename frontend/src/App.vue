@@ -181,6 +181,15 @@
               <el-menu-item index="/compare/tasks">历史任务</el-menu-item>
             </el-sub-menu>
 
+            <el-sub-menu index="competitor-sub">
+              <template #title>
+                <el-icon><DataAnalysis /></el-icon>
+                <span>竞品分析</span>
+              </template>
+              <el-menu-item index="/competitor">上传分析</el-menu-item>
+              <el-menu-item index="/competitor/tasks">历史任务</el-menu-item>
+            </el-sub-menu>
+
             <el-sub-menu index="convert-sub">
               <template #title>
                 <el-icon><Refresh /></el-icon>
@@ -263,7 +272,7 @@ import { useUserStore } from '@/store/user'
 import { qaAPI, systemAPI } from '@/api'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
-  Files, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
+  Files, DataAnalysis, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
   Edit, Setting, Message
 } from '@element-plus/icons-vue'
 
