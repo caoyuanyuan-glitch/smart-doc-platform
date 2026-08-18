@@ -65,7 +65,8 @@ class AIClient:
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
         self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "20")
-        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "30")
+        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "10")
+        self.translation_timeout = _env_float("TRANSLATION_TIMEOUT", "60")
 
         self.proxy_api_key = os.getenv("OPENAI_API_KEY")
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
