@@ -63,12 +63,6 @@
             <p>研发/文档工程师账号登录，进入工作台高效处理文档工作。</p>
           </div>
 
-          <div class="account-tip">
-            <el-icon class="account-tip-icon"><InfoFilled /></el-icon>
-            <span class="account-tip-label">测试账号</span>
-            <strong>admin / admin123</strong>
-          </div>
-
           <el-form
             ref="formRef"
             :model="form"
@@ -128,7 +122,6 @@ import {
   Collection,
   DocumentChecked,
   EditPen,
-  InfoFilled,
   Lock,
   User,
 } from '@element-plus/icons-vue'

@@ -30,26 +30,23 @@
           </el-select>
         </el-form-item>
           <el-form-item label="AI 模型" v-if="engine !== 'memory'">
-            <el-select v-model="model" placeholder="选择AI模型" style="width: 160px">
-              <el-option label="Kimi (Moonshot)" value="kimi" />
-              <el-option label="DeepSeek Chat" value="deepseek" />
-              <el-option label="ArkClaw Chat" value="arkclaw" />
+            <el-select v-model="model" placeholder="选择AI模型" style="width: 180px" :loading="providerLoading">
+              <el-option
+                v-for="option in availableModelOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
             </el-select>
           </el-form-item>
+          <span v-if="engine !== 'memory'" class="model-status-hint">{{ providerHintText }}</span>
         <el-form-item label="语言">
           <el-select v-model="sourceLang" style="width: 100px">
-            <el-option label="自动" value="auto" />
-            <el-option label="中文" value="zh" />
-            <el-option label="英文" value="en" />
+            <el-option v-for="option in sourceLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
           <el-icon class="swap-icon" @click="swapLanguages"><Sort /></el-icon>
           <el-select v-model="targetLang" style="width: 100px">
-            <el-option label="英文" value="en" />
-            <el-option label="中文" value="zh" />
-            <el-option label="日文" value="ja" />
-            <el-option label="韩文" value="ko" />
-            <el-option label="法文" value="fr" />
-            <el-option label="德文" value="de" />
+            <el-option v-for="option in targetLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -87,6 +84,11 @@
               <span class="card-header-title">翻译结果</span>
               <div v-if="result" class="result-meta">
                 <el-tag v-if="resultSourceTag" :type="resultSourceTag.type" size="small">{{ resultSourceTag.label }}</el-tag>
+                <div class="result-usage-stats">
+                  <span>总字数 {{ Number(result.source_word_count || 0).toLocaleString() }}</span>
+                  <span>AI {{ Number(result.ai_word_count || 0).toLocaleString() }}</span>
+                  <span>记忆库 {{ Number(result.memory_word_count || 0).toLocaleString() }}</span>
+                </div>
               </div>
             </div>
           </template>
@@ -103,6 +105,11 @@
           </div>
 
           <div v-if="result && !translating" class="result-content">
+            <div class="result-usage-stats result-usage-stats-panel">
+              <span>总字数 {{ Number(result.source_word_count || 0).toLocaleString() }}</span>
+              <span>AI {{ Number(result.ai_word_count || 0).toLocaleString() }}</span>
+              <span>记忆库 {{ Number(result.memory_word_count || 0).toLocaleString() }}</span>
+            </div>
             <el-input
               v-if="editingResult"
               v-model="translatedDraft"
@@ -166,12 +173,23 @@ import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
+import { TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
-
+import {
+  buildAvailableTranslationModels,
+  FALLBACK_TRANSLATION_MODELS,
+  getTranslationProviderHint,
+  TRANSLATION_SOURCE_LANGUAGE_OPTIONS,
+  TRANSLATION_TARGET_LANGUAGE_OPTIONS
+} from '@/utils/translationOptions'
 const engine = ref('hybrid')
 const model = ref('kimi')
 const sourceLang = ref('auto')
 const targetLang = ref('en')
+const providerLoading = ref(false)
+const providerStatus = ref(null)
+const sourceLanguageOptions = TRANSLATION_SOURCE_LANGUAGE_OPTIONS
+const targetLanguageOptions = TRANSLATION_TARGET_LANGUAGE_OPTIONS
 
 function swapLanguages() {
   if (sourceLang.value === 'auto') {
@@ -220,7 +238,12 @@ function syncWritableMemorySelection(preferredId = null) {
     return
   }
 
-  memoryWriteFileId.value = writableFiles[0]?.id ?? null
+  if (writableFiles.length === 1) {
+    memoryWriteFileId.value = writableFiles[0].id
+    return
+  }
+
+  memoryWriteFileId.value = null
 }
 
 const selectedMemoryWriteFile = computed(() => {
@@ -231,6 +254,16 @@ const selectedMemoryWriteFile = computed(() => {
   return writableMemoryLibraryFiles.value.find(file => String(file.id) === String(currentId)) || null
 })
 const canWriteMemory = computed(() => Boolean(selectedMemoryWriteFile.value))
+const availableModelOptions = computed(() => {
+  const options = buildAvailableTranslationModels(providerStatus.value)
+  if (options.length > 0) {
+    return options
+  }
+  return providerStatus.value ? [] : FALLBACK_TRANSLATION_MODELS
+})
+const providerHintText = computed(() => {
+  return getTranslationProviderHint(providerStatus.value, model.value, providerLoading.value)
+})
 const currentTranslatedText = computed(() => editingResult.value ? translatedDraft.value : (result.value?.translated || ''))
 const resultSourceTag = computed(() => {
   const fromMemory = Boolean(result.value?.from_memory)
@@ -248,8 +281,33 @@ const resultSourceTag = computed(() => {
 })
 
 onMounted(async () => {
-  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
+  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
 })
+
+function syncSelectedModel() {
+  if (engine.value === 'memory') {
+    return
+  }
+  const options = availableModelOptions.value
+  if (options.some((option) => option.value === model.value)) {
+    return
+  }
+  const preferred = String(providerStatus.value?.default_provider || '').trim().toLowerCase()
+  model.value = options.find((option) => option.value === preferred)?.value || options[0]?.value || 'kimi'
+}
+
+async function loadProviders() {
+  providerLoading.value = true
+  try {
+    const res = await translationAPI.getProviderStatus()
+    providerStatus.value = res.data || null
+  } catch (e) {
+    providerStatus.value = null
+  } finally {
+    providerLoading.value = false
+    syncSelectedModel()
+  }
+}
 
 async function loadMemoryBanks() {
   try {
@@ -276,7 +334,7 @@ async function loadMemoryLibraryFiles() {
 }
 
 function onEngineChange(val) {
-  // no-op now
+  syncSelectedModel()
 }
 
 async function translateText() {
@@ -300,6 +358,7 @@ async function translateText() {
     translatedDraft.value = res.data.translated || ''
     editingResult.value = false
     syncWritableMemorySelection(memoryFileId.value)
+    window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT))
     ElMessage.success('翻译完成')
   } catch (e) {
     ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
@@ -361,7 +420,8 @@ async function writeToMemoryLibrary() {
       source_lang: sourceLang.value,
       target_lang: targetLang.value
     })
-    ElMessage.success('已写入选中的记忆库 Excel 文件')
+    const targetName = selectedMemoryWriteFile.value?.name || '选中的记忆库 Excel 文件'
+    ElMessage.success(`已写入 ${targetName}`)
   } catch (e) {
     ElMessage.error('写入记忆库失败: ' + (e.response?.data?.detail || e.message))
   } finally {
@@ -427,6 +487,14 @@ function downloadResult() {
 
 .config-form-inline :deep(.el-form-item) {
   margin-bottom: 4px;
+}
+
+.model-status-hint {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .swap-icon {
@@ -522,7 +590,24 @@ function downloadResult() {
 
 .result-meta {
   display: flex;
-  gap: 6px;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.result-usage-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.result-usage-stats-panel {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .result-empty {

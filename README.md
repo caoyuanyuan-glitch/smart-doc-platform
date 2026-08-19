@@ -67,6 +67,18 @@ npm run dev
 
 ---
 
+## 服务器白名单持久化
+
+专用服务器部署时，在服务器的 `runtime.env` 中配置以下路径。该目录应使用服务器持久化磁盘，平台用户新增、编辑、导入和删除的白名单词条都会写入此文件，并在后端重启后自动加载。
+
+```env
+WHITELIST_DATA_FILE=/var/lib/smart-doc-platform/whitelist.json
+```
+
+本地开发环境未配置该变量时，后端继续使用 `backend/app/data/whitelist.json`，与服务器运行数据保持隔离。
+
+---
+
 ## 功能模块
 
 | 模块 | 文件 | 功能 |

@@ -92,6 +92,7 @@ if [ ! -f "$BACKEND_DIR/.env" ]; then
         log_warn "未找到 .env 文件！请手动创建 $BACKEND_DIR/.env"
         log_warn "参考内容:"
         log_warn "  KIMI_API_KEY=sk-xxx"
+        log_warn "  MOONSHOT_API_KEY=sk-xxx"
         log_warn "  KIMI_MODEL=moonshot-v1-8k"
         log_warn "  DEFAULT_MODEL_PROVIDER=kimi"
     fi

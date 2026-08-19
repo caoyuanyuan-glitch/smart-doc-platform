@@ -157,34 +157,6 @@
           暂无原始输出数据
         </div>
       </el-dialog>
-
-      <el-dialog v-model="templateDialogVisible" title="上传模板文件" width="min(520px, 90vw)">
-        <el-upload
-          ref="templateUploadRef"
-          class="template-dialog-upload"
-          action="#"
-          :auto-upload="false"
-          :show-file-list="false"
-          :limit="1"
-          accept=".txt,.md,.json,.xml,.html,.docx,.pdf"
-          :on-change="handleTemplateDialogChange"
-          :on-exceed="handleTemplateExceed"
-          drag
-        >
-          <div class="upload-drag-area">
-            <div class="upload-drag-icon">+</div>
-            <div class="upload-drag-text">将文件拖到此处，或点击选择</div>
-            <div class="upload-drag-hint">支持 .txt .md .json .xml .html .docx .pdf</div>
-          </div>
-        </el-upload>
-        <div v-if="templateFile" style="margin-top: 12px; padding: 8px 12px; background: #f0f9eb; border-radius: 6px; font-size: 13px; color: #374151;">
-          已选择：{{ templateFile.name }} ({{ (templateFile.size / 1024).toFixed(1) }} KB)
-        </div>
-        <template #footer>
-          <el-button @click="templateDialogVisible = false; templateFile = null">取消</el-button>
-          <el-button type="primary" :disabled="!templateFile" @click="templateDialogVisible = false">确认</el-button>
-        </template>
-      </el-dialog>
     </div>
 
     <div v-else-if="currentView === 'manual'">
@@ -284,6 +256,35 @@
           </div>
 
           <el-form :model="paragraphForm" label-width="130px" class="form-layout continuation-form">
+            <div class="template-switch-row">
+              <span class="template-switch-label">参考模板文件</span>
+              <el-switch
+                v-model="templateSwitchOn"
+                active-color="#409EFF"
+              />
+              <template v-if="templateAnalyzeStatus === 'analyzing'">
+                <span class="template-file-badge" style="background:#ecf5ff;border-color:#409EFF;">
+                  📄 {{ templateJobFilename }} · 分析中… ({{ templateAnalyzeLabel }})
+                </span>
+                <el-progress :percentage="Math.min(20 * templateAnalyzeStep, 100)" :stroke-width="6" style="margin-left:12px;width:160px;" />
+              </template>
+              <template v-else-if="templateAnalyzeStatus === 'done'">
+                <span class="template-file-badge" :style="templateParseStatus === 'fallback' ? 'background:#fdf6ec;border-color:#e6a23c;color:#b88230;' : ''">
+                  ✅ {{ templateJobFilename }}
+                  <el-icon class="template-file-clear" @click="clearTemplateFileAndSwitch"><Close /></el-icon>
+                </span>
+                <span v-if="templateParseStatus === 'fallback'" class="template-switch-hint" style="color:#e6a23c;">（部分降级为本地轻量解析）</span>
+              </template>
+              <template v-else-if="templateAnalyzeStatus === 'failed'">
+                <span class="template-file-badge" style="background:#fef0f0;border-color:#f56c6c;color:#c45656;">
+                  ⚠️ 分析失败：{{ templateAnalyzeLabel }}
+                  <el-icon class="template-file-clear" @click="clearTemplateFileAndSwitch"><Close /></el-icon>
+                </span>
+              </template>
+              <span v-else-if="templateSwitchOn" class="template-switch-hint">请上传模板文件并点击确认开始分析</span>
+              <span v-else class="template-switch-hint">开启后可上传模板说明书，AI 将参考其风格和结构进行续写</span>
+            </div>
+
             <el-form-item label="现有内容">
               <el-input
                 v-model="paragraphForm.sourceText"
@@ -292,6 +293,14 @@
                 placeholder="例如：将样本放入样本槽中，关闭槽盖。"
               />
               <div class="field-hint">已输入 {{ continuationCharCount }} 字</div>
+            </el-form-item>
+
+            <el-form-item label="当前标题/章节名">
+              <el-input
+                v-model="paragraphForm.chapterTitle"
+                placeholder="选填，例如：2.3 启动操作 / 样本制备流程"
+                clearable
+              />
             </el-form-item>
 
             <el-form-item label="续写意图">
@@ -316,34 +325,11 @@
                   placeholder="请输入自定义续写要求"
                 />
               </div>
-              <div
-                v-if="paragraphForm.intent === 'template_based'"
-                class="template-upload-wrap"
-              >
-                <el-upload
-                  ref="templateFileRef"
-                  class="template-upload"
-                  action="#"
-                  :auto-upload="false"
-                  :limit="1"
-                  :accept="TEMPLATE_ACCEPT"
-                  :show-file-list="true"
-                  :on-change="handleTemplateFileChange"
-                  :on-remove="handleTemplateFileRemove"
-                  :on-exceed="handleTemplateFileExceed"
-                >
-                  <el-button size="small" type="primary">选择模板文件</el-button>
-                  <template #tip>
-                    <div class="el-upload__tip">
-                      支持 Word / PDF / Markdown / TXT 格式，单文件 ≤ 10MB
-                    </div>
-                  </template>
-                </el-upload>
-              </div>
             </el-form-item>
 
             <el-form-item label="续写长度">
               <el-radio-group v-model="paragraphForm.length">
+                <el-radio-button label="auto">自动</el-radio-button>
                 <el-radio-button label="short">简短（1-2句）</el-radio-button>
                 <el-radio-button label="detailed">详细（1段）</el-radio-button>
               </el-radio-group>
@@ -417,13 +403,44 @@
         </el-table>
       </div>
     </div>
+
+    <el-dialog v-model="templateDialogVisible" title="上传模板文件" width="min(520px, 90vw)">
+      <el-upload
+        ref="templateUploadRef"
+        class="template-dialog-upload"
+        action="#"
+        :auto-upload="false"
+        :show-file-list="false"
+        :limit="1"
+        :size-limit="MAX_TEMPLATE_SIZE"
+        accept=".docx,.md,.pdf,.txt"
+        :on-change="handleTemplateDialogChange"
+        :on-exceed="handleTemplateExceed"
+        drag
+      >
+        <div class="upload-drag-area">
+          <div class="upload-drag-icon">+</div>
+          <div class="upload-drag-text">将文件拖到此处，或点击选择</div>
+          <div class="upload-drag-hint">支持 .docx .md .pdf .txt（≤ 10 MB）</div>
+        </div>
+      </el-upload>
+      <div v-if="templateFile" style="margin-top: 12px; padding: 8px 12px; border-radius: 6px; font-size: 13px;" :style="templateFile.size > MAX_TEMPLATE_SIZE ? 'background:#fef0f0;color:#c45656;' : 'background:#f0f9eb;color:#374151;'">
+        已选择：{{ templateFile.name }} ({{ (templateFile.size / 1024).toFixed(1) }} KB)
+        <span v-if="templateFile.size > MAX_TEMPLATE_SIZE" style="margin-left:8px;font-weight:500;">⚠️ 超过 10 MB 限制</span>
+      </div>
+      <template #footer>
+        <el-button @click="cancelTemplateDialog">取消</el-button>
+        <el-button type="primary" :disabled="!templateFile || templateFile.size > MAX_TEMPLATE_SIZE" @click="confirmTemplateAnalyze">确认并开始分析</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Close } from '@element-plus/icons-vue'
 import { generateAPI } from '@/api'
 
 const route = useRoute()
@@ -431,6 +448,8 @@ const router = useRouter()
 
 const MAX_IMAGE_STEP_FILES = 4
 const MAX_RAW_FILE_SIZE = 5 * 1024 * 1024
+const MAX_TEMPLATE_SIZE = 10 * 1024 * 1024
+const PARAGRAPH_STATE_KEY = 'smart_doc_continuation_paragraph_state'
 
 const viewConfig = {
   image: {
@@ -540,9 +559,10 @@ const manualResult = ref(null)
 const paragraphLoading = ref(false)
 const paragraphForm = ref({
   sourceText: '',
+  chapterTitle: '',
   intent: 'next_step',
   customIntent: '',
-  length: 'short',
+  length: 'auto',
   keepTerminology: true,
   keepSentenceStyle: true
 })
@@ -551,43 +571,199 @@ const paragraphEditing = ref(false)
 const paragraphEditText = ref('')
 const regenerateSeq = ref(0)
 
-const intentOptions = [
-  { value: 'next_step', label: '续写下一步操作（基于上下文推断）' },
-  { value: 'expand_detail', label: '扩写详细说明（增加参数/注意事项）' },
-  { value: 'safety_warning', label: '补充安全警告（识别风险点）' },
-  { value: 'troubleshooting', label: '补充故障处理（基于操作步骤）' },
-  { value: 'organize_steps', label: '整理为步骤（将内容梳理为编号步骤）' },
-  { value: 'custom', label: '自定义续写' },
-  { value: 'template_based', label: '参考模板文件续写' }
-]
+const templateSwitchOn = ref(false)
 
-const templateFileRef = ref(null)
-const uploadedTemplateFile = ref(null)
-const TEMPLATE_FILE_MAX_SIZE = 10 * 1024 * 1024
-const TEMPLATE_ACCEPT = '.doc,.docx,.pdf,.md,.markdown,.txt'
+const templateJobId = ref('')
+const templateAnalyzeStatus = ref('idle') // idle | analyzing | done | failed
+const templateAnalyzeStep = ref(0)
+const templateAnalyzeLabel = ref('')
+const templateParseStatus = ref('') // ai | fallback | ''
+const templateJobFilename = ref('')
+let templatePollingTimer = null
 
-function handleTemplateFileChange(file) {
-  const raw = file.raw || file
-  if (raw.size > TEMPLATE_FILE_MAX_SIZE) {
-    ElMessage.warning(`${raw.name} 文件过大 (${(raw.size / 1024 / 1024).toFixed(1)}MB)，模板文件需在 10MB 以内`)
-    templateFileRef.value?.clearFiles?.()
+watch(templateSwitchOn, (val) => {
+  if (val) {
+    if (!templateJobId.value) {
+      templateDialogVisible.value = true
+    }
+  } else {
+    stopPolling()
+    templateAnalyzeStatus.value = 'idle'
+    templateAnalyzeStep.value = 0
+    templateAnalyzeLabel.value = ''
+    templateParseStatus.value = ''
+    templateJobFilename.value = ''
+    clearTemplateFile()
+    templateJobId.value = ''
+    persistParagraphState()
+  }
+})
+
+watch(paragraphForm, persistParagraphState, { deep: true })
+
+function clearTemplateFileAndSwitch() {
+  clearTemplateFile()
+  templateJobId.value = ''
+  templateAnalyzeStatus.value = 'idle'
+  templateAnalyzeStep.value = 0
+  templateAnalyzeLabel.value = ''
+  templateParseStatus.value = ''
+  templateJobFilename.value = ''
+  stopPolling()
+  templateSwitchOn.value = false
+  stopPolling()
+  clearParagraphState()
+  persistParagraphState()
+}
+
+function cancelTemplateDialog() {
+  templateDialogVisible.value = false
+  clearTemplateFile()
+  if (templateSwitchOn.value && !templateJobId.value) {
+    templateSwitchOn.value = false
+  }
+}
+
+// ── localStorage 持久化 ──────────────────────────────────────────────
+
+function persistParagraphState() {
+  try {
+    const payload = {
+      templateSwitchOn: templateSwitchOn.value,
+      templateJobId: templateJobId.value,
+      templateAnalyzeStatus: templateAnalyzeStatus.value,
+      templateAnalyzeStep: templateAnalyzeStep.value,
+      templateAnalyzeLabel: templateAnalyzeLabel.value,
+      templateParseStatus: templateParseStatus.value,
+      templateJobFilename: templateJobFilename.value,
+      paragraphForm: { ...paragraphForm.value },
+    }
+    localStorage.setItem(PARAGRAPH_STATE_KEY, JSON.stringify(payload))
+  } catch (e) {
+    // localStorage 满了忽略
+  }
+}
+
+function restoreParagraphState() {
+  try {
+    const raw = localStorage.getItem(PARAGRAPH_STATE_KEY)
+    if (!raw) return
+    const payload = JSON.parse(raw)
+    if (payload.paragraphForm) {
+      paragraphForm.value = { ...paragraphForm.value, ...payload.paragraphForm }
+    }
+    if (payload.templateSwitchOn) templateSwitchOn.value = payload.templateSwitchOn
+    if (payload.templateJobId) templateJobId.value = payload.templateJobId
+    if (payload.templateAnalyzeStatus) templateAnalyzeStatus.value = payload.templateAnalyzeStatus
+    if (payload.templateAnalyzeStep) templateAnalyzeStep.value = payload.templateAnalyzeStep
+    if (payload.templateAnalyzeLabel) templateAnalyzeLabel.value = payload.templateAnalyzeLabel
+    if (payload.templateParseStatus) templateParseStatus.value = payload.templateParseStatus
+    if (payload.templateJobFilename) templateJobFilename.value = payload.templateJobFilename
+
+    if (templateJobId.value && templateAnalyzeStatus.value === 'analyzing') {
+      startPolling(templateJobId.value, true)
+    }
+  } catch (e) {}
+}
+
+function clearParagraphState() {
+  try { localStorage.removeItem(PARAGRAPH_STATE_KEY) } catch (e) {}
+}
+
+// ── 模板异步分析（卡点 1-A）─────────────────────────────────────────
+
+async function confirmTemplateAnalyze() {
+  if (!templateFile.value) {
+    ElMessage.warning('请先选择模板文件')
     return
   }
-  uploadedTemplateFile.value = raw
+  if (templateFile.value.size > MAX_TEMPLATE_SIZE) {
+    ElMessage.error(
+      `文件过大（${(templateFile.value.size / 1024 / 1024).toFixed(1)} MB），` +
+      `请上传 10 MB 以内的文件`
+    )
+    return
+  }
+  templateDialogVisible.value = false
+  await startTemplateAnalyze(templateFile.value)
 }
 
-function handleTemplateFileRemove() {
-  uploadedTemplateFile.value = null
+async function startTemplateAnalyze(rawFile) {
+  templateAnalyzeStatus.value = 'analyzing'
+  templateAnalyzeStep.value = 0
+  templateJobFilename.value = rawFile.name
+  templateAnalyzeLabel.value = '已提交，等待处理'
+  persistParagraphState()
+
+  try {
+    const fd = new FormData()
+    fd.append('template_file', rawFile)
+    const resp = await generateAPI.templateAnalyze(fd)
+    const job = resp.data || {}
+    templateJobId.value = job.job_id
+    templateAnalyzeStep.value = job.step || 0
+    templateAnalyzeLabel.value = job.step_label || '已提交'
+    persistParagraphState()
+    startPolling(templateJobId.value)
+  } catch (e) {
+    const msg = e?.response?.data?.detail || '模板分析提交失败'
+    templateAnalyzeStatus.value = 'failed'
+    templateAnalyzeLabel.value = typeof msg === 'string' ? msg : '提交失败'
+    persistParagraphState()
+    ElMessage.error(templateAnalyzeLabel.value)
+  }
 }
 
-function handleTemplateFileExceed() {
-  ElMessage.warning('最多只能上传一个模板文件')
+function startPolling(jobId, silent = false) {
+  stopPolling()
+  templatePollingTimer = setInterval(async () => {
+    try {
+      const resp = await generateAPI.templateStatus(jobId)
+      const job = resp.data || {}
+      templateAnalyzeStep.value = job.step || 0
+      templateAnalyzeLabel.value = job.step_label || '处理中'
+
+      if (job.status === 'done') {
+        templateAnalyzeStatus.value = 'done'
+        templateParseStatus.value = job.parse_status || ''
+        stopPolling()
+        if (templateParseStatus.value === 'fallback') {
+          ElMessage.warning(
+            '模板解析已完成，但部分内容降级为本地方案（可能影响续写效果）'
+          )
+        } else if (!silent) {
+          ElMessage.success('模板分析完成，可以开始续写了')
+        }
+        persistParagraphState()
+      } else if (job.status === 'failed') {
+        templateAnalyzeStatus.value = 'failed'
+        templateAnalyzeLabel.value = job.error || '分析失败'
+        stopPolling()
+        persistParagraphState()
+        if (!silent) ElMessage.error(templateAnalyzeLabel.value)
+      }
+    } catch (e) {
+      // 单次轮询失败不致命，继续下一轮
+    }
+  }, 1500)
 }
 
-function clearUploadedTemplate() {
-  uploadedTemplateFile.value = null
-  templateFileRef.value?.clearFiles?.()
+function stopPolling() {
+  if (templatePollingTimer) {
+    clearInterval(templatePollingTimer)
+    templatePollingTimer = null
+  }
 }
+
+const intentOptions = [
+  { value: 'next_step', label: '续写下一步操作' },
+  { value: 'expand_detail', label: '扩写详细说明' },
+  { value: 'supplement_parameters', label: '补充参数说明' },
+  { value: 'supplement_notices', label: '补充注意事项' },
+  { value: 'safety_warning', label: '补充安全警告' },
+  { value: 'troubleshooting', label: '补充故障处理' },
+  { value: 'custom', label: '自定义续写' }
+]
 
 const continuationCharCount = computed(() => paragraphForm.value.sourceText.length)
 const currentContinuationText = computed(() => {
@@ -634,6 +810,14 @@ function handleTemplateDialogChange(file) {
 function clearTemplateFile() {
   templateFile.value = null
   templateUploadRef.value?.clearFiles?.()
+  templateJobId.value = ''
+  templateAnalyzeStatus.value = 'idle'
+  templateAnalyzeStep.value = 0
+  templateAnalyzeLabel.value = ''
+  templateParseStatus.value = ''
+  templateJobFilename.value = ''
+  stopPolling()
+  persistParagraphState()
 }
 
 function handleTemplateExceed() {
@@ -912,22 +1096,27 @@ async function generateParagraph() {
     ElMessage.info('请填写自定义续写要求')
     return
   }
-  if (paragraphForm.value.intent === 'template_based' && !uploadedTemplateFile.value) {
-    ElMessage.info('请上传参考模板文件')
-    return
-  }
   paragraphLoading.value = true
   try {
     const formData = new FormData()
     formData.append('source_text', paragraphForm.value.sourceText)
+    formData.append('chapter_title', paragraphForm.value.chapterTitle || '')
     formData.append('intent', paragraphForm.value.intent)
     formData.append('custom_intent', paragraphForm.value.customIntent)
     formData.append('length', paragraphForm.value.length)
     formData.append('keep_terminology', paragraphForm.value.keepTerminology)
     formData.append('keep_sentence_style', paragraphForm.value.keepSentenceStyle)
     formData.append('regenerate_seq', regenerateSeq.value)
-    if (paragraphForm.value.intent === 'template_based' && uploadedTemplateFile.value) {
-      formData.append('template_file', uploadedTemplateFile.value)
+    if (templateSwitchOn.value) {
+      if (templateJobId.value && templateAnalyzeStatus.value === 'done') {
+        formData.append('template_job_id', templateJobId.value)
+      } else if (templateJobId.value && templateAnalyzeStatus.value === 'analyzing') {
+        ElMessage.warning('模板仍在分析中，请稍候')
+        paragraphLoading.value = false
+        return
+      } else if (templateFile.value) {
+        formData.append('template_file', templateFile.value)
+      }
     }
     const resp = await generateAPI.continueText(formData)
     const data = resp.data || {}
@@ -936,7 +1125,6 @@ async function generateParagraph() {
       continuation: cleanContinuationText(data.continuation || buildParagraphFallback()),
       used_terminology_files: data.used_terminology_files || [],
       used_style_guide_name: data.used_style_guide_name || '',
-      used_template_name: data.used_template_name || '',
       model: data.model || 'kimi',
       warning: data.warning || '',
       audit: data.audit || null
@@ -950,7 +1138,6 @@ async function generateParagraph() {
       continuation: buildParagraphFallback(),
       used_terminology_files: [],
       used_style_guide_name: '',
-      used_template_name: '',
       model: 'fallback',
       warning: '接口调用失败，已展示本地示例续写。'
     }
@@ -963,17 +1150,27 @@ async function generateParagraph() {
 }
 
 function buildParagraphFallback() {
-  if (paragraphForm.value.intent === 'safety_warning') {
-    return '请确认相关部件已正确放置并保持稳定，避免因安装不到位导致处理失败。操作过程中如发现异常提示，应停止当前流程并按故障处理说明进行检查。'
+  const intent = paragraphForm.value.intent
+  if (intent === 'next_step') {
+    return '完成当前操作后，在控制面板点击确认按钮，等待系统响应并观察界面状态变化。'
   }
-  if (paragraphForm.value.intent === 'troubleshooting') {
-    return '若系统未进入下一步，请检查样本位置、槽盖状态和界面提示信息。确认条件满足后，重新执行当前操作并观察系统反馈。'
+  if (intent === 'expand_detail') {
+    return '该步骤的执行效果受样本初始状态、环境温湿度及设备校准精度共同影响，操作前需确保各项前置条件满足说明书规定。'
   }
-  if (paragraphForm.value.intent === 'expand_detail') {
-    return '执行该操作前，应确认样本、耗材和设备状态均满足使用要求。完成操作后，观察界面状态变化，并根据提示继续后续流程。'
+  if (intent === 'supplement_parameters') {
+    return '工作电压：DC 12V ± 5%\n环境温度：15 ℃ ~ 30 ℃\n相对湿度：≤ 75%\n样本容量：0.5 mL ~ 2.0 mL\n运行时长：约 45 分钟'
   }
-  if (paragraphForm.value.intent === 'organize_steps') {
-    return '1. 确认样本已正确放置在样本槽中。\n2. 检查槽盖是否完全关闭并锁定。\n3. 在控制界面选择对应的实验流程。\n4. 点击启动按钮开始运行。\n5. 等待实验完成并查看结果。'
+  if (intent === 'supplement_notices') {
+    return '操作前请核对样本编号与录入信息是否一致。\n运行过程中请勿触碰设备外壳。\n更换耗材后请注意及时关闭舱门。\n操作完成后建议对工作台进行清洁。'
+  }
+  if (intent === 'safety_warning') {
+    return '⚠️ 舱门未完全关闭即启动设备，可能导致样本飞溅或运动部件外露，务必确认锁定后再执行。\n⚠️ 长时间连续运行会使设备过热，建议每 4 小时停机休息 10 分钟。\n⚠️ 请勿将磁性物品靠近控制主板，可能影响传感器读数准确性。'
+  }
+  if (intent === 'troubleshooting') {
+    return '异常标志：设备启动后界面无响应 → 检查电源插头是否插紧，重新上电重试。\n异常标志：槽盖关闭后系统仍提示未锁定 → 检查槽盖传感器是否被异物遮挡，清理后再次关闭。\n异常标志：实验中途暂停 → 查看样本是否偏离采样位，复位后点击继续按钮。'
+  }
+  if (intent === 'custom' && paragraphForm.value.customIntent.trim()) {
+    return `（示例续写）${paragraphForm.value.customIntent.trim()}：请确认操作对象就位后，按界面提示完成后续步骤。`
   }
   return '请确认当前操作对象已正确就位，然后点击界面中的开始按钮启动处理流程。系统进入下一步后，按照页面提示继续完成后续操作。'
 }
@@ -1047,9 +1244,10 @@ function goToPolish() {
 function resetParagraphForm() {
   paragraphForm.value = {
     sourceText: '',
+    chapterTitle: '',
     intent: 'next_step',
     customIntent: '',
-    length: 'short',
+    length: 'auto',
     keepTerminology: true,
     keepSentenceStyle: true
   }
@@ -1057,7 +1255,10 @@ function resetParagraphForm() {
   paragraphEditing.value = false
   paragraphEditText.value = ''
   regenerateSeq.value = 0
-  clearUploadedTemplate()
+  templateSwitchOn.value = false
+  stopPolling()
+  clearParagraphState()
+  clearTemplateFile()
 }
 
 function copyText(text) {
@@ -1074,6 +1275,15 @@ function downloadText(fileName, content) {
   URL.revokeObjectURL(url)
   ElMessage.success('下载已开始')
 }
+
+onMounted(() => {
+  restoreParagraphState()
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
+  persistParagraphState()
+})
 </script>
 
 <style>
@@ -1390,5 +1600,51 @@ function downloadText(fileName, content) {
   .page-header {
     flex-direction: column;
   }
+}
+
+.template-switch-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.template-switch-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: #1f2937;
+  margin-right: 4px;
+}
+
+.template-switch-hint {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.template-file-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #2563eb;
+  background: #eff6ff;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.template-file-clear {
+  cursor: pointer;
+  color: #94a3b8;
+  font-size: 14px;
+  transition: color 0.15s;
+}
+
+.template-file-clear:hover {
+  color: #ef4444;
 }
 </style>

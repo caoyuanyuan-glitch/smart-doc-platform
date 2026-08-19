@@ -20,4 +20,5 @@ class Issue(Base):
     source = Column(String)
     status = Column(String, default="pending")
     position = Column(Text)
+    providers = Column(Text, nullable=True)  # JSON array: ["qwen","deepseek"] — 多模型交叉验证
     created_at = Column(DateTime, default=datetime.utcnow)

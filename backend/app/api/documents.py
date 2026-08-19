@@ -5,14 +5,30 @@ from app.database import get_db
 from app.crud.document import create_document, get_document, get_documents, delete_document
 from app.crud.review import delete_reviews_by_document
 from app.schemas.document import Document, DocumentListItem
+from app.schemas.user import UserOut
+from app.api.auth import get_current_active_user
 from app.utils.document_parser import parse_file, get_file_type
 
 router = APIRouter()
 
 UPLOAD_DIR = "./static/uploads"
 
+
+def _ensure_document_access(document, current_user: UserOut):
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if current_user.role == "admin":
+        return document
+    if document.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问该文档")
+    return document
+
 @router.post("/upload/", response_model=DocumentListItem)
-async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_file(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
     
@@ -37,7 +53,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         document = create_document(
             db=db,
             document=DocumentCreate(filename=file.filename, file_type=file_type, content=content, preview=preview),
-            user_id=1
+            user_id=current_user.id,
         )
         from app.crud.document import update_document_status
         document = update_document_status(db, document.id, "ready")
@@ -50,23 +66,32 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/", response_model=list[DocumentListItem])
-async def read_documents(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    documents = get_documents(db, skip=skip, limit=limit)
+async def read_documents(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    owner_id = None if current_user.role == "admin" else current_user.id
+    documents = get_documents(db, user_id=owner_id, skip=skip, limit=limit)
     return documents
 
 @router.get("/{document_id}", response_model=Document)
-async def read_document(document_id: int, db: Session = Depends(get_db)):
-    document = get_document(db, document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
+async def read_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    document = _ensure_document_access(get_document(db, document_id), current_user)
     return document
 
 @router.delete("/{document_id}")
-async def delete_document_endpoint(document_id: int, db: Session = Depends(get_db)):
-    document = get_document(db, document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+async def delete_document_endpoint(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    document = _ensure_document_access(get_document(db, document_id), current_user)
 
     delete_reviews_by_document(db, document_id)
     delete_document(db, document_id)
