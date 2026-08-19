@@ -102,6 +102,16 @@ def test_check_spelling_keeps_original_case_for_each_occurrence(monkeypatch):
     assert issues[0]["suggestion"] == "oligo"
 
 
+def test_check_spelling_reports_fixed_pdf_phrase_typos(monkeypatch):
+    monkeypatch.setattr(spell_checker_utils, "_should_skip_spelling_issue", lambda word, context, file_type=None: False)
+
+    issues = spell_checker_utils.check_spelling("Filter the sample until it is lees than 60 μm and typed of beads.", file_type="pdf")
+
+    assert [issue["original_text"] for issue in issues] == ["lees than", "typed of"]
+    assert issues[0]["suggestion"] == "less than"
+    assert issues[1]["suggestion"] == "types of"
+
+
 def test_markdown_noise_masker_removes_code_and_links():
     content = "Keep `wrng` and [wrng](https://example.com) in docs.```python\nwrng\n```"
     masked = spell_checker_utils._mask_markdown_noise(content)
@@ -111,14 +121,12 @@ def test_markdown_noise_masker_removes_code_and_links():
 
 def test_runtime_whitelist_term_persists_in_memory_and_dictionary(monkeypatch):
     monkeypatch.setattr(spell_checker_utils, "spell", _FakeSpellWithWordFrequency())
-
     assert spell_checker_utils.add_runtime_whitelist_term("AlphaTool") is True
     assert spell_checker_utils.is_whitelisted("AlphaTool") is True
 
 
 def test_runtime_whitelist_is_case_sensitive(monkeypatch):
     monkeypatch.setattr(spell_checker_utils, "spell", _FakeSpellWithWordFrequency())
-
     spell_checker_utils.add_runtime_whitelist_term("RNAs")
 
     assert spell_checker_utils.is_whitelisted("RNAs") is True
@@ -205,3 +213,26 @@ def test_check_grammar_patterns_keeps_a_unified_phrase_valid():
     issues = spell_checker_utils.check_grammar_patterns("a unified FOV")
 
     assert issues == []
+
+
+def test_find_term_variant_issues_skips_when_correct_form_exists_in_document():
+    issues = spell_checker_utils._find_term_variant_issues(
+        "The High-throughput workflow is supported. Another note mentions highthroughput only in OCR text.",
+        set(),
+    )
+
+    assert all(issue["original_text"].lower() != "highthroughput" for issue in issues)
+
+
+def test_has_correct_term_variant_in_document_matches_hyphenated_pdf_form():
+    content = "Use the wide-\nbore pipette for transfer."
+
+    assert spell_checker_utils._has_correct_term_variant_in_document(content, "wide-bore") is True
+
+
+def test_should_skip_spelling_issue_skips_mixedly_false_positive():
+    assert spell_checker_utils._should_skip_spelling_issue("mixedly", "Samples were mixedly distributed.", file_type="pdf") is True
+
+
+def test_should_skip_spelling_issue_skips_nonfiltered_technical_term():
+    assert spell_checker_utils._should_skip_spelling_issue("nonfiltered", "Use nonfiltered pipette tips for transfer.", file_type="pdf") is True

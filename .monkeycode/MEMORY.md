@@ -51,25 +51,17 @@ Word 转 DITA 的步骤与图片输出规则
   - 表格标题只保留名称内容，去掉 `表 13`、`Table 13` 这类编号前缀，IME 样式会自动补序号
   - Word 中因排版产生的多余回车，需要在转换时自动识别并合并，避免把同一句内容截断成两句
 
-每日启动前拉取最新代码并创建分支
-- Date: 2026-06-17
-- Context: 用户要求每天早上开始跑代码前提醒拉取最新 main 并创建新分支
+Git 与自检工作流
+- Date: 2026-08-17
+- Context: 合并 2026-06-17、2026-06-18、2026-06-25、2026-06-29 的协作约束，便于后续执行
 - Category: 工作流协作
 - Instructions:
-  - 每日开始开发任务前，必须先执行 `git checkout main && git pull origin main`
-  - 然后根据当天日期创建新分支，命名规范: `YYMMDD-(feat|fix|chore|refactor)-xxxxx-xxxx-xxxx`
-  - 例如: `git checkout -b 260618-feat-polish-module`
-   - 创建后 `git push -u origin <branch-name>` 推送到远端
-
-每日17:50 推送所有修改
-- Date: 2026-06-18
-- Context: 用户要求在每天下午 17:50（北京时间 UTC+8）统一推送当天所有分支上的修改
-- Category: 工作流协作
-- Instructions:
-  - 所有时间以北京时间为准 (TZ='Asia/Shanghai')
-  - 白天可以随时 commit，但 push 全部等到 17:50
-  - 17:50 时检查所有有本地 commit 的分支，逐分支 push
-  - 格式: `git push origin <branch>`
+  - 每日开始开发任务前，先执行 `git checkout main && git pull origin main`
+  - 然后按日期创建分支，命名规范为 `YYMMDD-(feat|fix|chore|refactor)-xxxxx-xxxx-xxxx`
+  - 所有时间按北京时间 `TZ='Asia/Shanghai'` 处理
+  - 白天可以随时 commit，17:50 统一检查并逐分支执行 `git push origin <branch>`
+  - 未收到用户明确推送指令前，不主动执行 `git push`
+  - 每次完成代码修改后先做本地自检，再通知用户进行平台侧验证
 
 前后端自验命令
 - Date: 2026-07-01
@@ -106,22 +98,6 @@ Word 转 DITA 的步骤与图片输出规则
   - 本次任务仅修改审核模块相关实现
   - 其他业务模块保持现状，除非用户明确要求联动修改
 
-推送前需用户确认
-- Date: 2026-06-25
-- Context: 用户指出不要擅自推送代码到 GitHub
-- Category: 工作流协作
-- Instructions:
-  - 未收到用户明确推送指令（如"推送"、"push"、"提交到GitHub"等），不得擅自执行 git push
-  - 代码 commit 后等待用户下一步指示
-
-当天更新提交推送规则
-- Date: 2026-06-25
-- Context: 用户要求今天所有更新内容均需提交并推送到 GitHub
-- Category: 工作流协作
-- Instructions:
-  - 2026-06-25 当天，用户要求的所有代码或配置更新完成后，都需要提交并推送到 GitHub
-  - 若推送因凭据或平台服务异常失败，需要保留本地提交并向用户说明阻塞原因
-
 AI 翻译引擎排查规则
 - Date: 2026-06-26
 - Context: 用户要求将 Kimi 调用优先级和排查方法写入调用规则
@@ -131,14 +107,6 @@ AI 翻译引擎排查规则
   - 发生 `AI翻译引擎不可用` 时，先检查 `/api/translation/providers/status` 返回的 provider 可用状态
   - 排查重点是当前服务进程是否已注入 `KIMI_API_KEY`，再检查 `DEEPSEEK_API_KEY` 和 `ARKCLAW_API_KEY`
   - 仓库内只保留 `.env.example` 模板，实际服务配置以部署环境注入为准
-
-改动完成后先做本地自检
-- Date: 2026-06-29
-- Context: 用户要求格式转换模块修改完成后先由我自行检查，再交由平台测试
-- Category: 工作流协作
-- Instructions:
-  - 每次完成代码修改后，先执行本地自检并确认结果正常
-  - 自检通过后再通知用户进行平台侧验证
 
 DITA 父子节点兼容规则
 - Date: 2026-06-30
@@ -170,6 +138,23 @@ Word 转 DITA 批量转换基线规则
   - Vite 开发代理 `/api` 目标端口使用 `http://localhost:8000`
   - 本项目 README 指定后端开发服务端口为 `8000`
   - 若前端代理指向 `8001`，登录等接口会因代理目标错误而失败
+
+后端审核测试运行约定
+- Date: 2026-08-17
+- Context: Agent 在执行审核模块准确性优化并运行回归测试时发现
+- Category: 构建方法
+- Instructions:
+  - 后端测试需显式设置 `PYTHONPATH=/workspace/backend`，否则 `app` 包无法导入
+  - 审核模块相关回归命令可直接使用 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py`
+  - 当前环境若缺少测试依赖，先安装 `backend/requirements.txt`，并补装 `pytest` 与 `httpx`
+
+审核历史任务保留规则
+- Date: 2026-08-18
+- Context: 用户要求合并代码后继续保留历史审核任务
+- Category: 环境配置
+- Instructions:
+  - 审核模块默认数据库路径需优先复用项目现有的 `当前工作区/backend/app.db`
+  - 合并代码、重启预览服务或切换分支后，历史审核任务列表需要保持可见
 
 WorkBuddy 联动评审目录约定
 - Date: 2026-08-05

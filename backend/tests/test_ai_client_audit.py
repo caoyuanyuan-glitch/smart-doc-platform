@@ -1,3 +1,4 @@
+from app.utils import ai_client as ai_client_module
 from app.utils.ai_client import AIClient
 
 
@@ -118,3 +119,68 @@ def test_audit_document_runs_qwen_then_deepseek(monkeypatch):
     assert calls[1][1] == "review.audit_chunk.deepseek"
     assert result["issues"][0]["source_models"] == ["qwen", "deepseek"]
     assert result["issues"][0]["consensus_score"] >= 92
+
+
+def test_build_audit_prompt_payload_english_skips_chinese_base_prompt(monkeypatch):
+    client = AIClient.__new__(AIClient)
+
+    monkeypatch.setattr("app.utils.ai_client.build_system_prompt", lambda: "中文静态规则")
+    monkeypatch.setattr("app.utils.ai_client.PROMPT_BUILDER_FALLBACK_ACTIVE", False)
+
+    payload = client.build_audit_prompt_payload(
+        "Reviewing parameters",
+        language="en",
+        audit_basis="basis",
+        chapter_context={"document_name": "demo.pdf"},
+    )
+
+    assert "中文静态规则" not in payload["system_prompt"]
+    assert "Unicode-equivalent character differences" in payload["system_prompt"]
+    assert "Gerund vs noun form differences" in payload["system_prompt"]
+
+
+def test_audit_document_does_not_rechunk_large_content(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    client.qwen_client = object()
+    client.deepseek_client = None
+
+    captured = []
+
+    def fake_run_provider_audit(provider_key, messages, content, request_label=None, review_id=None):
+        captured.append((provider_key, len(content), request_label, review_id))
+        return []
+
+    monkeypatch.setattr(
+        client,
+        "build_audit_prompt_payload",
+        lambda content, language=None, audit_basis="", chapter_context=None: {
+            "system_prompt": "SYS",
+            "user_prompt": f"USER:{len(content)}",
+        },
+    )
+    monkeypatch.setattr(client, "_run_provider_audit", fake_run_provider_audit)
+
+    result = client.audit_document("A" * 9000, language="en", audit_basis="basis", review_id=7)
+
+    assert result == {"issues": []}
+    assert captured == [("qwen", 9000, "review.audit_chunk", 7)]
+
+
+def test_provider_limits_default_to_single_retry_and_45s_read_timeout(monkeypatch):
+    monkeypatch.delenv("AI_PROVIDER_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("AI_PROVIDER_READ_TIMEOUT", raising=False)
+
+    timeout = ai_client_module._provider_http_timeout()
+
+    assert ai_client_module._provider_max_attempts() == 2
+    assert timeout.read == 45.0
+
+
+def test_provider_limits_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("AI_PROVIDER_READ_TIMEOUT", "20")
+
+    timeout = ai_client_module._provider_http_timeout()
+
+    assert ai_client_module._provider_max_attempts() == 4
+    assert timeout.read == 20.0

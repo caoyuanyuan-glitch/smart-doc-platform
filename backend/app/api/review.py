@@ -9,6 +9,7 @@ import json
 import math
 import re
 import os
+import unicodedata
 try:
     from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
 except ModuleNotFoundError as exc:
@@ -74,7 +75,7 @@ UPLOAD_DIR = Path(__file__).resolve().parents[2] / "static" / "uploads"
 REVIEW_EXPORT_DIR = Path(__file__).resolve().parents[2] / "static" / "review_exports"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CYY_HUMAN_REVIEW_BASELINE_PATH = PROJECT_ROOT / ".monkeycode" / "docs" / "cyy-human-review-baseline.json"
-CYY_HUMAN_REVIEW_BASIS_CACHE = None
+CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = None
 REVIEW_BASIS_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "写作风格指南" / "中文技术文档写作风格指南.md",
     PROJECT_ROOT / "backend" / "seed" / "knowledge" / "写作规范" / "写作风格指南" / "MGI英文技术文档写作风格指南.md",
@@ -85,8 +86,10 @@ REVIEW_BASIS_VERSION_FILES = [
 ]
 REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "app" / "review_engine" / "pipeline.py",
+    PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "document_parser.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "spell_checker.py",
+    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json",
     Path(__file__).resolve(),
 ] + REVIEW_BASIS_VERSION_FILES
 
@@ -1058,11 +1061,18 @@ def _should_drop_punctuation_issue(issue):
     source = str(issue.get('source', '') or '').lower()
     original = str(issue.get('original_text', '') or '').strip()
     context = str(issue.get('context', '') or '')
+    suggestion = str(issue.get('suggestion', '') or '').strip()
+    description = str(issue.get('description', '') or '').strip()
     
     # AI产出的单字符标点问题全部过滤
     if source == 'ai':
         meaningful = re.sub(r"[\s.,;:!?()\[\]{}\"'`~@#$%^&*+=|\\<>/，。；：！？…—～（）【】《》""'']", "", original)
         if len(meaningful) <= 1:
+            return True
+
+    if re.fullmatch(r'[\W_]+', original or '', re.UNICODE) and len(original) <= 3:
+        generic_punctuation_hint = ' '.join([suggestion, description])
+        if re.search(r'标点符号使用必须符合规范|不得遗漏必要的标点|对应的半角英文标点|punctuation', generic_punctuation_hint, re.IGNORECASE):
             return True
     
     if rule not in {'PUNCT-001', 'HR003', 'PUNCT-002', 'R002'}:
@@ -1198,6 +1208,8 @@ def _should_drop_known_false_positive_issue(issue):
     if _is_intentionally_blank_page_false_positive(issue):
         return True
     if _is_complete_genomics_url_false_positive(issue):
+        return True
+    if _is_official_global_site_false_positive(issue):
         return True
     if _is_zh_en_spacing_false_positive(issue):
         return True
@@ -1429,6 +1441,14 @@ def _is_complete_genomics_url_false_positive(issue):
     return bool(re.search(r'https?://www\.CompleteGenomics\.com', text, re.IGNORECASE))
 
 
+def _is_official_global_site_false_positive(issue):
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    suggestion = str(_issue_value(issue, 'suggestion', '') or '').strip()
+    context = str(_issue_value(issue, 'context', '') or '').strip()
+    official_pattern = re.compile(r'(?<![\w-])(?:https?://)?(?:www\.)?global-mgitech\.com(?:/|$|\s|[?&#])', re.IGNORECASE)
+    return bool(official_pattern.search(original) or official_pattern.search(context))
+
+
 def _is_figure_details_sentence_false_positive(issue):
     figure_sentence = 'the details are shown in the figure below'
     original = _normalize_report_text(_issue_value(issue, 'original_text', ''))
@@ -1477,6 +1497,16 @@ def _ai_audit_timeout_seconds(content):
     return float(min(900, max(240, chunk_count * 75)))
 
 
+def _review_ai_chunk_timeout_seconds(chunk):
+    chunk_length = len(chunk or '')
+    base = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50')
+    if chunk_length >= 2500:
+        return max(base, 50.0)
+    if chunk_length >= 1500:
+        return max(base, 40.0)
+    return max(base, 30.0)
+
+
 def _iter_ai_audit_chunks(content, chunk_size=3000, overlap=250):
     content = content or ''
     if not content.strip():
@@ -1506,6 +1536,11 @@ def _review_env_int(name, default):
         return int(default)
 
 
+def _review_env_bool(name, default=False):
+    value = str(os.getenv(name, '1' if default else '0')).strip().lower()
+    return value in {'1', 'true', 'yes', 'on'}
+
+
 def _review_content_limit(file_type):
     file_type = str(file_type or '').lower()
     if file_type == 'pdf':
@@ -1530,16 +1565,14 @@ def _review_ai_token_budget():
 
 def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
-    
-    默认32块，支持通过环境变量 REVIEW_AI_MAX_CHUNKS 自定义。
-    根据文档总长度动态计算：短文档直接全覆盖，长文档按比例增加。
+
+    短文档全覆盖；长文档受环境预算 REVIEW_AI_MAX_CHUNKS 约束。
     """
-    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '32'))
+    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '10'))
     if total_length <= 0:
         return env_limit
-    # 每6000字符保证至少一个块采样
-    dynamic_limit = max(1, total_length // 3000)
-    return max(env_limit, dynamic_limit)
+    dynamic_limit = 1 + math.ceil(max(0, total_length - 3000) / 2750)
+    return min(env_limit, dynamic_limit)
 
 
 def _review_ai_budget_reached(review_id, request_label='review.audit_chunk'):
@@ -1568,7 +1601,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 cache_kwargs["document_name"] = document_name
             all_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, content, document_language, selected_basis,
-                _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '30'),
+                _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
                 **cache_kwargs,
             )
             for issue in all_issues:
@@ -1577,7 +1610,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 "enabled": True,
                 "selected_chunk_count": 1,
                 "total_chunk_count": 1,
-                "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '30'),
+                "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
                 "chunks": [{
                     "chunk_index": 1,
                     "start": 0,
@@ -1627,12 +1660,11 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
 
     all_issues = []
     total = len(chunks)
-    chunk_timeout = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '18')
     trace = ReviewTrace({
         "enabled": True,
         "selected_chunk_count": len(chunks),
         "total_chunk_count": len(all_chunks),
-        "chunk_timeout_seconds": chunk_timeout,
+        "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
         "chunks": [],
         "chunk_meta": [],
     })
@@ -1676,6 +1708,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             f"[审核] AI深度审核分块 {index}/{total}, start={start}, length={len(chunk)}, "
             f"selected={len(chunks)}/{len(all_chunks)}, basis_len={len(selected_basis)}"
         )
+        chunk_timeout = _review_ai_chunk_timeout_seconds(chunk)
         try:
             cache_kwargs = {}
             if provider is not None:
@@ -1827,6 +1860,7 @@ def _filter_review_false_positives(issues):
             or _should_drop_punctuation_issue(issue)
             or _should_drop_unit_issue(issue)
             or _should_drop_known_false_positive_issue(issue)
+            or _should_drop_unicode_equivalent_issue(issue)
         ):
             dropped += 1
             continue
@@ -2020,6 +2054,60 @@ def _filter_ai_issues_without_document_evidence_with_reasons(issues, content):
 
 def _count_ai_issues(items):
     return sum(1 for issue in items if str(issue.get('source', '') or '').lower() == 'ai')
+
+
+def _finalize_review_issues(issues, content, false_positive_signatures):
+    ai_filter_diagnostics = {
+        "initial_total": len(issues),
+        "initial_ai": _count_ai_issues(issues),
+    }
+    issues = dedupe_issues_by_original(issues)
+    ai_filter_diagnostics["after_dedup_ai"] = _count_ai_issues(issues)
+    issues = _sanitize_issue_suggestions(issues)
+    ai_filter_diagnostics["after_sanitize_ai"] = _count_ai_issues(issues)
+
+    use_legacy_post_filters = _review_env_bool('REVIEW_USE_LEGACY_POST_FILTERS', False)
+    ai_filter_diagnostics["legacy_post_filters_enabled"] = use_legacy_post_filters
+    if use_legacy_post_filters:
+        issues = _filter_review_false_positives(issues)
+        ai_filter_diagnostics["after_false_positive_ai"] = _count_ai_issues(issues)
+        issues = _filter_low_value_review_issues(issues)
+        ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
+
+    issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
+    ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
+    ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
+    issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
+    ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
+
+    pre_pipeline_issues = list(issues)
+    before_pipeline_count = len(issues)
+    issues = pipeline_select_review_issues(issues)
+    ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
+    print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+
+    recall_floor_enabled = _review_env_bool('REVIEW_RECALL_FLOOR', False)
+    ai_filter_diagnostics["recall_floor_enabled"] = recall_floor_enabled
+    if recall_floor_enabled and len(issues) < 3 and len(content or '') > 10000 and pre_pipeline_issues:
+        fallback_candidates = [
+            issue for issue in pre_pipeline_issues
+            if str(issue.get('original_text', '') or '').strip()
+            and str(issue.get('source', '') or '').lower() in ('rule', 'spellcheck', 'term')
+        ]
+        fallback_candidates = sorted(
+            fallback_candidates,
+            key=lambda item: (-pipeline_value_score(item), pipeline_sort_key(item)),
+        )
+        if fallback_candidates:
+            issues = fallback_candidates[: min(5, len(fallback_candidates))]
+            ai_filter_diagnostics["recall_floor_applied"] = True
+            print(f"[审核] 召回下限保护(仅确定性来源): 回退保留 {len(issues)} 个")
+        else:
+            ai_filter_diagnostics["recall_floor_applied"] = False
+    else:
+        ai_filter_diagnostics["recall_floor_applied"] = False
+
+    return issues, ai_filter_diagnostics
 
 
 def _issue_judgment_signature(issue):
@@ -2804,14 +2892,26 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
     source_to_targets = {}
     target_to_sources = {}
     terms = get_terms(db, limit=10000)
+    semantic_pair_suggestions = {
+        ('语言设置', 'Language'): ('suggestion', 'XLS-PAIR-001', '语义对等', '建议统一为“语言 / Language”或“Language Settings”', '中文“语言设置”对应英文“Language”缺少“设置”语义。', 'Excel中英语义对等检查'),
+        ('锁屏时间', 'Lock Screen Timeout Period'): ('suggestion', 'XLS-PAIR-002', '语义对等', '建议改为 Screen Timeout', '英文表达偏长，建议简化为更常见的界面文案。', 'Excel中英语义对等检查'),
+        ('日志信息', 'Logs'): ('suggestion', 'XLS-PAIR-003', '语义对等', '建议统一为“日志 / Logs”或补齐中英结构对应关系', '中文“日志信息”与英文“Logs”结构不完全对等。', 'Excel中英语义对等检查'),
+        ('时间日期', 'Date&Time'): ('general', 'XLS-PAIR-004', '语义对等', '建议统一为“日期时间 / Date&Time”', '中英词序不一致，建议统一术语表达。', 'Excel中英语义对等检查'),
+    }
+    confirm_to_suggestions = {
+        'Confirm to start firmware upgrade?': 'Confirm firmware upgrade?',
+        'Confirm to end aging test?': 'End aging test?',
+        'Confirm to clear aging count?': 'Clear aging count?',
+    }
 
     for row in rows:
         source = row['source_text']
         target = row['target_text']
+        source_stripped = source.strip()
         if source:
-            source_to_targets.setdefault(source.strip(), {}).setdefault(target.strip(), []).append(row['row_number'])
+            source_to_targets.setdefault(source_stripped, {}).setdefault(target.strip(), []).append(row['row_number'])
         if target:
-            target_to_sources.setdefault(target.strip().lower(), {}).setdefault(source.strip(), []).append(row['row_number'])
+            target_to_sources.setdefault(target.strip().lower(), {}).setdefault(source_stripped, []).append(row['row_number'])
 
         if not source:
             issues.append(_excel_issue(row, '完整性', 'XLS-COMP-001', 'serious', target, '补充中文原文', '中文原文为空，需补充。', 'Excel翻译对照表完整性检查'))
@@ -2819,6 +2919,21 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
             issues.append(_excel_issue(row, '完整性', 'XLS-COMP-002', 'serious', source, '补充英文译文', '英文译文为空，需补充。', 'Excel翻译对照表完整性检查'))
         if source.strip() and target.strip() and source.strip() == target.strip() and (_looks_chinese_text(source) or _looks_english_text(source)):
             issues.append(_excel_issue(row, '完整性', 'XLS-COMP-003', 'general', target, '确认是否已完成翻译', '原文与译文完全相同，需确认是否漏翻。', 'Excel翻译对照表完整性检查'))
+
+        if source:
+            if source != source_stripped:
+                issues.append(_excel_issue(row, '格式问题', 'XLS-CN-FMT-001', 'general', source, f'建议改为 {source_stripped}', '中文原文首尾存在多余空格。', 'Excel中文界面字符串格式检查'))
+            if source_stripped.endswith('-'):
+                issues.append(_excel_issue(row, '格式问题', 'XLS-CN-FMT-002', 'serious', source, f'建议改为 {source_stripped.rstrip("-")}', '中文原文尾部存在疑似残留连字符。', 'Excel中文界面字符串格式检查'))
+
+        if source_stripped and target.strip():
+            pair_rule = semantic_pair_suggestions.get((source_stripped, target.strip()))
+            if pair_rule:
+                severity, rule, category, suggestion, description, basis = pair_rule
+                issues.append(_excel_issue(row, category, rule, severity, f'{source_stripped} → {target.strip()}', suggestion, description, basis))
+
+        if source_stripped and target.strip().endswith('?') and not re.search(r'[？?]$', source_stripped):
+            issues.append(_excel_issue(row, '标点对等', 'XLS-PUNCT-001', 'suggestion', f'{source_stripped} → {target.strip()}', f'建议中文改为 {source_stripped}？', '英文为疑问句，中文建议补齐问号保持标点对等。', 'Excel中英标点对等检查'))
 
         if target:
             target_stripped = target.strip()
@@ -2850,15 +2965,16 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
                 'Blue Tooth': 'Bluetooth',
                 'Bar Code': 'Barcode',
                 'Exit system': 'Exit the system',
-                'System Setting': 'System Settings',
-                'Press the button': 'Click the button',
+                'Traget': 'Target',
             }
             for wrong, right in replacements.items():
                 if wrong.lower() in target.lower():
-                    spelling_errors = {'Delet', 'Sav e', 'Edite', 'C opy', 'recieve', 'teh', 'Blue Tooth'}
+                    spelling_errors = {'Delet', 'Sav e', 'Edite', 'C opy', 'recieve', 'teh', 'Blue Tooth', 'Traget'}
                     format_errors = {'Bar Code'}
                     category = '拼写错误' if wrong in spelling_errors else '格式问题' if wrong in format_errors else '语法错误'
                     issues.append(_excel_issue(row, category, 'XLS-LANG-001', 'serious', target, f'建议改为 {right}', f'发现常见语言问题：{wrong}', 'Excel界面字符串语言质量检查'))
+            if target_stripped == 'Error message':
+                issues.append(_excel_issue(row, '英文风格', 'XLS-EN-STYLE-002', 'general', target, '建议改为 Error Message', '标题式大小写建议与同类界面项保持一致。', 'Excel界面字符串大小写一致性检查'))
             if re.search(r'\binput\b', target, re.IGNORECASE):
                 issues.append(_excel_issue(row, '语法错误', 'XLS-LANG-002', 'serious', target, re.sub(r'\binput\b', 'enter', target, flags=re.IGNORECASE), '界面输入提示建议使用 enter。', '英文技术文档写作风格指南'))
             if source.startswith('请'):
@@ -2871,8 +2987,11 @@ def _run_excel_review_audit(db: Session, document, max_length=30):
             }
             if source.strip() in concise_source_suggestions:
                 issues.append(_excel_issue(row, '中文建议', 'XLS-CN-STYLE-002', 'suggestion', source, concise_source_suggestions[source.strip()], '中文界面文案建议更简洁。', '中文技术文档写作风格指南'))
-            if re.search(r'\bPress\b', target, re.IGNORECASE):
+            if re.search(r'\bPress\b', target, re.IGNORECASE) and not re.search(r'\bpress and hold\b', target, re.IGNORECASE):
                 issues.append(_excel_issue(row, '英文风格', 'XLS-EN-STYLE-001', 'suggestion', target, re.sub(r'\bPress\b', 'Click', target, flags=re.IGNORECASE), '界面操作建议使用 Click。', '英文技术文档写作风格指南'))
+            confirm_to_suggestion = confirm_to_suggestions.get(target_stripped)
+            if confirm_to_suggestion:
+                issues.append(_excel_issue(row, '语法错误', 'XLS-LANG-003', 'serious', target, f'建议改为 {confirm_to_suggestion}', '英文存在 Confirm to ... 结构，表达不自然。', 'Excel界面字符串语言质量检查'))
 
         for term in terms:
             non_standard = str(getattr(term, 'non_standard', '') or '').strip()
@@ -3771,6 +3890,8 @@ def _aggregate_report_issues(issues, content):
         if len(members) == 1:
             aggregated.append(members[0])
             continue
+        if all(_should_drop_punctuation_issue(member) for member in members):
+            continue
 
         first = dict(members[0])
         rule = _report_rule(_issue_value(first, 'rule', ''))
@@ -3807,6 +3928,8 @@ def _prepare_report_issues(issues, content):
     prepared = []
     for issue in issues:
         item = _report_issue_to_dict(issue)
+        if _should_drop_punctuation_issue(item):
+            continue
         if _should_drop_known_false_positive_issue(item):
             continue
         item['severity'] = _report_severity(item)
@@ -3942,43 +4065,57 @@ def _compact_basis_text(value, limit=120):
     return text[:limit]
 
 
-def _load_cyy_human_review_basis():
-    global CYY_HUMAN_REVIEW_BASIS_CACHE
-    if CYY_HUMAN_REVIEW_BASIS_CACHE is not None:
-        return CYY_HUMAN_REVIEW_BASIS_CACHE
+def _build_cyy_basis_section_text(category, category_count):
+    return "\n".join([
+        f"【CYY人工审核经验基线 - {category}】",
+        f"该类人工问题出现 {category_count} 次。",
+        "优先关注该类问题的证据充分性与上下文一致性。",
+    ])
 
-    CYY_HUMAN_REVIEW_BASIS_CACHE = ""
+
+def _load_cyy_human_review_basis_sections():
+    global CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
+    if CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE is not None:
+        return CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
+
+    CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = []
     if not CYY_HUMAN_REVIEW_BASELINE_PATH.exists():
-        return ""
+        return []
 
     try:
         payload = json.loads(CYY_HUMAN_REVIEW_BASELINE_PATH.read_text(encoding="utf-8"))
     except Exception as exc:
         print(f"[审核] 读取CYY人工审核基线失败: {exc}")
-        return ""
+        return []
 
     summary = payload.get("summary") or {}
     annotations = payload.get("annotations") or []
     by_category = summary.get("by_category") or {}
     focus_categories = [
         "表达与句式",
+        "人工审核其他项",
         "单位/空格",
+        "步骤结构",
+        "重复内容",
         "术语一致性",
         "表格/版式",
         "官网地址",
         "人工确认项",
+        "中文残留",
         "版本记录",
-        "字体/版式细节",
-        "标点符号",
         "图片/对象缺失",
         "分页与标题边界",
         "主题结构",
         "商标声明",
         "货号写法",
+        "法规/注册确认",
+        "表图编号",
+        "结构完整性",
     ]
 
-    lines = [
-        "【CYY人工审核经验基线】",
+    sections = []
+    summary_lines = [
+        "【CYY人工审核经验基线摘要】",
         f"来源: {summary.get('total', len(annotations))} 条人工审核批注的结构化摘要。",
         "使用要求: 优先关注以下高频问题；只有在当前原文中有明确证据时输出问题；样例用于判断审核偏好，不能凭样例臆造当前文档问题。",
         "高频关注类别: " + "；".join(
@@ -3986,8 +4123,12 @@ def _load_cyy_human_review_basis():
             for category in focus_categories
             if by_category.get(category, 0)
         ),
-        "典型人工意见样例:",
     ]
+    sections.append({
+        "label": "CYY人工审核经验基线摘要",
+        "text": "\n".join(line for line in summary_lines if line),
+        "priority": 5,
+    })
 
     examples_by_category = {}
     for item in annotations:
@@ -3995,20 +4136,38 @@ def _load_cyy_human_review_basis():
         if category not in focus_categories or category in examples_by_category:
             continue
         comment = _compact_basis_text(item.get("comment"), 80)
-        selected = _compact_basis_text(item.get("selected_text"), 90)
         if comment:
-            examples_by_category[category] = f"- {category}: 人工意见={comment}; 关注文本={selected}"
-        if len(examples_by_category) >= 10:
-            break
+            category_count = int(by_category.get(category, 0) or 0)
+            sections.append({
+                "label": f"CYY人工审核经验基线-{category}",
+                "text": _build_cyy_basis_section_text(category, category_count),
+                "priority": 3 if category_count >= 20 else 2,
+            })
+            examples_by_category[category] = True
 
-    lines.extend(examples_by_category.values())
-    CYY_HUMAN_REVIEW_BASIS_CACHE = "\n".join(line for line in lines if line).strip()
+    sections.sort(key=lambda item: (int(item.get("priority") or 0), len(str(item.get("text") or ""))), reverse=True)
+    CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE = sections
     print(f"[审核] 已加载CYY人工审核经验基线: {summary.get('total', len(annotations))}条")
-    return CYY_HUMAN_REVIEW_BASIS_CACHE
+    return CYY_HUMAN_REVIEW_BASIS_SECTIONS_CACHE
 
 
 def _build_ai_review_basis(spec_texts, document_language):
-    return "\n\n".join(section["text"] for section in _build_ai_review_basis_sections(spec_texts, document_language))
+    char_budget = max(1, _review_env_int('REVIEW_AI_BASIS_CHAR_BUDGET', '4200'))
+    selected = []
+    total_length = 0
+    for section in _build_ai_review_basis_sections(spec_texts, document_language):
+        text = str(section.get("text") or "").strip()
+        if not text:
+            continue
+        available = char_budget - total_length
+        if available <= 0:
+            break
+        clipped = text[:available].rstrip()
+        if not clipped:
+            continue
+        selected.append(clipped)
+        total_length += len(clipped)
+    return "\n\n".join(selected)
 
 
 def _build_ai_review_basis_sections(spec_texts, document_language):
@@ -4037,24 +4196,91 @@ def _build_ai_review_basis_sections(spec_texts, document_language):
             "text": "【说明书发布前自检 Checklist】\n" + spec_texts["final_checklists"][:2200],
             "priority": 5,
         })
-    cyy_basis = _load_cyy_human_review_basis()
-    if cyy_basis:
-        parts.append({
-            "label": "CYY人工审核经验基线",
-            "text": cyy_basis[:1800],
-            "priority": 5,
-        })
+    parts.extend(_load_cyy_human_review_basis_sections())
     return parts
+
+
+_BASIS_STOPWORDS_EN = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can",
+    "use", "using", "used", "this", "that", "with", "from", "into", "your",
+    "manual", "system", "document", "section", "step", "should", "will",
+    "may", "must", "when", "after", "before", "then", "than", "also",
+    "only", "each", "other", "such", "which", "while", "where", "what",
+    "have", "has", "had", "been", "being", "does", "did", "do", "shall",
+    "would", "could", "more", "most", "some", "these", "those", "there",
+    "their", "them", "they", "his", "her", "its", "our", "who", "whom",
+    "whose", "about", "above", "below", "between", "during", "through",
+    "under", "upon", "within", "without", "make", "made", "ensure",
+    "provide", "please", "per", "via", "etc", "eg", "ie", "one", "two",
+    "three", "first", "second", "new", "old", "up", "down", "out", "off",
+    "over", "again", "once",
+})
+
+_BASIS_STOPWORDS_CN = frozenset({
+    "的", "了", "是", "在", "和", "与", "或", "及", "等", "为", "对", "由",
+    "从", "到", "于", "中", "上", "下", "内", "外", "将", "应", "可", "须",
+    "需", "请", "本", "该", "此", "其", "它", "被", "把", "让", "向", "以",
+    "按", "通过", "进行", "使用", "用于", "说明", "文档", "内容", "步骤",
+    "系统", "设备", "产品", "用户", "操作", "要求", "建议", "需要", "可以",
+    "应该", "必须", "不要", "注意", "警告", "如果", "当", "时", "后", "前",
+    "一个", "一种", "一些", "这个", "那个", "这些", "那些", "相关", "问题",
+    "检查", "确认", "是否", "以及", "还有", "并且", "或者", "已经", "没有",
+    "需要", "进行", "处理", "情况", "页面", "界面", "功能", "字段", "按钮",
+})
+
+
+_BASIS_NOISE_PATTERNS = (
+    re.compile(r'^\d+$'),
+    re.compile(r'^[a-z]{1,2}$'),
+    re.compile(r'^[\W_]+$', re.UNICODE),
+)
+
+
+def _is_basis_noise_token(token):
+    token = str(token or '').strip().lower()
+    if not token:
+        return True
+    if any(pattern.match(token) for pattern in _BASIS_NOISE_PATTERNS):
+        return True
+    if token in _BASIS_STOPWORDS_EN or token in _BASIS_STOPWORDS_CN:
+        return True
+    if len(token) <= 1:
+        return True
+    if re.fullmatch(r'[a-z]+', token) and len(token) <= 2:
+        return True
+    return False
 
 
 def _extract_basis_tokens(text, max_tokens=80):
     normalized = str(text or "").lower()
     tokens = []
-    for token in re.findall(r'[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]{2,8}', normalized):
-        if token not in tokens:
-            tokens.append(token)
+    seen = set()
+    for token in re.findall(r'[a-z][a-z0-9_-]{2,}', normalized):
+        if token in seen or _is_basis_noise_token(token):
+            continue
+        seen.add(token)
+        tokens.append(token)
         if len(tokens) >= max_tokens:
-            break
+            return tokens
+    try:
+        import jieba
+
+        for word in jieba.cut(str(text or "")):
+            word = word.strip()
+            if len(word) < 2 or _is_basis_noise_token(word) or word in seen:
+                continue
+            seen.add(word)
+            tokens.append(word)
+            if len(tokens) >= max_tokens:
+                break
+    except Exception:
+        for token in re.findall(r'[\u4e00-\u9fff]{2,8}', normalized):
+            if token in seen or _is_basis_noise_token(token):
+                continue
+            seen.add(token)
+            tokens.append(token)
+            if len(tokens) >= max_tokens:
+                break
     return tokens
 
 
@@ -4063,37 +4289,76 @@ def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, ch
         return ""
 
     content_tokens = set(_extract_basis_tokens(content, max_tokens=120))
-    ranked = []
+    min_relevance = 0.08
+    summary_entry = None
+    other_ranked = []
     for index, section in enumerate(basis_sections):
+        label = str(section.get("label") or "")
         text = str(section.get("text") or "")
         section_tokens = set(_extract_basis_tokens(text, max_tokens=120))
         overlap = len(content_tokens & section_tokens)
+        token_hit_ratio = overlap / max(len(section_tokens), 1)
+        coverage_ratio = overlap / max(len(content_tokens), 1) if content_tokens else 0
+        relevance = (token_hit_ratio * 0.6) + (coverage_ratio * 0.4)
         priority = int(section.get("priority") or 0)
-        score = overlap * 10 + priority
-        ranked.append((score, priority, -index, section))
+        is_summary = "摘要" in label or "summary" in label.lower()
+        is_cyy_example = label.startswith("CYY人工审核经验基线-")
+        if is_summary:
+            summary_entry = (section, text, priority)
+        else:
+            other_ranked.append((relevance, overlap, priority, -index, is_cyy_example, section, text))
 
-    ranked.sort(reverse=True)
     selected = []
     total_length = 0
-    for score, _priority, _index, section in ranked:
-        text = str(section.get("text") or "").strip()
+
+    if summary_entry and summary_entry[1].strip():
+        summary_text = summary_entry[1].strip()
+        selected.append((summary_entry[0], summary_text))
+        total_length += len(summary_text)
+
+    other_ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+    cyy_selected = 0
+    cyy_budget = 1 if max_sections <= 3 else max(1, min(2, max_sections - 2))
+    for relevance, _overlap, _priority, _index, is_cyy_example, section, text in other_ranked:
+        text = text.strip()
         if not text:
             continue
-        if selected and score <= 0 and len(selected) >= max_sections:
+        if relevance < min_relevance:
+            continue
+        if is_cyy_example and cyy_selected >= cyy_budget:
             continue
         available = char_budget - total_length
         if available <= 0:
             break
-        clipped = text[:max(400, min(len(text), available))]
-        selected.append((int(section.get("priority") or 0), clipped))
+        clipped = text[:min(len(text), available)]
+        selected.append((section, clipped))
         total_length += len(clipped)
+        if is_cyy_example:
+            cyy_selected += 1
         if len(selected) >= max_sections or total_length >= char_budget:
             break
 
     if not selected:
         return ""
-    selected.sort(key=lambda item: item[0], reverse=True)
-    return "\n\n".join(text for _priority, text in selected)
+    lines = []
+    for section, text in selected:
+        label = str(section.get("label") or "审核依据")
+        lines.append(f"## {label}\n{text}")
+    return "\n\n".join(lines)
+
+
+def _unicode_equivalent(text):
+    normalized = str(text or "").replace("\u00b5", "\u03bc")
+    normalized = normalized.replace("\u2212", "-")
+    return unicodedata.normalize("NFKC", normalized)
+
+
+def _should_drop_unicode_equivalent_issue(issue):
+    original = str(issue.get("original_text", "") or "")
+    suggestion = str(issue.get("suggestion", "") or "")
+    if not original or not suggestion:
+        return False
+    return _unicode_equivalent(original) == _unicode_equivalent(suggestion)
 
 
 def _ai_provider_cache_fingerprint():
@@ -5175,27 +5440,47 @@ def _run_logic_integrity_audit(content):
     seen = set()
     lines = content.replace('\f', '\n').splitlines()
     previous_step = None
+    main_separator = None
     cursor = 0
     previous_non_empty_line = ''
     for line in lines:
         text = line.strip()
         if _looks_like_numbered_section_heading(text):
             previous_step = None
+            main_separator = None
             previous_non_empty_line = text
             cursor += len(line) + 1
             continue
-        match = re.match(r'^(?:Step\s+)?(\d+)[\.)]\s+(.+)$', text, re.IGNORECASE)
+        match = re.match(r'^(\s*)(?:Step\s+)?(\d+)([\.)])\s+(.+)$', line, re.IGNORECASE)
         if not match:
             if text:
                 previous_non_empty_line = text
             cursor += len(line) + 1
             continue
-        current = int(match.group(1))
+        indent = len(match.group(1))
+        current = int(match.group(2))
+        separator = match.group(3)
+        if indent >= 2:
+            previous_non_empty_line = text
+            cursor += len(line) + 1
+            continue
+        if main_separator is None:
+            main_separator = separator
+        elif separator != main_separator:
+            previous_non_empty_line = text
+            cursor += len(line) + 1
+            continue
         if re.search(r'\b(?:table|figure|fig\.?|section|chapter)\s*$', previous_non_empty_line, re.IGNORECASE):
             previous_non_empty_line = text
             cursor += len(line) + 1
             continue
-        if previous_step is not None and current - previous_step > 1:
+        if (
+            previous_step is not None
+            and current > previous_step
+            and current - previous_step > 1
+            and previous_step in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+            and current <= 20
+        ):
             key = ('LOGIC-001', current)
             if key in seen:
                 continue
@@ -5592,6 +5877,11 @@ def _run_chinese_human_baseline_rules(content):
         ('Catalog Number', 'Cat. No.', 'CYY-CN-CONSIST-004', '术语一致性', '建议统一为“Catalog Number”或“Cat. No.”中的一种', '全称与缩写混用时应明确统一口径。'),
         ('外周血单个核细胞', 'PBMC', 'CYY-CN-CONSIST-005', '术语一致性', '建议统一为“PBMC”或“外周血单个核细胞”中的一种', '缩写与中文全称并存时应统一术语口径。'),
         ('RNA 质量', 'RNA 完整性', 'CYY-CN-CONSIST-006', '术语一致性', '建议统一为“RNA 完整性”或“RNA 质量”中的一种', '同一质量概念在全文中应保持统一。'),
+        ('转化系数', '转换系数', 'CYY-CN-CONSIST-009', '术语一致性', '建议统一为“转换系数”或与界面实际文案保持一致', '同一字段名称在同一文档中应保持统一。'),
+        ('服务地址', '服务器地址', 'CYY-CN-CONSIST-010', '术语一致性', '建议统一为“服务器地址”或按界面实际文案确认', '同一配置项名称在正文和交叉引用中应保持一致。'),
+        ('左侧菜单栏', '左侧导航栏', 'CYY-CN-CONSIST-011', '术语一致性', '建议统一为“左侧导航栏”或按界面设计规范确认', '同一界面区域名称在全文中应保持统一。'),
+        ('自增物料', '手动新增普通物料', 'CYY-CN-CONSIST-012', '术语一致性', '建议统一为“手动新增物料”或明确“自增物料”的定义', '问题与答案中的物料术语应前后呼应。'),
+        ('修改密码界面', '重置密码', 'CYY-CN-CONSIST-013', '术语一致性', '建议统一为“重置密码界面”或按界面标题核实后统一', '图注名称与正文功能名称应保持一致。'),
     ]
     for original, paired, rule, category, suggestion, description in consistency_pairs:
         start = normalized.find(original)
@@ -5621,6 +5911,37 @@ def _run_chinese_human_baseline_rules(content):
             '建议统一为“图1”“图 1”或“Figure 1”中的一种编号格式',
             '同一图号在正文中的写法不一致，图表编号格式需要统一。',
             'CYY人工审核经验基线 - 图表编号格式统一', 'general', 92,
+        )
+
+    for match in re.finditer(r'X86\s*架构', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-TERM-005', '术语一致性',
+            '建议统一为“x86 架构”',
+            '处理器架构名称通常使用小写 x86。',
+            'CYY人工审核经验基线 - 英文大小写统一', 'general', 90,
+        )
+
+    for match in re.finditer(r'可点击【Browse】可选择', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-007', '表达与句式',
+            '建议改为“点击【Browse】可选择目标安装目录”或“可点击【Browse】选择目标安装目录”',
+            '同一句中“可…可…”重复，影响语句通顺。',
+            'CYY人工审核经验基线 - 中文步骤句式简化', 'general', 91,
+        )
+
+    mac_install_conflict = re.search(
+        r'拖拽αLab\s*Studio\s*软件图标到右侧的Application\s*文件夹进行安装[^。]*。[^。]*【Install】[^。]*【Finish】',
+        normalized,
+    )
+    if mac_install_conflict:
+        add_issue(
+            mac_install_conflict.start(), mac_install_conflict.end(), mac_install_conflict.group(0),
+            'CYY-CN-LOGIC-007', '内容逻辑',
+            '建议核对 MacOS 安装流程；若为拖拽安装，应删除【Install】【Finish】向导式步骤',
+            'MacOS 拖拽安装与 Windows 安装向导式按钮同时出现，流程逻辑存在冲突。',
+            'CYY人工审核经验基线 - 跨平台安装流程一致性', 'serious', 94,
         )
 
     for match in re.finditer(r'表3列出了试剂盒的5个组分。', normalized):
@@ -5775,6 +6096,50 @@ def _run_chinese_human_baseline_rules(content):
             '人工审核意见指出 NMPA 通常提供纸质说明书，需要确认电子版说明书表述是否合规。',
             'CYY人工审核经验基线 - NMPA说明书提供形式确认', 'serious', 90,
         )
+
+    step_pattern = re.compile(r'(?<!\d)(\d{1,2})[.、]\s*(.+?)(?=(?:\s*\d{1,2}[.、]\s)|$)', re.S)
+    step_rows = [(int(match.group(1)), match.start(), match.group(2).strip()) for match in step_pattern.finditer(content)]
+    for index in range(len(step_rows) - 1):
+        current_no, current_start, current_text = step_rows[index]
+        next_no, next_start, next_text = step_rows[index + 1]
+        if next_no != current_no + 1:
+            continue
+        current_norm = re.sub(r'\s+|[，。,.;；：:、“”‘’()（）【】<>《》\-]', '', current_text)
+        next_norm = re.sub(r'\s+|[，。,.;；：:、“”‘’()（）【】<>《》\-]', '', next_text)
+        if min(len(current_norm), len(next_norm)) < 16:
+            continue
+        if len(re.findall(r'(?<!\d)\d{1,2}[.)、]\s', current_text)) > 1 or len(re.findall(r'(?<!\d)\d{1,2}[.)、]\s', next_text)) > 1:
+            continue
+        if ('修改' in current_text and '添加' in next_text) or ('添加' in current_text and '修改' in next_text):
+            continue
+        current_labels = {label for label in re.findall(r'【([^】]+)】', current_text) if label not in {'添加', '保存', '确认', '下一步'}}
+        next_labels = {label for label in re.findall(r'【([^】]+)】', next_text) if label not in {'添加', '保存', '确认', '下一步'}}
+        if current_labels and next_labels and current_labels != next_labels:
+            continue
+        if not re.search(r'[\u4e00-\u9fff]', current_text) and not re.search(r'[\u4e00-\u9fff]', next_text):
+            continue
+        sm = difflib.SequenceMatcher(None, current_norm, next_norm)
+        diff_parts = [current_norm[a:b] for tag, a, b, _c, _d in sm.get_opcodes() if tag == 'replace']
+        diff_parts = [part for part in diff_parts if part]
+        if diff_parts and all(len(part) <= 10 and not re.search(r'[点击打开选择输入填写修改删除保存确定取消设置进入返回]', part) for part in diff_parts):
+            continue
+        if (current_norm in next_norm or next_norm in current_norm) and abs(len(current_norm) - len(next_norm)) >= 8:
+            continue
+        ratio = difflib.SequenceMatcher(None, current_norm, next_norm).ratio()
+        shared_tail = len(os.path.commonprefix([current_norm[::-1], next_norm[::-1]]))
+        if current_norm in next_norm or next_norm in current_norm or ratio >= 0.68 or shared_tail >= 14:
+            add_issue(
+                next_start,
+                min(len(content), next_start + len(next_text)),
+                f'{next_no}. {next_text}',
+                'CYY-CN-STRUCT-001',
+                '步骤结构',
+                f'建议核对步骤 {current_no} 和步骤 {next_no} 是否重复；如为同一动作，请合并或明确差异',
+                '相邻步骤文本高度重复，可能存在复制残留或步骤拆分不当。',
+                'CYY人工审核经验基线 - 相邻步骤重复检查',
+                'general',
+                89,
+            )
 
     return issues
 
@@ -6018,7 +6383,10 @@ def _export_review_html_file(review, document, issues):
     REVIEW_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     export_name = _build_review_export_filename(document.filename if document else "review", review.id, ".html")
     export_path = REVIEW_EXPORT_DIR / export_name
-    html = _generate_review_html_content(review, document, issues)
+    if getattr(document, 'file_type', '') == 'xlsx':
+        html = _generate_excel_review_html_content(review, document, issues)
+    else:
+        html = _generate_review_html_content(review, document, issues)
     export_path.write_text(html, encoding="utf-8")
     return export_path, export_name, "text/html; charset=utf-8"
 
@@ -6028,8 +6396,185 @@ def _excel_issue_position(issue):
     return str(position.get('sheet', '') or ''), int(position.get('row', 0) or 0)
 
 
+def _excel_issue_sort_key(issue):
+    severity_order = {'fatal': 0, 'serious': 1, 'general': 2, 'suggestion': 3}
+    severity = str(_issue_value(issue, 'severity', 'general') or 'general').lower()
+    return severity_order.get(severity, 9), str(_issue_value(issue, 'category', '') or ''), str(_issue_value(issue, 'rule', '') or '')
+
+
+def _build_excel_row_export_payload(row_issues):
+    opinions = []
+    has_term_issue = False
+    for issue in sorted(row_issues, key=_excel_issue_sort_key):
+        category = _issue_value(issue, 'category', '问题') or '问题'
+        description = _issue_value(issue, 'description', '') or _issue_value(issue, 'original_text', '')
+        suggestion = _format_issue_suggestion(issue)
+        text = f"[{category}] {description}"
+        if suggestion and suggestion != '-':
+            text += f" → {suggestion}"
+        opinions.append(text)
+        if category == '术语不一致':
+            has_term_issue = True
+    return {
+        'opinions': opinions,
+        'status': '需确认' if has_term_issue else '待修改',
+        'count': len(row_issues),
+    }
+
+
+def _collect_excel_issue_rows(issues):
+    grouped = defaultdict(list)
+    for issue in _select_export_issues(issues):
+        sheet_name, row_number = _excel_issue_position(issue)
+        if not sheet_name or row_number <= 0:
+            continue
+        grouped[(sheet_name, row_number)].append(issue)
+
+    rows = []
+    for (sheet_name, row_number), row_issues in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        sorted_issues = sorted(row_issues, key=_excel_issue_sort_key)
+        payload = _build_excel_row_export_payload(sorted_issues)
+        rows.append({
+            'sheet': sheet_name,
+            'row_number': row_number,
+            'issues': sorted_issues,
+            'opinions': payload['opinions'],
+            'status': payload['status'],
+            'count': payload['count'],
+            'context': _issue_value(sorted_issues[0], 'context', '') or '-',
+            'highest_severity': _format_issue_severity(_issue_value(sorted_issues[0], 'severity', 'general')),
+        })
+    return rows
+
+
+def _generate_excel_review_html_content(review, document, issues):
+    doc_name = getattr(document, 'filename', '') or f"文档{review.document_id}"
+    rows = _collect_excel_issue_rows(issues)
+    selected_issues = [issue for row in rows for issue in row['issues']]
+    severity_counts = Counter(str(_issue_value(issue, 'severity', 'general') or 'general') for issue in selected_issues)
+    sheet_count = len({row['sheet'] for row in rows})
+    row_cards = []
+    for index, row in enumerate(rows, start=1):
+        opinion_html = ''.join(f"<li>{html_lib.escape(opinion)}</li>" for opinion in row['opinions'])
+        issue_html = ''.join(
+            (
+                "<tr>"
+                f"<td>{html_lib.escape(_format_issue_severity(_issue_value(issue, 'severity', 'general')))}</td>"
+                f"<td>{html_lib.escape(str(_issue_value(issue, 'category', '-') or '-'))}</td>"
+                f"<td>{html_lib.escape(str(_issue_value(issue, 'description', '-') or '-'))}</td>"
+                f"<td>{html_lib.escape(_format_issue_suggestion(issue))}</td>"
+                "</tr>"
+            )
+            for issue in row['issues']
+        )
+        row_cards.append(f"""
+        <section class="row-card">
+          <div class="row-head">
+            <div>
+              <div class="row-index">#{index:03d}</div>
+              <h3>{html_lib.escape(row['sheet'])} / 第 {row['row_number']} 行</h3>
+            </div>
+            <div class="row-meta">
+              <span>{html_lib.escape(row['highest_severity'])}</span>
+              <span>{row['count']} 条问题</span>
+              <span>{html_lib.escape(row['status'])}</span>
+            </div>
+          </div>
+          <div class="context-box">{html_lib.escape(str(row['context'] or '-'))}</div>
+          <div class="opinion-box">
+            <div class="box-title">审核意见</div>
+            <ul>{opinion_html}</ul>
+          </div>
+          <table>
+            <thead>
+              <tr><th>级别</th><th>分类</th><th>问题说明</th><th>修改建议</th></tr>
+            </thead>
+            <tbody>{issue_html}</tbody>
+          </table>
+        </section>
+        """)
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Excel 审核报告 - {html_lib.escape(doc_name)}</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; padding: 24px; font-family: 'Microsoft YaHei', Arial, sans-serif; background: #edf3f8; color: #1f2937; }}
+    .container {{ max-width: 1180px; margin: 0 auto; background: #fff; border-radius: 24px; overflow: hidden; box-shadow: 0 18px 50px rgba(18, 39, 69, 0.12); }}
+    .hero {{ padding: 34px 38px 40px; background: linear-gradient(135deg, #153f70, #2f76c9); color: #fff; }}
+    .hero h1 {{ margin: 0 0 10px; font-size: 30px; }}
+    .hero p {{ margin: 0; max-width: 780px; line-height: 1.75; color: rgba(255,255,255,0.84); }}
+    .meta {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: -22px 32px 0; padding: 14px; background: rgba(255,255,255,0.96); border: 1px solid #d8e4f2; border-radius: 20px; }}
+    .meta-card {{ background: linear-gradient(180deg, #ffffff, #f8fbff); border: 1px solid #e2eaf5; border-radius: 16px; padding: 14px 16px; }}
+    .meta-label {{ font-size: 12px; color: #64748b; margin-bottom: 8px; }}
+    .meta-value {{ font-weight: 700; line-height: 1.5; }}
+    .section {{ padding: 28px 32px 0; }}
+    .summary-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
+    .summary-card {{ border-radius: 18px; padding: 18px 14px; color: #fff; text-align: center; }}
+    .summary-card .num {{ font-size: 28px; font-weight: 800; }}
+    .summary-card .label {{ margin-top: 6px; font-size: 13px; }}
+    .fatal {{ background: linear-gradient(135deg, #b91c1c, #ef4444); }}
+    .serious {{ background: linear-gradient(135deg, #d97706, #f59e0b); }}
+    .general {{ background: linear-gradient(135deg, #4b5563, #6b7280); }}
+    .suggestion {{ background: linear-gradient(135deg, #15803d, #22c55e); }}
+    .intro {{ padding: 18px 20px; border: 1px solid #dbe4ee; border-radius: 18px; background: linear-gradient(180deg, #f8fbff, #f1f6fc); line-height: 1.8; color: #334155; }}
+    .rows {{ display: grid; gap: 16px; padding-bottom: 32px; }}
+    .row-card {{ border: 1px solid #dbe4ee; border-radius: 20px; padding: 18px; background: #fff; box-shadow: 0 8px 24px rgba(17, 38, 64, 0.06); }}
+    .row-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }}
+    .row-head h3 {{ margin: 4px 0 0; color: #163c69; font-size: 20px; }}
+    .row-index {{ color: #64748b; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }}
+    .row-meta {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .row-meta span {{ display: inline-block; padding: 6px 10px; border-radius: 999px; background: #eef5fb; color: #163c69; font-size: 12px; font-weight: 700; }}
+    .context-box {{ padding: 12px 14px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }}
+    .opinion-box {{ margin-top: 12px; padding: 14px 16px; border-radius: 14px; border: 1px solid #fecaca; background: #fff5f5; }}
+    .box-title {{ color: #b91c1c; font-weight: 800; margin-bottom: 8px; }}
+    .opinion-box ul {{ margin: 0; padding-left: 20px; color: #b91c1c; line-height: 1.8; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 14px; }}
+    th, td {{ border: 1px solid #e7edf5; padding: 12px 14px; text-align: left; vertical-align: top; }}
+    th {{ background: #f6f9fd; color: #163f6f; }}
+    .empty {{ padding: 28px; border: 1px dashed #cbd5e1; border-radius: 16px; text-align: center; color: #64748b; background: #fff; }}
+    .footer {{ padding: 0 32px 28px; color: #64748b; font-size: 12px; }}
+    @media (max-width: 920px) {{ .meta, .summary-grid {{ grid-template-columns: 1fr; }} .row-head {{ flex-direction: column; }} body {{ padding: 16px; }} .hero {{ padding: 28px 22px 36px; }} .section, .footer {{ padding-left: 22px; padding-right: 22px; }} .meta {{ margin: -20px 22px 0; }} }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>Excel 审核报告</h1>
+      <p>本报告按工作表和行号汇总 Excel 审核问题，便于直接回写译文对照表并执行逐行修订。</p>
+    </div>
+    <div class="meta">
+      <div class="meta-card"><div class="meta-label">文档名称</div><div class="meta-value">{html_lib.escape(doc_name)}</div></div>
+      <div class="meta-card"><div class="meta-label">审核时间</div><div class="meta-value">{_format_report_datetime(getattr(review, 'completed_at', None) or getattr(review, 'created_at', None))}</div></div>
+      <div class="meta-card"><div class="meta-label">工作表数量</div><div class="meta-value">{sheet_count}</div></div>
+      <div class="meta-card"><div class="meta-label">命中行数</div><div class="meta-value">{len(rows)}</div></div>
+    </div>
+    <div class="section">
+      <div class="summary-grid">
+        <div class="summary-card fatal"><div class="num">{severity_counts.get('fatal', 0)}</div><div class="label">致命问题</div></div>
+        <div class="summary-card serious"><div class="num">{severity_counts.get('serious', 0)}</div><div class="label">严重问题</div></div>
+        <div class="summary-card general"><div class="num">{severity_counts.get('general', 0)}</div><div class="label">一般问题</div></div>
+        <div class="summary-card suggestion"><div class="num">{severity_counts.get('suggestion', 0)}</div><div class="label">建议项</div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="intro">Excel 导出文件会在原始正文右侧追加“审核意见 / 审核状态 / 问题数量”三列，其中“审核意见”使用红色字体并开启自动换行。HTML 报告与导出文件使用同一套行级问题汇总逻辑。</div>
+    </div>
+    <div class="section">
+      <div class="rows">{''.join(row_cards) if row_cards else '<div class="empty">当前没有可导出的 Excel 审核问题。</div>'}</div>
+    </div>
+    <div class="footer">Review Task #{review.id}</div>
+  </div>
+</body>
+</html>"""
+
+
 def _export_review_excel(review, document, issues):
     from openpyxl import load_workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     source_path = _get_document_upload_path(document)
     if not source_path or not source_path.exists():
@@ -6042,12 +6587,14 @@ def _export_review_excel(review, document, issues):
     shutil.copyfile(source_path, export_path)
 
     wb = load_workbook(export_path)
-    issues_by_row = {}
-    for issue in _select_export_issues(issues):
-        sheet_name, row_number = _excel_issue_position(issue)
-        if not sheet_name or row_number <= 0:
-            continue
-        issues_by_row.setdefault((sheet_name, row_number), []).append(issue)
+    issues_by_row = {
+        (row['sheet'], row['row_number']): row
+        for row in _collect_excel_issue_rows(issues)
+    }
+    header_fill = PatternFill("solid", fgColor="E8F1FF")
+    header_font = Font(bold=True)
+    opinion_font = Font(color="FF0000")
+    top_wrap_alignment = Alignment(vertical="top", wrap_text=True)
 
     for ws in wb.worksheets:
         opinion_col = ws.max_column + 1
@@ -6056,28 +6603,31 @@ def _export_review_excel(review, document, issues):
         ws.cell(row=1, column=opinion_col, value="审核意见")
         ws.cell(row=1, column=status_col, value="审核状态")
         ws.cell(row=1, column=count_col, value="问题数量")
+        for column in (opinion_col, status_col, count_col):
+            header_cell = ws.cell(row=1, column=column)
+            header_cell.font = header_font
+            header_cell.fill = header_fill
+            header_cell.alignment = top_wrap_alignment
+        ws.column_dimensions[get_column_letter(opinion_col)].width = 60
+        ws.column_dimensions[get_column_letter(status_col)].width = 14
+        ws.column_dimensions[get_column_letter(count_col)].width = 10
         for row_number in range(2, ws.max_row + 1):
-            row_issues = issues_by_row.get((ws.title, row_number), [])
-            if not row_issues:
-                ws.cell(row=row_number, column=opinion_col, value="—")
-                ws.cell(row=row_number, column=status_col, value="确认无误")
-                ws.cell(row=row_number, column=count_col, value=0)
+            row_payload = issues_by_row.get((ws.title, row_number))
+            opinion_cell = ws.cell(row=row_number, column=opinion_col)
+            status_cell = ws.cell(row=row_number, column=status_col)
+            count_cell = ws.cell(row=row_number, column=count_col)
+            opinion_cell.alignment = top_wrap_alignment
+            status_cell.alignment = top_wrap_alignment
+            count_cell.alignment = top_wrap_alignment
+            if not row_payload:
+                opinion_cell.value = "—"
+                status_cell.value = "确认无误"
+                count_cell.value = 0
                 continue
-            opinions = []
-            has_term_issue = False
-            for issue in row_issues:
-                category = _issue_value(issue, 'category', '问题') or '问题'
-                description = _issue_value(issue, 'description', '') or _issue_value(issue, 'original_text', '')
-                suggestion = _format_issue_suggestion(issue)
-                text = f"[{category}] {description}"
-                if suggestion and suggestion != '-':
-                    text += f" → {suggestion}"
-                opinions.append(text)
-                if category == '术语不一致':
-                    has_term_issue = True
-            ws.cell(row=row_number, column=opinion_col, value="\n".join(opinions))
-            ws.cell(row=row_number, column=status_col, value="需确认" if has_term_issue else "待修改")
-            ws.cell(row=row_number, column=count_col, value=len(row_issues))
+            opinion_cell.value = "\n".join(row_payload['opinions'])
+            opinion_cell.font = opinion_font
+            status_cell.value = row_payload['status']
+            count_cell.value = row_payload['count']
 
     wb.save(export_path)
     return export_path, export_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -6161,6 +6711,7 @@ def _run_english_heuristic_audit(content, file_type=None):
         return False
 
     official_global_site = 'https://global-mgitech.com/'
+    official_global_site_pattern = re.compile(r"(?<![\w-])(?:https?://)?(?:www\.)?global-mgitech\.com(?:/|$|\s|[?&#])", re.IGNORECASE)
     outdated_site_pattern = re.compile(r"(?<![A-Za-z0-9.-])(?:https?://)?(?:www\.)?(?:en\.mgi-tech\.com|global-mgi\.com|global\.mgi-tech\.com)(?![A-Za-z0-9.-])", re.IGNORECASE)
     for match in outdated_site_pattern.finditer(content):
         add_issue(match, "HR001", "合规", f"建议替换为 {official_global_site}", "英文资料中的海外官网地址应使用官网 English 入口域名。", "公司特定规范 - 海外官网地址", "fatal")
@@ -6254,6 +6805,17 @@ def _run_english_heuristic_audit(content, file_type=None):
 
     for match in re.finditer(r"\bmake\s+total\s+volume\b", content, re.IGNORECASE):
         add_issue(match, "GRAMMAR-004", "语法", "建议改为 make a total volume 或 make the total volume", "total volume 前建议添加冠词。", "英语语法规范 - 冠词")
+
+    for match in re.finditer(r"\bThis\s+instructions\s+for\s+use\s+describes\b", content, re.IGNORECASE):
+        add_issue(
+            match,
+            "GRAMMAR-007",
+            "语法",
+            "建议改为 These instructions for use describe",
+            "instructions 为复数名词，谓语和指示代词应保持一致。",
+            "英语语法规范 - 主谓一致",
+            "serious",
+        )
 
     please_replacements = {
         'please contact': 'contact technical support',
@@ -6355,6 +6917,8 @@ def _run_english_heuristic_audit(content, file_type=None):
         add_issue(match, 'STYLE-003', '风格', '建议改为 Perform the following steps', '祈使句建议直接使用动词原形。', '技术文档句式规范', 'general')
 
     for match in re.finditer(r"[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09]", content):
+        if official_global_site_pattern.search(get_context(content, match.start(), match.end(), 40)):
+            continue
         add_issue(match, 'PUNCT-001', '标点符号', '建议改为对应的半角英文标点', '英文文档中不应混入全角或中文标点。', '英文标点规范', 'serious')
 
     if file_type != 'pdf':
@@ -7335,7 +7899,7 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
     if rule_no in _DISABLED_RULES_FOR_REVIEW:
         return True
 
-    if file_type == "pdf" and rule_no in {"R002", "R013", "R036"}:
+    if file_type == "pdf" and rule_no in {"R002", "R013", "R036", "EXT-R002", "EXT-R013", "EXT-R036"}:
         return True
 
     if document_language == "en" and rule_no == "R016":
@@ -7580,36 +8144,42 @@ def dedupe_issues_by_original(issues):
     print(f"[审核] 误报过滤: 过滤 {len(issues) - len(filtered)} 个, 剩余 {len(filtered)} 个")
     
     def issue_rank(issue):
-        source = issue.get("source", "")
+        source = str(issue.get("source", "") or "").lower()
         severity = issue.get("severity", "general")
         confidence = issue.get("confidence", 0) or 0
         severity_rank = {"fatal": 4, "serious": 3, "general": 2, "suggestion": 1}.get(severity, 0)
-        source_rank = {"rule": 3, "term": 2, "ai": 1}.get(source, 0)
-        return (severity_rank, source_rank, confidence)
+        source_rank = {"rule": 4, "spellcheck": 3, "term": 2, "ai": 1}.get(source, 0)
+        return (source_rank, severity_rank, confidence)
+
+    def _norm_chapter(chapter):
+        return re.sub(r'\s+', '', str(chapter or '')).lower()[:60]
+
+    def _norm_suggestion(issue):
+        return re.sub(r'\s+', ' ', str(issue.get('suggestion', '') or '')).strip().lower()
+
+    def _same_issue(a_text, b_text):
+        a = re.sub(r'\s+', '', str(a_text or ''))
+        b = re.sub(r'\s+', '', str(b_text or ''))
+        return bool(a) and a == b
 
     # 第二步：去重（优先按原文+章节聚合，避免规则与 AI 对同一问题重复上报）
-    seen = {}
+    seen = []
     for issue in filtered:
-        norm = re.sub(r"\s+", "", str(issue.get("original_text", ""))).lower()
-        chapter = issue.get("chapter", "")
-        source = issue.get("source", "")
-        rule = issue.get("rule", "")
-        key = f"{norm}|{chapter}"
-        if source == 'spellcheck' or rule == 'SPELL':
-            key = f"spell|{norm}|{issue.get('position', '')}"
-        if rule in {'UNIT-003', 'UNIT-004', 'HR011'}:
-            key = f"{rule}|{norm}|{issue.get('position', '')}"
-        if rule in {'STYLE-003', 'HR008', 'GRAMMAR-001', 'GRAMMAR-002'}:
-            key = f"{rule}|{norm}|{issue.get('position', '')}"
+        original_text = issue.get("original_text", "")
+        norm = re.sub(r"\s+", "", str(original_text)).lower()
         if not norm.strip():
             continue
-        if key in seen:
-            old = seen[key]
-            if issue_rank(issue) > issue_rank(old):
-                seen[key] = issue
-        else:
-            seen[key] = issue
-    return list(seen.values())
+        matched_index = None
+        for index, existing in enumerate(seen):
+            if _same_issue(original_text, existing.get("original_text", "")):
+                matched_index = index
+                break
+        if matched_index is None:
+            seen.append(issue)
+            continue
+        if issue_rank(issue) > issue_rank(seen[matched_index]):
+            seen[matched_index] = issue
+    return list(seen)
 
 
 def _run_reference_and_term_consistency_audit(db: Session, content):
@@ -7638,135 +8208,6 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         print(f"[审核] 术语库一致性规则执行失败: {e}")
 
     return issues
-
-
-def _run_review_via_orchestrator(db, review_id: int, document_id: int, mode: str):
-    """使用新编排器执行审核（REVIEW_USE_ORCHESTRATOR=1 时启用）。
-
-    这是新旧引擎的桥接函数，将现有的文档加载和规则/AI 调用包装到
-    ReviewOrchestrator 的阶段流水线中，同时保持现有 API 兼容。
-    """
-    from app.review_engine.orchestrator import ReviewOrchestrator
-    from app.review_engine.context import DocumentContext
-    from app.review_engine.rules.engine import DeterministicRuleEngine
-
-    document = get_document(db, document_id=document_id)
-    if not document:
-        set_progress(review_id, 'failed', '文档不存在', 0, f'文档ID={document_id}不存在')
-        update_review_status(db, review_id, "failed", 0, "Document not found")
-        return
-
-    content = document.content or ""
-    if document.file_type == 'pdf':
-        content = clean_pdf_text(content)
-    content_limit = _review_content_limit(document.file_type)
-    content = content[:content_limit]
-    document_language = detect_language(content)
-
-    # Build DocumentContext
-    doc_ctx = DocumentContext.from_content(content, language=document_language, file_type=document.file_type)
-
-    # Build progress callback
-    def progress_cb(stage: str, pct: int, msg: str):
-        set_progress(review_id, 'running', stage, pct, msg)
-
-    # Create orchestrator
-    orchestrator = ReviewOrchestrator(on_progress=progress_cb)
-
-    # Stage 1: Deterministic rules (if mode is rule or hybrid)
-    if mode in ("rule", "hybrid"):
-        rules = get_rules(db)
-        terms = get_terms(db)
-        knowledge_basis = get_knowledge_basis(db)
-
-        def rule_stage(result, ctx):
-            rule_issues = run_rule_audit(content, rules, knowledge_basis, document.file_type)
-            if document.file_type == 'pdf':
-                rule_issues = [i for i in rule_issues if i.get('rule') not in {'R011', 'R016', 'R021'}]
-            term_issues = run_term_check(content, terms)
-            result.issues = rule_issues + term_issues
-
-        orchestrator.add_stage("rule_based_audit", rule_stage)
-
-        # New rules engine (parallel)
-        if os.getenv("REVIEW_USE_NEW_RULES", "1") == "1":
-            def new_rule_stage(result, ctx):
-                engine = DeterministicRuleEngine()
-                new_issues = engine.run_all(
-                    content, file_type=document.file_type,
-                    language=document_language,
-                    document_name=getattr(document, 'filename', '') or '',
-                )
-                existing = {(i.get('rule', ''), (i.get('original_text') or '')[:60]) for i in result.issues}
-                for issue in new_issues:
-                    key = (issue.get('rule', ''), (issue.get('original_text') or '')[:60])
-                    if key not in existing:
-                        result.issues.append(issue)
-                        existing.add(key)
-
-            orchestrator.add_stage("new_deterministic_rules", new_rule_stage)
-
-    # Stage 2: Validation / dedup (always)
-    def validate_stage(result, ctx):
-        before = len(result.issues)
-        from app.review_engine.pipeline import pipeline_select_review_issues
-        result.issues = pipeline_select_review_issues(result.issues)
-
-    orchestrator.add_stage("dedup_and_validation", validate_stage)
-
-    # Stage 3: AI deep review (if mode is ai or hybrid)
-    if mode in ("ai", "hybrid") and document.file_type != 'xlsx' and ai_client.has_any_client:
-        def ai_stage(result, ctx):
-            from app.review_engine.ai_candidates import AICandidateEngine
-            engine = AICandidateEngine(ai_client, review_id=review_id, progress_callback=progress_cb)
-            spec_texts = _load_review_spec_texts(db)
-            basis = _build_ai_review_basis(spec_texts, document_language)
-            ai_result = engine.run_review(content, language=document_language, audit_basis=basis, document_ctx=doc_ctx)
-            result.issues.extend(ai_result.issues)
-
-        orchestrator.add_stage("ai_deep_review", ai_stage)
-
-    # Run pipeline
-    run_result = orchestrator.run(review_id, {"document_id": document_id, "mode": mode})
-
-    # Save issues
-    from app.schemas.review import IssueCreate
-    for issue in run_result.issues:
-        create_issue(db=db, issue=IssueCreate(
-            review_id=review_id,
-            severity=issue.get("severity", "general"),
-            category=issue.get("category", ""),
-            rule=issue.get("rule", ""),
-            chapter=issue.get("chapter", ""),
-            original_text=issue.get("original_text", ""),
-            context=issue.get("context", ""),
-            suggestion=issue.get("suggestion", ""),
-            description=issue.get("description", ""),
-            audit_basis=issue.get("audit_basis", ""),
-            confidence=issue.get("confidence", 0),
-            source=issue.get("source", "rule"),
-            position=issue.get("position", ""),
-            providers=issue.get("providers", None),
-        ))
-
-    # Build summary with stage diagnostics
-    issues = run_result.issues
-    summary = json.dumps({
-        "total": len(issues),
-        "fatal": len([i for i in issues if i.get("severity") == "fatal"]),
-        "serious": len([i for i in issues if i.get("severity") == "serious"]),
-        "general": len([i for i in issues if i.get("severity") == "general"]),
-        "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
-        "language": document_language,
-        "stages": [{k: v for k, v in s.__dict__.items() if not k.startswith('_')} for s in run_result.stages],
-    })
-
-    status = "completed"
-    if run_result.fatal or run_result.errors:
-        status = "partial"
-    update_review_status(db, review_id, status, len(issues), summary)
-    set_progress(review_id, 'completed', '审核完成', 100, f'审核完成，共发现 {len(issues)} 个问题')
-    print(f"[审核] 编排器完成: {len(issues)} 个问题, {len(run_result.stages)} 个阶段")
 
 
 def _filter_low_quality_ai_issues(issues: list) -> list:
@@ -8026,11 +8467,6 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
     try:
         set_progress(review_id, 'running', '加载文档', 5, '正在读取文档内容...')
 
-        # ── REVIEW_USE_ORCHESTRATOR 开关：走新编排器路径 ──
-        if os.getenv("REVIEW_USE_ORCHESTRATOR", "0") == "1":
-            _run_review_via_orchestrator(db, review_id, document_id, mode)
-            return
-        
         document = get_document(db, document_id=document_id)
         if not document:
             set_progress(review_id, 'failed', '文档不存在', 0, f'文档ID={document_id}不存在')
@@ -8353,44 +8789,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
-        ai_filter_diagnostics = {
-            "initial_total": len(issues),
-            "initial_ai": _count_ai_issues(issues),
-        }
-        issues = dedupe_issues_by_original(issues)
-        ai_filter_diagnostics["after_dedup_ai"] = _count_ai_issues(issues)
-        issues = _sanitize_issue_suggestions(issues)
-        ai_filter_diagnostics["after_sanitize_ai"] = _count_ai_issues(issues)
-        issues = _filter_review_false_positives(issues)
-        ai_filter_diagnostics["after_false_positive_ai"] = _count_ai_issues(issues)
-        issues = _filter_low_value_review_issues(issues)
-        ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
-        issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
-        ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
-        ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
-        issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
-        ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
-        pre_pipeline_issues = list(issues)
-        before_pipeline_count = len(issues)
-        issues = pipeline_select_review_issues(issues)
-        ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
-        print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+        issues, ai_filter_diagnostics = _finalize_review_issues(issues, content, false_positive_signatures)
 
-        validation_dropped = _stage_input_counts.get("dedup_and_validation", before_pipeline_count) - len(issues)
+        validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
 
         retained_ai_count = sum(1 for issue in issues if str(issue.get('source', '') or '').lower() == 'ai')
         if retained_ai_count:
             print(f"[审核] AI问题最终保留数量={retained_ai_count}")
-        if len(issues) < 3 and len(content or '') > 10000 and pre_pipeline_issues:
-            fallback_candidates = [issue for issue in pre_pipeline_issues if str(issue.get('original_text', '') or '').strip()]
-            fallback_candidates = sorted(
-                fallback_candidates,
-                key=lambda item: (-pipeline_value_score(item), pipeline_sort_key(item)),
-            )
-            if fallback_candidates:
-                issues = fallback_candidates[: min(5, len(fallback_candidates))]
-                print(f"[审核] 召回下限保护: 长文问题数过少，回退保留 {len(issues)} 个高分问题")
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
@@ -9885,6 +10291,8 @@ async def export_review_html(
     issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(doc, 'content', None))
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html = _generate_compare_review_html_content(review, doc)
+    elif getattr(doc, 'file_type', '') == 'xlsx':
+        html = _generate_excel_review_html_content(review, doc, issues)
     else:
         html = _generate_review_html_content(review, doc, issues)
     return HTMLResponse(content=html)
@@ -9920,6 +10328,8 @@ async def generate_report(
     issues = _visible_review_issues(get_issues(db, review_id=review_id))
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html_content = _generate_compare_review_html_content(review, document)
+    elif getattr(document, 'file_type', '') == 'xlsx':
+        html_content = _generate_excel_review_html_content(review, document, issues)
     else:
         html_content = _generate_review_html_content(review, document, issues)
     return {"content": html_content, "format": "html"}

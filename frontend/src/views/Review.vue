@@ -246,7 +246,6 @@
           <el-table :data="reviews" border>
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
           <el-table-column prop="id" label="任务ID" width="80" />
-          <el-table-column prop="document_id" label="文档ID" width="80" />
           <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
           <el-table-column label="模式" width="140">
             <template #default="scope">
@@ -283,7 +282,11 @@
               <span v-else style="color:#999">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="created_at" label="开始时间" width="160" />
+          <el-table-column label="开始时间" width="180">
+            <template #default="scope">
+              {{ formatDateTime(scope.row.created_at) }}
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="360" fixed="right">
             <template #default="scope">
               <el-button 
@@ -623,6 +626,7 @@
         @selection-change="onIssueSelectionChange"
         ref="issueTableRef"
         row-key="id"
+        class="issue-detail-table"
       >
         <el-table-column type="selection" width="48" />
         <el-table-column label="ID" width="70">
@@ -669,9 +673,17 @@
             <span class="context-cell" v-html="renderIssueContext(scope.row, currentTaskMode)"></span>
           </template>
         </el-table-column>
-        <el-table-column label="建议" min-width="260" show-overflow-tooltip>
+        <el-table-column label="建议" min-width="340" class-name="suggestion-column">
           <template #default="scope">
-            <span class="suggestion-wrap suggestion-text">{{ issueSuggestionText(scope.row) }}</span>
+            <div class="suggestion-wrap">
+              <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
+              <div v-if="issueSuggestionSummary(scope.row)" class="suggestion-summary">{{ issueSuggestionSummary(scope.row) }}</div>
+              <div
+                v-if="issueSuggestionDiffHtml(scope.row)"
+                class="suggestion-diff"
+                v-html="issueSuggestionDiffHtml(scope.row)"
+              ></div>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="处理" min-width="220">
@@ -1035,6 +1047,7 @@ const route = useRoute()
 const router = useRouter()
 const documents = ref([])
 const reviews = ref([])
+const documentReviews = ref([])
 const issues = ref([])
 const rules = ref([])
 
@@ -1135,9 +1148,180 @@ function formatIssueDisplayId(index) {
 function issueSuggestionText(issue) {
   const suggestion = String(issue?.suggestion || '').trim()
   if (suggestion) return suggestion
-  const description = String(issue?.description || '').trim()
-  if (description) return description.replace(/^问题说明[:：]\s*/, '').replace(/^问题[:：]\s*/, '').trim()
+  const description = normalizeIssueDescription(issue)
+  if (description) return description
   return '-'
+}
+
+function issueSuggestionFullText(issue) {
+  const suggestion = String(issue?.suggestion || '').trim()
+  const description = normalizeIssueDescription(issue)
+  if (suggestion && description && description !== suggestion) {
+    return `${suggestion}\n\n说明：${description}`
+  }
+  return suggestion || description || '-'
+}
+
+function normalizeIssueDescription(issue) {
+  return String(issue?.description || '')
+    .trim()
+    .replace(/^问题说明[:：]\s*/, '')
+    .replace(/^问题[:：]\s*/, '')
+    .replace(/\s+/g, ' ')
+}
+
+function compactSuggestionText(text, limit = 36) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
+}
+
+function categoryProblemLabel(category) {
+  const text = String(category || '').trim()
+  if (!text) return ''
+  if (/语法|主谓|时态|单复数/.test(text)) return '语法问题'
+  if (/逻辑|步骤结构|操作步骤/.test(text)) return '操作步骤逻辑问题'
+  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
+  if (/拼写/.test(text)) return '拼写问题'
+  if (/标点|空格|格式/.test(text)) return '标点/格式问题'
+  if (/合规|法规|注册/.test(text)) return '合规表述问题'
+  if (/重复/.test(text)) return '重复内容问题'
+  if (/结构/.test(text)) return '结构完整性问题'
+  return `${text}问题`
+}
+
+function descriptionProblemLabel(description) {
+  const text = String(description || '').trim()
+  if (!text) return ''
+  if (/主谓一致|describe[s]?\b|describes\b|单数|复数|时态|grammar/i.test(text)) return '语法问题'
+  if (/跳号|跳到|编号|步骤|流程连续|逻辑/i.test(text)) return '操作步骤逻辑问题'
+  if (/拼写|misspell|typo/i.test(text)) return '拼写问题'
+  if (/术语|写法|统一|term/i.test(text)) return '术语一致性问题'
+  if (/标点|空格|格式|punctuation|spacing/i.test(text)) return '标点/格式问题'
+  if (/合规|法规|注册|ruo|compliance/i.test(text)) return '合规表述问题'
+  if (/重复|冗余/i.test(text)) return '重复内容问题'
+  return ''
+}
+
+function issueProblemLabel(issue) {
+  const description = normalizeIssueDescription(issue)
+  return descriptionProblemLabel(description) || categoryProblemLabel(issue?.category)
+}
+
+function escapeSuggestionHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function extractSuggestionReplacement(issue) {
+  const suggestion = String(issue?.suggestion || '').trim()
+  if (!suggestion) return ''
+  const patterns = [
+    /建议(?:改为|替换为|统一为)\s*[:：]?\s*(.+)$/i,
+    /(?:->|→)\s*(.+)$/,
+  ]
+  for (const pattern of patterns) {
+    const match = suggestion.match(pattern)
+    if (!match) continue
+    const candidate = String(match[1] || '').trim().replace(/[。；;]+$/, '')
+    if (candidate && !/[，,。；;].{8,}/.test(candidate)) return candidate
+  }
+  if (suggestion.length <= 80 && !/^请|^需|^应|^确认/.test(suggestion)) return suggestion
+  return ''
+}
+
+function buildSuggestionDiffMarkup(before, after) {
+  if (!before || !after || before === after) return ''
+  let prefix = 0
+  const maxPrefix = Math.min(before.length, after.length)
+  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1
+
+  let suffix = 0
+  const maxSuffix = Math.min(before.length - prefix, after.length - prefix)
+  while (
+    suffix < maxSuffix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+
+  const beforeHead = escapeSuggestionHtml(before.slice(0, prefix))
+  const beforeMid = escapeSuggestionHtml(before.slice(prefix, before.length - suffix || before.length))
+  const beforeTail = escapeSuggestionHtml(before.slice(before.length - suffix))
+  const afterHead = escapeSuggestionHtml(after.slice(0, prefix))
+  const afterMid = escapeSuggestionHtml(after.slice(prefix, after.length - suffix || after.length))
+  const afterTail = escapeSuggestionHtml(after.slice(after.length - suffix))
+
+  return `
+    <div class="suggestion-diff-row"><span class="suggestion-diff-label">原文</span><span>${beforeHead}<span class="diff-remove">${beforeMid || '&nbsp;'}</span>${beforeTail}</span></div>
+    <div class="suggestion-diff-row"><span class="suggestion-diff-label">建议</span><span>${afterHead}<span class="diff-add">${afterMid || '&nbsp;'}</span>${afterTail}</span></div>
+  `
+}
+
+function describeSuggestionChange(original, replacement) {
+  const before = String(original || '').trim()
+  const after = String(replacement || '').trim()
+  if (!before || !after || before === after) return ''
+
+  let prefix = 0
+  const maxPrefix = Math.min(before.length, after.length)
+  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1
+
+  let suffix = 0
+  const maxSuffix = Math.min(before.length - prefix, after.length - prefix)
+  while (
+    suffix < maxSuffix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+
+  const removed = before.slice(prefix, before.length - suffix || before.length).trim()
+  const added = after.slice(prefix, after.length - suffix || after.length).trim()
+  if (removed && added) {
+    if (removed.length <= 24 && added.length <= 32) {
+      return `将“${removed}”改为“${added}”`
+    }
+    return `将相关表述改为“${compactSuggestionText(added)}”`
+  }
+  if (!removed && added) {
+    return `补充“${compactSuggestionText(added)}”`
+  }
+  if (removed && !added) {
+    return `删除“${compactSuggestionText(removed)}”`
+  }
+  return `建议改为“${compactSuggestionText(after)}”`
+}
+
+function issueSuggestionOverview(issue) {
+  const problemLabel = issueProblemLabel(issue)
+  if (problemLabel) return problemLabel
+
+  const suggestion = String(issue?.suggestion || '').trim()
+  const replacement = extractSuggestionReplacement(issue)
+  const original = String(issue?.original_text || '').trim()
+  if (replacement && original && replacement !== original) {
+    return '该处表述需要修改。'
+  }
+  if (suggestion) return '建议按下方修改。'
+  return '该处需要处理。'
+}
+
+function issueSuggestionSummary(issue) {
+  if (issueSuggestionDiffHtml(issue)) return ''
+  return issueSuggestionFullText(issue)
+}
+
+function issueSuggestionDiffHtml(issue) {
+  const original = String(issue?.original_text || '').trim()
+  const replacement = extractSuggestionReplacement(issue)
+  if (!original || !replacement || original === replacement) return ''
+  if (replacement.length > 120) return ''
+  return buildSuggestionDiffMarkup(original, replacement)
 }
 
 function percentText(value) {
@@ -1411,8 +1595,8 @@ async function loadDocuments() {
     ])
     const uploadingDocs = documents.value.filter(doc => String(doc.id).startsWith('uploading-'))
     documents.value = [...uploadingDocs, ...(docResp.data || [])]
-    reviews.value = reviewResp.data || []
-    syncDocumentStatusesFromReviews(reviews.value)
+    documentReviews.value = reviewResp.data || []
+    syncDocumentStatusesFromReviews(documentReviews.value)
     syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
@@ -1502,13 +1686,15 @@ function _connectSSEForReview(reviewId) {
         const progress = JSON.parse(event.data)
         const status = progress.status
 
-        // 更新当前 reviews 列表中的进度
-        const review = (reviews.value || []).find(r => r.id === reviewId)
-        if (review) {
-          review.progress = progress
-          review.status = status
-          if (status === 'completed') {
-            review.total_issues = progress.total_issues || review.total_issues
+        // 同步当前页面和文档页中的审核任务快照
+        for (const reviewList of [reviews.value, documentReviews.value]) {
+          const review = (reviewList || []).find(r => r.id === reviewId)
+          if (review) {
+            review.progress = progress
+            review.status = status
+            if (status === 'completed') {
+              review.total_issues = progress.total_issues || review.total_issues
+            }
           }
         }
 
@@ -1538,7 +1724,10 @@ function _connectSSEForReview(reviewId) {
 
           // 完成后重新加载以获取完整结果
           if (status === 'completed') {
-            setTimeout(() => loadReviews(), 500)
+            setTimeout(() => {
+              if (currentView.value === 'documents') loadDocuments()
+              else loadReviews()
+            }, 500)
           }
         }
       } catch (_) { /* 忽略解析错误 */ }
@@ -1562,7 +1751,8 @@ function _disconnectAllSSE() {
 }
 
 function _hasRunningReviews() {
-  return (reviews.value || []).some(review => review.status === 'running')
+  const activeReviews = currentView.value === 'documents' ? documentReviews.value : reviews.value
+  return (activeReviews || []).some(review => review.status === 'running')
 }
 
 function syncReviewsPolling() {
@@ -1571,7 +1761,8 @@ function syncReviewsPolling() {
   if (!_hasRunningReviews()) return
 
   // 优先使用 SSE 实时推送
-  const runningReviews = (reviews.value || []).filter(r => r.status === 'running')
+  const activeReviews = currentView.value === 'documents' ? documentReviews.value : reviews.value
+  const runningReviews = (activeReviews || []).filter(r => r.status === 'running')
   const supportsSSE = typeof EventSource !== 'undefined'
 
   if (supportsSSE) {
@@ -1593,8 +1784,8 @@ function syncReviewsPolling() {
     try {
       if (currentView.value === 'documents') {
         const resp = await reviewAPI.list({ latest_only: true, limit: 500 })
-        reviews.value = resp.data || []
-        syncDocumentStatusesFromReviews(reviews.value)
+        documentReviews.value = resp.data || []
+        syncDocumentStatusesFromReviews(documentReviews.value)
       } else {
         const runningIds = new Set((reviews.value || []).filter(review => review.status === 'running').map(review => review.id))
         const resp = await reviewAPI.list({ status: 'running', limit: 500 })
@@ -1648,8 +1839,20 @@ function formatSize(size) {
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleString('zh-CN')
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(dateStr)
+    ? dateStr
+    : `${dateStr}Z`
+  const date = new Date(normalized)
+  if (Number.isNaN(date.getTime())) return String(dateStr).replace('T', ' ').slice(0, 19)
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date).replace(/\//g, '-')
 }
 
 function beforeUpload(file) {
@@ -1765,6 +1968,12 @@ function upsertDocumentRow(document) {
   ]
 }
 
+function upsertReviewSnapshot(targetList, review) {
+  if (!review?.id) return
+  const next = [review, ...(targetList.value || []).filter(item => item.id !== review.id)]
+  targetList.value = next.sort((left, right) => (right.id || 0) - (left.id || 0))
+}
+
 function beforeRulesUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
   if (ext !== 'json') {
@@ -1851,6 +2060,16 @@ async function startReview(documentId) {
       progress: 0,
       message: statusMessage
     }
+    upsertReviewSnapshot(documentReviews, {
+      id: reviewId,
+      document_id: documentId,
+      status: 'running',
+      mode: reviewMode.value,
+      progress: { status: 'running', progress: 0, message: statusMessage },
+      total_issues: 0,
+      created_at: new Date().toISOString(),
+    })
+    syncReviewsPolling()
     await loadReviews()
   } catch (error) {
     docReviewStatus[documentId] = {
@@ -3165,9 +3384,68 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
-.suggestion-text {
-  color: #1f2937;
+.issue-detail-table :deep(.el-table__cell) {
+  vertical-align: top;
+}
+
+.issue-detail-table :deep(.suggestion-column .cell) {
+  overflow: visible;
+  white-space: normal;
+}
+
+.suggestion-summary {
+  margin-top: 4px;
+  color: #475467;
   font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.suggestion-overview {
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.suggestion-diff {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fcfcfd;
+  border: 1px solid #eaecf0;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.suggestion-diff-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.suggestion-diff-row + .suggestion-diff-row {
+  margin-top: 4px;
+}
+
+.suggestion-diff-label {
+  flex: 0 0 30px;
+  color: #6b7280;
+}
+
+.diff-remove {
+  color: #b42318;
+  background: #fef3f2;
+  border-radius: 4px;
+  padding: 0 2px;
+  text-decoration: line-through;
+}
+
+.diff-add {
+  color: #b42318;
+  background: #fff1f3;
+  border-radius: 4px;
+  padding: 0 2px;
+  font-weight: 600;
 }
 
 .issue-action-cell {
@@ -3481,12 +3759,12 @@ onUnmounted(() => {
 }
 
 .highlight-problem {
-  color: #dc3545;
-  font-weight: bold;
-  background-color: #fef0f0;
+  color: #1f2937;
+  font-weight: 500;
+  background-color: #fff4cc;
   padding: 1px 4px;
   border-radius: 3px;
-  border: 1px solid #fbcfe8;
+  border: 1px solid #f5e0a3;
 }
 
 .gold-upload {

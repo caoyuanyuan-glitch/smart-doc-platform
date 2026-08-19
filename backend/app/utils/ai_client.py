@@ -49,7 +49,6 @@ except ModuleNotFoundError as exc:
             self.language = str(kwargs.get("language") or "").strip()
 
         def build_audit_system_prompt(self):
-            prompt = build_system_prompt()
             context_lines = []
 
             if self.document_name:
@@ -65,6 +64,13 @@ except ModuleNotFoundError as exc:
 
             if self.language:
                 context_lines.append(f"Review language: {self.language}")
+
+            if str(self.language or "").lower().startswith("en"):
+                if not context_lines:
+                    return ""
+                return "Additional review context:\n- " + "\n- ".join(context_lines)
+
+            prompt = build_system_prompt()
 
             if not context_lines:
                 return prompt
@@ -89,6 +95,23 @@ def _env_float(name, default):
         return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _provider_max_attempts():
+    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
+
+
+def _provider_http_timeout():
+    connect_timeout = max(1.0, _env_float("AI_PROVIDER_CONNECT_TIMEOUT", "30"))
+    read_timeout = max(5.0, _env_float("AI_PROVIDER_READ_TIMEOUT", "45"))
+    return httpx.Timeout(connect_timeout, read=read_timeout)
 
 
 def _strip_code_fence(text):
@@ -128,7 +151,7 @@ class AIClient:
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
-        timeout = httpx.Timeout(30.0, read=180.0)
+        timeout = _provider_http_timeout()
 
         self.qwen_client = OpenAI(
             api_key=self.qwen_api_key,
@@ -546,7 +569,7 @@ class AIClient:
         if not self.qwen_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -581,7 +604,7 @@ class AIClient:
         if not self.deepseek_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -616,7 +639,7 @@ class AIClient:
         if not self.arkclaw_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -651,7 +674,7 @@ class AIClient:
         if not self.kimi_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -712,7 +735,8 @@ class AIClient:
         if not self.mcai_available:
             return None
         import time as _time
-        for attempt in range(1, 4):
+        max_attempts = _provider_max_attempts()
+        for attempt in range(1, max_attempts + 1):
             try:
                 started_at = _time.time()
                 headers = {
@@ -729,7 +753,7 @@ class AIClient:
                     f"{self.mcai_base_url}/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=180.0,
+                    timeout=max(5.0, _env_float("AI_PROVIDER_READ_TIMEOUT", "45")),
                 )
                 if r.status_code == 200:
                     content = r.text.strip()
@@ -760,15 +784,15 @@ class AIClient:
                         if content.startswith('"') and content.endswith('"'):
                             content = json.loads(content)
                         return content
-                if r.status_code == 429 and attempt < 3:
+                if r.status_code == 429 and attempt < max_attempts:
                     wait = 2 ** attempt
-                    print(f"[AI] MCAI Proxy 429，等待{wait}s后重试 ({attempt}/3)")
+                    print(f"[AI] MCAI Proxy 429，等待{wait}s后重试 ({attempt}/{max_attempts})")
                     _time.sleep(wait)
                     continue
                 print(f"[AI] MCAI Proxy 错误: HTTP {r.status_code} {r.text[:100]}")
                 return None
             except Exception as e:
-                if "429" in str(e) and attempt < 3:
+                if "429" in str(e) and attempt < max_attempts:
                     _time.sleep(2 ** attempt)
                     continue
                 print(f"[AI] MCAI Proxy 调用失败: {str(e)[:100]}")
@@ -802,7 +826,7 @@ class AIClient:
 
         if providers:
             print(f"[AI] providers={', '.join(name for name, _, _ in providers)}")
-            max_retries = 3
+            max_retries = _provider_max_attempts()
             retry_delay = 2
             is_translation_request = str(request_label or "").startswith("translation.")
             for name, client, model in providers:
@@ -920,7 +944,7 @@ class AIClient:
                            request_label=request_label, review_id=review_id)
 
         print(f"[AI] chat_with_provider: using {name} ({model})")
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         is_translation_request = str(request_label or "").startswith("translation.")
 
@@ -1122,6 +1146,8 @@ class AIClient:
             category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
             rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
             audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
+            issue_source = self._clean_text(item.get("source"), 40) or source
+            status = self._clean_text(item.get("status"), 40) or "open"
             confidence = self._normalize_confidence(item.get("confidence"), 80 if source == "ai" else 0)
             severity = self._normalize_severity(item.get("severity"), confidence)
 
@@ -1161,7 +1187,8 @@ class AIClient:
                 "description": description,
                 "audit_basis": audit_basis,
                 "confidence": confidence,
-                "source": source,
+                "source": issue_source,
+                "status": status,
                 "position": self._clean_text(item.get("position"), 80),
                 "source_models": list(item.get("source_models") or []),
                 "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
@@ -1246,7 +1273,7 @@ class AIClient:
             return []
 
         data = self._extract_json(result, {"issues": []})
-        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
         for issue in issues:
             issue["source_models"] = [provider_key] if provider_key else []
             issue["consensus_score"] = int(issue.get("confidence") or 0)
@@ -1979,21 +2006,28 @@ class AIClient:
             base_system_prompt = builder.build_audit_system_prompt()
         except Exception as e:
             print(f"[ai_client] 分层提示词构建失败，回退到静态规则: {e}")
-            base_system_prompt = build_system_prompt()
+            base_system_prompt = "" if is_english else build_system_prompt()
 
         if PROMPT_BUILDER_FALLBACK_ACTIVE and not _prompt_builder_fallback_logged:
             print("[ai_client] prompt_builder 模块缺失，当前使用保守降级提示词构建")
             _prompt_builder_fallback_logged = True
 
         if is_english:
+            context_block = f"\n\n{base_system_prompt}" if base_system_prompt.strip() else ""
             system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.
-
-{base_system_prompt}
-
+{context_block}
 REVIEW GOAL:
 - Behave like a human release reviewer, not a grammar checker.
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
 - Ordinary grammar, article usage, punctuation, capitalization, spacing, and style preferences are low value. Report them only when they make an instruction ambiguous, incomplete, or impossible to perform.
+
+ADDITIONAL MANUAL REVIEW CHECKS:
+- Cross-reference semantics: report when a reference such as Section X.X, Figure X, or Table X points to missing content or clearly mismatched topic content. Use category "编号引用".
+- Readability: report sentences longer than 80 characters without proper punctuation breaks, or word order that makes the sentence hard to understand. Use category "可读性".
+- Mutually exclusive step order: report when the described order is logically inconsistent, such as performing a dependent operation after power-off.
+- Step merge suggestion: suggest merging adjacent steps only when the action is identical and the wording overlap is above 90 percent, with only parameter differences.
+- Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
+- Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 
 🚫 FORBIDDEN issue types (reporting any of these is an error):
 - ❌ Single punctuation marks (e.g. "." → "," or ":" → ";")
@@ -2001,6 +2035,11 @@ REVIEW GOAL:
 - ❌ Issues where original differs from expected only by one punctuation or space
 - ❌ Pure formatting differences (fullwidth/halfwidth, spacing preferences)
 - ❌ Issues where the original field is shorter than 2 meaningful characters
+- ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
+- ❌ Rewriting compliance / legal / regulatory statements, product names, or warning text to a more standard template, unless the document text itself proves an objective error
+- ❌ Suggesting to expand a well-known abbreviation (e.g. DNB → DNA Nanoball) unless this is the first occurrence in the document and no definition exists anywhere in the document
+- ❌ Gerund vs noun form differences in figure captions or UI labels (e.g. Reviewing parameters vs Review parameters) unless the same UI element uses both forms inconsistently within the same context
+- ❌ Adding/removing articles (a/an/the) when the meaning is unambiguous and the sentence remains grammatical
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
@@ -2043,22 +2082,39 @@ Output ONLY strict JSON:
 {{
   "issues": [
     {{
-      "severity": "serious|general|suggestion",
+      "severity": "fatal|serious|general|suggestion",
       "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
+      "context": "local context around the issue, about 40 chars before and after",
       "rule": "which rule is violated",
+      "basis": "review basis or checklist clause used for the judgment",
+      "source": "ai",
+      "status": "open",
       "confidence": 50-100
     }}
   ],
   "summary": {{
     "total": number,
+    "fatal": number,
     "serious": number,
     "general": number,
-    "suggestion": number
+    "suggestion": number,
+    "categories": {{
+      "结构完整": number,
+      "法规合规": number,
+      "术语一致性": number,
+      "编号引用": number,
+      "可读性": number,
+      "格式排版": number,
+      "其他": number
+    }}
   }}
 }}
+
+Use severity=fatal only for missing or wrong safety warnings, contraindications, warning statements, regulatory violations, or operation errors that may lead to personal injury or equipment damage. Use serious, general, or suggestion for all other issues.
 
 Confidence scoring guide:
 - 90-100: Definite error (misspelling, wrong terminology, factual error)
@@ -2074,12 +2130,25 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 - 优先输出影响发布审批、法规合规、用户操作、信息完整性、术语一致性、表格内容完整性、图文引用、版本记录、默认账号密码、IP/URL 暴露、法律声明的内容问题。
 - 普通语法、冠词、标点、大小写、空格、风格偏好属于低价值问题；只有会导致说明不清、步骤不可执行或合规风险时才输出。
 
+附加人工审核检查项（按需报告，不得为凑数而报）：
+- 交叉引用语义检查：文中“参见 X.X 节 / 图 X / 表 X”等引用，若被引用对象不存在或指向内容与描述主题明显不符，报告，category=编号引用。
+- 可读性检查：出现超过 80 字且无标点断句的长句，或读不通的语序，报告，category=可读性。
+- 互斥操作顺序检查：步骤描述存在“先 A 后 B”但 A 与 B 在逻辑上互斥或顺序颠倒时，报告。
+- 步骤合并建议：相邻步骤动作完全相同且文字重复度高于 90%，仅参数不同，可建议合并。
+- 索引页码准确性：目录或索引中的页码与实际章节页码不符时，报告，category=编号引用。
+- 商标或专有名词大小写：品牌名如 macOS、DNBSEQ、GenSeq 的大小写与官方写法不一致且同文档内混用时，报告，category=术语一致性。
+
 🚫 严禁输出的问题类型（违反即为错误）：
 - ❌ 单个标点符号（如 "。" → "，" 或 "." → ","）
 - ❌ 单个中文字符或英文字母（如 "的" → "地" 且仅有一个字）
 - ❌ 原文与建议仅差一个标点或空格
 - ❌ 纯格式差异（全角/半角标点互换、中英文空格增减）
 - ❌ original 字段长度小于 2 个有意义字符的问题
+- ❌ Unicode 等价字符差异，例如 µ(U+00B5) 与 μ(U+03BC)、全角与半角数字、U+2212 减号与 U+002D 连字符，在视觉呈现一致时不得报错
+- ❌ 仅为了更标准而改写合规、法律、法规声明、产品名称、警告文本；只有原文能证明存在客观错误时才允许报告
+- ❌ 要求展开公认缩写，例如 DNB → DNA Nanoball；只有全文第一次出现且全文其他位置都没有定义时才允许报告
+- ❌ 图注或 UI 标签中动名词与名词形式差异，例如 Reviewing parameters 与 Review parameters；只有同一对象在同一上下文内前后不一致时才允许报告
+- ❌ 在句义明确且句子仍然成立时，仅因冠词 a/an/the 的增删而报错
 
 重要提醒：
 - 只报告有明确文本证据的问题。
@@ -2122,21 +2191,38 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
   "issues": [
     {{
       "type": "合规|发布风险|操作步骤|信息完整性|术语|表格|图文引用|语法|文件名错误",
-      "severity": "serious|general|suggestion",
+      "severity": "fatal|serious|general|suggestion",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
       "location": "章节名或行号",
       "original": "原文内容",
       "expected": "正确写法",
+      "context": "问题所在段落前后约40字上下文",
       "rule": "违反的具体规则",
+      "basis": "判断依据或引用的规则条款",
+      "source": "ai",
+      "status": "open",
       "confidence": 50-100
     }}
   ],
   "summary": {{
-    "total": 数量,
-    "serious": 严重数量,
-    "general": 一般数量,
-    "suggestion": 建议数量
-  }}
+      "total": 数量,
+      "fatal": 致命数量,
+      "serious": 严重数量,
+      "general": 一般数量,
+      "suggestion": 建议数量,
+      "categories": {{
+        "结构完整": 数量,
+        "法规合规": 数量,
+        "术语一致性": 数量,
+        "编号引用": 数量,
+        "可读性": 数量,
+        "格式排版": 数量,
+        "其他": 数量
+      }}
+    }}
 }}
+
+severity=fatal 仅用于：安全警告、禁忌、警示信息缺失或错误，法规条款违规，或可能导致用户人身伤害、设备损坏的操作描述错误。其余问题使用 serious、general 或 suggestion。
 
 confidence 评分指南：
 - 90-100：确凿错误（拼写错误、术语用错、事实性错误）
@@ -2155,30 +2241,7 @@ confidence 评分指南：
         lang = language or "en"
 
         content = content or ""
-        if len(content) > 7000:
-            all_issues = []
-            chunk_size = 6000
-            overlap = 500
-            chunk_index = 1
-            for start in range(0, len(content), chunk_size - overlap):
-                chunk = content[start:start + chunk_size]
-                if not chunk.strip():
-                    continue
-                result = self.audit_document(
-                    chunk,
-                    language=lang,
-                    audit_basis=(audit_basis or "")[:2000],
-                    skip_kimi=skip_kimi,
-                    review_id=review_id,
-                    request_label=request_label,
-                    chapter_context=chapter_context,
-                    force_provider=force_provider,
-                )
-                for issue in result.get("issues", []):
-                    issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
-                    all_issues.append(issue)
-                chunk_index += 1
-            return {"issues": all_issues}
+        # 上层审核流程已做滑动窗口分块，这里保持单次模型调用，避免二次分块打散上下文。
 
         prompt_payload = self.build_audit_prompt_payload(
             content,
@@ -2209,7 +2272,7 @@ confidence 评分指南：
             if not result:
                 return {"issues": []}
             data = self._extract_json(result, {"issues": []})
-            issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+            issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
             for issue in issues:
                 issue["source_models"] = [str(force_provider or "")]
                 issue["consensus_score"] = int(issue.get("confidence") or 0)
@@ -2229,7 +2292,7 @@ confidence 评分指南：
             if not result:
                 return {"issues": []}
             data = self._extract_json(result, {"issues": []})
-            primary_issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
+            primary_issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
             for issue in primary_issues:
                 issue["source_models"] = ["fallback"]
                 issue["consensus_score"] = int(issue.get("confidence") or 0)
