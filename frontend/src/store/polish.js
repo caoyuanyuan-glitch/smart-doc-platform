@@ -37,13 +37,15 @@ export const usePolishStore = defineStore('polish', () => {
   }
 
   const defaultDocumentDraft = {
+    productType: '',
     sentenceFile: '',
     sentenceFileId: null,
     terminologyFile: '',
     terminologyFileId: null,
     sourceFile: '',
     outputPath: '已润色文档',
-    requirements: ''
+    requirements: '',
+    catAiSemanticScoring: false
   }
 
   const defaultDocumentSession = {

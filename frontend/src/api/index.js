@@ -42,6 +42,16 @@ export function getAPIErrorMessage(error, fallback = '请求失败') {
   return error?.message || fallback
 }
 
+export function getKnowledgeLoadErrorMessage(error, fallback = '加载知识库失败') {
+  if (error?.code === 'ECONNABORTED') {
+    return '加载知识库超时，请稍后重试'
+  }
+  if (!error?.response) {
+    return '知识库服务不可用，请确认后端服务已启动'
+  }
+  return getAPIErrorMessage(error, fallback)
+}
+
 function triggerBlobDownload(data, filename, mimeType = 'application/octet-stream') {
   const url = window.URL.createObjectURL(new Blob([data], { type: mimeType }))
   const link = document.createElement('a')
@@ -189,6 +199,21 @@ export const compareAPI = {
   getPreviewFileUrl: (id, side) => `/api/compare/${id}/preview/file?side=${side}`,
 }
 
+export const competitorAPI = {
+  create: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/competitor/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000
+    })
+  },
+  list: (params = {}) => instance.get('/competitor/', { params }),
+  get: (id) => instance.get(`/competitor/${id}`),
+  delete: (id) => instance.delete(`/competitor/${id}`),
+  getReport: (id) => instance.get(`/competitor/${id}/report`, { params: { format: 'md' } }),
+}
+
 export const rulesAPI = {
   list: () => instance.get('/rules/'),
   create: (rule) => instance.post('/rules/', rule),
@@ -219,12 +244,40 @@ export const auditBasisAPI = {
 
 export const polishAPI = {
   document: (id) => instance.post(`/polish/${id}`),
-  text: (text, styleGuideId = null, terminologyId = null) => instance.post('/polish/text', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
+  text: ({ text, productType = '', styleGuideId = null, terminologyId = null }, config = {}) => instance.post('/polish/text', {
+    text,
+    product_type: productType || null,
+    style_guide_id: styleGuideId,
+    terminology_id: terminologyId
+  }, config),
   polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
     instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
+  catAnalyze: (formData) => {
+    return instance.post('/polish/cat/analyze', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000
+    })
+  },
+  catApply: (payload) => instance.post('/polish/cat/apply', payload, { timeout: 600000 }),
+  downloadCatAsset: (downloadUrl, filename = 'cat_asset') => {
+    return instance.get(downloadUrl.replace(/^\/api/, ''), {
+      responseType: 'blob',
+      transformResponse: [(data) => data]
+    }).then((response) => {
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    })
+  },
+  downloadCatOutput: (downloadUrl, filename = 'cat_polished.docx') => polishAPI.downloadCatAsset(downloadUrl, filename),
   getProgress: (taskId) => instance.get(`/polish/progress/${taskId}`),
   listPolishedDocuments: () => instance.get('/polish/'),
   getPolishedDocument: (id) => instance.get(`/polish/${id}`),
@@ -405,4 +458,12 @@ export const docPolishAPI = {
   export: (data) => instance.post('/doc-polish/export', data, {
     timeout: 600000
   })
+}
+
+export const polishStatsAPI = {
+  getTextStats: () => instance.get('/polish/stats/text'),
+  getDocumentStats: () => instance.get('/polish/stats/document'),
+  getTextSessions: (params = {}) => instance.get('/polish/stats/text/sessions', { params }),
+  getDocumentSessions: (params = {}) => instance.get('/polish/stats/document/sessions', { params }),
+  getDocumentDetail: (analyzeId) => instance.get(`/polish/stats/document/${analyzeId}`)
 }

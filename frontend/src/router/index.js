@@ -5,6 +5,9 @@ const Home = () => import('@/views/Home.vue')
 const Review = () => import('@/views/Review.vue')
 const ReviewDashboard = () => import('@/views/ReviewDashboard.vue')
 const Polish = () => import('@/views/Polish.vue')
+const PolishStats = () => import('@/views/PolishStats.vue')
+const PolishTextSessions = () => import('@/views/PolishTextSessions.vue')
+const PolishDocumentSessions = () => import('@/views/PolishDocumentSessions.vue')
 const PolishHistory = () => import('@/views/PolishHistory.vue')
 const QA = () => import('@/views/QA.vue')
 const QAManual = () => import('@/views/QADoc.vue')
@@ -14,6 +17,7 @@ const Generate = () => import('@/views/Generate.vue')
 const DocGenerator = () => import('@/views/DocGenerator.vue')
 const Compare = () => import('@/views/Compare.vue')
 const CompareParams = () => import('@/views/CompareParams.vue')
+const Competitor = () => import('@/views/Competitor.vue')
 const Convert = () => import('@/views/Convert.vue')
 const Terms = () => import('@/views/Terms.vue')
 const Users = () => import('@/views/Users.vue')
@@ -78,6 +82,21 @@ const routes = [
     path: '/review/spell-check/whitelist',
     name: 'WhiteList',
     component: WhiteList
+  },
+  {
+    path: '/polish/stats',
+    name: 'PolishStats',
+    component: PolishStats
+  },
+  {
+    path: '/polish/stats/text-sessions',
+    name: 'PolishTextSessions',
+    component: PolishTextSessions
+  },
+  {
+    path: '/polish/stats/document-sessions',
+    name: 'PolishDocumentSessions',
+    component: PolishDocumentSessions
   },
   {
     path: '/polish',
@@ -185,6 +204,16 @@ const routes = [
     path: '/compare/params',
     name: 'CompareParams',
     component: CompareParams
+  },
+  {
+    path: '/competitor',
+    name: 'Competitor',
+    component: Competitor
+  },
+  {
+    path: '/competitor/tasks',
+    name: 'CompetitorTasks',
+    component: Competitor
   },
   {
     path: '/convert',

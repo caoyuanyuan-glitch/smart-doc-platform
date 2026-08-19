@@ -177,7 +177,7 @@
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
-import { getBlobErrorMessage, knowledgeAPI, translationAPI } from '@/api'
+import { getBlobErrorMessage, knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 import {
@@ -267,6 +267,7 @@ async function loadMemoryLibraryFiles() {
     memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
   } catch (e) {
     memoryLibraryFiles.value = []
+    ElMessage.warning(getKnowledgeLoadErrorMessage(e, '加载记忆库配置失败'))
   } finally {
     memoryLibraryLoading.value = false
   }
