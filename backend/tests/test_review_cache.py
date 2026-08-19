@@ -743,6 +743,71 @@ def test_dedupe_issues_by_original_prefers_spellcheck_when_chapter_differs_but_s
     assert deduped[0]["source"] == "spellcheck"
 
 
+def test_dedupe_similar_but_not_identical_issues_kept():
+    first_issue = {
+        "severity": "general",
+        "category": "操作步骤",
+        "rule": "AI-STEP",
+        "chapter": "Section 1",
+        "original_text": "点击【新增】按钮，填写物料编码，点击【确定】保存。",
+        "source": "ai",
+        "confidence": 92,
+        "position": "10-30",
+    }
+    second_issue = {
+        "severity": "general",
+        "category": "操作步骤",
+        "rule": "AI-STEP",
+        "chapter": "Section 1",
+        "original_text": "点击【新增】按钮，填写物料名称，点击【确定】保存。",
+        "source": "ai",
+        "confidence": 91,
+        "position": "31-51",
+    }
+
+    deduped = review_api.dedupe_issues_by_original([first_issue, second_issue])
+
+    assert len(deduped) == 2
+
+
+def test_parse_ai_issue_with_fatal_severity():
+    payload = json.dumps({
+        "issues": [{
+            "severity": "fatal",
+            "type": "Compliance",
+            "category": "法规合规",
+            "location": "Warnings",
+            "original": "WARNING label is missing.",
+            "expected": "Add the WARNING label.",
+            "context": "Before operation, the warning label is missing from the section.",
+            "rule": "SAFE-001",
+            "basis": "Safety checklist clause 2.1",
+            "source": "ai",
+            "status": "open",
+            "confidence": 96,
+        }],
+        "summary": {
+            "total": 1,
+            "fatal": 1,
+            "serious": 0,
+            "general": 0,
+            "suggestion": 0,
+            "categories": {"法规合规": 1},
+        },
+    })
+
+    data = review_api.ai_client._extract_json(payload, {"issues": []})
+    issues = review_api.ai_client.normalize_audit_issues(data.get("issues", []), "WARNING label is missing.")
+
+    assert len(issues) == 1
+    assert issues[0]["severity"] == "fatal"
+    assert issues[0]["category"] == "法规合规"
+    assert issues[0]["context"]
+    assert issues[0]["audit_basis"] == "Safety checklist clause 2.1"
+    assert issues[0]["source"] == "ai"
+    assert issues[0]["status"] == "open"
+
+
 def test_validate_ai_issue_candidate_rejects_ruo_template_rewrite():
     issue = {
         "source": "ai",
@@ -1378,14 +1443,15 @@ def test_review_ai_chunk_limit_defaults_to_ten(monkeypatch):
 def test_review_ai_chunk_limit_uses_dynamic_value_under_budget(monkeypatch):
     monkeypatch.delenv("REVIEW_AI_MAX_CHUNKS", raising=False)
 
-    assert review_api._review_ai_chunk_limit(9000) == 2
-    assert review_api._review_ai_chunk_limit(26000) == 5
+    assert review_api._review_ai_chunk_limit(6000) == 3
+    assert review_api._review_ai_chunk_limit(12000) == 5
+    assert review_api._review_ai_chunk_limit(30000) == 10
 
 
 def test_review_ai_chunk_limit_caps_long_documents_by_env_budget(monkeypatch):
     monkeypatch.setenv("REVIEW_AI_MAX_CHUNKS", "6")
 
-    assert review_api._review_ai_chunk_limit(40000) == 6
+    assert review_api._review_ai_chunk_limit(60000) == 6
 
 
 def test_review_ai_token_budget_defaults_to_zero(monkeypatch):
@@ -1677,11 +1743,24 @@ def test_chinese_human_baseline_rules_skip_adjacent_steps_with_different_actions
         "2. 点击【添加】，按需填写字典值code 及字典值名称，并设置标签颜色。"
         "3. 点击【物料大类】右侧的【添加】，按需填写字典值code 及名称。"
         "4. 点击【物料小类】右侧的【添加】，按需填写字典值code 及名称，为对应大类添加小类。"
+        "5. 点击【新增】按钮，填写物料编码，点击【确定】保存。"
+        "6. 点击【新增】按钮，填写物料名称，点击【确定】保存。"
+        "7. 取样本加入裂解液，充分混匀，室温静置。"
+        "8. 取样本加入裂解液，充分混匀，室温静置，12000rpm 离心 10 分钟。"
+        "9. Click the Add button to open the dialog."
+        "10. Click the Edit button to open the dialog."
+        "11. 打开系统设置，选择高级选项，点击保存。"
+        "12. 打开系统设置，选择高级选项，点击保存。"
     )
 
     issues = review_api._run_chinese_human_baseline_rules(content)
 
-    assert not any(issue["rule"] == "CYY-CN-STRUCT-001" for issue in issues)
+    struct_issues = [issue for issue in issues if issue["rule"] == "CYY-CN-STRUCT-001"]
+
+    assert not any("填写物料名称" in issue["original_text"] for issue in struct_issues)
+    assert not any("12000rpm 离心 10 分钟" in issue["original_text"] for issue in struct_issues)
+    assert not any("Click the Edit button" in issue["original_text"] for issue in struct_issues)
+    assert any("12. 打开系统设置，选择高级选项，点击保存。" == issue["original_text"] for issue in struct_issues)
 
 
 def test_chinese_human_baseline_rules_skip_cross_section_step_capture():

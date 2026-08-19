@@ -1565,15 +1565,13 @@ def _review_ai_token_budget():
 
 def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
-    
-    默认10块，支持通过环境变量 REVIEW_AI_MAX_CHUNKS 自定义。
-    根据文档总长度动态计算采样块数，并以环境预算作为上限。
+
+    短文档全覆盖；长文档受环境预算 REVIEW_AI_MAX_CHUNKS 约束。
     """
     env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '10'))
     if total_length <= 0:
         return env_limit
-    # 每 6000 字符约采样 1 块，长文档仍受环境预算约束。
-    dynamic_limit = max(1, (total_length + 5999) // 6000)
+    dynamic_limit = 1 + math.ceil(max(0, total_length - 3000) / 2750)
     return min(env_limit, dynamic_limit)
 
 
@@ -6118,6 +6116,15 @@ def _run_chinese_human_baseline_rules(content):
         next_labels = {label for label in re.findall(r'【([^】]+)】', next_text) if label not in {'添加', '保存', '确认', '下一步'}}
         if current_labels and next_labels and current_labels != next_labels:
             continue
+        if not re.search(r'[\u4e00-\u9fff]', current_text) and not re.search(r'[\u4e00-\u9fff]', next_text):
+            continue
+        sm = difflib.SequenceMatcher(None, current_norm, next_norm)
+        diff_parts = [current_norm[a:b] for tag, a, b, _c, _d in sm.get_opcodes() if tag == 'replace']
+        diff_parts = [part for part in diff_parts if part]
+        if diff_parts and all(len(part) <= 10 and not re.search(r'[点击打开选择输入填写修改删除保存确定取消设置进入返回]', part) for part in diff_parts):
+            continue
+        if (current_norm in next_norm or next_norm in current_norm) and abs(len(current_norm) - len(next_norm)) >= 8:
+            continue
         ratio = difflib.SequenceMatcher(None, current_norm, next_norm).ratio()
         shared_tail = len(os.path.commonprefix([current_norm[::-1], next_norm[::-1]]))
         if current_norm in next_norm or next_norm in current_norm or ratio >= 0.68 or shared_tail >= 14:
@@ -8150,29 +8157,29 @@ def dedupe_issues_by_original(issues):
     def _norm_suggestion(issue):
         return re.sub(r'\s+', ' ', str(issue.get('suggestion', '') or '')).strip().lower()
 
+    def _same_issue(a_text, b_text):
+        a = re.sub(r'\s+', '', str(a_text or ''))
+        b = re.sub(r'\s+', '', str(b_text or ''))
+        return bool(a) and a == b
+
     # 第二步：去重（优先按原文+章节聚合，避免规则与 AI 对同一问题重复上报）
-    seen = {}
+    seen = []
     for issue in filtered:
-        norm = re.sub(r"\s+", "", str(issue.get("original_text", ""))).lower()
-        chapter = _norm_chapter(issue.get("chapter", ""))
-        rule = str(issue.get("rule", "") or "")
-        suggestion = _norm_suggestion(issue)
-        key = f"{norm}|{chapter}"
-        if suggestion:
-            key = f"{norm}|{suggestion}"
-        if rule in {'UNIT-003', 'UNIT-004', 'HR011'}:
-            key = f"{rule}|{norm}|{issue.get('position', '')}"
-        if rule in {'STYLE-003', 'HR008', 'GRAMMAR-001', 'GRAMMAR-002'}:
-            key = f"{rule}|{norm}|{issue.get('position', '')}"
+        original_text = issue.get("original_text", "")
+        norm = re.sub(r"\s+", "", str(original_text)).lower()
         if not norm.strip():
             continue
-        if key in seen:
-            old = seen[key]
-            if issue_rank(issue) > issue_rank(old):
-                seen[key] = issue
-        else:
-            seen[key] = issue
-    return list(seen.values())
+        matched_index = None
+        for index, existing in enumerate(seen):
+            if _same_issue(original_text, existing.get("original_text", "")):
+                matched_index = index
+                break
+        if matched_index is None:
+            seen.append(issue)
+            continue
+        if issue_rank(issue) > issue_rank(seen[matched_index]):
+            seen[matched_index] = issue
+    return list(seen)
 
 
 def _run_reference_and_term_consistency_audit(db: Session, content):
@@ -8201,135 +8208,6 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         print(f"[审核] 术语库一致性规则执行失败: {e}")
 
     return issues
-
-
-def _run_review_via_orchestrator(db, review_id: int, document_id: int, mode: str):
-    """使用新编排器执行审核（REVIEW_USE_ORCHESTRATOR=1 时启用）。
-
-    这是新旧引擎的桥接函数，将现有的文档加载和规则/AI 调用包装到
-    ReviewOrchestrator 的阶段流水线中，同时保持现有 API 兼容。
-    """
-    from app.review_engine.orchestrator import ReviewOrchestrator
-    from app.review_engine.context import DocumentContext
-    from app.review_engine.rules.engine import DeterministicRuleEngine
-
-    document = get_document(db, document_id=document_id)
-    if not document:
-        set_progress(review_id, 'failed', '文档不存在', 0, f'文档ID={document_id}不存在')
-        update_review_status(db, review_id, "failed", 0, "Document not found")
-        return
-
-    content = document.content or ""
-    if document.file_type == 'pdf':
-        content = clean_pdf_text(content)
-    content_limit = _review_content_limit(document.file_type)
-    content = content[:content_limit]
-    document_language = detect_language(content)
-
-    # Build DocumentContext
-    doc_ctx = DocumentContext.from_content(content, language=document_language, file_type=document.file_type)
-
-    # Build progress callback
-    def progress_cb(stage: str, pct: int, msg: str):
-        set_progress(review_id, 'running', stage, pct, msg)
-
-    # Create orchestrator
-    orchestrator = ReviewOrchestrator(on_progress=progress_cb)
-
-    # Stage 1: Deterministic rules (if mode is rule or hybrid)
-    if mode in ("rule", "hybrid"):
-        rules = get_rules(db)
-        terms = get_terms(db)
-        knowledge_basis = get_knowledge_basis(db)
-
-        def rule_stage(result, ctx):
-            rule_issues = run_rule_audit(content, rules, knowledge_basis, document.file_type)
-            if document.file_type == 'pdf':
-                rule_issues = [i for i in rule_issues if i.get('rule') not in {'R011', 'R016', 'R021'}]
-            term_issues = run_term_check(content, terms)
-            result.issues = rule_issues + term_issues
-
-        orchestrator.add_stage("rule_based_audit", rule_stage)
-
-        # New rules engine (parallel)
-        if os.getenv("REVIEW_USE_NEW_RULES", "1") == "1":
-            def new_rule_stage(result, ctx):
-                engine = DeterministicRuleEngine()
-                new_issues = engine.run_all(
-                    content, file_type=document.file_type,
-                    language=document_language,
-                    document_name=getattr(document, 'filename', '') or '',
-                )
-                existing = {(i.get('rule', ''), (i.get('original_text') or '')[:60]) for i in result.issues}
-                for issue in new_issues:
-                    key = (issue.get('rule', ''), (issue.get('original_text') or '')[:60])
-                    if key not in existing:
-                        result.issues.append(issue)
-                        existing.add(key)
-
-            orchestrator.add_stage("new_deterministic_rules", new_rule_stage)
-
-    # Stage 2: Validation / dedup (always)
-    def validate_stage(result, ctx):
-        before = len(result.issues)
-        from app.review_engine.pipeline import pipeline_select_review_issues
-        result.issues = pipeline_select_review_issues(result.issues)
-
-    orchestrator.add_stage("dedup_and_validation", validate_stage)
-
-    # Stage 3: AI deep review (if mode is ai or hybrid)
-    if mode in ("ai", "hybrid") and document.file_type != 'xlsx' and ai_client.has_any_client:
-        def ai_stage(result, ctx):
-            from app.review_engine.ai_candidates import AICandidateEngine
-            engine = AICandidateEngine(ai_client, review_id=review_id, progress_callback=progress_cb)
-            spec_texts = _load_review_spec_texts(db)
-            basis = _build_ai_review_basis(spec_texts, document_language)
-            ai_result = engine.run_review(content, language=document_language, audit_basis=basis, document_ctx=doc_ctx)
-            result.issues.extend(ai_result.issues)
-
-        orchestrator.add_stage("ai_deep_review", ai_stage)
-
-    # Run pipeline
-    run_result = orchestrator.run(review_id, {"document_id": document_id, "mode": mode})
-
-    # Save issues
-    from app.schemas.review import IssueCreate
-    for issue in run_result.issues:
-        create_issue(db=db, issue=IssueCreate(
-            review_id=review_id,
-            severity=issue.get("severity", "general"),
-            category=issue.get("category", ""),
-            rule=issue.get("rule", ""),
-            chapter=issue.get("chapter", ""),
-            original_text=issue.get("original_text", ""),
-            context=issue.get("context", ""),
-            suggestion=issue.get("suggestion", ""),
-            description=issue.get("description", ""),
-            audit_basis=issue.get("audit_basis", ""),
-            confidence=issue.get("confidence", 0),
-            source=issue.get("source", "rule"),
-            position=issue.get("position", ""),
-            providers=issue.get("providers", None),
-        ))
-
-    # Build summary with stage diagnostics
-    issues = run_result.issues
-    summary = json.dumps({
-        "total": len(issues),
-        "fatal": len([i for i in issues if i.get("severity") == "fatal"]),
-        "serious": len([i for i in issues if i.get("severity") == "serious"]),
-        "general": len([i for i in issues if i.get("severity") == "general"]),
-        "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
-        "language": document_language,
-        "stages": [{k: v for k, v in s.__dict__.items() if not k.startswith('_')} for s in run_result.stages],
-    })
-
-    status = "completed"
-    if run_result.fatal or run_result.errors:
-        status = "partial"
-    update_review_status(db, review_id, status, len(issues), summary)
-    set_progress(review_id, 'completed', '审核完成', 100, f'审核完成，共发现 {len(issues)} 个问题')
-    print(f"[审核] 编排器完成: {len(issues)} 个问题, {len(run_result.stages)} 个阶段")
 
 
 def _filter_low_quality_ai_issues(issues: list) -> list:
@@ -8589,11 +8467,6 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
     try:
         set_progress(review_id, 'running', '加载文档', 5, '正在读取文档内容...')
 
-        # ── REVIEW_USE_ORCHESTRATOR 开关：走新编排器路径 ──
-        if os.getenv("REVIEW_USE_ORCHESTRATOR", "0") == "1":
-            _run_review_via_orchestrator(db, review_id, document_id, mode)
-            return
-        
         document = get_document(db, document_id=document_id)
         if not document:
             set_progress(review_id, 'failed', '文档不存在', 0, f'文档ID={document_id}不存在')

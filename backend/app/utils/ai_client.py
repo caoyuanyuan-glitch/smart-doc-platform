@@ -1132,6 +1132,8 @@ class AIClient:
             category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
             rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
             audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
+            issue_source = self._clean_text(item.get("source"), 40) or source
+            status = self._clean_text(item.get("status"), 40) or "open"
             confidence = self._normalize_confidence(item.get("confidence"), 80 if source == "ai" else 0)
             severity = self._normalize_severity(item.get("severity"), confidence)
 
@@ -1171,7 +1173,8 @@ class AIClient:
                 "description": description,
                 "audit_basis": audit_basis,
                 "confidence": confidence,
-                "source": source,
+                "source": issue_source,
+                "status": status,
                 "position": self._clean_text(item.get("position"), 80),
                 "source_models": list(item.get("source_models") or []),
                 "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
@@ -2004,6 +2007,14 @@ REVIEW GOAL:
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
 - Ordinary grammar, article usage, punctuation, capitalization, spacing, and style preferences are low value. Report them only when they make an instruction ambiguous, incomplete, or impossible to perform.
 
+ADDITIONAL MANUAL REVIEW CHECKS:
+- Cross-reference semantics: report when a reference such as Section X.X, Figure X, or Table X points to missing content or clearly mismatched topic content. Use category "编号引用".
+- Readability: report sentences longer than 80 characters without proper punctuation breaks, or word order that makes the sentence hard to understand. Use category "可读性".
+- Mutually exclusive step order: report when the described order is logically inconsistent, such as performing a dependent operation after power-off.
+- Step merge suggestion: suggest merging adjacent steps only when the action is identical and the wording overlap is above 90 percent, with only parameter differences.
+- Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
+- Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
+
 🚫 FORBIDDEN issue types (reporting any of these is an error):
 - ❌ Single punctuation marks (e.g. "." → "," or ":" → ";")
 - ❌ Single characters or letters (e.g. "a" → "an" with only one char)
@@ -2057,22 +2068,39 @@ Output ONLY strict JSON:
 {{
   "issues": [
     {{
-      "severity": "serious|general|suggestion",
+      "severity": "fatal|serious|general|suggestion",
       "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
+      "context": "local context around the issue, about 40 chars before and after",
       "rule": "which rule is violated",
+      "basis": "review basis or checklist clause used for the judgment",
+      "source": "ai",
+      "status": "open",
       "confidence": 50-100
     }}
   ],
   "summary": {{
     "total": number,
+    "fatal": number,
     "serious": number,
     "general": number,
-    "suggestion": number
+    "suggestion": number,
+    "categories": {{
+      "结构完整": number,
+      "法规合规": number,
+      "术语一致性": number,
+      "编号引用": number,
+      "可读性": number,
+      "格式排版": number,
+      "其他": number
+    }}
   }}
 }}
+
+Use severity=fatal only for missing or wrong safety warnings, contraindications, warning statements, regulatory violations, or operation errors that may lead to personal injury or equipment damage. Use serious, general, or suggestion for all other issues.
 
 Confidence scoring guide:
 - 90-100: Definite error (misspelling, wrong terminology, factual error)
@@ -2087,6 +2115,14 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 - 按人工发布审核的思路检查，不按普通语法校对检查。
 - 优先输出影响发布审批、法规合规、用户操作、信息完整性、术语一致性、表格内容完整性、图文引用、版本记录、默认账号密码、IP/URL 暴露、法律声明的内容问题。
 - 普通语法、冠词、标点、大小写、空格、风格偏好属于低价值问题；只有会导致说明不清、步骤不可执行或合规风险时才输出。
+
+附加人工审核检查项（按需报告，不得为凑数而报）：
+- 交叉引用语义检查：文中“参见 X.X 节 / 图 X / 表 X”等引用，若被引用对象不存在或指向内容与描述主题明显不符，报告，category=编号引用。
+- 可读性检查：出现超过 80 字且无标点断句的长句，或读不通的语序，报告，category=可读性。
+- 互斥操作顺序检查：步骤描述存在“先 A 后 B”但 A 与 B 在逻辑上互斥或顺序颠倒时，报告。
+- 步骤合并建议：相邻步骤动作完全相同且文字重复度高于 90%，仅参数不同，可建议合并。
+- 索引页码准确性：目录或索引中的页码与实际章节页码不符时，报告，category=编号引用。
+- 商标或专有名词大小写：品牌名如 macOS、DNBSEQ、GenSeq 的大小写与官方写法不一致且同文档内混用时，报告，category=术语一致性。
 
 🚫 严禁输出的问题类型（违反即为错误）：
 - ❌ 单个标点符号（如 "。" → "，" 或 "." → ","）
@@ -2141,21 +2177,38 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
   "issues": [
     {{
       "type": "合规|发布风险|操作步骤|信息完整性|术语|表格|图文引用|语法|文件名错误",
-      "severity": "serious|general|suggestion",
+      "severity": "fatal|serious|general|suggestion",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
       "location": "章节名或行号",
       "original": "原文内容",
       "expected": "正确写法",
+      "context": "问题所在段落前后约40字上下文",
       "rule": "违反的具体规则",
+      "basis": "判断依据或引用的规则条款",
+      "source": "ai",
+      "status": "open",
       "confidence": 50-100
     }}
   ],
   "summary": {{
-    "total": 数量,
-    "serious": 严重数量,
-    "general": 一般数量,
-    "suggestion": 建议数量
-  }}
+      "total": 数量,
+      "fatal": 致命数量,
+      "serious": 严重数量,
+      "general": 一般数量,
+      "suggestion": 建议数量,
+      "categories": {{
+        "结构完整": 数量,
+        "法规合规": 数量,
+        "术语一致性": 数量,
+        "编号引用": 数量,
+        "可读性": 数量,
+        "格式排版": 数量,
+        "其他": 数量
+      }}
+    }}
 }}
+
+severity=fatal 仅用于：安全警告、禁忌、警示信息缺失或错误，法规条款违规，或可能导致用户人身伤害、设备损坏的操作描述错误。其余问题使用 serious、general 或 suggestion。
 
 confidence 评分指南：
 - 90-100：确凿错误（拼写错误、术语用错、事实性错误）
