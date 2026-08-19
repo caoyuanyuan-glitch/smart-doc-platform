@@ -775,7 +775,7 @@ class AIClient:
                 return None
         return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None, excluded_providers=None):
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None, timeout=None, excluded_providers=None):
         # 优先级: DEFAULT_MODEL_PROVIDER 优先，其余按 Qwen > Kimi > DeepSeek > ArkClaw > Proxy
         self.last_chat_errors = []
         providers = []
@@ -825,10 +825,24 @@ class AIClient:
                                 "temperature": temperature,
                             }
                         )
-                        timeout_value = self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout
-                        if is_translation_request:
-                            timeout_value = max(timeout_value, self.translation_timeout)
-                        call_client = client.with_options(timeout=timeout_value, max_retries=0)
+                        if timeout is not None:
+                            effective_timeout = timeout
+                        else:
+                            timeout_value = self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout
+                            if is_translation_request:
+                                timeout_value = max(timeout_value, self.translation_timeout)
+                            effective_timeout = timeout_value
+                        if isinstance(effective_timeout, (int, float)):
+                            effective_timeout = httpx.Timeout(
+                                connect=10.0,
+                                read=float(effective_timeout),
+                                write=30.0,
+                                pool=10.0,
+                            )
+                        call_client = client.with_options(
+                            timeout=effective_timeout,
+                            max_retries=0,
+                        )
                         response = call_client.chat.completions.create(**request_kwargs)
                         self._record_usage_event(
                             name,
@@ -873,18 +887,18 @@ class AIClient:
 
     def chat_with_provider(self, provider, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
         """强制使用指定 provider 调用（不回退）。
-        
+
         Args:
             provider: 'qwen' 或 'deepseek'
             messages: OpenAI 格式消息列表
             max_tokens, temperature: 模型参数
             request_label, review_id: 用量追踪
-        
+
         Returns:
             str or None: 模型回复内容
         """
         provider = str(provider or "").strip().lower()
-        
+
         provider_map = {
             "qwen": ("Qwen", self.qwen_client, self.qwen_model),
             "deepseek": ("DeepSeek", self.deepseek_client, self.deepseek_model),
@@ -892,24 +906,24 @@ class AIClient:
             "arkclaw": ("ArkClaw", self.arkclaw_client, self.arkclaw_model),
             "proxy": ("Proxy", self.proxy_client, self.fallback_model),
         }
-        
+
         if provider not in provider_map:
             print(f"[AI] chat_with_provider: unknown provider '{provider}', falling back to default chain")
             return self.chat(messages, max_tokens=max_tokens, temperature=temperature,
                            request_label=request_label, review_id=review_id)
         
         name, client, model = provider_map[provider]
-        
+
         if not client:
             print(f"[AI] chat_with_provider: {name} not configured, falling back to default chain")
             return self.chat(messages, max_tokens=max_tokens, temperature=temperature,
                            request_label=request_label, review_id=review_id)
-        
+
         print(f"[AI] chat_with_provider: using {name} ({model})")
         max_retries = 3
         retry_delay = 2
         is_translation_request = str(request_label or "").startswith("translation.")
-        
+
         for attempt in range(1, max_retries + 1):
             try:
                 started_at = time.time()
@@ -951,7 +965,7 @@ class AIClient:
                     continue
                 print(f"[AI] {name} 调用失败: {error_str[:100]}")
                 break
-        
+
         return None
 
     @staticmethod

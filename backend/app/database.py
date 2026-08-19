@@ -147,6 +147,23 @@ def _ensure_legacy_sqlite_columns():
                 for s in stmts:
                     conn.execute(text(s))
 
+    try:
+        polish_feedback_columns = {col['name'] for col in inspector.get_columns('polish_feedback')}
+    except Exception:
+        polish_feedback_columns = set()
+
+    if polish_feedback_columns:
+        stmts = []
+        if 'correction_items' not in polish_feedback_columns:
+            stmts.append("ALTER TABLE polish_feedback ADD COLUMN correction_items TEXT")
+        if 'polish_session_id' not in polish_feedback_columns:
+            stmts.append("ALTER TABLE polish_feedback ADD COLUMN polish_session_id VARCHAR(64)")
+        if stmts:
+            with engine.begin() as conn:
+                for s in stmts:
+                    conn.execute(text(s))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_polish_feedback_polish_session_id ON polish_feedback (polish_session_id)"))
+
 def get_db():
     db = SessionLocal()
     try:
@@ -155,6 +172,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_decision_record
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()

@@ -10,7 +10,7 @@ class PolishLearningRule(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     rule_name = Column(String(128), nullable=True, comment="规则名称（如'术语替换''祈使句规范'）")
-    rule_type = Column(String(64), index=True, nullable=False, comment="规则分类：system_rule/replacement_rule/forbidden_rule/sentence_applicability_rule/imperative_rule/format_rule")
+    rule_type = Column(String(64), index=True, nullable=False, comment="规则分类：system_rule/replacement_rule/forbidden_rule/sentence_applicability_rule/imperative_rule/format_rule/typo_rule")
     engine_key = Column(String(64), nullable=True, unique=True, comment="引擎规则键，仅系统规则有值（如 termReplace/imperativePlease）")
     rule_key = Column(String(128), unique=True, index=True, nullable=False)
     match_pattern = Column(Text, nullable=False)

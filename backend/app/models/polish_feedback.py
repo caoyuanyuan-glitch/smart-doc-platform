@@ -13,5 +13,7 @@ class PolishFeedback(Base):
     corrections = Column(Text)          # 用户填写的修正内容原始文本
     target = Column(String(50))         # "terminology" | "sentence_guide"
     processed_count = Column(Integer, default=0)  # 成功写入的条目数
+    correction_items = Column(Text, nullable=True)  # JSON 数组
+    polish_session_id = Column(String(64), index=True, nullable=True)
     created_by = Column(String(100))
     created_at = Column(DateTime, default=datetime.utcnow)

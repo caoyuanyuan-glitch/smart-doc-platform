@@ -172,7 +172,7 @@
 import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort } from '@element-plus/icons-vue'
-import { knowledgeAPI, translationAPI } from '@/api'
+import { knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 import {
@@ -327,6 +327,7 @@ async function loadMemoryLibraryFiles() {
   } catch (e) {
     memoryLibraryFiles.value = []
     memoryWriteFileId.value = null
+    ElMessage.warning(getKnowledgeLoadErrorMessage(e, '加载记忆库配置失败'))
   } finally {
     memoryLibraryLoading.value = false
   }

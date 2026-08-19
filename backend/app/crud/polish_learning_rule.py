@@ -148,6 +148,15 @@ def get_enabled_custom_rules(db: Session) -> list:
         .all()
 
 
+def get_enabled_typo_rules(db: Session) -> list:
+    """获取启用的错别字规则，供错别字修正使用。"""
+    return db.query(PolishLearningRule)\
+        .filter(PolishLearningRule.enabled == True)\
+        .filter(PolishLearningRule.rule_type == 'typo_rule')\
+        .order_by(PolishLearningRule.priority_level.desc(), PolishLearningRule.id.asc())\
+        .all()
+
+
 def record_rule_triggers(db: Session, rule_ids: list[int] = None, engine_keys: list[str] = None) -> None:
     """按命中次数更新规则触发统计。"""
     now = datetime.utcnow()
@@ -187,6 +196,17 @@ def seed_system_rules(db: Session) -> int:
             "enabled": 0,
         },
         {
+            "rule_name": "错别字修正",
+            "rule_type": "system_rule",
+            "engine_key": "typoCheck",
+            "rule_key": "system:typoCheck",
+            "match_pattern": "错别字词条库中的错误词→正确词",
+            "replacement_text": "按内置错别字字典与自定义错别字词条进行替换",
+            "description": "对高频错别字进行保守替换，例如按装→安装、移液抢→移液器。",
+            "priority_level": 15,
+            "enabled": 1,
+        },
+        {
             "rule_name": "祈使句规范",
             "rule_type": "system_rule",
             "engine_key": "imperativePlease",
@@ -202,9 +222,9 @@ def seed_system_rules(db: Session) -> int:
             "rule_type": "system_rule",
             "engine_key": "numberSpace",
             "rule_key": "system:numberSpace",
-            "match_pattern": r"\d+\.?\d*\s*(μL|mL|L|℃|rpm|mm|cm|m|kg|g|mg|μg|s|min|h|V|A|W|Hz|%)",
+            "match_pattern": r"\d+\.?\d*\s*(μL|mL|L|℃|rpm|mm|cm|m|kg|g|mg|μg|s|min|h|V|A|W|Hz)",
             "replacement_text": "在数字和单位之间加空格",
-            "description": "数字与单位之间加一个空格：200μL→200 μL，20℃→20 ℃，100rpm→100 rpm。",
+            "description": "数字与单位之间加一个空格：200μL→200 μL，20℃→20 ℃，100rpm→100 rpm。百分比保持紧凑写法，如 75%。",
             "priority_level": 30,
             "enabled": 0,
         },
@@ -224,11 +244,11 @@ def seed_system_rules(db: Session) -> int:
             "rule_type": "system_rule",
             "engine_key": "punctuation",
             "rule_key": "system:punctuation",
-            "match_pattern": "句尾缺标点(.|!|?) | 条件句后缺逗号",
-            "replacement_text": "补充缺失的标点符号",
-            "description": "句尾缺少标点时补充句号，条件从句后补充逗号（如'如需修改密码可点击'→'如需修改密码，可点击'）。",
+            "match_pattern": "正文说明/注意事项/步骤描述中的完整句末缺少终止标点 | 条件句后缺逗号",
+            "replacement_text": "按上下文补充缺失的句末标点或条件逗号",
+            "description": "仅对正文说明、注意事项正文、步骤描述中的完整操作句或限制句补充句号；标题、表头、字段名、列表项名称、短标签保持原样。条件从句后补充逗号（如'如需修改密码可点击'→'如需修改密码，可点击'）。",
             "priority_level": 50,
-            "enabled": 0,
+            "enabled": 1,
         },
     ]
 
@@ -243,11 +263,19 @@ def seed_system_rules(db: Session) -> int:
             {"rk": item["rule_key"]}
         ).fetchone()
         if check:
+            db.execute(
+                text(
+                    "UPDATE polish_learning_rules "
+                    "SET rule_name = :rule_name, rule_type = :rule_type, engine_key = :engine_key, "
+                    "match_pattern = :match_pattern, replacement_text = :replacement_text, "
+                    "description = :description, priority_level = :priority_level, enabled = :enabled "
+                    "WHERE rule_key = :rule_key"
+                ),
+                item,
+            )
             continue
         db.execute(sql, item)
         created += 1
-
-    db.execute(text("UPDATE polish_learning_rules SET enabled = 0 WHERE rule_type = 'system_rule'"))
 
     db.commit()
     return created
