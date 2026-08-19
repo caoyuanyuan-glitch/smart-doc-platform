@@ -16,8 +16,7 @@ Each stage is independently testable and contributes diagnostics
 Compatibility
 -------------
 - Current ``review.py`` routes continue to call the original entry points.
-- New engine modules are additive — they do not change existing API
-  behaviour unless explicitly enabled (e.g. via ``REVIEW_USE_ORCHESTRATOR``).
+- New engine modules are additive and keep existing API behaviour stable.
 - Migration happens gradually: deterministic rules move from inline code
   to ``rules/`` modules one group at a time.
 

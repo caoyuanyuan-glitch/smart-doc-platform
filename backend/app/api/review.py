@@ -1499,12 +1499,12 @@ def _ai_audit_timeout_seconds(content):
 
 def _review_ai_chunk_timeout_seconds(chunk):
     chunk_length = len(chunk or '')
-    base = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '35')
+    base = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50')
     if chunk_length >= 2500:
-        return max(base, 35.0)
+        return max(base, 50.0)
     if chunk_length >= 1500:
-        return max(base, 28.0)
-    return max(base, 22.0)
+        return max(base, 40.0)
+    return max(base, 30.0)
 
 
 def _iter_ai_audit_chunks(content, chunk_size=3000, overlap=250):
@@ -1601,7 +1601,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 cache_kwargs["document_name"] = document_name
             all_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, content, document_language, selected_basis,
-                _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '30'),
+                _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
                 **cache_kwargs,
             )
             for issue in all_issues:
@@ -1610,7 +1610,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 "enabled": True,
                 "selected_chunk_count": 1,
                 "total_chunk_count": 1,
-                "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '30'),
+                "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
                 "chunks": [{
                     "chunk_index": 1,
                     "start": 0,
@@ -1664,7 +1664,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
         "enabled": True,
         "selected_chunk_count": len(chunks),
         "total_chunk_count": len(all_chunks),
-        "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '35'),
+        "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
         "chunks": [],
         "chunk_meta": [],
     })

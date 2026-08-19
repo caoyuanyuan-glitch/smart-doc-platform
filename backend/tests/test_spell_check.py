@@ -102,6 +102,16 @@ def test_check_spelling_keeps_original_case_for_each_occurrence(monkeypatch):
     assert issues[0]["suggestion"] == "oligo"
 
 
+def test_check_spelling_reports_fixed_pdf_phrase_typos(monkeypatch):
+    monkeypatch.setattr(spell_checker_utils, "_should_skip_spelling_issue", lambda word, context, file_type=None: False)
+
+    issues = spell_checker_utils.check_spelling("Filter the sample until it is lees than 60 μm and typed of beads.", file_type="pdf")
+
+    assert [issue["original_text"] for issue in issues] == ["lees than", "typed of"]
+    assert issues[0]["suggestion"] == "less than"
+    assert issues[1]["suggestion"] == "types of"
+
+
 def test_markdown_noise_masker_removes_code_and_links():
     content = "Keep `wrng` and [wrng](https://example.com) in docs.```python\nwrng\n```"
     masked = spell_checker_utils._mask_markdown_noise(content)

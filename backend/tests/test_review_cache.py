@@ -668,6 +668,26 @@ def test_pipeline_keeps_serious_real_spelling_issue():
     assert selected[0]["original_text"] == "consumbles"
 
 
+def test_pipeline_filters_low_value_generic_spelling_noise():
+    issues = [
+        {
+            "source": "spellcheck",
+            "rule": "SPELL",
+            "category": "拼写/用词错误",
+            "severity": "general",
+            "original_text": "StandardMPS",
+            "suggestion": "standard's",
+            "description": "拼写错误",
+            "audit_basis": "英文拼写规范",
+            "confidence": 80,
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
+
+
 def test_should_drop_unicode_equivalent_issue_accepts_mu_variants():
     issue = {
         "original_text": "20 µL",
@@ -1411,7 +1431,7 @@ def test_review_ai_chunk_timeout_seconds_uses_higher_default_for_large_chunks(mo
 
     timeout = review_api._review_ai_chunk_timeout_seconds("A" * 3000)
 
-    assert timeout == 35.0
+    assert timeout == 50.0
 
 
 def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):

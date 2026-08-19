@@ -25,6 +25,12 @@ _PDF_SPELL_SKIP_WORDS = {
     'transcranial', 'anonymization', 'jpg', 'fps', 'snr', 'tib', 'vrms', 'ghz', 'tis', 'pag', 'mproper',
 }
 
+_PDF_FIXED_PHRASE_MISSPELLINGS = [
+    (re.compile(r'\blees\s+than\b', re.IGNORECASE), 'less than'),
+    (re.compile(r'\btyped\s+of\b', re.IGNORECASE), 'types of'),
+    (re.compile(r'\bnucleus\s+acid\b', re.IGNORECASE), 'nucleic acid'),
+]
+
 DOMAIN_ABBREVIATIONS = {
     'audt', 'auth', 'alof', 'dtbk', 'emrg', 'didt', 'paut', 'plok', 'sgud', 'rdmp',
     'imt', 'mi', 'ti', 'prf', 'ri', 'pi', 'sd', 'roi', 'fov', 'tgc',
@@ -352,6 +358,7 @@ COMMON_MISSPELLINGS = {
     'equipement': 'equipment',
     'equippment': 'equipment',
     'equivelant': 'equivalent',
+    'lees': 'less',
     'errar': 'error',
     'errosion': 'erosion',
     'esential': 'essential',
@@ -2943,6 +2950,12 @@ COMMON_MISSPELLINGS = {
     'metabolom': 'metabolome',
     'mgisp': 'MGISP',
     'dnblab': 'DNBelab',
+    'resuspend': 'resuspend',
+    'resuspension': 'resuspension',
+    'demulsification': 'demulsification',
+    'standardmps': 'StandardMPS',
+    'omics': 'Omics',
+    'schtcr': 'scTCR',
 }
 
 FORCED_MISSPELLINGS = {
@@ -3115,6 +3128,9 @@ def _should_skip_spelling_issue(word, context, file_type=None):
     if _looks_like_joined_words(word):
         return True
 
+    if file_type == 'pdf' and re.fullmatch(r'[A-Z][a-z]+[A-Z]{2,}[A-Za-z0-9-]*', word):
+        return True
+
     lowered = word.lower()
     fragment_hits = sum(1 for fragment in _PDF_TECH_FRAGMENTS if fragment in lowered)
     if fragment_hits >= 2:
@@ -3158,6 +3174,37 @@ def _has_correct_term_variant_in_document(content, correct):
 def _format_spelling_suggestion(word, context, suggestions, certainty='疑似'):
     suggestion_part = '、'.join(str(item) for item in suggestions if item)
     return suggestion_part
+
+
+def _find_pdf_fixed_phrase_issues(content, seen_issue_keys):
+    issues = []
+    for pattern, correct in _PDF_FIXED_PHRASE_MISSPELLINGS:
+        for match in pattern.finditer(content or ''):
+            original_text = match.group(0)
+            normalized = _normalize_for_check(original_text)
+            dedupe_key = (normalized, 'spell-phrase', match.start())
+            if dedupe_key in seen_issue_keys:
+                continue
+            seen_issue_keys.add(dedupe_key)
+            context = _build_spelling_context(content, match.start(), match.end())
+            if _should_skip_spelling_issue(original_text, context, 'pdf'):
+                continue
+            chapter = _extract_chapter(content, match.start())
+            issues.append({
+                "severity": "serious",
+                "category": "拼写/用词错误",
+                "rule": "SPELL-PHRASE",
+                "chapter": chapter,
+                "original_text": original_text,
+                "context": context,
+                "suggestion": _format_spelling_suggestion(original_text, context, [correct], '确定'),
+                "description": f"原文片段：'{context}'；疑似错误短语：[{original_text}]；建议修改为：[{correct}]；是否确定：确定。",
+                "audit_basis": "英文拼写规范",
+                "confidence": 98,
+                "source": "spellcheck",
+                "position": f"{match.start()}-{match.end()}"
+            })
+    return issues
 
 
 def add_runtime_whitelist_terms(terms):
@@ -3338,6 +3385,7 @@ def check_spelling(content, min_word_length=3, file_type=None):
     seen_issue_keys = set()
 
     if file_type == 'pdf':
+        issues.extend(_find_pdf_fixed_phrase_issues(content, seen_issue_keys))
         issues.extend(_find_pdf_split_word_issues(content, seen_issue_keys))
 
     issues.extend(_find_term_variant_issues(content, seen_issue_keys))

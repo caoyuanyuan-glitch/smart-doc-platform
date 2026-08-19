@@ -184,7 +184,7 @@ def value_score(issue: Any) -> int:
 
     score = 50
     score += {"fatal": 25, "serious": 18, "general": 6, "suggestion": -8}.get(severity, 0)
-    score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 6}.get(source, 0)
+    score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 0}.get(source, 0)
     if confidence >= 95:
         score += 10
     elif confidence >= 90:
@@ -193,8 +193,11 @@ def value_score(issue: Any) -> int:
         score -= 12
     if is_high_value(data):
         score += 30
-    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT"}:
-        score += 12
+    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE"}:
+        if severity == "serious" or confidence >= 95:
+            score += 14
+        else:
+            score -= 18
     if rule.startswith("CYY-CN-UNIT-") or category == "单位格式":
         score -= 42
     if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
