@@ -13,6 +13,7 @@ import zipfile
 import tempfile
 import sys
 import threading
+from copy import copy
 import xml.etree.ElementTree as ET
 import lxml.etree as ET_LXML
 import re
@@ -50,6 +51,7 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 UPLOAD_DIR = "./static/uploads/translation"
 TRANSLATION_OUTPUT_DIR = "./static/translations"
 UNSUPPORTED_TRANSLATION_EXTENSIONS = {".dita", ".zip"}
+IMAGE_TRANSLATION_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 WRITABLE_MEMORY_FILE_TYPES = {"xlsx", "xlsm", "xltx", "xltm", "csv", "tsv"}
 
 _translate_tasks = {}
@@ -331,6 +333,30 @@ def _clear_memory_candidate_cache(memory_file_id: int | None = None):
             stale_keys.append(key)
     for key in stale_keys:
         cache.pop(key, None)
+
+
+def _normalize_memory_file_ids(memory_file_ids=None, memory_file_id: int | None = None) -> list[int]:
+    normalized_ids = []
+    seen = set()
+
+    def append_id(value):
+        try:
+            normalized_value = int(value)
+        except (TypeError, ValueError):
+            return
+        if normalized_value <= 0 or normalized_value in seen:
+            return
+        seen.add(normalized_value)
+        normalized_ids.append(normalized_value)
+
+    if isinstance(memory_file_ids, (list, tuple, set)):
+        for item in memory_file_ids:
+            append_id(item)
+    elif memory_file_ids is not None:
+        append_id(memory_file_ids)
+
+    append_id(memory_file_id)
+    return normalized_ids
 
 
 def _ensure_memory_bank_entry(
@@ -685,6 +711,9 @@ def _extract_text_for_language_detection(file_path: str, ext: str) -> str:
         return parse_xlsx_textual_content(file_path)
     if ext == ".txt":
         return _read_text_file_with_fallback(file_path)
+    if ext in IMAGE_TRANSLATION_EXTENSIONS:
+        _, blocks = _extract_image_ocr_blocks(file_path)
+        return "\n".join(block["text"] for block in blocks)
     return parse_file(file_path)
 
 
@@ -1087,13 +1116,20 @@ def _split_text_for_hybrid_segments(text: str):
 
 
 def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang: str, target_lang: str,
-                                       db: Session, bank: str = None, memory_file_id: int = None):
+                                       db: Session, bank: str = None, memory_file_ids=None, memory_file_id: int = None):
     segments = _split_text_for_hybrid_segments(source_text)
     non_empty_segments = [segment for segment in segments if segment and segment.strip()]
     if len(non_empty_segments) <= 1:
         return None, False, False
 
-    bundle = _get_memory_candidate_bundle(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+    bundle = _get_memory_candidate_bundle(
+        db,
+        source_lang,
+        target_lang,
+        bank=bank,
+        memory_file_ids=memory_file_ids,
+        memory_file_id=memory_file_id,
+    )
     translated_segments = [None] * len(segments)
     memory_used = False
     ai_used = False
@@ -1186,6 +1222,7 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
                         target_lang,
                         db,
                         bank=bank,
+                        memory_file_ids=memory_file_ids,
                         memory_file_id=memory_file_id,
                         allow_partial=True,
                     )
@@ -1202,7 +1239,7 @@ def _translate_hybrid_with_memory_fill(source_text: str, model: str, source_lang
 
 
 def _prefer_memory_first(engine: str) -> bool:
-    return engine == "memory" or (engine == "hybrid" and bool(_get_memory_bank() or _get_memory_file_id()))
+    return engine == "memory" or (engine == "hybrid" and bool(_get_memory_bank() or _get_memory_file_ids()))
 
 
 def _translate_text_items(texts, engine: str, model: str, source_lang: str, target_lang: str, db: Session):
@@ -1222,7 +1259,7 @@ def _translate_text_items(texts, engine: str, model: str, source_lang: str, targ
                 target_lang,
                 db,
                 bank=_get_memory_bank(),
-                memory_file_id=_get_memory_file_id(),
+                memory_file_ids=_get_memory_file_ids(),
                 allow_partial=allow_partial,
             )
             if hit:
@@ -1414,11 +1451,26 @@ def _set_memory_bank(bank: str):
 
 
 def _get_memory_file_id():
-    return getattr(_thread_locals, 'memory_file_id', None)
+    memory_file_ids = _get_memory_file_ids()
+    return memory_file_ids[0] if memory_file_ids else None
+
+
+def _get_memory_file_ids():
+    raw_ids = getattr(_thread_locals, 'memory_file_ids', None)
+    if raw_ids is None:
+        legacy_id = getattr(_thread_locals, 'memory_file_id', None)
+        return _normalize_memory_file_ids(memory_file_id=legacy_id)
+    return _normalize_memory_file_ids(memory_file_ids=raw_ids)
 
 
 def _set_memory_file_id(file_id):
-    _thread_locals.memory_file_id = file_id
+    _set_memory_file_ids(memory_file_id=file_id)
+
+
+def _set_memory_file_ids(memory_file_ids=None, memory_file_id: int | None = None):
+    normalized_ids = _normalize_memory_file_ids(memory_file_ids=memory_file_ids, memory_file_id=memory_file_id)
+    _thread_locals.memory_file_ids = normalized_ids
+    _thread_locals.memory_file_id = normalized_ids[0] if normalized_ids else None
 
 
 def _normalize_header_key(value: str) -> str:
@@ -1746,14 +1798,15 @@ def _build_memory_candidate_bundle(candidates):
 
 
 def _get_memory_candidate_bundle(db: Session, source_lang: str, target_lang: str,
-                                 bank: str = None, memory_file_id: int = None):
-    cache_key = ("memory_bundle", source_lang, target_lang, bank or "", memory_file_id or 0)
+                                 bank: str = None, memory_file_ids=None, memory_file_id: int = None):
+    normalized_file_ids = tuple(_normalize_memory_file_ids(memory_file_ids=memory_file_ids, memory_file_id=memory_file_id))
+    cache_key = ("memory_bundle", source_lang, target_lang, bank or "", normalized_file_ids)
     cache = _get_memory_candidate_cache()
     if cache_key in cache:
         return cache[cache_key]
 
     bundle = _build_memory_candidate_bundle(
-        _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+        _collect_memory_candidates(db, source_lang, target_lang, bank=bank, memory_file_ids=normalized_file_ids)
     )
     cache[cache_key] = bundle
     return bundle
@@ -1946,8 +1999,9 @@ def _search_memory_file(db: Session, memory_file_id: int, source_text: str, sour
 
 
 def _collect_memory_candidates(db: Session, source_lang: str, target_lang: str,
-                               bank: str = None, memory_file_id: int = None):
-    cache_key = ("memory_candidates", source_lang, target_lang, bank or "", memory_file_id or 0)
+                               bank: str = None, memory_file_ids=None, memory_file_id: int = None):
+    normalized_file_ids = tuple(_normalize_memory_file_ids(memory_file_ids=memory_file_ids, memory_file_id=memory_file_id))
+    cache_key = ("memory_candidates", source_lang, target_lang, bank or "", normalized_file_ids)
     cache = _get_memory_candidate_cache()
     if cache_key in cache:
         return cache[cache_key]
@@ -1955,8 +2009,8 @@ def _collect_memory_candidates(db: Session, source_lang: str, target_lang: str,
     candidates = []
     seen = set()
 
-    if memory_file_id:
-        for entry in _get_memory_file_candidates(db, memory_file_id, source_lang, target_lang):
+    for selected_memory_file_id in normalized_file_ids:
+        for entry in _get_memory_file_candidates(db, selected_memory_file_id, source_lang, target_lang):
             source_text_value = (entry.get("source_text") or "").strip()
             translated_text_value = (entry.get("translated_text") or "").strip()
             dedupe_key = (source_text_value, translated_text_value)
@@ -2061,7 +2115,7 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             target_lang,
             db,
             bank=_get_memory_bank(),
-            memory_file_id=_get_memory_file_id(),
+            memory_file_ids=_get_memory_file_ids(),
         )
         if hybrid_result is not None:
             return hybrid_result
@@ -2073,7 +2127,7 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
             target_lang,
             db,
             bank=_get_memory_bank(),
-            memory_file_id=_get_memory_file_id(),
+            memory_file_ids=_get_memory_file_ids(),
             allow_partial=engine == "memory",
         )
         if hit:
@@ -2092,7 +2146,7 @@ def _do_translate(text: str, engine: str, model: str, source_lang: str, target_l
                     target_lang,
                     db,
                     bank=_get_memory_bank(),
-                    memory_file_id=_get_memory_file_id(),
+                    memory_file_ids=_get_memory_file_ids(),
                     allow_partial=True,
                 )
                 if fallback_hit:
@@ -2353,7 +2407,7 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
             target_lang,
             db,
             bank=_get_memory_bank(),
-            memory_file_id=_get_memory_file_id(),
+            memory_file_ids=_get_memory_file_ids(),
             allow_partial=False,
         )
         if hit:
@@ -2400,6 +2454,14 @@ def _translate_pptx_xml(fpath: str, engine: str, model: str, source_lang: str, t
                 pptx_original.append(texts_to_translate[i])
                 pptx_translated.append(translated)
                 t_elem.text = (t_elem.text or original_text).replace(original_text, translated, 1)
+                run = t_elem.getparent()
+                if run is not None:
+                    run_properties = run.find(f"{{{DRAWING_NS}}}rPr")
+                    if run_properties is not None and run_properties.get("sz"):
+                        try:
+                            run_properties.set("sz", str(max(100, int(run_properties.get("sz")) - 100)))
+                        except ValueError:
+                            pass
 
     out_buf = io.BytesIO()
     in_buf.seek(0)
@@ -2420,15 +2482,26 @@ def _apply_translated_text_to_docx_paragraph(para, translated: str):
     runs = para.runs
     if not runs:
         return
+    from docx.shared import Pt
+
+    original_sizes = [run.font.size or para.style.font.size or Pt(11) for run in runs]
+
+    def apply_size(run, index):
+        size = original_sizes[min(index, len(original_sizes) - 1)]
+        run.font.size = Pt(max(1, size.pt - 1))
+
     if len(runs) == 1:
         runs[0].text = translated
+        apply_size(runs[0], 0)
         return
 
     total_orig = sum(len(r.text or "") for r in runs)
     if total_orig == 0:
         runs[0].text = translated
+        apply_size(runs[0], 0)
         for r in runs[1:]:
             r.text = ""
+            apply_size(r, 0)
         return
 
     pos = 0
@@ -2437,9 +2510,11 @@ def _apply_translated_text_to_docx_paragraph(para, translated: str):
         chunk_len = max(1, int(len(translated) * orig_len / total_orig))
         chunk = translated[pos:pos + chunk_len]
         r.text = chunk
+        apply_size(r, runs.index(r))
         pos += chunk_len
     if pos < len(translated):
         runs[-1].text += translated[pos:]
+    apply_size(runs[-1], len(runs) - 1)
 
 
 def _collect_docx_container_paragraphs(container, paragraphs_to_translate):
@@ -2568,6 +2643,10 @@ def _translate_xlsx(fpath: str, engine: str, model: str, source_lang: str, targe
         all_original.append(original_text)
         all_translated.append(translated_text)
         cell.value = translated_text
+        if translated_index is not None:
+            font = copy(cell.font)
+            font.sz = max(1, (font.sz or 11) - 1)
+            cell.font = font
 
     out_buf = io.BytesIO()
     wb.save(out_buf)
@@ -2602,7 +2681,18 @@ def _translate_pdf(fpath: str, engine: str, model: str, source_lang: str, target
                     "rect": rect,
                     "text": cleaned_text,
                     "line_count": max(1, len([line for line in cleaned_text.splitlines() if line.strip()])),
+                    "font_size": None,
                 })
+
+                spans = []
+                for page_block in page.get_text("dict", sort=True).get("blocks", []):
+                    for line in page_block.get("lines", []):
+                        for span in line.get("spans", []):
+                            span_rect = fitz.Rect(span.get("bbox", (0, 0, 0, 0)))
+                            if span_rect.intersects(rect) and span.get("size"):
+                                spans.append(float(span["size"]))
+                if spans:
+                    blocks[-1]["font_size"] = sum(spans) / len(spans)
 
             if not blocks:
                 all_original.append("")
@@ -2629,7 +2719,8 @@ def _translate_pdf(fpath: str, engine: str, model: str, source_lang: str, target
                 final_text = (translated_text or "").strip()
 
                 line_count = max(block_info["line_count"], len([line for line in final_text.splitlines() if line.strip()]))
-                font_size = min(16, max(7, rect.height / max(line_count * 1.35, 1)))
+                estimated_size = rect.height / max(line_count * 1.35, 1)
+                font_size = max(5, (block_info["font_size"] - 1) if block_info["font_size"] else estimated_size)
                 rc = -1
                 while font_size >= 5:
                     rc = page.insert_textbox(
@@ -2668,6 +2759,315 @@ def _translate_pdf(fpath: str, engine: str, model: str, source_lang: str, target
         return out_buf.read(), all_original, all_translated
     finally:
         doc.close()
+
+
+def _group_image_ocr_data(data: dict) -> list[dict]:
+    """Merge word-level OCR data into drawable text lines."""
+    lines = {}
+    texts = data.get("text") or []
+    for index, raw_text in enumerate(texts):
+        text = str(raw_text or "").strip()
+        if not text:
+            continue
+        try:
+            confidence = float((data.get("conf") or [])[index])
+        except (IndexError, TypeError, ValueError):
+            confidence = 0
+        if confidence < 35:
+            continue
+        key = tuple((data.get(name) or [0])[index] for name in ("block_num", "par_num", "line_num"))
+        try:
+            left = int((data.get("left") or [])[index])
+            top = int((data.get("top") or [])[index])
+            width = int((data.get("width") or [])[index])
+            height = int((data.get("height") or [])[index])
+        except (IndexError, TypeError, ValueError):
+            continue
+        line = lines.setdefault(key, {"words": [], "left": left, "top": top, "right": left + width, "bottom": top + height})
+        line["words"].append((left, text, confidence))
+        line["left"] = min(line["left"], left)
+        line["top"] = min(line["top"], top)
+        line["right"] = max(line["right"], left + width)
+        line["bottom"] = max(line["bottom"], top + height)
+
+    blocks = []
+    for line in lines.values():
+        words = [word for _, word, _ in sorted(line["words"])]
+        has_cjk = any(re.search(r"[\u3400-\u9fff]", word) for word in words)
+        text = ("".join(words) if has_cjk else " ".join(words)).strip()
+        if text and (len(re.sub(r"[^\w\u3400-\u9fff]", "", text)) >= 2):
+            blocks.append({
+                "text": text,
+                "left": line["left"],
+                "top": line["top"],
+                "width": max(1, line["right"] - line["left"]),
+                "height": max(1, line["bottom"] - line["top"]),
+                "confidence": sum(confidence for _, _, confidence in line["words"]) / len(line["words"]),
+            })
+    return sorted(blocks, key=lambda item: (item["top"], item["left"]))
+
+
+def _ocr_image_variant(image, lang: str, psm: int) -> tuple[list[dict], float]:
+    import pytesseract
+
+    data = pytesseract.image_to_data(
+        image,
+        lang=lang,
+        config=f"--oem 3 --psm {psm}",
+        output_type=pytesseract.Output.DICT,
+    )
+    blocks = _group_image_ocr_data(data)
+    confidences = []
+    for value in data.get("conf") or []:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            continue
+        if confidence >= 35:
+            confidences.append(confidence)
+    average_confidence = sum(confidences) / len(confidences) if confidences else 0
+    return blocks, average_confidence
+
+
+def _image_block_overlap(left: dict, right: dict) -> float:
+    x0 = max(left["left"], right["left"])
+    y0 = max(left["top"], right["top"])
+    x1 = min(left["left"] + left["width"], right["left"] + right["width"])
+    y1 = min(left["top"] + left["height"], right["top"] + right["height"])
+    if x1 <= x0 or y1 <= y0:
+        return 0
+    intersection = (x1 - x0) * (y1 - y0)
+    union = left["width"] * left["height"] + right["width"] * right["height"] - intersection
+    return intersection / union if union else 0
+
+
+def _image_block_contains(left: dict, right: dict) -> bool:
+    x0 = max(left["left"], right["left"])
+    y0 = max(left["top"], right["top"])
+    x1 = min(left["left"] + left["width"], right["left"] + right["width"])
+    y1 = min(left["top"] + left["height"], right["top"] + right["height"])
+    if x1 <= x0 or y1 <= y0:
+        return False
+    intersection = (x1 - x0) * (y1 - y0)
+    smaller = min(left["width"] * left["height"], right["width"] * right["height"])
+    return smaller > 0 and intersection / smaller >= 0.7
+
+
+def _merge_image_ocr_blocks(block_sets: list[list[dict]]) -> list[dict]:
+    """Keep complementary sparse-text OCR results while removing repeated detections."""
+    merged = []
+    for block in sorted((item for blocks in block_sets for item in blocks), key=lambda item: item.get("confidence", 0), reverse=True):
+        normalized = re.sub(r"\s+", "", block["text"]).lower()
+        duplicate_index = next((
+            index for index, existing in enumerate(merged)
+            if _image_block_overlap(block, existing) >= 0.55
+            or _image_block_contains(block, existing)
+            or (normalized and normalized == re.sub(r"\s+", "", existing["text"]).lower())
+        ), None)
+        if duplicate_index is None:
+            merged.append(block)
+        elif block.get("confidence", 0) > merged[duplicate_index].get("confidence", 0):
+            merged[duplicate_index] = block
+    for block in merged:
+        block.pop("confidence", None)
+    return sorted(merged, key=lambda item: (item["top"], item["left"]))
+
+
+def _detect_confirmation_button_blocks(image, blocks: list[dict]) -> list[dict]:
+    """Recover tiny yes/no labels from a standard confirmation dialog's paired buttons."""
+    def resolve_button_labels(text: str):
+        normalized = re.sub(r"\s+", " ", text or "").strip()
+        compact = re.sub(r"\s+", "", normalized)
+        if re.match(r"^是否", compact):
+            return "否", "是"
+        if normalized.endswith(("?", "？")) and re.search(r"[A-Za-z]", normalized):
+            return "No", "Yes"
+        return None
+
+    question_blocks = []
+    button_labels = None
+    for block in blocks:
+        labels = resolve_button_labels(block["text"])
+        if labels:
+            question_blocks.append(block)
+            button_labels = labels
+    if not question_blocks:
+        return []
+
+    from PIL import ImageOps
+
+    grayscale = ImageOps.grayscale(image)
+    pixels = grayscale.load()
+    candidates = []
+    start_y = max(block["top"] + block["height"] for block in question_blocks)
+    for y in range(start_y, max(start_y, int(image.height * 0.9))):
+        runs = []
+        in_run = False
+        for x in range(image.width):
+            is_border = pixels[x, y] < 180
+            if is_border and not in_run:
+                run_start = x
+                in_run = True
+            if in_run and (not is_border or x == image.width - 1):
+                run_end = x if is_border else x - 1
+                if run_end - run_start >= 35:
+                    runs.append((run_start, run_end))
+                in_run = False
+        if len(runs) >= 2:
+            left, right = runs[:2]
+            if abs((left[1] - left[0]) - (right[1] - right[0])) <= 20:
+                candidates = [left, right, y]
+                break
+    if not candidates:
+        return []
+
+    left, right, top = candidates
+
+    def find_bottom_border(button, start_y):
+        start, end = button
+        expected_width = end - start + 1
+        for y in range(start_y + 1, min(image.height, start_y + 50)):
+            dark_pixels = sum(1 for x in range(start, end + 1) if pixels[x, y] < 180)
+            if dark_pixels >= expected_width * 0.8:
+                return y
+        return min(image.height - 1, start_y + max(20, int(image.height * 0.13)))
+
+    left_bottom = find_bottom_border(left, top)
+    right_bottom = find_bottom_border(right, top)
+    border_inset = 2
+    left_label, right_label = button_labels or ("否", "是")
+    shared_font_size = max(8, min(14, min(left_bottom, right_bottom) - top - 5))
+    return [
+        {
+            "text": label,
+            # Clear only the button interior so the original label disappears
+            # while the surrounding button border remains intact.
+            "left": start + border_inset,
+            "top": top + border_inset,
+            "width": max(1, end - start + 1 - border_inset * 2),
+            "height": max(1, bottom - top - border_inset * 2),
+            "font_size": shared_font_size,
+            "draw_background": True,
+            "center_text": True,
+            "confidence": 999,
+        }
+        for start, end, bottom, label in ((left[0], left[1], left_bottom, left_label), (right[0], right[1], right_bottom, right_label))
+    ]
+
+
+def _extract_image_ocr_blocks(fpath: str) -> tuple:
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+        import pytesseract  # noqa: F401
+    except ImportError as exc:
+        raise ValueError("图片翻译需要 Pillow 和 Tesseract OCR 运行环境") from exc
+
+    try:
+        with Image.open(fpath) as source_image:
+            image = source_image.convert("RGB")
+        scale = 2 if max(image.size) < 2200 else 1
+        work_image = image.resize((image.width * scale, image.height * scale), Image.Resampling.LANCZOS)
+        grayscale = ImageOps.grayscale(work_image)
+        grayscale = ImageOps.autocontrast(grayscale)
+        enhanced = ImageEnhance.Sharpness(ImageEnhance.Contrast(grayscale).enhance(1.35)).enhance(1.5)
+        variants = [
+            (enhanced, 11),
+            (enhanced, 12),
+            (enhanced.filter(ImageFilter.SHARPEN), 6),
+            (enhanced.point(lambda value: 255 if value > 180 else 0), 11),
+        ]
+        block_sets = []
+        for variant, psm in variants:
+            blocks, confidence = _ocr_image_variant(variant, "chi_sim+eng", psm)
+            if blocks:
+                block_sets.append(blocks)
+        if not block_sets:
+            return image, []
+        blocks = _merge_image_ocr_blocks(block_sets)
+        if scale > 1:
+            for block in blocks:
+                for key in ("left", "top", "width", "height"):
+                    block[key] = max(1, int(round(block[key] / scale)))
+        blocks = _merge_image_ocr_blocks([blocks, _detect_confirmation_button_blocks(image, blocks)])
+    except Exception as exc:
+        raise ValueError(f"图片 OCR 识别失败: {exc}") from exc
+    return image, blocks
+
+
+def _get_image_translation_font(size: int):
+    from PIL import ImageFont
+
+    for path in (
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size=size)
+    return ImageFont.load_default(size=max(8, size))
+
+
+def _fit_image_translation(draw, text: str, box: dict):
+    left, top = box["left"], box["top"]
+    width, height = box["width"], box["height"]
+    base_size = box.get("font_size") or max(8, min(48, int(height * 0.8) - 1))
+    for font_size in range(max(8, int(base_size)), 7, -1):
+        font = _get_image_translation_font(font_size)
+        lines = []
+        current = ""
+        for char in text:
+            candidate = current + char
+            if current and draw.textlength(candidate, font=font) > width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        line_height = max(font_size + 2, int(font_size * 1.2))
+        if len(lines) * line_height <= height:
+            fitted_text = "\n".join(lines)
+            if box.get("center_text"):
+                text_width = max(draw.textlength(line, font=font) for line in lines)
+                left = int(left + max(0, (width - text_width) / 2))
+                top = int(top + max(0, (height - len(lines) * line_height) / 2))
+            return font, fitted_text, (left, top)
+    fallback = _get_image_translation_font(8)
+    return fallback, text, (left, top)
+
+
+def _translate_image(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
+    from PIL import ImageDraw
+
+    image, blocks = _extract_image_ocr_blocks(fpath)
+    if not blocks:
+        raise ValueError("图片中未识别到可翻译文字")
+
+    original_texts = [block["text"] for block in blocks]
+    translated_texts = _translate_text_items(original_texts, engine, model, source_lang, target_lang, db)
+    canvas = image.copy()
+    draw = ImageDraw.Draw(canvas)
+    for block, translated_text in zip(blocks, translated_texts):
+        translated_text = str(translated_text or "").strip()
+        if not translated_text:
+            continue
+        font, fitted_text, position = _fit_image_translation(draw, translated_text, block)
+        if block.get("draw_background", True):
+            draw.rectangle(
+                (block["left"], block["top"], block["left"] + block["width"], block["top"] + block["height"]),
+                fill="white",
+            )
+        try:
+            draw.multiline_text(position, fitted_text, fill="black", font=font, spacing=2)
+        except UnicodeError as exc:
+            raise ValueError("图片译文绘制需要支持目标语言的字体") from exc
+
+    output = io.BytesIO()
+    image_format = "PNG" if os.path.splitext(fpath)[1].lower() == ".png" else "JPEG"
+    if image_format == "JPEG" and canvas.mode != "RGB":
+        canvas = canvas.convert("RGB")
+    canvas.save(output, format=image_format, quality=95)
+    return output.getvalue(), original_texts, [str(item or "") for item in translated_texts]
 
 
 def _translate_markdown(fpath: str, engine: str, model: str, source_lang: str, target_lang: str, db: Session) -> tuple:
@@ -3002,9 +3402,16 @@ def _build_translation_stats_payload(db: Session, batch_id: str | None):
 
 
 def translate_with_memory(content: str, source_lang: str, target_lang: str,
-                          db: Session, bank: str = None, memory_file_id: int = None,
+                          db: Session, bank: str = None, memory_file_ids=None, memory_file_id: int = None,
                           allow_partial: bool = True) -> tuple:
-    bundle = _get_memory_candidate_bundle(db, source_lang, target_lang, bank=bank, memory_file_id=memory_file_id)
+    bundle = _get_memory_candidate_bundle(
+        db,
+        source_lang,
+        target_lang,
+        bank=bank,
+        memory_file_ids=memory_file_ids,
+        memory_file_id=memory_file_id,
+    )
 
     exact_match = _lookup_memory_exact_match(content, bundle)
     if exact_match:
@@ -3078,11 +3485,11 @@ def _translate_filename(filename: str, source_lang: str, target_lang: str, model
 
 def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
                           engine: str, model: str, source_lang: str, target_lang: str,
-                          memory_bank: str = "", memory_file_id: int = None):
+                          memory_bank: str = "", memory_file_ids=None):
     """Background thread that performs the actual translation and updates the DB record."""
     db = SessionLocal()
     _set_memory_bank(memory_bank)
-    _set_memory_file_id(memory_file_id)
+    _set_memory_file_ids(memory_file_ids=memory_file_ids)
     _reset_translation_usage_stats()
     try:
         with _translate_tasks_lock:
@@ -3253,6 +3660,12 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             all_translated_parts.extend(trans)
             with open(output_path, "wb") as f:
                 f.write(translated_bytes)
+        elif ext in IMAGE_TRANSLATION_EXTENSIONS:
+            translated_bytes, orig, trans = _translate_image(file_path, engine, model, source_lang, target_lang, db)
+            all_original_parts.extend(orig)
+            all_translated_parts.extend(trans)
+            with open(output_path, "wb") as f:
+                f.write(translated_bytes)
         elif ext == ".txt":
             content = _read_text_file_with_fallback(file_path)
             if not content.strip():
@@ -3319,7 +3732,7 @@ async def translate_text(
     req.model = _normalize_ai_model(req.model)
     engine = req.engine
     _set_memory_bank(req.memory_bank)
-    _set_memory_file_id(req.memory_file_id)
+    _set_memory_file_ids(memory_file_ids=req.memory_file_ids, memory_file_id=req.memory_file_id)
     _reset_translation_usage_stats()
     resolved_source_lang = _resolve_source_language(req.source_lang, req.target_lang, text=req.content)
     _ensure_translation_direction(resolved_source_lang, req.target_lang)
@@ -3418,6 +3831,7 @@ async def translate_file(
     target_lang: str = Form("en"),
     memory_bank: str = Form(""),
     memory_file_id: int = Form(None),
+    memory_file_ids: list[int] = Form([]),
     batch_id: str = Form(""),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
@@ -3467,7 +3881,7 @@ async def translate_file(
 
     thread = threading.Thread(
         target=_run_translate_thread,
-        args=(doc.id, file_path, ext, filename, engine, model, resolved_source_lang, target_lang, memory_bank, memory_file_id),
+        args=(doc.id, file_path, ext, filename, engine, model, resolved_source_lang, target_lang, memory_bank, _normalize_memory_file_ids(memory_file_ids=memory_file_ids, memory_file_id=memory_file_id)),
         daemon=True
     )
     thread.start()

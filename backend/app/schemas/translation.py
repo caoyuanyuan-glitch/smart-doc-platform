@@ -11,6 +11,7 @@ class TranslationRequest(BaseModel):
     target_lang: str = "en"
     memory_bank: Optional[str] = None
     memory_file_id: Optional[int] = None
+    memory_file_ids: Optional[list[int]] = None
 
 
 class TranslationResponse(BaseModel):

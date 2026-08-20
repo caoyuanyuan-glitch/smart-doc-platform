@@ -2,7 +2,7 @@
   <div class="doc-translate-container">
     <div class="page-header">
       <h2 class="page-title">文档翻译</h2>
-      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、IDML 文档</p>
+    <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、图片、Markdown、TXT、IDML 文档</p>
     </div>
 
     <el-card class="config-card config-horizontal" shadow="never">
@@ -19,12 +19,15 @@
         </el-form-item>
         <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
           <el-select
-            v-model="memoryFileId"
+            v-model="memoryFileIds"
             placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
             clearable
             filterable
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
             :loading="memoryLibraryLoading"
-            style="width: 260px"
+            style="width: 320px"
           >
             <el-option v-for="file in memoryLibraryFiles" :key="file.id" :label="file.label" :value="file.id" />
           </el-select>
@@ -75,12 +78,12 @@
               :auto-upload="false"
               multiple
               ref="fileUploadRef"
-              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf,.idml"
+              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.png,.jpg,.jpeg,.md,.txt,.xlf,.idml"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
                 <p class="upload-title">将文件拖到此处，或点击上传</p>
-                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、IDML 格式</p>
+                <p class="upload-hint">支持 Word、Excel、PPT、PDF、PNG/JPG 图片、Markdown、IDML 格式</p>
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
@@ -211,7 +214,7 @@ function swapLanguages() {
 
 const memoryBank = ref('')
 const memoryBanks = ref([])
-const memoryFileId = ref(null)
+const memoryFileIds = ref([])
 const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
 const docSource = ref('upload')
@@ -302,6 +305,12 @@ function onEngineChange(val) {
   syncSelectedModel()
 }
 
+function appendSelectedMemoryFileIds(formData) {
+  for (const memoryFileId of memoryFileIds.value) {
+    formData.append('memory_file_ids', String(memoryFileId))
+  }
+}
+
 function tableRowClassName({ row }) {
   if (selectedReviewedRow.value && selectedReviewedRow.value.id === row.id) {
     return 'selected-row'
@@ -355,9 +364,7 @@ async function translateReviewedDoc() {
     formData.append('target_lang', targetLang.value)
     formData.append('memory_bank', memoryBank.value || '')
     formData.append('batch_id', batchId)
-    if (memoryFileId.value != null) {
-      formData.append('memory_file_id', String(memoryFileId.value))
-    }
+    appendSelectedMemoryFileIds(formData)
     const tres = await translationAPI.translateFile(formData)
     updateJob(job.jobKey, {
       doc_id: tres.data.doc_id,
@@ -376,7 +383,7 @@ async function translateReviewedDoc() {
 
 function beforeFileUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
-  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'xlf', 'idml']
+  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'png', 'jpg', 'jpeg', 'md', 'txt', 'xlf', 'idml']
   if (!allowed.includes(ext)) {
     ElMessage.error(`不支持的文件格式: .${ext}`)
     return false
@@ -414,9 +421,7 @@ function handleFileTranslate(options) {
   formData.append('target_lang', targetLang.value)
   formData.append('memory_bank', memoryBank.value || '')
   formData.append('batch_id', batchId)
-  if (memoryFileId.value != null) {
-    formData.append('memory_file_id', String(memoryFileId.value))
-  }
+  appendSelectedMemoryFileIds(formData)
 
   translationAPI.translateFile(formData).then(res => {
     updateJob(job.jobKey, {

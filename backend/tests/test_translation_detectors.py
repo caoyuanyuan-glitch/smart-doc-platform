@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 from openpyxl import Workbook, load_workbook
+from PIL import Image
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -20,12 +21,17 @@ from app.api.translation import (  # noqa: E402
     _build_memory_candidate_bundle,
     _build_memory_seed_file_path,
     _count_translatable_text_units,
+    _collect_memory_candidates,
     _do_translate,
     _ensure_memory_bank_entry,
     _find_memory_glossary,
     _get_memory_file_candidates,
+    _normalize_memory_file_ids,
     _get_memory_match_trace,
     _get_translate_task_status,
+    _group_image_ocr_data,
+    _detect_confirmation_button_blocks,
+    _merge_image_ocr_blocks,
     _load_memory_file_entries,
     _looks_like_hallucination,
     _looks_like_invalid_translation,
@@ -36,6 +42,7 @@ from app.api.translation import (  # noqa: E402
     _translate_tasks,
     _translate_tasks_lock,
     _sync_memory_file_to_seed,
+    _translate_image,
 )
 from app.utils.runtime_paths import runtime_memory_seed_dir  # noqa: E402
 
@@ -78,9 +85,146 @@ class CancelFlowTest(unittest.TestCase):
             _translate_tasks.pop(doc_id, None)
 
 
+class ImageTranslationTest(unittest.TestCase):
+    def test_groups_ocr_words_into_ordered_lines(self):
+        blocks = _group_image_ocr_data({
+            "text": ["Open", "Settings", "Save"],
+            "conf": [96, 93, 91],
+            "left": [10, 50, 10],
+            "top": [20, 20, 60],
+            "width": [35, 55, 35],
+            "height": [16, 16, 16],
+            "block_num": [1, 1, 1],
+            "par_num": [1, 1, 1],
+            "line_num": [1, 1, 2],
+        })
+
+        self.assertEqual([block["text"] for block in blocks], ["Open Settings", "Save"])
+        self.assertEqual(blocks[0]["left"], 10)
+        self.assertEqual(blocks[0]["width"], 95)
+
+    def test_joins_cjk_words_without_inserting_spaces(self):
+        blocks = _group_image_ocr_data({
+            "text": ["设置", "页面"],
+            "conf": [96, 93],
+            "left": [10, 50],
+            "top": [20, 20],
+            "width": [35, 35],
+            "height": [16, 16],
+            "block_num": [1, 1],
+            "par_num": [1, 1],
+            "line_num": [1, 1],
+        })
+
+        self.assertEqual(blocks[0]["text"], "设置页面")
+
+    def test_discards_low_confidence_ocr_words(self):
+        blocks = _group_image_ocr_data({
+            "text": ["garbage", "Valid"],
+            "conf": [12, 92],
+            "left": [10, 10],
+            "top": [20, 60],
+            "width": [50, 40],
+            "height": [16, 16],
+            "block_num": [1, 1],
+            "par_num": [1, 1],
+            "line_num": [1, 2],
+        })
+
+        self.assertEqual([block["text"] for block in blocks], ["Valid"])
+
+    def test_discards_single_character_ocr_noise(self):
+        blocks = _group_image_ocr_data({
+            "text": ["©", "设置"],
+            "conf": [96, 93],
+            "left": [10, 10],
+            "top": [20, 60],
+            "width": [16, 35],
+            "height": [16, 16],
+            "block_num": [1, 1],
+            "par_num": [1, 1],
+            "line_num": [1, 2],
+        })
+
+        self.assertEqual([block["text"] for block in blocks], ["设置"])
+
+    def test_merges_complementary_ocr_layout_results(self):
+        merged = _merge_image_ocr_blocks([
+            [{"text": "确认测序对话框", "left": 140, "top": 220, "width": 130, "height": 18, "confidence": 95}],
+            [{"text": "是否要测序？", "left": 145, "top": 100, "width": 110, "height": 20, "confidence": 86}],
+        ])
+
+        self.assertEqual([block["text"] for block in merged], ["是否要测序？", "确认测序对话框"])
+
+    def test_prefers_higher_confidence_duplicate_ocr_block(self):
+        merged = _merge_image_ocr_blocks([
+            [{"text": "确认测序", "left": 140, "top": 220, "width": 100, "height": 18, "confidence": 60}],
+            [{"text": "确认测序", "left": 142, "top": 220, "width": 100, "height": 18, "confidence": 93}],
+        ])
+
+        self.assertEqual(merged, [{"text": "确认测序", "left": 142, "top": 220, "width": 100, "height": 18}])
+
+    def test_recovers_confirmation_button_labels_from_paired_borders(self):
+        image = Image.new("L", (400, 240), "white")
+        for x in range(80, 180):
+            image.putpixel((x, 170), 0)
+        for x in range(200, 300):
+            image.putpixel((x, 170), 0)
+        for x in range(80, 180):
+            image.putpixel((x, 190), 0)
+        for x in range(200, 300):
+            image.putpixel((x, 190), 0)
+
+        blocks = _detect_confirmation_button_blocks(image, [{"text": "是否继续操作？", "left": 140, "top": 90, "width": 100, "height": 20}])
+
+        self.assertEqual([block["text"] for block in blocks], ["否", "是"])
+        self.assertEqual([block["left"] for block in blocks], [82, 202])
+        self.assertEqual([block["draw_background"] for block in blocks], [True, True])
+        self.assertEqual([block["height"] for block in blocks], [16, 16])
+        self.assertTrue(all(block["font_size"] <= block["height"] for block in blocks))
+        self.assertEqual(blocks[0]["font_size"], blocks[1]["font_size"])
+
+    def test_recovers_english_confirmation_button_labels_from_paired_borders(self):
+        image = Image.new("L", (400, 240), "white")
+        for x in range(80, 180):
+            image.putpixel((x, 170), 0)
+            image.putpixel((x, 190), 0)
+        for x in range(200, 300):
+            image.putpixel((x, 170), 0)
+            image.putpixel((x, 190), 0)
+
+        blocks = _detect_confirmation_button_blocks(image, [{"text": "Proceed with sequencing ?", "left": 120, "top": 90, "width": 140, "height": 20}])
+
+        self.assertEqual([block["text"] for block in blocks], ["No", "Yes"])
+        self.assertEqual(blocks[0]["font_size"], blocks[1]["font_size"])
+
+    def test_button_blocks_override_tiny_duplicate_ocr_labels(self):
+        merged = _merge_image_ocr_blocks([
+            [{"text": "Yes", "left": 214, "top": 141, "width": 13, "height": 5, "confidence": 88}],
+            [{"text": "Yes", "left": 203, "top": 156, "width": 112, "height": 22, "confidence": 999, "font_size": 14, "draw_background": True, "center_text": True}],
+        ])
+
+        self.assertEqual(merged, [{"text": "Yes", "left": 203, "top": 156, "width": 112, "height": 22, "font_size": 14, "draw_background": True, "center_text": True}])
+
+    def test_translates_image_to_same_image_format(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "source.png"
+            Image.new("RGB", (180, 80), "white").save(source_path)
+            blocks = [{"text": "Open settings", "left": 10, "top": 10, "width": 120, "height": 24}]
+
+            with patch("app.api.translation._extract_image_ocr_blocks", return_value=(Image.open(source_path), blocks)), \
+                 patch("app.api.translation._translate_text_items", return_value=["Open configuration"]):
+                translated, original, output = _translate_image(str(source_path), "ai", "kimi", "en", "en", db=None)
+
+            self.assertEqual(original, ["Open settings"])
+            self.assertEqual(output, ["Open configuration"])
+            with Image.open(__import__("io").BytesIO(translated)) as image:
+                self.assertEqual(image.format, "PNG")
+
+
 class HybridMemoryFallbackTest(unittest.TestCase):
     def tearDown(self):
-        for attr in ["memory_bank", "memory_file_id", "translation_usage_stats", "memory_candidate_cache"]:
+        for attr in ["memory_bank", "memory_file_id", "memory_file_ids", "translation_usage_stats", "memory_candidate_cache"]:
             if hasattr(_thread_locals, attr):
                 delattr(_thread_locals, attr)
 
@@ -273,6 +417,38 @@ class TranslationStatisticsTest(unittest.TestCase):
         )
 
         self.assertEqual(count, 4)
+
+
+class MemoryFileSelectionTest(unittest.TestCase):
+    def test_normalize_memory_file_ids_merges_and_deduplicates(self):
+        self.assertEqual(_normalize_memory_file_ids(memory_file_ids=[3, "2", 3, 0, None], memory_file_id=2), [3, 2])
+
+    def test_collect_memory_candidates_merges_multiple_files_in_order(self):
+        db = unittest.mock.MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = []
+
+        with patch("app.api.translation._get_memory_file_candidates") as get_candidates:
+            get_candidates.side_effect = [
+                [
+                    {"source_text": "Alpha", "translated_text": "阿尔法"},
+                    {"source_text": "Beta", "translated_text": "贝塔"},
+                ],
+                [
+                    {"source_text": "Beta", "translated_text": "贝塔"},
+                    {"source_text": "Gamma", "translated_text": "伽马"},
+                ],
+            ]
+
+            candidates = _collect_memory_candidates(db, "en", "zh", memory_file_ids=[11, 12])
+
+        self.assertEqual(
+            candidates,
+            [
+                {"source_text": "Alpha", "translated_text": "阿尔法"},
+                {"source_text": "Beta", "translated_text": "贝塔"},
+                {"source_text": "Gamma", "translated_text": "伽马"},
+            ],
+        )
 
 
 class BatchedTranslationHelpersTest(unittest.TestCase):
