@@ -1,5 +1,6 @@
 <template>
-  <div class="app-container">
+  <el-config-provider :locale="zhCn">
+    <div class="app-container">
     <router-view v-if="$route.path === '/login'" />
     <template v-else>
       <header class="header" :class="{ collapsed: isCollapsed }">
@@ -263,12 +264,14 @@
         </router-view>
       </main>
     </template>
-  </div>
+    </div>
+  </el-config-provider>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, provide } from 'vue'
 import { useRouter } from 'vue-router'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { useUserStore } from '@/store/user'
 import { qaAPI, systemAPI } from '@/api'
 import {

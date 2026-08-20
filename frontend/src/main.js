@@ -1,8 +1,9 @@
 import { createApp } from 'vue'
-import ElementPlus from 'element-plus'
-import zhCn from 'element-plus/es/locale/lang/zh-cn'
-import 'element-plus/dist/index.css'
 import { createPinia } from 'pinia'
+// Element Plus 按需引入：模板中的 el-* 组件由 unplugin-vue-components 自动导入并附带样式
+// ElMessage / ElMessageBox 属于 JS API 调用，无法被模板解析器覆盖，需手动补充样式
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
 
 function renderBootstrapError(error) {
   const root = document.getElementById('app')
@@ -64,7 +65,6 @@ async function bootstrap() {
     const app = createApp(App)
     const pinia = createPinia()
 
-    app.use(ElementPlus, { locale: zhCn })
     app.use(pinia)
     app.use(router)
     app.mount('#app')
