@@ -72,7 +72,23 @@
 <script setup>
 import { ref, onMounted, watch, nextTick } from 'vue'
 import { ArrowLeft, ArrowRight, ZoomIn, ZoomOut, Loading, Warning } from '@element-plus/icons-vue'
-import * as pdfjsLib from 'pdfjs-dist'
+
+let pdfjsLib = null
+let workerConfigured = false
+
+async function ensurePdfjs() {
+  if (!pdfjsLib) {
+    pdfjsLib = await import('pdfjs-dist')
+  }
+  if (!workerConfigured) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      'pdfjs-dist/build/pdf.worker.min.mjs',
+      import.meta.url
+    ).toString()
+    workerConfigured = true
+  }
+  return pdfjsLib
+}
 
 const props = defineProps({
   pdfUrl: {
@@ -102,17 +118,13 @@ const error = ref('')
 let pdfDoc = null
 let currentRenderTask = null
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url
-).toString()
-
 async function loadPdf() {
   if (!props.pdfUrl) return
   loading.value = true
   error.value = ''
   try {
-    const loadingTask = pdfjsLib.getDocument(props.pdfUrl)
+    const lib = await ensurePdfjs()
+    const loadingTask = lib.getDocument(props.pdfUrl)
     pdfDoc = await loadingTask.promise
     totalPages.value = pdfDoc.numPages
     emit('loaded', { totalPages: totalPages.value })
