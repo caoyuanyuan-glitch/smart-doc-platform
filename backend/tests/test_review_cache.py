@@ -386,6 +386,25 @@ def test_select_relevant_ai_review_basis_keeps_summary_first_and_only_when_irrel
     assert "## 术语" not in selected
 
 
+def test_select_relevant_ai_review_basis_skips_summary_when_specific_sections_match():
+    sections = [
+        {"label": "CYY人工审核经验基线摘要", "text": "【CYY人工审核经验基线摘要】\n关注高频问题。", "priority": 5},
+        {"label": "说明书发布前自检 Checklist", "text": "【说明书发布前自检 Checklist】\nrevision history date version", "priority": 5},
+        {"label": "版本记录", "text": "【版本记录】\nrevision history copyright year version history", "priority": 4},
+    ]
+
+    selected = review_api._select_relevant_ai_review_basis(
+        "Please check revision history and copyright year consistency.",
+        sections,
+        max_sections=2,
+        char_budget=500,
+    )
+
+    assert "## 版本记录" in selected
+    assert "## 说明书发布前自检 Checklist" in selected
+    assert "## CYY人工审核经验基线摘要" not in selected
+
+
 def test_build_ai_review_basis_sections_include_english_and_common_error_specs():
     sections = review_api._build_ai_review_basis_sections(
         {
@@ -1426,6 +1445,412 @@ def test_run_english_heuristic_audit_keeps_official_global_site():
     assert not any(issue.get("rule") in {"HR001", "HR012"} for issue in issues)
 
 
+def test_run_manual_engineering_audit_detects_duplicate_sentence_and_step_leadin():
+    content = (
+        "Ubuntu is a registered trademark of Canonical Ltd.\n\n"
+        "Some setup notes are listed here.\n\n"
+        "Ubuntu is a registered trademark of Canonical Ltd.\n\n"
+        "Perform the following steps:\n"
+        "1. Open the software.\n"
+        "Perform the following steps:\n"
+        "2. Confirm the settings.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    rules = {issue["rule"] for issue in issues}
+
+    assert "DOC-DUP-001" in rules
+    assert "DOC-PROC-002" in rules
+
+
+def test_run_manual_engineering_audit_skips_duplicate_sentence_for_protocol_like_steps():
+    content = (
+        "Keep the PCR tube on the magnetic separation rack for 30 seconds, and then remove and discard the supernatant.\n\n"
+        "Some intermediate notes are listed here.\n\n"
+        "Keep the PCR tube on the magnetic separation rack for 30 seconds, and then remove and discard the supernatant.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert not any(issue["rule"] == "DOC-DUP-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_missing_space_before_parentheses():
+    issues = review_api._run_manual_engineering_audit(
+        "The storage summary includes Distribution(TB) and Capacity(GB).",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-FMT-003" and issue["original_text"] == "Distribution(TB)" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_missing_space_before_units():
+    issues = review_api._run_manual_engineering_audit(
+        "Description 24VDC, 5A DNBSEQ-E25RS 20VDC, 11.5A DNBSEQ-E25ARS 100-240 V~, 50 /60 Hz, 300 VA ±10% II",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-UNIT-001" and issue["original_text"] == "24VDC" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_manual_library_url():
+    issues = review_api._run_manual_engineering_audit(
+        "Download the instructions for use from https://global-mgitech.com.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-URL-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_neither_not():
+    issues = review_api._run_manual_engineering_audit(
+        "DNBSEQ-G400RS sequencing software version and read length in the case of neither pooling samples not sequencing the barcode.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-GRAM-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_a_appropriate():
+    issues = review_api._run_manual_engineering_audit(
+        "Use a appropriate cell strainer for the sample.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-GRAM-002" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_library_spelling():
+    issues = review_api._run_manual_engineering_audit(
+        "Table 41 DNBSEQ-G400RS making DNB requirements. Libary type cDNA library, TCR&BCR libraries.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-SPELL-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_basecall_repeat():
+    issues = review_api._run_manual_engineering_audit(
+        "Basecall version Basecall Basecall_1.0.8.208 or later version.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-DUP-006" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_by_use():
+    issues = review_api._run_manual_engineering_audit(
+        "It is recommended to mix the sample thoroughly by use the pipette.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-GRAM-003" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_missing_data_placeholder():
+    content = (
+        "About the sequencing set\n"
+        "Table 7 Recommended library insert size\n"
+        "Model\n"
+        "Recommended insert size (bp)\n"
+        "Data output (GB/flow cell)\n\n"
+        "E25 App-D FCU SE100 200 to 400\n"
+        "About\n\n"
+        "E25 App-D FCS SE100 200 to 400 About 2.5\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert any(issue["rule"] == "DOC-DATA-001" and issue["original_text"] == "About" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_temperature_range():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "y Cytoactivity > 80% y Clumping rate < 5% y Impurity rate < 5% y Cytoactivity < 5% y Clumping rate < 5% y Impurity rate < 5% Recommended cell input Recommended cell concentration (cell/μL) 2 ℃ to 8 ℃ (36 ℉) and -25 ℃ to -15 ℃.",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-UNIT-006" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_navigation_entry_mismatch():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "系统管理模块 点击左侧导航栏的【物料管理】，默认进入用户管理界面。"
+    )
+
+    assert any(issue["rule"] == "CYY-CN-NAV-001" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_wrong_material_code_reference():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "目录包含 管理物料编码规则 30。 物料编码规则设置参考第70 页“编辑字典”。"
+    )
+
+    assert any(issue["rule"] == "CYY-CN-REF-003" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_repeated_category_suffix():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "可查看物料、耗材、测试物料大类、试剂等大类，并按类别筛选右侧物料列表。"
+    )
+
+    assert any(issue["rule"] == "CYY-CN-DUP-002" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_new_create_term_drift():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "在出库登记界面，点击【新增】，进入新建出库登记界面。"
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-016" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_step_reference_style_drift():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "4) （可选）如需为物料配置多个属性，可重复步骤3。"
+    )
+
+    assert any(issue["rule"] == "CYY-CN-STEP-003" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_cytoactivity_threshold():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "y Cytoactivity > 80% y Clumping rate < 5% y Impurity rate < 5% y Cytoactivity < 5% y Clumping rate < 5% y Impurity rate < 5% Recommended cell input Recommended cell concentration (cell/μL)",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-RANGE-002" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_strip_case():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "8-Strip tube × 2 8-Strip tube × 2 8-Strip tube × 2 8-Strip tube × 2",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-TERM-005" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_storage_term():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "用于连接扫码枪或外部储存设备。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-016" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_login_term():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "用户账户和登陆密码信息",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-017" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_extra_particle():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "在仓门开启时，检查的托盘表面是否有灰尘。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-GRAMMAR-007" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_pipette_term():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "用移液枪将制备好的DNB样本加入到测序载片。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-018" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_storage_environment_term():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "运输/ 储存环 境温度和相对湿度。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-019" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_long_storage_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "用于连接扫码枪或外部储存设备。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-020" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_login_context_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "参数 y 内容：设备运行状况数据/日志 y 储存：主机硬盘/计算模块 y 内容：用户账户和登陆密码信息 y 储存：加密储存于主机硬盘。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-021" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_extra_word_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "本框，用弹出的软键盘中输入时间。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-GRAMMAR-008" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_pipette_context_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "用移液枪将制备好的DNB样本加入到测序载片。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-022" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_transport_storage_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "污染等级 使用场地 运输/ 储存环 境 温度 相对湿度 随机附件 详见装箱清单",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-023" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_reference_page():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "分析，此处DNB ID 需与第33 页“装载样本”一致。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-REF-001" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_external_storage_device():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "用于连接扫码枪或外部存储设备。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-024" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_login_password_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "参数 y 内容：用户账户和登陆密码信息",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-025" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_read_length_term():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "一链读长和二连读长暗反应的循环数（cycle）。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-SPELL-003" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_hard_sentence():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "禁止使用与设备零部件或设备内所含材料发生化学反应而引起危险的清洗剂或消毒剂。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-STYLE-002" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_ocr_storage_fragment():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "合。 部储存设",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-026" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_storage_colon_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "参数 y 内容：设备运行状况数据/ 日志 y 储存：主机硬盘/ 计算模块。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-027" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_peripheral_device_term():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "空间足够容纳相关配套或外围设备。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-028" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_peripheral_device_ocr_fragment():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "建议参 或外围设 热、线缆",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-CONSIST-029" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_reference_crosscheck():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "该测序方案中如需自定义Barcode 文件，参考第19 页“Barcode 管理界面”。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-REF-002" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_hyphen_term_drift():
+    issues = review_api._run_manual_engineering_audit(
+        "The single-base sequencing workflow is described below. The sing-base analysis is used in the appendix.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-TERM-003" and issue["original_text"] == "sing-base" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_case_only_hyphen_variants():
+    issues = review_api._run_manual_engineering_audit(
+        "Double-click the icon to continue. If needed, double-click the icon again.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-TERM-003" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_repeated_short_phrase():
+    issues = review_api._run_manual_engineering_audit(
+        "Click Back to return to the to the analysis result directory.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-DUP-004" and issue["original_text"] == "to the to the" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_non_target_repeated_short_phrase():
+    issues = review_api._run_manual_engineering_audit(
+        "The samples are grouped by groups by category in the OCR output.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-DUP-004" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_title_case_repeated_phrase():
+    issues = review_api._run_manual_engineering_audit(
+        "Electrical safety Electrical safety is listed in the chapter title.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-DUP-004" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_cross_sentence_case_shift_phrase():
+    issues = review_api._run_manual_engineering_audit(
+        "Use the device The device can then be restarted.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-DUP-004" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_self_referential_imperative():
+    issues = review_api._run_manual_engineering_audit(
+        "Perform the following steps: 1. Power off the power.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-DUP-005" and issue["original_text"] == "Power off the power" for issue in issues)
+
+
 def test_review_ai_chunk_timeout_seconds_uses_higher_default_for_large_chunks(monkeypatch):
     monkeypatch.delenv("REVIEW_AI_CHUNK_TIMEOUT", raising=False)
 
@@ -1676,6 +2101,33 @@ def test_chinese_human_baseline_rules_cover_consistency_logic_and_product_cases(
     }.issubset(rules)
 
 
+def test_chinese_human_baseline_rules_cover_storage_login_and_power_unit_format_cases():
+    content = (
+        "设备运行状况数据存储于主机硬盘，用户账户和登陆密码信息也会储存。"
+        "首次登录前请确认设备配置。"
+        "电源参数为 24VDC,5A 20VDC,11.5A 100-240V~,50/60 Hz,300VA。"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+    originals = {issue["original_text"] for issue in issues}
+    rules = {issue["rule"] for issue in issues}
+
+    assert {
+        "存储",
+        "登录",
+        "24VDC",
+        "5A",
+        "20VDC",
+        "11.5A",
+        "300VA",
+    }.issubset(originals)
+    assert {
+        "CYY-CN-CONSIST-014",
+        "CYY-CN-CONSIST-015",
+        "CYY-CN-UNIT-005",
+    }.issubset(rules)
+
+
 def test_chinese_human_baseline_rules_cover_spacing_figure_and_info_completeness_cases():
     content = (
         "前面试剂用量为 10 μL，后续实验使用 10μL。"
@@ -1742,6 +2194,23 @@ def test_chinese_human_baseline_rules_cover_alpha_lab_manual_gaps():
         "CYY-CN-GRAMMAR-007",
         "CYY-CN-LOGIC-007",
     }.issubset(rules)
+
+
+def test_chinese_human_baseline_rules_detect_macos_install_conflict_with_intermediate_steps():
+    content = (
+        "在MacOS 端安装本系统\n"
+        "1. 下载MacOS 安装包，双击该文件进入系统安装流程。\n"
+        "2. 按照界面指引，拖拽αLab Studio 软件图标到右侧的Application 文件夹进行安装。\n"
+        "3. 首次安装本平台，计算机将提示无法打开本系统。点击【好】，并进入【系统设置】> 【隐私与安全性】进入隐私与安全性设置界面。选择【仍要打开】进行软件安全确认。\n"
+        "4. 如系统再次提醒，点击【打开】打开本系统。\n"
+        "5. 点击【Install】，开始安装系统。安装完成后，点击【Finish】完成安装。\n"
+        "6. 安装完成后，可通过启动台或应用中心，点击 打开本系统。\n"
+        "在Android 平板端安装本系统"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert any(issue["rule"] == "CYY-CN-LOGIC-007" for issue in issues)
 
 
 def test_chinese_human_baseline_rules_detect_adjacent_duplicate_steps():

@@ -4284,6 +4284,34 @@ def _extract_basis_tokens(text, max_tokens=80):
     return tokens
 
 
+def _get_basis_section_tokens(section, max_tokens=120):
+    if not isinstance(section, dict):
+        return set()
+    cache = section.get("_token_cache")
+    if isinstance(cache, dict) and cache.get("max_tokens") == max_tokens:
+        return set(cache.get("tokens") or ())
+
+    label = str(section.get("label") or "")
+    text = str(section.get("text") or "")
+    tokens = _extract_basis_tokens(f"{label}\n{text}", max_tokens=max_tokens)
+    section["_token_cache"] = {
+        "max_tokens": max_tokens,
+        "tokens": tuple(tokens),
+    }
+    return set(tokens)
+
+
+def _is_summary_basis_section(label):
+    lowered = str(label or "").lower()
+    return "摘要" in str(label or "") or "summary" in lowered
+
+
+def _is_checklist_basis_section(label):
+    label = str(label or "")
+    lowered = label.lower()
+    return "checklist" in lowered or "自检" in label
+
+
 def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, char_budget=3200):
     if not basis_sections:
         return ""
@@ -4291,52 +4319,82 @@ def _select_relevant_ai_review_basis(content, basis_sections, max_sections=3, ch
     content_tokens = set(_extract_basis_tokens(content, max_tokens=120))
     min_relevance = 0.08
     summary_entry = None
+    checklist_entry = None
     other_ranked = []
     for index, section in enumerate(basis_sections):
         label = str(section.get("label") or "")
         text = str(section.get("text") or "")
-        section_tokens = set(_extract_basis_tokens(text, max_tokens=120))
+        section_tokens = _get_basis_section_tokens(section, max_tokens=120)
         overlap = len(content_tokens & section_tokens)
         token_hit_ratio = overlap / max(len(section_tokens), 1)
         coverage_ratio = overlap / max(len(content_tokens), 1) if content_tokens else 0
-        relevance = (token_hit_ratio * 0.6) + (coverage_ratio * 0.4)
+        label_tokens = set(_extract_basis_tokens(label, max_tokens=20))
+        label_overlap = len(content_tokens & label_tokens)
+        label_hit_ratio = label_overlap / max(len(label_tokens), 1) if label_tokens else 0
+        relevance = (token_hit_ratio * 0.5) + (coverage_ratio * 0.3) + (label_hit_ratio * 0.2)
         priority = int(section.get("priority") or 0)
-        is_summary = "摘要" in label or "summary" in label.lower()
+        is_summary = _is_summary_basis_section(label)
+        is_checklist = _is_checklist_basis_section(label)
         is_cyy_example = label.startswith("CYY人工审核经验基线-")
         if is_summary:
             summary_entry = (section, text, priority)
+        elif is_checklist:
+            checklist_entry = (relevance, overlap, priority, -index, section, text)
         else:
-            other_ranked.append((relevance, overlap, priority, -index, is_cyy_example, section, text))
+            other_ranked.append((relevance, overlap, label_overlap, priority, -index, is_cyy_example, section, text))
 
     selected = []
     total_length = 0
 
-    if summary_entry and summary_entry[1].strip():
-        summary_text = summary_entry[1].strip()
-        selected.append((summary_entry[0], summary_text))
-        total_length += len(summary_text)
+    def _append_selected(section, text):
+        nonlocal total_length
+        text = str(text or "").strip()
+        if not text:
+            return False
+        available = char_budget - total_length
+        if available <= 0:
+            return False
+        clipped = text[:min(len(text), available)].rstrip()
+        if not clipped:
+            return False
+        selected.append((section, clipped))
+        total_length += len(clipped)
+        return True
 
-    other_ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+    if checklist_entry:
+        relevance, overlap, _priority, _index, section, text = checklist_entry
+        checklist_label_tokens = set(_extract_basis_tokens(str(section.get("label") or ""), max_tokens=20))
+        checklist_label_overlap = len(content_tokens & checklist_label_tokens)
+        if overlap > 0 or checklist_label_overlap > 0:
+            _append_selected(section, text)
+
+    other_ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
     cyy_selected = 0
     cyy_budget = 1 if max_sections <= 3 else max(1, min(2, max_sections - 2))
-    for relevance, _overlap, _priority, _index, is_cyy_example, section, text in other_ranked:
+    for relevance, _overlap, label_overlap, _priority, _index, is_cyy_example, section, text in other_ranked:
         text = text.strip()
         if not text:
             continue
-        if relevance < min_relevance:
+        if any(section is existing_section for existing_section, _ in selected):
+            continue
+        if relevance < min_relevance and label_overlap <= 0:
             continue
         if is_cyy_example and cyy_selected >= cyy_budget:
             continue
-        available = char_budget - total_length
-        if available <= 0:
+        if not _append_selected(section, text):
             break
-        clipped = text[:min(len(text), available)]
-        selected.append((section, clipped))
-        total_length += len(clipped)
         if is_cyy_example:
             cyy_selected += 1
         if len(selected) >= max_sections or total_length >= char_budget:
             break
+
+    if checklist_entry and selected and len(selected) < max_sections and total_length < char_budget:
+        _relevance, _overlap, priority, _index, section, text = checklist_entry
+        if not any(section is existing_section for existing_section, _ in selected) and priority >= 5:
+            _append_selected(section, text)
+
+    if not selected and summary_entry and summary_entry[1].strip():
+        _append_selected(summary_entry[0], summary_entry[1])
 
     if not selected:
         return ""
@@ -5648,6 +5706,46 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 仪器参数术语', 'general', 95,
         )
 
+    for match in re.finditer(r'(?<!\d)\d+(?:\.\d+)?(?:VDC|VA|A|Hz|W|kW|mA|mV)\b', normalized, re.IGNORECASE):
+        raw = match.group(0)
+        suggestion = re.sub(r'^(\d+(?:\.\d+)?)([A-Za-z]+)$', r'\1 \2', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-UNIT-005', '单位格式',
+            suggestion,
+            '电源与功率单位建议在数值与单位之间保留空格。',
+            'CYY人工审核经验基线 - 电源单位格式', 'general', 94,
+        )
+
+    for match in re.finditer(r'(?<!\d)-?\d+\s*℃\s+to\s+-?\d+\s*℃', normalized, re.IGNORECASE):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        suggestion = raw.replace('℃', '°C')
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-UNIT-006', '单位格式',
+            suggestion,
+            '温度区间建议统一写为“°C”并保留数值与单位空格。',
+            'CYY人工审核经验基线 - 温度区间格式', 'general', 94,
+        )
+
+    for match in re.finditer(r'Cytoactivity\s*<\s*5%', normalized, re.IGNORECASE):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-RANGE-002', '范围/数值格式',
+            '请确认是否应为 Cytoactivity > 5%',
+            '活率阈值方向需要结合上下文确认，人工意见指出这里可能存在符号方向问题。',
+            'CYY人工审核经验基线 - 活率阈值确认', 'general', 90,
+        )
+
+    for match in re.finditer(r'细胞核活性小于\s*5%', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-CHECK-001', '人工确认项',
+            '请确认该处是否应为“细胞核活性大于 5%”',
+            '是否应该是大于。该活性阈值方向需要结合上下文和源文件确认。',
+            'CYY人工审核经验基线 - 细胞核活性阈值确认', 'general', 90,
+        )
+
     for match in re.finditer(r'(?<!\d)\d{4,}\s*rpm(?![A-Za-z])', normalized, re.IGNORECASE):
         raw = match.group(0)
         speed = re.match(r'(\d{4,})', raw, re.IGNORECASE)
@@ -5878,10 +5976,13 @@ def _run_chinese_human_baseline_rules(content):
         ('外周血单个核细胞', 'PBMC', 'CYY-CN-CONSIST-005', '术语一致性', '建议统一为“PBMC”或“外周血单个核细胞”中的一种', '缩写与中文全称并存时应统一术语口径。'),
         ('RNA 质量', 'RNA 完整性', 'CYY-CN-CONSIST-006', '术语一致性', '建议统一为“RNA 完整性”或“RNA 质量”中的一种', '同一质量概念在全文中应保持统一。'),
         ('转化系数', '转换系数', 'CYY-CN-CONSIST-009', '术语一致性', '建议统一为“转换系数”或与界面实际文案保持一致', '同一字段名称在同一文档中应保持统一。'),
+        ('存储', '储存', 'CYY-CN-CONSIST-014', '术语一致性', '建议全文统一为“存储”或“储存”中的一种', '同一保存概念在全文中应保持统一表述。'),
+        ('登录', '登陆', 'CYY-CN-CONSIST-015', '术语一致性', '建议全文统一为“登录”“登入”或“登陆”中的一种', '同一界面动作在全文中应保持统一表述。'),
         ('服务地址', '服务器地址', 'CYY-CN-CONSIST-010', '术语一致性', '建议统一为“服务器地址”或按界面实际文案确认', '同一配置项名称在正文和交叉引用中应保持一致。'),
         ('左侧菜单栏', '左侧导航栏', 'CYY-CN-CONSIST-011', '术语一致性', '建议统一为“左侧导航栏”或按界面设计规范确认', '同一界面区域名称在全文中应保持统一。'),
         ('自增物料', '手动新增普通物料', 'CYY-CN-CONSIST-012', '术语一致性', '建议统一为“手动新增物料”或明确“自增物料”的定义', '问题与答案中的物料术语应前后呼应。'),
         ('修改密码界面', '重置密码', 'CYY-CN-CONSIST-013', '术语一致性', '建议统一为“重置密码界面”或按界面标题核实后统一', '图注名称与正文功能名称应保持一致。'),
+        ('新增', '新建', 'CYY-CN-CONSIST-016', '术语一致性', '建议统一为“新增”或“新建”中的一种界面动作表述', '同一创建动作在全文中应保持统一表述。'),
     ]
     for original, paired, rule, category, suggestion, description in consistency_pairs:
         start = normalized.find(original)
@@ -5931,18 +6032,75 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 中文步骤句式简化', 'general', 91,
         )
 
+    for match in re.finditer(r'(?:测试物料)?大\s*类[^。\n]{0,12}大\s*类', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-DUP-002', '重复内容',
+            '建议改为“测试物料大类、试剂等”或按实际分类名称重写',
+            '“大类”在同一短语中重复出现，影响表达紧凑性。',
+            'CYY人工审核经验基线 - 分类名称重复压缩', 'general', 90,
+        )
+
+    for match in re.finditer(r'可重复步骤\s*3(?![)）])', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-STEP-003', '步骤结构',
+            '建议改为“可重复步骤3）”或“可重复步骤 3)”并与全文编号样式保持一致',
+            '步骤引用缺少与正文一致的编号样式，读者不易快速对应到具体步骤。',
+            'CYY人工审核经验基线 - 步骤编号引用统一', 'general', 89,
+        )
+
+    for match in re.finditer(r'系统管理模块\s*点击左侧导航栏的【物料管理】，默认进入用户管理界面', normalized):
+        add_issue(
+            match.start(), match.end(), '系统管理模块 -> 【物料管理】',
+            'CYY-CN-NAV-001', '术语一致性',
+            '建议核对入口名称；若为系统管理模块，步骤中应与【系统管理】保持一致',
+            '模块标题与实际点击入口名称不一致，容易误导读者。',
+            'CYY人工审核经验基线 - 导航入口一致性', 'serious', 94,
+        )
+
+    for match in re.finditer(r'当不点击【立即更新】则无法关闭弹窗时', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-012', '表达与句式',
+            '建议改为“若未点击【立即更新】，则无法关闭弹窗，此时执行如下操作”',
+            '条件句中“当不点击”表述生硬，影响可读性。',
+            'CYY人工审核经验基线 - 中文条件句优化', 'general', 90,
+        )
+
+    for match in re.finditer(r'打开存在默认存储路径中的模板', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-013', '表达与句式',
+            '建议改为“打开默认存储路径中的模板”',
+            '“打开存在默认存储路径中的模板”表述不自然，建议简化。',
+            'CYY人工审核经验基线 - 中文步骤句式简化', 'general', 90,
+        )
+
+    cross_ref_match = re.search(r'物料编码规则设置参考第70\s*页“编辑字典”', normalized)
+    if cross_ref_match and re.search(r'管理物料编码规则\s*30', normalized):
+        add_issue(
+            cross_ref_match.start(), cross_ref_match.end(), cross_ref_match.group(0),
+            'CYY-CN-REF-003', '交叉引用',
+            '建议核对引用对象，优先引用第30页“管理物料编码规则”或与实际章节标题保持一致',
+            '该处引用的页码和章节标题与目录中的“管理物料编码规则”不一致，存在交叉引用错误风险。',
+            'CYY人工审核经验基线 - 中文交叉引用核对', 'serious', 93,
+        )
+
     mac_install_conflict = re.search(
-        r'拖拽αLab\s*Studio\s*软件图标到右侧的Application\s*文件夹进行安装[^。]*。[^。]*【Install】[^。]*【Finish】',
+        r'(?:在MacOS\s*端安装本系统.*?)?'
+        r'拖拽αLab\s*Studio\s*软件图标到右侧的Application\s*文件夹进行安装.*?【Install】.*?【Finish】',
         normalized,
+        re.S,
     )
     if mac_install_conflict:
-        add_issue(
-            mac_install_conflict.start(), mac_install_conflict.end(), mac_install_conflict.group(0),
-            'CYY-CN-LOGIC-007', '内容逻辑',
-            '建议核对 MacOS 安装流程；若为拖拽安装，应删除【Install】【Finish】向导式步骤',
-            'MacOS 拖拽安装与 Windows 安装向导式按钮同时出现，流程逻辑存在冲突。',
-            'CYY人工审核经验基线 - 跨平台安装流程一致性', 'serious', 94,
-        )
+            add_issue(
+                mac_install_conflict.start(), mac_install_conflict.end(), mac_install_conflict.group(0),
+                'CYY-CN-LOGIC-007', '内容逻辑',
+                '建议核对 MacOS 安装流程；若为拖拽安装，应删除【Install】【Finish】向导式步骤',
+                'MacOS 拖拽安装与 Windows 安装向导式按钮同时出现，流程逻辑存在冲突。',
+                'CYY人工审核经验基线 - 跨平台安装流程一致性', 'serious', 94,
+            )
 
     for match in re.finditer(r'表3列出了试剂盒的5个组分。', normalized):
         add_issue(
@@ -6044,6 +6202,188 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 句末标点规范', 'general', 92,
         )
 
+    for match in re.finditer(r'本试剂盒适用于本试剂盒适用于', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-DUP-001', '重复内容',
+            '建议删除重复的“本试剂盒适用于”',
+            '相邻短语重复会直接影响句子可读性，通常属于 OCR 或排版重复。',
+            'CYY人工审核经验基线 - 重复短语检查', 'general', 93,
+        )
+
+    for match in re.finditer(r'测试方案', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-TERM-006', '术语拼写',
+            '建议统一为“测序方案”',
+            '当前步骤上下文在讲 sequencing scheme，写成“测试方案”属于术语误写。',
+            'CYY人工审核经验基线 - 测序方案术语核对', 'general', 93,
+        )
+
+    if '940-005023-00' in normalized:
+        for match in re.finditer(r'940-005203-00', normalized):
+            add_issue(
+                match.start(), match.end(), match.group(0),
+                'CYY-CN-PRODUCT-004', '货号一致性',
+                '建议核对该处货号是否应为 940-005023-00，并与前文试剂套装基本信息保持一致',
+                '同一试剂套装在前文基础信息中已出现 940-005023-00，该处写成 940-005203-00 存在高风险错号。',
+                'CYY人工审核经验基线 - 货号前后一致性', 'serious', 95,
+            )
+
+    if 'E25 App-D FCU SE100' in normalized:
+        for match in re.finditer(r'E25 FCL App-D FCU SE100', normalized):
+            add_issue(
+                match.start(), match.end(), match.group(0),
+                'CYY-CN-CONSIST-031', '术语一致性',
+                '建议核对型号写法，确认是否应删除多出的“FCL”并与前文“E25 App-D FCU SE100”保持一致',
+                '同一试剂套装型号在前文与正文写法不一致，发布前需要统一。',
+                'CYY人工审核经验基线 - 型号前后一致性', 'serious', 94,
+            )
+
+    summary_scope_match = re.search(r'试剂套装基本信息.*?(?:第1 章|第2 章|介绍)', normalized, re.DOTALL)
+    summary_scope = summary_scope_match.group(0) if summary_scope_match else normalized[:2200]
+
+    if 'App-C' not in summary_scope:
+        for match in re.finditer(r'对于App-C\s*测序', normalized):
+            add_issue(
+                match.start(), match.end(), match.group(0),
+                'CYY-CN-SCOPE-002', '适用范围/硬件配置',
+                '建议核对前文试剂套装基本信息是否已覆盖 App-C 测序类型，或确认此处是否应改为前文已有的型号/测序类型',
+                '前文试剂套装基本信息未覆盖 App-C 测序类型，但后文直接引用该类型，读者难以确认是否属于当前产品范围。',
+                'CYY人工审核经验基线 - 前后适用范围覆盖', 'serious', 95,
+            )
+
+    if 'FCL' not in summary_scope or 'A1' not in summary_scope:
+        for match in re.finditer(r'如使用的载片类型是FCL', normalized):
+            add_issue(
+                match.start(), match.end(), match.group(0),
+                'CYY-CN-SCOPE-003', '适用范围/硬件配置',
+                '建议核对前文试剂套装基本信息是否已明确 FCL 载片类型及其对应关系，或补充说明该载片类型的适用范围',
+                '前文总览未清晰交代该载片类型，但后文开始按载片类型约束测序方案，范围说明存在断层。',
+                'CYY人工审核经验基线 - 载片类型覆盖', 'serious', 94,
+            )
+
+    for match in re.finditer(r'如所选测试方案包含Barcode\s*长度，点击【Barcode】下拉列表，选择所需Barcode\s*文件。', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-012', '表达与句式',
+            '建议在该步骤前补充“（可选）”，并同步将“测试方案”统一为“测序方案”',
+            '该步骤只在包含 Barcode 长度的方案下触发，增加“（可选）”能帮助读者识别条件分支。',
+            'CYY人工审核经验基线 - 条件步骤显式化', 'general', 90,
+        )
+
+    for match in re.finditer(r'其它胶塞', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-032', '术语一致性',
+            '建议统一为“其他胶塞”',
+            '同一文档中建议统一使用“其他”，避免“其它/其他”混用。',
+            'CYY人工审核经验基线 - 其他/其它统一', 'general', 89,
+        )
+
+    for match in re.finditer(r'试剂套装基本信息\s*货号\s*名称\s*型号', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LAYOUT-006', '表格/版式',
+            '建议核对首页总览表题与表头之间的行距和列距，确认“货号/名称/型号”列间距是否均匀',
+            '首页总览表头在纯文本中出现紧密粘连，通常对应列间距或表头布局过近。',
+            'CYY人工审核经验基线 - 首页总览表头间距', 'general', 86,
+        )
+
+    revision_delete_match = re.search(r'删除MDA T-\s*试剂（App-C）', normalized)
+    if revision_delete_match:
+        for match in re.finditer(r'MDA T-\s*试剂\s*0\.32\s*mL/\s*支×1', normalized):
+            if match.start() <= revision_delete_match.end() + 200:
+                continue
+            add_issue(
+                match.start(), match.end(), match.group(0),
+                'CYY-CN-REVISION-002', '修订一致性',
+                '修订记录已标注删除该项，建议删除正文中的“MDA T-试剂（App-C）”条目或核对修订记录',
+                '版本记录写明已删除 MDA T-试剂（App-C），但正文组分清单仍保留该项，修订状态前后不一致。',
+                'CYY人工审核经验基线 - 修订记录删除项回查', 'serious', 96,
+            )
+
+    for match in re.finditer(r'从而大幅提高信号处理的准确性', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-STYLE-003', '表达与句式',
+            '建议改为更克制的表述，例如“有助于提高信号处理准确性”或按性能验证结论调整',
+            '“大幅提高”属于强结论表达，若缺少量化验证依据，建议改为更审慎的技术描述。',
+            'CYY人工审核经验基线 - 宣称强度控制', 'general', 89,
+        )
+
+    for match in re.finditer(r'选择所需Barcode\s*文件', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-009', '表达与句式',
+            '建议改为“选择 Barcode 文件”',
+            '“所需”在该操作句中信息增量较低，删除后指令更直接。',
+            'CYY人工审核经验基线 - 操作文案精简', 'general', 88,
+        )
+
+    for match in re.finditer(r'进入参数回顾界面后，载片序列号不可通过点击\s*回到输入信息界面修改。因此在\s*输入序列号时请确保序列号准确无误。', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-010', '表达与句式',
+            '建议改为“输入载片序列号时，请务必核对准确。进入参数回顾界面后，无法回退至上一步修改。”',
+            '当前提示语可进一步压缩并强化风险提示，便于用户快速理解“不可回退修改”的后果。',
+            'CYY人工审核经验基线 - 风险提示句改写', 'general', 90,
+        )
+
+    for match in re.finditer(r'托盘自动收回仪器。', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-011', '表达与句式',
+            '建议改为“托盘自动收回至仪器内。”',
+            '动作终点建议显式写出“至仪器内”，避免读者将“收回仪器”误读为回收整机。',
+            'CYY人工审核经验基线 - 动作终点补足', 'general', 89,
+        )
+
+    for match in re.finditer(r'反应条件如下：\s*10\s*表\s*9\s*DNB\s*制备反应引物杂交条件', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LAYOUT-004', '表格/版式',
+            '建议核对该处是否混入了页码，并检查表题与正文之间的分页或段间距设置',
+            '表格正文前出现独立页码残留，通常说明分页或版式流转存在异常。',
+            'CYY人工审核经验基线 - 表格分页残留检查', 'general', 88,
+        )
+
+    for match in re.finditer(r'信号因子1\s*17\s*μL\s*42\s*μL\s*17\s*μL\s*42\s*μL\s*信号因子2\s*10\s*μL\s*25\s*μL\s*10\s*μL\s*25\s*μL\s*信号因子缓冲液\s*7\s*mL\s*17\s*mL\s*7\s*mL\s*17\s*mL', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LAYOUT-005', '表格/版式',
+            '建议核对该表的列宽、加粗样式和数值对齐，确认各型号列的视觉层级一致',
+            '同一数据表中连续数值与单位密集堆叠，容易对应列宽、字重或表格样式异常。',
+            'CYY人工审核经验基线 - 数值表视觉密度检查', 'general', 87,
+        )
+
+    for match in re.finditer(r'离心5\s*秒后，\s*表\s*10', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LAYOUT-001', '表格/版式',
+            '建议核对正文与表题之间的间距和换行，避免出现“， 表10”紧贴的异常排版',
+            '表题前出现异常空隙或换行粘连，通常意味着表格前后的版式未对齐。',
+            'CYY人工审核经验基线 - 表题前间距检查', 'general', 87,
+        )
+
+    for match in re.finditer(r'引物杂交条件（App\s*文库）\s*时间\s*On\s*5\s*分钟\s*3\s*分钟\s*3\s*分钟\s*Hold', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LAYOUT-002', '表格/版式',
+            '建议核对该表各列是否均匀分布，并确认 On/Hold 与时间列是否正确对齐',
+            '表头与数值列在纯文本中发生粘连，通常对应表格列宽或对齐异常。',
+            'CYY人工审核经验基线 - 表格列对齐检查', 'general', 87,
+        )
+
+    for match in re.finditer(r'7\s*μL\s*42\s*μL\s*17\s*μL\s*42\s*μL\s*0\s*μL\s*25\s*μL\s*10\s*μL\s*25\s*μL\s*mL\s*17\s*mL\s*7\s*mL\s*17\s*mL', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-LAYOUT-003', '表格/版式',
+            '建议核对该表中数字、单位和加粗样式是否一致，并检查是否存在孤立单位或错位单元格',
+            '同一表行出现孤立单位和连续数值粘连，通常意味着表格样式或单元格对齐存在异常。',
+            'CYY人工审核经验基线 - 数值表行样式检查', 'general', 86,
+        )
+
     replacements = {
         'OTC 图': ('OCT 图', 'CYY-CN-TERM-001', '术语拼写', 'OCT 是该产品说明书中的标准术语，OTC 疑似拼写错误。'),
         '返还软件': ('返回软件', 'CYY-CN-UI-001', '界面文案确认', '界面按钮文案疑似错别字，需要与软件界面核对。'),
@@ -6077,6 +6417,305 @@ def _run_chinese_human_baseline_rules(content):
             '建议统一使用同一个术语，例如统一为“外部设备”或按项目术语表确认',
             '同一概念在全文中出现多个说法，索引和正文术语需要统一。',
             'CYY人工审核经验基线 - 外部设备术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'外围设备', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-028', '术语一致性',
+            '建议核对是否应统一为“外部设备”',
+            '看是否要统一，前文警告章节使用的是“外部设备”。',
+            'CYY人工审核经验基线 - 外围设备术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'外围设', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-029', '术语一致性',
+            '建议核对是否应统一为“外部设备”',
+            '看是否要统一，前文警告章节使用的是“外部设备”。',
+            'CYY人工审核经验基线 - 外围设备OCR片段', 'general', 91,
+        )
+
+    for match in re.finditer(r'8-Strip', normalized, re.IGNORECASE):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-TERM-005', '术语一致性',
+            '建议统一为 8-strip 或按全文既有写法确认大小写',
+            '同一耗材名称在全文中建议保持统一大小写。',
+            'CYY人工审核经验基线 - 耗材名称大小写统一', 'general', 90,
+        )
+
+    for match in re.finditer(r'外部储存设备', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-016', '术语一致性',
+            '建议统一为“外部存储设备”',
+            '存储/储存建议在全文中统一口径。',
+            'CYY人工审核经验基线 - 外部存储设备术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'外部存储设备', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-024', '术语一致性',
+            '建议统一为“外部存储设备”',
+            '用于连接扫码枪或外部存储设备。',
+            'CYY人工审核经验基线 - 外部存储设备直写', 'general', 91,
+        )
+
+    for match in re.finditer(r'部储存设', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-026', '术语一致性',
+            '建议统一为“外部存储设备”',
+            '存储，数据相关用存储。',
+            'CYY人工审核经验基线 - OCR储存片段', 'general', 91,
+        )
+
+    for match in re.finditer(r'用于连接扫码枪或外部储存设备', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-020', '术语一致性',
+            '建议统一为“用于连接扫码枪或外部存储设备”',
+            '存储，数据相关用存储。该句中的保存术语建议与全文统一。',
+            'CYY人工审核经验基线 - 外部存储设备句式', 'general', 91,
+        )
+
+    for match in re.finditer(r'用户账户和登陆密码信息', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-017', '术语一致性',
+            '建议统一为“用户账户和登录密码信息”',
+            '登录，不是登陆。登录/登陆建议在全文中统一口径。',
+            'CYY人工审核经验基线 - 登录密码术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'登陆密码信息', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-025', '术语一致性',
+            '建议统一为“登录密码信息”',
+            '登录，不是登陆。',
+            'CYY人工审核经验基线 - 登陆密码直写', 'general', 91,
+        )
+
+    for match in re.finditer(r'储存：', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-027', '术语一致性',
+            '建议统一为“存储：”',
+            '存储，数据相关用存储。',
+            'CYY人工审核经验基线 - 储存冒号术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'计算模块.*?用户账户和登陆密码信息.*?主机硬盘', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-CONSIST-021', '术语一致性',
+            '建议统一为“用户账户和登录密码信息”',
+            '登录/登陆建议在全文中统一口径。',
+            'CYY人工审核经验基线 - 登录密码上下文统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'检查的托盘表面', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-007', '语法表达',
+            '建议改为“检查托盘表面”',
+            '多余助词会影响句子通顺度。',
+            'CYY人工审核经验基线 - 多余助词', 'general', 90,
+        )
+
+    for match in re.finditer(r'本框，用弹出的软键盘中输入时间', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-008', '语法表达',
+            '建议删除“本框”',
+            '删除多余的字。该处存在多余字词。',
+            'CYY人工审核经验基线 - 多余字词', 'general', 90,
+        )
+
+    for match in re.finditer(r'(?:二连读长|二连读长暗反应)', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-003', '术语拼写',
+            '建议核对是否应为“二链读长”',
+            '错别字。读长术语建议与全文保持一致。',
+            'CYY人工审核经验基线 - 读长术语拼写', 'general', 90,
+        )
+
+    for match in re.finditer(r'二连读长', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-004', '术语拼写',
+            '建议核对是否应为“二链读长”',
+            '错别字。',
+            'CYY人工审核经验基线 - 二连读长直写', 'general', 90,
+        )
+
+    for match in re.finditer(r'移液枪', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-CONSIST-018', '术语一致性',
+            '建议统一为“移液器”',
+            '移液枪/移液器建议在全文中统一用词。',
+            'CYY人工审核经验基线 - 移液器术语统一', 'general', 92,
+        )
+
+    for match in re.finditer(r'用移液枪将制备好的DNB\s*样本加入到测序载片', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-CONSIST-022', '术语一致性',
+            '建议统一为“用移液器将制备好的DNB样本加入到测序载片”',
+            '统一改为移液器。该步骤中的器具名称建议与全文统一。',
+            'CYY人工审核经验基线 - 移液器上下文统一', 'general', 92,
+        )
+
+    for match in re.finditer(r'储存环\s*境', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-CONSIST-019', '术语一致性',
+            '建议统一为“储存环境”',
+            '环境名称建议保持连写一致。',
+            'CYY人工审核经验基线 - 储存环境术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'运输/\s*储存环\s*境', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-CONSIST-023', '术语一致性',
+            '建议统一为“运输/储存环境”',
+            '调整列宽，让这里可以一行展示完整。环境术语建议在表格和正文中统一。',
+            'CYY人工审核经验基线 - 运输储存环境术语统一', 'general', 91,
+        )
+
+    for match in re.finditer(r'运输\s*/\s*储存环\s*境', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-CONSIST-028', '术语一致性',
+            '建议统一为“运输/储存环境”',
+            '调整列宽，让这里可以一行展示完整。',
+            'CYY人工审核经验基线 - 运输储存环境OCR片段', 'general', 91,
+        )
+
+    for match in re.finditer(r'发生化学反应而引起危险', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-STYLE-002', '表达与句式',
+            '建议改为“发生化学反应，以免引起危险”',
+            '这句话拗口了，建议改为：禁止使用与设备零部件或设备内所含材料发生化学反应的清洗剂或消毒剂，以免引起危险。',
+            'CYY人工审核经验基线 - 清洗剂危险表述', 'general', 90,
+        )
+
+    for match in re.finditer(r'Barcode\s+Pirmer', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-005', '拼写错误',
+            '建议改为“Barcode Primer”',
+            '拼写错误 Primer。Primer 拼写错误，会直接影响术语准确性。',
+            'CYY人工审核经验基线 - Barcode Primer拼写检查', 'general', 92,
+        )
+
+    for match in re.finditer(r'Frag\s+Buffe\b', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-006', '拼写错误',
+            '建议改为“Frag Buffer”',
+            '少了一个r，应统一为“Frag Buffer”。',
+            'CYY人工审核经验基线 - Frag Buffer拼写检查', 'general', 92,
+        )
+
+    for match in re.finditer(r'PCR\s*心管', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-TERM-006', '术语一致性',
+            '建议改为“PCR 管”',
+            '缺少：离。这里应为器材名称“PCR 离心管”或“PCR 管”，当前文本疑似 OCR 误识别。',
+            'CYY人工审核经验基线 - PCR管OCR纠正', 'general', 91,
+        )
+
+    for match in re.finditer(r'PCR\s*心管中', normalized):
+        add_issue(
+            match.start(), match.end(), '中心',
+            'CYY-CN-TERM-007', '术语一致性',
+            '建议改为“离心管中”',
+            '这里缺少“离”，应为“PCR 离心管中”。',
+            'CYY人工审核经验基线 - 离心管缺字纠正', 'general', 91,
+        )
+
+    for match in re.finditer(r'2\s*℃\s*~\s*8\s*℃', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-FMT-001', '数字与单位格式',
+            '建议统一为“2 ℃ ~ 8 ℃”',
+            '单位前面加空格。数字、波浪线与温度单位的空格风格需要统一。',
+            'CYY人工审核经验基线 - 温度范围单位空格', 'serious', 92,
+        )
+
+    for match in re.finditer(r'0\.2\s*mL', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-FMT-002', '数字与单位格式',
+            '建议统一为“0.2 mL”',
+            '单位前面加空格。数字与体积单位之间的空格风格需要统一。',
+            'CYY人工审核经验基线 - 体积单位空格', 'serious', 92,
+        )
+
+    for match in re.finditer(r'\d+(?:\.\d+)?VDC，\d+(?:\.\d+)?A', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        suggestion = re.sub(r'(\d+(?:\.\d+)?)(VDC|A)', r'\1 \2', raw)
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-FMT-003', '数字与单位格式',
+            suggestion,
+            '单位前面要加空格。电源规格中的电压、电流单位建议统一与数值分开书写。',
+            'CYY人工审核经验基线 - 电源规格单位空格', 'serious', 92,
+        )
+
+    for match in re.finditer(r'“[^”]{0,40}”\.', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNC-002', '标点符号',
+            '建议将英文句号改为中文句号“。”',
+            '这是英文句号，全文检查。中文说明中的引号收尾处使用了英文句号，标点风格需要统一。',
+            'CYY人工审核经验基线 - 中文引号后英文句号', 'general', 90,
+        )
+
+    for match in re.finditer(r'(\d+)\s+种或者(\d+)\s+种Barcode\s+Primer', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-STYLE-003', '术语一致性',
+            '建议统一为“{}种或者{}种 Barcode Primer”'.format(match.group(1), match.group(2)),
+            '其他地方没有空格。数量词与英文术语之间的空格风格需要统一，避免同页出现不同写法。',
+            'CYY人工审核经验基线 - Barcode Primer数量空格统一', 'general', 89,
+        )
+
+    for match in re.finditer(r'与oligo\s*文库', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-CONSIST-030', '术语一致性',
+            '建议统一为“Oligo 文库”',
+            '大写需与其他位置一致，建议统一为“Oligo 文库”。',
+            'CYY人工审核经验基线 - Oligo术语大小写统一', 'general', 90,
+        )
+
+    for match in re.finditer(r'与第33 页“装载样本”', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REF-001', '交叉引用',
+            '请检查页码是否为第33页',
+            '无法跳转，页码不对。请检查页码和交叉引用是否一致。',
+            'CYY人工审核经验基线 - 页码跳转检查', 'general', 90,
+        )
+
+    for match in re.finditer(r'Barcode 管理界面|测序方案管理', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-REF-002', '交叉引用',
+            '请检查该引用是否需要同步到全文一致的页码或章节',
+            '未更新交叉引用，通查。',
+            'CYY人工审核经验基线 - 交叉引用通查', 'general', 90,
         )
 
     for match in re.finditer(r'\d+(?:\.\d+)?\s*mm\s*/\s*\d+(?:\.\d+)?\s*mm', normalized):
@@ -6980,6 +7619,22 @@ def _run_manual_engineering_audit(content, file_type=None):
             96,
         )
 
+    for match in re.finditer(r'(?<!\d)\d+(?:\.\d+)?(?:VDC|VA|A|Hz|W|kW|mA|mV)\b', content, re.IGNORECASE):
+        raw = match.group(0)
+        suggestion = re.sub(r'^(\d+(?:\.\d+)?)([A-Za-z]+)$', r'\1 \2', raw)
+        add_issue(
+            match.start(),
+            match.end(),
+            raw,
+            'DOC-UNIT-001',
+            '单位格式',
+            suggestion,
+            '英文技术说明书中电源、功率与频率单位建议在数值与单位之间保留空格。',
+            '说明书审核能力补强方案 - 英文单位格式',
+            'general',
+            94,
+        )
+
     for match in re.finditer(r'\b20\d{2}/\d{1,2}/\d{1,2}\b', content):
         add_issue(
             match.start(),
@@ -7084,6 +7739,146 @@ def _run_manual_engineering_audit(content, file_type=None):
             confidence,
         )
 
+    def normalize_sentence_for_duplicate(text):
+        text = re.sub(r'\s+', ' ', str(text or '')).strip()
+        text = re.sub(r'^[\-•*\d\.)\s]+', '', text)
+        text = re.sub(r'[\s:;,.!?]+$', '', text)
+        return text.lower()
+
+    protocol_like_duplicate_sentence = bool(re.search(
+        r'\b(?:PCR tube|supernatant|magnetic separation rack|centrifuge tube|beads|thermocycler)\b',
+        content,
+        re.IGNORECASE,
+    ))
+
+    duplicate_sentence_buckets = {}
+    if not protocol_like_duplicate_sentence:
+        sentence_pattern = re.compile(r'[^\n.!?][^.!?\n]{35,220}[.!?]')
+        for match in sentence_pattern.finditer(content):
+            original = re.sub(r'\s+', ' ', match.group(0)).strip()
+            if not re.match(r'^[A-Z]', original):
+                continue
+            normalized_sentence = normalize_sentence_for_duplicate(original)
+            if len(normalized_sentence) < 45:
+                continue
+            duplicate_sentence_buckets.setdefault(normalized_sentence, []).append((match.start(), match.end(), original))
+
+        for normalized_sentence, occurrences in duplicate_sentence_buckets.items():
+            if len(occurrences) < 2:
+                continue
+            first_start, _first_end, first_original = occurrences[0]
+            second_start, second_end, _second_original = occurrences[1]
+            if second_start - first_start < 60:
+                continue
+            add_issue(
+                second_start,
+                second_end,
+                first_original[:240],
+                'DOC-DUP-001',
+                '重复内容',
+                '建议删除重复句子或仅保留一处规范表述',
+                '同一完整句子在不同位置重复出现，发布前应确认是否为复制残留。',
+                '说明书审核能力补强方案 - 跨段重复句检查',
+                'serious',
+                91,
+            )
+
+    lead_in_occurrences = list(re.finditer(r'Perform the following steps:', content, re.IGNORECASE))
+    if len(lead_in_occurrences) >= 2:
+        first = lead_in_occurrences[0]
+        second = lead_in_occurrences[1]
+        if second.start() - first.start() < 500:
+            add_issue(
+                second.start(),
+                second.end(),
+                re.sub(r'\s+', ' ', second.group(0)).strip(),
+                'DOC-PROC-002',
+                '步骤引导重复',
+                '建议合并重复的步骤引导语，仅保留一处“Perform the following steps:”',
+                '相邻步骤区域重复出现相同引导语，通常表示编辑残留或段落组织重复。',
+                '说明书审核能力补强方案 - 步骤引导语重复检查',
+                'general',
+                90,
+            )
+
+    for match in re.finditer(r'\b([A-Za-z]{2,}\s+[A-Za-z]{2,})\s+\1\b', content, re.IGNORECASE):
+        phrase = re.sub(r'\s+', ' ', match.group(1)).strip()
+        original_text = re.sub(r'\s+', ' ', match.group(0)).strip()
+        if phrase.lower() != phrase or original_text.lower() != original_text:
+            continue
+        if phrase not in {'to the'}:
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            original_text,
+            'DOC-DUP-004',
+            '重复短语',
+            f'建议删除重复短语，保留一处 {phrase}',
+            '相邻位置重复出现相同短语，通常属于编辑残留或 OCR 合并错误。',
+            '说明书审核能力补强方案 - 连续短语重复检查',
+            'serious',
+            93,
+        )
+
+    for match in re.finditer(r'\b([A-Za-z]{3,})\s+(off|on|up|down)\s+the\s+\1\b', content, re.IGNORECASE):
+        verb = match.group(1)
+        particle = match.group(2)
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-DUP-005',
+            '语义重复',
+            f'建议核对是否应改为 {verb.capitalize()} {particle} the device.',
+            '动词与宾语使用同一词根，表达容易形成语义重复，通常需要替换为具体对象。',
+            '说明书审核能力补强方案 - 自我回指表达检查',
+            'serious',
+            92,
+        )
+
+    for match in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})\(([A-Za-z0-9][A-Za-z0-9 ./%+\-]{0,20})\)', content):
+        original = re.sub(r'\s+', ' ', match.group(0)).strip()
+        if re.search(r'\b(?:Table|Figure|Chapter)\b', original, re.IGNORECASE):
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            original,
+            'DOC-FMT-003',
+            '格式规范',
+            f'建议改为 {match.group(1)} ({match.group(2)})',
+            '英文术语与括号说明之间建议保留空格，以保持标题和表头格式一致。',
+            '说明书审核能力补强方案 - 括号前空格一致性',
+            'general',
+            89,
+        )
+
+    hyphen_terms = list(re.finditer(r'\b([A-Za-z]{3,})-([A-Za-z]{2,})\b', content))
+    hyphen_groups = {}
+    for match in hyphen_terms:
+        prefix = match.group(1)
+        suffix = match.group(2).lower()
+        hyphen_groups.setdefault(suffix, []).append((prefix, match.start(), match.end(), match.group(0)))
+    for suffix, items in hyphen_groups.items():
+        canonical_prefix = max(items, key=lambda item: len(item[0]))[0]
+        for prefix, start, end, original in items:
+            if prefix.lower() == canonical_prefix.lower():
+                continue
+            if canonical_prefix.lower().startswith(prefix.lower()) and len(canonical_prefix) - len(prefix) <= 2:
+                add_issue(
+                    start,
+                    end,
+                    original,
+                    'DOC-TERM-003',
+                    '术语一致性',
+                    f'建议核对是否应统一为 {canonical_prefix}-{suffix}',
+                    '同后缀连字符术语出现疑似截断或简写漂移，建议按全文主写法统一。',
+                    '说明书审核能力补强方案 - 连字符术语一致性',
+                    'serious',
+                    90,
+                )
+
     credential_patterns = [
         r'\bselect\s+the\s+account\s+([A-Za-z][\w-]{2,})\s*,?\s+enter\s+the\s+password\s+([^\s,.;]+)',
         r'\bdefault\s+account\s*\(\s*username\s*:\s*([^;\s)]+)\s*;\s*password\s*:\s*([^\s)]+)',
@@ -7115,6 +7910,163 @@ def _run_manual_engineering_audit(content, file_type=None):
             '说明书发布前自检 Checklist - 敏感运行信息',
             'general',
             91,
+        )
+
+    for match in re.finditer(r'https?://global-mgitech\.com(?!/resources/manual-library/)[^\s]*', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-URL-001',
+            '网址规范',
+            'https://global-mgitech.com/resources/manual-library/',
+            '电子说明书链接建议直接指向 manual-library 隐藏下载地址，避免暴露首页链接。',
+            '说明书审核能力补强方案 - 电子说明书隐藏地址',
+            'serious',
+            95,
+        )
+
+    for match in re.finditer(r'\bneither\b[^.\n]{0,120}?\bnot\b', content, re.IGNORECASE):
+        original = re.sub(r'\s+', ' ', match.group(0)).strip()
+        if re.search(r'\bnor\b', original, re.IGNORECASE):
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            original,
+            'DOC-GRAM-001',
+            '语法错误',
+            '建议将 not 改为 nor',
+            'neither 与否定词搭配时应使用 nor，以保持句式一致。',
+            '说明书审核能力补强方案 - neither/nor',
+            'general',
+            90,
+        )
+
+    for match in re.finditer(r'\ba\s+appropriate\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-002',
+            '语法错误',
+            'an appropriate',
+            '元音音标开头的单词前建议使用 an。',
+            '说明书审核能力补强方案 - 冠词错误',
+            'general',
+            89,
+        )
+
+    for match in re.finditer(r'\bLibary\b', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPELL-001',
+            '拼写错误',
+            'Library',
+            'Library 拼写错误会影响术语一致性和检索结果。',
+            '说明书审核能力补强方案 - Library 拼写',
+            'general',
+            95,
+        )
+
+    for match in re.finditer(r'\bBasecall\s+Basecall_', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-DUP-006',
+            '重复内容',
+            '建议删除重复的 Basecall，保留单个 Basecall_ 版本号表达',
+            'Basecall 版本字段出现重复词，通常是 OCR 或排版残留。',
+            '说明书审核能力补强方案 - Basecall 重复',
+            'general',
+            92,
+        )
+
+    for match in re.finditer(r'\bby\s+use\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-003',
+            '语法错误',
+            'by using',
+            '介词短语中 use 需要改为 using。',
+            '说明书审核能力补强方案 - by use 语法',
+            'general',
+            88,
+        )
+
+    for match in re.finditer(r'\bTask\s+exception\s+are\s+displayed\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-004',
+            '语法错误',
+            'Task exceptions are displayed',
+            'Task exception 与 are 搭配不一致，建议统一为复数表达或改为单数谓语。',
+            '说明书审核能力补强方案 - 主谓一致',
+            'general',
+            90,
+        )
+
+    for match in re.finditer(r'\bmodified\s+by\s+tapping\s+back\s+to\s+the\s+Enter\s+run\s+info\s+interface\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-005',
+            '表达与句式',
+            '建议改为 modified by tapping Back to return to the Enter run info interface',
+            '按钮名 Back 与返回动作建议分开表达，避免出现 back to the interface 这种生硬句式。',
+            '说明书审核能力补强方案 - 界面返回动作表达',
+            'general',
+            90,
+        )
+
+    for match in re.finditer(r'\bplease\s+ensure\s+the\s+flow\s+cell\s+ID\s+is\s+entered\s+accurately\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-006',
+            '表达与句式',
+            'please ensure that the flow cell ID is entered accurately',
+            'ensure 后补充 that，句式更完整，也更符合说明书书面表达。',
+            '说明书审核能力补强方案 - ensure that 句式',
+            'general',
+            89,
+        )
+
+    for match in re.finditer(r'\ba\s+(?:message\s+prompting|popup\s+message\s+indicating)\s+that\s+[A-Z][^.?!]{8,160}\?', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-QUOTE-001',
+            '标点符号',
+            '建议改为引导语加直接引语，例如 a message prompting "Are you sure you want to quit?"',
+            '界面弹窗文案属于直接引语，建议使用引号承载实际提示语。',
+            '说明书审核能力补强方案 - 弹窗直接引语',
+            'general',
+            91,
+        )
+
+    for match in re.finditer(r'\bthe\s+recipe\s+should\s+be\s+consistent\s+with\s+the\s+flow\s+cell\s+model\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-007',
+            '表达与句式',
+            'Select a recipe that matches the flow cell model',
+            '操作说明里直接使用 matches 更准确，也更符合用户动作导向文案。',
+            '说明书审核能力补强方案 - recipe 匹配表达',
+            'general',
+            89,
         )
 
     title_scope = content[:2500]
@@ -7393,6 +8345,59 @@ def _run_manual_engineering_audit(content, file_type=None):
             "说明书审核能力补强方案 - 货号一致性",
             "serious",
             88,
+        )
+
+    summary_header = re.search(r'(About the sequencing set|试剂套装基本信息)', content, re.IGNORECASE)
+    if summary_header:
+        next_major_section = re.search(r'\n\s*(?:4\.\d+|Chapter\s+4|第\s*4\s*章)\b', content[summary_header.start():], re.IGNORECASE)
+        summary_end = summary_header.start() + next_major_section.start() if next_major_section else summary_header.start() + 4000
+        summary_scope = content[summary_header.start():min(len(content), summary_end)]
+        summary_cat_nos = {
+            match.group(0)
+            for match in re.finditer(r'940-\d{6}-\d{2}', summary_scope)
+        }
+        if summary_cat_nos:
+            for match in re.finditer(r'940-\d{6}-\d{2}', content):
+                cat_no = match.group(0)
+                if cat_no in summary_cat_nos or match.start() < summary_header.start() + 1800:
+                    continue
+                window = content[max(0, match.start() - 120):min(len(content), match.end() + 120)]
+                if not re.search(r'DNBSEQ-E25RS|试剂套装|sequencing set', window, re.IGNORECASE):
+                    continue
+                add_issue(
+                    match.start(),
+                    match.end(),
+                    cat_no,
+                    'DOC-CATNO-003',
+                    '货号一致性',
+                    f'建议确认该货号是否需要在前文总览章节补充，或核对是否应改为已列出的货号：{"、".join(sorted(summary_cat_nos))}',
+                    '前文产品总览未覆盖该试剂套装货号，读者难以确认后文条目是否属于同一产品集合。',
+                    '说明书审核能力补强方案 - 总览章节货号覆盖',
+                    'serious',
+                    91,
+                )
+                break
+
+
+    missing_data_match = re.search(
+        r'Table\s+7\s+Recommended\s+library\s+insert\s+size[\s\S]{0,320}?Data output \(GB/flow cell\)[\s\S]{0,120}?\n\s*(About)\s*(?:\n|$)',
+        content,
+        re.IGNORECASE,
+    )
+    if missing_data_match:
+        about_match = missing_data_match.group(1)
+        start = missing_data_match.start(1)
+        add_issue(
+            start,
+            start + len(about_match),
+            about_match,
+            'DOC-DATA-001',
+            '信息完整性',
+            '建议补充该表格的具体数值，避免读者误以为此处仍是占位符。',
+            '表格中数据输出值残留 About 占位，信息不完整。',
+            '说明书审核能力补强方案 - 表格数据缺失',
+            'serious',
+            90,
         )
 
     # Short orphan sections.

@@ -5,12 +5,15 @@ import os
 import re
 import uuid
 from datetime import datetime
+from html.parser import HTMLParser
+from urllib import parse, request
 
 from app.api.auth import get_current_active_user
 from app.schemas.user import UserOut
 from app.database import get_db
 from app.schemas.competitor import CompetitorTask as CompetitorTaskOut
 from app.schemas.competitor import CompetitorTaskSummary, CompetitorReport
+from app.schemas.competitor import CompetitorUrlAnalyzeRequest
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
@@ -18,8 +21,58 @@ UPLOAD_DIR = "./static/uploads/competitor"
 # 注：仅支持可解析格式；旧版 .doc（二进制）无平台解析器，不列入白名单，避免"通过校验但解析失败"
 ALLOWED_EXTS = {".pdf", ".docx", ".md", ".markdown", ".txt"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_REMOTE_HTML_BYTES = 5 * 1024 * 1024  # 5 MB
 
 _SAFE_NAME_RE = re.compile(r"[^\w.\-\u4e00-\u9fff]+")
+
+
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._chunks = []
+        self._title_chunks = []
+        self._skip_depth = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        name = tag.lower()
+        if name in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+            return
+        if name == "title":
+            self._in_title = True
+        if name in {"p", "div", "section", "article", "header", "footer", "nav", "main", "aside", "br", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        name = tag.lower()
+        if name in {"script", "style", "noscript"} and self._skip_depth > 0:
+            self._skip_depth -= 1
+            return
+        if name == "title":
+            self._in_title = False
+        if name in {"p", "div", "section", "article", "header", "footer", "nav", "main", "aside", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._chunks.append("\n")
+
+    def handle_data(self, data):
+        if self._skip_depth > 0:
+            return
+        text = re.sub(r"\s+", " ", data or "").strip()
+        if not text:
+            return
+        self._chunks.append(text)
+        self._chunks.append(" ")
+        if self._in_title:
+            self._title_chunks.append(text)
+
+    def get_text(self) -> str:
+        text = "".join(self._chunks)
+        text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def get_title(self) -> str:
+        return re.sub(r"\s+", " ", " ".join(self._title_chunks)).strip()
 
 
 def _require_competitor_task_access(db: Session, task_id: int, current_user: UserOut):
@@ -59,6 +112,78 @@ def _sanitize_filename(filename: str) -> str:
     return name[:120]
 
 
+def _normalize_url(input_url: str) -> str:
+    raw = (input_url or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="网页链接不能为空")
+    parsed = parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="仅支持 http/https 网页链接")
+    return raw
+
+
+def _build_remote_display_name(page_title: str, final_url: str) -> str:
+    title = _sanitize_filename(page_title)
+    if title:
+        return title[:120]
+    parsed = parse.urlparse(final_url)
+    path_name = os.path.basename(parsed.path.rstrip("/"))
+    if path_name:
+        return _sanitize_filename(path_name)
+    host = parsed.netloc or "web_document"
+    return _sanitize_filename(host)
+
+
+def _parse_web_document(source_url: str) -> dict:
+    normalized_url = _normalize_url(source_url)
+    req = request.Request(
+        normalized_url,
+        headers={
+            "User-Agent": "SmartDocPlatformCompetitorBot/1.0",
+            "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.5,*/*;q=0.1",
+        },
+    )
+    try:
+        with request.urlopen(req, timeout=20) as resp:
+            headers = resp.headers
+            content_type = (headers.get_content_type() or "").lower()
+            if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
+                raise HTTPException(status_code=400, detail=f"链接内容类型不支持: {content_type or 'unknown'}")
+            payload = resp.read(MAX_REMOTE_HTML_BYTES + 1)
+            if len(payload) > MAX_REMOTE_HTML_BYTES:
+                raise HTTPException(status_code=413, detail="网页内容过大，请换用更短的手册页面")
+            charset = headers.get_content_charset() or "utf-8"
+            html = payload.decode(charset, errors="replace")
+            final_url = resp.geturl() or normalized_url
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"网页抓取失败: {exc}")
+
+    parser = _HTMLTextExtractor()
+    parser.feed(html)
+    parser.close()
+    full_text = parser.get_text()
+    if not full_text:
+        raise HTTPException(status_code=422, detail="未能从网页中提取到正文内容")
+    title = parser.get_title()
+    display_name = _build_remote_display_name(title, final_url)
+    return {
+        "filename": f"{display_name}.html",
+        "file_size": len(payload),
+        "full_text": full_text,
+        "pages_text": [full_text],
+        "source_meta": {
+            "format": "HTML",
+            "title": title,
+            "source_url": final_url,
+            "producer": "Web page",
+            "creator": parse.urlparse(final_url).netloc,
+            "pages": 1,
+        },
+    }
+
+
 def _parse_document(file_path: str, filename: str) -> dict:
     """按扩展名分发解析，统一返回 {full_text, pages_text}。"""
     from app.utils import doc_parser
@@ -85,12 +210,16 @@ def _parse_document(file_path: str, filename: str) -> dict:
     }
 
 
-def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: list) -> dict:
+def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: list, source_meta: Optional[dict] = None) -> dict:
     """执行竞品分析：编辑工具识别 + 可读性分析 + 报告渲染。"""
     from app.utils.competitor_analysis import analyze_tool_usage, analyze_readability
     from app.utils.competitor_report import render_competitor_report
 
     tool_analysis = analyze_tool_usage(file_path, full_text, pages_text)
+    if source_meta:
+        merged_meta = dict(tool_analysis.get("meta") or {})
+        merged_meta.update({k: v for k, v in (source_meta or {}).items() if v not in (None, "")})
+        tool_analysis["meta"] = merged_meta
     readability = analyze_readability(full_text, pages_text)
     try:
         report_md = render_competitor_report(filename, tool_analysis, readability)
@@ -178,6 +307,51 @@ async def create_competitor_task(
     # 分析完成（成功路径）：结果已全量入库，原文件不再需要，及时清理避免磁盘膨胀
     _safe_remove(stored_path)
     from app.crud.competitor import get_competitor_task
+    return get_competitor_task(db, task.id)
+
+
+@router.post("/url", response_model=CompetitorTaskOut)
+async def create_competitor_task_from_url(
+    payload: CompetitorUrlAnalyzeRequest,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    parsed = _parse_web_document(payload.url)
+
+    from app.crud.competitor import create_competitor_task as db_create
+    from app.crud.competitor import get_competitor_task
+    from app.crud.competitor import update_competitor_task
+
+    task = db_create(
+        db,
+        file_name=parsed["filename"],
+        file_size=parsed["file_size"],
+        user_id=current_user.id,
+    )
+    try:
+        result = _run_analysis(
+            parsed["filename"],
+            parsed["filename"],
+            parsed["full_text"],
+            parsed["pages_text"],
+            source_meta=parsed["source_meta"],
+        )
+        update_competitor_task(
+            db,
+            task.id,
+            status="completed",
+            tool_analysis=result["tool_analysis"],
+            readability=result["readability"],
+            report_md=result["report_md"],
+            completed_at=datetime.utcnow(),
+        )
+    except HTTPException as exc:
+        update_competitor_task(db, task.id, status="failed", error=exc.detail)
+        raise
+    except Exception as exc:
+        update_competitor_task(db, task.id, status="failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"分析失败: {exc}")
+
     return get_competitor_task(db, task.id)
 
 

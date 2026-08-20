@@ -97,6 +97,7 @@ Git 与自检工作流
 - Instructions:
   - 本次任务仅修改审核模块相关实现
   - 其他业务模块保持现状，除非用户明确要求联动修改
+  - 当前阶段不投入飞书上传相关功能，优先提升审核有效性和实质问题命中率
 
 AI 翻译引擎排查规则
 - Date: 2026-06-26
@@ -146,7 +147,18 @@ Word 转 DITA 批量转换基线规则
 - Instructions:
   - 后端测试需显式设置 `PYTHONPATH=/workspace/backend`，否则 `app` 包无法导入
   - 审核模块相关回归命令可直接使用 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py`
+  - 修改中文审核规则后，优先复跑 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py -q` 做快速回归
   - 当前环境若缺少测试依赖，先安装 `backend/requirements.txt`，并补装 `pytest` 与 `httpx`
+
+IFU PDF 回归测试约定
+- Date: 2026-08-19
+- Context: Agent 在把 IFU PDF OCR 回归样例接入测试并验证时发现
+- Category: 测试方法
+- Instructions:
+  - IFU PDF OCR 回归测试入口为 `当前工作区/backend/tests/test_document_parser_pdf_regression.py`
+  - 该测试依赖 `当前工作区/.monkeycode/docs/ifu-pdf-regression-cases-20260819.json` 作为参数化样例源
+  - 复跑命令使用 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_document_parser_pdf_regression.py`
+  - 相关审核回归可同时复跑 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py`
 
 审核历史任务保留规则
 - Date: 2026-08-18

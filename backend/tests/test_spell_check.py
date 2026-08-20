@@ -112,6 +112,22 @@ def test_check_spelling_reports_fixed_pdf_phrase_typos(monkeypatch):
     assert issues[1]["suggestion"] == "types of"
 
 
+def test_check_spelling_reports_common_pdf_typos(monkeypatch):
+    monkeypatch.setattr(spell_checker_utils, "_should_skip_spelling_issue", lambda word, context, file_type=None: False)
+
+    issues = spell_checker_utils.check_spelling("The power suppy waster container is dispalyed and the password shoud be consitent.", file_type="pdf")
+
+    assert {issue["original_text"] for issue in issues} == {"power suppy", "waster container", "dispalyed", "shoud", "consitent", "suppy"}
+    assert len(issues) == 6
+    suggestions = {issue["original_text"]: issue["suggestion"] for issue in issues}
+    assert suggestions["power suppy"] == "power supply"
+    assert suggestions["waster container"] == "waste container"
+    assert suggestions["dispalyed"] == "displayed"
+    assert suggestions["shoud"] == "should"
+    assert suggestions["consitent"] == "consistent"
+    assert suggestions["suppy"] == "supply"
+
+
 def test_markdown_noise_masker_removes_code_and_links():
     content = "Keep `wrng` and [wrng](https://example.com) in docs.```python\nwrng\n```"
     masked = spell_checker_utils._mask_markdown_noise(content)

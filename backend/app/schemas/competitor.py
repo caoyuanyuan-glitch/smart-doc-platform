@@ -7,6 +7,10 @@ class CompetitorTaskCreate(BaseModel):
     pass
 
 
+class CompetitorUrlAnalyzeRequest(BaseModel):
+    url: str
+
+
 class CompetitorTask(BaseModel):
     id: int
     file_name: str

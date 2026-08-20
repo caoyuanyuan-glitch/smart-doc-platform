@@ -29,6 +29,11 @@ _PDF_FIXED_PHRASE_MISSPELLINGS = [
     (re.compile(r'\blees\s+than\b', re.IGNORECASE), 'less than'),
     (re.compile(r'\btyped\s+of\b', re.IGNORECASE), 'types of'),
     (re.compile(r'\bnucleus\s+acid\b', re.IGNORECASE), 'nucleic acid'),
+    (re.compile(r'\bpower\s+suppy\b', re.IGNORECASE), 'power supply'),
+    (re.compile(r'\bwaster\s+container\b', re.IGNORECASE), 'waste container'),
+    (re.compile(r'\bMDA\s+T-Regent\b', re.IGNORECASE), 'MDA T-Reagent'),
+    (re.compile(r'\bDisgestive\s+Buffer\b', re.IGNORECASE), 'Digestive Buffer'),
+    (re.compile(r'\bto\s+return\s+to\s+teh\b', re.IGNORECASE), 'to return to the'),
 ]
 
 DOMAIN_ABBREVIATIONS = {
@@ -277,6 +282,7 @@ COMMON_MISSPELLINGS = {
     'certifice': 'certified',
     'charater': 'character',
     'charaters': 'characters',
+    'consitent': 'consistent',
     'challange': 'challenge',
     'changable': 'changeable',
     'charecter': 'character',
@@ -357,6 +363,10 @@ COMMON_MISSPELLINGS = {
     'eposide': 'episode',
     'equipement': 'equipment',
     'equippment': 'equipment',
+    'dispalyed': 'displayed',
+    'mangement': 'management',
+    'shoud': 'should',
+    'suppy': 'supply',
     'equivelant': 'equivalent',
     'lees': 'less',
     'errar': 'error',

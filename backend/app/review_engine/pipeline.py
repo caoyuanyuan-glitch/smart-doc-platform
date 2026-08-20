@@ -140,11 +140,18 @@ def issue_topic(issue: Any) -> str:
     return ""
 
 
+def is_whitelisted_layout_issue(issue: Any) -> bool:
+    data = issue_to_mapping(issue)
+    rule = str(data["rule"] or "").upper()
+    confidence = int(data["confidence"] or 0)
+    return rule.startswith("CYY-CN-LAYOUT-") and confidence >= 86
+
+
 def is_high_value(issue: Any) -> bool:
     rule = str(issue_value(issue, "rule", "") or "").upper()
     category = normalize_text(issue_value(issue, "category", ""))
     severity = str(issue_value(issue, "severity", "") or "").lower()
-    if is_visual_layout_issue(issue):
+    if is_visual_layout_issue(issue) and not is_whitelisted_layout_issue(issue):
         return False
     if rule.startswith("CYY-CN-UNIT-"):
         return False
@@ -234,7 +241,7 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return False
     if severity in {"general", "suggestion"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE) and len(original) <= 3:
         return True
-    if is_visual_layout_issue(data):
+    if is_visual_layout_issue(data) and not is_whitelisted_layout_issue(data):
         return True
     if rule in LOW_VALUE_RULES:
         return True

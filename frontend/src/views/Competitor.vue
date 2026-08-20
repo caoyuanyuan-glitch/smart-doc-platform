@@ -6,34 +6,52 @@
 
       <div class="panel">
         <div class="panel-header">
-          <span>上传竞品文档，自动识别编辑工具并分析可读性</span>
+          <span>上传竞品文档或输入网页手册链接，自动识别编辑工具并分析可读性</span>
           <div class="panel-actions">
-            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT，≤ 50MB</el-tag>
+            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT / HTML 链接</el-tag>
           </div>
         </div>
 
-        <el-upload
-          action="#"
-          :auto-upload="false"
-          :show-file-list="false"
-          :on-change="handleFileChange"
-          :before-upload="() => false"
-          accept=".pdf,.docx,.md,.markdown,.txt"
-          drag
-          style="width: 100%;"
-        >
-          <div class="upload-box large">
-            <el-icon style="font-size: 44px; color: #3b82f6; margin-bottom: 10px;"><UploadFilled /></el-icon>
-            <div v-if="!selectedFile" class="upload-hint">
-              将竞品文档拖拽到此处，或点击选择文件
+        <el-tabs v-model="inputMode" class="input-tabs">
+          <el-tab-pane label="文件上传" name="file">
+            <el-upload
+              action="#"
+              :auto-upload="false"
+              :show-file-list="false"
+              :on-change="handleFileChange"
+              :before-upload="() => false"
+              accept=".pdf,.docx,.md,.markdown,.txt"
+              drag
+              style="width: 100%;"
+            >
+              <div class="upload-box large">
+                <el-icon style="font-size: 44px; color: #3b82f6; margin-bottom: 10px;"><UploadFilled /></el-icon>
+                <div v-if="!selectedFile" class="upload-hint">
+                  将竞品文档拖拽到此处，或点击选择文件
+                </div>
+                <div v-else class="upload-name">{{ selectedFile.name }}</div>
+                <div class="upload-sub" v-if="!selectedFile">支持 PDF（含元数据工具识别）、Word、Markdown 纯文本</div>
+              </div>
+            </el-upload>
+          </el-tab-pane>
+
+          <el-tab-pane label="网页链接" name="url">
+            <div class="url-box">
+              <div class="url-label">输入竞品网页版手册链接</div>
+              <el-input
+                v-model="sourceUrl"
+                size="large"
+                placeholder="https://example.com/manual.html"
+                clearable
+                @input="handleUrlInput"
+              />
+              <div class="upload-sub">适合官网手册、帮助中心、HTML 说明页。当前抓取单页正文内容。</div>
             </div>
-            <div v-else class="upload-name">{{ selectedFile.name }}</div>
-            <div class="upload-sub" v-if="!selectedFile">支持 PDF（含元数据工具识别）、Word、Markdown 纯文本</div>
-          </div>
-        </el-upload>
+          </el-tab-pane>
+        </el-tabs>
 
         <div class="action-row">
-          <el-button type="primary" size="large" :loading="analyzing" :disabled="!selectedFile" @click="doAnalyze">
+          <el-button type="primary" size="large" :loading="analyzing" :disabled="analyzeDisabled" @click="doAnalyze">
             <el-icon><Search /></el-icon> 开始分析
           </el-button>
           <el-button size="large" @click="resetUpload">清空</el-button>
@@ -80,6 +98,9 @@
                   <el-descriptions-item label="页数">{{ toolMeta.pages || 0 }}</el-descriptions-item>
                   <el-descriptions-item label="Producer">{{ toolMeta.producer || '-' }}</el-descriptions-item>
                   <el-descriptions-item label="Creator">{{ toolMeta.creator || '-' }}</el-descriptions-item>
+                  <el-descriptions-item v-if="toolMeta.source_url" label="来源链接" :span="2">
+                    <a :href="toolMeta.source_url" target="_blank" rel="noopener noreferrer" class="source-link">{{ toolMeta.source_url }}</a>
+                  </el-descriptions-item>
                 </el-descriptions>
 
                 <div v-if="tools.length" class="sub-block">
@@ -232,6 +253,9 @@
                 <el-descriptions-item label="页数">{{ detailToolMeta.pages || 0 }}</el-descriptions-item>
                 <el-descriptions-item label="Producer">{{ detailToolMeta.producer || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="Creator">{{ detailToolMeta.creator || '-' }}</el-descriptions-item>
+                <el-descriptions-item v-if="detailToolMeta.source_url" label="来源链接" :span="2">
+                  <a :href="detailToolMeta.source_url" target="_blank" rel="noopener noreferrer" class="source-link">{{ detailToolMeta.source_url }}</a>
+                </el-descriptions-item>
               </el-descriptions>
               <div v-if="detailTools.length" class="sub-block">
                 <div class="sub-title">识别到的工具</div>
@@ -291,7 +315,9 @@ const router = useRouter()
 
 const currentView = computed(() => (route.path === '/competitor/tasks' ? 'tasks' : 'upload'))
 
+const inputMode = ref('file')
 const selectedFile = ref(null)
+const sourceUrl = ref('')
 const analyzing = ref(false)
 const detail = ref(null)          // 最近一次分析结果 / 查看详情对象
 const activeTab = ref('result')
@@ -305,33 +331,67 @@ const tasksLoading = ref(false)
 function handleFileChange(file) {
   selectedFile.value = file?.raw || file || null
   if (selectedFile.value) {
+    inputMode.value = 'file'
+    detail.value = null
+    activeTab.value = 'result'
+  }
+}
+
+function handleUrlInput() {
+  if (sourceUrl.value) {
+    inputMode.value = 'url'
     detail.value = null
     activeTab.value = 'result'
   }
 }
 
 function resetUpload() {
+  inputMode.value = 'file'
   selectedFile.value = null
+  sourceUrl.value = ''
   detail.value = null
   activeTab.value = 'result'
 }
 
+const analyzeDisabled = computed(() => {
+  if (inputMode.value === 'url') return !sourceUrl.value.trim()
+  return !selectedFile.value
+})
+
+function isValidHttpUrl(value) {
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 async function doAnalyze() {
-  const f = selectedFile.value
-  if (!f) return
-  // 提交前校验：类型 + 大小（后端同样校验，前端先行提示提升体验）
-  const okExt = /\.(pdf|docx|md|markdown|txt)$/i.test(f.name || '')
-  if (!okExt) {
-    ElMessage.warning('仅支持 PDF / DOCX / MD / TXT 格式')
-    return
-  }
-  if (f.size > 50 * 1024 * 1024) {
-    ElMessage.warning('文件大小不能超过 50MB')
-    return
-  }
   analyzing.value = true
   try {
-    const resp = await competitorAPI.create(selectedFile.value)
+    let resp
+    if (inputMode.value === 'url') {
+      const url = sourceUrl.value.trim()
+      if (!isValidHttpUrl(url)) {
+        ElMessage.warning('请输入有效的 http 或 https 链接')
+        return
+      }
+      resp = await competitorAPI.createFromUrl(url)
+    } else {
+      const f = selectedFile.value
+      if (!f) return
+      const okExt = /\.(pdf|docx|md|markdown|txt)$/i.test(f.name || '')
+      if (!okExt) {
+        ElMessage.warning('仅支持 PDF / DOCX / MD / TXT 格式')
+        return
+      }
+      if (f.size > 50 * 1024 * 1024) {
+        ElMessage.warning('文件大小不能超过 50MB')
+        return
+      }
+      resp = await competitorAPI.create(selectedFile.value)
+    }
     detail.value = resp.data
     activeTab.value = 'result'
     ElMessage.success('分析完成')
@@ -462,7 +522,7 @@ function triggerMdDownload(text, filename) {
 async function downloadReport() {
   const md = reportMd.value || (detail.value?.report_md)
   if (!md) return
-  const name = (detail.value?.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt)$/i, '')
+  const name = (detail.value?.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html)$/i, '')
   triggerMdDownload(md, `${name}_竞品分析报告.md`)
 }
 
@@ -470,10 +530,10 @@ async function downloadReportOf(row) {
   try {
     const resp = await competitorAPI.getReport(row.id)
     // 接口返回 {content, format}（与 compare 报告接口对齐）
-    const md = resp.data?.content || resp.data || ''
-    if (!md) return
-    const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt)$/i, '')
-    triggerMdDownload(md, `${name}_竞品分析报告.md`)
+     const md = resp.data?.content || resp.data || ''
+     if (!md) return
+     const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html)$/i, '')
+     triggerMdDownload(md, `${name}_竞品分析报告.md`)
   } catch (e) {
     ElMessage.error(getAPIErrorMessage(e, '下载报告失败'))
   }
@@ -588,6 +648,10 @@ watch(currentView, (view) => {
   font-size: 15px;
 }
 
+.input-tabs {
+  margin-top: 4px;
+}
+
 .upload-box {
   border: 1px dashed #cbd5e1;
   border-radius: 10px;
@@ -625,6 +689,17 @@ watch(currentView, (view) => {
   font-size: 14px;
   font-weight: 700;
   word-break: break-all;
+}
+
+.url-box {
+  padding: 12px 0 4px;
+}
+
+.url-label {
+  margin-bottom: 10px;
+  color: #334155;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .action-row {
@@ -689,6 +764,16 @@ watch(currentView, (view) => {
 
 .meta-desc {
   margin-bottom: 8px;
+}
+
+.source-link {
+  color: #2563eb;
+  word-break: break-all;
+  text-decoration: none;
+}
+
+.source-link:hover {
+  text-decoration: underline;
 }
 
 .sub-block {

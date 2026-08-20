@@ -48,6 +48,8 @@ def _normalize_pdf_extraction_artifacts(text: str) -> str:
     text = re.sub(r'(?<=\s)\|(?=\s)', ' ', text)
     text = re.sub(r'\b([A-Z])\s+([A-Z])\s+([A-Z])(?:\s+([A-Z]))?\b', lambda m: ''.join(part for part in m.groups() if part), text)
     text = re.sub(r'\b([A-Za-z])\s+([a-z])\s+([a-z])\s+([a-z])\b', r'\1\2\3\4', text)
+    text = re.sub(r'(?<=[A-Za-z\)])\s*([<>]=?|=)\s*(?=\d)', r' \1 ', text)
+    text = re.sub(r'(?<=\d)\s*([<>]=?|=)\s*(?=[A-Za-z])', r' \1 ', text)
     text = re.sub(r'\b(μ|u)\s+L\b', lambda m: f"{m.group(1)}L", text, flags=re.IGNORECASE)
     text = re.sub(r'\b([mknpμu])\s+(L|g|m)\b', r'\1\2', text, flags=re.IGNORECASE)
     text = re.sub(r'(?<=\d)\s*(?:℃|°\s*C)\b', ' °C', text)
