@@ -533,6 +533,8 @@ def parse_file(file_path):
         return parse_text(file_path)
     elif ext == '.idml':
         return parse_idml(file_path)
+    elif ext in {'.png', '.jpg', '.jpeg'}:
+        raise ValueError("图片文件需要通过图片翻译 OCR 流程处理")
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 

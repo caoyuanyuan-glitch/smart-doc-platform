@@ -22,3 +22,4 @@ python-multipart==0.0.9
 pyspellchecker==0.8.3
 docx2txt==0.9
 Pillow>=10.0.0
+pytesseract>=0.3.13

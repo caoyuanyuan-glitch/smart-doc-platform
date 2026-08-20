@@ -19,12 +19,15 @@
         </el-form-item>
         <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
           <el-select
-            v-model="memoryFileId"
+            v-model="memoryFileIds"
             placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
             clearable
             filterable
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
             :loading="memoryLibraryLoading"
-            style="width: 260px"
+            style="width: 320px"
           >
             <el-option v-for="file in memoryLibraryFiles" :key="file.id" :label="file.label" :value="file.id" />
           </el-select>
@@ -203,7 +206,7 @@ function swapLanguages() {
 
 const memoryBank = ref('')
 const memoryBanks = ref([])
-const memoryFileId = ref(null)
+const memoryFileIds = ref([])
 const memoryWriteFileId = ref(null)
 const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
@@ -219,14 +222,15 @@ const writableMemoryLibraryFiles = computed(() => {
   return memoryLibraryFiles.value.filter(file => writableMemoryFileTypes.includes(String(file.fileType || '').toLowerCase()))
 })
 
-function syncWritableMemorySelection(preferredId = null) {
+function syncWritableMemorySelection(preferredIds = []) {
   const writableFiles = writableMemoryLibraryFiles.value
-  const preferred = preferredId == null || preferredId === ''
-    ? null
-    : writableFiles.find(file => String(file.id) === String(preferredId))
+  const normalizedPreferredIds = Array.isArray(preferredIds)
+    ? preferredIds.map(id => String(id))
+    : []
+  const preferredMatches = writableFiles.filter(file => normalizedPreferredIds.includes(String(file.id)))
 
-  if (preferred) {
-    memoryWriteFileId.value = preferred.id
+  if (preferredMatches.length === 1) {
+    memoryWriteFileId.value = preferredMatches[0].id
     return
   }
 
@@ -323,7 +327,7 @@ async function loadMemoryLibraryFiles() {
   try {
     const res = await knowledgeAPI.getTree()
     memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
-    syncWritableMemorySelection(memoryFileId.value)
+    syncWritableMemorySelection(memoryFileIds.value)
   } catch (e) {
     memoryLibraryFiles.value = []
     memoryWriteFileId.value = null
@@ -352,12 +356,12 @@ async function translateText() {
       source_lang: sourceLang.value,
       target_lang: targetLang.value,
       memory_bank: memoryBank.value || null,
-      memory_file_id: memoryFileId.value || null
+      memory_file_ids: memoryFileIds.value
     })
     result.value = res.data
     translatedDraft.value = res.data.translated || ''
     editingResult.value = false
-    syncWritableMemorySelection(memoryFileId.value)
+    syncWritableMemorySelection(memoryFileIds.value)
     window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT))
     ElMessage.success('翻译完成')
   } catch (e) {
