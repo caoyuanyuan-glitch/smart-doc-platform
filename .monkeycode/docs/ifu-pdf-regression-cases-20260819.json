@@ -1,0 +1,90 @@
+{
+  "suite_name": "ifu_pdf_ocr_regression_20260819",
+  "baseline_document": "H-020-001371-00 DNBelab C Series High-throughput Single-cell 5'RNA&V(D)J Library Preparation Set V2.0 Instructions for Use_English_RUO_QD_R01.pdf",
+  "candidate_document": "H-020-001371-00 DNBelab C Series High-throughput Single-cell 5'RNA&V(D)J Library Preparation Set V2 Tina..pdf",
+  "notes": [
+    "baseline_document 作为本组回归样例的参考文本",
+    "candidate_document 提供 OCR 噪声和结构退化样例",
+    "这些样例覆盖文本级和结构级两类回归风险"
+  ],
+  "cases": [
+    {
+      "id": "PDF-SPACE-001",
+      "category": "单位/空格",
+      "priority": "high",
+      "strategy": "operator_spacing_consistency",
+      "synthetic_reference": "Cytoactivity < 5%",
+      "synthetic_candidate": "Cytoactivity<5%",
+      "anchor_terms": ["Cytoactivity", "5%"],
+      "reference_example": "Cytoactivity < 5%",
+      "failure_examples": [
+        "Cytoactivity<5%",
+        "Cytoactivity <5%",
+        "Cytoactivity < 5 %"
+      ],
+      "assertion": "候选文本在锚点附近的操作符与数字单位间距应与基线文本一致"
+    },
+    {
+      "id": "PDF-TABLE-001",
+      "category": "表格/版式",
+      "priority": "high",
+      "strategy": "rowspan_group_preservation",
+      "synthetic_reference": "Group A | Value 1\nGroup A | Value 2\nGroup B | Value 3",
+      "synthetic_candidate": "Group A | Value 1\nGroup A | Group A | Value 2\nGroup B | Value 3",
+      "anchor_terms": ["table", "rowspan", "merged cell"],
+      "reference_example": "基线表格保留合并单元格分组语义",
+      "failure_examples": [
+        "分组标题被重复展开到每一行",
+        "行数异常膨胀",
+        "表头或分组标题与数据行混排"
+      ],
+      "assertion": "候选结果应保留表格分组关系，不能把分组标题重复灌入每一行"
+    },
+    {
+      "id": "PDF-FIGURE-001",
+      "category": "图片/对象缺失",
+      "priority": "high",
+      "strategy": "figure_anchor_presence",
+      "synthetic_reference": "Figure 3 Sample loading layout [IMAGE]\nLoad the sample as shown in Figure 3.",
+      "synthetic_candidate": "Figure 3\nLoad the sample as shown.",
+      "anchor_terms": ["Figure", "Fig.", "image placeholder"],
+      "reference_example": "基线文本在图号附近保留图片占位或图题锚点",
+      "failure_examples": [
+        "图号存在但图片占位缺失",
+        "图片占位存在但图题丢失",
+        "图号附近说明句被截断"
+      ],
+      "assertion": "候选文本在图号锚点附近需保留对象占位、图题或等价引用信号"
+    },
+    {
+      "id": "PDF-TYPO-001",
+      "category": "断词噪声",
+      "priority": "medium",
+      "strategy": "short_window_fuzzy_compare",
+      "synthetic_reference": "vortex mixer to mix thoroughly",
+      "synthetic_candidate": "vortex mixer it o mix thoroughly",
+      "anchor_terms": ["vortex mixer", "mix thoroughly"],
+      "reference_example": "vortex mixer to mix thoroughly",
+      "failure_examples": [
+        "vortex mixer it o mix thoroughly"
+      ],
+      "assertion": "候选文本在高风险短语窗口内的编辑距离应低于阈值，断词和插字噪声超过阈值即失败"
+    },
+    {
+      "id": "PDF-DROP-001",
+      "category": "丢行/漏句",
+      "priority": "high",
+      "strategy": "sentence_alignment_gap_detection",
+      "synthetic_reference": "Step 1 Prepare cells. Step 2 Load the sample. Step 3 Start the run.",
+      "synthetic_candidate": "Step 1 Prepare cells. Step 3 Start the run.",
+      "anchor_terms": ["section", "paragraph", "missing line"],
+      "reference_example": "基线章节内句子连续完整",
+      "failure_examples": [
+        "同一段内缺少一整行",
+        "半句被截断后直接跳到下一句",
+        "章节内锚点顺序正常但内容缺失"
+      ],
+      "assertion": "候选文本与基线文本做句级对齐后，缺少完整句子或半句时判定为内容遗漏"
+    }
+  ]
+}
