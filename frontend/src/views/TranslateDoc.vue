@@ -152,9 +152,14 @@
                 </div>
                 <el-result icon="success" title="翻译完成" :sub-title="`原文件: ${job.original_filename}`">
                   <template #extra>
+                    <div class="translated-file-meta">译文: {{ job.translated_filename || job.original_filename }}</div>
+                    <el-button @click="openTranslatedPreview(job)">
+                      <el-icon><FolderOpened /></el-icon>
+                      预览
+                    </el-button>
                     <el-button type="primary" @click="downloadTranslatedFile(job)">
                       <el-icon><Download /></el-icon>
-                      下载译文 ({{ job.translated_filename || job.original_filename }})
+                      下载
                     </el-button>
                   </template>
                 </el-result>
@@ -175,6 +180,15 @@
       </div>
     </div>
   </div>
+
+  <el-dialog v-model="previewDialogVisible" title="译文预览" width="72%" class="translated-preview-dialog">
+    <div class="preview-meta">
+      <div>原文件: {{ previewJob?.original_filename || '-' }}</div>
+      <div>译文: {{ previewJob?.translated_filename || previewJob?.original_filename || '-' }}</div>
+    </div>
+    <el-skeleton v-if="previewLoading" :rows="8" animated />
+    <pre v-else class="preview-content">{{ previewContent || '暂无可预览内容' }}</pre>
+  </el-dialog>
 </template>
 <script setup>
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
@@ -239,6 +253,10 @@ const reviewedDocs = ref([])
 const reviewedDocsLoading = ref(false)
 const selectedReviewedDoc = ref(null)
 const selectedReviewedRow = ref(null)
+const previewDialogVisible = ref(false)
+const previewLoading = ref(false)
+const previewContent = ref('')
+const previewJob = ref(null)
 const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 
 onMounted(async () => {
@@ -445,6 +463,7 @@ function createJob(filename) {
     doc_id: null,
     original_filename: filename,
     translated_filename: '',
+    translated_preview: '',
     download_url: '',
     status: 'submitting',
     error: '',
@@ -473,6 +492,7 @@ async function restoreLatestBatchJobs() {
       doc_id: doc.id,
       original_filename: doc.filename,
       translated_filename: doc.translated_filename || '',
+      translated_preview: doc.translated_preview || '',
       download_url: doc.translated_filename ? `/api/translation/download/${doc.id}` : '',
       status: doc.translated_filename
         ? (String(doc.translated_filename).startsWith('ERROR:') ? 'error' : (String(doc.translated_filename).startsWith('CANCELED:') ? 'canceled' : 'completed'))
@@ -524,6 +544,7 @@ function startPolling(jobKey, docId) {
           doc_id: docId,
           original_filename: statusData.original_filename || '',
           translated_filename: statusData.translated_filename || '',
+          translated_preview: statusData.translated_preview || currentJob.translated_preview || '',
           download_url: statusData.download_url || `/api/translation/download/${docId}`,
           status: 'completed',
           error: '',
@@ -610,6 +631,7 @@ async function cancelTranslationJob(job) {
     updateJob(job.jobKey, {
       status: res.data.status === 'completed' ? 'completed' : 'canceled',
       translated_filename: res.data.translated_filename || job.translated_filename,
+      translated_preview: res.data.translated_preview || job.translated_preview,
       download_url: res.data.download_url || job.download_url,
       error: res.data.error || '翻译任务已停止',
       source_word_count: Number(res.data.source_word_count || 0),
@@ -629,6 +651,28 @@ function downloadTranslatedFile(job) {
       const message = await getBlobErrorMessage(error, '下载译文失败')
       ElMessage.error(message)
     })
+}
+
+async function openTranslatedPreview(job) {
+  if (!job?.doc_id) return
+  previewDialogVisible.value = true
+  previewLoading.value = true
+  previewJob.value = job
+  previewContent.value = job.translated_preview || ''
+
+  try {
+    const res = await translationAPI.previewTranslatedDoc(job.doc_id)
+    previewContent.value = res.data?.content || job.translated_preview || ''
+    updateJob(job.jobKey, {
+      translated_preview: previewContent.value,
+      translated_filename: res.data?.translated_filename || job.translated_filename,
+    })
+    previewJob.value = translationJobs.value.find(item => item.jobKey === job.jobKey) || job
+  } catch (e) {
+    ElMessage.error('加载译文预览失败')
+  } finally {
+    previewLoading.value = false
+  }
 }
 </script>
 
@@ -697,6 +741,35 @@ function downloadTranslatedFile(job) {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.translated-file-meta {
+  margin-bottom: 12px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.preview-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.preview-content {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+  color: #111827;
+  line-height: 1.7;
 }
 
 .config-horizontal {
