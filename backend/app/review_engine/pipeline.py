@@ -140,11 +140,18 @@ def issue_topic(issue: Any) -> str:
     return ""
 
 
+def is_whitelisted_layout_issue(issue: Any) -> bool:
+    data = issue_to_mapping(issue)
+    rule = str(data["rule"] or "").upper()
+    confidence = int(data["confidence"] or 0)
+    return rule.startswith("CYY-CN-LAYOUT-") and confidence >= 86
+
+
 def is_high_value(issue: Any) -> bool:
     rule = str(issue_value(issue, "rule", "") or "").upper()
     category = normalize_text(issue_value(issue, "category", ""))
     severity = str(issue_value(issue, "severity", "") or "").lower()
-    if is_visual_layout_issue(issue):
+    if is_visual_layout_issue(issue) and not is_whitelisted_layout_issue(issue):
         return False
     if rule.startswith("CYY-CN-UNIT-"):
         return False
@@ -168,7 +175,7 @@ def is_visual_layout_issue(issue: Any) -> bool:
     blob = issue_blob(data)
     if category in {"表格/版式", "图片/对象缺失", "字体/版式细节"}:
         return True
-    if rule in {"STRUCT-LAYOUT-001", "STRUCT-IMAGE-001", "DET-TYPO-001"}:
+    if rule in {"STRUCT-LAYOUT-001", "STRUCT-IMAGE-001", "DET-TYPO-001", "EXT-R015", "EXT-R017", "EXT-R018"}:
         return True
     return bool(VISUAL_LAYOUT_PATTERN.search(blob))
 
@@ -184,7 +191,7 @@ def value_score(issue: Any) -> int:
 
     score = 50
     score += {"fatal": 25, "serious": 18, "general": 6, "suggestion": -8}.get(severity, 0)
-    score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 6}.get(source, 0)
+    score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 0}.get(source, 0)
     if confidence >= 95:
         score += 10
     elif confidence >= 90:
@@ -193,8 +200,11 @@ def value_score(issue: Any) -> int:
         score -= 12
     if is_high_value(data):
         score += 30
-    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT"}:
-        score += 12
+    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE"}:
+        if severity == "serious" or confidence >= 95:
+            score += 14
+        else:
+            score -= 18
     if rule.startswith("CYY-CN-UNIT-") or category == "单位格式":
         score -= 42
     if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
@@ -225,12 +235,19 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
     description = normalize_text(data["description"])
     context = normalize_text(data["context"])
     category = normalize_text(data["category"])
+    severity = str(data["severity"] or "general").lower()
 
     if source == "spellcheck":
         return False
-    if is_visual_layout_issue(data):
+    if severity in {"general", "suggestion"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE) and len(original) <= 3:
+        return True
+    if is_visual_layout_issue(data) and not is_whitelisted_layout_issue(data):
         return True
     if rule in LOW_VALUE_RULES:
+        return True
+    if rule == "EXT-R011" and not re.search(r"['\"“”‘’]", f"{original} {context}"):
+        return True
+    if rule in {"EXT-R011", "EXT-R013"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE):
         return True
     if rule == "TERM-001" and re.fullmatch(r"click", original, re.IGNORECASE) and re.fullmatch(r"tap", suggestion, re.IGNORECASE):
         return True

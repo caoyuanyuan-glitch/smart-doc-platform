@@ -3,10 +3,11 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
 from app.utils.runtime_config import bootstrap_runtime_env
+from app.utils.runtime_paths import runtime_db_path
 
 bootstrap_runtime_env()
 
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{runtime_db_path()}")
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
@@ -37,6 +38,9 @@ def _ensure_legacy_sqlite_columns():
     if rule_columns and 'language' not in rule_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE rules ADD COLUMN language VARCHAR DEFAULT 'both'"))
+    if rule_columns and 'severity' not in rule_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE rules ADD COLUMN severity VARCHAR DEFAULT 'general'"))
 
     try:
         review_columns = {col['name'] for col in inspector.get_columns('reviews')}
@@ -46,6 +50,18 @@ def _ensure_legacy_sqlite_columns():
     if review_columns and 'completed_at' not in review_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE reviews ADD COLUMN completed_at DATETIME"))
+    if review_columns and 'provider' not in review_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE reviews ADD COLUMN provider VARCHAR"))
+
+    try:
+        issue_columns = {col['name'] for col in inspector.get_columns('issues')}
+    except Exception:
+        issue_columns = set()
+
+    if issue_columns and 'providers' not in issue_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE issues ADD COLUMN providers TEXT"))
 
     try:
         compare_columns = {col['name'] for col in inspector.get_columns('compare_tasks')}
@@ -83,6 +99,19 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN ai_word_count INTEGER DEFAULT 0"))
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN memory_word_count INTEGER DEFAULT 0"))
 
+    if translation_doc_columns and 'user_id' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN user_id INTEGER"))
+
+    try:
+        convert_task_columns = {col['name'] for col in inspector.get_columns('convert_tasks')}
+    except Exception:
+        convert_task_columns = set()
+
+    if convert_task_columns and 'user_id' not in convert_task_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE convert_tasks ADD COLUMN user_id INTEGER"))
+
 
     try:
         plr_columns = {col['name'] for col in inspector.get_columns('polish_learning_rules')}
@@ -118,6 +147,23 @@ def _ensure_legacy_sqlite_columns():
                 for s in stmts:
                     conn.execute(text(s))
 
+    try:
+        polish_feedback_columns = {col['name'] for col in inspector.get_columns('polish_feedback')}
+    except Exception:
+        polish_feedback_columns = set()
+
+    if polish_feedback_columns:
+        stmts = []
+        if 'correction_items' not in polish_feedback_columns:
+            stmts.append("ALTER TABLE polish_feedback ADD COLUMN correction_items TEXT")
+        if 'polish_session_id' not in polish_feedback_columns:
+            stmts.append("ALTER TABLE polish_feedback ADD COLUMN polish_session_id VARCHAR(64)")
+        if stmts:
+            with engine.begin() as conn:
+                for s in stmts:
+                    conn.execute(text(s))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_polish_feedback_polish_session_id ON polish_feedback (polish_session_id)"))
+
 def get_db():
     db = SessionLocal()
     try:
@@ -126,6 +172,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_decision_record
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()

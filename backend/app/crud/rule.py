@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -7,6 +8,74 @@ from app.schemas.rule import RuleCreate, RuleUpdate
 
 
 REVIEW_RULE_LIBRARY_SEED_PATH = Path(__file__).resolve().parents[2] / "seed" / "review_rule_library_seed.json"
+
+# 严重程度映射：种子数据中的中文 → 系统英文标识
+SEVERITY_MAP = {
+    "致命": "fatal",
+    "严重": "serious",
+    "一般": "general",
+    "建议": "suggestion",
+}
+
+
+def _convert_rule_content_to_regex(rule_content: str) -> str:
+    """将规则描述转换为可执行的正则表达式。
+
+    规则描述如检测关键词/模式的规则，提取核心模式转为正则。
+    无法转为纯正则的复杂语义规则使用高匹配模式。
+    """
+    if not rule_content or not rule_content.strip():
+        return r"(?!)"
+
+    content = rule_content.strip()
+    patterns = []
+
+    if "标点符号" in content:
+        return r"(?!)"
+
+    if "仅可交互UI元素" in content:
+        return r"(?!)"
+
+    if "统一使用双引号" in content and "单引号" in content:
+        return r"(?!)"
+
+    # 预定义的规则→正则映射（基于29条种子规则手工整理）
+    RULE_PATTERN_MAP = {
+        "公司官网地址": r"https?://[^\s]+mgi[^\s]*",
+        "多余的(空格|空行)": r"[ ]{2,}|\n{3,}",
+        "双引号": r"[\'\"](.*?)[\'\"]",
+        "中英文混用": r"[\u4e00-\u9fff]\s*[a-zA-Z]{2,}\s*[\u4e00-\u9fff]|[a-zA-Z]{2,}\s[\u4e00-\u9fff]{2,}",
+        "乘号": r"\*[×xX]?\s*\d+|\d+\s*\*",
+        "错别字.*现成.*现场": r"现场情况|现场",
+        "错别字.*避免.*不避免": r"不避免",
+        "成语": r"周而复始|恰如其分|千丝万缕|不言而喻|一目了然|举足轻重",
+        "文言化": r"未尽事宜|鉴于|据此|兹",
+        "引号": r"[\'\"]{2,}|[\u201c\u201d\u2018\u2019]",
+        "同义表述": r"(?:点击|轻触|按|按压|长按|双击)",
+        "术语.*不一致": r"(?:试剂盒|试剂|样本|标本)",
+        "统一使用": r"(?:不可以|不能|不应)",
+        "Cat.No": r"Cat\.?\s*No\.?",
+    }
+
+    # 匹配规则映射表
+    for keyword, pattern in RULE_PATTERN_MAP.items():
+        if keyword == "标点符号" and patterns:
+            continue
+        if keyword in content:
+            patterns.append(pattern)
+
+    # 如果映射表中没有匹配，则尝试取出引号中的关键词构建正则
+    if not patterns:
+        quoted = re.findall(r'"([^"]+)"', content)
+        if quoted:
+            patterns.append("|".join(re.escape(q.strip()) for q in quoted if len(q.strip()) >= 2))
+        else:
+            # 提取核心关键词（2-4字的中文词或3+字的英文词）
+            keywords = re.findall(r'[\u4e00-\u9fff]{2,4}|[A-Za-z]{3,}', content)
+            if keywords:
+                patterns.append("|".join(re.escape(kw) for kw in keywords[:5]))
+
+    return "|".join(patterns) if patterns else r"(?!)"
 
 
 def seed_external_review_rules(db: Session):
@@ -17,6 +86,7 @@ def seed_external_review_rules(db: Session):
     source = payload.get("source", "外部评审规则库")
     export_date = payload.get("export_date", "")
     created = 0
+    updated = 0
 
     for item in payload.get("rules", []):
         original_rule_id = str(item.get("rule_id", "")).strip()
@@ -24,28 +94,54 @@ def seed_external_review_rules(db: Session):
             continue
 
         rule_no = f"EXT-{original_rule_id}"
-        if get_rule_by_no(db, rule_no):
-            continue
-
+        rule_content = item.get("rule_content") or ""
+        category = item.get("category") or "其他"
+        chinese_severity = item.get("severity", "一般")
+        severity = SEVERITY_MAP.get(chinese_severity, "general")
         scenarios = "、".join(item.get("applicable_scenarios") or []) or "通用"
-        sync_status = "已同步" if item.get("synced") else "未同步"
-        severity = item.get("severity", "一般")
+
+        # 将规则内容转为可执行的正则表达式
+        regex = _convert_rule_content_to_regex(rule_content)
+
+        example = f"来源: {source} | 适用场景: {scenarios}"
+        audit_basis = f"{source}{' | 导出日期: ' + export_date if export_date else ''}"
+        existing = get_rule_by_no(db, rule_no)
+        if existing:
+            changed = False
+            updates = {
+                "category": category,
+                "description": rule_content,
+                "regex": regex,
+                "example": example,
+                "suggestion": rule_content,
+                "audit_basis": audit_basis,
+                "severity": severity,
+                "language": "both",
+            }
+            for field, value in updates.items():
+                if getattr(existing, field) != value:
+                    setattr(existing, field, value)
+                    changed = True
+            if changed:
+                updated += 1
+            continue
 
         db.add(Rule(
             rule_no=rule_no,
-            category=item.get("category") or "其他",
-            description=item.get("rule_content") or "",
-            regex=r"(?!)",
-            example=f"原编号: {original_rule_id} | 适用场景: {scenarios} | 同步状态: {sync_status}",
-            suggestion=f"严重级别: {severity} | 该规则当前作为规则库知识展示，请人工确认后补充可执行规则。",
-            audit_basis=f"{source}{' | 导出日期: ' + export_date if export_date else ''}",
+            category=category,
+            description=rule_content,
+            regex=regex,
+            example=example,
+            suggestion=rule_content,
+            audit_basis=audit_basis,
+            severity=severity,
             language="both",
         ))
         created += 1
 
-    if created:
+    if created or updated:
         db.commit()
-    return created
+    return created + updated
 
 def create_rule(db: Session, rule: RuleCreate):
     db_rule = Rule(
@@ -56,6 +152,7 @@ def create_rule(db: Session, rule: RuleCreate):
         example=rule.example,
         suggestion=rule.suggestion,
         audit_basis=rule.audit_basis,
+        severity=rule.severity,
         language=rule.language
     )
     db.add(db_rule)
@@ -87,6 +184,8 @@ def update_rule(db: Session, rule_id: int, rule_update: RuleUpdate):
             rule.suggestion = rule_update.suggestion
         if rule_update.audit_basis is not None:
             rule.audit_basis = rule_update.audit_basis
+        if rule_update.severity is not None:
+            rule.severity = rule_update.severity
         if rule_update.language is not None:
             rule.language = rule_update.language
         db.commit()
@@ -112,6 +211,7 @@ def bulk_create_rules(db: Session, rules: list[RuleCreate]):
                 example=rule.example,
                 suggestion=rule.suggestion,
                 audit_basis=rule.audit_basis,
+                severity=rule.severity,
                 language=rule.language
             ))
     if db_rules:

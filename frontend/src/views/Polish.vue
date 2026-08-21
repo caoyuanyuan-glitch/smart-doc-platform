@@ -1,18 +1,8 @@
 <template>
   <div class="polish-container" :class="{ 'document-mode': currentView === 'document' }">
-    <div v-if="currentView === 'document'" class="document-view">
+    <div v-if="currentView === 'document'" class="document-view" :class="{ 'document-result-mode': docResult }">
       <div class="page-title-row">
         <h2 class="page-title">文档润色</h2>
-        <div class="stats-card">
-          <span class="stats-label">准确率</span>
-          <span class="stats-value" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.averageAccuracy }}%</span>
-          <span class="stats-divider">|</span>
-          <span class="stats-label">共提交</span>
-          <span class="stats-count-wrap">
-            <span class="stats-count" :class="{ 'stats-green': docFeedbackStats.averageAccuracy >= 50, 'stats-red': docFeedbackStats.averageAccuracy < 50 }">{{ docFeedbackStats.totalSubmissions }}</span>
-            <span class="stats-unit">次</span>
-          </span>
-        </div>
         <div v-if="loading" class="polish-progress-float" :class="{ done: polishProgress >= 100 }">
           <div class="progress-float-bar">
             <el-icon class="is-loading" v-if="polishProgress < 100"><Loading /></el-icon>
@@ -29,21 +19,30 @@
         <div v-if="!docResult" class="doc-left">
           <div class="panel doc-input-panel">
             <div class="form-item">
+              <label class="form-label">产品类型</label>
+              <el-select v-model="formData.productType" class="full-width" placeholder="选择产品类型" clearable @change="handleProductTypeChange">
+                <el-option v-for="item in documentProductTypeOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </div>
+
+            <div class="form-item">
               <label class="form-label">句式清单文件</label>
               <div class="input-with-button">
-                <el-select v-model="formData.sentenceFileId" class="full-width" placeholder="选择句式清单文件" clearable>
-                  <el-option v-for="f in sentenceFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+                <el-select v-model="formData.sentenceFileId" class="full-width" :placeholder="sentenceFileSelectPlaceholder" clearable @change="handleSentenceFileChange">
+                  <el-option v-for="f in sentenceFileOptions" :key="String(f.id)" :label="f.label" :value="f.id" />
                 </el-select>
               </div>
+              <div class="form-helper-text">{{ sentenceFileHelperText }}</div>
             </div>
 
             <div class="form-item">
               <label class="form-label">术语对照表</label>
               <div class="input-with-button">
-                <el-select v-model="formData.terminologyFileId" class="full-width" placeholder="留空则使用数据库术语" clearable @change="onDocumentTerminologyChange">
-                  <el-option v-for="f in termFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+                <el-select v-model="formData.terminologyFileId" class="full-width" :placeholder="terminologyFileSelectPlaceholder" clearable @change="onDocumentTerminologyChange">
+                  <el-option v-for="f in termFileOptions" :key="String(f.id)" :label="f.label" :value="f.id" />
                 </el-select>
               </div>
+              <div class="form-helper-text">{{ terminologyFileHelperText }}</div>
             </div>
 
             <div class="form-item">
@@ -59,15 +58,179 @@
               <el-input v-model="formData.requirements" type="textarea" :rows="3" placeholder="请输入额外的润色要求（选填）" />
             </div>
 
+            <div v-if="showStandardDocumentWorkflow" class="form-item">
+              <label class="form-label">处理模式</label>
+              <el-radio-group v-model="formData.documentWorkflow" class="workflow-radio-group">
+                <el-radio-button v-if="showStandardDocumentWorkflow" label="standard" value="standard">标准润色</el-radio-button>
+                <el-radio-button label="cat" value="cat">句式辅助润色</el-radio-button>
+              </el-radio-group>
+              <div class="form-helper-text">
+                <span v-if="showStandardDocumentWorkflow && formData.documentWorkflow !== 'cat'">标准模式会直接输出整篇润色结果和差异确认列表。</span>
+                <span v-else>句式辅助模式会先抽取候选句式，再逐段确认后生成带修订的文档。</span>
+              </div>
+            </div>
+
+            <div v-if="formData.documentWorkflow === 'cat'" class="form-item">
+              <label class="form-label">AI 语义评分</label>
+              <div class="cat-ai-switch-row">
+                <el-switch v-model="formData.catAiSemanticScoring" inline-prompt active-text="开启" inactive-text="关闭" />
+                <span class="form-helper-text cat-ai-switch-text">
+                  <span v-if="formData.catAiSemanticScoring">匹配率高。调用AI语义评分和排序。</span>
+                  <span v-else>匹配率低。只使用规则召回和字符串匹配，不调用AI语义评分。</span>
+                </span>
+              </div>
+            </div>
+
             <div class="button-group doc-button-group">
-              <el-button @click="resetForm">重置</el-button>
+              <el-button @click="resetForm">清空</el-button>
               <el-button type="primary" :loading="loading" @click="submitPolish">提交</el-button>
             </div>
           </div>
 
         </div>
 
-        <div class="doc-right">
+        <div class="doc-right" :class="{ 'doc-right-full': docResult }">
+          <template v-if="formData.documentWorkflow === 'cat'">
+            <div v-if="catResult" class="panel doc-result-panel cat-result-panel">
+              <div class="panel-header">
+                <span>句式候选结果</span>
+                <div class="panel-actions">
+                  <el-tag v-if="catDocumentAccuracyRate !== null" size="small" type="success">文档准确率 {{ formatCatAccuracyRate(catDocumentAccuracyRate) }}</el-tag>
+                </div>
+              </div>
+
+              <div class="doc-review-panel cat-review-panel">
+                <div class="doc-review-summary">
+                  <div class="doc-review-count">当前候选句 {{ catItems.length }} 条，待处理 {{ pendingCatCount }} 条，已确认 {{ confirmedCatCount }} 条</div>
+                  <div class="doc-review-summary-actions">
+                    <div class="doc-review-confirmed">AI 评分 {{ formData.catAiSemanticScoring ? catAiStatusLabel : '已关闭' }}</div>
+                    <el-button v-if="catCandidateDebugSummaryText" text size="small" native-type="button" @click="catDiagnosticExpanded = !catDiagnosticExpanded">{{ catDiagnosticExpanded ? '收起召回诊断' : '展开召回诊断' }}</el-button>
+                  </div>
+                </div>
+
+                <div v-if="catDiagnosticExpanded && catCandidateDebugSummaryText" class="cat-ai-status-banner" :class="catResult.aiScoringStatus || 'skipped'">
+                  <span class="cat-ai-status-title">召回诊断</span>
+                  <span class="cat-ai-status-text">{{ catCandidateDebugSummaryText }}</span>
+                </div>
+
+                <div class="doc-review-toolbar cat-review-toolbar">
+                  <div class="doc-review-filters">
+                    <span class="cat-toolbar-hint">处理流程：检查候选句子→选择处理动作→生成润色文档→下载带修订的润色文件</span>
+                  </div>
+                  <div class="doc-review-bulk-actions">
+                    <el-button type="primary" size="small" native-type="button" :loading="catApplying" @click="applyCatSelections">生成润色文档</el-button>
+                  </div>
+                </div>
+
+                <div v-if="catApplyResult" class="cat-apply-banner">
+                  <div>
+                    <div class="cat-apply-title">润色文档已生成</div>
+                    <div class="cat-apply-meta">应用 {{ catApplyResult.appliedChangesCount }} 处，准确率 {{ formatCatAccuracyRate(catApplyResult.accuracyRate) }}</div>
+                  </div>
+                  <div class="cat-apply-actions">
+                    <el-button v-if="catApplyResult.previewUrl" size="small" native-type="button" @click="openCatPreview">查看预览</el-button>
+                    <el-button v-if="catApplyResult.reportDownloadUrl" size="small" native-type="button" @click="downloadCatReport">下载润色报告</el-button>
+                    <el-button v-if="catApplyResult.downloadUrl" size="small" type="primary" native-type="button" @click="downloadCatResult">下载润色文档</el-button>
+                  </div>
+                </div>
+
+                <div v-if="catItems.length" class="cat-item-list">
+                <div v-for="item in catItems" :key="`cat-${item.sentenceIndex}`" class="cat-item-card" :class="{ 'is-collapsed': item.resultCollapsed }">
+                  <div class="cat-item-header">
+                    <div>
+                      <div class="cat-item-title">句子 #{{ item.sentenceIndex + 1 }} · 段落 #{{ item.sourceParagraphIndex + 1 }}</div>
+                    </div>
+                    <div class="cat-item-header-actions">
+                      <el-button text size="small" native-type="button" @click="toggleCatItemCollapsed(item)">{{ item.resultCollapsed ? '展开结果' : '收起结果' }}</el-button>
+                      <el-tag size="small" :type="item.action === 'accept' ? 'success' : item.action === 'modify' ? 'warning' : item.action === 'reject' ? 'danger' : 'info'">
+                        {{ item.action === 'accept' ? '接受' : item.action === 'modify' ? '自定义' : item.action === 'reject' ? '拒绝' : '待处理' }}
+                      </el-tag>
+                    </div>
+                  </div>
+
+                  <div v-if="item.resultCollapsed" class="cat-item-collapsed-preview">
+                    <span class="cat-item-collapsed-label">{{ getCatCollapsedLabel(item) }}</span>
+                    <div class="issue-diff-content issue-diff-original" v-html="renderCatCollapsedPreviewHtml(item)"></div>
+                  </div>
+
+                  <div v-show="!item.resultCollapsed && selectedCatCandidate(item)" class="issue-diff-card cat-issue-diff-card">
+                    <div class="issue-diff-row">
+                      <span class="issue-diff-label">原文</span>
+                      <div class="issue-diff-content issue-diff-original" v-html="renderCatOriginalPanelHtml(item)"></div>
+                    </div>
+                    <div class="issue-diff-row">
+                      <span class="issue-diff-label">{{ item.action === 'modify' && item.savedModifiedText ? '自定义' : '候选' }}</span>
+                      <div class="issue-diff-content issue-diff-suggested">
+                        <div v-html="renderCatSuggestedDiffHtml(item.originalText, getCatDisplayText(item))"></div>
+                        <div v-if="item.action !== 'modify' && selectedCatCandidate(item)" class="cat-selected-meta">
+                          <span class="cat-selected-source">{{ formatCatCandidateSource(selectedCatCandidate(item)) }}</span>
+                          <span>匹配率 {{ formatCatCandidateMatchRate(selectedCatCandidate(item)) }}</span>
+                          <span v-if="selectedCatCandidate(item)?.semantic_score !== null && selectedCatCandidate(item)?.semantic_score !== undefined">语义分 {{ formatCatScore(selectedCatCandidate(item).semantic_score) }}%</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-show="!item.resultCollapsed && item.candidates.length > 1" class="cat-item-section cat-item-section-surface cat-item-section-surface-muted">
+                    <div class="cat-section-head">
+                      <label class="cat-item-label">候选句式</label>
+                      <span class="issue-candidate-count">共 {{ item.candidates.length }} 条</span>
+                    </div>
+                    <div class="cat-candidate-select-shell">
+                      <div class="cat-candidate-select-overlay">{{ selectedCatCandidate(item)?.template_text || '' }}</div>
+                      <el-select :ref="el => setCandidateSelectRef(item.rowKey, el)" v-model="item.selectedCandidateIndex" class="full-width cat-candidate-select" size="large" popper-class="cat-candidate-select-popper" placeholder="选择候选句式" @change="handleCatCandidateChange(item)">
+                        <el-option
+                          v-for="(candidate, candidateIndex) in item.candidates"
+                          :key="`cat-${item.sentenceIndex}-candidate-${candidateIndex}`"
+                          :label="candidate.template_text"
+                          :value="candidateIndex"
+                        >
+                          <div class="cat-candidate-option">
+                            <div class="cat-candidate-text">{{ candidate.template_text }}</div>
+                            <div v-if="candidate.semantic_score !== null && candidate.semantic_score !== undefined" class="cat-candidate-score">语义分 {{ formatCatScore(candidate.semantic_score) }}%</div>
+                          </div>
+                        </el-option>
+                      </el-select>
+                    </div>
+                  </div>
+
+                  <div v-show="!item.resultCollapsed" class="cat-item-section cat-item-section-compact cat-item-section-surface">
+                    <label class="cat-item-label">处理动作</label>
+                    <el-radio-group v-model="item.action" size="small" class="cat-action-group">
+                      <el-radio-button value="pending" @click="forceCatAction(item, 'pending')">待处理</el-radio-button>
+                      <el-radio-button value="accept" @click="forceCatAction(item, 'accept')">接受候选</el-radio-button>
+                      <el-radio-button value="modify" @click="forceCatAction(item, 'modify')">自定义</el-radio-button>
+                      <el-radio-button value="reject" @click="forceCatAction(item, 'reject')">拒绝</el-radio-button>
+                    </el-radio-group>
+                    <div v-if="item.isDraftSaved || item.action === 'modify'" class="cat-item-status-row">
+                      <span v-if="item.isDraftSaved" class="cat-item-saved-hint">{{ item.action === 'accept' ? '当前候选已保存，将以最新选择为准' : item.action === 'modify' ? '自定义文本已保存' : '当前处理结果已暂存' }}</span>
+                      <el-button v-if="item.action === 'modify' && item.isDraftSaved && !item.modifyEditorVisible" size="small" text native-type="button" @click="reopenCatModifyEditor(item)">编辑自定义</el-button>
+                    </div>
+                  </div>
+
+                  <div v-if="!item.resultCollapsed && item.action === 'modify' && item.modifyEditorVisible" class="cat-item-section cat-item-section-surface cat-item-section-surface-edit">
+                    <label class="cat-item-label">自定义润色文本</label>
+                    <el-input v-model="item.modifiedText" type="textarea" :rows="2" placeholder="输入你希望写入文档的最终文本" @input="markCatItemDirty(item)" />
+                    <div class="cat-item-inline-actions">
+                      <el-button v-if="item.candidates.length > 1" size="small" plain native-type="button" @click="focusCatCandidateSelect(item)">选择并更换候选</el-button>
+                      <el-button size="small" type="primary" plain native-type="button" @click="saveCatModify(item)">保存</el-button>
+                    </div>
+                  </div>
+                </div>
+                </div>
+                <div v-else class="doc-change-empty">{{ catEmptyStateText() }}</div>
+              </div>
+            </div>
+
+            <div v-else class="panel result-placeholder doc-result-panel">
+              <div class="panel-header">
+                <span>句式候选结果</span>
+              </div>
+              <div class="placeholder-text">上传文档后，这里会展示命中的句式候选和逐段确认区。</div>
+            </div>
+          </template>
+
+          <template v-else>
           <div v-if="docResult" class="panel doc-result-panel">
             <div class="panel-header">
               <span>润色结果</span>
@@ -182,6 +345,7 @@
                         collapse-tags
                         collapse-tags-tooltip
                         size="small"
+                        popper-class="cat-candidate-select-popper"
                         placeholder="选择一个或多个候选句子"
                         class="issue-candidate-select"
                         @change="selectCandidateSuggestion(issue, $event)"
@@ -251,6 +415,7 @@
             </div>
             <div class="placeholder-text">提交文档后，这里会展示润色结果和每条修改的确认状态。</div>
           </div>
+          </template>
         </div>
       </div>
     </div>
@@ -258,16 +423,6 @@
     <div v-if="currentView === 'text'">
       <div class="page-title-row">
         <h2 class="page-title">文本润色</h2>
-        <div class="stats-card">
-          <span class="stats-label">准确率</span>
-          <span class="stats-value" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.averageAccuracy }}%</span>
-          <span class="stats-divider">|</span>
-          <span class="stats-label">共润色</span>
-          <span class="stats-count-wrap">
-            <span class="stats-count" :class="{ 'stats-green': feedbackStats.averageAccuracy >= 50, 'stats-red': feedbackStats.averageAccuracy < 50 }">{{ feedbackStats.totalCount }}</span>
-            <span class="stats-unit">次</span>
-          </span>
-        </div>
       </div>
 
       <!-- 文件选择行 -->
@@ -277,20 +432,30 @@
         </div>
         <div class="file-select-row">
           <div class="file-select-col">
-            <label class="form-label">句式清单文件</label>
+            <label class="form-label">产品类型</label>
             <div class="input-with-button">
-              <el-select v-model="textSentenceFileId" size="small" class="full-width" placeholder="留空则加载全部" clearable>
-                <el-option v-for="f in sentenceFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+              <el-select v-model="textProductType" size="small" class="full-width" placeholder="选择产品类型" clearable @change="handleTextProductTypeChange">
+                <el-option v-for="item in documentProductTypeOptions" :key="`text-${item}`" :label="item" :value="item" />
               </el-select>
             </div>
           </div>
           <div class="file-select-col">
-            <label class="form-label">术语对照表</label>
+            <label class="form-label">句式清单文件</label>
             <div class="input-with-button">
-              <el-select v-model="textTerminologyFileId" size="small" class="full-width" placeholder="留空则使用数据库术语" clearable>
-                <el-option v-for="f in termFileOptions" :key="f.id" :label="f.label" :value="f.id" />
+              <el-select v-model="textSentenceFileId" size="small" class="full-width" :placeholder="textSentenceFileSelectPlaceholder" clearable @change="handleTextSentenceFileChange">
+                <el-option v-for="f in textSentenceFileOptions" :key="`text-sentence-${f.id}`" :label="f.label" :value="f.id" />
               </el-select>
             </div>
+            <div class="form-helper-text">{{ textSentenceFileHelperText }}</div>
+          </div>
+          <div class="file-select-col">
+            <label class="form-label">术语对照表</label>
+            <div class="input-with-button">
+              <el-select v-model="textTerminologyFileId" size="small" class="full-width" :placeholder="textTerminologyFileSelectPlaceholder" clearable @change="handleTextTerminologyChange">
+                <el-option v-for="f in textTermFileOptions" :key="`text-term-${f.id}`" :label="f.label" :value="f.id" />
+              </el-select>
+            </div>
+            <div class="form-helper-text">{{ textTerminologyFileHelperText }}</div>
           </div>
         </div>
       </div>
@@ -300,36 +465,59 @@
         <div class="content-left">
           <div class="panel">
             <div class="panel-header">
-              <span>请输入需要润色的文本</span>
+              <span>输入待润色文本</span>
               <div class="panel-actions">
-                <el-button type="primary" size="small" :loading="loading" @click="doPolish">开始润色</el-button>
+                <el-button type="primary" size="small" @click="doPolish">
+                  <el-icon v-if="loading" class="is-loading button-loading-icon"><Loading /></el-icon>
+                  <span>{{ loading ? '进行中' : '开始润色' }}</span>
+                </el-button>
                 <el-button size="small" @click="clearAll">清空</el-button>
               </div>
             </div>
-            <el-input
-              v-model="originalText"
-              type="textarea"
-              placeholder="请输入需要润色的文本..."
-            />
+            <div class="text-input-shell">
+              <el-input
+                v-model="originalText"
+                type="textarea"
+                placeholder="输入待润色文本..."
+              />
+            </div>
           </div>
         </div>
         <div class="content-right">
           <div v-if="result" class="panel result-panel">
               <div class="panel-header">
-                <div class="result-header-main">
+                <div class="result-header-inline">
                   <span>润色结果</span>
-                  <el-tag size="small" type="success">当前引擎：{{ currentPolishEngine }}</el-tag>
+                  <el-tag size="small" type="success">{{ currentPolishEngineLabel }}</el-tag>
                 </div>
                 <div class="panel-actions">
-                  <el-tag type="info" size="small">修改 {{ result.changes }} 处</el-tag>
                   <el-button size="small" @click="copyResult">复制</el-button>
                   <el-button size="small" @click="downloadResult">导出</el-button>
                 </div>
               </div>
               <div class="result-grid-vertical">
                 <div class="result-col-v">
-                  <div class="col-title"><span class="dot dot-green"></span>润色结果</div>
-                  <div class="col-content col-content-compact" v-html="highlightedPolishedHtml"></div>
+                  <div class="col-content col-content-compact issue-diff-content issue-diff-suggested" v-html="highlightedPolishedResultHtml"></div>
+                </div>
+              </div>
+              <div v-if="textCatPanelItems.length" class="text-cat-panel">
+                <div class="text-cat-header">
+                  <span>候选句子</span>
+                  <span class="text-cat-count">共 {{ textCatCandidateCount }} 条</span>
+                </div>
+                <div class="text-cat-list">
+                  <div v-for="item in textCatPanelItems" :key="item.rowKey" class="text-cat-item-row">
+                    <div class="cat-item-body">
+                      <el-select v-model="item.selectedCandidateIndex" class="full-width" size="large" placeholder="选择候选句式" placement="bottom-start" :popper-options="{ placement: 'bottom-start', modifiers: [{ name: 'flip', enabled: false }] }" @change="applyTextCatCandidate(item)">
+                        <el-option
+                          v-for="(candidate, candidateIndex) in item.candidates"
+                          :key="`${item.rowKey}-${candidateIndex}`"
+                          :label="candidate.template_text || ''"
+                          :value="candidateIndex"
+                        />
+                      </el-select>
+                    </div>
+                  </div>
                 </div>
               </div>
           </div>
@@ -347,35 +535,57 @@
         <div class="panel-header">
           <span>意见反馈</span>
         </div>
-        <div class="feedback-row">
-          <div class="feedback-left">
-            <div class="form-item">
-              <label class="form-label">准确率评分 (0-100%)</label>
-              <el-slider v-model="feedbackAccuracy" :min="0" :max="100" :step="5" show-input />
-            </div>
-          </div>
-          <div class="feedback-right">
-            <div class="form-item">
-              <label class="form-label">需修正的词语/句子</label>
-              <el-input
-                v-model="feedbackCorrections"
-                type="textarea"
-                :rows="3"
-                :placeholder="feedbackPlaceholder"
-              />
-              <div class="feedback-hint">{{ feedbackHint }}</div>
+        <div class="feedback-rating-row">
+          <div class="form-item">
+            <label class="form-label">准确度评分</label>
+            <div class="feedback-rating-inline">
+              <div class="feedback-rating-group">
+                <button
+                  v-for="star in feedbackStarSteps"
+                  :key="star"
+                  type="button"
+                  class="feedback-rating-btn"
+                  :class="{ active: star <= selectedFeedbackStars }"
+                  @click="setFeedbackStars(star)"
+                >
+                  <span class="rating-star">★</span>
+                </button>
+              </div>
+              <div class="feedback-rating-text">{{ feedbackRatingLabel }}</div>
             </div>
           </div>
         </div>
-        <div class="feedback-bottom">
+        <div class="feedback-type-row">
           <div class="form-item">
-            <label class="form-label">写入目标（将写入上方选中的对应文件）</label>
-            <el-radio-group v-model="feedbackTarget">
-              <el-radio value="terminology">术语对照表</el-radio>
-              <el-radio value="sentence_guide">句式清单文件</el-radio>
+            <label class="form-label">反馈类型</label>
+            <el-radio-group v-model="feedbackType">
+              <el-radio value="term">术语修正</el-radio>
+              <el-radio value="sentence">句式修正</el-radio>
             </el-radio-group>
           </div>
-          <div style="text-align: right">
+        </div>
+        <div class="feedback-body">
+          <template v-if="feedbackType === 'term'">
+            <div v-for="(item, index) in termItems" :key="`term-${index}`" class="term-row">
+              <el-input v-model="item.original" placeholder="原文用词" />
+              <span class="term-arrow">→</span>
+              <el-input v-model="item.standard" placeholder="标准用语" />
+              <el-button text @click="removeTermItem(index)">删除</el-button>
+            </div>
+            <el-button type="primary" plain size="small" @click="addTermItem">+ 添加术语修正</el-button>
+          </template>
+          <template v-else>
+            <el-input
+              v-model="sentenceCorrections"
+              type="textarea"
+              :rows="3"
+              placeholder="每行一条正确写法，例如：\n请勿在开机状态下断开电源。\n使用前请仔细阅读本说明书。"
+            />
+          </template>
+          <div class="feedback-hint">{{ feedbackHint }}</div>
+        </div>
+        <div class="feedback-bottom">
+          <div class="form-item">
             <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
           </div>
         </div>
@@ -392,7 +602,8 @@
 
     <el-dialog v-model="filePickerVisible" title="从知识库选择文件" width="480px">
       <div class="file-picker-content">
-        <div v-if="knowledgeTreeList.length === 0" class="picker-empty">暂无知识库文件</div>
+        <div v-if="knowledgeTreeLoading" class="picker-empty">正在加载知识库...</div>
+        <div v-else-if="knowledgeTreeList.length === 0" class="picker-empty">暂无知识库文件</div>
         <div v-else class="picker-list">
           <button
             v-for="item in knowledgeTreeList"
@@ -449,48 +660,60 @@
 
 <script setup>
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { polishAPI, knowledgeAPI, systemAPI } from '@/api'
+import axios from 'axios'
+import { polishAPI, knowledgeAPI, systemAPI, getAPIErrorMessage, getKnowledgeLoadErrorMessage } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
 import { usePolishStore } from '@/store/polish'
 
 const route = useRoute()
+const router = useRouter()
 const polishStore = usePolishStore()
 const { documentDraft, documentSession } = storeToRefs(polishStore)
 const candidateSelectRefs = new Map()
 const localFileInputRef = ref(null)
 const docPreviewRef = ref(null)
 const filePickerVisible = ref(false)
+const knowledgeTreeLoading = ref(false)
 const knowledgeTree = ref([])
 const knowledgeTreeList = ref([])
 const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
-const DEFAULT_DOCUMENT_SENTENCE_FILE_ID = 22
+const CAT_SESSION_KEY = 'polish-cat-session-v1'
+const CAT_SESSION_VERSION = '2026-08-10-cat-item-collapse-2'
 let knowledgeTreePromise = null
+let catSessionPersistTimer = null
+let activeTextPolishController = null
+const documentProductTypeOptions = ['建库试剂', '测序试剂', '核酸提取', '测序仪', '自动化', '软件', '超声']
 
 // ── 下拉框选项 ──
+const allSentenceFileOptions = ref([])
+const allTermFileOptions = ref([])
 const sentenceFileOptions = ref([])
 const termFileOptions = ref([])
-
-function applyDefaultDocumentSentenceFile() {
-  if (formData.value.sentenceFileId) return
-  const preferredFile = sentenceFileOptions.value.find(item => String(item.id) === String(DEFAULT_DOCUMENT_SENTENCE_FILE_ID))
-  if (!preferredFile) return
-  formData.value.sentenceFileId = preferredFile.id
-  formData.value.sentenceFile = preferredFile.name || preferredFile.label || ''
-}
+const textSentenceFileOptions = ref([])
+const textTermFileOptions = ref([])
+const sentenceProductFolderMap = ref({})
+const terminologyProductFolderMap = ref({})
+const sentenceFileAutoSelected = ref(false)
+const terminologyFileAutoSelected = ref(false)
+const textSentenceFileAutoSelected = ref(false)
+const textTerminologyFileAutoSelected = ref(false)
 
 // ── 加载句式清单 / 术语库下拉选项 ──
 async function loadDropdownOptions() {
   try {
     const rawData = await ensureKnowledgeTreeLoaded()
-    const sentenceNode = findNodeByName(rawData, '句式清单')
-    const termNode = findNodeByName(rawData, '术语库')
-    sentenceFileOptions.value = flattenFileOptions(sentenceNode ? [sentenceNode] : [])
-    termFileOptions.value = flattenFileOptions(termNode ? [termNode] : [])
-    applyDefaultDocumentSentenceFile()
+    const sentenceNode = findKnowledgePathNode(rawData, ['写作规范', '句式清单']) || findKnowledgeNode(rawData, ['句式清单'])
+    const termNode = findKnowledgePathNode(rawData, ['资源库', '术语库']) || findKnowledgeNode(rawData, ['术语库'])
+    allSentenceFileOptions.value = flattenFileOptions(sentenceNode ? [sentenceNode] : [])
+    sentenceProductFolderMap.value = buildSentenceProductFolderMap(sentenceNode)
+    allTermFileOptions.value = flattenFileOptions(termNode ? [termNode] : [])
+    terminologyProductFolderMap.value = buildProductFolderMap(termNode, '/资源库/术语库')
+    syncProductMatchedFileOptions()
+    syncTextProductMatchedFileOptions()
   } catch (e) {
     console.warn('加载知识库下拉选项失败', e)
   }
@@ -534,7 +757,14 @@ function flattenFileOptions(nodes) {
       const label = prefix ? `${prefix} / ${node.name}` : node.name
       const files = node.files || []
       files.forEach(f => {
-        result.push({ id: f.id, name: f.name, label: f.name, groupLabel: label })
+        result.push({
+          id: f.id,
+          name: f.name,
+          label: f.name,
+          groupLabel: label,
+          createdAt: f.created_at || '',
+          updatedAt: f.updated_at || ''
+        })
       })
       if (node.children && node.children.length > 0) {
         walk(node.children, label)
@@ -542,16 +772,169 @@ function flattenFileOptions(nodes) {
     })
   }
   walk(nodes)
-  return result
+  return result.sort(compareKnowledgeFilesByTimeDesc)
+}
+
+function toKnowledgeFileTimestamp(value) {
+  const ts = Date.parse(String(value || ''))
+  return Number.isNaN(ts) ? 0 : ts
+}
+
+function compareKnowledgeFilesByTimeDesc(a, b) {
+  const timeDiff = toKnowledgeFileTimestamp(b?.updatedAt || b?.createdAt) - toKnowledgeFileTimestamp(a?.updatedAt || a?.createdAt)
+  if (timeDiff !== 0) {
+    return timeDiff
+  }
+  return Number(b?.id || 0) - Number(a?.id || 0)
+}
+
+function findKnowledgePathNode(nodes, pathNames) {
+  if (!Array.isArray(nodes) || !Array.isArray(pathNames) || pathNames.length === 0) {
+    return null
+  }
+  let currentList = nodes
+  let currentNode = null
+  for (const name of pathNames) {
+    currentNode = Array.isArray(currentList) ? currentList.find(node => node.name === name) : null
+    if (!currentNode) {
+      return null
+    }
+    currentList = currentNode.children || []
+  }
+  return currentNode
+}
+
+function buildProductFolderMap(rootNode, rootPath) {
+  const map = {}
+  const children = Array.isArray(rootNode?.children) ? rootNode.children : []
+  documentProductTypeOptions.forEach(productType => {
+    const folderNode = children.find(node => node.name === productType)
+    map[productType] = {
+      folderNode: folderNode || null,
+      path: folderNode ? `${rootPath}/${productType}` : '',
+      files: flattenFileOptions(folderNode ? [folderNode] : [])
+    }
+  })
+  return map
+}
+
+function buildSentenceProductFolderMap(sentenceNode) {
+  return buildProductFolderMap(sentenceNode, '/写作规范/句式清单')
+}
+
+function getLatestMatchedFile(files) {
+  return Array.isArray(files) && files.length > 0 ? files[0] : null
+}
+
+function syncAutoMatchedField(fieldName, options, autoSelectedRef) {
+  const currentValue = formData.value[fieldName]
+  const latestMatchedFile = getLatestMatchedFile(options)
+  const exists = options.some(item => String(item.id) === String(currentValue))
+  if (autoSelectedRef.value) {
+    formData.value[fieldName] = latestMatchedFile?.id || null
+    autoSelectedRef.value = Boolean(latestMatchedFile)
+    return
+  }
+  if (currentValue && !exists) {
+    formData.value[fieldName] = null
+    autoSelectedRef.value = false
+    return
+  }
+}
+
+function syncProductMatchedFileOptions() {
+  const productType = String(formData.value.productType || '').trim()
+  const matchedSentence = productType ? sentenceProductFolderMap.value[productType] : null
+  const matchedTerminology = productType ? terminologyProductFolderMap.value[productType] : null
+  sentenceFileOptions.value = matchedSentence?.folderNode ? matchedSentence.files : allSentenceFileOptions.value
+  termFileOptions.value = matchedTerminology?.folderNode ? matchedTerminology.files : allTermFileOptions.value
+  syncAutoMatchedField('sentenceFileId', sentenceFileOptions.value, sentenceFileAutoSelected)
+  syncAutoMatchedField('terminologyFileId', termFileOptions.value, terminologyFileAutoSelected)
+  handleSentenceFileChange(formData.value.sentenceFileId, sentenceFileAutoSelected.value)
+  onDocumentTerminologyChange(formData.value.terminologyFileId, terminologyFileAutoSelected.value)
+}
+
+function handleProductTypeChange() {
+  formData.value.sentenceFileId = null
+  formData.value.sentenceFile = ''
+  formData.value.terminologyFileId = null
+  formData.value.terminologyFile = ''
+  sentenceFileAutoSelected.value = true
+  terminologyFileAutoSelected.value = true
+  syncProductMatchedFileOptions()
+}
+
+function handleSentenceFileChange(value, autoSelected = false) {
+  sentenceFileAutoSelected.value = autoSelected
+  const selected = sentenceFileOptions.value.find(item => String(item.id) === String(value))
+  formData.value.sentenceFile = selected?.name || ''
+}
+
+function syncTextAutoMatchedField(fieldRef, options, autoSelectedRef, onSelected) {
+  const currentValue = fieldRef.value
+  const latestMatchedFile = getLatestMatchedFile(options)
+  const exists = options.some(item => String(item.id) === String(currentValue))
+  if (autoSelectedRef.value) {
+    fieldRef.value = latestMatchedFile?.id || null
+    autoSelectedRef.value = Boolean(latestMatchedFile)
+  } else if (currentValue && !exists) {
+    fieldRef.value = null
+    autoSelectedRef.value = false
+  }
+  onSelected(fieldRef.value, autoSelectedRef.value)
+}
+
+function syncTextProductMatchedFileOptions(skipAutoMatch = false) {
+  const productType = String(textProductType.value || '').trim()
+  const matchedSentence = productType ? sentenceProductFolderMap.value[productType] : null
+  const matchedTerminology = productType ? terminologyProductFolderMap.value[productType] : null
+  textSentenceFileOptions.value = matchedSentence?.folderNode ? matchedSentence.files : allSentenceFileOptions.value
+  textTermFileOptions.value = matchedTerminology?.folderNode ? matchedTerminology.files : allTermFileOptions.value
+   if (skipAutoMatch) {
+    handleTextSentenceFileChange(textSentenceFileId.value, false)
+    handleTextTerminologyChange(textTerminologyFileId.value, false)
+    return
+  }
+  syncTextAutoMatchedField(textSentenceFileId, textSentenceFileOptions.value, textSentenceFileAutoSelected, handleTextSentenceFileChange)
+  syncTextAutoMatchedField(textTerminologyFileId, textTermFileOptions.value, textTerminologyFileAutoSelected, handleTextTerminologyChange)
+}
+
+function handleTextProductTypeChange() {
+  textSentenceFileId.value = null
+  textSentenceFileName.value = ''
+  textTerminologyFileId.value = null
+  textTerminologyFileName.value = ''
+  textSentenceFileAutoSelected.value = true
+  textTerminologyFileAutoSelected.value = true
+  syncTextProductMatchedFileOptions()
+}
+
+function handleTextSentenceFileChange(value, autoSelected = false) {
+  textSentenceFileAutoSelected.value = autoSelected
+  const selected = textSentenceFileOptions.value.find(item => String(item.id) === String(value))
+  textSentenceFileName.value = selected?.name || ''
+}
+
+function handleTextTerminologyChange(value, autoSelected = false) {
+  textTerminologyFileAutoSelected.value = autoSelected
+  const selected = textTermFileOptions.value.find(item => String(item.id) === String(value))
+  textTerminologyFileName.value = selected?.name || ''
 }
 
 const originalText = ref('')
+const textProductType = ref('')
 const textSentenceFileName = ref('')
 const textSentenceFileId = ref(null)
 const textTerminologyFileName = ref('')
 const textTerminologyFileId = ref(null)
 const result = ref(null)
+const textCatItems = ref([])
 const docResult = ref(null)
+const catResult = ref(null)
+const catItems = ref([])
+const catApplying = ref(false)
+const catDiagnosticExpanded = ref(false)
+const catApplyResult = ref(null)
 const docKeywordFilter = ref('')
 const docConfidenceFilter = ref('all')
 const docStatusFilter = ref('all')
@@ -564,26 +947,90 @@ const polishProgressMsg = ref('')
 const documentProgressEtaText = ref('')
 const docFeedbackLoading = ref(false)
 const docDecisionSaving = ref(false)
-const docFeedbackStats = ref({ totalSubmissions: 0, averageAccuracy: 0 })
 // 反馈相关
-const feedbackAccuracy = ref(80)
-const feedbackCorrections = ref('')
-const feedbackTarget = ref('terminology')
+const feedbackAccuracy = ref(null)
+const feedbackStarSteps = [1, 2, 3, 4, 5]
+const feedbackType = ref('term')
+const termItems = ref([{ original: '', standard: '' }])
+const sentenceCorrections = ref('')
 const feedbackLoading = ref(false)
-const feedbackStats = ref({ totalCount: 0, averageAccuracy: 0 })
 const currentPolishEngine = ref('检测中')
+const feedbackScoreMap = {
+  1: 20,
+  2: 40,
+  3: 60,
+  4: 80,
+  5: 100
+}
+const selectedFeedbackStars = computed(() => {
+  if (!feedbackAccuracy.value) {
+    return 0
+  }
+  return Object.entries(feedbackScoreMap).find(([, score]) => score === feedbackAccuracy.value)?.[0] * 1 || 0
+})
+const feedbackRatingLabel = computed(() => {
+  const star = selectedFeedbackStars.value
+  if (star === 5) return '非常准确'
+  if (star === 4) return '比较准确'
+  if (star === 3) return '部分准确'
+  if (star === 2) return '准确度偏低'
+  if (star === 1) return '准确度很低'
+  return '请选择 1 到 5 星'
+})
 
-const feedbackPlaceholder = computed(() => (
-  feedbackTarget.value === 'sentence_guide'
-    ? '每行一条，直接填写需补充或修正的词语/句子\n例如：请勿在开机状态下断开电源。'
-    : '每行一条，格式：非标准词 → 标准词\n例如：移液枪 → 移液器'
+const feedbackTarget = computed(() => (
+  feedbackType.value === 'term' ? 'terminology' : 'sentence_guide'
 ))
 
 const feedbackHint = computed(() => (
-  feedbackTarget.value === 'sentence_guide'
-    ? '句式清单文件：将自动写入平台反馈的句式清单，每行一条。'
-    : '术语对照表：将自动写入平台反馈的术语对照表，按"非标准词 → 标准词"填写。'
+  feedbackType.value === 'sentence'
+    ? '句式修正将写入平台反馈的句式清单，每行一条。'
+    : '术语修正将写入平台反馈的术语对照表，按“原文用词 → 标准用语”填写。'
 ))
+
+const feedbackTargetHint = computed(() => (
+  feedbackType.value === 'sentence'
+    ? '将自动写入平台反馈句式清单'
+    : '将自动写入平台反馈术语对照表'
+))
+
+function addTermItem() {
+  termItems.value.push({ original: '', standard: '' })
+}
+
+function removeTermItem(index) {
+  if (termItems.value.length === 1) {
+    termItems.value[0] = { original: '', standard: '' }
+    return
+  }
+  termItems.value.splice(index, 1)
+}
+
+function feedbackTargetLabel() {
+  return feedbackType.value === 'term' ? '平台反馈的术语对照表' : '平台反馈的句式清单'
+}
+
+function buildTermCorrections() {
+  return termItems.value
+    .map(item => ({
+      original: String(item.original || '').trim(),
+      standard: String(item.standard || '').trim()
+    }))
+    .filter(item => item.original && item.standard)
+    .map(item => `${item.original} -> ${item.standard}`)
+    .join('\n')
+}
+
+function resetFeedbackForm() {
+  feedbackAccuracy.value = null
+  feedbackType.value = 'term'
+  termItems.value = [{ original: '', standard: '' }]
+  sentenceCorrections.value = ''
+}
+
+function setFeedbackStars(star) {
+  feedbackAccuracy.value = feedbackScoreMap[star] || null
+}
 
 // 文档润色 - 需修正弹窗
 const correctionDialogVisible = ref(false)
@@ -1117,13 +1564,48 @@ function sliceSegmentsByRange(segments, start, end) {
   return mergeDiffSegments(result)
 }
 
-function renderSegmentsHtml(segments) {
+function renderDiffTokenHtml(text) {
+  return escapeHtml(String(text || ''))
+    .replace(/ /g, '<span class="diff-space">&#183;</span>')
+    .replace(/\t/g, '<span class="diff-space">&#8677;</span>')
+}
+
+function renderSegmentsHtml(segments, mode = 'suggested') {
+  const changedClass = mode === 'original' ? 'diff-highlight diff-highlight-original' : 'diff-highlight diff-highlight-suggested'
   return mergeDiffSegments(segments)
     .map(segment => {
-      const content = escapeHtml(segment.text)
-      return segment.changed ? `<span class="diff-highlight">${content}</span>` : content
+      const content = renderDiffTokenHtml(segment.text)
+      return segment.changed ? `<span class="${changedClass}">${content}</span>` : content
     })
     .join('')
+}
+
+function renderCatCandidateDiffHtml(sourceText, targetText, mode = 'suggested') {
+  if (String(sourceText || '').length + String(targetText || '').length > 20000) {
+    const displayText = mode === 'original' ? sourceText : targetText
+    return `<div class="result-text-block">${escapeHtml(displayText || '')}</div>`
+  }
+  return renderIssueDiffContent(sourceText, targetText, mode)
+}
+
+function renderCatOriginalDiffHtml(sourceText, targetText) {
+  return renderCatCandidateDiffHtml(sourceText, targetText, 'original')
+}
+
+function renderCatSuggestedDiffHtml(sourceText, targetText) {
+  return renderCatCandidateDiffHtml(sourceText, targetText, 'suggested')
+}
+
+function renderCatOriginalTextHtml(item) {
+  const text = String(item?.originalText || '').trim()
+  return `<div class="result-text-block">${escapeHtml(text)}</div>`
+}
+
+function renderCatOriginalPanelHtml(item) {
+  if (item?.action === 'reject') {
+    return renderCatOriginalTextHtml(item)
+  }
+  return renderCatOriginalDiffHtml(item?.originalText || '', getCatDisplayText(item))
 }
 
 function renderDiffHtml(sourceText, targetText, mode) {
@@ -1141,14 +1623,37 @@ function renderDiffHtml(sourceText, targetText, mode) {
       const subTarget = mode === 'original' ? findListItemInOther(item.text, idx, otherText) : item.text
       const diff = buildDiffSegments(subSource, subTarget)
       const segments = mode === 'original' ? diff.left : diff.right
-      return `<li>${renderSegmentsHtml(segments).trim()}</li>`
+      return `<li>${renderSegmentsHtml(segments, mode).trim()}</li>`
     }).join('')
     return `<${tagName} class="result-auto-list">${itemsHtml}</${tagName}>`
   }
 
   const diff = buildDiffSegments(sourceText, targetText)
   const segments = mode === 'original' ? diff.left : diff.right
-  return `<div class="result-text-block">${renderSegmentsHtml(segments)}</div>`
+  return `<div class="result-text-block">${renderSegmentsHtml(segments, mode)}</div>`
+}
+
+function renderTextPolishedResultHtml(resultData, polishedText) {
+  const nextText = String(polishedText || '').trim()
+  if (!nextText) {
+    return renderDiffHtml(resultData?.original, resultData?.polished, 'polished')
+  }
+  return renderDiffHtml(resultData?.original, nextText, 'polished')
+}
+
+function getDisplayedPolishedText(resultData, items) {
+  const baseText = String(resultData?.basePolished || resultData?.polished || resultData?.original || '')
+  if (!Array.isArray(items) || !items.length) {
+    return baseText
+  }
+  return items.reduce((currentText, item) => {
+    const candidateText = getTextCatCandidateValue(selectedTextCatCandidate(item))
+    const originalSentence = String(item?.originalText || '').trim()
+    if (!currentText || !candidateText || !originalSentence || !currentText.includes(originalSentence)) {
+      return currentText
+    }
+    return currentText.replace(originalSentence, candidateText)
+  }, baseText)
 }
 
 function findListItemInOther(itemText, index, otherText) {
@@ -1163,18 +1668,121 @@ function findListItemInOther(itemText, index, otherText) {
   return itemText
 }
 
+const textCatPanelItems = computed(() => textCatItems.value.filter(item => Array.isArray(item?.candidates) && item.candidates.length >= 2))
+const textCatCandidateCount = computed(() => textCatPanelItems.value.reduce((total, item) => total + (Array.isArray(item?.candidates) ? item.candidates.length : 0), 0))
+const singleTextCatItem = computed(() => {
+  if (textCatItems.value.length !== 1) {
+    return null
+  }
+  const [item] = textCatItems.value
+  return Array.isArray(item?.candidates) && item.candidates.length === 1 ? item : null
+})
+const activeTextCatMatchRate = computed(() => {
+  const sourceItem = singleTextCatItem.value || textCatPanelItems.value[0] || null
+  const candidate = selectedTextCatCandidate(sourceItem)
+  const matchRate = formatCatCandidateMatchRate(candidate)
+  if (!matchRate) {
+    return ''
+  }
+  return matchRate
+})
+const currentPolishEngineLabel = computed(() => {
+  if (currentPolishEngine.value === '本地润色' && activeTextCatMatchRate.value) {
+    return `当前引擎：句式匹配/匹配率：${activeTextCatMatchRate.value}`
+  }
+  return `当前引擎：${currentPolishEngine.value}`
+})
 const highlightedPolishedHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'polished'))
+const displayedPolishedText = computed(() => getDisplayedPolishedText(result.value, textCatItems.value))
+const highlightedPolishedResultHtml = computed(() => renderTextPolishedResultHtml(result.value, displayedPolishedText.value))
 const highlightedDocOriginalHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'original'))
 const highlightedDocPolishedHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'polished'))
+const currentSentenceProductFolder = computed(() => sentenceProductFolderMap.value[String(formData.value.productType || '').trim()] || null)
+const currentTerminologyProductFolder = computed(() => terminologyProductFolderMap.value[String(formData.value.productType || '').trim()] || null)
+const sentenceFileSelectPlaceholder = computed(() => {
+  if (formData.value.productType) {
+    return sentenceFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无句式清单文件'
+  }
+  return '自动匹配全部句式清单文件'
+})
+const sentenceFileHelperText = computed(() => {
+  if (!formData.value.productType) {
+    return ''
+  }
+  if (!currentSentenceProductFolder.value?.folderNode) {
+    return `当前产品类型未配置专属句式清单，已回退到全部知识库文件。`
+  }
+  return ''
+})
+const terminologyFileSelectPlaceholder = computed(() => {
+  if (formData.value.productType) {
+    return termFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无术语文件'
+  }
+  return '自动匹配全部术语文件'
+})
+const terminologyFileHelperText = computed(() => {
+  if (!formData.value.productType) {
+    return ''
+  }
+  if (!currentTerminologyProductFolder.value?.folderNode) {
+    return `当前产品类型未配置专属术语库，已回退到全部知识库文件。`
+  }
+  return ''
+})
+const currentTextSentenceProductFolder = computed(() => sentenceProductFolderMap.value[String(textProductType.value || '').trim()] || null)
+const currentTextTerminologyProductFolder = computed(() => terminologyProductFolderMap.value[String(textProductType.value || '').trim()] || null)
+const textSentenceFileSelectPlaceholder = computed(() => {
+  if (textProductType.value) {
+    return textSentenceFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无句式清单文件'
+  }
+  return '自动匹配全部句式清单文件'
+})
+const textSentenceFileHelperText = computed(() => {
+  if (!textProductType.value) {
+    return ''
+  }
+  if (!currentTextSentenceProductFolder.value?.folderNode) {
+    return '当前产品类型未配置专属句式清单，已回退到全部知识库文件。'
+  }
+  return ''
+})
+const textTerminologyFileSelectPlaceholder = computed(() => {
+  if (textProductType.value) {
+    return textTermFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无术语文件'
+  }
+  return '自动匹配全部术语文件'
+})
+const textTerminologyFileHelperText = computed(() => {
+  if (!textProductType.value) {
+    return ''
+  }
+  if (!currentTextTerminologyProductFolder.value?.folderNode) {
+    return '当前产品类型未配置专属术语库，已回退到全部知识库文件。'
+  }
+  return ''
+})
+
+const DEFAULT_DOCUMENT_WORKFLOW = 'cat'
+const showStandardDocumentWorkflow = false
+
+function normalizeDocumentWorkflow(workflow) {
+  if (!showStandardDocumentWorkflow) {
+    return DEFAULT_DOCUMENT_WORKFLOW
+  }
+  return workflow === 'standard' || workflow === 'cat' ? workflow : DEFAULT_DOCUMENT_WORKFLOW
+}
 
 const formData = ref({
+  productType: documentDraft.value.productType || '',
   sentenceFile: documentDraft.value.sentenceFile || '',
   sentenceFileId: documentDraft.value.sentenceFileId || null,
   terminologyFile: documentDraft.value.terminologyFile || '',
   terminologyFileId: documentDraft.value.terminologyFileId || null,
   sourceFile: documentDraft.value.sourceFile || '',
   outputPath: documentDraft.value.outputPath || '已润色文档',
-  requirements: documentDraft.value.requirements || ''
+  requirements: documentDraft.value.requirements || '',
+  documentWorkflow: normalizeDocumentWorkflow(documentDraft.value.documentWorkflow),
+  catAiSemanticScoring: Boolean(documentDraft.value.catAiSemanticScoring)
 })
 
 const currentView = computed(() => (route.path === '/polish/document' ? 'document' : 'text'))
@@ -1201,6 +1809,66 @@ const actionableDocIssueCount = computed(() => {
 const pendingDocIssueCount = computed(() => {
   const items = docResult.value?.changeDetails || []
   return items.filter(item => item.status === 'pending').length
+})
+
+function isCatItemConfirmed(item) {
+  if (!item) {
+    return false
+  }
+  return getEffectiveCatAction(item) !== 'pending'
+}
+
+const acceptedCatCount = computed(() => catItems.value.filter(item => getEffectiveCatAction(item) === 'accept').length)
+const modifiedCatCount = computed(() => catItems.value.filter(item => getEffectiveCatAction(item) === 'modify').length)
+const rejectedCatCount = computed(() => catItems.value.filter(item => getEffectiveCatAction(item) === 'reject').length)
+const confirmedCatCount = computed(() => catItems.value.filter(isCatItemConfirmed).length)
+const pendingCatCount = computed(() => catItems.value.length - confirmedCatCount.value)
+const catDocumentAccuracyRate = computed(() => {
+  if (!catItems.value.length || pendingCatCount.value > 0) {
+    return null
+  }
+  if (catApplyResult.value?.accuracyRate !== null && catApplyResult.value?.accuracyRate !== undefined && catApplyResult.value?.accuracyRate !== '') {
+    return Number(catApplyResult.value.accuracyRate)
+  }
+  const effectiveDecided = acceptedCatCount.value + modifiedCatCount.value + rejectedCatCount.value
+  if (effectiveDecided <= 0) {
+    return null
+  }
+  return Number((acceptedCatCount.value / effectiveDecided * 100).toFixed(1))
+})
+
+const catAiStatusLabel = computed(() => {
+  const status = catResult.value?.aiScoringStatus || ''
+  if (status === 'completed') return '已完成'
+  if (status === 'no_api_key') return '未配置 Key，已降级'
+  if (status === 'skipped') return '已跳过，已降级'
+  if (status === 'failed' || status === 'error' || status === 'parse_error' || status === 'invalid_payload' || status === 'empty') return '调用失败，已降级'
+  return '未知状态'
+})
+
+const catCandidateDebugSummaryText = computed(() => {
+  const summary = catResult.value?.candidateDebugSummary
+  if (!summary) {
+    return ''
+  }
+  const templatePoolSize = Number(summary.templatePoolSize || 0)
+  const templatesConsidered = Number(summary.templatesConsidered || 0)
+  const templatesMatched = Number(summary.templatesMatched || 0)
+  const returnedBeforeAi = Number(summary.returnedCandidatesBeforeAi || 0)
+  const surfaceRuleCandidates = Number(summary.surfaceRuleCandidates || 0)
+  const before = Number(summary.totalBeforeFilter || 0)
+  const after = Number(summary.totalAfterFilter || 0)
+  const review = Number(summary.needsReviewCount || 0)
+  const dropped = summary.droppedByReason || {}
+  const simpleMatchDropped = summary.simpleMatchDroppedByReason || {}
+  const topReason = Object.entries(dropped)
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0]
+  const topSimpleMatchReason = Object.entries(simpleMatchDropped)
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))[0]
+  const topReasonText = topReason ? `，主要过滤原因 ${topReason[0]} ${topReason[1]} 条` : ''
+  const simpleMatchText = topSimpleMatchReason ? `，_simple_match 主要拦截 ${topSimpleMatchReason[0]} ${topSimpleMatchReason[1]} 条` : ''
+  const surfaceRuleText = surfaceRuleCandidates > 0 ? `，表层规则直出 ${surfaceRuleCandidates}` : ''
+  return `模板池 ${templatePoolSize}，进入匹配 ${templatesConsidered}，召回通过 ${templatesMatched}${surfaceRuleText}，候选 ${returnedBeforeAi} -> ${before} -> ${after}，其中 ${review} 条需确认${topReasonText}${simpleMatchText}`
 })
 
 const confirmedDocChangeCount = computed(() => {
@@ -1258,7 +1926,6 @@ async function persistDocumentDecisions(showMessage = false, resetAfterSubmit = 
         ElMessage.success('文档反馈已提交，本次没有新增句式写入')
       }
     }
-    await loadDocumentFeedbackStats()
     if (resetAfterSubmit) {
       resetForm()
     }
@@ -1372,6 +2039,16 @@ function setCandidateSelectRef(rowKey, el) {
   } else {
     candidateSelectRefs.delete(rowKey)
   }
+}
+
+function focusCatCandidateSelect(item) {
+  const rowKey = item?.rowKey
+  if (!rowKey) {
+    return
+  }
+  const selectRef = candidateSelectRefs.get(rowKey)
+  selectRef?.focus?.()
+  selectRef?.toggleMenu?.()
 }
 
 function combineCandidateTexts(candidates) {
@@ -1544,7 +2221,7 @@ function renderIssueDiffContent(sourceText, targetText, mode) {
   const segments = mergeDiffSegments(mode === 'original' ? diff.left : diff.right)
   const changedClass = mode === 'original' ? 'diff-remove' : 'diff-add'
   const html = segments.map(segment => {
-    const content = escapeHtml(segment.text)
+    const content = renderDiffTokenHtml(segment.text)
     return segment.changed ? `<span class="${changedClass}">${content}</span>` : content
   }).join('')
   return `<div class="result-text-block">${html}</div>`
@@ -2004,6 +2681,7 @@ function normalizeDocumentChanges(changes) {
 function applyDocumentResult(data, fallbackSourceName = '') {
   const normalized = normalizeDocumentChanges(data?.review_items || data?.reviewItems || data?.changes || [])
   const normalizedChanges = normalized.items
+  clearCatResult()
   docKeywordFilter.value = ''
   docConfidenceFilter.value = 'all'
   docStatusFilter.value = 'all'
@@ -2052,7 +2730,8 @@ function shortTaskId(taskId) {
   return value.length > 12 ? value.slice(0, 12) : value
 }
 
-function onDocumentTerminologyChange(fileId) {
+function onDocumentTerminologyChange(fileId, autoSelected = false) {
+  terminologyFileAutoSelected.value = autoSelected
   const selected = termFileOptions.value.find(item => item.id === fileId)
   formData.value.terminologyFile = selected?.name || ''
 }
@@ -2126,9 +2805,9 @@ function stopDocumentProgress() {
 function openFilePicker(field, type) {
   currentPickerField.value = field
   if (type === 'knowledge') {
-    loadKnowledgeTree()
     selectedKnowledgeFile.value = null
     filePickerVisible.value = true
+    loadKnowledgeTree()
   }
 }
 
@@ -2143,38 +2822,45 @@ function openTextTerminologyPicker() {
 function clearTextSentenceFile() {
   textSentenceFileName.value = ''
   textSentenceFileId.value = null
+  textSentenceFileAutoSelected.value = false
 }
 
 function clearTextTerminologyFile() {
   textTerminologyFileName.value = ''
   textTerminologyFileId.value = null
+  textTerminologyFileAutoSelected.value = false
 }
 
 async function loadKnowledgeTree() {
+  knowledgeTreeLoading.value = true
   try {
     const rawData = await ensureKnowledgeTreeLoaded()
     knowledgeTree.value = flattenTree(rawData)
     // Filter: only show files from the relevant subtree
-    let filteredData = rawData
+    let filteredData = []
     if (currentPickerField.value === 'sentenceFile' || currentPickerField.value === 'textSentenceFile') {
-      const n = findNodeByName(rawData, '句式清单')
-      filteredData = n ? [n] : rawData
-    } else if (currentPickerField.value === 'textTerminologyFile') {
-      const n = findNodeByName(rawData, '术语库')
-      filteredData = n ? [n] : rawData
+      const n = findKnowledgePathNode(rawData, ['写作规范', '句式清单']) || findKnowledgeNode(rawData, ['句式清单'])
+      filteredData = n ? [n] : []
+    } else if (currentPickerField.value === 'terminologyFile' || currentPickerField.value === 'textTerminologyFile') {
+      const n = findKnowledgePathNode(rawData, ['资源库', '术语库']) || findKnowledgeNode(rawData, ['术语库'])
+      filteredData = n ? [n] : []
+    } else {
+      filteredData = rawData
     }
     knowledgeTreeList.value = flattenKnowledgeList(filteredData)
     selectedKnowledgeFile.value = null
   } catch (e) {
-    ElMessage.error('加载知识库失败')
+    ElMessage.error(getKnowledgeLoadErrorMessage(e))
+  } finally {
+    knowledgeTreeLoading.value = false
   }
 }
 
-function findNodeByName(nodes, name) {
+function findKnowledgeNode(nodes, names) {
   for (const node of nodes) {
-    if (node.name === name) return node
+    if (names.includes(node.name)) return node
     if (node.children && node.children.length > 0) {
-      const found = findNodeByName(node.children, name)
+      const found = findKnowledgeNode(node.children, names)
       if (found) return found
     }
   }
@@ -2238,9 +2924,19 @@ function confirmKnowledgeFile() {
     if (currentPickerField.value === 'textSentenceFile') {
       textSentenceFileName.value = selectedKnowledgeFile.value.name
       textSentenceFileId.value = selectedKnowledgeFile.value.id
+      textSentenceFileAutoSelected.value = false
     } else if (currentPickerField.value === 'textTerminologyFile') {
       textTerminologyFileName.value = selectedKnowledgeFile.value.name
       textTerminologyFileId.value = selectedKnowledgeFile.value.id
+      textTerminologyFileAutoSelected.value = false
+    } else if (currentPickerField.value === 'sentenceFile') {
+      formData.value.sentenceFile = selectedKnowledgeFile.value.name
+      formData.value.sentenceFileId = selectedKnowledgeFile.value.id
+      sentenceFileAutoSelected.value = false
+    } else if (currentPickerField.value === 'terminologyFile') {
+      formData.value.terminologyFile = selectedKnowledgeFile.value.name
+      formData.value.terminologyFileId = selectedKnowledgeFile.value.id
+      terminologyFileAutoSelected.value = false
     } else {
       formData.value[currentPickerField.value] = selectedKnowledgeFile.value.name
       formData.value[currentPickerField.value + 'Id'] = selectedKnowledgeFile.value.id
@@ -2266,6 +2962,599 @@ function onLocalFileSelected(event) {
   }
 }
 
+function formatCatScore(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return 0
+  }
+  return Math.round(Number(value) * 100)
+}
+
+function catCandidateMatchScore(candidate) {
+  if (!candidate) {
+    return 0
+  }
+  if (candidate.semantic_score !== null && candidate.semantic_score !== undefined && !Number.isNaN(Number(candidate.semantic_score))) {
+    return Number(candidate.semantic_score)
+  }
+  return Number(candidate.string_score || 0)
+}
+
+function formatCatCandidateMatchRate(candidate) {
+  return `${formatCatScore(catCandidateMatchScore(candidate))}%`
+}
+
+function formatCatCandidateSource(candidate) {
+  const source = String(candidate?.rule_source || '').trim()
+  if (source === 'surface_rules') {
+    return '数字格式/术语替换'
+  }
+  if (source === 'sentence_guide') {
+    return '句式匹配'
+  }
+  return '候选规则'
+}
+
+function formatCatAccuracyRate(value) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
+    return '待评估'
+  }
+  return `${Number(value)}%`
+}
+
+function dedupeCatCandidates(candidates) {
+  const bestByText = new Map()
+  for (const candidate of candidates || []) {
+    const templateText = String(candidate?.template_text || '')
+      .replace(/\s+/g, '')
+      .replace(/[，。！？!?；;：:、,.\s]+$/g, '')
+    if (!templateText) {
+      continue
+    }
+    const current = bestByText.get(templateText)
+    if (!current || Number(candidate?.string_score || 0) > Number(current?.string_score || 0)) {
+      bestByText.set(templateText, candidate)
+    }
+  }
+  return Array.from(bestByText.values()).sort((a, b) => {
+    const semanticDiff = Number(b?.semantic_score ?? -1) - Number(a?.semantic_score ?? -1)
+    if (semanticDiff !== 0) {
+      return semanticDiff
+    }
+    return Number(b?.string_score || 0) - Number(a?.string_score || 0)
+  })
+}
+
+function normalizeCatItems(items) {
+  return (items || [])
+    .filter(item => item?.has_candidates && Array.isArray(item.candidates) && item.candidates.length > 0)
+    .map(item => ({
+      rowKey: `${item.source_paragraph_index ?? item.paragraph_index ?? 0}-${item.sentence_index ?? item.paragraph_index ?? 0}-${item.original_text || ''}`,
+      paragraphIndex: item.paragraph_index,
+      sentenceIndex: item.sentence_index ?? item.paragraph_index ?? 0,
+      sourceParagraphIndex: item.source_paragraph_index ?? item.paragraph_index ?? 0,
+      sourceParagraphText: item.source_paragraph_text || '',
+      originalText: item.original_text || '',
+      candidates: dedupeCatCandidates(item.candidates || []),
+      selectedCandidateIndex: 0,
+      action: 'pending',
+      modifiedText: '',
+      savedModifiedText: '',
+      modifyEditorVisible: false,
+      isDraftSaved: false,
+      resultCollapsed: false
+    }))
+}
+
+function catEmptyStateText() {
+  if (!catResult.value) {
+    return '上传文档后，这里会展示命中的句式候选和逐段确认区。'
+  }
+  if ((catResult.value.totalWithCandidates || 0) === 0) {
+    return '本次分析完成，但没有命中可用的句式候选。'
+  }
+  if (!catItems.value.length) {
+    return '候选结果已返回，但当前没有可展示的条目。'
+  }
+  return '当前文档没有命中句式候选'
+}
+
+function clearCatResult() {
+  catResult.value = null
+  catItems.value = []
+  catApplyResult.value = null
+  catDiagnosticExpanded.value = false
+  clearCatSessionSnapshot()
+}
+
+function toggleCatItemCollapsed(item) {
+  if (!item) {
+    return
+  }
+  item.resultCollapsed = !item.resultCollapsed
+}
+
+function collapseCatItem(item) {
+  if (!item) {
+    return
+  }
+  item.resultCollapsed = true
+}
+
+function getCatCollapsedPreviewText(item) {
+  if (!item) {
+    return ''
+  }
+  if (item.action === 'reject') {
+    const originalText = String(item.originalText || '').trim()
+    return originalText || '当前条目已收起'
+  }
+  const text = String(getCatDisplayText(item) || item.originalText || '').trim()
+  return text || '当前条目已收起'
+}
+
+function getCatCollapsedLabel(item) {
+  if (item?.action === 'accept') {
+    return '候选'
+  }
+  if (item?.action === 'modify') {
+    return '自定义'
+  }
+  return '原文'
+}
+
+function renderCatCollapsedPreviewHtml(item) {
+  if (!item) {
+    return ''
+  }
+  return `<div class="result-text-block">${escapeHtml(getCatCollapsedPreviewText(item))}</div>`
+}
+
+function selectedCatCandidate(item) {
+  if (!item || !Array.isArray(item.candidates) || !item.candidates.length) {
+    return null
+  }
+  return item.candidates[item.selectedCandidateIndex] || item.candidates[0] || null
+}
+
+function selectedTextCatCandidate(item) {
+  if (!item || !Array.isArray(item.candidates) || !item.candidates.length) {
+    return null
+  }
+  return item.candidates[item.selectedCandidateIndex] || item.candidates[0] || null
+}
+
+function getTextCatCandidateValue(candidate) {
+  return String(candidate?.raw_template_text || candidate?.template_text || '').trim()
+}
+
+function getTextCatDisplayText(item) {
+  return getTextCatCandidateValue(selectedTextCatCandidate(item))
+}
+
+function normalizeTextCatItems(items) {
+  return (items || [])
+    .filter(item => Array.isArray(item?.candidates) && item.candidates.length > 0)
+    .map(item => ({
+      rowKey: `${item.paragraph_index ?? 0}-${item.sentence_index ?? 0}-${item.original_text || ''}`,
+      paragraphIndex: item.paragraph_index ?? 0,
+      sentenceIndex: item.sentence_index ?? 0,
+      originalText: item.original_text || '',
+      candidates: dedupeCatCandidates(item.candidates || []),
+      selectedCandidateIndex: 0,
+      applied: false,
+    }))
+}
+
+function applyTextCatCandidate(item) {
+  if (!result.value || !item) {
+    return
+  }
+  const candidate = selectedTextCatCandidate(item)
+  const originalSentence = String(item.originalText || '').trim()
+  const candidateText = getTextCatCandidateValue(candidate)
+  if (!candidateText || !originalSentence) {
+    ElMessage.warning('当前候选不可用')
+    return
+  }
+  const currentPolished = String(result.value.basePolished || result.value.polished || '')
+  const appliedItems = textCatItems.value.filter(entry => entry && entry.applied)
+  let nextPolished = currentPolished
+  const pendingItems = [...appliedItems.filter(entry => entry.rowKey !== item.rowKey), { ...item, applied: true, selectedCandidateIndex: item.selectedCandidateIndex }]
+  for (const entry of pendingItems) {
+    const entryOriginal = String(entry.originalText || '').trim()
+    const entryCandidateText = getTextCatCandidateValue(selectedTextCatCandidate(entry))
+    if (entryOriginal && entryCandidateText && nextPolished.includes(entryOriginal)) {
+      nextPolished = nextPolished.replace(entryOriginal, entryCandidateText)
+    }
+  }
+  item.applied = true
+  result.value = {
+    ...result.value,
+    polished: nextPolished,
+    changes: pendingItems.length,
+  }
+  ElMessage.success('已应用候选句式')
+}
+
+function getCatDisplayText(item) {
+  if (item?.action === 'modify' && item?.savedModifiedText) {
+    return String(item.savedModifiedText || '').trim()
+  }
+  return String(selectedCatCandidate(item)?.template_text || '').trim()
+}
+
+function getEffectiveCatAction(item) {
+  if (!item) {
+    return 'pending'
+  }
+  if (item.action === 'accept') {
+    return item.isDraftSaved ? 'accept' : 'pending'
+  }
+  if (item.action === 'modify') {
+    return item.isDraftSaved ? 'modify' : 'pending'
+  }
+  if (item.action === 'reject') {
+    return 'reject'
+  }
+  return 'pending'
+}
+
+function markCatItemDirty(item) {
+  if (!item) {
+    return
+  }
+  item.isDraftSaved = false
+}
+
+function handleCatCandidateChange(item) {
+  if (!item) {
+    return
+  }
+  const wasAccepted = item.action === 'accept'
+  markCatItemDirty(item)
+  if (wasAccepted) {
+    item.action = 'pending'
+  }
+  item.resultCollapsed = false
+}
+
+function reopenCatModifyEditor(item) {
+  if (!item) {
+    return
+  }
+  item.modifyEditorVisible = true
+}
+
+function fillCatModifyFromCandidate(item) {
+  if (!item) {
+    return
+  }
+  const candidate = selectedCatCandidate(item)
+  item.modifiedText = String(candidate?.template_text || item.originalText || '').trim()
+  item.action = 'modify'
+  markCatItemDirty(item)
+}
+
+function handleCatActionChange(item) {
+  if (!item) {
+    return
+  }
+  if (item.action === 'accept') {
+    const candidate = selectedCatCandidate(item)
+    if (!candidate?.template_text) {
+      item.action = 'pending'
+      ElMessage.warning('请先选择一个候选句式')
+      return
+    }
+    item.isDraftSaved = true
+    collapseCatItem(item)
+    ElMessage.success('当前候选已保存')
+    return
+  }
+  if (item.action === 'modify') {
+    const candidate = selectedCatCandidate(item)
+    item.modifiedText = String(item.savedModifiedText || candidate?.template_text || item.originalText || '').trim()
+    item.modifyEditorVisible = true
+    item.isDraftSaved = false
+    item.resultCollapsed = false
+    return
+  }
+  item.modifyEditorVisible = false
+  if (item.action === 'reject') {
+    collapseCatItem(item)
+  }
+  markCatItemDirty(item)
+}
+
+function forceCatAction(item, action) {
+  if (!item) {
+    return
+  }
+  item.action = action
+  handleCatActionChange(item)
+}
+
+async function saveCatModify(item) {
+  const text = String(item?.modifiedText || '').trim()
+  if (!text) {
+    ElMessage.warning('请先输入自定义润色文本')
+    return
+  }
+  item.modifiedText = text
+  item.savedModifiedText = text
+  item.action = 'modify'
+  item.isDraftSaved = true
+  item.modifyEditorVisible = false
+  collapseCatItem(item)
+  try {
+    const resp = await polishAPI.submitFeedback(
+      item?.originalText || '',
+      text,
+      100,
+      text,
+      'sentence_guide',
+      formData.value.terminologyFileId,
+      formData.value.sentenceFileId
+    )
+    const data = resp?.data || {}
+    if (data.processed_count > 0) {
+      ElMessage.success('自定义润色文本已保存，并已写入平台反馈句式清单')
+    } else {
+      ElMessage.success('自定义润色文本已保存，句式清单中已存在相同内容')
+    }
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`自定义润色文本已保存，本次写入句式清单失败：${errorMsg}`)
+  }
+}
+
+function buildCatDecisionPayload() {
+  return catItems.value.map(item => {
+    const candidate = selectedCatCandidate(item)
+    const action = getEffectiveCatAction(item)
+    const payload = {
+      paragraph_index: item.paragraphIndex,
+      sentence_index: item.sentenceIndex,
+      source_paragraph_index: item.sourceParagraphIndex,
+      source_paragraph_text: item.sourceParagraphText,
+      source_sentence_text: item.originalText,
+      action,
+      original_text: item.originalText,
+      string_score: candidate?.string_score || 0,
+      semantic_score: candidate?.semantic_score ?? null,
+      ai_reason: candidate?.ai_reason || null
+    }
+
+    if (action === 'accept' && candidate) {
+      payload.accepted_template = candidate.template_text || ''
+      payload.accepted_template_id = candidate.template_id || ''
+    }
+    if (action === 'modify') {
+      payload.modified_text = String(item.savedModifiedText || item.modifiedText || '').trim()
+    }
+    if (action === 'reject' && candidate) {
+      payload.rejected_template = candidate.template_text || ''
+      payload.rejected_template_id = candidate.template_id || ''
+    }
+    return payload
+  })
+}
+
+async function submitCatAnalyze() {
+  clearCatResult()
+  const payload = new FormData()
+  payload.append('file', pendingLocalFile)
+  if (formData.value.productType) {
+    payload.append('product_type', formData.value.productType)
+  }
+  if (formData.value.sentenceFileId && !sentenceFileAutoSelected.value) {
+    payload.append('sentence_file_id', formData.value.sentenceFileId)
+  }
+  if (formData.value.terminologyFileId && !terminologyFileAutoSelected.value) {
+    payload.append('terminology_file_id', formData.value.terminologyFileId)
+  }
+  if (formData.value.requirements) {
+    payload.append('requirements', formData.value.requirements)
+  }
+  payload.append('ai_semantic_scoring', formData.value.catAiSemanticScoring ? 'true' : 'false')
+
+  const resp = await polishAPI.catAnalyze(payload)
+  const data = resp.data || {}
+  docResult.value = null
+  catApplyResult.value = null
+  catResult.value = {
+    analyzeId: data.analyze_id,
+    totalParagraphs: data.total_paragraphs || 0,
+    totalWithCandidates: data.total_with_candidates || 0,
+    templateCoverage: data.template_coverage || 0,
+    resolvedTermCount: data.resolved_term_count || 0,
+    candidateDebugSummary: {
+      templatePoolSize: data.candidate_debug_summary?.template_pool_size || 0,
+      templatesConsidered: data.candidate_debug_summary?.templates_considered || 0,
+      templatesMatched: data.candidate_debug_summary?.templates_matched || 0,
+      returnedCandidatesBeforeAi: data.candidate_debug_summary?.returned_candidates_before_ai || 0,
+      surfaceRuleCandidates: data.candidate_debug_summary?.surface_rule_candidates || 0,
+      simpleMatchDroppedByReason: data.candidate_debug_summary?.simple_match_dropped_by_reason || {},
+      totalBeforeFilter: data.candidate_debug_summary?.total_before_filter || 0,
+      totalAfterFilter: data.candidate_debug_summary?.total_after_filter || 0,
+      needsReviewCount: data.candidate_debug_summary?.needs_review_count || 0,
+      droppedByReason: data.candidate_debug_summary?.dropped_by_reason || {}
+    },
+    sourceName: pendingLocalFile?.name || formData.value.sourceFile || '',
+    aiScoringStatus: data.ai_scoring_status || '',
+    aiScoringError: data.ai_scoring_error || ''
+  }
+  catItems.value = normalizeCatItems(data.items)
+  return data
+}
+
+async function applyCatSelections() {
+  if (!catResult.value?.analyzeId) {
+    ElMessage.warning('请先完成句式分析')
+    return
+  }
+
+  const invalidModified = catItems.value.some(item => item.action === 'modify' && !String(item.modifiedText || '').trim())
+  if (invalidModified) {
+    ElMessage.warning('自定义项需要填写最终文本')
+    return
+  }
+
+  catApplying.value = true
+  try {
+    const payload = {
+      analyze_id: catResult.value.analyzeId,
+      source_filename: catResult.value.sourceName || formData.value.sourceFile || 'polished.docx',
+      decisions: buildCatDecisionPayload()
+    }
+    const resp = await polishAPI.catApply(payload)
+    const data = resp.data || {}
+    catApplyResult.value = {
+      outputFile: data.output_file || '',
+      downloadUrl: data.download_url || '',
+      downloadFilename: data.download_filename || 'polished.docx',
+      reportDownloadUrl: data.report_download_url || '',
+      reportDownloadFilename: data.report_download_filename || 'polish_report.html',
+      appliedChangesCount: Number.isFinite(data.applied_count) ? data.applied_count : (Array.isArray(data.applied_changes) ? data.applied_changes.length : 0),
+      failedCount: Number.isFinite(data.failed_count) ? data.failed_count : 0,
+      accuracyRate: data.accuracy?.accuracy_rate ?? null,
+      docId: data.doc_id || null,
+      previewUrl: data.preview_url || '',
+      feedback: data.feedback || {}
+    }
+    if ((data.failed_count || 0) > 0) {
+      ElMessage.warning(`润色文档已生成，但 ${data.failed_count} 处替换未能定位原文`)
+    } else {
+      ElMessage.success('润色文档已生成')
+    }
+  } catch (e) {
+    const errorMsg = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error(`生成失败：${errorMsg}`)
+  } finally {
+    catApplying.value = false
+  }
+}
+
+async function downloadCatResult() {
+  if (!catApplyResult.value?.downloadUrl) {
+    ElMessage.warning('当前没有可下载的润色文档')
+    return
+  }
+  try {
+    await polishAPI.downloadCatOutput(catApplyResult.value.downloadUrl, catApplyResult.value.downloadFilename)
+  } catch (error) {
+    ElMessage.error(`下载润色文档失败：${getAPIErrorMessage(error, '下载失败')}`)
+  }
+}
+
+async function downloadCatReport() {
+  if (!catApplyResult.value?.reportDownloadUrl) {
+    ElMessage.warning('当前没有可下载的润色报告')
+    return
+  }
+  try {
+    await polishAPI.downloadCatAsset(catApplyResult.value.reportDownloadUrl, catApplyResult.value.reportDownloadFilename)
+  } catch (error) {
+    ElMessage.error(`下载润色报告失败：${getAPIErrorMessage(error, '下载失败')}`)
+  }
+}
+
+function openCatPreview() {
+  if (!catApplyResult.value?.docId) {
+    ElMessage.warning('当前没有可预览的润色结果')
+    return
+  }
+  router.push({ name: 'PolishPreview', params: { id: catApplyResult.value.docId } })
+}
+
+function readCatSessionSnapshot() {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  try {
+    const raw = window.sessionStorage.getItem(CAT_SESSION_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function clearCatSessionSnapshot() {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.sessionStorage.removeItem(CAT_SESSION_KEY)
+}
+
+function persistCatSessionSnapshot() {
+  if (typeof window === 'undefined') {
+    return
+  }
+  if (!catResult.value || formData.value.documentWorkflow !== 'cat') {
+    clearCatSessionSnapshot()
+    return
+  }
+  const payload = {
+    version: CAT_SESSION_VERSION,
+    formData: {
+      productType: formData.value.productType,
+      sentenceFile: formData.value.sentenceFile,
+      sentenceFileId: formData.value.sentenceFileId || null,
+      terminologyFile: formData.value.terminologyFile,
+      terminologyFileId: formData.value.terminologyFileId || null,
+      sourceFile: formData.value.sourceFile,
+      requirements: formData.value.requirements,
+      documentWorkflow: formData.value.documentWorkflow || 'cat',
+      catAiSemanticScoring: Boolean(formData.value.catAiSemanticScoring)
+    },
+    catResult: catResult.value,
+    catItems: catItems.value,
+    catApplyResult: catApplyResult.value
+  }
+  try {
+    window.sessionStorage.setItem(CAT_SESSION_KEY, JSON.stringify(payload))
+  } catch {
+    // Ignore storage quota errors and keep current interaction available.
+  }
+}
+
+function persistCatSessionSnapshotDebounced() {
+  if (catSessionPersistTimer) {
+    window.clearTimeout(catSessionPersistTimer)
+  }
+  catSessionPersistTimer = window.setTimeout(() => {
+    persistCatSessionSnapshot()
+    catSessionPersistTimer = null
+  }, 300)
+}
+
+function restoreCatSessionSnapshot() {
+  const snapshot = readCatSessionSnapshot()
+  if (!snapshot?.catResult) {
+    return
+  }
+  if (snapshot.version !== CAT_SESSION_VERSION) {
+    clearCatSessionSnapshot()
+    return
+  }
+  const restoredFormData = snapshot.formData || {}
+  formData.value = {
+    ...formData.value,
+    ...restoredFormData,
+    documentWorkflow: normalizeDocumentWorkflow(restoredFormData.documentWorkflow),
+    catAiSemanticScoring: Boolean(restoredFormData.catAiSemanticScoring)
+  }
+  catResult.value = snapshot.catResult || null
+  catItems.value = Array.isArray(snapshot.catItems)
+    ? snapshot.catItems.map(item => ({
+      ...item,
+      resultCollapsed: Boolean(item?.resultCollapsed)
+    }))
+    : []
+  catApplyResult.value = snapshot.catApplyResult || null
+  catDiagnosticExpanded.value = false
+}
+
 async function submitPolish() {
   if (!pendingLocalFile) {
     ElMessage.warning('请选择待润色文件')
@@ -2275,26 +3564,32 @@ async function submitPolish() {
   loading.value = true
   startDocumentProgress()
   
-  const payload = new FormData()
-  payload.append('file', pendingLocalFile)
-  if (formData.value.sentenceFileId) {
-    payload.append('sentence_file_id', formData.value.sentenceFileId)
-  }
-  if (formData.value.terminologyFileId) {
-    payload.append('terminology_file_id', formData.value.terminologyFileId)
-  }
-  if (formData.value.requirements) {
-    payload.append('requirements', formData.value.requirements)
-  }
-  
   try {
     const sourceName = pendingLocalFile?.name || formData.value.sourceFile || ''
-    const data = await polishStore.submitDocumentPolish(payload, sourceName)
+    if (formData.value.documentWorkflow === 'cat') {
+      await submitCatAnalyze()
+    } else {
+      const payload = new FormData()
+      payload.append('file', pendingLocalFile)
+      if (formData.value.productType) {
+        payload.append('product_type', formData.value.productType)
+      }
+      if (formData.value.sentenceFileId && !sentenceFileAutoSelected.value) {
+        payload.append('sentence_file_id', formData.value.sentenceFileId)
+      }
+      if (formData.value.terminologyFileId && !terminologyFileAutoSelected.value) {
+        payload.append('terminology_file_id', formData.value.terminologyFileId)
+      }
+      if (formData.value.requirements) {
+        payload.append('requirements', formData.value.requirements)
+      }
+      const data = await polishStore.submitDocumentPolish(payload, sourceName)
+      applyDocumentResult(data, sourceName)
+    }
     polishProgress.value = 100
-    polishProgressMsg.value = '润色完成'
+    polishProgressMsg.value = formData.value.documentWorkflow === 'cat' ? '句式分析完成' : '润色完成'
     stopDocumentProgress()
-    applyDocumentResult(data, sourceName)
-    ElMessage.success('润色成功')
+    ElMessage.success(formData.value.documentWorkflow === 'cat' ? '句式分析完成' : '润色成功')
     // 清空已选择的文件
     pendingLocalFile = null
     if (localFileInputRef.value) {
@@ -2316,23 +3611,53 @@ async function submitPolish() {
 }
 
 function resetForm() {
+  if (loading.value && activeTextPolishController) {
+    activeTextPolishController.abort()
+    activeTextPolishController = null
+  }
   formData.value = {
-    sentenceFile: formData.value.sentenceFile || '',
+    productType: '',
+    sentenceFile: '',
     sentenceFileId: null,
-    terminologyFile: formData.value.terminologyFile || '',
-    terminologyFileId: formData.value.terminologyFileId || null,
+    terminologyFile: '',
+    terminologyFileId: null,
     sourceFile: '',
     outputPath: '已润色文档',
-    requirements: ''
+    requirements: '',
+    documentWorkflow: normalizeDocumentWorkflow(formData.value.documentWorkflow),
+    catAiSemanticScoring: false
   }
-  applyDefaultDocumentSentenceFile()
+  formData.value.documentWorkflow = showStandardDocumentWorkflow.value ? normalizeDocumentWorkflow(formData.value.documentWorkflow) : 'cat'
+  formData.value.sentenceFile = ''
+  formData.value.terminologyFile = ''
+  sentenceFileAutoSelected.value = false
+  terminologyFileAutoSelected.value = false
+  textSentenceFileAutoSelected.value = false
+  textTerminologyFileAutoSelected.value = false
+  textSentenceFileId.value = null
+  textTerminologyFileId.value = null
+  textProductType.value = ''
+  textSentenceFileName.value = ''
+  textTerminologyFileName.value = ''
+  sentenceFileOptions.value = allSentenceFileOptions.value
+  termFileOptions.value = allTermFileOptions.value
+  textSentenceFileOptions.value = allSentenceFileOptions.value
+  textTermFileOptions.value = allTermFileOptions.value
+  syncProductMatchedFileOptions()
+  syncTextProductMatchedFileOptions(true)
   pendingLocalFile = null
   selectedKnowledgeFile.value = null
   docResult.value = null
+  clearCatResult()
+  result.value = null
+  textCatItems.value = []
+  originalText.value = ''
+  resetFeedbackForm()
   docKeywordFilter.value = ''
   docFeedbackLoading.value = false
   polishProgress.value = 0
   polishProgressMsg.value = ''
+  loading.value = false
   stopDocumentProgress()
   polishStore.clearDocumentSession()
 }
@@ -2368,51 +3693,89 @@ function downloadReport() {
 }
 
 async function doPolish() {
+  if (loading.value && activeTextPolishController) {
+    activeTextPolishController.abort()
+    activeTextPolishController = null
+    loading.value = false
+    ElMessage.error('已停止润色')
+    return
+  }
   if (!originalText.value.trim()) {
     ElMessage.info('请先输入需要润色的文本')
     return
   }
+  const controller = new AbortController()
+  activeTextPolishController = controller
   loading.value = true
   try {
-    const resp = await polishAPI.text(originalText.value, textSentenceFileId.value, textTerminologyFileId.value)
+    const resp = await polishAPI.text({
+      text: originalText.value,
+      productType: textProductType.value,
+      styleGuideId: textSentenceFileAutoSelected.value ? null : textSentenceFileId.value,
+      terminologyId: textTerminologyFileAutoSelected.value ? null : textTerminologyFileId.value
+    }, {
+      signal: controller.signal
+    })
     const data = resp.data || {}
     result.value = {
       original: data.original || originalText.value,
+      basePolished: data.base_polished || data.polished || data.original || originalText.value,
       polished: data.polished || data.original || originalText.value,
       changes: data.changes?.length || 0
     }
-    if (!data.polished || data.polished === data.original) {
+    textCatItems.value = normalizeTextCatItems(data.cat_items || [])
+    const nextDisplayedText = getDisplayedPolishedText(result.value, textCatItems.value)
+    if (!nextDisplayedText || nextDisplayedText === result.value.original) {
       ElMessage.info('润色完成，未检测到需要修改的内容')
     } else {
       ElMessage.success('润色完成')
     }
   } catch (e) {
+    if (axios.isCancel(e) || e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError') {
+      return
+    }
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`润色失败：${errorMsg}`)
     result.value = null
+    textCatItems.value = []
   } finally {
+    if (activeTextPolishController === controller) {
+      activeTextPolishController = null
+    }
     loading.value = false
   }
 }
 
 function clearAll() {
+  if (loading.value && activeTextPolishController) {
+    activeTextPolishController.abort()
+    activeTextPolishController = null
+  }
   originalText.value = ''
   result.value = null
+  textCatItems.value = []
+  textProductType.value = ''
   textSentenceFileName.value = ''
   textSentenceFileId.value = null
-  feedbackAccuracy.value = 80
-  feedbackCorrections.value = ''
-  feedbackTarget.value = 'terminology'
+  textSentenceFileAutoSelected.value = false
+  textTerminologyFileName.value = ''
+  textTerminologyFileId.value = null
+  textTerminologyFileAutoSelected.value = false
+  textSentenceFileOptions.value = allSentenceFileOptions.value
+  textTermFileOptions.value = allTermFileOptions.value
+  loading.value = false
+  syncTextProductMatchedFileOptions(true)
+  resetFeedbackForm()
 }
 
 function copyResult() {
-  navigator.clipboard.writeText(result.value.polished).then(() => {
+  navigator.clipboard.writeText(displayedPolishedText.value).then(() => {
     ElMessage.success('已复制到剪贴板')
   }).catch(() => ElMessage.info('复制失败，请手动复制'))
 }
 
 function downloadResult() {
-  const blob = new Blob([result.value.polished], { type: 'text/plain;charset=utf-8' })
+  const blob = new Blob([displayedPolishedText.value], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -2426,43 +3789,64 @@ async function submitFeedback() {
     ElMessage.warning('请先完成润色再提交反馈')
     return
   }
-  // 验证文件选择（准确率100%时无需修正，跳过文件校验）
-  if (feedbackAccuracy.value < 100) {
+  if (!feedbackAccuracy.value) {
+    ElMessage.warning('请先选择准确度评分')
+    return
+  }
+  let corrections = feedbackType.value === 'term' ? buildTermCorrections() : String(sentenceCorrections.value || '').trim()
+  if (feedbackAccuracy.value < 100 && !corrections) {
+    try {
+      await ElMessageBox.confirm(
+        '需要提交修正信息，以便优化准确率吗？',
+        '提示',
+        {
+          confirmButtonText: '是',
+          cancelButtonText: '否',
+          distinguishCancelAndClose: true,
+          closeOnClickModal: false,
+          closeOnPressEscape: false,
+          type: 'warning',
+        }
+      )
+      return
+    } catch (action) {
+      if (action !== 'cancel') {
+        return
+      }
+      corrections = ''
+    }
   }
   feedbackLoading.value = true
   try {
     const resp = await polishAPI.submitFeedback(
       result.value.original,
-      result.value.polished,
+      displayedPolishedText.value,
       feedbackAccuracy.value,
-      feedbackCorrections.value,
+      corrections,
       feedbackTarget.value,
       textTerminologyFileId.value,
       textSentenceFileId.value
     )
     const data = resp.data || {}
-    const targetName = feedbackTarget.value === 'terminology' ? '平台反馈的术语对照表' : '平台反馈的句式清单'
+    const targetName = feedbackTargetLabel()
     if (data.processed_count > 0) {
       ElMessage.success(`反馈已提交，已将 ${data.processed_count} 条修正写入${targetName}`)
     } else {
       ElMessage.success('反馈已提交')
     }
-    feedbackCorrections.value = ''
-    await loadFeedbackStats()
+    window.dispatchEvent(new CustomEvent('polish-text-feedback-submitted', {
+      detail: {
+        accuracy: feedbackAccuracy.value,
+        target: feedbackTarget.value,
+        createdAt: new Date().toISOString(),
+      }
+    }))
+    resetFeedbackForm()
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`反馈失败：${errorMsg}`)
   } finally {
     feedbackLoading.value = false
-  }
-}
-
-async function loadFeedbackStats() {
-  try {
-    const resp = await polishAPI.getFeedbackStats()
-    feedbackStats.value = { totalCount: resp.data.total_count || 0, averageAccuracy: resp.data.average_accuracy || 0 }
-  } catch (e) {
-    console.error('加载准确率统计失败:', e)
   }
 }
 
@@ -2481,22 +3865,19 @@ async function loadPolishEngineStatus() {
   }
 }
 
-async function loadDocumentFeedbackStats() {
-  try {
-    const resp = await polishAPI.getDocumentFeedbackStats()
-    docFeedbackStats.value = {
-      totalSubmissions: resp.data.total_submissions || 0,
-      averageAccuracy: resp.data.average_accuracy || 0
-    }
-  } catch (e) {
-    console.error('加载文档润色统计失败:', e)
-  }
-}
-
 async function submitDocumentFeedback() {
   docFeedbackLoading.value = true
   try {
-    await persistDocumentDecisions(true, true)
+    const data = await persistDocumentDecisions(true, true)
+    if (data) {
+      window.dispatchEvent(new CustomEvent('polish-document-feedback-submitted', {
+        detail: {
+          documentId: data.document_id || docResult.value?.id || null,
+          analyzeId: docResult.value?.id || null,
+          sourceFilename: docResult.value?.sourceName || formData.value.sourceFile || '',
+        },
+      }))
+    }
   } finally {
     docFeedbackLoading.value = false
   }
@@ -2504,15 +3885,34 @@ async function submitDocumentFeedback() {
 
 watch(formData, (value) => {
   polishStore.updateDocumentDraft({
+    productType: value.productType,
     sentenceFile: value.sentenceFile,
     sentenceFileId: value.sentenceFileId || null,
     terminologyFile: value.terminologyFile,
     terminologyFileId: value.terminologyFileId || null,
     sourceFile: value.sourceFile,
     outputPath: value.outputPath,
-    requirements: value.requirements
+    requirements: value.requirements,
+    documentWorkflow: value.documentWorkflow || 'standard',
+    catAiSemanticScoring: Boolean(value.catAiSemanticScoring)
   })
 }, { deep: true })
+
+watch(() => formData.value.documentWorkflow, (mode) => {
+  if (mode === 'cat') {
+    docResult.value = null
+  } else {
+    clearCatResult()
+  }
+})
+
+watch(
+  [() => catResult.value, () => catItems.value, () => catApplyResult.value, () => formData.value.documentWorkflow],
+  () => {
+    persistCatSessionSnapshotDebounced()
+  },
+  { deep: true }
+)
 
 watch(documentSession, (session) => {
   loading.value = session.loading
@@ -2531,10 +3931,9 @@ onMounted(async () => {
     originalText.value = pendingPolishText
     sessionStorage.removeItem('pendingPolishText')
   }
+  restoreCatSessionSnapshot()
   loadDropdownOptions()
   await loadPolishEngineStatus()
-  await loadFeedbackStats()
-  await loadDocumentFeedbackStats()
 })
 </script>
 
@@ -2546,18 +3945,18 @@ onMounted(async () => {
 }
 
 .polish-container.document-mode {
-  height: calc(100vh - 108px);
+  min-height: calc(100vh - 108px);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .document-view {
   flex: 1;
-  min-height: 0;
+  min-height: auto;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* ── 标题行 ── */
@@ -2590,79 +3989,6 @@ onMounted(async () => {
   padding: 3px 14px;
 }
 
-/* ── 统计卡片 ── */
-.stats-card {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 20px;
-  padding: 4px 16px;
-  font-size: 13px;
-}
-
-.stats-label {
-  color: #64748b;
-  font-weight: 600;
-  font-size: 20px;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-}
-
-.stats-value {
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  position: relative;
-  top: -1px;
-}
-
-.stats-green {
-  color: #16a34a;
-}
-
-.stats-red {
-  color: #dc2626;
-}
-
-.stats-divider {
-  color: #cbd5e1;
-  font-size: 22px;
-  margin: 0 2px;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-}
-
-.stats-count-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.stats-count {
-  font-weight: 700;
-  font-size: 24px;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  position: relative;
-  top: -1px;
-}
-
-.stats-unit {
-  color: #64748b;
-  font-weight: 600;
-  font-size: 20px;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-}
-
 /* ── 面板 ── */
 .panel {
   background: #fff;
@@ -2672,37 +3998,499 @@ onMounted(async () => {
   margin-bottom: 16px;
 }
 
+.workflow-radio-group {
+  display: inline-flex;
+}
+
+.form-helper-text {
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cat-ai-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cat-ai-switch-text {
+  margin-top: 0;
+}
+
+.cat-result-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: auto;
+  overflow: visible;
+}
+
+.cat-review-panel {
+  gap: 12px;
+  min-height: auto;
+  height: auto;
+}
+
+.cat-review-debug-bar {
+  margin-top: -2px;
+}
+
+.cat-review-toolbar {
+  padding-top: 2px;
+}
+
+.cat-toolbar-hint {
+  font-size: 13px;
+  color: #475569;
+}
+
+.cat-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.cat-summary-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cat-summary-card strong {
+  font-size: 22px;
+  color: #0f172a;
+}
+
+.cat-summary-label {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.cat-apply-banner {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cat-apply-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cat-ai-status-banner {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+}
+
+.cat-ai-status-banner.completed {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.cat-ai-status-banner.no_api_key,
+.cat-ai-status-banner.skipped,
+.cat-ai-status-banner.failed,
+.cat-ai-status-banner.error,
+.cat-ai-status-banner.parse_error,
+.cat-ai-status-banner.invalid_payload,
+.cat-ai-status-banner.empty {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.cat-ai-status-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.cat-ai-status-text {
+  font-size: 12px;
+  color: #475569;
+}
+
+.cat-apply-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.cat-apply-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.cat-item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: visible;
+  padding-right: 0;
+}
+
+.cat-item-card {
+  border: 1px solid #dbe4f0;
+  border-radius: 14px;
+  padding: 16px;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+}
+
+.cat-item-card.is-collapsed {
+  padding-bottom: 12px;
+}
+
+.cat-item-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.cat-item-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cat-item-collapsed-preview {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #475569;
+  padding: 8px 10px 0;
+  white-space: break-spaces;
+}
+
+.cat-item-collapsed-label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.cat-item-collapsed-preview .issue-diff-content {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.cat-item-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 6px;
+}
+
+.cat-item-section {
+  margin-top: 14px;
+}
+
+.cat-item-section-compact {
+  margin-top: 12px;
+}
+
+.cat-item-section-surface {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 12px 14px;
+}
+
+.cat-item-section-surface-muted {
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
+.cat-item-section-surface-edit {
+  background: linear-gradient(180deg, #fffdf7, #fff7ed);
+  border-color: #fed7aa;
+  padding: 12px 14px;
+}
+
+.cat-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.cat-issue-diff-card {
+  margin-bottom: 6px;
+  border-color: #dbe4f0;
+  background: linear-gradient(180deg, #f8fbff, #f8fafc);
+}
+
+.cat-item-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.cat-item-status-row {
+  margin-top: 10px;
+}
+
+.cat-item-saved-hint {
+  color: #047857;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cat-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cat-action-group :deep(.el-radio-button__inner) {
+  min-width: 84px;
+  padding: 7px 12px;
+}
+
+.cat-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.cat-compare-grid.is-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cat-compare-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.cat-compare-card.is-candidate {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.cat-compare-card.is-full-width {
+  width: 100%;
+}
+
+.cat-compare-title {
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.cat-compare-content {
+  padding: 12px;
+  color: #0f172a;
+  line-height: 1.8;
+}
+
+.cat-compare-content :deep(.diff-add) {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.cat-compare-content :deep(.diff-remove) {
+  color: #b91c1c;
+  text-decoration: line-through;
+  text-decoration-color: #dc2626;
+  text-decoration-thickness: 2px;
+  margin-right: 2px;
+}
+
+.cat-candidate-meta-inline {
+  padding: 0 12px 12px;
+}
+
+.cat-item-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.cat-candidate-select-shell {
+  position: relative;
+}
+
+.cat-candidate-select-overlay {
+  position: absolute;
+  top: 10px;
+  left: 13px;
+  right: 48px;
+  z-index: 2;
+  pointer-events: none;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: break-spaces;
+  word-break: break-word;
+  max-height: 52px;
+  overflow: hidden;
+}
+
+.cat-item-section-surface :deep(.el-select__wrapper) {
+  min-height: 64px;
+  height: auto;
+  max-height: 80px;
+  align-items: flex-start;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+.cat-item-section-surface :deep(.el-select__selection) {
+  align-items: flex-start;
+  max-height: 52px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 20px;
+  scrollbar-width: thin;
+}
+
+.cat-item-section-surface :deep(.el-select__selected-item) {
+  display: block;
+  white-space: normal;
+  overflow: hidden;
+  text-overflow: unset;
+  line-height: 1.5;
+  word-break: break-word;
+  opacity: 0;
+}
+
+.cat-candidate-select :deep(.el-select__placeholder) {
+  opacity: 0;
+}
+
+.cat-item-section-surface :deep(.el-select__placeholder) {
+  white-space: normal;
+  line-height: 1.45;
+}
+
+:deep(.cat-candidate-select-popper .el-select-dropdown__item) {
+  min-height: 56px;
+  height: auto;
+  white-space: normal;
+  align-items: stretch;
+  line-height: 1.5;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+:deep(.cat-candidate-select-popper .el-select-dropdown__wrap),
+:deep(.cat-candidate-select-popper .el-scrollbar__wrap) {
+  max-height: 420px;
+  scrollbar-width: thin;
+}
+
+.cat-candidate-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  width: 100%;
+  padding: 2px 0;
+}
+
+.cat-candidate-text {
+  color: #0f172a;
+  line-height: 1.5;
+  white-space: break-spaces;
+  word-break: break-word;
+}
+
+.cat-candidate-score {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #1d4ed8;
+  font-weight: 700;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
 .doc-layout {
   display: flex;
   gap: 18px;
   align-items: stretch;
   width: 100%;
-  flex: 1;
-  height: 0;
-  min-height: 0;
-  overflow: hidden;
+  flex: 1 0 auto;
+  height: auto;
+  min-height: auto;
+  overflow: visible;
 }
 
 .doc-left {
   flex: 1 1 0;
-  height: 100%;
+  height: auto;
   min-width: 0;
-  min-height: 0;
+  min-height: auto;
   display: flex;
   flex-direction: column;
 }
 
 .doc-right {
   flex: 2 1 0;
-  height: 100%;
+  height: auto;
   min-width: 0;
-  min-height: 0;
+  min-height: auto;
   display: flex;
   flex-direction: column;
 }
 
-.doc-layout-result-only .doc-right {
-  flex: 1 1 100%;
+.document-result-mode {
+  min-height: calc(100vh - 168px);
+}
+
+.doc-layout-result-only {
+  display: block;
+}
+
+.doc-layout-result-only .doc-left {
+  display: none;
+}
+
+.doc-layout-result-only .doc-right,
+.doc-right-full {
+  display: block;
+  flex: none;
   width: 100%;
 }
 
@@ -2712,6 +4500,10 @@ onMounted(async () => {
 
 .doc-right {
   margin-top: 2mm;
+}
+
+.doc-right-full {
+  margin-top: 0;
 }
 
 .doc-input-panel {
@@ -2727,12 +4519,17 @@ onMounted(async () => {
 
 .doc-result-panel {
   flex: 1;
-  height: 100%;
-  min-height: 0;
+  height: auto;
+  min-height: auto;
   margin-bottom: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.doc-right-full .doc-result-panel {
+  min-height: calc(100vh - 220px);
+  height: 100%;
 }
 
 .doc-result-preview {
@@ -2754,8 +4551,8 @@ onMounted(async () => {
 
 .doc-review-panel {
   flex: 1;
-  min-height: 0;
-  height: 0;
+  min-height: auto;
+  height: auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2763,6 +4560,11 @@ onMounted(async () => {
   border-radius: 8px;
   padding: 14px;
   background: #f8fafc;
+}
+
+.document-result-mode .doc-review-panel {
+  min-height: 0;
+  overflow: auto;
 }
 
 .doc-review-summary {
@@ -2977,16 +4779,16 @@ onMounted(async () => {
 .issue-diff-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid #e2e8f0;
   background: linear-gradient(180deg, #ffffff, #f8fafc);
   border-radius: 12px;
-  padding: 12px;
+  padding: 10px;
 }
 
 .issue-diff-row {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   align-items: flex-start;
 }
 
@@ -3004,7 +4806,23 @@ onMounted(async () => {
   flex: 1;
   word-break: break-word;
   font-size: 14px;
-  line-height: 1.8;
+  line-height: 1.65;
+  white-space: break-spaces;
+}
+
+.cat-selected-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.cat-selected-source {
+  color: #1d4ed8;
+  font-weight: 700;
 }
 
 .issue-diff-original {
@@ -3014,6 +4832,31 @@ onMounted(async () => {
 .issue-diff-suggested {
   color: #0f172a;
   font-weight: 400;
+}
+
+.issue-diff-content :deep(.diff-highlight) {
+  display: inline;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+
+.issue-diff-content :deep(.diff-highlight-suggested) {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.issue-diff-content :deep(.diff-highlight-original) {
+  background: #bbf7d0;
+  color: #166534;
+}
+
+.issue-diff-content :deep(.diff-space) {
+  display: inline-block;
+  min-width: 0.72em;
+  text-align: center;
+  color: inherit;
+  font-size: 0.9em;
+  vertical-align: baseline;
 }
 
 .issue-basis {
@@ -3136,7 +4979,7 @@ onMounted(async () => {
   color: #334155;
   font-weight: 500;
   word-break: break-word;
-  white-space: normal;
+  white-space: break-spaces;
   line-height: 1.6;
 }
 
@@ -3188,17 +5031,17 @@ onMounted(async () => {
 }
 
 .issue-diff-content :deep(.diff-add) {
-  background: #fecdd3;
-  color: #7f1d1d;
+  background: #fecaca;
+  color: #991b1b;
   padding: 1px 4px;
   border-radius: 4px;
 }
 
 .issue-diff-content :deep(.diff-remove) {
-  color: #b91c1c;
-  text-decoration: line-through;
-  text-decoration-color: #dc2626;
-  text-decoration-thickness: 2px;
+  background: #bbf7d0;
+  color: #166534;
+  padding: 1px 4px;
+  border-radius: 4px;
 }
 
 .issue-candidate-empty {
@@ -3327,6 +5170,16 @@ onMounted(async () => {
   gap: 8px;
 }
 
+.button-loading-icon {
+  margin-right: 4px;
+}
+
+.result-header-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* ── 文件选择行 ── */
 .file-select-row {
   display: flex;
@@ -3358,15 +5211,21 @@ onMounted(async () => {
   flex-direction: column;
 }
 
-.content-left .panel :deep(.el-textarea) {
+.text-input-shell {
   flex: 1;
   display: flex;
+  min-height: 0;
+}
+
+.content-left .panel :deep(.el-textarea) {
+  display: flex;
+  flex: 1;
+  width: 100%;
 }
 
 .content-left .panel :deep(.el-textarea__inner) {
-  flex: 1;
+  height: 100%;
   resize: vertical;
-  min-height: 320px;
 }
 
 .content-right {
@@ -3377,7 +5236,6 @@ onMounted(async () => {
 }
 
 .content-right .panel {
-  flex: 1;
   display: flex;
   flex-direction: column;
 }
@@ -3385,19 +5243,24 @@ onMounted(async () => {
 /* ── 结果面板 ── */
 .result-panel {
   margin-bottom: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
-.result-header-main {
-  display: inline-flex;
+.content-right .result-panel {
+  min-height: 0;
+}
+
+.result-header-title {
+  display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .result-panel .result-grid-vertical {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
 }
 
 .result-placeholder {
@@ -3422,29 +5285,126 @@ onMounted(async () => {
 }
 
 .result-col-v {
-  background: #f8fafc;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
-  overflow: hidden;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
 }
 
 .col-content-compact {
-  flex: 1;
-  min-height: 60px;
-  max-height: 160px;
-  overflow-y: auto;
-  padding: 12px 14px;
-  line-height: 1.7;
+  padding: 10px 12px;
+  line-height: 1.6;
   color: #374151;
-  font-size: 13px;
+  font-size: 14px;
   white-space: pre-wrap;
 }
 
+.text-single-candidate-card {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #fb7185;
+  box-shadow: inset 0 0 0 1px rgba(251, 113, 133, 0.12);
+  background: linear-gradient(180deg, #fff7ed, #fff1f2 45%, #fff7ed);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.text-single-candidate-body {
+  font-size: 13px;
+  line-height: 1.75;
+  color: #7f1d1d;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(253, 164, 175, 0.4);
+}
+
+.text-single-candidate-body :deep(.result-text-block) {
+  margin: 0;
+}
+
+.text-single-candidate-body :deep(.diff-add) {
+  background: linear-gradient(135deg, #ef4444, #f97316);
+  color: #fff7ed;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(190, 24, 93, 0.16);
+}
+
+.text-single-candidate-body :deep(.diff-remove) {
+  background: #fde68a;
+  color: #92400e;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.text-cat-panel {
+  margin-top: 8px;
+}
+
+.text-cat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.text-cat-header > span:first-child {
+  font-size: 13px;
+}
+
+.text-cat-count {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.text-cat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.text-cat-item-row {
+  padding: 0;
+}
+
+.text-cat-item-row .cat-item-body {
+  margin-top: 0;
+}
+
 .col-content-compact :deep(.diff-highlight) {
+  display: inline;
   color: #dc2626;
   background: #fecaca;
   font-weight: 600;
   border-radius: 3px;
+  padding: 0 2px;
+}
+
+.col-content-compact :deep(.diff-highlight-suggested) {
+  color: #991b1b;
+  background: #fecaca;
+}
+
+.col-content-compact :deep(.diff-highlight-original) {
+  color: #166534;
+  background: #bbf7d0;
+}
+
+.col-content-compact :deep(.diff-space) {
+  display: inline-block;
+  min-width: 0.72em;
+  text-align: center;
+  color: inherit;
+  font-size: 0.9em;
+  vertical-align: baseline;
 }
 
 .doc-change-table td :deep(.diff-highlight) {
@@ -3511,30 +5471,62 @@ onMounted(async () => {
   flex: 1;
 }
 
-/* ── 意见反馈 ── */
 .feedback-panel {
   margin-top: 16px;
 }
 
-.feedback-row {
+.feedback-rating-row,
+.feedback-type-row {
+  margin-bottom: 14px;
+}
+
+.feedback-rating-group {
   display: flex;
-  gap: 20px;
+  flex-wrap: wrap;
 }
 
-.feedback-left {
-  flex: 0 0 260px;
+.feedback-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.feedback-right {
-  flex: 1;
-  min-width: 0;
+.term-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.term-arrow {
+  color: #94a3b8;
+  font-weight: 700;
+  flex: 0 0 auto;
+  line-height: 1;
+}
+
+.term-row .el-input {
+  flex: 1 1 0;
+}
+
+.term-row .el-input :deep(.el-input__wrapper) {
+  min-height: 36px;
+  height: 36px;
+  padding: 0 12px;
+}
+
+.term-row .el-button {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  height: 36px;
 }
 
 .feedback-bottom {
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
   align-items: center;
-  margin-top: 4px;
+  gap: 12px;
+  margin-top: 6px;
   padding-top: 12px;
   border-top: 1px solid #f3f4f6;
 }
@@ -3556,6 +5548,62 @@ onMounted(async () => {
   font-size: 12px;
 }
 
+.feedback-rating-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.feedback-rating-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.feedback-rating-btn {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.2s;
+  outline: none;
+}
+
+.feedback-rating-btn:hover {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.feedback-rating-btn.active {
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.rating-star {
+  font-size: 22px;
+  color: #d1d5db;
+  line-height: 1;
+}
+
+.feedback-rating-btn.active .rating-star {
+  color: #f59e0b;
+}
+
+.feedback-rating-text {
+  font-size: 12px;
+  color: #6b7280;
+  font-weight: 500;
+  line-height: 1.4;
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
 .input-with-button {
   display: flex;
   gap: 8px;
@@ -3566,6 +5614,14 @@ onMounted(async () => {
 .input-with-button .el-select {
   flex: 1;
   min-width: 0;
+}
+
+.polish-container :deep(.el-input__inner),
+.polish-container :deep(.el-textarea__inner),
+.polish-container :deep(.el-select__selected-item),
+.polish-container :deep(.el-select__placeholder),
+.polish-container :deep(.el-select-dropdown__item) {
+  font-size: 14px;
 }
 
 .full-width {
@@ -3718,13 +5774,29 @@ onMounted(async () => {
     min-height: 0;
   }
 
-  .feedback-left {
-    flex: 1 1 auto;
-  }
-
   .feedback-bottom {
     align-items: flex-start;
     gap: 12px;
+    flex-direction: column;
+  }
+
+  .feedback-rating-btn {
+    flex: 0 0 calc(33.333% - 8px);
+  }
+
+  .cat-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cat-apply-banner,
+  .cat-item-header,
+  .cat-compare-grid {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .cat-compare-grid {
+    display: flex;
   }
 }
 
@@ -3743,6 +5815,31 @@ onMounted(async () => {
 @media (max-width: 768px) {
   .polish-container { max-width: 100%; }
   .content-row { flex-direction: column; }
-  .feedback-row { flex-direction: column; }
+  .cat-summary-grid { grid-template-columns: 1fr; }
+  .content-left,
+  .content-right,
+  .content-left .panel,
+  .content-right .panel,
+  .content-right .result-panel {
+    min-height: 0;
+  }
+  .content-left .panel :deep(.el-textarea__inner),
+  .col-content-compact {
+    min-height: 0;
+  }
+  .term-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .feedback-rating-inline {
+    align-items: flex-start;
+    gap: 8px 12px;
+  }
+  .feedback-rating-group {
+    flex: 0 0 auto;
+  }
+  .feedback-rating-text {
+    flex: 1 1 100%;
+  }
 }
 </style>

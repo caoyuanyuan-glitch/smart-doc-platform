@@ -1,9 +1,47 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system
+from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor
 from app.database import create_tables
 import threading
+import os
+
+
+def _is_production_like_env(value: str | None) -> bool:
+    return str(value or "development").strip().lower() in {"prod", "production", "staging"}
+
+
+def _ensure_bootstrap_admin(db, username: str, password: str):
+    from app.crud.user import create_user_with_details, get_user, get_password_hash
+    from app.schemas.user import UserCreateWithDetails
+
+    admin_user = get_user(db, username)
+    if not admin_user:
+        create_user_with_details(db, UserCreateWithDetails(
+            username=username,
+            password=password,
+            display_name="管理员",
+            role="admin",
+            status="active",
+        ))
+        print(f"[startup] 已创建管理员引导账号: {username}")
+        return
+
+    changed = False
+    if admin_user.role != "admin":
+        admin_user.role = "admin"
+        changed = True
+    if admin_user.status != "active":
+        admin_user.status = "active"
+        changed = True
+    if not _is_production_like_env(os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("ENV")):
+        admin_user.password_hash = get_password_hash(password)
+        changed = True
+
+    if changed:
+        db.commit()
+        db.refresh(admin_user)
+        print(f"[startup] 已校正管理员引导账号: {username}")
 
 app = FastAPI(title="智能技术文档平台", version="1.0.0")
 
@@ -22,6 +60,7 @@ app.include_router(documents.router, prefix="/api/documents", tags=["文档管�
 app.include_router(review.router, prefix="/api/review", tags=["文档审核"])
 app.include_router(compare.router, prefix="/api/compare", tags=["文档对比"])
 app.include_router(param_compare.router, prefix="/api/compare/params", tags=["参数对比"])
+app.include_router(competitor.router, prefix="/api/competitor", tags=["竞品分析"])
 app.include_router(rules.router, prefix="/api/rules", tags=["规则管理"])
 app.include_router(terms.router, prefix="/api/terms", tags=["术语库"])
 app.include_router(audit_basis.router, prefix="/api/audit_basis", tags=["审核依据"])
@@ -68,24 +107,21 @@ async def startup_event():
         print(f"[startup] 转换规则种子初始化失败: {e}")
     try:
         from app.database import SessionLocal
-        from app.crud.user import get_user, create_user_with_details, get_password_hash
-        from app.schemas.user import UserCreateWithDetails
-        db = SessionLocal()
-        admin_user = get_user(db, "admin")
-        if not admin_user:
-            create_user_with_details(db, UserCreateWithDetails(
-                username="admin", password="admin123",
-                display_name="管理员", role="admin", status="active",
-            ))
-            print("[startup] 默认管理员已创建 (admin/admin123)")
+        bootstrap_username = (os.getenv("ADMIN_BOOTSTRAP_USERNAME") or "").strip()
+        bootstrap_password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD") or ""
+        runtime_env = os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("ENV")
+        if (not bootstrap_username or not bootstrap_password) and not _is_production_like_env(runtime_env):
+            bootstrap_username = bootstrap_username or "admin"
+            bootstrap_password = bootstrap_password or "admin123"
+
+        if not bootstrap_username or not bootstrap_password:
+            print("[startup] 未配置管理员引导账号，跳过默认管理员初始化")
         else:
-            admin_user.password_hash = get_password_hash("admin123")
-            admin_user.display_name = "管理员"
-            admin_user.role = "admin"
-            admin_user.status = "active"
-            db.commit()
-            print("[startup] 默认管理员已重置为 admin/admin123")
-        db.close()
+            db = SessionLocal()
+            try:
+                _ensure_bootstrap_admin(db, bootstrap_username, bootstrap_password)
+            finally:
+                db.close()
     except Exception as e:
         print(f"[startup] 管理员初始化失败: {e}")
     try:

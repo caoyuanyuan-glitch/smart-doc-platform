@@ -213,10 +213,17 @@ const categoryNames = {
   'domains': '域名邮箱'
 }
 
+function compareWhitelistItems(left, right) {
+  return String(left.word || '').localeCompare(String(right.word || ''), 'en', {
+    sensitivity: 'case',
+    caseFirst: 'upper'
+  })
+}
+
 const totalCount = computed(() => tableData.value.length)
 
 const filteredData = computed(() => {
-  let data = tableData.value
+  let data = [...tableData.value]
   
   if (activeCategory.value !== 'all') {
     const categoryName = categoryNames[activeCategory.value] || activeCategory.value
@@ -231,7 +238,7 @@ const filteredData = computed(() => {
     )
   }
   
-  return data
+  return data.sort(compareWhitelistItems)
 })
 
 function getCategoryTagType(category) {
@@ -278,7 +285,7 @@ async function fetchData() {
       editWord: '',
       editCategory: '',
       editDescription: ''
-    }))
+    })).sort(compareWhitelistItems)
   } catch (error) {
     console.error('获取数据失败:', error)
     ElMessage.error('获取数据失败')

@@ -48,6 +48,8 @@ def _normalize_pdf_extraction_artifacts(text: str) -> str:
     text = re.sub(r'(?<=\s)\|(?=\s)', ' ', text)
     text = re.sub(r'\b([A-Z])\s+([A-Z])\s+([A-Z])(?:\s+([A-Z]))?\b', lambda m: ''.join(part for part in m.groups() if part), text)
     text = re.sub(r'\b([A-Za-z])\s+([a-z])\s+([a-z])\s+([a-z])\b', r'\1\2\3\4', text)
+    text = re.sub(r'(?<=[A-Za-z\)])\s*([<>]=?|=)\s*(?=\d)', r' \1 ', text)
+    text = re.sub(r'(?<=\d)\s*([<>]=?|=)\s*(?=[A-Za-z])', r' \1 ', text)
     text = re.sub(r'\b(μ|u)\s+L\b', lambda m: f"{m.group(1)}L", text, flags=re.IGNORECASE)
     text = re.sub(r'\b([mknpμu])\s+(L|g|m)\b', r'\1\2', text, flags=re.IGNORECASE)
     text = re.sub(r'(?<=\d)\s*(?:℃|°\s*C)\b', ' °C', text)
@@ -278,6 +280,12 @@ def parse_docx(file_path):
         text = ""
         for paragraph in doc.paragraphs:
             text += paragraph.text + "\n"
+        # Extract table text — critical for technical documents with spec tables
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                if row_text.strip():
+                    text += row_text + "\n"
         return text.strip()
     except Exception as e:
         raise ValueError(f"DOCX解析失败: {str(e)}")
@@ -527,6 +535,8 @@ def parse_file(file_path):
         return parse_text(file_path)
     elif ext == '.idml':
         return parse_idml(file_path)
+    elif ext in {'.png', '.jpg', '.jpeg'}:
+        raise ValueError("图片文件需要通过图片翻译 OCR 流程处理")
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 

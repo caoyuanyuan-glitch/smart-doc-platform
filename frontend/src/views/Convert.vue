@@ -159,6 +159,23 @@
                 </div>
               </div>
             </div>
+            <el-alert
+              class="convert-rule-alert"
+              title="本次转换规则"
+              type="info"
+              :closable="false"
+              show-icon
+            >
+              <template #default>
+                <div class="rule-list">
+                  <div>参考包只复用 <code>Cover</code> 和 <code>booklists/toc</code>。</div>
+                  <div><code>Manufacturer information</code> 按源 Word 生成。</div>
+                  <div>章节层级按 Word 原始结构对齐。</div>
+                  <div>步骤中的加粗、上标、下标保留。</div>
+                  <div>重复表头、页码、note 图标会自动清理。</div>
+                </div>
+              </template>
+            </el-alert>
           </el-form-item>
 
           <el-form-item v-if="showDitaOptions" label="输出语言">
@@ -800,6 +817,24 @@ onBeforeUnmount(() => stopPolling())
 .upload-area-small { padding: 12px; }
 
 .upload-icon { font-size: 32px; margin-bottom: 8px; }
+
+.convert-rule-alert {
+  margin-top: 12px;
+}
+
+.rule-list {
+  display: grid;
+  gap: 6px;
+  line-height: 1.5;
+  color: #4b5563;
+}
+
+.rule-list code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #eef2ff;
+  color: #3730a3;
+}
 
 .file-info {
   display: flex;

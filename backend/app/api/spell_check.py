@@ -2,20 +2,27 @@ import re
 import zipfile
 import io
 import os
-from fastapi import APIRouter, UploadFile, File, HTTPException
+import tempfile
+from pathlib import Path
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from docx import Document
 from openpyxl import load_workbook
 from xml.etree import ElementTree as ET
-from app.utils.spell_checker import run_spelling_and_grammar_check, spell as runtime_spell
+from app.api.auth import require_admin
+from app.api import whitelist as whitelist_api
+from app.utils import spell_checker as spell_checker_utils
+from app.utils.grammar_engine import check_grammar_with_languagetool
+from app.utils.spell_checker import run_spelling_and_grammar_check, add_runtime_whitelist_term, add_runtime_whitelist_terms, get_exact_whitelist_snapshot
+from app.utils.document_parser import parse_file
 
 try:
     from pptx import Presentation
 except ModuleNotFoundError:
     Presentation = None
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _require_pptx_support():
@@ -80,12 +87,12 @@ LOW_LEVEL_RULES = [
 ]
 
 WHITELIST_PATTERNS = {
-    "product": re.compile(r"(MGISP(?:-\d+)?(?:-Smart\s+8)?|DNBSEQ(?:-[Tt]\d+[×xX]?\d+[RSrs]?)?|MGICLab(?:-FZ\d+)?|MGI)", re.IGNORECASE),
-    "brand": re.compile(r"(Qubit|Eppendorf|HamiLton|Hamilton|Invitrogen|Thermo\s+Fisher\s+Scientific|BMG\s+LABTECH|AXYGEN|Greiner\s+Bio-One|Fluostar\s+Omega)", re.IGNORECASE),
+    "product": re.compile(r"(MGISP(?:-\d+)?(?:-Smart\s+8)?|DNBSEQ(?:-[Tt]\d+[×xX]?\d+[RSrs]?)?|MGICLab(?:-FZ\d+)?|MGI)"),
+    "brand": re.compile(r"(Qubit|Eppendorf|HamiLton|Hamilton|Invitrogen|Thermo\s+Fisher\s+Scientific|BMG\s+LABTECH|AXYGEN|Greiner\s+Bio-One|Fluostar\s+Omega)"),
     "document_id": re.compile(r"(JB-\w+-\d+|V\d+\.\d+(?:\.\d+)*|940-\d{6}-\d{2})"),
-    "term": re.compile(r"(ssCir|dsDNA|PCR|RCR|DNB|DIPSEQ|OliGreen|MPC2000|ALPS\s+50V|Pos\d+~?Pos\d+|wfex|sp960)", re.IGNORECASE),
+    "term": re.compile(r"(ssCir|dsDNA|PCR|RCR|DNB|DIPSEQ|OliGreen|MPC2000|ALPS\s+50V|Pos\d+~?Pos\d+|wfex|sp960)"),
     "domain": re.compile(r"(mgi-tech\.com|global-mgitech\.com|MGI-service@mgi-tech\.com)"),
-    "scientific": re.compile(r"(E\.\s*coli|in\s+situ|in\s+vitro|in\s+vivo|et\s+al\.)", re.IGNORECASE),
+    "scientific": re.compile(r"(E\.\s*coli|in\s+situ|in\s+vitro|in\s+vivo|et\s+al\.)"),
     "element": re.compile(r"(H|He|Li|Be|B|C|N|O|F|Ne|Na|Mg|Al|Si|P|S|Cl|Ar|K|Ca|Sc|Ti|V|Cr|Mn|Fe|Co|Ni|Cu|Zn|Ga|Ge|As|Se|Br|Kr|Rb|Sr|Y|Zr|Nb|Mo|Tc|Ru|Rh|Pd|Ag|Cd|In|Sn|Sb|Te|I|Xe|Cs|Ba|La|Ce|Pr|Nd|Pm|Sm|Eu|Gd|Tb|Dy|Ho|Er|Tm|Yb|Lu|Hf|Ta|W|Re|Os|Ir|Pt|Au|Hg|Tl|Pb|Bi|Po|At|Rn|Fr|Ra|Ac|Th|Pa|U|Np|Pu|Am|Cm|Bk|Cf|Es|Fm|Md|No|Lr)"),
 }
 
@@ -1144,6 +1151,26 @@ def _build_response(text, issues):
     }
 
 
+def _append_legacy_grammar_issues(text, issues):
+    legacy_errors = []
+    run_grammar(text, legacy_errors)
+    for error in legacy_errors:
+        start = error.get('start')
+        end = error.get('end')
+        if not isinstance(start, int) or not isinstance(end, int) or end > len(text):
+            continue
+        issues.append({
+            'severity': error.get('severity') or 'general',
+            'category': 'grammar',
+            'source': 'legacy_grammar_rule',
+            'original_text': text[start:end],
+            'context': text[max(0, start - 50):min(len(text), end + 50)],
+            'description': error.get('message') or '主谓不一致',
+            'suggestion': '',
+            'position': f'{start}-{end}',
+        })
+
+
 def _detect_document_language(text):
     chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
     english_words = len(re.findall(r'\b[a-zA-Z]{2,}\b', text))
@@ -1174,14 +1201,34 @@ def _collect_low_level_rule_issues(text, document_language):
     return issues
 
 
-def process_text(text):
+def _append_languagetool_issues(text, issues, document_language):
+    if document_language != 'english':
+        return
+    issues.extend(
+        check_grammar_with_languagetool(
+            text,
+            lang='en-US',
+            exact_whitelist=get_exact_whitelist_snapshot(),
+        )
+    )
+
+
+def process_text(text, file_type=None):
     """共享处理函数：统一走完整规则链并适配前端结果结构"""
     normalized_text = pre_clean_lines(text)
     document_language = _detect_document_language(normalized_text)
-    issues = run_spelling_and_grammar_check(normalized_text)
+    issues = run_spelling_and_grammar_check(normalized_text, file_type=file_type)
+    _append_legacy_grammar_issues(normalized_text, issues)
+    _append_languagetool_issues(normalized_text, issues, document_language)
     issues.extend(_collect_low_level_rule_issues(normalized_text, document_language))
     issues.extend(_collect_consistency_issues(normalized_text, document_language))
     return _build_response(normalized_text, issues)
+
+
+def _guess_file_type_from_text(text):
+    if re.search(r'```|`[^`\n]+`|\[[^\]]+\]\([^\)]+\)', text or ''):
+        return 'md'
+    return None
 
 
 def is_noun_singular(word: str) -> bool:
@@ -1458,6 +1505,17 @@ def extract_text_from_file(file: UploadFile):
                 if hasattr(shape, "text"):
                     txt += shape.text + "\n"
         return txt
+    elif ext == ".pdf":
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp_file:
+            temp_file.write(content)
+            temp_path = Path(temp_file.name)
+        try:
+            parsed = parse_file(str(temp_path))
+            if isinstance(parsed, dict):
+                return parsed.get("full_text") or ""
+            return str(parsed or "")
+        finally:
+            temp_path.unlink(missing_ok=True)
     else:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
 
@@ -1470,11 +1528,12 @@ class SpellCheckRequest(BaseModel):
 async def check_spell(request: SpellCheckRequest):
     if not request.text.strip():
         return {"errors": [], "spell_count": 0, "grammar_count": 0, "total_count": 0, "text": ""}
-    return process_text(request.text)
+    return process_text(request.text, file_type=_guess_file_type_from_text(request.text))
 
 
 @router.post("/upload", summary="上传文件并检查拼写语法")
 async def upload_and_check(file: UploadFile = File(...)):
+    ext = os.path.splitext(file.filename or "")[1].lower()
     try:
         text = extract_text_from_file(file)
     except HTTPException as e:
@@ -1485,7 +1544,7 @@ async def upload_and_check(file: UploadFile = File(...)):
     if not text.strip():
         return {"errors": [], "spell_count": 0, "grammar_count": 0, "total_count": 0, "text": "", "filename": file.filename}
 
-    result = process_text(text)
+    result = process_text(text, file_type=ext.lstrip('.'))
     result["filename"] = file.filename
     return result
 
@@ -1495,7 +1554,8 @@ async def add_custom_word(word: str):
     word = word.strip()
     if not word:
         raise HTTPException(status_code=400, detail="单词不能为空")
-    runtime_spell.word_frequency.load_words([word])
+    whitelist_api.add_terms_to_whitelist([word], item_category='专业术语', description='由拼写检查页面加入')
+    add_runtime_whitelist_term(word)
     return {"message": f"已添加单词: {word}"}
 
 
@@ -1509,13 +1569,14 @@ async def import_dict(file: UploadFile = File(...)):
         if not line or line.startswith("#"):
             continue
         words_to_add.append(line)
-    runtime_spell.word_frequency.load_words(words_to_add)
+    whitelist_api.add_terms_to_whitelist(words_to_add, item_category='专业术语', description='由词典导入')
+    add_runtime_whitelist_terms(words_to_add)
     return {"message": f"成功导入 {len(words_to_add)} 个单词"}
 
 
 @router.get("/export-dict", summary="导出自定义词典")
 async def export_dict():
     words = []
-    for w in runtime_spell.word_frequency:
+    for w in spell_checker_utils.spell.word_frequency:
         words.append(w)
     return {"words": words}

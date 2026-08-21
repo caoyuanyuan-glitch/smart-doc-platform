@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 
 _BOOTSTRAPPED = False
@@ -24,15 +24,28 @@ def _load_env_file(path: Path, override: bool):
         load_dotenv(path, override=override)
 
 
+def _load_env_file_with_protected_keys(path: Path, protected_keys: set[str]):
+    if not path.exists() or not path.is_file():
+        return
+    values = dotenv_values(path)
+    for key, value in values.items():
+        if not key or value is None:
+            continue
+        if key in protected_keys:
+            continue
+        os.environ[key] = str(value)
+
+
 def bootstrap_runtime_env():
     global _BOOTSTRAPPED
     if _BOOTSTRAPPED:
         return
 
-    _load_env_file(_BACKEND_DIR / ".env", override=False)
-    _load_env_file(_BACKEND_DIR / "runtime.env", override=True)
-    _load_env_file(Path("/root/.codingmatrix/smart-doc-runtime.env"), override=False)
-    _load_env_file(Path.home() / ".smart-doc-platform" / "runtime.env", override=True)
+    protected_keys = set(os.environ.keys())
+    _load_env_file_with_protected_keys(_BACKEND_DIR / ".env", protected_keys)
+    _load_env_file_with_protected_keys(_BACKEND_DIR / "runtime.env", protected_keys)
+    _load_env_file_with_protected_keys(Path("/root/.codingmatrix/smart-doc-runtime.env"), protected_keys)
+    _load_env_file_with_protected_keys(Path.home() / ".smart-doc-platform" / "runtime.env", protected_keys)
 
     custom_env_file = os.getenv("SMART_DOC_ENV_FILE") or os.getenv("ENV_FILE")
     if _non_empty(custom_env_file):
@@ -110,6 +123,7 @@ def apply_ai_secret_aliases():
     )
     if _configured(kimi_key):
         os.environ["KIMI_API_KEY"] = kimi_key
+        os.environ["MOONSHOT_API_KEY"] = kimi_key
 
     qwen_key = _resolve_secret_value(
         env_names=("QWEN_API_KEY", "DASHSCOPE_API_KEY"),

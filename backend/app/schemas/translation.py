@@ -11,6 +11,7 @@ class TranslationRequest(BaseModel):
     target_lang: str = "en"
     memory_bank: Optional[str] = None
     memory_file_id: Optional[int] = None
+    memory_file_ids: Optional[list[int]] = None
 
 
 class TranslationResponse(BaseModel):
@@ -19,6 +20,9 @@ class TranslationResponse(BaseModel):
     engine_used: str
     from_memory: bool = False
     from_ai: bool = False
+    source_word_count: int = 0
+    ai_word_count: int = 0
+    memory_word_count: int = 0
 
 
 class MemoryEntry(BaseModel):

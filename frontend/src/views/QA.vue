@@ -203,7 +203,7 @@
 import { ref, nextTick, computed, onMounted, inject, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { qaAPI, knowledgeAPI, instance } from '@/api'
+import { qaAPI, knowledgeAPI, instance, getKnowledgeLoadErrorMessage } from '@/api'
 import { useUserStore } from '@/store/user'
 import { User, Folder, Microphone, CopyDocument, Download, ArrowDown, Plus } from '@element-plus/icons-vue'
 
@@ -347,7 +347,7 @@ async function loadKnowledgeTree() {
     const rawTree = resp.data || []
     treeData.value = transformTreeData(rawTree)
   } catch (e) {
-    ElMessage.warning('加载知识库失败')
+    ElMessage.warning(getKnowledgeLoadErrorMessage(e))
   }
   treeLoading.value = false
 }

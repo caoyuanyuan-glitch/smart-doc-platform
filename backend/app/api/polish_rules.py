@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.crud import polish_learning_rule as crud
+from app.api.polish import _invalidate_typo_cache
 from app.schemas.polish_learning_rule import (
     PolishLearningRuleCreate,
     PolishLearningRuleUpdate,
@@ -20,7 +21,7 @@ from app.schemas.polish_learning_rule import (
 router = APIRouter(prefix="/api/polish-rules", tags=["润色规则管理"])
 
 # 合法的规则分类值
-VALID_RULE_TYPES = {"system_rule", "replacement_rule", "forbidden_rule", "sentence_applicability_rule", "imperative_rule", "format_rule"}
+VALID_RULE_TYPES = {"system_rule", "replacement_rule", "forbidden_rule", "sentence_applicability_rule", "imperative_rule", "format_rule", "typo_rule"}
 FIELD_MAP = {
     "规则名称": "rule_name",
     "规则分类": "rule_type",
@@ -37,6 +38,7 @@ RULE_TYPE_LABELS = {
     "句式适用": "sentence_applicability_rule",
     "祈使句规则": "imperative_rule",
     "格式规则": "format_rule",
+    "错别字规则": "typo_rule",
 }
 
 
@@ -55,7 +57,7 @@ def normalize_rule_row(row: dict) -> dict:
     rule_type = normalize_rule_type(row.get("rule_type", ""))
     row["rule_type"] = rule_type
     if rule_type and rule_type not in VALID_RULE_TYPES:
-        raise HTTPException(status_code=400, detail=f"无效的规则分类「{rule_type}」，可选: 系统规则、术语替换、禁止规则、句式适用、祈使句规则、格式规则")
+        raise HTTPException(status_code=400, detail=f"无效的规则分类「{rule_type}」，可选: 系统规则、术语替换、禁止规则、句式适用、祈使句规则、格式规则、错别字规则")
 
     if "priority_level" in row and row.get("priority_level") not in (None, ""):
         row["priority_level"] = int(row.get("priority_level", 0))
@@ -112,7 +114,9 @@ def create_rule(rule: PolishLearningRuleCreate, db: Session = Depends(get_db)):
     existing = crud.get_rule_by_key(db, rule.rule_key)
     if existing:
         raise HTTPException(status_code=400, detail=f"规则键 {rule.rule_key} 已存在")
-    return PolishLearningRuleOut.from_orm(crud.create_rule(db, rule))
+    created = crud.create_rule(db, rule)
+    _invalidate_typo_cache()
+    return PolishLearningRuleOut.from_orm(created)
 
 
 @router.put("/{rule_id}", response_model=PolishLearningRuleOut)
@@ -120,6 +124,7 @@ def update_rule(rule_id: int, rule_update: PolishLearningRuleUpdate, db: Session
     updated = crud.update_rule(db, rule_id, rule_update)
     if not updated:
         raise HTTPException(status_code=404, detail="规则不存在")
+    _invalidate_typo_cache()
     return PolishLearningRuleOut.from_orm(updated)
 
 
@@ -128,12 +133,14 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db)):
     success = crud.delete_rule(db, rule_id)
     if not success:
         raise HTTPException(status_code=404, detail="规则不存在")
+    _invalidate_typo_cache()
     return {"ok": True}
 
 
 @router.post("/batch-delete")
 def batch_delete_rules(body: PolishLearningRuleBatchDelete, db: Session = Depends(get_db)):
     deleted = crud.batch_delete_rules(db, body.ids)
+    _invalidate_typo_cache()
     return {"ok": True, "deleted": deleted}
 
 
@@ -205,7 +212,7 @@ def build_rules_workbook(rows: list[dict]):
     for index, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(index)].width = width
 
-    rule_type_validation = DataValidation(type="list", formula1='"系统规则,术语替换,禁止规则,句式适用,祈使句规则,格式规则"', allow_blank=False)
+    rule_type_validation = DataValidation(type="list", formula1='"系统规则,术语替换,禁止规则,句式适用,祈使句规则,格式规则,错别字规则"', allow_blank=False)
     enabled_validation = DataValidation(type="list", formula1='"启用,禁用"', allow_blank=False)
     ws.add_data_validation(rule_type_validation)
     ws.add_data_validation(enabled_validation)
@@ -214,7 +221,7 @@ def build_rules_workbook(rows: list[dict]):
 
     note = wb.create_sheet("填写说明")
     note.append(["字段", "说明"])
-    note.append(["规则分类", "请使用下拉选项：系统规则、术语替换、禁止规则、句式适用、祈使句规则、格式规则"])
+    note.append(["规则分类", "请使用下拉选项：系统规则、术语替换、禁止规则、句式适用、祈使句规则、格式规则、错别字规则"])
     note.append(["是否启用", "请使用下拉选项：启用、禁用"])
     note.append(["优先级", "数字越大优先级越高，默认 0"])
     for cell in note[1]:

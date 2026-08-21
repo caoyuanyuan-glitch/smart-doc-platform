@@ -11,12 +11,15 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from PIL import Image
 
+from app.api.auth import get_current_active_user
 from app.crud.knowledge import get_file, get_folder_tree
 from app.database import get_db
 from app.utils.document_parser import parse_file
 from app.utils.file_utils import read_file_safe
+from app.utils.template_profiler import build_template_profile, retrieve_for_intent, MAX_TEMPLATE_SIZE_BYTES
+from app.utils.template_job_manager import create_job, launch_job, get_job
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 DRAFT_CACHE: Dict[str, dict] = {}
 DRAFT_CACHE_MAX = 20
@@ -47,28 +50,35 @@ LANGUAGE_STYLE_INSTRUCTIONS = {
 }
 
 # ── Leading Words (锚定预训练概念，提升可预测性) ──
-# 每个意图用一个强引导词锚定 agent 行为，避免展开描述产生漂移
-LW_STEP = "步骤"        # 触发：操作序列、执行顺序、编号动作
-LW_WARN = "警示"        # 触发：风险识别、安全提示、规避措施
-LW_FAULT = "排查"       # 触发：异常检查、恢复操作、故障处理
-LW_DETAIL = "参数"      # 触发：补充条件、状态变化、注意事项
-LW_ORGANIZE = "梳理"    # 触发：编号重排、步骤化、结构化
+LW_STEP = "步骤"        # 触发：操作序列、执行顺序
+LW_DETAIL = "细化"      # 触发：展开说明、增加细节
+LW_PARAM = "参数"       # 触发：数值条件、技术指标
+LW_NOTICE = "须知"      # 触发：注意事项、使用提示
+LW_WARN = "警示"        # 触发：风险识别、安全提示
+LW_FAULT = "排查"       # 触发：异常检查、恢复操作
 LW_CUSTOM = "指令"      # 触发：用户自定义要求
-LW_TEMPLATE = "仿写"    # 触发：参照模板结构、章节组织、表达方式
 
 CONTINUATION_INTENT_INSTRUCTIONS = {
-    "next_step": f"[{LW_STEP}] 基于上下文推断可执行的下一步动作。输出格式：操作对象 + 动作 + 预期结果。",
-    "expand_detail": f"[{LW_DETAIL}] 补充操作参数、确认条件、状态变化或注意事项。保持与原文主题一致，不扩展新话题。",
-    "safety_warning": f"[{LW_WARN}] 识别当前操作的风险点，输出具体警示内容和规避措施。每条警示包含：风险场景 + 后果 + 规避动作。",
-    "troubleshooting": f"[{LW_FAULT}] 基于当前操作补充异常现象、检查项和恢复操作。每条包含：异常标志 + 检查步骤 + 恢复动作。",
-    "organize_steps": f"[{LW_ORGANIZE}] 将现有内容整理为 2-3 个带编号的执行步骤。强制要求：① 输出必须全部由编号步骤组成 ② 每行一个步骤，格式严格为「1. 具体动作描述」 ③ 禁止任何前言、解释、总结或额外文字 ④ 必须输出至少 2 个步骤。",
+    "next_step": f"[{LW_STEP}] 仅写下一步操作。① 只能描述紧随其后的一个动作，包含操作对象、具体动作和预期结果 ② 禁止补充参数、注意事项、安全警告或故障处理 ③ 禁止编写编号步骤链 ④ 仅输出一段话，不写标题或序号",
+    "expand_detail": f"[{LW_DETAIL}] 仅细化现有描述。① 对原文中的关键术语、机制、流程做展开说明 ② 禁止跳转到参数表、安全警告或故障处理 ③ 仅输出一段说明文，与原文主题完全一致",
+    "supplement_parameters": f"[{LW_PARAM}] 仅补充参数。① 输出与当前操作相关的技术参数：数值范围、阈值、工作条件、规格要求 ② 格式可用「参数名：取值」或短句描述 ③ 禁止写操作步骤、注意事项、安全警告或故障排查 ④ 不写标题，直接列参数",
+    "supplement_notices": f"[{LW_NOTICE}] 仅写注意事项。① 输出操作前/中/后需留意的要点（前置条件、操作细节、常见疏忽） ② 每条以短句开头，语气为温和提醒，非警告 ③ 禁止输出安全警示（含风险后果）、操作步骤或故障排查 ④ 建议用无编号短句，语气平实",
+    "safety_warning": f"[{LW_WARN}] 仅写安全警告。① 识别当前操作的风险点，每条包含「风险场景 + 可能后果 + 规避动作」② 语气严肃、带警示性 ③ 禁止输出普通注意事项（不含风险后果）、操作步骤、参数或故障排查 ④ 不写标题，直接列警示内容",
+    "troubleshooting": f"[{LW_FAULT}] 仅写故障处理。① 围绕当前操作场景补充异常现象、检查项和恢复动作 ② 每条包含「异常标志 + 检查步骤 + 恢复动作」③ 禁止输出操作步骤、参数说明、注意事项或安全警告 ④ 不写标题，直接列排查项",
     "custom": f"[{LW_CUSTOM}] 严格遵循用户提供的自定义续写要求，不添加要求以外的内容。",
-    "template_based": f"[{LW_TEMPLATE}] 参考用户上传的模板文件，沿袭其章节组织方式、句式结构和表达密度，对现有内容进行续写。强制要求：① 输出与现有内容语义连贯 ② 风格、句长、术语密度与模板保持一致 ③ 不复制模板原文，仅借鉴结构与表达方式 ④ 仅输出新增续写文本，不重复原文。",
 }
 
 CONTINUATION_LENGTH_INSTRUCTIONS = {
-    "short": "续写长度：简短，输出 1-2 句。",
-    "detailed": "续写长度：详细，输出 1 个自然段。",
+    "auto": "[续写长度] 自动。根据意图类型和上文上下文自行判断（1 句 ~ 1 段均可），以语义完整为原则，完成后立即停止。",
+    "short": "[续写长度] 简短（严格控制）。\n"
+             "① 只允许输出 1-2 个完整句子，正文总计不超过 80 个中文字符\n"
+             "② 写完 1-2 句后必须立即停止，严禁补充第三句或任何额外说明\n"
+             "③ 不要写序号、标题、项目符号",
+    "detailed": "[续写长度] 详细（严格控制）。\n"
+                "① 输出 1 个完整自然段，正文总计 150-350 个中文字符\n"
+                "② 该自然段由 4-10 个句子组成，围绕同一主题展开\n"
+                "③ 写完一个完整段落后必须立即停止，严禁继续写第二段\n"
+                "④ 不要写序号、标题、项目符号",
 }
 
 
@@ -81,12 +91,12 @@ class GenerateRequest(BaseModel):
 
 class ContinueTextRequest(BaseModel):
     source_text: str
+    chapter_title: str = ""
     intent: str = "next_step"
     custom_intent: str = ""
-    length: str = "short"
+    length: str = "auto"
     keep_terminology: bool = True
     keep_sentence_style: bool = True
-    # 用于打破可复现性：每次重新生成时由前端递增传入
     regenerate_seq: int = 0
 
 
@@ -396,18 +406,6 @@ def _compute_quality_score(source_text: str, continuation: str, intent: str) -> 
             score -= 15
             issues.append("续写内容与原文关联度较低，可能存在跑题")
 
-    # ── 5. 意图结构检查 ──
-    if intent == "organize_steps":
-        # 检查是否为编号步骤
-        lines = [l.strip() for l in continuation.split("\n") if l.strip()]
-        number_pat = re.compile(r'^[\d]+[.)、]\s*')
-        if not lines or not all(number_pat.match(l) for l in lines):
-            score -= 20
-            issues.append("未输出编号步骤格式")
-        elif len(lines) < 2:
-            score -= 15
-            issues.append("步骤数量不足")
-
     score = max(0, min(100, round(score)))
     passed = score >= 70
 
@@ -596,7 +594,7 @@ def _build_continuation_prompt(
     request: ContinueTextRequest,
     terminology_reference: Optional[dict],
     style_guide_bundle: Optional[dict],
-    template_reference: Optional[dict] = None,
+    template_profile: Optional[dict] = None,
 ) -> str:
     """
     构建续写 prompt —— 应用 mattpocock Skill 原则：
@@ -608,30 +606,33 @@ def _build_continuation_prompt(
     parts = [
         "[角色] 技术文档续写助手。",
         "[任务] 基于现有技术文档片段，生成可直接插入说明书的后续内容。",
+        "[铁律] 以下四条是每次续写都必须严格遵守的硬性规则，优先级高于其他任何指令：\n"
+        "① 不编造事实 — 不得杜撰不存在的功能、参数、操作步骤或安全风险，不确定的内容宁可省略也不要臆造；\n"
+        "② 不重复已有内容 — 不得复述、改写或仅在措辞上微调用户提供的现有内容，续写必须是原文之后的增量信息；\n"
+        "③ 只输出有价值内容 — 拒绝废话、套话、口水话（如'请按照说明书操作''注意安全''相关信息请参见下文'等无信息量的句子），每一句都必须对读者有实际帮助；\n"
+        "④ 技术文档风格 — 用词准确、句式简洁、逻辑严密，避免口语化、情绪化表达，不使用感叹号、表情符号或营销性语言。",
         CONTINUATION_INTENT_INSTRUCTIONS.get(request.intent) or CONTINUATION_INTENT_INSTRUCTIONS["next_step"],
         CONTINUATION_LENGTH_INSTRUCTIONS.get(request.length) or CONTINUATION_LENGTH_INSTRUCTIONS["short"],
         "[输出标准] 只输出新增续写文本，不重复原文。",
     ]
 
-    if request.intent == "organize_steps":
-        parts.append("[完成标准] 输出必须：① 仅包含编号步骤 ② 每行一个步骤，格式为「1. 动作描述」 ③ 不含前言/解释/总结/额外文字 ④ 步骤按执行顺序排列 ⑤ 至少 2 个步骤。")
-    elif request.intent == "template_based" and template_reference:
-        parts.append(
-            "[完成标准] 输出内容必须满足：① 与上文语义连贯 ② 沿袭模板的章节组织、句式结构与表达密度 "
-            "③ 不复制模板原文，仅借鉴结构与表达方式 ④ 不含标题/解释/JSON/Markdown 代码块。"
-        )
+    if request.intent == "next_step":
+        parts.append("[完成标准] ① 只输出一个后续动作的描述，包含操作对象、动作、预期结果 ② 必须与上文语义连贯 ③ 禁止补充参数、注意事项、警告、故障排查等其他类型内容 ④ 不写序号或标题")
+    elif request.intent == "supplement_parameters":
+        parts.append("[完成标准] ① 仅输出参数值、范围、阈值、规格，使用「参数名：取值」或短句 ② 禁止操作步骤、注意事项、警告、故障排查 ③ 不写标题，不写解释性文字 ④ 直接列参数")
+    elif request.intent == "supplement_notices":
+        parts.append("[完成标准] ① 仅输出温和提醒类注意事项，不涉及风险后果 ② 禁止安全警告、操作步骤、参数、故障排查 ③ 语气平实、提醒而非警示 ④ 不写标题")
+    elif request.intent == "safety_warning":
+        parts.append("[完成标准] ① 仅输出含风险场景 + 后果 + 规避动作的安全警告 ② 禁止普通注意事项、操作步骤、参数、故障排查 ③ 语气严肃、带警示性 ④ 不写标题")
+    elif request.intent == "troubleshooting":
+        parts.append("[完成标准] ① 仅输出含异常标志 + 检查步骤 + 恢复动作的故障排查项 ② 禁止操作步骤、参数、注意事项、安全警告 ③ 不写标题")
+    elif request.intent == "expand_detail":
+        parts.append("[完成标准] ① 仅细化原文已有的术语、机制或流程 ② 禁止跳转到其他意图类型（步骤/参数/注意/警告/排查）③ 与原文主题完全一致 ④ 一段说明文，不写标题")
     else:
         parts.append("[完成标准] 输出内容必须满足：① 与上文语义连贯 ② 不含标题/解释/JSON/Markdown 代码块 ③ 仅基于上下文合理推断，不引入外部假设。")
 
     if request.intent == "custom" and request.custom_intent.strip():
         parts.append(f"[自定义指令] {request.custom_intent.strip()}")
-
-    if template_reference and template_reference.get("content"):
-        template_name = template_reference.get("name") or "模板文件"
-        parts.append(
-            f"[模板参考] 以下是参考模板《{template_name}》的内容片段，请沿袭其章节组织方式、"
-            f"句式结构与表达密度（不要复制模板原文）：\n{template_reference['content']}"
-        )
 
     if terminology_reference:
         terminology_pairs = _parse_terminology_pairs(terminology_reference.get("content") or "")
@@ -654,16 +655,136 @@ def _build_continuation_prompt(
             + "\n\n".join(guide_blocks)
         )
 
+    if request.chapter_title.strip():
+        parts.append(f"[当前章节]\n{request.chapter_title.strip()}")
+
+    if template_profile:
+        profile = template_profile.get("document_profile") or {}
+        examples = template_profile.get("example_bank") or {}
+
+        # 检索相关片段（按 intent + chapter_title + source_text 做 query）
+        query_text = f"{request.chapter_title} {request.source_text[:80]}"
+        retrieved = retrieve_for_intent(
+            template_profile, intent=request.intent,
+            query=query_text, max_chars=1200,
+        )
+
+        tpl_blocks: List[str] = []
+
+        style_lines = []
+        ws = str(profile.get("writing_style") or "").strip()
+        fs = str(profile.get("format_spec") or "").strip()
+        gl = profile.get("glossary") or []
+        ty = profile.get("typical_sentences") or []
+        fo = profile.get("forbidden_expressions") or []
+        if ws:
+            style_lines.append(f"写作风格：{ws}")
+        if fs:
+            style_lines.append(f"格式规范：{fs}")
+        if gl:
+            gl_str = "；".join(
+                f"{g.get('term','')}={g.get('def','')}" if isinstance(g, dict) else str(g)
+                for g in gl[:12]
+            )
+            style_lines.append(f"术语表：{gl_str}")
+        if ty:
+            style_lines.append("典型句式：" + " / ".join(str(t) for t in ty[:6]))
+        if fo:
+            style_lines.append("禁用表达：" + " / ".join(str(f) for f in fo[:6]))
+
+        if style_lines:
+            tpl_blocks.append(
+                f"[模板风格锚定 · {template_profile.get('name','')}] "
+                "请按如下风格特征和术语表来写续写内容，但不要复述模板：\n"
+                + "\n".join(f"· {line}" for line in style_lines)
+            )
+
+        # 意图匹配的样例
+        intent_examples = examples.get(request.intent) or []
+        if intent_examples:
+            label = {
+                "next_step": "操作步骤写法",
+                "expand_detail": "详细说明写法",
+                "supplement_parameters": "参数写法",
+                "supplement_notices": "注意事项写法",
+                "safety_warning": "安全警告写法",
+                "troubleshooting": "故障处理写法",
+                "custom": "通用写法",
+            }.get(request.intent, "写法")
+            tpl_blocks.append(
+                f"[模板样例 · {label}] 以下是模板中同类型写法的原文摘录，"
+                "续写请参考其措辞和句式，不要照搬：\n"
+                + "\n".join(f"- {e}" for e in intent_examples[:5])
+            )
+
+        # 检索到的相关片段
+        if retrieved:
+            snippet_lines = []
+            for item in retrieved:
+                title = item.get("title", "")
+                content = item.get("content", "")
+                snippet_lines.append(
+                    f"【片段：{title}】\n{content}" if title else content
+                )
+            tpl_blocks.append(
+                f"[模板检索片段 · {request.intent}] 以下是模板中与"
+                "本意图相关的章节片段，请参考写法，不要复述原文：\n"
+                + "\n\n".join(snippet_lines)
+            )
+
+        if tpl_blocks:
+            parts.append("\n\n".join(tpl_blocks))
+        else:
+            preview = template_profile.get("full_text_preview") or ""
+            if preview:
+                parts.append(
+                    f"[参考模板 · {template_profile.get('name','')}] "
+                    "模板自动分析暂未命中意图相关片段，请参考模板整体写法：\n"
+                    f"{preview[:600]}"
+                )
+
     parts.append(f"[现有内容]\n{request.source_text.strip()}")
+
+    # [输出边界硬约束] —— 放在 prompt 末尾，让模型最后看到最强的长度锚定
+    if request.length == "short":
+        parts.append(
+            "[输出边界硬约束] 你现在必须输出续写内容。"
+            "规则如下：\n"
+            "① 最多写 2 句，每句控制在 30-50 字以内，总字数不超过 80 字\n"
+            "② 写完 1-2 句完整意思后，立即停止输出，不要加任何后续文字\n"
+            "③ 严禁输出解释、说明、标题、序号或额外段落\n"
+            "⚠️ 一旦达到 2 句或 80 字上限，必须停笔，不要贪多"
+        )
+    elif request.length == "detailed":
+        parts.append(
+            "[输出边界硬约束] 你现在必须输出续写内容。"
+            "规则如下：\n"
+            "① 写 1 个完整自然段（4-10 句，总字数 150-350 字）\n"
+            "② 自然段写完（语义完整、有明确结尾）后立即停止输出\n"
+            "③ 严禁输出第二段、标题、序号、项目符号或额外补充说明\n"
+            "⚠️ 段内写完即停，不要继续往下写"
+        )
+    else:
+        parts.append(
+            "[输出边界硬约束] 你现在必须输出续写内容。"
+            "根据上文和意图自行判断长度，但必须在语义完整后立即停止，不要贪多。"
+        )
+
     return "\n\n".join(parts)
 
 
-def _resolve_continuation_max_tokens(length: str) -> int:
+def _resolve_continuation_max_tokens(length: str, intent: str = "") -> int:
     if length == "short":
-        return 384
+        return 192
     if length == "detailed":
-        return 1024
-    return 512
+        return 768
+    if length == "auto":
+        if intent in ("supplement_parameters", "supplement_notices", "safety_warning", "troubleshooting"):
+            return 768
+        if intent == "next_step":
+            return 256
+        return 512
+    return 384
 
 
 def _clean_continuation_text(text: str) -> str:
@@ -795,14 +916,20 @@ def _split_single_step(text: str) -> list:
 
 
 def _continuation_fallback(request: ContinueTextRequest) -> str:
-    if request.intent == "safety_warning":
-        return "请确认相关部件已正确放置并保持稳定，避免因安装不到位导致处理失败。操作过程中如发现异常提示，应停止当前流程并按故障处理说明进行检查。"
-    if request.intent == "troubleshooting":
-        return "若系统未进入下一步，请检查样本位置、槽盖状态和界面提示信息。确认条件满足后，重新执行当前操作并观察系统反馈。"
+    if request.intent == "next_step":
+        return "完成当前操作后，在控制面板点击确认按钮，等待系统响应并观察界面状态变化。"
     if request.intent == "expand_detail":
-        return "执行该操作前，应确认样本、耗材和设备状态均满足使用要求。完成操作后，观察界面状态变化，并根据提示继续后续流程。"
-    if request.intent == "organize_steps":
-        return "1. 确认样本已正确放置在样本槽中。\n2. 检查槽盖是否完全关闭并锁定。\n3. 在控制界面选择对应的实验流程。\n4. 点击启动按钮开始运行。\n5. 等待实验完成并查看结果。"
+        return "该步骤的执行效果受样本初始状态、环境温湿度及设备校准精度共同影响，操作前需确保各项前置条件满足说明书规定。"
+    if request.intent == "supplement_parameters":
+        return "工作电压：DC 12V ± 5%\n环境温度：15 ℃ ~ 30 ℃\n相对湿度：≤ 75%\n样本容量：0.5 mL ~ 2.0 mL\n运行时长：约 45 分钟"
+    if request.intent == "supplement_notices":
+        return "操作前请核对样本编号与录入信息是否一致。\n运行过程中请勿触碰设备外壳。\n更换耗材后请注意及时关闭舱门。\n操作完成后建议对工作台进行清洁。"
+    if request.intent == "safety_warning":
+        return "⚠️ 舱门未完全关闭即启动设备，可能导致样本飞溅或运动部件外露，务必确认锁定后再执行。\n⚠️ 长时间连续运行会使设备过热，建议每 4 小时停机休息 10 分钟。\n⚠️ 请勿将磁性物品靠近控制主板，可能影响传感器读数准确性。"
+    if request.intent == "troubleshooting":
+        return "异常标志：设备启动后界面无响应 → 检查电源插头是否插紧，重新上电重试。\n异常标志：槽盖关闭后系统仍提示未锁定 → 检查槽盖传感器是否被异物遮挡，清理后再次关闭。\n异常标志：实验中途暂停 → 查看样本是否偏离采样位，复位后点击继续按钮。"
+    if request.intent == "custom" and request.custom_intent.strip():
+        return f"（兜底续写）{request.custom_intent.strip()}：请确认操作对象就位后，按界面提示完成后续步骤。"
     return "请确认当前操作对象已正确就位，然后点击界面中的开始按钮启动处理流程。系统进入下一步后，按照页面提示继续完成后续操作。"
 
 
@@ -962,19 +1089,52 @@ async def generate_content(request: GenerateRequest):
         }
 
 
+# ────────── 模板异步分析（卡点 1-A）──────────────────────────
+
+@router.post("/template-analyze")
+async def template_analyze(
+    template_file: UploadFile = File(...),
+):
+    """提交模板文件，后台异步分析。立即返回 job_id。"""
+    raw = await template_file.read()
+    filename = template_file.filename or "未命名模板"
+
+    try:
+        job = create_job(filename, raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    launch_job(job.job_id, raw)
+    return job.to_public_dict()
+
+
+@router.get("/template-status")
+async def template_status(job_id: str):
+    """查询 job 当前进度。"""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"job_id 不存在或已过期：{job_id}")
+    return job.to_public_dict()
+
+
+# ────────── 智能续写 ────────────────────────────────────────────
+
 @router.post("/continue-text")
 async def continue_text(
     source_text: str = Form(...),
+    chapter_title: str = Form(""),
     intent: str = Form("next_step"),
     custom_intent: str = Form(""),
-    length: str = Form("short"),
+    length: str = Form("auto"),
     keep_terminology: bool = Form(True),
     keep_sentence_style: bool = Form(True),
     regenerate_seq: int = Form(0),
     template_file: Optional[UploadFile] = File(None),
+    template_job_id: str = Form(""),
     db: Session = Depends(get_db),
 ):
     source_text = source_text.strip()
+    chapter_title = chapter_title.strip()
     if not source_text:
         raise HTTPException(status_code=400, detail="请填写现有内容")
     if len(source_text) > 6000:
@@ -982,17 +1142,9 @@ async def continue_text(
     if intent == "custom" and not custom_intent.strip():
         raise HTTPException(status_code=400, detail="请填写自定义续写要求")
 
-    template_reference = None
-    if intent == "template_based":
-        if not template_file or not template_file.filename:
-            raise HTTPException(status_code=400, detail="参考模板文件续写需要上传模板文件")
-        template_reference = await _load_template_reference(template_file)
-        if not template_reference:
-            raise HTTPException(status_code=400, detail="无法解析模板文件，请确认文件内容非空且格式受支持（word/pdf/md/txt）")
-
-    # 构造内部 request 对象，复用现有辅助函数
     request = ContinueTextRequest(
         source_text=source_text,
+        chapter_title=chapter_title,
         intent=intent,
         custom_intent=custom_intent,
         length=length,
@@ -1003,7 +1155,44 @@ async def continue_text(
 
     terminology_reference = _load_terminology_reference(db, keep_terminology)
     style_guide_bundle = _load_style_guide_bundle(db, None) if keep_sentence_style else None
-    prompt = _build_continuation_prompt(request, terminology_reference, style_guide_bundle, template_reference)
+
+    template_profile = None
+    if template_job_id:
+        job = get_job(template_job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"模板分析任务不存在或已过期")
+        if job.status == "analyzing":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TEMPLATE_ANALYZING",
+                    "job_id": job.job_id,
+                    "step": job.step,
+                    "step_label": job.step_label,
+                },
+            )
+        if job.status == "failed":
+            raise HTTPException(status_code=400, detail=f"模板分析失败：{job.error or '未知错误'}")
+        template_profile = job.profile
+    elif template_file:
+        try:
+            raw = await template_file.read()
+            if raw:
+                try:
+                    template_profile = build_template_profile(
+                        template_file.filename or "模板文件", raw
+                    )
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[continue-text] template_profile build failed: {e}")
+            template_profile = None
+
+    prompt = _build_continuation_prompt(
+        request, terminology_reference, style_guide_bundle, template_profile=template_profile
+    )
 
     base_temperature = 0.25
     if regenerate_seq > 0:
@@ -1031,15 +1220,11 @@ async def continue_text(
             result = ai_client.chat([
                 {"role": "system", "content": "[任务] 输出新增续写文本，不重复上文。"},
                 {"role": "user", "content": prompt},
-            ], max_tokens=_resolve_continuation_max_tokens(length),
+            ], max_tokens=_resolve_continuation_max_tokens(length, request.intent),
                temperature=temperature + attempt * 0.15, kimi_thinking="disabled")
             continuation = _clean_continuation_text(result)
             if not continuation:
                 continue
-
-            # ── 后处理：意图特定格式化 ──
-            if intent == "organize_steps":
-                continuation = _ensure_step_format(continuation)
 
             # ── 后处理：术语库强制对齐 ──
             if terminology_reference:
@@ -1067,7 +1252,7 @@ async def continue_text(
             "continuation": best_result,
             "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
             "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": [best_result]}) if style_guide_bundle else "",
-            "used_template_name": template_reference.get("name") if template_reference else "",
+            "template_name": template_profile.get("name") if template_profile else "",
             "model": "kimi",
             "warning": "",
             "audit": {
@@ -1085,8 +1270,6 @@ async def continue_text(
     except Exception as e:
         print(f"[continue-text] fallback: {e}")
         fallback_text = _continuation_fallback(request)
-        if intent == "organize_steps":
-            fallback_text = _ensure_step_format(fallback_text)
         if terminology_reference:
             fallback_text = _apply_terminology_to_text(fallback_text, terminology_reference)
         return {
@@ -1094,7 +1277,6 @@ async def continue_text(
             "continuation": fallback_text,
             "used_terminology_files": terminology_reference.get("files") if terminology_reference else [],
             "used_style_guide_name": _resolve_used_style_guide_name(style_guide_bundle, {"steps": []}) if style_guide_bundle else "",
-            "used_template_name": template_reference.get("name") if template_reference else "",
             "model": "fallback",
             "warning": "当前 AI 续写链路未返回有效结果，已展示本地示例续写。",
             "audit": {

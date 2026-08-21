@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile
+from fastapi import APIRouter, HTTPException, File, UploadFile, Depends
 from typing import List
 import os
 import time
 import json
+from app.api.auth import get_current_active_user
+from app.schemas.user import UserOut
 
 router = APIRouter()
 
@@ -17,6 +19,7 @@ def _ensure_upload_dir():
 @router.post("/")
 async def compare_params(
     files: List[UploadFile] = File(...),
+    current_user: UserOut = Depends(get_current_active_user),
 ):
     _ensure_upload_dir()
 
@@ -72,6 +75,7 @@ async def compare_params(
                 group_id=ts,
                 file_names=json.dumps(saved_names, ensure_ascii=False),
                 pair_result=pair_result,
+                user_id=current_user.id,
             )
 
         return {
@@ -90,7 +94,7 @@ async def compare_params(
                     pass
 
 
-def _save_param_task_to_db(file_a_name, file_b_name, group_id, file_names, pair_result):
+def _save_param_task_to_db(file_a_name, file_b_name, group_id, file_names, pair_result, user_id):
     """将参数对比结果保存到 CompareTask 表，以便在历史任务中查看"""
     try:
         from app.database import SessionLocal
@@ -133,7 +137,7 @@ def _save_param_task_to_db(file_a_name, file_b_name, group_id, file_names, pair_
                     "params_b": pair_result.get("params_b_count", 0),
                 }),
                 status="completed",
-                user_id=1,
+                user_id=user_id,
                 exact_match=match_count,
                 n_a=pair_result.get("params_a_count", 0),
                 n_b=pair_result.get("params_b_count", 0),

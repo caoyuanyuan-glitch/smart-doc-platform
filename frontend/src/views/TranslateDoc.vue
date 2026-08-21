@@ -2,7 +2,7 @@
   <div class="doc-translate-container">
     <div class="page-header">
       <h2 class="page-title">文档翻译</h2>
-      <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、Markdown、TXT、IDML 文档</p>
+    <p class="page-desc">支持 AI、AI + 记忆库、仅记忆库三种模式，可翻译 Word、Excel、PPT、PDF、图片、Markdown、TXT、IDML 文档</p>
     </div>
 
     <el-card class="config-card config-horizontal" shadow="never">
@@ -19,37 +19,37 @@
         </el-form-item>
         <el-form-item label="记忆库配置" v-if="engine !== 'ai'">
           <el-select
-            v-model="memoryFileId"
+            v-model="memoryFileIds"
             placeholder="从知识库 / 资源库 / 记忆库选择，可不选"
             clearable
             filterable
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
             :loading="memoryLibraryLoading"
-            style="width: 260px"
+            style="width: 320px"
           >
             <el-option v-for="file in memoryLibraryFiles" :key="file.id" :label="file.label" :value="file.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="AI 模型" v-if="engine !== 'memory'">
-          <el-select v-model="model" style="width: 160px">
-            <el-option label="Kimi (Moonshot)" value="kimi" />
-            <el-option label="DeepSeek Chat" value="deepseek" />
-            <el-option label="ArkClaw Chat" value="arkclaw" />
+          <el-select v-model="model" style="width: 180px" :loading="providerLoading">
+            <el-option
+              v-for="option in availableModelOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
           </el-select>
         </el-form-item>
+        <span v-if="engine !== 'memory'" class="model-status-hint">{{ providerHintText }}</span>
         <el-form-item label="语言">
           <el-select v-model="sourceLang" style="width: 100px">
-            <el-option label="自动" value="auto" />
-            <el-option label="中文" value="zh" />
-            <el-option label="英文" value="en" />
+            <el-option v-for="option in sourceLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
           <el-icon class="swap-icon" @click="swapLanguages"><Sort /></el-icon>
           <el-select v-model="targetLang" style="width: 100px">
-            <el-option label="英文" value="en" />
-            <el-option label="中文" value="zh" />
-            <el-option label="日文" value="ja" />
-            <el-option label="韩文" value="ko" />
-            <el-option label="法文" value="fr" />
-            <el-option label="德文" value="de" />
+            <el-option v-for="option in targetLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -78,12 +78,12 @@
               :auto-upload="false"
               multiple
               ref="fileUploadRef"
-              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.md,.txt,.xlf,.idml"
+              accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.png,.jpg,.jpeg,.md,.txt,.xlf,.idml"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
                 <p class="upload-title">将文件拖到此处，或点击上传</p>
-                <p class="upload-hint">支持 Word、Excel、PPT、PDF、Markdown、IDML 格式</p>
+                <p class="upload-hint">支持 Word、Excel、PPT、PDF、PNG/JPG 图片、Markdown、IDML 格式</p>
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
@@ -145,6 +145,11 @@
               </div>
 
               <div v-else-if="job.status === 'completed'" class="result-content">
+                <div class="result-usage-stats">
+                  <span>总字数 {{ Number(job.source_word_count || 0).toLocaleString() }}</span>
+                  <span>AI {{ Number(job.ai_word_count || 0).toLocaleString() }}</span>
+                  <span>记忆库 {{ Number(job.memory_word_count || 0).toLocaleString() }}</span>
+                </div>
                 <el-result icon="success" title="翻译完成" :sub-title="`原文件: ${job.original_filename}`">
                   <template #extra>
                     <el-button type="primary" @click="downloadTranslatedFile(job)">
@@ -175,17 +180,27 @@
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
-import { knowledgeAPI, translationAPI } from '@/api'
+import { getBlobErrorMessage, knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
+import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
+import {
+  buildAvailableTranslationModels,
+  FALLBACK_TRANSLATION_MODELS,
+  getTranslationProviderHint,
+  TRANSLATION_SOURCE_LANGUAGE_OPTIONS,
+  TRANSLATION_TARGET_LANGUAGE_OPTIONS
+} from '@/utils/translationOptions'
 
 const TRANSLATION_BATCH_STORAGE_KEY = 'translation:lastUploadBatchId'
-const TRANSLATION_BATCH_EVENT = 'translation-batch-updated'
-const TRANSLATION_STATS_EVENT = 'translation-stats-updated'
 
 const engine = ref('hybrid')
 const model = ref('kimi')
 const sourceLang = ref('auto')
 const targetLang = ref('en')
+const providerLoading = ref(false)
+const providerStatus = ref(null)
+const sourceLanguageOptions = TRANSLATION_SOURCE_LANGUAGE_OPTIONS
+const targetLanguageOptions = TRANSLATION_TARGET_LANGUAGE_OPTIONS
 
 function swapLanguages() {
   if (sourceLang.value === 'auto') {
@@ -199,7 +214,7 @@ function swapLanguages() {
 
 const memoryBank = ref('')
 const memoryBanks = ref([])
-const memoryFileId = ref(null)
+const memoryFileIds = ref([])
 const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
 const docSource = ref('upload')
@@ -207,6 +222,16 @@ const translationJobs = ref([])
 const pollingTimers = new Map()
 const hasActiveJobs = computed(() => translationJobs.value.some(job => job.status === 'submitting' || job.status === 'processing'))
 const currentBatchId = ref('')
+const availableModelOptions = computed(() => {
+  const options = buildAvailableTranslationModels(providerStatus.value)
+  if (options.length > 0) {
+    return options
+  }
+  return providerStatus.value ? [] : FALLBACK_TRANSLATION_MODELS
+})
+const providerHintText = computed(() => {
+  return getTranslationProviderHint(providerStatus.value, model.value, providerLoading.value)
+})
 
 const fileUploadRef = ref(null)
 
@@ -218,7 +243,7 @@ const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 
 onMounted(async () => {
   loadReviewedDocs()
-  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles()])
+  await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
   await restoreLatestBatchJobs()
 })
 
@@ -245,13 +270,45 @@ async function loadMemoryLibraryFiles() {
     memoryLibraryFiles.value = extractMemoryLibraryFiles(res.data || [])
   } catch (e) {
     memoryLibraryFiles.value = []
+    ElMessage.warning(getKnowledgeLoadErrorMessage(e, '加载记忆库配置失败'))
   } finally {
     memoryLibraryLoading.value = false
   }
 }
 
+function syncSelectedModel() {
+  if (engine.value === 'memory') {
+    return
+  }
+  const options = availableModelOptions.value
+  if (options.some((option) => option.value === model.value)) {
+    return
+  }
+  const preferred = String(providerStatus.value?.default_provider || '').trim().toLowerCase()
+  model.value = options.find((option) => option.value === preferred)?.value || options[0]?.value || 'kimi'
+}
+
+async function loadProviders() {
+  providerLoading.value = true
+  try {
+    const res = await translationAPI.getProviderStatus()
+    providerStatus.value = res.data || null
+  } catch (e) {
+    providerStatus.value = null
+  } finally {
+    providerLoading.value = false
+    syncSelectedModel()
+  }
+}
+
 function onEngineChange(val) {
-  // no-op now
+  syncSelectedModel()
+}
+
+function appendSelectedMemoryFileIds(formData) {
+  for (const memoryFileId of memoryFileIds.value) {
+    formData.append('memory_file_ids', String(memoryFileId))
+  }
 }
 
 function tableRowClassName({ row }) {
@@ -307,9 +364,7 @@ async function translateReviewedDoc() {
     formData.append('target_lang', targetLang.value)
     formData.append('memory_bank', memoryBank.value || '')
     formData.append('batch_id', batchId)
-    if (memoryFileId.value != null) {
-      formData.append('memory_file_id', String(memoryFileId.value))
-    }
+    appendSelectedMemoryFileIds(formData)
     const tres = await translationAPI.translateFile(formData)
     updateJob(job.jobKey, {
       doc_id: tres.data.doc_id,
@@ -328,7 +383,7 @@ async function translateReviewedDoc() {
 
 function beforeFileUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
-  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'md', 'txt', 'xlf', 'idml']
+  const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'png', 'jpg', 'jpeg', 'md', 'txt', 'xlf', 'idml']
   if (!allowed.includes(ext)) {
     ElMessage.error(`不支持的文件格式: .${ext}`)
     return false
@@ -366,9 +421,7 @@ function handleFileTranslate(options) {
   formData.append('target_lang', targetLang.value)
   formData.append('memory_bank', memoryBank.value || '')
   formData.append('batch_id', batchId)
-  if (memoryFileId.value != null) {
-    formData.append('memory_file_id', String(memoryFileId.value))
-  }
+  appendSelectedMemoryFileIds(formData)
 
   translationAPI.translateFile(formData).then(res => {
     updateJob(job.jobKey, {
@@ -395,7 +448,10 @@ function createJob(filename) {
     download_url: '',
     status: 'submitting',
     error: '',
-    pollingCount: 0
+    pollingCount: 0,
+    source_word_count: 0,
+    ai_word_count: 0,
+    memory_word_count: 0
   }
   translationJobs.value = [job, ...translationJobs.value]
   return job
@@ -424,7 +480,10 @@ async function restoreLatestBatchJobs() {
       error: String(doc.translated_filename || '').startsWith('ERROR:')
         ? String(doc.translated_filename).slice(6)
         : (String(doc.translated_filename || '').startsWith('CANCELED:') ? String(doc.translated_filename).slice(9) : ''),
-      pollingCount: 0
+      pollingCount: 0,
+      source_word_count: Number(doc.source_word_count || 0),
+      ai_word_count: Number(doc.ai_word_count || 0),
+      memory_word_count: Number(doc.memory_word_count || 0)
     }))
 
     for (const job of translationJobs.value) {
@@ -467,7 +526,10 @@ function startPolling(jobKey, docId) {
           translated_filename: statusData.translated_filename || '',
           download_url: statusData.download_url || `/api/translation/download/${docId}`,
           status: 'completed',
-          error: ''
+          error: '',
+          source_word_count: Number(statusData.source_word_count || 0),
+          ai_word_count: Number(statusData.ai_word_count || 0),
+          memory_word_count: Number(statusData.memory_word_count || 0)
         })
         window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'completed' } }))
         ElMessage.success('文档翻译完成')
@@ -477,7 +539,13 @@ function startPolling(jobKey, docId) {
       if (statusData.status === 'error') {
         stopPolling(jobKey)
         const error = statusData.error || '翻译过程中发生错误'
-        updateJob(jobKey, { status: 'error', error })
+        updateJob(jobKey, {
+          status: 'error',
+          error,
+          source_word_count: Number(statusData.source_word_count || 0),
+          ai_word_count: Number(statusData.ai_word_count || 0),
+          memory_word_count: Number(statusData.memory_word_count || 0)
+        })
         window.dispatchEvent(new CustomEvent(TRANSLATION_STATS_EVENT, { detail: { batchId: currentBatchId.value, docId, status: 'error' } }))
         ElMessage.error(error)
         return
@@ -485,7 +553,13 @@ function startPolling(jobKey, docId) {
 
       if (statusData.status === 'canceled') {
         stopPolling(jobKey)
-        updateJob(jobKey, { status: 'canceled', error: statusData.error || '翻译任务已停止' })
+        updateJob(jobKey, {
+          status: 'canceled',
+          error: statusData.error || '翻译任务已停止',
+          source_word_count: Number(statusData.source_word_count || 0),
+          ai_word_count: Number(statusData.ai_word_count || 0),
+          memory_word_count: Number(statusData.memory_word_count || 0)
+        })
         ElMessage.info(statusData.error || '翻译任务已停止')
         return
       }
@@ -537,7 +611,10 @@ async function cancelTranslationJob(job) {
       status: res.data.status === 'completed' ? 'completed' : 'canceled',
       translated_filename: res.data.translated_filename || job.translated_filename,
       download_url: res.data.download_url || job.download_url,
-      error: res.data.error || '翻译任务已停止'
+      error: res.data.error || '翻译任务已停止',
+      source_word_count: Number(res.data.source_word_count || 0),
+      ai_word_count: Number(res.data.ai_word_count || 0),
+      memory_word_count: Number(res.data.memory_word_count || 0)
     })
     ElMessage.info(res.data.status === 'completed' ? '翻译已完成，无法停止' : '翻译任务已停止')
   } catch (e) {
@@ -547,12 +624,11 @@ async function cancelTranslationJob(job) {
 
 function downloadTranslatedFile(job) {
   if (!job?.download_url) return
-  const link = document.createElement('a')
-  link.href = job.download_url
-  link.setAttribute('download', job.translated_filename || job.original_filename)
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
+  translationAPI.downloadTranslatedDoc(job.doc_id, job.translated_filename || job.original_filename)
+    .catch(async (error) => {
+      const message = await getBlobErrorMessage(error, '下载译文失败')
+      ElMessage.error(message)
+    })
 }
 </script>
 
@@ -635,6 +711,14 @@ function downloadTranslatedFile(job) {
 
 .config-form-inline :deep(.el-form-item) {
   margin-bottom: 4px;
+}
+
+.model-status-hint {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .swap-icon {
@@ -827,6 +911,16 @@ function downloadTranslatedFile(job) {
   margin-top: 4px;
   font-size: 12px;
   color: #6b7280;
+}
+
+.result-usage-stats {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #4b5563;
 }
 
 @media (max-width: 1024px) {

@@ -42,6 +42,54 @@ export function getAPIErrorMessage(error, fallback = '请求失败') {
   return error?.message || fallback
 }
 
+export function getKnowledgeLoadErrorMessage(error, fallback = '加载知识库失败') {
+  if (error?.code === 'ECONNABORTED') {
+    return '加载知识库超时，请稍后重试'
+  }
+  if (!error?.response) {
+    return '知识库服务不可用，请确认后端服务已启动'
+  }
+  return getAPIErrorMessage(error, fallback)
+}
+
+function triggerBlobDownload(data, filename, mimeType = 'application/octet-stream') {
+  const url = window.URL.createObjectURL(new Blob([data], { type: mimeType }))
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', filename)
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+function downloadBlob(url, filename, options = {}) {
+  return instance.get(url, {
+    responseType: 'blob',
+    transformResponse: [(data) => data],
+    ...options
+  }).then((response) => {
+    triggerBlobDownload(response.data, filename)
+    return response
+  })
+}
+
+export async function getBlobErrorMessage(error, fallback = '下载失败') {
+  const detail = error?.response?.data
+  if (detail instanceof Blob) {
+    try {
+      const text = await detail.text()
+      const parsed = JSON.parse(text)
+      if (typeof parsed?.detail === 'string' && parsed.detail.trim()) {
+        return parsed.detail
+      }
+    } catch {
+      return error?.message || fallback
+    }
+  }
+  return getAPIErrorMessage(error, fallback)
+}
+
 export const authAPI = {
   login: (username, password) => {
     const formData = new FormData()
@@ -55,7 +103,11 @@ export const authAPI = {
 
 export const systemAPI = {
   getAIStatus: () => instance.get('/system/ai-status', { timeout: 70000 }),
-  warmupAI: () => instance.post('/system/ai-warmup', {}, { timeout: 70000 })
+  warmupAI: () => instance.post('/system/ai-warmup', {}, { timeout: 70000 }),
+  getAIUsage: (limit = 50) => instance.get('/system/ai-usage', {
+    params: { limit },
+    timeout: 15000
+  })
 }
 
 export const userAPI = {
@@ -82,7 +134,22 @@ export const documentAPI = {
 }
 
 export const reviewAPI = {
-  create: (documentId, mode) => instance.post(`/review/${documentId}`, {}, { params: { mode }, timeout: 300000 }),
+  create: (documentId, mode, provider, providers) => {
+    const params = { mode, timeout: 300000 }
+    if (provider) params.provider = provider
+    if (providers && providers.length > 0) params.providers = providers.join(',')
+    return instance.post(`/review/${documentId}`, {}, { params })
+  },
+  compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
+    const formData = new FormData()
+    formData.append('main_file', mainFile)
+    formData.append('mode', mode)
+    referenceFiles.forEach((file) => formData.append('reference_files', file))
+    return instance.post('/review/compare-audit/run', formData, {
+      timeout: 300000,
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
   get: (id) => instance.get(`/review/${id}`),
   getIssues: (id) => instance.get(`/review/${id}/issues`),
   createManualIssue: (id, data) => instance.post(`/review/${id}/issues/manual`, data),
@@ -95,12 +162,25 @@ export const reviewAPI = {
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
   getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
   getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
-  list: () => instance.get('/review/'),
+  list: (params = {}) => instance.get('/review/', { params }),
   updateIssue: (issueId, status) => instance.put(`/review/issues/${issueId}`, { status }),
   batchJudge: (reviewId, judgments) => instance.post(`/review/${reviewId}/judge`, { judgments }),
   getReport: (id) => instance.get(`/review/${id}/report`),
   exportHtml: (id) => instance.get(`/review/${id}/export-html`, { responseType: 'blob' }),
-  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' })
+  exportResult: (id) => instance.get(`/review/${id}/export-result`, { responseType: 'blob' }),
+  getTraces: (id) => instance.get(`/review/${id}/traces`),
+  getCoverage: (id) => instance.get(`/review/${id}/coverage`),
+  getTerminology: (id) => instance.get(`/review/${id}/terminology`),
+  getSimilarDocs: (id) => instance.get(`/review/${id}/similar-documents`),
+  reindex: (id) => instance.post(`/review/${id}/reindex`),
+  search: (q, limit = 10) => instance.get('/review/search', { params: { q, limit } }),
+  getAggregatedReport: (id) => instance.get(`/review/${id}/aggregated-report`),
+  getRuleMigration: () => instance.get('/review/engine/rule-migration'),
+  runBatchEval: (params) => instance.post('/review/eval/batch', params, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  }),
+  getStageDiagnostics: (id) => instance.get(`/review/${id}/stage-diagnostics`),
+  getProviderStatus: () => instance.get('/review/provider-status'),
 }
 
 export const compareAPI = {
@@ -117,6 +197,22 @@ export const compareAPI = {
   updateConfig: (config) => instance.put('/compare/config', config),
   getPreviewInfo: (id) => instance.get(`/compare/${id}/preview/info`),
   getPreviewFileUrl: (id, side) => `/api/compare/${id}/preview/file?side=${side}`,
+}
+
+export const competitorAPI = {
+  create: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/competitor/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000
+    })
+  },
+  createFromUrl: (url) => instance.post('/competitor/url', { url }, { timeout: 600000 }),
+  list: (params = {}) => instance.get('/competitor/', { params }),
+  get: (id) => instance.get(`/competitor/${id}`),
+  delete: (id) => instance.delete(`/competitor/${id}`),
+  getReport: (id) => instance.get(`/competitor/${id}/report`, { params: { format: 'md' } }),
 }
 
 export const rulesAPI = {
@@ -149,12 +245,40 @@ export const auditBasisAPI = {
 
 export const polishAPI = {
   document: (id) => instance.post(`/polish/${id}`),
-  text: (text, styleGuideId = null, terminologyId = null) => instance.post('/polish/text', { text, style_guide_id: styleGuideId, terminology_id: terminologyId }),
+  text: ({ text, productType = '', styleGuideId = null, terminologyId = null }, config = {}) => instance.post('/polish/text', {
+    text,
+    product_type: productType || null,
+    style_guide_id: styleGuideId,
+    terminology_id: terminologyId
+  }, config),
   polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
     instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
   analyzeFile: (formData) => {
     return instance.post('/polish/analyze-file', formData)
   },
+  catAnalyze: (formData) => {
+    return instance.post('/polish/cat/analyze', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000
+    })
+  },
+  catApply: (payload) => instance.post('/polish/cat/apply', payload, { timeout: 600000 }),
+  downloadCatAsset: (downloadUrl, filename = 'cat_asset') => {
+    return instance.get(downloadUrl.replace(/^\/api/, ''), {
+      responseType: 'blob',
+      transformResponse: [(data) => data]
+    }).then((response) => {
+      const url = window.URL.createObjectURL(new Blob([response.data]))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', filename)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    })
+  },
+  downloadCatOutput: (downloadUrl, filename = 'cat_polished.docx') => polishAPI.downloadCatAsset(downloadUrl, filename),
   getProgress: (taskId) => instance.get(`/polish/progress/${taskId}`),
   listPolishedDocuments: () => instance.get('/polish/'),
   getPolishedDocument: (id) => instance.get(`/polish/${id}`),
@@ -164,36 +288,8 @@ export const polishAPI = {
     return instance.post('/polish/upload', formData)
   },
   previewPolishedFile: (id) => instance.get(`/polish/${id}/preview`),
-  downloadPolishedFile: (id, filename) => {
-    return instance.get(`/polish/${id}/download`, {
-      responseType: 'blob',
-      transformResponse: [(data) => data]
-    }).then((response) => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', filename)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.URL.revokeObjectURL(url)
-    })
-  },
-  downloadPolishedReport: (id, filename = '润色报告.docx') => {
-    return instance.get(`/polish/${id}/download-report`, {
-      responseType: 'blob',
-      transformResponse: [(data) => data]
-    }).then((response) => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', filename)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.URL.revokeObjectURL(url)
-    })
-  },
+  downloadPolishedFile: (id, filename) => downloadBlob(`/polish/${id}/download`, filename),
+  downloadPolishedReport: (id, filename = '润色报告.docx') => downloadBlob(`/polish/${id}/download-report`, filename),
   deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
   batchDeletePolishedDocuments: (ids) => instance.delete('/polish/batch', { data: { ids } }),
   submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
@@ -259,7 +355,14 @@ export const generateAPI = {
     instance.post('/generate/image-steps', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 240000
-    })
+    }),
+  templateAnalyze: (formData) =>
+    instance.post('/generate/template-analyze', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 30000
+    }),
+  templateStatus: (jobId) =>
+    instance.get('/generate/template-status', { params: { job_id: jobId }, timeout: 10000 })
 }
 
 export const convertAPI = {
@@ -290,6 +393,7 @@ export const convertAPI = {
 
 export const translationAPI = {
   translate: (data) => instance.post('/translation/translate', data),
+  getProviderStatus: () => instance.get('/translation/providers/status'),
   translateFile: (formData) => instance.post('/translation/translate/file', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 600000
@@ -314,6 +418,7 @@ export const translationAPI = {
       ...(batchId ? { batch_id: batchId } : {})
     }
   }),
+  downloadTranslatedDoc: (id, filename) => downloadBlob(`/translation/download/${id}`, filename),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
   deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
   getStats: (batchId) => instance.get('/translation/stats', {
@@ -336,21 +441,7 @@ export const knowledgeAPI = {
     })
   },
   previewFile: (fileId) => instance.get(`/knowledge/files/${fileId}/preview`),
-  downloadFile: (fileId, filename) => {
-    return instance.get(`/knowledge/files/${fileId}/download`, {
-      responseType: 'blob',
-      transformResponse: [(data) => data]
-    }).then((response) => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', filename)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.URL.revokeObjectURL(url)
-    })
-  },
+  downloadFile: (fileId, filename) => downloadBlob(`/knowledge/files/${fileId}/download`, filename),
   getFile: (fileId) => instance.get(`/knowledge/files/${fileId}`),
   moveFile: (fileId, data) => instance.put(`/knowledge/files/${fileId}/move`, data),
   deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`),
@@ -368,4 +459,12 @@ export const docPolishAPI = {
   export: (data) => instance.post('/doc-polish/export', data, {
     timeout: 600000
   })
+}
+
+export const polishStatsAPI = {
+  getTextStats: () => instance.get('/polish/stats/text'),
+  getDocumentStats: () => instance.get('/polish/stats/document'),
+  getTextSessions: (params = {}) => instance.get('/polish/stats/text/sessions', { params }),
+  getDocumentSessions: (params = {}) => instance.get('/polish/stats/document/sessions', { params }),
+  getDocumentDetail: (analyzeId) => instance.get(`/polish/stats/document/${analyzeId}`)
 }

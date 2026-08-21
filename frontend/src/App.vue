@@ -1,5 +1,6 @@
 <template>
-  <div class="app-container">
+  <el-config-provider :locale="zhCn">
+    <div class="app-container">
     <router-view v-if="$route.path === '/login'" />
     <template v-else>
       <header class="header" :class="{ collapsed: isCollapsed }">
@@ -53,7 +54,7 @@
               <div class="ai-status-title-row">
                 <div>
                   <div class="ai-status-title">Token 实时消耗</div>
-                  <div class="ai-status-subtitle">最近 {{ aiUsage.value?.limit || 50 }} 次 AI 调用汇总</div>
+                  <div class="ai-status-subtitle">最近 {{ aiUsage?.limit || 50 }} 次本地 AI 调用统计，供平台排障参考</div>
                 </div>
                 <el-button size="small" :loading="aiUsageLoading" @click="fetchAIUsage">刷新</el-button>
               </div>
@@ -148,11 +149,21 @@
               <template #title>首页</template>
             </el-menu-item>
 
+            <el-sub-menu index="competitor-sub">
+              <template #title>
+                <el-icon><DataAnalysis /></el-icon>
+                <span>竞品分析</span>
+              </template>
+              <el-menu-item index="/competitor">上传分析</el-menu-item>
+              <el-menu-item index="/competitor/tasks">历史任务</el-menu-item>
+            </el-sub-menu>
+
             <el-sub-menu index="polish-sub">
               <template #title>
                 <el-icon><MagicStick /></el-icon>
                 <span>智能润色</span>
               </template>
+              <el-menu-item index="/polish/stats">统计面板</el-menu-item>
               <el-menu-item index="/polish">文本润色</el-menu-item>
               <el-menu-item index="/polish/document">文档润色</el-menu-item>
               <el-menu-item index="/tools/polish-rules">润色规则</el-menu-item>
@@ -253,17 +264,19 @@
         </router-view>
       </main>
     </template>
-  </div>
+    </div>
+  </el-config-provider>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, provide } from 'vue'
 import { useRouter } from 'vue-router'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { useUserStore } from '@/store/user'
 import { qaAPI, systemAPI } from '@/api'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
-  Files, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
+  Files, DataAnalysis, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,
   Edit, Setting, Message
 } from '@element-plus/icons-vue'
 
@@ -1038,5 +1051,97 @@ body {
   color: #fff !important;
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
   font-weight: 600;
+}
+
+/* CAT 候选句式下拉框：修复长文本被截断 */
+.cat-candidate-select-popper {
+  min-width: 420px !important;
+  max-width: 760px !important;
+}
+
+.cat-candidate-select-popper .el-select-dropdown__item {
+  max-height: none !important;
+  height: auto !important;
+  min-height: 56px;
+  line-height: 1.5 !important;
+  padding: 8px 12px !important;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  display: flex;
+  align-items: stretch;
+}
+
+.cat-candidate-select-popper .el-select-dropdown__wrap,
+.cat-candidate-select-popper .el-scrollbar__wrap {
+  max-height: 420px;
+  scrollbar-width: thin;
+}
+
+.cat-candidate-select-popper .cat-candidate-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  width: 100%;
+  padding: 2px 0;
+}
+
+.cat-candidate-select-popper .cat-candidate-text {
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.6;
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.cat-candidate-select-popper .cat-candidate-score {
+  font-size: 12px;
+  color: #1d4ed8;
+  font-weight: 700;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.cat-candidate-select-popper .issue-candidate-option {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-text,
+.cat-candidate-select-popper .issue-candidate-option-meta,
+.cat-candidate-select-popper .issue-candidate-option-ai {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-text {
+  color: #334155;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.cat-candidate-select-popper .issue-candidate-option-percent,
+.cat-candidate-select-popper .issue-candidate-ai-badge {
+  white-space: nowrap;
 }
 </style>

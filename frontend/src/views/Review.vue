@@ -29,6 +29,33 @@
                 {{ reviewMode === 'rule' ? '只检查规则问题，速度快。' : '规则问题 + AI 深度检查，结果更全。' }}
               </span>
             </div>
+            <div v-if="reviewMode === 'hybrid'" class="review-mode-toolbar ai-model-toolbar">
+              <span class="review-mode-label">AI 模型</span>
+              <el-select
+                v-model="selectedProviders"
+                size="small"
+                style="width: 280px"
+                :disabled="providerLoading"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                placeholder="选择模型（多选=并发审核）"
+              >
+                <el-option
+                  v-for="m in availableModels"
+                  :key="m.name"
+                  :label="m.label"
+                  :value="m.name"
+                />
+              </el-select>
+              <span v-if="providerLoading" class="review-mode-hint">正在检测可用模型...</span>
+              <span v-else-if="availableModels.length === 0" class="review-mode-hint" style="color: #e6a23c">
+                未检测到可用 AI 模型，请检查 API Key 配置
+              </span>
+              <span v-else class="review-mode-hint">
+                {{ selectedProviders.length > 1 ? `已选 ${selectedProviders.length} 个模型（并发审核）` : `当前使用 ${selectedProviderLabel}` }}
+              </span>
+            </div>
             <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
               <el-progress :percentage="uploadProgress" :stroke-width="4" />
               <span class="progress-text">{{ uploadProgressText }}</span>
@@ -66,7 +93,7 @@
                 <template #default="scope">
                   <el-button
                     size="small"
-                    :disabled="docReviewStatus[scope.row.id]?.status === 'running'"
+                    :disabled="!canStartReview(scope.row)"
                     @click="startReview(scope.row.id)"
                   >
                     {{ docReviewStatus[scope.row.id]?.status === 'running' ? '审核中...' : '开始审核' }}
@@ -166,24 +193,36 @@
 
             <div class="compare-result-block">
               <h4>核心参数差异明细表</h4>
-              <el-table :data="visibleCompareRows" border>
-                <el-table-column prop="dimension" label="检查维度" width="120" />
-                <el-table-column prop="parameter_name" label="参数名称" width="180" />
-                <el-table-column label="主文档（说明书）内容" min-width="240" show-overflow-tooltip>
-                  <template #default="scope">
-                    <span class="compare-main-value" v-html="renderCompareMainValue(scope.row)"></span>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="reference_value" label="参照物众数（或少量参照物原值）" min-width="240" show-overflow-tooltip />
-                <el-table-column label="异常说明 / 差异结论" min-width="320">
-                  <template #default="scope">
-                    <div class="compare-conclusion-cell">
-                      <el-tag size="small" :type="compareLevelTagType(scope.row.level)">{{ scope.row.level }}</el-tag>
-                      <span>{{ scope.row.conclusion }}</span>
-                    </div>
-                  </template>
-                </el-table-column>
-              </el-table>
+              <div class="compare-table-wrap">
+                <el-table :data="visibleCompareRows" border style="width: 100%" :fit="false" class="compare-diff-table">
+                  <el-table-column prop="dimension" label="检查维度" width="120" fixed="left" />
+                  <el-table-column prop="parameter_name" label="参数名称" width="180" fixed="left" />
+                  <el-table-column label="主文档（说明书）内容" width="320" show-overflow-tooltip fixed="left">
+                    <template #default="scope">
+                      <span class="compare-main-value" v-html="renderCompareMainValue(scope.row)"></span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column
+                    v-for="(column, index) in compareReferenceColumns"
+                    :key="`${column.filename || 'reference'}-${index}`"
+                    :label="column.filename || `参考文件${index + 1}`"
+                    width="240"
+                    show-overflow-tooltip
+                  >
+                    <template #default="scope">
+                      <span>{{ renderCompareReferenceValue(scope.row, index) }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="异常说明 / 差异结论" width="320">
+                    <template #default="scope">
+                      <div class="compare-conclusion-cell">
+                        <el-tag size="small" :type="compareLevelTagType(scope.row.level)">{{ scope.row.level }}</el-tag>
+                        <span>{{ scope.row.conclusion }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
             </div>
 
             <el-empty
@@ -207,7 +246,6 @@
           <el-table :data="reviews" border>
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
           <el-table-column prop="id" label="任务ID" width="80" />
-          <el-table-column prop="document_id" label="文档ID" width="80" />
           <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
           <el-table-column label="模式" width="140">
             <template #default="scope">
@@ -244,7 +282,11 @@
               <span v-else style="color:#999">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="created_at" label="开始时间" width="160" />
+          <el-table-column label="开始时间" width="180">
+            <template #default="scope">
+              {{ formatDateTime(scope.row.created_at) }}
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="360" fixed="right">
             <template #default="scope">
               <el-button 
@@ -304,6 +346,10 @@
           <el-option label="一般" value="general" />
           <el-option label="建议" value="suggestion" />
         </el-select>
+        <el-button size="small" type="info" plain style="margin-left:8px" @click="showAuditTraces = !showAuditTraces">
+          {{ showAuditTraces ? '隐藏AI追踪' : 'AI调用追踪' }}
+          <el-badge v-if="auditTraces.length > 0 && !showAuditTraces" :value="auditTraces.length" class="trace-badge" />
+        </el-button>
         <span style="margin-left:auto">
           <el-button size="small" type="warning" plain @click="openManualIssueDialog">补充上报</el-button>
           <el-button size="small" type="success" plain :disabled="!currentTaskId" @click="batchConfirmAll(currentTaskId)">确认全部待审</el-button>
@@ -311,6 +357,268 @@
           <el-button size="small" @click="batchSetStatus('false_positive')">批量标记误报</el-button>
         </span>
       </div>
+
+      <!-- AI调用追踪面板 -->
+      <el-card v-if="showAuditTraces" class="audit-trace-panel" shadow="never">
+        <template #header>
+          <div class="trace-panel-header">
+            <span>AI审核调用追踪</span>
+            <el-tag size="small" type="info">{{ auditTraces.length }} 次调用</el-tag>
+            <span v-if="auditTraces.length > 0" style="margin-left:12px;font-size:12px;color:#888">
+              总Token: {{ totalTraceTokens.toLocaleString() }} | 
+              总延迟: {{ totalTraceLatency }}ms | 
+              Provider: {{ traceProviders.join(', ') }}
+            </span>
+          </div>
+        </template>
+        <div v-if="auditTraces.length === 0" style="text-align:center;color:#999;padding:20px">
+          暂无AI调用记录（可能为纯规则审核或审核尚未完成）
+        </div>
+        <el-table v-else :data="auditTraces" border size="small" max-height="300">
+          <el-table-column prop="chunk_index" label="分块" width="70" />
+          <el-table-column prop="chunk_size" label="块大小" width="90">
+            <template #default="scope">
+              {{ scope.row.chunk_size ? scope.row.chunk_size.toLocaleString() : '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="provider" label="Provider" width="100">
+            <template #default="scope">
+              <el-tag size="small" :type="providerTagType(scope.row.provider)">{{ scope.row.provider }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="model" label="模型" min-width="140" show-overflow-tooltip />
+          <el-table-column label="Token" width="140">
+            <template #default="scope">
+              <span style="font-size:12px">
+                P:{{ scope.row.prompt_tokens?.toLocaleString() || 0 }}
+                C:{{ scope.row.completion_tokens?.toLocaleString() || 0 }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="total_tokens" label="总计" width="80">
+            <template #default="scope">
+              {{ scope.row.total_tokens?.toLocaleString() || 0 }}
+            </template>
+          </el-table-column>
+          <el-table-column label="延迟" width="90">
+            <template #default="scope">
+              <span :style="{ color: scope.row.latency_ms > 30000 ? '#f56c6c' : '#67c23a' }">
+                {{ formatLatency(scope.row.latency_ms) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="status" label="状态" width="90">
+            <template #default="scope">
+              <el-tag size="small" :type="traceStatusTagType(scope.row.status)">
+                {{ traceStatusLabel(scope.row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="parsed_issue_count" label="检出" width="70" />
+          <el-table-column prop="error_message" label="备注" min-width="120" show-overflow-tooltip>
+            <template #default="scope">
+              <span v-if="scope.row.error_message" style="color:#f56c6c;font-size:12px">{{ scope.row.error_message }}</span>
+              <span v-else style="color:#ccc">-</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
+      <!-- 审核覆盖率统计 -->
+      <el-card v-if="coverageData" class="coverage-card" shadow="hover">
+        <template #header>
+          <div class="card-header">
+            <span>审核覆盖率统计</span>
+            <el-tag :type="coverageQualityType(coverageData.quality_score)" size="small" effect="dark">
+              质量评分 {{ coverageData.quality_score }}
+            </el-tag>
+            <el-button size="small" type="text" style="margin-left:8px" @click="showCoverage = !showCoverage">
+              {{ showCoverage ? '收起' : '展开详情' }}
+            </el-button>
+          </div>
+        </template>
+        <!-- 概要 -->
+        <div class="coverage-summary">
+          <div class="coverage-item">
+            <span class="coverage-label">检出问题</span>
+            <span class="coverage-value">{{ coverageData.total_issues }}</span>
+          </div>
+          <div class="coverage-item">
+            <span class="coverage-label">规则覆盖</span>
+            <span class="coverage-value">{{ coverageData.rules_triggered }}/{{ coverageData.total_available_rules }} ({{ coverageData.rule_coverage_pct }}%)</span>
+          </div>
+          <div class="coverage-item">
+            <span class="coverage-label">AI调用</span>
+            <span class="coverage-value">{{ coverageData.ai_stats?.total_traces || 0 }} 次</span>
+          </div>
+          <div class="coverage-item">
+            <span class="coverage-label">Token消耗</span>
+            <span class="coverage-value">{{ (coverageData.ai_stats?.total_tokens || 0).toLocaleString() }}</span>
+          </div>
+        </div>
+
+        <!-- 详情 -->
+        <div v-if="showCoverage" class="coverage-detail">
+          <!-- 严重度分布 -->
+          <div class="coverage-section">
+            <h4>严重度分布</h4>
+            <div class="severity-bars">
+              <div v-for="(count, sev) in coverageData.severity_distribution" :key="sev" class="severity-bar-row">
+                <span class="severity-bar-label">{{ severityLabelCN(sev) }}</span>
+                <el-progress
+                  :percentage="Math.round(count / coverageData.total_issues * 100)"
+                  :color="severityColor(sev)"
+                  :stroke-width="18"
+                  style="flex:1; margin: 0 12px"
+                >
+                  <span style="font-size:12px">{{ count }}</span>
+                </el-progress>
+              </div>
+            </div>
+          </div>
+
+          <!-- 类别分布 -->
+          <div class="coverage-section" v-if="Object.keys(coverageData.category_distribution || {}).length > 0">
+            <h4>问题类别分布</h4>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <el-tag
+                v-for="(count, cat) in coverageData.category_distribution"
+                :key="cat"
+                size="small"
+                :type="cat === '术语' ? 'danger' : cat === '合规' ? 'warning' : 'info'"
+              >
+                {{ cat }}: {{ count }}
+              </el-tag>
+            </div>
+          </div>
+
+          <!-- Top 规则命中 -->
+          <div class="coverage-section" v-if="Object.keys(coverageData.rule_hits || {}).length > 0">
+            <h4>规则命中 Top 10</h4>
+            <div style="display:flex;flex-direction:column;gap:4px;font-size:12px">
+              <div v-for="(count, rule, idx) in Object.entries(coverageData.rule_hits).slice(0,10)" :key="rule" style="display:flex;align-items:center">
+                <span style="width:24px;color:#999">{{ idx + 1 }}</span>
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ rule }}</span>
+                <el-tag size="small" type="primary">{{ count }}次</el-tag>
+              </div>
+            </div>
+          </div>
+
+          <!-- AI统计 -->
+          <div class="coverage-section" v-if="coverageData.ai_stats?.total_traces > 0">
+            <h4>AI调用统计</h4>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
+              <span>总Token: <b>{{ (coverageData.ai_stats.total_tokens || 0).toLocaleString() }}</b></span>
+              <span>总延迟: <b>{{ formatLatency(coverageData.ai_stats.total_latency_ms) }}</b></span>
+              <span>平均延迟: <b>{{ formatLatency(coverageData.ai_stats.avg_latency_ms) }}</b></span>
+              <span v-if="coverageData.ai_stats.provider_distribution">
+                Provider: 
+                <el-tag v-for="(c, p) in coverageData.ai_stats.provider_distribution" :key="p" size="small" style="margin-left:4px">
+                  {{ p }} ×{{ c }}
+                </el-tag>
+              </span>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <!-- 术语匹配率分析面板 -->
+      <el-card v-if="terminologyData" class="terminology-card" shadow="hover" style="margin-bottom:12px">
+        <template #header>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <span style="font-weight:600">术语库匹配率分析</span>
+              <el-tag :type="terminologyQualityType(terminologyData.summary?.quality_score)" size="small" effect="dark" style="margin-left:8px">
+                {{ terminologyData.summary?.quality_score || 0 }} 分
+              </el-tag>
+            </div>
+            <div>
+              <el-button size="small" @click="terminologyData = null" circle>✕</el-button>
+            </div>
+          </div>
+        </template>
+
+        <div v-if="terminologyData.distribution" class="match-distribution">
+          <div class="dist-title">匹配率分布</div>
+          <div class="dist-bars">
+            <div class="dist-bar" v-for="item in terminologyDistItems" :key="item.key">
+              <div class="dist-label">{{ item.label }}</div>
+              <div class="dist-track">
+                <div class="dist-fill" :style="{width: item.pct + '%', background: item.color}"></div>
+              </div>
+              <div class="dist-count">
+                <b :style="{color: item.color}">{{ item.value }}</b>
+                <span style="font-size:11px;color:#909399;margin-left:2px">({{ item.pct }}%)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <el-divider style="margin:12px 0" />
+
+        <div style="display:flex;gap:20px;flex-wrap:wrap">
+          <div class="term-stat-item">
+            <div class="term-stat-label">术语库总量</div>
+            <div class="term-stat-value">{{ terminologyData.summary?.total_terms_in_db || 0 }}</div>
+          </div>
+          <div class="term-stat-item">
+            <div class="term-stat-label">文档命中</div>
+            <div class="term-stat-value" style="color:#67c23a">{{ terminologyData.summary?.terms_found || 0 }}</div>
+          </div>
+          <div class="term-stat-item">
+            <div class="term-stat-label">未命中术语</div>
+            <div class="term-stat-value" style="color:#e6a23c">{{ terminologyData.summary?.terms_not_found || 0 }}</div>
+          </div>
+          <div class="term-stat-item">
+            <div class="term-stat-label">匹配总数</div>
+            <div class="term-stat-value">{{ terminologyData.distribution?.total_occurrences || 0 }}</div>
+          </div>
+          <div class="term-stat-item">
+            <div class="term-stat-label">匹配率</div>
+            <div class="term-stat-value" :style="{color: terminologyData.distribution?.match_rate > 60 ? '#67c23a' : '#e6a23c'}">
+              {{ terminologyData.distribution?.match_rate || 0 }}%
+            </div>
+          </div>
+        </div>
+
+        <div v-if="terminologyData.matches?.length > 0" style="margin-top:11px">
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#606266">
+            术语匹配详情 ({{ terminologyData.matches.length }} 条)
+          </div>
+          <el-table :data="terminologyData.matches.slice(0,20)" size="small" max-height="240" border>
+            <el-table-column prop="non_standard" label="非规范术语" width="160" />
+            <el-table-column prop="standard" label="规范术语" width="160" />
+            <el-table-column prop="category" label="分类" width="100" />
+            <el-table-column prop="match_type" label="匹配类型" width="110">
+              <template #default="{ row }">
+                <el-tag :type="matchTypeTag(row.match_type)" size="small">
+                  {{ matchTypeLabel(row.match_type) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="match_score" label="得分" width="70" align="center">
+              <template #default="{ row }">
+                <span :style="{color: row.match_score >= 85 ? '#67c23a' : row.match_score >= 50 ? '#e6a23c' : '#f56c6c', fontWeight:'bold'}">
+                  {{ row.match_score }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="suggestion" label="建议" min-width="200" show-overflow-tooltip />
+          </el-table>
+        </div>
+
+        <div v-if="terminologyData.unmatched_terms?.length > 0" style="margin-top:11px">
+          <div style="font-size:12px;color:#909399;margin-bottom:4px">
+            未在文档中出现的术语 ({{ terminologyData.unmatched_terms.length }} 条)
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px">
+            <el-tag v-for="t in terminologyData.unmatched_terms.slice(0,30)" :key="t.id" size="small" type="info">
+              {{ t.non_standard }} → {{ t.standard }}
+            </el-tag>
+          </div>
+        </div>
+      </el-card>
+
       <el-table
         :data="filteredDialogIssues"
         border
@@ -318,6 +626,7 @@
         @selection-change="onIssueSelectionChange"
         ref="issueTableRef"
         row-key="id"
+        class="issue-detail-table"
       >
         <el-table-column type="selection" width="48" />
         <el-table-column label="ID" width="70">
@@ -332,6 +641,31 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="模型" width="110" v-if="showProviderColumn">
+          <template #default="scope">
+            <div class="provider-tags">
+              <template v-if="scope.row.providers">
+                <el-tag
+                  v-for="p in parseProviders(scope.row.providers)"
+                  :key="p"
+                  size="small"
+                  :type="providerTagType(p)"
+                  effect="plain"
+                  class="provider-tag-item"
+                >
+                  {{ providerDisplayName(p) }}
+                </el-tag>
+                <el-tooltip v-if="parseProviders(scope.row.providers).length > 1"
+                  content="多模型交叉验证，置信度更高" placement="top">
+                  <el-tag size="small" type="success" effect="dark" class="provider-tag-item">
+                    ✓{{ parseProviders(scope.row.providers).length }}
+                  </el-tag>
+                </el-tooltip>
+              </template>
+              <span v-else style="color:#999;font-size:11px">-</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="category" label="分类" width="110" />
         <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
         <el-table-column label="原文" min-width="450">
@@ -339,9 +673,17 @@
             <span class="context-cell" v-html="renderIssueContext(scope.row, currentTaskMode)"></span>
           </template>
         </el-table-column>
-        <el-table-column label="建议" min-width="260" show-overflow-tooltip>
+        <el-table-column label="建议" min-width="340" class-name="suggestion-column">
           <template #default="scope">
-            <span class="suggestion-wrap suggestion-text">{{ issueSuggestionText(scope.row) }}</span>
+            <div class="suggestion-wrap">
+              <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
+              <div v-if="issueSuggestionSummary(scope.row)" class="suggestion-summary">{{ issueSuggestionSummary(scope.row) }}</div>
+              <div
+                v-if="issueSuggestionDiffHtml(scope.row)"
+                class="suggestion-diff"
+                v-html="issueSuggestionDiffHtml(scope.row)"
+              ></div>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="处理" min-width="220">
@@ -648,6 +990,31 @@
                   <el-tag :type="getSeverityType(scope.row.severity)">{{ getSeverityLabel(scope.row.severity) }}</el-tag>
                 </template>
               </el-table-column>
+              <el-table-column label="模型" width="110" v-if="showReportProviderColumn">
+                <template #default="scope">
+                  <div class="provider-tags">
+                    <template v-if="scope.row.providers">
+                      <el-tag
+                        v-for="p in parseProviders(scope.row.providers)"
+                        :key="p"
+                        size="small"
+                        :type="providerTagType(p)"
+                        effect="plain"
+                        class="provider-tag-item"
+                      >
+                        {{ providerDisplayName(p) }}
+                      </el-tag>
+                      <el-tooltip v-if="parseProviders(scope.row.providers).length > 1"
+                        content="多模型交叉验证，置信度更高" placement="top">
+                        <el-tag size="small" type="success" effect="dark" class="provider-tag-item">
+                          ✓{{ parseProviders(scope.row.providers).length }}
+                        </el-tag>
+                      </el-tooltip>
+                    </template>
+                    <span v-else style="color:#999;font-size:11px">-</span>
+                  </div>
+                </template>
+              </el-table-column>
               <el-table-column prop="category" label="分类" width="120" />
               <el-table-column prop="chapter" label="章节" width="180" />
               <el-table-column label="上下文" min-width="500">
@@ -680,6 +1047,7 @@ const route = useRoute()
 const router = useRouter()
 const documents = ref([])
 const reviews = ref([])
+const documentReviews = ref([])
 const issues = ref([])
 const rules = ref([])
 
@@ -690,6 +1058,7 @@ const rowFilters = reactive({})
 // 文档审核状态 (按文档ID存储)
 const docReviewStatus = reactive({})
 let reviewsPollingTimer = null
+let sseConnections = new Map()  // reviewId → EventSource
 
 // 问题详情弹窗
 const issueDialogVisible = ref(false)
@@ -707,6 +1076,12 @@ const parsedTextContent = ref('')
 const goldCompareDialogVisible = ref(false)
 const goldCompareLoading = ref(false)
 const goldCompareResult = ref(null)
+const auditTraces = ref([])  // AI调用追踪数据
+const coverageData = ref(null) // 审核覆盖率数据
+const showCoverage = ref(false) // 是否展示覆盖率面板
+const terminologyData = ref(null) // 术语匹配率分析数据
+const showTerminology = ref(false) // 是否展示术语面板
+const showAuditTraces = ref(false)  // 是否展开AI追踪面板
 const dialogCategories = computed(() => {
   const set = new Set()
   const list = taskIssues[currentTaskId.value] || []
@@ -729,6 +1104,21 @@ const filteredDialogIssues = computed(() => {
     return true
   })
 })
+const terminologyDistItems = computed(() => {
+  const d = terminologyData.value?.distribution
+  if (!d) return []
+  const total = d.total_occurrences || 1
+  return [
+    { key: 'golden', label: '102% 完美', value: d.golden_match || 0, color: '#00C853', pct: Math.round((d.golden_match || 0) / total * 100) },
+    { key: 'context', label: '101% 上下文', value: d.context_match || 0, color: '#00E676', pct: Math.round((d.context_match || 0) / total * 100) },
+    { key: 'perfect', label: '100% 完全', value: d.perfect_match || 0, color: '#67c23a', pct: Math.round((d.perfect_match || 0) / total * 100) },
+    { key: 'high', label: '85-99%', value: d.high_match || 0, color: '#85CE61', pct: Math.round((d.high_match || 0) / total * 100) },
+    { key: 'medium', label: '75-84%', value: d.medium_match || 0, color: '#E6A23C', pct: Math.round((d.medium_match || 0) / total * 100) },
+    { key: 'low', label: '50-74%', value: d.low_match || 0, color: '#E6A23C', pct: Math.round((d.low_match || 0) / total * 100) },
+    { key: 'vlow', label: '1-49%', value: d.very_low_match || 0, color: '#F56C6C', pct: Math.round((d.very_low_match || 0) / total * 100) },
+    { key: 'new', label: '新句段', value: d.new_segment || 0, color: '#909399', pct: Math.round((d.new_segment || 0) / total * 100) },
+  ]
+})
 
 const filteredDialogExcelRowCount = computed(() => {
   const rows = new Set()
@@ -740,6 +1130,17 @@ const filteredDialogExcelRowCount = computed(() => {
   return rows.size
 })
 
+// AI调用追踪计算属性
+const totalTraceTokens = computed(() => {
+  return auditTraces.value.reduce((sum, t) => sum + (t.total_tokens || 0), 0)
+})
+const totalTraceLatency = computed(() => {
+  return auditTraces.value.reduce((sum, t) => sum + (t.latency_ms || 0), 0)
+})
+const traceProviders = computed(() => {
+  return [...new Set(auditTraces.value.map(t => t.provider).filter(Boolean))]
+})
+
 function formatIssueDisplayId(index) {
   return String(index + 1).padStart(3, '0')
 }
@@ -747,9 +1148,180 @@ function formatIssueDisplayId(index) {
 function issueSuggestionText(issue) {
   const suggestion = String(issue?.suggestion || '').trim()
   if (suggestion) return suggestion
-  const description = String(issue?.description || '').trim()
-  if (description) return description.replace(/^问题说明[:：]\s*/, '').replace(/^问题[:：]\s*/, '').trim()
+  const description = normalizeIssueDescription(issue)
+  if (description) return description
   return '-'
+}
+
+function issueSuggestionFullText(issue) {
+  const suggestion = String(issue?.suggestion || '').trim()
+  const description = normalizeIssueDescription(issue)
+  if (suggestion && description && description !== suggestion) {
+    return `${suggestion}\n\n说明：${description}`
+  }
+  return suggestion || description || '-'
+}
+
+function normalizeIssueDescription(issue) {
+  return String(issue?.description || '')
+    .trim()
+    .replace(/^问题说明[:：]\s*/, '')
+    .replace(/^问题[:：]\s*/, '')
+    .replace(/\s+/g, ' ')
+}
+
+function compactSuggestionText(text, limit = 36) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
+}
+
+function categoryProblemLabel(category) {
+  const text = String(category || '').trim()
+  if (!text) return ''
+  if (/语法|主谓|时态|单复数/.test(text)) return '语法问题'
+  if (/逻辑|步骤结构|操作步骤/.test(text)) return '操作步骤逻辑问题'
+  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
+  if (/拼写/.test(text)) return '拼写问题'
+  if (/标点|空格|格式/.test(text)) return '标点/格式问题'
+  if (/合规|法规|注册/.test(text)) return '合规表述问题'
+  if (/重复/.test(text)) return '重复内容问题'
+  if (/结构/.test(text)) return '结构完整性问题'
+  return `${text}问题`
+}
+
+function descriptionProblemLabel(description) {
+  const text = String(description || '').trim()
+  if (!text) return ''
+  if (/主谓一致|describe[s]?\b|describes\b|单数|复数|时态|grammar/i.test(text)) return '语法问题'
+  if (/跳号|跳到|编号|步骤|流程连续|逻辑/i.test(text)) return '操作步骤逻辑问题'
+  if (/拼写|misspell|typo/i.test(text)) return '拼写问题'
+  if (/术语|写法|统一|term/i.test(text)) return '术语一致性问题'
+  if (/标点|空格|格式|punctuation|spacing/i.test(text)) return '标点/格式问题'
+  if (/合规|法规|注册|ruo|compliance/i.test(text)) return '合规表述问题'
+  if (/重复|冗余/i.test(text)) return '重复内容问题'
+  return ''
+}
+
+function issueProblemLabel(issue) {
+  const description = normalizeIssueDescription(issue)
+  return descriptionProblemLabel(description) || categoryProblemLabel(issue?.category)
+}
+
+function escapeSuggestionHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function extractSuggestionReplacement(issue) {
+  const suggestion = String(issue?.suggestion || '').trim()
+  if (!suggestion) return ''
+  const patterns = [
+    /建议(?:改为|替换为|统一为)\s*[:：]?\s*(.+)$/i,
+    /(?:->|→)\s*(.+)$/,
+  ]
+  for (const pattern of patterns) {
+    const match = suggestion.match(pattern)
+    if (!match) continue
+    const candidate = String(match[1] || '').trim().replace(/[。；;]+$/, '')
+    if (candidate && !/[，,。；;].{8,}/.test(candidate)) return candidate
+  }
+  if (suggestion.length <= 80 && !/^请|^需|^应|^确认/.test(suggestion)) return suggestion
+  return ''
+}
+
+function buildSuggestionDiffMarkup(before, after) {
+  if (!before || !after || before === after) return ''
+  let prefix = 0
+  const maxPrefix = Math.min(before.length, after.length)
+  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1
+
+  let suffix = 0
+  const maxSuffix = Math.min(before.length - prefix, after.length - prefix)
+  while (
+    suffix < maxSuffix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+
+  const beforeHead = escapeSuggestionHtml(before.slice(0, prefix))
+  const beforeMid = escapeSuggestionHtml(before.slice(prefix, before.length - suffix || before.length))
+  const beforeTail = escapeSuggestionHtml(before.slice(before.length - suffix))
+  const afterHead = escapeSuggestionHtml(after.slice(0, prefix))
+  const afterMid = escapeSuggestionHtml(after.slice(prefix, after.length - suffix || after.length))
+  const afterTail = escapeSuggestionHtml(after.slice(after.length - suffix))
+
+  return `
+    <div class="suggestion-diff-row"><span class="suggestion-diff-label">原文</span><span>${beforeHead}<span class="diff-remove">${beforeMid || '&nbsp;'}</span>${beforeTail}</span></div>
+    <div class="suggestion-diff-row"><span class="suggestion-diff-label">建议</span><span>${afterHead}<span class="diff-add">${afterMid || '&nbsp;'}</span>${afterTail}</span></div>
+  `
+}
+
+function describeSuggestionChange(original, replacement) {
+  const before = String(original || '').trim()
+  const after = String(replacement || '').trim()
+  if (!before || !after || before === after) return ''
+
+  let prefix = 0
+  const maxPrefix = Math.min(before.length, after.length)
+  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1
+
+  let suffix = 0
+  const maxSuffix = Math.min(before.length - prefix, after.length - prefix)
+  while (
+    suffix < maxSuffix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+
+  const removed = before.slice(prefix, before.length - suffix || before.length).trim()
+  const added = after.slice(prefix, after.length - suffix || after.length).trim()
+  if (removed && added) {
+    if (removed.length <= 24 && added.length <= 32) {
+      return `将“${removed}”改为“${added}”`
+    }
+    return `将相关表述改为“${compactSuggestionText(added)}”`
+  }
+  if (!removed && added) {
+    return `补充“${compactSuggestionText(added)}”`
+  }
+  if (removed && !added) {
+    return `删除“${compactSuggestionText(removed)}”`
+  }
+  return `建议改为“${compactSuggestionText(after)}”`
+}
+
+function issueSuggestionOverview(issue) {
+  const problemLabel = issueProblemLabel(issue)
+  if (problemLabel) return problemLabel
+
+  const suggestion = String(issue?.suggestion || '').trim()
+  const replacement = extractSuggestionReplacement(issue)
+  const original = String(issue?.original_text || '').trim()
+  if (replacement && original && replacement !== original) {
+    return '该处表述需要修改。'
+  }
+  if (suggestion) return '建议按下方修改。'
+  return '该处需要处理。'
+}
+
+function issueSuggestionSummary(issue) {
+  if (issueSuggestionDiffHtml(issue)) return ''
+  return issueSuggestionFullText(issue)
+}
+
+function issueSuggestionDiffHtml(issue) {
+  const original = String(issue?.original_text || '').trim()
+  const replacement = extractSuggestionReplacement(issue)
+  if (!original || !replacement || original === replacement) return ''
+  if (replacement.length > 120) return ''
+  return buildSuggestionDiffMarkup(original, replacement)
 }
 
 function percentText(value) {
@@ -814,6 +1386,41 @@ const judgmentStats = computed(() => {
 })
 
 const showRuleDialog = ref(false)
+
+// 多模型交叉验证：是否显示"模型"列
+const showProviderColumn = computed(() => {
+  return issues.value.some(issue => {
+    try {
+      const providers = typeof issue.providers === 'string'
+        ? JSON.parse(issue.providers) : issue.providers
+      return Array.isArray(providers) && providers.length > 0
+    } catch { return false }
+  })
+})
+
+const showReportProviderColumn = computed(() => {
+  return reportIssues.value.some(issue => {
+    try {
+      const providers = typeof issue.providers === 'string'
+        ? JSON.parse(issue.providers) : issue.providers
+      return Array.isArray(providers) && providers.length > 0
+    } catch { return false }
+  })
+})
+
+function parseProviders(providers) {
+  if (!providers) return []
+  if (Array.isArray(providers)) return providers
+  try {
+    const parsed = JSON.parse(providers)
+    return Array.isArray(parsed) ? parsed : [providers]
+  } catch { return [providers] }
+}
+
+function providerDisplayName(provider) {
+  const names = { qwen: 'Qwen', deepseek: 'DeepSeek', kimi: 'Kimi', arkclaw: 'ArkClaw', mcai: 'MCAI', proxy: 'Proxy' }
+  return names[provider] || provider.toUpperCase()
+}
 const editingRule = ref(null)
 const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
 const transferRuleDialogVisible = ref(false)
@@ -825,6 +1432,18 @@ const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
 const reviewMode = ref('hybrid')
+const selectedProviders = ref([])
+const availableModels = ref([])
+const providerLoading = ref(true)
+
+const selectedProviderLabel = computed(() => {
+  if (selectedProviders.value.length === 0) return '默认'
+  const names = selectedProviders.value.map(p => {
+    const m = availableModels.value.find(m => m.name === p)
+    return m ? m.label : p
+  })
+  return names.join(' + ')
+})
 const reviewSubTab = ref('single')
 const compareMode = ref('both')
 const compareSubmitting = ref(false)
@@ -839,6 +1458,13 @@ const visibleCompareRows = computed(() => {
   const rows = compareResult.value?.compare_rows || []
   if (showCompareConsistent.value) return rows
   return rows.filter((row) => row.level !== '一致')
+})
+
+const compareReferenceColumns = computed(() => {
+  const documents = compareResult.value?.reference_documents || []
+  if (documents.length) return documents
+  const firstRow = compareResult.value?.compare_rows?.[0]
+  return firstRow?.reference_values || []
 })
 
 watch(reviewSubTab, (tab) => {
@@ -927,6 +1553,7 @@ watch(() => route.path, () => {
 
 onMounted(() => {
   loadByView()
+  loadProviders()
 })
 
 function loadByView() {
@@ -934,6 +1561,30 @@ function loadByView() {
   if (currentView.value === 'documents') loadDocuments()
   else if (currentView.value === 'tasks' || currentView.value === 'reports') loadReviews()
   else if (currentView.value === 'rules') loadRules()
+}
+
+async function loadProviders() {
+  providerLoading.value = true
+  try {
+    const resp = await reviewAPI.getProviderStatus()
+    const data = resp.data
+    availableModels.value = (data.models || []).filter(m => m.available)
+    // 设置默认 provider（单选默认）
+    if (availableModels.value.length > 0) {
+      const defaultName = data.default_provider
+      const defaultMatch = availableModels.value.find(m => m.name === defaultName)
+      if (defaultMatch) {
+        selectedProviders.value = [defaultMatch.name]
+      } else {
+        selectedProviders.value = [availableModels.value[0].name]
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load AI providers:', e)
+    availableModels.value = []
+  } finally {
+    providerLoading.value = false
+  }
 }
 
 async function loadDocuments() {
@@ -944,8 +1595,8 @@ async function loadDocuments() {
     ])
     const uploadingDocs = documents.value.filter(doc => String(doc.id).startsWith('uploading-'))
     documents.value = [...uploadingDocs, ...(docResp.data || [])]
-    reviews.value = reviewResp.data || []
-    syncDocumentStatusesFromReviews(reviews.value)
+    documentReviews.value = reviewResp.data || []
+    syncDocumentStatusesFromReviews(documentReviews.value)
     syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
@@ -1015,22 +1666,131 @@ function syncDocumentStatusesFromReviews(reviewList) {
   })
 }
 
+function _getSSEBaseURL() {
+  // 从 Vite 代理或直接 API 推导
+  return import.meta.env.VITE_API_BASE || '/api'
+}
+
+function _connectSSEForReview(reviewId) {
+  if (sseConnections.has(reviewId)) return  // 已连接
+
+  const baseURL = _getSSEBaseURL()
+  const url = `${baseURL}/review/${reviewId}/progress-stream`
+
+  try {
+    const es = new EventSource(url)
+    sseConnections.set(reviewId, es)
+
+    es.onmessage = (event) => {
+      try {
+        const progress = JSON.parse(event.data)
+        const status = progress.status
+
+        // 同步当前页面和文档页中的审核任务快照
+        for (const reviewList of [reviews.value, documentReviews.value]) {
+          const review = (reviewList || []).find(r => r.id === reviewId)
+          if (review) {
+            review.progress = progress
+            review.status = status
+            if (status === 'completed') {
+              review.total_issues = progress.total_issues || review.total_issues
+            }
+          }
+        }
+
+        // 同步到文档状态
+        if (currentView.value === 'documents') {
+          // 找到对应文档并更新
+          for (const doc of documents.value) {
+            const ds = docReviewStatus[doc.id]
+            if (ds && ds.review_id === reviewId) {
+              ds.status = status
+              ds.progress = progress?.progress || 0
+              ds.message = status === 'completed'
+                ? reviewCompletionText(review)
+                : status === 'failed'
+                  ? reviewFailureText(review)
+                  : (progress?.message || progress?.step || '审核中...')
+              if (progress?.summary) ds.summary = progress.summary
+              break
+            }
+          }
+        }
+
+        // 审核完成/失败时断开 SSE
+        if (status === 'completed' || status === 'failed' || status === 'error' || status === 'timeout') {
+          es.close()
+          sseConnections.delete(reviewId)
+
+          // 完成后重新加载以获取完整结果
+          if (status === 'completed') {
+            setTimeout(() => {
+              if (currentView.value === 'documents') loadDocuments()
+              else loadReviews()
+            }, 500)
+          }
+        }
+      } catch (_) { /* 忽略解析错误 */ }
+    }
+
+    es.onerror = () => {
+      // SSE 连接失败，关闭并回退到轮询
+      es.close()
+      sseConnections.delete(reviewId)
+    }
+  } catch (_) {
+    // EventSource 不可用（如旧浏览器），回退到轮询
+  }
+}
+
+function _disconnectAllSSE() {
+  for (const [reviewId, es] of sseConnections) {
+    es.close()
+  }
+  sseConnections.clear()
+}
+
+function _hasRunningReviews() {
+  const activeReviews = currentView.value === 'documents' ? documentReviews.value : reviews.value
+  return (activeReviews || []).some(review => review.status === 'running')
+}
+
 function syncReviewsPolling() {
   stopReviewsPolling()
   if (currentView.value !== 'documents' && currentView.value !== 'tasks' && currentView.value !== 'reports') return
-  if (!reviews.value.some(review => review.status === 'running')) return
+  if (!_hasRunningReviews()) return
 
+  // 优先使用 SSE 实时推送
+  const activeReviews = currentView.value === 'documents' ? documentReviews.value : reviews.value
+  const runningReviews = (activeReviews || []).filter(r => r.status === 'running')
+  const supportsSSE = typeof EventSource !== 'undefined'
+
+  if (supportsSSE) {
+    for (const review of runningReviews) {
+      _connectSSEForReview(review.id)
+    }
+  }
+
+  // 轮询作为降级方案（每 10 秒一次，用于 SSE 不支持或连接断开时）
   reviewsPollingTimer = setInterval(async () => {
+    // 检查是否有 SSE 活跃连接覆盖所有运行中的审核
+    const allSSECovered = runningReviews.every(r => sseConnections.has(r.id))
+    if (allSSECovered) {
+      // SSE 覆盖良好，跳过本次轮询
+      if (!_hasRunningReviews()) stopReviewsPolling()
+      return
+    }
+
     try {
       if (currentView.value === 'documents') {
         const resp = await reviewAPI.list({ latest_only: true, limit: 500 })
-        reviews.value = resp.data || []
-        syncDocumentStatusesFromReviews(reviews.value)
+        documentReviews.value = resp.data || []
+        syncDocumentStatusesFromReviews(documentReviews.value)
       } else {
         const runningIds = new Set((reviews.value || []).filter(review => review.status === 'running').map(review => review.id))
         const resp = await reviewAPI.list({ status: 'running', limit: 500 })
-        const runningReviews = resp.data || []
-        const returnedIds = new Set(runningReviews.map(review => review.id))
+        const runningReviewsResp = resp.data || []
+        const returnedIds = new Set(runningReviewsResp.map(review => review.id))
         const finishedDuringPolling = [...runningIds].some(reviewId => !returnedIds.has(reviewId))
 
         if (finishedDuringPolling) {
@@ -1039,21 +1799,22 @@ function syncReviewsPolling() {
         }
 
         const reviewMap = new Map((reviews.value || []).map(review => [review.id, review]))
-        for (const review of runningReviews) {
+        for (const review of runningReviewsResp) {
           reviewMap.set(review.id, review)
         }
         reviews.value = [...reviewMap.values()].sort((left, right) => (right.id || 0) - (left.id || 0))
       }
-      if (!reviews.value.some(review => review.status === 'running')) {
+      if (!_hasRunningReviews()) {
         stopReviewsPolling()
       }
     } catch (error) {
       stopReviewsPolling()
     }
-  }, 3000)
+  }, 10000)  // SSE 降级轮询频率降低到 10 秒
 }
 
 function stopReviewsPolling() {
+  _disconnectAllSSE()
   if (reviewsPollingTimer) {
     clearInterval(reviewsPollingTimer)
     reviewsPollingTimer = null
@@ -1078,8 +1839,20 @@ function formatSize(size) {
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleString('zh-CN')
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(dateStr)
+    ? dateStr
+    : `${dateStr}Z`
+  const date = new Date(normalized)
+  if (Number.isNaN(date.getTime())) return String(dateStr).replace('T', ' ').slice(0, 19)
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date).replace(/\//g, '-')
 }
 
 function beforeUpload(file) {
@@ -1195,6 +1968,12 @@ function upsertDocumentRow(document) {
   ]
 }
 
+function upsertReviewSnapshot(targetList, review) {
+  if (!review?.id) return
+  const next = [review, ...(targetList.value || []).filter(item => item.id !== review.id)]
+  targetList.value = next.sort((left, right) => (right.id || 0) - (left.id || 0))
+}
+
 function beforeRulesUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
   if (ext !== 'json') {
@@ -1245,8 +2024,18 @@ function handleRulesImport(response) {
 }
 
 async function startReview(documentId) {
+  if (isTemporaryDocumentId(documentId)) {
+    ElMessage.warning('文档仍在上传处理中，请等待上传完成后再开始审核')
+    return
+  }
   try {
-    const response = await reviewAPI.create(documentId, reviewMode.value)
+    const providersList = (reviewMode.value === 'hybrid' && selectedProviders.value.length > 0)
+      ? selectedProviders.value : null
+    const singleProvider = (providersList && providersList.length === 1)
+      ? providersList[0] : null
+    const multiProviders = (providersList && providersList.length > 1)
+      ? providersList : null
+    const response = await reviewAPI.create(documentId, reviewMode.value, singleProvider, multiProviders)
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
 
@@ -1271,15 +2060,34 @@ async function startReview(documentId) {
       progress: 0,
       message: statusMessage
     }
+    upsertReviewSnapshot(documentReviews, {
+      id: reviewId,
+      document_id: documentId,
+      status: 'running',
+      mode: reviewMode.value,
+      progress: { status: 'running', progress: 0, message: statusMessage },
+      total_issues: 0,
+      created_at: new Date().toISOString(),
+    })
+    syncReviewsPolling()
     await loadReviews()
   } catch (error) {
     docReviewStatus[documentId] = {
       status: 'failed',
       progress: 0,
-      message: error.response?.data?.detail || '创建审核任务失败'
+      message: getAPIErrorMessage(error, '创建审核任务失败')
     }
-    ElMessage.error('审核失败，请重试: ' + (error.response?.data?.detail || error.message))
+    ElMessage.error(`审核失败，请重试: ${getAPIErrorMessage(error, '创建审核任务失败')}`)
   }
+}
+
+function isTemporaryDocumentId(documentId) {
+  return String(documentId || '').startsWith('uploading-')
+}
+
+function canStartReview(document) {
+  if (!document || isTemporaryDocumentId(document.id)) return false
+  return docReviewStatus[document.id]?.status !== 'running'
 }
 
 async function loadReviewIssues(reviewId) {
@@ -1511,10 +2319,19 @@ async function openIssueDialog(row) {
   issueFilter.status = ''
   issueFilter.severity = ''
   selectedIssueIds.value = []
+  showAuditTraces.value = false
+  auditTraces.value = []
+  coverageData.value = null
+  showCoverage.value = false
+  terminologyData.value = null
+  showTerminology.value = false
   issueDialogVisible.value = true
   if (taskIssues[row.id] === undefined) {
     await loadReviewIssues(row.id)
   }
+  loadAuditTraces(row.id)
+  loadCoverage(row.id)
+  loadTerminology(row.id)
 }
 
 // 通过文档ID打开问题详情弹窗
@@ -1531,9 +2348,48 @@ async function openIssueDialogByDoc(documentId) {
   issueFilter.status = ''
   issueFilter.severity = ''
   selectedIssueIds.value = []
+  showAuditTraces.value = false
+  auditTraces.value = []
+  coverageData.value = null
+  showCoverage.value = false
+  terminologyData.value = null
+  showTerminology.value = false
   issueDialogVisible.value = true
   if (taskIssues[reviewId] === undefined) {
     await loadReviewIssues(reviewId)
+  }
+  loadAuditTraces(reviewId)
+  loadCoverage(reviewId)
+  loadTerminology(reviewId)
+}
+
+async function loadAuditTraces(reviewId) {
+  try {
+    const response = await reviewAPI.getTraces(reviewId)
+    auditTraces.value = response.data?.traces || []
+  } catch (e) {
+    console.log('AI调用追踪加载失败:', e)
+    auditTraces.value = []
+  }
+}
+
+async function loadCoverage(reviewId) {
+  try {
+    const response = await reviewAPI.getCoverage(reviewId)
+    coverageData.value = response.data
+  } catch (e) {
+    console.log('审核覆盖率加载失败:', e)
+    coverageData.value = null
+  }
+}
+
+async function loadTerminology(reviewId) {
+  try {
+    const response = await reviewAPI.getTerminology(reviewId)
+    terminologyData.value = response.data
+  } catch (e) {
+    console.log('术语匹配率分析加载失败:', e)
+    terminologyData.value = null
   }
 }
 
@@ -1850,6 +2706,51 @@ function statusLabel(s) {
   return { confirmed: '已确认', false_positive: '误报' }[s] || '待确认'
 }
 
+// AI追踪面板辅助函数
+function providerTagType(provider) {
+  const p = (provider || '').toLowerCase()
+  if (p.includes('qwen')) return ''
+  if (p.includes('kimi')) return 'success'
+  if (p.includes('deepseek')) return 'primary'
+  return 'info'
+}
+function traceStatusTagType(status) {
+  return { success: 'success', timeout: 'warning', error: 'danger', pending: 'info' }[status] || 'info'
+}
+function traceStatusLabel(status) {
+  return { success: '成功', timeout: '超时', error: '失败', pending: '等待中' }[status] || status || '-'
+}
+function formatLatency(ms) {
+  if (!ms && ms !== 0) return '-'
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${(ms / 60000).toFixed(1)}min`
+}
+
+// 覆盖率面板辅助函数
+function coverageQualityType(score) {
+  if (score >= 80) return 'success'
+  if (score >= 60) return 'warning'
+  return 'danger'
+}
+function terminologyQualityType(score) {
+  if (score >= 80) return 'success'
+  if (score >= 60) return 'warning'
+  return 'danger'
+}
+function matchTypeTag(type) {
+  return { perfect: 'success', fuzzy_high: '', fuzzy: 'warning', fuzzy_low: 'warning', partial: 'danger' }[type] || 'info'
+}
+function matchTypeLabel(type) {
+  return { perfect: '100% 精确', fuzzy_high: '85-99%', fuzzy: '75-84%', fuzzy_low: '50-74%', partial: '<50%' }[type] || type
+}
+function severityColor(sev) {
+  return { fatal: '#F56C6C', serious: '#E6A23C', general: '#409EFF', suggestion: '#909399' }[sev] || '#909399'
+}
+function severityLabelCN(sev) {
+  return { fatal: '致命', serious: '严重', general: '一般', suggestion: '建议' }[sev] || sev || '-'
+}
+
 async function viewDocument(id) {
   try {
     await documentAPI.get(id)
@@ -2046,24 +2947,41 @@ const currentTaskMode = computed(() => {
 })
 
 function renderCompareIssueContext(issue) {
-  const parts = parseCompareIssueContext(issue?.context)
-  const diff = buildDiffMarkup(parts.main, parts.reference)
-  return [
-    '<div class="compare-context-block">',
-    `<div class="compare-context-row main"><div class="compare-context-label">主文档</div><div class="compare-context-value">${diff.mainHtml}</div></div>`,
-    `<div class="compare-context-row reference"><div class="compare-context-label">参考文档</div><div class="compare-context-value">${diff.referenceHtml}</div></div>`,
-    '</div>'
-  ].join('')
+  const entries = parseCompareIssueContext(issue?.context)
+  const mainEntry = entries.find((item) => item.label === '主文档') || { label: '主文档', value: '-' }
+  const referenceEntries = entries.filter((item) => item.label !== '主文档')
+  const baseReference = referenceEntries.find((item) => item.value && item.value !== '-')?.value || ''
+  const mainDiff = buildDiffMarkup(mainEntry.value, baseReference)
+  const rows = [
+    `<div class="compare-context-row main"><div class="compare-context-label">${escapeHtml(mainEntry.label)}</div><div class="compare-context-value">${mainDiff.mainHtml}</div></div>`
+  ]
+  for (const entry of referenceEntries) {
+    const diff = buildDiffMarkup(mainEntry.value, entry.value)
+    rows.push(`<div class="compare-context-row reference"><div class="compare-context-label">${escapeHtml(entry.label)}</div><div class="compare-context-value">${diff.referenceHtml}</div></div>`)
+  }
+  return `<div class="compare-context-block">${rows.join('')}</div>`
 }
 
 function parseCompareIssueContext(context) {
-  const text = String(context || '')
-  const mainMatch = text.match(/主文档[：:]\s*([\s\S]*?)(?:\n+参考文件[：:]\s*|$)/)
-  const referenceMatch = text.match(/参考文件[：:]\s*([\s\S]*)$/)
-  return {
-    main: (mainMatch?.[1] || '').trim(),
-    reference: (referenceMatch?.[1] || '').trim()
+  const lines = String(context || '')
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const entries = []
+  for (const line of lines) {
+    const match = line.match(/^([^：:]+)[：:]\s*([\s\S]*)$/)
+    if (!match) continue
+    entries.push({
+      label: match[1].trim(),
+      value: (match[2] || '').trim() || '-'
+    })
   }
+
+  if (!entries.length) {
+    return [{ label: '主文档', value: String(context || '').trim() || '-' }]
+  }
+  return entries
 }
 
 function buildDiffMarkup(mainText, referenceText) {
@@ -2079,9 +2997,20 @@ function buildDiffMarkup(mainText, referenceText) {
 
 function renderCompareMainValue(row) {
   const mainValue = String(row?.main_value || '').trim()
-  const referenceValue = simplifyReferenceValue(row?.reference_value)
+  const referenceValue = firstCompareReferenceValue(row)
   const diff = buildDiffMarkup(mainValue, referenceValue)
   return diff.mainHtml
+}
+
+function renderCompareReferenceValue(row, index) {
+  const item = row?.reference_values?.[index]
+  return String(item?.value || '-').trim() || '-'
+}
+
+function firstCompareReferenceValue(row) {
+  const firstValue = row?.reference_values?.find((item) => item?.value && item.value !== '-')?.value
+  if (firstValue) return String(firstValue).trim()
+  return simplifyReferenceValue(row?.reference_summary || row?.reference_value)
 }
 
 function simplifyReferenceValue(value) {
@@ -2243,6 +3172,12 @@ onUnmounted(() => {
   color: #64748b;
 }
 
+.ai-model-toolbar {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e8f0;
+}
+
 .compare-audit-section {
   display: flex;
   flex-direction: column;
@@ -2322,6 +3257,40 @@ onUnmounted(() => {
   margin: 0 0 10px;
   font-size: 14px;
   color: #334155;
+}
+
+.compare-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.compare-table-wrap :deep(.el-table) {
+  min-width: max-content;
+}
+
+.compare-table-wrap :deep(.el-table__header-wrapper),
+.compare-table-wrap :deep(.el-table__body-wrapper),
+.compare-table-wrap :deep(.el-scrollbar__wrap) {
+  overflow-x: visible !important;
+}
+
+.compare-table-wrap :deep(.el-table__fixed),
+.compare-table-wrap :deep(.el-table__fixed-right) {
+  box-shadow: none;
+}
+
+.compare-table-wrap :deep(.el-table__fixed-right::before),
+.compare-table-wrap :deep(.el-table__fixed::before) {
+  background-color: #dbe4ee;
+}
+
+.compare-diff-table :deep(.el-table__inner-wrapper::before) {
+  display: none;
 }
 
 .compare-conclusion-cell {
@@ -2415,9 +3384,68 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
-.suggestion-text {
-  color: #1f2937;
+.issue-detail-table :deep(.el-table__cell) {
+  vertical-align: top;
+}
+
+.issue-detail-table :deep(.suggestion-column .cell) {
+  overflow: visible;
+  white-space: normal;
+}
+
+.suggestion-summary {
+  margin-top: 4px;
+  color: #475467;
   font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.suggestion-overview {
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.suggestion-diff {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fcfcfd;
+  border: 1px solid #eaecf0;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.suggestion-diff-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.suggestion-diff-row + .suggestion-diff-row {
+  margin-top: 4px;
+}
+
+.suggestion-diff-label {
+  flex: 0 0 30px;
+  color: #6b7280;
+}
+
+.diff-remove {
+  color: #b42318;
+  background: #fef3f2;
+  border-radius: 4px;
+  padding: 0 2px;
+  text-decoration: line-through;
+}
+
+.diff-add {
+  color: #b42318;
+  background: #fff1f3;
+  border-radius: 4px;
+  padding: 0 2px;
+  font-weight: 600;
 }
 
 .issue-action-cell {
@@ -2431,6 +3459,20 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.provider-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  align-items: center;
+}
+
+.provider-tag-item {
+  font-size: 10px !important;
+  padding: 0 5px !important;
+  height: 18px !important;
+  line-height: 18px !important;
 }
 
 .report-content {
@@ -2565,6 +3607,22 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 8px;
 }
+.audit-trace-panel {
+  margin-bottom: 16px;
+}
+.audit-trace-panel .el-card__header {
+  padding: 10px 16px;
+  background: #f5f7fa;
+}
+.trace-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.trace-badge {
+  margin-left: 4px;
+}
 .dialog-footer {
   display: flex;
   align-items: center;
@@ -2581,6 +3639,66 @@ onUnmounted(() => {
 }
 .text-error { color: #f56c6c; font-family: 'Courier New', monospace; font-size: 13px; }
 .text-success { color: #67c23a; font-size: 13px; }
+
+/* 审核覆盖率面板 */
+.coverage-card {
+  margin-bottom: 12px;
+}
+.coverage-card .card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.coverage-summary {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.coverage-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 100px;
+}
+.coverage-label {
+  font-size: 12px;
+  color: #909399;
+}
+.coverage-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
+}
+.coverage-detail {
+  margin-top: 16px;
+  border-top: 1px solid #EBEEF5;
+  padding-top: 12px;
+}
+.coverage-section {
+  margin-bottom: 16px;
+}
+.coverage-section h4 {
+  font-size: 13px;
+  color: #606266;
+  margin: 0 0 8px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #F2F3F5;
+}
+.severity-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.severity-bar-row {
+  display: flex;
+  align-items: center;
+}
+.severity-bar-label {
+  width: 48px;
+  font-size: 12px;
+  color: #606266;
+  text-align: right;
+}
 
 .context-cell {
   font-size: 13px;
@@ -2641,12 +3759,12 @@ onUnmounted(() => {
 }
 
 .highlight-problem {
-  color: #dc3545;
-  font-weight: bold;
-  background-color: #fef0f0;
+  color: #1f2937;
+  font-weight: 500;
+  background-color: #fff4cc;
   padding: 1px 4px;
   border-radius: 3px;
-  border: 1px solid #fbcfe8;
+  border: 1px solid #f5e0a3;
 }
 
 .gold-upload {
@@ -2710,5 +3828,69 @@ onUnmounted(() => {
   .report-header {
     grid-template-columns: 1fr;
   }
+}
+
+/* 术语匹配率分析面板 */
+.terminology-card {
+  margin-bottom: 12px;
+}
+.match-distribution {
+  margin-bottom: 4px;
+}
+.dist-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #606266;
+  margin-bottom: 8px;
+}
+.dist-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.dist-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dist-label {
+  width: 90px;
+  font-size: 11px;
+  color: #606266;
+  text-align: right;
+  flex-shrink: 0;
+}
+.dist-track {
+  flex: 1;
+  height: 14px;
+  background: #f0f0f0;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.dist-fill {
+  height: 100%;
+  border-radius: 7px;
+  transition: width 0.4s ease;
+}
+.dist-count {
+  width: 65px;
+  font-size: 12px;
+  text-align: left;
+  flex-shrink: 0;
+}
+.term-stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 80px;
+}
+.term-stat-label {
+  font-size: 11px;
+  color: #909399;
+}
+.term-stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
 }
 </style>

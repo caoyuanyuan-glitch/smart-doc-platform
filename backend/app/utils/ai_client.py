@@ -2,6 +2,7 @@ import os
 import json
 import re
 import base64
+import logging
 import mimetypes
 import threading
 import httpx
@@ -20,6 +21,65 @@ from app.api.review_rules import (
     BRITISH_AMERICAN_SPELLINGS
 )
 
+logger = logging.getLogger(__name__)
+
+# 分层提示词构建器
+PROMPT_BUILDER_FALLBACK_ACTIVE = False
+_prompt_builder_fallback_logged = False
+
+try:
+    from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
+except ModuleNotFoundError as exc:
+    if exc.name != "app.utils.prompt_builder":
+        raise
+
+    logger.warning("prompt_builder 模块加载失败，审查提示词构建功能降级: %s", exc)
+
+    PROMPT_BUILDER_FALLBACK_ACTIVE = True
+
+    class ReviewPromptBuilder:
+        def __init__(self, *args, **kwargs):
+            self.chapter_context = kwargs.get("chapter_context") or {}
+            self.document_name = str(
+                kwargs.get("document_name")
+                or kwargs.get("filename")
+                or self.chapter_context.get("document_name")
+                or ""
+            ).strip()
+            self.language = str(kwargs.get("language") or "").strip()
+
+        def build_audit_system_prompt(self):
+            context_lines = []
+
+            if self.document_name:
+                context_lines.append(f"Document filename: {self.document_name}")
+
+            chapter_title = str(self.chapter_context.get("title") or self.chapter_context.get("chapter") or "").strip()
+            if chapter_title:
+                context_lines.append(f"Chapter title: {chapter_title}")
+
+            chapter_summary = str(self.chapter_context.get("summary") or self.chapter_context.get("context") or "").strip()
+            if chapter_summary:
+                context_lines.append(f"Chapter context: {chapter_summary[:500]}")
+
+            if self.language:
+                context_lines.append(f"Review language: {self.language}")
+
+            if str(self.language or "").lower().startswith("en"):
+                if not context_lines:
+                    return ""
+                return "Additional review context:\n- " + "\n- ".join(context_lines)
+
+            prompt = build_system_prompt()
+
+            if not context_lines:
+                return prompt
+
+            return f"{prompt}\n\nAdditional review context:\n- " + "\n- ".join(context_lines)
+
+    def build_review_system_prompt(*args, **kwargs):
+        return ReviewPromptBuilder(*args, **kwargs).build_audit_system_prompt()
+
 ANTHROPIC_VERSION = "2023-06-01"
 IMAGE_DRAFT_BATCH_SIZE = 2
 IMAGE_DRAFT_MAX_WORKERS = 6
@@ -35,6 +95,23 @@ def _env_float(name, default):
         return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _provider_max_attempts():
+    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
+
+
+def _provider_http_timeout():
+    connect_timeout = max(1.0, _env_float("AI_PROVIDER_CONNECT_TIMEOUT", "30"))
+    read_timeout = max(5.0, _env_float("AI_PROVIDER_READ_TIMEOUT", "45"))
+    return httpx.Timeout(connect_timeout, read=read_timeout)
 
 
 def _strip_code_fence(text):
@@ -55,7 +132,6 @@ class AIClient:
         self.qwen_model = os.getenv("QWEN_MODEL", os.getenv("DASHSCOPE_MODEL", "qwen-max"))
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-        self.deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 
         self.arkclaw_api_key = os.getenv("ARKCLAW_API_KEY")
         self.arkclaw_base_url = os.getenv("ARKCLAW_BASE_URL", "https://api.arkclaw.com/v1")
@@ -65,8 +141,9 @@ class AIClient:
         self.kimi_api_key = get_kimi_api_key()
         self.kimi_base_url = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         self.kimi_model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
-        self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "900")
-        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "900")
+        self.kimi_chat_timeout = _env_float("KIMI_CHAT_TIMEOUT", "20")
+        self.provider_chat_timeout = _env_float("AI_PROVIDER_CHAT_TIMEOUT", "10")
+        self.translation_timeout = _env_float("TRANSLATION_TIMEOUT", "60")
 
         self.proxy_api_key = os.getenv("OPENAI_API_KEY")
         self.proxy_base_url = os.getenv("OPENAI_BASE_URL")
@@ -74,7 +151,7 @@ class AIClient:
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
-        timeout = httpx.Timeout(connect=900.0, read=900.0, write=900.0, pool=900.0)
+        timeout = _provider_http_timeout()
 
         self.qwen_client = OpenAI(
             api_key=self.qwen_api_key,
@@ -86,7 +163,7 @@ class AIClient:
 
         self.deepseek_client = OpenAI(
             api_key=self.deepseek_api_key,
-            base_url=self.deepseek_base_url,
+            base_url="https://api.deepseek.com/v1",
             timeout=timeout,
         ) if _is_valid_key(self.deepseek_api_key) else None
 
@@ -115,6 +192,7 @@ class AIClient:
         self.last_chat_errors = []
         self.usage_events = []
         self.usage_lock = threading.Lock()
+        self.disabled_providers = set()
 
         self.mcai_proxy_client = None
         if self.mcai_available:
@@ -141,34 +219,96 @@ class AIClient:
 
     def available_providers(self):
         providers = []
-        if self.qwen_client:
+        if self.qwen_client and "qwen" not in self.disabled_providers:
             providers.append("qwen")
-        if self.kimi_client:
+        if self.kimi_client and "kimi" not in self.disabled_providers:
             providers.append("kimi")
-        if self.deepseek_client:
+        if self.deepseek_client and "deepseek" not in self.disabled_providers:
             providers.append("deepseek")
-        if self.arkclaw_client:
+        if self.arkclaw_client and "arkclaw" not in self.disabled_providers:
             providers.append("arkclaw")
-        if self.mcai_proxy_client:
+        if self.mcai_proxy_client and "mcai" not in self.disabled_providers:
             providers.append("mcai")
-        if self.proxy_client:
+        if self.proxy_client and "proxy" not in self.disabled_providers:
             providers.append("proxy")
         return providers
 
-    def provider_status(self):
-        return {
-            "default_provider": (self.default_provider or "qwen").strip().lower() or "qwen",
-            "priority": ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"],
-            "providers": {
-                "qwen": self.qwen_client is not None,
-                "kimi": self.kimi_client is not None,
-                "deepseek": self.deepseek_client is not None,
-                "arkclaw": self.arkclaw_client is not None,
-                "mcai": self.mcai_proxy_client is not None,
-                "proxy": self.proxy_client is not None,
-            },
-            "available": self.available_providers(),
+    def _provider_priority(self):
+        ordered = ["qwen", "kimi", "deepseek", "arkclaw", "mcai", "proxy"]
+        default_provider = (self.default_provider or "").strip().lower()
+        if default_provider in ordered:
+            ordered = [default_provider] + [name for name in ordered if name != default_provider]
+        return ordered
+
+    def _select_primary_provider(self, provider_results=None):
+        priority = self._provider_priority()
+        if provider_results:
+            for name in priority:
+                if (provider_results.get(name) or {}).get("status") == "ok":
+                    return name
+        for name in priority:
+            if name in self.available_providers():
+                return name
+        return priority[0] if priority else "qwen"
+
+    def provider_status(self, include_health=False):
+        default_provider = (self.default_provider or "qwen").strip().lower() or "qwen"
+        configured = {
+            "qwen": self.qwen_client is not None,
+            "kimi": self.kimi_client is not None,
+            "deepseek": self.deepseek_client is not None,
+            "arkclaw": self.arkclaw_client is not None,
+            "mcai": self.mcai_proxy_client is not None,
+            "proxy": self.proxy_client is not None,
         }
+        enabled = {
+            "qwen": configured["qwen"] and "qwen" not in self.disabled_providers,
+            "kimi": configured["kimi"] and "kimi" not in self.disabled_providers,
+            "deepseek": configured["deepseek"] and "deepseek" not in self.disabled_providers,
+            "arkclaw": configured["arkclaw"] and "arkclaw" not in self.disabled_providers,
+            "mcai": configured["mcai"] and "mcai" not in self.disabled_providers,
+            "proxy": configured["proxy"] and "proxy" not in self.disabled_providers,
+        }
+        status = {
+            "default_provider": default_provider,
+            "priority": self._provider_priority(),
+            "providers": enabled,
+            "configured": configured,
+            "available": [name for name, is_enabled in enabled.items() if is_enabled],
+            "disabled": sorted(self.disabled_providers),
+        }
+        if not include_health:
+            return status
+
+        health = self.health_check()
+        health_providers = health.get("providers", {})
+        available = [name for name, item in health_providers.items() if item.get("status") == "ok"]
+        status["available"] = available
+        status["health"] = {
+            "healthy": bool(health.get("healthy")),
+            "ok_providers": int(health.get("ok_providers") or 0),
+            "total_providers": int(health.get("total_providers") or 0),
+            "primary": health.get("primary") or default_provider,
+            "primary_status": health.get("primary_status") or "unknown",
+            "providers": health_providers,
+        }
+        status["providers"] = {
+            name: {
+                "configured": configured.get(name, False),
+                "enabled": enabled.get(name, False),
+                "healthy": name in available,
+                **(health_providers.get(name) or {}),
+            }
+            for name in status["priority"]
+        }
+        return status
+
+    def _disable_provider(self, provider, reason=""):
+        provider = str(provider or "").strip().lower()
+        if not provider or provider in self.disabled_providers:
+            return
+        self.disabled_providers.add(provider)
+        print(f"[AI] provider disabled: {provider} reason={reason[:120]}")
 
     def health_check(self):
         results = {}
@@ -233,11 +373,12 @@ class AIClient:
             results["mcai"] = {"status": "unavailable", "reason": "no_api_key"}
 
         ok_count = sum(1 for r in results.values() if r.get("status") == "ok")
-        primary = (self.default_provider or "qwen").strip().lower() or "qwen"
+        primary = self._select_primary_provider(results)
         return {
             "total_providers": len(results),
             "ok_providers": ok_count,
             "healthy": ok_count > 0,
+            "preferred": (self.default_provider or "qwen").strip().lower() or "qwen",
             "primary": primary,
             "primary_status": results.get(primary, {}).get("status", "unknown"),
             "providers": results,
@@ -409,12 +550,12 @@ class AIClient:
                 preferred.append(name)
 
         availability = {
-            "qwen": self.qwen_client is not None,
-            "kimi": self.kimi_client is not None,
-            "deepseek": self.deepseek_client is not None,
-            "arkclaw": self.arkclaw_client is not None,
-            "mcai": self.mcai_proxy_client is not None,
-            "proxy": self.proxy_client is not None,
+            "qwen": self.qwen_client is not None and "qwen" not in self.disabled_providers,
+            "kimi": self.kimi_client is not None and "kimi" not in self.disabled_providers,
+            "deepseek": self.deepseek_client is not None and "deepseek" not in self.disabled_providers,
+            "arkclaw": self.arkclaw_client is not None and "arkclaw" not in self.disabled_providers,
+            "mcai": self.mcai_proxy_client is not None and "mcai" not in self.disabled_providers,
+            "proxy": self.proxy_client is not None and "proxy" not in self.disabled_providers,
         }
         for name in preferred:
             if availability.get(name):
@@ -428,7 +569,7 @@ class AIClient:
         if not self.qwen_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -463,7 +604,7 @@ class AIClient:
         if not self.deepseek_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -498,7 +639,7 @@ class AIClient:
         if not self.arkclaw_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -533,7 +674,7 @@ class AIClient:
         if not self.kimi_client:
             return None
         import time
-        max_retries = 3
+        max_retries = _provider_max_attempts()
         retry_delay = 2
         for attempt in range(1, max_retries + 1):
             try:
@@ -557,6 +698,8 @@ class AIClient:
                 return response.choices[0].message.content
             except Exception as e:
                 error_str = str(e)
+                if any(code in error_str for code in ("401", "incorrect_api_key", "invalid_api_key")):
+                    self._disable_provider("kimi", error_str)
                 if "429" in error_str and attempt < max_retries:
                     print(f"Kimi 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
                     time.sleep(retry_delay)
@@ -592,7 +735,8 @@ class AIClient:
         if not self.mcai_available:
             return None
         import time as _time
-        for attempt in range(1, 4):
+        max_attempts = _provider_max_attempts()
+        for attempt in range(1, max_attempts + 1):
             try:
                 started_at = _time.time()
                 headers = {
@@ -609,7 +753,7 @@ class AIClient:
                     f"{self.mcai_base_url}/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=180.0,
+                    timeout=max(5.0, _env_float("AI_PROVIDER_READ_TIMEOUT", "45")),
                 )
                 if r.status_code == 200:
                     content = r.text.strip()
@@ -640,30 +784,30 @@ class AIClient:
                         if content.startswith('"') and content.endswith('"'):
                             content = json.loads(content)
                         return content
-                if r.status_code == 429 and attempt < 3:
+                if r.status_code == 429 and attempt < max_attempts:
                     wait = 2 ** attempt
-                    print(f"[AI] MCAI Proxy 429，等待{wait}s后重试 ({attempt}/3)")
+                    print(f"[AI] MCAI Proxy 429，等待{wait}s后重试 ({attempt}/{max_attempts})")
                     _time.sleep(wait)
                     continue
                 print(f"[AI] MCAI Proxy 错误: HTTP {r.status_code} {r.text[:100]}")
                 return None
             except Exception as e:
-                if "429" in str(e) and attempt < 3:
+                if "429" in str(e) and attempt < max_attempts:
                     _time.sleep(2 ** attempt)
                     continue
                 print(f"[AI] MCAI Proxy 调用失败: {str(e)[:100]}")
                 return None
         return None
 
-    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None):
+    def chat(self, messages, max_tokens=2048, fallback=True, temperature=0.3, kimi_thinking=None, skip_kimi=False, request_label=None, review_id=None, timeout=None, excluded_providers=None):
         # 优先级: DEFAULT_MODEL_PROVIDER 优先，其余按 Qwen > Kimi > DeepSeek > ArkClaw > Proxy
         self.last_chat_errors = []
         providers = []
-        print(f"message:{messages}")
+        excluded = {str(item).strip().lower() for item in (excluded_providers or []) if str(item).strip()}
         ordered_specs = [
-        ('deepseek', 'DeepSeek', self.deepseek_client, self.deepseek_model),
             ('qwen', 'Qwen', self.qwen_client, self.qwen_model),
             ('kimi', 'Kimi', self.kimi_client, self.kimi_model),
+            ('deepseek', 'DeepSeek', self.deepseek_client, self.deepseek_model),
             ('arkclaw', 'ArkClaw', self.arkclaw_client, self.arkclaw_model),
             ('proxy', 'Proxy', self.proxy_client, self.fallback_model),
         ]
@@ -673,14 +817,18 @@ class AIClient:
         for provider_key, display_name, client, model in ordered_specs:
             if provider_key == 'kimi' and skip_kimi:
                 continue
+            if provider_key in excluded:
+                continue
+            if provider_key in self.disabled_providers:
+                continue
             if client:
                 providers.append((display_name, client, model))
 
         if providers:
             print(f"[AI] providers={', '.join(name for name, _, _ in providers)}")
-            started_at = time.time()
-            max_retries = 3
+            max_retries = _provider_max_attempts()
             retry_delay = 2
+            is_translation_request = str(request_label or "").startswith("translation.")
             for name, client, model in providers:
                 for attempt in range(1, max_retries + 1):
                     try:
@@ -689,7 +837,7 @@ class AIClient:
                             self._build_kimi_request_kwargs(
                                 model=model,
                                 messages=messages,
-                                max_tokens=30000,
+                                max_tokens=max_tokens,
                                 temperature=temperature,
                                 thinking=kimi_thinking,
                             )
@@ -697,20 +845,29 @@ class AIClient:
                             else {
                                 "model": model,
                                 "messages": messages,
-                                "max_tokens": 30000,
+                                "max_tokens": max_tokens,
                                 "temperature": temperature,
                             }
                         )
-                        print(f"request_kwargs:{request_kwargs}")
-                        print(f"Kimi超时: {self.kimi_chat_timeout}")
-                        print(f"Provider超时: {self.provider_chat_timeout}")
+                        if timeout is not None:
+                            effective_timeout = timeout
+                        else:
+                            timeout_value = self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout
+                            if is_translation_request:
+                                timeout_value = max(timeout_value, self.translation_timeout)
+                            effective_timeout = timeout_value
+                        if isinstance(effective_timeout, (int, float)):
+                            effective_timeout = httpx.Timeout(
+                                connect=10.0,
+                                read=float(effective_timeout),
+                                write=30.0,
+                                pool=10.0,
+                            )
                         call_client = client.with_options(
-                            timeout=self.kimi_chat_timeout if name == 'Kimi' else self.provider_chat_timeout,
+                            timeout=effective_timeout,
                             max_retries=0,
                         )
                         response = call_client.chat.completions.create(**request_kwargs)
-                        elapsed_ms = round((time.time() - started_at) * 1000)
-                        print(f"[AI] {name} 第 {attempt} 次尝试耗时: {elapsed_ms} ms (成功)")
                         self._record_usage_event(
                             name,
                             model,
@@ -721,22 +878,25 @@ class AIClient:
                         )
                         choice = response.choices[0]
                         content = choice.message.content or ""
-                        print(f"AI回答：{content}")
                         if content.strip():
                             return content
                         self.last_chat_errors.append(f"{name}: 返回空内容")
                         print(f"[AI] {name} 返回空内容: finish_reason={getattr(choice, 'finish_reason', '')}")
                         break
                     except Exception as e:
-                        elapsed_ms = round((time.time() - started_at) * 1000)
                         error_str = str(e)
+                        if name == 'Kimi' and any(code in error_str for code in ("401", "incorrect_api_key", "invalid_api_key")):
+                            self._disable_provider("kimi", error_str)
                         if "429" in error_str and attempt < max_retries:
+                            if is_translation_request:
+                                print(f"[AI] {name} 引擎繁忙 (429)，翻译场景直接切换到下一个 Provider")
+                                break
                             print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 后重试... (第 {attempt}/{max_retries} 次)")
                             time.sleep(retry_delay)
                             retry_delay *= 2
                             continue
                         self.last_chat_errors.append(f"{name}: {error_str[:160]}")
-                        print(f"[AI] {name} 耗时: {elapsed_ms} ms 调用失败: {error_str[:100]}")
+                        print(f"[AI] {name} 调用失败: {error_str[:100]}")
                         break
 
                 if not fallback:
@@ -746,6 +906,89 @@ class AIClient:
             content = self._call_mcai_proxy(messages, max_tokens, temperature, request_label=request_label, review_id=review_id)
             if content and content.strip():
                 return content
+
+        return None
+
+    def chat_with_provider(self, provider, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        """强制使用指定 provider 调用（不回退）。
+
+        Args:
+            provider: 'qwen' 或 'deepseek'
+            messages: OpenAI 格式消息列表
+            max_tokens, temperature: 模型参数
+            request_label, review_id: 用量追踪
+
+        Returns:
+            str or None: 模型回复内容
+        """
+        provider = str(provider or "").strip().lower()
+
+        provider_map = {
+            "qwen": ("Qwen", self.qwen_client, self.qwen_model),
+            "deepseek": ("DeepSeek", self.deepseek_client, self.deepseek_model),
+            "kimi": ("Kimi", self.kimi_client, self.kimi_model),
+            "arkclaw": ("ArkClaw", self.arkclaw_client, self.arkclaw_model),
+            "proxy": ("Proxy", self.proxy_client, self.fallback_model),
+        }
+
+        if provider not in provider_map:
+            print(f"[AI] chat_with_provider: unknown provider '{provider}', falling back to default chain")
+            return self.chat(messages, max_tokens=max_tokens, temperature=temperature,
+                           request_label=request_label, review_id=review_id)
+        
+        name, client, model = provider_map[provider]
+
+        if not client:
+            print(f"[AI] chat_with_provider: {name} not configured, falling back to default chain")
+            return self.chat(messages, max_tokens=max_tokens, temperature=temperature,
+                           request_label=request_label, review_id=review_id)
+
+        print(f"[AI] chat_with_provider: using {name} ({model})")
+        max_retries = _provider_max_attempts()
+        retry_delay = 2
+        is_translation_request = str(request_label or "").startswith("translation.")
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                started_at = time.time()
+                request_kwargs = (
+                    self._build_kimi_request_kwargs(
+                        model=model, messages=messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                    ) if name == "Kimi" else {
+                        "model": model, "messages": messages,
+                        "max_tokens": max_tokens, "temperature": temperature,
+                    }
+                )
+                timeout_value = self.kimi_chat_timeout if name == "Kimi" else self.provider_chat_timeout
+                if is_translation_request:
+                    timeout_value = max(timeout_value, self.translation_timeout)
+                call_client = client.with_options(timeout=timeout_value, max_retries=0)
+                response = call_client.chat.completions.create(**request_kwargs)
+                self._record_usage_event(
+                    name, model,
+                    getattr(response, "usage", None),
+                    request_label=request_label,
+                    review_id=review_id,
+                    elapsed_ms=round((time.time() - started_at) * 1000),
+                )
+                content = response.choices[0].message.content or ""
+                if content.strip():
+                    return content
+                print(f"[AI] {name} 返回空内容")
+                break
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries:
+                    if is_translation_request:
+                        print(f"[AI] {name} 引擎繁忙 (429)，翻译场景停止重试")
+                        break
+                    print(f"[AI] {name} 引擎繁忙 (429), 等待 {retry_delay}s 重试 ({attempt}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                print(f"[AI] {name} 调用失败: {error_str[:100]}")
+                break
 
         return None
 
@@ -903,6 +1146,8 @@ class AIClient:
             category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
             rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
             audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
+            issue_source = self._clean_text(item.get("source"), 40) or source
+            status = self._clean_text(item.get("status"), 40) or "open"
             confidence = self._normalize_confidence(item.get("confidence"), 80 if source == "ai" else 0)
             severity = self._normalize_severity(item.get("severity"), confidence)
 
@@ -942,11 +1187,97 @@ class AIClient:
                 "description": description,
                 "audit_basis": audit_basis,
                 "confidence": confidence,
-                "source": source,
+                "source": issue_source,
+                "status": status,
                 "position": self._clean_text(item.get("position"), 80),
+                "source_models": list(item.get("source_models") or []),
+                "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
             })
 
         return normalized
+
+    @staticmethod
+    def _audit_issue_merge_key(issue):
+        if not isinstance(issue, dict):
+            return ""
+        fields = [
+            str(issue.get("rule") or "").strip().lower(),
+            str(issue.get("category") or "").strip().lower(),
+            str(issue.get("chapter") or "").strip().lower(),
+            str(issue.get("original_text") or "").strip().lower(),
+            str(issue.get("suggestion") or "").strip().lower(),
+        ]
+        return "||".join(fields)
+
+    def _merge_audit_issue_sets(self, primary_issues, secondary_issues, primary_model, secondary_model):
+        merged = []
+        issue_map = {}
+
+        def add_issue(issue, model_name, matched=False):
+            item = dict(issue or {})
+            key = self._audit_issue_merge_key(item)
+            if not key:
+                return
+            existing = issue_map.get(key)
+            if existing is None:
+                item["source_models"] = [model_name] if model_name else []
+                item["consensus_score"] = max(0, min(100, int(item.get("confidence") or 0)))
+                issue_map[key] = item
+                merged.append(item)
+                return
+
+            source_models = list(existing.get("source_models") or [])
+            if model_name and model_name not in source_models:
+                source_models.append(model_name)
+            existing["source_models"] = source_models
+            existing["confidence"] = max(int(existing.get("confidence") or 0), int(item.get("confidence") or 0))
+            if matched:
+                boosted = max(int(existing.get("confidence") or 0) + 8, int(item.get("confidence") or 0) + 8)
+                existing["consensus_score"] = min(100, max(int(existing.get("consensus_score") or 0), boosted))
+            else:
+                existing["consensus_score"] = max(int(existing.get("consensus_score") or 0), int(item.get("confidence") or 0))
+
+            if not existing.get("description") and item.get("description"):
+                existing["description"] = item.get("description")
+            if not existing.get("context") and item.get("context"):
+                existing["context"] = item.get("context")
+            if not existing.get("position") and item.get("position"):
+                existing["position"] = item.get("position")
+
+        for issue in primary_issues or []:
+            add_issue(issue, primary_model)
+
+        for issue in secondary_issues or []:
+            add_issue(issue, secondary_model, matched=True)
+
+        for issue in merged:
+            source_models = list(issue.get("source_models") or [])
+            issue["source_models"] = source_models
+            if len(source_models) >= 2:
+                if issue.get("severity") == "suggestion":
+                    issue["severity"] = "general"
+            elif int(issue.get("confidence") or 0) < 85 and issue.get("severity") == "serious":
+                issue["severity"] = "general"
+        return merged
+
+    def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
+        provider_key = str(provider_key or "").strip().lower()
+        if provider_key == "qwen":
+            result = self.call_qwen(messages, max_tokens=2048, temperature=0.2, request_label=request_label, review_id=review_id)
+        elif provider_key == "deepseek":
+            result = self.call_deepseek(messages, max_tokens=2048, temperature=0.2, request_label=request_label, review_id=review_id)
+        else:
+            result = None
+
+        if not result:
+            return []
+
+        data = self._extract_json(result, {"issues": []})
+        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
+        for issue in issues:
+            issue["source_models"] = [provider_key] if provider_key else []
+            issue["consensus_score"] = int(issue.get("confidence") or 0)
+        return issues
 
     # ------------------------------------------------------------------
     # 文档润色
@@ -1011,10 +1342,7 @@ class AIClient:
 - 原句写的是"制备卡"，输出必须是"制备卡"，不得改成示例里的"样本制备卡"
 - 原句没有提到的设备名、试剂名、步骤名，一律不得添加
 
-输出：以 JSON 数组形式返回，数组中每个 JSON 对象包含三个字段：
-- original：润色前的句子
-- revised：润色后的句子
-- reference：参考的句式模板或规则"""
+输出：直接输出改写后的完整文本，无需解释。"""
 
         if terminology:
             term_lines = []
@@ -1040,61 +1368,33 @@ class AIClient:
 {text}
 ===== 待审核文本结束 =====
 
-请对审核文本逐句改写。"""
+逐句改写，每句保留原文的具体名称和参数。"""
 
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt}
         ]
-        result = self.chat(messages, max_tokens=30000, request_label=request_label)
+        result = self.chat(messages, max_tokens=4096, request_label=request_label)
 
         if not result:
-            return []
-
-        print(f"=== raw result ===")
-        print(repr(result))  # 用 repr 可以看到换行符、特殊字符等
-        print(f"=== raw result end ===")
-        # 2. 打印 result 的类型
-        print(f"result type: {type(result)}")
-        # 3. 如果 result 是多行，逐行打印
-        print(f"=== result lines ===")
-        for i, line in enumerate(result.split('\n')):
-            print(f"line {i}: {repr(line)}")
-        print(f"=== result lines end ===")
-        raw = result.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw)
+            return {"original": text, "polished": text}
 
         try:
-            print(f"rwa:{raw}")
-            print(f"这里没执行？")
-            parsed = json.loads(raw)
-        except Exception:
-            print(f"[AI] 润色结果解析失败，回退原文: {result[:80]}")
-            return []
+            parsed = json.loads(result)
+            if isinstance(parsed, dict) and "polished" in parsed:
+                polished_value = parsed.get("polished")
+                if self._is_invalid_polish_response(text, polished_value):
+                    print(f"[AI] 润色结果无效，回退规则润色: {str(polished_value)[:80]}")
+                    return {"original": text, "polished": text}
+                return parsed
+        except:
+            pass
 
-        if not isinstance(parsed, list):
-            print(f"[AI] 润色结果格式不正确，回退原文: {result[:80]}")
-            return []
+        if self._is_invalid_polish_response(text, result):
+            print(f"[AI] 润色结果无效，回退规则润色: {result[:80]}")
+            return {"original": text, "polished": text}
 
-        normalized = []
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            original = str(item.get("original") or "").strip()
-            revised = str(item.get("revised") or "").strip()
-            reference = str(item.get("reference") or "").strip()
-            if not original:
-                original = text
-            if not revised or self._is_invalid_polish_response(original, revised):
-                revised = original
-            normalized.append({
-                "original": original,
-                "revised": revised,
-                "reference": reference,
-            })
-        print(f"=== normalized：{normalized}")
-        return normalized
+        return {"original": text, "polished": result.strip()}
 
     def qa_answer(self, question, context, request_label="qa.answer"):
         prompt = f"""
@@ -1690,46 +1990,56 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk"):
+    def build_audit_prompt_payload(self, content, language=None, audit_basis="", chapter_context=None, document_name=None):
+        global _prompt_builder_fallback_logged
         lang = language or "en"
         is_english = lang in ("en", "both")
-
         content = content or ""
-        if len(content) > 7000:
-            all_issues = []
-            chunk_size = 6000
-            overlap = 500
-            chunk_index = 1
-            for start in range(0, len(content), chunk_size - overlap):
-                chunk = content[start:start + chunk_size]
-                if not chunk.strip():
-                    continue
-                result = self.audit_document(
-                    chunk,
-                    language=lang,
-                    audit_basis=(audit_basis or "")[:2000],
-                    skip_kimi=skip_kimi,
-                    review_id=review_id,
-                    request_label=request_label,
-                )
-                for issue in result.get("issues", []):
-                    issue["chapter"] = issue.get("chapter") or f"AI chunk {chunk_index}"
-                    all_issues.append(issue)
-                chunk_index += 1
-            return {"issues": all_issues}
+        try:
+            builder = ReviewPromptBuilder(
+                document_type="technical_document",
+                language=lang,
+                document_name=document_name,
+                chapter_context=chapter_context or {},
+                load_from_db=True,
+            )
+            base_system_prompt = builder.build_audit_system_prompt()
+        except Exception as e:
+            print(f"[ai_client] 分层提示词构建失败，回退到静态规则: {e}")
+            base_system_prompt = "" if is_english else build_system_prompt()
 
-        # 使用完整的System Prompt模板（包含所有审核规则）
-        base_system_prompt = build_system_prompt()
+        if PROMPT_BUILDER_FALLBACK_ACTIVE and not _prompt_builder_fallback_logged:
+            print("[ai_client] prompt_builder 模块缺失，当前使用保守降级提示词构建")
+            _prompt_builder_fallback_logged = True
 
         if is_english:
+            context_block = f"\n\n{base_system_prompt}" if base_system_prompt.strip() else ""
             system_prompt = f"""You are a senior reviewer for regulated English technical documents in medical devices, IVD, and research instruments.
-
-{base_system_prompt}
-
+{context_block}
 REVIEW GOAL:
 - Behave like a human release reviewer, not a grammar checker.
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
 - Ordinary grammar, article usage, punctuation, capitalization, spacing, and style preferences are low value. Report them only when they make an instruction ambiguous, incomplete, or impossible to perform.
+
+ADDITIONAL MANUAL REVIEW CHECKS:
+- Cross-reference semantics: report when a reference such as Section X.X, Figure X, or Table X points to missing content or clearly mismatched topic content. Use category "编号引用".
+- Readability: report sentences longer than 80 characters without proper punctuation breaks, or word order that makes the sentence hard to understand. Use category "可读性".
+- Mutually exclusive step order: report when the described order is logically inconsistent, such as performing a dependent operation after power-off.
+- Step merge suggestion: suggest merging adjacent steps only when the action is identical and the wording overlap is above 90 percent, with only parameter differences.
+- Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
+- Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
+
+🚫 FORBIDDEN issue types (reporting any of these is an error):
+- ❌ Single punctuation marks (e.g. "." → "," or ":" → ";")
+- ❌ Single characters or letters (e.g. "a" → "an" with only one char)
+- ❌ Issues where original differs from expected only by one punctuation or space
+- ❌ Pure formatting differences (fullwidth/halfwidth, spacing preferences)
+- ❌ Issues where the original field is shorter than 2 meaningful characters
+- ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
+- ❌ Rewriting compliance / legal / regulatory statements, product names, or warning text to a more standard template, unless the document text itself proves an objective error
+- ❌ Suggesting to expand a well-known abbreviation (e.g. DNB → DNA Nanoball) unless this is the first occurrence in the document and no definition exists anywhere in the document
+- ❌ Gerund vs noun form differences in figure captions or UI labels (e.g. Reviewing parameters vs Review parameters) unless the same UI element uses both forms inconsistently within the same context
+- ❌ Adding/removing articles (a/an/the) when the meaning is unambiguous and the sentence remains grammatical
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
@@ -1745,7 +2055,13 @@ IMPORTANT REMINDERS:
   {', '.join(ENGLISH_CORRECT_SPELLINGS[:50])}...
 - British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
 - Product names, company names, model numbers, and technical abbreviations are VALID unless context proves an error.
-- If the review basis includes CYY human review experience, use it to identify content-level defects. Focus on evidence-backed sentence meaning, revision history, terminology consistency, table content, figure references, page boundary content loss, and topic-structure issues."""
+- If the review basis includes CYY human review experience, use it to identify content-level defects. Focus on evidence-backed sentence meaning, revision history, terminology consistency, table content, figure references, page boundary content loss, and topic-structure issues.
+
+FILENAME CHECKING:
+- When the context prompt provides a document filename, verify it against the document content.
+- Check for: spelling errors in filename, product name mismatch between filename and content, incorrect version/date format in filename, missing or extra spaces/underscores in product names in filename.
+- If the filename contains a product name (e.g. "DNBSEQ-T7"), verify that the same product name appears consistently in the document body.
+- Flag filename issues with type "FilenameError" and rule "FILENAME-001" (spelling), "FILENAME-002" (product mismatch), or "FILENAME-003" (version/date format)."""
 
             user_prompt = f"""Please review the following English technical document.
 
@@ -1755,27 +2071,57 @@ Document excerpt:
 Release checklist and review basis:
 {audit_basis[:3500] if audit_basis else 'No additional checklist provided.'}
 
+Requirements:
+1. Output results in JSON format
+2. Report only issues with clear textual evidence
+3. CYY human review experience baseline is for identifying content issues - report with evidence
+4. Deduplicate: report each error only once per document
+5. If the system prompt provided a document filename, check for filename spelling errors and product name consistency with body content
+
 Output ONLY strict JSON:
 {{
   "issues": [
     {{
-      "severity": "serious|general|suggestion",
-      "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar",
+      "severity": "fatal|serious|general|suggestion",
+      "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
-      "rule": "which rule is violated"
+      "context": "local context around the issue, about 40 chars before and after",
+      "rule": "which rule is violated",
+      "basis": "review basis or checklist clause used for the judgment",
+      "source": "ai",
+      "status": "open",
+      "confidence": 50-100
     }}
   ],
   "summary": {{
     "total": number,
+    "fatal": number,
     "serious": number,
     "general": number,
-    "suggestion": number
+    "suggestion": number,
+    "categories": {{
+      "结构完整": number,
+      "法规合规": number,
+      "术语一致性": number,
+      "编号引用": number,
+      "可读性": number,
+      "格式排版": number,
+      "其他": number
+    }}
   }}
 }}
 
-Return empty issues array if no high-confidence issues found."""
+Use severity=fatal only for missing or wrong safety warnings, contraindications, warning statements, regulatory violations, or operation errors that may lead to personal injury or equipment damage. Use serious, general, or suggestion for all other issues.
+
+Confidence scoring guide:
+- 90-100: Definite error (misspelling, wrong terminology, factual error)
+- 70-89: Likely error (non-standard grammar, inconsistent formatting)
+- 50-69: Uncertain / needs human review (report only if safety or compliance related)
+
+Return empty issues array if no issues with confidence >= 70. Only report confidence 50-69 issues when they affect operational safety or regulatory compliance."""
         else:
             system_prompt = f"""{base_system_prompt}
 
@@ -1784,19 +2130,46 @@ Return empty issues array if no high-confidence issues found."""
 - 优先输出影响发布审批、法规合规、用户操作、信息完整性、术语一致性、表格内容完整性、图文引用、版本记录、默认账号密码、IP/URL 暴露、法律声明的内容问题。
 - 普通语法、冠词、标点、大小写、空格、风格偏好属于低价值问题；只有会导致说明不清、步骤不可执行或合规风险时才输出。
 
+附加人工审核检查项（按需报告，不得为凑数而报）：
+- 交叉引用语义检查：文中“参见 X.X 节 / 图 X / 表 X”等引用，若被引用对象不存在或指向内容与描述主题明显不符，报告，category=编号引用。
+- 可读性检查：出现超过 80 字且无标点断句的长句，或读不通的语序，报告，category=可读性。
+- 互斥操作顺序检查：步骤描述存在“先 A 后 B”但 A 与 B 在逻辑上互斥或顺序颠倒时，报告。
+- 步骤合并建议：相邻步骤动作完全相同且文字重复度高于 90%，仅参数不同，可建议合并。
+- 索引页码准确性：目录或索引中的页码与实际章节页码不符时，报告，category=编号引用。
+- 商标或专有名词大小写：品牌名如 macOS、DNBSEQ、GenSeq 的大小写与官方写法不一致且同文档内混用时，报告，category=术语一致性。
+
+🚫 严禁输出的问题类型（违反即为错误）：
+- ❌ 单个标点符号（如 "。" → "，" 或 "." → ","）
+- ❌ 单个中文字符或英文字母（如 "的" → "地" 且仅有一个字）
+- ❌ 原文与建议仅差一个标点或空格
+- ❌ 纯格式差异（全角/半角标点互换、中英文空格增减）
+- ❌ original 字段长度小于 2 个有意义字符的问题
+- ❌ Unicode 等价字符差异，例如 µ(U+00B5) 与 μ(U+03BC)、全角与半角数字、U+2212 减号与 U+002D 连字符，在视觉呈现一致时不得报错
+- ❌ 仅为了更标准而改写合规、法律、法规声明、产品名称、警告文本；只有原文能证明存在客观错误时才允许报告
+- ❌ 要求展开公认缩写，例如 DNB → DNA Nanoball；只有全文第一次出现且全文其他位置都没有定义时才允许报告
+- ❌ 图注或 UI 标签中动名词与名词形式差异，例如 Reviewing parameters 与 Review parameters；只有同一对象在同一上下文内前后不一致时才允许报告
+- ❌ 在句义明确且句子仍然成立时，仅因冠词 a/an/the 的增删而报错
+
 重要提醒：
 - 只报告有明确文本证据的问题。
 - 不要只为了可读性、语气或风格润色而输出问题。
 - 不要把解析残片、截断单词、换行造成的半词识别为拼写错误。
 - 不要反复报告 click/select/open 等普通 UI 动词；只有缺少按钮、图标、字段、菜单或页面对象导致用户无法操作时才报告。
-- UI 对象缺失时，不要凭空猜测 Browse、Edit 等按钮名；只有原文节选中出现该名称时才能写入建议。证据不足时使用“对应图标/按钮”这类泛化建议。
+- UI 对象缺失时，不要凭空猜测 Browse、Edit 等按钮名；只有原文节选中出现该名称时才能写入建议。证据不足时使用"对应图标/按钮"这类泛化建议。
 - 版式外观、列宽、字体大小、图标尺寸、图片尺寸、表格拥挤、图形摆放交由人工审核。只有文本证据能证明内容缺失、编号错误、标题错误或引用断裂时，才报告表格或图片相关问题。
 - 修改建议必须严格保持原意，不得擅自改变试剂名称、供应方/用户角色、产品名称、合规声明、存储动作或技术术语。
 - 不得擅自改变数字值、数量、列数/行数、温度、时间、体积、浓度或页码；只有原文证据能直接证明数字错误时才可报告。
 - 数字和单位之间必须保留一个空格，包括 μL、mL、ng、bp、°C、%、× 和缓冲液名称；可以补缺失空格，不能删除已有空格。
 - 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
 - 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。
-- 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。"""
+- 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。
+
+文件名检查（当上下文提供了文档文件名时）：
+- 检查文件名是否存在拼写错误。
+- 检查文件名中的产品名称是否与正文一致（如文件名含"DNBSEQ-T7"但正文写"DNBSEQ-T10"则为错误）。
+- 检查文件名中的版本号、日期格式是否规范。
+- 检查文件名中产品名称的拼写、大小写、空格/下划线是否与正文一致。
+- 文件名问题类型标记为 "文件名错误"，规则用 FILENAME-001（拼写）、FILENAME-002（产品名不一致）、FILENAME-003（版本/日期格式）。"""
 
             user_prompt = f"""请审核下面这段中文技术文档。
 
@@ -1811,53 +2184,138 @@ Return empty issues array if no high-confidence issues found."""
 2. 只报告有明确文本证据的真实问题
 3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
+5. 如果系统提示中给出了文档文件名，请检查文件名拼写、产品名与正文一致性
 
 输出严格JSON：
 {{
   "issues": [
     {{
-      "type": "合规|发布风险|操作步骤|信息完整性|术语|表格|图文引用|语法",
-      "severity": "serious|general|suggestion",
+      "type": "合规|发布风险|操作步骤|信息完整性|术语|表格|图文引用|语法|文件名错误",
+      "severity": "fatal|serious|general|suggestion",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
       "location": "章节名或行号",
       "original": "原文内容",
       "expected": "正确写法",
-      "rule": "违反的具体规则"
+      "context": "问题所在段落前后约40字上下文",
+      "rule": "违反的具体规则",
+      "basis": "判断依据或引用的规则条款",
+      "source": "ai",
+      "status": "open",
+      "confidence": 50-100
     }}
   ],
   "summary": {{
-    "total": 数量,
-    "serious": 严重数量,
-    "general": 一般数量,
-    "suggestion": 建议数量
-  }}
+      "total": 数量,
+      "fatal": 致命数量,
+      "serious": 严重数量,
+      "general": 一般数量,
+      "suggestion": 建议数量,
+      "categories": {{
+        "结构完整": 数量,
+        "法规合规": 数量,
+        "术语一致性": 数量,
+        "编号引用": 数量,
+        "可读性": 数量,
+        "格式排版": 数量,
+        "其他": 数量
+      }}
+    }}
 }}
 
-如果没有高置信度问题，返回空数组。"""
+severity=fatal 仅用于：安全警告、禁忌、警示信息缺失或错误，法规条款违规，或可能导致用户人身伤害、设备损坏的操作描述错误。其余问题使用 serious、general 或 suggestion。
+
+confidence 评分指南：
+- 90-100：确凿错误（拼写错误、术语用错、事实性错误）
+- 70-89：很可能有误（语法不规范、格式不一致）
+- 50-69：可疑/需人工确认（只有强烈怀疑时才报告，否则不报告）
+
+如果没有高置信度(≥70)问题，返回空数组。50-69的问题只在影响操作安全或法规合规时才报告。"""
+
+        return {
+            "language": lang,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
+
+    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk", chapter_context=None, force_provider=None):
+        lang = language or "en"
+
+        content = content or ""
+        # 上层审核流程已做滑动窗口分块，这里保持单次模型调用，避免二次分块打散上下文。
+
+        prompt_payload = self.build_audit_prompt_payload(
+            content,
+            language=lang,
+            audit_basis=audit_basis,
+            chapter_context=chapter_context,
+        )
+        system_prompt = prompt_payload["system_prompt"]
+        user_prompt = prompt_payload["user_prompt"]
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
 
-        result = self.chat(
-            messages,
-            max_tokens=2048,
-            temperature=0.2,
-            skip_kimi=skip_kimi,
-            request_label=request_label,
-            review_id=review_id,
-        )
-        if not result:
+        if force_provider:
+            forced_issues = self._run_provider_audit(force_provider, messages, content, request_label=request_label, review_id=review_id)
+            if forced_issues:
+                return {"issues": forced_issues}
+            result = self.chat_with_provider(
+                force_provider,
+                messages,
+                max_tokens=2048,
+                temperature=0.2,
+                request_label=request_label,
+                review_id=review_id,
+            )
+            if not result:
+                return {"issues": []}
+            data = self._extract_json(result, {"issues": []})
+            issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
+            for issue in issues:
+                issue["source_models"] = [str(force_provider or "")]
+                issue["consensus_score"] = int(issue.get("confidence") or 0)
+            return {"issues": issues}
+
+        if self.qwen_client:
+            primary_issues = self._run_provider_audit("qwen", messages, content, request_label=request_label, review_id=review_id)
+        else:
+            result = self.chat(
+                messages,
+                max_tokens=2048,
+                temperature=0.2,
+                skip_kimi=skip_kimi,
+                request_label=request_label,
+                review_id=review_id,
+            )
+            if not result:
+                return {"issues": []}
+            data = self._extract_json(result, {"issues": []})
+            primary_issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
+            for issue in primary_issues:
+                issue["source_models"] = ["fallback"]
+                issue["consensus_score"] = int(issue.get("confidence") or 0)
+
+        if not primary_issues and not self.deepseek_client:
             return {"issues": []}
 
-        data = self._extract_json(result, {"issues": []})
-        issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai", min_confidence=75)
-        return {"issues": issues}
+        secondary_issues = []
+        if self.deepseek_client:
+            secondary_issues = self._run_provider_audit("deepseek", messages, content, request_label=f"{request_label}.deepseek", review_id=review_id)
+
+        if not primary_issues:
+            return {"issues": secondary_issues}
+        if not secondary_issues:
+            return {"issues": primary_issues}
+
+        merged_issues = self._merge_audit_issue_sets(primary_issues, secondary_issues, "qwen", "deepseek")
+        return {"issues": merged_issues}
 
     # ------------------------------------------------------------------
     # 规则审核的二次验证
     # ------------------------------------------------------------------
-    def filter_rule_false_positives(self, candidate_issues, document_language, review_id=None, request_label="review.rule_false_positive_filter"):
+    def filter_rule_false_positives(self, candidate_issues, document_language, review_id=None, request_label="review.rule_false_positive_filter", force_provider=None):
         if not candidate_issues:
             return []
 
@@ -1920,13 +2378,20 @@ Only high-confidence false positives may be removed."""
 只有确定为误报的项才返回 false_positive=true。"""
 
             messages = [{"role": "user", "content": prompt}]
-            result = self.chat(
-                messages,
-                max_tokens=2500,
-                temperature=0.1,
-                request_label=request_label,
-                review_id=review_id,
-            )
+            if force_provider:
+                result = self.chat_with_provider(
+                    force_provider, messages,
+                    max_tokens=2500, temperature=0.1,
+                    request_label=request_label, review_id=review_id,
+                )
+            else:
+                result = self.chat(
+                    messages,
+                    max_tokens=2500,
+                    temperature=0.1,
+                    request_label=request_label,
+                    review_id=review_id,
+                )
             if not result:
                 filtered.extend(chunk)
                 continue
