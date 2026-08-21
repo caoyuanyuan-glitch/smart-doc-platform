@@ -134,10 +134,9 @@ export const documentAPI = {
 }
 
 export const reviewAPI = {
-  create: (documentId, mode, provider, providers) => {
+  create: (documentId, mode, provider) => {
     const params = { mode, timeout: 300000 }
     if (provider) params.provider = provider
-    if (providers && providers.length > 0) params.providers = providers.join(',')
     return instance.post(`/review/${documentId}`, {}, { params })
   },
   compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
@@ -181,6 +180,8 @@ export const reviewAPI = {
   }),
   getStageDiagnostics: (id) => instance.get(`/review/${id}/stage-diagnostics`),
   getProviderStatus: () => instance.get('/review/provider-status'),
+  listFalsePositiveMemory: (params = {}) => instance.get('/review/false-positive-memory', { params }),
+  deleteFalsePositiveMemory: (id) => instance.delete(`/review/false-positive-memory/${id}`),
 }
 
 export const compareAPI = {

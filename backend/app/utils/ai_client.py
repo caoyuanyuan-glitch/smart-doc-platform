@@ -1462,6 +1462,91 @@ class AIClient:
         mime = content_type or mimetypes.guess_type(file_name or "")[0] or "image/png"
         return f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
 
+    def verify_review_issue_from_image(self, image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify"):
+        if not self.kimi_client or not image_bytes:
+            return {"decision": "skipped", "reason": "kimi_unavailable", "confidence": 0}
+
+        issue_payload = issue_payload or {}
+        prompt = f"""
+你是一名技术文档审核复核员，需要根据页面截图判断一个审核问题是否有图片证据支持。
+
+页面信息：第 {int(page_number or 0) or '?'} 页
+问题级别：{str(issue_payload.get('severity') or '')[:40]}
+问题类别：{str(issue_payload.get('category') or '')[:80]}
+原文片段：{self._clean_text(issue_payload.get('original_text'), 160)}
+上下文：{self._clean_text(issue_payload.get('context'), 320)}
+问题描述：{self._clean_text(issue_payload.get('description'), 220)}
+修改建议：{self._clean_text(issue_payload.get('suggestion'), 220)}
+
+请只根据图片可见证据判断：
+1. `confirm`：页面中能直接看到该问题，或能看到足够强的支持证据。
+2. `reject`：页面中看不到该问题，且更像 PDF 文本提取伪影、重复文本层、断行噪声、图标丢失或 OCR 误识别。
+3. `uncertain`：图片证据不足，无法稳定确认。
+
+已知优先按伪影或可接受差异处理的场景：
+- 双层文本层重复，例如同一句或同一短语重复叠加。
+- 图标、按钮、软件控件在文本层缺失，但截图中界面显示正常。
+- 弯引号和直引号混用、英文句号位于闭引号外。
+- `following status`、`turn on it` 这类文本层可疑表达，但截图里语义正常或无法稳定读出。
+
+输出严格 JSON：
+{{
+  "decision": "confirm|reject|uncertain",
+  "reason": "一句话说明依据",
+  "visible_text": "从图片中能读到的关键文字，读不到则留空",
+  "confidence": 0,
+  "is_extraction_artifact": false
+}}
+""".strip()
+
+        user_content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": self.build_image_data_url(image_bytes, file_name=f"review-page-{page_number or 0}.png")}
+            },
+        ]
+
+        started_at = time.time()
+        try:
+            response = self.kimi_client.with_options(timeout=40, max_retries=0).chat.completions.create(
+                **self._build_kimi_request_kwargs(
+                    model=self.kimi_model,
+                    messages=[{"role": "user", "content": user_content}],
+                    max_tokens=500,
+                    thinking="disabled",
+                )
+            )
+            self._record_usage_event(
+                "kimi",
+                self.kimi_model,
+                getattr(response, "usage", None),
+                request_label=request_label,
+                review_id=review_id,
+                elapsed_ms=round((time.time() - started_at) * 1000),
+            )
+            result = response.choices[0].message.content or ""
+        except Exception as exc:
+            return {
+                "decision": "error",
+                "reason": self._clean_text(str(exc), 180),
+                "confidence": 0,
+                "is_extraction_artifact": False,
+            }
+
+        data = self._extract_json(result, {})
+        decision = str(data.get("decision") or "").strip().lower()
+        if decision not in {"confirm", "reject", "uncertain"}:
+            decision = "uncertain"
+        return {
+            "decision": decision,
+            "reason": self._clean_text(data.get("reason"), 220),
+            "visible_text": self._clean_text(data.get("visible_text"), 220),
+            "confidence": self._normalize_confidence(data.get("confidence"), 0),
+            "is_extraction_artifact": bool(data.get("is_extraction_artifact")),
+            "raw_text": self._clean_text(result, 500),
+        }
+
     def _analyze_image_batch_to_draft(self, batch_images, batch_start, total_images, user_prompt=""):
         image_range = f"第 {batch_start + 1}-{batch_start + len(batch_images)} 张，共 {total_images} 张"
         draft_instruction = f"""

@@ -79,11 +79,26 @@ app.include_router(system.router, prefix="/api/system", tags=["系统状态"])
 @app.on_event("startup")
 async def startup_event():
     create_tables()
+
+    def _warmup_audit_basis_search():
+        try:
+            from app.api.review import _build_ai_review_basis_sections, _load_review_spec_texts
+            from app.services.audit_basis_search import get_audit_basis_search_service
+
+            spec_texts = _load_review_spec_texts()
+            basis_sections = _build_ai_review_basis_sections(spec_texts, "both")
+            service = get_audit_basis_search_service()
+            if service.warmup(basis_sections):
+                print(f"[startup] 审核依据 ES 预热完成: {service.index_name}")
+        except Exception as e:
+            print(f"[startup] 审核依据 ES 预热失败: {e}")
+
     try:
         from app.utils.ai_client import ai_client
         threading.Thread(target=ai_client.warmup, name="ai-warmup", daemon=True).start()
     except Exception as e:
         print(f"[startup] AI 预热失败: {e}")
+    threading.Thread(target=_warmup_audit_basis_search, name="audit-basis-es-warmup", daemon=True).start()
     try:
         from app.database import SessionLocal
         from app.crud.convert_rule import seed_default_rules

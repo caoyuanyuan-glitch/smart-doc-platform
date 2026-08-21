@@ -3,11 +3,11 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
 from app.utils.runtime_config import bootstrap_runtime_env
-from app.utils.runtime_paths import runtime_db_path
+from app.utils.runtime_paths import ensure_runtime_db_path
 
 bootstrap_runtime_env()
 
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{runtime_db_path()}")
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{ensure_runtime_db_path()}")
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
@@ -172,6 +172,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_decision_record
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_decision_record, false_positive_memory
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()

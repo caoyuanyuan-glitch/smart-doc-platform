@@ -210,6 +210,7 @@
               <el-menu-item index="/review">开始审核</el-menu-item>
               <el-menu-item index="/review/tasks">历史审核任务</el-menu-item>
               <el-menu-item index="/review/rules">规则管理</el-menu-item>
+              <el-menu-item v-if="userStore.isAdmin" index="/review/false-positive-memory">误报记忆库</el-menu-item>
               <el-sub-menu index="spell-check-sub">
                 <template #title>拼写检查</template>
                 <el-menu-item index="/review/spell-check">开始检查</el-menu-item>
