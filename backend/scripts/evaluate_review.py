@@ -3,6 +3,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +143,63 @@ def load_human_annotations(path):
     return parse_human_annotation_markdown(baseline_path)
 
 
+def _norm_match_text(value):
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def _matches_any_text(value, candidates):
+    value_norm = _norm_match_text(value)
+    if not value_norm:
+        return False
+    for candidate in candidates or []:
+        candidate_norm = _norm_match_text(candidate)
+        if candidate_norm and candidate_norm in value_norm:
+            return True
+    return False
+
+
+def _as_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _annotation_matches_ignore_rule(item, patterns):
+    blob = " ".join([item.category, item.expected_rule, item.comment, item.selected_text, item.context])
+    return _matches_any_text(blob, patterns)
+
+
+def _issue_matches_false_positive(issue, patterns):
+    blob = " ".join([issue.get("rule", ""), issue.get("category", ""), issue.get("original_text", ""), issue.get("suggestion", ""), issue.get("description", "")])
+    return _matches_any_text(blob, patterns)
+
+
+def _evaluate_annotation_filters(annotations, allowed_misses, explicit_false_positives):
+    kept = []
+    ignored = []
+    for item in annotations:
+        if _annotation_matches_ignore_rule(item, allowed_misses):
+            ignored.append(asdict(item))
+            continue
+        kept.append(item)
+    return kept, ignored
+
+
+def _evaluate_issue_filters(issues, explicit_false_positives):
+    kept = []
+    ignored = []
+    for issue in issues:
+        if _issue_matches_false_positive(issue, explicit_false_positives):
+            ignored.append(issue)
+            continue
+        kept.append(issue)
+    return kept, ignored
+
+
 def evaluate(review_id, markers):
     db = SessionLocal()
     try:
@@ -207,13 +265,72 @@ def evaluate_with_human_baseline(review_id, markers, baseline_path):
     finally:
         db.close()
     annotations = load_human_annotations(baseline_path)
+    scoped = []
     if document_filename:
         normalized_doc = normalize_filename_for_match(document_filename)
         scoped = [item for item in annotations if normalize_filename_for_match(item.file) in normalized_doc or normalized_doc in normalize_filename_for_match(item.file)]
-        if scoped:
-            annotations = scoped
+    if scoped:
+        annotations = scoped
     result["human_baseline"] = evaluate_against_annotations(issues, annotations)
     result["human_baseline"]["document_filename"] = document_filename
+    return result
+
+
+def evaluate_suite_document(doc_cfg, markers):
+    review_id = doc_cfg.get("review_id")
+    if not review_id:
+        return None
+
+    baseline_path = doc_cfg.get("baseline") or doc_cfg.get("baseline_document")
+    standard_answers = _as_list(doc_cfg.get("standard_answers"))
+    explicit_false_positives = _as_list(doc_cfg.get("explicit_false_positives"))
+    allowed_misses = _as_list(doc_cfg.get("allowed_misses"))
+
+    if not baseline_path and standard_answers:
+        baseline_path = standard_answers[0]
+
+    if baseline_path:
+        result = evaluate_with_human_baseline(review_id, markers, baseline_path)
+    else:
+        result = evaluate(review_id, markers)
+
+    result["config"] = {
+        "name": doc_cfg.get("name", f"review_{review_id}"),
+        "standard_answers": list(standard_answers),
+        "allowed_misses": list(allowed_misses),
+        "explicit_false_positives": list(explicit_false_positives),
+    }
+
+    if "human_baseline" in result:
+        annotations = load_human_annotations(baseline_path)
+        filtered_annotations, ignored_annotations = _evaluate_annotation_filters(
+            annotations,
+            allowed_misses,
+            explicit_false_positives,
+        )
+        if filtered_annotations != annotations:
+            db = SessionLocal()
+            try:
+                filtered_issues = [issue_to_dict(issue) for issue in db.query(Issue).filter(Issue.review_id == review_id).all()]
+            finally:
+                db.close()
+            result["human_baseline_filtered"] = evaluate_against_annotations(
+                filtered_issues,
+                filtered_annotations,
+            )
+            result["human_baseline_filtered"]["ignored_annotations"] = ignored_annotations[:50]
+
+    db = SessionLocal()
+    try:
+        issues = [issue_to_dict(issue) for issue in db.query(Issue).filter(Issue.review_id == review_id).all()]
+    finally:
+        db.close()
+    filtered_issues, ignored_issues = _evaluate_issue_filters(issues, explicit_false_positives)
+    result["suite_filters"] = {
+        "filtered_issue_count": len(filtered_issues),
+        "ignored_issue_count": len(ignored_issues),
+        "explicit_false_positive_rules": list(explicit_false_positives),
+    }
     return result
 
 
@@ -304,11 +421,9 @@ def batch_evaluate_from_config(config_path, markers):
         review_id = doc_cfg.get("review_id")
         if not review_id:
             continue
-        baseline_path = doc_cfg.get("baseline")
-        if baseline_path:
-            result = evaluate_with_human_baseline(review_id, markers, baseline_path)
-        else:
-            result = evaluate(review_id, markers)
+        result = evaluate_suite_document(doc_cfg, markers)
+        if not result:
+            continue
 
         total = result["total"]
         noop_rate = result["noop_suggestions"] / max(total, 1)
@@ -343,6 +458,8 @@ def batch_evaluate_from_config(config_path, markers):
                 "protected_change_rate": round(protected_rate, 4),
                 "high_value_rate": round(high_value_rate, 4),
             },
+            "config": result.get("config", {}),
+            "suite_filters": result.get("suite_filters", {}),
             "result": result,
         })
 

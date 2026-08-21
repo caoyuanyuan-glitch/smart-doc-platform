@@ -1,6 +1,9 @@
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.models.review import Review
 from app.models.issue import Issue
+from app.models.document import Document
+from app.models.false_positive_memory import FalsePositiveMemory
 from app.schemas.review import ReviewCreate, IssueCreate, IssueUpdate
 from datetime import datetime
 
@@ -69,6 +72,87 @@ def update_issue(db: Session, issue_id: int, issue_update: IssueUpdate):
         db.commit()
         db.refresh(issue)
     return issue
+
+
+def list_false_positive_memory_signatures(db: Session):
+    rows = db.query(FalsePositiveMemory).filter(FalsePositiveMemory.enabled.is_(True)).all()
+    return {str(row.signature or '').strip().lower() for row in rows if str(row.signature or '').strip()}
+
+
+def delete_false_positive_memory_for_issue(db: Session, source_issue_id: int):
+    db.query(FalsePositiveMemory).filter(FalsePositiveMemory.source_issue_id == source_issue_id).delete(synchronize_session=False)
+    db.commit()
+
+
+def upsert_false_positive_memory_for_issue(db: Session, issue, signatures: set[str]):
+    normalized_signatures = {
+        str(signature or '').strip().lower()
+        for signature in signatures
+        if str(signature or '').strip()
+    }
+    db.query(FalsePositiveMemory).filter(FalsePositiveMemory.source_issue_id == issue.id).delete(synchronize_session=False)
+    for signature in sorted(normalized_signatures):
+        db.add(FalsePositiveMemory(
+            source_issue_id=issue.id,
+            signature=signature,
+            rule=str(getattr(issue, 'rule', '') or ''),
+            category=str(getattr(issue, 'category', '') or ''),
+            original_text=str(getattr(issue, 'original_text', '') or ''),
+            enabled=True,
+        ))
+    db.commit()
+
+
+def list_false_positive_memory(db: Session, keyword: str = "", skip: int = 0, limit: int = 50):
+    query = (
+        db.query(FalsePositiveMemory, Issue, Review, Document)
+        .outerjoin(Issue, Issue.id == FalsePositiveMemory.source_issue_id)
+        .outerjoin(Review, Review.id == Issue.review_id)
+        .outerjoin(Document, Document.id == Review.document_id)
+    )
+
+    normalized_keyword = str(keyword or "").strip()
+    if normalized_keyword:
+        like_pattern = f"%{normalized_keyword}%"
+        query = query.filter(or_(
+            FalsePositiveMemory.signature.ilike(like_pattern),
+            FalsePositiveMemory.rule.ilike(like_pattern),
+            FalsePositiveMemory.category.ilike(like_pattern),
+            FalsePositiveMemory.original_text.ilike(like_pattern),
+            Document.filename.ilike(like_pattern),
+        ))
+
+    total = query.count()
+    rows = (
+        query.order_by(FalsePositiveMemory.created_at.desc(), FalsePositiveMemory.id.desc())
+        .offset(max(skip, 0))
+        .limit(max(1, limit))
+        .all()
+    )
+
+    items = []
+    for memory, issue, review, document in rows:
+        items.append({
+            "id": memory.id,
+            "source_issue_id": memory.source_issue_id,
+            "signature": str(memory.signature or ""),
+            "rule": str(memory.rule or ""),
+            "category": str(memory.category or ""),
+            "original_text": str(memory.original_text or ""),
+            "created_at": memory.created_at,
+            "review_id": getattr(review, "id", None),
+            "document_id": getattr(document, "id", None),
+            "document_name": str(getattr(document, "filename", "") or ""),
+        })
+    return items, total
+
+
+def delete_false_positive_memory_entry(db: Session, memory_id: int):
+    entry = db.query(FalsePositiveMemory).filter(FalsePositiveMemory.id == memory_id).first()
+    if entry:
+        db.delete(entry)
+        db.commit()
+    return entry
 
 def delete_issue(db: Session, issue_id: int):
     issue = db.query(Issue).filter(Issue.id == issue_id).first()

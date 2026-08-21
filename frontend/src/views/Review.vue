@@ -32,14 +32,11 @@
             <div v-if="reviewMode === 'hybrid'" class="review-mode-toolbar ai-model-toolbar">
               <span class="review-mode-label">AI 模型</span>
               <el-select
-                v-model="selectedProviders"
+                v-model="selectedProvider"
                 size="small"
                 style="width: 280px"
                 :disabled="providerLoading"
-                multiple
-                collapse-tags
-                collapse-tags-tooltip
-                placeholder="选择模型（多选=并发审核）"
+                placeholder="选择模型"
               >
                 <el-option
                   v-for="m in availableModels"
@@ -53,7 +50,7 @@
                 未检测到可用 AI 模型，请检查 API Key 配置
               </span>
               <span v-else class="review-mode-hint">
-                {{ selectedProviders.length > 1 ? `已选 ${selectedProviders.length} 个模型（并发审核）` : `当前使用 ${selectedProviderLabel}` }}
+                {{ `当前使用 ${selectedProviderLabel}` }}
               </span>
             </div>
             <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
@@ -670,7 +667,7 @@
         <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
         <el-table-column label="原文" min-width="450">
           <template #default="scope">
-            <span class="context-cell" v-html="renderIssueContext(scope.row, currentTaskMode)"></span>
+            <span class="context-cell" v-html="renderIssueOriginalCell(scope.row, currentTaskMode)"></span>
           </template>
         </el-table-column>
         <el-table-column label="建议" min-width="340" class-name="suggestion-column">
@@ -1317,11 +1314,7 @@ function issueSuggestionSummary(issue) {
 }
 
 function issueSuggestionDiffHtml(issue) {
-  const original = String(issue?.original_text || '').trim()
-  const replacement = extractSuggestionReplacement(issue)
-  if (!original || !replacement || original === replacement) return ''
-  if (replacement.length > 120) return ''
-  return buildSuggestionDiffMarkup(original, replacement)
+  return ''
 }
 
 function percentText(value) {
@@ -1432,17 +1425,14 @@ const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
 const reviewMode = ref('hybrid')
-const selectedProviders = ref([])
+const selectedProvider = ref('')
 const availableModels = ref([])
 const providerLoading = ref(true)
 
 const selectedProviderLabel = computed(() => {
-  if (selectedProviders.value.length === 0) return '默认'
-  const names = selectedProviders.value.map(p => {
-    const m = availableModels.value.find(m => m.name === p)
-    return m ? m.label : p
-  })
-  return names.join(' + ')
+  if (!selectedProvider.value) return '默认'
+  const model = availableModels.value.find(m => m.name === selectedProvider.value)
+  return model ? model.label : selectedProvider.value
 })
 const reviewSubTab = ref('single')
 const compareMode = ref('both')
@@ -1574,9 +1564,9 @@ async function loadProviders() {
       const defaultName = data.default_provider
       const defaultMatch = availableModels.value.find(m => m.name === defaultName)
       if (defaultMatch) {
-        selectedProviders.value = [defaultMatch.name]
+        selectedProvider.value = defaultMatch.name
       } else {
-        selectedProviders.value = [availableModels.value[0].name]
+        selectedProvider.value = availableModels.value[0].name
       }
     }
   } catch (e) {
@@ -2029,13 +2019,10 @@ async function startReview(documentId) {
     return
   }
   try {
-    const providersList = (reviewMode.value === 'hybrid' && selectedProviders.value.length > 0)
-      ? selectedProviders.value : null
-    const singleProvider = (providersList && providersList.length === 1)
-      ? providersList[0] : null
-    const multiProviders = (providersList && providersList.length > 1)
-      ? providersList : null
-    const response = await reviewAPI.create(documentId, reviewMode.value, singleProvider, multiProviders)
+    const provider = reviewMode.value === 'hybrid' && selectedProvider.value
+      ? selectedProvider.value
+      : null
+    const response = await reviewAPI.create(documentId, reviewMode.value, provider)
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
 
@@ -2941,6 +2928,51 @@ function renderIssueContext(issue, mode = '') {
   return highlightOriginalText(issue?.context, issue?.original_text)
 }
 
+function renderIssueOriginalCell(issue, mode = '') {
+  if (String(mode || '').startsWith('compare:')) {
+    return renderCompareIssueContext(issue)
+  }
+
+  const originalText = normalizeDisplayText(issue?.original_text)
+  const contextText = normalizeDisplayText(issue?.context)
+  if (!originalText) {
+    return highlightOriginalText(contextText, issue?.original_text)
+  }
+
+  const mainHtml = `<div class="issue-original-main">${highlightOriginalText(originalText, originalText)}</div>`
+  const snippet = buildIssueLocatorSnippet(contextText, originalText)
+  if (!snippet) {
+    return mainHtml
+  }
+  return `${mainHtml}<div class="issue-original-snippet">${highlightOriginalText(snippet, originalText)}</div>`
+}
+
+function normalizeDisplayText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim()
+}
+
+function buildIssueLocatorSnippet(contextText, originalText, sideLength = 36) {
+  if (!contextText || !originalText || contextText === originalText) {
+    return ''
+  }
+
+  const loweredContext = contextText.toLowerCase()
+  const loweredOriginal = originalText.toLowerCase()
+  let matchIndex = loweredContext.indexOf(loweredOriginal)
+  if (matchIndex < 0) {
+    return contextText.length > sideLength * 2 + 3
+      ? `${contextText.slice(0, sideLength * 2).trim()}...`
+      : contextText
+  }
+
+  const start = Math.max(0, matchIndex - sideLength)
+  const end = Math.min(contextText.length, matchIndex + originalText.length + sideLength)
+  let snippet = contextText.slice(start, end).trim()
+  if (start > 0) snippet = `...${snippet}`
+  if (end < contextText.length) snippet = `${snippet}...`
+  return snippet === originalText ? '' : snippet
+}
+
 const currentTaskMode = computed(() => {
   const currentReview = reviews.value.find(item => item.id === currentTaskId.value)
   return currentReview?.mode || currentReport.value?.mode || ''
@@ -3705,6 +3737,17 @@ onUnmounted(() => {
   line-height: 1.6;
   word-break: break-all;
   color: #303133;
+}
+
+.issue-original-main {
+  color: #1f2937;
+}
+
+.issue-original-snippet {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .compare-context-block {

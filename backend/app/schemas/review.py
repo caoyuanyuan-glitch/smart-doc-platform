@@ -71,3 +71,21 @@ class Issue(BaseModel):
 
 class IssueUpdate(BaseModel):
     status: str
+
+
+class FalsePositiveMemoryItem(BaseModel):
+    id: int
+    source_issue_id: int
+    signature: str
+    rule: str = ""
+    category: str = ""
+    original_text: str = ""
+    created_at: Optional[datetime] = None
+    review_id: Optional[int] = None
+    document_id: Optional[int] = None
+    document_name: str = ""
+
+
+class FalsePositiveMemoryListResponse(BaseModel):
+    items: list[FalsePositiveMemoryItem]
+    total: int

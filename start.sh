@@ -30,10 +30,14 @@ pip install -r requirements.txt -q
 echo "✅ 后端依赖安装完成"
 echo ""
 
-echo "🔄 初始化数据库..."
-python init_data.py
-
-echo "✅ 数据库初始化完成"
+DB_EXISTS=$(python3 -c "from app.utils.runtime_paths import ensure_runtime_db_path; print('1' if ensure_runtime_db_path().exists() else '0')")
+if [ "$DB_EXISTS" = "1" ]; then
+    echo "✅ 检测到已有数据库，保留历史审核任务"
+else
+    echo "🔄 首次初始化数据库..."
+    python init_data.py
+    echo "✅ 数据库初始化完成"
+fi
 echo ""
 
 echo "🚀 启动后端服务 (端口 8000)..."

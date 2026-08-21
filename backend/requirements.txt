@@ -23,3 +23,4 @@ pyspellchecker==0.8.3
 docx2txt==0.9
 Pillow>=10.0.0
 pytesseract>=0.3.13
+elasticsearch>=8.14.0
