@@ -96,6 +96,24 @@ def _require_translation_doc_access(db: Session, doc_id: int, current_user: User
     return doc
 
 
+def _read_translation_file_preview(doc: TranslationDoc) -> str:
+    output_filename = str(doc.translated_filename or "").strip()
+    if not output_filename or output_filename.startswith("ERROR:") or output_filename.startswith(CANCELED_TRANSLATION_PREFIX):
+        return ""
+
+    output_path = os.path.join(TRANSLATION_OUTPUT_DIR, output_filename)
+    if not os.path.exists(output_path):
+        return ""
+
+    try:
+        return parse_file(output_path)
+    except Exception:
+        try:
+            return read_file_safe(output_path)
+        except Exception:
+            return str(doc.translated_preview or "")
+
+
 def _get_translate_task_status(doc_id: int) -> str:
     with _translate_tasks_lock:
         task = _translate_tasks.get(doc_id) or {}
@@ -4031,6 +4049,25 @@ async def download_translated_file(
         )
 
     raise HTTPException(status_code=404, detail="文件不存在")
+
+
+@router.get("/docs/{doc_id}/preview")
+async def preview_translated_file(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    doc = _require_translation_doc_access(db, doc_id, current_user)
+    content = _read_translation_file_preview(doc)
+    if not content:
+        content = str(doc.translated_preview or doc.translated_content or "")
+    return {
+        "doc_id": doc.id,
+        "filename": doc.filename or "",
+        "translated_filename": doc.translated_filename or "",
+        "file_type": doc.file_type or "",
+        "content": content,
+    }
 
 
 @router.get("/reviewed-docs")

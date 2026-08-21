@@ -419,6 +419,7 @@ export const translationAPI = {
     }
   }),
   downloadTranslatedDoc: (id, filename) => downloadBlob(`/translation/download/${id}`, filename),
+  previewTranslatedDoc: (id) => instance.get(`/translation/docs/${id}/preview`),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
   deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
   getStats: (batchId) => instance.get('/translation/stats', {
