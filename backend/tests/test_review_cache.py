@@ -700,7 +700,7 @@ def test_false_positive_signature_filter_drops_matched_issues():
 
     filtered = review_api._apply_false_positive_signature_penalty(
         issues,
-        {"spell|拼写|consumbles", "consumbles"},
+        {"SPELL|拼写|consumbles"},
     )
 
     assert len(filtered) == 1
@@ -742,7 +742,10 @@ def test_sync_false_positive_memory_adds_and_removes_entries():
 
         review_api._sync_false_positive_memory(db, issue)
         signatures = review_api.list_false_positive_memory_signatures(db)
-        assert "consumbles" in signatures
+        assert "spell|拼写|consumbles" in signatures
+        assert "spell|consumbles" in signatures
+        assert "拼写|consumbles" in signatures
+        assert "consumbles" not in signatures
 
         issue.status = "confirmed"
         db.commit()
@@ -753,6 +756,21 @@ def test_sync_false_positive_memory_adds_and_removes_entries():
         assert "consumbles" not in signatures
     finally:
         db.close()
+
+
+def test_false_positive_penalty_keeps_same_text_on_different_rule():
+    issues = [
+        {"rule": "SPELL", "category": "拼写", "original_text": "consumbles", "source": "spellcheck"},
+        {"rule": "R013", "category": "术语", "original_text": "consumbles", "source": "ai"},
+    ]
+
+    filtered = review_api._apply_false_positive_signature_penalty(
+        issues,
+        {"SPELL|拼写|consumbles"},
+    )
+
+    assert len(filtered) == 1
+    assert filtered[0]["rule"] == "R013"
 
 
 def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
@@ -2188,6 +2206,56 @@ def test_run_chinese_human_baseline_rules_detects_read_length_term():
     )
 
     assert any(issue["rule"] == "CYY-CN-SPELL-003" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_repeated_page_number():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "正文第一页\n21\f正文第二页\n23\f正文第三页\n24\f正文第四页\n23",
+    )
+
+    page_issue = next(issue for issue in issues if issue["rule"] == "CYY-CN-PAGE-001")
+    assert page_issue["original_text"] == "页码 23（第4个PDF页面）"
+
+
+def test_run_chinese_human_baseline_rules_detects_suspicious_address():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "生物医学科技（绍兴）有限公司 绍兴市越城区稽山街道越南大道2 号C2 栋2 层",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-ADDR-001" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_cable_typo():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "扫码枪 线揽 本表格依据GB 26572-2025 的规定编制。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-SPELL-005" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_figure_table_spacing():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "入库登记\n在入库登记界面，可新建、查看待提交和已完成的入库登记单。\n图 1 入库登记界面\n项目 说明\n1 左侧导航栏",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-LAYOUT-007" for issue in issues)
+
+
+def test_restore_high_value_rule_issues_keeps_page_number_issue():
+    selected = []
+    candidates = [
+        {
+            "rule": "CYY-CN-PAGE-001",
+            "category": "页码异常",
+            "original_text": "23",
+            "description": "页码重复",
+            "source": "rule",
+        }
+    ]
+
+    restored = review_api._restore_high_value_rule_issues(selected, candidates)
+
+    assert restored == candidates
 
 
 def test_run_chinese_human_baseline_rules_detects_hard_sentence():
