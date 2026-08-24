@@ -1160,11 +1160,20 @@ function issueSuggestionFullText(issue) {
 }
 
 function normalizeIssueDescription(issue) {
-  return String(issue?.description || '')
+  let text = String(issue?.description || '')
     .trim()
     .replace(/^问题说明[:：]\s*/, '')
     .replace(/^问题[:：]\s*/, '')
     .replace(/\s+/g, ' ')
+  text = text
+    .replace(/原文片段[:：]\s*['"“”‘’]?[^；;。]*(?:[；;。]|$)/g, '')
+    .replace(/疑似错误(?:词|短语)[:：]\s*\[[^\]]+\][；;。]?/g, '')
+    .replace(/建议(?:修改词|修改为|修改短语)?[:：]?\s*\[[^\]]+\][；;。]?/g, '')
+    .replace(/是否确定[:：]\s*确定[；;。]?/g, '')
+    .replace(/；\s*；/g, '；')
+    .replace(/^[；;。\s]+|[；;。\s]+$/g, '')
+    .trim()
+  return text
 }
 
 function compactSuggestionText(text, limit = 36) {
@@ -1178,8 +1187,8 @@ function categoryProblemLabel(category) {
   if (!text) return ''
   if (/语法|主谓|时态|单复数/.test(text)) return '语法问题'
   if (/逻辑|步骤结构|操作步骤/.test(text)) return '操作步骤逻辑问题'
-  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
   if (/拼写/.test(text)) return '拼写问题'
+  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
   if (/标点|空格|格式/.test(text)) return '标点/格式问题'
   if (/合规|法规|注册/.test(text)) return '合规表述问题'
   if (/重复/.test(text)) return '重复内容问题'
@@ -1295,21 +1304,28 @@ function describeSuggestionChange(original, replacement) {
 }
 
 function issueSuggestionOverview(issue) {
-  const problemLabel = issueProblemLabel(issue)
-  if (problemLabel) return problemLabel
-
-  const suggestion = String(issue?.suggestion || '').trim()
   const replacement = extractSuggestionReplacement(issue)
   const original = String(issue?.original_text || '').trim()
   if (replacement && original && replacement !== original) {
-    return '该处表述需要修改。'
+    return describeSuggestionChange(original, replacement)
   }
+
+  const suggestion = String(issue?.suggestion || '').trim()
   if (suggestion) return '建议按下方修改。'
+
+  const problemLabel = issueProblemLabel(issue)
+  if (problemLabel) return problemLabel
+
   return '该处需要处理。'
 }
 
 function issueSuggestionSummary(issue) {
-  if (issueSuggestionDiffHtml(issue)) return ''
+  const description = normalizeIssueDescription(issue)
+  if (description) return description
+
+  const suggestion = String(issue?.suggestion || '').trim()
+  if (suggestion) return suggestion
+
   return issueSuggestionFullText(issue)
 }
 
@@ -2939,38 +2955,11 @@ function renderIssueOriginalCell(issue, mode = '') {
     return highlightOriginalText(contextText, issue?.original_text)
   }
 
-  const mainHtml = `<div class="issue-original-main">${highlightOriginalText(originalText, originalText)}</div>`
-  const snippet = buildIssueLocatorSnippet(contextText, originalText)
-  if (!snippet) {
-    return mainHtml
-  }
-  return `${mainHtml}<div class="issue-original-snippet">${highlightOriginalText(snippet, originalText)}</div>`
+  return `<div class="issue-original-main">${highlightOriginalText(originalText, originalText)}</div>`
 }
 
 function normalizeDisplayText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim()
-}
-
-function buildIssueLocatorSnippet(contextText, originalText, sideLength = 36) {
-  if (!contextText || !originalText || contextText === originalText) {
-    return ''
-  }
-
-  const loweredContext = contextText.toLowerCase()
-  const loweredOriginal = originalText.toLowerCase()
-  let matchIndex = loweredContext.indexOf(loweredOriginal)
-  if (matchIndex < 0) {
-    return contextText.length > sideLength * 2 + 3
-      ? `${contextText.slice(0, sideLength * 2).trim()}...`
-      : contextText
-  }
-
-  const start = Math.max(0, matchIndex - sideLength)
-  const end = Math.min(contextText.length, matchIndex + originalText.length + sideLength)
-  let snippet = contextText.slice(start, end).trim()
-  if (start > 0) snippet = `...${snippet}`
-  if (end < contextText.length) snippet = `${snippet}...`
-  return snippet === originalText ? '' : snippet
 }
 
 const currentTaskMode = computed(() => {

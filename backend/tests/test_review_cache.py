@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from app.api import review as review_api
 from app.api import review_rules
 from app.crud import rule as crud_rule
+from app.crud import review as crud_review
 from app.review_engine import pipeline as review_pipeline
 from app.review_engine import validation as review_validation
 
@@ -340,6 +341,24 @@ def test_list_reviews_supports_filters(monkeypatch):
     assert captured == {"document_id": 21, "status": "running", "latest_only": True, "limit": 25}
     assert result[0]["document_name"] == "demo.docx"
     assert result[0]["progress"]["progress"] == 42
+
+
+def test_list_reviews_filters_reconciled_runtime_status(monkeypatch):
+    stale_running_review = SimpleNamespace(id=9, document_id=22, status="running", summary="", total_issues=0)
+    document_calls = []
+
+    monkeypatch.setattr(review_api, "_query_review_rows", lambda *args, **kwargs: [stale_running_review])
+    monkeypatch.setattr(
+        review_api,
+        "_reconcile_review_runtime_state",
+        lambda db, review: SimpleNamespace(**{**review.__dict__, "status": "failed"}),
+    )
+    monkeypatch.setattr(review_api, "get_documents_by_ids", lambda db, document_ids: document_calls.append(document_ids) or [])
+
+    result = asyncio.run(review_api.list_reviews(status="running", db=None))
+
+    assert result == []
+    assert document_calls == [[]]
 
 
 def test_export_review_excel_appends_red_opinion_columns(tmp_path, monkeypatch):
@@ -754,6 +773,31 @@ def test_sync_false_positive_memory_adds_and_removes_entries():
         review_api._sync_false_positive_memory(db, issue)
         signatures = review_api.list_false_positive_memory_signatures(db)
         assert "consumbles" not in signatures
+    finally:
+        db.close()
+
+
+def test_seed_preset_false_positive_memory_is_idempotent():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    db = SessionLocal()
+    try:
+        assert crud_review.seed_preset_false_positive_memory(db) == 12
+        assert crud_review.seed_preset_false_positive_memory(db) == 0
+
+        items, total = crud_review.list_false_positive_memory(db, limit=20)
+
+        assert total == 12
+        assert len(items) == 12
+        assert {item["document_name"] for item in items} == {"预置"}
+        assert all(item["source_issue_id"] == 0 for item in items)
     finally:
         db.close()
 
@@ -1961,13 +2005,21 @@ def test_run_manual_engineering_audit_detects_missing_space_before_units():
     assert any(issue["rule"] == "DOC-UNIT-001" and issue["original_text"] == "24VDC" for issue in issues)
 
 
-def test_run_manual_engineering_audit_detects_manual_library_url():
+def test_run_manual_engineering_audit_keeps_global_site_for_english_manual():
     issues = review_api._run_manual_engineering_audit(
         "Download the instructions for use from https://global-mgitech.com.",
         file_type="pdf",
     )
 
-    assert any(issue["rule"] == "DOC-URL-001" for issue in issues)
+    assert not any(issue["rule"] == "DOC-URL-001" for issue in issues)
+
+
+def test_should_skip_rule_match_skips_ext_r005_global_site_for_english_manual():
+    rule = SimpleNamespace(rule_no="EXT-R005")
+    content = "For more information, visit https://global-mgitech.com for the latest manuals."
+    match = next(re.finditer(r"https://global-mgitech\.com", content))
+
+    assert review_api._should_skip_rule_match(rule, match, content, "en", file_type="pdf") is True
 
 
 def test_run_manual_engineering_audit_detects_neither_not():
