@@ -251,6 +251,19 @@ def _query_review_rows_legacy(
     return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
 
 
+def _reconcile_review_rows_for_response(db: Session, reviews, status: str | None = None):
+    normalized_status = _normalize_review_status(status)
+    reconciled = []
+    for review in reviews:
+        review = _reconcile_review_runtime_state(db, review)
+        if not review:
+            continue
+        if normalized_status and review.status != normalized_status:
+            continue
+        reconciled.append(review)
+    return reconciled
+
+
 def _ensure_document_access(document, current_user: UserOut):
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -8044,6 +8057,8 @@ def _run_manual_engineering_audit(content, file_type=None):
     if not content:
         return issues
 
+    document_language = detect_language(content)
+
     title_window = content[:1200]
     for match in re.finditer(r'\bserise\b', title_window, re.IGNORECASE):
         add_issue(
@@ -8352,19 +8367,20 @@ def _run_manual_engineering_audit(content, file_type=None):
             91,
         )
 
-    for match in re.finditer(r'https?://global-mgitech\.com(?!/resources/manual-library/)[^\s]*', content, re.IGNORECASE):
-        add_issue(
-            match.start(),
-            match.end(),
-            re.sub(r'\s+', ' ', match.group(0)).strip(),
-            'DOC-URL-001',
-            '网址规范',
-            'https://global-mgitech.com/resources/manual-library/',
-            '电子说明书链接建议直接指向 manual-library 隐藏下载地址，避免暴露首页链接。',
-            '说明书审核能力补强方案 - 电子说明书隐藏地址',
-            'serious',
-            95,
-        )
+    if document_language != 'en':
+        for match in re.finditer(r'https?://global-mgitech\.com(?!/resources/manual-library/)[^\s]*', content, re.IGNORECASE):
+            add_issue(
+                match.start(),
+                match.end(),
+                re.sub(r'\s+', ' ', match.group(0)).strip(),
+                'DOC-URL-001',
+                '网址规范',
+                'https://global-mgitech.com/resources/manual-library/',
+                '电子说明书链接建议直接指向 manual-library 隐藏下载地址，避免暴露首页链接。',
+                '说明书审核能力补强方案 - 电子说明书隐藏地址',
+                'serious',
+                95,
+            )
 
     for match in re.finditer(r'\bneither\b[^.\n]{0,120}?\bnot\b', content, re.IGNORECASE):
         original = re.sub(r'\s+', ' ', match.group(0)).strip()
@@ -9244,6 +9260,7 @@ async def list_reviews(
             latest_only=latest_only,
             limit=limit,
         )
+    reviews = _reconcile_review_rows_for_response(db, reviews, status=status)
     document_map = {
         doc.id: doc
         for doc in get_documents_by_ids(db, [review.document_id for review in reviews])
@@ -9378,6 +9395,10 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
 
     if document_language == "en" and rule_no == "R016":
         return True
+
+    if document_language == "en" and rule_no in {"EXT-R005", "DOC-URL-001"}:
+        if re.search(r'(?<![\w-])(?:https?://)?(?:www\.)?global-mgitech\.com(?:/|$|\s|[?&#])', original_text, re.IGNORECASE):
+            return True
 
     # Numeric punctuation inside decimals, versions, and enumerations is usually valid.
     if rule_no == "R001":
@@ -11978,7 +11999,7 @@ async def get_review_coverage(
     # 3. 规则命中统计
     rule_hit = {}
     for issue in issues:
-        rule_name = issue.rule_name or issue.rule or "未分类"
+        rule_name = getattr(issue, "rule_name", None) or issue.rule or "未分类"
         rule_hit[rule_name] = rule_hit.get(rule_name, 0) + 1
 
     # 4. 状态分布
@@ -11990,7 +12011,7 @@ async def get_review_coverage(
     # 5. 章节分布
     chapter_dist = {}
     for issue in issues:
-        loc = issue.location or "未标记位置"
+        loc = getattr(issue, "location", None) or issue.chapter or "未标记位置"
         chapter = loc.split("节")[0] if "节" in loc else (
             loc.split("段")[0] if "段" in loc else loc[:30]
         )
@@ -12065,10 +12086,24 @@ async def get_terminology_analysis(
     # 获取文档内容
     content = getattr(document, 'content', '') or ''
 
-    # 执行术语匹配分析
-    from app.services.terminology_matcher import analyze_terminology
-    result = analyze_terminology(content, term_dicts, 
-                                  'both')
+    # 执行术语匹配分析；缺少可选分析器时返回空结果，避免阻塞审核详情页。
+    try:
+        from app.services.terminology_matcher import analyze_terminology
+    except ModuleNotFoundError as exc:
+        if exc.name != 'app.services.terminology_matcher':
+            raise
+        return {
+            'review_id': review_id,
+            'document_name': getattr(document, 'filename', ''),
+            'matches': [],
+            'unmatched_terms': term_dicts[:50],
+            'match_count': 0,
+            'total_terms': len(term_dicts),
+            'match_rate': 0,
+            'error': '术语分析模块未启用',
+        }
+
+    result = analyze_terminology(content, term_dicts, 'both')
 
     # 获取术语库中未命中的术语列表
     matched_ids = set(m['term_id'] for m in result['matches'])
