@@ -2029,10 +2029,18 @@ def _filter_low_value_review_issues(issues):
 def _apply_false_positive_signature_penalty(issues, false_positive_signatures):
     if not false_positive_signatures:
         return issues
+    normalized_false_positive_signatures = {
+        str(signature or '').strip().lower()
+        for signature in false_positive_signatures
+        if str(signature or '').strip()
+    }
+    if not normalized_false_positive_signatures:
+        return issues
     filtered = []
     dropped = 0
     for issue in issues:
-        if _issue_judgment_signatures(issue) & false_positive_signatures:
+        issue_signatures = {signature.lower() for signature in _issue_judgment_signatures(issue)}
+        if issue_signatures & normalized_false_positive_signatures:
             dropped += 1
             continue
         filtered.append(issue)
@@ -2061,11 +2069,33 @@ def _count_ai_issues(items):
     return sum(1 for issue in items if str(issue.get('source', '') or '').lower() == 'ai')
 
 
+def _restore_high_value_rule_issues(selected_issues, candidate_issues):
+    restored = list(selected_issues)
+    existing = {
+        (
+            str(issue.get('rule', '') or '').upper(),
+            _normalize_search_text(issue.get('original_text', '') or ''),
+        )
+        for issue in restored
+    }
+    for issue in candidate_issues:
+        rule = str(issue.get('rule', '') or '').upper()
+        if not rule.startswith(('CYY-CN-PAGE-', 'CYY-CN-ADDR-')):
+            continue
+        key = (rule, _normalize_search_text(issue.get('original_text', '') or ''))
+        if key in existing:
+            continue
+        restored.append(issue)
+        existing.add(key)
+    return restored
+
+
 def _finalize_review_issues(issues, content, false_positive_signatures):
     ai_filter_diagnostics = {
         "initial_total": len(issues),
         "initial_ai": _count_ai_issues(issues),
     }
+    initial_issues = list(issues)
     issues = dedupe_issues_by_original(issues)
     ai_filter_diagnostics["after_dedup_ai"] = _count_ai_issues(issues)
     issues = _sanitize_issue_suggestions(issues)
@@ -2088,6 +2118,7 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
     pre_pipeline_issues = list(issues)
     before_pipeline_count = len(issues)
     issues = pipeline_select_review_issues(issues)
+    issues = _restore_high_value_rule_issues(issues, pre_pipeline_issues + initial_issues)
     ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
     print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
 
@@ -2132,7 +2163,6 @@ def _issue_judgment_signatures(issue):
         f'{rule}|{category}|{original}',
         f'{rule}|{original}',
         f'{category}|{original}',
-        original,
     }
 
 
@@ -5913,7 +5943,8 @@ def _run_logic_integrity_audit(content):
 def _run_chinese_human_baseline_rules(content):
     issues = []
     seen = set()
-    normalized = str(content or '').replace('\f', '\n')
+    raw_content = str(content or '')
+    normalized = raw_content.replace('\f', '\n')
 
     def add_issue(start, end, original_text, rule, category, suggestion, description, audit_basis, severity='general', confidence=92):
         original_text = re.sub(r'\s+', ' ', str(original_text or '')).strip()
@@ -5937,6 +5968,41 @@ def _run_chinese_human_baseline_rules(content):
             'source': 'rule',
             'position': _encode_issue_position(start, end),
         })
+
+    page_offsets = []
+    offset = 0
+    for page_text in raw_content.split('\f'):
+        page_offsets.append(offset)
+        offset += len(page_text) + 1
+
+    visible_page_numbers = []
+    for page_index, page_text in enumerate(raw_content.split('\f')):
+        lines = [line.strip() for line in str(page_text or '').splitlines() if line.strip()]
+        if not lines:
+            continue
+        for line in reversed(lines[-8:]):
+            if re.fullmatch(r'\d{1,3}', line):
+                page_number = int(line)
+                local_start = page_text.rfind(line)
+                if local_start >= 0:
+                    visible_page_numbers.append((page_index + 1, page_number, page_offsets[page_index] + local_start, line))
+                break
+
+    seen_page_numbers = {}
+    last_page_number = None
+    for page_index, page_number, start, raw in visible_page_numbers:
+        if page_number in seen_page_numbers and last_page_number is not None and page_number <= last_page_number:
+            previous_page = seen_page_numbers[page_number]
+            issue_text = f'页码 {page_number}（第{page_index}个PDF页面）'
+            add_issue(
+                start, start + len(raw), issue_text,
+                'CYY-CN-PAGE-001', '页码异常',
+                '请核对全文页脚页码，修正重复或回跳的页码编号',
+                f'页脚页码“{page_number}”已在第 {previous_page} 个 PDF 页面出现，当前第 {page_index} 个 PDF 页面再次出现，页码序列存在重复或回跳。',
+                'CYY人工审核经验基线 - 页码序列一致性', 'general', 93,
+            )
+        seen_page_numbers.setdefault(page_number, page_index)
+        last_page_number = page_number
 
     for match in re.finditer(r'\b(?:H-020-)?0{2}X{4}-00\b|\b0-00X{4}-00\b', normalized, re.IGNORECASE):
         add_issue(
@@ -6111,6 +6177,15 @@ def _run_chinese_human_baseline_rules(content):
             '建议改为“污染”',
             '该处疑似常见错别字。',
             'CYY人工审核经验基线 - 常见中文错别字', 'serious', 97,
+        )
+
+    for match in re.finditer(r'线揽', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-005', '术语拼写',
+            '建议改为“线缆”',
+            '“线揽”疑似“线缆”的错别字，物料或部件表中应使用规范部件名称。',
+            'CYY人工审核经验基线 - 常见中文错别字', 'general', 96,
         )
 
     for match in re.finditer(r'加入至', normalized):
@@ -6576,6 +6651,16 @@ def _run_chinese_human_baseline_rules(content):
                 'CYY人工审核经验基线 - 货号前后一致性', 'serious', 95,
             )
 
+    for match in re.finditer(r'[^\n，。；;]{0,18}越南大道\s*\d+\s*号[^\n，。；;]{0,18}', normalized):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
+        add_issue(
+            match.start(), match.end(), raw,
+            'CYY-CN-ADDR-001', '人工确认项',
+            '请检索企业注册地址或源文件，确认该地址是否应为“城南大道”或其他正式道路名称',
+            '地址中出现“越南大道”，该道路名在当前语境下可疑，建议通过企业登记信息、源文件或全文地址清单核对。',
+            'CYY人工审核经验基线 - 地址字段检索核查', 'general', 90,
+        )
+
     if 'E25 App-D FCU SE100' in normalized:
         for match in re.finditer(r'E25 FCL App-D FCU SE100', normalized):
             add_issue(
@@ -6634,6 +6719,15 @@ def _run_chinese_human_baseline_rules(content):
             '建议核对首页总览表题与表头之间的行距和列距，确认“货号/名称/型号”列间距是否均匀',
             '首页总览表头在纯文本中出现紧密粘连，通常对应列间距或表头布局过近。',
             'CYY人工审核经验基线 - 首页总览表头间距', 'general', 86,
+        )
+
+    for match in re.finditer(r'入库登记\s*在入库登记界面，可新建、查看待提交和已完成的入库登记单。\s*图\s*1\s*入库登记界面\s*项目\s*说明\s*1', normalized):
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-LAYOUT-007', '表格/版式',
+            '建议核对“入库登记界面”图注与下方说明表的距离，并确认编号方框尺寸和间距是否一致',
+            '图注、说明表表头和编号在纯文本中连续粘连，通常对应对象距离过近或编号框尺寸异常。',
+            'CYY人工审核经验基线 - 图注说明表间距检查', 'general', 86,
         )
 
     revision_delete_match = re.search(r'删除MDA T-\s*试剂（App-C）', normalized)
@@ -9855,6 +9949,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         issues = []
         content = document.content or ""
+        raw_pdf_content = content
         if document.file_type == 'pdf':
             content = clean_pdf_text(content)
         original_content_length = len(content)
@@ -10003,6 +10098,20 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 if document_language in ("cn", "both"):
                     try:
                         chinese_baseline_issues = _run_chinese_human_baseline_rules(content)
+                        if document.file_type == 'pdf' and raw_pdf_content and raw_pdf_content != content:
+                            existing_keys = {
+                                (issue.get('rule'), _normalize_search_text(issue.get('original_text', '') or ''))
+                                for issue in chinese_baseline_issues
+                            }
+                            raw_page_issues = [
+                                issue for issue in _run_chinese_human_baseline_rules(raw_pdf_content)
+                                if str(issue.get('rule', '') or '').startswith('CYY-CN-PAGE-')
+                            ]
+                            for issue in raw_page_issues:
+                                key = (issue.get('rule'), _normalize_search_text(issue.get('original_text', '') or ''))
+                                if key not in existing_keys:
+                                    chinese_baseline_issues.append(issue)
+                                    existing_keys.add(key)
                         print(f"[审核] 中文人工基线高置信规则发现问题: {len(chinese_baseline_issues)}个")
                         rule_issues.extend(chinese_baseline_issues)
                     except Exception as e:

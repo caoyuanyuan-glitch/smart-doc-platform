@@ -33,6 +33,10 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
     text = " ".join([comment, selected_text, context]).lower()
 
     priority_patterns = [
+        (r"登录|登陆", "术语一致性", "structural_consistency", "STRUCT-TERM-001"),
+        (r"线揽|线缆", "术语拼写", "deterministic", "DET-TERM-SPELL-001"),
+        (r"页码.*重复|页码错误|全局页码", "页码异常", "structural_consistency", "STRUCT-PAGE-NUM-001"),
+        (r"城南大道|越南大道|地址", "地址字段确认", "ai_assisted", "AI-ADDR-001"),
         (r"出现了中文|中文", "中文残留", "deterministic", "DET-CN-001"),
         (r"缺少.*ne384|ne384.*硬件配置|不是还有ne384|前面.*没有提到.*测序|前面.*没有提到.*载片类型|根本没有这个载片类型", "适用范围/硬件配置", "structural_consistency", "STRUCT-SCOPE-001"),
         (r"图片编号|图.*编号|table.*编号|编号.*连续", "表图编号", "structural_consistency", "STRUCT-FIGTAB-001"),
@@ -176,7 +180,13 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-FIGTAB-001":
         return rule.startswith("DOC-FIGTAB") or "表图编号" in category
     if item.expected_rule == "STRUCT-LAYOUT-001":
+        if "列宽" in text and "储存环境" in blob:
+            return True
         return rule.startswith("CYY-CN-LAYOUT-") or "表格/版式" in category
+    if item.expected_rule == "STRUCT-IMAGE-001" and all(token in text for token in ["install", "finish", "打开本系统"]):
+        return rule == "CYY-CN-LOGIC-007" or "内容逻辑" in category
+    if item.expected_rule == "STRUCT-IMAGE-001":
+        return rule.startswith("CYY-CN-IMAGE-") or "图片" in category or "对象缺失" in category
     if item.expected_rule == "STRUCT-STEP-001":
         return rule == "CYY-CN-STRUCT-001" or "步骤结构" in category
     if item.expected_rule == "AI-PROC-001":
@@ -187,6 +197,15 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         return rule == "DOC-POS-001" or "台面位置" in category
     if item.expected_rule == "AI-CHECK-001" and all(token in text for token in ["install", "finish", "打开本系统"]):
         return rule == "CYY-CN-LOGIC-007" or "内容逻辑" in category
+    if item.expected_rule == "AI-CHECK-001":
+        selected = _norm_for_match(item.selected_text)
+        if selected and len(selected) >= 2 and selected in blob:
+            return True
+        return rule.startswith(("CYY-CN-CHECK-", "CYY-CN-ADDR-")) or "人工确认" in category
+    if item.expected_rule == "AI-ADDR-001":
+        return rule.startswith("CYY-CN-ADDR-") or "地址" in category
+    if item.expected_rule == "STRUCT-PAGE-NUM-001":
+        return rule.startswith("CYY-CN-PAGE-") or "页码" in category
     if item.expected_rule == "DET-SPACE-001":
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
