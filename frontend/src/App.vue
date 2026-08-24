@@ -156,6 +156,7 @@
               </template>
               <el-menu-item index="/competitor">上传分析</el-menu-item>
               <el-menu-item index="/competitor/tasks">历史任务</el-menu-item>
+              <el-menu-item index="/competitor/compare">对比分析</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="polish-sub">

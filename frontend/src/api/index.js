@@ -214,6 +214,10 @@ export const competitorAPI = {
   get: (id) => instance.get(`/competitor/${id}`),
   delete: (id) => instance.delete(`/competitor/${id}`),
   getReport: (id) => instance.get(`/competitor/${id}/report`, { params: { format: 'md' } }),
+  createComparison: (data) => instance.post('/competitor/compare', data, { timeout: 120000 }),
+  listComparisons: (params = {}) => instance.get('/competitor/compare', { params }),
+  getComparison: (id) => instance.get(`/competitor/compare/${id}`),
+  deleteComparison: (id) => instance.delete(`/competitor/compare/${id}`),
 }
 
 export const rulesAPI = {

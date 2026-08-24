@@ -12,6 +12,11 @@ from app.database import get_db
 from app.schemas.competitor import CompetitorTask as CompetitorTaskOut
 from app.schemas.competitor import CompetitorTaskSummary, CompetitorReport
 from app.schemas.competitor import CompetitorUrlAnalyzeRequest
+from app.schemas.competitor import (
+    CompetitorComparison as CompetitorComparisonOut,
+    CompetitorComparisonSummary,
+    CompetitorComparisonCreate,
+)
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
@@ -222,6 +227,14 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
             merged_warnings.append(w)
     if merged_warnings:
         readability["warnings"] = merged_warnings
+    # 洞察引擎（需求缺口1）：分数 → 对本司的可执行启示；规则层保底，AI 层可选降级
+    from app.utils.competitor_insight import generate_insights
+    try:
+        readability["insights"] = generate_insights(tool_analysis, readability)
+    except Exception as exc:
+        # 洞察失败不能影响分析主流程：降级为空洞察，报告仅缺"启示"章节
+        print(f"[competitor] 洞察生成失败（降级为空）: {exc}")
+        readability["insights"] = {"insights": [], "ai_available": False}
     try:
         report_md = render_competitor_report(filename, tool_analysis, readability)
     except Exception as exc:
@@ -361,6 +374,122 @@ async def create_competitor_task_from_url(
         raise HTTPException(status_code=500, detail=f"分析失败: {exc}")
 
     return get_competitor_task(db, task.id)
+
+
+@router.post("/compare", response_model=CompetitorComparisonOut)
+async def create_competitor_comparison(
+    payload: CompetitorComparisonCreate,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """创建多文档对比（2-5 个已完成分析任务，可选其一为我方基线）。
+
+    路由声明在 GET /{task_id} 之前，避免路径参数吞掉 /compare。
+    """
+    task_ids = payload.task_ids or []
+    if len(task_ids) < 2 or len(task_ids) > 5:
+        raise HTTPException(status_code=400, detail="参与对比的任务数须为 2-5 个")
+    # 元素必须是整数 ID（Pydantic list 未约束元素类型，防止 dict 等不可哈希类型打穿 set()）
+    if any(not isinstance(t, int) or isinstance(t, bool) for t in task_ids):
+        raise HTTPException(status_code=400, detail="task_ids 必须为整数任务 ID 列表")
+    if len(set(task_ids)) != len(task_ids):
+        raise HTTPException(status_code=400, detail="参与对比的任务存在重复")
+
+    from app.crud.competitor import get_competitor_task
+    tasks = []
+    for tid in task_ids:
+        task = get_competitor_task(db, task_id=tid)
+        if not task or (current_user.role != "admin" and task.user_id != current_user.id):
+            raise HTTPException(status_code=404, detail=f"任务不存在: {tid}")
+        if task.status != "completed" or not task.readability:
+            raise HTTPException(status_code=400, detail=f"任务 {tid} 未完成分析，无法参与对比")
+        tasks.append(task)
+
+    from app.utils.competitor_comparison import (
+        load_task_payloads, build_comparison, render_comparison_report,
+    )
+    payloads = load_task_payloads(tasks)
+    # 先剔除损坏 JSON 再校验数量：若此时剩 <2 条，根因是"结果损坏"而非"任务数不足"，
+    # 用 422 + 明确文案，避免误导排障
+    if len(payloads) < 2:
+        broken = len(tasks) - len(payloads)
+        raise HTTPException(
+            status_code=422,
+            detail=f"{broken} 个任务的分析结果损坏（JSON 解析失败），无法对比",
+        )
+    try:
+        result, insights = build_comparison(payloads, payload.baseline_task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    warnings = []
+    for p in payloads:
+        for w in p.get("warnings") or []:
+            item = f"「{p['name']}」{w}"
+            if item not in warnings:
+                warnings.append(item)
+
+    title = ((payload.title or "").strip() or "竞品文档对比")[:120]
+    try:
+        report_md = render_comparison_report(title, result, insights, warnings)
+    except Exception as exc:
+        print(f"[competitor] 对比报告渲染失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"对比报告生成失败: {exc}")
+
+    from app.crud.competitor import create_competitor_comparison as db_create
+    return db_create(
+        db,
+        title=title[:120],
+        task_ids=task_ids,
+        baseline_task_id=payload.baseline_task_id,
+        result={**result, "insights": insights},
+        report_md=report_md,
+        user_id=current_user.id,
+    )
+
+
+def _require_comparison_access(db: Session, comparison_id: int, current_user: UserOut):
+    from app.crud.competitor import get_competitor_comparison
+    item = get_competitor_comparison(db, comparison_id)
+    if not item or (current_user.role != "admin" and item.user_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Comparison not found")
+    return item
+
+
+@router.get("/compare", response_model=List[CompetitorComparisonSummary])
+async def read_competitor_comparisons(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """对比列表：管理员可见全部，普通用户仅可见自己的。"""
+    from app.crud.competitor import get_competitor_comparisons
+    user_id = None if current_user.role == "admin" else current_user.id
+    return get_competitor_comparisons(db, user_id=user_id, skip=skip, limit=limit)
+
+
+@router.get("/compare/{comparison_id}", response_model=CompetitorComparisonOut)
+async def read_competitor_comparison(
+    comparison_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """对比详情（含结构化结果与 Markdown 报告全文）。"""
+    return _require_comparison_access(db, comparison_id, current_user)
+
+
+@router.delete("/compare/{comparison_id}")
+async def delete_competitor_comparison(
+    comparison_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """删除对比记录（不影响参与任务本身）。"""
+    _require_comparison_access(db, comparison_id, current_user)
+    from app.crud.competitor import delete_competitor_comparison as db_delete
+    db_delete(db, comparison_id)
+    return {"message": "Comparison deleted successfully", "comparison_id": comparison_id}
 
 
 @router.get("/", response_model=List[CompetitorTaskSummary])

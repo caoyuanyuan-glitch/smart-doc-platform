@@ -192,6 +192,31 @@ def _render_readability_section(readability: Dict) -> str:
     return "\n".join(lines)
 
 
+def _render_insight_section(readability: Dict) -> str:
+    """「对本司的启示」章节（需求缺口1：分析要有指导意义，不能只报分数）。"""
+    payload = readability.get("insights") or {}
+    insights = payload.get("insights") if isinstance(payload, dict) else payload
+    if not insights:
+        return ""
+    ai_available = payload.get("ai_available") if isinstance(payload, dict) else False
+    lines = ["## 三、对本司的启示（Actionable Insights）", ""]
+    if ai_available:
+        lines.append("> 含 AI 补充洞察（基于规则层结果增强，未配置 AI 时自动降级为纯规则）。")
+        lines.append("")
+    lines.append("| 优先级 | 领域 | 行动建议 | 依据 |")
+    lines.append("| --- | --- | --- | --- |")
+    for i in insights:
+        priority = str(i.get("priority", ""))
+        tag = "P1 高价值" if priority == "P1" else "P2 参考"
+        source = "AI" if i.get("source") == "ai" else "规则"
+        lines.append(
+            f"| {tag} | {_md_escape(i.get('area', ''))} | {_md_escape(i.get('action', ''))} | "
+            f"{_md_escape(i.get('evidence', ''))}（{source}） |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_competitor_report(file_name: str, tool_analysis: Dict, readability: Dict,
                              error: Optional[str] = None) -> str:
     """渲染完整 Markdown 报告。error 非空时输出失败说明。"""
@@ -213,6 +238,9 @@ def render_competitor_report(file_name: str, tool_analysis: Dict, readability: D
         return "\n".join(lines)
     lines.append(_render_tool_section(tool_analysis))
     lines.append(_render_readability_section(readability))
+    insight_section = _render_insight_section(readability)
+    if insight_section:
+        lines.append(insight_section)
     lines.append("---")
     lines.append("")
     lines.append("> 本报告由智能技术文档平台自动生成（规则引擎），供竞品文档分析参考。")
