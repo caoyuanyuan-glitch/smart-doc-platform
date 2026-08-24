@@ -20,7 +20,7 @@
               :show-file-list="false"
               :on-change="handleFileChange"
               :before-upload="() => false"
-              accept=".pdf,.docx,.md,.markdown,.txt"
+              accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm"
               drag
               style="width: 100%;"
             >
@@ -30,7 +30,7 @@
                   将竞品文档拖拽到此处，或点击选择文件
                 </div>
                 <div v-else class="upload-name">{{ selectedFile.name }}</div>
-                <div class="upload-sub" v-if="!selectedFile">支持 PDF（含元数据工具识别）、Word、Markdown 纯文本</div>
+                <div class="upload-sub" v-if="!selectedFile">支持 PDF（含元数据工具识别）、Word、Markdown 纯文本、本地 HTML（适合 JS 渲染页面另存后上传）</div>
               </div>
             </el-upload>
           </el-tab-pane>
@@ -381,9 +381,9 @@ async function doAnalyze() {
     } else {
       const f = selectedFile.value
       if (!f) return
-      const okExt = /\.(pdf|docx|md|markdown|txt)$/i.test(f.name || '')
+      const okExt = /\.(pdf|docx|md|markdown|txt|html|htm)$/i.test(f.name || '')
       if (!okExt) {
-        ElMessage.warning('仅支持 PDF / DOCX / MD / TXT 格式')
+        ElMessage.warning('仅支持 PDF / DOCX / MD / TXT / HTML 格式')
         return
       }
       if (f.size > 50 * 1024 * 1024) {
@@ -522,7 +522,7 @@ function triggerMdDownload(text, filename) {
 async function downloadReport() {
   const md = reportMd.value || (detail.value?.report_md)
   if (!md) return
-  const name = (detail.value?.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html)$/i, '')
+  const name = (detail.value?.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
   triggerMdDownload(md, `${name}_竞品分析报告.md`)
 }
 
@@ -532,7 +532,7 @@ async function downloadReportOf(row) {
     // 接口返回 {content, format}（与 compare 报告接口对齐）
      const md = resp.data?.content || resp.data || ''
      if (!md) return
-     const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html)$/i, '')
+     const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
      triggerMdDownload(md, `${name}_竞品分析报告.md`)
   } catch (e) {
     ElMessage.error(getAPIErrorMessage(e, '下载报告失败'))

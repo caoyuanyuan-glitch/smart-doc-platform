@@ -14,6 +14,22 @@ from app.database import Base, get_db
 from app.models.competitor_task import CompetitorTask
 from app.models.user import User
 
+# 公网 IP 的 getaddrinfo 假结果（family, type, proto, canonname, sockaddr）
+_FAKE_PUBLIC_ADDRINFO = [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+
+def _fake_urlopen_response(html: bytes, final_url: str):
+    fake_headers = Mock()
+    fake_headers.get_content_type.return_value = "text/html"
+    fake_headers.get_content_charset.return_value = "utf-8"
+    fake_response = Mock()
+    fake_response.headers = fake_headers
+    fake_response.read.return_value = html
+    fake_response.geturl.return_value = final_url
+    fake_response.__enter__ = Mock(return_value=fake_response)
+    fake_response.__exit__ = Mock(return_value=False)
+    return fake_response
+
 
 class CompetitorUrlApiTestCase(unittest.TestCase):
     @classmethod
@@ -60,49 +76,68 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
         return {"Authorization": f"Bearer {token}"}
 
     def test_create_competitor_task_from_url_extracts_html_content(self):
-        html = b"""
+        """URL 分析：正文去噪（nav/footer 不入正文）+ Flare 证据链 + 元数据落库。"""
+        # main 正文超过低内容阈值，且含 Flare 结构特征
+        body_paragraphs = "\n".join(
+            f"<p>Configure the instrument before the first run. Review the safety notes "
+            f"before operation and check the sequencing reagents. Step {i} of the startup "
+            f"procedure must be completed by a trained operator with valid certification.</p>"
+            for i in range(1, 6)
+        )
+        html = f"""
         <html>
-          <head><title>Sample Manual</title><style>.hidden{display:none}</style></head>
-          <body>
+          <head>
+            <title>Sample Manual</title>
+            <style>.hidden{{display:none}}</style>
+            <link rel="stylesheet" href="/Skins/Default/Stylesheets/Topic.css">
+          </head>
+          <body data-mc-topics-name="Topic">
+            <nav><a>HomeNAV</a><a>ProductsNAV</a></nav>
+            <footer><span>FooterLegalBoilerplate</span></footer>
             <main>
               <h1>Quick Start</h1>
-              <p>Configure the instrument before the first run.</p>
-              <p>Review the safety notes before operation.</p>
+              {body_paragraphs}
             </main>
+            <script src="/Content/Resources/MadCapAll.js"></script>
             <script>console.log('skip me')</script>
           </body>
         </html>
-        """
-        fake_headers = Mock()
-        fake_headers.get_content_type.return_value = "text/html"
-        fake_headers.get_content_charset.return_value = "utf-8"
-        fake_response = Mock()
-        fake_response.headers = fake_headers
-        fake_response.read.return_value = html
-        fake_response.geturl.return_value = "https://docs.example.com/manual.html"
-        fake_response.__enter__ = Mock(return_value=fake_response)
-        fake_response.__exit__ = Mock(return_value=False)
+        """.encode("utf-8")
 
-        with patch("app.api.competitor.request.urlopen", return_value=fake_response):
+        with patch("app.utils.competitor_html.socket.getaddrinfo", return_value=_FAKE_PUBLIC_ADDRINFO), \
+             patch("app.utils.competitor_html.request.urlopen",
+                   return_value=_fake_urlopen_response(html, "https://docs.example.com/Content/IN/Topic.htm")):
             response = self.client.post(
                 "/api/competitor/url",
                 headers=self._auth_headers("writer_user"),
-                json={"url": "https://docs.example.com/manual.html"},
+                json={"url": "https://docs.example.com/Content/IN/Topic.htm"},
             )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "completed")
-        self.assertEqual(payload["file_name"], "Sample_Manual.html")
 
-        tool_meta = json.loads(payload["tool_analysis"])["meta"]
+        tool_analysis = json.loads(payload["tool_analysis"])
+        tool_meta = tool_analysis["meta"]
         self.assertEqual(tool_meta["format"], "HTML")
-        self.assertEqual(tool_meta["source_url"], "https://docs.example.com/manual.html")
+        self.assertEqual(tool_meta["source_url"], "https://docs.example.com/Content/IN/Topic.htm")
         self.assertEqual(tool_meta["title"], "Sample Manual")
 
+        # Flare 证据链：URL /Content/ + Skins CSS + data-mc 属性 + MadCapAll.js → 高置信
+        tools = tool_analysis["tools"]
+        self.assertTrue(tools, "应识别出编辑工具")
+        self.assertEqual(tools[0]["name"], "MadCap Flare")
+        self.assertEqual(tools[0]["confidence"], "high")
+        self.assertGreaterEqual(len(tool_analysis.get("html_evidence", [])), 2)
+
+        # 正文去噪：nav/footer 噪声不进正文与报告；正文关键句保留
+        self.assertNotIn("HomeNAV", payload["report_md"])
+        self.assertNotIn("FooterLegalBoilerplate", payload["report_md"])
+        self.assertIn("Configure the instrument", payload["report_md"])
+
+        # 正文量充足时不应出现低内容警告
         readability = json.loads(payload["readability"])
-        self.assertGreater(readability["overall_score"], 0)
-        self.assertIn("Quick Start", payload["report_md"])
+        self.assertFalse(any("文本量较少" in w for w in readability.get("warnings", [])))
 
         db = self.SessionLocal()
         try:
@@ -111,6 +146,27 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
             self.assertEqual(tasks[0].status, "completed")
         finally:
             db.close()
+
+    def test_create_competitor_task_from_url_flags_low_content_page(self):
+        """JS 骨架页：可提取文本过少时应输出低内容警告而非静默误导。"""
+        html = b"""
+        <html><head><title>Skeleton</title></head><body>
+          <nav><a>Menu1</a></nav>
+          <main><p>Loading...</p></main>
+        </body></html>
+        """
+        with patch("app.utils.competitor_html.socket.getaddrinfo", return_value=_FAKE_PUBLIC_ADDRINFO), \
+             patch("app.utils.competitor_html.request.urlopen",
+                   return_value=_fake_urlopen_response(html, "https://docs.example.com/skeleton")):
+            response = self.client.post(
+                "/api/competitor/url",
+                headers=self._auth_headers("writer_user"),
+                json={"url": "https://docs.example.com/skeleton"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        readability = json.loads(response.json()["readability"])
+        self.assertTrue(any("文本量较少" in w or "过少" in w for w in readability.get("warnings", [])))
 
     def test_create_competitor_task_from_url_rejects_invalid_scheme(self):
         response = self.client.post(
@@ -121,3 +177,36 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("http/https", response.json()["detail"])
+
+    def test_create_competitor_task_from_url_rejects_loopback(self):
+        """SSRF 防护：禁止访问环回地址。"""
+        response = self.client.post(
+            "/api/competitor/url",
+            headers=self._auth_headers("writer_user"),
+            json={"url": "http://127.0.0.1/api/docs"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("公网", response.json()["detail"])
+
+    def test_create_competitor_task_from_url_rejects_private_network(self):
+        """SSRF 防护：禁止访问私网地址。"""
+        response = self.client.post(
+            "/api/competitor/url",
+            headers=self._auth_headers("writer_user"),
+            json={"url": "http://192.168.1.10/manual.html"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_create_competitor_task_from_url_rejects_uncommon_port(self):
+        """仅允许 80/443 端口。"""
+        response = self.client.post(
+            "/api/competitor/url",
+            headers=self._auth_headers("writer_user"),
+            json={"url": "https://docs.example.com:8443/manual.html"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("端口", response.json()["detail"])
+
+
+if __name__ == "__main__":
+    unittest.main()

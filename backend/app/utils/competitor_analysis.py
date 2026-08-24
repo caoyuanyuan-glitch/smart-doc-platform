@@ -232,6 +232,88 @@ _TERM_TAIL_ZH = re.compile(
 _EN_TERM_RE = re.compile(r"\b[A-Za-z]+(?:-[A-Za-z]+)*\b")
 _ALPHANUM_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\._]*")
 _CJK_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,8}")
+
+# ---------------------------------------------------------------- 术语库
+# 需求 §3.2/§5.3：术语 = 领域专业术语（内置测序/图像分析术语 + 平台词典），
+# 而非"长度 > 6 的英文单词"——旧启发式把 technical/information 等普通词全部
+# 误判为术语，导致术语密度虚高（实测 48.5%）。命中规则：精确 + 词干（英文）+ 大小写不敏感。
+_BUILTIN_EN_TERMS = {
+    # 测序领域（需求 §3.2）
+    "sequencing", "genomics", "metagenomics", "genome", "genomic", "transcriptome",
+    "nucleotide", "oligo", "oligonucleotide", "adapter", "adapters", "ligation",
+    "library", "libraries", "flowcell", "flowcells", "cluster", "clusters",
+    "basecall", "basecalls", "demultiplexing", "multiplexing", "barcode",
+    "barcodes", "indexing", "reads", "read", "run", "chemistry", "reagent",
+    "reagents", "kit", "kits", "specimen", "specimens", "assay", "assays",
+    "amplification", "denaturation", "hybridization", "polymerase", "primer",
+    "primers", "cDNA", "gDNA", "rna", "dna", "dnb", "pcr", "cbs", "wgs",
+    "rna-seq", "16s",
+    # 图像/信号分析领域（需求 §3.2）
+    "segmentation", "threshold", "thresholding", "roi", "rois", "marker",
+    "markers", "intensity", "focus", "imaging", "image", "images", "pixel",
+    "pixels", "calibration", "align", "alignment", "registration", "contrast",
+    "fluorescence", "emission", "excitation", "laser", "optics", "detector",
+    # 仪器/运行维护常用技术词
+    "instrument", "module", "firmware", "software", "throughput", "yield",
+    "q30", "error", "phi", "maintenance", "troubleshooting", "consumable",
+    "consumables", "cartridge", "tips", "plate", "tubes", "chamber", "valve",
+    "pump", "temperature", "incubation", "wash", "buffer", "buffers",
+}
+
+_DIC_DIR = None
+
+
+# 平台词典中属普通词的条目（拼写白名单用途可保留，术语密度统计需排除）
+_PLATFORM_TERM_EXCLUDES = {"table", "figure", "step", "sec", "min", "hr", "rxn", "sativa"}
+
+
+def _load_platform_terms() -> set:
+    """复用平台词典 app/dictionary/technical_terms.txt（测序领域术语）。"""
+    global _DIC_DIR
+    if _DIC_DIR is None:
+        import os
+        _DIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dictionary")
+    terms = set()
+    try:
+        path = os.path.join(_DIC_DIR, "technical_terms.txt")
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                term = line.strip().lower()
+                if term and not term.startswith("#") and term not in _PLATFORM_TERM_EXCLUDES:
+                    terms.add(term)
+    except OSError:
+        pass  # 词典缺失时降级为仅内置术语
+    return terms
+
+
+def _en_stem(token: str) -> str:
+    """轻量英文词干：仅处理规则复数（-s/-es），供词干匹配。"""
+    t = token.lower()
+    if len(t) > 3 and t.endswith("ies"):
+        return t[:-3] + "y"
+    if len(t) > 2 and t.endswith("es"):
+        return t[:-2]
+    if len(t) > 2 and t.endswith("s") and not t.endswith("ss"):
+        return t[:-1]
+    return t
+
+
+_ALL_EN_TERMS = _BUILTIN_EN_TERMS | _load_platform_terms()
+_ALL_EN_TERMS_STEMS = {_en_stem(t) for t in _ALL_EN_TERMS}
+
+
+def _is_en_term(raw_token: str) -> bool:
+    """英文术语判定：领域术语命中（精确/词干）或强术语特征（数字/连字符/全大写缩写）。"""
+    low = raw_token.lower()
+    if low in _ALL_EN_TERMS or _en_stem(low) in _ALL_EN_TERMS_STEMS:
+        return True
+    if re.search(r"\d", raw_token):          # 型号/编号（NextSeq 2000、Q30）
+        return True
+    if "-" in raw_token:                     # 复合术语（base-call、RNA-seq）
+        return True
+    if len(raw_token) >= 2 and raw_token.isupper():  # 缩写（DNA、PCR、MGI）
+        return True
+    return False
 _MODIFIER_STACK_ZH_RE = re.compile(r"([\u4e00-\u9fff]{1,6}的){3,}")
 _MODIFIER_STACK_EN_RE = re.compile(r"\b(?:high|low|fast|slow|new|old|large|small|big|automatic|manual|digital|optical|thermal|electrical|mechanical|advanced|standard|optional|integrated|portable|compact|powerful)\b(?:\s+(?:high|low|fast|slow|new|old|large|small|big|automatic|manual|digital|optical|thermal|electrical|mechanical|advanced|standard|optional|integrated|portable|compact|powerful)){2,}", re.IGNORECASE)
 
@@ -326,10 +408,11 @@ def _dim_term_density(full_text: str, language: str, tokens: List[str]) -> Dict:
             if (len(t) >= 2 and _TERM_TAIL_ZH.search(t)) or (_ALPHANUM_TOKEN_RE.fullmatch(t) and re.search(r"[A-Za-z0-9]", t))
         ]
     else:
-        term_tokens = [
-            t for t in tokens
-            if (len(t) > 6 and not t.lower() in _STOP_EN) or re.search(r"\d", t) or "-" in t
-        ]
+        # 英文：按领域术语库命中（精确/词干/大小写不敏感）+ 强术语特征判定。
+        # 注意在原始大小写文本上取词，保留 DNA/PCR 等缩写与 Q30 等型号的大小写信息。
+        raw_tokens = _EN_TERM_RE.findall(full_text)
+        term_tokens = [t for t in raw_tokens if _is_en_term(t)]
+        tokens = raw_tokens
     density = len(term_tokens) / max(len(tokens), 1)
     # 密度 <= 15% 满分；每 +5% 扣 8 分，封顶 100
     score = _clamp_score(100 - max(0.0, density - 0.15) / 0.05 * 8.0)
@@ -435,6 +518,35 @@ def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, 
     overall = sum(dims[k]["score"] * _WEIGHTS[k] for k in _WEIGHTS)
     overall = _clamp_score(overall)
 
+    # 评级抑制：任一维度显著失分（<55 分）时，综合评级必须下调——
+    # 避免出现"术语密度 46 分但综合评级 excellent"的误导性结论。
+    level = _level_of(overall)
+    level_note = ""
+    _quality_rank = {"poor": 1, "fair": 2, "good": 3, "excellent": 4}
+    min_dim_score = min(d["score"] for d in dims.values())
+    weakest = min(dims, key=lambda k: dims[k]["score"])
+    if min_dim_score < 40:
+        capped = "poor"
+    elif min_dim_score < 55:
+        capped = "fair"
+    else:
+        capped = None
+    if capped and _quality_rank[level] > _quality_rank[capped]:
+        dim_names = {"sentence_length": "平均句长", "term_density": "术语密度",
+                     "passive_ratio": "被动句比例", "paragraph_length": "段落长度",
+                     "modifier_stack": "修饰词堆叠"}
+        level = capped
+        level_note = f"「{dim_names[weakest]}」维度仅 {min_dim_score} 分，综合评级已下调至 {level}"
+
+    # 低文本量警告：样本过少时评分参考价值有限（如 JS 渲染页面只抓到骨架）
+    warnings = []
+    token_count = len(tokens)
+    if len(sentences) < 10 or token_count < 120:
+        warnings.append(
+            f"提取文本量较少（{len(sentences)} 句 / {token_count} 词），评分仅供参考；"
+            "网页输入请确认正文非 JS 动态加载，或改用本地 HTML 上传。"
+        )
+
     suggestions = []
     if dims["sentence_length"]["score"] < 75:
         suggestions.append("存在较多超长句，建议拆分：单句不超过 40 字（中文）/ 20 词（英文）。")
@@ -452,7 +564,9 @@ def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, 
     return {
         "language": language,
         "overall_score": overall,
-        "level": _level_of(overall),
+        "level": level,
+        "level_note": level_note,
+        "warnings": warnings,
         "dimensions": {
             "sentence_length": dims["sentence_length"],
             "term_density": dims["term_density"],

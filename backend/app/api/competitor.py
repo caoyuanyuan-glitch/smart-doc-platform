@@ -5,8 +5,6 @@ import os
 import re
 import uuid
 from datetime import datetime
-from html.parser import HTMLParser
-from urllib import parse, request
 
 from app.api.auth import get_current_active_user
 from app.schemas.user import UserOut
@@ -19,60 +17,11 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads/competitor"
 # 注：仅支持可解析格式；旧版 .doc（二进制）无平台解析器，不列入白名单，避免"通过校验但解析失败"
-ALLOWED_EXTS = {".pdf", ".docx", ".md", ".markdown", ".txt"}
+# 本地 HTML 上传（需求 V1.2 §4.1 P1）：用于 JS 渲染/受限站点人工保存页面后上传分析
+ALLOWED_EXTS = {".pdf", ".docx", ".md", ".markdown", ".txt", ".html", ".htm"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
-MAX_REMOTE_HTML_BYTES = 5 * 1024 * 1024  # 5 MB
 
 _SAFE_NAME_RE = re.compile(r"[^\w.\-\u4e00-\u9fff]+")
-
-
-class _HTMLTextExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self._chunks = []
-        self._title_chunks = []
-        self._skip_depth = 0
-        self._in_title = False
-
-    def handle_starttag(self, tag, attrs):
-        name = tag.lower()
-        if name in {"script", "style", "noscript"}:
-            self._skip_depth += 1
-            return
-        if name == "title":
-            self._in_title = True
-        if name in {"p", "div", "section", "article", "header", "footer", "nav", "main", "aside", "br", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}:
-            self._chunks.append("\n")
-
-    def handle_endtag(self, tag):
-        name = tag.lower()
-        if name in {"script", "style", "noscript"} and self._skip_depth > 0:
-            self._skip_depth -= 1
-            return
-        if name == "title":
-            self._in_title = False
-        if name in {"p", "div", "section", "article", "header", "footer", "nav", "main", "aside", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}:
-            self._chunks.append("\n")
-
-    def handle_data(self, data):
-        if self._skip_depth > 0:
-            return
-        text = re.sub(r"\s+", " ", data or "").strip()
-        if not text:
-            return
-        self._chunks.append(text)
-        self._chunks.append(" ")
-        if self._in_title:
-            self._title_chunks.append(text)
-
-    def get_text(self) -> str:
-        text = "".join(self._chunks)
-        text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
-    def get_title(self) -> str:
-        return re.sub(r"\s+", " ", " ".join(self._title_chunks)).strip()
 
 
 def _require_competitor_task_access(db: Session, task_id: int, current_user: UserOut):
@@ -113,16 +62,16 @@ def _sanitize_filename(filename: str) -> str:
 
 
 def _normalize_url(input_url: str) -> str:
-    raw = (input_url or "").strip()
-    if not raw:
-        raise HTTPException(status_code=400, detail="网页链接不能为空")
-    parsed = parse.urlparse(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="仅支持 http/https 网页链接")
-    return raw
+    """URL 校验（含 SSRF 防护）由 utils.competitor_html.assert_public_http_url 承担。"""
+    from app.utils.competitor_html import UrlNotAllowedError, assert_public_http_url
+    try:
+        return assert_public_http_url(input_url)
+    except UrlNotAllowedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _build_remote_display_name(page_title: str, final_url: str) -> str:
+    from urllib import parse
     title = _sanitize_filename(page_title)
     if title:
         return title[:120]
@@ -135,42 +84,29 @@ def _build_remote_display_name(page_title: str, final_url: str) -> str:
 
 
 def _parse_web_document(source_url: str) -> dict:
-    normalized_url = _normalize_url(source_url)
-    req = request.Request(
-        normalized_url,
-        headers={
-            "User-Agent": "SmartDocPlatformCompetitorBot/1.0",
-            "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.5,*/*;q=0.1",
-        },
-    )
-    try:
-        with request.urlopen(req, timeout=20) as resp:
-            headers = resp.headers
-            content_type = (headers.get_content_type() or "").lower()
-            if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
-                raise HTTPException(status_code=400, detail=f"链接内容类型不支持: {content_type or 'unknown'}")
-            payload = resp.read(MAX_REMOTE_HTML_BYTES + 1)
-            if len(payload) > MAX_REMOTE_HTML_BYTES:
-                raise HTTPException(status_code=413, detail="网页内容过大，请换用更短的手册页面")
-            charset = headers.get_content_charset() or "utf-8"
-            html = payload.decode(charset, errors="replace")
-            final_url = resp.geturl() or normalized_url
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"网页抓取失败: {exc}")
+    """抓取网页并完成正文抽取；工具识别证据由 _run_analysis 阶段合并。"""
+    from app.utils import competitor_html
 
-    parser = _HTMLTextExtractor()
-    parser.feed(html)
-    parser.close()
-    full_text = parser.get_text()
+    _normalize_url(source_url)  # 预校验，给出明确的 400 文案
+    try:
+        fetched = competitor_html.fetch_html(source_url)
+    except competitor_html.UrlNotAllowedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    extraction = competitor_html.extract_main_text(fetched["html"])
+    full_text = extraction.get("full_text", "")
     if not full_text:
-        raise HTTPException(status_code=422, detail="未能从网页中提取到正文内容")
-    title = parser.get_title()
+        raise HTTPException(status_code=422, detail="未能从网页中提取到正文内容（可能为纯 JS 渲染页面）")
+
+    final_url = fetched["final_url"]
+    title = extraction.get("title", "")
     display_name = _build_remote_display_name(title, final_url)
+    from urllib import parse
     return {
         "filename": f"{display_name}.html",
-        "file_size": len(payload),
+        "file_size": fetched["size"],
         "full_text": full_text,
         "pages_text": [full_text],
         "source_meta": {
@@ -179,21 +115,56 @@ def _parse_web_document(source_url: str) -> dict:
             "source_url": final_url,
             "producer": "Web page",
             "creator": parse.urlparse(final_url).netloc,
+            "generator": extraction.get("generator", ""),
             "pages": 1,
         },
+        "html_context": {
+            "final_url": final_url,
+            "html": fetched["html"][:200000],  # 证据检测仅需要头部与资产引用，截断防止超量存储
+            "extraction": {
+                k: extraction.get(k)
+                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes")
+            },
+        },
+        "warnings": extraction.get("notes", []),
     }
 
 
 def _parse_document(file_path: str, filename: str) -> dict:
-    """按扩展名分发解析，统一返回 {full_text, pages_text}。"""
+    """按扩展名分发解析，统一返回 {full_text, pages_text, html_context?}。"""
     from app.utils import doc_parser
     ext = os.path.splitext(filename)[1].lower()
+    html_context = None
+    warnings = []
     if ext == ".pdf":
         result = doc_parser.parse_pdf(file_path)
     elif ext == ".docx":
         result = doc_parser.parse_docx(file_path)
     elif ext in (".md", ".markdown", ".txt"):
         result = doc_parser.parse_markdown(file_path)
+    elif ext in (".html", ".htm"):
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                html = f.read()
+        except OSError as exc:
+            raise HTTPException(status_code=422, detail=f"HTML 文件读取失败: {exc}")
+        from app.utils import competitor_html
+        extraction = competitor_html.extract_main_text(html)
+        result = {"full_text": extraction.get("full_text", ""), "pages_text": []}
+        if not result["full_text"]:
+            raise HTTPException(
+                status_code=422,
+                detail="未能从 HTML 中提取到正文内容（可能为纯 JS 渲染页面）",
+            )
+        html_context = {
+            "final_url": "",
+            "html": html[:200000],
+            "extraction": {
+                k: extraction.get(k)
+                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes")
+            },
+        }
+        warnings = extraction.get("notes", [])
     else:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}")
     if not result or not result.get("full_text", "").strip():
@@ -202,15 +173,37 @@ def _parse_document(file_path: str, filename: str) -> dict:
         raise HTTPException(status_code=422, detail=detail)
     pages_text = result.get("pages_text") or []
     if not pages_text:
-        # DOCX/MD/TXT 无"页"概念：以全文作为单页兜底，保证报告页码定位可用
+        # DOCX/MD/TXT/HTML 无"页"概念：以全文作为单页兜底，保证报告页码定位可用
         pages_text = [result["full_text"]]
     return {
         "full_text": result.get("full_text", ""),
         "pages_text": pages_text,
+        "html_context": html_context,
+        "warnings": warnings,
     }
 
 
-def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: list, source_meta: Optional[dict] = None) -> dict:
+def _merge_html_tool_analysis(tool_analysis: dict, html_context: Optional[dict]) -> None:
+    """将 HTML 工具识别证据链（MadCap Flare 等）并入 tool_analysis。"""
+    if not html_context:
+        return
+    from app.utils import competitor_html
+    detection = competitor_html.detect_html_tool(
+        html_context.get("final_url", ""),
+        html_context.get("extraction") or {},
+        html_context.get("html", ""),
+    )
+    tools = detection.get("tools", [])
+    if tools:
+        tool_analysis["tools"] = tools
+        tool_analysis["summary"] = detection["summary"]
+    tool_analysis["html_evidence"] = detection.get("evidence", [])
+
+
+def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: list,
+                  source_meta: Optional[dict] = None,
+                  html_context: Optional[dict] = None,
+                  warnings: Optional[list] = None) -> dict:
     """执行竞品分析：编辑工具识别 + 可读性分析 + 报告渲染。"""
     from app.utils.competitor_analysis import analyze_tool_usage, analyze_readability
     from app.utils.competitor_report import render_competitor_report
@@ -220,7 +213,15 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
         merged_meta = dict(tool_analysis.get("meta") or {})
         merged_meta.update({k: v for k, v in (source_meta or {}).items() if v not in (None, "")})
         tool_analysis["meta"] = merged_meta
+    _merge_html_tool_analysis(tool_analysis, html_context)
     readability = analyze_readability(full_text, pages_text)
+    # 合并抽取阶段警告（正文过少/JS 渲染受限）到可读性结果，统一由报告渲染输出
+    merged_warnings = list(readability.get("warnings") or [])
+    for w in warnings or []:
+        if w not in merged_warnings:
+            merged_warnings.append(w)
+    if merged_warnings:
+        readability["warnings"] = merged_warnings
     try:
         report_md = render_competitor_report(filename, tool_analysis, readability)
     except Exception as exc:
@@ -285,7 +286,12 @@ async def create_competitor_task(
 
     try:
         parsed = _parse_document(stored_path, safe_name)
-        result = _run_analysis(stored_path, safe_name, parsed["full_text"], parsed["pages_text"])
+        result = _run_analysis(
+            stored_path, safe_name,
+            parsed["full_text"], parsed["pages_text"],
+            html_context=parsed.get("html_context"),
+            warnings=parsed.get("warnings"),
+        )
         from app.crud.competitor import update_competitor_task
         update_competitor_task(
             db, task.id,
@@ -335,6 +341,8 @@ async def create_competitor_task_from_url(
             parsed["full_text"],
             parsed["pages_text"],
             source_meta=parsed["source_meta"],
+            html_context=parsed.get("html_context"),
+            warnings=parsed.get("warnings"),
         )
         update_competitor_task(
             db,

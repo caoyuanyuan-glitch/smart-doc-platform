@@ -68,14 +68,22 @@ def _render_tool_section(tool_analysis: Dict) -> str:
     meta = tool_analysis.get("meta", {})
     tools = tool_analysis.get("tools", [])
     font_signals = tool_analysis.get("font_signals", [])
+    html_evidence = tool_analysis.get("html_evidence", [])
 
     lines = ["## 一、编辑工具识别", ""]
     lines.append(f"- **结论**：{_md_escape(tool_analysis.get('summary', '未知'))}")
-    lines.append(f"- **文档格式**：{_md_escape(meta.get('format', '未知'))}（共 {_md_escape(meta.get('pages', 0))} 页）")
+    if meta.get("source_url"):
+        # HTML 输入：来源与页面数对网页无意义，展示来源链接
+        lines.append(f"- **文档格式**：{_md_escape(meta.get('format', '未知'))}")
+        lines.append(f"- **来源链接**：{_md_escape(meta.get('source_url', ''))}")
+    else:
+        lines.append(f"- **文档格式**：{_md_escape(meta.get('format', '未知'))}（共 {_md_escape(meta.get('pages', 0))} 页）")
     if meta.get("producer"):
         lines.append(f"- **Producer 元数据**：{_md_escape(meta['producer'])}")
     if meta.get("creator"):
         lines.append(f"- **Creator 元数据**：{_md_escape(meta['creator'])}")
+    if meta.get("generator"):
+        lines.append(f"- **站点生成器**：{_md_escape(meta['generator'])}")
     lines.append("")
 
     if tools:
@@ -87,8 +95,19 @@ def _render_tool_section(tool_analysis: Dict) -> str:
                 f"{_md_escape(t.get('confidence', ''))} | {_md_escape(t.get('source', ''))} |"
             )
         lines.append("")
+        if html_evidence:
+            lines.append("**识别证据**")
+            lines.append("")
+            for ev in html_evidence[:6]:
+                lines.append(f"- {_md_escape(ev)}")
+            lines.append("")
     else:
-        lines.append("> 未识别到明确的编辑工具。可能是扫描件或使用未知工具生成。")
+        fallback = "未识别到明确的编辑工具"
+        if meta.get("source_url"):
+            fallback += "（HTML 无已知 HAT/框架特征，证据不足）"
+        else:
+            fallback += "。可能是扫描件或使用未知工具生成。"
+        lines.append(f"> {_md_escape(fallback)}")
         lines.append("")
 
     if font_signals:
@@ -113,6 +132,14 @@ def _render_readability_section(readability: Dict) -> str:
         f"**评级**：{readability.get('level', '未知')}"
     )
     lines.append("")
+    # 评级说明：任一维度显著失分导致评级下调时，必须向读者披露原因
+    if readability.get("level_note"):
+        lines.append(f"> 评级说明：{readability['level_note']}")
+        lines.append("")
+    # 数据可信度警告（低文本量/JS 渲染受限等）
+    for w in readability.get("warnings") or []:
+        lines.append(f"> ⚠ {_md_escape(w)}")
+        lines.append("")
     lines.append("| 维度 | 得分 | 权重 | 说明 |")
     lines.append("| --- | --- | --- | --- |")
     weights = {
