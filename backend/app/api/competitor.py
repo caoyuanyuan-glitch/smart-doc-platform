@@ -128,7 +128,8 @@ def _parse_web_document(source_url: str) -> dict:
             "html": fetched["html"][:200000],  # 证据检测仅需要头部与资产引用，截断防止超量存储
             "extraction": {
                 k: extraction.get(k)
-                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes")
+                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes",
+                          "img_count", "table_count", "heading_count")
             },
         },
         "warnings": extraction.get("notes", []),
@@ -166,7 +167,8 @@ def _parse_document(file_path: str, filename: str) -> dict:
             "html": html[:200000],
             "extraction": {
                 k: extraction.get(k)
-                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes")
+                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes",
+                          "img_count", "table_count", "heading_count")
             },
         }
         warnings = extraction.get("notes", [])
@@ -209,8 +211,8 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
                   source_meta: Optional[dict] = None,
                   html_context: Optional[dict] = None,
                   warnings: Optional[list] = None) -> dict:
-    """执行竞品分析：编辑工具识别 + 可读性分析 + 报告渲染。"""
-    from app.utils.competitor_analysis import analyze_tool_usage, analyze_readability
+    """执行竞品分析：编辑工具识别 + 可读性分析 + 结构统计 + 报告渲染。"""
+    from app.utils.competitor_analysis import analyze_tool_usage, analyze_readability, analyze_structure
     from app.utils.competitor_report import render_competitor_report
 
     tool_analysis = analyze_tool_usage(file_path, full_text, pages_text)
@@ -219,6 +221,15 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
         merged_meta.update({k: v for k, v in (source_meta or {}).items() if v not in (None, "")})
         tool_analysis["meta"] = merged_meta
     _merge_html_tool_analysis(tool_analysis, html_context)
+    # 结构统计（客观指标）：失败不影响主流程，降级为空统计并在 notes 说明
+    try:
+        tool_analysis["structure_stats"] = analyze_structure(
+            file_path, full_text, pages_text,
+            html_extraction=(html_context or {}).get("extraction"),
+        )
+    except Exception as exc:
+        print(f"[competitor] 结构统计失败（降级为空）: {exc}")
+        tool_analysis["structure_stats"] = {"notes": [f"结构统计失败: {exc}"]}
     readability = analyze_readability(full_text, pages_text)
     # 合并抽取阶段警告（正文过少/JS 渲染受限）到可读性结果，统一由报告渲染输出
     merged_warnings = list(readability.get("warnings") or [])

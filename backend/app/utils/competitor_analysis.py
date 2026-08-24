@@ -1,10 +1,11 @@
 """竞品文档分析引擎（MVP，纯规则实现）。
 
-两个分析能力：
+三个分析能力：
 1. 编辑工具识别：读取 PDF 元数据（producer/creator）、嵌入字体与文本指纹，
    推断文档由何种工具制作（InDesign / FrameMaker / Word / LaTeX 等）。
 2. 可读性分析：基于统计规则的量化评分，维度包括
    平均句长(25%) / 术语密度(20%) / 被动句比例(20%) / 段落长度(15%) / 修饰词堆叠(20%)。
+3. 结构统计：页数/章节数/图片数/表格数/安全警告数等客观指标（不做主观评分）。
 
 说明：本模块为 MVP 规则引擎，不调用 AI；语义级增强（如 AI 术语表、语境被动句判断）
 预留到 Phase 2，由 app/utils/ai_client.py 统一接入。
@@ -40,6 +41,13 @@ _TOOL_PATTERNS: List[Tuple[str, str, str]] = [
     ("frame maker", "Adobe FrameMaker", "结构化写作/排版工具"),
     ("quarkxpress", "QuarkXPress", "排版工具"),
     ("pandoc", "Pandoc", "文档转换工具"),
+    # DITA-OT：producer/creator 常见形态 "DITA Open Toolkit [x.y]" / "dita-ot" / "ditaot"
+    # （评审意见采纳项：补齐 DITA 发布链识别，竞品结构化写作主流工具之一）
+    ("dita open toolkit", "DITA-OT", "结构化写作/DITA 发布工具"),
+    ("dita-ot", "DITA-OT", "结构化写作/DITA 发布工具"),
+    ("ditaot", "DITA-OT", "结构化写作/DITA 发布工具"),
+    # oXygen XML Editor：DITA 侧最常见的创作工具（creator 字段）
+    ("oxygen xml", "oXygen XML Editor", "结构化 XML 编辑器（DITA 常用）"),
     ("pdflatex", "LaTeX (pdfTeX)", "排版工具"),
     ("xelatex", "LaTeX (XeTeX)", "排版工具"),
     ("lualatex", "LaTeX (LuaTeX)", "排版工具"),
@@ -49,6 +57,7 @@ _TOOL_PATTERNS: List[Tuple[str, str, str]] = [
     ("openoffice", "Apache OpenOffice", "文字处理工具"),
     ("wps", "WPS Office", "文字处理工具"),
     ("distiller", "Adobe Acrobat Distiller", "PDF 转换工具"),
+    ("prince", "Prince XML", "HTML 转 PDF 排版工具"),
     ("acrobat", "Adobe Acrobat", "PDF 工具"),
     ("pdfium", "PDFium", "浏览器/PDF 渲染内核"),
     ("chrome", "Google Chrome 打印", "浏览器打印"),
@@ -587,9 +596,149 @@ def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, 
     }
 
 
-def analyze_document(filepath: str, full_text: str, pages_text: Optional[List[str]] = None) -> Dict:
-    """文档总入口：返回 {tool_analysis, readability} 供存储与报告渲染。"""
+# ------------------------------------------------------------ 结构统计（客观指标）
+# 评审意见采纳项：报告除评分外补充客观事实统计（页数/章节/图表/安全警告），
+# 评分可信度存疑时读者仍可获得可验证的结构信息。
+
+# 标题行特征（保守启发式：只统计独立短行；编号标题要求至少两级如 3.2，避开 "1. 操作步骤"）
+_HEADING_LINE_RES = [
+    re.compile(r"^\s*chapter\s+\d+", re.IGNORECASE),
+    re.compile(r"^\s*appendix\s+[a-z0-9]", re.IGNORECASE),
+    re.compile(r"^\s*\d+(\.\d+){1,3}[.、\s]\s*\S"),
+    re.compile(r"^\s*第[一二三四五六七八九十百\d]+[章节部]"),
+]
+_HEADING_LINE_MAX = 60
+_HEADING_LINE_END_EXCLUDE = ("。", ".", ";", "；", ",", "，", "!", "！", "?", "？")
+
+# 安全警告标签：要求位于行首（手册警告块的常规排式）。两侧都要求标签后为标点/空白/行尾：
+# 英文 "WARNING Hot surface" 计、"WARNING signs indicate..." 不计；
+# 中文「警告：xxx」计、「注意事项」「注意观察仪器状态」等普通词组不计（交叉审查 P0-1 修复）
+_WARNING_LINE_RES = [
+    re.compile(r'^(WARNING|CAUTION|DANGER|NOTICE)(?:\s*[!：:）)]|\s+(?=[A-Z0-9"(\u4e00-\u9fff])|$)'),
+    re.compile(r"^(警告|注意|危险|警示)(?=[\s!！:：,，。．]|$)"),
+]
+
+# 表格线框检测的页数上限与时间预算：超限跳过/提前结束，避免拖慢同步分析（交叉审查 P1-4）
+_TABLE_DETECT_MAX_PAGES = 300
+_TABLE_DETECT_TIME_BUDGET = 10.0  # 秒
+
+
+def _is_heading_line(line: str) -> bool:
+    s = line.strip()
+    if not s or len(s) > _HEADING_LINE_MAX:
+        return False
+    if s.endswith(_HEADING_LINE_END_EXCLUDE):
+        return False
+    return any(rx.match(s) for rx in _HEADING_LINE_RES)
+
+
+def _is_warning_line(line: str) -> bool:
+    s = line.strip()
+    if not s or len(s) > _HEADING_LINE_MAX * 2:
+        return False
+    return any(rx.match(s) for rx in _WARNING_LINE_RES)
+
+
+def _count_pdf_figures(doc) -> int:
+    """统计 PDF 嵌入图片：按 xref 去重（同一 logo 复用只计一次），xref=0 的内联图按出现次数计。"""
+    xrefs = set()
+    inline = 0
+    for page in doc:
+        try:
+            for img in page.get_images(full=True):
+                xref = img[0] if img else 0
+                if xref:
+                    xrefs.add(xref)
+                else:
+                    inline += 1
+        except Exception:
+            continue
+    return len(xrefs) + inline
+
+
+def _count_pdf_tables(doc) -> Tuple[Optional[int], str]:
+    """统计 PDF 表格数（PyMuPDF find_tables 线框策略）。返回 (数量, 说明)；不可用时数量为 None。
+
+    - 旧版 PyMuPDF 无 find_tables → None + 说明（不能静默当 0，交叉审查 P1-2）
+    - 超时间预算 → 返回已检页的部分计数 + 说明（计数可能偏低）
+    """
+    if doc.page_count > _TABLE_DETECT_MAX_PAGES:
+        return None, f"页数超过 {_TABLE_DETECT_MAX_PAGES}，跳过表格检测以控制耗时"
+    if doc.page_count and not hasattr(doc[0], "find_tables"):
+        return None, "当前 PyMuPDF 版本不支持 find_tables，表格数不可用"
+    import time
+    deadline = time.monotonic() + _TABLE_DETECT_TIME_BUDGET
+    total = 0
+    for page in doc:
+        if time.monotonic() > deadline:
+            return total, f"表格检测超出 {_TABLE_DETECT_TIME_BUDGET:.0f}s 时间预算，已提前结束（计数可能偏低）"
+        try:
+            total += len(page.find_tables().tables)
+        except Exception:
+            continue
+    return total, ""
+
+
+def analyze_structure(filepath: str, full_text: str, pages_text: Optional[List[str]] = None,
+                      html_extraction: Optional[Dict] = None) -> Dict:
+    """客观结构统计：页数 / 章节数（标题行）/ 图片数 / 表格数 / 安全警告数。
+
+    - 文本类指标（标题行/警告数）：全部格式可用，基于行首特征正则
+    - 图片/表格数：PDF 走 fitz（图片按 xref 去重、表格走线框检测），HTML 走标签计数，
+      其余格式（DOCX/MD/TXT）暂不支持，以 notes 说明
+    """
+    notes: List[str] = []
+    lines = (full_text or "").splitlines()
+    # 标题按文本去重：目录页（TOC）中的 "3.2 Installation …… 12" 不与正文标题重复计数
+    heading_texts = {ln.strip() for ln in lines if _is_heading_line(ln)}
+    heading_count = len(heading_texts)
+    warning_count = sum(1 for ln in lines if _is_warning_line(ln))
+    page_count = len(pages_text) if pages_text else (1 if full_text else 0)
+    figure_count: Optional[int] = None
+    table_count: Optional[int] = None
+
+    path_low = str(filepath or "").lower()
+    if path_low.endswith(".pdf"):
+        try:
+            import fitz
+            doc = fitz.open(filepath)
+            try:
+                page_count = doc.page_count
+                figure_count = _count_pdf_figures(doc)
+                table_count, note = _count_pdf_tables(doc)
+                if note:
+                    notes.append(note)
+            finally:
+                doc.close()
+        except Exception as exc:
+            notes.append(f"PDF 结构统计失败：{exc}")
+    elif html_extraction is not None:
+        # HTML：解析器统计的标签数（已剔除 nav/header/footer 骨架内的元素）
+        page_count = 1
+        figure_count = html_extraction.get("img_count")
+        table_count = html_extraction.get("table_count")
+        tag_headings = html_extraction.get("heading_count")
+        if isinstance(tag_headings, int):
+            # 标签计数（h1-h3）比文本正则更可靠，优先采用
+            heading_count = tag_headings
+    else:
+        notes.append("图片/表格统计当前仅支持 PDF 与 HTML 输入")
+
+    return {
+        "page_count": page_count,
+        "heading_count": heading_count,
+        "figure_count": figure_count,
+        "table_count": table_count,
+        "warning_count": warning_count,
+        "notes": notes,
+    }
+
+
+def analyze_document(filepath: str, full_text: str, pages_text: Optional[List[str]] = None,
+                     html_extraction: Optional[Dict] = None) -> Dict:
+    """文档总入口：返回 {tool_analysis, readability, structure_stats} 供存储与报告渲染。"""
     return {
         "tool_analysis": analyze_tool_usage(filepath, full_text, pages_text),
         "readability": analyze_readability(full_text, pages_text),
+        "structure_stats": analyze_structure(filepath, full_text, pages_text, html_extraction),
     }

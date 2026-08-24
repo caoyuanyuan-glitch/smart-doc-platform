@@ -115,7 +115,7 @@ class InsightEngineTestCase(unittest.TestCase):
         read = _readability(90, "excellent", {"term_density": 45})
         read["insights"] = generate_insights(_TOOL_HAT, read)
         md = render_competitor_report("manual.pdf", _TOOL_HAT, read)
-        self.assertIn("三、对本司的启示", md)
+        self.assertIn("四、对本司的启示", md)
         self.assertIn("P1", md)
 
 

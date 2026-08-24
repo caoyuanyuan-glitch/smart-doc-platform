@@ -126,8 +126,23 @@
                   </div>
                 </div>
 
+                <!-- 结构统计（客观指标） -->
+                <template v-if="structureStats">
+                  <h3 class="block-title" style="margin-top: 24px;">二、结构统计（客观指标）</h3>
+                  <el-descriptions :column="3" border size="small">
+                    <el-descriptions-item label="页数">{{ structureStats.page_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="章节数">{{ structureStats.heading_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="图片数">{{ structureStats.figure_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="表格数">{{ structureStats.table_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="安全警告数">{{ structureStats.warning_count ?? '—' }}</el-descriptions-item>
+                  </el-descriptions>
+                  <div v-for="(note, i) in structureStats.notes || []" :key="i" class="dim-desc" style="color: #d97706;">
+                    ⚠ {{ note }}
+                  </div>
+                </template>
+
                 <!-- 可读性分析 -->
-                <h3 class="block-title" style="margin-top: 24px;">二、可读性分析</h3>
+                <h3 class="block-title" style="margin-top: 24px;">{{ structureStats ? '三、' : '二、' }}可读性分析</h3>
                 <div class="dim-list">
                   <div v-for="dim in dimRows" :key="dim.key" class="dim-row">
                     <div class="dim-head">
@@ -270,7 +285,21 @@
                 </el-table>
               </div>
 
-              <h3 class="block-title" style="margin-top: 20px;">二、可读性分析</h3>
+              <template v-if="detailStructureStats">
+                <h3 class="block-title" style="margin-top: 20px;">二、结构统计（客观指标）</h3>
+                <el-descriptions :column="5" border size="small">
+                  <el-descriptions-item label="页数">{{ detailStructureStats.page_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="章节">{{ detailStructureStats.heading_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="图">{{ detailStructureStats.figure_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="表">{{ detailStructureStats.table_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="警告">{{ detailStructureStats.warning_count ?? '—' }}</el-descriptions-item>
+                </el-descriptions>
+                <div v-for="(note, i) in detailStructureStats.notes || []" :key="i" class="dim-desc" style="color: #d97706;">
+                  ⚠ {{ note }}
+                </div>
+              </template>
+
+              <h3 class="block-title" style="margin-top: 20px;">{{ detailStructureStats ? '三、' : '二、' }}可读性分析</h3>
               <div class="dim-list">
                 <div v-for="dim in detailDimRows" :key="dim.key" class="dim-row">
                   <div class="dim-head">
@@ -419,6 +448,8 @@ const toolSummary = computed(() => toolAnalysis.value.summary || '未知')
 const toolMeta = computed(() => toolAnalysis.value.meta || {})
 const tools = computed(() => toolAnalysis.value.tools || [])
 const fontSignals = computed(() => toolAnalysis.value.font_signals || [])
+// 结构统计（客观指标）：旧任务无该字段时为 null，对应章节不渲染
+const structureStats = computed(() => toolAnalysis.value.structure_stats || null)
 const reportMd = computed(() => detail.value?.report_md || '')
 const stats = computed(() => readability.value.stats || {})
 
@@ -545,6 +576,7 @@ const detailReadability = computed(() => safeParse(detail.value?.readability))
 const detailToolSummary = computed(() => detailToolAnalysis.value.summary || '未知')
 const detailToolMeta = computed(() => detailToolAnalysis.value.meta || {})
 const detailTools = computed(() => detailToolAnalysis.value.tools || [])
+const detailStructureStats = computed(() => detailToolAnalysis.value.structure_stats || null)
 const detailReportMd = computed(() => detail.value?.report_md || '')
 const detailDimRows = computed(() => {
   const dims = detailReadability.value.dimensions || {}

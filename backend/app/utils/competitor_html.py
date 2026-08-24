@@ -135,9 +135,21 @@ class _MainTextExtractor(HTMLParser):
         self.script_srcs: List[str] = []
         self.css_hrefs: List[str] = []
         self.attrs_sample: List[str] = []
+        # 结构统计（客观指标）：正文区域的 img / table / h1-h3 标签计数
+        self.img_count = 0
+        self.table_count = 0
+        self.heading_count = 0
 
     def handle_starttag(self, tag, attrs):
         name = tag.lower()
+        # 结构统计：只统计骨架（nav/header/footer 等）之外的内容元素
+        if self._skip_depth == 0:
+            if name == "img":
+                self.img_count += 1
+            elif name == "table":
+                self.table_count += 1
+            elif name in ("h1", "h2", "h3"):
+                self.heading_count += 1
         attr_map = {k.lower(): (v or "") for k, v in attrs}
         if name in _BOILERPLATE_TAGS:
             self._skip_depth += 1
@@ -157,10 +169,10 @@ class _MainTextExtractor(HTMLParser):
                 self.css_hrefs.append(href)
         if name == "meta" and attr_map.get("name", "").lower() == "generator":
             self.generator = attr_map.get("content", "").strip()
-        # 收集含工具特征的属性名（如 data-mc-*）
+        # 收集含工具特征的属性名（如 data-mc-* / data-dita-*）
         for k, v in attrs:
             kl = str(k).lower()
-            if kl.startswith("data-mc") and kl not in self.attrs_sample:
+            if (kl.startswith("data-mc") or kl.startswith("data-dita")) and kl not in self.attrs_sample:
                 self.attrs_sample.append(kl)
         if name in _BLOCK_TAGS or name in _BOILERPLATE_TAGS:
             self._chunks.append("\n")
@@ -229,6 +241,10 @@ class _MainTextExtractor(HTMLParser):
             "attrs_sample": self.attrs_sample[:10],
             "low_content": low_content,
             "notes": notes,
+            # 结构统计（客观指标）：剔除骨架后的内容元素计数
+            "img_count": self.img_count,
+            "table_count": self.table_count,
+            "heading_count": self.heading_count,
         }
 
 
@@ -312,11 +328,34 @@ def detect_html_tool(final_url: str, extraction: Dict, html: str) -> Dict:
         })
         evidence.extend(robo[:5])
 
+    # --- DITA-OT（结构化写作发布链；评审意见采纳项）
+    dita_hits = []
+    path_low = (parse.urlparse(final_url).path or "").lower()
+    for seg in ("/topics/", "/concepts/", "/tasks/"):
+        if seg in path_low:
+            dita_hits.append(f"URL 路径含 DITA 输出目录特征 {seg}（{path_low[:80]}）")
+    # 负向前瞻排除 "task-list"/"topic-*" 等 GFM 扩展类名（交叉审查 P1-3）
+    if re.search(r'class="[^"]*\b(?:topic|concept|task)(?![-\w])', html or ""):
+        dita_hits.append("HTML 元素含 DITA topic/concept/task 主题类名")
+    if any(a.startswith("data-dita") for a in (extraction.get("attrs_sample") or [])):
+        dita_hits.append("HTML 含 data-dita-* 属性（DITA 发布标记）")
+    if dita_hits:
+        uniq_dita = list(dict.fromkeys(dita_hits))[:5]
+        tools.append({
+            "name": "DITA-OT",
+            "category": "结构化写作/DITA 发布工具",
+            "confidence": "high" if len(uniq_dita) >= 2 else "medium",
+            "source": "HTML 结构特征（URL/类名/属性）",
+            "evidence": uniq_dita,
+        })
+        evidence.extend(uniq_dita)
+
     # --- 静态文档框架（generator / 资产特征）
     generator = (extraction.get("generator") or "").strip()
     if generator:
         gen_low = generator.lower()
         framework_map = [
+            ("dita", "DITA-OT"),
             ("docusaurus", "Docusaurus"),
             ("vitepress", "VitePress"),
             ("vuepress", "VuePress"),
@@ -327,14 +366,24 @@ def detect_html_tool(final_url: str, extraction: Dict, html: str) -> Dict:
         ]
         for key, name in framework_map:
             if key in gen_low:
-                tools.append({
-                    "name": name,
-                    "category": "文档站点框架",
-                    "confidence": "medium",
-                    "source": f"meta generator: {generator[:80]}",
-                    "evidence": [f"<meta name=generator content 含 {name}>"],
-                })
-                evidence.append(f"meta generator: {generator[:80]}")
+                existing = next((t for t in tools if t.get("name") == name), None)
+                gen_evidence = f"meta generator: {generator[:80]}"
+                if existing:
+                    # 结构特征已识别该工具：generator 作为追加证据并入，置信度可升 high
+                    if gen_evidence not in existing["evidence"]:
+                        existing["evidence"].append(gen_evidence)
+                        evidence.append(gen_evidence)
+                    if len(existing["evidence"]) >= 2:
+                        existing["confidence"] = "high"
+                else:
+                    tools.append({
+                        "name": name,
+                        "category": "结构化写作/DITA 发布工具" if name == "DITA-OT" else "文档站点框架",
+                        "confidence": "medium",
+                        "source": f"meta generator: {generator[:80]}",
+                        "evidence": [f"<meta name=generator content 含 {name}>"],
+                    })
+                    evidence.append(gen_evidence)
                 break
 
     summary = "未能识别明确的编辑工具"

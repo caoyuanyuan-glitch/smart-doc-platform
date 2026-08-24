@@ -260,7 +260,7 @@ def generate_insights(tool_analysis: Dict, readability: Dict) -> Dict:
     """洞察总入口：规则层保底 + AI 层可选增强。
 
     返回 {"insights": [...], "ai_available": bool}，存入 readability["insights"]，
-    由报告渲染器输出「三、对本司的启示」章节。
+    由报告渲染器输出「四、对本司的启示」章节。
     """
     insights = generate_rule_insights(tool_analysis, readability)
     ai_available = False

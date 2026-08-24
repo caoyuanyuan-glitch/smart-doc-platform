@@ -120,13 +120,34 @@ def _render_tool_section(tool_analysis: Dict) -> str:
     return "\n".join(lines)
 
 
+def _render_structure_section(tool_analysis: Dict) -> str:
+    """「结构统计」章节：客观指标，不涉及主观评分（评审意见采纳项）。"""
+    stats = tool_analysis.get("structure_stats") or {}
+    if not stats:
+        return ""
+    fmt = lambda v: "—" if v is None else v
+    lines = ["## 二、结构统计（客观指标）", ""]
+    lines.append("| 指标 | 数值 | 口径说明 |")
+    lines.append("| --- | --- | --- |")
+    lines.append(f"| 页数 | {fmt(stats.get('page_count'))} | 文档总页数 |")
+    lines.append(f"| 章节数 | {fmt(stats.get('heading_count'))} | 标题行启发式识别（Chapter/多级编号/第X章），近似值 |")
+    lines.append(f"| 图片数 | {fmt(stats.get('figure_count'))} | PDF 嵌入图（按 xref 去重）/ HTML `<img>` |")
+    lines.append(f"| 表格数 | {fmt(stats.get('table_count'))} | PDF 线框检测 / HTML `<table>` |")
+    lines.append(f"| 安全警告数 | {fmt(stats.get('warning_count'))} | 行首 WARNING/CAUTION/DANGER/NOTICE/警告/注意/危险 |")
+    lines.append("")
+    for note in stats.get("notes") or []:
+        lines.append(f"> ⚠ {_md_escape(note)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _render_readability_section(readability: Dict) -> str:
     dims = readability.get("dimensions", {})
     stats = readability.get("stats", {})
     suggestions = readability.get("suggestions", [])
     language_label = "中文" if readability.get("language") == "zh" else "英文"
 
-    lines = ["## 二、可读性分析", ""]
+    lines = ["## 三、可读性分析", ""]
     lines.append(
         f"- **语言**：{language_label}　**综合评分**：{readability.get('overall_score', 0)} 分　"
         f"**评级**：{readability.get('level', '未知')}"
@@ -189,6 +210,8 @@ def _render_readability_section(readability: Dict) -> str:
     for s in suggestions:
         lines.append(f"- {s}")
     lines.append("")
+    lines.append("> 评分方法：规则引擎 v1.0（各维度公式、权重与阈值详见平台文档《竞品文档分析算法设计说明》）。")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -199,7 +222,7 @@ def _render_insight_section(readability: Dict) -> str:
     if not insights:
         return ""
     ai_available = payload.get("ai_available") if isinstance(payload, dict) else False
-    lines = ["## 三、对本司的启示（Actionable Insights）", ""]
+    lines = ["## 四、对本司的启示（Actionable Insights）", ""]
     if ai_available:
         lines.append("> 含 AI 补充洞察（基于规则层结果增强，未配置 AI 时自动降级为纯规则）。")
         lines.append("")
@@ -237,6 +260,9 @@ def render_competitor_report(file_name: str, tool_analysis: Dict, readability: D
         ]
         return "\n".join(lines)
     lines.append(_render_tool_section(tool_analysis))
+    structure_section = _render_structure_section(tool_analysis)
+    if structure_section:
+        lines.append(structure_section)
     lines.append(_render_readability_section(readability))
     insight_section = _render_insight_section(readability)
     if insight_section:
