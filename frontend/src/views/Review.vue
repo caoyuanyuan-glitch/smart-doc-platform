@@ -32,14 +32,11 @@
             <div v-if="reviewMode === 'hybrid'" class="review-mode-toolbar ai-model-toolbar">
               <span class="review-mode-label">AI 模型</span>
               <el-select
-                v-model="selectedProviders"
+                v-model="selectedProvider"
                 size="small"
                 style="width: 280px"
                 :disabled="providerLoading"
-                multiple
-                collapse-tags
-                collapse-tags-tooltip
-                placeholder="选择模型（多选=并发审核）"
+                placeholder="选择模型"
               >
                 <el-option
                   v-for="m in availableModels"
@@ -53,7 +50,7 @@
                 未检测到可用 AI 模型，请检查 API Key 配置
               </span>
               <span v-else class="review-mode-hint">
-                {{ selectedProviders.length > 1 ? `已选 ${selectedProviders.length} 个模型（并发审核）` : `当前使用 ${selectedProviderLabel}` }}
+                {{ `当前使用 ${selectedProviderLabel}` }}
               </span>
             </div>
             <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress-section">
@@ -670,7 +667,7 @@
         <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
         <el-table-column label="原文" min-width="450">
           <template #default="scope">
-            <span class="context-cell" v-html="renderIssueContext(scope.row, currentTaskMode)"></span>
+            <span class="context-cell" v-html="renderIssueOriginalCell(scope.row, currentTaskMode)"></span>
           </template>
         </el-table-column>
         <el-table-column label="建议" min-width="340" class-name="suggestion-column">
@@ -1163,11 +1160,20 @@ function issueSuggestionFullText(issue) {
 }
 
 function normalizeIssueDescription(issue) {
-  return String(issue?.description || '')
+  let text = String(issue?.description || '')
     .trim()
     .replace(/^问题说明[:：]\s*/, '')
     .replace(/^问题[:：]\s*/, '')
     .replace(/\s+/g, ' ')
+  text = text
+    .replace(/原文片段[:：]\s*['"“”‘’]?[^；;。]*(?:[；;。]|$)/g, '')
+    .replace(/疑似错误(?:词|短语)[:：]\s*\[[^\]]+\][；;。]?/g, '')
+    .replace(/建议(?:修改词|修改为|修改短语)?[:：]?\s*\[[^\]]+\][；;。]?/g, '')
+    .replace(/是否确定[:：]\s*确定[；;。]?/g, '')
+    .replace(/；\s*；/g, '；')
+    .replace(/^[；;。\s]+|[；;。\s]+$/g, '')
+    .trim()
+  return text
 }
 
 function compactSuggestionText(text, limit = 36) {
@@ -1181,8 +1187,8 @@ function categoryProblemLabel(category) {
   if (!text) return ''
   if (/语法|主谓|时态|单复数/.test(text)) return '语法问题'
   if (/逻辑|步骤结构|操作步骤/.test(text)) return '操作步骤逻辑问题'
-  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
   if (/拼写/.test(text)) return '拼写问题'
+  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
   if (/标点|空格|格式/.test(text)) return '标点/格式问题'
   if (/合规|法规|注册/.test(text)) return '合规表述问题'
   if (/重复/.test(text)) return '重复内容问题'
@@ -1298,30 +1304,33 @@ function describeSuggestionChange(original, replacement) {
 }
 
 function issueSuggestionOverview(issue) {
-  const problemLabel = issueProblemLabel(issue)
-  if (problemLabel) return problemLabel
-
-  const suggestion = String(issue?.suggestion || '').trim()
   const replacement = extractSuggestionReplacement(issue)
   const original = String(issue?.original_text || '').trim()
   if (replacement && original && replacement !== original) {
-    return '该处表述需要修改。'
+    return describeSuggestionChange(original, replacement)
   }
+
+  const suggestion = String(issue?.suggestion || '').trim()
   if (suggestion) return '建议按下方修改。'
+
+  const problemLabel = issueProblemLabel(issue)
+  if (problemLabel) return problemLabel
+
   return '该处需要处理。'
 }
 
 function issueSuggestionSummary(issue) {
-  if (issueSuggestionDiffHtml(issue)) return ''
+  const description = normalizeIssueDescription(issue)
+  if (description) return description
+
+  const suggestion = String(issue?.suggestion || '').trim()
+  if (suggestion) return suggestion
+
   return issueSuggestionFullText(issue)
 }
 
 function issueSuggestionDiffHtml(issue) {
-  const original = String(issue?.original_text || '').trim()
-  const replacement = extractSuggestionReplacement(issue)
-  if (!original || !replacement || original === replacement) return ''
-  if (replacement.length > 120) return ''
-  return buildSuggestionDiffMarkup(original, replacement)
+  return ''
 }
 
 function percentText(value) {
@@ -1432,17 +1441,14 @@ const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
 const reviewMode = ref('hybrid')
-const selectedProviders = ref([])
+const selectedProvider = ref('')
 const availableModels = ref([])
 const providerLoading = ref(true)
 
 const selectedProviderLabel = computed(() => {
-  if (selectedProviders.value.length === 0) return '默认'
-  const names = selectedProviders.value.map(p => {
-    const m = availableModels.value.find(m => m.name === p)
-    return m ? m.label : p
-  })
-  return names.join(' + ')
+  if (!selectedProvider.value) return '默认'
+  const model = availableModels.value.find(m => m.name === selectedProvider.value)
+  return model ? model.label : selectedProvider.value
 })
 const reviewSubTab = ref('single')
 const compareMode = ref('both')
@@ -1574,9 +1580,9 @@ async function loadProviders() {
       const defaultName = data.default_provider
       const defaultMatch = availableModels.value.find(m => m.name === defaultName)
       if (defaultMatch) {
-        selectedProviders.value = [defaultMatch.name]
+        selectedProvider.value = defaultMatch.name
       } else {
-        selectedProviders.value = [availableModels.value[0].name]
+        selectedProvider.value = availableModels.value[0].name
       }
     }
   } catch (e) {
@@ -2029,13 +2035,10 @@ async function startReview(documentId) {
     return
   }
   try {
-    const providersList = (reviewMode.value === 'hybrid' && selectedProviders.value.length > 0)
-      ? selectedProviders.value : null
-    const singleProvider = (providersList && providersList.length === 1)
-      ? providersList[0] : null
-    const multiProviders = (providersList && providersList.length > 1)
-      ? providersList : null
-    const response = await reviewAPI.create(documentId, reviewMode.value, singleProvider, multiProviders)
+    const provider = reviewMode.value === 'hybrid' && selectedProvider.value
+      ? selectedProvider.value
+      : null
+    const response = await reviewAPI.create(documentId, reviewMode.value, provider)
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
 
@@ -2941,6 +2944,24 @@ function renderIssueContext(issue, mode = '') {
   return highlightOriginalText(issue?.context, issue?.original_text)
 }
 
+function renderIssueOriginalCell(issue, mode = '') {
+  if (String(mode || '').startsWith('compare:')) {
+    return renderCompareIssueContext(issue)
+  }
+
+  const originalText = normalizeDisplayText(issue?.original_text)
+  const contextText = normalizeDisplayText(issue?.context)
+  if (!originalText) {
+    return highlightOriginalText(contextText, issue?.original_text)
+  }
+
+  return `<div class="issue-original-main">${highlightOriginalText(originalText, originalText)}</div>`
+}
+
+function normalizeDisplayText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim()
+}
+
 const currentTaskMode = computed(() => {
   const currentReview = reviews.value.find(item => item.id === currentTaskId.value)
   return currentReview?.mode || currentReport.value?.mode || ''
@@ -3705,6 +3726,17 @@ onUnmounted(() => {
   line-height: 1.6;
   word-break: break-all;
   color: #303133;
+}
+
+.issue-original-main {
+  color: #1f2937;
+}
+
+.issue-original-snippet {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .compare-context-block {

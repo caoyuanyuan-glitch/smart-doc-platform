@@ -1,13 +1,7 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from app.database import Base
+from app.database import Base, SessionLocal, engine
 from app.models.rule import Rule
 from app.models.term import Term
 from app.models.audit_basis import AuditBasis
-
-DATABASE_URL = "sqlite:///./app.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_data():
     Base.metadata.create_all(bind=engine)

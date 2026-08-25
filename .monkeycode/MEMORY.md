@@ -161,12 +161,14 @@ IFU PDF 回归测试约定
   - 相关审核回归可同时复跑 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py`
 
 审核历史任务保留规则
-- Date: 2026-08-18
-- Context: 用户要求合并代码后继续保留历史审核任务
+- Date: 2026-08-21
+- Context: 用户要求历史审核任务可持续保留，Agent 在修复默认数据库持久化链路时更新
 - Category: 环境配置
 - Instructions:
-  - 审核模块默认数据库路径需优先复用项目现有的 `当前工作区/backend/app.db`
+  - 审核模块默认数据库路径使用 `~/.smart-doc-platform/app.db` 持久化保存历史审核任务
+  - 若项目根目录下存在旧库 `当前工作区/backend/app.db`，启动时需自动迁移到运行时持久目录并继续复用
   - 合并代码、重启预览服务或切换分支后，历史审核任务列表需要保持可见
+  - 常规启动脚本仅在数据库文件缺失时执行 `init_data.py` 初始化，已有数据库需直接复用
 
 WorkBuddy 联动评审目录约定
 - Date: 2026-08-05

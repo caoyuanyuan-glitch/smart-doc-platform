@@ -4,6 +4,7 @@ const Login = () => import('@/views/Login.vue')
 const Home = () => import('@/views/Home.vue')
 const Review = () => import('@/views/Review.vue')
 const ReviewDashboard = () => import('@/views/ReviewDashboard.vue')
+const FalsePositiveMemory = () => import('@/views/FalsePositiveMemory.vue')
 const Polish = () => import('@/views/Polish.vue')
 const PolishStats = () => import('@/views/PolishStats.vue')
 const PolishTextSessions = () => import('@/views/PolishTextSessions.vue')
@@ -63,6 +64,11 @@ const routes = [
     path: '/review/rules',
     name: 'ReviewRules',
     component: Review
+  },
+  {
+    path: '/review/false-positive-memory',
+    name: 'FalsePositiveMemory',
+    component: FalsePositiveMemory
   },
   {
     path: '/review/basis',

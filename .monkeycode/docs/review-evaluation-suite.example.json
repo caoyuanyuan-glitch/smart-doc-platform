@@ -1,0 +1,29 @@
+{
+  "suite_name": "review_engine_refactor_example",
+  "documents": [
+    {
+      "name": "gene_seq_e25ars",
+      "review_id": 0,
+      "standard_answers": [
+        "H-020-001246-00 Gene+Seq-E25ARS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_R01 Tina.pdf"
+      ],
+      "allowed_misses": ["AI-STYLE-001"],
+      "explicit_false_positives": ["R029", "STRUCT-LAYOUT-001"]
+    },
+    {
+      "name": "ifu_css_regression",
+      "review_id": 0,
+      "standard_answers": [
+        "H-020-001371-00 DNBelab C Series High-throughput Single-cell 5'RNA&V(D)J Library Preparation Set V2.0 Instructions for Use_English_RUO_QD_R01.pdf"
+      ],
+      "allowed_misses": ["AI-CHECK-001"],
+      "explicit_false_positives": ["STRUCT-IMAGE-001"]
+    }
+  ],
+  "thresholds": {
+    "max_noop_rate": 0.05,
+    "max_numeric_change_rate": 0.0,
+    "max_protected_change_rate": 0.0,
+    "min_high_value_rate": 0.3
+  }
+}
