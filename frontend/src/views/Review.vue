@@ -47,7 +47,7 @@
               </el-select>
               <span v-if="providerLoading" class="review-mode-hint">正在检测可用模型...</span>
               <span v-else-if="availableModels.length === 0" class="review-mode-hint" style="color: #e6a23c">
-                未检测到可用 AI 模型，请检查 API Key 配置
+                AI 模型健康检查未通过，请检查 API Key 或服务连通性
               </span>
               <span v-else class="review-mode-hint">
                 {{ `当前使用 ${selectedProviderLabel}` }}
@@ -525,7 +525,10 @@
           <div style="display:flex;justify-content:space-between;align-items:center">
             <div>
               <span style="font-weight:600">术语库匹配率分析</span>
-              <el-tag :type="terminologyQualityType(terminologyData.summary?.quality_score)" size="small" effect="dark" style="margin-left:8px">
+              <el-tag v-if="terminologyUnavailable" type="info" size="small" effect="plain" style="margin-left:8px">
+                未启用
+              </el-tag>
+              <el-tag v-else :type="terminologyQualityType(terminologyData.summary?.quality_score)" size="small" effect="dark" style="margin-left:8px">
                 {{ terminologyData.summary?.quality_score || 0 }} 分
               </el-tag>
             </div>
@@ -535,7 +538,16 @@
           </div>
         </template>
 
-        <div v-if="terminologyData.distribution" class="match-distribution">
+        <el-alert
+          v-if="terminologyUnavailable"
+          :title="terminologyUnavailableMessage"
+          type="info"
+          show-icon
+          :closable="false"
+          style="margin-bottom:12px"
+        />
+
+        <div v-if="!terminologyUnavailable && terminologyData.distribution" class="match-distribution">
           <div class="dist-title">匹配率分布</div>
           <div class="dist-bars">
             <div class="dist-bar" v-for="item in terminologyDistItems" :key="item.key">
@@ -551,9 +563,9 @@
           </div>
         </div>
 
-        <el-divider style="margin:12px 0" />
+        <el-divider v-if="!terminologyUnavailable" style="margin:12px 0" />
 
-        <div style="display:flex;gap:20px;flex-wrap:wrap">
+        <div v-if="!terminologyUnavailable" style="display:flex;gap:20px;flex-wrap:wrap">
           <div class="term-stat-item">
             <div class="term-stat-label">术语库总量</div>
             <div class="term-stat-value">{{ terminologyData.summary?.total_terms_in_db || 0 }}</div>
@@ -578,7 +590,7 @@
           </div>
         </div>
 
-        <div v-if="terminologyData.matches?.length > 0" style="margin-top:11px">
+        <div v-if="!terminologyUnavailable && terminologyData.matches?.length > 0" style="margin-top:11px">
           <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#606266">
             术语匹配详情 ({{ terminologyData.matches.length }} 条)
           </div>
@@ -604,7 +616,7 @@
           </el-table>
         </div>
 
-        <div v-if="terminologyData.unmatched_terms?.length > 0" style="margin-top:11px">
+        <div v-if="!terminologyUnavailable && terminologyData.unmatched_terms?.length > 0" style="margin-top:11px">
           <div style="font-size:12px;color:#909399;margin-bottom:4px">
             未在文档中出现的术语 ({{ terminologyData.unmatched_terms.length }} 条)
           </div>
@@ -1117,6 +1129,21 @@ const terminologyDistItems = computed(() => {
   ]
 })
 
+const terminologyUnavailable = computed(() => {
+  const data = terminologyData.value
+  if (!data) return false
+  if (data.error) return true
+  const totalTerms = Number(data.summary?.total_terms_in_db ?? data.total_terms ?? 0)
+  const totalOccurrences = Number(data.distribution?.total_occurrences ?? data.match_count ?? 0)
+  return totalTerms <= 0 && totalOccurrences <= 0
+})
+
+const terminologyUnavailableMessage = computed(() => {
+  const data = terminologyData.value || {}
+  if (data.error) return data.error
+  return '暂无可用术语库或术语分析结果，当前不计算术语匹配率'
+})
+
 const filteredDialogExcelRowCount = computed(() => {
   const rows = new Set()
   for (const issue of filteredDialogIssues.value) {
@@ -1182,38 +1209,6 @@ function compactSuggestionText(text, limit = 36) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
 }
 
-function categoryProblemLabel(category) {
-  const text = String(category || '').trim()
-  if (!text) return ''
-  if (/语法|主谓|时态|单复数/.test(text)) return '语法问题'
-  if (/逻辑|步骤结构|操作步骤/.test(text)) return '操作步骤逻辑问题'
-  if (/拼写/.test(text)) return '拼写问题'
-  if (/术语|用词|写法/.test(text)) return '术语一致性问题'
-  if (/标点|空格|格式/.test(text)) return '标点/格式问题'
-  if (/合规|法规|注册/.test(text)) return '合规表述问题'
-  if (/重复/.test(text)) return '重复内容问题'
-  if (/结构/.test(text)) return '结构完整性问题'
-  return `${text}问题`
-}
-
-function descriptionProblemLabel(description) {
-  const text = String(description || '').trim()
-  if (!text) return ''
-  if (/主谓一致|describe[s]?\b|describes\b|单数|复数|时态|grammar/i.test(text)) return '语法问题'
-  if (/跳号|跳到|编号|步骤|流程连续|逻辑/i.test(text)) return '操作步骤逻辑问题'
-  if (/拼写|misspell|typo/i.test(text)) return '拼写问题'
-  if (/术语|写法|统一|term/i.test(text)) return '术语一致性问题'
-  if (/标点|空格|格式|punctuation|spacing/i.test(text)) return '标点/格式问题'
-  if (/合规|法规|注册|ruo|compliance/i.test(text)) return '合规表述问题'
-  if (/重复|冗余/i.test(text)) return '重复内容问题'
-  return ''
-}
-
-function issueProblemLabel(issue) {
-  const description = normalizeIssueDescription(issue)
-  return descriptionProblemLabel(description) || categoryProblemLabel(issue?.category)
-}
-
 function escapeSuggestionHtml(text) {
   return String(text || '')
     .replace(/&/g, '&amp;')
@@ -1272,6 +1267,9 @@ function describeSuggestionChange(original, replacement) {
   const before = String(original || '').trim()
   const after = String(replacement || '').trim()
   if (!before || !after || before === after) return ''
+  if (isNumericUnitSpacingChange(before, after)) {
+    return '在数字与单位之间补充空格'
+  }
 
   let prefix = 0
   const maxPrefix = Math.min(before.length, after.length)
@@ -1303,6 +1301,13 @@ function describeSuggestionChange(original, replacement) {
   return `建议改为“${compactSuggestionText(after)}”`
 }
 
+function isNumericUnitSpacingChange(before, after) {
+  const compactBefore = before.replace(/\s+/g, '')
+  const compactAfter = after.replace(/\s+/g, '')
+  if (compactBefore !== compactAfter) return false
+  return /\d\s+(?:VDC|VAC|A|mA|VA|Hz|kHz|MHz|mL|μL|uL|℃|°C|kg|g|mg|mm|cm|m)\b/i.test(after)
+}
+
 function issueSuggestionOverview(issue) {
   const replacement = extractSuggestionReplacement(issue)
   const original = String(issue?.original_text || '').trim()
@@ -1312,11 +1317,7 @@ function issueSuggestionOverview(issue) {
 
   const suggestion = String(issue?.suggestion || '').trim()
   if (suggestion) return '建议按下方修改。'
-
-  const problemLabel = issueProblemLabel(issue)
-  if (problemLabel) return problemLabel
-
-  return '该处需要处理。'
+  return ''
 }
 
 function issueSuggestionSummary(issue) {
@@ -1584,10 +1585,13 @@ async function loadProviders() {
       } else {
         selectedProvider.value = availableModels.value[0].name
       }
+    } else {
+      selectedProvider.value = ''
     }
   } catch (e) {
     console.error('Failed to load AI providers:', e)
     availableModels.value = []
+    selectedProvider.value = ''
   } finally {
     providerLoading.value = false
   }
@@ -2090,6 +2094,7 @@ function isTemporaryDocumentId(documentId) {
 
 function canStartReview(document) {
   if (!document || isTemporaryDocumentId(document.id)) return false
+  if (reviewMode.value === 'hybrid' && (providerLoading.value || availableModels.value.length === 0 || !selectedProvider.value)) return false
   return docReviewStatus[document.id]?.status !== 'running'
 }
 
