@@ -88,6 +88,23 @@ def test_evaluate_against_annotations_matches_layout_and_image_cross_rules():
     assert result['matched'] == 2
 
 
+def test_evaluate_against_annotations_reports_strict_and_loose_matches_separately():
+    annotations = [
+        HumanAnnotation('doc.pdf', '1', 'Square', 'Tina', '调整列宽，让这里可以一行展示完整', '运输 境', '', '表格/版式', 'structural_consistency', 'STRUCT-LAYOUT-001'),
+    ]
+    issues = [
+        {'rule': 'CYY-CN-LAYOUT-002', 'category': '表格/版式', 'original_text': '其他表格内容', 'description': '检测到同类版式问题'},
+    ]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result['matched'] == 1
+    assert result['strict_matched'] == 0
+    assert result['match_rate'] == 1.0
+    assert result['strict_match_rate'] == 0.0
+    assert result['strict_misses'][0]['expected_rule'] == 'STRUCT-LAYOUT-001'
+
+
 def test_batch_evaluate_from_config_preserves_suite_fields(tmp_path, monkeypatch):
     config = {
         "documents": [
