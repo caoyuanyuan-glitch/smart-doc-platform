@@ -239,16 +239,40 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     return False
 
 
+def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+    if not _matches_expected_rule(item, issue, blob):
+        return False
+
+    selected = _norm_for_match(item.selected_text)
+    comment = _norm_for_match(item.comment)
+    context = _norm_for_match(item.context[:160])
+    original = _norm_for_match(issue.get("original_text", ""))
+    description = _norm_for_match(issue.get("description", ""))
+
+    if selected and len(selected) >= 4 and (selected in blob or (original and original in selected)):
+        return True
+    if original and len(original) >= 4 and selected and original in selected:
+        return True
+    if comment and len(comment) >= 8 and (comment in blob or comment in description):
+        return True
+    if not selected and context and len(context) >= 16 and context[:40] in blob:
+        return True
+    return False
+
+
 def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list[HumanAnnotation]) -> dict[str, Any]:
     issue_pairs = [(issue, _issue_blob(issue)) for issue in issues]
 
     hits = []
     misses = []
+    strict_hits = []
+    strict_misses = []
     for item in annotations:
         selected = _norm_for_match(item.selected_text)
         comment = _norm_for_match(item.comment)
         context = _norm_for_match(item.context[:160])
         matched = False
+        strict_matched = any(_matches_annotation_strictly(item, issue, blob) for issue, blob in issue_pairs)
         for issue, blob in issue_pairs:
             if _matches_expected_rule(item, issue, blob):
                 matched = True
@@ -274,12 +298,21 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
             hits.append(record)
         else:
             misses.append(record)
+        if strict_matched:
+            strict_hits.append(record)
+        else:
+            strict_misses.append(record)
 
     return {
         "human_total": len(annotations),
         "matched": len(hits),
         "missed": len(misses),
         "match_rate": round(len(hits) / len(annotations), 4) if annotations else 0,
+        "strict_matched": len(strict_hits),
+        "strict_missed": len(strict_misses),
+        "strict_match_rate": round(len(strict_hits) / len(annotations), 4) if annotations else 0,
         "misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in misses])["by_category"] if misses else {},
+        "strict_misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in strict_misses])["by_category"] if strict_misses else {},
         "misses": misses[:50],
+        "strict_misses": strict_misses[:50],
     }

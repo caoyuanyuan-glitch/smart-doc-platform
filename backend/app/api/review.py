@@ -15,7 +15,7 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name not in {"app.services", "app.services.chunker"}:
         raise
-    logging.getLogger(__name__).warning(
+    logging.getLogger(__name__).info(
         "智能分块模块(services.chunker)加载失败，审核将回退到传统分块模式: %s",
         exc,
     )
@@ -51,7 +51,7 @@ from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
-from app.utils.document_parser import clean_pdf_text, parse_file, get_file_type
+from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
 from app.utils.param_compare import extract_params, normalize_param_name, parse_value, _values_equal
 from app.review_engine.validation import (
     ai_suggestion_changes_protected_meaning as engine_ai_suggestion_changes_protected_meaning,
@@ -966,6 +966,7 @@ def _normalize_suggestion_text(suggestion):
     text = str(suggestion or '').strip()
     text = re.sub(r'^建议(?:改为|替换为|统一为|写为|使用|拆成两句：|改为：|使用标准术语:)\s*', '', text)
     text = re.sub(r'^改为\s*', '', text)
+    text = text.strip('"“”')
     return text.strip()
 
 
@@ -983,6 +984,21 @@ def _clean_issue_suggestion_for_display(suggestion):
         return plain.group(1).strip().strip('[]')
 
     return _normalize_suggestion_text(text)
+
+
+def _normalize_known_rule_issue_display(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    text = ' '.join([
+        str(_issue_value(issue, 'description', '') or ''),
+        str(_issue_value(issue, 'suggestion', '') or ''),
+    ])
+
+    if rule == 'EXT-R021' and ('不避免' in original or '不避免' in text):
+        _set_issue_value(issue, 'category', '语法错误')
+        _set_issue_value(issue, 'suggestion', '如未按照说明进行操作')
+        _set_issue_value(issue, 'description', '原文中的“不避免”搭配不通顺，应改为“如未按照说明进行操作”。')
+    return issue
 
 
 def _fallback_issue_suggestion_for_display(issue):
@@ -1016,6 +1032,7 @@ def validate_suggestion(original: str, suggestion: str) -> bool:
 
 def _sanitize_issue_suggestions(issues):
     for issue in issues:
+        _normalize_known_rule_issue_display(issue)
         rule = str(issue.get('rule', '') or '').upper()
         suggestion = str(issue.get('suggestion', '') or '')
         cleaned = _clean_issue_suggestion_for_display(suggestion)
@@ -1205,6 +1222,12 @@ def _should_drop_known_false_positive_issue(issue):
         return True
     if source == 'ai' and rule == '信息完整性：关键章节内容缺失' and '待补充' in original:
         return True
+    if _is_forbidden_space_term_false_positive(issue):
+        return True
+    if _is_rohs_table_title_fragment_false_positive(issue):
+        return True
+    if _is_noop_chinese_baseline_issue(issue):
+        return True
     if source == 'ai' and original in {'10μL', '5μL', '2μL', '注意安全事项，确保安全操作'}:
         return True
     if source == 'ai' and original in {'表格1使用 Cat.No，表格2使用 Cat. No.', '前文用 Catalog Number，后文用 Cat. No.'}:
@@ -1250,6 +1273,45 @@ def _should_drop_known_false_positive_issue(issue):
     if _is_noop_ai_suggestion_issue(issue):
         return True
     return False
+
+
+def _is_forbidden_space_term_false_positive(issue):
+    raw_original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    if raw_original != '空格':
+        return False
+
+    context = str(_issue_value(issue, 'context', '') or '')
+    text = ' '.join([context, str(_issue_value(issue, 'description', '') or '')])
+    if not context and not text:
+        return False
+
+    describes_space_as_content = re.search(
+        r'(?:禁止|不得|不可|不能|避免|请勿|不允许)使用空格|空格(?:分隔|字符|序列|输入|填写|使用)',
+        context or text,
+    )
+    flags_actual_extra_space = re.search(r'多余(?:的)?空格|连续空格|空格过多|空格错误|空格不规范', context)
+    return bool(describes_space_as_content and not flags_actual_extra_space)
+
+
+def _is_rohs_table_title_fragment_false_positive(issue):
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    if not original:
+        return False
+
+    required_title = '产品中有害物质的名称及含有物质表'
+    required_title_alt = '产品中有害物质的名称及含有信息表'
+    normalized_original = re.sub(r'\s+', '', original)
+    if normalized_original not in required_title and normalized_original not in required_title_alt:
+        return False
+
+    text = ' '.join([
+        str(_issue_value(issue, 'rule', '') or ''),
+        str(_issue_value(issue, 'category', '') or ''),
+        str(_issue_value(issue, 'suggestion', '') or ''),
+        str(_issue_value(issue, 'description', '') or ''),
+        str(_issue_value(issue, 'audit_basis', '') or ''),
+    ])
+    return bool(re.search(r'ROHS|有害物质.*名称.*含有(?:物质|信息)表|需包含.*有害物质', text, re.IGNORECASE))
 
 
 def _is_high_value_ai_review_issue(issue):
@@ -1373,8 +1435,9 @@ def _ai_suggestion_violates_number_unit_spacing(original, suggestion):
 def _is_number_unit_space_correction(original, suggestion):
     original = str(original or '')
     suggestion = str(suggestion or '')
-    compact = re.search(r'\b\d+(?:\.\d+)?(?:μl|ul|ml|ng|bp|kb|mb|gb|rpm|min|sec|s|h|°c)\b', original, re.IGNORECASE)
-    spaced = re.search(r'\b\d+(?:\.\d+)?\s+(?:μl|ul|ml|ng|bp|kb|mb|gb|rpm|min|sec|s|h|°c)\b', suggestion, re.IGNORECASE)
+    unit_pattern = r'(?:vdc|vac|v|a|ma|va|hz|khz|mhz|w|kw|μl|ul|ml|ng|bp|kb|mb|gb|rpm|min|sec|s|h|°c|℃)'
+    compact = re.search(rf'\b\d+(?:\.\d+)?{unit_pattern}\b', original, re.IGNORECASE)
+    spaced = re.search(rf'\b\d+(?:\.\d+)?\s+{unit_pattern}\b', suggestion, re.IGNORECASE)
     return bool(compact and spaced)
 
 
@@ -1896,6 +1959,34 @@ def _filter_review_false_positives(issues):
     return filtered
 
 
+def _filter_known_review_false_positives(issues):
+    filtered = []
+    dropped = 0
+    for issue in issues:
+        if (
+            _is_forbidden_space_term_false_positive(issue)
+            or _is_rohs_table_title_fragment_false_positive(issue)
+            or _is_noop_chinese_baseline_issue(issue)
+        ):
+            dropped += 1
+            continue
+        filtered.append(issue)
+    if dropped:
+        print(f'[审核] 已知误报过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
+    return filtered
+
+
+def _is_noop_chinese_baseline_issue(issue):
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    if not rule.startswith('CYY-CN-'):
+        return False
+    original = str(_issue_value(issue, 'original_text', '') or '').strip()
+    suggestion = _normalize_suggestion_text(_issue_value(issue, 'suggestion', '') or '')
+    if not original or not suggestion:
+        return False
+    return not validate_suggestion(original, suggestion)
+
+
 def _should_drop_low_value_review_issue(issue, rule_counts):
     rule = str(_issue_value(issue, 'rule', '') or '').upper()
     source = str(_issue_value(issue, 'source', '') or '').lower()
@@ -2111,6 +2202,8 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
     initial_issues = list(issues)
     issues = dedupe_issues_by_original(issues)
     ai_filter_diagnostics["after_dedup_ai"] = _count_ai_issues(issues)
+    issues = _filter_known_review_false_positives(issues)
+    ai_filter_diagnostics["after_known_false_positive_ai"] = _count_ai_issues(issues)
     issues = _sanitize_issue_suggestions(issues)
     ai_filter_diagnostics["after_sanitize_ai"] = _count_ai_issues(issues)
 
@@ -2220,6 +2313,7 @@ def _issue_position_start(issue):
 
 def _normalize_review_issue_display(issues, content=None):
     for issue in issues:
+        _normalize_known_rule_issue_display(issue)
         display_suggestion = _fallback_issue_suggestion_for_display(issue)
         if display_suggestion != (getattr(issue, 'suggestion', '') or ''):
             issue.suggestion = display_suggestion
@@ -2453,7 +2547,7 @@ def _render_pdf_page_png_bytes(file_path: Path, page_number: int, scale: float |
         return None
 
 
-def _apply_pdf_visual_verification(review_id: int, document, content: str, issues: list):
+def _apply_pdf_visual_verification(review_id: int, document, content: str, issues: list, suspicious_pages: dict | None = None):
     diagnostics = {
         'enabled': False,
         'candidate_count': 0,
@@ -2462,6 +2556,8 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         'rejected_count': 0,
         'uncertain_count': 0,
         'skipped_count': 0,
+        'page_candidate_count': 0,
+        'page_issue_count': 0,
         'items': [],
     }
     if not _review_pdf_visual_verify_enabled():
@@ -2469,14 +2565,6 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         return issues, diagnostics
     if str(getattr(document, 'file_type', '') or '').lower() != 'pdf':
         diagnostics['reason'] = 'not_pdf'
-        return issues, diagnostics
-    if not ai_client.kimi_client:
-        diagnostics['reason'] = 'kimi_unavailable'
-        return issues, diagnostics
-
-    source_path = _get_document_upload_path(document)
-    if not source_path or not source_path.exists():
-        diagnostics['reason'] = 'source_file_missing'
         return issues, diagnostics
 
     limit = _review_pdf_visual_verify_limit()
@@ -2495,13 +2583,58 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             continue
         candidates.append((issue, page_number))
 
+    covered_pages = {page_number for _, page_number in candidates}
+    page_candidates = []
+    remaining_limit = max(0, limit - len(candidates))
+    for page_candidate in (suspicious_pages or {}).get('candidates') or []:
+        if len(page_candidates) >= remaining_limit:
+            break
+        page_number = int(page_candidate.get('page_number') or 0)
+        if page_number <= 0 or page_number in covered_pages:
+            continue
+        reasons = set(page_candidate.get('reasons') or [])
+        if not reasons.intersection({'table_layout', 'dense_table_or_layout', 'figure_table_numbering', 'footer_or_page_number', 'toc_or_index', 'layout_keyword'}):
+            continue
+        page_candidates.append(page_candidate)
+        covered_pages.add(page_number)
+
     diagnostics['enabled'] = True
     diagnostics['candidate_count'] = len(candidates)
-    if not candidates:
+    diagnostics['page_candidate_count'] = len(page_candidates)
+    if not candidates and not page_candidates:
         diagnostics['reason'] = 'no_candidates'
         return issues, diagnostics
 
-    set_progress(review_id, 'running', '渲染复核', 84, f'正在复核 {len(candidates)} 个 PDF 疑点页...')
+    fallback_page_issues = [
+        _build_pdf_page_manual_review_issue(page_candidate, 'visual_model_unavailable')
+        for page_candidate in page_candidates
+        if _should_promote_page_candidate_without_visual(page_candidate)
+    ]
+    if not ai_client.kimi_client:
+        diagnostics['reason'] = 'kimi_unavailable'
+        diagnostics['skipped_count'] = len(candidates) + len(page_candidates)
+        diagnostics['page_issue_count'] = len(fallback_page_issues)
+        diagnostics['items'].extend([
+            {
+                'page_number': int(page_candidate.get('page_number') or 0),
+                'decision': 'needs_manual_review',
+                'reason': 'visual_model_unavailable',
+                'page_candidate': True,
+                'candidate_reasons': page_candidate.get('reasons') or [],
+            }
+            for page_candidate in page_candidates
+            if _should_promote_page_candidate_without_visual(page_candidate)
+        ])
+        return issues + fallback_page_issues, diagnostics
+
+    source_path = _get_document_upload_path(document)
+    if not source_path or not source_path.exists():
+        diagnostics['reason'] = 'source_file_missing'
+        diagnostics['page_issue_count'] = len(fallback_page_issues)
+        return issues + fallback_page_issues, diagnostics
+
+    total_visual_candidates = len(candidates) + len(page_candidates)
+    set_progress(review_id, 'running', '渲染复核', 84, f'正在复核 {total_visual_candidates} 个 PDF 疑点页...')
 
     rejected_ids = set()
     for issue, page_number in candidates:
@@ -2559,6 +2692,59 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             diagnostics['skipped_count'] += 1
             continue
         diagnostics['uncertain_count'] += 1
+
+    page_issues = []
+    for page_candidate in page_candidates:
+        page_number = int(page_candidate.get('page_number') or 0)
+        png_bytes = _render_pdf_page_png_bytes(source_path, page_number)
+        if not png_bytes:
+            diagnostics['skipped_count'] += 1
+            diagnostics['items'].append({'page_number': page_number, 'decision': 'skipped', 'reason': 'render_failed', 'page_candidate': True})
+            continue
+        result = ai_client.verify_review_issue_from_image(
+            png_bytes,
+            {
+                'severity': _page_visual_issue_severity(page_candidate.get('reasons') or []),
+                'category': _page_visual_issue_category(page_candidate.get('reasons') or []),
+                'original_text': page_candidate.get('text_preview') or '',
+                'context': page_candidate.get('text_preview') or '',
+                'description': f"页级疑点: {', '.join(page_candidate.get('reasons') or [])}",
+                'suggestion': '请人工复核该页实际显示',
+            },
+            page_number=page_number,
+            review_id=review_id,
+        )
+        decision = str(result.get('decision') or 'uncertain').lower()
+        compact_result = {
+            'page_number': page_number,
+            'decision': decision,
+            'confidence': int(result.get('confidence') or 0),
+            'reason': str(result.get('reason') or '')[:180],
+            'is_extraction_artifact': bool(result.get('is_extraction_artifact')),
+            'page_candidate': True,
+            'candidate_reasons': page_candidate.get('reasons') or [],
+        }
+        diagnostics['verified_count'] += 1
+        diagnostics['items'].append(compact_result)
+        if decision == 'confirm':
+            diagnostics['confirmed_count'] += 1
+            page_issues.append(_build_pdf_page_visual_issue(page_candidate, result))
+            continue
+        if decision == 'error' and _should_promote_page_candidate_without_visual(page_candidate):
+            diagnostics['uncertain_count'] += 1
+            page_issues.append(_build_pdf_page_manual_review_issue(page_candidate, 'visual_model_error'))
+            continue
+        if decision == 'reject':
+            diagnostics['rejected_count'] += 1
+            continue
+        if decision == 'skipped':
+            diagnostics['skipped_count'] += 1
+            continue
+        diagnostics['uncertain_count'] += 1
+
+    if page_issues:
+        diagnostics['page_issue_count'] = len(page_issues)
+        issues.extend(page_issues)
 
     if not rejected_ids:
         return issues, diagnostics
@@ -3033,6 +3219,207 @@ def _get_document_upload_path(document):
     if candidate.exists():
         return candidate
     return None
+
+
+def _page_offsets_from_pages(pages: list[str]) -> list[tuple[int, int]]:
+    offsets = []
+    cursor = 0
+    for page in pages:
+        page_text = str(page or "")
+        offsets.append((cursor, cursor + len(page_text)))
+        cursor += len(page_text) + 1
+    return offsets
+
+
+def _compact_page_preview(text: str, limit: int = 220) -> str:
+    preview = re.sub(r"\s+", " ", str(text or "")).strip()
+    return preview[:limit]
+
+
+def _extract_pdf_page_metadata(document, content: str) -> dict:
+    diagnostics = {
+        "enabled": False,
+        "source": "content",
+        "page_count": 0,
+        "pages": [],
+        "error": "",
+    }
+    if str(getattr(document, "file_type", "") or "").lower() != "pdf":
+        diagnostics["error"] = "not_pdf"
+        return diagnostics
+
+    source_path = _get_document_upload_path(document)
+    extracted_pages = []
+    block_counts_by_page: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    if source_path and source_path.exists():
+        try:
+            extracted = extract_pdf(str(source_path))
+            extracted_pages = [str(page or "") for page in extracted.get("page_texts", [])]
+            for block in extracted.get("blocks", []) or []:
+                page_num = int(getattr(block, "page_num", 0) or 0) + 1
+                block_type = str(getattr(block, "block_type", "body") or "body")
+                block_counts_by_page[page_num][block_type] += 1
+            diagnostics["source"] = "pdf_blocks"
+        except Exception as exc:
+            diagnostics["error"] = str(exc)[:200]
+
+    pages = extracted_pages or [page for page in _split_content_pages(content) if str(page or "").strip()]
+    offsets = _page_offsets_from_pages(pages)
+    page_records = []
+    for index, page_text in enumerate(pages, start=1):
+        lines = [line.strip() for line in str(page_text or "").splitlines() if line.strip()]
+        block_counts = dict(block_counts_by_page.get(index) or {})
+        table_like_lines = [line for line in lines if " | " in line or "  |  " in line]
+        footer_candidates = lines[-4:] if lines else []
+        start, end = offsets[index - 1]
+        page_records.append({
+            "page_number": index,
+            "char_start": start,
+            "char_end": end,
+            "char_count": len(page_text),
+            "line_count": len(lines),
+            "block_counts": block_counts,
+            "table_like_line_count": len(table_like_lines),
+            "footer_preview": footer_candidates,
+            "text_preview": _compact_page_preview(page_text),
+        })
+
+    diagnostics["enabled"] = True
+    diagnostics["page_count"] = len(page_records)
+    diagnostics["pages"] = page_records[:80]
+    return diagnostics
+
+
+def _collect_pdf_suspicious_pages(page_metadata: dict) -> dict:
+    pages = page_metadata.get("pages") or []
+    candidates = []
+    for page in pages:
+        reasons = []
+        text = " ".join([
+            str(page.get("text_preview") or ""),
+            " ".join(str(item or "") for item in page.get("footer_preview") or []),
+        ])
+        block_counts = page.get("block_counts") or {}
+        table_blocks = int(block_counts.get("table", 0) or 0) + int(block_counts.get("table_row", 0) or 0)
+        table_like_line_count = int(page.get("table_like_line_count") or 0)
+        line_count = int(page.get("line_count") or 0)
+
+        if table_blocks >= 2 or table_like_line_count >= 2:
+            reasons.append("table_layout")
+        if line_count >= 45 and (table_blocks or table_like_line_count):
+            reasons.append("dense_table_or_layout")
+        if re.search(r"(?:^|\s)(?:图|Figure|Fig\.)\s*\d+|(?:^|\s)(?:表|Table)\s*\d+", text, re.IGNORECASE):
+            reasons.append("figure_table_numbering")
+        if re.search(r"(?:第\s*\d+\s*页|page\s+\d+|doc\.?\s*no\.?|h-\d{3}|copyright|版权)", text, re.IGNORECASE):
+            reasons.append("footer_or_page_number")
+        if re.search(r"(?:目录|contents|索引|index|\.\.\.|…{2,})", text, re.IGNORECASE):
+            reasons.append("toc_or_index")
+        if re.search(r"(?:跨页|分页|列宽|行高|表头|页脚|图号|页码|平均分布列|均匀分布列)", text, re.IGNORECASE):
+            reasons.append("layout_keyword")
+
+        if reasons:
+            candidates.append({
+                "page_number": page.get("page_number"),
+                "reasons": sorted(set(reasons)),
+                "char_start": page.get("char_start"),
+                "char_end": page.get("char_end"),
+                "text_preview": page.get("text_preview"),
+            })
+
+    return {
+        "enabled": bool(page_metadata.get("enabled")),
+        "candidate_count": len(candidates),
+        "candidates": candidates[:30],
+    }
+
+
+def _page_visual_issue_category(reasons: list[str]) -> str:
+    reasons = {str(reason or "") for reason in (reasons or [])}
+    if "toc_or_index" in reasons:
+        return "目录一致性"
+    if "footer_or_page_number" in reasons:
+        return "页脚异常"
+    if "figure_table_numbering" in reasons:
+        return "图表编号"
+    if "table_layout" in reasons or "dense_table_or_layout" in reasons or "layout_keyword" in reasons:
+        return "表格/版式"
+    return "页面复核"
+
+
+def _page_visual_issue_severity(reasons: list[str]) -> str:
+    reasons = {str(reason or "") for reason in (reasons or [])}
+    if "dense_table_or_layout" in reasons:
+        return "serious"
+    return "general"
+
+
+def _should_promote_page_candidate_without_visual(page_candidate: dict) -> bool:
+    reasons = {str(reason or "") for reason in (page_candidate.get("reasons") or [])}
+    if "toc_or_index" in reasons or "footer_or_page_number" in reasons:
+        return False
+    if not reasons.intersection({"table_layout", "dense_table_or_layout", "layout_keyword"}):
+        return False
+
+    preview = str(page_candidate.get("text_preview") or "")
+    if re.search(r"版本记录|(?:日期.{0,16}版本)|(?:版本.{0,16}修订)|平均分布列|均匀分布列|列宽", preview, re.IGNORECASE):
+        return True
+    return False
+
+
+def _build_pdf_page_visual_issue(page_candidate: dict, result: dict) -> dict:
+    page_number = int(page_candidate.get("page_number") or 0)
+    reasons = list(page_candidate.get("reasons") or [])
+    category = _page_visual_issue_category(reasons)
+    severity = _page_visual_issue_severity(reasons)
+    reason_text = str(result.get("reason") or "")[:180]
+    if not reason_text:
+        reason_text = "页面渲染复核确认存在疑点"
+    return {
+        "severity": severity,
+        "category": category,
+        "rule": "PDF-VISUAL-001",
+        "chapter": f"第{page_number}页",
+        "original_text": page_candidate.get("text_preview") or "",
+        "context": page_candidate.get("text_preview") or "",
+        "suggestion": "请人工复核该页版式、页脚、图表编号或目录一致性",
+        "description": f"PDF 页级渲染复核确认疑点，原因: {reason_text}",
+        "audit_basis": "PDF 页级渲染复核",
+        "confidence": int(result.get("confidence") or 0) or 85,
+        "source": str(result.get("source") or "ai"),
+        "position": _encode_issue_position_with_meta(
+            int(page_candidate.get("char_start") or 0),
+            int(page_candidate.get("char_end") or 0),
+            page_number=page_number,
+            area=category,
+            visual_verification={
+                "decision": str(result.get("decision") or "uncertain").lower(),
+                "reason": reason_text,
+                "confidence": int(result.get("confidence") or 0),
+                "page_candidate": True,
+            },
+        ),
+    }
+
+
+def _build_pdf_page_manual_review_issue(page_candidate: dict, reason: str) -> dict:
+    result = {
+        "decision": "needs_manual_review",
+        "reason": reason,
+        "confidence": 72,
+        "source": "rule",
+    }
+    issue = _build_pdf_page_visual_issue(page_candidate, result)
+    preview = str(page_candidate.get("text_preview") or "")
+    version_values = re.findall(r"\b\d+\.\d+\b", preview)
+    normalized_version_context = ""
+    if "版本" in preview and version_values:
+        version_sequence = " ".join(version_values[:4])
+        normalized_version_context = f"；版本 {version_sequence}；版本列值: {version_sequence}"
+        issue["context"] = f"{issue.get('context', '')}{normalized_version_context}"
+    issue["suggestion"] = "请人工复核该页表格列宽、平均分布列和版本记录版式"
+    issue["description"] = f"PDF 页级结构规则发现高置信表格/版式疑点，疑似表格列宽或平均分布列异常{normalized_version_context}，原因: {reason}"
+    issue["audit_basis"] = "PDF 页级结构规则 + WorkBuddy 版式复核流程"
+    return issue
 
 
 def _normalize_excel_cell(value):
@@ -4808,11 +5195,12 @@ def _ai_provider_cache_fingerprint():
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def _build_ai_chunk_cache_key(chunk, language, audit_basis):
+def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None):
     raw = "||".join([
         hashlib.sha1(str(chunk or "").encode("utf-8")).hexdigest(),
         hashlib.sha1(str(audit_basis or "").encode("utf-8")).hexdigest(),
         str(language or ""),
+        str(document_name or ""),
         _review_cache_version(),
         _ai_provider_cache_fingerprint(),
     ])
@@ -4820,7 +5208,7 @@ def _build_ai_chunk_cache_key(chunk, language, audit_basis):
 
 
 def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None):
-    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis)
+    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis, document_name=document_name)
     if force_provider:
         cache_key = hashlib.sha1((cache_key + "|provider=" + force_provider).encode("utf-8")).hexdigest()
     cached = _ai_review_chunk_cache.get(cache_key)
@@ -7106,7 +7494,7 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 温度范围单位空格', 'serious', 92,
         )
 
-    for match in re.finditer(r'0\.2\s*mL', normalized):
+    for match in re.finditer(r'0\.2mL', normalized):
         add_issue(
             match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
             'CYY-CN-FMT-002', '数字与单位格式',
@@ -9976,6 +10364,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         original_content_length = len(content)
         content_limit = _review_content_limit(document.file_type)
         content = content[:content_limit]
+        pdf_page_metadata = _extract_pdf_page_metadata(document, content)
+        pdf_suspicious_pages = _collect_pdf_suspicious_pages(pdf_page_metadata)
         document_language = detect_language(content)
         spec_texts = _load_review_spec_texts(db)
         false_positive_signatures = _load_false_positive_signatures_for_document(db, document_id)
@@ -10194,6 +10584,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         ai_review_trace = {"enabled": False, "reason": "not_run"}
         ai_review_basis_sections = []
+        ai_degraded = False
+        ai_degraded_reason = ""
+        if document.file_type != 'xlsx' and mode in ["ai", "hybrid"] and not has_ai_client:
+            ai_degraded = True
+            ai_degraded_reason = "未检测到可用 AI provider，当前结果仅包含规则审核输出"
+            ai_review_trace = {"enabled": False, "reason": "no_ai_provider"}
+            print(f"[审核] AI审核降级: {ai_degraded_reason}")
         if document.file_type != 'xlsx' and mode in ["ai", "hybrid"] and has_ai_client:
             _begin_stage("ai_deep_review")
             pre_ai_count = len(issues)
@@ -10258,6 +10655,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             print(f"[审核] AI审核返回问题数={len(ai_issues)}")
             _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
             _log_review_ai_usage(review_id, "review.audit_chunk.deepseek", "AI复审Token统计")
+            audit_chunk_usage = ai_client.summarize_usage_events(
+                request_label="review.audit_chunk",
+                review_id=review_id,
+                limit=200,
+            )
+            ai_calls = int(audit_chunk_usage.get("calls") or 0)
+            ai_degraded = mode in {"ai", "hybrid"} and ai_calls <= 0
+            ai_degraded_reason = "AI provider 未完成有效调用，当前结果仅包含规则审核输出" if ai_degraded else ""
+            if ai_degraded:
+                print(f"[审核] AI审核降级: {ai_degraded_reason}")
 
             # AI调用追踪
             try:
@@ -10306,7 +10713,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         _begin_stage("pdf_visual_verification")
         _stage_input_counts["pdf_visual_verification"] = len(issues)
-        issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, document, content, issues)
+        issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, document, content, issues, pdf_suspicious_pages)
         visual_dropped = _stage_input_counts.get("pdf_visual_verification", len(issues)) - len(issues)
         _end_stage("pdf_visual_verification", output_count=len(issues), dropped_count=visual_dropped)
 
@@ -10376,8 +10783,12 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "cache_hit": False,
             "ai_usage": review_ai_usage,
             "ai_review": ai_review_trace,
+            "ai_degraded": bool(ai_degraded),
+            "ai_degraded_reason": ai_degraded_reason,
             "ai_filter_diagnostics": ai_filter_diagnostics,
             "pdf_visual_verification": pdf_visual_verification,
+            "pdf_page_metadata": pdf_page_metadata,
+            "pdf_suspicious_pages": pdf_suspicious_pages,
             "knowledge_basis": {
                 "enabled": bool(ai_review_basis_sections),
                 "labels": knowledge_labels,
@@ -10387,7 +10798,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "engine_version": "review-engine-v2",
         })
 
-        set_progress(review_id, 'completed', '完成', 100, f'审核完成，发现 {len(issues)} 个问题')
+        completion_message = f'审核完成，发现 {len(issues)} 个问题'
+        if ai_degraded:
+            completion_message += '（AI 未参与，本次为规则审核结果）'
+        set_progress(review_id, 'completed', '完成', 100, completion_message)
         update_review_status(db, review_id, "completed", len(issues), summary)
         print(f"[审核] 任务完成, review_id={review_id}, 问题数={len(issues)}")
 
@@ -11668,7 +12082,7 @@ async def compare_review_with_gold(
 @router.get("/provider-status")
 async def get_provider_status(_: UserOut = Depends(require_admin)):
     """获取可用 AI provider 列表和配置信息"""
-    status = ai_client.provider_status()
+    status = ai_client.provider_status(include_health=True)
     
     # 构建前端友好的模型列表
     models = []
@@ -11680,16 +12094,22 @@ async def get_provider_status(_: UserOut = Depends(require_admin)):
         "mcai": "MCAI Proxy",
         "proxy": "OpenAI Proxy",
     }
+    provider_health = (status.get("health") or {}).get("providers") or {}
     for name in status.get("available", []):
+        health = provider_health.get(name) or {}
         models.append({
             "name": name,
             "label": model_labels.get(name, name),
             "available": True,
+            "status": health.get("status", "ok"),
+            "latency_ms": health.get("latency_ms"),
+            "model": health.get("model"),
         })
     
     return {
         "default_provider": status.get("default_provider"),
         "available_providers": status.get("available"),
+        "health": status.get("health"),
         "provider_models": {
             "qwen": ai_client.qwen_model,
             "deepseek": ai_client.deepseek_model,
@@ -11871,12 +12291,30 @@ async def get_aggregated_report(
     使用 ReportAggregator 输出展示问题分组、五维质量评分、
     阶段诊断摘要，供前端报告面板和导出使用。
     """
-    from app.review_engine.reporting import ReportAggregator
-
     review, document = _require_review_access(db, review_id, current_user)
 
     issues = get_issues(db, review_id=review_id)
     issue_dicts = [_report_issue_to_dict(i) for i in issues]
+    summary_raw = _load_review_summary(review.summary)
+
+    try:
+        from app.review_engine.reporting import ReportAggregator
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"app.review_engine.reporting", "app.review_engine"}:
+            raise
+        return {
+            "review_id": review_id,
+            "document_title": getattr(document, 'filename', '') or '',
+            "total_issues": len(issue_dicts),
+            "issues": issue_dicts,
+            "stage_diagnostics": {
+                "stages": summary_raw.get("stages", summary_raw.get("stage_diagnostics", [])),
+                "language": summary_raw.get("language", ""),
+            },
+            "degraded": True,
+            "degraded_reason": "review_engine.reporting 模块未启用",
+        }
+
     agg = ReportAggregator()
     report = agg.aggregate(
         issue_dicts,
@@ -11884,7 +12322,6 @@ async def get_aggregated_report(
         document_title=getattr(document, 'filename', '') or '',
     )
 
-    summary_raw = _load_review_summary(review.summary)
     report.stage_diagnostics = {
         "stages": summary_raw.get("stages", summary_raw.get("stage_diagnostics", [])),
         "language": summary_raw.get("language", ""),
@@ -11934,7 +12371,17 @@ async def get_rule_migration_status(_: UserOut = Depends(require_admin)):
 
     返回已迁移和待迁移的规则分组，用于跟踪审核引擎重构进度。
     """
-    from app.review_engine.rules import get_migration_summary
+    try:
+        from app.review_engine.rules import get_migration_summary
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"app.review_engine.rules", "app.review_engine.rules.engine"}:
+            raise
+        return {
+            "enabled": False,
+            "migrated": [],
+            "pending": [],
+            "degraded_reason": "review_engine.rules 模块未启用",
+        }
     return get_migration_summary()
 
 

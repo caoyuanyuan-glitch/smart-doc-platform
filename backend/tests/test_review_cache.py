@@ -33,6 +33,82 @@ def test_build_review_cache_key_changes_with_mode(monkeypatch):
     assert rule_key != hybrid_key
 
 
+def test_build_ai_chunk_cache_key_changes_with_document_name(monkeypatch):
+    monkeypatch.setattr(review_api, "_review_cache_version", lambda: "v1")
+    monkeypatch.setattr(review_api, "_ai_provider_cache_fingerprint", lambda: "provider-v1")
+
+    key_a = review_api._build_ai_chunk_cache_key("same content", "cn", "same basis", document_name="A.pdf")
+    key_b = review_api._build_ai_chunk_cache_key("same content", "cn", "same basis", document_name="B.pdf")
+
+    assert key_a != key_b
+
+
+def test_provider_status_uses_health_check_available_providers(monkeypatch):
+    def fake_provider_status(include_health=False):
+        assert include_health is True
+        return {
+            "default_provider": "qwen",
+            "available": ["kimi"],
+            "health": {
+                "healthy": True,
+                "ok_providers": 1,
+                "total_providers": 2,
+                "primary": "kimi",
+                "primary_status": "ok",
+                "providers": {
+                    "qwen": {"status": "error", "model": "qwen-max", "error": "401"},
+                    "kimi": {"status": "ok", "model": "moonshot-v1-8k", "latency_ms": 42},
+                },
+            },
+        }
+
+    monkeypatch.setattr(review_api.ai_client, "provider_status", fake_provider_status)
+
+    payload = asyncio.run(review_api.get_provider_status(None))
+
+    assert payload["available_providers"] == ["kimi"]
+    assert payload["models"] == [{
+        "name": "kimi",
+        "label": "Kimi (Moonshot)",
+        "available": True,
+        "status": "ok",
+        "latency_ms": 42,
+        "model": "moonshot-v1-8k",
+    }]
+    assert payload["health"]["ok_providers"] == 1
+
+
+def test_pdf_page_metadata_collects_suspicious_table_pages(monkeypatch):
+    document = SimpleNamespace(file_type="pdf", filename="demo.pdf")
+    monkeypatch.setattr(review_api, "_get_document_upload_path", lambda document: review_api.PROJECT_ROOT / "backend")
+    monkeypatch.setattr(
+        review_api,
+        "extract_pdf",
+        lambda path: {
+            "page_texts": [
+                "版本  日期\n2.0  2026年7月15日\n1.0  2025年11月17日\n3",
+                "正文内容\n图 1 系统组成\nDoc. No. H-020-001246-00",
+            ],
+            "blocks": [
+                SimpleNamespace(page_num=0, block_type="table_row"),
+                SimpleNamespace(page_num=0, block_type="table_row"),
+                SimpleNamespace(page_num=1, block_type="caption"),
+            ],
+        },
+    )
+
+    metadata = review_api._extract_pdf_page_metadata(document, "fallback")
+    suspicious = review_api._collect_pdf_suspicious_pages(metadata)
+
+    assert metadata["enabled"] is True
+    assert metadata["source"] == "pdf_blocks"
+    assert metadata["page_count"] == 2
+    assert suspicious["candidate_count"] == 2
+    first_page = suspicious["candidates"][0]
+    assert first_page["page_number"] == 1
+    assert "table_layout" in first_page["reasons"]
+
+
 def test_run_filename_audit_skips_known_product_output_filename():
     issues = review_api._run_filename_audit(
         "ROINAMEquantification.csv",
@@ -869,6 +945,98 @@ def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
     issue_meta = json.loads(issues[0]["position"])
     assert issue_meta["visual_verification"]["decision"] == "reject"
     assert issue_meta["visual_verification"]["is_extraction_artifact"] is True
+
+
+def test_apply_pdf_visual_verification_adds_confirmed_page_candidate_issue(monkeypatch):
+    document = SimpleNamespace(file_type="pdf", filename="demo.pdf")
+    issues = []
+    suspicious_pages = {
+        "enabled": True,
+        "candidate_count": 1,
+        "candidates": [{
+            "page_number": 3,
+            "reasons": ["table_layout", "dense_table_or_layout"],
+            "char_start": 20,
+            "char_end": 80,
+            "text_preview": "版本 日期 2.0 2026年7月15日 1.0 2025年11月17日",
+        }],
+    }
+
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_enabled", lambda: True)
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_limit", lambda: 6)
+    monkeypatch.setattr(review_api, "_get_document_upload_path", lambda document: review_api.PROJECT_ROOT / "backend")
+    monkeypatch.setattr(review_api, "_render_pdf_page_png_bytes", lambda file_path, page_number, scale=None: b"png-bytes")
+    monkeypatch.setattr(review_api.ai_client, "kimi_client", object())
+    monkeypatch.setattr(
+        review_api.ai_client,
+        "verify_review_issue_from_image",
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+            "decision": "confirm",
+            "reason": "表格列宽分布不均，页面显示拥挤",
+            "confidence": 88,
+            "is_extraction_artifact": False,
+        },
+    )
+    monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
+
+    filtered, diagnostics = review_api._apply_pdf_visual_verification(123, document, "dummy", issues, suspicious_pages)
+
+    assert len(filtered) == 1
+    assert filtered[0]["rule"] == "PDF-VISUAL-001"
+    assert filtered[0]["category"] == "表格/版式"
+    assert diagnostics["page_candidate_count"] == 1
+    assert diagnostics["page_issue_count"] == 1
+    issue_meta = json.loads(filtered[0]["position"])
+    assert issue_meta["page_number"] == 3
+    assert issue_meta["visual_verification"]["page_candidate"] is True
+
+
+def test_apply_pdf_visual_verification_adds_manual_page_issue_on_visual_error(monkeypatch):
+    document = SimpleNamespace(file_type="pdf", filename="demo.pdf")
+    issues = []
+    suspicious_pages = {
+        "enabled": True,
+        "candidate_count": 1,
+        "candidates": [{
+            "page_number": 3,
+            "reasons": ["table_layout"],
+            "char_start": 20,
+            "char_end": 80,
+            "text_preview": "版本记录 日期 版本 修订 2026年7月15日 2.0 编制 2025年11月17日 1.0",
+        }],
+    }
+
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_enabled", lambda: True)
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_limit", lambda: 6)
+    monkeypatch.setattr(review_api, "_get_document_upload_path", lambda document: review_api.PROJECT_ROOT / "backend")
+    monkeypatch.setattr(review_api, "_render_pdf_page_png_bytes", lambda file_path, page_number, scale=None: b"png-bytes")
+    monkeypatch.setattr(review_api.ai_client, "kimi_client", object())
+    monkeypatch.setattr(
+        review_api.ai_client,
+        "verify_review_issue_from_image",
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+            "decision": "error",
+            "reason": "visual model unavailable",
+            "confidence": 0,
+            "is_extraction_artifact": False,
+        },
+    )
+    monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
+
+    filtered, diagnostics = review_api._apply_pdf_visual_verification(123, document, "dummy", issues, suspicious_pages)
+
+    assert len(filtered) == 1
+    assert filtered[0]["rule"] == "PDF-VISUAL-001"
+    assert filtered[0]["category"] == "表格/版式"
+    assert filtered[0]["source"] == "rule"
+    assert "平均分布列" in filtered[0]["description"]
+    assert "版本 2.0 1.0" in filtered[0]["context"]
+    assert "版本列值: 2.0 1.0" in filtered[0]["context"]
+    assert diagnostics["page_candidate_count"] == 1
+    assert diagnostics["page_issue_count"] == 1
+    issue_meta = json.loads(filtered[0]["position"])
+    assert issue_meta["page_number"] == 3
+    assert issue_meta["visual_verification"]["decision"] == "needs_manual_review"
 
 
 def test_apply_pdf_visual_verification_filters_known_quote_mapping_artifact_after_uncertain(monkeypatch):
@@ -2881,6 +3049,144 @@ def test_known_false_positive_filter_drops_official_global_site_issue():
     }
 
     assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_run_chinese_human_baseline_rules_keeps_correct_ml_spacing():
+    content = '表 4 推荐耗材清单\n低吸附 EP 管 0.2 mL，用于样本制备。'
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue['rule'] == 'CYY-CN-FMT-002' for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_missing_ml_spacing():
+    content = '表 4 推荐耗材清单\n低吸附 EP 管 0.2mL，用于样本制备。'
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert any(issue['rule'] == 'CYY-CN-FMT-002' and issue['original_text'] == '0.2mL' for issue in issues)
+
+
+def test_clean_issue_suggestion_for_display_strips_chinese_quotes():
+    assert review_api._clean_issue_suggestion_for_display('建议统一为“2 ℃ ~ 8 ℃”') == '2 ℃ ~ 8 ℃'
+
+
+def test_normalize_ext_r021_uses_grammar_category_and_replacement_suggestion():
+    issue = {
+        'original_text': '如操作不当或不避免',
+        'rule': 'EXT-R021',
+        'category': '格式错误',
+        'suggestion': '避免"不避免"类语法错误。"如操作不当或不避免"不通顺，应改为"如不按照说明操作"或"如操作不当或未加避免"',
+        'description': '避免"不避免"类语法错误。',
+    }
+
+    review_api._sanitize_issue_suggestions([issue])
+
+    assert issue['category'] == '语法错误'
+    assert issue['suggestion'] == '如未按照说明进行操作'
+    assert issue['description'] == '原文中的“不避免”搭配不通顺，应改为“如未按照说明进行操作”。'
+
+
+def test_known_false_positive_filter_drops_noop_chinese_baseline_issue():
+    issue = {
+        'original_text': '外部存储设备',
+        'rule': 'CYY-CN-CONSIST-024',
+        'source': 'rule',
+        'suggestion': '建议统一为“外部存储设备”',
+        'description': '用于连接扫码枪或外部存储设备。',
+        'audit_basis': 'CYY人工审核经验基线 - 外部存储设备直写',
+        'context': '用于连接扫码枪或外部存储设备',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_known_false_positive_filter_keeps_unit_spacing_suggestion():
+    issue = {
+        'original_text': '24VDC，5A',
+        'rule': 'CYY-CN-FMT-003',
+        'source': 'rule',
+        'suggestion': '24 VDC，5 A',
+        'description': '单位前面要加空格。',
+        'audit_basis': 'CYY人工审核经验基线 - 电源规格单位空格',
+        'context': '说明 24VDC，5A 100-240V~，50/60 Hz，300VA',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is False
+
+
+def test_known_false_positive_filter_drops_space_term_usage_issue():
+    issue = {
+        'original_text': '空格',
+        'rule': 'EXT-R009',
+        'source': 'rule',
+        'suggestion': '文档内容中不得出现多余的空格、空行等排版问题',
+        'description': '检查多余空格。',
+        'audit_basis': '通用格式规则',
+        'context': 'Barcode 序列间禁止使用空格，长度需大于等于 6，且相等。',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_known_false_positive_filter_drops_rohs_title_fragment_issue():
+    issue = {
+        'original_text': '品中有害',
+        'rule': '需包含产品中有害物质的名称及含有物质表',
+        'source': 'ai',
+        'category': '合规问题',
+        'severity': 'serious',
+        'suggestion': '建议按下方修改。需包含产品中有害物质的名称及含有物质表',
+        'description': '需包含产品中有害物质的名称及含有物质表',
+        'audit_basis': '合规规则',
+        'context': '产品中有害物质的名称及含有物质表',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_finalize_review_issues_filters_known_false_positives_by_default():
+    issues = [
+        {
+            'original_text': '空格',
+            'rule': 'EXT-R009',
+            'source': 'rule',
+            'suggestion': '文档内容中不得出现多余的空格、空行等排版问题',
+            'description': '检查多余空格。',
+            'audit_basis': '通用格式规则',
+            'context': 'Barcode 序列间禁止使用空格，长度需大于等于 6，且相等。',
+        },
+        {
+            'original_text': '物质的名',
+            'rule': 'EXT-R019',
+            'source': 'ai',
+            'category': '合规问题',
+            'severity': 'serious',
+            'suggestion': '建议按下方修改。需包含产品中有害物质的名称及含有物质表',
+            'description': '需包含产品中有害物质的名称及含有物质表',
+            'audit_basis': '合规规则',
+            'context': '产品中有害物质的名称及含有物质表',
+        },
+        {
+            'original_text': 'XXXXXXXXXXX',
+            'rule': 'CYY-CN-PLACEHOLDER-001',
+            'source': 'rule',
+            'category': '占位符残留',
+            'severity': 'serious',
+            'suggestion': '替换为真实信息。',
+            'description': '文档存在占位符残留。',
+            'audit_basis': '中文人工审核规则',
+            'context': '联系电话：XXXXXXXXXXX',
+        },
+    ]
+
+    filtered, diagnostics = review_api._finalize_review_issues(issues, '联系电话：XXXXXXXXXXX', set())
+
+    originals = {issue['original_text'] for issue in filtered}
+    assert '空格' not in originals
+    assert '物质的名' not in originals
+    assert 'XXXXXXXXXXX' in originals
+    assert diagnostics['after_known_false_positive_ai'] == 0
 
 
 def test_should_skip_rule_match_skips_ext_r013_for_pdf():

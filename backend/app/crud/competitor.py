@@ -3,8 +3,9 @@ from app.models.competitor_task import CompetitorTask
 import json
 
 
-def create_competitor_task(db: Session, file_name: str, file_size: int, user_id: int):
+def create_competitor_task(db: Session, file_name: str, file_size: int, user_id: int, source_type: str = "file"):
     db_task = CompetitorTask(
+        source_type=source_type,
         file_name=file_name,
         file_size=file_size,
         user_id=user_id,
@@ -29,7 +30,8 @@ def get_competitor_tasks(db: Session, user_id: int = None, skip: int = 0, limit:
 
 def update_competitor_task(db: Session, task_id: int, *, status: str = None,
                            tool_analysis: dict = None, readability: dict = None,
-                           report_md: str = None, error: str = None, completed_at=None):
+                           report_md: str = None, error: str = None,
+                           overall_score: float = None, completed_at=None):
     task = db.query(CompetitorTask).filter(CompetitorTask.id == task_id).first()
     if not task:
         return None
@@ -43,6 +45,8 @@ def update_competitor_task(db: Session, task_id: int, *, status: str = None,
         task.report_md = report_md
     if error is not None:
         task.error = error
+    if overall_score is not None:
+        task.overall_score = overall_score
     if completed_at is not None:
         task.completed_at = completed_at
     db.commit()
