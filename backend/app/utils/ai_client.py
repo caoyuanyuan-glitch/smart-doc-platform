@@ -33,7 +33,7 @@ except ModuleNotFoundError as exc:
     if exc.name != "app.utils.prompt_builder":
         raise
 
-    logger.warning("prompt_builder 模块加载失败，审查提示词构建功能降级: %s", exc)
+    logger.info("prompt_builder 模块加载失败，审查提示词构建功能降级: %s", exc)
 
     PROMPT_BUILDER_FALLBACK_ACTIVE = True
 
