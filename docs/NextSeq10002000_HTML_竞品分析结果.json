@@ -1,0 +1,116 @@
+{
+  "document_name": "NextSeq10002000.htm",
+  "source_url": "https://support-docs.illumina.com/IN/NextSeq10002000/Content/IN/FrontPages/NextSeq10002000.htm",
+  "title": "NextSeq 1000/2000",
+  "analysis_scope": "single_html_front_page",
+  "analysis_note": "本次分析对象是帮助集首页，不是整套帮助站的所有 topic 页面。Findability 和 Usability 分数仅代表首页文本抽取结果。",
+  "tool_analysis": {
+    "summary": "主编辑工具：MadCap Flare（high 置信）",
+    "meta": {
+      "format": "HTML",
+      "producer": "Web page",
+      "creator": "support-docs.illumina.com",
+      "title": "NextSeq 1000/2000",
+      "pages": 1,
+      "source_url": "https://support-docs.illumina.com/IN/NextSeq10002000/Content/IN/FrontPages/NextSeq10002000.htm"
+    },
+    "html_evidence": [
+      "URL 路径含 Flare 导出目录特征 /Content/（https://support-docs.illumina.com/IN/NextSeq10002000/Content/IN/FrontPages/NextSeq10002000.htm）",
+      "Topic 页以 .htm 结尾且位于 /Content/ 目录（HAT 导出特征）",
+      "HTML 引用 MadCap 运行时脚本或标记"
+    ]
+  },
+  "readability": {
+    "overall_score": 89.3,
+    "level": "excellent",
+    "language": "en",
+    "stats": {
+      "sentence_count": 7,
+      "paragraph_count": 27,
+      "avg_sentence_len": 14.9,
+      "avg_paragraph_len": 3.9,
+      "term_density_pct": 48.5,
+      "passive_ratio_pct": 0.0,
+      "jieba_available": false
+    },
+    "interpretation": [
+      "首页文案短、句长可控，所以总体可读性高。",
+      "术语密度高，原因是文本主要由产品名和章节名构成。",
+      "该评分更适合代表首页文本风格，不适合直接外推整套正文。"
+    ],
+    "structure_stats": {
+      "pages": 1,
+      "chapter_count": 0,
+      "image_count": 0,
+      "table_count": 0,
+      "warning_count": 0,
+      "cautions": [
+        "安全警告数为 0：检测依赖文本关键词匹配，图标或特殊排版呈现的安全提示可能未被统计，建议人工复核。",
+        "文本样本量有限（7 句），评分仅供参考；建议补充更多正文内容后复核。",
+        "当前页面路径疑似手册入口页/封面页，非正文内容；建议选择具体子页面分析，或上传完整 HTML 包后分析。"
+      ]
+    }
+  },
+  "access": {
+    "overall_score": 63.3,
+    "level": "fair",
+    "summary": "页面可直接访问，但首页文本缺少明显版本透明度信号。"
+  },
+  "findability": {
+    "overall_score": 0.0,
+    "level": "poor",
+    "summary": "当前单页文本抽取结果未捕获完整目录树、搜索框或索引结构。",
+    "caution": "该分数代表首页文本抽取结果，不代表整站没有查找能力。"
+  },
+  "usability": {
+    "overall_score": 54.2,
+    "level": "poor",
+    "summary": "首页以入口导航为主，缺少步骤正文，导致步骤完整性和可操作性得分偏低。",
+    "stats": {
+      "step_hits": 0,
+      "task_title_hits": 0,
+      "heading_count_sampled": 23,
+      "link_hits": 1
+    }
+  },
+  "comparison_to_pdf": {
+    "pdf_readability_score": 100.0,
+    "pdf_access_score": 83.3,
+    "pdf_findability_score": 34.3,
+    "pdf_usability_score": 58.0,
+    "key_difference": [
+      "PDF 版本覆盖完整正文，HTML 首页只覆盖导航入口。",
+      "HTML 首页验证了帮助系统原始来源路径。",
+      "HTML 首页更适合评估导航骨架，PDF 更适合评估完整内容能力。"
+    ]
+  },
+  "topic_samples": [
+    {
+      "label": "System Overview",
+      "url": "https://support-docs.illumina.com/IN/NextSeq10002000/Content/IN/NextSeq2000_1000/SystemOverview.htm",
+      "text_length": 2692,
+      "readability_score": 86.2,
+      "access_score": 83.3,
+      "findability_score": 50.0,
+      "usability_score": 54.2
+    },
+    {
+      "label": "Sequencing Protocol",
+      "url": "https://support-docs.illumina.com/IN/NextSeq10002000/Content/IN/NextSeq2000_1000/Protocol_seq.htm",
+      "text_length": 1243,
+      "readability_score": 92.7,
+      "access_score": 83.3,
+      "findability_score": 0.0,
+      "usability_score": 44.2
+    },
+    {
+      "label": "Troubleshooting",
+      "url": "https://support-docs.illumina.com/IN/NextSeq10002000/Content/IN/NextSeq2000_1000/Troubleshooting.htm",
+      "text_length": 675,
+      "readability_score": 90.2,
+      "access_score": 83.3,
+      "findability_score": 0.0,
+      "usability_score": 54.2
+    }
+  ]
+}

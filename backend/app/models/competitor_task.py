@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger
+from sqlalchemy import Column, Integer, String, DateTime, Text, BigInteger, Float
 from app.database import Base
 from datetime import datetime
 
@@ -13,11 +13,13 @@ class CompetitorTask(Base):
     __tablename__ = "competitor_tasks"
 
     id = Column(Integer, primary_key=True, index=True)
+    source_type = Column(String, default="file")
     file_name = Column(String)
     file_size = Column(BigInteger, default=0)
     status = Column(String, default="pending")  # pending / processing / completed / failed
     tool_analysis = Column(Text)   # JSON: 编辑工具识别结果
     readability = Column(Text)     # JSON: 可读性分析结果
+    overall_score = Column(Float, default=0.0)
     report_md = Column(Text)       # Markdown 报告全文
     error = Column(Text)           # 失败原因
     user_id = Column(Integer)

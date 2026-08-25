@@ -1,6 +1,6 @@
 """竞品文档分析报告渲染（Markdown）。
 
-输入：analyze_document() 产出的结构化结果（tool_analysis / readability）。
+输入：analyze_document() 产出的结构化结果（tool_analysis / readability / access / findability / usability）。
 输出：可直接预览与导出的 Markdown 报告全文。
 """
 
@@ -76,6 +76,8 @@ def _render_tool_section(tool_analysis: Dict) -> str:
         lines.append(f"- **Producer 元数据**：{_md_escape(meta['producer'])}")
     if meta.get("creator"):
         lines.append(f"- **Creator 元数据**：{_md_escape(meta['creator'])}")
+    if meta.get("source_url"):
+        lines.append(f"- **来源链接**：{_md_escape(meta['source_url'])}")
     lines.append("")
 
     if tools:
@@ -98,6 +100,30 @@ def _render_tool_section(tool_analysis: Dict) -> str:
             embed = "嵌入" if fs.get("embedded") else "未嵌入"
             lines.append(f"- {_md_escape(fs.get('hint', ''))}（{embed}，字体「{_md_escape(fs.get('name', ''))}」）")
         lines.append("")
+    html_evidence = tool_analysis.get("html_evidence") or []
+    if html_evidence:
+        lines.append("**识别证据**")
+        lines.append("")
+        for item in html_evidence:
+            lines.append(f"- {_md_escape(item)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_structure_section(readability: Dict) -> str:
+    stats = readability.get("structure_stats") or {}
+    lines = ["## 二、结构统计（客观指标）", ""]
+    lines.append("| 指标 | 数值 | 口径说明 |")
+    lines.append("| --- | --- | --- |")
+    lines.append(f"| 页数 | {stats.get('pages', 0)} | 文档总页数 |")
+    lines.append(f"| 章节数 | {stats.get('chapter_count', 0)} | 标题行启发式识别，近似值 |")
+    lines.append(f"| 图片数 | {stats.get('image_count', 0)} | HTML `<img>` 或 PDF 嵌入图统计 |")
+    lines.append(f"| 表格数 | {stats.get('table_count', 0)} | HTML `<table>` 或 PDF 表格统计 |")
+    lines.append(f"| 安全警告数 | {stats.get('warning_count', 0)} | 行首 WARNING/CAUTION/DANGER/NOTICE/警告/注意/危险 |")
+    lines.append("")
+    for item in stats.get("cautions") or []:
+        lines.append(f"> {_md_escape(item)}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -107,12 +133,16 @@ def _render_readability_section(readability: Dict) -> str:
     suggestions = readability.get("suggestions", [])
     language_label = "中文" if readability.get("language") == "zh" else "英文"
 
-    lines = ["## 二、可读性分析", ""]
+    lines = ["## 三、可读性分析", ""]
     lines.append(
         f"- **语言**：{language_label}　**综合评分**：{readability.get('overall_score', 0)} 分　"
         f"**评级**：{readability.get('level', '未知')}"
     )
     lines.append("")
+    for item in (readability.get("structure_stats") or {}).get("cautions") or []:
+        if "文本样本量有限" in str(item) or "入口页" in str(item) or "封面页" in str(item):
+            lines.append(f"> {_md_escape(item)}")
+            lines.append("")
     lines.append("| 维度 | 得分 | 权重 | 说明 |")
     lines.append("| --- | --- | --- | --- |")
     weights = {
@@ -165,8 +195,42 @@ def _render_readability_section(readability: Dict) -> str:
     return "\n".join(lines)
 
 
-def render_competitor_report(file_name: str, tool_analysis: Dict, readability: Dict,
-                             error: Optional[str] = None) -> str:
+def _render_experience_section(title: str, index_label: str, data: Dict, dim_labels: Dict[str, str], note: str) -> str:
+    lines = [f"## {index_label}、{title}", ""]
+    lines.append(f"> {note}")
+    lines.append("")
+    lines.append(
+        f"- **综合评分**：{data.get('overall_score', 0)} 分　**评级**：{data.get('level', '未知')}"
+    )
+    lines.append("")
+    lines.append("| 维度 | 得分 | 说明 |")
+    lines.append("| --- | --- | --- |")
+    for key, label in dim_labels.items():
+        dim = (data.get("dimensions") or {}).get(key, {})
+        lines.append(f"| {label} | {dim.get('score', 'N/A')} | {dim.get('label', '')} |")
+    lines.append("")
+    na_dimensions = data.get("na_dimensions") or []
+    if na_dimensions:
+        lines.append(
+            f"> 以下维度不适用于当前输入，已置 N/A：{_md_escape('、'.join(str(v) for v in na_dimensions))}"
+        )
+        lines.append("")
+    summary = data.get("summary")
+    if summary:
+        lines.append(f"- {_md_escape(summary)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def render_competitor_report(
+    file_name: str,
+    tool_analysis: Dict,
+    readability: Dict,
+    access: Optional[Dict] = None,
+    findability: Optional[Dict] = None,
+    usability: Optional[Dict] = None,
+    error: Optional[str] = None,
+) -> str:
     """渲染完整 Markdown 报告。error 非空时输出失败说明。"""
     now = datetime.now()
     lines = [
@@ -185,7 +249,52 @@ def render_competitor_report(file_name: str, tool_analysis: Dict, readability: D
         ]
         return "\n".join(lines)
     lines.append(_render_tool_section(tool_analysis))
+    lines.append(_render_structure_section(readability))
     lines.append(_render_readability_section(readability))
+    if access:
+        lines.append(
+            _render_experience_section(
+                "可获得性分析（Access）",
+                "四",
+                access,
+                {
+                    "format_choice": "格式选择",
+                    "version_transparency": "版本透明度",
+                    "offline_availability": "离线可用性",
+                },
+                "用户能否拿到文档，以及获取和离线使用体验。",
+            )
+        )
+    if findability:
+        lines.append(
+            _render_experience_section(
+                "易查找性分析（Findability）",
+                "五",
+                findability,
+                {
+                    "toc": "目录（TOC）",
+                    "index_or_glossary": "索引与术语表",
+                },
+                "用户能否快速定位所需内容，以及导航与索引支持情况。",
+            )
+        )
+    if usability:
+        lines.append(
+            _render_experience_section(
+                "可用性分析（Usability）",
+                "六",
+                usability,
+                {
+                    "task_oriented_titles": "任务导向标题",
+                    "step_completeness": "步骤完整性",
+                    "error_recovery": "错误恢复信息",
+                    "information_consistency": "信息一致性",
+                    "link_effectiveness": "链接有效性",
+                    "actionability": "可操作指令",
+                },
+                "用户能否依靠文档顺畅完成任务。",
+            )
+        )
     lines.append("---")
     lines.append("")
     lines.append("> 本报告由智能技术文档平台自动生成（规则引擎），供竞品文档分析参考。")

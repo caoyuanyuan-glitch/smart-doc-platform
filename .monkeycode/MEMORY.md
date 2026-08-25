@@ -64,13 +64,14 @@ Git 与自检工作流
   - 每次完成代码修改后先做本地自检，再通知用户进行平台侧验证
 
 前后端自验命令
-- Date: 2026-07-01
-- Context: Agent 在执行智能润色规则管理任务时校正路径
+- Date: 2026-08-25
+- Context: Agent 在执行竞品分析模块前端校验与预览时校正当前仓库路径
 - Category: 构建方法
 - Instructions:
-  - 智能润色项目实际路径为 `/workspace/smart-doc-platform`
-  - 当前工作区前端构建校验使用 `cd /workspace/smart-doc-platform/frontend && npm run build`
-  - 当前工作区后端语法校验使用 `cd /workspace/smart-doc-platform/backend && python3 -m compileall app`
+  - 当前仓库根目录为 `/workspace`
+  - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
+  - 当前工作区前端预览启动使用 `cd /workspace/frontend && npm run dev -- --host 0.0.0.0 --port 5173`
+  - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
