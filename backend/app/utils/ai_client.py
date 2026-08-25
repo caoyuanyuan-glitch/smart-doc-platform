@@ -724,7 +724,7 @@ class AIClient:
         if self._is_kimi_k2_family(model):
             thinking_type = thinking or "enabled"
             extra_body = dict(kwargs.get("extra_body") or {})
-            extra_body["thinking"] = {"type": thinking_type}
+#             extra_body["thinking"] = {"type": thinking_type}
             kwargs["extra_body"] = extra_body
             kwargs["temperature"] = 0.6 if thinking_type == "disabled" else 1.0
         else:
@@ -840,6 +840,7 @@ class AIClient:
                                 max_tokens=max_tokens,
                                 temperature=temperature,
                                 thinking=kimi_thinking,
+                                timeout=900
                             )
                             if name == 'Kimi'
                             else {
@@ -935,7 +936,7 @@ class AIClient:
             print(f"[AI] chat_with_provider: unknown provider '{provider}', falling back to default chain")
             return self.chat(messages, max_tokens=max_tokens, temperature=temperature,
                            request_label=request_label, review_id=review_id)
-        
+
         name, client, model = provider_map[provider]
 
         if not client:
@@ -1341,6 +1342,7 @@ class AIClient:
 - 原句写的是"开"，输出必须是"开"，不得改成示例里的"ON"
 - 原句写的是"制备卡"，输出必须是"制备卡"，不得改成示例里的"样本制备卡"
 - 原句没有提到的设备名、试剂名、步骤名，一律不得添加
+- 如果润色前后的句子，格式、文字、符号等都没有改变，则不应该在JSON中输出
 
 输出：直接输出改写后的完整文本，无需解释。"""
 
