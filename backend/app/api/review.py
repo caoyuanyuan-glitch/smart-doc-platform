@@ -15,7 +15,7 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name not in {"app.services", "app.services.chunker"}:
         raise
-    logging.getLogger(__name__).warning(
+    logging.getLogger(__name__).info(
         "智能分块模块(services.chunker)加载失败，审核将回退到传统分块模式: %s",
         exc,
     )
@@ -12291,12 +12291,30 @@ async def get_aggregated_report(
     使用 ReportAggregator 输出展示问题分组、五维质量评分、
     阶段诊断摘要，供前端报告面板和导出使用。
     """
-    from app.review_engine.reporting import ReportAggregator
-
     review, document = _require_review_access(db, review_id, current_user)
 
     issues = get_issues(db, review_id=review_id)
     issue_dicts = [_report_issue_to_dict(i) for i in issues]
+    summary_raw = _load_review_summary(review.summary)
+
+    try:
+        from app.review_engine.reporting import ReportAggregator
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"app.review_engine.reporting", "app.review_engine"}:
+            raise
+        return {
+            "review_id": review_id,
+            "document_title": getattr(document, 'filename', '') or '',
+            "total_issues": len(issue_dicts),
+            "issues": issue_dicts,
+            "stage_diagnostics": {
+                "stages": summary_raw.get("stages", summary_raw.get("stage_diagnostics", [])),
+                "language": summary_raw.get("language", ""),
+            },
+            "degraded": True,
+            "degraded_reason": "review_engine.reporting 模块未启用",
+        }
+
     agg = ReportAggregator()
     report = agg.aggregate(
         issue_dicts,
@@ -12304,7 +12322,6 @@ async def get_aggregated_report(
         document_title=getattr(document, 'filename', '') or '',
     )
 
-    summary_raw = _load_review_summary(review.summary)
     report.stage_diagnostics = {
         "stages": summary_raw.get("stages", summary_raw.get("stage_diagnostics", [])),
         "language": summary_raw.get("language", ""),
@@ -12354,7 +12371,17 @@ async def get_rule_migration_status(_: UserOut = Depends(require_admin)):
 
     返回已迁移和待迁移的规则分组，用于跟踪审核引擎重构进度。
     """
-    from app.review_engine.rules import get_migration_summary
+    try:
+        from app.review_engine.rules import get_migration_summary
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"app.review_engine.rules", "app.review_engine.rules.engine"}:
+            raise
+        return {
+            "enabled": False,
+            "migrated": [],
+            "pending": [],
+            "degraded_reason": "review_engine.rules 模块未启用",
+        }
     return get_migration_summary()
 
 
