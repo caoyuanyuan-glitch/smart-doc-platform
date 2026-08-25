@@ -724,7 +724,7 @@ class AIClient:
         if self._is_kimi_k2_family(model):
             thinking_type = thinking or "enabled"
             extra_body = dict(kwargs.get("extra_body") or {})
-            extra_body["thinking"] = {"type": thinking_type}
+#             extra_body["thinking"] = {"type": thinking_type}
             kwargs["extra_body"] = extra_body
             kwargs["temperature"] = 0.6 if thinking_type == "disabled" else 1.0
         else:
