@@ -8,6 +8,11 @@
 
 说明：本模块为 MVP 规则引擎，不调用 AI；语义级增强（如 AI 术语表、语境被动句判断）
 预留到 Phase 2，由 app/utils/ai_client.py 统一接入。
+
+当前输出能力：
+1. 编辑工具识别
+2. 可读性分析
+3. 可获得性（Access）/ 易查找性（Findability）/ 可用性（Usability）启发式评分
 """
 
 from __future__ import annotations
@@ -82,6 +87,9 @@ _TEXT_SIGNALS: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"[\u00ad]{3,}"), "InDesign 排版", "出现大量软连字符（InDesign 断行特征）"),
     (re.compile(r"[\u201c\u201d\u2018\u2019]{5,}"), "通用文字处理器", "出现密集弯引号（Word/文字处理器特征）"),
 ]
+
+_WARNING_LINE_RE = re.compile(r"(?im)^\s*(?:warning|caution|danger|notice|警告|注意|危险)\b")
+_CHAPTER_LINE_RE = re.compile(r"(?im)^\s*(?:chapter\s+\d+|section\s+\d+|part\s+\d+|第[一二三四五六七八九十0-9]+章)\b")
 
 
 def _match_producer(producer: str, creator: str) -> List[Dict]:
@@ -215,6 +223,52 @@ def analyze_tool_usage(filepath: str, full_text: str, pages_text: Optional[List[
         "text_signals": text_signals,
         "raw_fonts": fonts[:20],
     }
+
+
+def enrich_tool_usage(tool_analysis: Dict, source_meta: Optional[Dict] = None) -> Dict:
+    """基于 HTML 结构线索补强工具识别。"""
+    source_meta = source_meta or {}
+    meta = dict(tool_analysis.get("meta") or {})
+    meta.update({k: v for k, v in source_meta.items() if v not in (None, "")})
+    tool_analysis["meta"] = meta
+
+    if str(meta.get("format", "")).upper() != "HTML":
+        return tool_analysis
+
+    hints = meta.get("html_hints") or {}
+    source_url = str(meta.get("source_url") or "")
+    flare_reasons = []
+    structural_reasons = []
+    if hints.get("content_path") or "/Content/" in source_url:
+        structural_reasons.append(f"URL 路径含 Flare 导出目录特征 /Content/（{source_url or 'HTML path'}）")
+    if hints.get("topic_htm") or re.search(r"/[^/]+\.htm(?:$|[?#])", source_url, re.IGNORECASE):
+        structural_reasons.append("Topic 页以 .htm 结尾且位于 /Content/ 目录（HAT 导出特征）")
+    if hints.get("madcap_runtime"):
+        flare_reasons.append("HTML 引用 MadCap 运行时脚本或标记")
+
+    all_reasons = flare_reasons + [r for r in structural_reasons if r not in flare_reasons]
+
+    if all_reasons:
+        tools = list(tool_analysis.get("tools") or [])
+        existing = next((t for t in tools if str(t.get("name")) == "MadCap Flare"), None)
+        confidence = "high" if flare_reasons else "medium"
+        source = "HTML 运行时与结构特征（脚本/URL/样式表）" if flare_reasons else "HTML 结构特征（URL/样式表）"
+        if existing is None:
+            tools.insert(0, {
+                "name": "MadCap Flare",
+                "category": "帮助文档创作工具（HAT）",
+                "confidence": confidence,
+                "source": source,
+                "evidence": all_reasons,
+            })
+        else:
+            existing["confidence"] = confidence
+            existing["source"] = source
+            existing["evidence"] = all_reasons
+        tool_analysis["tools"] = tools
+        tool_analysis["summary"] = f"主编辑工具：MadCap Flare（{confidence} 置信）"
+        tool_analysis["html_evidence"] = all_reasons
+    return tool_analysis
 
 
 # ------------------------------------------------------------ 可读性分析
@@ -409,6 +463,125 @@ def _level_of(score: float) -> str:
     return "poor"
 
 
+_VERSION_RE = re.compile(
+    r"\b(?:version|ver\.?|revision|rev\.?|document\s+number|doc\s+id|part\s+number)\b|\b\d{4}-\d{2}-\d{2}\b",
+    re.IGNORECASE,
+)
+_TOC_RE = re.compile(r"\b(?:table of contents|contents)\b|\n\s*contents\s*\n", re.IGNORECASE)
+_INDEX_RE = re.compile(r"\b(?:index|glossary|terminology)\b", re.IGNORECASE)
+_TROUBLE_RE = re.compile(r"\b(?:troubleshooting|faq|error|warning|caution|recovery|resolve)\b", re.IGNORECASE)
+_STEP_RE = re.compile(r"(?m)^\s*(?:\d+\.|\d+\)|step\s+\d+|\u2022|-\s+(?:click|select|open|check|review|install|configure|run|restart))", re.IGNORECASE)
+_PRECOND_RE = re.compile(r"\b(?:before you begin|prerequisite|requirements|prepare|preparation)\b", re.IGNORECASE)
+_TASK_TITLE_RE = re.compile(r"\b(?:install|configure|set up|prepare|run|start|stop|restart|maintain|troubleshoot|review|replace|check|clean)\b", re.IGNORECASE)
+_LINK_RE = re.compile(r"https?://\S+|\b\S+\.(?:html?|pdf)\b", re.IGNORECASE)
+
+
+def _avg_applicable(scores: List[Optional[float]]) -> float:
+    vals = [float(s) for s in scores if s is not None]
+    if not vals:
+        return 0.0
+    return _clamp_score(sum(vals) / len(vals))
+
+
+def analyze_experience(filepath: str, full_text: str, tool_analysis: Dict, pages_text: Optional[List[str]] = None) -> Dict:
+    """启发式评估 Access / Findability / Usability。
+
+    目标是补齐竞品横向比较的结构化维度。
+    当前为规则近似值，适合趋势判断与同类样本比较。
+    """
+    pages_text = pages_text or []
+    ext = str(filepath).rsplit(".", 1)[-1].lower() if "." in str(filepath) else ""
+    meta = tool_analysis.get("meta") or {}
+    text = full_text or ""
+
+    has_version = bool(_VERSION_RE.search(text))
+    has_toc = bool(_TOC_RE.search(text))
+    has_index = bool(_INDEX_RE.search(text))
+    has_trouble = bool(_TROUBLE_RE.search(text))
+    step_hits = len(_STEP_RE.findall(text))
+    has_precond = bool(_PRECOND_RE.search(text))
+    link_hits = len(_LINK_RE.findall(text))
+
+    headings = []
+    for line in text.splitlines():
+        line = line.strip()
+        if 4 <= len(line) <= 80 and not line.endswith("."):
+            headings.append(line)
+    heading_sample = headings[:30]
+    task_title_hits = sum(1 for h in heading_sample if _TASK_TITLE_RE.search(h))
+    task_title_score = 30
+    if heading_sample:
+        task_title_score = _clamp_score(task_title_hits / len(heading_sample) * 100)
+
+    format_choice = 50 if ext in {"pdf", "html", "htm"} else 70
+    version_transparency = 100 if has_version else 40
+    offline_availability = 100 if ext in {"pdf", "html", "htm", "docx", "md", "markdown", "txt"} else 60
+    access_overall = _avg_applicable([format_choice, version_transparency, offline_availability])
+
+    toc_score = 60 if has_toc else (25 if len(pages_text) > 5 else 0)
+    index_score = 100 if has_index else 0
+    findability_overall = _avg_applicable([toc_score, index_score])
+
+    if step_hits >= 8 and has_precond:
+        step_completeness = 85
+    elif step_hits >= 3:
+        step_completeness = 65
+    else:
+        step_completeness = 35
+    error_recovery = 100 if has_trouble else 40
+    information_consistency = 100
+    link_effectiveness = 60 if ext in {"html", "htm"} and link_hits > 0 else 30
+    actionability = 85 if step_hits >= 8 else (60 if step_hits >= 3 else 30)
+    usability_overall = _avg_applicable(
+        [task_title_score, step_completeness, error_recovery, information_consistency, link_effectiveness, actionability]
+    )
+
+    return {
+        "access": {
+            "overall_score": access_overall,
+            "level": _level_of(access_overall),
+            "dimensions": {
+                "format_choice": {"score": format_choice, "label": "格式选择"},
+                "version_transparency": {"score": version_transparency, "label": "版本透明度"},
+                "offline_availability": {"score": offline_availability, "label": "离线可用性"},
+            },
+            "summary": "离线可用性和版本透明度较好，单一导出格式限制了格式弹性。"
+            if ext in {"pdf", "html", "htm"}
+            else "版本透明度和离线能力可用，格式弹性取决于源文档体系。",
+            "na_dimensions": ["获取门槛", "站内搜索", "移动端适配", "多语言支持"],
+        },
+        "findability": {
+            "overall_score": findability_overall,
+            "level": _level_of(findability_overall),
+            "dimensions": {
+                "toc": {"score": toc_score, "label": "目录（TOC）"},
+                "index_or_glossary": {"score": index_score, "label": "索引与术语表"},
+            },
+            "summary": "目录可作为弱导航信号，术语索引决定查找效率上限。",
+            "na_dimensions": ["站内搜索", "面包屑导航", "URL 语义化", "SEO 元数据", "关键内容直达"],
+        },
+        "usability": {
+            "overall_score": usability_overall,
+            "level": _level_of(usability_overall),
+            "dimensions": {
+                "task_oriented_titles": {"score": task_title_score, "label": "任务导向标题"},
+                "step_completeness": {"score": step_completeness, "label": "步骤完整性"},
+                "error_recovery": {"score": error_recovery, "label": "错误恢复信息"},
+                "information_consistency": {"score": information_consistency, "label": "信息一致性"},
+                "link_effectiveness": {"score": link_effectiveness, "label": "链接有效性"},
+                "actionability": {"score": actionability, "label": "可操作指令"},
+            },
+            "summary": "任务步骤、恢复信息和导航支持共同决定使用顺畅度。",
+            "stats": {
+                "step_hits": step_hits,
+                "task_title_hits": task_title_hits,
+                "heading_count_sampled": len(heading_sample),
+                "link_hits": link_hits,
+            },
+        },
+    }
+
+
 def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, language: str = None) -> Dict:
     """可读性量化分析。
 
@@ -473,9 +646,44 @@ def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, 
     }
 
 
-def analyze_document(filepath: str, full_text: str, pages_text: Optional[List[str]] = None) -> Dict:
-    """文档总入口：返回 {tool_analysis, readability} 供存储与报告渲染。"""
+def analyze_structure_stats(full_text: str, source_meta: Optional[Dict] = None, readability: Optional[Dict] = None) -> Dict:
+    """结构统计：章节、图表、安全警告与样本可信度提示。"""
+    source_meta = source_meta or {}
+    readability = readability or {}
+    hints = source_meta.get("html_hints") or {}
+    sentence_count = ((readability.get("stats") or {}).get("sentence_count")) or 0
+    pages = int(source_meta.get("pages") or 1)
+    chapter_count = len(_CHAPTER_LINE_RE.findall(full_text or ""))
+    image_count = int(hints.get("img_count") or 0)
+    table_count = int(hints.get("table_count") or 0)
+    warning_count = len(_WARNING_LINE_RE.findall(full_text or ""))
+
+    cautions = []
+    if warning_count == 0:
+        cautions.append("安全警告数为 0：检测依赖文本关键词匹配，图标或特殊排版呈现的安全提示可能未被统计，建议人工复核。")
+    if sentence_count and sentence_count < 200:
+        cautions.append(f"文本样本量有限（{sentence_count} 句），评分仅供参考；建议补充更多正文内容后复核。")
+
+    source_url = str(source_meta.get("source_url") or "")
+    if "/FrontPages/" in source_url:
+        cautions.append("当前页面路径疑似手册入口页/封面页，非正文内容；建议选择具体子页面分析，或上传完整 HTML 包后分析。")
+
     return {
-        "tool_analysis": analyze_tool_usage(filepath, full_text, pages_text),
-        "readability": analyze_readability(full_text, pages_text),
+        "pages": pages,
+        "chapter_count": chapter_count,
+        "image_count": image_count,
+        "table_count": table_count,
+        "warning_count": warning_count,
+        "cautions": cautions,
+    }
+
+
+def analyze_document(filepath: str, full_text: str, pages_text: Optional[List[str]] = None) -> Dict:
+    """文档总入口：返回结构化竞品分析结果。"""
+    tool_analysis = analyze_tool_usage(filepath, full_text, pages_text)
+    readability = analyze_readability(full_text, pages_text)
+    return {
+        "tool_analysis": tool_analysis,
+        "readability": readability,
+        **analyze_experience(filepath, full_text, tool_analysis, pages_text),
     }

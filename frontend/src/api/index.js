@@ -213,7 +213,7 @@ export const competitorAPI = {
   list: (params = {}) => instance.get('/competitor/', { params }),
   get: (id) => instance.get(`/competitor/${id}`),
   delete: (id) => instance.delete(`/competitor/${id}`),
-  getReport: (id) => instance.get(`/competitor/${id}/report`, { params: { format: 'md' } }),
+  getReport: (id, format = 'md') => instance.get(`/competitor/${id}/report`, { params: { format } }),
 }
 
 export const rulesAPI = {

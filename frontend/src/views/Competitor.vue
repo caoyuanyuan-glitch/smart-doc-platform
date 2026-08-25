@@ -8,7 +8,7 @@
         <div class="panel-header">
           <span>上传竞品文档或输入网页手册链接，自动识别编辑工具并分析可读性</span>
           <div class="panel-actions">
-            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT / HTML 链接</el-tag>
+            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT / HTML 文件或链接</el-tag>
           </div>
         </div>
 
@@ -20,7 +20,7 @@
               :show-file-list="false"
               :on-change="handleFileChange"
               :before-upload="() => false"
-              accept=".pdf,.docx,.md,.markdown,.txt"
+              accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm"
               drag
               style="width: 100%;"
             >
@@ -30,7 +30,7 @@
                   将竞品文档拖拽到此处，或点击选择文件
                 </div>
                 <div v-else class="upload-name">{{ selectedFile.name }}</div>
-                <div class="upload-sub" v-if="!selectedFile">支持 PDF（含元数据工具识别）、Word、Markdown 纯文本</div>
+                <div class="upload-sub" v-if="!selectedFile">支持 PDF、Word、Markdown、TXT，以及本地保存的 HTML 手册页</div>
               </div>
             </el-upload>
           </el-tab-pane>
@@ -64,13 +64,17 @@
           <div class="summary-card">
             <div class="summary-card-label">编辑工具识别</div>
             <div class="summary-card-value small" :class="toolOkClass">{{ toolSummary }}</div>
-            <div class="summary-card-sub" v-if="toolMeta.pages">格式 {{ toolMeta.format }} · {{ toolMeta.pages }} 页</div>
+            <div class="summary-card-sub">
+              <span>{{ sourceTypeLabel(detail?.source_type) }}</span>
+              <span v-if="toolMeta.format"> · 格式 {{ toolMeta.format }}</span>
+              <span v-if="toolMeta.pages"> · {{ toolMeta.pages }} 页</span>
+            </div>
           </div>
           <div class="summary-card">
             <div class="summary-card-label">可读性综合评分</div>
-            <div class="summary-card-value score">{{ readability.overall_score }}</div>
+            <div class="summary-card-value score">{{ overallScore }}</div>
             <div class="summary-card-sub">
-              <el-tag :type="levelTagType" size="small">{{ readability.level }}</el-tag>
+               <el-tag :type="levelTagType(readability.level)" size="small">{{ readability.level }}</el-tag>
               <span style="margin-left: 8px; color: #64748b;">{{ readability.language === 'zh' ? '中文' : '英文' }}</span>
             </div>
           </div>
@@ -82,6 +86,9 @@
             <div class="panel-actions">
               <el-button size="small" type="primary" :disabled="!reportMd" @click="downloadReport">
                 <el-icon><Download /></el-icon> 下载 Markdown 报告
+              </el-button>
+              <el-button size="small" :disabled="!detail" @click="downloadJsonReport">
+                下载 JSON 结果
               </el-button>
               <el-button size="small" @click="resetUpload">重新分析</el-button>
             </div>
@@ -126,6 +133,21 @@
                   </div>
                 </div>
 
+                <div v-if="htmlEvidence.length" class="sub-block">
+                  <div class="sub-title">HTML 识别证据</div>
+                  <div v-for="(item, index) in htmlEvidence" :key="index" class="evidence-line">{{ item }}</div>
+                </div>
+
+                <div v-if="structureStatsRows.length" class="sub-block">
+                  <div class="sub-title">结构统计</div>
+                  <div class="stats-pill-row">
+                    <div v-for="item in structureStatsRows" :key="item.key" class="stats-pill">
+                      <span class="stats-pill-label">{{ item.label }}</span>
+                      <span class="stats-pill-value">{{ item.value }}</span>
+                    </div>
+                  </div>
+                </div>
+
                 <!-- 可读性分析 -->
                 <h3 class="block-title" style="margin-top: 24px;">二、可读性分析</h3>
                 <div class="dim-list">
@@ -167,6 +189,22 @@
                     {{ sg }}
                   </div>
                 </div>
+
+                <template v-if="experienceRows.length">
+                  <h3 class="block-title" style="margin-top: 24px;">三、体验维度</h3>
+                  <div class="experience-grid">
+                    <div v-for="item in experienceRows" :key="item.key" class="experience-card">
+                      <div class="experience-head">
+                        <span class="experience-name">{{ item.label }}</span>
+                        <span class="experience-score">{{ item.score }}</span>
+                      </div>
+                      <div class="experience-summary">{{ item.summary || '已完成规则分析' }}</div>
+                      <div v-if="item.findings.length" class="experience-findings">
+                        <div v-for="(finding, index) in item.findings" :key="index" class="experience-finding">{{ finding }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
             </el-tab-pane>
 
@@ -205,9 +243,12 @@
               <el-tag :type="statusType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="来源" width="100">
+            <template #default="{ row }">{{ sourceTypeLabel(row.source_type) }}</template>
+          </el-table-column>
           <el-table-column label="可读性评分" width="120">
             <template #default="{ row }">
-              <span v-if="readabilityOf(row)">{{ readabilityOf(row).overall_score }} 分（{{ readabilityOf(row).level }}）</span>
+              <span v-if="hasOverallScore(row)">{{ overallScoreOf(row) }} 分（{{ readabilityOf(row).level }}）</span>
               <span v-else>-</span>
             </template>
           </el-table-column>
@@ -221,6 +262,9 @@
               </el-button>
               <el-button size="small" link :disabled="row.status !== 'completed'" @click="downloadReportOf(row)">
                 下载报告
+              </el-button>
+              <el-button size="small" link :disabled="row.status !== 'completed'" @click="downloadJsonReportOf(row)">
+                下载 JSON
               </el-button>
               <el-button size="small" type="danger" link @click="confirmDelete(row)">
                 删除
@@ -240,8 +284,12 @@
             <span class="dialog-summary-value">{{ detailToolSummary }}</span>
           </div>
           <div class="dialog-summary-item">
+            <span class="dialog-summary-label">来源类型</span>
+            <span class="dialog-summary-value">{{ sourceTypeLabel(detail?.source_type) }}</span>
+          </div>
+          <div class="dialog-summary-item">
             <span class="dialog-summary-label">可读性评分</span>
-            <span class="dialog-summary-value">{{ detailReadability.overall_score }} 分（{{ detailReadability.level }}）</span>
+            <span class="dialog-summary-value">{{ detailOverallScore }} 分（{{ detailReadability.level }}）</span>
           </div>
         </div>
         <el-tabs v-model="dialogTab">
@@ -269,6 +317,19 @@
                   </el-table-column>
                 </el-table>
               </div>
+              <div v-if="detailHtmlEvidence.length" class="sub-block">
+                <div class="sub-title">HTML 识别证据</div>
+                <div v-for="(item, index) in detailHtmlEvidence" :key="index" class="evidence-line">{{ item }}</div>
+              </div>
+              <div v-if="detailStructureStatsRows.length" class="sub-block">
+                <div class="sub-title">结构统计</div>
+                <div class="stats-pill-row">
+                  <div v-for="item in detailStructureStatsRows" :key="item.key" class="stats-pill">
+                    <span class="stats-pill-label">{{ item.label }}</span>
+                    <span class="stats-pill-value">{{ item.value }}</span>
+                  </div>
+                </div>
+              </div>
 
               <h3 class="block-title" style="margin-top: 20px;">二、可读性分析</h3>
               <div class="dim-list">
@@ -288,6 +349,21 @@
                   {{ sg }}
                 </div>
               </div>
+              <template v-if="detailExperienceRows.length">
+                <h3 class="block-title" style="margin-top: 20px;">三、体验维度</h3>
+                <div class="experience-grid">
+                  <div v-for="item in detailExperienceRows" :key="item.key" class="experience-card">
+                    <div class="experience-head">
+                      <span class="experience-name">{{ item.label }}</span>
+                      <span class="experience-score">{{ item.score }}</span>
+                    </div>
+                    <div class="experience-summary">{{ item.summary || '已完成规则分析' }}</div>
+                    <div v-if="item.findings.length" class="experience-findings">
+                      <div v-for="(finding, index) in item.findings" :key="index" class="experience-finding">{{ finding }}</div>
+                    </div>
+                  </div>
+                </div>
+              </template>
             </div>
           </el-tab-pane>
           <el-tab-pane label="Markdown 报告" name="md">
@@ -297,6 +373,7 @@
       </template>
       <template #footer>
         <el-button @click="detailVisible = false">关闭</el-button>
+        <el-button :disabled="!detail" @click="downloadJsonReportOf(detail)">下载 JSON</el-button>
         <el-button type="primary" :disabled="!detailReportMd" @click="downloadReportOf(detail)">下载报告</el-button>
       </template>
     </el-dialog>
@@ -381,9 +458,9 @@ async function doAnalyze() {
     } else {
       const f = selectedFile.value
       if (!f) return
-      const okExt = /\.(pdf|docx|md|markdown|txt)$/i.test(f.name || '')
+      const okExt = /\.(pdf|docx|md|markdown|txt|html|htm)$/i.test(f.name || '')
       if (!okExt) {
-        ElMessage.warning('仅支持 PDF / DOCX / MD / TXT 格式')
+        ElMessage.warning('仅支持 PDF / DOCX / MD / TXT / HTML 格式')
         return
       }
       if (f.size > 50 * 1024 * 1024) {
@@ -415,6 +492,7 @@ function safeParse(value, fallback = {}) {
 
 const toolAnalysis = computed(() => safeParse(detail.value?.tool_analysis))
 const readability = computed(() => safeParse(detail.value?.readability))
+const overallScore = computed(() => detail.value?.overall_score ?? readability.value?.overall_score ?? 0)
 const toolSummary = computed(() => toolAnalysis.value.summary || '未知')
 const toolMeta = computed(() => toolAnalysis.value.meta || {})
 const tools = computed(() => toolAnalysis.value.tools || [])
@@ -456,6 +534,9 @@ const sampleGroups = computed(() => {
 })
 
 const suggestions = computed(() => readability.value.suggestions || [])
+const experienceRows = computed(() => buildExperienceRows(readability.value))
+const structureStatsRows = computed(() => buildStructureStatsRows(readability.value.structure_stats || {}))
+const htmlEvidence = computed(() => toolAnalysis.value.html_evidence || [])
 
 // ---------- 历史任务 ----------
 async function loadTasks() {
@@ -472,6 +553,15 @@ async function loadTasks() {
 
 function readabilityOf(row) {
   return safeParse(row.readability)
+}
+
+function overallScoreOf(row) {
+  const parsed = readabilityOf(row)
+  return row?.overall_score ?? parsed?.overall_score ?? null
+}
+
+function hasOverallScore(row) {
+  return overallScoreOf(row) !== null && overallScoreOf(row) !== undefined
 }
 
 async function viewTask(row) {
@@ -519,29 +609,58 @@ function triggerMdDownload(text, filename) {
   window.URL.revokeObjectURL(url)
 }
 
+function triggerJsonDownload(payload, filename) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+  const url = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', filename)
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
+}
+
 async function downloadReport() {
   const md = reportMd.value || (detail.value?.report_md)
   if (!md) return
-  const name = (detail.value?.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html)$/i, '')
+  const name = (detail.value?.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
   triggerMdDownload(md, `${name}_竞品分析报告.md`)
 }
 
 async function downloadReportOf(row) {
   try {
-    const resp = await competitorAPI.getReport(row.id)
+    const resp = await competitorAPI.getReport(row.id, 'md')
     // 接口返回 {content, format}（与 compare 报告接口对齐）
-     const md = resp.data?.content || resp.data || ''
+      const md = resp.data?.content || resp.data || ''
      if (!md) return
-     const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html)$/i, '')
+     const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
      triggerMdDownload(md, `${name}_竞品分析报告.md`)
   } catch (e) {
     ElMessage.error(getAPIErrorMessage(e, '下载报告失败'))
   }
 }
 
+async function downloadJsonReport() {
+  if (!detail.value?.id) return
+  await downloadJsonReportOf(detail.value)
+}
+
+async function downloadJsonReportOf(row) {
+  try {
+    const resp = await competitorAPI.getReport(row.id, 'json')
+    const payload = resp.data?.content || {}
+    const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
+    triggerJsonDownload(payload, `${name}_竞品分析结果.json`)
+  } catch (e) {
+    ElMessage.error(getAPIErrorMessage(e, '下载 JSON 结果失败'))
+  }
+}
+
 // ---------- 详情对话框数据 ----------
 const detailToolAnalysis = computed(() => safeParse(detail.value?.tool_analysis))
 const detailReadability = computed(() => safeParse(detail.value?.readability))
+const detailOverallScore = computed(() => detail.value?.overall_score ?? detailReadability.value?.overall_score ?? 0)
 const detailToolSummary = computed(() => detailToolAnalysis.value.summary || '未知')
 const detailToolMeta = computed(() => detailToolAnalysis.value.meta || {})
 const detailTools = computed(() => detailToolAnalysis.value.tools || [])
@@ -561,6 +680,9 @@ const detailDimRows = computed(() => {
   })
 })
 const detailSuggestions = computed(() => detailReadability.value.suggestions || [])
+const detailExperienceRows = computed(() => buildExperienceRows(detailReadability.value))
+const detailStructureStatsRows = computed(() => buildStructureStatsRows(detailReadability.value.structure_stats || {}))
+const detailHtmlEvidence = computed(() => detailToolAnalysis.value.html_evidence || [])
 
 // ---------- 展示辅助 ----------
 function formatSize(size) {
@@ -604,6 +726,46 @@ function scoreColorTag(score) {
 
 function levelTagType(level) {
   return { excellent: 'success', good: 'success', fair: 'warning', poor: 'danger' }[level] || 'info'
+}
+
+function buildExperienceRows(payload) {
+  const labels = {
+    access: '可获得性',
+    findability: '易查找性',
+    usability: '可用性'
+  }
+  return Object.entries(labels)
+    .map(([key, label]) => {
+      const item = payload?.[key]
+      if (!item) return null
+      return {
+        key,
+        label,
+        score: Math.round(item.score ?? 0),
+        summary: item.summary || '',
+        findings: Array.isArray(item.findings) ? item.findings : []
+      }
+    })
+    .filter(Boolean)
+}
+
+function buildStructureStatsRows(stats) {
+  const labels = {
+    heading_count: '标题数',
+    list_count: '列表数',
+    table_count: '表格数',
+    image_count: '图片数'
+  }
+  return Object.entries(labels)
+    .filter(([key]) => stats?.[key] !== null && stats?.[key] !== undefined)
+    .map(([key, label]) => ({ key, label, value: stats[key] }))
+}
+
+function sourceTypeLabel(sourceType) {
+  return {
+    file: '本地文件',
+    html: 'HTML/网页'
+  }[sourceType] || '本地文件'
 }
 
 const toolOkClass = computed(() => (tools.value.length ? '' : 'muted'))
@@ -800,6 +962,42 @@ watch(currentView, (view) => {
   font-size: 12px;
 }
 
+.evidence-line {
+  padding: 6px 0;
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.6;
+}
+
+.stats-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.stats-pill {
+  min-width: 120px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stats-pill-label {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.stats-pill-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
 .dim-list {
   display: grid;
   gap: 12px;
@@ -868,6 +1066,56 @@ watch(currentView, (view) => {
   line-height: 1.5;
 }
 
+.experience-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.experience-card {
+  padding: 14px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.experience-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.experience-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.experience-score {
+  font-size: 18px;
+  font-weight: 800;
+  color: #2563eb;
+}
+
+.experience-summary {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.6;
+}
+
+.experience-findings {
+  margin-top: 8px;
+}
+
+.experience-finding {
+  padding: 4px 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
 .report-pre {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
@@ -907,5 +1155,13 @@ watch(currentView, (view) => {
   font-size: 14px;
   font-weight: 700;
   color: #1e293b;
+}
+
+@media (max-width: 900px) {
+  .result-summary-grid,
+  .experience-grid,
+  .stats-row {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
