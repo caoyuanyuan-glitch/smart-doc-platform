@@ -84,8 +84,9 @@ async def startup_event():
         try:
             from app.api.review import _build_ai_review_basis_sections, _load_review_spec_texts
             from app.services.audit_basis_search import get_audit_basis_search_service
-
-            spec_texts = _load_review_spec_texts()
+            from app.database import SessionLocal
+            db = SessionLocal()
+            spec_texts = _load_review_spec_texts(db)
             basis_sections = _build_ai_review_basis_sections(spec_texts, "both")
             service = get_audit_basis_search_service()
             if service.warmup(basis_sections):
