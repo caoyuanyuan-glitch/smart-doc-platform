@@ -229,6 +229,9 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-DUP-001":
         return rule.startswith("DOC-DUP") or rule == "CYY-CN-DUP-002" or "重复" in category
     if item.expected_rule == "STRUCT-TERM-001":
+        selected = _norm_for_match(item.selected_text)
+        if selected and len(selected) >= 4 and selected in blob:
+            return True
         return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or "术语一致性" in category
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
@@ -257,6 +260,13 @@ def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], b
         return True
     if not selected and context and len(context) >= 16 and context[:40] in blob:
         return True
+    # 兜底：批注提取的 selected_text 常为乱码碎片（PDF 文本层伪影），
+    # 此时用批注 context 与问题原文的 token 重叠度判断是否同一处文本。
+    if context and len(context) >= 16 and original and len(original) >= 8:
+        context_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", item.context.lower())}
+        original_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", str(issue.get("original_text", "")).lower())}
+        if original_tokens and len(context_tokens & original_tokens) / len(original_tokens) >= 0.5:
+            return True
     return False
 
 
