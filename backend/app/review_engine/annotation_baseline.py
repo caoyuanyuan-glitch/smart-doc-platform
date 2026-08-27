@@ -166,6 +166,44 @@ def _issue_blob(issue: dict[str, Any]) -> str:
     ]))
 
 
+def _longest_common_substring_len(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    best = 0
+    for left_char in left:
+        current = [0] * (len(right) + 1)
+        for index, right_char in enumerate(right, start=1):
+            if left_char == right_char:
+                current[index] = previous[index - 1] + 1
+                best = max(best, current[index])
+        previous = current
+    return best
+
+
+def _has_substantive_text_overlap(item: HumanAnnotation, issue: dict[str, Any]) -> bool:
+    selected = _norm_for_match(item.selected_text)
+    comment = _norm_for_match(item.comment)
+    context = _norm_for_match(item.context)
+    original = _norm_for_match(issue.get("original_text", ""))
+    if not selected or not original:
+        return bool(original and len(original) >= 4 and (original in comment or original in context))
+    if len(original) >= 4 and (original in comment or original in context):
+        return True
+    if comment and len(comment) >= 4 and (comment in original or original in comment):
+        return True
+    overlap = _longest_common_substring_len(selected, original)
+    if overlap >= 4:
+        return True
+    if overlap >= 2 and re.search(r"重复|同上|同下|统一", comment):
+        return True
+    if overlap >= 3 and re.search(r"多余字|多余的字|错别字|拼写", comment):
+        return True
+    if overlap >= 2 and re.search(r"错别字|拼写", comment):
+        return True
+    return False
+
+
 def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
     rule = str(issue.get("rule", "") or "").upper()
     category = str(issue.get("category", "") or "")
@@ -260,6 +298,37 @@ def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], b
     return False
 
 
+def _matches_annotation_loosely(
+    item: HumanAnnotation,
+    issue: dict[str, Any],
+    blob: str,
+    *,
+    allow_rule_family: bool = True,
+) -> bool:
+    selected = _norm_for_match(item.selected_text)
+    comment = _norm_for_match(item.comment)
+    context = _norm_for_match(item.context[:160])
+
+    if allow_rule_family and _matches_expected_rule(item, issue, blob):
+        return True
+    if selected and len(selected) >= 2 and selected in blob:
+        return True
+    if selected and len(selected) >= 2:
+        for part in re.split(r"[-,，;；\s]+", selected):
+            if part and len(part) >= 2 and part in blob:
+                return True
+    if _has_substantive_text_overlap(item, issue):
+        return True
+    original = _norm_for_match(issue.get("original_text", ""))
+    if original and len(original) >= 1 and selected and original in selected:
+        return True
+    if comment and len(comment) >= 4 and comment in blob:
+        return True
+    if context and len(context) >= 12 and context[:40] in blob:
+        return True
+    return False
+
+
 def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list[HumanAnnotation]) -> dict[str, Any]:
     issue_pairs = [(issue, _issue_blob(issue)) for issue in issues]
 
@@ -268,31 +337,8 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
     strict_hits = []
     strict_misses = []
     for item in annotations:
-        selected = _norm_for_match(item.selected_text)
-        comment = _norm_for_match(item.comment)
-        context = _norm_for_match(item.context[:160])
-        matched = False
+        matched = any(_matches_annotation_loosely(item, issue, blob) for issue, blob in issue_pairs)
         strict_matched = any(_matches_annotation_strictly(item, issue, blob) for issue, blob in issue_pairs)
-        for issue, blob in issue_pairs:
-            if _matches_expected_rule(item, issue, blob):
-                matched = True
-                break
-            if selected and len(selected) >= 2 and selected in blob:
-                matched = True
-                break
-            if selected and len(selected) >= 2 and any(part and len(part) >= 2 and part in blob for part in re.split(r"[-,，;；\s]+", selected)):
-                matched = True
-                break
-            original = _norm_for_match(issue.get("original_text", ""))
-            if original and len(original) >= 1 and selected and original in selected:
-                matched = True
-                break
-            if comment and len(comment) >= 4 and comment in blob:
-                matched = True
-                break
-            if context and len(context) >= 12 and context[:40] in blob:
-                matched = True
-                break
         record = asdict(item)
         if matched:
             hits.append(record)
@@ -303,16 +349,59 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         else:
             strict_misses.append(record)
 
+    matched_issue_ids = {
+        id(issue)
+        for issue, blob in issue_pairs
+        if any(_matches_annotation_loosely(item, issue, blob, allow_rule_family=False) for item in annotations)
+    }
+    strict_matched_issue_ids = {
+        id(issue)
+        for issue, blob in issue_pairs
+        if any(_matches_annotation_strictly(item, issue, blob) for item in annotations)
+    }
+    issue_total = len(issues)
+    recall = len(hits) / len(annotations) if annotations else 0
+    precision = len(matched_issue_ids) / issue_total if issue_total else 0
+    f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0
+    strict_recall = len(strict_hits) / len(annotations) if annotations else 0
+    strict_precision = len(strict_matched_issue_ids) / issue_total if issue_total else 0
+    strict_f1 = (2 * strict_precision * strict_recall / (strict_precision + strict_recall)) if strict_precision + strict_recall else 0
+    unmatched_issues = [issue for issue, _blob in issue_pairs if id(issue) not in matched_issue_ids]
+    strict_unmatched_issues = [issue for issue, _blob in issue_pairs if id(issue) not in strict_matched_issue_ids]
+
     return {
         "human_total": len(annotations),
+        "issue_total": issue_total,
         "matched": len(hits),
         "missed": len(misses),
-        "match_rate": round(len(hits) / len(annotations), 4) if annotations else 0,
+        "match_rate": round(recall, 4),
+        "recall": round(recall, 4),
+        "precision": round(precision, 4),
+        "f1": round(f1, 4),
+        "matched_issue_count": len(matched_issue_ids),
+        "unmatched_issue_count": len(unmatched_issues),
         "strict_matched": len(strict_hits),
         "strict_missed": len(strict_misses),
-        "strict_match_rate": round(len(strict_hits) / len(annotations), 4) if annotations else 0,
+        "strict_match_rate": round(strict_recall, 4),
+        "strict_recall": round(strict_recall, 4),
+        "strict_precision": round(strict_precision, 4),
+        "strict_f1": round(strict_f1, 4),
+        "strict_matched_issue_count": len(strict_matched_issue_ids),
+        "strict_unmatched_issue_count": len(strict_unmatched_issues),
         "misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in misses])["by_category"] if misses else {},
         "strict_misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in strict_misses])["by_category"] if strict_misses else {},
+        "unmatched_issues_by_category": _summarize_issue_categories(unmatched_issues),
+        "strict_unmatched_issues_by_category": _summarize_issue_categories(strict_unmatched_issues),
         "misses": misses[:50],
         "strict_misses": strict_misses[:50],
+        "unmatched_issues": unmatched_issues[:50],
+        "strict_unmatched_issues": strict_unmatched_issues[:50],
     }
+
+
+def _summarize_issue_categories(issues: list[dict[str, Any]]) -> dict[str, int]:
+    categories: dict[str, int] = {}
+    for issue in issues:
+        category = str(issue.get("category") or "-")
+        categories[category] = categories.get(category, 0) + 1
+    return dict(sorted(categories.items(), key=lambda pair: (-pair[1], pair[0])))

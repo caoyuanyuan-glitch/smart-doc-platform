@@ -105,6 +105,63 @@ def test_evaluate_against_annotations_reports_strict_and_loose_matches_separatel
     assert result['strict_misses'][0]['expected_rule'] == 'STRUCT-LAYOUT-001'
 
 
+def test_evaluate_against_annotations_reports_precision_recall_and_f1():
+    annotations = [
+        HumanAnnotation('doc.pdf', '1', 'Square', 'Tina', '单位前面加空格', '24VDC，5A', '', '单位/空格', 'deterministic', 'DET-SPACE-001'),
+        HumanAnnotation('doc.pdf', '2', 'Square', 'Tina', '错别字，链，不是连', '二连读长', '', '术语拼写', 'deterministic', 'DET-TERM-SPELL-001'),
+    ]
+    issues = [
+        {'rule': 'CYY-CN-FMT-003', 'category': '数字与单位格式', 'original_text': '24VDC，5A', 'suggestion': '24 VDC，5 A', 'description': ''},
+        {'rule': 'CYY-CN-SPELL-003', 'category': '术语拼写', 'original_text': '二连读长', 'suggestion': '二链读长', 'description': ''},
+        {'rule': 'CYY-CN-CONSIST-999', 'category': '术语一致性', 'original_text': '额外问题', 'suggestion': '额外修正', 'description': ''},
+    ]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result['human_total'] == 2
+    assert result['issue_total'] == 3
+    assert result['recall'] == 1.0
+    assert result['precision'] == 0.6667
+    assert result['f1'] == 0.8
+    assert result['matched_issue_count'] == 2
+    assert result['unmatched_issue_count'] == 1
+    assert result['unmatched_issues_by_category'] == {'术语一致性': 1}
+
+
+def test_evaluate_against_annotations_matches_ocr_fragment_overlap_for_precision():
+    annotations = [
+        HumanAnnotation('doc.pdf', '27', 'Square', 'Tina', '错别字，链，不是连', '连读 者某', '', '术语拼写', 'deterministic', 'DET-TERM-SPELL-001'),
+        HumanAnnotation('doc.pdf', '52', 'Square', 'Tina', '多余的字', '查的托 % 酒', '', '人工审核其他项', 'ai_assisted', 'AI-HUMAN-OTHER'),
+    ]
+    issues = [
+        {'rule': 'CYY-CN-SPELL-003', 'category': '术语拼写', 'original_text': '二连读长', 'suggestion': '二链读长', 'description': '错别字'},
+        {'rule': 'CYY-CN-GRAMMAR-007', 'category': '语法表达', 'original_text': '检查的托盘表面', 'suggestion': '检查托盘表面', 'description': '多余助词'},
+    ]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result['precision'] == 1.0
+    assert result['matched_issue_count'] == 2
+
+
+def test_evaluate_against_annotations_matches_issue_text_in_human_context_and_comment():
+    annotations = [
+        HumanAnnotation('doc.pdf', '15', 'Square', 'Tina', '与后面的大类重复', '大类、 表。', '', '重复内容', 'structural_consistency', 'STRUCT-DUP-001'),
+        HumanAnnotation('doc.pdf', '23', 'Square', 'Tina', '删了', '程。 】可', '可点击【Browse】可选择目标安装目录。', '表达与句式', 'ai_assisted', 'AI-STYLE-001'),
+        HumanAnnotation('doc.pdf', '78', 'Square', 'Tina', '（即，自增物料）', '料。', '', '人工确认项', 'ai_assisted', 'AI-CHECK-001'),
+    ]
+    issues = [
+        {'rule': 'CYY-CN-DUP-002', 'category': '重复内容', 'original_text': '测试物料大类、试剂等大 类', 'suggestion': '测试物料大类、试剂等'},
+        {'rule': 'CYY-CN-GRAMMAR-007', 'category': '表达与句式', 'original_text': '可点击【Browse】可选择', 'suggestion': '点击【Browse】可选择目标安装目录'},
+        {'rule': 'CYY-CN-CONSIST-012', 'category': '术语一致性', 'original_text': '自增物料', 'suggestion': '明确“自增物料”的定义'},
+    ]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result['precision'] == 1.0
+    assert result['matched_issue_count'] == 3
+
+
 def test_batch_evaluate_from_config_preserves_suite_fields(tmp_path, monkeypatch):
     config = {
         "documents": [
