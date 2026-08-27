@@ -148,6 +148,15 @@ def _ensure_legacy_sqlite_columns():
                     conn.execute(text(s))
 
     try:
+        competitor_columns = {col['name'] for col in inspector.get_columns('competitor_tasks')}
+    except Exception:
+        competitor_columns = set()
+
+    if competitor_columns and 'experience' not in competitor_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE competitor_tasks ADD COLUMN experience TEXT"))
+
+    try:
         polish_feedback_columns = {col['name'] for col in inspector.get_columns('polish_feedback')}
     except Exception:
         polish_feedback_columns = set()

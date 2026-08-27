@@ -58,12 +58,16 @@ class InsightEngineTestCase(unittest.TestCase):
             os.environ["COMPETITOR_AI_INSIGHT"] = self._old_ai_flag
 
     def test_high_score_dimension_yields_learning_insight(self):
-        read = _readability(90, "excellent", {"sentence_length": 98})
+        """v1.1：高分维度（≥85）合并为单条「竞品基准」洞察，不再逐维刷屏。"""
+        read = _readability(90, "excellent", {"sentence_length": 98, "passive_ratio": 92})
         insights = generate_rule_insights(_TOOL_HAT, read)
-        match = [i for i in insights if i["area"] == "可读性 · 平均句长"]
-        self.assertTrue(match)
-        self.assertEqual(match[0]["priority"], "P2")
-        self.assertIn("对标", match[0]["action"])
+        baseline = [i for i in insights if i["area"] == "可读性 · 竞品基准"]
+        self.assertEqual(len(baseline), 1)
+        self.assertEqual(baseline[0]["priority"], "P2")
+        self.assertIn("基准", baseline[0]["action"])
+        self.assertIn("平均句长", baseline[0]["action"], "强维度名称应出现在基准条目中")
+        # 旧版逐维高分洞察（area=维度名、P2）不应再出现
+        self.assertFalse([i for i in insights if i["area"] == "可读性 · 平均句长"])
 
     def test_low_score_dimension_yields_p1_opportunity(self):
         read = _readability(70, "good", {"term_density": 40})
@@ -115,7 +119,8 @@ class InsightEngineTestCase(unittest.TestCase):
         read = _readability(90, "excellent", {"term_density": 45})
         read["insights"] = generate_insights(_TOOL_HAT, read)
         md = render_competitor_report("manual.pdf", _TOOL_HAT, read)
-        self.assertIn("四、对本司的启示", md)
+        # 章节编号动态分配（结构统计/体验缺失时顺延），只断言标题与内容存在
+        self.assertIn("对本司的启示", md)
         self.assertIn("P1", md)
 
 

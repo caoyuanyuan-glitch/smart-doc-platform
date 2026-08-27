@@ -39,8 +39,8 @@ class TermDetectionTestCase(unittest.TestCase):
             "All trademarks are the property of their respective owners. "
             "For specific trademark information, refer to the legal page. "
             "Technical information for operating and maintaining the system is "
-            "provided in this document for reference only."
-        )
+            "provided in this document for reference only. "
+        ) * 40  # v1.1 样本三档：4 句 × 40 = 160 句 ≥ 100，走正常评分路径
         result = analyze_readability(text, [text])
         density = result["dimensions"]["term_density"]["density"]
         self.assertLess(density, 15.0, f"普通文本术语密度应 < 15%，实际 {density}%")
@@ -49,23 +49,30 @@ class TermDetectionTestCase(unittest.TestCase):
 
 
 class LevelSuppressionTestCase(unittest.TestCase):
+    @staticmethod
+    def _sufficient_text(para: str, n: int = 120) -> str:
+        # v1.1 样本量三档：<100 句不评分（insufficient），需 >=100 句触发正常评分
+        return "\n".join([para] * n)
+
     def test_weakest_dimension_caps_level(self):
         """任一维度 < 55 分时，综合评级必须下调（不允许 46 分维度配 excellent）。"""
         para = "DNA RNA PCR sequencing reagents flowcells barcode adapters library."
-        text = "\n".join([para] * 8)
+        text = self._sufficient_text(para)
         result = analyze_readability(text, [text])
+        self.assertEqual(result["sample_status"], "limited")
         self.assertEqual(result["dimensions"]["term_density"]["score"], 0.0)
         self.assertGreaterEqual(result["overall_score"], 55)  # 其他维度拉高总分
         self.assertEqual(result["level"], "poor")             # 但评级被最差维度压制
         self.assertTrue(result.get("level_note"))
 
     def test_balanced_text_not_suppressed(self):
-        text = (
+        base = (
             "The instrument is ready. Check the power cable before use.\n"
             "Close the door and press start. Wait for the run to finish.\n"
             "Open the software and review the report. Save the file to disk.\n"
-            "Turn off the lamp. Clean the surface with a soft cloth."
+            "Turn off the lamp. Clean the surface with a soft cloth.\n"
         )
+        text = base * 15  # 120 句，样本量达 limited 档，可正常评分
         result = analyze_readability(text, [text])
         self.assertFalse(result.get("level_note"), "均衡文本不应出现评级下调说明")
 
@@ -167,6 +174,57 @@ class SsrfGuardTestCase(unittest.TestCase):
         with patch.object(socket, "getaddrinfo", return_value=fake):
             url = assert_public_http_url("https://docs.example.com/manual.htm")
         self.assertEqual(url, "https://docs.example.com/manual.htm")
+
+    def test_redirect_to_private_not_followed(self):
+        """P0 修复：fetch_html 逐跳校验——重定向到内网/云元数据地址拒绝跟随（二跳 SSRF 防护）。"""
+        from urllib import request
+        from app.utils.competitor_html import _SafeRedirectHandler
+        handler = _SafeRedirectHandler()
+        req = request.Request("https://docs.example.com/a")
+        target = handler.redirect_request(
+            req, None, 302, "Found", {}, "http://169.254.169.254/latest/meta-data")
+        self.assertIsNone(target)  # 返回 None = 不跟随，不向内网发起二次请求
+
+    def test_redirect_to_private_hostname_not_followed(self):
+        """P0 修复：重定向目标主机名解析到私网（DNS rebinding 类）同样拒绝跟随。"""
+        import socket
+        from unittest.mock import patch
+        from urllib import request
+        from app.utils.competitor_html import _SafeRedirectHandler
+        handler = _SafeRedirectHandler()
+        req = request.Request("https://docs.example.com/a")
+        fake = [(2, 1, 6, "", ("10.1.2.3", 443))]
+        with patch.object(socket, "getaddrinfo", return_value=fake):
+            target = handler.redirect_request(
+                req, None, 302, "Found", {}, "https://evil.example.com/b")
+        self.assertIsNone(target)
+
+    def test_redirect_to_public_followed(self):
+        """P0 修复：合规重定向（公网目标）正常跟随，不破坏 http→https/CDN 等正常跳转。"""
+        import socket
+        from unittest.mock import patch
+        from urllib import request
+        from app.utils.competitor_html import _SafeRedirectHandler
+        handler = _SafeRedirectHandler()
+        req = request.Request("https://docs.example.com/a")
+        fake = [(2, 1, 6, "", ("93.184.216.34", 443))]
+        with patch.object(socket, "getaddrinfo", return_value=fake):
+            new_req = handler.redirect_request(
+                req, None, 301, "Moved", {}, "https://docs.example.com/b")
+        self.assertIsNotNone(new_req)
+        self.assertIn("/b", new_req.full_url)
+
+    def test_fetch_html_uses_safe_redirect_handler(self):
+        """P0 修复防回归：fetch_html 必须经 _SafeRedirectHandler 建 opener（默认 urlopen 会跟随重定向）。"""
+        from unittest import mock
+        from app.utils import competitor_html
+        with mock.patch.object(competitor_html.request, "build_opener") as m_build, \
+             mock.patch.object(competitor_html, "assert_public_http_url", side_effect=lambda u: u):
+            m_build.return_value.open.side_effect = RuntimeError("abort before io")
+            with self.assertRaises(RuntimeError):
+                competitor_html.fetch_html("https://docs.example.com/a")
+        self.assertEqual(m_build.call_count, 1)
+        self.assertIs(m_build.call_args[0][0], competitor_html._SafeRedirectHandler)
 
 
 if __name__ == "__main__":

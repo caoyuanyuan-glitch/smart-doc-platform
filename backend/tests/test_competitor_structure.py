@@ -71,6 +71,51 @@ class FingerprintDitaPrinceTestCase(unittest.TestCase):
         self.assertTrue(any("generator" in e for e in dita[0]["evidence"]))
 
 
+class FlareEvidenceTestCase(unittest.TestCase):
+    """MadCap Flare 证据链补强（V1.2.2，实测 Illumina 全站具备）。
+
+    新增两条证据：<html xmlns:MadCap> 根命名空间 + data-mc-help-system-file-name 属性。
+    注意：data-mc-* 属性本身会先命中「HTML 含 data-mc-* 属性」证据，故帮助系统属性
+    用例至少 2 条证据 → high；xmlns 单独命中为 1 条 → medium。
+    """
+
+    def test_flare_xmlns_namespace_evidence_medium(self):
+        """仅 xmlns:MadCap 根命名空间 → 1 条新证据 → medium。"""
+        html = ('<html xmlns:MadCap="http://www.madcapsoftware.com/Schemas/MadCap.xsd">'
+                '<body><main><h1>Install the system</h1><p>Guide body text here.</p></main></body></html>')
+        extraction = extract_main_text(html)
+        result = detect_html_tool("https://example.com/page.html", extraction, html)
+        flare = [t for t in result["tools"] if t["name"] == "MadCap Flare"]
+        self.assertEqual(len(flare), 1)
+        self.assertTrue(any("xmlns:MadCap" in e for e in flare[0]["evidence"]))
+        self.assertEqual(flare[0]["confidence"], "medium")
+
+    def test_flare_help_system_file_name_evidence(self):
+        """data-mc-help-system-file-name → 帮助系统属性 + data-mc-* 属性两条证据 → high。"""
+        html = ('<html data-mc-help-system-file-name="UserGuide_HTML5.flmsp">'
+                '<body><main><h1>Install</h1><p>Guide body text.</p></main></body></html>')
+        extraction = extract_main_text(html)
+        result = detect_html_tool("https://example.com/page.html", extraction, html)
+        flare = [t for t in result["tools"] if t["name"] == "MadCap Flare"]
+        self.assertEqual(len(flare), 1)
+        self.assertTrue(any("data-mc-help-system-file-name" in e for e in flare[0]["evidence"]))
+        self.assertEqual(flare[0]["confidence"], "high")
+
+    def test_flare_two_new_evidences_high(self):
+        """两条 V1.2.2 新证据（命名空间 + 帮助系统属性）同时命中 → 证据齐全且 high。"""
+        html = ('<html xmlns:MadCap="http://www.madcapsoftware.com/Schemas/MadCap.xsd" '
+                'data-mc-help-system-file-name="UserGuide_HTML5.flmsp">'
+                '<body><main><h1>Install</h1><p>Guide body text.</p></main></body></html>')
+        extraction = extract_main_text(html)
+        result = detect_html_tool("https://example.com/page.html", extraction, html)
+        flare = [t for t in result["tools"] if t["name"] == "MadCap Flare"]
+        self.assertEqual(len(flare), 1)
+        self.assertEqual(flare[0]["confidence"], "high")
+        evidence = flare[0]["evidence"]
+        self.assertTrue(any("xmlns:MadCap" in e for e in evidence))
+        self.assertTrue(any("data-mc-help-system-file-name" in e for e in evidence))
+
+
 class StructureStatsTestCase(unittest.TestCase):
     def test_heading_line_heuristics(self):
         self.assertTrue(_is_heading_line("Chapter 3 Safety Precautions"))
@@ -243,7 +288,7 @@ class RunAnalysisInjectionTestCase(unittest.TestCase):
         # 报告同时包含结构统计章节与重排后的可读性章节
         self.assertIn("二、结构统计（客观指标）", result["report_md"])
         self.assertIn("三、可读性分析", result["report_md"])
-        self.assertIn("四、对本司的启示", result["report_md"])
+        self.assertIn("七、对本司的启示", result["report_md"])
 
 
 if __name__ == "__main__":

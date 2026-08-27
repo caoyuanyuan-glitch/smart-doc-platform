@@ -39,6 +39,11 @@ _BLOCK_TAGS = {"p", "div", "section", "li", "tr", "table", "br", "h1", "h2",
 # 低内容判定阈值：正文低于该字符数时，提示"疑似 JS 渲染/骨架页"
 LOW_CONTENT_CHARS = 400
 
+# 警告类 unicode 符号（⚠ U+26A0 / ☠ U+2620 / ⛔ U+26D4 / 盾牌 🛡 / 禁令 🚧🚫 等）：
+# 图标型安全提示的文本层残留，辅助判断"0 警告 ≠ 真没有"（外部评审 P1 采纳项）
+# 增补平面字符须写完整码点 \U0001F6E1，代理对写法在 Python3 str 中匹配不到（交叉审查 P2 修复）
+_WARNING_SYMBOL_RE = re.compile(r"[\u26a0\u2620\U0001F6E1\U0001F6A7\U0001F6AB\u26d4]")
+
 
 class UrlNotAllowedError(ValueError):
     """目标 URL 未通过安全校验（非公网地址/非法端口/非法协议）。"""
@@ -80,6 +85,25 @@ def assert_public_http_url(raw_url: str) -> str:
     return raw
 
 
+class _SafeRedirectHandler(request.HTTPRedirectHandler):
+    """SSRF 防护（交叉审查 P0 修复）：跟随重定向前逐跳校验目标 URL 安全性。
+
+    `urlopen` 默认跟随 3xx，重定向目标可能指向内网/私网地址（开放重定向二跳 SSRF）。
+    本 handler 在每次重定向前调用 `assert_public_http_url` 校验 newurl，
+    目标不合规（内网/私网/非 80-443/非 http(s)）则不跟随——urlopen 抛出 3xx
+    HTTPError 由调用方按抓取失败处理，不向重定向目标发起二次请求。
+    注意：与链接抽查的 `_NoRedirect`（完全禁跟随，3xx 视为可达）语义不同，
+    抓取场景允许合规重定向（http→https、路径跳转、公网 CDN），仅拦截危险跳转。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            assert_public_http_url(newurl)
+        except UrlNotAllowedError:
+            return None  # 重定向目标不合规：不跟随，不发起二次请求
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def fetch_html(raw_url: str) -> Dict:
     """抓取网页并返回 {html, final_url, content_type, size}。
 
@@ -93,8 +117,9 @@ def fetch_html(raw_url: str) -> Dict:
             "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.5,*/*;q=0.1",
         },
     )
+    opener = request.build_opener(_SafeRedirectHandler)
     try:
-        with request.urlopen(req, timeout=FETCH_TIMEOUT_SECONDS) as resp:
+        with opener.open(req, timeout=FETCH_TIMEOUT_SECONDS) as resp:
             content_type = (resp.headers.get_content_type() or "").lower()
             if content_type not in ALLOWED_CONTENT_TYPES:
                 raise RuntimeError(f"链接内容类型不支持: {content_type or 'unknown'}")
@@ -139,6 +164,8 @@ class _MainTextExtractor(HTMLParser):
         self.img_count = 0
         self.table_count = 0
         self.heading_count = 0
+        # 警告类 unicode 符号计数（图标型安全提示的文本层残留，外部评审 P1 采纳项）
+        self.warning_symbol_count = 0
 
     def handle_starttag(self, tag, attrs):
         name = tag.lower()
@@ -200,6 +227,8 @@ class _MainTextExtractor(HTMLParser):
         text = re.sub(r"\s+", " ", data or "").strip()
         if not text:
             return
+        # 警告类符号计数（⚠/☠/⛔ 等），供结构统计的图标型警告辅助判断
+        self.warning_symbol_count += len(_WARNING_SYMBOL_RE.findall(text))
         self._chunks.append(text)
         self._chunks.append(" ")
         if self._main_depth > 0:
@@ -245,6 +274,7 @@ class _MainTextExtractor(HTMLParser):
             "img_count": self.img_count,
             "table_count": self.table_count,
             "heading_count": self.heading_count,
+            "warning_symbol_count": self.warning_symbol_count,
         }
 
 
@@ -253,6 +283,39 @@ def extract_main_text(html: str) -> Dict:
     parser.feed(html)
     parser.close()
     return parser.result()
+
+
+# ------------------------------------------------------------ 入口页识别
+
+# 帮助中心/在线手册常见的入口页/封面页路径特征（进入正文目录前的壳页面）
+_ENTRY_PAGE_PATH_RES = [
+    re.compile(r"/frontpages?/", re.IGNORECASE),
+    re.compile(r"/(index|home|default|toc)(\.htm|\.html)?([?#]|$)", re.IGNORECASE),
+]
+# 入口页判定阈值：全文低于该字符数视为"封面/导航页"（正文未进入）
+_ENTRY_PAGE_MIN_CHARS = 500
+
+
+def entry_page_hints(final_url: str, full_text: str) -> List[str]:
+    """检测当前 HTML 页面是否疑似入口页/封面页（外部评审 P1 采纳项）。
+
+    命中路径特征或全文过短时返回提示；两者皆无返回空列表。
+    注意：这是"识别+提示"，不自动爬取子链接（递归抓站放 Phase 2）。
+    """
+    hints = []
+    path = parse.urlparse(final_url or "").path or ""
+    if any(rx.search(path) for rx in _ENTRY_PAGE_PATH_RES):
+        hints.append(
+            f"当前页面路径疑似手册入口页/封面页（{path[:60]}），非正文内容；"
+            "建议选择具体子页面分析，或上传完整 HTML 包后分析。"
+        )
+    text_len = len((full_text or "").strip())
+    if text_len and text_len < _ENTRY_PAGE_MIN_CHARS:
+        hints.append(
+            f"当前页面正文仅 {text_len} 字符，疑似封面/导航页而非正文；"
+            "如需完整分析，建议选择正文子页面或上传 PDF 原件。"
+        )
+    return hints
 
 
 # ------------------------------------------------------------ 工具识别证据链
@@ -296,6 +359,12 @@ def detect_html_tool(final_url: str, extraction: Dict, html: str) -> Dict:
         flare_hits.append("HTML 含 data-mc-* 属性（MadCap 运行时标记）")
     if re.search(r"MadCap\w*\.js|MadCap:", html or ""):
         flare_hits.append("HTML 引用 MadCapAll/MadCap 运行时脚本")
+    # V1.2.2 证据链补强（实测 Illumina 全站具备）：根命名空间 + 帮助系统属性
+    if "xmlns:madcap" in (html or "")[:3000].lower():
+        flare_hits.append("HTML 根声明 xmlns:MadCap 命名空间")
+    _mc_sys = re.search(r'data-mc-help-system-file-name\s*=\s*["\']([^"\']+)["\']', html or "")
+    if _mc_sys:
+        flare_hits.append(f"Flare 帮助系统属性 data-mc-help-system-file-name={_mc_sys.group(1)[:40]}")
 
     tools = []
     if flare_hits:

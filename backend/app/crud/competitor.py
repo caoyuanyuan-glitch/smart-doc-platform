@@ -29,7 +29,8 @@ def get_competitor_tasks(db: Session, user_id: int = None, skip: int = 0, limit:
 
 def update_competitor_task(db: Session, task_id: int, *, status: str = None,
                            tool_analysis: dict = None, readability: dict = None,
-                           report_md: str = None, error: str = None, completed_at=None):
+                           experience: dict = None, report_md: str = None,
+                           error: str = None, completed_at=None):
     task = db.query(CompetitorTask).filter(CompetitorTask.id == task_id).first()
     if not task:
         return None
@@ -39,6 +40,8 @@ def update_competitor_task(db: Session, task_id: int, *, status: str = None,
         task.tool_analysis = json.dumps(tool_analysis, ensure_ascii=False)
     if readability is not None:
         task.readability = json.dumps(readability, ensure_ascii=False)
+    if experience is not None:
+        task.experience = json.dumps(experience, ensure_ascii=False)
     if report_md is not None:
         task.report_md = report_md
     if error is not None:

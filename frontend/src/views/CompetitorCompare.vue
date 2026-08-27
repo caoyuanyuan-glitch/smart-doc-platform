@@ -100,6 +100,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -123,6 +124,7 @@ const detailVisible = ref(false)
 const detail = ref(null)
 const result = ref(null)
 const taskTable = ref(null)
+const route = useRoute()
 
 const selectedIds = computed(() => selectedRows.value.map((r) => r.id))
 const baselineName = computed(() => {
@@ -307,9 +309,21 @@ const downloadReport = () => {
   URL.revokeObjectURL(url)
 }
 
-onMounted(() => {
-  fetchTasks()
+onMounted(async () => {
+  await fetchTasks()
   fetchComparisons()
+  // 支持从单份报告页「与我方文件对比」跳转预填（P2-6：非数字参数忽略 + 目标不存在时提示）
+  const preselect = route.query.preselect
+  if (preselect && /^\d+$/.test(String(preselect)) && taskTable.value) {
+    const target = tasks.value.find((t) => String(t.id) === String(preselect))
+    if (target) {
+      nextTick(() => {
+        taskTable.value.toggleRowSelection(target, true)
+      })
+    } else {
+      ElMessage.warning('所选分析任务不在列表中，请手动勾选')
+    }
+  }
 })
 </script>
 

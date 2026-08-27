@@ -89,50 +89,82 @@ def _build_remote_display_name(page_title: str, final_url: str) -> str:
 
 
 def _parse_web_document(source_url: str) -> dict:
-    """抓取网页并完成正文抽取；工具识别证据由 _run_analysis 阶段合并。"""
-    from app.utils import competitor_html
+    """递归抓取网页站点（全站子页面/topic）并完成正文汇总与抽取。
+
+    用户裁定（2026-08-24）：所有子页面、子 topic 都需要爬取，不只是入口页面。
+    返回 pages_html（各页完整 HTML，供体验三维度页级聚合），不落库。
+    """
+    from app.utils import competitor_crawl, competitor_html
 
     _normalize_url(source_url)  # 预校验，给出明确的 400 文案
     try:
-        fetched = competitor_html.fetch_html(source_url)
+        crawl = competitor_crawl.crawl_site(source_url)
     except competitor_html.UrlNotAllowedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    extraction = competitor_html.extract_main_text(fetched["html"])
-    full_text = extraction.get("full_text", "")
-    if not full_text:
+    if not crawl["combined_text"].strip():
+        # 全站均无可提取正文（纯 JS 渲染/空骨架）：与单页口径一致，明确报错
         raise HTTPException(status_code=422, detail="未能从网页中提取到正文内容（可能为纯 JS 渲染页面）")
 
-    final_url = fetched["final_url"]
-    title = extraction.get("title", "")
+    final_url = crawl["final_url"]
+    full_text = crawl["combined_text"]
+    pages_text = [p["full_text"] for p in crawl["pages"] if p["full_text"]]
+    # 入口页（pages[0]）重新抽取完整资产特征（脚本/样式/生成器），供工具识别证据链
+    entry_html = crawl["pages"][0]["html"]
+    entry_extraction = competitor_html.extract_main_text(entry_html)
+    title = entry_extraction.get("title", "") or crawl["pages"][0].get("title", "")
     display_name = _build_remote_display_name(title, final_url)
     from urllib import parse
+    # 入口页/封面页识别（外部评审 P1 采纳项）：命中时并入 warnings，报告显著提示
+    entry_hints = competitor_html.entry_page_hints(final_url, full_text)
+    warnings = list(entry_extraction.get("notes", [])) + entry_hints
+    # 结构统计用全站累加（替换单页计数）
+    struct = crawl["structure"]
+    html_context = {
+        "final_url": final_url,
+        "html": entry_html[:200000],  # 证据检测仅需要头部与资产引用，截断防止超量存储
+        "extraction": {
+            "script_srcs": entry_extraction.get("script_srcs"),
+            "css_hrefs": entry_extraction.get("css_hrefs"),
+            "attrs_sample": entry_extraction.get("attrs_sample"),
+            "generator": entry_extraction.get("generator"),
+            "low_content": entry_extraction.get("low_content"),
+            "notes": entry_extraction.get("notes"),
+            "page_count": crawl["ok"],
+            "img_count": struct["img_count"],
+            "table_count": struct["table_count"],
+            "heading_count": struct["heading_count"],
+            "warning_symbol_count": struct["warning_symbol_count"],
+            "warning_count": struct["warning_count"],
+        },
+        "crawl": {
+            "ok": crawl["ok"],
+            "failed": crawl["failed"],
+            "total": crawl["total"],
+            "skipped": crawl["skipped"],
+            "dedup": crawl["dedup"],
+            "max_depth": crawl["pages"][-1]["depth"] if crawl["pages"] else 1,
+        },
+    }
     return {
         "filename": f"{display_name}.html",
-        "file_size": fetched["size"],
+        "file_size": sum(len(p["html"]) for p in crawl["pages"]),
         "full_text": full_text,
-        "pages_text": [full_text],
+        "pages_text": pages_text,
+        "pages_html": [p["html"] for p in crawl["pages"]],  # 内存字段，不落库
         "source_meta": {
             "format": "HTML",
             "title": title,
             "source_url": final_url,
             "producer": "Web page",
             "creator": parse.urlparse(final_url).netloc,
-            "generator": extraction.get("generator", ""),
-            "pages": 1,
+            "generator": entry_extraction.get("generator", ""),
+            "pages": crawl["ok"],
         },
-        "html_context": {
-            "final_url": final_url,
-            "html": fetched["html"][:200000],  # 证据检测仅需要头部与资产引用，截断防止超量存储
-            "extraction": {
-                k: extraction.get(k)
-                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes",
-                          "img_count", "table_count", "heading_count")
-            },
-        },
-        "warnings": extraction.get("notes", []),
+        "html_context": html_context,
+        "warnings": warnings,
     }
 
 
@@ -168,10 +200,11 @@ def _parse_document(file_path: str, filename: str) -> dict:
             "extraction": {
                 k: extraction.get(k)
                 for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes",
-                          "img_count", "table_count", "heading_count")
+                          "img_count", "table_count", "heading_count", "warning_symbol_count")
             },
         }
-        warnings = extraction.get("notes", [])
+        # 本地 HTML 也可能为入口页（无 URL 路径特征时按全文长度判定）
+        warnings = list(extraction.get("notes", [])) + competitor_html.entry_page_hints("", result["full_text"])
     else:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}")
     if not result or not result.get("full_text", "").strip():
@@ -210,9 +243,14 @@ def _merge_html_tool_analysis(tool_analysis: dict, html_context: Optional[dict])
 def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: list,
                   source_meta: Optional[dict] = None,
                   html_context: Optional[dict] = None,
-                  warnings: Optional[list] = None) -> dict:
-    """执行竞品分析：编辑工具识别 + 可读性分析 + 结构统计 + 报告渲染。"""
+                  warnings: Optional[list] = None,
+                  pages_html: Optional[list] = None) -> dict:
+    """执行竞品分析：编辑工具识别 + 可读性分析 + 体验三维度 + 结构统计 + 报告渲染。
+
+    pages_html（全站递归爬取场景）：各页完整 HTML，供体验三维度页级聚合（不落库）。
+    """
     from app.utils.competitor_analysis import analyze_tool_usage, analyze_readability, analyze_structure
+    from app.utils.competitor_experience import analyze_experience
     from app.utils.competitor_report import render_competitor_report
 
     tool_analysis = analyze_tool_usage(file_path, full_text, pages_text)
@@ -231,6 +269,18 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
         print(f"[competitor] 结构统计失败（降级为空）: {exc}")
         tool_analysis["structure_stats"] = {"notes": [f"结构统计失败: {exc}"]}
     readability = analyze_readability(full_text, pages_text)
+    # 体验三维度（需求说明书 V1.2 §3.3-3.5）：可获得性/易查找性/可用性（DQTI 理论）
+    # 失败不影响主流程：降级为空结果，报告缺三章节
+    try:
+        experience = analyze_experience(
+            file_path, full_text, pages_text,
+            html=(html_context or {}).get("html"),
+            final_url=(html_context or {}).get("final_url", ""),
+            pages_html=pages_html,
+        )
+    except Exception as exc:
+        print(f"[competitor] 体验维度分析失败（降级为空）: {exc}")
+        experience = {"error": f"体验维度分析失败: {exc}"}
     # 合并抽取阶段警告（正文过少/JS 渲染受限）到可读性结果，统一由报告渲染输出
     merged_warnings = list(readability.get("warnings") or [])
     for w in warnings or []:
@@ -241,13 +291,13 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
     # 洞察引擎（需求缺口1）：分数 → 对本司的可执行启示；规则层保底，AI 层可选降级
     from app.utils.competitor_insight import generate_insights
     try:
-        readability["insights"] = generate_insights(tool_analysis, readability)
+        readability["insights"] = generate_insights(tool_analysis, readability, experience)
     except Exception as exc:
         # 洞察失败不能影响分析主流程：降级为空洞察，报告仅缺"启示"章节
         print(f"[competitor] 洞察生成失败（降级为空）: {exc}")
         readability["insights"] = {"insights": [], "ai_available": False}
     try:
-        report_md = render_competitor_report(filename, tool_analysis, readability)
+        report_md = render_competitor_report(filename, tool_analysis, readability, experience)
     except Exception as exc:
         # 兜底降级：报告渲染自身异常时用最小模板，保证 status=completed 且报告可下载
         print(f"[competitor] 报告渲染失败，使用兜底模板: {exc}")
@@ -264,6 +314,7 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
     return {
         "tool_analysis": tool_analysis,
         "readability": readability,
+        "experience": experience,
         "report_md": report_md,
     }
 
@@ -322,6 +373,7 @@ async def create_competitor_task(
             status="completed",
             tool_analysis=result["tool_analysis"],
             readability=result["readability"],
+            experience=result["experience"],
             report_md=result["report_md"],
             completed_at=datetime.utcnow(),
         )
@@ -367,6 +419,7 @@ async def create_competitor_task_from_url(
             source_meta=parsed["source_meta"],
             html_context=parsed.get("html_context"),
             warnings=parsed.get("warnings"),
+            pages_html=parsed.get("pages_html"),
         )
         update_competitor_task(
             db,
@@ -374,6 +427,7 @@ async def create_competitor_task_from_url(
             status="completed",
             tool_analysis=result["tool_analysis"],
             readability=result["readability"],
+            experience=result["experience"],
             report_md=result["report_md"],
             completed_at=datetime.utcnow(),
         )

@@ -105,8 +105,9 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
         """.encode("utf-8")
 
         with patch("app.utils.competitor_html.socket.getaddrinfo", return_value=_FAKE_PUBLIC_ADDRINFO), \
-             patch("app.utils.competitor_html.request.urlopen",
-                   return_value=_fake_urlopen_response(html, "https://docs.example.com/Content/IN/Topic.htm")):
+             patch("app.utils.competitor_html.request.build_opener",
+                   return_value=Mock(open=Mock(return_value=_fake_urlopen_response(
+                       html, "https://docs.example.com/Content/IN/Topic.htm")))):
             response = self.client.post(
                 "/api/competitor/url",
                 headers=self._auth_headers("writer_user"),
@@ -130,13 +131,19 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
         self.assertEqual(tools[0]["confidence"], "high")
         self.assertGreaterEqual(len(tool_analysis.get("html_evidence", [])), 2)
 
-        # 正文去噪：nav/footer 噪声不进正文与报告；正文关键句保留
+        # 正文去噪：nav/footer 噪声不进正文与报告
         self.assertNotIn("HomeNAV", payload["report_md"])
         self.assertNotIn("FooterLegalBoilerplate", payload["report_md"])
-        self.assertIn("Configure the instrument", payload["report_md"])
-
-        # 正文量充足时不应出现低内容警告
+        # v1.1 样本量三档：本样例仅 15 句（<100），报告应标注样本不足而非输出评分
+        self.assertIn("样本不足（未评分）", payload["report_md"])
         readability = json.loads(payload["readability"])
+        self.assertIsNone(readability.get("overall_score"))
+        self.assertEqual(readability.get("level"), "insufficient")
+        self.assertTrue(any("样本量不足" in w for w in readability.get("warnings", [])))
+        # 正文提取有效：去噪后句子计数与样例一致（5 段 × 3 句）
+        self.assertEqual(readability["stats"]["sentence_count"], 15)
+
+        # 不应出现低内容警告（正文抽取本身成功，样本不足≠低内容）
         self.assertFalse(any("文本量较少" in w for w in readability.get("warnings", [])))
 
         db = self.SessionLocal()
@@ -156,8 +163,9 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
         </body></html>
         """
         with patch("app.utils.competitor_html.socket.getaddrinfo", return_value=_FAKE_PUBLIC_ADDRINFO), \
-             patch("app.utils.competitor_html.request.urlopen",
-                   return_value=_fake_urlopen_response(html, "https://docs.example.com/skeleton")):
+             patch("app.utils.competitor_html.request.build_opener",
+                   return_value=Mock(open=Mock(return_value=_fake_urlopen_response(
+                       html, "https://docs.example.com/skeleton")))):
             response = self.client.post(
                 "/api/competitor/url",
                 headers=self._auth_headers("writer_user"),

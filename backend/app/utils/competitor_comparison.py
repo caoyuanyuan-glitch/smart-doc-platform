@@ -42,7 +42,19 @@ _GAP_THRESHOLD = 8.0
 # 离散度阈值：无基线时，极差 ≥ 15 分的维度视为竞品间分化点
 _SPREAD_THRESHOLD = 15.0
 
-_LEVEL_ZH = {"excellent": "优秀", "good": "良好", "fair": "一般", "poor": "较差"}
+_LEVEL_ZH = {"excellent": "优秀", "good": "良好", "fair": "一般", "poor": "较差", "insufficient": "样本不足"}
+
+
+def _rank_key(d: dict):
+    """综合排名排序键（None 安全）：样本不足（insufficient，score=None）排最后。
+
+    v1.1 样本量三档使已完成任务的 overall_score 可为 None，直接按分数排序会
+    对 None 抛 TypeError（交叉审查 P1）：以 (has_score, score) 元组配合
+    reverse=True 排序——有分数的任务元组更大（True）排在前面，None 的
+    (False, 0) 自然落到最后。
+    """
+    s = d.get("overall_score")
+    return (s is not None, s if isinstance(s, (int, float)) else 0)
 
 
 def load_task_payloads(tasks: List) -> List[dict]:
@@ -114,7 +126,7 @@ def build_comparison(payloads: List[dict], baseline_task_id: Optional[int] = Non
         valid = {tid: s for tid, s in scores.items() if s is not None}
         dimension_winners[key] = max(valid, key=valid.get) if valid else None
 
-    overall_ranking = sorted(documents, key=lambda d: d["overall_score"], reverse=True)
+    overall_ranking = sorted(documents, key=_rank_key, reverse=True)
 
     gaps, insights = _build_gaps(documents, dimension_matrix, baseline_task_id)
 
@@ -215,18 +227,28 @@ def _build_gaps(documents: List[dict], dimension_matrix: Dict, baseline_task_id:
                     "evidence": f"最高 {valid[best_tid]} / 最低 {valid[worst_tid]}",
                 })
 
-    # 综合排名洞察：基线非第一 → P1；第一 → P2
+    # 综合排名洞察：基线非第一 → P1；第一 → P2（样本不足任务 None 安全）
     if documents:
-        ranking = sorted(documents, key=lambda d: d["overall_score"], reverse=True)
+        ranking = sorted(documents, key=_rank_key, reverse=True)
         top = ranking[0]
-        if baseline_task_id is not None:
+        if top.get("overall_score") is None:
+            insights.append({
+                "priority": "P2",
+                "area": "对比 · 综合",
+                "action": "参与对比的任务综合评分均为空（样本不足未评分），综合排名不具参考性；建议补充正文后重新分析再对比。",
+                "evidence": "综合评分全部为 None（insufficient）",
+            })
+        elif baseline_task_id is not None:
             base = by_id[baseline_task_id]
-            if top["is_baseline"]:
+            if base.get("overall_score") is None:
+                pass  # 基线样本不足：不给综合结论（分维度差距已在 None 保护下逐项跳过）
+            elif top["is_baseline"]:
+                runner_up = ranking[1]["overall_score"] if len(ranking) > 1 and ranking[1].get("overall_score") is not None else "-"
                 insights.append({
                     "priority": "P2",
                     "area": "对比 · 综合",
                     "action": f"我方基线综合评分排名第一（{top['overall_score']} 分），整体编写质量具备竞争优势，保持现有规范。",
-                    "evidence": f"综合评分 {top['overall_score']} vs 最优竞品 {ranking[1]['overall_score'] if len(ranking) > 1 else '-'}",
+                    "evidence": f"综合评分 {top['overall_score']} vs 最优竞品 {runner_up}",
                 })
             else:
                 gap_total = round(top["overall_score"] - base["overall_score"], 1)

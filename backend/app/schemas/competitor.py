@@ -18,6 +18,7 @@ class CompetitorTask(BaseModel):
     status: str
     tool_analysis: Optional[str] = None
     readability: Optional[str] = None
+    experience: Optional[str] = None
     report_md: Optional[str] = None
     error: Optional[str] = None
     user_id: int
@@ -36,6 +37,7 @@ class CompetitorTaskSummary(BaseModel):
     status: str
     tool_analysis: Optional[str] = None
     readability: Optional[str] = None
+    experience: Optional[str] = None
     error: Optional[str] = None
     user_id: int
     created_at: datetime
