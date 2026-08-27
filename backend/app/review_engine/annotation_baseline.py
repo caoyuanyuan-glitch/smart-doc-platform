@@ -262,7 +262,8 @@ def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], b
         return True
     # 兜底：批注提取的 selected_text 常为乱码碎片（PDF 文本层伪影），
     # 此时用批注 context 与问题原文的 token 重叠度判断是否同一处文本。
-    if context and len(context) >= 16 and original and len(original) >= 8:
+    # 不设原文长度门槛：短原文（如 '1 times'，7 字符）的 token 也能精确重叠。
+    if context and len(context) >= 16 and original:
         context_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", item.context.lower())}
         original_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", str(issue.get("original_text", "")).lower())}
         if original_tokens and len(context_tokens & original_tokens) / len(original_tokens) >= 0.5:
