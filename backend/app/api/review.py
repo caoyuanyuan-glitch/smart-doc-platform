@@ -8519,6 +8519,37 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 基础语法：数量"1"后接复数名词（如 swing downward 1 times -> 1 time / once）
+    # 采用高频量词白名单，天然排除 bus/series/analysis 等本身以 s 结尾的单数词，避免误报
+    _GRAMMAR_ONE_PLURAL = {
+        'times': 'time', 'cycles': 'cycle', 'days': 'day', 'hours': 'hour',
+        'minutes': 'minute', 'seconds': 'second', 'weeks': 'week', 'months': 'month',
+        'years': 'year', 'drops': 'drop', 'wells': 'well', 'tubes': 'tube',
+        'steps': 'step', 'vials': 'vial', 'strips': 'strip', 'repeats': 'repeat',
+        'aliquots': 'aliquot', 'columns': 'column', 'rows': 'row', 'washes': 'wash',
+        'tips': 'tip', 'plates': 'plate', 'samples': 'sample', 'tests': 'test',
+        'reads': 'read', 'wipes': 'wipe', 'turns': 'turn', 'passes': 'pass',
+        'inversions': 'inversion', 'rotations': 'rotation', 'centrifugations': 'centrifugation',
+    }
+    for match in re.finditer(r'\b(?:1|one)\s+([a-z]+s)\b', content, re.IGNORECASE):
+        plural = match.group(1).lower()
+        singular = _GRAMMAR_ONE_PLURAL.get(plural)
+        if not singular:
+            continue
+        numeral = '1' if match.group(0).lower().startswith('1') else 'one'
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-GRAMMAR-001',
+            '语法与表达',
+            f"{numeral} {singular}" if numeral == '1' else singular,
+            f"数量为 {numeral} 时名词应用单数形式：{match.group(0)} -> {numeral} {singular}" + ("（或改用 once）" if plural == 'times' else ""),
+            '英文技术说明书语法基础检查 - 数词与名词单复数一致性',
+            'general',
+            93,
+        )
+
     for match in re.finditer(r'\b20\d{2}/\d{1,2}/\d{1,2}\b', content):
         add_issue(
             match.start(),
