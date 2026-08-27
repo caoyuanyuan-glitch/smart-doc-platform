@@ -210,7 +210,7 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
             return True
-        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003"} or "格式规范" in category
+        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002"} or "格式规范" in category or "空格" in category
     if item.expected_rule == "DET-PUNCT-001":
         return rule.startswith("DOC-PUNCT") or rule.startswith("DOC-QUOTE") or "标点" in category
     if item.expected_rule == "DET-CATNO-001":
