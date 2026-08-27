@@ -4,6 +4,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from app.review_engine.models import ValidationResult
+from app.review_engine.pipeline import _log_pipeline_drop
 
 
 _BASIS_MARKERS = (
@@ -66,8 +67,24 @@ def normalize_noop_compare_text(text: Any) -> str:
     return re.sub(r"[\s\.,;:!?，。；：！？、()（）\[\]【】{}<>\-–—_/]+", "", text)
 
 
+def is_whitespace_only_correction(original: Any, suggestion: Any) -> bool:
+    """仅空格差异（补缺失空格/删多余空格）属于实质性修复。
+
+    例："temperature.For these" -> "temperature. For these"（句号后缺空格）、
+    "High-throu ghput" -> "High-throughput"（词中多余空格）。
+    这类建议与原文去掉空白后完全一致，但空格本身就是问题所在，不能按 no-op 丢弃。
+    """
+    a = str(original or "")
+    b = str(suggestion or "")
+    if not a or not b or a == b:
+        return False
+    return re.sub(r"\s+", "", a) == re.sub(r"\s+", "", b)
+
+
 def has_substantive_suggestion(original: Any, suggestion: Any) -> bool:
     if is_number_unit_space_correction(original, suggestion):
+        return True
+    if is_whitespace_only_correction(original, suggestion):
         return True
     return bool(normalize_noop_compare_text(original) != normalize_noop_compare_text(suggestion))
 
@@ -204,6 +221,10 @@ def ai_suggestion_is_low_value_english_rewrite(original: Any, suggestion: Any) -
     original_text = normalize_report_text(original)
     suggestion_text = normalize_report_text(suggestion)
     if not original_text or not suggestion_text:
+        return False
+    if is_whitespace_only_correction(original_text, suggestion_text):
+        # 仅空格差异（补缺失空格/删多余空格）本身就是要修的问题，
+        # 不能因 token 去空格后相同而判为低价值改写。
         return False
     if _is_localized_meaningful_english_fix(original_text, suggestion_text):
         return False
@@ -511,4 +532,5 @@ def filter_ai_issues_without_document_evidence(issues: list[dict[str, Any]], con
             filtered.append(issue)
             continue
         dropped_by_reason[result.reason] = dropped_by_reason.get(result.reason, 0) + 1
+        _log_pipeline_drop(f"ai_evidence:{result.reason}", issue)
     return filtered, dropped_by_reason
