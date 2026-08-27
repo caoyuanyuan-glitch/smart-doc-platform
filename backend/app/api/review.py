@@ -58,6 +58,7 @@ from app.review_engine.validation import (
     ai_suggestion_violates_number_unit_spacing as engine_ai_suggestion_violates_number_unit_spacing,
     filter_ai_issues_without_document_evidence as engine_filter_ai_issues_without_document_evidence,
     normalize_noop_compare_text as engine_normalize_noop_compare_text,
+    validate_ai_issue_candidate as engine_validate_ai_issue_candidate,
 )
 from app.review_engine.layers import count_issue_layers
 from app.review_engine.pipeline import (
@@ -2169,6 +2170,37 @@ def _filter_ai_issues_without_document_evidence_with_reasons(issues, content):
     return filtered, dropped_by_reason
 
 
+def _compact_ai_filter_issue_sample(issue, reason):
+    def _clip(value, limit=160):
+        text = re.sub(r'\s+', ' ', str(value or '')).strip()
+        return text[:limit]
+
+    return {
+        'reason': reason,
+        'rule': _clip(issue.get('rule', ''), 80),
+        'category': _clip(issue.get('category', ''), 80),
+        'severity': _clip(issue.get('severity', ''), 40),
+        'confidence': issue.get('confidence', 0),
+        'original_text': _clip(issue.get('original_text', '')),
+        'suggestion': _clip(issue.get('suggestion', '')),
+        'description': _clip(issue.get('description', '')),
+    }
+
+
+def _sample_ai_evidence_filter_drops(issues, content, limit=5):
+    samples = []
+    for issue in issues:
+        if str(issue.get('source', '') or '').lower() != 'ai':
+            continue
+        result = engine_validate_ai_issue_candidate(issue, content)
+        if result.accepted:
+            continue
+        samples.append(_compact_ai_filter_issue_sample(issue, result.reason))
+        if len(samples) >= limit:
+            break
+    return samples
+
+
 def _count_ai_issues(items):
     return sum(1 for issue in items if str(issue.get('source', '') or '').lower() == 'ai')
 
@@ -2215,9 +2247,11 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
         issues = _filter_low_value_review_issues(issues)
         ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
 
+    ai_evidence_drop_samples = _sample_ai_evidence_filter_drops(issues, content)
     issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
     ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
     ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
+    ai_filter_diagnostics["document_evidence_drop_samples"] = ai_evidence_drop_samples
     issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
     ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
 
@@ -7205,6 +7239,20 @@ def _run_chinese_human_baseline_rules(content):
             '建议核对正文与表题之间的间距和换行，避免出现“， 表10”紧贴的异常排版',
             '表题前出现异常空隙或换行粘连，通常意味着表格前后的版式未对齐。',
             'CYY人工审核经验基线 - 表题前间距检查', 'general', 87,
+        )
+
+    for match in re.finditer(r'版本\s*2\.0\s*1\.0', normalized):
+        start = max(0, match.start() - 80)
+        end = min(len(normalized), match.end() + 160)
+        nearby = normalized[start:end]
+        if '修订记录' not in nearby and '发布日期' not in nearby and '修订版本' not in nearby:
+            continue
+        add_issue(
+            match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'CYY-CN-LAYOUT-008', '表格/版式',
+            '建议将修订记录表列宽平均分布，确保版本号与日期列对齐',
+            '平均分布列。修订记录表中版本号连续粘连，通常对应列宽或对齐异常。',
+            'CYY人工审核经验基线 - 修订记录表列宽', 'general', 88,
         )
 
     for match in re.finditer(r'引物杂交条件（App\s*文库）\s*时间\s*On\s*5\s*分钟\s*3\s*分钟\s*3\s*分钟\s*Hold', normalized):
