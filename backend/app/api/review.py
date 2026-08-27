@@ -1025,7 +1025,7 @@ def validate_suggestion(original: str, suggestion: str) -> bool:
     if original_text and original_text != normalized_suggestion:
         compact_original = re.sub(r'\s+', '', original_text)
         compact_suggestion = re.sub(r'\s+', '', normalized_suggestion)
-        if compact_original == compact_suggestion and re.search(r'\s', normalized_suggestion):
+        if compact_original == compact_suggestion and (re.search(r'\s', normalized_suggestion) or re.search(r'\s', original_text)):
             return True
     return _normalize_noop_compare_text(original) != _normalize_noop_compare_text(normalized_suggestion)
 
@@ -8476,6 +8476,47 @@ def _run_manual_engineering_audit(content, file_type=None):
             '说明书审核能力补强方案 - 英文单位格式',
             'general',
             94,
+        )
+
+    # 缺失空格：句末标点后直接连写下一个单词（如 temperature.For these）
+    for match in re.finditer(r'([A-Za-z]{2,}[.!?]|[0-9]+[.!?])([A-Z][a-z]{2,})', content):
+        head, tail = match.group(1), match.group(2)
+        if head.lower().rstrip('.!?') in ('etc', 'eg', 'ie', 'vs', 'approx', 'fig', 'eq', 'no'):
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-001',
+            '空格与排版',
+            f"{head} {tail}",
+            '英文句子结束后应有一个空格，句末标点后直接连写下一个单词会影响可读性。',
+            '说明书审核能力补强方案 - 句末标点后空格',
+            'general',
+            92,
+        )
+
+    # 多余空格：连字符复合词被断开（如 High-throu ghput -> High-throughput）
+    # 仅当合并后的完整复合词在文档其他位置正常出现时才判定，避免误报正常短语
+    _hyphen_vocab = {m.group(0).lower() for m in re.finditer(r'\b[A-Za-z]+(?:-[A-Za-z]+){1,3}\b', content)}
+    for match in re.finditer(r'\b([A-Za-z]+(?:-[A-Za-z]+)+)\s+([a-z]{2,})\b', content):
+        head, tail = match.group(1), match.group(2)
+        joined = (head + tail).lower()
+        if joined not in _hyphen_vocab:
+            continue
+        if match.group(0).lower() in _hyphen_vocab:
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-SPACE-002',
+            '空格与排版',
+            head + tail,
+            '复合词内部被空格断开，建议合并为完整复合词。',
+            '说明书审核能力补强方案 - 复合词断词',
+            'general',
+            92,
         )
 
     for match in re.finditer(r'\b20\d{2}/\d{1,2}/\d{1,2}\b', content):
