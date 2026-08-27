@@ -787,6 +787,74 @@ def test_finalize_review_issues_defaults_to_pipeline_only(monkeypatch):
     assert diagnostics["document_evidence_drop_reasons"] == {"missing_evidence": 1}
 
 
+def test_sample_ai_evidence_filter_drops_includes_compact_reason():
+    samples = review_api._sample_ai_evidence_filter_drops(
+        [
+            {
+                "source": "ai",
+                "rule": "AI-GRAMMAR",
+                "category": "语法表达",
+                "severity": "general",
+                "confidence": 82,
+                "original_text": "missing phrase",
+                "suggestion": "replacement phrase",
+                "description": "AI suggested a correction",
+            },
+            {
+                "source": "rule",
+                "rule": "R001",
+                "original_text": "ignored",
+            },
+        ],
+        "document content without that phrase",
+    )
+
+    assert samples == [
+        {
+            "reason": "original_text_not_found",
+            "rule": "AI-GRAMMAR",
+            "category": "语法表达",
+            "severity": "general",
+            "confidence": 82,
+            "original_text": "missing phrase",
+            "suggestion": "replacement phrase",
+            "description": "AI suggested a correction",
+        }
+    ]
+
+
+def test_finalize_review_issues_records_ai_evidence_drop_samples(monkeypatch):
+    monkeypatch.delenv("REVIEW_USE_LEGACY_POST_FILTERS", raising=False)
+    monkeypatch.delenv("REVIEW_RECALL_FLOOR", raising=False)
+
+    monkeypatch.setattr(review_api, "dedupe_issues_by_original", lambda issues: list(issues))
+    monkeypatch.setattr(review_api, "_sanitize_issue_suggestions", lambda issues: list(issues))
+    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(review_api, "pipeline_select_review_issues", lambda issues: list(issues))
+
+    issues, diagnostics = review_api._finalize_review_issues(
+        [
+            {
+                "source": "ai",
+                "rule": "AI-GRAMMAR",
+                "category": "语法表达",
+                "severity": "general",
+                "confidence": 75,
+                "original_text": "not in document",
+                "suggestion": "in document",
+                "description": "AI correction",
+            }
+        ],
+        "document body",
+        set(),
+    )
+
+    assert issues == []
+    assert diagnostics["document_evidence_drop_reasons"] == {"original_text_not_found": 1}
+    assert diagnostics["document_evidence_drop_samples"][0]["reason"] == "original_text_not_found"
+    assert diagnostics["document_evidence_drop_samples"][0]["original_text"] == "not in document"
+
+
 def test_false_positive_signature_filter_drops_matched_issues():
     issues = [
         {"rule": "SPELL", "category": "拼写", "original_text": "consumbles", "source": "spellcheck"},
@@ -1387,6 +1455,46 @@ def test_pipeline_filters_low_value_generic_spelling_noise():
     assert selected == []
 
 
+def test_pipeline_filters_low_precision_cyy_reference_check():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "CYY-CN-REF-002",
+            "category": "交叉引用",
+            "severity": "general",
+            "original_text": "Barcode 管理界面",
+            "suggestion": "请检查该引用是否需要同步到全文一致的页码或章节",
+            "description": "未更新交叉引用，通查。",
+            "audit_basis": "CYY人工审核经验基线 - 交叉引用通查",
+            "confidence": 90,
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
+
+
+def test_pipeline_filters_short_time_placeholder_noise():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "CYY-CN-PLACEHOLDER-001",
+            "category": "占位符残留",
+            "severity": "general",
+            "original_text": "XX:XX:XX",
+            "suggestion": "请替换为正式内容或删除该占位符",
+            "description": "疑似模板占位符残留。",
+            "audit_basis": "CYY人工审核经验基线 - 占位符检查",
+            "confidence": 90,
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
+
+
 def test_should_drop_unicode_equivalent_issue_accepts_mu_variants():
     issue = {
         "original_text": "20 µL",
@@ -1487,6 +1595,46 @@ def test_dedupe_similar_but_not_identical_issues_kept():
     deduped = review_api.dedupe_issues_by_original([first_issue, second_issue])
 
     assert len(deduped) == 2
+
+
+def test_pipeline_keeps_substantive_high_confidence_ai_grammar_issue():
+    issue = {
+        "severity": "general",
+        "category": "Grammar",
+        "rule": "AI-GRAMMAR",
+        "chapter": "Section 1",
+        "original_text": "The sample are ready for loading.",
+        "suggestion": "The samples are ready for loading.",
+        "description": "Subject-verb agreement issue.",
+        "source": "ai",
+        "confidence": 91,
+        "position": "10-45",
+    }
+
+    selected = review_pipeline.select_review_issues([issue])
+
+    assert len(selected) == 1
+    assert selected[0]["source"] == "ai"
+    assert selected[0]["review_value_score"] >= 45
+
+
+def test_pipeline_still_filters_low_value_ai_template_issue():
+    issue = {
+        "severity": "general",
+        "category": "Grammar",
+        "rule": "AI-GRAMMAR",
+        "chapter": "Section 1",
+        "original_text": "Browse",
+        "suggestion": "Click Browse.",
+        "description": "Generic UI wording suggestion.",
+        "source": "ai",
+        "confidence": 96,
+        "position": "10-16",
+    }
+
+    selected = review_pipeline.select_review_issues([issue])
+
+    assert selected == []
 
 
 def test_parse_ai_issue_with_fatal_severity():
@@ -2171,6 +2319,14 @@ def test_run_manual_engineering_audit_detects_missing_space_before_units():
     )
 
     assert any(issue["rule"] == "DOC-UNIT-001" and issue["original_text"] == "24VDC" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_revision_table_column_layout():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "修订记录 修订版本 发布日期 版本 2.0 1.0 2024-01-01 2023-01-01",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-LAYOUT-008" and issue["original_text"] == "版本 2.0 1.0" for issue in issues)
 
 
 def test_run_manual_engineering_audit_keeps_global_site_for_english_manual():
