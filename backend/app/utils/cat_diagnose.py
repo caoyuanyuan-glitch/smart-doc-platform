@@ -98,7 +98,7 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 4. 术语必须与给定术语表一致；术语表没有的，保留原文。
 5. category 只能从枚举取；severity 只能是 low/medium/high。
 6. 只输出 JSON，不要任何解释文字。
-7. 诊断成立时：logic、missing、ambiguity 三类允许 revised 为空（只需写清 problem 与 rationale）；其余类别必须给出完整改写 revised，revised 不得为空，且必须与 quote 及原句不同。
+7. 诊断成立时：logic、missing、ambiguity 三类允许 revised 为空（写清 problem 与 rationale 即可）。其他类别若你能给出忠实改写则必须给出；若你识别出问题但给不出忠实改写，请改用 logic/missing/ambiguity 类别并把 revised 留空——这优于沉默。
 8. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
 
 category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, logic, missing, register, audience, risk, other
