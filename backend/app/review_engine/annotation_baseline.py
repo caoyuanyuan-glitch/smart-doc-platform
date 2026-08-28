@@ -248,7 +248,7 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
             return True
-        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003"} or "格式规范" in category
+        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003", "DOC-UNIT-001"} or "格式规范" in category or "空格" in category
     if item.expected_rule == "DET-PUNCT-001":
         return rule.startswith("DOC-PUNCT") or rule.startswith("DOC-QUOTE") or "标点" in category
     if item.expected_rule == "DET-CATNO-001":
@@ -267,11 +267,15 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-DUP-001":
         return rule.startswith("DOC-DUP") or rule == "CYY-CN-DUP-002" or "重复" in category
     if item.expected_rule == "STRUCT-TERM-001":
+        selected = _norm_for_match(item.selected_text)
+        if selected and len(selected) >= 4 and selected in blob:
+            return True
         return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or "术语一致性" in category
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
-            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007",
+            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAMMAR-001",
+            "DOC-GRAMMAR-002",
             "CYY-CN-STYLE-003", "CYY-CN-GRAMMAR-009", "CYY-CN-GRAMMAR-010", "CYY-CN-GRAMMAR-011",
         } or "表达与句式" in category
     return False
@@ -295,6 +299,14 @@ def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], b
         return True
     if not selected and context and len(context) >= 16 and context[:40] in blob:
         return True
+    # 兜底：批注提取的 selected_text 常为乱码碎片（PDF 文本层伪影），
+    # 此时用批注 context 与问题原文的 token 重叠度判断是否同一处文本。
+    # 不设原文长度门槛：短原文（如 '1 times'，7 字符）的 token 也能精确重叠。
+    if context and len(context) >= 16 and original:
+        context_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", item.context.lower())}
+        original_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", str(issue.get("original_text", "")).lower())}
+        if original_tokens and len(context_tokens & original_tokens) / len(original_tokens) >= 0.5:
+            return True
     return False
 
 

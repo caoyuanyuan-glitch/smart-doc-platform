@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from collections import Counter
 from typing import Any
@@ -446,6 +447,32 @@ def suppress_shadowed_ai(issues: list[Any]) -> list[Any]:
     return filtered
 
 
+def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, threshold: int | None = None) -> None:
+    """丢弃归因日志：环境变量 REVIEW_DROP_LOG 指向 JSONL 文件时记录每条被丢弃的问题及原因。"""
+    path = os.getenv("REVIEW_DROP_LOG", "")
+    if not path:
+        return
+    data = issue_to_mapping(issue)
+    record = {
+        "reason": reason,
+        "score": score,
+        "threshold": threshold,
+        "source": data["source"],
+        "rule": data["rule"],
+        "severity": data["severity"],
+        "category": data["category"],
+        "confidence": data["confidence"],
+        "original_text": data["original_text"][:200],
+        "suggestion": data["suggestion"][:200],
+        "description": data["description"][:200],
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> list[Any]:
     counters: Counter = Counter()
     selected_by_key: dict[str, Any] = {}
@@ -454,18 +481,27 @@ def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: 
         data = issue_to_mapping(issue)
         status = str(data["status"] or "").lower()
         if status_filter and status not in {"", "pending", "confirmed", "converted_to_rule"}:
+            _log_pipeline_drop("status_filtered", issue)
             continue
         if not data["original_text"]:
+            _log_pipeline_drop("empty_original_text", issue)
             continue
         if is_noise(issue, counters):
+            _log_pipeline_drop("noise", issue)
             continue
         threshold = 38 if str(data["severity"] or "").lower() in {"fatal", "serious"} else min_score
-        if value_score(issue) < threshold:
+        score = value_score(issue)
+        if score < threshold:
+            _log_pipeline_drop("below_threshold", issue, score=score, threshold=threshold)
             continue
         key = dedupe_key(issue)
         existing = selected_by_key.get(key)
         if existing is None or issue_rank(issue) > issue_rank(existing):
+            if existing is not None:
+                _log_pipeline_drop("dedupe_shadowed", existing)
             selected_by_key[key] = issue
+        else:
+            _log_pipeline_drop("dedupe_shadowed", issue)
 
     selected = suppress_shadowed_ai(list(selected_by_key.values()))
     return sorted(selected, key=sort_key)
