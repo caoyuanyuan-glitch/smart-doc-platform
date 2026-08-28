@@ -210,7 +210,7 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
             return True
-        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002"} or "格式规范" in category or "空格" in category
+        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003", "DOC-UNIT-001"} or "格式规范" in category or "空格" in category
     if item.expected_rule == "DET-PUNCT-001":
         return rule.startswith("DOC-PUNCT") or rule.startswith("DOC-QUOTE") or "标点" in category
     if item.expected_rule == "DET-CATNO-001":
@@ -237,6 +237,7 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
             "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAMMAR-001",
+            "DOC-GRAMMAR-002",
             "CYY-CN-STYLE-003", "CYY-CN-GRAMMAR-009", "CYY-CN-GRAMMAR-010", "CYY-CN-GRAMMAR-011",
         } or "表达与句式" in category
     return False

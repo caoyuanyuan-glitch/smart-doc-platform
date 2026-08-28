@@ -86,7 +86,26 @@ def has_substantive_suggestion(original: Any, suggestion: Any) -> bool:
         return True
     if is_whitespace_only_correction(original, suggestion):
         return True
+    if is_duplicate_punctuation_reduction(original, suggestion):
+        return True
     return bool(normalize_noop_compare_text(original) != normalize_noop_compare_text(suggestion))
+
+
+def is_duplicate_punctuation_reduction(original: Any, suggestion: Any) -> bool:
+    """删除连续重复标点属于实质性修复（如 ',,' -> ','、'..' -> '.'）。
+
+    noop 比较会剥掉所有标点，导致 ',,' 与 ',' 归一化后均为空串而被误判为
+    no-op；此处显式判定"建议 == 原文去掉重复标点"来放行此类修复。
+    """
+    a = str(original or "")
+    b = str(suggestion or "")
+    if not a or not b or a == b:
+        return False
+    if re.sub(r"\s+", "", a) == re.sub(r"\s+", "", b):
+        return False
+    reduced = re.sub(r"([,;:!?，。；：！？])\s*\1+", r"\1", a)
+    reduced = re.sub(r"(?<!\.)\.\.(?!\.)", ".", reduced)
+    return reduced == b.strip() or re.sub(r"\s+", "", reduced) == re.sub(r"\s+", "", b)
 
 
 def is_number_unit_space_correction(original: Any, suggestion: Any) -> bool:

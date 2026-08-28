@@ -57,6 +57,7 @@ from app.review_engine.validation import (
     ai_suggestion_changes_protected_meaning as engine_ai_suggestion_changes_protected_meaning,
     ai_suggestion_violates_number_unit_spacing as engine_ai_suggestion_violates_number_unit_spacing,
     filter_ai_issues_without_document_evidence as engine_filter_ai_issues_without_document_evidence,
+    is_duplicate_punctuation_reduction as engine_is_duplicate_punctuation_reduction,
     normalize_noop_compare_text as engine_normalize_noop_compare_text,
 )
 from app.review_engine.layers import count_issue_layers
@@ -1027,6 +1028,8 @@ def validate_suggestion(original: str, suggestion: str) -> bool:
         compact_suggestion = re.sub(r'\s+', '', normalized_suggestion)
         if compact_original == compact_suggestion and (re.search(r'\s', normalized_suggestion) or re.search(r'\s', original_text)):
             return True
+        if _is_duplicate_punctuation_reduction(original_text, normalized_suggestion):
+            return True
     return _normalize_noop_compare_text(original) != _normalize_noop_compare_text(normalized_suggestion)
 
 
@@ -1441,6 +1444,10 @@ def _is_number_unit_space_correction(original, suggestion):
     return bool(compact and spaced)
 
 
+def _is_duplicate_punctuation_reduction(original, suggestion):
+    return engine_is_duplicate_punctuation_reduction(original, suggestion)
+
+
 def _ai_suggestion_changes_protected_meaning(original, suggestion):
     return engine_ai_suggestion_changes_protected_meaning(original, suggestion)
 
@@ -1474,6 +1481,8 @@ def _is_noop_position_or_same_text_issue(issue):
     if not original or not suggestion:
         return False
     if _is_number_unit_space_correction(original, suggestion):
+        return False
+    if _is_duplicate_punctuation_reduction(original, suggestion):
         return False
     if original == suggestion or _normalize_noop_compare_text(original) == _normalize_noop_compare_text(suggestion):
         return True
@@ -8548,6 +8557,185 @@ def _run_manual_engineering_audit(content, file_type=None):
             '英文技术说明书语法基础检查 - 数词与名词单复数一致性',
             'general',
             93,
+        )
+
+    # 基础排版：数字与单位之间缺空格（如 5mL -> 5 mL、30min -> 30 min、15℃ -> 15 ℃）
+    # 单位白名单 + 前后边界约束，避开型号编号（E25RS）、版本号（V3.0）、乘号（2×150）等
+    _UNIT_AFTER_NUMBER_RE = re.compile(
+        r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)(µL|uL|μL|mL|ml|mg|µg|ug|μg|ng|kg|"
+        r"mm|cm|µm|um|μm|nm|mM|µM|uM|μM|nM|pmol|fmol|nmol|µmol|umol|μmol|mmol|"
+        r"mol|°C|℃|min|sec|hr|hrs|rpm|kb|bp|Mb|Gb|kHz|MHz|GHz|Gbps|Mbps|"
+        r"m|L|g|h)(?![A-Za-z0-9])"
+    )
+    for match in _UNIT_AFTER_NUMBER_RE.finditer(content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-003',
+            '空格与排版',
+            f"{match.group(1)} {match.group(2)}",
+            '数值与单位之间应保留一个空格（SI 单位规范），直接连写影响可读性与规范一致性。',
+            '说明书审核能力补强方案 - 数值与单位间距',
+            'general',
+            92,
+        )
+
+    # 基础标点：连续重复标点（如 ',,' '。.'；'..' 排除省略号 '...'）
+    for match in re.finditer(r'([,;:!?])\s*\1', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-PUNCT-001',
+            '标点符号',
+            match.group(1),
+            '出现连续重复的标点符号，通常是录入或排版残留，建议只保留一个。',
+            '说明书审核能力补强方案 - 重复标点',
+            'general',
+            92,
+        )
+    for match in re.finditer(r'(?<!\.)\.\.(?!\.)', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-PUNCT-001',
+            '标点符号',
+            '.',
+            '出现连续两个句点（非省略号），通常是录入或排版残留，建议只保留一个句点。',
+            '说明书审核能力补强方案 - 重复标点',
+            'general',
+            92,
+        )
+
+    # 基础语法：冠词 a/an 与后续单词读音不一致
+    # 缩写词按字母读音判定（an SMS / a USB），juː 音词与不发音 h 词用白名单处理
+    _AN_JU_SOUND = {
+        'university', 'universities', 'unique', 'unit', 'units', 'user', 'users',
+        'useful', 'usual', 'usually', 'uniform', 'universal', 'urine', 'utility',
+        'european', 'one', 'once', 'ubiquitin', 'euploid', 'usage', 'used', 'use',
+    }
+    _AN_SILENT_H = {
+        'hour', 'hours', 'honest', 'honestly', 'honesty', 'honor', 'honored',
+        'honour', 'heir', 'heiress',
+    }
+    _AN_SKIP_WORDS = {
+        'in', 'until', 'and', 'or', 'of', 'to', 'on', 'at', 'by', 'for', 'with',
+        'from', 'as', 'is', 'are', 'was', 'be', 'that', 'this', 'the', 'if',
+        'ensure', 'not', 'no', 'all', 'any',
+    }
+    _ABBR_VOWEL_SOUND = set('AEFHILMNORSX')  # 字母名以元音音开头（F 读 /ɛf/ 等）
+    _WORDLIKE_CAPS = {'home', 'end', 'start', 'next', 'back', 'stop', 'pause', 'run',
+                      'save', 'open', 'close', 'fastq', 'bam', 'cram', 'sam', 'tab'}
+
+    def _abbrev_article(word):
+        if len(word) < 2 or not word.isupper() or not word.isalpha():
+            return None
+        if word.lower() in _WORDLIKE_CAPS:
+            return None
+        return 'an' if word[0] in _ABBR_VOWEL_SOUND else 'a'
+
+    for match in re.finditer(r'\b(a|an)[ \t]{1,3}([A-Za-z]+)', content, re.IGNORECASE):
+        art, word = match.group(1).lower(), match.group(2)
+        wl = word.lower()
+        if len(word) == 1 or not word.isalpha() or wl in _AN_SKIP_WORDS:
+            continue
+        abbr_article = _abbrev_article(word)
+        if abbr_article:
+            if art != abbr_article:
+                add_issue(
+                    match.start(),
+                    match.end(),
+                    re.sub(r'\s+', ' ', match.group(0)).strip(),
+                    'DOC-GRAMMAR-002',
+                    '语法与表达',
+                    f"{abbr_article} {word}",
+                    f"缩写词 {word} 按字母读音应以 {'an' if abbr_article == 'an' else 'a'} 引导，冠词用法不一致。",
+                    '英文技术说明书语法基础检查 - 冠词与缩写词搭配',
+                    'general',
+                    89,
+                )
+            continue
+        if wl in _AN_JU_SOUND or wl in _AN_SILENT_H:
+            if art == 'a' and wl in _AN_SILENT_H:
+                add_issue(
+                    match.start(),
+                    match.end(),
+                    re.sub(r'\s+', ' ', match.group(0)).strip(),
+                    'DOC-GRAMMAR-002',
+                    '语法与表达',
+                    f"an {word}",
+                    f"{word} 的 h 不发音，以元音音开头，应使用 an。",
+                    '英文技术说明书语法基础检查 - 冠词 a/an 一致性',
+                    'general',
+                    89,
+                )
+            elif art == 'an' and wl in _AN_JU_SOUND:
+                add_issue(
+                    match.start(),
+                    match.end(),
+                    re.sub(r'\s+', ' ', match.group(0)).strip(),
+                    'DOC-GRAMMAR-002',
+                    '语法与表达',
+                    f"a {word}",
+                    f"{word} 以辅音音 /juː/ 开头，应使用 a。",
+                    '英文技术说明书语法基础检查 - 冠词 a/an 一致性',
+                    'general',
+                    89,
+                )
+            continue
+        first = wl[0]
+        if art == 'a' and first in 'aeiou':
+            add_issue(
+                match.start(),
+                match.end(),
+                re.sub(r'\s+', ' ', match.group(0)).strip(),
+                'DOC-GRAMMAR-002',
+                '语法与表达',
+                f"an {word}",
+                f"{word} 以元音音开头，冠词应用 an。",
+                '英文技术说明书语法基础检查 - 冠词 a/an 一致性',
+                'general',
+                89,
+            )
+        elif art == 'an' and first in 'bcdfghjklmnpqrstvwxyz':
+            add_issue(
+                match.start(),
+                match.end(),
+                re.sub(r'\s+', ' ', match.group(0)).strip(),
+                'DOC-GRAMMAR-002',
+                '语法与表达',
+                f"a {word}",
+                f"{word} 以辅音音开头，冠词应用 a。",
+                '英文技术说明书语法基础检查 - 冠词 a/an 一致性',
+                'general',
+                89,
+            )
+
+    # 基础语法：相邻重复词（如 'the the'）
+    # 跳过 that/had（有合法重复用法）；第二个词首字母大写多为 UI 按钮名（click "Click Expand"）
+    for match in re.finditer(r'\b([A-Za-z]{2,})([ \t]{1,3})\1\b', content, re.IGNORECASE):
+        first = match.group(1)
+        second = match.group(0)[len(first) + len(match.group(2)):]
+        if len(set(first.lower())) == 1:
+            # 占位符文本（'xxxx xxxx'、'XX XX' 常见于标签/表格示意图），不是重复词错误
+            continue
+        if first.lower() in {'that', 'had', 'very'}:
+            continue
+        if first[0].islower() and second[:1].isupper():
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-DUP-007',
+            '重复内容',
+            first,
+            f"单词 {first!r} 连续重复出现，通常是录入或复制粘贴残留，建议删除多余的一个。",
+            '说明书审核能力补强方案 - 相邻重复词',
+            'general',
+            91,
         )
 
     for match in re.finditer(r'\b20\d{2}/\d{1,2}/\d{1,2}\b', content):
