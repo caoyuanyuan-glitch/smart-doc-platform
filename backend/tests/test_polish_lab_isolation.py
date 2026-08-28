@@ -36,3 +36,7 @@ class PolishLabIsolationTest(unittest.TestCase):
     def test_api_prefix_is_isolated(self):
         self.assertIn("/api/polish-lab", self.lab_src)
         self.assertNotIn("/api/polish-lab", self.polish_src)
+
+    def test_diagnose_candidate_routes_stay_on_lab(self):
+        self.assertIn('"/diagnose-candidates"', self.lab_src)
+        self.assertNotIn("diagnose-candidates", self.polish_src)

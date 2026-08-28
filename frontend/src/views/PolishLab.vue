@@ -2,8 +2,7 @@
   <div class="polish-container" :class="{ 'document-mode': currentView === 'document' }">
     <div v-if="currentView === 'document'" class="document-view" :class="{ 'document-result-mode': docResult }">
       <div class="page-title-row">
-        <h2 class="page-title">文档润色（AI调试）</h2>
-        <el-tag type="warning" effect="plain">AI 增强调试副本</el-tag>
+        <h2 class="page-title">文档润色</h2>
         <div v-if="loading" class="polish-progress-float" :class="{ done: polishProgress >= 100 }">
           <div class="progress-float-bar">
             <el-icon class="is-loading" v-if="polishProgress < 100"><Loading /></el-icon>
@@ -430,8 +429,7 @@
 
     <div v-if="currentView === 'text'">
       <div class="page-title-row">
-        <h2 class="page-title">文本润色（AI调试）</h2>
-        <el-tag type="warning" effect="plain">AI 增强调试副本</el-tag>
+        <h2 class="page-title">文本润色</h2>
       </div>
 
       <!-- 文件选择行 -->
@@ -605,6 +603,35 @@
             <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div v-if="currentView === 'candidates'" class="candidates-view">
+      <div class="page-title-row">
+        <h2 class="page-title">AI 诊断候补</h2>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span>可转规则的诊断记录</span>
+          <div class="panel-actions">
+            <el-button size="small" :loading="diagnoseCandidatesLoading" @click="loadDiagnoseCandidates">刷新</el-button>
+          </div>
+        </div>
+        <el-table :data="diagnoseCandidates" v-loading="diagnoseCandidatesLoading" empty-text="暂无候补">
+          <el-table-column prop="quote" label="原文片段" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="revised" label="改写" min-width="160" show-overflow-tooltip />
+          <el-table-column label="分类" width="100">
+            <template #default="{ row }">{{ CATEGORY_LABELS[row.category] || row.category }}</template>
+          </el-table-column>
+          <el-table-column prop="problem" label="问题" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="rule_hint" label="规则提示" min-width="140" show-overflow-tooltip />
+          <el-table-column label="操作" width="180" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link :loading="row._importing" @click="importDiagnoseCandidate(row)">转规则</el-button>
+              <el-button type="info" link :loading="row._dismissing" @click="dismissDiagnoseCandidate(row)">忽略</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
       </div>
     </div>
 
@@ -1809,7 +1836,11 @@ const formData = ref({
   catAiSemanticScoring: Boolean(documentDraft.value.catAiSemanticScoring)
 })
 
-const currentView = computed(() => (route.path === '/polish-lab/document' ? 'document' : 'text'))
+const currentView = computed(() => {
+  if (route.path === '/polish-lab/document') return 'document'
+  if (route.path === '/polish-lab/candidates') return 'candidates'
+  return 'text'
+})
 
 let pendingLocalFile = null
 let documentProgressTimer = null
@@ -3041,6 +3072,49 @@ function isDiagnoseCandidate(candidate) {
   return String(candidate?.rule_source || '').trim() === 'ai_diagnose' || Boolean(candidate?.revised && candidate?.problem)
 }
 
+const diagnoseCandidates = ref([])
+const diagnoseCandidatesLoading = ref(false)
+
+async function loadDiagnoseCandidates() {
+  diagnoseCandidatesLoading.value = true
+  try {
+    const { data } = await polishAPI.listDiagnoseCandidates({ ruleable: true, status: 'pending' })
+    diagnoseCandidates.value = data?.items || []
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '加载诊断候补失败'))
+  } finally {
+    diagnoseCandidatesLoading.value = false
+  }
+}
+
+async function importDiagnoseCandidate(row) {
+  if (!row?.id) return
+  row._importing = true
+  try {
+    await polishAPI.importDiagnoseCandidate(row.id)
+    ElMessage.success('已导入为润色规则')
+    await loadDiagnoseCandidates()
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '导入规则失败'))
+  } finally {
+    row._importing = false
+  }
+}
+
+async function dismissDiagnoseCandidate(row) {
+  if (!row?.id) return
+  row._dismissing = true
+  try {
+    await polishAPI.dismissDiagnoseCandidate(row.id)
+    ElMessage.success('已忽略该候补')
+    await loadDiagnoseCandidates()
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '忽略候补失败'))
+  } finally {
+    row._dismissing = false
+  }
+}
+
 function categoryLabel(source) {
   const key = String(source?.category || '').trim()
   return CATEGORY_LABELS[key] || ''
@@ -3994,6 +4068,15 @@ onMounted(async () => {
   restoreCatSessionSnapshot()
   loadDropdownOptions()
   await loadPolishEngineStatus()
+  if (currentView.value === 'candidates') {
+    loadDiagnoseCandidates()
+  }
+})
+
+watch(currentView, (view) => {
+  if (view === 'candidates') {
+    loadDiagnoseCandidates()
+  }
 })
 </script>
 

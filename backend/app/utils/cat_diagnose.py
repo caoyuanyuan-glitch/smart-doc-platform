@@ -98,6 +98,8 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 4. 术语必须与给定术语表一致；术语表没有的，保留原文。
 5. category 只能从枚举取；severity 只能是 low/medium/high。
 6. 只输出 JSON，不要任何解释文字。
+7. 诊断成立时必须给出完整改写 revised；revised 不得为空，且必须与 quote 及原句不同。
+8. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
 
 category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, logic, missing, register, audience, risk, other
 
@@ -111,7 +113,7 @@ category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, 
 {json_sentences}
 
 输出格式：
-{{"diagnoses":[{{"sentence_index":0,"quote":"...","category":"term","severity":"high","problem":"...","revised":"...","rationale":"..."}}]}}
+{{"diagnoses":[{{"sentence_index":0,"quote":"...","category":"term","severity":"high","problem":"...","revised":"...","rationale":"...","ruleable":false,"rule_hint":""}}]}}
 无问题返回 {{"diagnoses":[]}}。
 """
 
@@ -168,7 +170,7 @@ def _truthy_env(name: str, default: str = "false") -> bool:
 
 
 def is_ai_diagnose_enabled() -> bool:
-    return _truthy_env("AI_DIAGNOSE_ENABLED", "false")
+    return _truthy_env("AI_DIAGNOSE_ENABLED", "true")
 
 
 def diagnose_timeout() -> float:
@@ -184,6 +186,39 @@ def diagnose_batch_size() -> int:
     except (TypeError, ValueError):
         value = 15
     return max(1, value)
+
+
+def diagnose_guide_max_chars() -> int:
+    try:
+        value = int(os.getenv("AI_DIAGNOSE_GUIDE_CHARS", "2400") or 2400)
+    except (TypeError, ValueError):
+        value = 2400
+    return max(200, value)
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= max_chars:
+        return raw
+    return raw[: max_chars - 1] + "..."
+
+
+def _is_identity_revision(quote: Any, revised: Any, original: Any = "") -> bool:
+    rev = _norm_text(revised)
+    if not rev:
+        return True
+    if rev == _norm_text(quote):
+        return True
+    original_norm = _norm_text(original)
+    return bool(original_norm) and rev == original_norm
+
+
+def _parse_ruleable(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def map_rule_to_category(
@@ -295,6 +330,8 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
     problem = str(raw.get("problem") or "").strip()
     if not quote or not revised or not problem:
         return None
+    if _is_identity_revision(quote, revised):
+        return None
     return {
         "sentence_index": sentence_index,
         "quote": quote,
@@ -303,6 +340,8 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
         "problem": problem,
         "revised": revised,
         "rationale": str(raw.get("rationale") or "").strip(),
+        "ruleable": _parse_ruleable(raw.get("ruleable")),
+        "rule_hint": str(raw.get("rule_hint") or "").strip(),
     }
 
 
@@ -340,6 +379,8 @@ def diagnosis_to_candidate(diag: dict, original_text: str = "") -> dict:
         "revised": revised,
         "problem": str(diag.get("problem") or ""),
         "rationale": str(diag.get("rationale") or ""),
+        "ruleable": bool(diag.get("ruleable")),
+        "rule_hint": str(diag.get("rule_hint") or ""),
     }
 
 
@@ -403,6 +444,16 @@ def merge_local_and_diagnoses(
         quote_key = _norm_text(diag.get("quote"))
         category = diag.get("category")
         severity = str(diag.get("severity") or "low")
+        sent_preview = sentence_by_index.get(idx) or {}
+        original_preview = str(
+            sent_preview.get("source_sentence_text")
+            or sent_preview.get("text")
+            or sent_preview.get("original_text")
+            or diag.get("quote")
+            or ""
+        ).strip()
+        if _is_identity_revision(diag.get("quote"), diag.get("revised"), original_preview):
+            continue
         local = items_by_index.get(idx)
         local_categories = set()
         local_quotes = set()
@@ -468,7 +519,7 @@ def _build_prompt(sentences: list[dict], terminology: Any, sentence_guide: str, 
     return _DIAGNOSE_PROMPT.format(
         product=product,
         terminology_md=_format_terminology(terminology),
-        sentence_guide=(sentence_guide or "").strip() or "（无）",
+        sentence_guide=_clip_text((sentence_guide or "").strip() or "（无）", diagnose_guide_max_chars()),
         json_sentences=json.dumps(payload, ensure_ascii=False),
     )
 
@@ -512,7 +563,20 @@ async def _diagnose_batch(sentences: list[dict], terminology: Any, sentence_guid
         payload = extract_json_object(raw)
         if payload is None:
             return []
-    return parse_diagnoses_payload(payload, allowed_indexes=allowed)
+    parsed = parse_diagnoses_payload(payload, allowed_indexes=allowed)
+    original_by_index = {
+        item.get("sentence_index"): str(
+            item.get("text") or item.get("source_sentence_text") or item.get("original_text") or ""
+        )
+        for item in sentences
+    }
+    kept = []
+    for diag in parsed:
+        original = original_by_index.get(diag.get("sentence_index"), "")
+        if _is_identity_revision(diag.get("quote"), diag.get("revised"), original):
+            continue
+        kept.append(diag)
+    return kept
 
 
 async def open_diagnose_sentences(
@@ -530,8 +594,22 @@ async def open_diagnose_sentences(
     batch_size = diagnose_batch_size()
     diagnoses: list[dict] = []
     try:
+        total_batches = (len(items) + batch_size - 1) // batch_size
+        logger.info(
+            "[CAT_DIAGNOSE] start sentences=%s batch_size=%s batches=%s timeout=%s",
+            len(items),
+            batch_size,
+            total_batches,
+            diagnose_timeout(),
+        )
         for start in range(0, len(items), batch_size):
             batch = items[start : start + batch_size]
+            logger.info(
+                "[CAT_DIAGNOSE] batch %s/%s size=%s",
+                start // batch_size + 1,
+                total_batches,
+                len(batch),
+            )
             diagnoses.extend(await _diagnose_batch(batch, terminology, sentence_guide, product_type))
     except Exception as exc:
         logger.warning("[CAT_DIAGNOSE] 诊断失败，静默降级: %s", exc)

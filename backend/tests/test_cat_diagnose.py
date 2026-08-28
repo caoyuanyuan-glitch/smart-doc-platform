@@ -120,5 +120,66 @@ class CatDiagnoseSwitchTest(unittest.TestCase):
         self.assertEqual(parsed[0]["category"], "term")
 
 
+class CatDiagnoseRevisedFilterTest(unittest.TestCase):
+    def test_empty_or_same_revised_is_dropped(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [
+                {
+                    "sentence_index": 0,
+                    "quote": "流道池",
+                    "category": "term",
+                    "severity": "high",
+                    "problem": "非标准名",
+                    "revised": "",
+                    "rationale": "手册",
+                },
+                {
+                    "sentence_index": 0,
+                    "quote": "流道池",
+                    "category": "term",
+                    "severity": "high",
+                    "problem": "非标准名",
+                    "revised": "流道池",
+                    "rationale": "手册",
+                },
+                {
+                    "sentence_index": 0,
+                    "quote": "流道池",
+                    "category": "term",
+                    "severity": "high",
+                    "problem": "非标准名",
+                    "revised": "flow cell",
+                    "rationale": "手册",
+                    "ruleable": True,
+                    "rule_hint": "流道池",
+                },
+            ]
+        }, allowed_indexes={0})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["revised"], "flow cell")
+        self.assertTrue(parsed[0]["ruleable"])
+        self.assertEqual(parsed[0]["rule_hint"], "流道池")
+
+
+class CatDiagnoseBatchTest(unittest.TestCase):
+    def test_sentences_are_split_into_batches_of_15(self):
+        from app.utils import cat_diagnose
+
+        calls = []
+
+        async def fake_batch(sentences, terminology, sentence_guide, product_type):
+            calls.append(len(sentences))
+            return []
+
+        items = [{"sentence_index": i, "text": f"句子{i}。"} for i in range(32)]
+        with patch.dict(os.environ, {"AI_DIAGNOSE_ENABLED": "true", "AI_DIAGNOSE_BATCH_SIZE": "15"}, clear=False):
+            with patch.object(cat_diagnose, "_diagnose_batch", side_effect=fake_batch):
+                result = asyncio.run(cat_diagnose.open_diagnose_sentences(items, {}, "", ""))
+        self.assertEqual(result, [])
+        self.assertEqual(calls, [15, 15, 2])
+
+
 if __name__ == "__main__":
     unittest.main()

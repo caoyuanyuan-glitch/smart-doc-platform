@@ -205,7 +205,16 @@ def fix_imperative(line: str, issues: list) -> str:
 _UNIT_TOKENS = r'r/min|kHz|MHz|GHz|kPa|MPa|kVA|mA|mV|kV|kW|MW|kN|min|rpm|bp|mL|μL|µL|uL|μg|µg|mg|ng|kg|μm|µm|mm|cm|°C|℃|Hz|Pa|VA|mM|μM|µM|nM|m|L|g|V|A|W|N|s|h|M'
 
 _NUMBER_UNIT_NO_SPACE = re.compile(
-    r'(\d+\.?\d*)\s*(' + _UNIT_TOKENS + r')(?![A-Za-z])'
+    r'(\d+\.?\d*)[\s·~～=>/—－,、]*(' + _UNIT_TOKENS + r')(?![A-Za-z])'
+)
+
+
+_NUMBER_RANGE_UNIT = re.compile(
+    r'(\d+\.?\d*)\s*([~～—－])\s*(\d+\.?\d*)[\s·~～=>/—－,、]*(' + _UNIT_TOKENS + r')(?![A-Za-z])'
+)
+
+_MEASURE_RATIO = re.compile(
+    r'([A-Za-z]+\d+(?:\.\d+)?)(/)([A-Za-z]+\d+(?:\.\d+)?)(=)(\d+(?:\.\d+)?)'
 )
 
 
@@ -214,6 +223,39 @@ def detect_number_unit_spacing(line: str) -> list:
     检测数字与单位之间缺少空格的问题。
     """
     issues = []
+    used = []
+
+    def _take(start, end):
+        for left, right in used:
+            if not (end <= left or start >= right):
+                return False
+        used.append((start, end))
+        return True
+
+    for m in _NUMBER_RANGE_UNIT.finditer(line):
+        replacement = f'{m.group(1)} {m.group(2)} {m.group(3)} {m.group(4)}'
+        full = m.group(0)
+        if full != replacement and _take(m.start(), m.end()):
+            issues.append({
+                'original': full,
+                'replacement': replacement,
+                'reason': '数字与单位间需空格',
+                'rule_name': '数字单位空格',
+                'type': 'format',
+            })
+
+    for m in _MEASURE_RATIO.finditer(line):
+        replacement = f'{m.group(1)} / {m.group(3)} = {m.group(5)}'
+        full = m.group(0)
+        if full != replacement and _take(m.start(), m.end()):
+            issues.append({
+                'original': full,
+                'replacement': replacement,
+                'reason': '数字与单位间需空格',
+                'rule_name': '数字单位空格',
+                'type': 'format',
+            })
+
     for m in _NUMBER_UNIT_NO_SPACE.finditer(line):
         full = m.group(0)
         number_part = m.group(1)
@@ -222,7 +264,7 @@ def detect_number_unit_spacing(line: str) -> list:
         if ' ' in full or '\u00A0' in full:
             continue
         replacement = f'{number_part} {unit_part}'
-        if full != replacement:
+        if full != replacement and _take(m.start(), m.end()):
             issues.append({
                 'original': full,
                 'replacement': replacement,

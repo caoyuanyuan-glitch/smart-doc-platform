@@ -126,6 +126,11 @@ const routes = [
     component: PolishLab
   },
   {
+    path: '/polish-lab/candidates',
+    name: 'PolishLabCandidates',
+    component: PolishLab
+  },
+  {
     path: '/polish/history',
     name: 'PolishHistory',
     component: PolishHistory

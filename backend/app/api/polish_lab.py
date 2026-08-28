@@ -53,6 +53,58 @@ _polish_tasks: dict = {}  # {task_id: {"status", "progress", "message", "result"
 _polish_tasks_lock = threading.Lock()
 
 
+def _persist_lab_diagnoses(db: Session, diagnoses, sentence_items=None, analyze_id=None, source="text"):
+    if not db or not diagnoses:
+        return
+    try:
+        from app.models.cat_diagnose_record_lab import CatDiagnoseRecordLab
+
+        sentence_by_index = {
+            item.get("sentence_index"): item
+            for item in (sentence_items or [])
+            if isinstance(item, dict)
+        }
+        rows = []
+        for diag in diagnoses:
+            if not isinstance(diag, dict):
+                continue
+            sent = sentence_by_index.get(diag.get("sentence_index")) or {}
+            original = str(
+                sent.get("source_sentence_text")
+                or sent.get("text")
+                or sent.get("original_text")
+                or diag.get("quote")
+                or ""
+            ).strip()
+            rows.append(
+                CatDiagnoseRecordLab(
+                    analyze_id=analyze_id,
+                    source=source,
+                    sentence_index=diag.get("sentence_index"),
+                    original_text=original,
+                    quote=str(diag.get("quote") or ""),
+                    category=str(diag.get("category") or "other"),
+                    severity=str(diag.get("severity") or "low"),
+                    problem=str(diag.get("problem") or ""),
+                    revised=str(diag.get("revised") or ""),
+                    rationale=str(diag.get("rationale") or ""),
+                    ruleable=bool(diag.get("ruleable")),
+                    rule_hint=str(diag.get("rule_hint") or ""),
+                    status="pending",
+                )
+            )
+        if not rows:
+            return
+        db.add_all(rows)
+        db.commit()
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning("[CAT_DIAGNOSE] 诊断落库失败: %s", exc)
+
+
 # ============================================================
 # 术语库加载 & 语言检测
 # ============================================================
@@ -7642,6 +7694,7 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
                     sentence_guide,
                     input_data.product_type or "",
                 )
+                _persist_lab_diagnoses(db, ai_diag, sentence_items, source="text")
                 cat_items, diagnose_items = merge_local_and_diagnoses(
                     cat_items,
                     ai_diag,
@@ -10015,6 +10068,138 @@ async def upload_polished_file(
     return {"message": "文件上传成功", "id": db_file.id}
 
 
+class DiagnoseImportBody(BaseModel):
+    match_pattern: Optional[str] = None
+    replacement_text: Optional[str] = None
+    rule_name: Optional[str] = None
+    rule_type: Optional[str] = None
+
+
+_DIAGNOSE_RULE_TYPES = {
+    "term": "replacement_rule",
+    "spelling": "format_rule",
+    "word": "replacement_rule",
+    "register": "imperative_rule",
+    "syntax": "sentence_applicability_rule",
+    "grammar": "format_rule",
+}
+
+
+def _serialize_diagnose_record(row) -> dict:
+    return {
+        "id": row.id,
+        "analyze_id": row.analyze_id,
+        "source": row.source,
+        "sentence_index": row.sentence_index,
+        "original_text": row.original_text,
+        "quote": row.quote,
+        "category": row.category,
+        "severity": row.severity,
+        "problem": row.problem,
+        "revised": row.revised,
+        "rationale": row.rationale,
+        "ruleable": bool(row.ruleable),
+        "rule_hint": row.rule_hint,
+        "status": row.status,
+        "imported_rule_id": row.imported_rule_id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+@router.get("/diagnose-candidates")
+def list_diagnose_candidates(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    ruleable: Optional[bool] = Query(True),
+    status: Optional[str] = Query("pending"),
+    db: Session = Depends(get_db),
+):
+    from app.models.cat_diagnose_record_lab import CatDiagnoseRecordLab
+
+    q = db.query(CatDiagnoseRecordLab)
+    if ruleable is not None:
+        q = q.filter(CatDiagnoseRecordLab.ruleable == ruleable)
+    if status:
+        q = q.filter(CatDiagnoseRecordLab.status == status)
+    total = q.count()
+    rows = q.order_by(CatDiagnoseRecordLab.id.desc()).offset(skip).limit(limit).all()
+    return {"total": total, "items": [_serialize_diagnose_record(row) for row in rows]}
+
+
+@router.post("/diagnose-candidates/{record_id}/import")
+def import_diagnose_candidate(
+    record_id: int,
+    body: Optional[DiagnoseImportBody] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user_optional),
+):
+    from app.models.cat_diagnose_record_lab import CatDiagnoseRecordLab
+    from app.crud.polish_learning_rule import create_rule, get_rule_by_key
+    from app.schemas.polish_learning_rule import PolishLearningRuleCreate
+
+    row = db.query(CatDiagnoseRecordLab).filter(CatDiagnoseRecordLab.id == record_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="诊断候补不存在")
+    payload = body or DiagnoseImportBody()
+    match_pattern = (payload.match_pattern or row.rule_hint or row.quote or "").strip()
+    if match_pattern:
+        try:
+            re.compile(match_pattern)
+        except re.error:
+            match_pattern = re.escape(row.quote or row.original_text or match_pattern)
+    else:
+        match_pattern = re.escape(row.quote or row.original_text or "")
+    if not match_pattern:
+        raise HTTPException(status_code=400, detail="缺少可导入的匹配模式")
+    replacement_text = payload.replacement_text if payload.replacement_text is not None else (row.revised or "")
+    rule_name = (payload.rule_name or row.problem or "AI 诊断规则").strip()[:128]
+    rule_type = payload.rule_type or _DIAGNOSE_RULE_TYPES.get(row.category or "", "format_rule")
+    rule_key = f"lab-diag-{row.id}-{uuid.uuid4().hex[:8]}"
+    while get_rule_by_key(db, rule_key):
+        rule_key = f"lab-diag-{row.id}-{uuid.uuid4().hex[:8]}"
+    created = create_rule(
+        db,
+        PolishLearningRuleCreate(
+            rule_name=rule_name,
+            rule_type=rule_type,
+            engine_key=None,
+            rule_key=rule_key,
+            match_pattern=match_pattern,
+            replacement_text=replacement_text,
+            description=(row.rationale or row.problem or "").strip() or None,
+            priority_level=0,
+            enabled=True,
+        ),
+    )
+    row.status = "imported"
+    row.imported_rule_id = created.id
+    db.commit()
+    db.refresh(row)
+    _invalidate_typo_cache()
+    return {
+        "ok": True,
+        "rule_id": created.id,
+        "rule_key": created.rule_key,
+        "item": _serialize_diagnose_record(row),
+    }
+
+
+@router.post("/diagnose-candidates/{record_id}/dismiss")
+def dismiss_diagnose_candidate(
+    record_id: int,
+    db: Session = Depends(get_db),
+):
+    from app.models.cat_diagnose_record_lab import CatDiagnoseRecordLab
+
+    row = db.query(CatDiagnoseRecordLab).filter(CatDiagnoseRecordLab.id == record_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="诊断候补不存在")
+    row.status = "dismissed"
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "item": _serialize_diagnose_record(row)}
+
+
 @router.get("/")
 async def list_polished_documents(db: Session = Depends(get_db)):
     docs = get_polished_documents(db)
@@ -10963,6 +11148,7 @@ async def cat_analyze(
                         sentence_guide,
                         product_type or "",
                     )
+                    _persist_lab_diagnoses(db, ai_diag, unmatched, source="document")
                     diagnose_items = diagnoses_to_cat_items(ai_diag, unmatched)
                 except Exception:
                     diagnose_items = []

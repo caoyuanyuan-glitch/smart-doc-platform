@@ -318,6 +318,10 @@ function createPolishAPI(prefix) {
 export const polishAPI = createPolishAPI('/polish')
 export const polishLabAPI = createPolishAPI('/polish-lab')
 
+polishLabAPI.listDiagnoseCandidates = (params = {}) => instance.get('/polish-lab/diagnose-candidates', { params })
+polishLabAPI.importDiagnoseCandidate = (id, payload = {}) => instance.post(`/polish-lab/diagnose-candidates/${id}/import`, payload)
+polishLabAPI.dismissDiagnoseCandidate = (id) => instance.post(`/polish-lab/diagnose-candidates/${id}/dismiss`)
+
 export const qaAPI = {
   ask: (documentId, question) => instance.post(`/qa/${documentId}`, {}, { params: { question } }),
   askGeneral: (question, knowledgeIds = [], sessionId = null) => instance.post('/qa/general', { question, knowledge_ids: knowledgeIds, session_id: sessionId }),
