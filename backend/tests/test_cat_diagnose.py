@@ -264,5 +264,16 @@ class CatDiagnoseBatchTest(unittest.TestCase):
         self.assertEqual(calls, [15, 15, 2])
 
 
+class CatDiagnoseHintImportTest(unittest.TestCase):
+    def test_hint_empty_revised_requires_replacement(self):
+        from app.utils.cat_diagnose import hint_import_requires_replacement
+
+        self.assertTrue(hint_import_requires_replacement("logic", ""))
+        self.assertTrue(hint_import_requires_replacement("missing", "   "))
+        self.assertTrue(hint_import_requires_replacement("ambiguity", None))
+        self.assertFalse(hint_import_requires_replacement("logic", "关闭电源后再维护。"))
+        self.assertFalse(hint_import_requires_replacement("term", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

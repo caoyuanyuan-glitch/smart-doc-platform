@@ -1933,7 +1933,9 @@ const catCandidateDebugSummaryText = computed(() => {
   const topReasonText = topReason ? `，主要过滤原因 ${topReason[0]} ${topReason[1]} 条` : ''
   const simpleMatchText = topSimpleMatchReason ? `，_simple_match 主要拦截 ${topSimpleMatchReason[0]} ${topSimpleMatchReason[1]} 条` : ''
   const surfaceRuleText = surfaceRuleCandidates > 0 ? `，表层规则直出 ${surfaceRuleCandidates}` : ''
-  return `模板池 ${templatePoolSize}，进入匹配 ${templatesConsidered}，召回通过 ${templatesMatched}${surfaceRuleText}，候选 ${returnedBeforeAi} -> ${before} -> ${after}，其中 ${review} 条需确认${topReasonText}${simpleMatchText}`
+  const unmatchedSentences = Number(summary.unmatchedSentenceCount || 0)
+  const diagnoseItemCount = Number(summary.diagnoseItemCount || 0)
+  return `模板池 ${templatePoolSize}，进入匹配 ${templatesConsidered}，召回通过 ${templatesMatched}${surfaceRuleText}，候选 ${returnedBeforeAi} -> ${before} -> ${after}，其中 ${review} 条需确认${topReasonText}${simpleMatchText}，unmatched ${unmatchedSentences} 句，AI 诊断产出 ${diagnoseItemCount} 条`
 })
 
 const confirmedDocChangeCount = computed(() => {
@@ -3117,9 +3119,28 @@ async function loadDiagnoseCandidates() {
 
 async function importDiagnoseCandidate(row) {
   if (!row?.id) return
+  const needsReplacement = HINT_ONLY_CATEGORIES.has(String(row.category || '')) && !String(row.revised || '').trim()
+  let payload = {}
+  if (needsReplacement) {
+    try {
+      const { value } = await ElMessageBox.prompt(
+        '该类诊断没有改写文本，请填写替换文本后再导入规则',
+        '填写替换文本',
+        { confirmButtonText: '导入', cancelButtonText: '取消', inputPlaceholder: 'replacement_text' }
+      )
+      const replacementText = String(value || '').trim()
+      if (!replacementText) {
+        ElMessage.error('替换文本不能为空')
+        return
+      }
+      payload = { replacement_text: replacementText }
+    } catch {
+      return
+    }
+  }
   row._importing = true
   try {
-    await polishAPI.importDiagnoseCandidate(row.id)
+    await polishAPI.importDiagnoseCandidate(row.id, payload)
     ElMessage.success('已导入为润色规则')
     await loadDiagnoseCandidates()
   } catch (error) {
@@ -3543,7 +3564,9 @@ async function submitCatAnalyze() {
       totalBeforeFilter: data.candidate_debug_summary?.total_before_filter || 0,
       totalAfterFilter: data.candidate_debug_summary?.total_after_filter || 0,
       needsReviewCount: data.candidate_debug_summary?.needs_review_count || 0,
-      droppedByReason: data.candidate_debug_summary?.dropped_by_reason || {}
+      droppedByReason: data.candidate_debug_summary?.dropped_by_reason || {},
+      unmatchedSentenceCount: data.candidate_debug_summary?.unmatched_sentence_count || 0,
+      diagnoseItemCount: data.candidate_debug_summary?.diagnose_item_count || 0
     },
     sourceName: pendingLocalFile?.name || formData.value.sourceFile || '',
     aiScoringStatus: data.ai_scoring_status || '',

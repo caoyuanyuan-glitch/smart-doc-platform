@@ -10151,7 +10151,18 @@ def import_diagnose_candidate(
         match_pattern = re.escape(row.quote or row.original_text or "")
     if not match_pattern:
         raise HTTPException(status_code=400, detail="缺少可导入的匹配模式")
-    replacement_text = payload.replacement_text if payload.replacement_text is not None else (row.revised or "")
+    from app.utils.cat_diagnose import hint_import_requires_replacement
+
+    provided_replacement = payload.replacement_text if payload.replacement_text is not None else None
+    if hint_import_requires_replacement(row.category, row.revised):
+        replacement_text = str(provided_replacement or "").strip()
+        if not replacement_text:
+            raise HTTPException(
+                status_code=400,
+                detail="logic/missing/ambiguity 诊断 revised 为空，请手填 replacement_text 后再导入",
+            )
+    else:
+        replacement_text = provided_replacement if provided_replacement is not None else (row.revised or "")
     rule_name = (payload.rule_name or row.problem or "AI 诊断规则").strip()[:128]
     rule_type = payload.rule_type or _DIAGNOSE_RULE_TYPES.get(row.category or "", "format_rule")
     rule_key = f"lab-diag-{row.id}-{uuid.uuid4().hex[:8]}"
@@ -11086,6 +11097,8 @@ async def cat_analyze(
             "total_after_filter": 0,
             "needs_review_count": 0,
             "dropped_by_reason": {},
+            "unmatched_sentence_count": 0,
+            "diagnose_item_count": 0,
         }
         ai_semantic_active = ai_semantic_scoring and ai_scoring_status == "completed"
 
@@ -11105,6 +11118,13 @@ async def cat_analyze(
                 else:
                     drop_reason = str(candidate.get("drop_reason") or "unknown")
                     candidate_debug_summary["dropped_by_reason"][drop_reason] = candidate_debug_summary["dropped_by_reason"].get(drop_reason, 0) + 1
+                    if drop_reason == "low_filtered_score":
+                        logger.info(
+                            "[CAT_ANALYZE] drop stage=low_filtered_score quote=%s score=%s template=%s",
+                            item.get("original_text") or "",
+                            candidate.get("filtered_semantic_score"),
+                            candidate.get("template_text") or "",
+                        )
             filtered_candidates.sort(
                 key=lambda candidate: (
                     float(candidate.get("filtered_semantic_score", 0.0) or 0.0),
@@ -11119,6 +11139,8 @@ async def cat_analyze(
             candidate_debug_summary["total_after_filter"] += len(item["candidates"])
 
         diagnose_items = []
+        unmatched_sentence_count = sum(1 for item in items if not item.get("has_candidates"))
+        candidate_debug_summary["unmatched_sentence_count"] = unmatched_sentence_count
         try:
             from app.utils.cat_diagnose import (
                 annotate_cat_candidates,
@@ -11155,6 +11177,7 @@ async def cat_analyze(
         except Exception:
             diagnose_items = []
 
+        candidate_debug_summary["diagnose_item_count"] = len(diagnose_items)
         _cleanup_cat_cache()
         analyze_id = str(uuid.uuid4())
         _cat_cache_timestamps[analyze_id] = time.time()

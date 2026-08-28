@@ -224,6 +224,10 @@ def _parse_ruleable(value: Any) -> bool:
 HINT_ONLY_CATEGORIES = frozenset({"logic", "missing", "ambiguity"})
 
 
+def hint_import_requires_replacement(category: Any, revised: Any) -> bool:
+    return str(category or "") in HINT_ONLY_CATEGORIES and not str(revised or "").strip()
+
+
 def _log_diagnose_drop(stage: str, category: Any, quote: Any, revised: Any) -> None:
     logger.info(
         "[CAT_DIAGNOSE] drop stage=%s category=%s quote=%s revised=%s",
