@@ -184,6 +184,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_decision_record, false_positive_memory
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, polished_document_lab, convert_task, convert_rule, polish_feedback, polish_feedback_lab, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_analysis_session_lab, cat_decision_record, cat_decision_record_lab, false_positive_memory
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()

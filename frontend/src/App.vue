@@ -170,6 +170,15 @@
               <el-menu-item index="/polish/history">已润色文档</el-menu-item>
             </el-sub-menu>
 
+            <el-sub-menu index="polish-lab-sub">
+              <template #title>
+                <el-icon><MagicStick /></el-icon>
+                <span>智能润色(AI调试)</span>
+              </template>
+              <el-menu-item index="/polish-lab">文本润色</el-menu-item>
+              <el-menu-item index="/polish-lab/document">文档润色</el-menu-item>
+            </el-sub-menu>
+
             <el-sub-menu index="generate-sub">
               <template #title>
                 <el-icon><DocumentAdd /></el-icon>

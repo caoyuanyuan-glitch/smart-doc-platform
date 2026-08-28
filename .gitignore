@@ -182,6 +182,7 @@ backend/static/preview/
 # Project-specific: Knowledge base files
 backend/app/static/knowledge/
 backend/app/static/polished/
+backend/app/static/polish-lab/
 
 # Project-specific: Database
 *.db

@@ -244,73 +244,79 @@ export const auditBasisAPI = {
   delete: (id) => instance.delete(`/audit_basis/${id}`)
 }
 
-export const polishAPI = {
-  document: (id) => instance.post(`/polish/${id}`),
-  text: ({ text, productType = '', styleGuideId = null, terminologyId = null }, config = {}) => instance.post('/polish/text', {
-    text,
-    product_type: productType || null,
-    style_guide_id: styleGuideId,
-    terminology_id: terminologyId
-  }, config),
-  polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
-    instance.post('/polish/skill', { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
-  analyzeFile: (formData) => {
-    return instance.post('/polish/analyze-file', formData)
-  },
-  catAnalyze: (formData) => {
-    return instance.post('/polish/cat/analyze', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 600000
-    })
-  },
-  catApply: (payload) => instance.post('/polish/cat/apply', payload, { timeout: 600000 }),
-  downloadCatAsset: (downloadUrl, filename = 'cat_asset') => {
-    return instance.get(downloadUrl.replace(/^\/api/, ''), {
-      responseType: 'blob',
-      transformResponse: [(data) => data]
-    }).then((response) => {
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', filename)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.URL.revokeObjectURL(url)
-    })
-  },
-  downloadCatOutput: (downloadUrl, filename = 'cat_polished.docx') => polishAPI.downloadCatAsset(downloadUrl, filename),
-  getProgress: (taskId) => instance.get(`/polish/progress/${taskId}`),
-  listPolishedDocuments: () => instance.get('/polish/'),
-  getPolishedDocument: (id) => instance.get(`/polish/${id}`),
-  uploadPolishedFile: (file) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    return instance.post('/polish/upload', formData)
-  },
-  previewPolishedFile: (id) => instance.get(`/polish/${id}/preview`),
-  downloadPolishedFile: (id, filename) => downloadBlob(`/polish/${id}/download`, filename),
-  downloadPolishedReport: (id, filename = '润色报告.docx') => downloadBlob(`/polish/${id}/download-report`, filename),
-  deletePolishedDocument: (id) => instance.delete(`/polish/${id}`),
-  batchDeletePolishedDocuments: (ids) => instance.delete('/polish/batch', { data: { ids } }),
-  submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
-    instance.post('/polish/feedback', {
-      original_text: originalText,
-      polished_text: polishedText,
-      accuracy,
-      corrections,
-      target,
-      terminology_file_id: terminologyFileId || null,
-      sentence_file_id: sentenceFileId || null
-    }),
-  submitDocumentFeedback: (documentId, sourceFilename, items) =>
-    instance.post('/polish/feedback/document', {
-      document_id: documentId || null,
-      source_filename: sourceFilename || '',
-      items: items || []
-    }),
-  getFeedbackStats: () => instance.get('/polish/feedback/stats')
+function createPolishAPI(prefix) {
+  const api = {
+    document: (id) => instance.post(`${prefix}/${id}`),
+    text: ({ text, productType = '', styleGuideId = null, terminologyId = null }, config = {}) => instance.post(`${prefix}/text`, {
+      text,
+      product_type: productType || null,
+      style_guide_id: styleGuideId,
+      terminology_id: terminologyId
+    }, config),
+    polishWithSkill: (text, skillId = 3, styleGuideId = 1, terminologyId = null) =>
+      instance.post(`${prefix}/skill`, { text, skill_id: skillId, style_guide_id: styleGuideId, terminology_id: terminologyId }),
+    analyzeFile: (formData) => {
+      return instance.post(`${prefix}/analyze-file`, formData)
+    },
+    catAnalyze: (formData) => {
+      return instance.post(`${prefix}/cat/analyze`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 600000
+      })
+    },
+    catApply: (payload) => instance.post(`${prefix}/cat/apply`, payload, { timeout: 600000 }),
+    downloadCatAsset: (downloadUrl, filename = 'cat_asset') => {
+      return instance.get(downloadUrl.replace(/^\/api/, ''), {
+        responseType: 'blob',
+        transformResponse: [(data) => data]
+      }).then((response) => {
+        const url = window.URL.createObjectURL(new Blob([response.data]))
+        const link = document.createElement('a')
+        link.href = url
+        link.setAttribute('download', filename)
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        window.URL.revokeObjectURL(url)
+      })
+    },
+    downloadCatOutput: (downloadUrl, filename = 'cat_polished.docx') => api.downloadCatAsset(downloadUrl, filename),
+    getProgress: (taskId) => instance.get(`${prefix}/progress/${taskId}`),
+    listPolishedDocuments: () => instance.get(`${prefix}/`),
+    getPolishedDocument: (id) => instance.get(`${prefix}/${id}`),
+    uploadPolishedFile: (file) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      return instance.post(`${prefix}/upload`, formData)
+    },
+    previewPolishedFile: (id) => instance.get(`${prefix}/${id}/preview`),
+    downloadPolishedFile: (id, filename) => downloadBlob(`${prefix}/${id}/download`, filename),
+    downloadPolishedReport: (id, filename = '润色报告.docx') => downloadBlob(`${prefix}/${id}/download-report`, filename),
+    deletePolishedDocument: (id) => instance.delete(`${prefix}/${id}`),
+    batchDeletePolishedDocuments: (ids) => instance.delete(`${prefix}/batch`, { data: { ids } }),
+    submitFeedback: (originalText, polishedText, accuracy, corrections, target, terminologyFileId, sentenceFileId) =>
+      instance.post(`${prefix}/feedback`, {
+        original_text: originalText,
+        polished_text: polishedText,
+        accuracy,
+        corrections,
+        target,
+        terminology_file_id: terminologyFileId || null,
+        sentence_file_id: sentenceFileId || null
+      }),
+    submitDocumentFeedback: (documentId, sourceFilename, items) =>
+      instance.post(`${prefix}/feedback/document`, {
+        document_id: documentId || null,
+        source_filename: sourceFilename || '',
+        items: items || []
+      }),
+    getFeedbackStats: () => instance.get(`${prefix}/feedback/stats`)
+  }
+  return api
 }
+
+export const polishAPI = createPolishAPI('/polish')
+export const polishLabAPI = createPolishAPI('/polish-lab')
 
 export const qaAPI = {
   ask: (documentId, question) => instance.post(`/qa/${documentId}`, {}, { params: { question } }),

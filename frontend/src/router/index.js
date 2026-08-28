@@ -6,6 +6,7 @@ const Review = () => import('@/views/Review.vue')
 const ReviewDashboard = () => import('@/views/ReviewDashboard.vue')
 const FalsePositiveMemory = () => import('@/views/FalsePositiveMemory.vue')
 const Polish = () => import('@/views/Polish.vue')
+const PolishLab = () => import('@/views/PolishLab.vue')
 const PolishStats = () => import('@/views/PolishStats.vue')
 const PolishTextSessions = () => import('@/views/PolishTextSessions.vue')
 const PolishDocumentSessions = () => import('@/views/PolishDocumentSessions.vue')
@@ -113,6 +114,16 @@ const routes = [
     path: '/polish/document',
     name: 'PolishDocument',
     component: Polish
+  },
+  {
+    path: '/polish-lab',
+    name: 'PolishLab',
+    component: PolishLab
+  },
+  {
+    path: '/polish-lab/document',
+    name: 'PolishLabDocument',
+    component: PolishLab
   },
   {
     path: '/polish/history',

@@ -187,3 +187,13 @@ WorkBuddy 联动评审目录约定
 - Instructions:
   - 规则优先使用结构、关系、通用模式和已有抽取能力
   - 避免通过硬编码具体词语扩展匹配或拦截规则
+
+智能润色 AI 调试副本改动范围
+- Date: 2026-08-28
+- Context: 用户要求后续任务只改智能润色 AI 调试副本
+- Category: 行为指令
+- Instructions:
+  - 后续润色相关开发、调试、AI 增强只改副本模块
+  - 后端只改 `backend/app/api/polish_lab.py` 及 `*_lab` 模型/CRUD/测试
+  - 前端只改 `frontend/src/views/PolishLab.vue`、`frontend/src/store/polishLab.js`，以及为副本接线所需的路由/菜单/`polishLabAPI`
+  - 正式润色入口 `/polish`、`/api/polish`、`Polish.vue`、`polish.py` 保持不动

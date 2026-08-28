@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor
+from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, polish_lab, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor
 from app.database import create_tables
 import threading
 import os
@@ -65,6 +65,7 @@ app.include_router(rules.router, prefix="/api/rules", tags=["规则管理"])
 app.include_router(terms.router, prefix="/api/terms", tags=["术语库"])
 app.include_router(audit_basis.router, prefix="/api/audit_basis", tags=["审核依据"])
 app.include_router(polish.router, prefix="/api/polish", tags=["智能润色"])
+app.include_router(polish_lab.router, prefix="/api/polish-lab", tags=["智能润色AI调试"])
 app.include_router(qa.router, prefix="/api/qa", tags=["智能问答"])
 app.include_router(manual_search.router, prefix="/api/manual", tags=["说明书问答"])
 app.include_router(generate.router, prefix="/api/generate", tags=["内容生成"])
