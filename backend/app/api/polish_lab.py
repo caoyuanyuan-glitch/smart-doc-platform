@@ -11099,6 +11099,8 @@ async def cat_analyze(
             "dropped_by_reason": {},
             "unmatched_sentence_count": 0,
             "diagnose_item_count": 0,
+            "diagnose_hint_count": 0,
+            "diagnose_rewrite_count": 0,
         }
         ai_semantic_active = ai_semantic_scoring and ai_scoring_status == "completed"
 
@@ -11178,6 +11180,23 @@ async def cat_analyze(
             diagnose_items = []
 
         candidate_debug_summary["diagnose_item_count"] = len(diagnose_items)
+        from app.utils.cat_diagnose import HINT_ONLY_CATEGORIES as _HINT_ONLY_CATEGORIES
+        diagnose_hint_count = 0
+        diagnose_rewrite_count = 0
+        for item in diagnose_items:
+            for candidate in item.get("candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                is_hint = (
+                    candidate.get("category") in _HINT_ONLY_CATEGORIES
+                    and not str(candidate.get("revised") or "").strip()
+                )
+                if is_hint:
+                    diagnose_hint_count += 1
+                else:
+                    diagnose_rewrite_count += 1
+        candidate_debug_summary["diagnose_hint_count"] = diagnose_hint_count
+        candidate_debug_summary["diagnose_rewrite_count"] = diagnose_rewrite_count
         _cleanup_cat_cache()
         analyze_id = str(uuid.uuid4())
         _cat_cache_timestamps[analyze_id] = time.time()

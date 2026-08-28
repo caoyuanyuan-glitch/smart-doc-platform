@@ -1935,7 +1935,9 @@ const catCandidateDebugSummaryText = computed(() => {
   const surfaceRuleText = surfaceRuleCandidates > 0 ? `，表层规则直出 ${surfaceRuleCandidates}` : ''
   const unmatchedSentences = Number(summary.unmatchedSentenceCount || 0)
   const diagnoseItemCount = Number(summary.diagnoseItemCount || 0)
-  return `模板池 ${templatePoolSize}，进入匹配 ${templatesConsidered}，召回通过 ${templatesMatched}${surfaceRuleText}，候选 ${returnedBeforeAi} -> ${before} -> ${after}，其中 ${review} 条需确认${topReasonText}${simpleMatchText}，unmatched ${unmatchedSentences} 句，AI 诊断产出 ${diagnoseItemCount} 条`
+  const diagnoseHintCount = Number(summary.diagnoseHintCount || 0)
+  const diagnoseRewriteCount = Number(summary.diagnoseRewriteCount || 0)
+  return `模板池 ${templatePoolSize}，进入匹配 ${templatesConsidered}，召回通过 ${templatesMatched}${surfaceRuleText}，候选 ${returnedBeforeAi} -> ${before} -> ${after}，其中 ${review} 条需确认${topReasonText}${simpleMatchText}，unmatched ${unmatchedSentences} 句，AI 诊断产出 ${diagnoseItemCount} 条（hint ${diagnoseHintCount} / 改写 ${diagnoseRewriteCount}）`
 })
 
 const confirmedDocChangeCount = computed(() => {
@@ -3566,7 +3568,9 @@ async function submitCatAnalyze() {
       needsReviewCount: data.candidate_debug_summary?.needs_review_count || 0,
       droppedByReason: data.candidate_debug_summary?.dropped_by_reason || {},
       unmatchedSentenceCount: data.candidate_debug_summary?.unmatched_sentence_count || 0,
-      diagnoseItemCount: data.candidate_debug_summary?.diagnose_item_count || 0
+      diagnoseItemCount: data.candidate_debug_summary?.diagnose_item_count || 0,
+      diagnoseHintCount: data.candidate_debug_summary?.diagnose_hint_count || 0,
+      diagnoseRewriteCount: data.candidate_debug_summary?.diagnose_rewrite_count || 0
     },
     sourceName: pendingLocalFile?.name || formData.value.sourceFile || '',
     aiScoringStatus: data.ai_scoring_status || '',
