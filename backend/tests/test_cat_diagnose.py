@@ -78,6 +78,39 @@ class CatDiagnoseMergeTest(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertEqual(kept[0]["category"], "risk")
 
+    def test_hint_only_empty_revised_is_kept(self):
+        from app.utils.cat_diagnose import merge_local_and_diagnoses
+
+        cat_items = [{
+            "sentence_index": 1,
+            "original_text": "另一句。",
+            "candidates": [{
+                "template_text": "另一句。",
+                "category": "term",
+                "severity": "high",
+            }],
+        }]
+        diagnoses = [{
+            "sentence_index": 0,
+            "quote": "请勿关闭电源，关闭电源后再进行维护。",
+            "category": "logic",
+            "severity": "high",
+            "problem": "前后指令冲突",
+            "revised": "",
+            "rationale": "无法忠实改写",
+        }]
+        sentence_items = [
+            {"sentence_index": 0, "text": "请勿关闭电源，关闭电源后再进行维护。"},
+            {"sentence_index": 1, "text": "另一句。"},
+        ]
+        merged, kept = merge_local_and_diagnoses(cat_items, diagnoses, sentence_items)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["category"], "logic")
+        self.assertEqual(kept[0]["revised"], "")
+        logic_items = [item for item in merged if item.get("sentence_index") == 0]
+        self.assertEqual(len(logic_items), 1)
+        self.assertEqual(logic_items[0]["candidates"][0]["problem"], "前后指令冲突")
+
 
 class CatDiagnoseSwitchTest(unittest.TestCase):
     def test_switch_off_skips_ai_and_returns_empty(self):
@@ -161,6 +194,56 @@ class CatDiagnoseRevisedFilterTest(unittest.TestCase):
         self.assertEqual(parsed[0]["revised"], "flow cell")
         self.assertTrue(parsed[0]["ruleable"])
         self.assertEqual(parsed[0]["rule_hint"], "流道池")
+
+    def test_hint_only_categories_keep_empty_or_identity_revised(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [
+                {
+                    "sentence_index": 0,
+                    "quote": "请勿关闭电源，关闭电源后再进行维护。",
+                    "category": "logic",
+                    "severity": "high",
+                    "problem": "前后指令冲突",
+                    "revised": "",
+                    "rationale": "无法在不增补条件下给出忠实改写",
+                },
+                {
+                    "sentence_index": 0,
+                    "quote": "将其加入其中并观察结果。",
+                    "category": "ambiguity",
+                    "severity": "medium",
+                    "problem": "指代不明",
+                    "revised": "将其加入其中并观察结果。",
+                    "rationale": "缺少明确对象",
+                },
+                {
+                    "sentence_index": 0,
+                    "quote": "将样本孵育后进行测序。",
+                    "category": "missing",
+                    "severity": "medium",
+                    "problem": "缺少孵育条件",
+                    "revised": "将样本在指定条件下孵育后进行测序。",
+                    "rationale": "需要补参数，但当前只作提示",
+                },
+                {
+                    "sentence_index": 0,
+                    "quote": "流道池",
+                    "category": "term",
+                    "severity": "high",
+                    "problem": "非标准名",
+                    "revised": "",
+                    "rationale": "手册",
+                },
+            ]
+        }, allowed_indexes={0})
+        self.assertEqual(len(parsed), 3)
+        by_cat = {item["category"]: item for item in parsed}
+        self.assertEqual(by_cat["logic"]["revised"], "")
+        self.assertEqual(by_cat["ambiguity"]["revised"], "")
+        self.assertEqual(by_cat["missing"]["revised"], "将样本在指定条件下孵育后进行测序。")
+        self.assertNotIn("term", by_cat)
 
 
 class CatDiagnoseBatchTest(unittest.TestCase):

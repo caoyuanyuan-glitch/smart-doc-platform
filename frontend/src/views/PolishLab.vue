@@ -161,7 +161,12 @@
                       <span class="issue-diff-label">原文</span>
                       <div class="issue-diff-content issue-diff-original" v-html="renderCatOriginalPanelHtml(item)"></div>
                     </div>
-                    <div class="issue-diff-row">
+                    <div v-if="isHintOnlyDiagnose(selectedCatCandidate(item), item.originalText)" class="cat-hint-card">
+                      <div class="cat-hint-title">提示</div>
+                      <div v-if="selectedCatCandidate(item)?.problem" class="cat-diagnose-problem">{{ selectedCatCandidate(item).problem }}</div>
+                      <div v-if="selectedCatCandidate(item)?.rationale" class="cat-diagnose-rationale">{{ selectedCatCandidate(item).rationale }}</div>
+                    </div>
+                    <div v-else class="issue-diff-row">
                       <span class="issue-diff-label">{{ item.action === 'modify' && item.savedModifiedText ? '自定义' : '候选' }}</span>
                       <div class="issue-diff-content issue-diff-suggested">
                         <div v-html="renderCatSuggestedDiffHtml(item.originalText, getCatDisplayText(item))"></div>
@@ -205,7 +210,7 @@
                     <label class="cat-item-label">处理动作</label>
                     <el-radio-group v-model="item.action" size="small" class="cat-action-group">
                       <el-radio-button value="pending" @click="forceCatAction(item, 'pending')">待处理</el-radio-button>
-                      <el-radio-button value="accept" @click="forceCatAction(item, 'accept')">接受候选</el-radio-button>
+                      <el-radio-button v-if="!isHintOnlyDiagnose(selectedCatCandidate(item), item.originalText)" value="accept" @click="forceCatAction(item, 'accept')">接受候选</el-radio-button>
                       <el-radio-button value="modify" @click="forceCatAction(item, 'modify')">自定义</el-radio-button>
                       <el-radio-button value="reject" @click="forceCatAction(item, 'reject')">拒绝</el-radio-button>
                     </el-radio-group>
@@ -518,7 +523,7 @@
                       <div class="cat-issue-tags" v-if="categoryLabel(selectedTextCatCandidate(item))">
                         <span class="cat-category-tag">{{ categoryLabel(selectedTextCatCandidate(item)) }}</span>
                       </div>
-                      <el-select v-model="item.selectedCandidateIndex" class="full-width" size="large" placeholder="选择候选句式" placement="bottom-start" :popper-options="{ placement: 'bottom-start', modifiers: [{ name: 'flip', enabled: false }] }" @change="applyTextCatCandidate(item)">
+                      <el-select v-if="item.candidates.length > 1 || !isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" v-model="item.selectedCandidateIndex" class="full-width" size="large" placeholder="选择候选句式" placement="bottom-start" :popper-options="{ placement: 'bottom-start', modifiers: [{ name: 'flip', enabled: false }] }" @change="applyTextCatCandidate(item)">
                         <el-option
                           v-for="(candidate, candidateIndex) in item.candidates"
                           :key="`${item.rowKey}-${candidateIndex}`"
@@ -526,7 +531,12 @@
                           :value="candidateIndex"
                         />
                       </el-select>
-                      <div v-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
+                      <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
+                        <div class="cat-hint-title">提示</div>
+                        <div v-if="selectedTextCatCandidate(item)?.problem" class="cat-diagnose-problem">{{ selectedTextCatCandidate(item).problem }}</div>
+                        <div v-if="selectedTextCatCandidate(item)?.rationale" class="cat-diagnose-rationale">{{ selectedTextCatCandidate(item).rationale }}</div>
+                      </div>
+                      <div v-else-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
                         <div v-if="selectedTextCatCandidate(item)?.problem" class="cat-diagnose-problem">{{ selectedTextCatCandidate(item).problem }}</div>
                         <div v-if="selectedTextCatCandidate(item)?.rationale" class="cat-diagnose-rationale">{{ selectedTextCatCandidate(item).rationale }}</div>
                       </div>
@@ -3072,6 +3082,24 @@ function isDiagnoseCandidate(candidate) {
   return String(candidate?.rule_source || '').trim() === 'ai_diagnose' || Boolean(candidate?.revised && candidate?.problem)
 }
 
+const HINT_ONLY_CATEGORIES = new Set(['logic', 'missing', 'ambiguity'])
+
+function compactDiagnoseText(value) {
+  return String(value || '').replace(/\s+/g, '')
+}
+
+function hasDistinctRevised(candidate, originalText) {
+  const revised = String(candidate?.revised || '').trim()
+  if (!revised) return false
+  const revisedNorm = compactDiagnoseText(revised)
+  return revisedNorm !== compactDiagnoseText(candidate?.quote) && revisedNorm !== compactDiagnoseText(originalText)
+}
+
+function isHintOnlyDiagnose(candidate, originalText) {
+  if (!isDiagnoseCandidate(candidate)) return false
+  return HINT_ONLY_CATEGORIES.has(String(candidate?.category || '')) && !hasDistinctRevised(candidate, originalText)
+}
+
 const diagnoseCandidates = ref([])
 const diagnoseCandidatesLoading = ref(false)
 
@@ -3284,6 +3312,9 @@ function applyTextCatCandidate(item) {
     return
   }
   const candidate = selectedTextCatCandidate(item)
+  if (isHintOnlyDiagnose(candidate, item.originalText)) {
+    return
+  }
   const originalSentence = String(item.originalText || '').trim()
   const candidateText = getTextCatCandidateValue(candidate)
   if (!candidateText || !originalSentence) {
@@ -4351,6 +4382,20 @@ watch(currentView, (view) => {
 
 .cat-diagnose-rationale {
   margin-top: 2px;
+}
+
+.cat-hint-card {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #fff8e6;
+  border: 1px solid #f3d19e;
+  border-radius: 6px;
+}
+
+.cat-hint-title {
+  font-size: 12px;
+  color: #b88230;
+  margin-bottom: 4px;
 }
 
 .cat-item-card.is-collapsed {

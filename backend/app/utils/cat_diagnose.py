@@ -98,7 +98,7 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 4. 术语必须与给定术语表一致；术语表没有的，保留原文。
 5. category 只能从枚举取；severity 只能是 low/medium/high。
 6. 只输出 JSON，不要任何解释文字。
-7. 诊断成立时必须给出完整改写 revised；revised 不得为空，且必须与 quote 及原句不同。
+7. 诊断成立时：logic、missing、ambiguity 三类允许 revised 为空（只需写清 problem 与 rationale）；其余类别必须给出完整改写 revised，revised 不得为空，且必须与 quote 及原句不同。
 8. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
 
 category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, logic, missing, register, audience, risk, other
@@ -221,6 +221,19 @@ def _parse_ruleable(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+HINT_ONLY_CATEGORIES = frozenset({"logic", "missing", "ambiguity"})
+
+
+def _log_diagnose_drop(stage: str, category: Any, quote: Any, revised: Any) -> None:
+    logger.info(
+        "[CAT_DIAGNOSE] drop stage=%s category=%s quote=%s revised=%s",
+        stage,
+        str(category or ""),
+        str(quote or ""),
+        str(revised or ""),
+    )
+
+
 def map_rule_to_category(
     issue: Any = None,
     rule_source: str = "",
@@ -328,10 +341,19 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
     quote = str(raw.get("quote") or "").strip()
     revised = str(raw.get("revised") or "").strip()
     problem = str(raw.get("problem") or "").strip()
-    if not quote or not revised or not problem:
-        return None
-    if _is_identity_revision(quote, revised):
-        return None
+    if category in HINT_ONLY_CATEGORIES:
+        if not quote or not problem:
+            _log_diagnose_drop("normalize", category, quote, revised)
+            return None
+        if revised and _is_identity_revision(quote, revised):
+            revised = ""
+    else:
+        if not quote or not revised or not problem:
+            _log_diagnose_drop("normalize", category, quote, revised)
+            return None
+        if _is_identity_revision(quote, revised):
+            _log_diagnose_drop("normalize", category, quote, revised)
+            return None
     return {
         "sentence_index": sentence_index,
         "quote": quote,
@@ -453,7 +475,12 @@ def merge_local_and_diagnoses(
             or ""
         ).strip()
         if _is_identity_revision(diag.get("quote"), diag.get("revised"), original_preview):
-            continue
+            if category in HINT_ONLY_CATEGORIES:
+                diag = dict(diag)
+                diag["revised"] = ""
+            else:
+                _log_diagnose_drop("merge", category, diag.get("quote"), diag.get("revised"))
+                continue
         local = items_by_index.get(idx)
         local_categories = set()
         local_quotes = set()
@@ -563,6 +590,18 @@ async def _diagnose_batch(sentences: list[dict], terminology: Any, sentence_guid
         payload = extract_json_object(raw)
         if payload is None:
             return []
+    raw_items = payload.get("diagnoses") if isinstance(payload, dict) else []
+    if isinstance(raw_items, list):
+        logger.info("[CAT_DIAGNOSE] batch raw_diagnoses=%s", len(raw_items))
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            logger.info(
+                "[CAT_DIAGNOSE] raw category=%s quote=%s revised=%s",
+                str(raw_item.get("category") or ""),
+                str(raw_item.get("quote") or ""),
+                str(raw_item.get("revised") or ""),
+            )
     parsed = parse_diagnoses_payload(payload, allowed_indexes=allowed)
     original_by_index = {
         item.get("sentence_index"): str(
@@ -574,7 +613,12 @@ async def _diagnose_batch(sentences: list[dict], terminology: Any, sentence_guid
     for diag in parsed:
         original = original_by_index.get(diag.get("sentence_index"), "")
         if _is_identity_revision(diag.get("quote"), diag.get("revised"), original):
-            continue
+            if diag.get("category") in HINT_ONLY_CATEGORIES:
+                diag = dict(diag)
+                diag["revised"] = ""
+            else:
+                _log_diagnose_drop("batch", diag.get("category"), diag.get("quote"), diag.get("revised"))
+                continue
         kept.append(diag)
     return kept
 
