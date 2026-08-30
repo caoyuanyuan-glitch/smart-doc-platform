@@ -84,10 +84,49 @@ def summarize(group_a: list[str], group_b: list[str], diagnoses: list[dict]) -> 
     }
 
 
+DEFAULT_EVAL_RUNS = 3
+
+
+def _mean(values: list) -> float | None:
+    nums = [float(v) for v in values if v is not None]
+    if not nums:
+        return None
+    return round(sum(nums) / len(nums), 6)
+
+
+def aggregate_run_summaries(summaries: list[dict]) -> dict:
+    """多次取样后取均值。召回≥70%、误报≤20% 以均值判定。"""
+    mean_recall = _mean([item.get("recall") for item in summaries])
+    mean_fp = _mean([item.get("false_positive_rate") for item in summaries])
+    return {
+        "runs": len(summaries),
+        "mean_recall": mean_recall,
+        "mean_false_positive_rate": mean_fp,
+        "recall_pass": None if mean_recall is None else mean_recall >= 0.70,
+        "false_positive_pass": None if mean_fp is None else mean_fp <= 0.20,
+        "per_run": [
+            {
+                "a_hits": item.get("a_hits"),
+                "b_hits": item.get("b_hits"),
+                "recall": item.get("recall"),
+                "false_positive_rate": item.get("false_positive_rate"),
+                "diagnose_count": len(item.get("diagnoses") or []),
+            }
+            for item in summaries
+        ],
+    }
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate CAT open diagnose recall/false-positive")
     parser.add_argument("--sample", default="", help="评测样本 markdown 路径")
     parser.add_argument("--product-type", default="")
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=DEFAULT_EVAL_RUNS,
+        help="每个文档的取样次数，默认 3 次后取均值",
+    )
     args = parser.parse_args()
 
     enabled = str(os.getenv("AI_DIAGNOSE_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
@@ -106,20 +145,24 @@ async def main() -> int:
         print(f"已读取 {sample_path}，但没有解析到 A/B 组句子。")
         return 4
 
-    diagnoses = await diagnose_sentences(sentences, args.product_type)
-    summary = summarize(groups["A"], groups["B"], diagnoses)
+    run_count = max(1, int(args.runs or DEFAULT_EVAL_RUNS))
+    run_summaries = []
+    for _ in range(run_count):
+        diagnoses = await diagnose_sentences(sentences, args.product_type)
+        run_summaries.append(summarize(groups["A"], groups["B"], diagnoses))
+    aggregated = aggregate_run_summaries(run_summaries)
     print(json.dumps({
         "sample": str(sample_path),
-        "group_a": summary["group_a"],
-        "group_b": summary["group_b"],
-        "a_hits": summary["a_hits"],
-        "b_hits": summary["b_hits"],
-        "recall": summary["recall"],
-        "false_positive_rate": summary["false_positive_rate"],
-        "recall_pass": summary["recall_pass"],
-        "false_positive_pass": summary["false_positive_pass"],
+        "group_a": run_summaries[0]["group_a"],
+        "group_b": run_summaries[0]["group_b"],
+        "runs": aggregated["runs"],
+        "mean_recall": aggregated["mean_recall"],
+        "mean_false_positive_rate": aggregated["mean_false_positive_rate"],
+        "recall_pass": aggregated["recall_pass"],
+        "false_positive_pass": aggregated["false_positive_pass"],
+        "per_run": aggregated["per_run"],
     }, ensure_ascii=False, indent=2))
-    if summary["recall_pass"] and summary["false_positive_pass"]:
+    if aggregated["recall_pass"] and aggregated["false_positive_pass"]:
         return 0
     return 1
 

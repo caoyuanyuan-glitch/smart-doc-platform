@@ -603,7 +603,7 @@ def _chat_diagnose(prompt: str) -> str:
     result = lab_ai_chat(
         [{"role": "user", "content": prompt}],
         max_tokens=2048,
-        temperature=0.1,
+        temperature=0,
         request_label="polish.diagnose",
         timeout=int(max(1, diagnose_timeout())),
     )

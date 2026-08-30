@@ -197,3 +197,5 @@ WorkBuddy 联动评审目录约定
   - 后端只改 `backend/app/api/polish_lab.py` 及 `*_lab` 模型/CRUD/测试
   - 前端只改 `frontend/src/views/PolishLab.vue`、`frontend/src/store/polishLab.js`，以及为副本接线所需的路由/菜单/`polishLabAPI`
   - 正式润色入口 `/polish`、`/api/polish`、`Polish.vue`、`polish.py` 保持不动
+  - 阶段 2 评测每个文档至少跑 3 次取均值，召回≥70% 以均值判定
+  - diagnose 温度试到 0 后若仍波动，停止换 provider/seed，改走多次取均值
