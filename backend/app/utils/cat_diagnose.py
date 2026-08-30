@@ -338,6 +338,15 @@ def extract_json_object(text: str) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+_ICON_PLACEHOLDER_RE = re.compile(
+    r"[\u4e00-\u9fa5][·~～\s]\s*(?:按钮|图标|键|符号|菜单|选项|控件)"
+)
+
+
+def _is_icon_placeholder_quote(quote: str) -> bool:
+    return bool(_ICON_PLACEHOLDER_RE.search(quote or ""))
+
+
 def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Optional[dict]:
     if not isinstance(raw, dict):
         _log_diagnose_drop("normalize", "", "", "", reason="bad_shape")
@@ -378,6 +387,16 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
     quote = str(raw.get("quote") or "").strip()
     revised = str(raw.get("revised") or "").strip()
     problem = str(raw.get("problem") or "").strip()
+    if category == "missing" and _is_icon_placeholder_quote(quote):
+        _log_diagnose_drop(
+            "normalize",
+            category,
+            quote,
+            revised,
+            reason="icon_placeholder",
+            sentence_index=sentence_index,
+        )
+        return None
     if category in HINT_ONLY_CATEGORIES:
         if not quote or not problem:
             _log_diagnose_drop("normalize", category, quote, revised, reason="empty", sentence_index=sentence_index)

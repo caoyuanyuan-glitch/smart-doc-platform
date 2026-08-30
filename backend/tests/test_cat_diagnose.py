@@ -220,6 +220,42 @@ class CatDiagnoseSwitchTest(unittest.TestCase):
         self.assertEqual(parsed[0]["sentence_index"], 20)
 
 
+class CatDiagnoseIconPlaceholderTest(unittest.TestCase):
+    def test_missing_icon_placeholder_is_dropped(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        with self.assertLogs("app.utils.cat_diagnose", level="INFO") as cm:
+            parsed = parse_diagnoses_payload({
+                "diagnoses": [{
+                    "sentence_index": 0,
+                    "quote": "界面上 按钮",
+                    "category": "missing",
+                    "severity": "medium",
+                    "problem": "按钮名称缺失",
+                    "revised": "",
+                }]
+            }, allowed_indexes={0})
+        self.assertEqual(parsed, [])
+        self.assertIn("reason=icon_placeholder", "\n".join(cm.output))
+
+    def test_term_icon_placeholder_quote_is_kept(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 0,
+                "quote": "界面上 按钮",
+                "category": "term",
+                "severity": "high",
+                "problem": "非标准名",
+                "revised": "界面上 Start 按钮",
+            }]
+        }, allowed_indexes={0})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["category"], "term")
+        self.assertEqual(parsed[0]["quote"], "界面上 按钮")
+
+
 class CatDiagnoseRevisedFilterTest(unittest.TestCase):
     def test_empty_or_same_revised_is_dropped(self):
         from app.utils.cat_diagnose import parse_diagnoses_payload
