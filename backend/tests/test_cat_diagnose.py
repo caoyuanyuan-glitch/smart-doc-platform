@@ -152,6 +152,73 @@ class CatDiagnoseSwitchTest(unittest.TestCase):
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["category"], "term")
 
+    def test_silent_normalize_paths_log_reason(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        payload = {
+            "diagnoses": [
+                "bad",
+                {
+                    "sentence_index": "x",
+                    "quote": "q",
+                    "category": "term",
+                    "severity": "high",
+                    "problem": "p",
+                    "revised": "r",
+                },
+                {
+                    "sentence_index": 9,
+                    "quote": "q",
+                    "category": "term",
+                    "severity": "high",
+                    "problem": "p",
+                    "revised": "r",
+                },
+                {
+                    "sentence_index": 0,
+                    "quote": "q",
+                    "category": "clarity",
+                    "severity": "high",
+                    "problem": "p",
+                    "revised": "r",
+                },
+                {
+                    "sentence_index": 1,
+                    "quote": "流道池",
+                    "category": "term",
+                    "severity": "high",
+                    "problem": "非标准名",
+                    "revised": "flow cell",
+                },
+            ]
+        }
+        with self.assertLogs("app.utils.cat_diagnose", level="INFO") as cm:
+            parsed = parse_diagnoses_payload(payload, allowed_indexes={0, 1})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["sentence_index"], 1)
+        text = "\n".join(cm.output)
+        self.assertIn("reason=bad_shape", text)
+        self.assertIn("reason=bad_index", text)
+        self.assertIn("reason=index_not_allowed", text)
+        self.assertIn("reason=bad_category", text)
+        self.assertIn("clarity", text)
+
+    def test_index_from_other_unmatched_batch_is_kept(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 20,
+                "quote": "跨批句子",
+                "category": "term",
+                "severity": "high",
+                "problem": "术语",
+                "revised": "term",
+            }]
+        }, allowed_indexes={0, 1, 20})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["sentence_index"], 20)
+
 
 class CatDiagnoseRevisedFilterTest(unittest.TestCase):
     def test_empty_or_same_revised_is_dropped(self):
@@ -252,8 +319,19 @@ class CatDiagnoseBatchTest(unittest.TestCase):
 
         calls = []
 
-        async def fake_batch(sentences, terminology, sentence_guide, product_type):
-            calls.append(len(sentences))
+        async def fake_batch(
+            sentences,
+            terminology,
+            sentence_guide,
+            product_type,
+            allowed_indexes=None,
+            original_by_index=None,
+        ):
+            calls.append({
+                "size": len(sentences),
+                "allowed": set(allowed_indexes or []),
+                "originals": set((original_by_index or {}).keys()),
+            })
             return []
 
         items = [{"sentence_index": i, "text": f"句子{i}。"} for i in range(32)]
@@ -261,7 +339,12 @@ class CatDiagnoseBatchTest(unittest.TestCase):
             with patch.object(cat_diagnose, "_diagnose_batch", side_effect=fake_batch):
                 result = asyncio.run(cat_diagnose.open_diagnose_sentences(items, {}, "", ""))
         self.assertEqual(result, [])
-        self.assertEqual(calls, [15, 15, 2])
+        self.assertEqual([item["size"] for item in calls], [15, 15, 2])
+        full_indexes = set(range(32))
+        self.assertEqual(calls[0]["allowed"], full_indexes)
+        self.assertEqual(calls[1]["allowed"], full_indexes)
+        self.assertEqual(calls[2]["allowed"], full_indexes)
+        self.assertEqual(calls[0]["originals"], full_indexes)
 
 
 class CatDiagnoseHintImportTest(unittest.TestCase):

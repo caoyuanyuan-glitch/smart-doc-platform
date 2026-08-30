@@ -228,13 +228,22 @@ def hint_import_requires_replacement(category: Any, revised: Any) -> bool:
     return str(category or "") in HINT_ONLY_CATEGORIES and not str(revised or "").strip()
 
 
-def _log_diagnose_drop(stage: str, category: Any, quote: Any, revised: Any) -> None:
+def _log_diagnose_drop(
+    stage: str,
+    category: Any,
+    quote: Any,
+    revised: Any,
+    reason: str = "",
+    sentence_index: Any = None,
+) -> None:
     logger.info(
-        "[CAT_DIAGNOSE] drop stage=%s category=%s quote=%s revised=%s",
+        "[CAT_DIAGNOSE] drop stage=%s reason=%s category=%s quote=%s revised=%s sentence_index=%s",
         stage,
+        str(reason or ""),
         str(category or ""),
         str(quote or ""),
         str(revised or ""),
+        "" if sentence_index is None else sentence_index,
     )
 
 
@@ -331,32 +340,56 @@ def extract_json_object(text: str) -> Optional[dict]:
 
 def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Optional[dict]:
     if not isinstance(raw, dict):
+        _log_diagnose_drop("normalize", "", "", "", reason="bad_shape")
         return None
     try:
         sentence_index = int(raw.get("sentence_index"))
     except (TypeError, ValueError):
+        _log_diagnose_drop(
+            "normalize",
+            raw.get("category"),
+            raw.get("quote"),
+            raw.get("revised"),
+            reason="bad_index",
+        )
         return None
     if allowed_indexes is not None and sentence_index not in allowed_indexes:
+        _log_diagnose_drop(
+            "normalize",
+            raw.get("category"),
+            raw.get("quote"),
+            raw.get("revised"),
+            reason="index_not_allowed",
+            sentence_index=sentence_index,
+        )
         return None
     category = str(raw.get("category") or "").strip()
     severity = str(raw.get("severity") or "").strip()
     if category not in CATEGORIES or severity not in SEVERITIES:
+        _log_diagnose_drop(
+            "normalize",
+            category,
+            raw.get("quote"),
+            raw.get("revised"),
+            reason="bad_category",
+            sentence_index=sentence_index,
+        )
         return None
     quote = str(raw.get("quote") or "").strip()
     revised = str(raw.get("revised") or "").strip()
     problem = str(raw.get("problem") or "").strip()
     if category in HINT_ONLY_CATEGORIES:
         if not quote or not problem:
-            _log_diagnose_drop("normalize", category, quote, revised)
+            _log_diagnose_drop("normalize", category, quote, revised, reason="empty", sentence_index=sentence_index)
             return None
         if revised and _is_identity_revision(quote, revised):
             revised = ""
     else:
         if not quote or not revised or not problem:
-            _log_diagnose_drop("normalize", category, quote, revised)
+            _log_diagnose_drop("normalize", category, quote, revised, reason="empty", sentence_index=sentence_index)
             return None
         if _is_identity_revision(quote, revised):
-            _log_diagnose_drop("normalize", category, quote, revised)
+            _log_diagnose_drop("normalize", category, quote, revised, reason="identity", sentence_index=sentence_index)
             return None
     return {
         "sentence_index": sentence_index,
@@ -483,7 +516,14 @@ def merge_local_and_diagnoses(
                 diag = dict(diag)
                 diag["revised"] = ""
             else:
-                _log_diagnose_drop("merge", category, diag.get("quote"), diag.get("revised"))
+                _log_diagnose_drop(
+                    "merge",
+                    category,
+                    diag.get("quote"),
+                    diag.get("revised"),
+                    reason="identity",
+                    sentence_index=idx,
+                )
                 continue
         local = items_by_index.get(idx)
         local_categories = set()
@@ -572,10 +612,17 @@ def _chat_diagnose(prompt: str) -> str:
     return str(result or "")
 
 
-async def _diagnose_batch(sentences: list[dict], terminology: Any, sentence_guide: str, product_type: str) -> list[dict]:
+async def _diagnose_batch(
+    sentences: list[dict],
+    terminology: Any,
+    sentence_guide: str,
+    product_type: str,
+    allowed_indexes: Optional[set] = None,
+    original_by_index: Optional[dict] = None,
+) -> list[dict]:
     if not sentences:
         return []
-    allowed = {item.get("sentence_index") for item in sentences}
+    allowed = allowed_indexes if allowed_indexes is not None else {item.get("sentence_index") for item in sentences}
     prompt = _build_prompt(sentences, terminology, sentence_guide, product_type)
     timeout = diagnose_timeout()
     try:
@@ -601,27 +648,35 @@ async def _diagnose_batch(sentences: list[dict], terminology: Any, sentence_guid
             if not isinstance(raw_item, dict):
                 continue
             logger.info(
-                "[CAT_DIAGNOSE] raw category=%s quote=%s revised=%s",
+                "[CAT_DIAGNOSE] raw category=%s quote=%s revised=%s sentence_index=%s",
                 str(raw_item.get("category") or ""),
                 str(raw_item.get("quote") or ""),
                 str(raw_item.get("revised") or ""),
+                raw_item.get("sentence_index"),
             )
     parsed = parse_diagnoses_payload(payload, allowed_indexes=allowed)
-    original_by_index = {
-        item.get("sentence_index"): str(
-            item.get("text") or item.get("source_sentence_text") or item.get("original_text") or ""
+    originals = dict(original_by_index or {})
+    for item in sentences:
+        originals.setdefault(
+            item.get("sentence_index"),
+            str(item.get("text") or item.get("source_sentence_text") or item.get("original_text") or ""),
         )
-        for item in sentences
-    }
     kept = []
     for diag in parsed:
-        original = original_by_index.get(diag.get("sentence_index"), "")
+        original = originals.get(diag.get("sentence_index"), "")
         if _is_identity_revision(diag.get("quote"), diag.get("revised"), original):
             if diag.get("category") in HINT_ONLY_CATEGORIES:
                 diag = dict(diag)
                 diag["revised"] = ""
             else:
-                _log_diagnose_drop("batch", diag.get("category"), diag.get("quote"), diag.get("revised"))
+                _log_diagnose_drop(
+                    "batch",
+                    diag.get("category"),
+                    diag.get("quote"),
+                    diag.get("revised"),
+                    reason="identity",
+                    sentence_index=diag.get("sentence_index"),
+                )
                 continue
         kept.append(diag)
     return kept
@@ -641,6 +696,13 @@ async def open_diagnose_sentences(
         return []
     batch_size = diagnose_batch_size()
     diagnoses: list[dict] = []
+    all_allowed = {item.get("sentence_index") for item in items}
+    all_originals = {
+        item.get("sentence_index"): str(
+            item.get("text") or item.get("source_sentence_text") or item.get("original_text") or ""
+        )
+        for item in items
+    }
     try:
         total_batches = (len(items) + batch_size - 1) // batch_size
         logger.info(
@@ -658,7 +720,16 @@ async def open_diagnose_sentences(
                 total_batches,
                 len(batch),
             )
-            diagnoses.extend(await _diagnose_batch(batch, terminology, sentence_guide, product_type))
+            diagnoses.extend(
+                await _diagnose_batch(
+                    batch,
+                    terminology,
+                    sentence_guide,
+                    product_type,
+                    allowed_indexes=all_allowed,
+                    original_by_index=all_originals,
+                )
+            )
     except Exception as exc:
         logger.warning("[CAT_DIAGNOSE] 诊断失败，静默降级: %s", exc)
         return []
