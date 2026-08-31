@@ -7341,6 +7341,7 @@ def _split_cat_sentences(paragraphs: list[str], source_paragraphs: Optional[list
         for chunk_index, chunk in enumerate(chunks):
             sentence_text = str(chunk or '').strip()
             source_sentence_text = str(source_chunks[chunk_index] or sentence_text).strip() if chunk_index < len(source_chunks) else sentence_text
+            sentence_text = re.sub(r'^\d{1,3}(?:\.\d{1,3}){1,3}\s*', '', sentence_text.strip())
             if not sentence_text:
                 continue
             normalized = re.sub(r'\s+', '', sentence_text)

@@ -181,9 +181,15 @@ def load_document_sentences(path: Path) -> list[str]:
         parts = re.split(r"(?<=[。！？!?])", chunk)
         for part in parts:
             sentence = part.strip()
+            sentence = re.sub(r"^\d{1,3}(?:\.\d{1,3}){1,3}\s*", "", sentence.strip())
             if sentence:
                 sentences.append(sentence)
     return sentences
+
+
+FORBIDDEN_SOURCE_RE = re.compile(
+    r"版本记录|产品信息|第[一二三四五六七八九十\d]+[章节]|图示|表格|标准|\d{1,3}(?:\.\d{1,3}){1,3}"
+)
 
 
 def quality_metrics(diagnoses: list[dict]) -> dict:
@@ -194,6 +200,9 @@ def quality_metrics(diagnoses: list[dict]) -> dict:
     high = 0
     term_high = 0
     revised_nonempty = 0
+    forbidden = 0
+    logic_high = 0
+    forbidden_hits = []
     for item in diagnoses or []:
         if not isinstance(item, dict):
             continue
@@ -201,6 +210,7 @@ def quality_metrics(diagnoses: list[dict]) -> dict:
         category = str(item.get("category") or "")
         severity = str(item.get("severity") or "")
         revised = str(item.get("revised") or "").strip()
+        problem = str(item.get("problem") or "")
         if hint_import_requires_replacement(category, revised):
             hint += 1
         if severity == "high":
@@ -209,6 +219,11 @@ def quality_metrics(diagnoses: list[dict]) -> dict:
             term_high += 1
         if revised:
             revised_nonempty += 1
+        if category == "logic" and severity == "high":
+            logic_high += 1
+        if FORBIDDEN_SOURCE_RE.search(problem):
+            forbidden += 1
+            forbidden_hits.append(problem)
     return {
         "diagnose_count": total,
         "hint_count": hint,
@@ -216,6 +231,9 @@ def quality_metrics(diagnoses: list[dict]) -> dict:
         "high_count": high,
         "term_high_count": term_high,
         "revised_nonempty_count": revised_nonempty,
+        "logic_high_count": logic_high,
+        "forbidden_count": forbidden,
+        "forbidden_hits": forbidden_hits,
     }
 
 
@@ -228,6 +246,8 @@ def aggregate_quality_metrics(runs: list[dict]) -> dict:
         "high_count": _mean([item.get("high_count") for item in runs]),
         "term_high_count": _mean([item.get("term_high_count") for item in runs]),
         "revised_nonempty_count": _mean([item.get("revised_nonempty_count") for item in runs]),
+        "logic_high_count": _mean([item.get("logic_high_count") for item in runs]),
+        "forbidden_count": _mean([item.get("forbidden_count") for item in runs]),
         "per_run": runs,
     }
 
@@ -247,6 +267,8 @@ def print_prompt_compare_table(v0: dict, current: dict) -> None:
         ("severity = high 条数", "high_count", "count"),
         ("term 类报 high 条数", "term_high_count", "count"),
         ("revised 非空条数", "revised_nonempty_count", "count"),
+        ("logic high 条数", "logic_high_count", "count"),
+        ("problem 出处正则命中", "forbidden_count", "count"),
     ]
     print("指标\tv0\tcurrent")
     for label, key, kind in rows:
