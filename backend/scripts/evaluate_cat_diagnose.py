@@ -4,6 +4,9 @@
 默认读取《评测样本-漏检诊断30条.md》。样本文件不存在时打印跳过说明。
 
 `--prompt-version v0|current` 只替换 `_DIAGNOSE_PROMPT`。`--compare` 在同一输入上对比两个版本。
+
+`--mode single|decoupled` 选择单次调用或改写/校验解耦，默认 decoupled。
+`--compare-mode` 在同一输入上对比 single 与 decoupled。
 """
 
 from __future__ import annotations
@@ -85,11 +88,11 @@ def parse_samples(markdown_text: str) -> dict:
     return groups
 
 
-async def diagnose_sentences(sentences: list[str], product_type: str = "") -> list[dict]:
+async def diagnose_sentences(sentences: list[str], product_type: str = "", mode: str | None = None) -> list[dict]:
     from app.utils.cat_diagnose import open_diagnose_sentences
 
     items = [{"sentence_index": index, "text": text} for index, text in enumerate(sentences)]
-    return await open_diagnose_sentences(items, {}, "", product_type)
+    return await open_diagnose_sentences(items, {}, "", product_type, mode=mode)
 
 
 def summarize(group_a: list[str], group_b: list[str], diagnoses: list[dict]) -> dict:
@@ -188,7 +191,7 @@ def load_document_sentences(path: Path) -> list[str]:
 
 
 FORBIDDEN_SOURCE_RE = re.compile(
-    r"版本记录|产品信息|第[一二三四五六七八九十\d]+[章节]|图示|表格|标准|\d{1,3}(?:\.\d{1,3}){1,3}"
+    r"版本记录|版本|修订|图示|图\d|上下文|上文|前文|章节|文档主题|主题|术语表|表格|表\d|标准|如图|见表|见图|参引"
 )
 
 
@@ -280,10 +283,24 @@ def print_prompt_compare_table(v0: dict, current: dict) -> None:
     print("两者差不多 → prompt 不是变量，查 temp 或批次切分")
 
 
-async def run_quality_eval(sentences: list[str], product_type: str, runs: int) -> dict:
+def print_mode_compare_table(single: dict, decoupled: dict) -> None:
+    rows = [
+        ("诊断总条数（均值）", "diagnose_count", "count"),
+        ("hint 类占比", "hint_ratio", "ratio"),
+        ("severity = high 条数", "high_count", "count"),
+        ("logic high 条数", "logic_high_count", "count"),
+        ("problem 禁词命中", "forbidden_count", "count"),
+        ("revised 非空条数", "revised_nonempty_count", "count"),
+    ]
+    print("指标\tsingle\tdecoupled")
+    for label, key, kind in rows:
+        print(f"{label}\t{_format_metric(single.get(key), kind)}\t{_format_metric(decoupled.get(key), kind)}")
+
+
+async def run_quality_eval(sentences: list[str], product_type: str, runs: int, mode: str | None = None) -> dict:
     per_run = []
     for _ in range(runs):
-        diagnoses = await diagnose_sentences(sentences, product_type)
+        diagnoses = await diagnose_sentences(sentences, product_type, mode=mode)
         per_run.append(quality_metrics(diagnoses))
     return aggregate_quality_metrics(per_run)
 
@@ -309,6 +326,17 @@ async def main() -> int:
         "--compare",
         action="store_true",
         help="同一输入上对比 v0 与 current，各跑 --runs 次后输出对比表",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["single", "decoupled"],
+        default="decoupled",
+        help="诊断调用模式，默认 decoupled（改写/校验拆分）",
+    )
+    parser.add_argument(
+        "--compare-mode",
+        action="store_true",
+        help="同一输入上对比 single 与 decoupled，各跑 --runs 次",
     )
     args = parser.parse_args()
 
@@ -336,7 +364,7 @@ async def main() -> int:
             print(f"已读取 {document_path}，但没有解析到句子。")
             return 4
 
-    if args.compare or document_path:
+    if args.compare or args.compare_mode or document_path:
         if not sentences:
             sample_path = find_sample_file(args.sample)
             if sample_path is None:
@@ -348,16 +376,33 @@ async def main() -> int:
             if not sentences:
                 print(f"已读取 {sample_path}，但没有解析到句子。")
                 return 4
+        if args.compare_mode:
+            results = {}
+            for mode in ("single", "decoupled"):
+                results[mode] = await run_quality_eval(sentences, args.product_type, run_count, mode=mode)
+            payload = {
+                "source": source_label,
+                "sentence_count": len(sentences),
+                "runs": run_count,
+                "mode": ["single", "decoupled"],
+                "results": results,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print()
+            print_mode_compare_table(results["single"], results["decoupled"])
+            return 0
         versions = ["v0", "current"] if args.compare else [args.prompt_version]
         results = {}
+        eval_mode = "single" if args.compare else args.mode
         for version in versions:
             apply_prompt_version(version)
-            results[version] = await run_quality_eval(sentences, args.product_type, run_count)
+            results[version] = await run_quality_eval(sentences, args.product_type, run_count, mode=eval_mode)
         payload = {
             "source": source_label,
             "sentence_count": len(sentences),
             "runs": run_count,
             "prompt_version": versions if args.compare else args.prompt_version,
+            "mode": eval_mode,
             "results": results,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -380,7 +425,7 @@ async def main() -> int:
     apply_prompt_version(args.prompt_version)
     run_summaries = []
     for _ in range(run_count):
-        diagnoses = await diagnose_sentences(sentences, args.product_type)
+        diagnoses = await diagnose_sentences(sentences, args.product_type, mode=args.mode)
         run_summaries.append(summarize(groups["A"], groups["B"], diagnoses))
     aggregated = aggregate_run_summaries(run_summaries)
     print(json.dumps({

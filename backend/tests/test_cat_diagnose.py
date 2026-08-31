@@ -433,5 +433,75 @@ class CatDiagnoseHintImportTest(unittest.TestCase):
         self.assertFalse(hint_import_requires_replacement("term", ""))
 
 
+class CatDiagnoseDecoupledTest(unittest.TestCase):
+    def test_parse_validate_output(self):
+        from app.utils.cat_diagnose import parse_validate_output
+
+        self.assertIsNone(parse_validate_output("无需修改"))
+        self.assertIsNone(parse_validate_output("无需修改。"))
+        self.assertEqual(parse_validate_output("逗号使用不规范 | low"), ("逗号使用不规范", "low"))
+        self.assertEqual(parse_validate_output("至于为错别字｜high"), ("至于为错别字", "high"))
+
+    def test_identity_rewrite_skips_validate(self):
+        from app.utils import cat_diagnose
+
+        calls = []
+
+        def fake_chat(prompt, request_label="polish.diagnose"):
+            calls.append(request_label)
+            return '{"revisions":[{"sentence_index":0,"revised":"原句保持不变。"}]}'
+
+        items = [{"sentence_index": 0, "text": "原句保持不变。"}]
+        with patch.dict(os.environ, {"AI_DIAGNOSE_ENABLED": "true"}, clear=False):
+            with patch.object(cat_diagnose, "_chat_diagnose", side_effect=fake_chat):
+                result = asyncio.run(cat_diagnose.open_diagnose_sentences(
+                    items, {}, "", "", mode="decoupled",
+                ))
+        self.assertEqual(result, [])
+        self.assertEqual(calls, ["polish.rewrite"])
+
+    def test_accepted_rewrite_keeps_problem_and_revised(self):
+        from app.utils import cat_diagnose
+
+        replies = [
+            '{"revisions":[{"sentence_index":0,"revised":"置于常温解冻。"}]}',
+            '{"results":[{"sentence_index":0,"output":"至于为错别字 | high"}]}',
+        ]
+
+        def fake_chat(prompt, request_label="polish.diagnose"):
+            return replies.pop(0)
+
+        items = [{"sentence_index": 0, "text": "至于常温解冻。"}]
+        with patch.dict(os.environ, {"AI_DIAGNOSE_ENABLED": "true"}, clear=False):
+            with patch.object(cat_diagnose, "_chat_diagnose", side_effect=fake_chat):
+                result = asyncio.run(cat_diagnose.open_diagnose_sentences(
+                    items, {}, "", "", mode="decoupled",
+                ))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["revised"], "置于常温解冻。")
+        self.assertEqual(result[0]["severity"], "high")
+        self.assertEqual(result[0]["problem"], "至于为错别字")
+        self.assertEqual(result[0]["category"], "spelling")
+
+    def test_validate_no_change_drops_rewrite(self):
+        from app.utils import cat_diagnose
+
+        replies = [
+            '{"revisions":[{"sentence_index":0,"revised":"酶切文库制备。"}]}',
+            '{"results":[{"sentence_index":0,"output":"无需修改"}]}',
+        ]
+
+        def fake_chat(prompt, request_label="polish.diagnose"):
+            return replies.pop(0)
+
+        items = [{"sentence_index": 0, "text": "Fast RNA 文库制备。"}]
+        with patch.dict(os.environ, {"AI_DIAGNOSE_ENABLED": "true"}, clear=False):
+            with patch.object(cat_diagnose, "_chat_diagnose", side_effect=fake_chat):
+                result = asyncio.run(cat_diagnose.open_diagnose_sentences(
+                    items, {}, "", "", mode="decoupled",
+                ))
+        self.assertEqual(result, [])
+
+
 if __name__ == "__main__":
     unittest.main()

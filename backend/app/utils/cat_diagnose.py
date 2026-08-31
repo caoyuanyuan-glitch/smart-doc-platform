@@ -124,6 +124,69 @@ category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, 
 
 
 
+
+_REWRITE_PROMPT = """你是文本润色助手。你只负责改写，不解释理由。
+
+【输入】待润色的原句。
+【任务】原句存在语病、错别字、逻辑不通、表述不当等明显问题时，输出修订版；
+        没有明显问题时，原样输出原句。
+【规则】
+1. 你没有任何本句之外的信息：无上下文、无章节、无图示、无版本记录、
+   无术语表、无文档主题。
+2. 禁止因为任何句外信息（包括你以为的"文档其他地方应该怎样"）改动本句。
+3. 只改有问题的部分，保持原句语义与术语不变。
+4. 不要解释修改原因。
+【输出】只输出修订后的句子文本，不要任何附加内容。
+
+【待改写句子】
+{json_sentences}
+
+批量时只输出 JSON：{{"revisions":[{{"sentence_index":0,"revised":"..."}}]}}
+无改动的句子可省略或 revised 填原文。
+"""
+
+_VALIDATE_PROMPT = """你是审校评审。你的任务：严格检验一份修订是否成立，并解释其动机。
+
+【输入】原句 + 修订版。
+【任务】二选一：
+- 修订版相对原句有实质改进 → 输出问题描述（原句的缺陷，即修订的原因），
+  并给出严重程度。
+- 修订版与原句无实质差异，或修订版引入了新问题（改变语义、改错术语等）→
+  输出"无需修改"。
+
+【问题描述要求】
+1. 一句话，不超过24字。
+2. 只能描述原句本身的缺陷，措辞只能引用原句中的词。
+3. 严禁提及任何本句之外的内容。以下字样及同义表达一律禁止：
+   版本/版本记录/修订、图示/图X、上下文/上文/前文、章节/X.Y节、
+   文档主题/主题、术语表、表格/表X、标准、如图/见表/见图/参引。
+4. 你只能看到原句和修订版这两个文本；除此之外不存在任何文档内容。
+
+【严重程度标准】
+high = 客观错误（错别字、数值错误、语义颠倒、逻辑硬伤）
+medium = 术语不规范、指代歧义、表述不清
+low = 语体风格、标点、冗余
+
+【倾向】默认接受修订，除非修订明显更差。
+【输出】"问题描述 | 严重程度"，或"无需修改"。
+
+【原句与修订】
+{json_pairs}
+
+批量时只输出 JSON：{{"results":[{{"sentence_index":0,"output":"问题描述 | 严重程度"}}]}}
+无需修改时 output 为"无需修改"。
+"""
+
+_SEVERITY_ALIASES = {
+    "high": "high",
+    "medium": "medium",
+    "low": "low",
+    "高": "high",
+    "中": "medium",
+    "低": "low",
+}
+
+
 def lab_ai_provider_name() -> str:
     return str(os.getenv("POLISH_LAB_AI_PROVIDER", "deepseek") or "deepseek").strip().lower() or "deepseek"
 
@@ -191,6 +254,20 @@ def diagnose_batch_size() -> int:
     except (TypeError, ValueError):
         value = 15
     return max(1, value)
+
+
+_active_diagnose_mode: Optional[str] = None
+
+
+def diagnose_mode(explicit: Optional[str] = None) -> str:
+    if explicit is not None:
+        raw = str(explicit)
+    elif _active_diagnose_mode:
+        raw = str(_active_diagnose_mode)
+    else:
+        raw = str(os.getenv("AI_DIAGNOSE_MODE", "decoupled") or "decoupled")
+    value = raw.strip().lower()
+    return "single" if value == "single" else "decoupled"
 
 
 def diagnose_guide_max_chars() -> int:
@@ -650,7 +727,7 @@ def _build_prompt(sentences: list[dict], terminology: Any, sentence_guide: str, 
     )
 
 
-def _chat_diagnose(prompt: str) -> str:
+def _chat_diagnose(prompt: str, request_label: str = "polish.diagnose") -> str:
     from app.utils.ai_client import ai_client
 
     if not ai_client or not getattr(ai_client, "has_any_client", False):
@@ -659,7 +736,7 @@ def _chat_diagnose(prompt: str) -> str:
         [{"role": "user", "content": prompt}],
         max_tokens=2048,
         temperature=0,
-        request_label="polish.diagnose",
+        request_label=request_label,
         timeout=int(max(1, diagnose_timeout())),
     )
     if isinstance(result, dict):
@@ -667,7 +744,132 @@ def _chat_diagnose(prompt: str) -> str:
     return str(result or "")
 
 
-async def _diagnose_batch(
+def _item_text(item: dict) -> str:
+    return str(item.get("text") or item.get("source_sentence_text") or item.get("original_text") or "").strip()
+
+
+def _infer_category(problem: str) -> str:
+    text = str(problem or "")
+    rules = (
+        (r"术语|专名", "term"),
+        (r"标点|错别字|拼写|空格|单位", "spelling"),
+        (r"语法", "grammar"),
+        (r"用词|口语", "word"),
+        (r"歧义|指代", "ambiguity"),
+        (r"冗余|重复", "redundancy"),
+        (r"语体|祈使", "register"),
+        (r"逻辑|顺序|矛盾", "logic"),
+        (r"缺失|缺少", "missing"),
+        (r"风险|安全", "risk"),
+    )
+    for pattern, category in rules:
+        if re.search(pattern, text):
+            return category
+    return "other"
+
+
+def parse_validate_output(raw: str) -> Optional[tuple[str, str]]:
+    text = str(raw or "").strip().strip("\"'")
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", text)
+    if compact in {"无需修改", "无需修改。"}:
+        return None
+    parts = re.split(r"\s*[|｜]\s*", text)
+    if len(parts) < 2:
+        return None
+    severity_token = parts[-1].strip()
+    severity = _SEVERITY_ALIASES.get(severity_token.lower()) or _SEVERITY_ALIASES.get(severity_token)
+    if severity not in SEVERITIES:
+        return None
+    problem = "|".join(parts[:-1]).strip()
+    if not problem:
+        return None
+    return problem, severity
+
+
+def parse_revisions_payload(payload: Any, sentences: list[dict]) -> dict:
+    items = []
+    if isinstance(payload, dict):
+        raw = payload.get("revisions")
+        if raw is None:
+            raw = payload.get("diagnoses")
+        if isinstance(raw, list):
+            items = raw
+    elif isinstance(payload, list):
+        items = payload
+    originals = {item.get("sentence_index"): _item_text(item) for item in sentences}
+    by_index = {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            idx = int(raw.get("sentence_index"))
+        except (TypeError, ValueError):
+            continue
+        if idx not in originals:
+            continue
+        revised = str(raw.get("revised") or raw.get("text") or "").strip()
+        if not revised:
+            continue
+        original = originals.get(idx) or ""
+        if _is_identity_revision(original, revised, original):
+            continue
+        by_index[idx] = revised
+    return by_index
+
+
+def parse_validate_payload(payload: Any) -> dict:
+    items = []
+    if isinstance(payload, dict):
+        raw = payload.get("results")
+        if raw is None:
+            raw = payload.get("diagnoses")
+        if isinstance(raw, list):
+            items = raw
+    elif isinstance(payload, list):
+        items = payload
+    parsed = {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            idx = int(raw.get("sentence_index"))
+        except (TypeError, ValueError):
+            continue
+        output = str(raw.get("output") or raw.get("verdict") or "").strip()
+        if not output and raw.get("problem") and raw.get("severity"):
+            output = f"{raw.get('problem')} | {raw.get('severity')}"
+        parsed[idx] = parse_validate_output(output)
+    return parsed
+
+
+async def _chat_json(prompt: str, request_label: str) -> Optional[dict]:
+    timeout = diagnose_timeout()
+    try:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(_chat_diagnose, prompt, request_label),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning("[CAT_DIAGNOSE] %s 调用失败: %s", request_label, exc)
+        return None
+    payload = extract_json_object(raw)
+    if payload is not None:
+        return payload
+    retry_prompt = prompt + "\n\n上次输出不是合法 JSON。请只输出 JSON 对象。"
+    try:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(_chat_diagnose, retry_prompt, request_label),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning("[CAT_DIAGNOSE] %s JSON 重试失败: %s", request_label, exc)
+        return None
+    return extract_json_object(raw)
+
+
+async def _diagnose_batch_single(
     sentences: list[dict],
     terminology: Any,
     sentence_guide: str,
@@ -737,11 +939,103 @@ async def _diagnose_batch(
     return kept
 
 
+async def _diagnose_batch_decoupled(
+    sentences: list[dict],
+    allowed_indexes: Optional[set] = None,
+    original_by_index: Optional[dict] = None,
+) -> list[dict]:
+    if not sentences:
+        return []
+    allowed = allowed_indexes if allowed_indexes is not None else {item.get("sentence_index") for item in sentences}
+    originals = dict(original_by_index or {})
+    payload_sentences = []
+    for item in sentences:
+        idx = item.get("sentence_index")
+        text = _item_text(item)
+        originals.setdefault(idx, text)
+        payload_sentences.append({"sentence_index": idx, "text": text})
+    rewrite_prompt = _REWRITE_PROMPT.format(json_sentences=json.dumps(payload_sentences, ensure_ascii=False))
+    rewrite_payload = await _chat_json(rewrite_prompt, "polish.rewrite")
+    revisions = parse_revisions_payload(rewrite_payload, sentences)
+    logger.info("[CAT_DIAGNOSE] decoupled rewrite changed=%s / %s", len(revisions), len(sentences))
+    if not revisions:
+        return []
+    pairs = []
+    for item in sentences:
+        idx = item.get("sentence_index")
+        revised = revisions.get(idx)
+        if not revised:
+            continue
+        pairs.append({
+            "sentence_index": idx,
+            "original": originals.get(idx) or _item_text(item),
+            "revised": revised,
+        })
+    if not pairs:
+        return []
+    validate_prompt = _VALIDATE_PROMPT.format(json_pairs=json.dumps(pairs, ensure_ascii=False))
+    validate_payload = await _chat_json(validate_prompt, "polish.validate")
+    verdicts = parse_validate_payload(validate_payload)
+    raw_items = []
+    for pair in pairs:
+        idx = pair["sentence_index"]
+        if idx not in allowed:
+            continue
+        parsed = verdicts.get(idx)
+        if not parsed:
+            _log_diagnose_drop(
+                "validate",
+                "",
+                pair["original"],
+                pair["revised"],
+                reason="no_change",
+                sentence_index=idx,
+            )
+            continue
+        problem, severity = parsed
+        raw_items.append({
+            "sentence_index": idx,
+            "quote": pair["original"],
+            "category": _infer_category(problem),
+            "severity": severity,
+            "problem": problem,
+            "revised": pair["revised"],
+            "ruleable": False,
+            "rule_hint": "",
+        })
+    return parse_diagnoses_payload({"diagnoses": raw_items}, allowed_indexes=allowed)
+
+
+async def _diagnose_batch(
+    sentences: list[dict],
+    terminology: Any,
+    sentence_guide: str,
+    product_type: str,
+    allowed_indexes: Optional[set] = None,
+    original_by_index: Optional[dict] = None,
+) -> list[dict]:
+    if diagnose_mode() == "single":
+        return await _diagnose_batch_single(
+            sentences,
+            terminology,
+            sentence_guide,
+            product_type,
+            allowed_indexes=allowed_indexes,
+            original_by_index=original_by_index,
+        )
+    return await _diagnose_batch_decoupled(
+        sentences,
+        allowed_indexes=allowed_indexes,
+        original_by_index=original_by_index,
+    )
+
+
 async def open_diagnose_sentences(
     sentences: list[dict],
     terminology: dict,
     sentence_guide: str,
     product_type: str = "",
+    mode: Optional[str] = None,
 ) -> list[dict]:
     """开放式病句诊断。无问题或失败时返回空数组。"""
     if not is_ai_diagnose_enabled():
@@ -749,6 +1043,9 @@ async def open_diagnose_sentences(
     items = [item for item in sentences or [] if isinstance(item, dict)]
     if not items:
         return []
+    global _active_diagnose_mode
+    previous_mode = _active_diagnose_mode
+    _active_diagnose_mode = diagnose_mode(mode)
     batch_size = diagnose_batch_size()
     diagnoses: list[dict] = []
     all_allowed = {item.get("sentence_index") for item in items}
@@ -761,7 +1058,8 @@ async def open_diagnose_sentences(
     try:
         total_batches = (len(items) + batch_size - 1) // batch_size
         logger.info(
-            "[CAT_DIAGNOSE] start sentences=%s batch_size=%s batches=%s timeout=%s",
+            "[CAT_DIAGNOSE] start mode=%s sentences=%s batch_size=%s batches=%s timeout=%s",
+            _active_diagnose_mode,
             len(items),
             batch_size,
             total_batches,
@@ -788,4 +1086,6 @@ async def open_diagnose_sentences(
     except Exception as exc:
         logger.warning("[CAT_DIAGNOSE] 诊断失败，静默降级: %s", exc)
         return []
+    finally:
+        _active_diagnose_mode = previous_mode
     return diagnoses
