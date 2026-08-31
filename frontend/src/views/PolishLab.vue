@@ -28,7 +28,7 @@
             <div class="form-item">
               <label class="form-label">句式清单文件</label>
               <div class="input-with-button">
-                <el-select v-model="formData.sentenceFileId" class="full-width" :placeholder="sentenceFileSelectPlaceholder" clearable @change="handleSentenceFileChange">
+                <el-select v-model="formData.sentenceFileId" class="full-width" :placeholder="sentenceFileSelectPlaceholder" :disabled="!formData.productType" clearable @change="handleSentenceFileChange">
                   <el-option v-for="f in sentenceFileOptions" :key="String(f.id)" :label="f.label" :value="f.id" />
                 </el-select>
               </div>
@@ -38,7 +38,7 @@
             <div class="form-item">
               <label class="form-label">术语对照表</label>
               <div class="input-with-button">
-                <el-select v-model="formData.terminologyFileId" class="full-width" :placeholder="terminologyFileSelectPlaceholder" clearable @change="onDocumentTerminologyChange">
+                <el-select v-model="formData.terminologyFileId" class="full-width" :placeholder="terminologyFileSelectPlaceholder" :disabled="!formData.productType" clearable @change="onDocumentTerminologyChange">
                   <el-option v-for="f in termFileOptions" :key="String(f.id)" :label="f.label" :value="f.id" />
                 </el-select>
               </div>
@@ -533,7 +533,7 @@
           <div class="file-select-col">
             <label class="form-label">句式清单文件</label>
             <div class="input-with-button">
-              <el-select v-model="textSentenceFileId" size="small" class="full-width" :placeholder="textSentenceFileSelectPlaceholder" clearable @change="handleTextSentenceFileChange">
+              <el-select v-model="textSentenceFileId" size="small" class="full-width" :placeholder="textSentenceFileSelectPlaceholder" :disabled="!textProductType" clearable @change="handleTextSentenceFileChange">
                 <el-option v-for="f in textSentenceFileOptions" :key="`text-sentence-${f.id}`" :label="f.label" :value="f.id" />
               </el-select>
             </div>
@@ -542,7 +542,7 @@
           <div class="file-select-col">
             <label class="form-label">术语对照表</label>
             <div class="input-with-button">
-              <el-select v-model="textTerminologyFileId" size="small" class="full-width" :placeholder="textTerminologyFileSelectPlaceholder" clearable @change="handleTextTerminologyChange">
+              <el-select v-model="textTerminologyFileId" size="small" class="full-width" :placeholder="textTerminologyFileSelectPlaceholder" :disabled="!textProductType" clearable @change="handleTextTerminologyChange">
                 <el-option v-for="f in textTermFileOptions" :key="`text-term-${f.id}`" :label="f.label" :value="f.id" />
               </el-select>
             </div>
@@ -1847,7 +1847,7 @@ const sentenceFileSelectPlaceholder = computed(() => {
   if (formData.value.productType) {
     return sentenceFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无句式清单文件'
   }
-  return '自动匹配全部句式清单文件'
+  return '请先选择产品类型'
 })
 const sentenceFileHelperText = computed(() => {
   if (!formData.value.productType) {
@@ -1862,7 +1862,7 @@ const terminologyFileSelectPlaceholder = computed(() => {
   if (formData.value.productType) {
     return termFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无术语文件'
   }
-  return '自动匹配全部术语文件'
+  return '请先选择产品类型'
 })
 const terminologyFileHelperText = computed(() => {
   if (!formData.value.productType) {
@@ -1879,7 +1879,7 @@ const textSentenceFileSelectPlaceholder = computed(() => {
   if (textProductType.value) {
     return textSentenceFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无句式清单文件'
   }
-  return '自动匹配全部句式清单文件'
+  return '请先选择产品类型'
 })
 const textSentenceFileHelperText = computed(() => {
   if (!textProductType.value) {
@@ -1894,7 +1894,7 @@ const textTerminologyFileSelectPlaceholder = computed(() => {
   if (textProductType.value) {
     return textTermFileOptions.value.length ? '自动匹配当前产品类型文件' : '当前产品类型下暂无术语文件'
   }
-  return '自动匹配全部术语文件'
+  return '请先选择产品类型'
 })
 const textTerminologyFileHelperText = computed(() => {
   if (!textProductType.value) {
