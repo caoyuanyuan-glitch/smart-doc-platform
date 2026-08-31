@@ -119,6 +119,27 @@ def test_run_filename_audit_skips_known_product_output_filename():
     assert issues == []
 
 
+def test_run_filename_audit_skips_revision_and_absent_cover_product():
+    filename = "H-020-001368-00 MGIDL-G99RS 全自动样本加载仪快速操作指南_中文_RUO_WH-R02.pdf"
+    content = "触摸屏显示用户交互界面。长按【长按启动】按钮旁的指纹区域。"
+
+    issues = review_api._run_filename_audit(filename, content, "cn")
+
+    assert not any(issue["rule"] == "FILENAME-002" for issue in issues)
+
+
+def test_run_filename_audit_flags_conflicting_product_model():
+    issues = review_api._run_filename_audit(
+        "DNBSEQ-T7 操作指南.pdf",
+        "本指南适用于 DNBSEQ-T10 测序仪。",
+        "cn",
+    )
+
+    issue = next(item for item in issues if item["rule"] == "FILENAME-002")
+    assert issue["original_text"] == "DNBSEQ-T7"
+    assert "DNBSEQ-T10" in issue["description"]
+
+
 def test_resolve_compare_row_level_accepts_email_only_support_contact_for_english_manuals():
     field_def = {
         "name": "技术支持联系方式（电话/邮箱）",
@@ -2613,6 +2634,58 @@ def test_run_chinese_human_baseline_rules_detects_cable_typo():
     )
 
     assert any(issue["rule"] == "CYY-CN-SPELL-005" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_jiaohu_typo():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "触摸屏 显示用户交户界面。",
+    )
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-SPELL-007")
+    assert issue["original_text"] == "交户"
+    assert "交互" in issue["suggestion"]
+
+
+def test_run_chinese_human_baseline_rules_detects_similar_ui_labels():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "主界面显示【长按开启】。\n操作时请长按【长按启动】按钮旁的指纹区域。",
+    )
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-UI-002")
+    assert "长按开启" in issue["original_text"]
+    assert "长按启动" in issue["original_text"]
+
+
+def test_run_chinese_human_baseline_rules_ignores_similar_english_ui_codes():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "载片类型包括：【FTN】、【FTS】、【FTL】。",
+    )
+
+    assert not any(issue["rule"] == "CYY-CN-UI-002" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_wrong_step_page_reference():
+    content = (
+        "具体操作，参考第2页“加载DNB”步骤5。\n01\f"
+        "加载DNB\n1. 打开加载仪的翻盖。\n02\f"
+        "4. 轻轻按压翻盖。\n5. 上下滑动主界面，选择载片类型。\n03"
+    )
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-REF-005")
+    assert "步骤5" in issue["original_text"]
+    assert "第 3 页" in issue["suggestion"]
+
+
+def test_run_chinese_human_baseline_rules_keeps_matching_step_page_reference():
+    content = (
+        "具体操作，参考第2页“加载DNB”步骤1。\n01\f"
+        "加载DNB\n1. 打开加载仪的翻盖。\n02\f"
+        "4. 轻轻按压翻盖。\n5. 上下滑动主界面，选择载片类型。\n03"
+    )
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-REF-005" for issue in issues)
 
 
 def test_run_chinese_human_baseline_rules_detects_figure_table_spacing():

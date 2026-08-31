@@ -38,18 +38,21 @@ Modules
 
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401
 from app.review_engine.false_positives import is_rulebook_false_positive, rulebook_false_positive_reason  # noqa: F401
+from app.review_engine.orchestrator import (  # noqa: F401
+    AICandidateEngine,
+    AIReviewResult,
+    ChunkMeta,
+    DeterministicRuleEngine,
+    DisplayIssue,
+    EvalResult,
+    EvalSuiteResult,
+    EvaluationRunner,
+    ReportAggregator,
+    ReviewOrchestrator,
+    ReviewReport,
+    ReviewRunResult,
+)
+from app.review_engine.pipeline import select_review_issues  # noqa: F401
 
-DocumentContext = None
-TextSpan = None
-ReviewOrchestrator = None
-ReviewRunResult = None
-AICandidateEngine = None
-AIReviewResult = None
-ChunkMeta = None
-ReportAggregator = None
-ReviewReport = None
-DisplayIssue = None
-EvaluationRunner = None
-EvalResult = None
-EvalSuiteResult = None
-DeterministicRuleEngine = None
+DocumentContext = dict
+TextSpan = tuple

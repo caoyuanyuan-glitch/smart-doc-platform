@@ -13,6 +13,7 @@ CHINESE_SPELLING_RULES = [
     {"original": "震荡混匀", "expected": "振荡混匀", "severity": "serious", "rule": "词语误用（振荡指往复运动）"},
     {"original": "试剂艙", "expected": "试剂仓", "severity": "serious", "rule": "错别字"},
     {"original": "以（表示已完成时）", "expected": "已", "severity": "serious", "rule": "词语误用"},
+    {"original": "交户", "expected": "交互", "severity": "serious", "rule": "错别字"},
     {"original": "手工冰箱", "expected": "冰箱", "severity": "serious", "rule": "不规范表述"},
     {"original": "拍摄模组", "expected": "识别模组", "severity": "general", "rule": "术语错误（拍摄模组不含扫码器）"},
 ]

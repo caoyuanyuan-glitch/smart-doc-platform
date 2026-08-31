@@ -138,6 +138,8 @@ export const reviewAPI = {
     const params = { mode, timeout: 300000 }
     if (provider) params.provider = provider
     if (options.force) params.force = true
+    if (options.visual_document_id) params.visual_document_id = options.visual_document_id
+    if (options.pairing_confirmed) params.pairing_confirmed = true
     return instance.post(`/review/${documentId}`, {}, { params })
   },
   createSnippet: (payload) => instance.post('/review/snippet', payload, { timeout: 300000 }),

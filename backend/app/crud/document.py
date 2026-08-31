@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from app.models.document import Document
 from app.schemas.document import DocumentCreate
+from datetime import datetime
 
 def create_document(db: Session, document: DocumentCreate, user_id: int):
     db_document = Document(
@@ -27,6 +28,8 @@ def get_documents_by_ids(db: Session, document_ids: list[int]):
 
 def get_documents(db: Session, user_id: int = None, skip: int = 0, limit: int = 100):
     query = db.query(Document)
+    if hasattr(Document, "deleted_at"):
+        query = query.filter(Document.deleted_at.is_(None))
     if user_id is not None:
         query = query.filter(Document.user_id == user_id)
     return query.order_by(Document.id.desc()).offset(skip).limit(limit).all()
@@ -34,8 +37,16 @@ def get_documents(db: Session, user_id: int = None, skip: int = 0, limit: int = 
 def delete_document(db: Session, document_id: int):
     document = db.query(Document).filter(Document.id == document_id).first()
     if document:
-        db.delete(document)
-        db.commit()
+        from app.models.review import Review
+        has_reviews = db.query(Review.id).filter(Review.document_id == document_id).first()
+        if has_reviews:
+            document.deleted_at = datetime.utcnow()
+            document.status = "deleted"
+            db.commit()
+            db.refresh(document)
+        else:
+            db.delete(document)
+            db.commit()
     return document
 
 def update_document_status(db: Session, document_id: int, status: str):
