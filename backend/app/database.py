@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
@@ -17,6 +17,14 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+@event.listens_for(engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+    if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
 def _ensure_legacy_sqlite_columns():
     """为旧版 SQLite 数据库补齐当前代码依赖的列。"""
     inspector = inspect(engine)
@@ -29,6 +37,9 @@ def _ensure_legacy_sqlite_columns():
     if document_columns and 'file_size' not in document_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE documents ADD COLUMN file_size BIGINT DEFAULT 0"))
+    if document_columns and 'deleted_at' not in document_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE documents ADD COLUMN deleted_at DATETIME"))
 
     try:
         rule_columns = {col['name'] for col in inspector.get_columns('rules')}
@@ -53,6 +64,21 @@ def _ensure_legacy_sqlite_columns():
     if review_columns and 'provider' not in review_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE reviews ADD COLUMN provider VARCHAR"))
+    review_extra = {
+        'stage': "ALTER TABLE reviews ADD COLUMN stage VARCHAR DEFAULT ''",
+        'progress': "ALTER TABLE reviews ADD COLUMN progress INTEGER DEFAULT 0",
+        'message': "ALTER TABLE reviews ADD COLUMN message TEXT DEFAULT ''",
+        'heartbeat_at': "ALTER TABLE reviews ADD COLUMN heartbeat_at DATETIME",
+        'error_message': "ALTER TABLE reviews ADD COLUMN error_message TEXT",
+        'retry_count': "ALTER TABLE reviews ADD COLUMN retry_count INTEGER DEFAULT 0",
+        'worker_id': "ALTER TABLE reviews ADD COLUMN worker_id VARCHAR",
+        'started_at': "ALTER TABLE reviews ADD COLUMN started_at DATETIME",
+        'filter_mode': "ALTER TABLE reviews ADD COLUMN filter_mode VARCHAR DEFAULT 'pipeline'",
+    }
+    for column_name, stmt in review_extra.items():
+        if review_columns and column_name not in review_columns:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
 
     try:
         issue_columns = {col['name'] for col in inspector.get_columns('issues')}
@@ -187,3 +213,4 @@ def create_tables():
     from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_decision_record, false_positive_memory
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()
+    _ensure_review_foreign_keys()
