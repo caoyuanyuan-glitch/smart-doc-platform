@@ -12059,6 +12059,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "ai_review": ai_review_trace,
             "ai_degraded": bool(ai_degraded),
             "ai_degraded_reason": ai_degraded_reason,
+            "ai_budget_exceeded": bool(isinstance(ai_review_trace, dict) and ai_review_trace.get("budget_reached")),
             "ai_filter_diagnostics": ai_filter_diagnostics,
             "pdf_visual_verification": pdf_visual_verification,
             "pdf_page_metadata": pdf_page_metadata,

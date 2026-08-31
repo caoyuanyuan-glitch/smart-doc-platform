@@ -158,3 +158,59 @@ def test_review_engine_exports_are_real():
     assert result.issues == []
     assert AICandidateEngine().collect([]) == []
     assert ReportAggregator().aggregate([1]) == [1]
+
+
+def test_visual_all_providers_unavailable(monkeypatch):
+    monkeypatch.setenv("REVIEW_VISUAL_PROVIDERS", "kimi,qwen")
+    monkeypatch.setattr(review_api, "_visual_provider_available", lambda name: False)
+    result = review_api._verify_review_issue_visually(b"png", {"original_text": "x"}, 1, 7)
+    assert result["visual_status"] == "provider_unavailable"
+    assert result["attempts"]
+
+
+def test_visual_kimi_confirm_does_not_count_as_skipped(monkeypatch):
+    monkeypatch.setenv("REVIEW_VISUAL_PROVIDERS", "kimi,qwen")
+    monkeypatch.setattr(review_api, "_visual_provider_available", lambda name: True)
+    monkeypatch.setattr(
+        review_api.ai_client,
+        "verify_review_issue_from_image",
+        lambda *args, **kwargs: {"decision": "confirm", "reason": "visible"},
+    )
+    result = review_api._verify_review_issue_visually(b"png", {"original_text": "x"}, 1, 7)
+    assert result["visual_status"] == "verified"
+    assert result["provider"] == "kimi"
+
+
+def test_persist_progress_and_reclaim_stale_running():
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.crud.review import persist_review_progress, reclaim_stale_running_reviews
+    from app.database import Base
+    from app.models.document import Document
+    from app.models.review import Review
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    document = Document(filename="manual.docx", file_type="docx", content="body")
+    db.add(document)
+    db.commit()
+    review = Review(document_id=document.id, mode="hybrid", status="running")
+    db.add(review)
+    db.commit()
+
+    persist_review_progress(db, review.id, "running", "AI智能审核", 40, "working")
+    db.refresh(review)
+    assert review.stage == "AI智能审核"
+    assert review.progress == 40
+    assert review.heartbeat_at is not None
+
+    review.heartbeat_at = datetime.utcnow() - timedelta(seconds=2000)
+    db.commit()
+    reclaimed = reclaim_stale_running_reviews(db, timeout_seconds=30)
+    db.refresh(review)
+    assert reclaimed == 1
+    assert review.status == "failed"
