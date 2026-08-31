@@ -226,7 +226,8 @@ def test_build_audit_prompt_payload_english_skips_chinese_base_prompt(monkeypatc
 
     assert "中文静态规则" not in payload["system_prompt"]
     assert "Unicode-equivalent character differences" in payload["system_prompt"]
-    assert "Gerund vs noun form differences" in payload["system_prompt"]
+    assert "severity=suggestion" in payload["system_prompt"]
+    assert "observations" in payload["user_prompt"]
 
 
 def test_audit_document_does_not_rechunk_large_content(monkeypatch):
@@ -258,7 +259,8 @@ def test_audit_document_does_not_rechunk_large_content(monkeypatch):
 
     result = client.audit_document("A" * 9000, language="en", audit_basis="basis", review_id=7)
 
-    assert result == {"issues": []}
+    assert result["issues"] == []
+    assert result["observations"] == []
     assert captured == [("qwen", 9000, "review.audit_chunk", 7)]
 
 
@@ -280,3 +282,33 @@ def test_provider_limits_can_be_overridden(monkeypatch):
 
     assert ai_client_module._provider_max_attempts() == 4
     assert timeout.read == 20.0
+
+
+def test_normalize_audit_issues_keeps_mid_confidence_for_human_review():
+    client = AIClient.__new__(AIClient)
+    issues = client.normalize_audit_issues(
+        [{
+            "original": "Buffer A",
+            "expected": "Buffer B",
+            "description": "术语可能不一致",
+            "confidence": 62,
+            "severity": "general",
+            "category": "术语一致性",
+        }],
+        "Use Buffer A before mixing.",
+    )
+    assert len(issues) == 1
+    assert issues[0]["needs_human_review"] is True
+
+
+def test_normalize_audit_observations_dedupes_by_title():
+    client = AIClient.__new__(AIClient)
+    observations = client.normalize_audit_observations([
+        {"title": "占位符过多", "description": "低置信", "confidence": 55, "category": "格式排版"},
+        {"title": "占位符过多", "description": "高置信", "confidence": 88, "category": "格式排版"},
+        {"title": "引用断裂", "description": "见图 3", "confidence": 70, "category": "编号引用"},
+    ])
+    assert len(observations) == 2
+    first = next(item for item in observations if item["title"] == "占位符过多")
+    assert first["confidence"] == 88
+    assert first["description"] == "高置信"

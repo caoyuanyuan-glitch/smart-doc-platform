@@ -101,7 +101,7 @@ def update_review_status(db: Session, review_id: int, status: str, total_issues:
         review.status = status
         review.total_issues = total_issues
         review.summary = summary
-        if status in {"completed", "failed"}:
+        if status in {"completed", "failed", "cancelled"}:
             review.completed_at = datetime.utcnow()
         db.commit()
         db.refresh(review)

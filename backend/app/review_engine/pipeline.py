@@ -4,6 +4,8 @@ import re
 from collections import Counter
 from typing import Any
 
+from app.review_engine.false_positives import is_rulebook_false_positive
+
 
 SEVERITY_RANK = {"fatal": 4, "serious": 3, "general": 2, "suggestion": 1}
 SOURCE_RANK = {"rule": 4, "term": 3, "grammar": 2, "ai": 1, "spellcheck": 0}
@@ -291,6 +293,8 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
 
     if source == "spellcheck":
         return False
+    if is_rulebook_false_positive(data):
+        return True
     if rule in CYY_LOW_PRECISION_RULES:
         return True
     if rule == "CYY-CN-PLACEHOLDER-001" and re.fullmatch(r"X{1,4}(?::X{1,4}){1,2}", original, re.IGNORECASE):
