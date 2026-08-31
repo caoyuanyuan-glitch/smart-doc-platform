@@ -34,7 +34,7 @@ class CatDiagnoseMappingTest(unittest.TestCase):
         self.assertEqual(items[0]["candidates"][0]["category"], "term")
         self.assertEqual(items[0]["candidates"][0]["severity"], "high")
         self.assertEqual(items[0]["candidates"][1]["category"], "word")
-        self.assertEqual(items[0]["candidates"][1]["severity"], "medium")
+        self.assertNotIn("severity", items[0]["candidates"][1])
 
 
 class CatDiagnoseMergeTest(unittest.TestCase):
@@ -151,6 +151,7 @@ class CatDiagnoseSwitchTest(unittest.TestCase):
         }, allowed_indexes={1})
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["category"], "term")
+        self.assertNotIn("rationale", parsed[0])
 
     def test_silent_normalize_paths_log_reason(self):
         from app.utils.cat_diagnose import parse_diagnoses_payload
@@ -297,6 +298,7 @@ class CatDiagnoseRevisedFilterTest(unittest.TestCase):
         self.assertEqual(parsed[0]["revised"], "flow cell")
         self.assertTrue(parsed[0]["ruleable"])
         self.assertEqual(parsed[0]["rule_hint"], "流道池")
+        self.assertNotIn("rationale", parsed[0])
 
     def test_hint_only_categories_keep_empty_or_identity_revised(self):
         from app.utils.cat_diagnose import parse_diagnoses_payload
@@ -347,6 +349,8 @@ class CatDiagnoseRevisedFilterTest(unittest.TestCase):
         self.assertEqual(by_cat["ambiguity"]["revised"], "")
         self.assertEqual(by_cat["missing"]["revised"], "将样本在指定条件下孵育后进行测序。")
         self.assertNotIn("term", by_cat)
+        for item in parsed:
+            self.assertNotIn("rationale", item)
 
 
 class CatDiagnoseBatchTest(unittest.TestCase):
@@ -387,18 +391,18 @@ class CatDiagnoseCompactTextTest(unittest.TestCase):
     def test_compact_keeps_short_problem(self):
         from app.utils.cat_diagnose import compact_diagnose_text
 
-        self.assertEqual(compact_diagnose_text("术语不规范", 36), "术语不规范")
+        self.assertEqual(compact_diagnose_text("术语不规范", 24), "术语不规范")
 
     def test_compact_cuts_long_problem_to_first_clauses(self):
         from app.utils.cat_diagnose import compact_diagnose_text
 
         text = "“点击文本框”表述不完整，缺少点击后的操作对象或方式，且与前句3.5.2编号重复"
-        compact = compact_diagnose_text(text, 36)
-        self.assertLessEqual(len(compact), 36)
+        compact = compact_diagnose_text(text, 24)
+        self.assertLessEqual(len(compact), 24)
         self.assertIn("表述不完整", compact)
         self.assertNotIn("编号重复", compact)
 
-    def test_duplicate_rationale_cleared_on_normalize(self):
+    def test_normalize_omits_rationale(self):
         from app.utils.cat_diagnose import parse_diagnoses_payload
 
         parsed = parse_diagnoses_payload({
@@ -414,7 +418,8 @@ class CatDiagnoseCompactTextTest(unittest.TestCase):
         }, allowed_indexes={0})
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["problem"], "“至于”为错别字，应为“置于”")
-        self.assertEqual(parsed[0]["rationale"], "")
+        self.assertLessEqual(len(parsed[0]["problem"]), 24)
+        self.assertNotIn("rationale", parsed[0])
 
 
 class CatDiagnoseHintImportTest(unittest.TestCase):

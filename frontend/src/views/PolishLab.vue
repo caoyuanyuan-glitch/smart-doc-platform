@@ -169,7 +169,7 @@
                       clearable
                       size="small"
                       class="cat-filter-select cat-filter-select-severity"
-                      placeholder="全部严重程度"
+                      placeholder="AI诊断严重程度"
                     >
                       <el-option :label="`高 · 严重问题 (${catSeverityCounts.high || 0})`" value="high">
                         <div class="cat-filter-option">
@@ -245,7 +245,6 @@
                     <div v-if="isHintOnlyDiagnose(selectedCatCandidate(item), item.originalText)" class="cat-hint-card">
                       <div class="cat-hint-title">提示</div>
                       <div v-if="diagnoseProblemText(selectedCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedCatCandidate(item)) }}</div>
-                      <div v-if="diagnoseRationaleText(selectedCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedCatCandidate(item)) }}</div>
                     </div>
                     <div v-else class="issue-diff-row">
                       <span class="issue-diff-label">{{ item.action === 'modify' && item.savedModifiedText ? '自定义' : '候选' }}</span>
@@ -257,7 +256,6 @@
                         </div>
                         <div v-if="isDiagnoseCandidate(selectedCatCandidate(item))" class="cat-diagnose-meta">
                           <div v-if="diagnoseProblemText(selectedCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedCatCandidate(item)) }}</div>
-                          <div v-if="diagnoseRationaleText(selectedCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedCatCandidate(item)) }}</div>
                         </div>
                       </div>
                     </div>
@@ -615,11 +613,9 @@
                       <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
                         <div class="cat-hint-title">提示</div>
                         <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
-                        <div v-if="diagnoseRationaleText(selectedTextCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedTextCatCandidate(item)) }}</div>
                       </div>
                       <div v-else-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
                         <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
-                        <div v-if="diagnoseRationaleText(selectedTextCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedTextCatCandidate(item)) }}</div>
                       </div>
                     </div>
                   </div>
@@ -714,7 +710,9 @@
           <el-table-column label="分类" width="100">
             <template #default="{ row }">{{ CATEGORY_LABELS[row.category] || row.category }}</template>
           </el-table-column>
-          <el-table-column prop="problem" label="问题" min-width="180" show-overflow-tooltip />
+          <el-table-column label="问题" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ diagnoseProblemText(row) }}</template>
+          </el-table-column>
           <el-table-column prop="rule_hint" label="规则提示" min-width="140" show-overflow-tooltip />
           <el-table-column label="操作" width="180" fixed="right">
             <template #default="{ row }">
@@ -3173,15 +3171,15 @@ function isDiagnoseCandidate(candidate) {
 
 const HINT_ONLY_CATEGORIES = new Set(['logic', 'missing', 'ambiguity'])
 
-function compactDiagnoseText(value) {
+function compactDiagnoseCompareText(value) {
   return String(value || '').replace(/\s+/g, '')
 }
 
 function hasDistinctRevised(candidate, originalText) {
   const revised = String(candidate?.revised || '').trim()
   if (!revised) return false
-  const revisedNorm = compactDiagnoseText(revised)
-  return revisedNorm !== compactDiagnoseText(candidate?.quote) && revisedNorm !== compactDiagnoseText(originalText)
+  const revisedNorm = compactDiagnoseCompareText(revised)
+  return revisedNorm !== compactDiagnoseCompareText(candidate?.quote) && revisedNorm !== compactDiagnoseCompareText(originalText)
 }
 
 function isHintOnlyDiagnose(candidate, originalText) {
@@ -3189,7 +3187,7 @@ function isHintOnlyDiagnose(candidate, originalText) {
   return HINT_ONLY_CATEGORIES.has(String(candidate?.category || '')) && !hasDistinctRevised(candidate, originalText)
 }
 
-const DIAGNOSE_TEXT_MAX = 36
+const DIAGNOSE_TEXT_MAX = 24
 
 function compactDiagnoseText(value, maxChars = DIAGNOSE_TEXT_MAX) {
   let text = String(value || '').trim()
@@ -3214,35 +3212,6 @@ function compactDiagnoseText(value, maxChars = DIAGNOSE_TEXT_MAX) {
 
 function diagnoseProblemText(candidate) {
   return compactDiagnoseText(candidate?.problem)
-}
-
-function normalizeDiagnoseCompareText(value) {
-  return String(value || '')
-    .replace(/[“”"‘’'`]/g, '')
-    .replace(/[，。；、：:！!？?\s]/g, '')
-    .toLowerCase()
-}
-
-function isDuplicateDiagnoseRationale(problem, rationale) {
-  const a = normalizeDiagnoseCompareText(problem)
-  const b = normalizeDiagnoseCompareText(rationale)
-  if (!a || !b) return false
-  if (a === b || b.includes(a) || a.includes(b)) return true
-  const quoted = [...String(problem).matchAll(/[“"']([^”"']+)[”"']/g)].map(item => item[1]).filter(Boolean)
-  if (quoted.length && quoted.every(item => String(rationale).includes(item))) {
-    return /错别字|应为|应改为|重复|不完整/.test(problem) && /错别字|应为|应改为|之意|属于/.test(rationale)
-  }
-  return false
-}
-
-function diagnoseRationaleText(candidate) {
-  const rawProblem = String(candidate?.problem || '').trim()
-  const rawRationale = String(candidate?.rationale || '').trim()
-  if (!rawRationale || isDuplicateDiagnoseRationale(rawProblem, rawRationale)) return ''
-  const problem = compactDiagnoseText(rawProblem)
-  const rationale = compactDiagnoseText(rawRationale)
-  if (!rationale || isDuplicateDiagnoseRationale(problem, rationale)) return ''
-  return rationale
 }
 
 const diagnoseCandidates = ref([])
@@ -4636,14 +4605,6 @@ watch(currentView, (view) => {
   text-align: center;
 }
 
-.cat-severity-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  color: #475569;
-  font-size: 12px;
-}
-
 .cat-legend-item {
   display: inline-flex;
   align-items: center;
@@ -4775,10 +4736,6 @@ watch(currentView, (view) => {
   color: #334155;
 }
 
-.cat-diagnose-rationale {
-  margin-top: 2px;
-}
-
 .cat-hint-card {
   margin-top: 8px;
   padding: 10px 12px;
@@ -4795,8 +4752,7 @@ watch(currentView, (view) => {
   margin-bottom: 4px;
 }
 
-.cat-hint-card .cat-diagnose-problem,
-.cat-hint-card .cat-diagnose-rationale {
+.cat-hint-card .cat-diagnose-problem {
   font-size: 14px;
   line-height: 1.65;
 }

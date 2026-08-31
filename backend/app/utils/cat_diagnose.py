@@ -98,10 +98,9 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 4. 术语必须与给定术语表一致；术语表没有的，保留原文。
 5. category 只能从枚举取；severity 只能是 low/medium/high。
 6. 只输出 JSON，不要任何解释文字。
-7. 诊断成立时：logic、missing、ambiguity 三类允许 revised 为空（写清 problem 与 rationale 即可）。其他类别若你能给出忠实改写则必须给出；若你识别出问题但给不出忠实改写，请改用 logic/missing/ambiguity 类别并把 revised 留空——这优于沉默。
+7. 诊断成立时：logic、missing、ambiguity 三类允许 revised 为空（写清 problem 即可）。其他类别若你能给出忠实改写则必须给出；若你识别出问题但给不出忠实改写，请改用 logic/missing/ambiguity 类别并把 revised 留空——这优于沉默。
 8. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
-9. problem 只写一句结论，不超过 30 字，不要展开解释。
-10. rationale 只补充 problem 未写明的依据，不超过 30 字；与 problem 重复则留空。
+9. problem 只写一句结论，不超过 24 字，需自带依据出处（如"与前文3.4节不一致""定义见术语表"），不要展开解释、不要列举例外。
 
 category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, logic, missing, register, audience, risk, other
 
@@ -115,7 +114,7 @@ category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, 
 {json_sentences}
 
 输出格式：
-{{"diagnoses":[{{"sentence_index":0,"quote":"...","category":"term","severity":"high","problem":"...","revised":"...","rationale":"...","ruleable":false,"rule_hint":""}}]}}
+{{"diagnoses":[{{"sentence_index":0,"quote":"...","category":"term","severity":"high","problem":"...","revised":"...","ruleable":false,"rule_hint":""}}]}}
 无问题返回 {{"diagnoses":[]}}。
 """
 
@@ -277,14 +276,14 @@ def map_rule_to_category(
 
 
 def annotate_cat_candidates(items: Optional[list]) -> list:
-    """给现有 candidate 补 category/severity，已有字段不覆盖。"""
+    """给现有 candidate 补 category，已有字段不覆盖。"""
     for item in items or []:
         if not isinstance(item, dict):
             continue
         for candidate in item.get("candidates") or []:
             if not isinstance(candidate, dict):
                 continue
-            mapped_category, mapped_severity = map_rule_to_category(
+            mapped_category, _mapped_severity = map_rule_to_category(
                 issue=candidate,
                 rule_source=str(candidate.get("rule_source") or ""),
                 rule_name=str(candidate.get("rule_name") or ""),
@@ -293,8 +292,6 @@ def annotate_cat_candidates(items: Optional[list]) -> list:
             )
             if not candidate.get("category"):
                 candidate["category"] = mapped_category
-            if not candidate.get("severity"):
-                candidate["severity"] = mapped_severity
     return items or []
 
 
@@ -349,10 +346,8 @@ def _is_icon_placeholder_quote(quote: str) -> bool:
     return bool(_ICON_PLACEHOLDER_RE.search(quote or ""))
 
 
-_DIAGNOSE_PROBLEM_MAX = 36
-_DIAGNOSE_RATIONALE_MAX = 36
+_DIAGNOSE_PROBLEM_MAX = 24
 _DIAGNOSE_SENTENCE_SEPS = ("。", "！", "？", "!", "?")
-_DIAGNOSE_COMPARE_DROP = "“”\"‘’'，。；、：:！!？? \t\r\n"
 
 
 def _first_diagnose_sentence(text: str) -> str:
@@ -383,28 +378,6 @@ def compact_diagnose_text(text: str, max_chars: int) -> str:
             break
     clipped = (assembled or value)[:max_chars]
     return clipped.rstrip("，、；;：: ")
-
-
-def _normalize_diagnose_compare_text(text: str) -> str:
-    value = str(text or "")
-    for ch in _DIAGNOSE_COMPARE_DROP:
-        value = value.replace(ch, "")
-    return value.lower()
-
-
-def diagnose_rationale_is_duplicate(problem: str, rationale: str) -> bool:
-    a = _normalize_diagnose_compare_text(problem)
-    b = _normalize_diagnose_compare_text(rationale)
-    if not a or not b:
-        return False
-    if a == b or a in b or b in a:
-        return True
-    quoted = re.findall(r"[“\"']([^”\"']+)[”\"']", str(problem or ""))
-    if quoted and all(item in str(rationale or "") for item in quoted):
-        return bool(re.search(r"错别字|应为|应改为|重复|不完整", problem or "")) and bool(
-            re.search(r"错别字|应为|应改为|之意|属于", rationale or "")
-        )
-    return False
 
 
 def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Optional[dict]:
@@ -470,11 +443,7 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
         if _is_identity_revision(quote, revised):
             _log_diagnose_drop("normalize", category, quote, revised, reason="identity", sentence_index=sentence_index)
             return None
-    rationale = str(raw.get("rationale") or "").strip()
     problem = compact_diagnose_text(problem, _DIAGNOSE_PROBLEM_MAX)
-    rationale = compact_diagnose_text(rationale, _DIAGNOSE_RATIONALE_MAX)
-    if diagnose_rationale_is_duplicate(problem, rationale):
-        rationale = ""
     return {
         "sentence_index": sentence_index,
         "quote": quote,
@@ -482,7 +451,6 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
         "severity": severity,
         "problem": problem,
         "revised": revised,
-        "rationale": rationale,
         "ruleable": _parse_ruleable(raw.get("ruleable")),
         "rule_hint": str(raw.get("rule_hint") or "").strip(),
     }
@@ -521,7 +489,6 @@ def diagnosis_to_candidate(diag: dict, original_text: str = "") -> dict:
         "quote": quote,
         "revised": revised,
         "problem": str(diag.get("problem") or ""),
-        "rationale": str(diag.get("rationale") or ""),
         "ruleable": bool(diag.get("ruleable")),
         "rule_hint": str(diag.get("rule_hint") or ""),
     }
