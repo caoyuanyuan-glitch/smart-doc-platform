@@ -2221,7 +2221,7 @@ IMPORTANT REMINDERS:
 FILENAME CHECKING:
 - When the context prompt provides a document filename, verify it against the document content.
 - Check for: spelling errors in filename, product name mismatch between filename and content, incorrect version/date format in filename, missing or extra spaces/underscores in product names in filename.
-- If the filename contains a product name (e.g. "DNBSEQ-T7"), verify that the same product name appears consistently in the document body.
+- If the filename contains a product name (e.g. "DNBSEQ-T7"), flag FILENAME-002 only when the body contains a different product model. Do not flag mere absence, revision tokens, or document-number tokens.
 - Flag filename issues with type "FilenameError" and rule "FILENAME-001" (spelling), "FILENAME-002" (product mismatch), or "FILENAME-003" (version/date format)."""
 
             user_prompt = f"""Please review the following English technical document.
@@ -2332,7 +2332,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 
 文件名检查（当上下文提供了文档文件名时）：
 - 检查文件名是否存在拼写错误。
-- 检查文件名中的产品名称是否与正文一致（如文件名含"DNBSEQ-T7"但正文写"DNBSEQ-T10"则为错误）。
+- 仅当正文出现另一个不同产品型号时，才报告文件名产品名不一致；正文未出现该型号、或文件名片段是版本号/物料编码时不要报。
 - 检查文件名中的版本号、日期格式是否规范。
 - 检查文件名中产品名称的拼写、大小写、空格/下划线是否与正文一致。
 - 文件名问题类型标记为 "文件名错误"，规则用 FILENAME-001（拼写）、FILENAME-002（产品名不一致）、FILENAME-003（版本/日期格式）。"""

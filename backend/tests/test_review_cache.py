@@ -119,6 +119,27 @@ def test_run_filename_audit_skips_known_product_output_filename():
     assert issues == []
 
 
+def test_run_filename_audit_skips_revision_and_absent_cover_product():
+    filename = "H-020-001368-00 MGIDL-G99RS 全自动样本加载仪快速操作指南_中文_RUO_WH-R02.pdf"
+    content = "触摸屏显示用户交互界面。长按【长按启动】按钮旁的指纹区域。"
+
+    issues = review_api._run_filename_audit(filename, content, "cn")
+
+    assert not any(issue["rule"] == "FILENAME-002" for issue in issues)
+
+
+def test_run_filename_audit_flags_conflicting_product_model():
+    issues = review_api._run_filename_audit(
+        "DNBSEQ-T7 操作指南.pdf",
+        "本指南适用于 DNBSEQ-T10 测序仪。",
+        "cn",
+    )
+
+    issue = next(item for item in issues if item["rule"] == "FILENAME-002")
+    assert issue["original_text"] == "DNBSEQ-T7"
+    assert "DNBSEQ-T10" in issue["description"]
+
+
 def test_resolve_compare_row_level_accepts_email_only_support_contact_for_english_manuals():
     field_def = {
         "name": "技术支持联系方式（电话/邮箱）",

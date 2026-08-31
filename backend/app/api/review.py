@@ -6171,6 +6171,24 @@ _FILENAME_SPELLING_FIXES = {
 }
 
 
+_FILENAME_PRODUCT_RE = re.compile(r'[A-Z][A-Za-z0-9]+(?:-[A-Za-z0-9]+)+')
+
+
+def _normalize_filename_product_token(token):
+    return re.sub(r'[\s_\-]+', '', str(token or '')).casefold()
+
+
+def _is_filename_control_token(token):
+    text = str(token or '').strip()
+    if not text:
+        return True
+    if re.fullmatch(r'[A-Z](?:-\d{2,6})+(?:-\d{2,6})*', text):
+        return True
+    if re.fullmatch(r'(?:[A-Z]{1,4}-)?R\d{2,3}', text, re.IGNORECASE):
+        return True
+    return False
+
+
 def _is_known_product_output_filename(stem: str) -> bool:
     normalized = str(stem or "").strip()
     if not normalized:
@@ -6232,35 +6250,47 @@ def _run_filename_audit(filename: str, content: str, document_language: str) -> 
     product_patterns = re.findall(r'[A-Z][A-Za-z0-9]+(?:-[A-Za-z0-9]+)+', stem)
     # 过滤掉常见非产品名词（如 Notification, Product, Upgrade, User, For）
     stop_words = {'Notification', 'Product', 'Upgrade', 'Update', 'User', 'Users', 'For', 'Document', 'Notice'}
-    candidate_products = [p for p in product_patterns if p not in stop_words and len(p) >= 3]
-    
+    candidate_products = [
+        token for token in product_patterns
+        if token not in stop_words and len(token) >= 3 and not _is_filename_control_token(token)
+    ]
+    compact_content = _normalize_filename_product_token(content)
+    body_products = [
+        token for token in _FILENAME_PRODUCT_RE.findall(str(content or ''))
+        if not _is_filename_control_token(token)
+    ]
+
     for product in candidate_products:
-        # 在正文内容中搜索该产品名
-        if product not in content:
-            # 尝试模糊匹配：忽略大小写和空格变体
-            pattern_variants = [
-                product,
-                product.replace('-', ' '),
-                product.replace('-', ''),
-                product.replace(' ', '-'),
-                product.replace(' ', ''),
-            ]
-            found = any(v in content for v in pattern_variants)
-            if not found and len(product) >= 4:
-                issues.append({
-                    "severity": "general",
-                    "category": "文件名错误",
-                    "rule": "FILENAME-002",
-                    "chapter": "文件名",
-                    "original_text": product,
-                    "context": f"文件名: {basename}",
-                    "suggestion": f"确认产品名「{product}」是否与正文一致",
-                    "description": f"文件名中的产品名「{product}」在正文内容中未找到，请确认文件名和内容的产品名是否一致",
-                    "audit_basis": "文件名与内容一致性检查",
-                    "confidence": 70,
-                    "source": "rule",
-                    "position": "filename",
-                })
+        compact_product = _normalize_filename_product_token(product)
+        if compact_product and compact_product in compact_content:
+            continue
+        conflicts = []
+        seen_conflicts = set()
+        for body_product in body_products:
+            compact_body = _normalize_filename_product_token(body_product)
+            if not compact_body or compact_body == compact_product:
+                continue
+            if compact_body in seen_conflicts:
+                continue
+            seen_conflicts.add(compact_body)
+            conflicts.append(body_product)
+        if not conflicts:
+            continue
+        conflict_text = conflicts[0]
+        issues.append({
+            "severity": "general",
+            "category": "文件名错误",
+            "rule": "FILENAME-002",
+            "chapter": "文件名",
+            "original_text": product,
+            "context": f"文件名: {basename}",
+            "suggestion": f"请将文件名或正文统一为「{product}」或「{conflict_text}」",
+            "description": f"文件名产品名「{product}」与正文「{conflict_text}」不一致",
+            "audit_basis": "文件名与内容一致性检查",
+            "confidence": 82,
+            "source": "rule",
+            "position": "filename",
+        })
     
     # ── 3. 日期格式检查 ──
     # 检测 YYYYMMDD 格式（无分隔符）
