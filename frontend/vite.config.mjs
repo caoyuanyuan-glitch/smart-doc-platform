@@ -30,6 +30,17 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
   },
+  optimizeDeps: {
+    holdUntilCrawlEnd: true,
+    include: [
+      'vue',
+      'vue-router',
+      'pinia',
+      'axios',
+      'element-plus',
+      'element-plus/es'
+    ]
+  },
   build: {
     chunkSizeWarningLimit: 800,
     rollupOptions: {
@@ -50,11 +61,8 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
     allowedHosts: true,
-    hmr: {
-      protocol: 'wss',
-      clientPort: 443,
-      overlay: false,
-    },
+    // 预览网关下关闭 HMR，避免 WebSocket 断连和按需依赖发现导致整页刷新
+    hmr: false,
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
@@ -72,6 +80,21 @@ export default defineConfig({
             console.error('Proxy error:', err.message)
           })
         }
+      }
+    }
+  },
+  preview: {
+    host: '0.0.0.0',
+    port: 5173,
+    allowedHosts: true,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,
+        ws: true,
+        proxyTimeout: 600000,
+        timeout: 600000
       }
     }
   }
