@@ -34,6 +34,10 @@ _PDF_FIXED_PHRASE_MISSPELLINGS = [
     (re.compile(r'\bMDA\s+T-Regent\b', re.IGNORECASE), 'MDA T-Reagent'),
     (re.compile(r'\bDisgestive\s+Buffer\b', re.IGNORECASE), 'Digestive Buffer'),
     (re.compile(r'\bto\s+return\s+to\s+teh\b', re.IGNORECASE), 'to return to the'),
+    (re.compile(r'\binformations\b', re.IGNORECASE), 'information'),
+    (re.compile(r'\bequipments\b', re.IGNORECASE), 'equipment'),
+    (re.compile(r'\bdatas\b', re.IGNORECASE), 'data'),
+    (re.compile(r'\bin\s+the\s+same\s+time\b', re.IGNORECASE), 'at the same time'),
 ]
 
 DOMAIN_ABBREVIATIONS = {

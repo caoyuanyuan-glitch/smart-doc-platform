@@ -69,8 +69,14 @@ def test_merge_audit_issue_sets_downgrades_low_confidence_single_model_issue():
 
 def test_audit_document_runs_qwen_then_deepseek(monkeypatch):
     client = AIClient.__new__(AIClient)
+    client.default_provider = "qwen"
+    client.disabled_providers = set()
     client.qwen_client = object()
+    client.kimi_client = None
     client.deepseek_client = object()
+    client.arkclaw_client = None
+    client.mcai_proxy_client = None
+    client.proxy_client = None
 
     calls = []
 
@@ -121,6 +127,90 @@ def test_audit_document_runs_qwen_then_deepseek(monkeypatch):
     assert result["issues"][0]["consensus_score"] >= 92
 
 
+def test_audit_document_falls_back_to_kimi_when_qwen_returns_no_issues(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    client.default_provider = "qwen"
+    client.disabled_providers = set()
+    client.qwen_client = object()
+    client.kimi_client = object()
+    client.deepseek_client = None
+    client.arkclaw_client = None
+    client.mcai_proxy_client = None
+    client.proxy_client = None
+
+    calls = []
+
+    def fake_run_provider_audit(provider_key, messages, content, request_label=None, review_id=None):
+        calls.append((provider_key, request_label, review_id, content))
+        if provider_key == "qwen":
+            return []
+        return [{
+            "severity": "general",
+            "category": "语法表达",
+            "rule": "AI-GRAMMAR",
+            "chapter": "章节1",
+            "original_text": "如操作不当或不避免",
+            "context": "如操作不当或不避免",
+            "suggestion": "如未按照说明进行操作",
+            "description": "搭配不通顺",
+            "audit_basis": "审核依据",
+            "confidence": 91,
+            "source": "ai",
+            "position": "1-10",
+            "source_models": [provider_key],
+            "consensus_score": 91,
+        }]
+
+    monkeypatch.setattr("app.utils.ai_client.build_system_prompt", lambda: "BASE")
+    monkeypatch.setattr(client, "_run_provider_audit", fake_run_provider_audit)
+
+    result = client.audit_document("如操作不当或不避免", language="cn", audit_basis="basis", review_id=10)
+
+    assert [call[0] for call in calls] == ["qwen", "kimi"]
+    assert result["issues"][0]["source_models"] == ["kimi"]
+
+
+def test_run_provider_audit_uses_configurable_max_tokens(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    captured = {}
+
+    def fake_call_qwen(messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        captured["max_tokens"] = max_tokens
+        return '{"issues": []}'
+
+    monkeypatch.setenv("AI_AUDIT_MAX_TOKENS", "512")
+    monkeypatch.setattr(client, "call_qwen", fake_call_qwen)
+
+    result = client._run_provider_audit("qwen", [], "text")
+
+    assert result == []
+    assert captured["max_tokens"] == 512
+
+
+def test_qwen3_request_disables_thinking_by_default(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    client.qwen_model = "qwen3.7-flash"
+    client.qwen_enable_thinking = False
+
+    monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
+
+    payload = client._build_qwen_request_kwargs(model=client.qwen_model, messages=[])
+
+    assert payload["extra_body"]["enable_thinking"] is False
+
+
+def test_qwen_request_respects_enable_thinking_env(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    client.qwen_model = "qwen-max"
+    client.qwen_enable_thinking = True
+
+    monkeypatch.setenv("QWEN_ENABLE_THINKING", "true")
+
+    payload = client._build_qwen_request_kwargs(model=client.qwen_model, messages=[])
+
+    assert payload["extra_body"]["enable_thinking"] is True
+
+
 def test_build_audit_prompt_payload_english_skips_chinese_base_prompt(monkeypatch):
     client = AIClient.__new__(AIClient)
 
@@ -141,8 +231,14 @@ def test_build_audit_prompt_payload_english_skips_chinese_base_prompt(monkeypatc
 
 def test_audit_document_does_not_rechunk_large_content(monkeypatch):
     client = AIClient.__new__(AIClient)
+    client.default_provider = "qwen"
+    client.disabled_providers = set()
     client.qwen_client = object()
+    client.kimi_client = None
     client.deepseek_client = None
+    client.arkclaw_client = None
+    client.mcai_proxy_client = None
+    client.proxy_client = None
 
     captured = []
 

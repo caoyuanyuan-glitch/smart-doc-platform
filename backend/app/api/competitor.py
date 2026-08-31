@@ -345,8 +345,11 @@ async def create_competitor_task(
     safe_name = _sanitize_filename(filename)
     _ensure_upload_dir()
 
+    # 来源类型：本地 HTML 上传单独标记（区别于普通文档与网页链接）
+    source_type = "html" if ext in (".html", ".htm") else "file"
     from app.crud.competitor import create_competitor_task as db_create
-    task = db_create(db, file_name=safe_name, file_size=len(data), user_id=current_user.id)
+    task = db_create(db, file_name=safe_name, file_size=len(data), user_id=current_user.id,
+                     source_type=source_type)
 
     stored_name = f"{task.id}_{uuid.uuid4().hex[:8]}_{safe_name}"
     stored_path = os.path.join(UPLOAD_DIR, stored_name)
@@ -374,6 +377,7 @@ async def create_competitor_task(
             tool_analysis=result["tool_analysis"],
             readability=result["readability"],
             experience=result["experience"],
+            overall_score=result["readability"].get("overall_score"),
             report_md=result["report_md"],
             completed_at=datetime.utcnow(),
         )
@@ -409,6 +413,7 @@ async def create_competitor_task_from_url(
         file_name=parsed["filename"],
         file_size=parsed["file_size"],
         user_id=current_user.id,
+        source_type="url",
     )
     try:
         result = _run_analysis(
@@ -428,6 +433,7 @@ async def create_competitor_task_from_url(
             tool_analysis=result["tool_analysis"],
             readability=result["readability"],
             experience=result["experience"],
+            overall_score=result["readability"].get("overall_score"),
             report_md=result["report_md"],
             completed_at=datetime.utcnow(),
         )
@@ -583,15 +589,43 @@ async def read_competitor_task(
 @router.get("/{task_id}/report", response_model=CompetitorReport)
 async def read_competitor_report(
     task_id: int,
-    format: str = Query("md", pattern="^(md|text)$"),
+    format: str = Query("md", pattern="^(md|text|json)$"),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
-    """报告全文（JSON {content, format}，与 compare 报告接口对齐）。"""
+    """报告全文（JSON {content, format}，与 compare 报告接口对齐）。
+
+    format=json（需求说明书 V1.1 导出要求采纳项）：返回结构化结果（含
+    tool_analysis/readability/experience 已解析对象），便于二次处理与归档。
+    """
     task = _require_competitor_task_access(db, task_id, current_user)
     if task.status != "completed" or not task.report_md:
         detail = task.error or "分析尚未完成"
         raise HTTPException(status_code=404, detail=detail)
+    if format == "json":
+        import json as _json
+
+        def _maybe_json(value):
+            if isinstance(value, str):
+                try:
+                    return _json.loads(value)
+                except (ValueError, TypeError):
+                    return value
+            return value
+
+        return {
+            "content": {
+                "id": task.id,
+                "source_type": task.source_type,
+                "file_name": task.file_name,
+                "overall_score": task.overall_score,
+                "tool_analysis": _maybe_json(task.tool_analysis),
+                "readability": _maybe_json(task.readability),
+                "experience": _maybe_json(task.experience),
+                "report_md": task.report_md,
+            },
+            "format": format,
+        }
     content = task.report_md
     if format == "text":
         # text 参数需返回纯文本（去 Markdown 标记），避免"标着 text 返回 md"的误导

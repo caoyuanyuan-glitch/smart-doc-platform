@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from app.api import review as review_api
 from app.api import review_rules
 from app.crud import rule as crud_rule
+from app.crud import review as crud_review
 from app.review_engine import pipeline as review_pipeline
 from app.review_engine import validation as review_validation
 
@@ -30,6 +31,82 @@ def test_build_review_cache_key_changes_with_mode(monkeypatch):
     hybrid_key = review_api._build_review_cache_key(document, "hybrid")
 
     assert rule_key != hybrid_key
+
+
+def test_build_ai_chunk_cache_key_changes_with_document_name(monkeypatch):
+    monkeypatch.setattr(review_api, "_review_cache_version", lambda: "v1")
+    monkeypatch.setattr(review_api, "_ai_provider_cache_fingerprint", lambda: "provider-v1")
+
+    key_a = review_api._build_ai_chunk_cache_key("same content", "cn", "same basis", document_name="A.pdf")
+    key_b = review_api._build_ai_chunk_cache_key("same content", "cn", "same basis", document_name="B.pdf")
+
+    assert key_a != key_b
+
+
+def test_provider_status_uses_health_check_available_providers(monkeypatch):
+    def fake_provider_status(include_health=False):
+        assert include_health is True
+        return {
+            "default_provider": "qwen",
+            "available": ["kimi"],
+            "health": {
+                "healthy": True,
+                "ok_providers": 1,
+                "total_providers": 2,
+                "primary": "kimi",
+                "primary_status": "ok",
+                "providers": {
+                    "qwen": {"status": "error", "model": "qwen-max", "error": "401"},
+                    "kimi": {"status": "ok", "model": "moonshot-v1-8k", "latency_ms": 42},
+                },
+            },
+        }
+
+    monkeypatch.setattr(review_api.ai_client, "provider_status", fake_provider_status)
+
+    payload = asyncio.run(review_api.get_provider_status(None))
+
+    assert payload["available_providers"] == ["kimi"]
+    assert payload["models"] == [{
+        "name": "kimi",
+        "label": "Kimi (Moonshot)",
+        "available": True,
+        "status": "ok",
+        "latency_ms": 42,
+        "model": "moonshot-v1-8k",
+    }]
+    assert payload["health"]["ok_providers"] == 1
+
+
+def test_pdf_page_metadata_collects_suspicious_table_pages(monkeypatch):
+    document = SimpleNamespace(file_type="pdf", filename="demo.pdf")
+    monkeypatch.setattr(review_api, "_get_document_upload_path", lambda document: review_api.PROJECT_ROOT / "backend")
+    monkeypatch.setattr(
+        review_api,
+        "extract_pdf",
+        lambda path: {
+            "page_texts": [
+                "版本  日期\n2.0  2026年7月15日\n1.0  2025年11月17日\n3",
+                "正文内容\n图 1 系统组成\nDoc. No. H-020-001246-00",
+            ],
+            "blocks": [
+                SimpleNamespace(page_num=0, block_type="table_row"),
+                SimpleNamespace(page_num=0, block_type="table_row"),
+                SimpleNamespace(page_num=1, block_type="caption"),
+            ],
+        },
+    )
+
+    metadata = review_api._extract_pdf_page_metadata(document, "fallback")
+    suspicious = review_api._collect_pdf_suspicious_pages(metadata)
+
+    assert metadata["enabled"] is True
+    assert metadata["source"] == "pdf_blocks"
+    assert metadata["page_count"] == 2
+    assert suspicious["candidate_count"] == 2
+    first_page = suspicious["candidates"][0]
+    assert first_page["page_number"] == 1
+    assert "table_layout" in first_page["reasons"]
 
 
 def test_run_filename_audit_skips_known_product_output_filename():
@@ -340,6 +417,24 @@ def test_list_reviews_supports_filters(monkeypatch):
     assert captured == {"document_id": 21, "status": "running", "latest_only": True, "limit": 25}
     assert result[0]["document_name"] == "demo.docx"
     assert result[0]["progress"]["progress"] == 42
+
+
+def test_list_reviews_filters_reconciled_runtime_status(monkeypatch):
+    stale_running_review = SimpleNamespace(id=9, document_id=22, status="running", summary="", total_issues=0)
+    document_calls = []
+
+    monkeypatch.setattr(review_api, "_query_review_rows", lambda *args, **kwargs: [stale_running_review])
+    monkeypatch.setattr(
+        review_api,
+        "_reconcile_review_runtime_state",
+        lambda db, review: SimpleNamespace(**{**review.__dict__, "status": "failed"}),
+    )
+    monkeypatch.setattr(review_api, "get_documents_by_ids", lambda db, document_ids: document_calls.append(document_ids) or [])
+
+    result = asyncio.run(review_api.list_reviews(status="running", db=None))
+
+    assert result == []
+    assert document_calls == [[]]
 
 
 def test_export_review_excel_appends_red_opinion_columns(tmp_path, monkeypatch):
@@ -692,6 +787,74 @@ def test_finalize_review_issues_defaults_to_pipeline_only(monkeypatch):
     assert diagnostics["document_evidence_drop_reasons"] == {"missing_evidence": 1}
 
 
+def test_sample_ai_evidence_filter_drops_includes_compact_reason():
+    samples = review_api._sample_ai_evidence_filter_drops(
+        [
+            {
+                "source": "ai",
+                "rule": "AI-GRAMMAR",
+                "category": "语法表达",
+                "severity": "general",
+                "confidence": 82,
+                "original_text": "missing phrase",
+                "suggestion": "replacement phrase",
+                "description": "AI suggested a correction",
+            },
+            {
+                "source": "rule",
+                "rule": "R001",
+                "original_text": "ignored",
+            },
+        ],
+        "document content without that phrase",
+    )
+
+    assert samples == [
+        {
+            "reason": "original_text_not_found",
+            "rule": "AI-GRAMMAR",
+            "category": "语法表达",
+            "severity": "general",
+            "confidence": 82,
+            "original_text": "missing phrase",
+            "suggestion": "replacement phrase",
+            "description": "AI suggested a correction",
+        }
+    ]
+
+
+def test_finalize_review_issues_records_ai_evidence_drop_samples(monkeypatch):
+    monkeypatch.delenv("REVIEW_USE_LEGACY_POST_FILTERS", raising=False)
+    monkeypatch.delenv("REVIEW_RECALL_FLOOR", raising=False)
+
+    monkeypatch.setattr(review_api, "dedupe_issues_by_original", lambda issues: list(issues))
+    monkeypatch.setattr(review_api, "_sanitize_issue_suggestions", lambda issues: list(issues))
+    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(review_api, "pipeline_select_review_issues", lambda issues: list(issues))
+
+    issues, diagnostics = review_api._finalize_review_issues(
+        [
+            {
+                "source": "ai",
+                "rule": "AI-GRAMMAR",
+                "category": "语法表达",
+                "severity": "general",
+                "confidence": 75,
+                "original_text": "not in document",
+                "suggestion": "in document",
+                "description": "AI correction",
+            }
+        ],
+        "document body",
+        set(),
+    )
+
+    assert issues == []
+    assert diagnostics["document_evidence_drop_reasons"] == {"original_text_not_found": 1}
+    assert diagnostics["document_evidence_drop_samples"][0]["reason"] == "original_text_not_found"
+    assert diagnostics["document_evidence_drop_samples"][0]["original_text"] == "not in document"
+
+
 def test_false_positive_signature_filter_drops_matched_issues():
     issues = [
         {"rule": "SPELL", "category": "拼写", "original_text": "consumbles", "source": "spellcheck"},
@@ -700,7 +863,7 @@ def test_false_positive_signature_filter_drops_matched_issues():
 
     filtered = review_api._apply_false_positive_signature_penalty(
         issues,
-        {"spell|拼写|consumbles", "consumbles"},
+        {"SPELL|拼写|consumbles"},
     )
 
     assert len(filtered) == 1
@@ -742,7 +905,10 @@ def test_sync_false_positive_memory_adds_and_removes_entries():
 
         review_api._sync_false_positive_memory(db, issue)
         signatures = review_api.list_false_positive_memory_signatures(db)
-        assert "consumbles" in signatures
+        assert "spell|拼写|consumbles" in signatures
+        assert "spell|consumbles" in signatures
+        assert "拼写|consumbles" in signatures
+        assert "consumbles" not in signatures
 
         issue.status = "confirmed"
         db.commit()
@@ -753,6 +919,46 @@ def test_sync_false_positive_memory_adds_and_removes_entries():
         assert "consumbles" not in signatures
     finally:
         db.close()
+
+
+def test_seed_preset_false_positive_memory_is_idempotent():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    db = SessionLocal()
+    try:
+        assert crud_review.seed_preset_false_positive_memory(db) == 12
+        assert crud_review.seed_preset_false_positive_memory(db) == 0
+
+        items, total = crud_review.list_false_positive_memory(db, limit=20)
+
+        assert total == 12
+        assert len(items) == 12
+        assert {item["document_name"] for item in items} == {"预置"}
+        assert all(item["source_issue_id"] == 0 for item in items)
+    finally:
+        db.close()
+
+
+def test_false_positive_penalty_keeps_same_text_on_different_rule():
+    issues = [
+        {"rule": "SPELL", "category": "拼写", "original_text": "consumbles", "source": "spellcheck"},
+        {"rule": "R013", "category": "术语", "original_text": "consumbles", "source": "ai"},
+    ]
+
+    filtered = review_api._apply_false_positive_signature_penalty(
+        issues,
+        {"SPELL|拼写|consumbles"},
+    )
+
+    assert len(filtered) == 1
+    assert filtered[0]["rule"] == "R013"
 
 
 def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
@@ -807,6 +1013,98 @@ def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
     issue_meta = json.loads(issues[0]["position"])
     assert issue_meta["visual_verification"]["decision"] == "reject"
     assert issue_meta["visual_verification"]["is_extraction_artifact"] is True
+
+
+def test_apply_pdf_visual_verification_adds_confirmed_page_candidate_issue(monkeypatch):
+    document = SimpleNamespace(file_type="pdf", filename="demo.pdf")
+    issues = []
+    suspicious_pages = {
+        "enabled": True,
+        "candidate_count": 1,
+        "candidates": [{
+            "page_number": 3,
+            "reasons": ["table_layout", "dense_table_or_layout"],
+            "char_start": 20,
+            "char_end": 80,
+            "text_preview": "版本 日期 2.0 2026年7月15日 1.0 2025年11月17日",
+        }],
+    }
+
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_enabled", lambda: True)
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_limit", lambda: 6)
+    monkeypatch.setattr(review_api, "_get_document_upload_path", lambda document: review_api.PROJECT_ROOT / "backend")
+    monkeypatch.setattr(review_api, "_render_pdf_page_png_bytes", lambda file_path, page_number, scale=None: b"png-bytes")
+    monkeypatch.setattr(review_api.ai_client, "kimi_client", object())
+    monkeypatch.setattr(
+        review_api.ai_client,
+        "verify_review_issue_from_image",
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+            "decision": "confirm",
+            "reason": "表格列宽分布不均，页面显示拥挤",
+            "confidence": 88,
+            "is_extraction_artifact": False,
+        },
+    )
+    monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
+
+    filtered, diagnostics = review_api._apply_pdf_visual_verification(123, document, "dummy", issues, suspicious_pages)
+
+    assert len(filtered) == 1
+    assert filtered[0]["rule"] == "PDF-VISUAL-001"
+    assert filtered[0]["category"] == "表格/版式"
+    assert diagnostics["page_candidate_count"] == 1
+    assert diagnostics["page_issue_count"] == 1
+    issue_meta = json.loads(filtered[0]["position"])
+    assert issue_meta["page_number"] == 3
+    assert issue_meta["visual_verification"]["page_candidate"] is True
+
+
+def test_apply_pdf_visual_verification_adds_manual_page_issue_on_visual_error(monkeypatch):
+    document = SimpleNamespace(file_type="pdf", filename="demo.pdf")
+    issues = []
+    suspicious_pages = {
+        "enabled": True,
+        "candidate_count": 1,
+        "candidates": [{
+            "page_number": 3,
+            "reasons": ["table_layout"],
+            "char_start": 20,
+            "char_end": 80,
+            "text_preview": "版本记录 日期 版本 修订 2026年7月15日 2.0 编制 2025年11月17日 1.0",
+        }],
+    }
+
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_enabled", lambda: True)
+    monkeypatch.setattr(review_api, "_review_pdf_visual_verify_limit", lambda: 6)
+    monkeypatch.setattr(review_api, "_get_document_upload_path", lambda document: review_api.PROJECT_ROOT / "backend")
+    monkeypatch.setattr(review_api, "_render_pdf_page_png_bytes", lambda file_path, page_number, scale=None: b"png-bytes")
+    monkeypatch.setattr(review_api.ai_client, "kimi_client", object())
+    monkeypatch.setattr(
+        review_api.ai_client,
+        "verify_review_issue_from_image",
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+            "decision": "error",
+            "reason": "visual model unavailable",
+            "confidence": 0,
+            "is_extraction_artifact": False,
+        },
+    )
+    monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
+
+    filtered, diagnostics = review_api._apply_pdf_visual_verification(123, document, "dummy", issues, suspicious_pages)
+
+    assert len(filtered) == 1
+    assert filtered[0]["rule"] == "PDF-VISUAL-001"
+    assert filtered[0]["category"] == "表格/版式"
+    assert filtered[0]["source"] == "rule"
+    assert "平均分布列" in filtered[0]["description"]
+    assert "版本 2.0 1.0" in filtered[0]["context"]
+    assert "版本列值: 2.0 1.0" in filtered[0]["context"]
+    assert diagnostics["page_candidate_count"] == 1
+    assert diagnostics["page_issue_count"] == 1
+    issue_meta = json.loads(filtered[0]["position"])
+    assert issue_meta["page_number"] == 3
+    assert issue_meta["visual_verification"]["decision"] == "needs_manual_review"
 
 
 def test_apply_pdf_visual_verification_filters_known_quote_mapping_artifact_after_uncertain(monkeypatch):
@@ -1157,6 +1455,46 @@ def test_pipeline_filters_low_value_generic_spelling_noise():
     assert selected == []
 
 
+def test_pipeline_filters_low_precision_cyy_reference_check():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "CYY-CN-REF-002",
+            "category": "交叉引用",
+            "severity": "general",
+            "original_text": "Barcode 管理界面",
+            "suggestion": "请检查该引用是否需要同步到全文一致的页码或章节",
+            "description": "未更新交叉引用，通查。",
+            "audit_basis": "CYY人工审核经验基线 - 交叉引用通查",
+            "confidence": 90,
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
+
+
+def test_pipeline_filters_short_time_placeholder_noise():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "CYY-CN-PLACEHOLDER-001",
+            "category": "占位符残留",
+            "severity": "general",
+            "original_text": "XX:XX:XX",
+            "suggestion": "请替换为正式内容或删除该占位符",
+            "description": "疑似模板占位符残留。",
+            "audit_basis": "CYY人工审核经验基线 - 占位符检查",
+            "confidence": 90,
+        }
+    ]
+
+    selected = review_pipeline.select_review_issues(issues)
+
+    assert selected == []
+
+
 def test_should_drop_unicode_equivalent_issue_accepts_mu_variants():
     issue = {
         "original_text": "20 µL",
@@ -1257,6 +1595,46 @@ def test_dedupe_similar_but_not_identical_issues_kept():
     deduped = review_api.dedupe_issues_by_original([first_issue, second_issue])
 
     assert len(deduped) == 2
+
+
+def test_pipeline_keeps_substantive_high_confidence_ai_grammar_issue():
+    issue = {
+        "severity": "general",
+        "category": "Grammar",
+        "rule": "AI-GRAMMAR",
+        "chapter": "Section 1",
+        "original_text": "The sample are ready for loading.",
+        "suggestion": "The samples are ready for loading.",
+        "description": "Subject-verb agreement issue.",
+        "source": "ai",
+        "confidence": 91,
+        "position": "10-45",
+    }
+
+    selected = review_pipeline.select_review_issues([issue])
+
+    assert len(selected) == 1
+    assert selected[0]["source"] == "ai"
+    assert selected[0]["review_value_score"] >= 45
+
+
+def test_pipeline_still_filters_low_value_ai_template_issue():
+    issue = {
+        "severity": "general",
+        "category": "Grammar",
+        "rule": "AI-GRAMMAR",
+        "chapter": "Section 1",
+        "original_text": "Browse",
+        "suggestion": "Click Browse.",
+        "description": "Generic UI wording suggestion.",
+        "source": "ai",
+        "confidence": 96,
+        "position": "10-16",
+    }
+
+    selected = review_pipeline.select_review_issues([issue])
+
+    assert selected == []
 
 
 def test_parse_ai_issue_with_fatal_severity():
@@ -1943,13 +2321,29 @@ def test_run_manual_engineering_audit_detects_missing_space_before_units():
     assert any(issue["rule"] == "DOC-UNIT-001" and issue["original_text"] == "24VDC" for issue in issues)
 
 
-def test_run_manual_engineering_audit_detects_manual_library_url():
+def test_run_chinese_human_baseline_rules_detects_revision_table_column_layout():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "修订记录 修订版本 发布日期 版本 2.0 1.0 2024-01-01 2023-01-01",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-LAYOUT-008" and issue["original_text"] == "版本 2.0 1.0" for issue in issues)
+
+
+def test_run_manual_engineering_audit_keeps_global_site_for_english_manual():
     issues = review_api._run_manual_engineering_audit(
         "Download the instructions for use from https://global-mgitech.com.",
         file_type="pdf",
     )
 
-    assert any(issue["rule"] == "DOC-URL-001" for issue in issues)
+    assert not any(issue["rule"] == "DOC-URL-001" for issue in issues)
+
+
+def test_should_skip_rule_match_skips_ext_r005_global_site_for_english_manual():
+    rule = SimpleNamespace(rule_no="EXT-R005")
+    content = "For more information, visit https://global-mgitech.com for the latest manuals."
+    match = next(re.finditer(r"https://global-mgitech\.com", content))
+
+    assert review_api._should_skip_rule_match(rule, match, content, "en", file_type="pdf") is True
 
 
 def test_run_manual_engineering_audit_detects_neither_not():
@@ -2188,6 +2582,56 @@ def test_run_chinese_human_baseline_rules_detects_read_length_term():
     )
 
     assert any(issue["rule"] == "CYY-CN-SPELL-003" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_repeated_page_number():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "正文第一页\n21\f正文第二页\n23\f正文第三页\n24\f正文第四页\n23",
+    )
+
+    page_issue = next(issue for issue in issues if issue["rule"] == "CYY-CN-PAGE-001")
+    assert page_issue["original_text"] == "页码 23（第4个PDF页面）"
+
+
+def test_run_chinese_human_baseline_rules_detects_suspicious_address():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "生物医学科技（绍兴）有限公司 绍兴市越城区稽山街道越南大道2 号C2 栋2 层",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-ADDR-001" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_cable_typo():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "扫码枪 线揽 本表格依据GB 26572-2025 的规定编制。",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-SPELL-005" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_figure_table_spacing():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "入库登记\n在入库登记界面，可新建、查看待提交和已完成的入库登记单。\n图 1 入库登记界面\n项目 说明\n1 左侧导航栏",
+    )
+
+    assert any(issue["rule"] == "CYY-CN-LAYOUT-007" for issue in issues)
+
+
+def test_restore_high_value_rule_issues_keeps_page_number_issue():
+    selected = []
+    candidates = [
+        {
+            "rule": "CYY-CN-PAGE-001",
+            "category": "页码异常",
+            "original_text": "23",
+            "description": "页码重复",
+            "source": "rule",
+        }
+    ]
+
+    restored = review_api._restore_high_value_rule_issues(selected, candidates)
+
+    assert restored == candidates
 
 
 def test_run_chinese_human_baseline_rules_detects_hard_sentence():
@@ -2761,6 +3205,144 @@ def test_known_false_positive_filter_drops_official_global_site_issue():
     }
 
     assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_run_chinese_human_baseline_rules_keeps_correct_ml_spacing():
+    content = '表 4 推荐耗材清单\n低吸附 EP 管 0.2 mL，用于样本制备。'
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue['rule'] == 'CYY-CN-FMT-002' for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_missing_ml_spacing():
+    content = '表 4 推荐耗材清单\n低吸附 EP 管 0.2mL，用于样本制备。'
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert any(issue['rule'] == 'CYY-CN-FMT-002' and issue['original_text'] == '0.2mL' for issue in issues)
+
+
+def test_clean_issue_suggestion_for_display_strips_chinese_quotes():
+    assert review_api._clean_issue_suggestion_for_display('建议统一为“2 ℃ ~ 8 ℃”') == '2 ℃ ~ 8 ℃'
+
+
+def test_normalize_ext_r021_uses_grammar_category_and_replacement_suggestion():
+    issue = {
+        'original_text': '如操作不当或不避免',
+        'rule': 'EXT-R021',
+        'category': '格式错误',
+        'suggestion': '避免"不避免"类语法错误。"如操作不当或不避免"不通顺，应改为"如不按照说明操作"或"如操作不当或未加避免"',
+        'description': '避免"不避免"类语法错误。',
+    }
+
+    review_api._sanitize_issue_suggestions([issue])
+
+    assert issue['category'] == '语法错误'
+    assert issue['suggestion'] == '如未按照说明进行操作'
+    assert issue['description'] == '原文中的“不避免”搭配不通顺，应改为“如未按照说明进行操作”。'
+
+
+def test_known_false_positive_filter_drops_noop_chinese_baseline_issue():
+    issue = {
+        'original_text': '外部存储设备',
+        'rule': 'CYY-CN-CONSIST-024',
+        'source': 'rule',
+        'suggestion': '建议统一为“外部存储设备”',
+        'description': '用于连接扫码枪或外部存储设备。',
+        'audit_basis': 'CYY人工审核经验基线 - 外部存储设备直写',
+        'context': '用于连接扫码枪或外部存储设备',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_known_false_positive_filter_keeps_unit_spacing_suggestion():
+    issue = {
+        'original_text': '24VDC，5A',
+        'rule': 'CYY-CN-FMT-003',
+        'source': 'rule',
+        'suggestion': '24 VDC，5 A',
+        'description': '单位前面要加空格。',
+        'audit_basis': 'CYY人工审核经验基线 - 电源规格单位空格',
+        'context': '说明 24VDC，5A 100-240V~，50/60 Hz，300VA',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is False
+
+
+def test_known_false_positive_filter_drops_space_term_usage_issue():
+    issue = {
+        'original_text': '空格',
+        'rule': 'EXT-R009',
+        'source': 'rule',
+        'suggestion': '文档内容中不得出现多余的空格、空行等排版问题',
+        'description': '检查多余空格。',
+        'audit_basis': '通用格式规则',
+        'context': 'Barcode 序列间禁止使用空格，长度需大于等于 6，且相等。',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_known_false_positive_filter_drops_rohs_title_fragment_issue():
+    issue = {
+        'original_text': '品中有害',
+        'rule': '需包含产品中有害物质的名称及含有物质表',
+        'source': 'ai',
+        'category': '合规问题',
+        'severity': 'serious',
+        'suggestion': '建议按下方修改。需包含产品中有害物质的名称及含有物质表',
+        'description': '需包含产品中有害物质的名称及含有物质表',
+        'audit_basis': '合规规则',
+        'context': '产品中有害物质的名称及含有物质表',
+    }
+
+    assert review_api._should_drop_known_false_positive_issue(issue) is True
+
+
+def test_finalize_review_issues_filters_known_false_positives_by_default():
+    issues = [
+        {
+            'original_text': '空格',
+            'rule': 'EXT-R009',
+            'source': 'rule',
+            'suggestion': '文档内容中不得出现多余的空格、空行等排版问题',
+            'description': '检查多余空格。',
+            'audit_basis': '通用格式规则',
+            'context': 'Barcode 序列间禁止使用空格，长度需大于等于 6，且相等。',
+        },
+        {
+            'original_text': '物质的名',
+            'rule': 'EXT-R019',
+            'source': 'ai',
+            'category': '合规问题',
+            'severity': 'serious',
+            'suggestion': '建议按下方修改。需包含产品中有害物质的名称及含有物质表',
+            'description': '需包含产品中有害物质的名称及含有物质表',
+            'audit_basis': '合规规则',
+            'context': '产品中有害物质的名称及含有物质表',
+        },
+        {
+            'original_text': 'XXXXXXXXXXX',
+            'rule': 'CYY-CN-PLACEHOLDER-001',
+            'source': 'rule',
+            'category': '占位符残留',
+            'severity': 'serious',
+            'suggestion': '替换为真实信息。',
+            'description': '文档存在占位符残留。',
+            'audit_basis': '中文人工审核规则',
+            'context': '联系电话：XXXXXXXXXXX',
+        },
+    ]
+
+    filtered, diagnostics = review_api._finalize_review_issues(issues, '联系电话：XXXXXXXXXXX', set())
+
+    originals = {issue['original_text'] for issue in filtered}
+    assert '空格' not in originals
+    assert '物质的名' not in originals
+    assert 'XXXXXXXXXXX' in originals
+    assert diagnostics['after_known_false_positive_ai'] == 0
 
 
 def test_should_skip_rule_match_skips_ext_r013_for_pdf():

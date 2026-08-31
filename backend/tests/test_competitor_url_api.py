@@ -151,6 +151,121 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
             tasks = db.query(CompetitorTask).all()
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0].status, "completed")
+            # URL 分析流程的来源类型语义
+            self.assertEqual(tasks[0].source_type, "url")
+        finally:
+            db.close()
+
+    def _seed_completed_task(self, **overrides) -> int:
+        """直接落库一条已完成任务，用于报告端点测试。"""
+        db = self.SessionLocal()
+        try:
+            task = CompetitorTask(
+                file_name=overrides.get("file_name", "manual.html"),
+                file_size=1024,
+                status="completed",
+                source_type=overrides.get("source_type", "html"),
+                user_id=self._current_user_id("writer_user"),
+                tool_analysis=overrides.get("tool_analysis", '{"meta": {"format": "HTML"}, "tools": []}'),
+                readability=overrides.get("readability", '{"overall_score": 82.5, "level": "good"}'),
+                experience=overrides.get("experience", '{"access": {"score": 60.0}}'),
+                overall_score=overrides.get("overall_score", 82.5),
+                report_md=overrides.get("report_md", "# 竞品文档分析报告\n\n正文。"),
+            )
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            return task.id
+        finally:
+            db.close()
+
+    def _current_user_id(self, username: str) -> int:
+        db = self.SessionLocal()
+        try:
+            user = db.query(User).filter(User.username == username).first()
+            return user.id
+        finally:
+            db.close()
+
+    def test_read_competitor_report_supports_json_format(self):
+        """format=json：返回结构化结果（tool_analysis/readability/experience 为已解析对象）。"""
+        task_id = self._seed_completed_task()
+        response = self.client.get(
+            f"/api/competitor/{task_id}/report",
+            params={"format": "json"},
+            headers=self._auth_headers("writer_user"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["format"], "json")
+
+        content = payload["content"]
+        self.assertEqual(content["id"], task_id)
+        self.assertEqual(content["source_type"], "html")
+        self.assertEqual(content["file_name"], "manual.html")
+        self.assertEqual(content["overall_score"], 82.5)
+
+        # 字符串字段应解析为对象，而非二次编码的字符串
+        self.assertIsInstance(content["tool_analysis"], dict)
+        self.assertEqual(content["tool_analysis"]["meta"]["format"], "HTML")
+        self.assertIsInstance(content["readability"], dict)
+        self.assertEqual(content["readability"]["level"], "good")
+        self.assertIsInstance(content["experience"], dict)
+        self.assertIn("access", content["experience"])
+        # 报告 Markdown 全文以字符串原样返回
+        self.assertTrue(content["report_md"].startswith("# 竞品文档分析报告"))
+
+    def test_read_competitor_report_json_falls_back_on_broken_payload(self):
+        """format=json：历史脏数据（非法 JSON 字符串）原样返回，不 500。"""
+        task_id = self._seed_completed_task(readability="{broken json")
+        response = self.client.get(
+            f"/api/competitor/{task_id}/report",
+            params={"format": "json"},
+            headers=self._auth_headers("writer_user"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        content = response.json()["content"]
+        self.assertEqual(content["readability"], "{broken json")
+
+    def test_upload_html_file_marks_source_type_html(self):
+        """本地 HTML 上传：source_type=html（区别于普通文档 file 与网页链接 url）。"""
+        body_paragraphs = "\n".join(
+            f"<p>Configure the instrument before the first run. Review the safety notes "
+            f"and check the sequencing reagents. Step {i} must be completed by a trained "
+            f"operator with valid certification before starting the sequencing run.</p>"
+            for i in range(1, 6)
+        )
+        html = f"""
+        <html><head><title>Uploaded Manual</title></head><body>
+          <main><h1>Quick Start</h1>{body_paragraphs}</main>
+        </body></html>
+        """.encode("utf-8")
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("app.api.competitor.UPLOAD_DIR", tmp_dir):
+                response = self.client.post(
+                    "/api/competitor/",
+                    headers=self._auth_headers("writer_user"),
+                    files={"file": ("uploaded_manual.html", html, "text/html")},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["source_type"], "html")
+        # 上传流程走 HTML 正文抽取：format 应识别为 HTML
+        tool_analysis = json.loads(payload["tool_analysis"])
+        self.assertEqual(tool_analysis["meta"]["format"], "HTML")
+        self.assertIn("uploaded", payload["report_md"])
+
+        db = self.SessionLocal()
+        try:
+            tasks = db.query(CompetitorTask).all()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].source_type, "html")
         finally:
             db.close()
 

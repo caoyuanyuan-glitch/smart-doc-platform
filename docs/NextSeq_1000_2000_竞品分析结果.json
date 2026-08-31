@@ -1,0 +1,165 @@
+{
+  "document_name": "NextSeq 1000_2000.pdf",
+  "product": "Illumina NextSeq 1000/2000 Sequencing System",
+  "analysis_basis": {
+    "pdf_metadata": {
+      "title": "NextSeq 1000/2000",
+      "creator": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "producer": "Skia/PDF m124"
+    },
+    "page_count": 49,
+    "content_source": "文档解析服务提取的 Markdown 正文",
+    "confidence": "high"
+  },
+  "source_judgement": {
+    "source_type": "html",
+    "export_tool": "Google Chrome 打印",
+    "export_confidence": "high",
+    "label": "网页导出 PDF",
+    "reason": [
+      "Producer 显示为 Skia/PDF m124，属于 Chromium 浏览器常见导出链路",
+      "Creator 显示为 Chrome 124 浏览器 UA",
+      "正文带有支持站网页路径和浏览器打印痕迹",
+      "表格和图片解析后保留了明显的 HTML/DOM 转换特征"
+    ],
+    "weak_signals": [
+      "存在嵌入字体 ArialMT，符合网页或通用界面导出链路",
+      "正文中有多个 .htm/.html 页面路径痕迹，说明原文可能来自 topic 页面结构",
+      "这些线索支持帮助系统来源假设，但不足以直接判定为特定 HAT 工具"
+    ]
+  },
+  "structure": {
+    "document_type": "设备说明书/安装操作维护手册",
+    "primary_sections": [
+      "System Overview",
+      "Safety & Compliance",
+      "Site Preparation",
+      "System Configuration",
+      "Custom Primers",
+      "Kit Configurations",
+      "Consumables & Equipment",
+      "Sequencing Protocol",
+      "Sequencing Output",
+      "Maintenance",
+      "Troubleshooting",
+      "Resources & References"
+    ],
+    "navigation_strength": "high",
+    "task_orientation": "high"
+  },
+  "readability": {
+    "overall_score": 100.0,
+    "rating": "excellent",
+    "language": "en",
+    "sentence_count": 1965,
+    "average_sentence_words": 12.3,
+    "average_paragraph_words": 10.6,
+    "terminology_density": 0.115,
+    "passive_voice_ratio": 0.092,
+    "overall_assessment": "工程导向明显，适合查阅式阅读",
+    "sentence_length": "中等偏长，说明性段落长于操作步骤段落",
+    "term_density": "high",
+    "step_orientation": "high",
+    "information_density": "high",
+    "target_reader": "熟悉测序设备和实验室流程的专业用户",
+    "score_interpretation": [
+      "量化高分来自句长、术语密度、被动比例和段落长度均处于规则引擎理想区间",
+      "这个分数代表规则层面的语言可读性，不代表新手阅读门槛低",
+      "对专业文档而言，它属于高密度但仍然可控的表达方式"
+    ]
+  },
+  "access": {
+    "overall_score": 83.3,
+    "rating": "good",
+    "summary": "离线可用性和版本透明度较好，PDF 单一格式限制了格式弹性。",
+    "details": {
+      "format_choice": 50,
+      "version_transparency": 100,
+      "offline_availability": 100
+    },
+    "na_dimensions": [
+      "获取门槛",
+      "站内搜索",
+      "移动端适配",
+      "多语言支持"
+    ]
+  },
+  "findability": {
+    "overall_score": 34.3,
+    "rating": "poor",
+    "summary": "原网页的导航能力在 PDF 形态下损失明显，目录仍可见，术语查找支持弱。",
+    "details": {
+      "toc": 60,
+      "index_or_glossary": 0
+    },
+    "na_dimensions": [
+      "站内搜索",
+      "面包屑导航",
+      "URL 语义化",
+      "SEO 元数据",
+      "关键内容直达"
+    ]
+  },
+  "usability": {
+    "overall_score": 58.0,
+    "rating": "fair",
+    "summary": "故障恢复信息和步骤完整性较好，任务导向标题与 PDF 内部导航能力偏弱。",
+    "details": {
+      "task_oriented_titles": 30,
+      "step_completeness": 65,
+      "error_recovery": 100,
+      "information_consistency": 100,
+      "link_effectiveness": 30,
+      "actionability": 30
+    }
+  },
+  "quality_observations": {
+    "strengths": [
+      "结构化强，章节路径完整",
+      "安装、配置、运行、维护、排障闭环完整",
+      "参数、限制条件、运维细节覆盖充分",
+      "适合按任务查找和执行"
+    ],
+    "risks": [
+      "语言和术语密度高，新手阅读门槛高",
+      "配置和输出文件相关章节信息压缩度高",
+      "脱离网页交互环境后，PDF 导航体验弱于原网页"
+    ]
+  },
+  "parse_quality": {
+    "usable_for": [
+      "章节识别",
+      "主题摘要",
+      "步骤抽取",
+      "术语索引",
+      "高层竞品结构分析"
+    ],
+    "not_ideal_for": [
+      "高精度正文复用",
+      "复杂表格精确还原",
+      "图示与版面关系还原",
+      "逐句严格语言评分"
+    ],
+    "issues": [
+      "存在断词、串词、错字",
+      "字符级噪声和局部标签污染",
+      "页眉页脚和网页打印痕迹残留",
+      "复杂表格边界弱化",
+      "图示区域大量退化为图片占位"
+    ],
+    "scoring_impact": [
+      "浏览器导出 PDF 的分页与断行会影响句长、段落长度和步骤边界统计",
+      "当前规则评分适合做竞品横向比较",
+      "更严格的单文档评级更适合基于原始网页内容计算"
+    ]
+  },
+  "benchmark_value": {
+    "main_takeaway": "该竞品文档的核心优势在于结构组织和任务支持能力，而不是低门槛阅读体验。",
+    "worth_learning": [
+      "按用户任务链设计章节顺序",
+      "前置交代安装、配置、网络、权限和输出文件要求",
+      "用表格、编号步骤和交叉引用支撑查阅效率",
+      "补强维护、状态和故障处理覆盖度"
+    ]
+  }
+}

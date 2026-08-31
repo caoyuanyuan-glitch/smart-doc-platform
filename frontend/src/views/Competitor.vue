@@ -277,6 +277,9 @@
               <el-button size="small" link :disabled="row.status !== 'completed'" @click="downloadReportOf(row)">
                 下载报告
               </el-button>
+              <el-button size="small" link :disabled="row.status !== 'completed'" @click="downloadJsonReportOf(row)">
+                下载 JSON
+              </el-button>
               <el-button size="small" type="danger" link @click="confirmDelete(row)">
                 删除
               </el-button>
@@ -404,6 +407,7 @@
       <template #footer>
         <el-button @click="detailVisible = false">关闭</el-button>
         <el-button :disabled="!detail?.id" @click="goToCompare">与我方文件对比</el-button>
+        <el-button :disabled="!detail?.id" @click="downloadJsonReportOf(detail)">下载 JSON</el-button>
         <el-button type="primary" :disabled="!detailReportMd" @click="downloadReportOf(detail)">下载报告</el-button>
       </template>
     </el-dialog>
@@ -762,6 +766,25 @@ async function downloadReportOf(row) {
      triggerMdDownload(md, `${name}_竞品分析报告.md`)
   } catch (e) {
     ElMessage.error(getAPIErrorMessage(e, '下载报告失败'))
+  }
+}
+
+async function downloadJsonReportOf(row) {
+  // 结构化 JSON 导出（需求说明书 V1.1 导出要求）：含 tool_analysis/readability/experience
+  try {
+    const resp = await competitorAPI.getReport(row.id, 'json')
+    const content = resp.data?.content
+    if (!content) return
+    const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
+    const blob = new Blob([JSON.stringify(content, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name}_竞品分析结果.json`
+    a.click()
+    window.URL.revokeObjectURL(url)
+  } catch (e) {
+    ElMessage.error(getAPIErrorMessage(e, '下载 JSON 失败'))
   }
 }
 

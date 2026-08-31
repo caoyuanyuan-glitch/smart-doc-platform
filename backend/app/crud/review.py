@@ -7,6 +7,74 @@ from app.models.false_positive_memory import FalsePositiveMemory
 from app.schemas.review import ReviewCreate, IssueCreate, IssueUpdate
 from datetime import datetime
 
+
+PRESET_FALSE_POSITIVE_MEMORY_ENTRIES = [
+    (
+        "FP-V1-001",
+        "排版格式类",
+        "嵌套有序列表编号差异是正常层级表达：外层 1. 2. 3.、内层子步骤 1) 2) 3)（ol 嵌套），不标记格式不统一",
+    ),
+    (
+        "FP-V1-002",
+        "排版格式类",
+        "正文商标 ® 不要求重复标注：商标声明页即首次出现处，声明页已带 ® 即合规，正文中的商标名不再加 ®",
+    ),
+    (
+        "FP-V1-003",
+        "排版格式类",
+        "软件实际生成的文件名，占位符+名称直接拼接（如 ROINAMEquantification.csv）属产品命名规则，不标记文件名连写",
+    ),
+    (
+        "FP-V1-004",
+        "PDF文本提取伪影类",
+        "内嵌图标/按钮图片不会进入文本层，界面图标引用处显示缺失是工具限制，不判缺失图标；须渲染页面图像核实后再下结论",
+    ),
+    (
+        "FP-V1-005",
+        "PDF文本提取伪影类",
+        "弯引号开/直引号闭的混用，多为字体 ToUnicode 映射伪影，不上报",
+    ),
+    (
+        "FP-V1-006",
+        "PDF文本提取伪影类",
+        '英文句号在闭引号外（"xxx".）属英式标点风格，可接受，不上报',
+    ),
+    (
+        "FP-V1-007",
+        "PDF文本提取伪影类",
+        "文本层单复数/短语动词词序异常（如 following status、turn on it）按可接受表达/提取伪影处理，不上报；以渲染页实际显示为准",
+    ),
+    (
+        "FP-V1-008",
+        "PDF文本提取伪影类",
+        "双层文本层重复（如 一旦您开始使 / 一旦您开始使 / 用本软件）是提取伪影，非文档问题，不上报",
+    ),
+    (
+        "FP-V1-009",
+        "内容规范类",
+        "海外（英文）手册的制造商/联系信息仅提供 Email、不写电话，属行业惯例与公司海外手册规范，不标记缺联系电话",
+    ),
+    (
+        "FP-V1-012",
+        "内容规范类",
+        "海外（英文）手册中 https://global-mgitech.com 是正确官网地址，不标记官网地址错误或术语一致性问题",
+    ),
+    (
+        "FP-V1-010",
+        "已判定排除的疑点",
+        "表 17/18 标题完全相同（凸阵式探头 B 模式声输出数据）：额定频率不同（3.5 vs 5.0 MHz），属同探头不同频率档的合规表达",
+    ),
+    (
+        "FP-V1-011",
+        "已判定排除的疑点",
+        "缺页码（目录页码与实际章节页不符的扫描结果）：均为章节隔页/留白页（隔页显示章号 01-08），属正常排版",
+    ),
+]
+
+
+def _false_positive_memory_signature(rule: str, category: str, original_text: str) -> str:
+    return f"{rule}|{category}|{original_text}".strip().lower()[:512]
+
 def create_review(db: Session, review: ReviewCreate):
     db_review = Review(
         document_id=review.document_id,
@@ -74,6 +142,31 @@ def update_issue(db: Session, issue_id: int, issue_update: IssueUpdate):
     return issue
 
 
+def seed_preset_false_positive_memory(db: Session):
+    inserted = 0
+    for rule, category, original_text in PRESET_FALSE_POSITIVE_MEMORY_ENTRIES:
+        signature = _false_positive_memory_signature(rule, category, original_text)
+        exists = (
+            db.query(FalsePositiveMemory)
+            .filter(FalsePositiveMemory.signature == signature)
+            .first()
+        )
+        if exists:
+            continue
+        db.add(FalsePositiveMemory(
+            source_issue_id=0,
+            signature=signature,
+            rule=rule,
+            category=category,
+            original_text=original_text,
+            enabled=True,
+        ))
+        inserted += 1
+    if inserted:
+        db.commit()
+    return inserted
+
+
 def list_false_positive_memory_signatures(db: Session):
     rows = db.query(FalsePositiveMemory).filter(FalsePositiveMemory.enabled.is_(True)).all()
     return {str(row.signature or '').strip().lower() for row in rows if str(row.signature or '').strip()}
@@ -132,6 +225,9 @@ def list_false_positive_memory(db: Session, keyword: str = "", skip: int = 0, li
 
     items = []
     for memory, issue, review, document in rows:
+        document_name = str(getattr(document, "filename", "") or "")
+        if not document_name and getattr(memory, "source_issue_id", None) == 0:
+            document_name = "预置"
         items.append({
             "id": memory.id,
             "source_issue_id": memory.source_issue_id,
@@ -142,7 +238,7 @@ def list_false_positive_memory(db: Session, keyword: str = "", skip: int = 0, li
             "created_at": memory.created_at,
             "review_id": getattr(review, "id", None),
             "document_id": getattr(document, "id", None),
-            "document_name": str(getattr(document, "filename", "") or ""),
+            "document_name": document_name,
         })
     return items, total
 

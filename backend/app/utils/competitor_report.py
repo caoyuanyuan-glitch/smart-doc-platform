@@ -1,6 +1,6 @@
 """竞品文档分析报告渲染（Markdown）。
 
-输入：analyze_document() 产出的结构化结果（tool_analysis / readability）。
+输入：analyze_document() 产出的结构化结果（tool_analysis / readability / access / findability / usability）。
 输出：可直接预览与导出的 Markdown 报告全文。
 """
 

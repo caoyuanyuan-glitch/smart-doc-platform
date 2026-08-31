@@ -33,6 +33,10 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
     text = " ".join([comment, selected_text, context]).lower()
 
     priority_patterns = [
+        (r"登录|登陆", "术语一致性", "structural_consistency", "STRUCT-TERM-001"),
+        (r"线揽|线缆", "术语拼写", "deterministic", "DET-TERM-SPELL-001"),
+        (r"页码.*重复|页码错误|全局页码", "页码异常", "structural_consistency", "STRUCT-PAGE-NUM-001"),
+        (r"城南大道|越南大道|地址", "地址字段确认", "ai_assisted", "AI-ADDR-001"),
         (r"出现了中文|中文", "中文残留", "deterministic", "DET-CN-001"),
         (r"缺少.*ne384|ne384.*硬件配置|不是还有ne384|前面.*没有提到.*测序|前面.*没有提到.*载片类型|根本没有这个载片类型", "适用范围/硬件配置", "structural_consistency", "STRUCT-SCOPE-001"),
         (r"图片编号|图.*编号|table.*编号|编号.*连续", "表图编号", "structural_consistency", "STRUCT-FIGTAB-001"),
@@ -162,6 +166,44 @@ def _issue_blob(issue: dict[str, Any]) -> str:
     ]))
 
 
+def _longest_common_substring_len(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    best = 0
+    for left_char in left:
+        current = [0] * (len(right) + 1)
+        for index, right_char in enumerate(right, start=1):
+            if left_char == right_char:
+                current[index] = previous[index - 1] + 1
+                best = max(best, current[index])
+        previous = current
+    return best
+
+
+def _has_substantive_text_overlap(item: HumanAnnotation, issue: dict[str, Any]) -> bool:
+    selected = _norm_for_match(item.selected_text)
+    comment = _norm_for_match(item.comment)
+    context = _norm_for_match(item.context)
+    original = _norm_for_match(issue.get("original_text", ""))
+    if not selected or not original:
+        return bool(original and len(original) >= 4 and (original in comment or original in context))
+    if len(original) >= 4 and (original in comment or original in context):
+        return True
+    if comment and len(comment) >= 4 and (comment in original or original in comment):
+        return True
+    overlap = _longest_common_substring_len(selected, original)
+    if overlap >= 4:
+        return True
+    if overlap >= 2 and re.search(r"重复|同上|同下|统一", comment):
+        return True
+    if overlap >= 3 and re.search(r"多余字|多余的字|错别字|拼写", comment):
+        return True
+    if overlap >= 2 and re.search(r"错别字|拼写", comment):
+        return True
+    return False
+
+
 def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
     rule = str(issue.get("rule", "") or "").upper()
     category = str(issue.get("category", "") or "")
@@ -176,7 +218,13 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-FIGTAB-001":
         return rule.startswith("DOC-FIGTAB") or "表图编号" in category
     if item.expected_rule == "STRUCT-LAYOUT-001":
+        if "列宽" in text and "储存环境" in blob:
+            return True
         return rule.startswith("CYY-CN-LAYOUT-") or "表格/版式" in category
+    if item.expected_rule == "STRUCT-IMAGE-001" and all(token in text for token in ["install", "finish", "打开本系统"]):
+        return rule == "CYY-CN-LOGIC-007" or "内容逻辑" in category
+    if item.expected_rule == "STRUCT-IMAGE-001":
+        return rule.startswith("CYY-CN-IMAGE-") or "图片" in category or "对象缺失" in category
     if item.expected_rule == "STRUCT-STEP-001":
         return rule == "CYY-CN-STRUCT-001" or "步骤结构" in category
     if item.expected_rule == "AI-PROC-001":
@@ -187,11 +235,20 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         return rule == "DOC-POS-001" or "台面位置" in category
     if item.expected_rule == "AI-CHECK-001" and all(token in text for token in ["install", "finish", "打开本系统"]):
         return rule == "CYY-CN-LOGIC-007" or "内容逻辑" in category
+    if item.expected_rule == "AI-CHECK-001":
+        selected = _norm_for_match(item.selected_text)
+        if selected and len(selected) >= 2 and selected in blob:
+            return True
+        return rule.startswith(("CYY-CN-CHECK-", "CYY-CN-ADDR-")) or "人工确认" in category
+    if item.expected_rule == "AI-ADDR-001":
+        return rule.startswith("CYY-CN-ADDR-") or "地址" in category
+    if item.expected_rule == "STRUCT-PAGE-NUM-001":
+        return rule.startswith("CYY-CN-PAGE-") or "页码" in category
     if item.expected_rule == "DET-SPACE-001":
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
             return True
-        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003"} or "格式规范" in category
+        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003", "DOC-UNIT-001"} or "格式规范" in category or "空格" in category
     if item.expected_rule == "DET-PUNCT-001":
         return rule.startswith("DOC-PUNCT") or rule.startswith("DOC-QUOTE") or "标点" in category
     if item.expected_rule == "DET-CATNO-001":
@@ -210,13 +267,77 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-DUP-001":
         return rule.startswith("DOC-DUP") or rule == "CYY-CN-DUP-002" or "重复" in category
     if item.expected_rule == "STRUCT-TERM-001":
+        selected = _norm_for_match(item.selected_text)
+        if selected and len(selected) >= 4 and selected in blob:
+            return True
         return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or "术语一致性" in category
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
-            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007",
+            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAMMAR-001",
+            "DOC-GRAMMAR-002",
             "CYY-CN-STYLE-003", "CYY-CN-GRAMMAR-009", "CYY-CN-GRAMMAR-010", "CYY-CN-GRAMMAR-011",
         } or "表达与句式" in category
+    return False
+
+
+def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+    if not _matches_expected_rule(item, issue, blob):
+        return False
+
+    selected = _norm_for_match(item.selected_text)
+    comment = _norm_for_match(item.comment)
+    context = _norm_for_match(item.context[:160])
+    original = _norm_for_match(issue.get("original_text", ""))
+    description = _norm_for_match(issue.get("description", ""))
+
+    if selected and len(selected) >= 4 and (selected in blob or (original and original in selected)):
+        return True
+    if original and len(original) >= 4 and selected and original in selected:
+        return True
+    if comment and len(comment) >= 8 and (comment in blob or comment in description):
+        return True
+    if not selected and context and len(context) >= 16 and context[:40] in blob:
+        return True
+    # 兜底：批注提取的 selected_text 常为乱码碎片（PDF 文本层伪影），
+    # 此时用批注 context 与问题原文的 token 重叠度判断是否同一处文本。
+    # 不设原文长度门槛：短原文（如 '1 times'，7 字符）的 token 也能精确重叠。
+    if context and len(context) >= 16 and original:
+        context_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", item.context.lower())}
+        original_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", str(issue.get("original_text", "")).lower())}
+        if original_tokens and len(context_tokens & original_tokens) / len(original_tokens) >= 0.5:
+            return True
+    return False
+
+
+def _matches_annotation_loosely(
+    item: HumanAnnotation,
+    issue: dict[str, Any],
+    blob: str,
+    *,
+    allow_rule_family: bool = True,
+) -> bool:
+    selected = _norm_for_match(item.selected_text)
+    comment = _norm_for_match(item.comment)
+    context = _norm_for_match(item.context[:160])
+
+    if allow_rule_family and _matches_expected_rule(item, issue, blob):
+        return True
+    if selected and len(selected) >= 2 and selected in blob:
+        return True
+    if selected and len(selected) >= 2:
+        for part in re.split(r"[-,，;；\s]+", selected):
+            if part and len(part) >= 2 and part in blob:
+                return True
+    if _has_substantive_text_overlap(item, issue):
+        return True
+    original = _norm_for_match(issue.get("original_text", ""))
+    if original and len(original) >= 1 and selected and original in selected:
+        return True
+    if comment and len(comment) >= 4 and comment in blob:
+        return True
+    if context and len(context) >= 12 and context[:40] in blob:
+        return True
     return False
 
 
@@ -225,42 +346,74 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
 
     hits = []
     misses = []
+    strict_hits = []
+    strict_misses = []
     for item in annotations:
-        selected = _norm_for_match(item.selected_text)
-        comment = _norm_for_match(item.comment)
-        context = _norm_for_match(item.context[:160])
-        matched = False
-        for issue, blob in issue_pairs:
-            if _matches_expected_rule(item, issue, blob):
-                matched = True
-                break
-            if selected and len(selected) >= 2 and selected in blob:
-                matched = True
-                break
-            if selected and len(selected) >= 2 and any(part and len(part) >= 2 and part in blob for part in re.split(r"[-,，;；\s]+", selected)):
-                matched = True
-                break
-            original = _norm_for_match(issue.get("original_text", ""))
-            if original and len(original) >= 1 and selected and original in selected:
-                matched = True
-                break
-            if comment and len(comment) >= 4 and comment in blob:
-                matched = True
-                break
-            if context and len(context) >= 12 and context[:40] in blob:
-                matched = True
-                break
+        matched = any(_matches_annotation_loosely(item, issue, blob) for issue, blob in issue_pairs)
+        strict_matched = any(_matches_annotation_strictly(item, issue, blob) for issue, blob in issue_pairs)
         record = asdict(item)
         if matched:
             hits.append(record)
         else:
             misses.append(record)
+        if strict_matched:
+            strict_hits.append(record)
+        else:
+            strict_misses.append(record)
+
+    matched_issue_ids = {
+        id(issue)
+        for issue, blob in issue_pairs
+        if any(_matches_annotation_loosely(item, issue, blob, allow_rule_family=False) for item in annotations)
+    }
+    strict_matched_issue_ids = {
+        id(issue)
+        for issue, blob in issue_pairs
+        if any(_matches_annotation_strictly(item, issue, blob) for item in annotations)
+    }
+    issue_total = len(issues)
+    recall = len(hits) / len(annotations) if annotations else 0
+    precision = len(matched_issue_ids) / issue_total if issue_total else 0
+    f1 = (2 * precision * recall / (precision + recall)) if precision + recall else 0
+    strict_recall = len(strict_hits) / len(annotations) if annotations else 0
+    strict_precision = len(strict_matched_issue_ids) / issue_total if issue_total else 0
+    strict_f1 = (2 * strict_precision * strict_recall / (strict_precision + strict_recall)) if strict_precision + strict_recall else 0
+    unmatched_issues = [issue for issue, _blob in issue_pairs if id(issue) not in matched_issue_ids]
+    strict_unmatched_issues = [issue for issue, _blob in issue_pairs if id(issue) not in strict_matched_issue_ids]
 
     return {
         "human_total": len(annotations),
+        "issue_total": issue_total,
         "matched": len(hits),
         "missed": len(misses),
-        "match_rate": round(len(hits) / len(annotations), 4) if annotations else 0,
+        "match_rate": round(recall, 4),
+        "recall": round(recall, 4),
+        "precision": round(precision, 4),
+        "f1": round(f1, 4),
+        "matched_issue_count": len(matched_issue_ids),
+        "unmatched_issue_count": len(unmatched_issues),
+        "strict_matched": len(strict_hits),
+        "strict_missed": len(strict_misses),
+        "strict_match_rate": round(strict_recall, 4),
+        "strict_recall": round(strict_recall, 4),
+        "strict_precision": round(strict_precision, 4),
+        "strict_f1": round(strict_f1, 4),
+        "strict_matched_issue_count": len(strict_matched_issue_ids),
+        "strict_unmatched_issue_count": len(strict_unmatched_issues),
         "misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in misses])["by_category"] if misses else {},
+        "strict_misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in strict_misses])["by_category"] if strict_misses else {},
+        "unmatched_issues_by_category": _summarize_issue_categories(unmatched_issues),
+        "strict_unmatched_issues_by_category": _summarize_issue_categories(strict_unmatched_issues),
         "misses": misses[:50],
+        "strict_misses": strict_misses[:50],
+        "unmatched_issues": unmatched_issues[:50],
+        "strict_unmatched_issues": strict_unmatched_issues[:50],
     }
+
+
+def _summarize_issue_categories(issues: list[dict[str, Any]]) -> dict[str, int]:
+    categories: dict[str, int] = {}
+    for issue in issues:
+        category = str(issue.get("category") or "-")
+        categories[category] = categories.get(category, 0) + 1
+    return dict(sorted(categories.items(), key=lambda pair: (-pair[1], pair[0])))

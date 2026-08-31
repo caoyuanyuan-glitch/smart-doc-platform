@@ -33,7 +33,7 @@ except ModuleNotFoundError as exc:
     if exc.name != "app.utils.prompt_builder":
         raise
 
-    logger.warning("prompt_builder 模块加载失败，审查提示词构建功能降级: %s", exc)
+    logger.info("prompt_builder 模块加载失败，审查提示词构建功能降级: %s", exc)
 
     PROMPT_BUILDER_FALLBACK_ACTIVE = True
 
@@ -104,8 +104,19 @@ def _env_int(name, default):
         return int(default)
 
 
+def _env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _provider_max_attempts():
     return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
+
+
+def _audit_max_tokens():
+    return max(256, _env_int("AI_AUDIT_MAX_TOKENS", "2048"))
 
 
 def _provider_http_timeout():
@@ -130,6 +141,7 @@ class AIClient:
         self.qwen_api_key = get_qwen_api_key()
         self.qwen_base_url = os.getenv("QWEN_BASE_URL", os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
         self.qwen_model = os.getenv("QWEN_MODEL", os.getenv("DASHSCOPE_MODEL", "qwen-max"))
+        self.qwen_enable_thinking = _env_bool("QWEN_ENABLE_THINKING", False)
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
@@ -562,6 +574,12 @@ class AIClient:
                 return name
         return None
 
+    def _build_qwen_request_kwargs(self, **kwargs):
+        model = str(kwargs.get("model") or self.qwen_model or "").strip().lower()
+        if model.startswith("qwen3") or "QWEN_ENABLE_THINKING" in os.environ:
+            kwargs.setdefault("extra_body", {})["enable_thinking"] = self.qwen_enable_thinking
+        return kwargs
+
     # ------------------------------------------------------------------
     # 基础 chat 接口
     # ------------------------------------------------------------------
@@ -575,10 +593,12 @@ class AIClient:
             try:
                 started_at = time.time()
                 response = self.qwen_client.chat.completions.create(
-                    model=self.qwen_model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
+                    **self._build_qwen_request_kwargs(
+                        model=self.qwen_model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
                 )
                 self._record_usage_event(
                     "qwen",
@@ -724,7 +744,7 @@ class AIClient:
         if self._is_kimi_k2_family(model):
             thinking_type = thinking or "enabled"
             extra_body = dict(kwargs.get("extra_body") or {})
-            extra_body["thinking"] = {"type": thinking_type}
+#             extra_body["thinking"] = {"type": thinking_type}
             kwargs["extra_body"] = extra_body
             kwargs["temperature"] = 0.6 if thinking_type == "disabled" else 1.0
         else:
@@ -833,22 +853,28 @@ class AIClient:
                 for attempt in range(1, max_retries + 1):
                     try:
                         started_at = time.time()
-                        request_kwargs = (
-                            self._build_kimi_request_kwargs(
+                        if name == 'Kimi':
+                            request_kwargs = self._build_kimi_request_kwargs(
                                 model=model,
                                 messages=messages,
                                 max_tokens=max_tokens,
                                 temperature=temperature,
                                 thinking=kimi_thinking,
                             )
-                            if name == 'Kimi'
-                            else {
+                        elif name == 'Qwen':
+                            request_kwargs = self._build_qwen_request_kwargs(
+                                model=model,
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                            )
+                        else:
+                            request_kwargs = {
                                 "model": model,
                                 "messages": messages,
                                 "max_tokens": max_tokens,
                                 "temperature": temperature,
                             }
-                        )
                         if timeout is not None:
                             effective_timeout = timeout
                         else:
@@ -951,15 +977,21 @@ class AIClient:
         for attempt in range(1, max_retries + 1):
             try:
                 started_at = time.time()
-                request_kwargs = (
-                    self._build_kimi_request_kwargs(
+                if name == "Kimi":
+                    request_kwargs = self._build_kimi_request_kwargs(
                         model=model, messages=messages,
                         max_tokens=max_tokens, temperature=temperature,
-                    ) if name == "Kimi" else {
+                    )
+                elif name == "Qwen":
+                    request_kwargs = self._build_qwen_request_kwargs(
+                        model=model, messages=messages,
+                        max_tokens=max_tokens, temperature=temperature,
+                    )
+                else:
+                    request_kwargs = {
                         "model": model, "messages": messages,
                         "max_tokens": max_tokens, "temperature": temperature,
                     }
-                )
                 timeout_value = self.kimi_chat_timeout if name == "Kimi" else self.provider_chat_timeout
                 if is_translation_request:
                     timeout_value = max(timeout_value, self.translation_timeout)
@@ -1262,10 +1294,17 @@ class AIClient:
 
     def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
         provider_key = str(provider_key or "").strip().lower()
+        max_tokens = _audit_max_tokens()
         if provider_key == "qwen":
-            result = self.call_qwen(messages, max_tokens=2048, temperature=0.2, request_label=request_label, review_id=review_id)
+            result = self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        elif provider_key == "kimi":
+            result = self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
         elif provider_key == "deepseek":
-            result = self.call_deepseek(messages, max_tokens=2048, temperature=0.2, request_label=request_label, review_id=review_id)
+            result = self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        elif provider_key == "arkclaw":
+            result = self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        elif provider_key == "proxy":
+            result = self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
         else:
             result = None
 
@@ -2363,30 +2402,23 @@ confidence 评分指南：
                 issue["consensus_score"] = int(issue.get("confidence") or 0)
             return {"issues": issues}
 
-        if self.qwen_client:
-            primary_issues = self._run_provider_audit("qwen", messages, content, request_label=request_label, review_id=review_id)
-        else:
-            result = self.chat(
-                messages,
-                max_tokens=2048,
-                temperature=0.2,
-                skip_kimi=skip_kimi,
-                request_label=request_label,
-                review_id=review_id,
-            )
-            if not result:
-                return {"issues": []}
-            data = self._extract_json(result, {"issues": []})
-            primary_issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
-            for issue in primary_issues:
-                issue["source_models"] = ["fallback"]
-                issue["consensus_score"] = int(issue.get("confidence") or 0)
+        primary_provider = ""
+        primary_issues = []
+        for provider_key in self._provider_priority():
+            if provider_key == "kimi" and skip_kimi:
+                continue
+            if provider_key not in self.available_providers():
+                continue
+            primary_issues = self._run_provider_audit(provider_key, messages, content, request_label=request_label, review_id=review_id)
+            if primary_issues:
+                primary_provider = provider_key
+                break
 
         if not primary_issues and not self.deepseek_client:
             return {"issues": []}
 
         secondary_issues = []
-        if self.deepseek_client:
+        if self.deepseek_client and primary_provider != "deepseek":
             secondary_issues = self._run_provider_audit("deepseek", messages, content, request_label=f"{request_label}.deepseek", review_id=review_id)
 
         if not primary_issues:
@@ -2394,7 +2426,7 @@ confidence 评分指南：
         if not secondary_issues:
             return {"issues": primary_issues}
 
-        merged_issues = self._merge_audit_issue_sets(primary_issues, secondary_issues, "qwen", "deepseek")
+        merged_issues = self._merge_audit_issue_sets(primary_issues, secondary_issues, primary_provider or "primary", "deepseek")
         return {"issues": merged_issues}
 
     # ------------------------------------------------------------------

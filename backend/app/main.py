@@ -84,8 +84,9 @@ async def startup_event():
         try:
             from app.api.review import _build_ai_review_basis_sections, _load_review_spec_texts
             from app.services.audit_basis_search import get_audit_basis_search_service
-
-            spec_texts = _load_review_spec_texts()
+            from app.database import SessionLocal
+            db = SessionLocal()
+            spec_texts = _load_review_spec_texts(db)
             basis_sections = _build_ai_review_basis_sections(spec_texts, "both")
             service = get_audit_basis_search_service()
             if service.warmup(basis_sections):
@@ -104,6 +105,7 @@ async def startup_event():
         from app.crud.convert_rule import seed_default_rules
         from app.crud.rule import seed_external_review_rules
         from app.crud.polish_learning_rule import seed_system_rules
+        from app.crud.review import seed_preset_false_positive_memory
 
         db = SessionLocal()
         try:
@@ -116,6 +118,9 @@ async def startup_event():
             system_rule_count = seed_system_rules(db)
             if system_rule_count:
                 print(f"[startup] 已初始化 {system_rule_count} 条润色系统规则")
+            false_positive_memory_count = seed_preset_false_positive_memory(db)
+            if false_positive_memory_count:
+                print(f"[startup] 已初始化 {false_positive_memory_count} 条预置误报记忆")
         finally:
             db.close()
     except Exception as e:

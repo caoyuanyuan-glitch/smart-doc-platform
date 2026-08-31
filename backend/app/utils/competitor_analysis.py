@@ -9,6 +9,11 @@
 
 说明：本模块为 MVP 规则引擎，不调用 AI；语义级增强（如 AI 术语表、语境被动句判断）
 预留到 Phase 2，由 app/utils/ai_client.py 统一接入。
+
+当前输出能力：
+1. 编辑工具识别
+2. 可读性分析
+3. 可获得性（Access）/ 易查找性（Findability）/ 可用性（Usability）启发式评分
 """
 
 from __future__ import annotations

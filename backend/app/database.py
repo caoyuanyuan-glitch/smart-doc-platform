@@ -79,6 +79,21 @@ def _ensure_legacy_sqlite_columns():
             conn.execute(text("ALTER TABLE compare_tasks ADD COLUMN task_type VARCHAR DEFAULT 'doc'"))
 
     try:
+        competitor_columns = {col['name'] for col in inspector.get_columns('competitor_tasks')}
+    except Exception:
+        competitor_columns = set()
+
+    if competitor_columns and 'source_type' not in competitor_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE competitor_tasks ADD COLUMN source_type VARCHAR DEFAULT 'file'"))
+    if competitor_columns and 'overall_score' not in competitor_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE competitor_tasks ADD COLUMN overall_score FLOAT DEFAULT 0.0"))
+    if competitor_columns and 'experience' not in competitor_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE competitor_tasks ADD COLUMN experience TEXT"))
+
+    try:
         translation_doc_columns = {col['name'] for col in inspector.get_columns('translation_docs')}
     except Exception:
         translation_doc_columns = set()
@@ -146,15 +161,6 @@ def _ensure_legacy_sqlite_columns():
             with engine.begin() as conn:
                 for s in stmts:
                     conn.execute(text(s))
-
-    try:
-        competitor_columns = {col['name'] for col in inspector.get_columns('competitor_tasks')}
-    except Exception:
-        competitor_columns = set()
-
-    if competitor_columns and 'experience' not in competitor_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE competitor_tasks ADD COLUMN experience TEXT"))
 
     try:
         polish_feedback_columns = {col['name'] for col in inspector.get_columns('polish_feedback')}

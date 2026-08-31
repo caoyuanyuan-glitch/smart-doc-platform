@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from collections import Counter
 from typing import Any
@@ -21,8 +22,36 @@ LOW_VALUE_RULES = {
     "TENSE-001",
 }
 
+CYY_LOW_PRECISION_RULES = {
+    "EXT-R021",
+    "CYY-CN-TERM-003",
+    "CYY-CN-REF-002",
+    "CYY-CN-STYLE-002",
+    "CYY-CN-STYLE-003",
+    "CYY-CN-GRAMMAR-009",
+    "CYY-CN-GRAMMAR-011",
+}
+
 TOPIC_DETERMINISTIC_SHADOW = {"revision", "trademark", "credential", "network", "rohs", "appendix_table"}
 TOPIC_AI_SINGLETON = {"rohs"}
+CYY_SEMANTIC_DEDUPE_RULES = {
+    "CYY-CN-CONSIST-014": "storage_term",
+    "CYY-CN-CONSIST-016": "storage_term",
+    "CYY-CN-CONSIST-020": "storage_term",
+    "CYY-CN-CONSIST-024": "storage_term",
+    "CYY-CN-CONSIST-026": "storage_term",
+    "CYY-CN-CONSIST-027": "storage_term",
+    "CYY-CN-CONSIST-015": "login_term",
+    "CYY-CN-CONSIST-017": "login_term",
+    "CYY-CN-CONSIST-021": "login_term",
+    "CYY-CN-CONSIST-025": "login_term",
+    "CYY-CN-TERM-003": "external_device_term",
+    "CYY-CN-CONSIST-028": "external_device_term",
+    "CYY-CN-CONSIST-029": "external_device_term",
+    "CYY-CN-CONSIST-018": "pipette_term",
+    "CYY-CN-CONSIST-022": "pipette_term",
+    "CYY-CN-REF-002": "cross_reference_check",
+}
 
 HIGH_VALUE_PATTERN = re.compile(
     r"default\s+(?:account|password|username)|credential|password|ip\s+address|"
@@ -168,6 +197,26 @@ def is_high_value(issue: Any) -> bool:
     return bool(HIGH_VALUE_PATTERN.search(issue_blob(issue)))
 
 
+def is_substantive_ai_issue(issue: Any) -> bool:
+    data = issue_to_mapping(issue)
+    if str(data["source"] or "").lower() != "ai":
+        return False
+    if int(data["confidence"] or 0) < 85:
+        return False
+    original = normalize_text(data["original_text"])
+    suggestion = normalize_text(data["suggestion"])
+    if not original or not suggestion or compact_text(original) == compact_text(suggestion):
+        return False
+    blob = issue_blob(data)
+    if LOW_VALUE_PATTERN.search(original) or LOW_VALUE_PATTERN.search(blob):
+        return False
+    if re.search(r"\bcheck\s+if\b|是否使用|是否正确", suggestion, re.IGNORECASE):
+        return False
+    if re.search(r"\[[^\]]*(?:table content|company name|address|contact details)[^\]]*\]", suggestion, re.IGNORECASE):
+        return False
+    return True
+
+
 def is_visual_layout_issue(issue: Any) -> bool:
     data = issue_to_mapping(issue)
     rule = str(data["rule"] or "").upper()
@@ -191,7 +240,10 @@ def value_score(issue: Any) -> int:
 
     score = 50
     score += {"fatal": 25, "serious": 18, "general": 6, "suggestion": -8}.get(severity, 0)
-    score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 0}.get(source, 0)
+    if is_substantive_ai_issue(data):
+        score += 6
+    else:
+        score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 0}.get(source, 0)
     if confidence >= 95:
         score += 10
     elif confidence >= 90:
@@ -209,7 +261,7 @@ def value_score(issue: Any) -> int:
         score -= 42
     if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
         score -= 32
-    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data):
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data) and not is_substantive_ai_issue(data):
         score -= 26
     if LOW_VALUE_PATTERN.search(normalize_text(data["original_text"])) or LOW_VALUE_PATTERN.search(issue_blob(data)):
         score -= 55
@@ -217,7 +269,7 @@ def value_score(issue: Any) -> int:
         score -= 45
     if source == "spellcheck" and not is_high_value(data):
         score -= 4
-    if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not is_high_value(data):
+    if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not is_high_value(data) and not is_substantive_ai_issue(data):
         score -= 20
     if not data["original_text"] or not data["suggestion"]:
         score -= 20
@@ -239,6 +291,10 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
 
     if source == "spellcheck":
         return False
+    if rule in CYY_LOW_PRECISION_RULES:
+        return True
+    if rule == "CYY-CN-PLACEHOLDER-001" and re.fullmatch(r"X{1,4}(?::X{1,4}){1,2}", original, re.IGNORECASE):
+        return True
     if severity in {"general", "suggestion"} and re.fullmatch(r"[\W_]+", original or "", re.UNICODE) and len(original) <= 3:
         return True
     if is_visual_layout_issue(data) and not is_whitelisted_layout_issue(data):
@@ -277,7 +333,7 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return True
     if rule == "CHECKLIST-TRADEMARK" and str(data["severity"] or "").lower() in {"general", "suggestion"}:
         return True
-    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and str(data["severity"] or "").lower() in {"general", "suggestion"} and not is_high_value(data):
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and str(data["severity"] or "").lower() in {"general", "suggestion"} and not is_high_value(data) and not is_substantive_ai_issue(data):
         return True
     if source == "ai" and re.search(r"\bcheck\s+if\b|是否使用|是否正确", suggestion, re.IGNORECASE):
         return True
@@ -319,6 +375,9 @@ def dedupe_key(issue: Any) -> str:
     original = compact_text(data["original_text"])
     source = str(data["source"] or "").lower()
     rule = str(data["rule"] or "").upper()
+    semantic_group = CYY_SEMANTIC_DEDUPE_RULES.get(rule)
+    if semantic_group:
+        return f"cyy-semantic|{semantic_group}"
     if topic:
         return f"topic|{topic}|{original[:80]}"
     if rule in {"CYY-CN-PLACEHOLDER-001", "CYY-CN-MATERIAL-001"}:
@@ -330,12 +389,13 @@ def dedupe_key(issue: Any) -> str:
     return f"{rule}|{original}|{compact_text(data['chapter'])}"
 
 
-def issue_rank(issue: Any) -> tuple[int, int, int, int, int]:
+def issue_rank(issue: Any) -> tuple[int, int, int, int, int, int]:
     data = issue_to_mapping(issue)
     return (
         value_score(data),
         SEVERITY_RANK.get(str(data["severity"] or "general").lower(), 0),
         SOURCE_RANK.get(str(data["source"] or "").lower(), 0),
+        len(compact_text(data["original_text"])),
         int(data["confidence"] or 0),
         -parse_position_start(data["position"]),
     )
@@ -387,6 +447,32 @@ def suppress_shadowed_ai(issues: list[Any]) -> list[Any]:
     return filtered
 
 
+def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, threshold: int | None = None) -> None:
+    """丢弃归因日志：环境变量 REVIEW_DROP_LOG 指向 JSONL 文件时记录每条被丢弃的问题及原因。"""
+    path = os.getenv("REVIEW_DROP_LOG", "")
+    if not path:
+        return
+    data = issue_to_mapping(issue)
+    record = {
+        "reason": reason,
+        "score": score,
+        "threshold": threshold,
+        "source": data["source"],
+        "rule": data["rule"],
+        "severity": data["severity"],
+        "category": data["category"],
+        "confidence": data["confidence"],
+        "original_text": data["original_text"][:200],
+        "suggestion": data["suggestion"][:200],
+        "description": data["description"][:200],
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> list[Any]:
     counters: Counter = Counter()
     selected_by_key: dict[str, Any] = {}
@@ -395,18 +481,27 @@ def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: 
         data = issue_to_mapping(issue)
         status = str(data["status"] or "").lower()
         if status_filter and status not in {"", "pending", "confirmed", "converted_to_rule"}:
+            _log_pipeline_drop("status_filtered", issue)
             continue
         if not data["original_text"]:
+            _log_pipeline_drop("empty_original_text", issue)
             continue
         if is_noise(issue, counters):
+            _log_pipeline_drop("noise", issue)
             continue
         threshold = 38 if str(data["severity"] or "").lower() in {"fatal", "serious"} else min_score
-        if value_score(issue) < threshold:
+        score = value_score(issue)
+        if score < threshold:
+            _log_pipeline_drop("below_threshold", issue, score=score, threshold=threshold)
             continue
         key = dedupe_key(issue)
         existing = selected_by_key.get(key)
         if existing is None or issue_rank(issue) > issue_rank(existing):
+            if existing is not None:
+                _log_pipeline_drop("dedupe_shadowed", existing)
             selected_by_key[key] = issue
+        else:
+            _log_pipeline_drop("dedupe_shadowed", issue)
 
     selected = suppress_shadowed_ai(list(selected_by_key.values()))
     return sorted(selected, key=sort_key)
