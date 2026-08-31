@@ -383,6 +383,40 @@ class CatDiagnoseBatchTest(unittest.TestCase):
         self.assertEqual(calls[0]["originals"], full_indexes)
 
 
+class CatDiagnoseCompactTextTest(unittest.TestCase):
+    def test_compact_keeps_short_problem(self):
+        from app.utils.cat_diagnose import compact_diagnose_text
+
+        self.assertEqual(compact_diagnose_text("术语不规范", 36), "术语不规范")
+
+    def test_compact_cuts_long_problem_to_first_clauses(self):
+        from app.utils.cat_diagnose import compact_diagnose_text
+
+        text = "“点击文本框”表述不完整，缺少点击后的操作对象或方式，且与前句3.5.2编号重复"
+        compact = compact_diagnose_text(text, 36)
+        self.assertLessEqual(len(compact), 36)
+        self.assertIn("表述不完整", compact)
+        self.assertNotIn("编号重复", compact)
+
+    def test_duplicate_rationale_cleared_on_normalize(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 0,
+                "quote": "至于常温解冻",
+                "category": "spelling",
+                "severity": "high",
+                "problem": "“至于”为错别字，应为“置于”",
+                "revised": "置于常温解冻",
+                "rationale": "“至于”与“置于”字形相近但语义不同，此处应为“放置到”之意，属于错别字。",
+            }],
+        }, allowed_indexes={0})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["problem"], "“至于”为错别字，应为“置于”")
+        self.assertEqual(parsed[0]["rationale"], "")
+
+
 class CatDiagnoseHintImportTest(unittest.TestCase):
     def test_hint_empty_revised_requires_replacement(self):
         from app.utils.cat_diagnose import hint_import_requires_replacement

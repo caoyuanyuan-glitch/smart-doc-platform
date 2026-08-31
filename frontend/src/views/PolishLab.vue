@@ -1,6 +1,6 @@
 <template>
-  <div class="polish-container" :class="{ 'document-mode': currentView === 'document' }">
-    <div v-if="currentView === 'document'" class="document-view" :class="{ 'document-result-mode': docResult }">
+  <div class="polish-container" :class="{ 'document-mode': currentView === 'document', 'has-document-result': documentResultActive }">
+    <div v-if="currentView === 'document'" class="document-view" :class="{ 'document-result-mode': documentResultActive }">
       <div class="page-title-row">
         <h2 class="page-title">文档润色</h2>
         <div v-if="loading" class="polish-progress-float" :class="{ done: polishProgress >= 100 }">
@@ -15,8 +15,8 @@
         </div>
       </div>
 
-      <div class="doc-layout" :class="{ 'doc-layout-result-only': docResult }">
-        <div v-if="!docResult" class="doc-left">
+      <div class="doc-layout" :class="{ 'doc-layout-result-only': documentResultActive }">
+        <div v-if="!documentResultActive" class="doc-left">
           <div class="panel doc-input-panel">
             <div class="form-item">
               <label class="form-label">产品类型</label>
@@ -83,23 +83,27 @@
 
             <div class="button-group doc-button-group">
               <el-button @click="resetForm">清空</el-button>
+              <el-button v-if="catResult && !catResultPageVisible" @click="showCatResultPage">查看结果</el-button>
               <el-button type="primary" :loading="loading" @click="submitPolish">提交</el-button>
             </div>
           </div>
 
         </div>
 
-        <div class="doc-right" :class="{ 'doc-right-full': docResult }">
+        <div class="doc-right" :class="{ 'doc-right-full': documentResultActive }">
           <template v-if="formData.documentWorkflow === 'cat'">
-            <div v-if="catResult" class="panel doc-result-panel cat-result-panel">
+            <div v-if="catResult && catResultPageVisible" class="panel doc-result-panel cat-result-panel">
+              <div class="cat-result-toolbar">
               <div class="panel-header">
-                <span>句式候选结果</span>
+                <div class="cat-result-heading">
+                  <el-button size="small" native-type="button" @click="exitCatResultPage">返回</el-button>
+                  <span>句式候选结果</span>
+                </div>
                 <div class="panel-actions">
                   <el-tag v-if="catDocumentAccuracyRate !== null" size="small" type="success">文档准确率 {{ formatCatAccuracyRate(catDocumentAccuracyRate) }}</el-tag>
                 </div>
               </div>
-
-              <div class="doc-review-panel cat-review-panel">
+                <div class="cat-result-chrome">
                 <div class="doc-review-summary">
                   <div class="doc-review-count">当前候选句 {{ catItems.length }} 条，待处理 {{ pendingCatCount }} 条，已确认 {{ confirmedCatCount }} 条</div>
                   <div class="doc-review-summary-actions">
@@ -134,13 +138,90 @@
                   </div>
                 </div>
 
+                <div v-if="catItems.length" class="cat-list-controls">
+                  <div class="cat-filter-bar">
+                    <el-select
+                      v-model="catCategoryFilter"
+                      multiple
+                      collapse-tags
+                      collapse-tags-tooltip
+                      clearable
+                      size="small"
+                      class="cat-filter-select"
+                      placeholder="全部类别"
+                    >
+                      <el-option
+                        v-for="key in catCategoryChipKeys"
+                        :key="`cat-filter-${key}`"
+                        :label="`${CATEGORY_LABELS[key]} (${catCategoryCounts[key] || 0})`"
+                        :value="key"
+                      >
+                        <div class="cat-filter-option">
+                          <span>{{ CATEGORY_LABELS[key] }}</span>
+                          <span class="cat-filter-count">{{ catCategoryCounts[key] || 0 }}</span>
+                        </div>
+                      </el-option>
+                    </el-select>
+                    <el-select
+                      v-model="catSeverityFilter"
+                      multiple
+                      collapse-tags
+                      clearable
+                      size="small"
+                      class="cat-filter-select cat-filter-select-severity"
+                      placeholder="全部严重程度"
+                    >
+                      <el-option :label="`高 · 严重问题 (${catSeverityCounts.high || 0})`" value="high">
+                        <div class="cat-filter-option">
+                          <span class="cat-legend-item high"><span class="cat-legend-swatch"></span>高 · 严重问题</span>
+                          <span class="cat-filter-count">{{ catSeverityCounts.high || 0 }}</span>
+                        </div>
+                      </el-option>
+                      <el-option :label="`中 · 建议关注 (${catSeverityCounts.medium || 0})`" value="medium">
+                        <div class="cat-filter-option">
+                          <span class="cat-legend-item medium"><span class="cat-legend-swatch"></span>中 · 建议关注</span>
+                          <span class="cat-filter-count">{{ catSeverityCounts.medium || 0 }}</span>
+                        </div>
+                      </el-option>
+                      <el-option :label="`低 · 提示性 (${catSeverityCounts.low || 0})`" value="low">
+                        <div class="cat-filter-option">
+                          <span class="cat-legend-item low"><span class="cat-legend-swatch"></span>低 · 提示性</span>
+                          <span class="cat-filter-count">{{ catSeverityCounts.low || 0 }}</span>
+                        </div>
+                      </el-option>
+                    </el-select>
+                  </div>
+                </div>
+                </div>
+              </div>
+
+              <div class="doc-review-panel cat-review-panel">
+                <div class="cat-result-body">
                 <div v-if="catItems.length" class="cat-item-list">
-                <div v-for="item in catItems" :key="`cat-${item.sentenceIndex}`" class="cat-item-card" :class="[severityClass(selectedCatCandidate(item)), { 'is-collapsed': item.resultCollapsed }]">
+                <div v-if="!displayedCatItems.length" class="cat-filter-empty">当前筛选没有匹配的候选句</div>
+                <div v-for="item in displayedCatItems" :key="`cat-${item.sentenceIndex}`" class="cat-item-card" :class="[severityClass(selectedCatCandidate(item)), { 'is-collapsed': item.resultCollapsed }]">
                   <div class="cat-item-header">
                     <div>
-                      <div class="cat-item-title">句子 #{{ item.sentenceIndex + 1 }} · 段落 #{{ item.sourceParagraphIndex + 1 }}</div>
-                      <div v-if="categoryLabel(selectedCatCandidate(item))" class="cat-issue-tags">
-                        <span class="cat-category-tag">{{ categoryLabel(selectedCatCandidate(item)) }}</span>
+                      <div class="cat-item-title-row">
+                        <span v-if="severityClass(selectedCatCandidate(item))" class="cat-severity-badge" :class="severityClass(selectedCatCandidate(item))">
+                          <svg v-if="candidateSeverity(selectedCatCandidate(item)) === 'high'" class="cat-severity-icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 3.2 L21.6 20.6 H2.4 Z" fill="currentColor" />
+                            <rect x="11" y="9" width="2" height="6.2" rx="0.6" fill="#fff" />
+                            <rect x="11" y="16.8" width="2" height="2" rx="0.6" fill="#fff" />
+                          </svg>
+                          <svg v-else-if="candidateSeverity(selectedCatCandidate(item)) === 'medium'" class="cat-severity-icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <circle cx="12" cy="12" r="7" fill="currentColor" />
+                          </svg>
+                          <svg v-else-if="candidateSeverity(selectedCatCandidate(item)) === 'low'" class="cat-severity-icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <circle cx="12" cy="12" r="7.2" fill="none" stroke="currentColor" stroke-width="2.2" />
+                            <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="2.2" />
+                          </svg>
+                        </span>
+                        <div class="cat-item-title">句子 #{{ item.sentenceIndex + 1 }} · 段落 #{{ item.sourceParagraphIndex + 1 }}</div>
+                      </div>
+                      <div v-if="categoryLabel(selectedCatCandidate(item)) || formatCatCandidateSource(selectedCatCandidate(item))" class="cat-issue-tags">
+                        <span v-if="categoryLabel(selectedCatCandidate(item))" class="cat-category-tag">{{ categoryLabel(selectedCatCandidate(item)) }}</span>
+                        <span v-if="formatCatCandidateSource(selectedCatCandidate(item))" class="cat-source-tag">{{ formatCatCandidateSource(selectedCatCandidate(item)) }}</span>
                       </div>
                     </div>
                     <div class="cat-item-header-actions">
@@ -163,21 +244,20 @@
                     </div>
                     <div v-if="isHintOnlyDiagnose(selectedCatCandidate(item), item.originalText)" class="cat-hint-card">
                       <div class="cat-hint-title">提示</div>
-                      <div v-if="selectedCatCandidate(item)?.problem" class="cat-diagnose-problem">{{ selectedCatCandidate(item).problem }}</div>
-                      <div v-if="selectedCatCandidate(item)?.rationale" class="cat-diagnose-rationale">{{ selectedCatCandidate(item).rationale }}</div>
+                      <div v-if="diagnoseProblemText(selectedCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedCatCandidate(item)) }}</div>
+                      <div v-if="diagnoseRationaleText(selectedCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedCatCandidate(item)) }}</div>
                     </div>
                     <div v-else class="issue-diff-row">
                       <span class="issue-diff-label">{{ item.action === 'modify' && item.savedModifiedText ? '自定义' : '候选' }}</span>
                       <div class="issue-diff-content issue-diff-suggested">
                         <div v-html="renderCatSuggestedDiffHtml(item.originalText, getCatDisplayText(item))"></div>
-                        <div v-if="item.action !== 'modify' && selectedCatCandidate(item)" class="cat-selected-meta">
-                          <span class="cat-selected-source">{{ formatCatCandidateSource(selectedCatCandidate(item)) }}</span>
+                        <div v-if="item.action !== 'modify' && selectedCatCandidate(item) && !isDiagnoseCandidate(selectedCatCandidate(item))" class="cat-selected-meta">
                           <span v-if="!isDiagnoseCandidate(selectedCatCandidate(item))">匹配率 {{ formatCatCandidateMatchRate(selectedCatCandidate(item)) }}</span>
                           <span v-if="!isDiagnoseCandidate(selectedCatCandidate(item)) && selectedCatCandidate(item)?.semantic_score !== null && selectedCatCandidate(item)?.semantic_score !== undefined">语义分 {{ formatCatScore(selectedCatCandidate(item).semantic_score) }}%</span>
                         </div>
                         <div v-if="isDiagnoseCandidate(selectedCatCandidate(item))" class="cat-diagnose-meta">
-                          <div v-if="selectedCatCandidate(item)?.problem" class="cat-diagnose-problem">{{ selectedCatCandidate(item).problem }}</div>
-                          <div v-if="selectedCatCandidate(item)?.rationale" class="cat-diagnose-rationale">{{ selectedCatCandidate(item).rationale }}</div>
+                          <div v-if="diagnoseProblemText(selectedCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedCatCandidate(item)) }}</div>
+                          <div v-if="diagnoseRationaleText(selectedCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedCatCandidate(item)) }}</div>
                         </div>
                       </div>
                     </div>
@@ -231,6 +311,7 @@
                 </div>
                 </div>
                 <div v-else class="doc-change-empty">{{ catEmptyStateText() }}</div>
+                </div>
               </div>
             </div>
 
@@ -533,12 +614,12 @@
                       </el-select>
                       <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
                         <div class="cat-hint-title">提示</div>
-                        <div v-if="selectedTextCatCandidate(item)?.problem" class="cat-diagnose-problem">{{ selectedTextCatCandidate(item).problem }}</div>
-                        <div v-if="selectedTextCatCandidate(item)?.rationale" class="cat-diagnose-rationale">{{ selectedTextCatCandidate(item).rationale }}</div>
+                        <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                        <div v-if="diagnoseRationaleText(selectedTextCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedTextCatCandidate(item)) }}</div>
                       </div>
                       <div v-else-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
-                        <div v-if="selectedTextCatCandidate(item)?.problem" class="cat-diagnose-problem">{{ selectedTextCatCandidate(item).problem }}</div>
-                        <div v-if="selectedTextCatCandidate(item)?.rationale" class="cat-diagnose-rationale">{{ selectedTextCatCandidate(item).rationale }}</div>
+                        <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                        <div v-if="diagnoseRationaleText(selectedTextCatCandidate(item))" class="cat-diagnose-rationale">{{ diagnoseRationaleText(selectedTextCatCandidate(item)) }}</div>
                       </div>
                     </div>
                   </div>
@@ -985,9 +1066,13 @@ const textCatItems = ref([])
 const docResult = ref(null)
 const catResult = ref(null)
 const catItems = ref([])
+const catCategoryFilter = ref([])
+const catSeverityFilter = ref([])
 const catApplying = ref(false)
 const catDiagnosticExpanded = ref(false)
 const catApplyResult = ref(null)
+const catResultPageVisible = ref(false)
+const documentResultActive = computed(() => Boolean(docResult.value) || (Boolean(catResult.value) && catResultPageVisible.value))
 const docKeywordFilter = ref('')
 const docConfidenceFilter = ref('all')
 const docStatusFilter = ref('all')
@@ -3104,6 +3189,62 @@ function isHintOnlyDiagnose(candidate, originalText) {
   return HINT_ONLY_CATEGORIES.has(String(candidate?.category || '')) && !hasDistinctRevised(candidate, originalText)
 }
 
+const DIAGNOSE_TEXT_MAX = 36
+
+function compactDiagnoseText(value, maxChars = DIAGNOSE_TEXT_MAX) {
+  let text = String(value || '').trim()
+  if (!text) return ''
+  const sentenceEnd = text.search(/[。！？!?]/)
+  if (sentenceEnd >= 0) {
+    text = text.slice(0, sentenceEnd).trim()
+  }
+  if (text.length <= maxChars) return text
+  const chunks = text.split(/(?<=[，、；;：:])/)
+  let assembled = ''
+  for (const chunk of chunks) {
+    const piece = String(chunk || '').trim()
+    if (!piece) continue
+    const next = assembled + piece
+    if (assembled && next.length > maxChars) break
+    assembled = next
+    if (assembled.length >= maxChars) break
+  }
+  return (assembled || text).slice(0, maxChars).replace(/[，、；;：:]+$/, '')
+}
+
+function diagnoseProblemText(candidate) {
+  return compactDiagnoseText(candidate?.problem)
+}
+
+function normalizeDiagnoseCompareText(value) {
+  return String(value || '')
+    .replace(/[“”"‘’'`]/g, '')
+    .replace(/[，。；、：:！!？?\s]/g, '')
+    .toLowerCase()
+}
+
+function isDuplicateDiagnoseRationale(problem, rationale) {
+  const a = normalizeDiagnoseCompareText(problem)
+  const b = normalizeDiagnoseCompareText(rationale)
+  if (!a || !b) return false
+  if (a === b || b.includes(a) || a.includes(b)) return true
+  const quoted = [...String(problem).matchAll(/[“"']([^”"']+)[”"']/g)].map(item => item[1]).filter(Boolean)
+  if (quoted.length && quoted.every(item => String(rationale).includes(item))) {
+    return /错别字|应为|应改为|重复|不完整/.test(problem) && /错别字|应为|应改为|之意|属于/.test(rationale)
+  }
+  return false
+}
+
+function diagnoseRationaleText(candidate) {
+  const rawProblem = String(candidate?.problem || '').trim()
+  const rawRationale = String(candidate?.rationale || '').trim()
+  if (!rawRationale || isDuplicateDiagnoseRationale(rawProblem, rawRationale)) return ''
+  const problem = compactDiagnoseText(rawProblem)
+  const rationale = compactDiagnoseText(rawRationale)
+  if (!rationale || isDuplicateDiagnoseRationale(problem, rationale)) return ''
+  return rationale
+}
+
 const diagnoseCandidates = ref([])
 const diagnoseCandidatesLoading = ref(false)
 
@@ -3179,6 +3320,14 @@ function severityClass(source) {
   return ''
 }
 
+function candidateSeverity(source) {
+  const severity = String(source?.severity || '').trim()
+  if (severity === 'high' || severity === 'medium' || severity === 'low') {
+    return severity
+  }
+  return ''
+}
+
 function formatCatAccuracyRate(value) {
   if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) {
     return '待评估'
@@ -3246,9 +3395,23 @@ function catEmptyStateText() {
 function clearCatResult() {
   catResult.value = null
   catItems.value = []
+  catCategoryFilter.value = []
+  catSeverityFilter.value = []
   catApplyResult.value = null
   catDiagnosticExpanded.value = false
+  catResultPageVisible.value = false
   clearCatSessionSnapshot()
+}
+
+function showCatResultPage() {
+  if (!catResult.value) {
+    return
+  }
+  catResultPageVisible.value = true
+}
+
+function exitCatResultPage() {
+  catResultPageVisible.value = false
 }
 
 function toggleCatItemCollapsed(item) {
@@ -3300,6 +3463,47 @@ function selectedCatCandidate(item) {
   }
   return item.candidates[item.selectedCandidateIndex] || item.candidates[0] || null
 }
+
+const catCategoryChipKeys = Object.keys(CATEGORY_LABELS)
+
+const catCategoryCounts = computed(() => {
+  const counts = {}
+  for (const key of catCategoryChipKeys) {
+    counts[key] = 0
+  }
+  for (const item of catItems.value) {
+    const key = String(selectedCatCandidate(item)?.category || '').trim()
+    if (!key) continue
+    counts[key] = (counts[key] || 0) + 1
+  }
+  return counts
+})
+
+const catSeverityCounts = computed(() => {
+  const counts = { high: 0, medium: 0, low: 0 }
+  for (const item of catItems.value) {
+    const severity = String(selectedCatCandidate(item)?.severity || '').trim()
+    if (severity in counts) {
+      counts[severity] += 1
+    }
+  }
+  return counts
+})
+
+const displayedCatItems = computed(() => {
+  const selected = new Set(catCategoryFilter.value)
+  const severities = new Set(catSeverityFilter.value)
+  return catItems.value.filter(item => {
+    const candidate = selectedCatCandidate(item)
+    if (selected.size && !selected.has(String(candidate?.category || '').trim())) {
+      return false
+    }
+    if (severities.size && !severities.has(String(candidate?.severity || '').trim())) {
+      return false
+    }
+    return true
+  })
+})
 
 function selectedTextCatCandidate(item) {
   if (!item || !Array.isArray(item.candidates) || !item.candidates.length) {
@@ -3577,6 +3781,9 @@ async function submitCatAnalyze() {
     aiScoringError: data.ai_scoring_error || ''
   }
   catItems.value = normalizeCatItems([...(data.items || []), ...(data.diagnose_items || [])])
+  catCategoryFilter.value = []
+  catSeverityFilter.value = []
+  catResultPageVisible.value = true
   return data
 }
 
@@ -3745,6 +3952,7 @@ function restoreCatSessionSnapshot() {
     : []
   catApplyResult.value = snapshot.catApplyResult || null
   catDiagnosticExpanded.value = false
+  catResultPageVisible.value = Boolean(catResult.value)
 }
 
 async function submitPolish() {
@@ -4152,6 +4360,13 @@ watch(currentView, (view) => {
   overflow: visible;
 }
 
+.polish-container.document-mode.has-document-result {
+  height: calc(100vh - 108px);
+  min-height: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+}
+
 .document-view {
   flex: 1;
   min-height: auto;
@@ -4227,6 +4442,36 @@ watch(currentView, (view) => {
   min-height: 0;
   height: auto;
   overflow: visible;
+}
+
+.cat-result-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cat-result-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+}
+
+.cat-result-toolbar .panel-header {
+  margin-bottom: 12px;
+}
+
+.cat-result-chrome {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.cat-result-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .cat-review-panel {
@@ -4344,6 +4589,118 @@ watch(currentView, (view) => {
   color: #475569;
 }
 
+.cat-list-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 12px;
+}
+
+.cat-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.cat-filter-select {
+  width: 220px;
+}
+
+.cat-filter-select-severity {
+  width: 200px;
+}
+
+.cat-filter-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+
+.cat-filter-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.cat-filter-empty {
+  padding: 16px;
+  color: #64748b;
+  font-size: 13px;
+  text-align: center;
+}
+
+.cat-severity-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.cat-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cat-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.cat-legend-item.high .cat-legend-swatch {
+  background: #dc2626;
+}
+
+.cat-legend-item.medium .cat-legend-swatch {
+  background: #f59e0b;
+}
+
+.cat-legend-item.low .cat-legend-swatch {
+  background: #64748b;
+}
+
+.cat-item-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cat-severity-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.cat-severity-icon {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
+.cat-severity-badge.severity-high .cat-severity-icon {
+  color: #dc2626;
+}
+
+.cat-severity-badge.severity-medium .cat-severity-icon {
+  color: #d97706;
+}
+
+.cat-severity-badge.severity-low .cat-severity-icon {
+  color: #64748b;
+}
+
 .cat-item-list {
   display: flex;
   flex-direction: column;
@@ -4354,7 +4711,6 @@ watch(currentView, (view) => {
 
 .cat-item-card {
   border: 1px solid #dbe4f0;
-  border-left: 4px solid #94a3b8;
   border-radius: 14px;
   padding: 16px;
   background: linear-gradient(180deg, #ffffff, #f8fbff);
@@ -4363,17 +4719,17 @@ watch(currentView, (view) => {
 
 .cat-item-card.severity-high,
 .text-cat-item-row.severity-high {
-  border-left-color: #dc2626;
+  background: linear-gradient(180deg, rgba(254, 202, 202, 0.48) 0%, rgba(254, 226, 226, 0.32) 100%);
 }
 
 .cat-item-card.severity-medium,
 .text-cat-item-row.severity-medium {
-  border-left-color: #f59e0b;
+  background: linear-gradient(180deg, rgba(253, 230, 138, 0.48) 0%, rgba(254, 243, 199, 0.32) 100%);
 }
 
 .cat-item-card.severity-low,
 .text-cat-item-row.severity-low {
-  border-left-color: #64748b;
+  background: linear-gradient(180deg, rgba(203, 213, 225, 0.48) 0%, rgba(226, 232, 240, 0.3) 100%);
 }
 
 .cat-issue-tags {
@@ -4391,6 +4747,18 @@ watch(currentView, (view) => {
   border-radius: 999px;
   background: #eef2ff;
   color: #3730a3;
+  font-size: 12px;
+  line-height: 22px;
+}
+
+.cat-source-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  height: 22px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
   font-size: 12px;
   line-height: 22px;
 }
@@ -4417,12 +4785,20 @@ watch(currentView, (view) => {
   background: #fff8e6;
   border: 1px solid #f3d19e;
   border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.65;
 }
 
 .cat-hint-title {
   font-size: 12px;
   color: #b88230;
   margin-bottom: 4px;
+}
+
+.cat-hint-card .cat-diagnose-problem,
+.cat-hint-card .cat-diagnose-rationale {
+  font-size: 14px;
+  line-height: 1.65;
 }
 
 .cat-item-card.is-collapsed {
@@ -4474,7 +4850,8 @@ watch(currentView, (view) => {
   font-size: 14px;
   font-weight: 700;
   color: #111827;
-  margin-bottom: 6px;
+  margin: 0;
+  line-height: 28px;
 }
 
 .cat-item-section {
@@ -4742,11 +5119,17 @@ watch(currentView, (view) => {
 }
 
 .document-result-mode {
-  min-height: calc(100vh - 168px);
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .doc-layout-result-only {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .doc-layout-result-only .doc-left {
@@ -4755,8 +5138,11 @@ watch(currentView, (view) => {
 
 .doc-layout-result-only .doc-right,
 .doc-right-full {
-  display: block;
-  flex: none;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
   width: 100%;
 }
 
@@ -4794,8 +5180,10 @@ watch(currentView, (view) => {
 }
 
 .doc-right-full .doc-result-panel {
-  min-height: calc(100vh - 220px);
-  height: 100%;
+  min-height: 0;
+  height: auto;
+  flex: 1;
+  overflow: hidden;
 }
 
 .doc-result-preview {
@@ -4831,6 +5219,11 @@ watch(currentView, (view) => {
 .document-result-mode .doc-review-panel {
   min-height: 0;
   overflow: auto;
+}
+
+.document-result-mode .cat-review-panel {
+  overflow: hidden;
+  min-height: 0;
 }
 
 .doc-review-summary {
@@ -5639,7 +6032,6 @@ watch(currentView, (view) => {
 
 .text-cat-item-row {
   padding: 8px 10px;
-  border-left: 4px solid #94a3b8;
   border-radius: 8px;
   background: #f8fafc;
 }

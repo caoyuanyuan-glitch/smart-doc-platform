@@ -100,6 +100,8 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 6. 只输出 JSON，不要任何解释文字。
 7. 诊断成立时：logic、missing、ambiguity 三类允许 revised 为空（写清 problem 与 rationale 即可）。其他类别若你能给出忠实改写则必须给出；若你识别出问题但给不出忠实改写，请改用 logic/missing/ambiguity 类别并把 revised 留空——这优于沉默。
 8. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
+9. problem 只写一句结论，不超过 30 字，不要展开解释。
+10. rationale 只补充 problem 未写明的依据，不超过 30 字；与 problem 重复则留空。
 
 category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, logic, missing, register, audience, risk, other
 
@@ -347,6 +349,64 @@ def _is_icon_placeholder_quote(quote: str) -> bool:
     return bool(_ICON_PLACEHOLDER_RE.search(quote or ""))
 
 
+_DIAGNOSE_PROBLEM_MAX = 36
+_DIAGNOSE_RATIONALE_MAX = 36
+_DIAGNOSE_SENTENCE_SEPS = ("。", "！", "？", "!", "?")
+_DIAGNOSE_COMPARE_DROP = "“”\"‘’'，。；、：:！!？? \t\r\n"
+
+
+def _first_diagnose_sentence(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    positions = [value.find(sep) for sep in _DIAGNOSE_SENTENCE_SEPS if value.find(sep) >= 0]
+    if not positions:
+        return value
+    return value[: min(positions)].strip()
+
+
+def compact_diagnose_text(text: str, max_chars: int) -> str:
+    value = _first_diagnose_sentence(text)
+    if not value or len(value) <= max_chars:
+        return value
+    chunks = re.split(r"(?<=[，、；;：:])", value)
+    assembled = ""
+    for chunk in chunks:
+        piece = str(chunk or "").strip()
+        if not piece:
+            continue
+        nxt = f"{assembled}{piece}"
+        if assembled and len(nxt) > max_chars:
+            break
+        assembled = nxt
+        if len(assembled) >= max_chars:
+            break
+    clipped = (assembled or value)[:max_chars]
+    return clipped.rstrip("，、；;：: ")
+
+
+def _normalize_diagnose_compare_text(text: str) -> str:
+    value = str(text or "")
+    for ch in _DIAGNOSE_COMPARE_DROP:
+        value = value.replace(ch, "")
+    return value.lower()
+
+
+def diagnose_rationale_is_duplicate(problem: str, rationale: str) -> bool:
+    a = _normalize_diagnose_compare_text(problem)
+    b = _normalize_diagnose_compare_text(rationale)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    quoted = re.findall(r"[“\"']([^”\"']+)[”\"']", str(problem or ""))
+    if quoted and all(item in str(rationale or "") for item in quoted):
+        return bool(re.search(r"错别字|应为|应改为|重复|不完整", problem or "")) and bool(
+            re.search(r"错别字|应为|应改为|之意|属于", rationale or "")
+        )
+    return False
+
+
 def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Optional[dict]:
     if not isinstance(raw, dict):
         _log_diagnose_drop("normalize", "", "", "", reason="bad_shape")
@@ -410,6 +470,11 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
         if _is_identity_revision(quote, revised):
             _log_diagnose_drop("normalize", category, quote, revised, reason="identity", sentence_index=sentence_index)
             return None
+    rationale = str(raw.get("rationale") or "").strip()
+    problem = compact_diagnose_text(problem, _DIAGNOSE_PROBLEM_MAX)
+    rationale = compact_diagnose_text(rationale, _DIAGNOSE_RATIONALE_MAX)
+    if diagnose_rationale_is_duplicate(problem, rationale):
+        rationale = ""
     return {
         "sentence_index": sentence_index,
         "quote": quote,
@@ -417,7 +482,7 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
         "severity": severity,
         "problem": problem,
         "revised": revised,
-        "rationale": str(raw.get("rationale") or "").strip(),
+        "rationale": rationale,
         "ruleable": _parse_ruleable(raw.get("ruleable")),
         "rule_hint": str(raw.get("rule_hint") or "").strip(),
     }
