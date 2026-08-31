@@ -36,6 +36,10 @@ def test_snippet_scope_keeps_sentence_level_writing_issues():
         {'category': '交叉引用', 'rule': 'XREF-001', 'source': 'rule'},
         {'category': '发布前自检', 'rule': 'CHECKLIST-COPYRIGHT-YEAR', 'source': 'rule'},
         {'category': '主题结构', 'rule': 'STRUCT-001', 'source': 'ai'},
+        {'category': '发布前自检', 'rule': 'CHECKLIST-TRADEMARK', 'source': 'rule'},
+        {'category': '页码', 'rule': 'CYY-CN-PAGE-001', 'source': 'rule'},
+        {'category': '版式', 'rule': 'CYY-CN-LAYOUT-001', 'source': 'rule'},
+        {'category': '修订记录', 'rule': 'DOC-REV-001', 'source': 'rule'},
     ]
 
     result = review_api._filter_snippet_scope_issues(kept + dropped)
@@ -51,6 +55,9 @@ def test_snippet_scope_keeps_sentence_level_writing_issues():
         'CYY-CN-FORMAT-005',
         'AI',
     ]
+    assert 'CHECKLIST-TRADEMARK' not in {item['rule'] for item in result}
+    assert 'CYY-CN-PAGE-001' not in {item['rule'] for item in result}
+    assert 'DOC-REV-001' not in {item['rule'] for item in result}
 
 
 def test_prepare_snippet_text_rejects_empty_and_oversize():

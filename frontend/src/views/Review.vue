@@ -257,6 +257,7 @@
                 show-word-limit
                 placeholder="在此粘贴需要审核的句子或段落..."
               />
+              <div class="upload-tip">只检查语法、拼写和术语，不会报告目录、版式、交叉引用或发布前自检问题。</div>
               <div class="review-mode-toolbar">
                 <span class="review-mode-label">审核模式</span>
                 <el-radio-group v-model="reviewMode" size="small">
@@ -337,6 +338,29 @@
                 :class="{ 'is-error': snippetStatus.status === 'failed' || snippetStatus.status === 'cancelled' }"
               >
                 {{ reviewStatusText(snippetStatus) }}
+              </div>
+              <div v-if="snippetStatus?.status === 'completed'" class="snippet-preview">
+                <div class="snippet-preview-head">
+                  <span>问题预览</span>
+                  <span class="snippet-preview-count">共 {{ snippetPreviewIssues.length }} 条</span>
+                </div>
+                <el-table
+                  v-if="snippetPreviewIssues.length"
+                  :data="visibleSnippetPreviewIssues"
+                  border
+                  size="small"
+                >
+                  <el-table-column label="级别" width="80">
+                    <template #default="scope">{{ severityLabel(scope.row.severity) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="category" label="类别" width="120" show-overflow-tooltip />
+                  <el-table-column prop="original_text" label="原文" min-width="160" show-overflow-tooltip />
+                  <el-table-column prop="suggestion" label="建议" min-width="180" show-overflow-tooltip />
+                </el-table>
+                <div v-else class="snippet-preview-empty">未发现语法、拼写或术语问题。</div>
+                <div v-if="snippetPreviewIssues.length > visibleSnippetPreviewIssues.length" class="snippet-preview-more">
+                  还有 {{ snippetPreviewIssues.length - visibleSnippetPreviewIssues.length }} 条，点击“查看问题”看全部。
+                </div>
               </div>
             </div>
           </div>
@@ -1638,6 +1662,9 @@ const snippetSubmitting = ref(false)
 const snippetDocumentId = ref(null)
 const snippetReviewState = ref(null)
 const snippetStatus = computed(() => snippetReviewState.value)
+const snippetPreviewIssues = ref([])
+const snippetPreviewReviewId = ref(null)
+const visibleSnippetPreviewIssues = computed(() => snippetPreviewIssues.value.slice(0, 8))
 const canStartSnippetReview = computed(() => {
   if (!String(snippetText.value || '').trim()) return false
   if (snippetSubmitting.value) return false
@@ -1921,6 +1948,25 @@ function applySnippetReviewSnapshot(review, progress = null) {
     summary: review.summary,
     total_issues: review.total_issues,
     mode: review.mode || snippetReviewState.value?.mode
+  }
+  if (status === 'completed' && review.id) {
+    loadSnippetPreviewIssues(review.id)
+  }
+}
+
+async function loadSnippetPreviewIssues(reviewId) {
+  if (!reviewId) {
+    snippetPreviewIssues.value = []
+    snippetPreviewReviewId.value = null
+    return
+  }
+  if (snippetPreviewReviewId.value === reviewId) return
+  snippetPreviewReviewId.value = reviewId
+  try {
+    const response = await reviewAPI.getIssues(reviewId)
+    snippetPreviewIssues.value = response.data || []
+  } catch (_) {
+    snippetPreviewIssues.value = []
   }
 }
 
@@ -2430,6 +2476,8 @@ async function startSnippetReview() {
       progress: 0,
       message: '正在启动审核...'
     }
+    snippetPreviewIssues.value = []
+    snippetPreviewReviewId.value = null
     const response = await reviewAPI.createSnippet({
       text,
       mode: reviewMode.value,
@@ -2498,6 +2546,8 @@ function clearSnippetEditor() {
   snippetText.value = ''
   snippetDocumentId.value = null
   snippetReviewState.value = null
+  snippetPreviewIssues.value = []
+  snippetPreviewReviewId.value = null
 }
 
 function openSnippetIssues() {
@@ -3776,6 +3826,31 @@ onUnmounted(() => {
 .snippet-result.is-error {
   background: #fef0f0;
   color: #b42318;
+}
+
+.snippet-preview {
+  margin-top: 16px;
+}
+
+.snippet-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: #303133;
+}
+
+.snippet-preview-count {
+  color: #909399;
+  font-size: 13px;
+}
+
+.snippet-preview-empty,
+.snippet-preview-more {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #909399;
 }
 
 .issue-flag-row {
