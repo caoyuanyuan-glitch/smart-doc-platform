@@ -100,10 +100,35 @@ REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json",
     Path(__file__).resolve(),
 ] + REVIEW_BASIS_VERSION_FILES
+REVIEW_PROMPT_VERSION = "review-prompt-v3"
+REVIEW_FILTER_POLICY_VERSION = "review-filter-v2"
+_AI_REVIEW_SEMAPHORE = threading.BoundedSemaphore(max(1, int(os.getenv("REVIEW_AI_MAX_CONCURRENCY", "4") or 4)))
 
 
 def get_progress(review_id: int):
-    return _review_progress.get(review_id, {'status': 'unknown', 'step': '', 'progress': 0, 'message': ''})
+    cached = _review_progress.get(review_id)
+    if cached and cached.get('status') not in {None, '', 'unknown'}:
+        return cached
+    try:
+        from app.database import SessionLocal
+        from app.crud.review import get_review
+        db = SessionLocal()
+        try:
+            review = get_review(db, review_id)
+        finally:
+            db.close()
+        if not review:
+            return {'status': 'unknown', 'step': '', 'progress': 0, 'message': ''}
+        return {
+            'status': review.status or 'unknown',
+            'step': getattr(review, 'stage', '') or '',
+            'progress': int(getattr(review, 'progress', 0) or 0),
+            'message': getattr(review, 'message', None) or review.summary or '',
+            'timestamp': (getattr(review, 'heartbeat_at', None) or datetime.utcnow()).isoformat(),
+        }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("读取审核进度失败 review_id=%s: %s", review_id, exc)
+        return _review_progress.get(review_id, {'status': 'unknown', 'step': '', 'progress': 0, 'message': ''})
 
 
 class ReviewCancelled(Exception):
@@ -153,6 +178,16 @@ def set_progress(review_id: int, status: str, step: str, progress: int, message:
         'message': message,
         'timestamp': datetime.now().isoformat()
     }
+    try:
+        from app.database import SessionLocal
+        from app.crud.review import persist_review_progress
+        db = SessionLocal()
+        try:
+            persist_review_progress(db, review_id, status, step, progress, message)
+        finally:
+            db.close()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("持久化审核进度失败 review_id=%s: %s", review_id, exc)
 
 
 
@@ -174,6 +209,10 @@ def _reconcile_review_runtime_state(db: Session, review):
 
     progress = get_progress(review.id)
     if progress.get('status') == 'running':
+        heartbeat = getattr(review, 'heartbeat_at', None) or getattr(review, 'started_at', None) or review.created_at
+        timeout = max(30, _review_env_int('REVIEW_TASK_HEARTBEAT_TIMEOUT', '900'))
+        if heartbeat and (datetime.utcnow() - heartbeat).total_seconds() > timeout:
+            return _mark_review_as_failed(db, review, '审核任务心跳超时，已回收')
         return review
     if progress.get('status') == 'cancelled' or _is_review_cancelled(review.id):
         return _mark_review_as_cancelled(db, review)
@@ -204,6 +243,7 @@ def _review_cache_version():
 def _build_review_cache_key(document, mode: str):
     content = str(getattr(document, "content", "") or "")
     content_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()
+    from app.review_engine.versions import BASIS_POLICY_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
     fingerprint = "||".join([
         str(getattr(document, "id", "") or ""),
         str(getattr(document, "filename", "") or ""),
@@ -212,6 +252,11 @@ def _build_review_cache_key(document, mode: str):
         content_hash,
         str(mode or "hybrid"),
         _review_cache_version(),
+        PROMPT_VERSION,
+        FILTER_POLICY_VERSION,
+        BASIS_POLICY_VERSION,
+        str(getattr(ai_client, "default_provider", "") or ""),
+        _ai_provider_cache_fingerprint(),
     ])
     return hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()
 
@@ -239,11 +284,31 @@ def _is_snippet_scope_issue(issue):
     rule = str(_issue_value(issue, "rule", "") or "")
     description = str(_issue_value(issue, "description", "") or "")
     blob = f"{category} {rule} {description}"
-    if re.search(r"安全合规|交叉引用|主题结构|目录|文件名|版权年份|copyright.?year|CHECKLIST-COPYRIGHT", blob, re.IGNORECASE):
+    if re.search(
+        r"安全合规|交叉引用|主题结构|目录结构|文件名审核|版权年份|copyright.?year|"
+        r"发布前自检|CHECKLIST-|CYY-CN-PAGE-|CYY-CN-LAYOUT-|CYY-CN-REVISION-|"
+        r"DOC-REV-|STRUCT-|SAFE-|XREF-|列宽|字号|图标大小|字体/版式",
+        blob,
+        re.IGNORECASE,
+    ):
         return False
     if re.search(r"英文文档中文混入|ENG-CN-001", blob, re.IGNORECASE):
         return False
-    return True
+    if re.search(
+        r"语法|拼写|术语|错别字|用词|标点|单位|空格|可读性|格式规范|商标|"
+        r"GRAMMAR|SPELL|TERM|CN-TYPO|PUNCT|UNIT-|DOC-SPACE|DOC-TM|DOC-FMT|"
+        r"CYY-CN-UNIT|CYY-CN-FORMAT|CYY-CN-PUNCT|CYY-CN-SPELL|CYY-CN-TERM|"
+        r"CYY-CN-GRAMMAR|CYY-CN-PRODUCT|DOC-DUP-00[45]|TYPO",
+        blob,
+        re.IGNORECASE,
+    ):
+        return True
+    source = str(_issue_value(issue, "source", "") or "").lower()
+    if source in {"spellcheck", "term", "grammar"}:
+        return True
+    if source == "ai" and re.search(r"句子|用词|拼写|语法|术语|标点|可读", blob):
+        return True
+    return False
 
 
 def _filter_snippet_scope_issues(issues):
@@ -689,10 +754,33 @@ def _query_review_rows_for_user(
     latest_only: bool = False,
     limit: int = 100,
 ):
-    rows = _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
     if current_user.role == "admin":
-        return rows
-    return [review for review in rows if getattr(get_document(db, review.document_id), "user_id", None) == current_user.id]
+        return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+    normalized_status = _normalize_review_status(status)
+    normalized_limit = max(1, min(int(limit or 100), 500))
+    if latest_only:
+        latest_query = db.query(
+            ReviewModel.document_id.label("document_id"),
+            func.max(ReviewModel.id).label("latest_id"),
+        ).join(DocumentModel, DocumentModel.id == ReviewModel.document_id).filter(DocumentModel.user_id == current_user.id)
+        if document_id is not None:
+            latest_query = latest_query.filter(ReviewModel.document_id == document_id)
+        if normalized_status:
+            latest_query = latest_query.filter(ReviewModel.status == normalized_status)
+        latest_subquery = latest_query.group_by(ReviewModel.document_id).subquery()
+        return (
+            db.query(ReviewModel)
+            .join(latest_subquery, ReviewModel.id == latest_subquery.c.latest_id)
+            .order_by(ReviewModel.id.desc())
+            .limit(normalized_limit)
+            .all()
+        )
+    query = db.query(ReviewModel).join(DocumentModel, DocumentModel.id == ReviewModel.document_id).filter(DocumentModel.user_id == current_user.id)
+    if document_id is not None:
+        query = query.filter(ReviewModel.document_id == document_id)
+    if normalized_status:
+        query = query.filter(ReviewModel.status == normalized_status)
+    return query.order_by(ReviewModel.id.desc()).limit(normalized_limit).all()
 
 
 def _has_bound_current_user(current_user) -> bool:
@@ -1363,10 +1451,10 @@ def _inject_comments_to_docx(docx_path, comments_data):
     temp_output = os.path.join(temp_dir, 'output.docx')
 
     try:
-        with zipfile.ZipFile(docx_path, 'r') as zin:
-            zin.extractall(temp_dir)
-
-        word_dir = os.path.join(temp_dir, 'word')
+        from app.review_engine.safe_zip import safe_extract_zip
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        safe_extract_zip(docx_path, extract_dir, allowed_prefixes=('word/', '[Content_Types].xml', '_rels/', 'docProps/'))
+        word_dir = os.path.join(extract_dir, 'word')
         with open(os.path.join(word_dir, 'comments.xml'), 'wb') as f:
             f.write(comments_bytes)
 
@@ -1415,10 +1503,10 @@ def _inject_comments_to_docx(docx_path, comments_data):
                 f.write(etree.tostring(doc_tree, xml_declaration=True, encoding='UTF-8', standalone=True))
 
         with zipfile.ZipFile(temp_output, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for dirpath, _, filenames in os.walk(temp_dir):
+            for dirpath, _, filenames in os.walk(extract_dir):
                 for fname in filenames:
                     full_path = os.path.join(dirpath, fname)
-                    arcname = os.path.relpath(full_path, temp_dir)
+                    arcname = os.path.relpath(full_path, extract_dir)
                     zout.write(full_path, arcname)
 
         if os.path.exists(docx_path):
@@ -2237,6 +2325,8 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             print(f"[审核] 小文档全量审核失败 ({e})，回退到分块模式")
 
     use_smart_chunking = os.getenv('REVIEW_SMART_CHUNKING', '1') == '1'
+    chunker_mode = "fallback"
+    chunker_fallback_reason = ""
     if use_smart_chunking and create_smart_chunker is not None and len(content) > 1000:
         try:
             chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)))
@@ -2244,20 +2334,29 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             if smart_chunks:
                 chunks = [(c.index + 1, c.start, c.content) for c in smart_chunks]
                 all_chunks = chunks
+                chunker_mode = "smart"
                 print(f"[审核] 智能分块: {len(chunks)} 个章节感知分块, 覆盖 {sum(len(c[2]) for c in chunks)} 字符")
             else:
                 all_chunks = _iter_ai_audit_chunks(content)
                 chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+                chunker_fallback_reason = "empty_smart_chunks"
         except Exception as e:
             print(f"[审核] 智能分块失败 ({e}), 回退到滑动窗口分块")
             all_chunks = _iter_ai_audit_chunks(content)
             chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+            chunker_fallback_reason = str(e)
     else:
         all_chunks = _iter_ai_audit_chunks(content)
         chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+        if create_smart_chunker is None:
+            chunker_fallback_reason = "chunker_module_missing"
+        elif not use_smart_chunking:
+            chunker_fallback_reason = "smart_chunking_disabled"
+        else:
+            chunker_fallback_reason = "content_too_short"
 
     if not chunks:
-        return [], {"enabled": False, "selected_chunk_count": 0, "total_chunk_count": 0, "chunks": [], "chunk_meta": []}
+        return [], {"enabled": False, "selected_chunk_count": 0, "total_chunk_count": 0, "chunks": [], "chunk_meta": [], "chunker_mode": chunker_mode, "fallback_reason": chunker_fallback_reason}
 
     all_issues = []
     total = len(chunks)
@@ -2268,6 +2367,8 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
         "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
         "chunks": [],
         "chunk_meta": [],
+        "chunker_mode": chunker_mode,
+        "fallback_reason": chunker_fallback_reason,
     })
     for index, start, chunk in chunks:
         budget_reached, budget_summary = _review_ai_budget_reached(review_id)
@@ -2790,11 +2891,13 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
 
     use_legacy_post_filters = _review_env_bool('REVIEW_USE_LEGACY_POST_FILTERS', False)
     ai_filter_diagnostics["legacy_post_filters_enabled"] = use_legacy_post_filters
+    ai_filter_diagnostics["filter_mode"] = "legacy" if use_legacy_post_filters else "pipeline"
     if use_legacy_post_filters:
         issues = _filter_review_false_positives(issues)
         ai_filter_diagnostics["after_false_positive_ai"] = _count_ai_issues(issues)
         issues = _filter_low_value_review_issues(issues)
         ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
+        print("[审核] 兼容模式 REVIEW_USE_LEGACY_POST_FILTERS 已启用，结果可能与默认流水线不同")
 
     ai_evidence_drop_samples = _sample_ai_evidence_filter_drops(issues, content)
     issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
@@ -3162,7 +3265,60 @@ def _render_pdf_page_png_bytes(file_path: Path, page_number: int, scale: float |
         return None
 
 
+def _visual_provider_available(provider: str) -> bool:
+    name = str(provider or "").strip().lower()
+    if name == "kimi":
+        return bool(getattr(ai_client, "kimi_client", None))
+    if name == "qwen":
+        return bool(getattr(ai_client, "qwen_client", None) or getattr(ai_client, "dashscope_client", None))
+    if name == "deepseek":
+        return bool(getattr(ai_client, "deepseek_client", None))
+    return False
+
+
+def _verify_review_issue_visually(png_bytes, issue_payload, page_number, review_id):
+    from app.review_engine.visual import map_visual_status, visual_provider_chain
+
+    attempts = []
+    last = {
+        "decision": "skipped",
+        "reason": "provider_unavailable",
+        "confidence": 0,
+        "visual_status": "provider_unavailable",
+        "provider": "",
+        "attempts": 0,
+    }
+    for provider in visual_provider_chain():
+        if not _visual_provider_available(provider):
+            attempts.append({"provider": provider, "visual_status": "provider_unavailable"})
+            continue
+        if provider != "kimi":
+            attempts.append({"provider": provider, "visual_status": "provider_unavailable", "reason": "vision_adapter_missing"})
+            continue
+        result = ai_client.verify_review_issue_from_image(
+            png_bytes,
+            issue_payload,
+            page_number=page_number,
+            review_id=review_id,
+        ) or {}
+        status = map_visual_status(result.get("decision"), result.get("reason"))
+        result["visual_status"] = status
+        result["provider"] = provider
+        attempts.append({"provider": provider, "visual_status": status, "reason": str(result.get("reason") or "")[:180]})
+        result["attempts"] = len(attempts)
+        if status != "provider_unavailable":
+            result["attempts"] = attempts
+            return result
+        last = result
+    last["attempts"] = attempts
+    last["visual_status"] = "provider_unavailable"
+    last["provider"] = ",".join(item["provider"] for item in attempts) if attempts else ""
+    return last
+
+
 def _apply_pdf_visual_verification(review_id: int, document, content: str, issues: list, suspicious_pages: dict | None = None):
+    from app.review_engine.visual import map_visual_status, visual_provider_chain
+
     diagnostics = {
         'enabled': False,
         'candidate_count': 0,
@@ -3225,8 +3381,11 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         for page_candidate in page_candidates
         if _should_promote_page_candidate_without_visual(page_candidate)
     ]
-    if not ai_client.kimi_client:
-        diagnostics['reason'] = 'kimi_unavailable'
+    visual_chain = visual_provider_chain()
+    if not any(_visual_provider_available(name) for name in visual_chain):
+        diagnostics['reason'] = 'provider_unavailable'
+        diagnostics['visual_status'] = 'provider_unavailable'
+        diagnostics['provider_chain'] = visual_chain
         diagnostics['skipped_count'] = len(candidates) + len(page_candidates)
         diagnostics['page_issue_count'] = len(fallback_page_issues)
         diagnostics['items'].extend([
@@ -3234,6 +3393,7 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
                 'page_number': int(page_candidate.get('page_number') or 0),
                 'decision': 'needs_manual_review',
                 'reason': 'visual_model_unavailable',
+                'visual_status': 'provider_unavailable',
                 'page_candidate': True,
                 'candidate_reasons': page_candidate.get('reasons') or [],
             }
@@ -3260,7 +3420,7 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             diagnostics['items'].append({'page_number': page_number, 'decision': 'skipped', 'reason': 'render_failed'})
             continue
 
-        result = ai_client.verify_review_issue_from_image(
+        result = _verify_review_issue_visually(
             png_bytes,
             {
                 'severity': _issue_value(issue, 'severity', ''),
@@ -3279,6 +3439,8 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             'confidence': int(result.get('confidence') or 0),
             'reason': str(result.get('reason') or '')[:180],
             'is_extraction_artifact': bool(result.get('is_extraction_artifact')),
+            'visual_status': result.get('visual_status') or map_visual_status(decision, result.get('reason')),
+            'provider': result.get('provider') or '',
         }
         _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=compact_result)
 
@@ -3316,7 +3478,7 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             diagnostics['skipped_count'] += 1
             diagnostics['items'].append({'page_number': page_number, 'decision': 'skipped', 'reason': 'render_failed', 'page_candidate': True})
             continue
-        result = ai_client.verify_review_issue_from_image(
+        result = _verify_review_issue_visually(
             png_bytes,
             {
                 'severity': _page_visual_issue_severity(page_candidate.get('reasons') or []),
@@ -3338,6 +3500,8 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             'is_extraction_artifact': bool(result.get('is_extraction_artifact')),
             'page_candidate': True,
             'candidate_reasons': page_candidate.get('reasons') or [],
+            'visual_status': result.get('visual_status') or map_visual_status(decision, result.get('reason')),
+            'provider': result.get('provider') or '',
         }
         diagnostics['verified_count'] += 1
         diagnostics['items'].append(compact_result)
@@ -3830,10 +3994,12 @@ def _build_review_export_filename(doc_name, review_id, suffix):
 
 
 def _get_document_upload_path(document):
-    candidate = UPLOAD_DIR / (document.filename or "")
-    if candidate.exists():
-        return candidate
-    return None
+    from app.review_engine.paths import ReviewPathError, resolve_review_file_path
+    try:
+        candidate = resolve_review_file_path(UPLOAD_DIR, getattr(document, "filename", "") or "")
+    except ReviewPathError:
+        return None
+    return candidate if candidate.exists() else None
 
 
 def _page_offsets_from_pages(pages: list[str]) -> list[tuple[int, int]]:
@@ -5615,11 +5781,32 @@ def _deduplicate_basis_sections(sections):
 def _fetch_es_relevant_basis_sections(content, basis_sections, document_language, limit=4):
     try:
         service = get_audit_basis_search_service()
-        return _deduplicate_basis_sections(
+        from app.review_engine.basis_trace import build_basis_trace
+        es_available = bool(service.is_available())
+        hits = _deduplicate_basis_sections(
             service.search(content, basis_sections, document_language=document_language, limit=limit)
+        ) if es_available else []
+        if hits:
+            _review_observation_store["_basis_trace"] = build_basis_trace(
+                sections=hits, es_available=True, es_hit=True
+            )
+            return hits
+        _review_observation_store["_basis_trace"] = build_basis_trace(
+            sections=basis_sections,
+            es_available=es_available,
+            fallback=True,
+            fallback_reason="es_unavailable" if not es_available else "es_empty",
         )
+        return []
     except Exception as exc:
         print(f"[审核] ES 审核依据召回失败，回退本地匹配: {exc}")
+        from app.review_engine.basis_trace import build_basis_trace
+        _review_observation_store["_basis_trace"] = build_basis_trace(
+            sections=basis_sections,
+            es_available=False,
+            fallback=True,
+            fallback_reason=str(exc)[:180],
+        )
         return []
 
 
@@ -5815,6 +6002,7 @@ def _ai_provider_cache_fingerprint():
 
 
 def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None):
+    from app.review_engine.versions import FILTER_POLICY_VERSION, PROMPT_VERSION
     raw = "||".join([
         hashlib.sha1(str(chunk or "").encode("utf-8")).hexdigest(),
         hashlib.sha1(str(audit_basis or "").encode("utf-8")).hexdigest(),
@@ -5822,6 +6010,8 @@ def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None):
         str(document_name or ""),
         _review_cache_version(),
         _ai_provider_cache_fingerprint(),
+        PROMPT_VERSION,
+        FILTER_POLICY_VERSION,
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
@@ -5845,22 +6035,26 @@ def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis
     if document_name:
         chapter_context["document_name"] = document_name
 
-    result = _call_with_timeout(
-        ai_client.audit_document,
-        chunk_timeout,
-        chunk,
-        _ai_prompt_language(document_language, chunk),
-        audit_basis,
-        True,
-        review_id,
-        "review.audit_chunk",
-        chapter_context=chapter_context if chapter_context else None,
-        force_provider=force_provider,
-    )
-    chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
-    _record_review_observations(review_id, result.get('observations') if isinstance(result, dict) else [])
-    _ai_review_chunk_cache[cache_key] = deepcopy(chunk_issues)
-    return chunk_issues, False
+    _AI_REVIEW_SEMAPHORE.acquire()
+    try:
+        result = _call_with_timeout(
+            ai_client.audit_document,
+            chunk_timeout,
+            chunk,
+            _ai_prompt_language(document_language, chunk),
+            audit_basis,
+            True,
+            review_id,
+            "review.audit_chunk",
+            chapter_context=chapter_context if chapter_context else None,
+            force_provider=force_provider,
+        )
+        chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
+        _record_review_observations(review_id, result.get('observations') if isinstance(result, dict) else [])
+        _ai_review_chunk_cache[cache_key] = deepcopy(chunk_issues)
+        return chunk_issues, False
+    finally:
+        _AI_REVIEW_SEMAPHORE.release()
 
 
 def _log_review_ai_usage(review_id, request_label, title):
@@ -11494,48 +11688,49 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 except Exception as e:
                     print(f"[审核] 说明书工程质量规则执行失败: {e}")
 
-                if document.file_type == 'pdf':
+                if not snippet_review:
+                    if document.file_type == 'pdf':
+                        try:
+                            structural_issues = _run_pdf_structure_audit(content)
+                            print(f"[审核] PDF结构规则发现问题: {len(structural_issues)}个")
+                            rule_issues.extend(structural_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF结构规则执行失败: {e}")
+
                     try:
-                        structural_issues = _run_pdf_structure_audit(content)
-                        print(f"[审核] PDF结构规则发现问题: {len(structural_issues)}个")
-                        rule_issues.extend(structural_issues)
+                        supplemental_issues = _run_reference_and_term_consistency_audit(db, content)
+                        print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
+                        rule_issues.extend(supplemental_issues)
                     except Exception as e:
-                        print(f"[审核] PDF结构规则执行失败: {e}")
+                        print(f"[审核] 引用/术语规则执行失败: {e}")
 
-                try:
-                    supplemental_issues = _run_reference_and_term_consistency_audit(db, content)
-                    print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
-                    rule_issues.extend(supplemental_issues)
-                except Exception as e:
-                    print(f"[审核] 引用/术语规则执行失败: {e}")
+                    try:
+                        logic_issues = _run_logic_integrity_audit(content)
+                        print(f"[审核] 逻辑完整性规则发现问题: {len(logic_issues)}个")
+                        rule_issues.extend(logic_issues)
+                    except Exception as e:
+                        print(f"[审核] 逻辑完整性规则执行失败: {e}")
 
-                try:
-                    logic_issues = _run_logic_integrity_audit(content)
-                    print(f"[审核] 逻辑完整性规则发现问题: {len(logic_issues)}个")
-                    rule_issues.extend(logic_issues)
-                except Exception as e:
-                    print(f"[审核] 逻辑完整性规则执行失败: {e}")
+                    try:
+                        safety_issues = _run_safety_compliance_audit(content, document_language)
+                        print(f"[审核] 安全合规规则发现问题: {len(safety_issues)}个")
+                        rule_issues.extend(safety_issues)
+                    except Exception as e:
+                        print(f"[审核] 安全合规规则执行失败: {e}")
 
-                try:
-                    safety_issues = _run_safety_compliance_audit(content, document_language)
-                    print(f"[审核] 安全合规规则发现问题: {len(safety_issues)}个")
-                    rule_issues.extend(safety_issues)
-                except Exception as e:
-                    print(f"[审核] 安全合规规则执行失败: {e}")
+                    try:
+                        cross_ref_issues = _run_cross_reference_audit(content)
+                        print(f"[审核] 交叉引用规则发现问题: {len(cross_ref_issues)}个")
+                        rule_issues.extend(cross_ref_issues)
+                    except Exception as e:
+                        print(f"[审核] 交叉引用规则执行失败: {e}")
 
-                try:
-                    cross_ref_issues = _run_cross_reference_audit(content)
-                    print(f"[审核] 交叉引用规则发现问题: {len(cross_ref_issues)}个")
-                    rule_issues.extend(cross_ref_issues)
-                except Exception as e:
-                    print(f"[审核] 交叉引用规则执行失败: {e}")
-
-                try:
-                    long_sentence_issues = _run_long_sentence_audit(content, document.file_type)
-                    print(f"[审核] 长句规则发现问题: {len(long_sentence_issues)}个")
-                    rule_issues.extend(long_sentence_issues)
-                except Exception as e:
-                    print(f"[审核] 长句规则执行失败: {e}")
+                    try:
+                        long_sentence_issues = _run_long_sentence_audit(content, document.file_type)
+                        print(f"[审核] 长句规则发现问题: {len(long_sentence_issues)}个")
+                        rule_issues.extend(long_sentence_issues)
+                    except Exception as e:
+                        print(f"[审核] 长句规则执行失败: {e}")
 
             if document.file_type != 'xlsx':
                 if document_language in ("cn", "both"):
@@ -11583,7 +11778,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             rule_stage_output = len(candidate_rule_issues)
             _end_stage("rule_based_audit", output_count=rule_stage_output)
 
-            if has_ai_client and len(candidate_rule_issues) > 0:
+            skip_ai_fp_filter = snippet_review and engine_mode == "rule"
+            if has_ai_client and len(candidate_rule_issues) > 0 and not skip_ai_fp_filter:
                 _begin_stage("ai_false_positive_filter")
                 _stage_input_counts["ai_false_positive_filter"] = len(candidate_rule_issues)
                 set_progress(review_id, 'running', 'AI二次验证', 55, f'正在AI验证 {len(candidate_rule_issues)} 个候选问题...')
@@ -11697,6 +11893,31 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     print(f"[审核] AI 审核超时({_ai_audit_timeout_seconds(content):.0f}s)")
                 except Exception as e:
                     print(f"[审核] AI 审核失败: {e}")
+                from app.review_engine.consensus import should_trigger_second_provider
+                require_consensus = _review_env_bool('REVIEW_REQUIRE_CONSENSUS', False)
+                trigger, trigger_reason = should_trigger_second_provider(
+                    ai_issues,
+                    require_consensus=require_consensus,
+                )
+                second_provider = os.getenv('REVIEW_CONSENSUS_PROVIDER', 'deepseek')
+                if trigger and second_provider and second_provider != single_provider:
+                    print(f"[审核] 按需共识触发: {trigger_reason}, second={second_provider}")
+                    extra_issues, extra_meta = _run_single_provider_ai_review(
+                        review_id, content, document_language,
+                        ai_review_basis_sections, second_provider, document.filename
+                    )
+                    merged_issues, merged_meta = _merge_multi_provider_results(
+                        {single_provider or "primary": ai_issues, second_provider: extra_issues},
+                        [single_provider or "primary", second_provider],
+                    )
+                    ai_issues = merged_issues
+                    if isinstance(ai_review_trace, dict):
+                        ai_review_trace["consensus_trigger"] = trigger_reason
+                        ai_review_trace["provider_list"] = [single_provider or "primary", second_provider]
+                        ai_review_trace["consensus_meta"] = merged_meta
+                    ai_chunk_meta = merged_meta or ai_chunk_meta
+                elif isinstance(ai_review_trace, dict):
+                    ai_review_trace["consensus_trigger"] = ""
 
             print(f"[审核] AI审核返回问题数={len(ai_issues)}")
             _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
@@ -11848,6 +12069,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 "count": len(knowledge_labels),
             },
             "stage_diagnostics": _stage_diagnostics,
+            "basis_trace": _review_observation_store.get("_basis_trace") or {
+                "basis_source": "local" if ai_review_basis_sections else "none",
+                "basis_labels": knowledge_labels,
+                "basis_version": "review-basis-v1",
+                "es_available": False,
+                "fallback": False,
+                "fallback_reason": "",
+            },
+            "prompt_version": REVIEW_PROMPT_VERSION,
+            "filter_policy_version": REVIEW_FILTER_POLICY_VERSION,
             "observations": _compact_review_observations(
                 _take_review_observations(review_id), issues
             ),
@@ -11955,6 +12186,8 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     if mode not in {"rule", "ai", "hybrid"}:
         raise HTTPException(status_code=400, detail="Unsupported review mode")
 
+    from app.crud.review import reclaim_stale_running_reviews
+    reclaim_stale_running_reviews(db, timeout_seconds=_review_env_int('REVIEW_TASK_HEARTBEAT_TIMEOUT', '900'))
     document = _ensure_document_access(get_document(db, document_id=document_id), current_user)
 
     active_review = _get_active_review_for_document(db, document_id)

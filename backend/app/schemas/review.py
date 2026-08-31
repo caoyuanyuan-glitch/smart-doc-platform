@@ -102,3 +102,44 @@ class FalsePositiveMemoryItem(BaseModel):
 class FalsePositiveMemoryListResponse(BaseModel):
     items: list[FalsePositiveMemoryItem]
     total: int
+
+
+class PositionObject(BaseModel):
+    start: int = 0
+    end: int = 0
+    area: str = ""
+    page: Optional[int] = None
+
+
+class VisualVerification(BaseModel):
+    visual_status: str = "skipped"
+    provider: str = ""
+    reason: str = ""
+    attempts: int = 0
+
+
+class StageDiagnostics(BaseModel):
+    stage: str
+    input_count: int = 0
+    output_count: int = 0
+    dropped_count: int = 0
+    duration_ms: int = 0
+    errors: list[str] = []
+    drop_reasons: dict[str, int] = {}
+
+
+class BasisTrace(BaseModel):
+    basis_source: str = "none"
+    basis_signature: str = ""
+    basis_labels: list[str] = []
+    basis_version: str = "review-basis-v1"
+    es_available: bool = False
+    fallback: bool = False
+    fallback_reason: str = ""
+
+
+class IssueV2(Issue):
+    schema_version: str = "v2"
+    position_object: Optional[PositionObject] = None
+    providers_list: Optional[list[str]] = None
+    visual_verification: Optional[VisualVerification] = None

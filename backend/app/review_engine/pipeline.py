@@ -480,32 +480,56 @@ def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, thresh
 def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> list[Any]:
     counters: Counter = Counter()
     selected_by_key: dict[str, Any] = {}
+    drop_reasons: Counter = Counter()
     for raw_issue in issues or []:
         issue = normalize_issue(raw_issue)
         data = issue_to_mapping(issue)
         status = str(data["status"] or "").lower()
         if status_filter and status not in {"", "pending", "confirmed", "converted_to_rule"}:
             _log_pipeline_drop("status_filtered", issue)
+            drop_reasons["status_filtered"] += 1
             continue
         if not data["original_text"]:
             _log_pipeline_drop("empty_original_text", issue)
+            drop_reasons["empty_original_text"] += 1
             continue
         if is_noise(issue, counters):
             _log_pipeline_drop("noise", issue)
+            drop_reasons["noise"] += 1
             continue
         threshold = 38 if str(data["severity"] or "").lower() in {"fatal", "serious"} else min_score
         score = value_score(issue)
         if score < threshold:
             _log_pipeline_drop("below_threshold", issue, score=score, threshold=threshold)
+            drop_reasons["below_threshold"] += 1
             continue
         key = dedupe_key(issue)
         existing = selected_by_key.get(key)
         if existing is None or issue_rank(issue) > issue_rank(existing):
             if existing is not None:
                 _log_pipeline_drop("dedupe_shadowed", existing)
+                drop_reasons["dedupe_shadowed"] += 1
             selected_by_key[key] = issue
         else:
             _log_pipeline_drop("dedupe_shadowed", issue)
+            drop_reasons["dedupe_shadowed"] += 1
 
     selected = suppress_shadowed_ai(list(selected_by_key.values()))
     return sorted(selected, key=sort_key)
+
+
+def select_review_issues_with_diagnostics(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> tuple[list[Any], dict[str, Any]]:
+    import time
+    from app.review_engine.models import ReviewStageDiagnostics
+
+    started = time.perf_counter()
+    input_count = len(issues or [])
+    selected = select_review_issues(issues, min_score=min_score, status_filter=status_filter)
+    diagnostics = ReviewStageDiagnostics(
+        stage="select_review_issues",
+        input_count=input_count,
+        output_count=len(selected),
+        dropped_count=max(0, input_count - len(selected)),
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )
+    return selected, diagnostics.to_dict()

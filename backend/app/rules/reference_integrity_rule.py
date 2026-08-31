@@ -15,7 +15,7 @@ class ReferenceIntegrityRule:
         if line_end < 0:
             line_end = len(text)
         line = text[line_start:line_end].strip()
-        return bool(re.match(rf'^{label}\s+{match.group(1)}\b', line, re.IGNORECASE))
+        return bool(re.match(rf'^{label}\s*{match.group(1)}\b', line, re.IGNORECASE))
 
     def _collect_reference_matches(self, text: str, pattern: str, label: str) -> Tuple[set, Dict[str, re.Match]]:
         refs = set()
@@ -36,6 +36,11 @@ class ReferenceIntegrityRule:
         ref_figures, figure_positions = self._collect_reference_matches(text, r'\b[Ff]igure\s+(\d+)\b', 'Figure')
         actual_tables = set(re.findall(r'^Table\s+(\d+)\b', text, re.MULTILINE))
         actual_figures = set(re.findall(r'^Figure\s+(\d+)\b', text, re.MULTILINE))
+
+        cn_tables, cn_table_positions = self._collect_reference_matches(text, r'表\s*(\d+)', '表')
+        cn_figures, cn_figure_positions = self._collect_reference_matches(text, r'图\s*(\d+)', '图')
+        actual_cn_tables = set(re.findall(r'^表\s*(\d+)\b', text, re.MULTILINE))
+        actual_cn_figures = set(re.findall(r'^图\s*(\d+)\b', text, re.MULTILINE))
 
         for table_no in sorted(ref_tables - actual_tables, key=int):
             match = table_positions.get(table_no)
@@ -61,6 +66,36 @@ class ReferenceIntegrityRule:
                 'original_text': f'Figure {figure_no}',
                 'suggestion': f'建议补充 Figure {figure_no}，或删除该引用',
                 'description': f'引用 Figure {figure_no}，但文档中未找到对应标题。',
+                'audit_basis': '引用完整性检查',
+                'confidence': 90,
+                'source': 'rule',
+                'position': self._encode_position(match.start(), match.end()) if match else '',
+            })
+
+        for table_no in sorted(cn_tables - actual_cn_tables, key=lambda item: int(item) if str(item).isdigit() else item):
+            match = cn_table_positions.get(table_no)
+            issues.append({
+                'severity': 'serious',
+                'category': '引用完整性',
+                'rule': 'REF-001',
+                'original_text': f'表{table_no}',
+                'suggestion': f'建议补充表 {table_no}，或删除该引用',
+                'description': f'引用表 {table_no}，但文档中未找到对应标题。',
+                'audit_basis': '引用完整性检查',
+                'confidence': 90,
+                'source': 'rule',
+                'position': self._encode_position(match.start(), match.end()) if match else '',
+            })
+
+        for figure_no in sorted(cn_figures - actual_cn_figures, key=lambda item: int(item) if str(item).isdigit() else item):
+            match = cn_figure_positions.get(figure_no)
+            issues.append({
+                'severity': 'serious',
+                'category': '引用完整性',
+                'rule': 'REF-002',
+                'original_text': f'图{figure_no}',
+                'suggestion': f'建议补充图 {figure_no}，或删除该引用',
+                'description': f'引用图 {figure_no}，但文档中未找到对应标题。',
                 'audit_basis': '引用完整性检查',
                 'confidence': 90,
                 'source': 'rule',
