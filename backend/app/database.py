@@ -321,7 +321,13 @@ def _ensure_review_foreign_keys():
         with engine.begin() as conn:
             conn.execute(text("PRAGMA foreign_keys=OFF"))
             _prepare_review_fk_parents(conn)
-            for name in ("issues", "audit_traces", "reviews"):
+            # Parent first, then children. Renaming reviews while children still
+            # point at it can rewrite their FK target to the temporary table name.
+            if "reviews" in needed:
+                for child in ("issues", "audit_traces"):
+                    if child in tables and child not in needed:
+                        needed.append(child)
+            for name in ("reviews", "issues", "audit_traces"):
                 if name in needed:
                     _rebuild_sqlite_table_with_fk(conn, table_map[name])
             violations = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
