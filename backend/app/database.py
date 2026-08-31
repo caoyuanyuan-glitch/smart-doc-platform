@@ -21,6 +21,14 @@ class ReviewForeignKeyError(RuntimeError):
     """Raised when review-module foreign keys cannot be applied."""
 
 
+class OrphanReviewDataError(ReviewForeignKeyError):
+    """Raised when orphan review rows would require silent rewrite."""
+
+    def __init__(self, message, report=None):
+        super().__init__(message)
+        self.report = report or {}
+
+
 _DELETED_DOCUMENT_FILENAME = "__deleted_document__"
 
 
@@ -157,7 +165,6 @@ def _ensure_legacy_sqlite_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE convert_tasks ADD COLUMN user_id INTEGER"))
 
-
     try:
         plr_columns = {col['name'] for col in inspector.get_columns('polish_learning_rules')}
     except Exception:
@@ -262,19 +269,58 @@ def _ensure_deleted_document_placeholder(conn):
     return row[0]
 
 
-def _prepare_review_fk_parents(conn):
-    tombstone_id = _ensure_deleted_document_placeholder(conn)
-    conn.execute(
-        text(
-            "UPDATE reviews SET document_id = :tid "
-            "WHERE document_id IS NULL OR document_id NOT IN (SELECT id FROM documents)"
-        ),
-        {"tid": tombstone_id},
-    )
-    conn.execute(text("DELETE FROM issues WHERE review_id IS NULL OR review_id NOT IN (SELECT id FROM reviews)"))
+def collect_orphan_review_report(conn) -> dict:
     tables = {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+    orphan_reviews = []
+    orphan_issues = []
+    orphan_traces = []
+    if "reviews" in tables:
+        rows = conn.execute(
+            text(
+                "SELECT id, document_id FROM reviews "
+                "WHERE document_id IS NULL OR document_id NOT IN (SELECT id FROM documents)"
+            )
+        ).fetchall()
+        orphan_reviews = [{"id": row[0], "document_id": row[1], "suggestion": "abort_migration"} for row in rows]
+    if "issues" in tables:
+        rows = conn.execute(
+            text(
+                "SELECT id, review_id FROM issues "
+                "WHERE review_id IS NULL OR review_id NOT IN (SELECT id FROM reviews)"
+            )
+        ).fetchall()
+        orphan_issues = [{"id": row[0], "review_id": row[1], "suggestion": "abort_migration"} for row in rows]
     if "audit_traces" in tables:
-        conn.execute(text("DELETE FROM audit_traces WHERE review_id IS NULL OR review_id NOT IN (SELECT id FROM reviews)"))
+        rows = conn.execute(
+            text(
+                "SELECT id, review_id FROM audit_traces "
+                "WHERE review_id IS NULL OR review_id NOT IN (SELECT id FROM reviews)"
+            )
+        ).fetchall()
+        orphan_traces = [{"id": row[0], "review_id": row[1], "suggestion": "abort_migration"} for row in rows]
+    counts = {
+        "orphan_reviews": len(orphan_reviews),
+        "orphan_issues": len(orphan_issues),
+        "orphan_traces": len(orphan_traces),
+    }
+    return {
+        "has_orphans": any(counts.values()),
+        "counts": counts,
+        "orphan_reviews": orphan_reviews,
+        "orphan_issues": orphan_issues,
+        "orphan_traces": orphan_traces,
+        "summary": counts,
+        "recommendation": "abort_migration" if any(counts.values()) else "continue",
+    }
+
+
+def _prepare_review_fk_parents(conn):
+    report = collect_orphan_review_report(conn)
+    if report.get("has_orphans"):
+        raise OrphanReviewDataError(
+            "orphan review data blocks FK migration: " + str(report.get("summary") or report),
+            report=report,
+        )
 
 
 def _rebuild_sqlite_table_with_fk(conn, table):
@@ -321,8 +367,6 @@ def _ensure_review_foreign_keys():
         with engine.begin() as conn:
             conn.execute(text("PRAGMA foreign_keys=OFF"))
             _prepare_review_fk_parents(conn)
-            # Parent first, then children. Renaming reviews while children still
-            # point at it can rewrite their FK target to the temporary table name.
             if "reviews" in needed:
                 for child in ("issues", "audit_traces"):
                     if child in tables and child not in needed:

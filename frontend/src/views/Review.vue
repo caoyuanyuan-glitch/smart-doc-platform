@@ -2396,6 +2396,21 @@ function handleRulesImport(response) {
   loadRules()
 }
 
+function findPairedVisualDocumentId(documentId) {
+  const current = documents.value.find(doc => String(doc.id) === String(documentId))
+  if (!current) return null
+  const fileType = String(current.file_type || current.fileType || '').toLowerCase()
+  if (fileType !== 'docx') return null
+  const stem = String(current.filename || current.name || '').replace(/\.[^.]+$/, '').toLowerCase()
+  if (!stem) return null
+  const paired = documents.value.find(doc => {
+    const otherType = String(doc.file_type || doc.fileType || '').toLowerCase()
+    const otherStem = String(doc.filename || doc.name || '').replace(/\.[^.]+$/, '').toLowerCase()
+    return otherType === 'pdf' && otherStem === stem && String(doc.id) !== String(documentId)
+  })
+  return paired ? paired.id : null
+}
+
 async function startReview(documentId) {
   if (isTemporaryDocumentId(documentId)) {
     ElMessage.warning('文档仍在上传处理中，请等待上传完成后再开始审核')
@@ -2405,7 +2420,11 @@ async function startReview(documentId) {
     const provider = reviewMode.value === 'hybrid' && selectedProvider.value
       ? selectedProvider.value
       : null
-    const response = await reviewAPI.create(documentId, reviewMode.value, provider, { force: true })
+    const visualDocumentId = findPairedVisualDocumentId(documentId)
+    const response = await reviewAPI.create(documentId, reviewMode.value, provider, {
+      force: true,
+      visual_document_id: visualDocumentId || undefined
+    })
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
 

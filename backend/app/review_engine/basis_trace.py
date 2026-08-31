@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 
 
@@ -22,6 +23,12 @@ def _signature(sections) -> str:
 
 def build_basis_trace(
     *,
+    review_id=None,
+    issue_id=None,
+    candidate_id=None,
+    rule_id: str = "",
+    basis_query: str = "",
+    provider: str = "",
     sections=None,
     es_available: bool = False,
     es_hit: bool = False,
@@ -45,6 +52,15 @@ def build_basis_trace(
     else:
         source = "local"
     return {
+        "review_id": review_id,
+        "issue_id": issue_id,
+        "candidate_id": candidate_id,
+        "rule_id": rule_id,
+        "basis_query": basis_query,
+        "basis_documents": labels,
+        "provider": provider,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "ok" if sections else "empty",
         "basis_source": source,
         "basis_signature": _signature(sections),
         "basis_labels": labels,

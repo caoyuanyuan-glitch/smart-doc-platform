@@ -20,6 +20,8 @@ class ReviewCreate(BaseModel):
     document_id: int
     mode: str = "hybrid"
     provider: Optional[str] = None
+    visual_document_id: Optional[int] = None
+    pairing_confirmed: bool = False
 
 class SnippetReviewCreate(BaseModel):
     text: str
@@ -116,6 +118,10 @@ class VisualVerification(BaseModel):
     provider: str = ""
     reason: str = ""
     attempts: int = 0
+    status: str = "skipped"
+    error_code: Optional[str] = None
+    verified_at: Optional[str] = None
+    evidence_page: Optional[int] = None
 
 
 class StageDiagnostics(BaseModel):
@@ -136,6 +142,15 @@ class BasisTrace(BaseModel):
     es_available: bool = False
     fallback: bool = False
     fallback_reason: str = ""
+    review_id: Optional[int] = None
+    issue_id: Optional[int] = None
+    candidate_id: Optional[str] = None
+    rule_id: str = ""
+    basis_query: str = ""
+    basis_documents: list[str] = []
+    provider: str = ""
+    created_at: Optional[str] = None
+    status: str = "empty"
 
 
 class IssueV2(Issue):

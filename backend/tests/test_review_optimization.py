@@ -131,6 +131,7 @@ def test_visual_status_mapping():
     assert map_visual_status("reject") == "rejected"
     assert map_visual_status("skipped", "kimi_unavailable") == "provider_unavailable"
     assert map_visual_status("error") == "failed"
+    assert map_visual_status("not_required") == "not_required"
 
 
 def test_basis_trace_sources():

@@ -153,6 +153,12 @@ def _clear_review_runtime_flags(review_id: int) -> None:
         return
     _review_cancel_flags.pop(review_id, None)
     _review_force_rerun_ids.discard(review_id)
+    from app.review_engine.task_state import clear_task_state
+    clear_task_state(review_id)
+    _review_observation_store.pop(str(review_id), None)
+    _review_observation_store.pop(f"{review_id}:basis_trace", None)
+    _review_observation_store.pop(f"{review_id}:diagnostics", None)
+    _review_observation_store.pop(f"{review_id}:visual", None)
 
 
 def _ensure_review_not_cancelled(review_id: int) -> None:
@@ -267,6 +273,24 @@ SNIPPET_DOCUMENT_PREFIX = "文本片段_"
 _review_observation_store = {}
 
 
+def _current_review_id():
+    from app.review_engine.task_state import get_current_review_id
+    return get_current_review_id()
+
+
+def _store_basis_trace(review_id, payload):
+    if review_id is None:
+        return
+    from app.review_engine.task_state import set_task_value
+    set_task_value(review_id, "basis_trace", payload)
+    _review_observation_store[f"{review_id}:basis_trace"] = payload
+
+
+def _load_basis_trace(review_id):
+    from app.review_engine.task_state import get_task_value
+    return get_task_value(review_id, "basis_trace") or _review_observation_store.get(f"{review_id}:basis_trace")
+
+
 def _review_base_mode(mode):
     text = str(mode or "hybrid").strip()
     if text.startswith("snippet:"):
@@ -363,14 +387,16 @@ def _cluster_merge_key(issue):
     rule = str(_issue_value(issue, "rule", "") or "").upper()
     category = str(_issue_value(issue, "category", "") or "")
     original = _normalize_cluster_original(_issue_value(issue, "original_text", ""))
-    blob = f"{category} {rule}"
-    always = bool(re.search(r"占位符|标点符号|中英文空格|placeholder|punctuation", blob, re.IGNORECASE))
-    if always:
-        pattern = original[:40] if original else rule
-        return f"always|{rule}|{pattern}"
-    if rule and original:
-        return f"{rule}|{original[:80]}"
-    return f"{rule}|{id(issue)}"
+    from app.review_engine.matching.identity import issue_identity_key
+    return "|".join(str(part) for part in issue_identity_key({
+        "rule": rule,
+        "category": category,
+        "type": _issue_value(issue, "type", ""),
+        "chapter": _issue_value(issue, "chapter", ""),
+        "original_text": original or _issue_value(issue, "original_text", ""),
+        "position": _issue_value(issue, "position", ""),
+        "page": _issue_value(issue, "page", ""),
+    }))
 
 
 def _cluster_merge_issues(issues):
@@ -2239,7 +2265,14 @@ def _review_content_limit(file_type):
     return _review_env_int('REVIEW_CONTENT_LIMIT', '120000')
 
 
+def _review_sampling_mode():
+    return str(os.getenv('REVIEW_SAMPLING_MODE', 'off') or 'off').strip().lower()
+
+
 def _select_ai_audit_chunks(chunks, max_chunks):
+    mode = _review_sampling_mode()
+    if mode in {'', 'off', 'none', 'false', '0'}:
+        return list(chunks or [])
     if max_chunks <= 0 or len(chunks) <= max_chunks:
         return chunks
     if max_chunks == 1:
@@ -2329,7 +2362,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     chunker_fallback_reason = ""
     if use_smart_chunking and create_smart_chunker is not None and len(content) > 1000:
         try:
-            chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)))
+            chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)), sampling_mode=_review_sampling_mode())
             smart_chunks = chunker.chunk_document(content)
             if smart_chunks:
                 chunks = [(c.index + 1, c.start, c.content) for c in smart_chunks]
@@ -2397,9 +2430,13 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             document_name=document_name,
         )
         basis_labels = _extract_basis_labels_from_text(selected_basis)
+        batch_size = max(1, _review_ai_chunk_limit(total_length))
         chunk_trace = {
             "chunk_index": index,
+            "batch_index": (index - 1) // batch_size,
+            "total_batches": max(1, (total - 1) // batch_size + 1),
             "start": start,
+            "end": start + len(chunk),
             "length": len(chunk),
             "basis_labels": basis_labels,
             "basis_preview": _compact_prompt_text(selected_basis, 240),
@@ -2492,64 +2529,65 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             }
 
     trace["issue_count"] = len(all_issues)
+    from app.services.chunker import compute_chunk_coverage
+    processed_ok = [item for item in trace.get("chunks") or [] if item.get("status") in (None, "ok")]
+    processed_ranges = [
+        (int(item.get("start") or 0), int(item.get("start") or 0) + int(item.get("length") or 0))
+        for item in processed_ok
+    ]
+    skipped = []
+    if trace.get("budget_reached"):
+        processed_indexes = {int(item.get("chunk_index") or 0) for item in processed_ok}
+        for index, start, chunk in chunks:
+            if index not in processed_indexes:
+                skipped.append(f"AI chunk {index}")
+    coverage = compute_chunk_coverage(
+        total_length,
+        processed_ranges,
+        skipped_chapters=skipped,
+        chunker_mode=chunker_mode,
+        fallback_reason=chunker_fallback_reason,
+        total_chunk_count=len(all_chunks),
+        processed_chunk_count=len(processed_ok),
+    )
+    batch_size = max(1, _review_ai_chunk_limit(total_length))
+    coverage["batch_size"] = batch_size
+    coverage["total_batches"] = max(1, (len(all_chunks) + batch_size - 1) // batch_size)
+    coverage["sampling_mode"] = _review_sampling_mode()
+    if coverage["skipped_chunk_count"] or coverage["skipped_chapters"]:
+        coverage["full_document_reviewed"] = False
+    else:
+        coverage["full_document_reviewed"] = True
+    trace.update(coverage)
     return all_issues, trace
 
 
 def _dedup_across_chunks(issues: list) -> list:
-    """跨分块去重：合并不同chunk中发现的同一问题。
-    
-    策略：
-    1. 完全相同 original_text → 合并
-    2. 高度重叠（一个包含另一个且长度比 > 0.7）→ 合并
-    3. 同一规则(rules match) + 原文高度相似(编辑距离 ≤ 2) → 合并
-    4. 合并时保留较高的置信度和严重级别
-    """
+    """跨分块去重：仅合并身份键相同的问题，不同章节或保护字面量不同时保留。"""
     if len(issues) <= 1:
         return issues
-    
+    from app.review_engine.matching.identity import issue_identity_key
     result = []
-    for issue in issues:
-        original = str(issue.get("original_text", "") or "").strip().lower()
-        rule = str(issue.get("rule", "") or "").strip().lower()
-        
+    for index, issue in enumerate(issues):
+        original = str(issue.get("original_text", "") or "").strip()
         if not original:
             result.append(issue)
             continue
-        
+        issue.setdefault("candidate_id", f"cand-{index}")
+        key = issue_identity_key(issue)
         matched = False
         for existing in result:
-            existing_original = str(existing.get("original_text", "") or "").strip().lower()
-            existing_rule = str(existing.get("rule", "") or "").strip().lower()
-            
-            if not existing_original:
+            if issue_identity_key(existing) != key:
                 continue
-            
-            # 策略1: 完全相同
-            if original == existing_original:
-                matched = True
-                break
-            
-            # 策略2: 高度重叠（短文本用编辑距离）
-            len_o = len(original)
-            len_e = len(existing_original)
-            
-            if len_o >= 3 and len_e >= 3:
-                shorter = original if len_o <= len_e else existing_original
-                longer = existing_original if len_o <= len_e else original
-                if shorter in longer and len(shorter) / len(longer) > 0.6:
-                    matched = True
-                    break
-            
-            # 策略3: 同一规则 + 高度相似原文
-            if rule and existing_rule and rule == existing_rule:
-                if len_o <= 10 and len_e <= 10 and abs(len_o - len_e) <= 3:
-                    if _edit_distance(original, existing_original) <= 2:
-                        matched = True
-                        break
-        
+            keep_id = existing.get("candidate_id") or existing.get("rule") or ""
+            existing["dedupe_reason"] = "same_identity_key"
+            existing.setdefault("merged_into", keep_id)
+            issue["merged_into"] = keep_id
+            issue["dedupe_reason"] = "same_identity_key"
+            matched = True
+            break
         if not matched:
             result.append(issue)
-    
     return result
 
 
@@ -3331,11 +3369,17 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         'page_issue_count': 0,
         'items': [],
     }
+    from app.review_engine.visual import apply_visual_verification, build_visual_verification, map_visual_status, visual_provider_chain
     if not _review_pdf_visual_verify_enabled():
         diagnostics['reason'] = 'disabled'
+        for issue in issues:
+            apply_visual_verification(issue, build_visual_verification(status='skipped', error_code='disabled'))
+            issue['visual_verification'] = build_visual_verification(status='skipped', error_code='disabled')
         return issues, diagnostics
     if str(getattr(document, 'file_type', '') or '').lower() != 'pdf':
         diagnostics['reason'] = 'not_pdf'
+        for issue in issues:
+            issue['visual_verification'] = build_visual_verification(status='not_required')
         return issues, diagnostics
 
     limit = _review_pdf_visual_verify_limit()
@@ -3387,6 +3431,11 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         diagnostics['visual_status'] = 'provider_unavailable'
         diagnostics['provider_chain'] = visual_chain
         diagnostics['skipped_count'] = len(candidates) + len(page_candidates)
+        for issue, page_number in candidates:
+            visual = build_visual_verification(status='provider_unavailable', evidence_page=page_number)
+            issue['visual_verification'] = visual
+            issue['status'] = 'blocked'
+            _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=visual)
         diagnostics['page_issue_count'] = len(fallback_page_issues)
         diagnostics['items'].extend([
             {
@@ -3415,9 +3464,12 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
     for issue, page_number in candidates:
         png_bytes = _render_pdf_page_png_bytes(source_path, page_number)
         if not png_bytes:
-            _normalize_issue_position_meta(issue, page_number=page_number, visual_verification={'decision': 'skipped', 'reason': 'render_failed'})
+            visual = build_visual_verification(status='failed', error_code='render_failed', evidence_page=page_number)
+            issue['visual_verification'] = visual
+            issue['status'] = 'blocked'
+            _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=visual)
             diagnostics['skipped_count'] += 1
-            diagnostics['items'].append({'page_number': page_number, 'decision': 'skipped', 'reason': 'render_failed'})
+            diagnostics['items'].append({'page_number': page_number, 'decision': 'failed', 'reason': 'render_failed', 'status': 'failed'})
             continue
 
         result = _verify_review_issue_visually(
@@ -3441,7 +3493,23 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             'is_extraction_artifact': bool(result.get('is_extraction_artifact')),
             'visual_status': result.get('visual_status') or map_visual_status(decision, result.get('reason')),
             'provider': result.get('provider') or '',
+            'attempts': result.get('attempts') or 1,
+            'evidence_page': page_number,
         }
+        visual = build_visual_verification(
+            status=compact_result['visual_status'],
+            provider=compact_result['provider'],
+            attempts=compact_result['attempts'],
+            error_code=compact_result['reason'],
+            evidence_page=page_number,
+            decision=decision,
+            reason=compact_result['reason'],
+            is_extraction_artifact=compact_result['is_extraction_artifact'],
+        )
+        compact_result.update(visual)
+        issue['visual_verification'] = visual
+        if visual['status'] in {'failed', 'provider_unavailable'}:
+            issue['status'] = 'blocked'
         _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=compact_result)
 
         diagnostics['verified_count'] += 1
@@ -5786,27 +5854,31 @@ def _fetch_es_relevant_basis_sections(content, basis_sections, document_language
         hits = _deduplicate_basis_sections(
             service.search(content, basis_sections, document_language=document_language, limit=limit)
         ) if es_available else []
+        review_id = _current_review_id()
         if hits:
-            _review_observation_store["_basis_trace"] = build_basis_trace(
-                sections=hits, es_available=True, es_hit=True
-            )
+            _store_basis_trace(review_id, build_basis_trace(
+                review_id=review_id, sections=hits, es_available=True, es_hit=True
+            ))
             return hits
-        _review_observation_store["_basis_trace"] = build_basis_trace(
+        _store_basis_trace(review_id, build_basis_trace(
+            review_id=review_id,
             sections=basis_sections,
             es_available=es_available,
             fallback=True,
             fallback_reason="es_unavailable" if not es_available else "es_empty",
-        )
+        ))
         return []
     except Exception as exc:
         print(f"[审核] ES 审核依据召回失败，回退本地匹配: {exc}")
         from app.review_engine.basis_trace import build_basis_trace
-        _review_observation_store["_basis_trace"] = build_basis_trace(
+        review_id = _current_review_id()
+        _store_basis_trace(review_id, build_basis_trace(
+            review_id=review_id,
             sections=basis_sections,
             es_available=False,
             fallback=True,
             fallback_reason=str(exc)[:180],
-        )
+        ))
         return []
 
 
@@ -6001,9 +6073,10 @@ def _ai_provider_cache_fingerprint():
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None):
-    from app.review_engine.versions import FILTER_POLICY_VERSION, PROMPT_VERSION
+def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None, review_id=None):
+    from app.review_engine.versions import BASIS_POLICY_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
     raw = "||".join([
+        str(review_id or ""),
         hashlib.sha1(str(chunk or "").encode("utf-8")).hexdigest(),
         hashlib.sha1(str(audit_basis or "").encode("utf-8")).hexdigest(),
         str(language or ""),
@@ -6012,12 +6085,13 @@ def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None):
         _ai_provider_cache_fingerprint(),
         PROMPT_VERSION,
         FILTER_POLICY_VERSION,
+        BASIS_POLICY_VERSION,
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None):
-    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis, document_name=document_name)
+    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis, document_name=document_name, review_id=review_id)
     if force_provider:
         cache_key = hashlib.sha1((cache_key + "|provider=" + force_provider).encode("utf-8")).hexdigest()
     cached = _ai_review_chunk_cache.get(cache_key)
@@ -8808,8 +8882,6 @@ def _run_cross_reference_audit(content):
     normalized = content.replace('\f', '\n')
     section_numbers = set(re.findall(r'(?m)^\s*(\d+(?:\.\d+)*)[\.)]?\s+[A-Z][^\n]{2,}', normalized))
     step_numbers = {int(num) for num in re.findall(r'(?im)^\s*(?:Step\s+)?(\d+)[\.)]\s+.+$', normalized)}
-    table_numbers = set(re.findall(r'(?im)^\s*(?:Table|表)\s*(\d+)\b', normalized))
-    figure_numbers = set(re.findall(r'(?im)^\s*(?:Figure|Fig\.|图)\s*(\d+)\b', normalized))
     structured_section_numbers = {num for num in section_numbers if '.' in num}
     seen = set()
 
@@ -8841,52 +8913,7 @@ def _run_cross_reference_audit(content):
                     'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='章节', target=f'Section {ref}', check_result='引用缺失'),
                 })
 
-    for match in re.finditer(r'\b(?:according to|refer to|see)?\s*(?:Table|table|表)\s*(\d+)\b', normalized):
-        ref = match.group(1)
-        if ref in table_numbers:
-            continue
-        key = ('REF-TABLE', ref, match.start())
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-            'severity': 'serious',
-            'category': '交叉引用',
-            'rule': 'REF-003',
-            'chapter': '',
-            'original_text': match.group(0).strip(),
-            'context': get_context(normalized, match.start(), match.end(), 120),
-            'suggestion': f'补充 Table {ref}，或删除该引用。',
-            'description': f'引用原文：{match.group(0).strip()}；引用类型：表；目标对象：Table {ref}；检查结果：引用缺失。文档中没有 Table {ref} 的标题。',
-            'audit_basis': '表格引用应能定位到唯一的表格标题。',
-            'confidence': 92,
-            'source': 'rule',
-            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='表', target=f'Table {ref}', check_result='引用缺失'),
-        })
-
-    for match in re.finditer(r'\b(?:Figure|Fig\.|图)\s*(\d+)\b', normalized, re.IGNORECASE):
-        ref = match.group(1)
-        if ref in figure_numbers:
-            continue
-        key = ('REF-FIGURE', ref, match.start())
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-            'severity': 'general',
-            'category': '交叉引用',
-            'rule': 'REF-004',
-            'chapter': '',
-            'original_text': match.group(0),
-            'context': get_context(normalized, match.start(), match.end(), 120),
-            'suggestion': f'补充 Figure {ref} 对应标题，或删除该引用。',
-            'description': f'引用原文：{match.group(0)}；引用类型：图；目标对象：Figure {ref}；检查结果：引用缺失。文档中没有对应图标题。',
-            'audit_basis': '图引用应能定位到唯一的图标题。',
-            'confidence': 88,
-            'source': 'rule',
-            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='图', target=f'Figure {ref}', check_result='引用缺失'),
-        })
-
+    # Figure/Table checks live only in ReferenceIntegrityRule / reference_index.
     if len(step_numbers) >= 3:
         for match in re.finditer(r'\bStep\s+(\d+)\b', normalized, re.IGNORECASE):
             ref = int(match.group(1))
@@ -11432,7 +11459,11 @@ def dedupe_issues_by_original(issues):
         return (source_rank, severity_rank, confidence)
 
     def _norm_chapter(chapter):
-        return re.sub(r'\s+', '', str(chapter or '')).lower()[:60]
+        text = re.sub(r'\s+', '', str(chapter or '')).lower()
+        match = re.search(r'(\d+(?:\.\d+)*)', text)
+        if match:
+            return match.group(1)
+        return text[:60]
 
     def _norm_suggestion(issue):
         return re.sub(r'\s+', ' ', str(issue.get('suggestion', '') or '')).strip().lower()
@@ -11449,9 +11480,19 @@ def dedupe_issues_by_original(issues):
         norm = re.sub(r"\s+", "", str(original_text)).lower()
         if not norm.strip():
             continue
+        from app.review_engine.matching.identity import issue_identity_key
+        key = issue_identity_key(issue)
         matched_index = None
         for index, existing in enumerate(seen):
-            if _same_issue(original_text, existing.get("original_text", "")):
+            existing_chapter = _norm_chapter(existing.get("chapter"))
+            issue_chapter = _norm_chapter(issue.get("chapter"))
+            if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
+                continue
+            if issue_identity_key(existing) == key or (
+                _same_issue(original_text, existing.get("original_text", ""))
+                and issue_chapter == existing_chapter
+                and issue_identity_key(existing)[5] == key[5]
+            ):
                 matched_index = index
                 break
         if matched_index is None:
@@ -11729,7 +11770,7 @@ def _run_single_provider_ai_review(review_id: int, content: str, document_langua
         return [], []
 
 
-def _run_review_background(review_id: int, document_id: int, mode: str, provider: str = None, provider_list: list = None):
+def _run_review_background(review_id: int, document_id: int, mode: str, provider: str = None, provider_list: list = None, visual_document_id: int = None, pairing_confirmed: bool = False):
     """后台执行审核任务（带进度更新）
     
     Args:
@@ -11763,6 +11804,9 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
     try:
         set_progress(review_id, 'running', '加载文档', 5, '正在读取文档内容...')
         _review_observation_store.pop(str(review_id), None)
+        from app.review_engine.task_state import set_current_review_id, clear_task_state
+        clear_task_state(review_id)
+        set_current_review_id(review_id)
 
         document = get_document(db, document_id=document_id)
         if not document:
@@ -11783,6 +11827,43 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         pdf_page_metadata = _extract_pdf_page_metadata(document, content)
         pdf_suspicious_pages = _collect_pdf_suspicious_pages(pdf_page_metadata)
         document_language = detect_language(content)
+        from app.review_engine.document_model import build_document_model
+        from app.review_engine.pairing import resolve_input_pairing
+        from app.review_engine.profile import build_document_profile
+        source_format = 'pdf' if str(document.file_type or '').lower() == 'pdf' else 'docx'
+        fallback_reason = 'pdf_only' if source_format == 'pdf' else ''
+        document_model = build_document_model(
+            content,
+            source_format=source_format,
+            document_language=document_language,
+            fallback_reason=fallback_reason,
+        )
+        visual_doc = get_document(db, document_id=visual_document_id) if visual_document_id else None
+        content_user = getattr(document, 'user_id', None)
+        visual_user = getattr(visual_doc, 'user_id', None) if visual_doc is not None else None
+        same_user = content_user is None or visual_user is None or content_user == visual_user
+        pairing = resolve_input_pairing(
+            document,
+            visual_doc,
+            explicit=bool(pairing_confirmed),
+            same_user=same_user,
+            same_task=True,
+        )
+        if pairing.needs_user_confirm or pairing.pairing_status == 'unpaired':
+            visual_doc = None
+            fallback_reason = pairing.message or 'pairing_unconfirmed'
+            document_model.fallback_reason = fallback_reason
+        document_profile = build_document_profile(
+            content,
+            file_type=document.file_type,
+            language=document_language,
+            model=document_model,
+        )
+        document_profile['visual_layer_available'] = bool(
+            pairing.pairing_status == 'paired' or pairing.input_mode == 'C'
+        )
+        document_profile['pairing_status'] = pairing.pairing_status
+        document_profile['input_mode'] = pairing.input_mode
         spec_texts = _load_review_spec_texts(db)
         false_positive_signatures = _load_false_positive_signatures_for_document(db, document_id)
         print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}/{original_content_length}字符, 上限={content_limit}")
@@ -12185,7 +12266,18 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             issues = _filter_snippet_scope_issues(issues)
             print(f"[审核] 文本片段范围过滤: {before_scope} -> {len(issues)}")
         else:
-            issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, document, content, issues, pdf_suspicious_pages)
+            visual_target = document
+            visual_content = content
+            visual_pages = pdf_suspicious_pages
+            if pairing.pairing_status == 'paired' and visual_doc is not None and str(getattr(visual_doc, 'file_type', '') or '').lower() == 'pdf':
+                visual_target = visual_doc
+                visual_content = visual_doc.content or content
+                visual_pages = _collect_pdf_suspicious_pages(_extract_pdf_page_metadata(visual_doc, visual_content))
+            issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, visual_target, visual_content, issues, visual_pages)
+            from app.review_engine.visual import build_visual_verification
+            for issue in issues:
+                if not issue.get('visual_verification'):
+                    issue['visual_verification'] = build_visual_verification(status='not_required')
         visual_dropped = _stage_input_counts.get("pdf_visual_verification", len(issues)) - len(issues)
         _end_stage("pdf_visual_verification", output_count=len(issues), dropped_count=visual_dropped)
 
@@ -12194,6 +12286,24 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             print(f"[审核] AI问题最终保留数量={retained_ai_count}")
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
+        from app.review_engine.evidence import enrich_issue_evidence
+        from app.review_engine.profile import apply_rule_gating
+        from app.review_engine.issue_status import compute_status_counts
+        gated, rule_gate_diagnostics = apply_rule_gating(issues, document_profile)
+        issues = [enrich_issue_evidence(issue, document_model, source_format=pairing.source_format) for issue in gated]
+        if pairing.input_mode == 'B':
+            from app.review_engine.visual import build_visual_verification
+            for issue in issues:
+                issue['visual_verification'] = build_visual_verification(status='not_required', error_code='no_pdf')
+                position_object = issue.get('position_object') or {}
+                position_object['bbox'] = None
+                issue['position_object'] = position_object
+        if pairing.input_mode == 'C' and str(document_profile.get('text_layer_quality') or '') == 'poor':
+            for issue in issues:
+                if str(issue.get('status') or '') not in {'confirmed', 'false_positive', 'ignored'}:
+                    issue['status'] = 'blocked'
+                    issue['rejected_reason'] = 'pdf_text_layer_unreliable'
+        issue_status_counts = compute_status_counts(issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
         if len(issues) > 0:
             categories = {}
@@ -12208,6 +12318,12 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         _ensure_review_not_cancelled(review_id)
         for issue in issues:
+            persisted_position = _decode_issue_position(issue.get("position", ""))
+            persisted_position.update({
+                key: issue.get(key)
+                for key in ("evidence", "position_object", "visual_verification", "source_format", "target_status", "rejected_reason")
+                if issue.get(key) not in (None, "", {}, [])
+            })
             create_issue(db=db, issue=IssueCreate(
                 review_id=review_id,
                 severity=issue["severity"],
@@ -12221,7 +12337,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 audit_basis=issue.get("audit_basis", ""),
                 confidence=issue.get("confidence", 0),
                 source=issue.get("source", "rule"),
-                position=issue.get("position", ""),
+                position=json.dumps(persisted_position, ensure_ascii=False) if persisted_position else issue.get("position", ""),
+                status=str(issue.get("status") or "pending"),
                 providers=issue.get("providers", None),
             ))
 
@@ -12269,7 +12386,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 "count": len(knowledge_labels),
             },
             "stage_diagnostics": _stage_diagnostics,
-            "basis_trace": _review_observation_store.get("_basis_trace") or {
+            "basis_trace": _load_basis_trace(review_id) or {
+                "review_id": review_id,
                 "basis_source": "local" if ai_review_basis_sections else "none",
                 "basis_labels": knowledge_labels,
                 "basis_version": "review-basis-v1",
@@ -12283,6 +12401,18 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 _take_review_observations(review_id), issues
             ),
             "engine_version": "review-engine-v2",
+            "input_pairing": pairing.to_dict(),
+            "document_profile": document_profile,
+            "document_model": {
+                "source_format": document_model.source_format,
+                "document_language": document_model.document_language,
+                "document_type": document_model.document_type,
+                "heading_count": len(document_model.headings),
+                "paragraph_count": len(document_model.paragraphs),
+                "fallback_reason": document_model.fallback_reason,
+            },
+            "rule_gate_diagnostics": rule_gate_diagnostics,
+            "issue_status_counts": issue_status_counts,
         })
 
         completion_message = f'审核完成，发现 {len(issues)} 个问题'
@@ -12372,6 +12502,8 @@ async def create_snippet_review_task(
 async def create_review_task(document_id: int, mode: str = "hybrid",
                              provider: str = None, providers: str = None,
                              force: bool = Query(False),
+                             visual_document_id: int = Query(None),
+                             pairing_confirmed: bool = Query(False),
                              background_tasks: BackgroundTasks = None,
                              db: Session = Depends(get_db),
                              current_user: UserOut = Depends(get_current_active_user)):
@@ -12422,7 +12554,7 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     
     # 启动后台审核任务（传递 provider_list）
     if background_tasks:
-        background_tasks.add_task(_run_review_background, review.id, document_id, mode, provider, provider_list)
+        background_tasks.add_task(_run_review_background, review.id, document_id, mode, provider, provider_list, visual_document_id, pairing_confirmed)
     
     return {"review_id": review.id, "status": "running", "message": "审核已开始，请稍候"}
 
