@@ -17,6 +17,13 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+class ReviewForeignKeyError(RuntimeError):
+    """Raised when review-module foreign keys cannot be applied."""
+
+
+_DELETED_DOCUMENT_FILENAME = "__deleted_document__"
+
+
 @event.listens_for(engine, "connect")
 def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
     if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
@@ -201,6 +208,129 @@ def _ensure_legacy_sqlite_columns():
                 for s in stmts:
                     conn.execute(text(s))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_polish_feedback_polish_session_id ON polish_feedback (polish_session_id)"))
+
+
+def _sqlite_has_fk(inspector, table_name, column_name, referred_table):
+    try:
+        fks = inspector.get_foreign_keys(table_name)
+    except Exception:
+        return False
+    for fk in fks:
+        if fk.get("referred_table") == referred_table and list(fk.get("constrained_columns") or []) == [column_name]:
+            return True
+    return False
+
+
+def _table_columns(conn, table_name):
+    return [row[1] for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()]
+
+
+def _ensure_deleted_document_placeholder(conn):
+    row = conn.execute(
+        text("SELECT id FROM documents WHERE filename = :name LIMIT 1"),
+        {"name": _DELETED_DOCUMENT_FILENAME},
+    ).fetchone()
+    if row:
+        return row[0]
+    columns = set(_table_columns(conn, "documents"))
+    fields = ["filename"]
+    values = [":name"]
+    params = {"name": _DELETED_DOCUMENT_FILENAME}
+    if "file_type" in columns:
+        fields.append("file_type")
+        values.append("'unknown'")
+    if "file_size" in columns:
+        fields.append("file_size")
+        values.append("0")
+    if "content" in columns:
+        fields.append("content")
+        values.append("''")
+    if "status" in columns:
+        fields.append("status")
+        values.append("'deleted'")
+    if "deleted_at" in columns:
+        fields.append("deleted_at")
+        values.append("CURRENT_TIMESTAMP")
+    conn.execute(
+        text(f"INSERT INTO documents ({', '.join(fields)}) VALUES ({', '.join(values)})"),
+        params,
+    )
+    row = conn.execute(
+        text("SELECT id FROM documents WHERE filename = :name LIMIT 1"),
+        {"name": _DELETED_DOCUMENT_FILENAME},
+    ).fetchone()
+    return row[0]
+
+
+def _prepare_review_fk_parents(conn):
+    tombstone_id = _ensure_deleted_document_placeholder(conn)
+    conn.execute(
+        text(
+            "UPDATE reviews SET document_id = :tid "
+            "WHERE document_id IS NULL OR document_id NOT IN (SELECT id FROM documents)"
+        ),
+        {"tid": tombstone_id},
+    )
+    conn.execute(text("DELETE FROM issues WHERE review_id IS NULL OR review_id NOT IN (SELECT id FROM reviews)"))
+    tables = {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+    if "audit_traces" in tables:
+        conn.execute(text("DELETE FROM audit_traces WHERE review_id IS NULL OR review_id NOT IN (SELECT id FROM reviews)"))
+
+
+def _rebuild_sqlite_table_with_fk(conn, table):
+    from sqlalchemy.schema import CreateTable
+
+    tmp_name = f"{table.name}__fk_mig"
+    conn.execute(text(f"ALTER TABLE {table.name} RENAME TO {tmp_name}"))
+    for idx in conn.execute(text(f"PRAGMA index_list({tmp_name})")).fetchall():
+        name = idx[1]
+        if name and not str(name).startswith("sqlite_autoindex"):
+            conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+    conn.execute(CreateTable(table))
+    old_cols = set(_table_columns(conn, tmp_name))
+    shared = [column.name for column in table.columns if column.name in old_cols]
+    col_sql = ", ".join(shared)
+    conn.execute(text(f"INSERT INTO {table.name} ({col_sql}) SELECT {col_sql} FROM {tmp_name}"))
+    conn.execute(text(f"DROP TABLE {tmp_name}"))
+
+
+def _ensure_review_foreign_keys():
+    if not SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    needed = []
+    if "reviews" in tables and not _sqlite_has_fk(inspector, "reviews", "document_id", "documents"):
+        needed.append("reviews")
+    if "issues" in tables and not _sqlite_has_fk(inspector, "issues", "review_id", "reviews"):
+        needed.append("issues")
+    if "audit_traces" in tables and not _sqlite_has_fk(inspector, "audit_traces", "review_id", "reviews"):
+        needed.append("audit_traces")
+    if not needed:
+        return
+    from app.models.audit_trace import AuditTrace
+    from app.models.issue import Issue
+    from app.models.review import Review
+
+    table_map = {
+        "issues": Issue.__table__,
+        "audit_traces": AuditTrace.__table__,
+        "reviews": Review.__table__,
+    }
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            _prepare_review_fk_parents(conn)
+            for name in ("issues", "audit_traces", "reviews"):
+                if name in needed:
+                    _rebuild_sqlite_table_with_fk(conn, table_map[name])
+            violations = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+            if violations:
+                raise ReviewForeignKeyError(f"foreign key check failed: {violations[:5]}")
+    except ReviewForeignKeyError:
+        raise
+    except Exception as exc:
+        raise ReviewForeignKeyError(f"failed to apply review foreign keys: {exc}") from exc
 
 def get_db():
     db = SessionLocal()
