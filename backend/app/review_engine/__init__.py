@@ -27,6 +27,7 @@ Modules
 - ``layers.py``          — Issue layer classification (deterministic/structural/AI)
 - ``validation.py``      — AI issue evidence + safety checks
 - ``pipeline.py``        — Issue ranking, de-duplication, shadow suppression
+ - ``false_positives.py`` — Rulebook v1 false-positive matchers for default filtering
 - ``orchestrator.py``    — Stage-based pipeline runner with diagnostics
 - ``ai_candidates.py``   — AI candidate engine (chunking, provider, caching)
 - ``reporting.py``       — Report aggregator (display groups, quality scoring)
@@ -36,6 +37,7 @@ Modules
 """
 
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401
+from app.review_engine.false_positives import is_rulebook_false_positive, rulebook_false_positive_reason  # noqa: F401
 
 DocumentContext = None
 TextSpan = None

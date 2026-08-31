@@ -866,8 +866,11 @@ def test_false_positive_signature_filter_drops_matched_issues():
         {"SPELL|拼写|consumbles"},
     )
 
-    assert len(filtered) == 1
-    assert filtered[0]["original_text"] == "digestive"
+    assert len(filtered) == 2
+    marked = next(item for item in filtered if item["original_text"] == "consumbles")
+    kept = next(item for item in filtered if item["original_text"] == "digestive")
+    assert marked.get("possible_false_positive") is True
+    assert kept.get("possible_false_positive") is not True
 
 
 def test_sync_false_positive_memory_adds_and_removes_entries():
@@ -957,8 +960,11 @@ def test_false_positive_penalty_keeps_same_text_on_different_rule():
         {"SPELL|拼写|consumbles"},
     )
 
-    assert len(filtered) == 1
-    assert filtered[0]["rule"] == "R013"
+    assert len(filtered) == 2
+    spell_issue = next(item for item in filtered if item["rule"] == "SPELL")
+    term_issue = next(item for item in filtered if item["rule"] == "R013")
+    assert spell_issue.get("possible_false_positive") is True
+    assert term_issue.get("possible_false_positive") is not True
 
 
 def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
@@ -2960,7 +2966,7 @@ def test_chinese_human_baseline_rules_cover_consistency_logic_and_product_cases(
         "前文用 Catalog Number，后文用 Cat. No.。表格1使用 Cat.No。"
         "使用 PBMC 和外周血单个核细胞进行分析。RNA 完整性对实验结果至关重要，RNA 质量直接影响数据可靠性。"
         "表3列出了试剂盒的5个组分。步骤3要求使用试剂A进行反应。声称无 RNase 污染。"
-        "货号：H-020-000898-01。规格：16 RXN / 4 RXN。"
+        "货号：H-020-000898-01。规格：16 RXN / 4 RXN。请将规格单位 RXN 改为反应。"
     )
 
     issues = review_api._run_chinese_human_baseline_rules(content)
@@ -3339,10 +3345,11 @@ def test_finalize_review_issues_filters_known_false_positives_by_default():
     filtered, diagnostics = review_api._finalize_review_issues(issues, '联系电话：XXXXXXXXXXX', set())
 
     originals = {issue['original_text'] for issue in filtered}
-    assert '空格' not in originals
+    space_issue = next(issue for issue in filtered if issue['original_text'] == '空格')
+    assert space_issue.get('possible_false_positive') is True
     assert '物质的名' not in originals
     assert 'XXXXXXXXXXX' in originals
-    assert diagnostics['after_known_false_positive_ai'] == 0
+    assert diagnostics['after_known_false_positive_ai'] == 1
 
 
 def test_should_skip_rule_match_skips_ext_r013_for_pdf():
@@ -3409,3 +3416,137 @@ def test_normalize_review_issue_display_falls_back_to_description_when_suggestio
     result = review_api._normalize_review_issue_display([issue])
 
     assert result[0].suggestion == '术语表缺少对应中文释义'
+
+
+def test_rulebook_false_positive_drops_nested_list_numbering():
+    issue = {
+        "source": "ai",
+        "rule": "AI-STYLE-001",
+        "category": "格式规范",
+        "severity": "general",
+        "original_text": "1)",
+        "context": "1. Prepare the sample\n  1) Mix the buffer\n  2) Incubate",
+        "suggestion": "外层与内层编号格式不统一，请统一为 1. 2. 3.",
+        "description": "嵌套有序列表编号差异",
+        "audit_basis": "格式规范",
+        "confidence": 88,
+    }
+
+    assert review_api.is_rulebook_false_positive(issue) is True
+    assert review_pipeline.select_review_issues([issue]) == []
+
+
+def test_rulebook_false_positive_drops_official_global_site():
+    issue = {
+        "source": "ai",
+        "rule": "DET-URL-001",
+        "category": "官网地址",
+        "severity": "serious",
+        "original_text": "https://global-mgitech.com/",
+        "context": "Visit https://global-mgitech.com/ for support.",
+        "suggestion": "官网地址错误，应改为 en.mgi-tech.com",
+        "description": "术语一致性：官网地址不正确",
+        "audit_basis": "官网规范",
+        "confidence": 90,
+    }
+
+    filtered, _diagnostics = review_api._finalize_review_issues([issue], "Visit https://global-mgitech.com/", set())
+    assert filtered == []
+
+
+def test_rulebook_false_positive_drops_english_email_only_contact():
+    issue = {
+        "source": "ai",
+        "rule": "AI-CHECK-001",
+        "category": "信息完整性",
+        "severity": "general",
+        "original_text": "MGI-service@mgi-tech.com",
+        "context": "Technical support: MGI-service@mgi-tech.com",
+        "suggestion": "The manufacturer contact is missing a telephone number.",
+        "description": "English manual lacks a phone number",
+        "audit_basis": "contact completeness",
+        "confidence": 86,
+    }
+
+    assert review_api.is_rulebook_false_positive(issue) is True
+
+
+def test_rulebook_false_positive_keeps_real_url_issue():
+    issue = {
+        "source": "rule",
+        "rule": "DET-URL-001",
+        "category": "官网地址",
+        "severity": "serious",
+        "original_text": "https://en.mgi-tech.com/",
+        "context": "Visit https://en.mgi-tech.com/ for support.",
+        "suggestion": "英文手册应使用 https://global-mgitech.com/",
+        "description": "官网地址错误",
+        "audit_basis": "官网规范",
+        "confidence": 95,
+    }
+
+    assert review_api.is_rulebook_false_positive(issue) is False
+
+
+def test_review_cache_version_tracks_false_positive_module():
+    assert review_api.PROJECT_ROOT / "backend" / "app" / "review_engine" / "false_positives.py" in review_api.REVIEW_CACHE_VERSION_FILES
+
+
+def test_should_reuse_cached_review_respects_force_and_provider():
+    cached = SimpleNamespace(id=9)
+    assert review_api._should_reuse_cached_review(cached) is True
+    assert review_api._should_reuse_cached_review(cached, force=True) is False
+    assert review_api._should_reuse_cached_review(cached, provider="qwen") is False
+    assert review_api._should_reuse_cached_review(None) is False
+
+
+def test_normalize_review_status_accepts_cancelled():
+    assert review_api._normalize_review_status("cancelled") == "cancelled"
+    assert review_api._normalize_review_status("running") == "running"
+
+
+def test_review_cancel_flag_blocks_progress_and_clears():
+    review_id = 99001
+    review_api._clear_review_runtime_flags(review_id)
+    review_api.request_review_cancel(review_id)
+    assert review_api._is_review_cancelled(review_id) is True
+    try:
+        review_api.set_progress(review_id, "running", "规则审核", 25, "进行中")
+        assert False, "cancelled review should reject progress updates"
+    except review_api.ReviewCancelled:
+        pass
+    review_api.set_progress(
+        review_id,
+        "cancelled",
+        "已停止",
+        0,
+        "用户已停止审核",
+        allow_when_cancelled=True,
+    )
+    assert review_api.get_progress(review_id)["status"] == "cancelled"
+    review_api._clear_review_runtime_flags(review_id)
+    assert review_api._is_review_cancelled(review_id) is False
+
+
+def test_run_cached_ai_chunk_review_bypasses_cache_on_force(monkeypatch):
+    review_id = 99002
+    cache_key = "force-chunk-key"
+    review_api._clear_review_runtime_flags(review_id)
+    review_api._review_force_rerun_ids.add(review_id)
+    review_api._ai_review_chunk_cache[cache_key] = [{"rule": "cached"}]
+    monkeypatch.setattr(review_api, "_build_ai_chunk_cache_key", lambda *args, **kwargs: cache_key)
+    calls = []
+
+    def fake_timeout(*args, **kwargs):
+        calls.append(1)
+        return {"issues": [{"rule": "fresh"}]}
+
+    monkeypatch.setattr(review_api, "_call_with_timeout", fake_timeout)
+    issues, cache_hit = review_api._run_cached_ai_chunk_review(
+        review_id, "chunk", "cn", "basis", 10
+    )
+    assert cache_hit is False
+    assert issues == [{"rule": "fresh"}]
+    assert calls == [1]
+    review_api._clear_review_runtime_flags(review_id)
+    review_api._ai_review_chunk_cache.pop(cache_key, None)

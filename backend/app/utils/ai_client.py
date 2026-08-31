@@ -1158,7 +1158,7 @@ class AIClient:
         text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
         return text.strip()
 
-    def normalize_audit_issues(self, issues, content, source="ai", min_confidence=70):
+    def normalize_audit_issues(self, issues, content, source="ai", min_confidence=50):
         normalized = []
         if not isinstance(issues, list):
             return normalized
@@ -1185,6 +1185,7 @@ class AIClient:
 
             if confidence < min_confidence:
                 continue
+            needs_human_review = bool(item.get("needs_human_review")) or (50 <= confidence < 70)
             if not description and not suggestion:
                 continue
             if len(description) < 4 and len(suggestion) < 2:
@@ -1224,9 +1225,46 @@ class AIClient:
                 "position": self._clean_text(item.get("position"), 80),
                 "source_models": list(item.get("source_models") or []),
                 "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
+                "needs_human_review": needs_human_review,
             })
 
         return normalized
+
+    def normalize_audit_observations(self, observations):
+        normalized = []
+        seen = {}
+        if not isinstance(observations, list):
+            return normalized
+        for item in observations:
+            if not isinstance(item, dict):
+                continue
+            title = self._clean_text(item.get("title"), 24)
+            description = self._clean_text(item.get("description"), 80)
+            if not title and not description:
+                continue
+            category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
+            severity = self._normalize_severity(item.get("severity"), self._normalize_confidence(item.get("confidence"), 70))
+            confidence = self._normalize_confidence(item.get("confidence"), 70)
+            key = (title or description[:80]).lower()
+            payload = {
+                "category": category,
+                "severity": severity,
+                "title": title or description[:80],
+                "description": description or title,
+                "confidence": confidence,
+            }
+            if key not in seen:
+                seen[key] = payload
+                normalized.append(payload)
+                continue
+            if confidence > int(seen[key].get("confidence") or 0):
+                seen[key].update(payload)
+        return normalized
+
+    def _take_pending_observations(self):
+        items = getattr(self, "_pending_audit_observations", None) or []
+        self._pending_audit_observations = []
+        return self.normalize_audit_observations(items)
 
     @staticmethod
     def _audit_issue_merge_key(issue):
@@ -1313,6 +1351,10 @@ class AIClient:
 
         data = self._extract_json(result, {"issues": []})
         issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
+        observations = self.normalize_audit_observations(data.get("observations", []))
+        pending = getattr(self, "_pending_audit_observations", None)
+        if isinstance(pending, list):
+            pending.extend(observations)
         for issue in issues:
             issue["source_models"] = [provider_key] if provider_key else []
             issue["consensus_score"] = int(issue.get("confidence") or 0)
@@ -2143,7 +2185,7 @@ class AIClient:
 REVIEW GOAL:
 - Behave like a human release reviewer, not a grammar checker.
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
-- Ordinary grammar, article usage, punctuation, capitalization, spacing, and style preferences are low value. Report them only when they make an instruction ambiguous, incomplete, or impossible to perform.
+- Style, readability, redundancy, punctuation habits, spacing, and similar quality issues SHOULD be reported with severity=suggestion. Keep fatal/serious/general for safety, compliance, operability, completeness, and consistency problems.
 
 ADDITIONAL MANUAL REVIEW CHECKS:
 - Cross-reference semantics: report when a reference such as Section X.X, Figure X, or Table X points to missing content or clearly mismatched topic content. Use category "编号引用".
@@ -2154,16 +2196,11 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 
 🚫 FORBIDDEN issue types (reporting any of these is an error):
-- ❌ Single punctuation marks (e.g. "." → "," or ":" → ";")
-- ❌ Single characters or letters (e.g. "a" → "an" with only one char)
-- ❌ Issues where original differs from expected only by one punctuation or space
-- ❌ Pure formatting differences (fullwidth/halfwidth, spacing preferences)
-- ❌ Issues where the original field is shorter than 2 meaningful characters
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
-- ❌ Rewriting compliance / legal / regulatory statements, product names, or warning text to a more standard template, unless the document text itself proves an objective error
-- ❌ Suggesting to expand a well-known abbreviation (e.g. DNB → DNA Nanoball) unless this is the first occurrence in the document and no definition exists anywhere in the document
-- ❌ Gerund vs noun form differences in figure captions or UI labels (e.g. Reviewing parameters vs Review parameters) unless the same UI element uses both forms inconsistently within the same context
-- ❌ Adding/removing articles (a/an/the) when the meaning is unambiguous and the sentence remains grammatical
+- ❌ Issues where the original field is shorter than 2 meaningful characters
+- ❌ Pure formatting differences that are visually identical
+
+Quality issues such as punctuation habit, spacing, articles, abbreviation expansion, gerund vs noun, and style preferences SHOULD be reported as severity=suggestion.
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
@@ -2201,6 +2238,7 @@ Requirements:
 3. CYY human review experience baseline is for identifying content issues - report with evidence
 4. Deduplicate: report each error only once per document
 5. If the system prompt provided a document filename, check for filename spelling errors and product name consistency with body content
+6. Also output observations (1-3 chapter-level findings). Do not repeat any fact already covered by issues. Title <= 16 characters, description one sentence.
 
 Output ONLY strict JSON:
 {{
@@ -2217,6 +2255,15 @@ Output ONLY strict JSON:
       "basis": "review basis or checklist clause used for the judgment",
       "source": "ai",
       "status": "open",
+      "confidence": 50-100
+    }}
+  ],
+  "observations": [
+    {{
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "severity": "fatal|serious|general|suggestion",
+      "title": "short title",
+      "description": "one-sentence chapter-level evidence",
       "confidence": 50-100
     }}
   ],
@@ -2243,16 +2290,16 @@ Use severity=fatal only for missing or wrong safety warnings, contraindications,
 Confidence scoring guide:
 - 90-100: Definite error (misspelling, wrong terminology, factual error)
 - 70-89: Likely error (non-standard grammar, inconsistent formatting)
-- 50-69: Uncertain / needs human review (report only if safety or compliance related)
+- 50-69: Uncertain / needs human review. Still report these issues and set needs_human_review=true.
 
-Return empty issues array if no issues with confidence >= 70. Only report confidence 50-69 issues when they affect operational safety or regulatory compliance."""
+Return all issues with confidence >= 50. Do not return an empty issues array only because confidence is below 70."""
         else:
             system_prompt = f"""{base_system_prompt}
 
 审核目标：
 - 按人工发布审核的思路检查，不按普通语法校对检查。
 - 优先输出影响发布审批、法规合规、用户操作、信息完整性、术语一致性、表格内容完整性、图文引用、版本记录、默认账号密码、IP/URL 暴露、法律声明的内容问题。
-- 普通语法、冠词、标点、大小写、空格、风格偏好属于低价值问题；只有会导致说明不清、步骤不可执行或合规风险时才输出。
+- 风格、可读性、表述冗余、标点习惯等属于质量类问题，允许报告，统一归入 severity=suggestion；仍需报告 fatal/serious/general 的安全、合规、可操作性和一致性问题。
 
 附加人工审核检查项（按需报告，不得为凑数而报）：
 - 交叉引用语义检查：文中“参见 X.X 节 / 图 X / 表 X”等引用，若被引用对象不存在或指向内容与描述主题明显不符，报告，category=编号引用。
@@ -2263,16 +2310,11 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 - 商标或专有名词大小写：品牌名如 macOS、DNBSEQ、GenSeq 的大小写与官方写法不一致且同文档内混用时，报告，category=术语一致性。
 
 🚫 严禁输出的问题类型（违反即为错误）：
-- ❌ 单个标点符号（如 "。" → "，" 或 "." → ","）
-- ❌ 单个中文字符或英文字母（如 "的" → "地" 且仅有一个字）
-- ❌ 原文与建议仅差一个标点或空格
-- ❌ 纯格式差异（全角/半角标点互换、中英文空格增减）
-- ❌ original 字段长度小于 2 个有意义字符的问题
 - ❌ Unicode 等价字符差异，例如 µ(U+00B5) 与 μ(U+03BC)、全角与半角数字、U+2212 减号与 U+002D 连字符，在视觉呈现一致时不得报错
-- ❌ 仅为了更标准而改写合规、法律、法规声明、产品名称、警告文本；只有原文能证明存在客观错误时才允许报告
-- ❌ 要求展开公认缩写，例如 DNB → DNA Nanoball；只有全文第一次出现且全文其他位置都没有定义时才允许报告
-- ❌ 图注或 UI 标签中动名词与名词形式差异，例如 Reviewing parameters 与 Review parameters；只有同一对象在同一上下文内前后不一致时才允许报告
-- ❌ 在句义明确且句子仍然成立时，仅因冠词 a/an/the 的增删而报错
+- ❌ original 字段长度小于 2 个有意义字符的问题
+- ❌ 纯格式差异但视觉呈现完全一致
+
+标点习惯、空格、冠词、缩写展开、动名词形式和风格偏好等质量类问题应报告，severity=suggestion。
 
 重要提醒：
 - 只报告有明确文本证据的问题。
@@ -2309,6 +2351,7 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
 5. 如果系统提示中给出了文档文件名，请检查文件名拼写、产品名与正文一致性
+6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。title 不超过 16 字，description 只保留一句。
 
 输出严格JSON：
 {{
@@ -2325,6 +2368,15 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
       "basis": "判断依据或引用的规则条款",
       "source": "ai",
       "status": "open",
+      "confidence": 50-100
+    }}
+  ],
+  "observations": [
+    {{
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "severity": "fatal|serious|general|suggestion",
+      "title": "短标题",
+      "description": "一句证据说明",
       "confidence": 50-100
     }}
   ],
@@ -2351,9 +2403,9 @@ severity=fatal 仅用于：安全警告、禁忌、警示信息缺失或错误�
 confidence 评分指南：
 - 90-100：确凿错误（拼写错误、术语用错、事实性错误）
 - 70-89：很可能有误（语法不规范、格式不一致）
-- 50-69：可疑/需人工确认（只有强烈怀疑时才报告，否则不报告）
+- 50-69：可疑/需人工确认，仍需报告并标记 needs_human_review=true
 
-如果没有高置信度(≥70)问题，返回空数组。50-69的问题只在影响操作安全或法规合规时才报告。"""
+置信度 ≥50 的问题都要输出。不要因为没有 ≥70 的问题就返回空数组。"""
 
         return {
             "language": lang,
@@ -2366,6 +2418,7 @@ confidence 评分指南：
 
         content = content or ""
         # 上层审核流程已做滑动窗口分块，这里保持单次模型调用，避免二次分块打散上下文。
+        self._pending_audit_observations = []
 
         prompt_payload = self.build_audit_prompt_payload(
             content,
@@ -2384,7 +2437,7 @@ confidence 评分指南：
         if force_provider:
             forced_issues = self._run_provider_audit(force_provider, messages, content, request_label=request_label, review_id=review_id)
             if forced_issues:
-                return {"issues": forced_issues}
+                return {"issues": forced_issues, "observations": self._take_pending_observations()}
             result = self.chat_with_provider(
                 force_provider,
                 messages,
@@ -2394,13 +2447,14 @@ confidence 评分指南：
                 review_id=review_id,
             )
             if not result:
-                return {"issues": []}
+                return {"issues": [], "observations": self._take_pending_observations()}
             data = self._extract_json(result, {"issues": []})
             issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
             for issue in issues:
                 issue["source_models"] = [str(force_provider or "")]
                 issue["consensus_score"] = int(issue.get("confidence") or 0)
-            return {"issues": issues}
+            observations = self.normalize_audit_observations(data.get("observations", []))
+            return {"issues": issues, "observations": observations}
 
         primary_provider = ""
         primary_issues = []
@@ -2415,19 +2469,19 @@ confidence 评分指南：
                 break
 
         if not primary_issues and not self.deepseek_client:
-            return {"issues": []}
+            return {"issues": [], "observations": self._take_pending_observations()}
 
         secondary_issues = []
         if self.deepseek_client and primary_provider != "deepseek":
             secondary_issues = self._run_provider_audit("deepseek", messages, content, request_label=f"{request_label}.deepseek", review_id=review_id)
 
         if not primary_issues:
-            return {"issues": secondary_issues}
+            return {"issues": secondary_issues, "observations": self._take_pending_observations()}
         if not secondary_issues:
-            return {"issues": primary_issues}
+            return {"issues": primary_issues, "observations": self._take_pending_observations()}
 
         merged_issues = self._merge_audit_issue_sets(primary_issues, secondary_issues, primary_provider or "primary", "deepseek")
-        return {"issues": merged_issues}
+        return {"issues": merged_issues, "observations": self._take_pending_observations()}
 
     # ------------------------------------------------------------------
     # 规则审核的二次验证

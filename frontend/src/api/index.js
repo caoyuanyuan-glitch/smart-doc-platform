@@ -134,11 +134,13 @@ export const documentAPI = {
 }
 
 export const reviewAPI = {
-  create: (documentId, mode, provider) => {
+  create: (documentId, mode, provider, options = {}) => {
     const params = { mode, timeout: 300000 }
     if (provider) params.provider = provider
+    if (options.force) params.force = true
     return instance.post(`/review/${documentId}`, {}, { params })
   },
+  createSnippet: (payload) => instance.post('/review/snippet', payload, { timeout: 300000 }),
   compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
     const formData = new FormData()
     formData.append('main_file', mainFile)
@@ -159,6 +161,7 @@ export const reviewAPI = {
     return instance.post(`/review/${id}/gold-compare`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
+  cancel: (reviewId) => instance.post(`/review/${reviewId}/cancel`),
   getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
   getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
   list: (params = {}) => instance.get('/review/', { params }),

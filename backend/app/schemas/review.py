@@ -10,10 +10,22 @@ class ReviewProgress(BaseModel):
     message: str = ""
     timestamp: str = ""
 
+class ReviewJudgmentStats(BaseModel):
+    confirmed: int = 0
+    false_positive: int = 0
+    pending: int = 0
+    manual: int = 0
+
 class ReviewCreate(BaseModel):
     document_id: int
     mode: str = "hybrid"
     provider: Optional[str] = None
+
+class SnippetReviewCreate(BaseModel):
+    text: str
+    mode: str = "hybrid"
+    provider: Optional[str] = None
+    force: bool = True
 
 class Review(BaseModel):
     id: int
@@ -27,6 +39,7 @@ class Review(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime] = None
     progress: Optional[ReviewProgress] = None
+    judgment_stats: Optional[ReviewJudgmentStats] = None
 
     class Config:
         orm_mode = True
