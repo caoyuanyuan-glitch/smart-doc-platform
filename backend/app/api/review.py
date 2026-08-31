@@ -7176,6 +7176,95 @@ def _span_in_tableish_text(text, start, end):
     return neighborhood.count('|') >= 4
 
 
+def _short_edit_distance(left, right):
+    if left == right:
+        return 0
+    if abs(len(left) - len(right)) > 2:
+        return 99
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, 1):
+        current = [i]
+        for j, right_char in enumerate(right, 1):
+            current.append(min(
+                current[-1] + 1,
+                previous[j] + 1,
+                previous[j - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
+
+
+def _extract_printed_page_number(page_text):
+    lines = [line.strip() for line in str(page_text or '').splitlines() if line.strip()]
+    for line in reversed(lines[-8:]):
+        if re.fullmatch(r'0*\d{1,3}', line):
+            return int(line)
+    return None
+
+
+def _printed_page_spans(raw_content):
+    text = str(raw_content or '')
+    if not text:
+        return []
+    if '\f' in text:
+        spans = []
+        offset = 0
+        pages = text.split('\f')
+        for page_index, page_text in enumerate(pages):
+            printed = _extract_printed_page_number(page_text)
+            start = offset
+            end = offset + len(page_text)
+            spans.append({
+                'printed': printed if printed is not None else page_index + 1,
+                'start': start,
+                'end': end,
+            })
+            offset = end + 1
+        return spans
+
+    markers = list(re.finditer(r'(?m)^[ \t]*0*(\d{2,3})[ \t]*$', text))
+    if len(markers) < 2:
+        return []
+    numbers = [int(match.group(1)) for match in markers]
+    increasing = sum(1 for index in range(1, len(numbers)) if numbers[index] >= numbers[index - 1])
+    if increasing < len(numbers) - 1:
+        return []
+
+    spans = []
+    start = 0
+    for index, match in enumerate(markers):
+        spans.append({
+            'printed': int(match.group(1)),
+            'start': start,
+            'end': match.end(),
+        })
+        start = match.end()
+    if spans:
+        spans[-1]['end'] = len(text)
+    return spans
+
+
+def _printed_page_at_offset(spans, offset):
+    for span in spans:
+        if span['start'] <= offset < span['end']:
+            return span['printed']
+        if offset == span['end'] and span is spans[-1]:
+            return span['printed']
+    return None
+
+
+def _find_named_section_start(normalized, section_name):
+    name = re.sub(r'\s+', '', str(section_name or ''))
+    if not name:
+        return None
+    direct = re.search(re.escape(str(section_name or '').strip()), normalized)
+    if direct:
+        return direct.start()
+    pattern = r'(?m)^[ \t]*' + r'\s*'.join(re.escape(char) for char in name) + r'[ \t]*$'
+    match = re.search(pattern, normalized)
+    return match.start() if match else None
+
+
 def _run_chinese_human_baseline_rules(content):
     issues = []
     seen = set()
@@ -7436,6 +7525,15 @@ def _run_chinese_human_baseline_rules(content):
             '建议改为“线缆”',
             '“线揽”疑似“线缆”的错别字，物料或部件表中应使用规范部件名称。',
             'CYY人工审核经验基线 - 常见中文错别字', 'general', 96,
+        )
+
+    for match in re.finditer(r'交户', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-007', '术语拼写',
+            '建议改为“交互”',
+            '“交户”疑似“交互”的错别字，界面说明中应使用“用户交互界面”。',
+            'CYY人工审核经验基线 - 常见中文错别字', 'serious', 97,
         )
 
     for match in re.finditer(r'加入至', normalized):
@@ -8517,6 +8615,77 @@ def _run_chinese_human_baseline_rules(content):
                 'CYY人工审核经验基线 - 相邻步骤重复检查',
                 'general',
                 89,
+            )
+
+    ui_labels = []
+    for match in re.finditer(r'【([^】]{1,40})】', normalized):
+        compact = re.sub(r'\s+', '', match.group(1))
+        if compact:
+            ui_labels.append((match.start(), match.end(), compact))
+    for match in re.finditer(r'(?m)^[ \t]*(长按[\u4e00-\u9fff]{2})[ \t]*$', normalized):
+        ui_labels.append((match.start(), match.end(), match.group(1)))
+
+    unique_ui_labels = {}
+    for start, end, compact in ui_labels:
+        if not re.search(r'[\u4e00-\u9fff]', compact):
+            continue
+        if not (2 <= len(compact) <= 12):
+            continue
+        unique_ui_labels.setdefault(compact, (start, end))
+
+    ui_items = list(unique_ui_labels.items())
+    for left_index, (left_label, left_span) in enumerate(ui_items):
+        for right_label, right_span in ui_items[left_index + 1:]:
+            if abs(len(left_label) - len(right_label)) > 1:
+                continue
+            if len(os.path.commonprefix([left_label, right_label])) < 2:
+                continue
+            distance = _short_edit_distance(left_label, right_label)
+            if distance < 1 or distance > 2:
+                continue
+            start, end = left_span
+            add_issue(
+                start, end, f'{left_label} / {right_label}',
+                'CYY-CN-UI-002', '术语一致性',
+                f'建议将界面文案统一为“{left_label}”或“{right_label}”中的一种',
+                f'同一操作在界面文案中同时出现“{left_label}”和“{right_label}”，用词需要统一。',
+                'CYY人工审核经验基线 - 界面按钮文案一致性', 'general', 94,
+            )
+
+    page_spans = _printed_page_spans(raw_content)
+    procedure_steps = [
+        (int(match.group(1)), match.start())
+        for match in re.finditer(r'(?m)^[ \t]*(\d{1,2})\.\s+\S', normalized)
+    ]
+    page_step_ref_re = re.compile(
+        r'第\s*(\d+)\s*页\s*[“"「]?\s*([^”"」步骤]{0,40}?)\s*[”"」]?\s*步骤\s*(\d+)'
+    )
+    if page_spans and procedure_steps:
+        for match in page_step_ref_re.finditer(normalized):
+            cited_page = int(match.group(1))
+            section_name = re.sub(r'\s+', '', match.group(2) or '')
+            cited_step = int(match.group(3))
+            search_from = 0
+            if section_name:
+                heading_start = _find_named_section_start(normalized, match.group(2))
+                if heading_start is None:
+                    continue
+                search_from = heading_start
+            step_pos = next(
+                (pos for number, pos in procedure_steps if number == cited_step and pos >= search_from),
+                None,
+            )
+            if step_pos is None:
+                continue
+            actual_page = _printed_page_at_offset(page_spans, step_pos)
+            if actual_page is None or actual_page == cited_page:
+                continue
+            add_issue(
+                match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+                'CYY-CN-REF-005', '交叉引用',
+                f'请将页码改为第 {actual_page} 页，或核对该步骤所在页',
+                f'引用“步骤{cited_step}”指向第 {cited_page} 页，该步骤实际出现在第 {actual_page} 页。',
+                'CYY人工审核经验基线 - 步骤页码交叉引用', 'serious', 95,
             )
 
     return issues
