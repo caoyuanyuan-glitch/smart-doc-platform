@@ -1,174 +1,56 @@
 <template>
   <div class="qa-container">
-    <h2 class="page-title">知识库问答</h2>
+    <header class="qa-hero">
+      <div>
+        <h2 class="page-title">知识库问答</h2>
+        <p class="page-subtitle">点一张意向卡片框定检索范围，或直接提问检索写作规范与资源库</p>
+      </div>
+      <el-button v-if="inChat" class="back-home-btn" @click="backToScenes">
+        <el-icon><ArrowLeft /></el-icon>
+        返回主页
+      </el-button>
+    </header>
 
-    <div class="qa-layout">
-      <aside class="knowledge-panel">
-        <div class="panel-header-row">
-          <span class="panel-title">文件夹结构</span>
-          <el-button text size="small" @click="expandAll">{{ treeExpanded ? '折叠全部' : '展开全部' }}</el-button>
-        </div>
-        <div v-if="treeLoading" class="tree-loading">加载中...</div>
-        <el-tree
-          v-else
-          ref="treeRef"
-          :data="treeData"
-          show-checkbox
-          node-key="id"
-          :props="treeProps"
-          :default-expand-all="false"
-          :check-strictly="false"
-          :expand-on-click-node="true"
-          @check="handleTreeCheck"
-        >
-          <template #default="{ node, data }">
-            <span class="tree-node">
-              <el-icon class="tree-folder-icon"><Folder /></el-icon>
-              <span class="tree-node-label">{{ node.label }}</span>
-              <span class="tree-node-count" v-if="data.docCount > 0">{{ data.docCount }}个文档</span>
-              <span class="tree-node-count empty" v-else>空</span>
-            </span>
-          </template>
-        </el-tree>
-      </aside>
-
-      <section class="chat-panel">
-        <div class="chat-toolbar">
-          <div class="ai-status-indicator" v-if="aiStatus" @click="refreshAiStatus">
-            <span class="status-dot" :class="aiStatus.primary_status"></span>
-            <span class="status-text">Kimi</span>
-            <span class="status-latency" v-if="aiStatus.providers?.kimi?.status === 'ok'">{{ aiStatus.providers.kimi.latency_ms }}ms</span>
-            <span class="status-error" v-else-if="aiStatus.providers?.kimi?.status === 'error'" title="Kimi 不可用">离线</span>
-            <span class="status-refresh-hint">点击刷新</span>
-          </div>
-          <el-button size="small" text @click="newConversation" :disabled="messages.length <= 1">
-            <el-icon><Plus /></el-icon> 新建会话
-          </el-button>
-          <el-button size="small" text @click="copyAll" :disabled="messages.length <= 1">
-            <el-icon><CopyDocument /></el-icon> 复制全文
-          </el-button>
-          <el-dropdown @command="handleExport">
-            <el-button size="small" text :disabled="messages.length <= 1">
-              <el-icon><Download /></el-icon> 导出
-              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
-                <el-dropdown-item command="word">Word (.doc)</el-dropdown-item>
-                <el-dropdown-item command="pdf">PDF (.pdf)</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-        </div>
-        <div class="chat-messages" ref="chatBox">
-          <div
-            v-if="checkedLabels.length > 0"
-            class="selected-tags"
+    <div v-if="!inChat" class="qa-home">
+      <section class="home-main">
+        <div class="scene-grid">
+          <button
+            v-for="card in SCENE_CARDS"
+            :key="card.key"
+            class="scene-card"
+            :style="{ '--accent': card.accent }"
+            type="button"
+            :disabled="treeLoading"
+            @click="enterScene(card)"
           >
-            <span class="selected-tags-label">已选知识库：</span>
-            <el-tag
-              v-for="label in checkedLabels"
-              :key="label"
-              size="small"
-              closable
-              @close="removeTag(label)"
-            >{{ label }}</el-tag>
-          </div>
-          <div v-if="showInitialSuggestions" class="recommendations">
-            <div v-if="initialSuggestionsLoading" class="recommendations-loading">
-              <span v-for="n in 4" :key="n" class="skeleton-line"></span>
-            </div>
-            <div v-else class="suggestion-list">
-              <div
-                v-for="(q, i) in displaySuggestions"
-                :key="i"
-                class="suggestion-item"
-                @click="clickSuggestion(q)"
-              >
-                <span class="suggestion-dot"></span>
-                <span class="suggestion-text">"{{ stripQuotes(q) }}"</span>
-              </div>
-            </div>
-            <span
-              v-if="suggestionsRefreshable && displaySuggestions.length"
-              class="refresh-btn"
-              @click="refreshInitialSuggestions"
-            >
-              <el-icon><svg viewBox="0 0 1024 1024" width="12" height="12"><path d="M771.776 794.88A384 384 0 0 1 128 512h64a320 320 0 0 0 555.712 216.448H654.72a32 32 0 0 1 0 64h151.776a32 32 0 0 0 32-32V612.48a32 32 0 0 0-64 0v141.056a31.872 31.872 0 0 1-2.72 41.344zM276.288 229.12A384 384 0 0 1 896 512h-64a320 320 0 0 0-555.712-216.448h93.056a32 32 0 1 1 0 64H213.248a32 32 0 0 1-32-32V180.224a32 32 0 0 1 64 0v93.056a31.904 31.904 0 0 1 31.04-44.16z" fill="currentColor"></path></svg></el-icon>
-              换一批
-            </span>
-          </div>
-          <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
-            <div class="avatar" :class="msg.role">
-              <el-icon v-if="msg.role === 'user'"><User /></el-icon>
-              <el-icon v-else>
-                <svg viewBox="0 0 32 32" fill="none" style="width:18px;height:18px">
-                  <line x1="16" y1="2" x2="16" y2="6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                  <circle cx="16" cy="1.5" r="1.5" fill="#f59e0b"/>
-                  <rect x="5" y="6" width="22" height="19" rx="6" stroke="currentColor" stroke-width="1.5"/>
-                  <circle cx="11" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
-                  <circle cx="21" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
-                  <circle cx="11" cy="14" r="1.2" fill="currentColor"/>
-                  <circle cx="21" cy="14" r="1.2" fill="currentColor"/>
-                  <path d="M11 21 Q16 24 21 21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
-                </svg>
-              </el-icon>
-            </div>
-            <div class="bubble-wrap">
-              <div class="bubble">{{ msg.content }}</div>
-              <div v-if="msg.sources && msg.sources.length" class="sources">
-                <div class="sources-title">参考来源：</div>
-                <div v-for="(s, si) in uniqSources(msg.sources)" :key="si" class="source-item">{{ s.title || s }}</div>
-              </div>
-              <div v-if="msg.role === 'assistant' && i > 0" class="feedback-row">
-                <div class="feedback-actions">
-                  <span class="feedback-label">评价：</span>
-                  <el-button :type="msg.rating === 1 ? 'primary' : 'default'" size="small" circle @click="rateAnswer(i, 1)">👍</el-button>
-                  <el-button :type="msg.rating === -1 ? 'danger' : 'default'" size="small" circle @click="rateAnswer(i, -1)">👎</el-button>
-                </div>
-                <el-divider direction="vertical" />
-                <el-button size="small" text type="warning" @click="openFeedbackDialog(i)">内容有误？点此反馈</el-button>
-              </div>
-            </div>
-            <div v-if="msg.role === 'assistant' && i > 0 && msg.suggestions && msg.suggestions.length" class="followup-suggestions">
-              <div class="followup-header">你可能还想问</div>
-              <div
-                v-for="(sug, si) in msg.suggestions"
-                :key="si"
-                class="followup-item"
-                :class="{ 'followup-item--expired': i !== lastAssistantIndex }"
-                @click="i === lastAssistantIndex && clickSuggestion(sug)"
-              >
-                <span class="followup-dot"></span>
-                <span class="followup-text">"{{ stripQuotes(sug) }}"</span>
-              </div>
-            </div>
-          </div>
-          <div v-if="loading" class="message assistant">
-            <div class="avatar assistant">
-              <el-icon>
-                <svg viewBox="0 0 32 32" fill="none" style="width:18px;height:18px">
-                  <line x1="16" y1="2" x2="16" y2="6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                  <circle cx="16" cy="1.5" r="1.5" fill="#f59e0b"/>
-                  <rect x="5" y="6" width="22" height="19" rx="6" stroke="currentColor" stroke-width="1.5"/>
-                  <circle cx="11" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
-                  <circle cx="21" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
-                  <circle cx="11" cy="14" r="1.2" fill="currentColor"/>
-                  <circle cx="21" cy="14" r="1.2" fill="currentColor"/>
-                  <path d="M11 21 Q16 24 21 21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
-                </svg>
-              </el-icon>
-            </div>
-            <div class="bubble typing">正在分析知识库内容<span class="dots">...</span></div>
-          </div>
+            <span class="scene-mark" aria-hidden="true"></span>
+            <span class="scene-kicker">{{ card.kicker }}</span>
+            <h3 class="scene-title">{{ card.title }}</h3>
+            <p class="scene-desc">{{ card.desc }}</p>
+            <span class="scene-meta">{{ sceneDocLabel(card) }}</span>
+          </button>
         </div>
-        <div class="chat-input">
+
+        <div class="quick-ask">
+          <div class="quick-ask-head">快捷问法</div>
+          <button
+            v-for="item in GLOBAL_SUGGESTIONS"
+            :key="item"
+            class="quick-ask-item"
+            type="button"
+            :disabled="loading"
+            @click="sendQuestion(item)"
+          >
+            {{ item }}
+          </button>
+        </div>
+
+        <div class="chat-input home-input">
           <el-input
             v-model="question"
             type="textarea"
             :rows="2"
-            placeholder="请输入您的问题，按Enter发送..."
+            placeholder="不选卡片将在「写作规范」和「资源库」中全局检索..."
             @keydown.enter.exact.prevent="sendQuestion(question)"
           />
           <el-button class="voice-btn" :class="{ recording: isRecording }" @click="toggleVoice">
@@ -177,7 +59,200 @@
           <el-button type="primary" :loading="loading" @click="sendQuestion(question)">发送</el-button>
         </div>
       </section>
+
+      <aside class="home-side">
+        <div class="side-head">
+          <span>最近问答</span>
+          <el-button v-if="sessionList.length" size="small" text @click="goHistory">全部</el-button>
+        </div>
+        <div v-if="!sessionList.length" class="side-empty">提问后，会话会显示在这里</div>
+        <button
+          v-for="s in sessionList.slice(0, 8)"
+          :key="s.id"
+          class="side-item"
+          type="button"
+          @click="loadSession(s.id)"
+        >
+          <span class="side-item-title">{{ s.title }}</span>
+          <span class="side-item-time">{{ formatTime(s.updated_at) }}</span>
+        </button>
+      </aside>
     </div>
+
+    <section v-else class="chat-panel">
+      <div class="chat-toolbar">
+        <el-button size="small" text @click="newConversation" :disabled="messages.length <= 1">
+          <el-icon><Plus /></el-icon> 新建会话
+        </el-button>
+        <el-button size="small" text @click="copyAll" :disabled="messages.length <= 1">
+          <el-icon><CopyDocument /></el-icon> 复制全文
+        </el-button>
+        <el-dropdown @command="handleExport">
+          <el-button size="small" text :disabled="messages.length <= 1">
+            <el-icon><Download /></el-icon> 导出
+            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
+              <el-dropdown-item command="word">Word (.doc)</el-dropdown-item>
+              <el-dropdown-item command="pdf">PDF (.pdf)</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </div>
+      <div class="chat-messages" ref="chatBox">
+        <div class="selected-tags">
+          <span class="selected-tags-label">当前范围：</span>
+          <template v-if="activeScene">
+            <el-tag size="small" closable @close="backToScenes">{{ activeScene.title }}</el-tag>
+          </template>
+          <template v-else>
+            <el-tag size="small">写作规范</el-tag>
+            <el-tag size="small">资源库</el-tag>
+            <span class="scope-hint">全局检索</span>
+          </template>
+        </div>
+        <div v-if="showInitialSuggestions" class="recommendations">
+          <div v-if="initialSuggestionsLoading" class="recommendations-loading">
+            <span v-for="n in 4" :key="n" class="skeleton-line"></span>
+          </div>
+          <div v-else class="suggestion-list">
+            <div
+              v-for="(q, i) in displaySuggestions"
+              :key="i"
+              class="suggestion-item"
+              @click="clickSuggestion(q)"
+            >
+              <span class="suggestion-dot"></span>
+              <span class="suggestion-text">"{{ stripQuotes(q) }}"</span>
+            </div>
+          </div>
+          <span
+            v-if="suggestionsRefreshable && displaySuggestions.length"
+            class="refresh-btn"
+            @click="refreshInitialSuggestions"
+          >
+            换一批
+          </span>
+        </div>
+        <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
+          <div class="avatar" :class="msg.role">
+            <el-icon v-if="msg.role === 'user'"><User /></el-icon>
+            <el-icon v-else>
+              <svg viewBox="0 0 32 32" fill="none" style="width:18px;height:18px">
+                <line x1="16" y1="2" x2="16" y2="6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <circle cx="16" cy="1.5" r="1.5" fill="#f59e0b"/>
+                <rect x="5" y="6" width="22" height="19" rx="6" stroke="currentColor" stroke-width="1.5"/>
+                <circle cx="11" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
+                <circle cx="21" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
+                <circle cx="11" cy="14" r="1.2" fill="currentColor"/>
+                <circle cx="21" cy="14" r="1.2" fill="currentColor"/>
+                <path d="M11 21 Q16 24 21 21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+              </svg>
+            </el-icon>
+          </div>
+          <div class="bubble-wrap">
+            <div class="bubble">{{ msg.content }}</div>
+            <div v-if="msg.sources && msg.sources.length" class="sources">
+              <div class="sources-title">参考来源：</div>
+              <div v-for="(s, si) in uniqSources(msg.sources)" :key="si" class="source-item">{{ s.title || s }}</div>
+            </div>
+            <div v-if="msg.role === 'assistant' && i > 0" class="feedback-row">
+              <div class="feedback-actions">
+                <span class="feedback-label">评价：</span>
+                <el-button
+                  class="rate-btn"
+                  :type="msg.rating === 1 ? 'primary' : 'default'"
+                  size="small"
+                  circle
+                  title="有帮助"
+                  @click="rateAnswer(i, 1)"
+                >
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M7 10v12"/>
+                    <path d="M15 5.88L14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88z"/>
+                  </svg>
+                </el-button>
+                <el-button
+                  class="rate-btn"
+                  :type="msg.rating === -1 ? 'danger' : 'default'"
+                  size="small"
+                  circle
+                  title="无帮助"
+                  @click="rateAnswer(i, -1)"
+                >
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M17 14V2"/>
+                    <path d="M9 18.12L10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88z"/>
+                  </svg>
+                </el-button>
+              </div>
+              <el-divider direction="vertical" />
+              <el-button size="small" text type="warning" @click="openFeedbackDialog(i)">内容有误？点此反馈</el-button>
+              <button
+                v-if="msg.suggestions && msg.suggestions.length"
+                class="followup-toggle"
+                type="button"
+                @click="toggleFollowup(i)"
+              >
+                <span class="followup-label">你可能还想问</span>
+                <span class="followup-count">{{ msg.suggestions.length }}</span>
+                <el-icon class="followup-arrow" :class="{ open: isFollowupOpen(i) }"><ArrowDown /></el-icon>
+              </button>
+            </div>
+            <div
+              v-if="msg.role === 'assistant' && i > 0 && msg.suggestions && msg.suggestions.length"
+              class="followup-panel"
+            >
+              <div v-show="isFollowupOpen(i)" class="followup-body">
+                <button
+                  v-for="(sug, si) in msg.suggestions"
+                  :key="si"
+                  class="followup-item"
+                  :class="{ 'followup-item--expired': i !== lastAssistantIndex }"
+                  type="button"
+                  :disabled="i !== lastAssistantIndex"
+                  @click="i === lastAssistantIndex && clickSuggestion(sug)"
+                >
+                  {{ stripQuotes(sug) }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="loading" class="message assistant">
+          <div class="avatar assistant">
+            <el-icon>
+              <svg viewBox="0 0 32 32" fill="none" style="width:18px;height:18px">
+                <line x1="16" y1="2" x2="16" y2="6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <circle cx="16" cy="1.5" r="1.5" fill="#f59e0b"/>
+                <rect x="5" y="6" width="22" height="19" rx="6" stroke="currentColor" stroke-width="1.5"/>
+                <circle cx="11" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
+                <circle cx="21" cy="14" r="2.5" stroke="currentColor" stroke-width="1.2" fill="#1e40af"/>
+                <circle cx="11" cy="14" r="1.2" fill="currentColor"/>
+                <circle cx="21" cy="14" r="1.2" fill="currentColor"/>
+                <path d="M11 21 Q16 24 21 21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+              </svg>
+            </el-icon>
+          </div>
+          <div class="bubble typing">正在分析知识库内容<span class="dots">...</span></div>
+        </div>
+      </div>
+      <div class="chat-input">
+        <el-input
+          v-model="question"
+          type="textarea"
+          :rows="2"
+          :placeholder="inputPlaceholder"
+          @keydown.enter.exact.prevent="sendQuestion(question)"
+        />
+        <el-button class="voice-btn" :class="{ recording: isRecording }" @click="toggleVoice">
+          <el-icon><Microphone /></el-icon>
+        </el-button>
+        <el-button type="primary" :loading="loading" @click="sendQuestion(question)">发送</el-button>
+      </div>
+    </section>
 
     <el-dialog v-model="feedbackVisible" title="反馈内容有误" width="500px">
       <el-form label-position="top">
@@ -201,44 +276,135 @@
 
 <script setup>
 import { ref, nextTick, computed, onMounted, inject, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { qaAPI, knowledgeAPI, instance, getKnowledgeLoadErrorMessage } from '@/api'
+import { qaAPI, knowledgeAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { useUserStore } from '@/store/user'
-import { User, Folder, Microphone, CopyDocument, Download, ArrowDown, Plus } from '@element-plus/icons-vue'
+import { User, Microphone, CopyDocument, Download, ArrowDown, ArrowLeft, Plus } from '@element-plus/icons-vue'
+
+const AGENT_KB_NAME = 'AI agent知识库'
+
+const SCENE_CARDS = [
+  {
+    key: 'style',
+    kicker: '写作规范',
+    title: '查写作规范与风格',
+    desc: '中英文技术文档的语气、用词、标题与版式约定',
+    accent: '#1d4ed8',
+    paths: [['写作规范', '写作风格指南']],
+    suggestions: [
+      '中文技术文档标题和术语该怎么写',
+      '英文说明书的语气和句式有哪些要求',
+      '风格指南里最容易忽略的点是什么'
+    ]
+  },
+  {
+    key: 'sentence',
+    kicker: '句式清单',
+    title: '找表达句式',
+    desc: '建库试剂、自动化等说明书里可直接套用的表达',
+    accent: '#0f766e',
+    paths: [['写作规范', '句式清单']],
+    suggestions: [
+      '建库试剂说明书常用句式有哪些',
+      '自动化说明书里操作步骤该怎么写',
+      '平台反馈过哪些需要统一的句式'
+    ]
+  },
+  {
+    key: 'review',
+    kicker: '审核自检',
+    title: '内容审核与自检',
+    desc: '常见错误、审核规则、Checklist 与发布前核对项',
+    accent: '#b45309',
+    paths: [
+      ['写作规范', '常见错误清单'],
+      ['写作规范', '技术文档审核规则库'],
+      ['写作规范', '说明书自检checklist'],
+      ['写作规范', '审核依据汇总']
+    ],
+    suggestions: [
+      '发布前我应该按哪些项做自检',
+      '技术文档常见错误有哪些',
+      '说明书审核时要重点核对什么'
+    ]
+  },
+  {
+    key: 'term',
+    kicker: '术语库',
+    title: '查术语',
+    desc: '产品、模块与流程的标准译名和对照表',
+    accent: '#be123c',
+    paths: [['资源库', '术语库']],
+    suggestions: [
+      '这个术语的标准译名是什么',
+      '自动化相关术语有哪些对照',
+      '平台反馈过哪些术语需要统一'
+    ]
+  },
+  {
+    key: 'tm',
+    kicker: '记忆库',
+    title: '中英互译',
+    desc: '已审核语料和记忆库条目，用来对照既有译法',
+    accent: '#6d28d9',
+    paths: [['资源库', '记忆库']],
+    suggestions: [
+      '这段中文在记忆库里有没有现成译法',
+      'T7 相关语料是怎么翻译的',
+      '记忆库里有哪些可复用的句对'
+    ]
+  },
+  {
+    key: 'files',
+    kicker: '文件资料',
+    title: '找文件资料',
+    desc: '说明书、手册和产品介绍等原始资料',
+    accent: '#334155',
+    paths: [['资源库', '文件资料']],
+    suggestions: [
+      '这份说明书的主要内容是什么',
+      '产品介绍里强调了哪些功能',
+      '培训手册应该从哪一节开始读'
+    ]
+  }
+]
+
+const GLOBAL_SUGGESTIONS = [
+  '中文技术文档写作有哪些必须遵守的规范',
+  '说明书发布前要做哪些自检',
+  '常用术语的标准译名在哪里查',
+  '记忆库里有没有可复用的中英句对'
+]
 
 const route = useRoute()
-
+const router = useRouter()
 const question = ref('')
 const loading = ref(false)
-const aiStatus = ref(null)
 const chatBox = ref(null)
-const treeRef = ref(null)
 const treeData = ref([])
 const treeLoading = ref(false)
-const treeExpanded = ref(false)
-const checkedIds = ref([])
-const checkedLabels = ref([])
+const activeScene = ref(null)
+const askedUnscoped = ref(false)
 
-const treeProps = { children: 'children', label: 'name' }
-
-const messages = ref([
-  { role: 'assistant', content: '您好！我是智能文档助手。请在左侧文件夹树中勾选知识库，然后向我提问。', sources: [], rating: 0 }
-])
-
+const messages = ref([])
 const initialSuggestionsLoading = ref(false)
 const suggestionsRefreshable = ref(false)
 const displaySuggestions = ref([])
+const openFollowups = ref({})
 
-const FALLBACK_SUGGESTIONS = [
-  '我想快速上手这份文档，应该从哪里开始读起',
-  '文档中有哪些容易踩坑的地方需要特别注意',
-  '这个产品和新手入门流程相比，有哪些关键变化',
-  '如何判断我的文档质量是否达到了发布标准'
-]
+const inChat = computed(() => Boolean(activeScene.value) || askedUnscoped.value)
+const scopeLabel = computed(() => {
+  if (activeScene.value) return activeScene.value.title
+  return '写作规范、资源库（全局）'
+})
+const inputPlaceholder = computed(() => {
+  if (activeScene.value) return `在「${activeScene.value.title}」范围内提问，按 Enter 发送...`
+  return '将在「写作规范」和「资源库」中全局检索，按 Enter 发送...'
+})
 
 const showInitialSuggestions = computed(() => {
-  return !messages.value.some(m => m.role === 'user')
+  return inChat.value && !messages.value.some(m => m.role === 'user')
 })
 
 const lastAssistantIndex = computed(() => {
@@ -260,31 +426,84 @@ let recognition = null
 const refreshFeedbackCount = inject('refreshFeedbackCount', null)
 const userStore = useUserStore()
 const sessionId = ref(null)
+const sessionList = ref([])
+
+function findNodeByPath(nodes, parts) {
+  let list = nodes || []
+  let node = null
+  for (const part of parts) {
+    node = list.find(item => item.name === part) || null
+    if (!node) return null
+    list = node.children || []
+  }
+  return node
+}
+
+function resolveSceneFolderIds(card) {
+  const ids = []
+  for (const path of card.paths) {
+    const node = findNodeByPath(treeData.value, path)
+    if (node) ids.push(node.id)
+  }
+  return ids
+}
+
+function sceneDocCount(card) {
+  let count = 0
+  for (const path of card.paths) {
+    const node = findNodeByPath(treeData.value, path)
+    count += node?.docCount || 0
+  }
+  return count
+}
+
+function sceneDocLabel(card) {
+  if (treeLoading.value) return '正在读取知识库...'
+  const count = sceneDocCount(card)
+  return count > 0 ? `${count} 份资料` : '目录待同步'
+}
+
+function currentKnowledgeIds() {
+  if (!activeScene.value) return []
+  return resolveSceneFolderIds(activeScene.value)
+}
+
+function greetingForScope() {
+  if (activeScene.value) {
+  return `已进入「${activeScene.value.title}」。我会只检索该范围内的资料。`
+  }
+  return '将在「写作规范」和「资源库」中全局检索。'
+}
+
+function resetMessages(withGreeting = true) {
+  messages.value = withGreeting
+    ? [{ role: 'assistant', content: greetingForScope(), sources: [], rating: 0 }]
+    : []
+  sessionId.value = null
+  openFollowups.value = {}
+}
 
 async function fetchInitialSuggestions() {
   if (!showInitialSuggestions.value) return
-  const ids = checkedIds.value
-  if (!ids.length) {
-    displaySuggestions.value = [...FALLBACK_SUGGESTIONS]
-    suggestionsRefreshable.value = false
-    return
+  const ids = currentKnowledgeIds()
+  if (activeScene.value) {
+    displaySuggestions.value = [...activeScene.value.suggestions]
+  } else {
+    displaySuggestions.value = [...GLOBAL_SUGGESTIONS]
   }
-  initialSuggestionsLoading.value = true
+  suggestionsRefreshable.value = Boolean(ids.length)
+  if (!ids.length) return
+  initialSuggestionsLoading.value = false
   try {
     const resp = await qaAPI.getInitialSuggestions(ids, 4)
     const data = resp.data?.data
     if (data?.suggestions?.length) {
       displaySuggestions.value = data.suggestions
       suggestionsRefreshable.value = data.refreshable === true
-    } else {
-      displaySuggestions.value = [...FALLBACK_SUGGESTIONS]
-      suggestionsRefreshable.value = false
     }
   } catch {
-    displaySuggestions.value = [...FALLBACK_SUGGESTIONS]
     suggestionsRefreshable.value = false
   }
-  initialSuggestionsLoading.value = false
 }
 
 function refreshInitialSuggestions() {
@@ -300,51 +519,108 @@ function clickSuggestion(text) {
   sendQuestion(text)
 }
 
+function isFollowupOpen(index) {
+  return Boolean(openFollowups.value[index])
+}
+
+function toggleFollowup(index) {
+  openFollowups.value = {
+    ...openFollowups.value,
+    [index]: !openFollowups.value[index]
+  }
+}
+
+function enterScene(card) {
+  if (treeLoading.value) {
+    ElMessage.info('知识库目录加载中，请稍候')
+    return
+  }
+  const ids = resolveSceneFolderIds(card)
+  if (!ids.length) {
+    ElMessage.warning('该场景对应的知识目录暂不可用，请先同步知识库')
+    return
+  }
+  activeScene.value = card
+  askedUnscoped.value = false
+  resetMessages(true)
+  displaySuggestions.value = [...card.suggestions]
+  fetchInitialSuggestions()
+  nextTick(() => scrollToBottom())
+}
+
+function backToScenes() {
+  if (loading.value) return
+  activeScene.value = null
+  askedUnscoped.value = false
+  messages.value = []
+  sessionId.value = null
+  displaySuggestions.value = []
+  question.value = ''
+  openFollowups.value = {}
+  loadSessionList()
+}
+
 function newConversation() {
   if (loading.value) return
-  messages.value = [
-    { role: 'assistant', content: '您好！我是智能文档助手。请在左侧文件夹树中勾选知识库，然后向我提问。', sources: [], rating: 0 }
-  ]
-  sessionId.value = null
+  resetMessages(true)
   displaySuggestions.value = []
   fetchInitialSuggestions()
   nextTick(() => scrollToBottom())
 }
 
-onMounted(() => {
-  loadKnowledgeTree()
-  fetchInitialSuggestions()
-  fetchAiStatus()
-})
+function formatTime(iso) {
+  if (!iso) return ''
+  return String(iso).replace('T', ' ').slice(0, 16)
+}
 
-async function fetchAiStatus() {
+function goHistory() {
+  router.push('/qa/history/general')
+}
+
+async function loadSessionList() {
   try {
-    const resp = await instance.get('/system/ai-status')
-    aiStatus.value = resp.data
-  } catch (e) {
-    aiStatus.value = null
+    const r = await qaAPI.getSessions('general')
+    sessionList.value = r.data?.sessions || []
+  } catch {
+    sessionList.value = []
   }
 }
 
-function refreshAiStatus() {
-  fetchAiStatus()
+async function loadSession(id) {
+  try {
+    const r = await qaAPI.getSessionDetail(id)
+    const d = r.data
+    sessionId.value = id
+    activeScene.value = null
+    askedUnscoped.value = true
+    messages.value = (d.messages || []).map(m => ({
+      role: m.role,
+      content: m.content,
+      sources: m.sources || [],
+      rating: m.rating || 0,
+      suggestions: []
+    }))
+    await nextTick()
+    scrollToBottom()
+  } catch {
+    ElMessage.warning('加载失败')
+  }
 }
+
+onMounted(() => {
+  loadKnowledgeTree()
+  loadSessionList()
+})
 
 watch(() => route.path, () => {
   loadKnowledgeTree()
-})
-
-watch(checkedIds, () => {
-  if (showInitialSuggestions.value) {
-    fetchInitialSuggestions()
-  }
 })
 
 async function loadKnowledgeTree() {
   treeLoading.value = true
   try {
     const resp = await knowledgeAPI.getTree()
-    const rawTree = resp.data || []
+    const rawTree = (resp.data || []).filter(node => node.name !== AGENT_KB_NAME)
     treeData.value = transformTreeData(rawTree)
   } catch (e) {
     ElMessage.warning(getKnowledgeLoadErrorMessage(e))
@@ -363,7 +639,7 @@ function countRecursiveDocs(node) {
 }
 
 function transformTreeData(nodes) {
-  return nodes.map(node => {
+  return (nodes || []).map(node => {
     const docCount = countRecursiveDocs(node)
     return {
       id: node.id,
@@ -374,71 +650,17 @@ function transformTreeData(nodes) {
   })
 }
 
-function expandAll() {
-  treeExpanded.value = !treeExpanded.value
-  if (treeExpanded.value) {
-    expandAllNodes(treeData.value)
-  } else {
-    collapseAllNodes(treeData.value)
-  }
-}
-
-function expandAllNodes(nodes) {
-  for (const node of nodes) {
-    treeRef.value?.store?.nodesMap?.[node.id]?.expand()
-    if (node.children && node.children.length) {
-      expandAllNodes(node.children)
-    }
-  }
-}
-
-function collapseAllNodes(nodes) {
-  for (const node of nodes) {
-    treeRef.value?.store?.nodesMap?.[node.id]?.collapse()
-    if (node.children && node.children.length) {
-      collapseAllNodes(node.children)
-    }
-  }
-}
-
-function handleTreeCheck() {
-  const checked = treeRef.value?.getCheckedNodes(false, false) || []
-  const halfChecked = treeRef.value?.getHalfCheckedNodes() || []
-  checkedIds.value = [...checked.map(n => n.id), ...halfChecked.map(n => n.id)]
-  checkedLabels.value = checked.map(n => getNodePath(n))
-}
-
-function getNodePath(node) {
-  if (!node) return ''
-  let nodeData = node
-  const parts = [nodeData.name || nodeData.label]
-  let current = node
-  while (current.parent && current.parent.level > 0) {
-    parts.unshift(current.parent.data?.name || current.parent.label)
-    current = current.parent
-  }
-  return parts.join(' / ')
-}
-
-function removeTag(label) {
-  const pathParts = label.split(' / ')
-  const leafName = pathParts[pathParts.length - 1]
-  const nodes = treeRef.value?.getCheckedNodes(false, false) || []
-  const target = nodes.find(n => (n.name || n.label) === leafName)
-  if (target) {
-    treeRef.value?.setChecked(target.id, false, true)
-    handleTreeCheck()
-  }
-}
-
 async function sendQuestion(q) {
   const text = (typeof q === 'string' ? q : question.value).trim()
   if (!text) return
-  const checked = treeRef.value?.getCheckedNodes(false, false) || []
-  const ids = checked.map(n => n.id)
-  if (ids.length === 0) {
-    ElMessage.info('请至少选择一个知识库')
+  const ids = currentKnowledgeIds()
+  if (activeScene.value && ids.length === 0) {
+    ElMessage.warning('该场景对应的知识目录暂不可用')
     return
+  }
+  if (!inChat.value) {
+    askedUnscoped.value = true
+    resetMessages(false)
   }
   messages.value.push({ role: 'user', content: text, sources: [], rating: 0 })
   question.value = ''
@@ -498,8 +720,8 @@ function buildMarkdown() {
       if (msg.sources && msg.sources.length) {
         md += '\n> 参考来源：' + uniqSources(msg.sources).map(s => s.title || s).join('、') + '\n'
       }
-      if (msg.rating === 1) md += '> 评价：👍 有帮助\n'
-      if (msg.rating === -1) md += '> 评价：👎 无帮助\n'
+      if (msg.rating === 1) md += '> 评价：有帮助\n'
+      if (msg.rating === -1) md += '> 评价：无帮助\n'
       md += '\n---\n\n'
     }
   }
@@ -525,8 +747,8 @@ h1{border-bottom:2px solid #2563eb;padding-bottom:8px}
       if (msg.sources && msg.sources.length) {
         html += `<p class="src">参考来源：${escapeHtml(uniqSources(msg.sources).map(s => s.title || s).join('、'))}</p>`
       }
-      if (msg.rating === 1) html += '<p class="src">评价：👍 有帮助</p>'
-      if (msg.rating === -1) html += '<p class="src">评价：👎 无帮助</p>'
+      if (msg.rating === 1) html += '<p class="src">评价：有帮助</p>'
+      if (msg.rating === -1) html += '<p class="src">评价：无帮助</p>'
       html += '<div class="bar">———</div>'
     }
   }
@@ -640,122 +862,272 @@ function scrollToBottom() {
 </script>
 
 <style scoped>
-.qa-container { padding: 0; }
+.qa-container {
+  padding: 0;
+  min-height: calc(100vh - 108px);
+  display: flex;
+  flex-direction: column;
+}
+
+.qa-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+}
 
 .page-title {
-  font-size: 20px; font-weight: 600; color: #1f2937; margin-bottom: 20px;
+  font-size: 26px;
+  font-weight: 650;
+  color: #111827;
+  margin: 0 0 6px;
+  letter-spacing: 0.01em;
 }
 
-.qa-layout {
-  display: grid; grid-template-columns: 300px 1fr; gap: 20px; min-height: 600px;
+.page-subtitle {
+  margin: 0;
+  color: #6b7280;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
-.knowledge-panel {
-  background: #fff; border-radius: 10px; padding: 16px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-  max-height: calc(100vh - 180px); overflow-y: auto;
+.back-home-btn {
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid #d7dee8;
+  background: #fff;
+  color: #334155;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.back-home-btn:hover,
+.back-home-btn:focus {
+  border-color: #93c5fd;
+  color: #1d4ed8;
+  background: #f8fbff;
 }
 
-.panel-header-row {
-  display: flex; justify-content: space-between; align-items: center;
-  padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #f0f0f0;
+.qa-home {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  min-height: 0;
+  align-items: stretch;
 }
-.panel-title { font-weight: 600; color: #1f2937; }
 
-.tree-loading { color: #94a3b8; padding: 20px; text-align: center; }
+.home-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
 
-.tree-node {
-  display: flex; align-items: center; flex: 1; min-width: 0;
-  padding-right: 4px;
+.scene-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
-.tree-folder-icon {
-  color: #e6a23c; font-size: 16px; margin-right: 6px; flex-shrink: 0;
-}
-.tree-node-label {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 14px; color: #374151;
-}
-.tree-node-count {
-  font-size: 11px; color: #9ca3af; margin-left: auto; flex-shrink: 0;
-  background: #f0f0f0; padding: 1px 6px; border-radius: 8px;
-}
-.tree-node-count.empty { color: #d1d5db; }
 
-.knowledge-panel :deep(.el-tree) {
+.scene-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  background: #fffaf3;
+  border: 1px solid #efe4d4;
+  border-radius: 14px;
+  padding: 14px 14px 12px 20px;
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: 0 8px 18px rgba(28, 25, 23, 0.04);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+
+.scene-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent);
+  box-shadow: 0 16px 32px rgba(28, 25, 23, 0.08);
+}
+
+.scene-card:disabled {
+  cursor: wait;
+  opacity: 0.7;
+  transform: none;
+}
+
+.scene-mark {
+  position: absolute;
+  left: 0;
+  top: 14px;
+  width: 6px;
+  height: 28px;
+  border-radius: 0 6px 6px 0;
+  background: var(--accent);
+}
+
+.scene-kicker {
+  display: inline-block;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.scene-title {
+  margin: 0 0 4px;
+  font-size: 16px;
+  color: #1c1917;
+  font-weight: 700;
+}
+
+.scene-desc {
+  margin: 0 0 8px;
+  color: #57534e;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.scene-meta {
+  font-size: 12px;
+  color: #a8a29e;
+  margin-top: auto;
+}
+
+.quick-ask {
+  flex: 1;
+  min-height: 0;
+  background: #fff;
+  border: 1px solid #efe8dc;
+  border-radius: 14px;
+  padding: 10px 14px 12px;
+  display: flex;
+  flex-direction: column;
+}
+.quick-ask-head {
+  font-size: 12px;
+  color: #94a3b8;
+  padding: 4px 2px 8px;
+}
+.quick-ask-item {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #f1f5f9;
   background: transparent;
+  padding: 10px 6px;
+  font-size: 13px;
+  color: #334155;
+  cursor: pointer;
+  line-height: 1.5;
 }
-.knowledge-panel :deep(.el-tree-node__content) {
-  height: 36px; border-radius: 6px; padding-right: 4px;
+.quick-ask-item:hover { background: #f8fbff; color: #1d4ed8; }
+.quick-ask-item:disabled { cursor: wait; opacity: 0.6; }
+
+.home-side {
+  background: #fff;
+  border: 1px solid #e8eef5;
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
 }
-.knowledge-panel :deep(.el-tree-node__content:hover) {
-  background: #f5f7fa;
+.side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 650;
+  color: #1e293b;
+  margin-bottom: 8px;
 }
-.knowledge-panel :deep(.el-checkbox__label) {
-  display: none;
+.side-empty { color: #94a3b8; font-size: 13px; padding: 20px 4px; line-height: 1.6; }
+.side-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #f1f5f9;
+  background: transparent;
+  padding: 12px 4px;
+  cursor: pointer;
 }
+.side-item:hover { background: #f8fbff; }
+  .side-item-title {
+    font-size: 13px;
+    color: #334155;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .side-item-time { font-size: 12px; color: #94a3b8; }
 
 .selected-tags {
-  padding: 10px 14px; background: #f0f7ff; border-radius: 8px; margin-bottom: 12px;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 10px 14px;
+  background: #f0f7ff;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 .selected-tags-label { font-size: 12px; color: #6b7280; font-weight: 500; }
+.scope-hint {
+  font-size: 12px;
+  color: #2563eb;
+  background: #eff6ff;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
 
 .chat-panel {
-  background: #fff; border-radius: 10px;
+  background: #fff;
+  border-radius: 10px;
   box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-  display: flex; flex-direction: column; overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex: 1;
 }
 
 .chat-toolbar {
-  display: flex; gap: 8px; padding: 8px 16px;
-  border-bottom: 1px solid #f0f0f0; justify-content: space-between;
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  justify-content: flex-end;
   align-items: center;
 }
 
-.ai-status-indicator {
-  display: flex; align-items: center; gap: 6px; cursor: pointer;
-  padding: 2px 10px; border-radius: 12px; font-size: 12px;
-  background: #f5f7fa; transition: background 0.2s;
-  user-select: none;
-}
-.ai-status-indicator:hover {
-  background: #e8ecf1;
-}
-.status-dot {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-}
-.status-dot.ok { background: #67c23a; }
-.status-dot.error { background: #f56c6c; }
-.status-dot.unavailable { background: #e6a23c; }
-.status-text {
-  font-weight: 600; color: #303133;
-}
-.status-latency {
-  color: #909399; font-size: 11px;
-}
-.status-error {
-  color: #f56c6c; font-size: 11px; font-weight: 600;
-}
-.status-refresh-hint {
-  color: #c0c4cc; font-size: 10px; opacity: 0;
-  transition: opacity 0.2s;
-}
-.ai-status-indicator:hover .status-refresh-hint {
-  opacity: 1;
-}
-
 .chat-messages {
-  flex: 1; padding: 20px; overflow-y: auto; background: #f8fafc;
-  min-height: 500px; max-height: calc(100vh - 300px);
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  background: #f8fafc;
+  min-height: 500px;
+  max-height: calc(100vh - 300px);
 }
 
 .message { display: flex; margin-bottom: 20px; gap: 10px; }
 .message.user { flex-direction: row-reverse; }
 
 .avatar {
-  width: 36px; height: 36px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  color: #fff; flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
 }
 .avatar.user { background: #3b82f6; }
 .avatar.assistant { background: #409EFF; }
@@ -763,44 +1135,86 @@ function scrollToBottom() {
 .bubble-wrap { max-width: 70%; }
 
 .bubble {
-  padding: 12px 16px; border-radius: 12px;
-  line-height: 1.7; color: #374151; font-size: 14px; white-space: pre-wrap;
+  padding: 12px 16px;
+  border-radius: 12px;
+  line-height: 1.7;
+  color: #374151;
+  font-size: 14px;
+  white-space: pre-wrap;
 }
 .message.user .bubble { background: #3b82f6; color: #fff; border-bottom-right-radius: 4px; }
 .message.assistant .bubble { background: #fff; border: 1px solid #e5e7eb; border-bottom-left-radius: 4px; }
 
 .sources {
-  margin-top: 8px; padding: 10px 12px;
-  background: #f1f5f9; border-radius: 8px; font-size: 12px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #f1f5f9;
+  border-radius: 8px;
+  font-size: 12px;
 }
 .sources-title { color: #64748b; margin-bottom: 4px; font-weight: 500; }
 .source-item { color: #475569; padding: 2px 0; }
 
 .feedback-row {
-  display: flex; align-items: center; gap: 6px; margin-top: 10px;
-  padding-top: 8px; border-top: 1px solid #f0f0f0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #f0f0f0;
 }
 
 .feedback-actions {
-  display: flex; align-items: center; gap: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .feedback-label {
-  font-size: 12px; color: #94a3b8; margin-right: 2px;
+  font-size: 12px;
+  color: #94a3b8;
+  margin-right: 2px;
+}
+
+.rate-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.rate-btn :deep(span) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .typing { color: #94a3b8; font-style: italic; }
 
 .chat-input {
-  display: flex; gap: 10px; padding: 16px;
-  border-top: 1px solid #e5e7eb; background: #fff; align-items: flex-end;
+  display: flex;
+  gap: 10px;
+  padding: 16px;
+  border-top: 1px solid #e5e7eb;
+  background: #fff;
+  align-items: flex-end;
+}
+.home-input {
+  border: 1px solid #e7e0d6;
+  border-radius: 14px;
+  padding: 8px 8px 8px 12px;
+  box-shadow: 0 8px 20px rgba(28, 25, 23, 0.04);
 }
 .chat-input .el-textarea { flex: 1; }
 .voice-btn {
-  width: 40px; height: 40px; border-radius: 50%; padding: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  padding: 0;
 }
 .voice-btn.recording {
-  background: #ef4444; color: #fff; border-color: #ef4444;
+  background: #ef4444;
+  color: #fff;
+  border-color: #ef4444;
   animation: pulse 1.2s infinite;
 }
 @keyframes pulse {
@@ -809,18 +1223,28 @@ function scrollToBottom() {
 }
 
 .feedback-preview-text {
-  background: #f8fafc; border-radius: 6px; padding: 10px;
-  font-size: 13px; color: #475569; max-height: 120px; overflow-y: auto;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 13px;
+  color: #475569;
+  max-height: 120px;
+  overflow-y: auto;
 }
 
 .recommendations {
-  margin-bottom: 12px; margin-top: 4px;
+  margin-bottom: 12px;
+  margin-top: 4px;
 }
 .recommendations-loading {
-  display: flex; flex-direction: column; gap: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 .skeleton-line {
-  height: 20px; background: #f0f0f0; border-radius: 4px;
+  height: 20px;
+  background: #f0f0f0;
+  border-radius: 4px;
   width: 80%;
   animation: skeleton-pulse 1.4s ease-in-out infinite;
 }
@@ -831,70 +1255,134 @@ function scrollToBottom() {
   0%,100% { opacity: 1; } 50% { opacity: 0.4; }
 }
 .suggestion-list {
-  display: flex; flex-direction: column;
-  background: #fff; border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 8px;
   overflow: hidden;
 }
 .suggestion-item {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 12px 14px; cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
   transition: background 0.15s;
   border-bottom: 1px solid #f0f0f0;
 }
-.suggestion-item:last-child {
-  border-bottom: none;
-}
-.suggestion-item:hover {
-  background: #f8fafc;
-}
+.suggestion-item:last-child { border-bottom: none; }
+.suggestion-item:hover { background: #f8fafc; }
 .suggestion-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: #3b82f6; flex-shrink: 0; margin-top: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3b82f6;
+  flex-shrink: 0;
+  margin-top: 8px;
 }
 .suggestion-text {
-  font-size: 15px; font-weight: 600; color: #1f2937;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
   line-height: 1.6;
 }
 .refresh-btn {
-  display: inline-block; margin-top: 8px; font-size: 12px; color: #909399;
-  cursor: pointer; user-select: none;
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909399;
+  cursor: pointer;
+  user-select: none;
 }
 .refresh-btn:hover { color: #3b82f6; }
 
-.followup-suggestions {
-  padding-left: 46px; margin-top: 16px;
-  border-top: 1px dashed #e5e7eb; padding-top: 12px;
+.followup-panel {
+  margin-top: 0;
 }
-.followup-header {
-  font-size: 12px; color: #909399; margin-bottom: 8px;
+.followup-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px 0 12px;
+  border: 1px solid #e6edf5;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.followup-toggle:hover {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.followup-label {
+  line-height: 1;
+}
+.followup-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+.followup-toggle:hover .followup-count {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.followup-arrow {
+  font-size: 11px;
+  transition: transform 0.18s ease;
+}
+.followup-arrow.open { transform: rotate(180deg); }
+.followup-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
 }
 .followup-item {
-  display: flex; align-items: flex-start; gap: 8px;
-  padding: 8px 0; cursor: pointer;
-  transition: color 0.15s;
+  text-align: left;
+  border: 1px solid #e8eef5;
+  background: #fff;
+  border-radius: 8px;
+  padding: 7px 11px;
+  font-size: 13px;
+  color: #334155;
+  line-height: 1.5;
+  cursor: pointer;
+  max-width: 100%;
 }
 .followup-item:hover {
-  color: #3b82f6;
+  border-color: #93c5fd;
+  background: #f8fbff;
+  color: #1d4ed8;
 }
-.followup-item--expired {
-  cursor: default; opacity: 0.4;
+.followup-item--expired,
+.followup-item:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
-.followup-item--expired:hover {
-  color: inherit;
-}
-.followup-dot {
-  width: 5px; height: 5px; border-radius: 50%;
-  background: #3b82f6; flex-shrink: 0; margin-top: 6px;
-}
-.followup-item--expired .followup-dot {
-  background: #c0c4cc;
-}
-.followup-text {
-  font-size: 13px; color: #1f2937; line-height: 1.6;
+.followup-item--expired:hover,
+.followup-item:disabled:hover {
+  border-color: #e8eef5;
+  background: #fff;
+  color: #334155;
 }
 
-@media (max-width: 900px) {
-  .qa-layout { grid-template-columns: 1fr; }
-  .followup-suggestions { padding-left: 46px; }
+@media (max-width: 980px) {
+  .qa-home { grid-template-columns: 1fr; }
+  .scene-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .scene-grid { grid-template-columns: 1fr; }
+  .qa-hero { align-items: flex-start; flex-direction: column; }
 }
 </style>
