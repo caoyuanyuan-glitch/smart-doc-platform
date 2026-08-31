@@ -2,15 +2,8 @@
   <div class="dashboard-page">
     <div class="page-hd">
       <h2>智能问答看板</h2>
-      <span class="page-sub">管理员数据分析面板</span>
       <div class="page-hd-right">
-        <span class="last-updated" v-if="lastUpdatedText">{{ lastUpdatedText }}</span>
-        <el-switch
-          v-model="autoRefresh"
-          size="small"
-          active-text="自动刷新"
-          @change="toggleAutoRefresh"
-        />
+        <el-button size="small" :loading="loading" @click="loadDashboard">刷新</el-button>
       </div>
     </div>
 
@@ -112,7 +105,7 @@
       </div>
     </div>
 
-    <div class="detail-section">
+    <div class="detail-section" v-if="userStore.isAdmin">
       <div class="detail-hd">
         <h3>对话明细</h3>
         <el-button size="small" @click="exportData" :disabled="items.length === 0">导出数据</el-button>
@@ -184,9 +177,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { qaAPI } from '@/api'
+import { useUserStore } from '@/store/user'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
@@ -195,9 +189,10 @@ import { CanvasRenderer } from 'echarts/renderers'
 
 use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
+const userStore = useUserStore()
 const loading = ref(false)
-const period = ref('yesterday')
-const overview = reactive({ active_users: 0, conversations: 0, active_users_trend: 0, conversations_trend: 0, hit_rate: 0, hit_rate_trend: 0, period_label: '昨日', compare_label: '较前一日' })
+const period = ref('today')
+const overview = reactive({ active_users: 0, conversations: 0, active_users_trend: 0, conversations_trend: 0, hit_rate: 0, hit_rate_trend: 0, period_label: '今日', compare_label: '较昨日' })
 const chartUsersData = ref([])
 const chartConvData = ref([])
 const chartHitRateData = ref([])
@@ -211,20 +206,6 @@ const dateRange = ref(null)
 const filterUser = ref('')
 const filterType = ref('')
 const filterRating = ref(null)
-const lastUpdated = ref(null)
-const autoRefresh = ref(true)
-let refreshTimer = null
-let silenceNextLoad = false
-
-const lastUpdatedText = computed(() => {
-  if (!lastUpdated.value) return ''
-  const diff = Math.floor((Date.now() - lastUpdated.value.getTime()) / 1000)
-  if (diff < 10) return '刚刚更新'
-  if (diff < 60) return `${diff}秒前更新`
-  const min = Math.floor(diff / 60)
-  if (min < 60) return `${min}分钟前更新`
-  return `${Math.floor(min / 60)}小时前更新`
-})
 
 const chartUsersOption = computed(() => ({
   tooltip: { trigger: 'axis' },
@@ -257,16 +238,18 @@ const chartHitRateOption = computed(() => ({
 }))
 
 async function loadDashboard() {
-  if (!silenceNextLoad) loading.value = true
+  loading.value = true
   try {
     const params = { page: page.value, page_size: pageSize.value, period: period.value }
     if (dateRange.value && dateRange.value.length === 2) {
       params.start_date = dateRange.value[0]
       params.end_date = dateRange.value[1]
     }
-    if (filterUser.value) params.user_name = filterUser.value
-    if (filterType.value) params.session_type = filterType.value
-    if (filterRating.value !== null && filterRating.value !== '') params.rating = filterRating.value
+    if (userStore.isAdmin) {
+      if (filterUser.value) params.user_name = filterUser.value
+      if (filterType.value) params.session_type = filterType.value
+      if (filterRating.value !== null && filterRating.value !== '') params.rating = filterRating.value
+    }
 
     const r = await qaAPI.getDashboard(params)
     const data = r.data
@@ -278,44 +261,16 @@ async function loadDashboard() {
     chartManualHitRateData.value = data.charts?.manual_hit_rate || []
     items.value = data.items || []
     total.value = data.total || 0
-    lastUpdated.value = new Date()
   } catch (e) {
-    if (e.response?.status === 403) {
-      ElMessage.error('仅管理员可访问此页面')
-    } else {
-      ElMessage.error('加载看板数据失败')
-    }
+    ElMessage.error('加载看板数据失败')
   }
   loading.value = false
-  silenceNextLoad = false
 }
 
 function onPeriodChange() {
   page.value = 1
   dateRange.value = null
   loadDashboard()
-}
-
-function startAutoRefresh() {
-  stopAutoRefresh()
-  if (autoRefresh.value) {
-    refreshTimer = setInterval(() => {
-      silenceNextLoad = true
-      loadDashboard()
-    }, 30000)
-  }
-}
-
-function stopAutoRefresh() {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
-}
-
-function toggleAutoRefresh() {
-  if (autoRefresh.value) startAutoRefresh()
-  else stopAutoRefresh()
 }
 
 function exportData() {
@@ -339,11 +294,6 @@ function exportData() {
 
 onMounted(() => {
   loadDashboard()
-  startAutoRefresh()
-})
-
-onUnmounted(() => {
-  stopAutoRefresh()
 })
 </script>
 
@@ -351,9 +301,7 @@ onUnmounted(() => {
 .dashboard-page { padding: 24px; background: #f1f5f9; min-height: 100%; }
 .page-hd { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
 .page-hd h2 { margin: 0; font-size: 20px; color: #1e293b; }
-.page-sub { font-size: 13px; color: #94a3b8; }
 .page-hd-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.last-updated { font-size: 12px; color: #94a3b8; white-space: nowrap; }
 
 .period-bar { margin-bottom: 20px; }
 
