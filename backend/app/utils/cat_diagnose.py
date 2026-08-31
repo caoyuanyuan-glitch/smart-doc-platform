@@ -102,10 +102,9 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
    - low：风格优化、可读性建议、轻微措辞问题
    术语同义替换、风格统一类问题不得报 high。
 6. 只输出 JSON，不要任何解释文字。
-7. 诊断成立时：logic、missing、ambiguity 三类允许 revised 为空（写清 problem 即可）。其他类别若你能给出忠实改写则必须给出；若你识别出问题但给不出忠实改写，请改用 logic/missing/ambiguity 类别并把 revised 留空——这优于沉默。
-8. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
-9. problem 只写一句结论，不超过 24 字，需自带依据出处（如"定义见术语表""与术语表不符"），不要展开解释、不要列举例外。
-11. 禁止编造章节引用（如"3.1节""§3.5.2"）。你只能看到待审查句子、术语表和风格指南，看不到文档章节结构。problem 中的出处只能引用术语表、风格指南，不得出现任何章节号。
+7. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
+8. problem 只写一句结论，不超过 24 字，需自带依据出处（如"定义见术语表""与术语表不符"），不要展开解释、不要列举例外。
+9. 禁止编造章节引用（如"3.1节""§3.5.2"）。你只能看到待审查句子、术语表和风格指南，看不到文档章节结构。problem 中的出处只能引用术语表、风格指南，不得出现任何章节号。
 
 category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, logic, missing, register, audience, risk, other
 
