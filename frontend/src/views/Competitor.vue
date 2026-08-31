@@ -6,9 +6,9 @@
 
       <div class="panel">
         <div class="panel-header">
-          <span>上传竞品文档或输入网页手册链接，自动识别编辑工具并分析可读性</span>
+          <span>上传竞品文档或输入网页手册链接，自动识别编辑工具、分析可读性与体验三维度（可获得性 / 易查找性 / 可用性），并生成可执行的改进建议</span>
           <div class="panel-actions">
-            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT / HTML 文件或链接</el-tag>
+            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT / HTML 链接</el-tag>
           </div>
         </div>
 
@@ -30,7 +30,7 @@
                   将竞品文档拖拽到此处，或点击选择文件
                 </div>
                 <div v-else class="upload-name">{{ selectedFile.name }}</div>
-                <div class="upload-sub" v-if="!selectedFile">支持 PDF、Word、Markdown、TXT，以及本地保存的 HTML 手册页</div>
+                <div class="upload-sub" v-if="!selectedFile">支持 PDF（含元数据工具识别）、Word、Markdown 纯文本、本地 HTML（适合 JS 渲染页面另存后上传）</div>
               </div>
             </el-upload>
           </el-tab-pane>
@@ -64,17 +64,13 @@
           <div class="summary-card">
             <div class="summary-card-label">编辑工具识别</div>
             <div class="summary-card-value small" :class="toolOkClass">{{ toolSummary }}</div>
-            <div class="summary-card-sub">
-              <span>{{ sourceTypeLabel(detail?.source_type) }}</span>
-              <span v-if="toolMeta.format"> · 格式 {{ toolMeta.format }}</span>
-              <span v-if="toolMeta.pages"> · {{ toolMeta.pages }} 页</span>
-            </div>
+            <div class="summary-card-sub" v-if="toolMeta.pages">格式 {{ toolMeta.format }} · {{ toolMeta.pages }} 页</div>
           </div>
           <div class="summary-card">
             <div class="summary-card-label">可读性综合评分</div>
-            <div class="summary-card-value score">{{ overallScore }}</div>
+            <div class="summary-card-value score">{{ readability.overall_score ?? '样本不足' }}</div>
             <div class="summary-card-sub">
-               <el-tag :type="levelTagType(readability.level)" size="small">{{ readability.level }}</el-tag>
+              <el-tag v-if="readability.overall_score != null" :type="levelTagType(readability.level)" size="small">{{ readability.level }}</el-tag>
               <span style="margin-left: 8px; color: #64748b;">{{ readability.language === 'zh' ? '中文' : '英文' }}</span>
             </div>
           </div>
@@ -87,8 +83,8 @@
               <el-button size="small" type="primary" :disabled="!reportMd" @click="downloadReport">
                 <el-icon><Download /></el-icon> 下载 Markdown 报告
               </el-button>
-              <el-button size="small" :disabled="!detail" @click="downloadJsonReport">
-                下载 JSON 结果
+              <el-button size="small" type="success" @click="goToCompare">
+                <el-icon><Switch /></el-icon> 与我方文件对比
               </el-button>
               <el-button size="small" @click="resetUpload">重新分析</el-button>
             </div>
@@ -133,30 +129,31 @@
                   </div>
                 </div>
 
-                <div v-if="htmlEvidence.length" class="sub-block">
-                  <div class="sub-title">HTML 识别证据</div>
-                  <div v-for="(item, index) in htmlEvidence" :key="index" class="evidence-line">{{ item }}</div>
-                </div>
-
-                <div v-if="structureStatsRows.length" class="sub-block">
-                  <div class="sub-title">结构统计</div>
-                  <div class="stats-pill-row">
-                    <div v-for="item in structureStatsRows" :key="item.key" class="stats-pill">
-                      <span class="stats-pill-label">{{ item.label }}</span>
-                      <span class="stats-pill-value">{{ item.value }}</span>
-                    </div>
+                <!-- 结构统计（客观指标） -->
+                <template v-if="structureStats">
+                  <h3 class="block-title" style="margin-top: 24px;">二、结构统计（客观指标）</h3>
+                  <el-descriptions :column="3" border size="small">
+                    <el-descriptions-item label="页数">{{ structureStats.page_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="章节数">{{ structureStats.heading_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="图片数">{{ structureStats.figure_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="表格数">{{ structureStats.table_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="安全警告数">{{ structureStats.warning_count ?? '—' }}</el-descriptions-item>
+                    <el-descriptions-item v-if="(structureStats.warning_symbol_count || 0) > 0" label="警告符号（文本层）">{{ structureStats.warning_symbol_count }}</el-descriptions-item>
+                  </el-descriptions>
+                  <div v-for="(note, i) in structureStats.notes || []" :key="i" class="dim-desc" style="color: #d97706;">
+                    ⚠ {{ note }}
                   </div>
-                </div>
+                </template>
 
                 <!-- 可读性分析 -->
-                <h3 class="block-title" style="margin-top: 24px;">二、可读性分析</h3>
+                <h3 class="block-title" style="margin-top: 24px;">{{ structureStats ? '三、' : '二、' }}可读性分析</h3>
                 <div class="dim-list">
                   <div v-for="dim in dimRows" :key="dim.key" class="dim-row">
                     <div class="dim-head">
                       <span class="dim-name">{{ dim.label }}</span>
-                      <span class="dim-value">{{ dim.score }}</span>
+                      <span class="dim-value">{{ dim.score == null ? 'N/A' : dim.score }}</span>
                     </div>
-                    <el-progress :percentage="dim.score" :stroke-width="10" :color="scoreColor(dim.score)" :show-text="false" />
+                    <el-progress :percentage="dim.score || 0" :stroke-width="10" :color="scoreColor(dim.score)" :show-text="false" />
                     <div class="dim-desc">{{ dim.desc }}</div>
                   </div>
                 </div>
@@ -190,21 +187,38 @@
                   </div>
                 </div>
 
-                <template v-if="experienceRows.length">
-                  <h3 class="block-title" style="margin-top: 24px;">三、体验维度</h3>
-                  <div class="experience-grid">
-                    <div v-for="item in experienceRows" :key="item.key" class="experience-card">
-                      <div class="experience-head">
-                        <span class="experience-name">{{ item.label }}</span>
-                        <span class="experience-score">{{ item.score }}</span>
+                <!-- 体验三维度（可获得性/易查找性/可用性，V1.2） -->
+                <template v-for="sec in experienceSections" :key="sec.key">
+                  <h3 class="block-title" style="margin-top: 24px;">{{ sec.number }}、{{ sec.title }}</h3>
+                  <div style="margin-bottom: 8px;">
+                    <el-tag v-if="sec.overall != null" :type="levelTagType(sec.level)" size="small">
+                      综合 {{ sec.overall }} 分 · {{ sec.level }}
+                    </el-tag>
+                    <span v-else class="dim-desc">样本不足（未评分）</span>
+                  </div>
+                  <div class="dim-list">
+                    <div v-for="dim in sec.rows" :key="dim.key" class="dim-row">
+                      <div class="dim-head">
+                        <span class="dim-name">{{ dim.label }}</span>
+                        <span class="dim-value">{{ dim.score == null ? 'N/A' : dim.score }}</span>
                       </div>
-                      <div class="experience-summary">{{ item.summary || '已完成规则分析' }}</div>
-                      <div v-if="item.findings.length" class="experience-findings">
-                        <div v-for="(finding, index) in item.findings" :key="index" class="experience-finding">{{ finding }}</div>
-                      </div>
+                      <el-progress :percentage="dim.score || 0" :stroke-width="10" :color="scoreColor(dim.score)" :show-text="false" />
+                      <div class="dim-desc">{{ dim.desc }}</div>
                     </div>
                   </div>
+                  <div v-for="(note, i) in sec.notes" :key="'note' + i" class="dim-desc" style="color: #d97706;">
+                    {{ note }}
+                  </div>
                 </template>
+
+                <!-- 体验维度改进建议 -->
+                <div v-if="experienceSuggestions.length" class="sub-block">
+                  <div class="sub-title">体验维度改进建议</div>
+                  <div v-for="(sg, i) in experienceSuggestions" :key="i" class="suggestion-line">
+                    <el-icon style="color: #3b82f6; margin-right: 6px;"><CircleCheck /></el-icon>
+                    {{ sg }}
+                  </div>
+                </div>
               </div>
             </el-tab-pane>
 
@@ -243,12 +257,12 @@
               <el-tag :type="statusType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="来源" width="100">
-            <template #default="{ row }">{{ sourceTypeLabel(row.source_type) }}</template>
-          </el-table-column>
-          <el-table-column label="可读性评分" width="120">
+          <el-table-column label="可读性评分" width="130">
             <template #default="{ row }">
-              <span v-if="hasOverallScore(row)">{{ overallScoreOf(row) }} 分（{{ readabilityOf(row).level }}）</span>
+              <span v-if="readabilityOf(row)">
+                <template v-if="readabilityOf(row).overall_score != null">{{ readabilityOf(row).overall_score }} 分（{{ readabilityOf(row).level }}）</template>
+                <template v-else>样本不足</template>
+              </span>
               <span v-else>-</span>
             </template>
           </el-table-column>
@@ -284,12 +298,11 @@
             <span class="dialog-summary-value">{{ detailToolSummary }}</span>
           </div>
           <div class="dialog-summary-item">
-            <span class="dialog-summary-label">来源类型</span>
-            <span class="dialog-summary-value">{{ sourceTypeLabel(detail?.source_type) }}</span>
-          </div>
-          <div class="dialog-summary-item">
             <span class="dialog-summary-label">可读性评分</span>
-            <span class="dialog-summary-value">{{ detailOverallScore }} 分（{{ detailReadability.level }}）</span>
+            <span class="dialog-summary-value">
+              <template v-if="detailReadability.overall_score != null">{{ detailReadability.overall_score }} 分（{{ detailReadability.level }}）</template>
+              <template v-else>样本不足</template>
+            </span>
           </div>
         </div>
         <el-tabs v-model="dialogTab">
@@ -317,28 +330,30 @@
                   </el-table-column>
                 </el-table>
               </div>
-              <div v-if="detailHtmlEvidence.length" class="sub-block">
-                <div class="sub-title">HTML 识别证据</div>
-                <div v-for="(item, index) in detailHtmlEvidence" :key="index" class="evidence-line">{{ item }}</div>
-              </div>
-              <div v-if="detailStructureStatsRows.length" class="sub-block">
-                <div class="sub-title">结构统计</div>
-                <div class="stats-pill-row">
-                  <div v-for="item in detailStructureStatsRows" :key="item.key" class="stats-pill">
-                    <span class="stats-pill-label">{{ item.label }}</span>
-                    <span class="stats-pill-value">{{ item.value }}</span>
-                  </div>
-                </div>
-              </div>
 
-              <h3 class="block-title" style="margin-top: 20px;">二、可读性分析</h3>
+              <template v-if="detailStructureStats">
+                <h3 class="block-title" style="margin-top: 20px;">二、结构统计（客观指标）</h3>
+                <el-descriptions :column="5" border size="small">
+                  <el-descriptions-item label="页数">{{ detailStructureStats.page_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="章节">{{ detailStructureStats.heading_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="图">{{ detailStructureStats.figure_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="表">{{ detailStructureStats.table_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item label="警告">{{ detailStructureStats.warning_count ?? '—' }}</el-descriptions-item>
+                  <el-descriptions-item v-if="(detailStructureStats.warning_symbol_count || 0) > 0" label="警告符号">{{ detailStructureStats.warning_symbol_count }}</el-descriptions-item>
+                </el-descriptions>
+                <div v-for="(note, i) in detailStructureStats.notes || []" :key="i" class="dim-desc" style="color: #d97706;">
+                  ⚠ {{ note }}
+                </div>
+              </template>
+
+              <h3 class="block-title" style="margin-top: 20px;">{{ detailStructureStats ? '三、' : '二、' }}可读性分析</h3>
               <div class="dim-list">
                 <div v-for="dim in detailDimRows" :key="dim.key" class="dim-row">
                   <div class="dim-head">
                     <span class="dim-name">{{ dim.label }}</span>
-                    <span class="dim-value">{{ dim.score }}</span>
+                    <span class="dim-value">{{ dim.score == null ? 'N/A' : dim.score }}</span>
                   </div>
-                  <el-progress :percentage="dim.score" :stroke-width="8" :color="scoreColor(dim.score)" :show-text="false" />
+                  <el-progress :percentage="dim.score || 0" :stroke-width="8" :color="scoreColor(dim.score)" :show-text="false" />
                   <div class="dim-desc">{{ dim.desc }}</div>
                 </div>
               </div>
@@ -349,21 +364,39 @@
                   {{ sg }}
                 </div>
               </div>
-              <template v-if="detailExperienceRows.length">
-                <h3 class="block-title" style="margin-top: 20px;">三、体验维度</h3>
-                <div class="experience-grid">
-                  <div v-for="item in detailExperienceRows" :key="item.key" class="experience-card">
-                    <div class="experience-head">
-                      <span class="experience-name">{{ item.label }}</span>
-                      <span class="experience-score">{{ item.score }}</span>
+
+              <!-- 体验三维度（可获得性/易查找性/可用性，V1.2） -->
+              <template v-for="sec in detailExperienceSections" :key="sec.key">
+                <h3 class="block-title" style="margin-top: 20px;">{{ sec.number }}、{{ sec.title }}</h3>
+                <div style="margin-bottom: 8px;">
+                  <el-tag v-if="sec.overall != null" :type="levelTagType(sec.level)" size="small">
+                    综合 {{ sec.overall }} 分 · {{ sec.level }}
+                  </el-tag>
+                  <span v-else class="dim-desc">样本不足（未评分）</span>
+                </div>
+                <div class="dim-list">
+                  <div v-for="dim in sec.rows" :key="dim.key" class="dim-row">
+                    <div class="dim-head">
+                      <span class="dim-name">{{ dim.label }}</span>
+                      <span class="dim-value">{{ dim.score == null ? 'N/A' : dim.score }}</span>
                     </div>
-                    <div class="experience-summary">{{ item.summary || '已完成规则分析' }}</div>
-                    <div v-if="item.findings.length" class="experience-findings">
-                      <div v-for="(finding, index) in item.findings" :key="index" class="experience-finding">{{ finding }}</div>
-                    </div>
+                    <el-progress :percentage="dim.score || 0" :stroke-width="8" :color="scoreColor(dim.score)" :show-text="false" />
+                    <div class="dim-desc">{{ dim.desc }}</div>
                   </div>
                 </div>
+                <div v-for="(note, i) in sec.notes" :key="'note' + i" class="dim-desc" style="color: #d97706;">
+                  {{ note }}
+                </div>
               </template>
+
+              <!-- 体验维度改进建议 -->
+              <div v-if="detailExperienceSuggestions.length" class="sub-block">
+                <div class="sub-title">体验维度改进建议</div>
+                <div v-for="(sg, i) in detailExperienceSuggestions" :key="i" class="suggestion-line">
+                  <el-icon style="color: #3b82f6; margin-right: 6px;"><CircleCheck /></el-icon>
+                  {{ sg }}
+                </div>
+              </div>
             </div>
           </el-tab-pane>
           <el-tab-pane label="Markdown 报告" name="md">
@@ -373,7 +406,8 @@
       </template>
       <template #footer>
         <el-button @click="detailVisible = false">关闭</el-button>
-        <el-button :disabled="!detail" @click="downloadJsonReportOf(detail)">下载 JSON</el-button>
+        <el-button :disabled="!detail?.id" @click="goToCompare">与我方文件对比</el-button>
+        <el-button :disabled="!detail?.id" @click="downloadJsonReportOf(detail)">下载 JSON</el-button>
         <el-button type="primary" :disabled="!detailReportMd" @click="downloadReportOf(detail)">下载报告</el-button>
       </template>
     </el-dialog>
@@ -384,7 +418,7 @@
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, UploadFilled, Download, MagicStick, CircleCheck } from '@element-plus/icons-vue'
+import { Search, UploadFilled, Download, MagicStick, CircleCheck, Switch } from '@element-plus/icons-vue'
 import { competitorAPI, getAPIErrorMessage } from '@/api'
 
 const route = useRoute()
@@ -492,11 +526,12 @@ function safeParse(value, fallback = {}) {
 
 const toolAnalysis = computed(() => safeParse(detail.value?.tool_analysis))
 const readability = computed(() => safeParse(detail.value?.readability))
-const overallScore = computed(() => detail.value?.overall_score ?? readability.value?.overall_score ?? 0)
 const toolSummary = computed(() => toolAnalysis.value.summary || '未知')
 const toolMeta = computed(() => toolAnalysis.value.meta || {})
 const tools = computed(() => toolAnalysis.value.tools || [])
 const fontSignals = computed(() => toolAnalysis.value.font_signals || [])
+// 结构统计（客观指标）：旧任务无该字段时为 null，对应章节不渲染
+const structureStats = computed(() => toolAnalysis.value.structure_stats || null)
 const reportMd = computed(() => detail.value?.report_md || '')
 const stats = computed(() => readability.value.stats || {})
 
@@ -511,32 +546,146 @@ const dimRows = computed(() => {
   }
   return Object.keys(names).map((key) => {
     const dim = dims[key] || {}
-    return { key, label: names[key], score: Math.round(dim.score ?? 0), desc: dim.label || '' }
+    return { key, label: names[key], score: dim.score == null ? null : Math.round(dim.score), desc: dim.label || '' }
   })
 })
 
 const sampleGroups = computed(() => {
+  // 样本不足（overall_score 为 null）时不展示例句，避免把低样本量样本当问题
+  if (readability.value.overall_score == null) return []
   const dims = readability.value.dimensions || {}
   const names = {
     sentence_length: '超长句',
+    term_density: '术语堆砌句',
     passive_ratio: '被动句',
     modifier_stack: '修饰词堆叠',
     paragraph_length: '超长段落'
   }
   const groups = []
   for (const [key, label] of Object.entries(names)) {
-    const samples = (dims[key]?.samples || []).filter((s) => s && s.text)
+    const dim = dims[key] || {}
+    // 与报告口径一致：仅得分 <75 的维度展示例句
+    if (!(dim.score != null && dim.score < 75)) continue
+    const samples = (dim.samples || []).filter((s) => s && s.text)
     if (samples.length) {
-      groups.push({ key, label, score: dims[key]?.score || 100, samples })
+      groups.push({ key, label, score: dim.score, samples })
     }
   }
   return groups
 })
 
 const suggestions = computed(() => readability.value.suggestions || [])
-const experienceRows = computed(() => buildExperienceRows(readability.value))
-const structureStatsRows = computed(() => buildStructureStatsRows(readability.value.structure_stats || {}))
-const htmlEvidence = computed(() => toolAnalysis.value.html_evidence || [])
+
+// 体验三维度低分维度 → 前端直接生成改进建议（与后端 insights 互补，保持单份报告可视化完整）
+// 公共生成函数：主视图与详情对话框共用（P2-9 修复，避免双份逻辑漂移）
+function buildExperienceSuggestions(exp) {
+  if (!exp) return []
+  const list = []
+  const sections = [
+    { key: 'access', label: '可获得性' },
+    { key: 'findability', label: '易查找性' },
+    { key: 'usability', label: '可用性' }
+  ]
+  const dimActions = {
+    access_barrier: '确保文档公开可访问，避免强制登录/注册',
+    formats: '提供多格式输出（PDF + 在线 HTML）',
+    has_search: '配置站内检索或完善目录/索引',
+    mobile_adaptation: '采用响应式布局适配移动端',
+    languages: '评估目标市场语言覆盖',
+    version_transparency: '标注文档版本号与更新日期',
+    offline_available: '提供可下载离线包',
+    toc_completeness: '建立层级清晰的目录与书签导航',
+    has_breadcrumb: '添加面包屑导航帮助定位',
+    has_index_glossary: '添加术语索引与词汇表',
+    url_semantic: '使用描述性 URL 路径',
+    seo_metadata: '配置页面 SEO 元数据',
+    quick_links: '在首页放置常用操作快捷入口',
+    task_oriented_headings: '标题采用任务导向写法',
+    step_completeness: '操作步骤包含前置条件、动作、预期结果',
+    error_recovery: '添加常见错误提示与恢复方法',
+    consistency: '统一术语、单位与排版规范',
+    link_validity: '定期巡检超链接有效性',
+    imperative_instructions: '使用祈使句明确用户动作'
+  }
+  for (const sec of sections) {
+    const part = exp[sec.key]
+    if (!part || !part.dimensions) continue
+    for (const [dk, dv] of Object.entries(part.dimensions)) {
+      // 与后端 _EXPERIENCE_DIM_ACTIONS 对齐：has_search 仅在 Access 区生成建议（P2-3 修复）
+      if (sec.key === 'findability' && dk === 'has_search') continue
+      // 类型与适用性校验（P2-8 修复：score 须为数值，避免字符串隐式比较造成前后端分歧）
+      if (typeof dv !== 'object' || dv === null || dv.applicable === false || typeof dv.score !== 'number') continue
+      if (dv.score < 55) {
+        list.push(`【${sec.label}·${dimActions[dk] || dk}】竞品明显偏弱（${dv.score} 分），我方应${dimActions[dk] || '优化该维度'}，形成差异化优势。`)
+      } else if (dv.score < 70) {
+        list.push(`【${sec.label}·${dimActions[dk] || dk}】竞品有改进空间（${dv.score} 分），我方保持${dimActions[dk] || '优化'}即可领先。`)
+      }
+    }
+  }
+  return list.slice(0, 10)
+}
+
+const experienceSuggestions = computed(() => buildExperienceSuggestions(safeParse(detail.value?.experience)))
+
+// ---------- 体验三维度（可获得性/易查找性/可用性，V1.2） ----------
+// 中文章节号：与后端报告动态编号对齐（P1 修复：结构统计缺失时顺延，不硬编码四五六）
+const CN_NUMS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+const EXPERIENCE_SECTIONS = [
+  {
+    key: 'access', title: '可获得性分析',
+    dims: [
+      ['access_barrier', '获取门槛'], ['formats', '格式选择'], ['has_search', '站内搜索'],
+      ['mobile_adaptation', '移动端适配'], ['languages', '多语言支持'],
+      ['version_transparency', '版本透明度'], ['offline_available', '离线可用性']
+    ]
+  },
+  {
+    key: 'findability', title: '易查找性分析',
+    dims: [
+      ['has_search', '站内搜索'], ['toc_completeness', '目录（TOC）'], ['has_breadcrumb', '面包屑导航'],
+      ['has_index_glossary', '索引与术语表'], ['url_semantic', 'URL 语义化'],
+      ['seo_metadata', 'SEO 元数据'], ['quick_links', '关键内容直达']
+    ]
+  },
+  {
+    key: 'usability', title: '可用性分析',
+    dims: [
+      ['task_oriented_headings', '任务导向标题'], ['step_completeness', '步骤完整性'],
+      ['error_recovery', '错误恢复信息'], ['consistency', '信息一致性'],
+      ['link_validity', '链接有效性'], ['imperative_instructions', '可操作指令']
+    ]
+  }
+]
+
+function buildExperienceRows(exp, hasStructure) {
+  if (!exp) return []
+  // 体验章节起始编号：结构统计存在 → 四、；缺失 → 三、（与后端报告动态编号一致）
+  const startIdx = hasStructure ? 3 : 2
+  return EXPERIENCE_SECTIONS
+    .map((sec, i) => {
+      const part = exp[sec.key] || {}
+      const dims = part.dimensions || {}
+      const rows = sec.dims
+        .map(([key, label]) => {
+          const dim = dims[key] || {}
+          return { key, label, score: dim.score == null ? null : Math.round(dim.score), desc: dim.note || '' }
+        })
+        .filter((d) => dims[d.key])
+      return {
+        key: sec.key,
+        number: CN_NUMS[startIdx + i] || sec.title.slice(0, 1),
+        title: sec.title,
+        overall: part.overall_score,
+        level: part.level || '',
+        notes: part.notes || [],
+        rows
+      }
+    })
+    .filter((s) => s.rows.length > 0)
+}
+
+const experience = computed(() => safeParse(detail.value?.experience))
+const experienceSections = computed(() => buildExperienceRows(experience.value, !!structureStats.value))
 
 // ---------- 历史任务 ----------
 async function loadTasks() {
@@ -553,15 +702,6 @@ async function loadTasks() {
 
 function readabilityOf(row) {
   return safeParse(row.readability)
-}
-
-function overallScoreOf(row) {
-  const parsed = readabilityOf(row)
-  return row?.overall_score ?? parsed?.overall_score ?? null
-}
-
-function hasOverallScore(row) {
-  return overallScoreOf(row) !== null && overallScoreOf(row) !== undefined
 }
 
 async function viewTask(row) {
@@ -609,18 +749,6 @@ function triggerMdDownload(text, filename) {
   window.URL.revokeObjectURL(url)
 }
 
-function triggerJsonDownload(payload, filename) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
-  const url = window.URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.setAttribute('download', filename)
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  window.URL.revokeObjectURL(url)
-}
-
 async function downloadReport() {
   const md = reportMd.value || (detail.value?.report_md)
   if (!md) return
@@ -630,9 +758,9 @@ async function downloadReport() {
 
 async function downloadReportOf(row) {
   try {
-    const resp = await competitorAPI.getReport(row.id, 'md')
+    const resp = await competitorAPI.getReport(row.id)
     // 接口返回 {content, format}（与 compare 报告接口对齐）
-      const md = resp.data?.content || resp.data || ''
+     const md = resp.data?.content || resp.data || ''
      if (!md) return
      const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
      triggerMdDownload(md, `${name}_竞品分析报告.md`)
@@ -641,29 +769,41 @@ async function downloadReportOf(row) {
   }
 }
 
-async function downloadJsonReport() {
-  if (!detail.value?.id) return
-  await downloadJsonReportOf(detail.value)
-}
-
 async function downloadJsonReportOf(row) {
+  // 结构化 JSON 导出（需求说明书 V1.1 导出要求）：含 tool_analysis/readability/experience
   try {
     const resp = await competitorAPI.getReport(row.id, 'json')
-    const payload = resp.data?.content || {}
+    const content = resp.data?.content
+    if (!content) return
     const name = (row.file_name || 'competitor').replace(/\.(pdf|docx|md|markdown|txt|html|htm)$/i, '')
-    triggerJsonDownload(payload, `${name}_竞品分析结果.json`)
+    const blob = new Blob([JSON.stringify(content, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name}_竞品分析结果.json`
+    a.click()
+    window.URL.revokeObjectURL(url)
   } catch (e) {
-    ElMessage.error(getAPIErrorMessage(e, '下载 JSON 结果失败'))
+    ElMessage.error(getAPIErrorMessage(e, '下载 JSON 失败'))
   }
+}
+
+function goToCompare() {
+  const taskId = detail.value?.id
+  if (!taskId) {
+    ElMessage.warning('当前无有效任务，请先完成分析')
+    return
+  }
+  router.push({ path: '/competitor/compare', query: { preselect: String(taskId) } })
 }
 
 // ---------- 详情对话框数据 ----------
 const detailToolAnalysis = computed(() => safeParse(detail.value?.tool_analysis))
 const detailReadability = computed(() => safeParse(detail.value?.readability))
-const detailOverallScore = computed(() => detail.value?.overall_score ?? detailReadability.value?.overall_score ?? 0)
 const detailToolSummary = computed(() => detailToolAnalysis.value.summary || '未知')
 const detailToolMeta = computed(() => detailToolAnalysis.value.meta || {})
 const detailTools = computed(() => detailToolAnalysis.value.tools || [])
+const detailStructureStats = computed(() => detailToolAnalysis.value.structure_stats || null)
 const detailReportMd = computed(() => detail.value?.report_md || '')
 const detailDimRows = computed(() => {
   const dims = detailReadability.value.dimensions || {}
@@ -676,13 +816,15 @@ const detailDimRows = computed(() => {
   }
   return Object.keys(names).map((key) => {
     const dim = dims[key] || {}
-    return { key, label: names[key], score: Math.round(dim.score ?? 0), desc: dim.label || '' }
+    return { key, label: names[key], score: dim.score == null ? null : Math.round(dim.score), desc: dim.label || '' }
   })
 })
 const detailSuggestions = computed(() => detailReadability.value.suggestions || [])
-const detailExperienceRows = computed(() => buildExperienceRows(detailReadability.value))
-const detailStructureStatsRows = computed(() => buildStructureStatsRows(detailReadability.value.structure_stats || {}))
-const detailHtmlEvidence = computed(() => detailToolAnalysis.value.html_evidence || [])
+const detailExperience = computed(() => safeParse(detail.value?.experience))
+const detailExperienceSections = computed(() => buildExperienceRows(detailExperience.value, !!detailStructureStats.value))
+
+// 详情对话框：体验维度改进建议（复用公共生成函数，与主视图保持一致）
+const detailExperienceSuggestions = computed(() => buildExperienceSuggestions(detailExperience.value))
 
 // ---------- 展示辅助 ----------
 function formatSize(size) {
@@ -713,59 +855,21 @@ function confidenceType(confidence) {
 }
 
 function scoreColor(score) {
+  if (score == null) return '#94a3b8'  // 样本不足/未评分：灰色
   if (score >= 85) return '#22c55e'
   if (score >= 70) return '#f59e0b'
   return '#ef4444'
 }
 
 function scoreColorTag(score) {
+  if (score == null) return 'info'
   if (score >= 85) return 'success'
   if (score >= 70) return 'warning'
   return 'danger'
 }
 
 function levelTagType(level) {
-  return { excellent: 'success', good: 'success', fair: 'warning', poor: 'danger' }[level] || 'info'
-}
-
-function buildExperienceRows(payload) {
-  const labels = {
-    access: '可获得性',
-    findability: '易查找性',
-    usability: '可用性'
-  }
-  return Object.entries(labels)
-    .map(([key, label]) => {
-      const item = payload?.[key]
-      if (!item) return null
-      return {
-        key,
-        label,
-        score: Math.round(item.score ?? 0),
-        summary: item.summary || '',
-        findings: Array.isArray(item.findings) ? item.findings : []
-      }
-    })
-    .filter(Boolean)
-}
-
-function buildStructureStatsRows(stats) {
-  const labels = {
-    heading_count: '标题数',
-    list_count: '列表数',
-    table_count: '表格数',
-    image_count: '图片数'
-  }
-  return Object.entries(labels)
-    .filter(([key]) => stats?.[key] !== null && stats?.[key] !== undefined)
-    .map(([key, label]) => ({ key, label, value: stats[key] }))
-}
-
-function sourceTypeLabel(sourceType) {
-  return {
-    file: '本地文件',
-    html: 'HTML/网页'
-  }[sourceType] || '本地文件'
+  return { excellent: 'success', good: 'success', fair: 'warning', poor: 'danger', insufficient: 'info' }[level] || 'info'
 }
 
 const toolOkClass = computed(() => (tools.value.length ? '' : 'muted'))
@@ -962,42 +1066,6 @@ watch(currentView, (view) => {
   font-size: 12px;
 }
 
-.evidence-line {
-  padding: 6px 0;
-  font-size: 13px;
-  color: #475569;
-  line-height: 1.6;
-}
-
-.stats-pill-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.stats-pill {
-  min-width: 120px;
-  padding: 10px 12px;
-  border-radius: 999px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.stats-pill-label {
-  font-size: 12px;
-  color: #64748b;
-}
-
-.stats-pill-value {
-  font-size: 14px;
-  font-weight: 700;
-  color: #1e293b;
-}
-
 .dim-list {
   display: grid;
   gap: 12px;
@@ -1066,56 +1134,6 @@ watch(currentView, (view) => {
   line-height: 1.5;
 }
 
-.experience-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.experience-card {
-  padding: 14px;
-  border-radius: 10px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-}
-
-.experience-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.experience-name {
-  font-size: 13px;
-  font-weight: 700;
-  color: #1e293b;
-}
-
-.experience-score {
-  font-size: 18px;
-  font-weight: 800;
-  color: #2563eb;
-}
-
-.experience-summary {
-  margin-top: 8px;
-  font-size: 13px;
-  color: #475569;
-  line-height: 1.6;
-}
-
-.experience-findings {
-  margin-top: 8px;
-}
-
-.experience-finding {
-  padding: 4px 0;
-  font-size: 12px;
-  color: #64748b;
-  line-height: 1.5;
-}
-
 .report-pre {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
@@ -1155,13 +1173,5 @@ watch(currentView, (view) => {
   font-size: 14px;
   font-weight: 700;
   color: #1e293b;
-}
-
-@media (max-width: 900px) {
-  .result-summary-grid,
-  .experience-grid,
-  .stats-row {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

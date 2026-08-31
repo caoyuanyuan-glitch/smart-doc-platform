@@ -89,6 +89,9 @@ def _ensure_legacy_sqlite_columns():
     if competitor_columns and 'overall_score' not in competitor_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE competitor_tasks ADD COLUMN overall_score FLOAT DEFAULT 0.0"))
+    if competitor_columns and 'experience' not in competitor_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE competitor_tasks ADD COLUMN experience TEXT"))
 
     try:
         translation_doc_columns = {col['name'] for col in inspector.get_columns('translation_docs')}
@@ -184,6 +187,6 @@ def get_db():
         db.close()
 
 def create_tables():
-    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_decision_record, false_positive_memory
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, competitor_comparison, cat_analysis_session, cat_decision_record, false_positive_memory
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()
