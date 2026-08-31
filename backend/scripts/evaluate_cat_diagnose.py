@@ -191,7 +191,7 @@ def load_document_sentences(path: Path) -> list[str]:
 
 
 FORBIDDEN_SOURCE_RE = re.compile(
-    r"版本记录|版本|修订|图示|图\d|上下文|上文|前文|章节|文档主题|主题|术语表|表格|表\d|标准|如图|见表|见图|参引"
+    r"版本记录|版本|修订|图示|图\d|上下文|上文|前文|章节|文档主题|主题|术语表|表\d+|标准|如表|如图|见表|见图|参引"
 )
 
 
@@ -295,14 +295,97 @@ def print_mode_compare_table(single: dict, decoupled: dict) -> None:
     print("指标\tsingle\tdecoupled")
     for label, key, kind in rows:
         print(f"{label}\t{_format_metric(single.get(key), kind)}\t{_format_metric(decoupled.get(key), kind)}")
+    stage = decoupled.get("decoupled_stage") or {}
+    if stage:
+        print()
+        print("decoupled 分段计数（均值）")
+        print(f"stage1_no_change\t{_format_metric(stage.get('stage1_no_change'))}")
+        print(f"stage1_revised\t{_format_metric(stage.get('stage1_revised'))}")
+        print(f"stage2_rejected\t{_format_metric(stage.get('stage2_rejected'))}")
+        print(f"produced\t{_format_metric(stage.get('produced'))}")
+
+
+STAGE_KEYS = ("stage1_no_change", "stage1_revised", "stage2_rejected", "produced")
+
+
+def _attach_decoupled_stage(metrics: dict, mode: str | None) -> dict:
+    resolved = (mode or "decoupled").strip().lower()
+    if resolved == "single":
+        return metrics
+    from app.utils.cat_diagnose import last_decoupled_stats
+
+    metrics = dict(metrics)
+    metrics["decoupled_stage"] = last_decoupled_stats()
+    return metrics
+
+
+def _aggregate_stage_means(runs: list[dict]) -> dict | None:
+    stages = [item.get("decoupled_stage") for item in runs if isinstance(item.get("decoupled_stage"), dict)]
+    if not stages:
+        return None
+    return {key: _mean([item.get(key) for item in stages]) for key in STAGE_KEYS}
+
+
+def diagnoses_only_in_single(
+    single_runs: list[list[dict]],
+    decoupled_runs: list[list[dict]],
+    sentences: list[str],
+) -> list[dict]:
+    """single 至少出现一次、decoupled 三次都没有的句子。"""
+    decoupled_indexes = set()
+    for run in decoupled_runs or []:
+        for item in run or []:
+            if isinstance(item, dict) and item.get("sentence_index") is not None:
+                decoupled_indexes.add(item.get("sentence_index"))
+    seen: dict = {}
+    for run in single_runs or []:
+        for item in run or []:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("sentence_index")
+            if idx is None or idx in decoupled_indexes or idx in seen:
+                continue
+            text = ""
+            if isinstance(idx, int) and 0 <= idx < len(sentences):
+                text = sentences[idx]
+            seen[idx] = {
+                "sentence_index": idx,
+                "sentence": text or str(item.get("quote") or ""),
+                "problem": item.get("problem"),
+                "severity": item.get("severity"),
+                "category": item.get("category"),
+            }
+    return [seen[key] for key in sorted(seen, key=lambda value: (value is None, value))]
+
+
+def print_single_only_list(items: list[dict]) -> None:
+    print()
+    print(f"single 有、decoupled 无：{len(items)} 条")
+    for item in items:
+        print(
+            f"[{item.get('sentence_index')}] "
+            f"{item.get('severity') or '-'} "
+            f"{item.get('category') or '-'} "
+            f"{item.get('problem') or ''}"
+        )
+        print(f"  {item.get('sentence') or ''}")
 
 
 async def run_quality_eval(sentences: list[str], product_type: str, runs: int, mode: str | None = None) -> dict:
+    """quality 评测。collect 诊断列表时放在 _diagnoses_runs，调用方打印前需弹出。"""
     per_run = []
+    diagnoses_runs = []
     for _ in range(runs):
         diagnoses = await diagnose_sentences(sentences, product_type, mode=mode)
-        per_run.append(quality_metrics(diagnoses))
-    return aggregate_quality_metrics(per_run)
+        metrics = _attach_decoupled_stage(quality_metrics(diagnoses), mode)
+        per_run.append(metrics)
+        diagnoses_runs.append(diagnoses)
+    aggregated = aggregate_quality_metrics(per_run)
+    stage = _aggregate_stage_means(per_run)
+    if stage:
+        aggregated["decoupled_stage"] = stage
+    aggregated["_diagnoses_runs"] = diagnoses_runs
+    return aggregated
 
 
 async def main() -> int:
@@ -378,25 +461,38 @@ async def main() -> int:
                 return 4
         if args.compare_mode:
             results = {}
+            diagnoses_by_mode = {}
             for mode in ("single", "decoupled"):
-                results[mode] = await run_quality_eval(sentences, args.product_type, run_count, mode=mode)
+                aggregated = await run_quality_eval(sentences, args.product_type, run_count, mode=mode)
+                diagnoses_by_mode[mode] = aggregated.pop("_diagnoses_runs", [])
+                results[mode] = aggregated
+            single_only = diagnoses_only_in_single(
+                diagnoses_by_mode["single"],
+                diagnoses_by_mode["decoupled"],
+                sentences,
+            )
             payload = {
                 "source": source_label,
                 "sentence_count": len(sentences),
                 "runs": run_count,
                 "mode": ["single", "decoupled"],
                 "results": results,
+                "single_only_count": len(single_only),
+                "single_only": single_only,
             }
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             print()
             print_mode_compare_table(results["single"], results["decoupled"])
+            print_single_only_list(single_only)
             return 0
         versions = ["v0", "current"] if args.compare else [args.prompt_version]
         results = {}
         eval_mode = "single" if args.compare else args.mode
         for version in versions:
             apply_prompt_version(version)
-            results[version] = await run_quality_eval(sentences, args.product_type, run_count, mode=eval_mode)
+            aggregated = await run_quality_eval(sentences, args.product_type, run_count, mode=eval_mode)
+            aggregated.pop("_diagnoses_runs", None)
+            results[version] = aggregated
         payload = {
             "source": source_label,
             "sentence_count": len(sentences),
@@ -409,6 +505,15 @@ async def main() -> int:
         if args.compare:
             print()
             print_prompt_compare_table(results["v0"], results["current"])
+        elif eval_mode != "single":
+            stage = results.get(args.prompt_version, {}).get("decoupled_stage") or {}
+            if stage:
+                print()
+                print("decoupled 分段计数（均值）")
+                print(f"stage1_no_change\t{_format_metric(stage.get('stage1_no_change'))}")
+                print(f"stage1_revised\t{_format_metric(stage.get('stage1_revised'))}")
+                print(f"stage2_rejected\t{_format_metric(stage.get('stage2_rejected'))}")
+                print(f"produced\t{_format_metric(stage.get('produced'))}")
         return 0
 
     sample_path = find_sample_file(args.sample)

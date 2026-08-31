@@ -459,6 +459,10 @@ class CatDiagnoseDecoupledTest(unittest.TestCase):
                 ))
         self.assertEqual(result, [])
         self.assertEqual(calls, ["polish.rewrite"])
+        self.assertEqual(
+            cat_diagnose.last_decoupled_stats(),
+            {"stage1_no_change": 1, "stage1_revised": 0, "stage2_rejected": 0, "produced": 0},
+        )
 
     def test_accepted_rewrite_keeps_problem_and_revised(self):
         from app.utils import cat_diagnose
@@ -482,6 +486,10 @@ class CatDiagnoseDecoupledTest(unittest.TestCase):
         self.assertEqual(result[0]["severity"], "high")
         self.assertEqual(result[0]["problem"], "至于为错别字")
         self.assertEqual(result[0]["category"], "spelling")
+        self.assertEqual(
+            cat_diagnose.last_decoupled_stats(),
+            {"stage1_no_change": 0, "stage1_revised": 1, "stage2_rejected": 0, "produced": 1},
+        )
 
     def test_validate_no_change_drops_rewrite(self):
         from app.utils import cat_diagnose
@@ -501,6 +509,30 @@ class CatDiagnoseDecoupledTest(unittest.TestCase):
                     items, {}, "", "", mode="decoupled",
                 ))
         self.assertEqual(result, [])
+        self.assertEqual(
+            cat_diagnose.last_decoupled_stats(),
+            {"stage1_no_change": 0, "stage1_revised": 1, "stage2_rejected": 1, "produced": 0},
+        )
+
+    def test_forbidden_source_regex_skips_plain_table(self):
+        import importlib.util
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "evaluate_cat_diagnose.py")
+        spec = importlib.util.spec_from_file_location("evaluate_cat_diagnose", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        pattern = module.FORBIDDEN_SOURCE_RE
+        self.assertIsNone(pattern.search("下面的表格列出了试剂组分。"))
+        self.assertIsNotNone(pattern.search("如表1所示。"))
+        self.assertIsNotNone(pattern.search("见表 2。"))
+        items = module.diagnoses_only_in_single(
+            [[{"sentence_index": 0, "problem": "语序不当", "severity": "medium", "category": "syntax"}]],
+            [[]],
+            ["至于常温解冻。"],
+        )
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["sentence_index"], 0)
+        self.assertEqual(items[0]["problem"], "语序不当")
 
 
 if __name__ == "__main__":

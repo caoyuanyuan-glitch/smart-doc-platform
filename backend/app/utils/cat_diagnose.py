@@ -257,6 +257,12 @@ def diagnose_batch_size() -> int:
 
 
 _active_diagnose_mode: Optional[str] = None
+_last_decoupled_stats: dict[str, int] = {
+    "stage1_no_change": 0,
+    "stage1_revised": 0,
+    "stage2_rejected": 0,
+    "produced": 0,
+}
 
 
 def diagnose_mode(explicit: Optional[str] = None) -> str:
@@ -268,6 +274,20 @@ def diagnose_mode(explicit: Optional[str] = None) -> str:
         raw = str(os.getenv("AI_DIAGNOSE_MODE", "decoupled") or "decoupled")
     value = raw.strip().lower()
     return "single" if value == "single" else "decoupled"
+
+
+def last_decoupled_stats() -> dict[str, int]:
+    return dict(_last_decoupled_stats)
+
+
+def _reset_decoupled_stats() -> None:
+    for key in _last_decoupled_stats:
+        _last_decoupled_stats[key] = 0
+
+
+def _add_decoupled_stats(**counts: int) -> None:
+    for key, value in counts.items():
+        _last_decoupled_stats[key] = int(_last_decoupled_stats.get(key) or 0) + int(value or 0)
 
 
 def diagnose_guide_max_chars() -> int:
@@ -958,7 +978,15 @@ async def _diagnose_batch_decoupled(
     rewrite_payload = await _chat_json(rewrite_prompt, "polish.rewrite")
     revisions = parse_revisions_payload(rewrite_payload, sentences)
     logger.info("[CAT_DIAGNOSE] decoupled rewrite changed=%s / %s", len(revisions), len(sentences))
+    batch_n = len(sentences)
+    batch_m = len(revisions)
     if not revisions:
+        _add_decoupled_stats(
+            stage1_no_change=batch_n,
+            stage1_revised=0,
+            stage2_rejected=0,
+            produced=0,
+        )
         return []
     pairs = []
     for item in sentences:
@@ -972,17 +1000,25 @@ async def _diagnose_batch_decoupled(
             "revised": revised,
         })
     if not pairs:
+        _add_decoupled_stats(
+            stage1_no_change=batch_n - batch_m,
+            stage1_revised=batch_m,
+            stage2_rejected=0,
+            produced=0,
+        )
         return []
     validate_prompt = _VALIDATE_PROMPT.format(json_pairs=json.dumps(pairs, ensure_ascii=False))
     validate_payload = await _chat_json(validate_prompt, "polish.validate")
     verdicts = parse_validate_payload(validate_payload)
     raw_items = []
+    batch_k = 0
     for pair in pairs:
         idx = pair["sentence_index"]
         if idx not in allowed:
             continue
         parsed = verdicts.get(idx)
         if not parsed:
+            batch_k += 1
             _log_diagnose_drop(
                 "validate",
                 "",
@@ -1003,7 +1039,14 @@ async def _diagnose_batch_decoupled(
             "ruleable": False,
             "rule_hint": "",
         })
-    return parse_diagnoses_payload({"diagnoses": raw_items}, allowed_indexes=allowed)
+    kept = parse_diagnoses_payload({"diagnoses": raw_items}, allowed_indexes=allowed)
+    _add_decoupled_stats(
+        stage1_no_change=batch_n - batch_m,
+        stage1_revised=batch_m,
+        stage2_rejected=batch_k,
+        produced=len(kept),
+    )
+    return kept
 
 
 async def _diagnose_batch(
@@ -1056,6 +1099,8 @@ async def open_diagnose_sentences(
         for item in items
     }
     try:
+        if _active_diagnose_mode == "decoupled":
+            _reset_decoupled_stats()
         total_batches = (len(items) + batch_size - 1) // batch_size
         logger.info(
             "[CAT_DIAGNOSE] start mode=%s sentences=%s batch_size=%s batches=%s timeout=%s",
@@ -1087,5 +1132,14 @@ async def open_diagnose_sentences(
         logger.warning("[CAT_DIAGNOSE] 诊断失败，静默降级: %s", exc)
         return []
     finally:
+        if _active_diagnose_mode == "decoupled":
+            stats = _last_decoupled_stats
+            logger.info(
+                "[CAT_DIAGNOSE] decoupled stage1_no_change=%s stage1_revised=%s stage2_rejected=%s produced=%s",
+                stats.get("stage1_no_change", 0),
+                stats.get("stage1_revised", 0),
+                stats.get("stage2_rejected", 0),
+                stats.get("produced", 0),
+            )
         _active_diagnose_mode = previous_mode
     return diagnoses
