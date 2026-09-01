@@ -915,8 +915,7 @@ def _serialize_review_list_item(db: Session, review, document_map, judgment_stat
     review_dict['document_file_type'] = doc.file_type if doc else ''
     if not review_dict.get('summary'):
         review_dict['summary'] = '{}'
-    if review.status == 'running':
-        review_dict['progress'] = get_progress(review.id)
+    review_dict['progress'] = get_progress(review.id)
     review_dict['judgment_stats'] = judgment_stats or _empty_judgment_stats()
     return review_dict
 
