@@ -25,7 +25,15 @@ class PairingResult:
     needs_user_confirm: bool = False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data["content_document_id"] = self.content_source_file_id
+        data["visual_document_id"] = self.visual_source_file_id
+        data["content_source_document_id"] = self.content_source_file_id
+        data["visual_source_document_id"] = self.visual_source_file_id
+        data["mode"] = "paired" if self.pairing_status == "paired" else "single"
+        data["status"] = self.pairing_status
+        data["pairing_message"] = self.message
+        return data
 
 
 def _stem(name: str) -> str:
@@ -72,6 +80,7 @@ def resolve_input_pairing(
             content_source_file_id=content_id,
             visual_source_file_id=visual_id,
             source_format=MODE_DOCX_PDF,
+            message="Word 作为内容输入，PDF 作为视觉复核输入",
         )
 
     if not same_user or not same_task:

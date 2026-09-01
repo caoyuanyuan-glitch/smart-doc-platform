@@ -104,7 +104,7 @@ def update_review_status(db: Session, review_id: int, status: str, total_issues:
         if status == "running" and not getattr(review, "started_at", None):
             review.started_at = datetime.utcnow()
         review.heartbeat_at = datetime.utcnow()
-        if status in {"completed", "failed", "cancelled"}:
+        if status in {"completed", "failed", "cancelled", "timeout", "error"}:
             review.completed_at = datetime.utcnow()
         db.commit()
         db.refresh(review)

@@ -33,6 +33,24 @@ def test_build_review_cache_key_changes_with_mode(monkeypatch):
     assert rule_key != hybrid_key
 
 
+def test_build_review_cache_key_isolates_visual_input(monkeypatch):
+    monkeypatch.setattr(review_api, "_review_cache_version", lambda: "v1")
+    document = SimpleNamespace(
+        id=1,
+        filename="demo.docx",
+        file_type="docx",
+        file_size=128,
+        content="same content",
+    )
+    visual_a = SimpleNamespace(id=2, filename="a.pdf", file_type="pdf", file_size=10, content="pdf-a")
+    visual_b = SimpleNamespace(id=3, filename="b.pdf", file_type="pdf", file_size=11, content="pdf-b")
+    single = review_api._build_review_cache_key(document, "hybrid")
+    paired_a = review_api._build_review_cache_key(document, "hybrid", visual_document=visual_a, pairing_confirmed=True)
+    paired_b = review_api._build_review_cache_key(document, "hybrid", visual_document=visual_b, pairing_confirmed=True)
+    assert single != paired_a
+    assert paired_a != paired_b
+
+
 def test_build_ai_chunk_cache_key_changes_with_document_name(monkeypatch):
     monkeypatch.setattr(review_api, "_review_cache_version", lambda: "v1")
     monkeypatch.setattr(review_api, "_ai_provider_cache_fingerprint", lambda: "provider-v1")
@@ -264,7 +282,7 @@ def test_select_relevant_ai_review_basis_falls_back_without_es(monkeypatch):
 
 def test_find_cached_completed_review_matches_cache_key(monkeypatch):
     expected_key = "cache-key-1"
-    monkeypatch.setattr(review_api, "_build_review_cache_key", lambda document, mode: expected_key)
+    monkeypatch.setattr(review_api, "_build_review_cache_key", lambda document, mode, **kwargs: expected_key)
 
     matched_review = SimpleNamespace(
         id=12,
@@ -364,7 +382,7 @@ def test_system_prompt_keeps_ui_bracket_guidance_without_forcing_screen_names():
 
 
 def test_find_cached_completed_review_skips_non_completed(monkeypatch):
-    monkeypatch.setattr(review_api, "_build_review_cache_key", lambda document, mode: "cache-key-1")
+    monkeypatch.setattr(review_api, "_build_review_cache_key", lambda document, mode, **kwargs: "cache-key-1")
     reviews = [
         SimpleNamespace(id=21, status="running", summary=json.dumps({"cache_key": "cache-key-1"})),
         SimpleNamespace(id=22, status="failed", summary=json.dumps({"cache_key": "cache-key-1"})),
@@ -388,7 +406,8 @@ def test_list_reviews_batches_document_lookup(monkeypatch):
     ]
     calls = []
 
-    monkeypatch.setattr(review_api, "get_reviews", lambda db: reviews)
+    monkeypatch.setattr(review_api, "_query_review_rows", lambda *args, **kwargs: reviews)
+    monkeypatch.setattr(review_api, "_count_review_rows", lambda *args, **kwargs: len(reviews))
     monkeypatch.setattr(review_api, "_reconcile_review_runtime_state", lambda db, review: review)
     monkeypatch.setattr(review_api, "get_progress", lambda review_id: {"status": "running", "progress": 35, "message": "处理中"})
 
@@ -398,12 +417,14 @@ def test_list_reviews_batches_document_lookup(monkeypatch):
 
     monkeypatch.setattr(review_api, "get_documents_by_ids", fake_get_documents_by_ids)
 
-    result = asyncio.run(review_api.list_reviews(db=None))
+    result = asyncio.run(review_api.list_reviews(db=None, skip=0, limit=20))
+    items = result["items"]
 
     assert calls == [[11, 12]]
-    assert result[0]["document_name"] == "a.docx"
-    assert result[0]["progress"]["progress"] == 35
-    assert result[1]["document_file_type"] == "pdf"
+    assert result["total"] == 2
+    assert items[0]["document_name"] == "a.docx"
+    assert items[0]["progress"]["progress"] == 35
+    assert items[1]["document_file_type"] == "pdf"
 
 
 def test_normalize_review_status_accepts_supported_values():
@@ -417,16 +438,18 @@ def test_list_reviews_supports_filters(monkeypatch):
     documents = [SimpleNamespace(id=21, filename="demo.docx", file_type="docx")]
     captured = {}
 
-    def fake_query_review_rows(db, document_id=None, status=None, latest_only=False, limit=100):
+    def fake_query_review_rows(db, document_id=None, status=None, latest_only=False, limit=100, skip=0):
         captured.update({
             "document_id": document_id,
             "status": status,
             "latest_only": latest_only,
             "limit": limit,
+            "skip": skip,
         })
         return reviews
 
     monkeypatch.setattr(review_api, "_query_review_rows", fake_query_review_rows)
+    monkeypatch.setattr(review_api, "_count_review_rows", lambda *args, **kwargs: 1)
     monkeypatch.setattr(review_api, "get_documents_by_ids", lambda db, document_ids: documents)
     monkeypatch.setattr(review_api, "_reconcile_review_runtime_state", lambda db, review: review)
     monkeypatch.setattr(review_api, "get_progress", lambda review_id: {"status": "running", "progress": 42, "message": "处理中"})
@@ -435,9 +458,9 @@ def test_list_reviews_supports_filters(monkeypatch):
         review_api.list_reviews(document_id=21, status="running", latest_only=True, limit=25, db=None)
     )
 
-    assert captured == {"document_id": 21, "status": "running", "latest_only": True, "limit": 25}
-    assert result[0]["document_name"] == "demo.docx"
-    assert result[0]["progress"]["progress"] == 42
+    assert captured == {"document_id": 21, "status": "running", "latest_only": True, "limit": 25, "skip": 0}
+    assert result["items"][0]["document_name"] == "demo.docx"
+    assert result["items"][0]["progress"]["progress"] == 42
 
 
 def test_list_reviews_filters_reconciled_runtime_status(monkeypatch):
@@ -445,6 +468,7 @@ def test_list_reviews_filters_reconciled_runtime_status(monkeypatch):
     document_calls = []
 
     monkeypatch.setattr(review_api, "_query_review_rows", lambda *args, **kwargs: [stale_running_review])
+    monkeypatch.setattr(review_api, "_count_review_rows", lambda *args, **kwargs: 1)
     monkeypatch.setattr(
         review_api,
         "_reconcile_review_runtime_state",
@@ -454,7 +478,7 @@ def test_list_reviews_filters_reconciled_runtime_status(monkeypatch):
 
     result = asyncio.run(review_api.list_reviews(status="running", db=None))
 
-    assert result == []
+    assert result["items"] == []
     assert document_calls == [[]]
 
 

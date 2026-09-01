@@ -42,9 +42,25 @@ class Review(BaseModel):
     completed_at: Optional[datetime] = None
     progress: Optional[ReviewProgress] = None
     judgment_stats: Optional[ReviewJudgmentStats] = None
+    stage: Optional[str] = ""
+    message: Optional[str] = ""
+    heartbeat_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    input_pairing: Optional[dict] = None
+    diagnostics: Optional[dict] = None
+    error_code: Optional[str] = None
+    error_detail: Optional[str] = None
 
     class Config:
         orm_mode = True
+        extra = "allow"
+
+
+class ReviewListResponse(BaseModel):
+    items: list[Review]
+    total: int = 0
+    skip: int = 0
+    limit: int = 20
 
 class IssueCreate(BaseModel):
     review_id: int

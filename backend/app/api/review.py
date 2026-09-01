@@ -41,7 +41,7 @@ from app.crud.term import get_terms
 from app.models.term import Term
 from app.crud.audit_basis import get_audit_basis
 from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files, get_file
-from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate, FalsePositiveMemoryListResponse, SnippetReviewCreate
+from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate, FalsePositiveMemoryListResponse, SnippetReviewCreate, ReviewListResponse
 from app.schemas.document import DocumentCreate
 from app.models.review import Review as ReviewModel
 from app.models.issue import Issue as IssueModel
@@ -62,6 +62,7 @@ from app.review_engine.validation import (
     validate_ai_issue_candidate as engine_validate_ai_issue_candidate,
 )
 from app.review_engine.layers import count_issue_layers
+from app.review_engine.bounded_cache import BoundedTTLCache
 from app.review_engine.pipeline import (
     select_review_issues as pipeline_select_review_issues,
     sort_key as pipeline_sort_key,
@@ -74,7 +75,10 @@ from app.services.audit_basis_search import get_audit_basis_search_service
 from app.schemas.user import UserOut
 
 _review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
-_ai_review_chunk_cache = {}
+_ai_review_chunk_cache = BoundedTTLCache(
+    max_items=max(1, int(os.getenv("REVIEW_CHUNK_CACHE_MAX_ITEMS", "1000") or 1000)),
+    ttl_seconds=max(1, int(os.getenv("REVIEW_CHUNK_CACHE_TTL_SECONDS", "86400") or 86400)),
+)
 _review_cancel_flags = {}
 _review_force_rerun_ids = set()
 _REVIEW_TERMINAL_STATUSES = {"completed", "failed", "error", "cancelled", "timeout"}
@@ -103,6 +107,65 @@ REVIEW_CACHE_VERSION_FILES = [
 REVIEW_PROMPT_VERSION = "review-prompt-v3"
 REVIEW_FILTER_POLICY_VERSION = "review-filter-v2"
 _AI_REVIEW_SEMAPHORE = threading.BoundedSemaphore(max(1, int(os.getenv("REVIEW_AI_MAX_CONCURRENCY", "4") or 4)))
+_VISUAL_REVIEW_SEMAPHORE = threading.BoundedSemaphore(max(1, min(8, int(os.getenv("REVIEW_VISUAL_MAX_CONCURRENCY", "2") or 2))))
+_page_render_cache = BoundedTTLCache(
+    max_items=max(1, int(os.getenv("REVIEW_PAGE_CACHE_MAX_ITEMS", "200") or 200)),
+    ttl_seconds=max(1, int(os.getenv("REVIEW_PAGE_CACHE_TTL_SECONDS", "3600") or 3600)),
+)
+
+
+def _int_env(name: str, default: str) -> int:
+    try:
+        return int(os.getenv(name, default) or default)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _chunk_cache():
+    global _ai_review_chunk_cache
+    if _ai_review_chunk_cache is None or isinstance(_ai_review_chunk_cache, dict):
+        from app.review_engine.bounded_cache import BoundedTTLCache
+        migrated = _ai_review_chunk_cache if isinstance(_ai_review_chunk_cache, dict) else {}
+        _ai_review_chunk_cache = BoundedTTLCache(
+            max_items=_int_env("REVIEW_CHUNK_CACHE_MAX_ITEMS", "1000"),
+            ttl_seconds=_int_env("REVIEW_CHUNK_CACHE_TTL_SECONDS", "86400"),
+        )
+        for key, value in migrated.items():
+            _ai_review_chunk_cache.set(key, value)
+    return _ai_review_chunk_cache
+
+
+def _page_cache():
+    global _page_render_cache
+    if _page_render_cache is None:
+        from app.review_engine.bounded_cache import BoundedTTLCache
+        _page_render_cache = BoundedTTLCache(
+            max_items=_int_env("REVIEW_PAGE_CACHE_MAX_ITEMS", "200"),
+            ttl_seconds=_int_env("REVIEW_PAGE_CACHE_TTL_SECONDS", "3600"),
+        )
+    return _page_render_cache
+
+
+def _visual_semaphore():
+    global _VISUAL_REVIEW_SEMAPHORE
+    if _VISUAL_REVIEW_SEMAPHORE is None:
+        _VISUAL_REVIEW_SEMAPHORE = threading.BoundedSemaphore(max(1, min(8, _int_env("REVIEW_VISUAL_MAX_CONCURRENCY", "2"))))
+    return _VISUAL_REVIEW_SEMAPHORE
+
+
+def _assert_review_runtime_ready():
+    import inspect
+    from app.review_engine.pairing import resolve_input_pairing
+    from app.database import OrphanReviewDataError, _prepare_review_fk_parents, collect_orphan_review_report
+    from app.services.chunker import create_smart_chunker as chunker_factory
+    if not callable(resolve_input_pairing):
+        raise RuntimeError("runtime_missing:resolve_input_pairing")
+    if not callable(collect_orphan_review_report) or not callable(_prepare_review_fk_parents):
+        raise RuntimeError("runtime_missing:orphan_migration")
+    if "sampling_mode" not in inspect.signature(chunker_factory).parameters:
+        raise RuntimeError("runtime_missing:sampling_mode")
+    if OrphanReviewDataError is None:
+        raise RuntimeError("runtime_missing:OrphanReviewDataError")
 
 
 def get_progress(review_id: int):
@@ -246,21 +309,41 @@ def _review_cache_version():
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12] if raw else "unknown"
 
 
-def _build_review_cache_key(document, mode: str):
+def _build_review_cache_key(document, mode: str, visual_document=None, pairing=None, pairing_confirmed=False):
     content = str(getattr(document, "content", "") or "")
-    content_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()
-    from app.review_engine.versions import BASIS_POLICY_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    from app.review_engine.versions import (
+        BASIS_POLICY_VERSION,
+        CHUNKER_VERSION,
+        FILTER_POLICY_VERSION,
+        PROMPT_VERSION,
+        VISUAL_POLICY_VERSION,
+    )
+    visual_content = str(getattr(visual_document, "content", "") or "") if visual_document is not None else ""
+    visual_hash = hashlib.sha256(visual_content.encode("utf-8")).hexdigest() if visual_content else "null"
+    pairing_status = ""
+    if isinstance(pairing, dict):
+        pairing_status = str(pairing.get("pairing_status") or "")
+    elif pairing is not None:
+        pairing_status = str(getattr(pairing, "pairing_status", "") or "")
+    pairing_mode = "paired" if visual_document is not None or pairing_status == "paired" else "single"
     fingerprint = "||".join([
         str(getattr(document, "id", "") or ""),
         str(getattr(document, "filename", "") or ""),
         str(getattr(document, "file_type", "") or ""),
         str(getattr(document, "file_size", 0) or 0),
         content_hash,
+        visual_hash,
+        str(getattr(visual_document, "file_type", "") or "") if visual_document is not None else "null",
+        pairing_mode,
+        "1" if pairing_confirmed else "0",
         str(mode or "hybrid"),
         _review_cache_version(),
         PROMPT_VERSION,
         FILTER_POLICY_VERSION,
         BASIS_POLICY_VERSION,
+        CHUNKER_VERSION,
+        VISUAL_POLICY_VERSION,
         str(getattr(ai_client, "default_provider", "") or ""),
         _ai_provider_cache_fingerprint(),
     ])
@@ -656,6 +739,55 @@ def _issue_count(issue):
         return 1
 
 
+
+def _build_issue_create(review_id, issue):
+    persisted_position = _decode_issue_position(issue.get("position", ""))
+    persisted_position.update({
+        key: issue.get(key)
+        for key in ("evidence", "position_object", "visual_verification", "source_format", "target_status", "rejected_reason")
+        if issue.get(key) not in (None, "", {}, [])
+    })
+    return IssueCreate(
+        review_id=review_id,
+        severity=issue.get("severity") or "general",
+        category=issue.get("category", ""),
+        rule=issue.get("rule", ""),
+        chapter=issue.get("chapter", ""),
+        original_text=issue.get("original_text", ""),
+        context=issue.get("context", ""),
+        suggestion=issue.get("suggestion", ""),
+        description=issue.get("description", ""),
+        audit_basis=issue.get("audit_basis", ""),
+        confidence=issue.get("confidence", 0),
+        source=issue.get("source", "rule"),
+        position=json.dumps(persisted_position, ensure_ascii=False) if persisted_position else issue.get("position", ""),
+        status=str(issue.get("status") or "pending"),
+        providers=issue.get("providers", None),
+    )
+
+
+def _persist_review_issues(db, review_id, issues):
+    created = 0
+    for issue in issues or []:
+        payload = _build_issue_create(review_id, issue)
+        existing_id = issue.get("_db_id")
+        if existing_id:
+            if db is not None:
+                db_issue = db.query(IssueModel).filter(IssueModel.id == existing_id).first()
+                if db_issue:
+                    db_issue.position = payload.position
+                    db_issue.status = payload.status
+                    db_issue.suggestion = payload.suggestion
+                    db_issue.description = payload.description
+                    db_issue.confidence = payload.confidence
+                    db.commit()
+            continue
+        db_issue = create_issue(db=db, issue=payload)
+        issue["_db_id"] = getattr(db_issue, "id", None)
+        created += 1
+    return created
+
+
 def _persist_diagnostic_flags(issues):
     for issue in issues or []:
         meta = {}
@@ -722,8 +854,14 @@ def _create_snippet_document(db: Session, text: str, user_id: int):
     return document
 
 
-def _find_cached_completed_review(db: Session, document, mode: str):
-    cache_key = _build_review_cache_key(document, mode)
+def _find_cached_completed_review(db: Session, document, mode: str, visual_document=None, pairing=None, pairing_confirmed=False):
+    cache_key = _build_review_cache_key(
+        document,
+        mode,
+        visual_document=visual_document,
+        pairing=pairing,
+        pairing_confirmed=pairing_confirmed,
+    )
     for review in get_reviews(db, document_id=document.id, limit=20):
         if review.status != "completed":
             continue
@@ -737,14 +875,22 @@ def _normalize_review_status(status: str | None):
     value = str(status or "").strip().lower()
     if not value or value == "all":
         return None
-    if value not in {"pending", "running", "completed", "failed", "cancelled"}:
-        raise HTTPException(status_code=400, detail="Unsupported review status")
     return value
 
 
-def _query_review_rows(db: Session, document_id: int | None = None, status: str | None = None, latest_only: bool = False, limit: int = 100):
+def _apply_review_filters(query, document_id: int | None = None, status: str | None = None):
+    normalized_status = _normalize_review_status(status)
+    if document_id is not None:
+        query = query.filter(ReviewModel.document_id == document_id)
+    if normalized_status:
+        query = query.filter(ReviewModel.status == normalized_status)
+    return query
+
+
+def _query_review_rows(db: Session, document_id: int | None = None, status: str | None = None, latest_only: bool = False, limit: int = 100, skip: int = 0):
     normalized_status = _normalize_review_status(status)
     normalized_limit = max(1, min(int(limit or 100), 500))
+    normalized_skip = max(0, int(skip or 0))
 
     if latest_only:
         latest_query = db.query(
@@ -759,7 +905,8 @@ def _query_review_rows(db: Session, document_id: int | None = None, status: str 
         return (
             db.query(ReviewModel)
             .join(latest_subquery, ReviewModel.id == latest_subquery.c.latest_id)
-            .order_by(ReviewModel.id.desc())
+            .order_by(ReviewModel.created_at.desc(), ReviewModel.id.desc())
+            .offset(normalized_skip)
             .limit(normalized_limit)
             .all()
         )
@@ -769,7 +916,24 @@ def _query_review_rows(db: Session, document_id: int | None = None, status: str 
         query = query.filter(ReviewModel.document_id == document_id)
     if normalized_status:
         query = query.filter(ReviewModel.status == normalized_status)
-    return query.order_by(ReviewModel.id.desc()).limit(normalized_limit).all()
+    return query.order_by(ReviewModel.created_at.desc(), ReviewModel.id.desc()).offset(normalized_skip).limit(normalized_limit).all()
+
+
+def _count_review_rows(db: Session, document_id: int | None = None, status: str | None = None, latest_only: bool = False):
+    normalized_status = _normalize_review_status(status)
+    if latest_only:
+        latest_query = db.query(ReviewModel.document_id)
+        if document_id is not None:
+            latest_query = latest_query.filter(ReviewModel.document_id == document_id)
+        if normalized_status:
+            latest_query = latest_query.filter(ReviewModel.status == normalized_status)
+        return latest_query.distinct().count()
+    query = db.query(func.count(ReviewModel.id))
+    if document_id is not None:
+        query = query.filter(ReviewModel.document_id == document_id)
+    if normalized_status:
+        query = query.filter(ReviewModel.status == normalized_status)
+    return int(query.scalar() or 0)
 
 
 def _query_review_rows_for_user(
@@ -779,11 +943,13 @@ def _query_review_rows_for_user(
     status: str | None = None,
     latest_only: bool = False,
     limit: int = 100,
+    skip: int = 0,
 ):
     if current_user.role == "admin":
-        return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+        return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit, skip=skip)
     normalized_status = _normalize_review_status(status)
     normalized_limit = max(1, min(int(limit or 100), 500))
+    normalized_skip = max(0, int(skip or 0))
     if latest_only:
         latest_query = db.query(
             ReviewModel.document_id.label("document_id"),
@@ -797,7 +963,8 @@ def _query_review_rows_for_user(
         return (
             db.query(ReviewModel)
             .join(latest_subquery, ReviewModel.id == latest_subquery.c.latest_id)
-            .order_by(ReviewModel.id.desc())
+            .order_by(ReviewModel.created_at.desc(), ReviewModel.id.desc())
+            .offset(normalized_skip)
             .limit(normalized_limit)
             .all()
         )
@@ -806,7 +973,27 @@ def _query_review_rows_for_user(
         query = query.filter(ReviewModel.document_id == document_id)
     if normalized_status:
         query = query.filter(ReviewModel.status == normalized_status)
-    return query.order_by(ReviewModel.id.desc()).limit(normalized_limit).all()
+    return query.order_by(ReviewModel.created_at.desc(), ReviewModel.id.desc()).offset(normalized_skip).limit(normalized_limit).all()
+
+
+def _count_review_rows_for_user(
+    db: Session,
+    current_user: UserOut,
+    document_id: int | None = None,
+    status: str | None = None,
+    latest_only: bool = False,
+):
+    if current_user.role == "admin":
+        return _count_review_rows(db, document_id=document_id, status=status, latest_only=latest_only)
+    normalized_status = _normalize_review_status(status)
+    query = db.query(ReviewModel).join(DocumentModel, DocumentModel.id == ReviewModel.document_id).filter(DocumentModel.user_id == current_user.id)
+    if document_id is not None:
+        query = query.filter(ReviewModel.document_id == document_id)
+    if normalized_status:
+        query = query.filter(ReviewModel.status == normalized_status)
+    if latest_only:
+        return query.with_entities(ReviewModel.document_id).distinct().count()
+    return int(query.with_entities(func.count(ReviewModel.id)).scalar() or 0)
 
 
 def _has_bound_current_user(current_user) -> bool:
@@ -828,10 +1015,9 @@ def _query_review_rows_legacy(
     status: str | None = None,
     latest_only: bool = False,
     limit: int = 100,
+    skip: int = 0,
 ):
-    if document_id is None and status is None and not latest_only and limit == 100:
-        return get_reviews(db)
-    return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+    return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit, skip=skip)
 
 
 def _reconcile_review_rows_for_response(db: Session, reviews, status: str | None = None):
@@ -915,9 +1101,23 @@ def _serialize_review_list_item(db: Session, review, document_map, judgment_stat
     review_dict['document_file_type'] = doc.file_type if doc else ''
     if not review_dict.get('summary'):
         review_dict['summary'] = '{}'
-    if review.status == 'running':
-        review_dict['progress'] = get_progress(review.id)
+    progress_info = get_progress(review.id) if review.status == 'running' else None
+    if progress_info:
+        review_dict['progress'] = progress_info
+        review_dict['stage'] = progress_info.get('step') or review_dict.get('stage') or ''
+        if not review_dict.get('message'):
+            review_dict['message'] = progress_info.get('message') or ''
     review_dict['judgment_stats'] = judgment_stats or _empty_judgment_stats()
+    summary = _load_review_summary(review.summary)
+    if isinstance(summary, dict):
+        review_dict['input_pairing'] = summary.get('input_pairing') or review_dict.get('input_pairing')
+        review_dict['error_code'] = summary.get('error_code') or review_dict.get('error_code')
+        review_dict['error_detail'] = summary.get('error_detail') or summary.get('error') or review_dict.get('error_detail')
+        review_dict['diagnostics'] = summary.get('stage_diagnostics') or summary.get('diagnostics') or review_dict.get('diagnostics')
+        if not review_dict.get('stage'):
+            review_dict['stage'] = summary.get('stage') or summary.get('step') or ''
+        if not review_dict.get('message'):
+            review_dict['message'] = summary.get('message') or summary.get('error_detail') or summary.get('error') or ''
     return review_dict
 
 
@@ -3285,22 +3485,82 @@ def _match_known_pdf_false_positive(issue):
 def _render_pdf_page_png_bytes(file_path: Path, page_number: int, scale: float | None = None):
     if not file_path or not file_path.exists() or int(page_number or 0) <= 0:
         return None
+    zoom = float(scale or _review_pdf_visual_verify_scale())
+    from app.review_engine.versions import VISUAL_POLICY_VERSION
+    cache_key = "||".join([
+        str(file_path),
+        str(int(page_number)),
+        f"{zoom:.3f}",
+        VISUAL_POLICY_VERSION,
+    ])
+    cached = _page_cache().get(cache_key)
+    if cached is not None:
+        return cached
     try:
         import fitz
     except ModuleNotFoundError:
         return None
-
-    zoom = float(scale or _review_pdf_visual_verify_scale())
     try:
         with fitz.open(str(file_path)) as doc:
             if page_number > len(doc):
                 return None
             page = doc.load_page(page_number - 1)
             pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-            return pix.tobytes('png')
+            png_bytes = pix.tobytes('png')
+            _page_cache().set(cache_key, png_bytes)
+            return png_bytes
     except Exception as exc:
         print(f"[审核] PDF 页面渲染失败 page={page_number}: {exc}")
         return None
+
+
+def _run_visual_page_jobs(review_id, source_path, page_jobs):
+    results = {}
+    unique = {}
+    for page_number, payload in page_jobs:
+        page_number = int(page_number or 0)
+        if page_number > 0 and page_number not in unique:
+            unique[page_number] = payload
+    if not unique:
+        return results
+    workers = max(1, min(8, _int_env("REVIEW_VISUAL_MAX_CONCURRENCY", "2")))
+
+    def _job(page_number, payload):
+        started = time.perf_counter()
+        acquired = _visual_semaphore().acquire()
+        try:
+            png_bytes = _render_pdf_page_png_bytes(source_path, page_number)
+            if not png_bytes:
+                return page_number, {
+                    "decision": "failed",
+                    "reason": "render_failed",
+                    "visual_status": "failed",
+                    "confidence": 0,
+                    "provider": "",
+                    "attempts": 0,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                }
+            result = _verify_review_issue_visually(
+                png_bytes,
+                payload,
+                page_number=page_number,
+                review_id=review_id,
+            ) or {}
+            result["latency_ms"] = int((time.perf_counter() - started) * 1000)
+            return page_number, result
+        finally:
+            if acquired:
+                _visual_semaphore().release()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_job, page_number, payload) for page_number, payload in unique.items()]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                page_number, result = future.result()
+                results[page_number] = result
+            except Exception as exc:
+                print(f"[审核] 视觉复核页面任务失败: {exc}")
+    return results
 
 
 def _visual_provider_available(provider: str) -> bool:
@@ -3460,10 +3720,46 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
     total_visual_candidates = len(candidates) + len(page_candidates)
     set_progress(review_id, 'running', '渲染复核', 84, f'正在复核 {total_visual_candidates} 个 PDF 疑点页...')
 
+    page_jobs = []
+    seen_pages = set()
+    for issue, page_number in candidates:
+        if page_number in seen_pages:
+            continue
+        seen_pages.add(page_number)
+        page_jobs.append((page_number, {
+            'severity': _issue_value(issue, 'severity', ''),
+            'category': _issue_value(issue, 'category', ''),
+            'original_text': _issue_value(issue, 'original_text', ''),
+            'context': _issue_value(issue, 'context', ''),
+            'description': _issue_value(issue, 'description', ''),
+            'suggestion': _issue_value(issue, 'suggestion', ''),
+        }))
+    for page_candidate in page_candidates:
+        page_number = int(page_candidate.get('page_number') or 0)
+        if page_number in seen_pages:
+            continue
+        seen_pages.add(page_number)
+        page_jobs.append((page_number, {
+            'severity': _page_visual_issue_severity(page_candidate.get('reasons') or []),
+            'category': _page_visual_issue_category(page_candidate.get('reasons') or []),
+            'original_text': page_candidate.get('text_preview') or '',
+            'context': page_candidate.get('text_preview') or '',
+            'description': f"页级疑点: {', '.join(page_candidate.get('reasons') or [])}",
+            'suggestion': '请人工复核该页实际显示',
+        }))
+    page_results = _run_visual_page_jobs(review_id, source_path, page_jobs)
+
     rejected_ids = set()
     for issue, page_number in candidates:
-        png_bytes = _render_pdf_page_png_bytes(source_path, page_number)
-        if not png_bytes:
+        result = page_results.get(page_number) or {
+            'decision': 'failed',
+            'reason': 'render_failed',
+            'visual_status': 'failed',
+            'confidence': 0,
+            'provider': '',
+            'attempts': 0,
+        }
+        if str(result.get('reason') or '') == 'render_failed' and not result.get('provider'):
             visual = build_visual_verification(status='failed', error_code='render_failed', evidence_page=page_number)
             issue['visual_verification'] = visual
             issue['status'] = 'blocked'
@@ -3471,20 +3767,6 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             diagnostics['skipped_count'] += 1
             diagnostics['items'].append({'page_number': page_number, 'decision': 'failed', 'reason': 'render_failed', 'status': 'failed'})
             continue
-
-        result = _verify_review_issue_visually(
-            png_bytes,
-            {
-                'severity': _issue_value(issue, 'severity', ''),
-                'category': _issue_value(issue, 'category', ''),
-                'original_text': _issue_value(issue, 'original_text', ''),
-                'context': _issue_value(issue, 'context', ''),
-                'description': _issue_value(issue, 'description', ''),
-                'suggestion': _issue_value(issue, 'suggestion', ''),
-            },
-            page_number=page_number,
-            review_id=review_id,
-        )
         decision = str(result.get('decision') or 'uncertain').lower()
         compact_result = {
             'decision': decision,
@@ -3495,6 +3777,7 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             'provider': result.get('provider') or '',
             'attempts': result.get('attempts') or 1,
             'evidence_page': page_number,
+            'latency_ms': result.get('latency_ms'),
         }
         visual = build_visual_verification(
             status=compact_result['visual_status'],
@@ -3513,7 +3796,6 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=compact_result)
 
         diagnostics['verified_count'] += 1
-        known_false_positive_reason = None
         if decision == 'confirm':
             diagnostics['items'].append({'page_number': page_number, **compact_result})
             diagnostics['confirmed_count'] += 1
@@ -3541,24 +3823,15 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
     page_issues = []
     for page_candidate in page_candidates:
         page_number = int(page_candidate.get('page_number') or 0)
-        png_bytes = _render_pdf_page_png_bytes(source_path, page_number)
-        if not png_bytes:
+        result = page_results.get(page_number) or {
+            'decision': 'skipped',
+            'reason': 'render_failed',
+            'visual_status': 'failed',
+        }
+        if str(result.get('reason') or '') == 'render_failed' and not result.get('provider'):
             diagnostics['skipped_count'] += 1
             diagnostics['items'].append({'page_number': page_number, 'decision': 'skipped', 'reason': 'render_failed', 'page_candidate': True})
             continue
-        result = _verify_review_issue_visually(
-            png_bytes,
-            {
-                'severity': _page_visual_issue_severity(page_candidate.get('reasons') or []),
-                'category': _page_visual_issue_category(page_candidate.get('reasons') or []),
-                'original_text': page_candidate.get('text_preview') or '',
-                'context': page_candidate.get('text_preview') or '',
-                'description': f"页级疑点: {', '.join(page_candidate.get('reasons') or [])}",
-                'suggestion': '请人工复核该页实际显示',
-            },
-            page_number=page_number,
-            review_id=review_id,
-        )
         decision = str(result.get('decision') or 'uncertain').lower()
         compact_result = {
             'page_number': page_number,
@@ -3570,6 +3843,7 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             'candidate_reasons': page_candidate.get('reasons') or [],
             'visual_status': result.get('visual_status') or map_visual_status(decision, result.get('reason')),
             'provider': result.get('provider') or '',
+            'latency_ms': result.get('latency_ms'),
         }
         diagnostics['verified_count'] += 1
         diagnostics['items'].append(compact_result)
@@ -6074,9 +6348,8 @@ def _ai_provider_cache_fingerprint():
 
 
 def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None, review_id=None):
-    from app.review_engine.versions import BASIS_POLICY_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
+    from app.review_engine.versions import BASIS_POLICY_VERSION, CHUNKER_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
     raw = "||".join([
-        str(review_id or ""),
         hashlib.sha1(str(chunk or "").encode("utf-8")).hexdigest(),
         hashlib.sha1(str(audit_basis or "").encode("utf-8")).hexdigest(),
         str(language or ""),
@@ -6086,6 +6359,7 @@ def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None, 
         PROMPT_VERSION,
         FILTER_POLICY_VERSION,
         BASIS_POLICY_VERSION,
+        CHUNKER_VERSION,
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
@@ -11016,19 +11290,21 @@ def get_context(content, start, end, context_length=200):
     return context
 
 
-@router.get("/", response_model=list[Review])
+@router.get("/", response_model=ReviewListResponse)
 async def list_reviews(
     document_id: int | None = Query(default=None),
     status: str | None = Query(default=None),
     latest_only: bool = Query(default=False),
-    limit: int = Query(default=100, ge=1, le=500),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
     document_id = _resolve_param_value(document_id)
     status = _resolve_param_value(status)
     latest_only = bool(_resolve_param_value(latest_only, False))
-    limit = int(_resolve_param_value(limit, 100) or 100)
+    skip = max(0, int(_resolve_param_value(skip, 0) or 0))
+    limit = max(1, min(int(_resolve_param_value(limit, 20) or 20), 100))
     if _has_bound_current_user(current_user):
         reviews = _query_review_rows_for_user(
             db,
@@ -11037,6 +11313,14 @@ async def list_reviews(
             status=status,
             latest_only=latest_only,
             limit=limit,
+            skip=skip,
+        )
+        total = _count_review_rows_for_user(
+            db,
+            current_user,
+            document_id=document_id,
+            status=status,
+            latest_only=latest_only,
         )
     else:
         reviews = _query_review_rows_legacy(
@@ -11045,6 +11329,13 @@ async def list_reviews(
             status=status,
             latest_only=latest_only,
             limit=limit,
+            skip=skip,
+        )
+        total = _count_review_rows(
+            db,
+            document_id=document_id,
+            status=status,
+            latest_only=latest_only,
         )
     reviews = _reconcile_review_rows_for_response(db, reviews, status=status)
     document_map = {
@@ -11052,10 +11343,11 @@ async def list_reviews(
         for doc in get_documents_by_ids(db, [review.document_id for review in reviews])
     }
     stats_map = _judgment_stats_map(db, [review.id for review in reviews])
-    return [
+    items = [
         _serialize_review_list_item(db, review, document_map, stats_map.get(review.id))
         for review in reviews
     ]
+    return {"items": items, "total": int(total or 0), "skip": skip, "limit": limit}
 
 
 @router.get("/false-positive-memory", response_model=FalsePositiveMemoryListResponse)
@@ -11849,10 +12141,17 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             same_user=same_user,
             same_task=True,
         )
-        if pairing.needs_user_confirm or pairing.pairing_status == 'unpaired':
-            visual_doc = None
-            fallback_reason = pairing.message or 'pairing_unconfirmed'
-            document_model.fallback_reason = fallback_reason
+        if visual_document_id and (visual_doc is None or pairing.needs_user_confirm or pairing.pairing_status == 'unpaired'):
+            fail_message = pairing.message or 'visual_document_missing'
+            fail_summary = json.dumps({
+                "error_code": "pairing_failed",
+                "error_detail": fail_message,
+                "input_pairing": pairing.to_dict(),
+                "total": 0,
+            }, ensure_ascii=False)
+            set_progress(review_id, 'failed', '配对失败', 0, fail_message)
+            update_review_status(db, review_id, "failed", 0, fail_summary)
+            return
         document_profile = build_document_profile(
             content,
             file_type=document.file_type,
@@ -12258,6 +12557,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
 
+        _persist_review_issues(db, review_id, issues)
+
         _begin_stage("pdf_visual_verification")
         _stage_input_counts["pdf_visual_verification"] = len(issues)
         if snippet_review:
@@ -12273,7 +12574,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 visual_target = visual_doc
                 visual_content = visual_doc.content or content
                 visual_pages = _collect_pdf_suspicious_pages(_extract_pdf_page_metadata(visual_doc, visual_content))
-            issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, visual_target, visual_content, issues, visual_pages)
+            try:
+                issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, visual_target, visual_content, issues, visual_pages)
+            except Exception as visual_exc:
+                print(f"[审核] 视觉复核失败，保留内容审核结果: {visual_exc}")
+                pdf_visual_verification = {
+                    "enabled": True,
+                    "visual_status": "failed",
+                    "reason": "visual_stage_error",
+                    "error": str(visual_exc)[:300],
+                }
             from app.review_engine.visual import build_visual_verification
             for issue in issues:
                 if not issue.get('visual_verification'):
@@ -12317,30 +12627,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             layer_counts = {}
 
         _ensure_review_not_cancelled(review_id)
-        for issue in issues:
-            persisted_position = _decode_issue_position(issue.get("position", ""))
-            persisted_position.update({
-                key: issue.get(key)
-                for key in ("evidence", "position_object", "visual_verification", "source_format", "target_status", "rejected_reason")
-                if issue.get(key) not in (None, "", {}, [])
-            })
-            create_issue(db=db, issue=IssueCreate(
-                review_id=review_id,
-                severity=issue["severity"],
-                category=issue.get("category", ""),
-                rule=issue.get("rule", ""),
-                chapter=issue.get("chapter", ""),
-                original_text=issue.get("original_text", ""),
-                context=issue.get("context", ""),
-                suggestion=issue.get("suggestion", ""),
-                description=issue.get("description", ""),
-                audit_basis=issue.get("audit_basis", ""),
-                confidence=issue.get("confidence", 0),
-                source=issue.get("source", "rule"),
-                position=json.dumps(persisted_position, ensure_ascii=False) if persisted_position else issue.get("position", ""),
-                status=str(issue.get("status") or "pending"),
-                providers=issue.get("providers", None),
-            ))
+        _persist_review_issues(db, review_id, issues)
 
         review_ai_usage = {
             "rule_false_positive_filter": ai_client.summarize_usage_events(
@@ -12368,7 +12655,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
             "language": document_language,
             "layers": layer_counts,
-            "cache_key": _build_review_cache_key(document, mode),
+            "cache_key": _build_review_cache_key(document, mode, visual_document=visual_doc, pairing=pairing, pairing_confirmed=pairing_confirmed),
             "cache_version": _review_cache_version(),
             "cache_hit": False,
             "ai_usage": review_ai_usage,
@@ -12514,6 +12801,9 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
         providers: 兼容旧请求的多个 provider 参数，当前仅取第一个有效模型。
     """
     print(f"[DEBUG create_review_task] provider={provider!r} providers={providers!r} mode={mode!r} force={force!r}")
+    force = bool(_resolve_param_value(force, False))
+    visual_document_id = _resolve_param_value(visual_document_id)
+    pairing_confirmed = bool(_resolve_param_value(pairing_confirmed, False))
 
     if mode not in {"rule", "ai", "hybrid"}:
         raise HTTPException(status_code=400, detail="Unsupported review mode")
@@ -12530,7 +12820,57 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     # 规范化 providers 列表
     provider_list = _normalize_providers(provider, providers)
 
-    cached_review, cached_summary = _find_cached_completed_review(db, document, mode)
+    try:
+        _assert_review_runtime_ready()
+    except Exception as exc:
+        db_provider = provider_list[0] if provider_list else provider
+        review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider))
+        fail_summary = json.dumps({"error_code": "runtime_missing", "error_detail": str(exc), "total": 0}, ensure_ascii=False)
+        update_review_status(db, review.id, "failed", 0, fail_summary)
+        set_progress(review.id, 'failed', '运行时检查失败', 0, str(exc))
+        return {"review_id": review.id, "status": "failed", "message": str(exc), "error_code": "runtime_missing"}
+
+    visual_doc = get_document(db, document_id=visual_document_id) if visual_document_id else None
+    from app.review_engine.pairing import resolve_input_pairing
+    content_user = getattr(document, 'user_id', None)
+    visual_user = getattr(visual_doc, 'user_id', None) if visual_doc is not None else None
+    same_user = content_user is None or visual_user is None or content_user == visual_user
+    pairing = resolve_input_pairing(
+        document,
+        visual_doc,
+        explicit=bool(pairing_confirmed),
+        same_user=same_user,
+        same_task=True,
+    )
+    if visual_document_id and (visual_doc is None or pairing.needs_user_confirm or pairing.pairing_status == 'unpaired'):
+        db_provider = provider_list[0] if provider_list else provider
+        review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider, visual_document_id=visual_document_id, pairing_confirmed=pairing_confirmed))
+        fail_message = pairing.message if visual_doc is not None else "visual_document_not_found"
+        fail_summary = json.dumps({
+            "error_code": "pairing_failed",
+            "error_detail": fail_message,
+            "input_pairing": pairing.to_dict(),
+            "total": 0,
+        }, ensure_ascii=False)
+        update_review_status(db, review.id, "failed", 0, fail_summary)
+        set_progress(review.id, 'failed', '配对失败', 0, fail_message)
+        return {
+            **pairing.to_dict(),
+            "review_id": review.id,
+            "status": "failed",
+            "message": fail_message,
+            "error_code": "pairing_failed",
+            "pairing_status": pairing.pairing_status,
+        }
+
+    cached_review, cached_summary = _find_cached_completed_review(
+        db,
+        document,
+        mode,
+        visual_document=visual_doc,
+        pairing=pairing,
+        pairing_confirmed=pairing_confirmed,
+    )
     if not _should_reuse_cached_review(cached_review, provider=provider, providers=providers, force=force):
         cached_review = None
         cached_summary = None
@@ -12538,15 +12878,17 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
         total = cached_summary.get("total", cached_review.total_issues or 0) if isinstance(cached_summary, dict) else (cached_review.total_issues or 0)
         message = f"复用缓存结果，共 {total} 个问题"
         return {
+            **pairing.to_dict(),
             "review_id": cached_review.id,
             "status": "completed",
             "message": message,
             "cache_hit": True,
             "cached_from_review": cached_review.id,
+            "pairing_status": pairing.pairing_status,
         }
 
     db_provider = provider_list[0] if provider_list else provider
-    review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider))
+    review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider, visual_document_id=visual_document_id, pairing_confirmed=pairing_confirmed))
     update_review_status(db, review.id, "running", 0, "审核任务已创建")
     set_progress(review.id, 'running', '初始化', 0, '审核任务已创建')
     if force:
@@ -12556,7 +12898,13 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     if background_tasks:
         background_tasks.add_task(_run_review_background, review.id, document_id, mode, provider, provider_list, visual_document_id, pairing_confirmed)
     
-    return {"review_id": review.id, "status": "running", "message": "审核已开始，请稍候"}
+    return {
+        **pairing.to_dict(),
+        "review_id": review.id,
+        "status": "running",
+        "message": "审核已开始，请稍候",
+        "pairing_status": pairing.pairing_status,
+    }
 
 
 def _dashboard_date_range(time_range='7d', start_date=None, end_date=None):

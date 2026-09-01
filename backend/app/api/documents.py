@@ -92,7 +92,8 @@ async def delete_document_endpoint(
     current_user: UserOut = Depends(get_current_active_user),
 ):
     document = _ensure_document_access(get_document(db, document_id), current_user)
-
-    delete_reviews_by_document(db, document_id)
+    filename = str(getattr(document, "filename", "") or "")
+    if filename.startswith("文本片段_"):
+        delete_reviews_by_document(db, document_id)
     delete_document(db, document_id)
     return {"message": "Document deleted successfully"}

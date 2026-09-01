@@ -130,12 +130,12 @@ def test_basis_trace_isolated_by_review_id():
     assert review_api._load_basis_trace(12)["basis_source"] == "es"
 
 
-def test_chunk_cache_key_includes_review_id(monkeypatch):
+def test_chunk_cache_key_excludes_review_id(monkeypatch):
     monkeypatch.setattr(review_api, "_review_cache_version", lambda: "v1")
     monkeypatch.setattr(review_api, "_ai_provider_cache_fingerprint", lambda: "p1")
     key_a = review_api._build_ai_chunk_cache_key("chunk", "cn", "basis", review_id=1)
     key_b = review_api._build_ai_chunk_cache_key("chunk", "cn", "basis", review_id=2)
-    assert key_a != key_b
+    assert key_a == key_b
 
 
 def test_orphan_fk_migration_aborts():

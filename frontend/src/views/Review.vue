@@ -372,7 +372,19 @@
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">历史审核任务</h2>
       <div class="table-section">
-          <el-table :data="pagedReviews" border>
+          <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+            <span>状态</span>
+            <el-select v-model="taskStatusFilter" style="width:140px">
+              <el-option label="全部" value="all" />
+              <el-option label="已完成" value="completed" />
+              <el-option label="进行中" value="running" />
+              <el-option label="失败" value="failed" />
+              <el-option label="已停止" value="cancelled" />
+              <el-option label="已超时" value="timeout" />
+              <el-option label="等待中" value="pending" />
+            </el-select>
+          </div>
+          <el-table :data="pagedReviews" border v-loading="historyLoading">
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
           <el-table-column prop="id" label="任务ID" width="80" />
           <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
@@ -383,8 +395,8 @@
           </el-table-column>
           <el-table-column prop="status" label="状态" width="90">
             <template #default="scope">
-              <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : scope.row.status === 'cancelled' ? 'warning' : 'info'">
-                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : scope.row.status === 'cancelled' ? '已停止' : '进行中' }}
+              <el-tag :type="reviewStatusTagType(scope.row.status)">
+                {{ reviewStatusLabel(scope.row.status) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -410,14 +422,14 @@
               <el-button 
                 size="small" 
                 type="primary" 
-                :disabled="scope.row.status !== 'completed'"
+                :loading="issueDialogLoading && currentTaskId === scope.row.id"
                 @click="openIssueDialog(scope.row)"
               >
                 查看问题
               </el-button>
               <el-button 
                 size="small" 
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canConfirmAll(scope.row)"
                 @click="batchConfirmAll(scope.row.id)"
               >
                 一键确认
@@ -426,7 +438,7 @@
                 v-if="shouldShowDownloadResult(scope.row)"
                 size="small"
                 type="success"
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canDownloadResult(scope.row)"
                 @click="downloadReviewResult(scope.row)"
               >
                 {{ resultButtonLabel(scope.row.document_file_type) }}
@@ -435,7 +447,7 @@
                 size="small" 
                 type="success" 
                 plain
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canExportReport(scope.row)"
                 @click="exportReviewHtml(scope.row.id)"
               >
                 HTML报告
@@ -447,16 +459,16 @@
           <el-pagination
             v-model:current-page="taskPage"
             v-model:page-size="taskPageSize"
-            :page-sizes="[10, 20, 50]"
-            :total="historyReviews.length"
-            layout="total, sizes, prev, pager, next"
+            :page-sizes="[10, 20, 50, 100]"
+            :total="taskTotal"
+            layout="total, sizes, prev, pager, next, jumper"
           />
         </div>
       </div>
     </div>
 
     <!-- 问题详情弹窗 -->
-    <el-dialog v-model="issueDialogVisible" :title="`问题详情 - 任务#${currentTaskId}`" width="95%" top="5vh">
+    <el-dialog v-model="issueDialogVisible" :title="`问题详情 - 任务#${currentTaskId}`" width="95%" top="5vh" v-loading="issueDialogLoading">
       <div class="issue-dialog-toolbar">
         <el-input v-model="issueFilter.keyword" placeholder="搜索原文/上下文/建议" style="width:300px" clearable />
         <el-select v-model="issueFilter.category" placeholder="分类" clearable style="width:140px;margin-left:8px">
@@ -1132,8 +1144,8 @@
           <el-table-column prop="document_name" label="文档名" />
           <el-table-column prop="status" label="状态" width="100">
             <template #default="scope">
-              <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : scope.row.status === 'cancelled' ? 'warning' : 'info'">
-                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : scope.row.status === 'cancelled' ? '已停止' : '进行中' }}
+              <el-tag :type="reviewStatusTagType(scope.row.status)">
+                {{ reviewStatusLabel(scope.row.status) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -1259,6 +1271,12 @@ const issuePage = ref(1)
 const issuePageSize = ref(50)
 const taskPage = ref(1)
 const taskPageSize = ref(20)
+const taskTotal = ref(0)
+const taskStatusFilter = ref('all')
+const historyLoading = ref(false)
+const issueDialogLoading = ref(false)
+let issueDialogRequestSeq = 0
+let reportRequestSeq = 0
 const manualIssueDialogVisible = ref(false)
 const manualIssueSaving = ref(false)
 const manualIssueForm = ref({ severity: 'general', category: '人工补充', chapter: '', original_text: '', suggestion: '', description: '' })
@@ -1304,15 +1322,12 @@ const pagedDialogIssues = computed(() => {
   const start = (issuePage.value - 1) * issuePageSize.value
   return filteredDialogIssues.value.slice(start, start + issuePageSize.value)
 })
-const historyReviews = computed(() => (reviews.value || []).filter(review => review.status === 'completed'))
+const historyReviews = computed(() => reviews.value || [])
 const suspectedFalsePositiveCount = computed(() => {
   const list = taskIssues[currentTaskId.value] || []
   return list.filter(item => issueHasFlag(item, 'possible_false_positive')).length
 })
-const pagedReviews = computed(() => {
-  const start = (taskPage.value - 1) * taskPageSize.value
-  return historyReviews.value.slice(start, start + taskPageSize.value)
-})
+const pagedReviews = computed(() => historyReviews.value)
 const topRuleHits = computed(() => {
   const hits = coverageData.value?.rule_hits || {}
   return Object.entries(hits)
@@ -1719,10 +1734,9 @@ watch(filteredDialogIssues, (list) => {
   }
 })
 
-watch(reviews, (list) => {
-  const maxPage = Math.max(1, Math.ceil(historyReviews.value.length / taskPageSize.value) || 1)
-  if (taskPage.value > maxPage) {
-    taskPage.value = maxPage
+watch([taskPage, taskPageSize, taskStatusFilter], () => {
+  if (currentView.value === 'tasks' || currentView.value === 'reports') {
+    loadReviews()
   }
 })
 
@@ -1862,15 +1876,37 @@ async function loadDocuments() {
 
 async function loadReviews() {
   try {
-    const resp = await reviewAPI.list({ limit: 500 })
-    reviews.value = resp.data || []
+    historyLoading.value = true
     if (currentView.value === 'documents') {
-      syncDocumentStatusesFromReviews(reviews.value)
+      const resp = await reviewAPI.list({ latest_only: true, limit: 100, skip: 0 })
+      const payload = resp.data || {}
+      const items = Array.isArray(payload) ? payload : (payload.items || [])
+      reviews.value = items
+      syncDocumentStatusesFromReviews(items)
+      syncSnippetReviewState(items)
+      syncReviewsPolling()
+      return
+    }
+    const skip = (taskPage.value - 1) * taskPageSize.value
+    const params = { skip, limit: taskPageSize.value }
+    if (taskStatusFilter.value && taskStatusFilter.value !== 'all') {
+      params.status = taskStatusFilter.value
+    }
+    const resp = await reviewAPI.list(params)
+    const payload = resp.data || {}
+    if (Array.isArray(payload)) {
+      reviews.value = payload
+      taskTotal.value = payload.length
+    } else {
+      reviews.value = payload.items || []
+      taskTotal.value = Number(payload.total || 0)
     }
     syncSnippetReviewState(reviews.value)
     syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载任务列表失败: ${getAPIErrorMessage(e)}`)
+  } finally {
+    historyLoading.value = false
   }
 }
 
@@ -2423,7 +2459,8 @@ async function startReview(documentId) {
     const visualDocumentId = findPairedVisualDocumentId(documentId)
     const response = await reviewAPI.create(documentId, reviewMode.value, provider, {
       force: true,
-      visual_document_id: visualDocumentId || undefined
+      visual_document_id: visualDocumentId || undefined,
+      pairing_confirmed: Boolean(visualDocumentId)
     })
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
@@ -2774,6 +2811,44 @@ function resultButtonLabel(fileType) {
   return '下载结果'
 }
 
+function reviewStatusLabel(status) {
+  const value = String(status || '').toLowerCase()
+  const labels = {
+    completed: '已完成',
+    running: '进行中',
+    failed: '失败',
+    cancelled: '已停止',
+    timeout: '已超时',
+    pending: '等待中',
+    error: '失败',
+  }
+  if (!labels[value]) {
+    console.warn('[review] unknown status', status)
+    return value ? `未知状态(${status})` : '未知状态'
+  }
+  return labels[value]
+}
+
+function reviewStatusTagType(status) {
+  const value = String(status || '').toLowerCase()
+  if (value === 'completed') return 'success'
+  if (value === 'failed' || value === 'error') return 'danger'
+  if (value === 'cancelled' || value === 'timeout') return 'warning'
+  return 'info'
+}
+
+function canConfirmAll(row) {
+  return String(row?.status || '') === 'completed'
+}
+
+function canDownloadResult(row) {
+  return String(row?.status || '') === 'completed'
+}
+
+function canExportReport(row) {
+  return String(row?.status || '') === 'completed'
+}
+
 function reviewModeLabel(mode) {
   return {
     rule: '快速审核',
@@ -2895,7 +2970,9 @@ function clearFilters() {
 
 // 打开问题详情弹窗
 async function openIssueDialog(row) {
-  currentTaskId.value = row.id
+  const seq = ++issueDialogRequestSeq
+  const reviewId = row.id
+  currentTaskId.value = reviewId
   currentReport.value = row
   issueFilter.keyword = ''
   issueFilter.category = ''
@@ -2910,13 +2987,28 @@ async function openIssueDialog(row) {
   terminologyData.value = null
   showTerminology.value = false
   issueDialogVisible.value = true
-  if (taskIssues[row.id] === undefined) {
-    await loadReviewIssues(row.id)
+  issueDialogLoading.value = true
+  try {
+    const [reviewResponse, issuesResponse] = await Promise.all([
+      reviewAPI.get(reviewId),
+      reviewAPI.getIssues(reviewId)
+    ])
+    if (seq !== issueDialogRequestSeq) return
+    currentReport.value = reviewResponse.data || row
+    taskIssues[reviewId] = issuesResponse.data || []
+    issues.value = taskIssues[reviewId]
+    loadAuditTraces(reviewId)
+    loadCoverage(reviewId)
+    loadTerminology(reviewId)
+    loadReviewObservations(reviewId)
+  } catch (error) {
+    if (seq !== issueDialogRequestSeq) return
+    const detail = error?.response?.data?.detail || error?.message || '未知错误'
+    ElMessage.error(`加载任务详情失败：${detail}`)
+    taskIssues[reviewId] = taskIssues[reviewId] || []
+  } finally {
+    if (seq === issueDialogRequestSeq) issueDialogLoading.value = false
   }
-  loadAuditTraces(row.id)
-  loadCoverage(row.id)
-  loadTerminology(row.id)
-  loadReviewObservations(row.id)
 }
 
 // 通过文档ID打开问题详情弹窗
@@ -3490,14 +3582,20 @@ function handleSortChange({ prop, order }) {
 }
 
 async function loadReport(id) {
+  const seq = ++reportRequestSeq
   try {
-    const report = reviews.value.find(r => r.id === id) || {}
-    currentReport.value = report
-    const response = await reviewAPI.getIssues(id)
-    issues.value = response.data || []
+    const [reviewResponse, issuesResponse] = await Promise.all([
+      reviewAPI.get(id),
+      reviewAPI.getIssues(id)
+    ])
+    if (seq !== reportRequestSeq) return
+    currentReport.value = reviewResponse.data || {}
+    issues.value = issuesResponse.data || []
+    taskIssues[id] = issues.value
     showReport.value = true
   } catch (error) {
-    ElMessage.error('加载报告失败')
+    const detail = error?.response?.data?.detail || error?.message || '未知错误'
+    ElMessage.error(`加载报告失败：${detail}`)
   }
 }
 
