@@ -26,4 +26,6 @@ class TranslationDoc(Base):
     memory_word_count = Column(Integer, default=0)
     batch_id = Column(String, default="", index=True)
     user_id = Column(Integer, index=True, nullable=True)
+    file_size = Column(Integer, default=0)
+    duration_ms = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)

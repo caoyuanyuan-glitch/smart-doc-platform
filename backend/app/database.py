@@ -159,6 +159,13 @@ def _ensure_legacy_sqlite_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE translation_docs ADD COLUMN user_id INTEGER"))
 
+    if translation_doc_columns and 'file_size' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN file_size INTEGER DEFAULT 0"))
+    if translation_doc_columns and 'duration_ms' not in translation_doc_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE translation_docs ADD COLUMN duration_ms INTEGER DEFAULT 0"))
+
     try:
         convert_task_columns = {col['name'] for col in inspector.get_columns('convert_tasks')}
     except Exception:

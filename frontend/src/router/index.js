@@ -25,6 +25,8 @@ const Terms = () => import('@/views/Terms.vue')
 const Users = () => import('@/views/Users.vue')
 const Translate = () => import('@/views/Translate.vue')
 const TranslateDoc = () => import('@/views/TranslateDoc.vue')
+const TranslateHistory = () => import('@/views/TranslateHistory.vue')
+const TranslatePreview = () => import('@/views/TranslatePreview.vue')
 const TranslateStats = () => import('@/views/TranslateStats.vue')
 const Knowledge = () => import('@/views/Knowledge.vue')
 const PolishPreview = () => import('@/views/PolishPreview.vue')
@@ -256,6 +258,16 @@ const routes = [
     path: '/translate/docs',
     name: 'TranslateDocs',
     component: TranslateDoc
+  },
+  {
+    path: '/translate/history',
+    name: 'TranslateHistory',
+    component: TranslateHistory
+  },
+  {
+    path: '/translate/preview/:id',
+    name: 'TranslatePreview',
+    component: TranslatePreview
   },
   {
     path: '/translate/stats',

@@ -79,6 +79,8 @@
               multiple
               ref="fileUploadRef"
               accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.png,.jpg,.jpeg,.md,.txt,.xlf,.idml"
+              :on-change="syncUploadFileCount"
+              :on-remove="syncUploadFileCount"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
@@ -87,10 +89,16 @@
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
-            <el-button class="upload-submit-btn" type="primary" :loading="hasActiveJobs" @click="submitFileUpload">
-              <el-icon><Switch /></el-icon>
-              上传并翻译
-            </el-button>
+            <div class="upload-submit-row">
+              <el-button class="upload-submit-btn" type="primary" :loading="hasActiveJobs" @click="submitFileUpload">
+                <el-icon><Switch /></el-icon>
+                开始翻译
+              </el-button>
+              <el-button class="upload-clear-btn" :disabled="hasActiveJobs || !canClearTranslation" @click="clearTranslationSession">
+                <el-icon><Delete /></el-icon>
+                清空
+              </el-button>
+            </div>
           </div>
 
           <div v-if="docSource === 'reviewed'" class="reviewed-area">
@@ -193,7 +201,7 @@
 <script setup>
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
+import { UploadFilled, Switch, FolderOpened, Download, Sort, Delete } from '@element-plus/icons-vue'
 import { getBlobErrorMessage, knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
@@ -235,6 +243,12 @@ const docSource = ref('upload')
 const translationJobs = ref([])
 const pollingTimers = new Map()
 const hasActiveJobs = computed(() => translationJobs.value.some(job => job.status === 'submitting' || job.status === 'processing'))
+const canClearTranslation = computed(() => (
+  selectedUploadCount.value > 0
+  || translationJobs.value.length > 0
+  || Boolean(selectedReviewedDoc.value)
+  || previewDialogVisible.value
+))
 const currentBatchId = ref('')
 const availableModelOptions = computed(() => {
   const options = buildAvailableTranslationModels(providerStatus.value)
@@ -250,6 +264,7 @@ const providerHintText = computed(() => {
 const fileUploadRef = ref(null)
 
 const reviewedDocs = ref([])
+const selectedUploadCount = ref(0)
 const reviewedDocsLoading = ref(false)
 const selectedReviewedDoc = ref(null)
 const selectedReviewedRow = ref(null)
@@ -420,6 +435,32 @@ function submitFileUpload() {
   localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, currentBatchId.value)
   window.dispatchEvent(new CustomEvent(TRANSLATION_BATCH_EVENT, { detail: { batchId: currentBatchId.value } }))
   fileUploadRef.value.submit()
+}
+
+function syncUploadFileCount(_file, fileList) {
+  selectedUploadCount.value = Array.isArray(fileList) ? fileList.length : 0
+}
+
+function clearTranslationSession() {
+  if (hasActiveJobs.value) {
+    return
+  }
+  for (const jobKey of [...pollingTimers.keys()]) {
+    stopPolling(jobKey)
+  }
+  translationJobs.value = []
+  currentBatchId.value = ''
+  sessionStorage.removeItem(TRANSLATION_BATCH_STORAGE_KEY)
+  localStorage.removeItem(TRANSLATION_BATCH_STORAGE_KEY)
+  selectedReviewedDoc.value = null
+  selectedReviewedRow.value = null
+  previewDialogVisible.value = false
+  previewLoading.value = false
+  previewContent.value = ''
+  previewJob.value = null
+  fileUploadRef.value?.clearFiles()
+  selectedUploadCount.value = 0
+  ElMessage.success('已清空当前翻译文档')
 }
 
 function handleFileTranslate(options) {
@@ -877,6 +918,23 @@ async function openTranslatedPreview(job) {
 .upload-submit-btn {
   margin-top: 16px;
   width: 100%;
+}
+
+.upload-submit-row {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-submit-row .upload-submit-btn {
+  margin-top: 0;
+  flex: 1;
+  width: auto;
+}
+
+.upload-clear-btn {
+  flex-shrink: 0;
 }
 
 .reviewed-area {
