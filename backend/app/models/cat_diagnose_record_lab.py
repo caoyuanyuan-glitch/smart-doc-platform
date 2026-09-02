@@ -11,6 +11,7 @@ class CatDiagnoseRecordLab(Base):
     id = Column(Integer, primary_key=True, index=True)
     analyze_id = Column(String(64), index=True, nullable=True)
     source = Column(String(20), default="text")
+    source_name = Column(String(255), nullable=True)
     sentence_index = Column(Integer, nullable=True)
     original_text = Column(Text)
     quote = Column(Text)

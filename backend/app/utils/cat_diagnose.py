@@ -11,80 +11,87 @@ import logging
 import os
 import re
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from typing import Any, Optional
 
 
 logger = logging.getLogger(__name__)
 
 CATEGORIES = (
-    "spelling",
     "grammar",
     "word",
     "term",
     "ambiguity",
     "redundancy",
-    "syntax",
     "logic",
     "missing",
-    "register",
-    "audience",
     "risk",
-    "other",
 )
 
 SEVERITIES = ("low", "medium", "high")
 
 CATEGORY_LABELS = {
-    "spelling": "拼写标点",
     "grammar": "语法",
     "word": "用词",
     "term": "术语",
     "ambiguity": "歧义",
     "redundancy": "冗余",
-    "syntax": "句式",
     "logic": "逻辑",
     "missing": "缺失",
-    "register": "语体",
-    "audience": "受众",
     "risk": "风险",
-    "other": "其他",
+    "spelling": "用词",
+    "register": "用词",
+    "audience": "用词",
+    "syntax": "语法",
+    "other": "逻辑",
 }
+
+_CATEGORY_ALIASES = {
+    "spelling": "word",
+    "register": "word",
+    "audience": "word",
+    "syntax": "grammar",
+}
+
+_FUNCTION_POS = {"c", "p", "u", "y", "e", "o", "w", "f", "d", "r", "xc"}
+_WORD_FORM_PROBLEM_RE = re.compile(r"错别字|拼写|词形")
+_FORMAT_TEXT_RE = re.compile(r"^[\s\dμµA-Za-z.%°℃℉()（）\[\]\-_/±~～=<>]+$")
 
 SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 
 # 交接包真实 type → (category, severity)
 _TYPE_MAP = {
     "term": ("term", "high"),
-    "typo": ("spelling", "high"),
-    "imperative": ("register", "low"),
-    "format": ("spelling", "low"),
-    "punctuation": ("spelling", "low"),
+    "typo": ("word", "medium"),
+    "imperative": ("word", "low"),
+    "format": ("word", "low"),
+    "punctuation": ("word", "low"),
     "terminology_rule": ("term", "high"),
     "forbidden_words": ("word", "high"),
     "double_negative": ("logic", "medium"),
-    "passive_voice": ("syntax", "low"),
+    "passive_voice": ("grammar", "low"),
     "pronoun_reference": ("ambiguity", "medium"),
-    "sentence_length": ("syntax", "low"),
-    "informal": ("register", "medium"),
-    "preferred_sentences": ("syntax", "low"),
-    "template": ("syntax", "low"),
-    "ai": ("register", "medium"),
-    "text": ("other", "low"),
-    "image": ("other", "low"),
-    "unsupported": ("other", "low"),
+    "sentence_length": ("grammar", "low"),
+    "informal": ("word", "medium"),
+    "preferred_sentences": ("grammar", "low"),
+    "template": ("grammar", "low"),
+    "ai": ("word", "medium"),
+    "text": ("word", "low"),
+    "image": ("word", "low"),
+    "unsupported": ("word", "low"),
 }
 
 _RULE_NAME_MAP = {
     "术语替换": ("term", "high"),
-    "错别字修正": ("spelling", "high"),
-    "祈使句规范": ("register", "low"),
-    "数字单位空格": ("spelling", "low"),
-    "中英文空格": ("spelling", "low"),
-    "标点规范": ("spelling", "low"),
+    "错别字修正": ("word", "medium"),
+    "祈使句规范": ("word", "low"),
+    "数字单位空格": ("word", "low"),
+    "中英文空格": ("word", "low"),
+    "标点规范": ("word", "low"),
 }
 
 _RULE_SOURCE_MAP = {
-    "sentence_guide": ("syntax", "low"),
+    "sentence_guide": ("grammar", "low"),
     "surface_rules": ("word", "medium"),
 }
 
@@ -97,16 +104,17 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 3. 修改必须忠于原意，不得增删事实与参数。
 4. 术语必须与给定术语表一致；术语表没有的，保留原文。
 5. category 只能从枚举取；severity 按以下标准判定：
-   - high：客观事实错误、参数/数值错误、安全风险弱化、逻辑矛盾
-   - medium：术语不规范、歧义、语体不符、缺失关键限定
-   - low：风格优化、可读性建议、轻微措辞问题
-   术语同义替换、风格统一类问题不得报 high。
+   - high：照做会出错、人员安全、结论被误解
+   - medium：费解可能出错、数据风险；错别字默认 medium
+   - low：纯风格、标点、冗余
+   术语同义替换、风格统一类问题不得报 high。spelling 归 word；register/audience 归 word；syntax 归 grammar；other 按内容归 logic/term/risk。
+   word vs term：word=词形错（错别字、形近字、拼写），如「至于」应为「置于」；term=同一概念的不同写法、术语统一，如「机器」应为「仪器」、「样品」应为「样本」、「枪头」应为「吸头」。不得把术语统一报成 word，也不得把词形错报成 term。
 6. 只输出 JSON，不要任何解释文字。
 7. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
 8. problem 只写一句结论，不超过 24 字，只描述原文句子本身的问题（如"术语与术语表不一致""逻辑顺序颠倒"），不要引用任何外部依据，不要出现"版本记录""产品信息""章节""图示""表格""标准""规范"等来源字样。
 9. 禁止引用任何外部来源。你只能看到待审查句子、术语表和风格指南，看不到文档章节结构、版本记录、产品信息或文档主题。problem 不得以任何形式提及或暗示外部来源；判断依据只能来自句子本身、术语表或风格指南。
 
-category 枚举：spelling, grammar, word, term, ambiguity, redundancy, syntax, logic, missing, register, audience, risk, other
+category 枚举：grammar, word, term, ambiguity, redundancy, logic, missing, risk
 
 【术语表】
 {terminology_md}
@@ -163,9 +171,10 @@ _VALIDATE_PROMPT = """你是审校评审。你的任务：严格检验一份修�
 4. 你只能看到原句和修订版这两个文本；除此之外不存在任何文档内容。
 
 【严重程度标准】
-high = 客观错误（错别字、数值错误、语义颠倒、逻辑硬伤）
-medium = 术语不规范、指代歧义、表述不清
-low = 语体风格、标点、冗余
+high = 照做会出错、人员安全、结论被误解
+medium = 费解可能出错、数据风险；错别字默认 medium
+low = 纯风格、标点、冗余
+数值、孔位数量、操作对象错误报 high。
 
 【倾向】默认接受修订，除非修订明显更差。
 【输出】"问题描述 | 严重程度"，或"无需修改"。
@@ -356,7 +365,7 @@ def map_rule_to_category(
     match_detail: Optional[dict] = None,
     issue_type: str = "",
 ) -> tuple[str, str]:
-    """本地规则命中 → (category, severity)。先 type，再 rule_name，再 rule_source，最后 other。"""
+    """本地规则命中 → (category, severity)。先 type，再 rule_name，再 rule_source，最后 word。"""
     payload: dict = {}
     if isinstance(issue, dict):
         payload.update(issue)
@@ -373,7 +382,7 @@ def map_rule_to_category(
         return _RULE_NAME_MAP[name_val]
     if source_val in _RULE_SOURCE_MAP:
         return _RULE_SOURCE_MAP[source_val]
-    return ("other", "low")
+    return ("word", "low")
 
 
 def annotate_cat_candidates(items: Optional[list]) -> list:
@@ -384,15 +393,34 @@ def annotate_cat_candidates(items: Optional[list]) -> list:
         for candidate in item.get("candidates") or []:
             if not isinstance(candidate, dict):
                 continue
+            had_category = bool(str(candidate.get("category") or "").strip())
+            original = str(
+                item.get("original_text")
+                or item.get("source_sentence_text")
+                or item.get("text")
+                or ""
+            )
+            revised = str(candidate.get("template_text") or candidate.get("revised") or "")
+            issue_type = str(candidate.get("type") or item.get("type") or "").strip()
+            if not issue_type and str(candidate.get("rule_source") or "") == "surface_rules":
+                issue_type = classify_surface_edit(original, revised, str(candidate.get("problem") or ""))
+                candidate["type"] = issue_type
             mapped_category, _mapped_severity = map_rule_to_category(
                 issue=candidate,
                 rule_source=str(candidate.get("rule_source") or ""),
                 rule_name=str(candidate.get("rule_name") or ""),
                 match_detail=candidate,
-                issue_type=str(candidate.get("type") or item.get("type") or ""),
+                issue_type=issue_type,
             )
-            if not candidate.get("category"):
+            if not had_category:
                 candidate["category"] = mapped_category
+                if candidate.get("category") in {"word", "term"}:
+                    candidate["category"] = refine_word_term_category(
+                        original,
+                        revised,
+                        str(candidate.get("problem") or ""),
+                        str(candidate.get("category") or ""),
+                    )
     return items or []
 
 
@@ -506,7 +534,12 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
             sentence_index=sentence_index,
         )
         return None
-    category = str(raw.get("category") or "").strip()
+    category = canonicalize_category(
+        str(raw.get("category") or "").strip(),
+        str(raw.get("problem") or "").strip(),
+        str(raw.get("quote") or "").strip(),
+        str(raw.get("revised") or "").strip(),
+    )
     severity = str(raw.get("severity") or "").strip()
     if category not in CATEGORIES or severity not in SEVERITIES:
         _log_diagnose_drop(
@@ -768,24 +801,143 @@ def _item_text(item: dict) -> str:
     return str(item.get("text") or item.get("source_sentence_text") or item.get("original_text") or "").strip()
 
 
+def _pos_flags(token: str) -> list[str]:
+    text = str(token or "").strip()
+    if not text:
+        return []
+    try:
+        import jieba.posseg as pseg
+        return [str(item.flag or "") for item in pseg.cut(text)]
+    except Exception:
+        return []
+
+
+def _is_latin_term_token(token: str) -> bool:
+    return bool(re.search(r"[A-Za-z]{2,}", str(token or "")))
+
+
+def _is_content_term_token(token: str) -> bool:
+    text = str(token or "").strip()
+    if _is_latin_term_token(text):
+        return True
+    flags = _pos_flags(text)
+    if not flags:
+        return bool(re.fullmatch(r"[一-鿿]{2,8}", text))
+    if any(flag in _FUNCTION_POS for flag in flags):
+        return False
+    return all(flag.startswith(("n", "v")) for flag in flags)
+
+
+def _expand_cjk_span(text: str, start: int, end: int) -> str:
+    value = str(text or "")
+    raw = value[max(0, start):min(len(value), end)]
+    try:
+        import jieba
+        covering = []
+        for word, wstart, wend in jieba.tokenize(value, mode="default"):
+            if wend <= start or wstart >= end:
+                continue
+            covering.append(word)
+        token = "".join(covering).strip()
+        if token:
+            return token
+    except Exception:
+        pass
+    return raw.strip() or raw
+
+
+def _lexical_replace_pairs(original: str, revised: str) -> list[tuple[str, str]]:
+    source = str(original or "")
+    target = str(revised or "")
+    if not source or not target or source == target:
+        return []
+    pairs = []
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, source, target, autojunk=False).get_opcodes():
+        if tag != "replace":
+            continue
+        src_raw = source[i1:i2]
+        dst_raw = target[j1:j2]
+        if _FORMAT_TEXT_RE.match(src_raw) and _FORMAT_TEXT_RE.match(dst_raw):
+            continue
+        src = _expand_cjk_span(source, i1, i2)
+        dst = _expand_cjk_span(target, j1, j2)
+        if src and dst and src != dst:
+            pairs.append((src, dst))
+    return pairs
+
+
+def classify_surface_edit(original: str, revised: str, problem: str = "") -> str:
+    """term=术语统一；typo=词形错；format=数字/空格/标点。"""
+    if _WORD_FORM_PROBLEM_RE.search(str(problem or "")):
+        return "typo"
+    pairs = _lexical_replace_pairs(original, revised)
+    if not pairs:
+        return "format"
+    if any(_is_content_term_token(src) and _is_content_term_token(dst) for src, dst in pairs):
+        return "term"
+    return "typo"
+
+
+def refine_word_term_category(
+    original: str = "",
+    revised: str = "",
+    problem: str = "",
+    category: str = "",
+) -> str:
+    cat = str(category or "").strip().lower()
+    if cat in _CATEGORY_ALIASES:
+        cat = _CATEGORY_ALIASES[cat]
+    if cat and cat not in {"word", "term"}:
+        return cat
+    if _WORD_FORM_PROBLEM_RE.search(str(problem or "")):
+        return "word"
+    if original and revised:
+        kind = classify_surface_edit(original, revised, problem)
+        if kind == "term":
+            return "term"
+        if kind == "typo":
+            return "word"
+    return cat or "word"
+
+
+def canonicalize_category(
+    category: str,
+    problem: str = "",
+    original: str = "",
+    revised: str = "",
+) -> str:
+    cat = str(category or "").strip().lower()
+    if cat in _CATEGORY_ALIASES:
+        cat = _CATEGORY_ALIASES[cat]
+    if cat in {"", "other"}:
+        inferred = _infer_category(problem)
+        if inferred in CATEGORIES:
+            cat = inferred
+        else:
+            cat = "word"
+    if cat in {"word", "term"} and (original or revised or problem):
+        cat = refine_word_term_category(original, revised, problem, cat)
+    if cat in CATEGORIES:
+        return cat
+    return cat
+
+
 def _infer_category(problem: str) -> str:
     text = str(problem or "")
     rules = (
         (r"术语|专名", "term"),
-        (r"标点|错别字|拼写|空格|单位", "spelling"),
-        (r"语法", "grammar"),
-        (r"用词|口语", "word"),
+        (r"标点|错别字|拼写|空格|单位|语体|祈使|用词|口语|受众", "word"),
+        (r"语法|句式|语序|被动", "grammar"),
         (r"歧义|指代", "ambiguity"),
         (r"冗余|重复", "redundancy"),
-        (r"语体|祈使", "register"),
-        (r"逻辑|顺序|矛盾", "logic"),
+        (r"风险|安全|弱化", "risk"),
+        (r"逻辑|顺序|矛盾|数值|孔位", "logic"),
         (r"缺失|缺少", "missing"),
-        (r"风险|安全", "risk"),
     )
     for pattern, category in rules:
         if re.search(pattern, text):
             return category
-    return "other"
+    return "word"
 
 
 def parse_validate_output(raw: str) -> Optional[tuple[str, str]]:
@@ -1036,8 +1188,8 @@ async def _diagnose_batch_decoupled(
             "severity": severity,
             "problem": problem,
             "revised": pair["revised"],
-            "ruleable": False,
-            "rule_hint": "",
+            "ruleable": True,
+            "rule_hint": pair["original"],
         })
     kept = parse_diagnoses_payload({"diagnoses": raw_items}, allowed_indexes=allowed)
     _add_decoupled_stats(

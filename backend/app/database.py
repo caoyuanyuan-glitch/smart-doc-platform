@@ -176,6 +176,24 @@ def _ensure_legacy_sqlite_columns():
                     conn.execute(text(s))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_polish_feedback_polish_session_id ON polish_feedback (polish_session_id)"))
 
+    try:
+        diagnose_tables = set(inspector.get_table_names())
+    except Exception:
+        diagnose_tables = set()
+    if "cat_diagnose_record_lab" in diagnose_tables:
+        try:
+            diagnose_columns = {col["name"] for col in inspector.get_columns("cat_diagnose_record_lab")}
+        except Exception:
+            diagnose_columns = set()
+        with engine.begin() as conn:
+            if "source_name" not in diagnose_columns:
+                conn.execute(text("ALTER TABLE cat_diagnose_record_lab ADD COLUMN source_name VARCHAR(255)"))
+            conn.execute(text(
+                "UPDATE cat_diagnose_record_lab SET ruleable = 1 "
+                "WHERE COALESCE(ruleable, 0) = 0 "
+                "AND revised IS NOT NULL AND TRIM(revised) != ''"
+            ))
+
 def get_db():
     db = SessionLocal()
     try:

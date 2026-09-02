@@ -705,7 +705,13 @@
           </div>
         </div>
         <el-table :data="diagnoseCandidates" v-loading="diagnoseCandidatesLoading" empty-text="暂无候补">
-          <el-table-column prop="quote" label="原文片段" min-width="160" show-overflow-tooltip />
+          <el-table-column label="入库时间" width="170">
+            <template #default="{ row }">{{ formatDiagnoseCreatedAt(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="原文出处" min-width="160" show-overflow-tooltip>
+            <template #default="{ row }">{{ formatDiagnoseSource(row) }}</template>
+          </el-table-column>
+          <el-table-column prop="quote" label="原文片段" min-width="180" show-overflow-tooltip />
           <el-table-column prop="revised" label="改写" min-width="160" show-overflow-tooltip />
           <el-table-column label="分类" width="100">
             <template #default="{ row }">{{ CATEGORY_LABELS[row.category] || row.category }}</template>
@@ -713,7 +719,6 @@
           <el-table-column label="问题" min-width="180" show-overflow-tooltip>
             <template #default="{ row }">{{ diagnoseProblemText(row) }}</template>
           </el-table-column>
-          <el-table-column prop="rule_hint" label="规则提示" min-width="140" show-overflow-tooltip />
           <el-table-column label="操作" width="180" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link :loading="row._importing" @click="importDiagnoseCandidate(row)">转规则</el-button>
@@ -3138,6 +3143,16 @@ function formatCatCandidateMatchRate(candidate) {
 function formatCatCandidateSource(candidate) {
   const source = String(candidate?.rule_source || '').trim()
   if (source === 'surface_rules') {
+    const kind = String(candidate?.type || '').trim()
+    if (kind === 'term' || String(candidate?.category || '').trim() === 'term') {
+      return '术语替换'
+    }
+    if (kind === 'format' || kind === 'punctuation') {
+      return '数字格式/标点格式'
+    }
+    if (kind === 'typo') {
+      return '错别字'
+    }
     return '数字格式/术语替换'
   }
   if (source === 'sentence_guide') {
@@ -3150,19 +3165,40 @@ function formatCatCandidateSource(candidate) {
 }
 
 const CATEGORY_LABELS = {
-  spelling: '拼写标点',
   grammar: '语法',
   word: '用词',
   term: '术语',
   ambiguity: '歧义',
   redundancy: '冗余',
-  syntax: '句式',
   logic: '逻辑',
   missing: '缺失',
-  register: '语体',
-  audience: '受众',
   risk: '风险',
-  other: '其他'
+  spelling: '用词',
+  register: '用词',
+  audience: '用词',
+  syntax: '语法',
+  other: '逻辑'
+}
+
+const CATEGORY_CANONICAL = {
+  grammar: 'grammar',
+  syntax: 'grammar',
+  word: 'word',
+  spelling: 'word',
+  register: 'word',
+  audience: 'word',
+  term: 'term',
+  ambiguity: 'ambiguity',
+  redundancy: 'redundancy',
+  logic: 'logic',
+  other: 'logic',
+  missing: 'missing',
+  risk: 'risk'
+}
+
+function canonicalCategory(source) {
+  const key = String(source?.category ?? source ?? '').trim()
+  return CATEGORY_CANONICAL[key] || key
 }
 
 function isDiagnoseCandidate(candidate) {
@@ -3217,10 +3253,25 @@ function diagnoseProblemText(candidate) {
 const diagnoseCandidates = ref([])
 const diagnoseCandidatesLoading = ref(false)
 
+function formatDiagnoseCreatedAt(value) {
+  if (!value) return ''
+  const raw = String(value)
+  const date = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(raw) ? raw : `${raw}Z`)
+  if (Number.isNaN(date.getTime())) return raw
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function formatDiagnoseSource(row) {
+  const sourceName = String(row?.source_name || '').trim()
+  if (sourceName) return sourceName
+  return String(row?.source || '') === 'text' ? '文本润色' : '文档分析'
+}
+
 async function loadDiagnoseCandidates() {
   diagnoseCandidatesLoading.value = true
   try {
-    const { data } = await polishAPI.listDiagnoseCandidates({ ruleable: true, status: 'pending' })
+    const { data } = await polishAPI.listDiagnoseCandidates({ status: 'pending' })
     diagnoseCandidates.value = data?.items || []
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '加载诊断候补失败'))
@@ -3277,7 +3328,7 @@ async function dismissDiagnoseCandidate(row) {
 }
 
 function categoryLabel(source) {
-  const key = String(source?.category || '').trim()
+  const key = canonicalCategory(source)
   return CATEGORY_LABELS[key] || ''
 }
 
@@ -3352,11 +3403,13 @@ function catEmptyStateText() {
   if (!catResult.value) {
     return '上传文档后，这里会展示命中的句式候选和逐段确认区。'
   }
-  if ((catResult.value.totalWithCandidates || 0) === 0) {
-    return '本次分析完成，但没有命中可用的句式候选。'
+  if (catResult.value.diagnoseStatus === 'failed' && !catItems.value.length) {
+    return catResult.value.diagnoseError
+      ? `句式分析未产出结果：${catResult.value.diagnoseError}`
+      : '句式分析未产出结果，AI 诊断失败。'
   }
-  if (!catItems.value.length) {
-    return '候选结果已返回，但当前没有可展示的条目。'
+  if ((catResult.value.totalWithCandidates || 0) === 0 || !catItems.value.length) {
+    return '本次分析未产出可展示的句式候选。'
   }
   return '当前文档没有命中句式候选'
 }
@@ -3433,7 +3486,7 @@ function selectedCatCandidate(item) {
   return item.candidates[item.selectedCandidateIndex] || item.candidates[0] || null
 }
 
-const catCategoryChipKeys = Object.keys(CATEGORY_LABELS)
+const catCategoryChipKeys = ['grammar', 'word', 'term', 'ambiguity', 'redundancy', 'logic', 'missing', 'risk']
 
 const catCategoryCounts = computed(() => {
   const counts = {}
@@ -3441,9 +3494,9 @@ const catCategoryCounts = computed(() => {
     counts[key] = 0
   }
   for (const item of catItems.value) {
-    const key = String(selectedCatCandidate(item)?.category || '').trim()
-    if (!key) continue
-    counts[key] = (counts[key] || 0) + 1
+    const key = canonicalCategory(selectedCatCandidate(item))
+    if (!key || !(key in counts)) continue
+    counts[key] += 1
   }
   return counts
 })
@@ -3464,7 +3517,7 @@ const displayedCatItems = computed(() => {
   const severities = new Set(catSeverityFilter.value)
   return catItems.value.filter(item => {
     const candidate = selectedCatCandidate(item)
-    if (selected.size && !selected.has(String(candidate?.category || '').trim())) {
+    if (selected.size && !selected.has(canonicalCategory(candidate))) {
       return false
     }
     if (severities.size && !severities.has(String(candidate?.severity || '').trim())) {
@@ -3683,7 +3736,11 @@ function buildCatDecisionPayload() {
       original_text: item.originalText,
       string_score: candidate?.string_score || 0,
       semantic_score: candidate?.semantic_score ?? null,
-      ai_reason: candidate?.ai_reason || null
+      ai_reason: candidate?.ai_reason || null,
+      category: candidate?.category || '',
+      severity: candidate?.severity || '',
+      candidate_text: candidate?.template_text || candidate?.revised || '',
+      rule_source: candidate?.rule_source || ''
     }
 
     if (action === 'accept' && candidate) {
@@ -3721,6 +3778,9 @@ async function submitCatAnalyze() {
 
   const resp = await polishAPI.catAnalyze(payload)
   const data = resp.data || {}
+  if (!data.analyze_id) {
+    throw new Error('未返回分析编号，分析未真正完成')
+  }
   docResult.value = null
   catApplyResult.value = null
   catResult.value = {
@@ -3747,7 +3807,9 @@ async function submitCatAnalyze() {
     },
     sourceName: pendingLocalFile?.name || formData.value.sourceFile || '',
     aiScoringStatus: data.ai_scoring_status || '',
-    aiScoringError: data.ai_scoring_error || ''
+    aiScoringError: data.ai_scoring_error || '',
+    diagnoseStatus: data.diagnose_status || '',
+    diagnoseError: data.diagnose_error || ''
   }
   catItems.value = normalizeCatItems([...(data.items || []), ...(data.diagnose_items || [])])
   catCategoryFilter.value = []
@@ -3773,7 +3835,8 @@ async function applyCatSelections() {
     const payload = {
       analyze_id: catResult.value.analyzeId,
       source_filename: catResult.value.sourceName || formData.value.sourceFile || 'polished.docx',
-      decisions: buildCatDecisionPayload()
+      decisions: buildCatDecisionPayload(),
+      ai_semantic_scoring: Boolean(formData.value.catAiSemanticScoring)
     }
     const resp = await polishAPI.catApply(payload)
     const data = resp.data || {}
@@ -3937,6 +4000,19 @@ async function submitPolish() {
     const sourceName = pendingLocalFile?.name || formData.value.sourceFile || ''
     if (formData.value.documentWorkflow === 'cat') {
       await submitCatAnalyze()
+      polishProgress.value = 100
+      stopDocumentProgress()
+      if (!catItems.value.length) {
+        polishProgressMsg.value = '未产出可展示的句式候选'
+        const emptyMsg = catEmptyStateText()
+        if (catResult.value?.diagnoseStatus === 'failed') {
+          throw new Error(emptyMsg)
+        }
+        ElMessage.warning(emptyMsg)
+      } else {
+        polishProgressMsg.value = '句式分析完成'
+        ElMessage.success('句式分析完成')
+      }
     } else {
       const payload = new FormData()
       payload.append('file', pendingLocalFile)
@@ -3954,11 +4030,11 @@ async function submitPolish() {
       }
       const data = await polishStore.submitDocumentPolish(payload, sourceName)
       applyDocumentResult(data, sourceName)
+      polishProgress.value = 100
+      polishProgressMsg.value = '润色完成'
+      stopDocumentProgress()
+      ElMessage.success('润色成功')
     }
-    polishProgress.value = 100
-    polishProgressMsg.value = formData.value.documentWorkflow === 'cat' ? '句式分析完成' : '润色完成'
-    stopDocumentProgress()
-    ElMessage.success(formData.value.documentWorkflow === 'cat' ? '句式分析完成' : '润色成功')
     // 清空已选择的文件
     pendingLocalFile = null
     if (localFileInputRef.value) {

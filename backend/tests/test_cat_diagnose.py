@@ -9,17 +9,17 @@ class CatDiagnoseMappingTest(unittest.TestCase):
         from app.utils.cat_diagnose import map_rule_to_category
 
         self.assertEqual(map_rule_to_category({"type": "term", "rule_name": "术语替换"}), ("term", "high"))
-        self.assertEqual(map_rule_to_category({"type": "typo"}), ("spelling", "high"))
-        self.assertEqual(map_rule_to_category({"type": "imperative"}), ("register", "low"))
-        self.assertEqual(map_rule_to_category({"type": "format"}), ("spelling", "low"))
-        self.assertEqual(map_rule_to_category({"type": "punctuation"}), ("spelling", "low"))
+        self.assertEqual(map_rule_to_category({"type": "typo"}), ("word", "medium"))
+        self.assertEqual(map_rule_to_category({"type": "imperative"}), ("word", "low"))
+        self.assertEqual(map_rule_to_category({"type": "format"}), ("word", "low"))
+        self.assertEqual(map_rule_to_category({"type": "punctuation"}), ("word", "low"))
         self.assertEqual(map_rule_to_category({"type": "forbidden_words"}), ("word", "high"))
         self.assertEqual(map_rule_to_category({"type": "double_negative"}), ("logic", "medium"))
-        self.assertEqual(map_rule_to_category({"type": "passive_voice"}), ("syntax", "low"))
-        self.assertEqual(map_rule_to_category({"rule_name": "中英文空格"}), ("spelling", "low"))
-        self.assertEqual(map_rule_to_category(rule_source="sentence_guide"), ("syntax", "low"))
+        self.assertEqual(map_rule_to_category({"type": "passive_voice"}), ("grammar", "low"))
+        self.assertEqual(map_rule_to_category({"rule_name": "中英文空格"}), ("word", "low"))
+        self.assertEqual(map_rule_to_category(rule_source="sentence_guide"), ("grammar", "low"))
         self.assertEqual(map_rule_to_category(rule_source="surface_rules"), ("word", "medium"))
-        self.assertEqual(map_rule_to_category({"type": "unknown-rule"}), ("other", "low"))
+        self.assertEqual(map_rule_to_category({"type": "unknown-rule"}), ("word", "low"))
 
     def test_annotate_does_not_overwrite_existing_fields(self):
         from app.utils.cat_diagnose import annotate_cat_candidates
@@ -418,6 +418,7 @@ class CatDiagnoseCompactTextTest(unittest.TestCase):
         }, allowed_indexes={0})
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["problem"], "“至于”为错别字，应为“置于”")
+        self.assertEqual(parsed[0]["category"], "word")
         self.assertLessEqual(len(parsed[0]["problem"]), 24)
         self.assertNotIn("rationale", parsed[0])
 
@@ -485,7 +486,8 @@ class CatDiagnoseDecoupledTest(unittest.TestCase):
         self.assertEqual(result[0]["revised"], "置于常温解冻。")
         self.assertEqual(result[0]["severity"], "high")
         self.assertEqual(result[0]["problem"], "至于为错别字")
-        self.assertEqual(result[0]["category"], "spelling")
+        self.assertEqual(result[0]["category"], "word")
+        self.assertTrue(result[0]["ruleable"])
         self.assertEqual(
             cat_diagnose.last_decoupled_stats(),
             {"stage1_no_change": 0, "stage1_revised": 1, "stage2_rejected": 0, "produced": 1},
@@ -533,6 +535,64 @@ class CatDiagnoseDecoupledTest(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["sentence_index"], 0)
         self.assertEqual(items[0]["problem"], "语序不当")
+
+
+class CatDiagnoseCategoryV08Test(unittest.TestCase):
+    def test_canonicalize_spelling_to_word(self):
+        from app.utils.cat_diagnose import canonicalize_category
+
+        self.assertEqual(canonicalize_category("spelling"), "word")
+        self.assertEqual(canonicalize_category("register"), "word")
+        self.assertEqual(canonicalize_category("syntax"), "grammar")
+
+    def test_other_maps_by_problem_content(self):
+        from app.utils.cat_diagnose import canonicalize_category, _infer_category
+
+        self.assertEqual(_infer_category("至于为错别字"), "word")
+        self.assertEqual(canonicalize_category("other", "“两个”应为“三个”，数值错误"), "logic")
+        self.assertEqual(canonicalize_category("other", "术语与术语表不一致"), "term")
+        self.assertEqual(canonicalize_category("risk"), "risk")
+        self.assertEqual(_infer_category("风险弱化，冲洗即可"), "risk")
+
+
+class CatDiagnoseTermWordV09Test(unittest.TestCase):
+    def test_machine_to_instrument_is_term(self):
+        from app.utils.cat_diagnose import annotate_cat_candidates, refine_word_term_category
+
+        original = '3.8.4将制备卡平置于机器上，制备卡的凹口要与机器推板上的凸出位置对应（图12）。'
+        revised = '3.8.4将制备卡平置于仪器上，制备卡的凹口要与仪器载台上的凸出位置对应（图12）。'
+        self.assertEqual(refine_word_term_category(original, revised, '', 'word'), 'term')
+        items = [{
+            'original_text': original,
+            'candidates': [{
+                'rule_source': 'surface_rules',
+                'template_text': revised,
+            }],
+        }]
+        annotate_cat_candidates(items)
+        self.assertEqual(items[0]['candidates'][0]['category'], 'term')
+        self.assertEqual(items[0]['candidates'][0]['type'], 'term')
+
+    def test_sample_and_tip_unification_are_term(self):
+        from app.utils.cat_diagnose import refine_word_term_category
+
+        self.assertEqual(
+            refine_word_term_category('每个样品中加入5 μL', '每个样本中加入5 μL', '', 'word'),
+            'term',
+        )
+        self.assertEqual(
+            refine_word_term_category('正确的插上移液器的枪头。', '正确的插上移液器的吸头。', '', 'word'),
+            'term',
+        )
+
+    def test_typo_zhiyu_stays_word(self):
+        from app.utils.cat_diagnose import canonicalize_category, refine_word_term_category
+
+        original = '实验前将所有的冷冻试剂至于常温解冻。'
+        revised = '实验前将所有的冷冻试剂置于常温解冻。'
+        self.assertEqual(refine_word_term_category(original, revised, '错别字“至于”应为“置于”', 'word'), 'word')
+        self.assertEqual(canonicalize_category('term', '错别字“至于”应为“置于”', original, revised), 'word')
+        self.assertEqual(canonicalize_category('word', '错别字“至于”应为“置于”', original, revised), 'word')
 
 
 if __name__ == "__main__":

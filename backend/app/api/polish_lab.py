@@ -53,7 +53,7 @@ _polish_tasks: dict = {}  # {task_id: {"status", "progress", "message", "result"
 _polish_tasks_lock = threading.Lock()
 
 
-def _persist_lab_diagnoses(db: Session, diagnoses, sentence_items=None, analyze_id=None, source="text"):
+def _persist_lab_diagnoses(db: Session, diagnoses, sentence_items=None, analyze_id=None, source="text", source_name=None):
     if not db or not diagnoses:
         return
     try:
@@ -65,6 +65,7 @@ def _persist_lab_diagnoses(db: Session, diagnoses, sentence_items=None, analyze_
             if isinstance(item, dict)
         }
         rows = []
+        stored_source_name = str(source_name or "").strip()
         for diag in diagnoses:
             if not isinstance(diag, dict):
                 continue
@@ -80,6 +81,7 @@ def _persist_lab_diagnoses(db: Session, diagnoses, sentence_items=None, analyze_
                 CatDiagnoseRecordLab(
                     analyze_id=analyze_id,
                     source=source,
+                    source_name=stored_source_name or None,
                     sentence_index=diag.get("sentence_index"),
                     original_text=original,
                     quote=str(diag.get("quote") or ""),
@@ -88,8 +90,8 @@ def _persist_lab_diagnoses(db: Session, diagnoses, sentence_items=None, analyze_
                     problem=str(diag.get("problem") or ""),
                     revised=str(diag.get("revised") or ""),
                     rationale=str(diag.get("rationale") or ""),
-                    ruleable=bool(diag.get("ruleable")),
-                    rule_hint=str(diag.get("rule_hint") or ""),
+                    ruleable=bool(diag.get("ruleable")) or bool(str(diag.get("revised") or "").strip()),
+                    rule_hint=str(diag.get("rule_hint") or diag.get("quote") or ""),
                     status="pending",
                 )
             )
@@ -97,6 +99,12 @@ def _persist_lab_diagnoses(db: Session, diagnoses, sentence_items=None, analyze_
             return
         db.add_all(rows)
         db.commit()
+        logger.info(
+            "[CAT_DIAGNOSE] persisted count=%s analyze_id=%s source=%s",
+            len(rows),
+            analyze_id or "",
+            source,
+        )
     except Exception as exc:
         try:
             db.rollback()
@@ -171,6 +179,17 @@ def _protect_model_numbers(text: str) -> str:
     text = re.sub(r'(?<=(?:表|图)\d)\s*(?=[A-Za-z]{2,})', ' ', text)
     text = re.sub(r'(?<=\d\.\d)\s*(?=[A-Za-z]{2,})', ' ', text)
     return text
+
+
+_MARKDOWN_INLINE_ESCAPE_RE = re.compile(r'\\([\\`*_{}\[\]()#+\-.!|~])')
+
+
+def _unescape_markdown_inline(text: str) -> str:
+    """还原句式库 Markdown 转义，避免模板把 \\. \\- 带进候选。"""
+    value = str(text or '')
+    if '\\' not in value:
+        return value
+    return _MARKDOWN_INLINE_ESCAPE_RE.sub(r'\1', value)
 
 
 def _use_ai_only() -> bool:
@@ -817,7 +836,7 @@ _term_cache: dict = {}
 _typo_cache: dict = {}
 _CANDIDATE_RECALL_GUIDE_MARKER = '## 候选召回句式库'
 _AI_STYLE_GUIDE_MARKER = '## 仅供 AI 润色的通用风格指南'
-_STEP_PREFIX_PATTERN = re.compile(r'^((?:\d+[.、)]?)+(?:\s+|(?=[\u4e00-\u9fffA-Za-z(（])))\s*(.+)$')
+_STEP_PREFIX_PATTERN = re.compile(r'^((?:\d+[.、)]?)+)(?:[.。]+)?(?:\s+|(?=[\u4e00-\u9fffA-Za-z(（]))\s*(.+)$')
 _DOC_REVIEW_REFERENCE_CANDIDATE_THRESHOLD = 75
 
 
@@ -844,7 +863,7 @@ def _split_step_prefix(text: str) -> tuple[str, str]:
     match = _STEP_PREFIX_PATTERN.match(value)
     if not match:
         return '', value
-    return match.group(1), (match.group(2) or '').strip()
+    return match.group(1), (match.group(2) or '').strip().lstrip('.。')
 
 
 def _split_list_marker_prefix(text: str) -> tuple[str, str]:
@@ -919,7 +938,8 @@ def _reapply_sentence_prefix(original: str, suggestion: str) -> str:
     if notice_prefix and not result.startswith(notice_prefix):
         result = f'{notice_prefix}{result}'
 
-    return _normalize_terminal_sentence_punctuation(result)
+    result = _normalize_terminal_sentence_punctuation(result)
+    return re.sub(r'^(\d+(?:\.\d+)*)\.{2,}', r'\1.', result)
 
 
 def _normalize_doc_ai_line(original: str, ai_line: str) -> str:
@@ -3623,8 +3643,8 @@ def _prepare_sentence_guide_content(file_name: str, content: str) -> str:
     if not content:
         return ''
     if (file_name or '').strip() == PLATFORM_FEEDBACK_FILENAME:
-        return _sanitize_platform_feedback_guide(content)
-    return content
+        return _sanitize_platform_feedback_guide(_unescape_markdown_inline(content))
+    return _unescape_markdown_inline(content)
 
 
 def _fallback_guide_entries_from_text(guide_text: str) -> list:
@@ -3643,7 +3663,7 @@ def _fallback_guide_entries_from_text(guide_text: str) -> list:
         if not sentences and len(_normalize_sentence_for_match(line)) >= 8:
             sentences = [line]
         for sentence in sentences:
-            text = _protect_model_numbers(sentence.strip())
+            text = _protect_model_numbers(_unescape_markdown_inline(sentence.strip()))
             normalized = _normalize_sentence_for_match(text)
             if len(normalized) < 8:
                 continue
@@ -4076,6 +4096,10 @@ class CatDecision(BaseModel):
     string_score: float = 0.0
     semantic_score: Optional[float] = None
     ai_reason: Optional[str] = None
+    category: Optional[str] = None
+    severity: Optional[str] = None
+    candidate_text: Optional[str] = None
+    rule_source: Optional[str] = None
 
 
 class CatAnalyzeRequest(BaseModel):
@@ -4098,6 +4122,8 @@ class CatApplyRequest(BaseModel):
     decisions: List[CatDecision] = []
     sentence_file_id: Optional[int] = None
     sentence_file_name: Optional[str] = None
+    ai_semantic_scoring: Optional[bool] = None
+    ai_semantic_scoring: Optional[bool] = None
 
 
 _DOC_REVIEW_AUTO_APPLY_THRESHOLD = 95
@@ -4977,7 +5003,7 @@ def _parse_table_sentence_templates(section: str) -> list[str]:
             if col_idx < len(cells):
                 val = cells[col_idx].strip().strip('"\'""''').strip()
                 # 去掉常见 Markdown 转义，避免模板文本把反斜杠带进最终替换结果。
-                val = re.sub(r'\\([*_\-~()\[\]{}])', r'\1', val)
+                val = _unescape_markdown_inline(val)
                 if val and not re.match(r'^\d+$', val) and val not in ('...', '....'):
                     sentences.append(val)
     return sentences
@@ -5071,7 +5097,7 @@ def _parse_structured_sentence_templates(section: str) -> list[dict]:
                 template_text = cells[example_col_idx].strip()
             if not template_text and header_map['template_text'] < len(cells):
                 template_text = cells[header_map['template_text']].strip()
-            template_text = re.sub(r'\\([*_\-~()\[\]{}])', r'\1', template_text).strip('"\'“”')
+            template_text = _unescape_markdown_inline(template_text).strip('"\'“”')
             if not template_text or re.match(r'^\d+$', template_text):
                 continue
             template = {
@@ -5095,8 +5121,8 @@ def _parse_structured_sentence_templates(section: str) -> list[dict]:
 
 def _template_entry_text(template) -> str:
     if isinstance(template, dict):
-        return _protect_model_numbers(str(template.get('template_text', '') or '').strip())
-    return _protect_model_numbers(str(template or '').strip())
+        return _protect_model_numbers(_unescape_markdown_inline(str(template.get('template_text', '') or '').strip()))
+    return _protect_model_numbers(_unescape_markdown_inline(str(template or '').strip()))
 
 
 def _template_entry_candidates(template) -> list[str]:
@@ -6098,7 +6124,25 @@ _CAT_KEYWORD_ENTITY_PATTERNS = [
     (re.compile(r'\b(?:货号|型号|编号|序列号|No\.?|Part\s*#|CAT\s*#)?\s*[:：]?\s*([A-Za-z0-9\-]{6,})\b', re.IGNORECASE), "编号/货号/型号"),
     (re.compile(r'(?:套件|试剂盒|Kit|制备套件)\s*([A-Z])\b'), "套件版本"),
     (re.compile(r'\b[Vv]\s*(\d+(?:\.\d+)*)\b'), "版本号"),
+    (re.compile(r'\b([A-Z]{2,}SEQ-[A-Za-z0-9]+(?:\s+[A-Z]{2}(?![A-Za-z]))?)'), "测序平台"),
+    (re.compile(r'\b(DNBelab-[A-Za-z0-9]+(?:\s+[A-Z]{2}(?![A-Za-z]))?)'), "仪器型号"),
+    (re.compile(r'([A-Za-z0-9\-]*[\u4e00-\u9fffA-Za-z0-9\-（）()]{0,24}试剂套装)'), "试剂套装名"),
+    (re.compile(r'@([A-Za-z0-9.-]+\.[A-Za-z]{2,})', re.IGNORECASE), "邮箱域名"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(μL|µL|uL|mL|ng|μg|µg|mg|°C|℃|°)(?![A-Za-z])', re.IGNORECASE), "数值"),
 ]
+
+_CAT_ENTITY_CHANGE_SCORE_FACTOR = 0.82
+
+_CAT_ENTITY_BACKFILL_LABELS = {
+    '测序平台',
+    '仪器型号',
+    '试剂套装名',
+}
+_CAT_MODEL_BACKFILL_LABELS = {'测序平台', '仪器型号'}
+_CN_CARDINAL_DIGITS = {
+    '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+    '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+}
 
 _CAT_KEY_TERM_ANCHOR_GROUPS = {
     'temperature': (
@@ -6164,6 +6208,10 @@ _CAT_KEY_TERM_ANCHOR_GROUPS = {
         ('室温放置', re.compile(r'室温放置')),
         ('离心', re.compile(r'离心')),
         ('混匀', re.compile(r'混匀')),
+    ),
+    'operation_mode': (
+        ('手动', re.compile(r'手动')),
+        ('自动', re.compile(r'自动')),
     ),
 }
 
@@ -6293,37 +6341,303 @@ def _calc_similarity(a: str, b: str) -> float:
 
 def _extract_critical_entities(text: str) -> dict[str, list[str]]:
     entities: dict[str, list[str]] = {}
-    value = str(text or '')
-    for pattern, label in _CAT_KEYWORD_ENTITY_PATTERNS:
-        matches = pattern.findall(value)
-        if not matches:
-            continue
-        cleaned = []
-        for matched in matches:
-            if isinstance(matched, tuple):
-                candidate = next((part for part in matched if part), '')
-            else:
-                candidate = matched
-            candidate = str(candidate or '').strip().upper()
-            if candidate:
-                cleaned.append(candidate)
-        if cleaned:
-            entities.setdefault(label, []).extend(cleaned)
+    for label, raw, _, _ in _extract_critical_entity_spans(text):
+        value = _normalize_entity_value(raw)
+        if value:
+            entities.setdefault(label, []).append(value)
     return entities
 
 
 def _critical_entities_compatible(sentence: str, candidate: str) -> tuple[bool, str]:
+    changes = _critical_entity_changes(sentence, candidate)
+    if not changes:
+        return True, ''
+    return False, changes[0]
+
+
+def _critical_entity_changes(sentence: str, candidate: str) -> list[str]:
     sentence_entities = _extract_critical_entities(sentence)
     candidate_entities = _extract_critical_entities(candidate)
     if not sentence_entities:
-        return True, ''
+        return []
+    changes: list[str] = []
     for label, sentence_values in sentence_entities.items():
         candidate_values = candidate_entities.get(label, [])
         if not candidate_values:
-            return False, f'{label}缺失'
-        if not (set(sentence_values) & set(candidate_values)):
-            return False, f'{label}不一致'
-    return True, ''
+            changes.append(f'{label}缺失')
+        elif not (set(sentence_values) & set(candidate_values)):
+            changes.append(f'{label}不一致')
+    return changes
+
+
+def _apply_cat_entity_change_penalty(source_text: str, candidate: dict) -> dict:
+    if not isinstance(candidate, dict):
+        return candidate
+    display = str(candidate.get('template_text') or '')
+    changes = _critical_entity_changes(source_text, display)
+    if not changes:
+        return candidate
+    original_score = float(candidate.get('string_score') or 0.0)
+    candidate['unpenalized_string_score'] = original_score
+    candidate['string_score'] = round(original_score * _CAT_ENTITY_CHANGE_SCORE_FACTOR, 4)
+    candidate['entity_penalty_reason'] = '；'.join(changes)
+    tags = list(candidate.get('review_tags') or [])
+    if 'entity_changed' not in tags:
+        tags.append('entity_changed')
+    candidate['review_tags'] = tags
+    return candidate
+
+
+def _normalize_entity_value(value: str) -> str:
+    return re.sub(r'\s+', '', str(value or '')).upper()
+
+
+def _is_model_token_extension(shorter: str, longer: str) -> bool:
+    if not shorter or not longer or len(longer) <= len(shorter):
+        return False
+    if not longer.startswith(shorter):
+        return False
+    suffix = longer[len(shorter):]
+    return bool(suffix) and suffix.isalnum()
+
+
+def _extract_critical_entity_spans(text: str) -> list[tuple[str, str, int, int]]:
+    value = str(text or '')
+    spans: list[tuple[str, str, int, int]] = []
+    for pattern, label in _CAT_KEYWORD_ENTITY_PATTERNS:
+        for match in pattern.finditer(value):
+            raw = str(match.group(0) or '').strip()
+            if not raw:
+                continue
+            start = match.start()
+            end = match.end()
+            if label == '试剂套装名':
+                trimmed = re.search(r'[A-Z][A-Za-z0-9\-]*(?:[\u4e00-\u9fffA-Za-z0-9\-（）()]{0,20})?试剂套装$', raw)
+                if not trimmed:
+                    continue
+                start += trimmed.start()
+                raw = trimmed.group(0)
+            spans.append((label, raw, start, end))
+    spans.sort(key=lambda item: (item[2], -(item[3] - item[2])))
+    return spans
+
+
+def _backfill_critical_entities(source_text: str, candidate_text: str) -> str:
+    source_text = str(source_text or '')
+    result = str(candidate_text or '')
+    if not source_text or not result or source_text == result:
+        return result
+    source_spans = _extract_critical_entity_spans(source_text)
+    candidate_spans = _extract_critical_entity_spans(result)
+    if not source_spans or not candidate_spans:
+        return result
+
+    source_by_label: dict[str, list[str]] = {}
+    for label, raw, _, _ in source_spans:
+        source_by_label.setdefault(label, []).append(raw)
+
+    candidate_by_label: dict[str, list[tuple[str, int, int]]] = {}
+    for label, raw, start, end in candidate_spans:
+        candidate_by_label.setdefault(label, []).append((raw, start, end))
+
+    labels = sorted(
+        candidate_by_label.keys(),
+        key=lambda label: -max((end - start) for _, start, end in candidate_by_label[label]),
+    )
+    used_source: dict[str, set[int]] = {}
+    occupied: list[tuple[int, int]] = []
+    planned: list[tuple[int, int, str]] = []
+    for label in labels:
+        if label not in _CAT_ENTITY_BACKFILL_LABELS:
+            continue
+        source_vals = source_by_label.get(label) or []
+        if not source_vals:
+            continue
+        source_norms = [_normalize_entity_value(item) for item in source_vals]
+        for raw, start, end in candidate_by_label[label]:
+            cand_norm = _normalize_entity_value(raw)
+            if cand_norm in source_norms:
+                used_source.setdefault(label, set()).add(source_norms.index(cand_norm))
+                continue
+            replacement = None
+            for index, source_raw in enumerate(source_vals):
+                if index in used_source.get(label, set()):
+                    continue
+                source_norm = source_norms[index]
+                if label in _CAT_MODEL_BACKFILL_LABELS:
+                    if _is_model_token_extension(source_norm, cand_norm):
+                        used_source.setdefault(label, set()).add(index)
+                        replacement = None
+                        break
+                    if _is_model_token_extension(cand_norm, source_norm):
+                        replacement = source_raw
+                        used_source.setdefault(label, set()).add(index)
+                        break
+                replacement = source_raw
+                used_source.setdefault(label, set()).add(index)
+                break
+            if not replacement:
+                continue
+            if any(not (end <= occupied_start or start >= occupied_end) for occupied_start, occupied_end in occupied):
+                continue
+            planned.append((start, end, replacement))
+            occupied.append((start, end))
+
+    planned.sort(key=lambda item: item[0], reverse=True)
+    for start, end, replacement in planned:
+        result = f'{result[:start]}{replacement}{result[end:]}'
+    return result
+
+
+def _normalize_cat_artifact_text(text: str) -> str:
+    value = str(text or '').strip()
+    _, body = _split_step_prefix(value)
+    value = (body or value).lstrip('.。').strip()
+    value = value.replace('的', '')
+    value = re.sub(r'界面上\s+按钮', '界面上按钮', value)
+    return re.sub(r'\s+', ' ', value).strip()
+
+
+def _is_trivial_cat_artifact_edit(source_text: str, candidate_text: str) -> bool:
+    source_norm = _normalize_cat_artifact_text(source_text)
+    candidate_norm = _normalize_cat_artifact_text(candidate_text)
+    if not source_norm or not candidate_norm:
+        return False
+    return source_norm == candidate_norm
+
+
+def _has_missing_icon_button_name(text: str) -> bool:
+    """True when extraction dropped the icon button name: 界面上[的]按钮."""
+    return bool(re.search(r'界面上\s*的?\s*按钮', str(text or '')))
+
+
+def _should_skip_cat_artifact_sentence(text: str) -> bool:
+    return _has_missing_icon_button_name(text)
+
+
+def _is_dropped_cat_artifact_revision(original: str, revised: str) -> bool:
+    original_text = str(original or '').strip()
+    revised_text = str(revised or '').strip()
+    if not revised_text:
+        return False
+    if _is_trivial_cat_artifact_edit(original_text, revised_text):
+        return True
+    if _has_missing_icon_button_name(original_text) and _has_missing_icon_button_name(revised_text):
+        return True
+    return False
+
+
+def _filter_cat_artifact_diagnose_pool(sentence_items: Optional[list]) -> list:
+    kept = []
+    for item in sentence_items or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(
+            item.get('source_sentence_text')
+            or item.get('text')
+            or item.get('original_text')
+            or ''
+        )
+        if _should_skip_cat_artifact_sentence(text):
+            continue
+        kept.append(item)
+    return kept
+
+
+def _filter_cat_artifact_diagnoses(diagnoses: Optional[list], sentence_items: Optional[list] = None) -> list:
+    sentence_by_index = {
+        item.get('sentence_index'): item
+        for item in sentence_items or []
+        if isinstance(item, dict)
+    }
+    kept = []
+    for diag in diagnoses or []:
+        if not isinstance(diag, dict):
+            continue
+        sent = sentence_by_index.get(diag.get('sentence_index')) or {}
+        original = str(
+            sent.get('source_sentence_text')
+            or sent.get('text')
+            or sent.get('original_text')
+            or diag.get('quote')
+            or ''
+        )
+        if _should_skip_cat_artifact_sentence(original):
+            continue
+        revised = str(diag.get('revised') or '')
+        quote = str(diag.get('quote') or original)
+        if revised and (
+            _is_dropped_cat_artifact_revision(original, revised)
+            or _is_dropped_cat_artifact_revision(quote, revised)
+        ):
+            continue
+        kept.append(diag)
+    return kept
+
+
+def _filter_cat_artifact_diagnose_items(diagnose_items: Optional[list]) -> list:
+    kept = []
+    for item in diagnose_items or []:
+        if not isinstance(item, dict):
+            continue
+        original = str(item.get('original_text') or item.get('source_sentence_text') or '')
+        if _should_skip_cat_artifact_sentence(original):
+            continue
+        candidates = []
+        for cand in item.get('candidates') or []:
+            if not isinstance(cand, dict):
+                continue
+            revised = str(cand.get('template_text') or cand.get('text') or '')
+            if revised and _is_dropped_cat_artifact_revision(original, revised):
+                continue
+            candidates.append(cand)
+        if not candidates:
+            continue
+        next_item = dict(item)
+        next_item['candidates'] = candidates
+        kept.append(next_item)
+    return kept
+
+
+def _is_concatenated_context_merge(original: str, template: str, merged: str) -> bool:
+    original_text = str(original or '').strip()
+    template_text = str(template or '').strip()
+    merged_text = str(merged or '').strip()
+    if not original_text or not template_text or not merged_text:
+        return False
+    if len(merged_text) <= max(len(original_text), len(template_text)) + 6:
+        return False
+    matcher = SequenceMatcher(None, original_text, template_text, autojunk=False)
+    original_only = []
+    template_only = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ('delete', 'replace') and (i2 - i1) >= 8:
+            original_only.append(original_text[i1:i2])
+        if tag in ('insert', 'replace') and (j2 - j1) >= 8:
+            template_only.append(template_text[j1:j2])
+    original_kept = any(chunk in merged_text for chunk in original_only)
+    template_kept = any(chunk in merged_text for chunk in template_only)
+    return (
+        original_kept
+        and template_kept
+        and len(merged_text) > len(original_text) + 8
+        and len(merged_text) > len(template_text) + 8
+    )
+
+
+def _finalize_composed_cat_candidate(original: str, candidate: str, composed: str) -> str:
+    source_text = str(original or '').strip()
+    candidate_text = str(candidate or '').strip()
+    result = _backfill_critical_entities(source_text, str(composed or '').strip())
+    source_core = _strip_cat_match_prefix(source_text)
+    candidate_core = _strip_cat_match_prefix(candidate_text)
+    result_core = _strip_cat_match_prefix(result)
+    if _is_concatenated_context_merge(source_core, candidate_core, result_core):
+        result = _reapply_sentence_prefix(source_text, candidate_text)
+        result = _backfill_critical_entities(source_text, result)
+    result = _append_uncovered_trailing_clauses(source_text, result)
+    result = _restore_source_quantity_forms(source_text, result)
+    return result
 
 
 def _extract_key_term_anchor_groups(text: str) -> dict[str, set[str]]:
@@ -6358,7 +6672,7 @@ def _key_term_anchor_consistent(sentence: str, template: str) -> tuple[bool, str
         sentence_only = sentence_values - template_values
         template_only = template_values - sentence_values
 
-        if group in {'temperature', 'molecule'} and sentence_only and template_only:
+        if group in {'temperature', 'molecule', 'operation_mode'} and sentence_only and template_only:
             if group == 'temperature' and re.search(r'-\s*\d+\s*[℃°cC]\s*[~～\-至]\s*-?\s*\d+\s*[℃°cC]', sentence):
                 continue
             return False, f'{group}冲突'
@@ -6548,7 +6862,8 @@ def _normalize_cat_duplicate_text(text: str) -> str:
     value = _normalize_visible_compare_text(text)
     value = value.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
     value = _normalize_terminal_sentence_punctuation(value)
-    return re.sub(r'\s+', ' ', value).strip()
+    value = re.sub(r'\s+', ' ', value).strip()
+    return value.lstrip('.。').strip()
 
 
 def _cat_exact_duplicate(source_text: str, candidate_text: str) -> bool:
@@ -6622,6 +6937,98 @@ def _has_missing_ui_operation_markers_with_markers(source_markers: set[str], tem
     return not bool(critical_source_markers & template_markers)
 
 
+def _has_injected_ui_bracket_labels(source: str, candidate: str) -> bool:
+    labels = re.findall(r'【([^】]{1,20})】', str(candidate or ''))
+    if not labels:
+        return False
+    source_text = str(source or '')
+    for label in labels:
+        if label and label in source_text:
+            continue
+        return True
+    return False
+
+
+def _clause_covered_in_text(clause: str, text: str, threshold: float = 0.45) -> bool:
+    clause_text = str(clause or '').strip()
+    haystack = str(text or '').strip()
+    if not clause_text or not haystack:
+        return False
+    compact_clause = re.sub(r'\s+', '', clause_text)
+    compact_text = re.sub(r'\s+', '', haystack)
+    if compact_clause and compact_clause in compact_text:
+        return True
+    if _clause_similarity(clause_text, haystack) >= threshold:
+        return True
+    return any(_clause_similarity(clause_text, other) >= threshold for other in _split_sentence_clauses(haystack))
+
+
+def _uncovered_trailing_source_clauses(source_core: str, candidate_core: str) -> list[str]:
+    source_clauses = _split_sentence_clauses(source_core)
+    if len(source_clauses) < 2:
+        return []
+    trailing = []
+    seen_covered = False
+    for clause in reversed(source_clauses):
+        if _clause_covered_in_text(clause, candidate_core):
+            seen_covered = True
+            break
+        if len(_normalize_sentence_for_match(clause)) < 4:
+            continue
+        trailing.append(clause)
+    if not seen_covered:
+        return []
+    trailing.reverse()
+    return trailing
+
+
+def _append_uncovered_trailing_clauses(source_text: str, result: str) -> str:
+    source_core = _strip_cat_match_prefix(source_text)
+    result_text = str(result or '').strip()
+    trailing = _uncovered_trailing_source_clauses(source_core, result_text)
+    if not trailing or not result_text:
+        return result_text
+    terminal = ''
+    terminal_match = re.search(r'([。.!！？?]+)\s*$', result_text)
+    if terminal_match:
+        terminal = terminal_match.group(1)[-1]
+        result_text = result_text[:terminal_match.start()].rstrip('，,;；')
+    extra = '，'.join(item.rstrip('。.!！？?，,;；') for item in trailing if item.strip())
+    if not extra:
+        return f'{result_text}{terminal}'
+    return f'{result_text}，{extra}{terminal}'
+
+
+def _restore_source_quantity_forms(source_text: str, candidate_text: str) -> str:
+    source = str(source_text or '')
+    result = str(candidate_text or '')
+    if not source or not result:
+        return result
+    classifier = r'[个张份条项次轮孔管板卡]'
+    for match in re.finditer(rf'([{"".join(_CN_CARDINAL_DIGITS.keys())}]+)({classifier})', source):
+        digits, unit = match.group(1), match.group(2)
+        source_form = match.group(0)
+        if len(digits) == 1:
+            arabic = _CN_CARDINAL_DIGITS.get(digits)
+        elif digits == '十':
+            arabic = 10
+        else:
+            continue
+        if arabic is None:
+            continue
+        arabic_form = f'{arabic}{unit}'
+        if arabic_form in result:
+            result = result.replace(arabic_form, source_form, 1)
+    for match in re.finditer(rf'([{"".join(_CN_CARDINAL_DIGITS.keys())}])({classifier})([\u4e00-\u9fff]{{2,6}})', source):
+        source_form = match.group(0)
+        if source_form in result:
+            continue
+        unit, noun = match.group(2), match.group(3)
+        pattern = rf'每{re.escape(unit)}(?:样本)?{re.escape(noun)}'
+        result = re.sub(pattern, source_form, result, count=1)
+    return result
+
+
 def _trim_redundant_cat_suffix(text: str) -> str:
     value = str(text or '').strip()
     if not value:
@@ -6638,17 +7045,20 @@ def _trim_redundant_cat_suffix(text: str) -> str:
     if not repeated_fragment:
         return f'{value}{terminal}' if value else terminal
     body = value[:-len(match.group(0))]
-    if repeated_fragment in body:
+    # Only drop duplicated conjuncts (A与A). Shared substrings in earlier modifiers stay.
+    if body.endswith(repeated_fragment):
         value = body.rstrip('，,；;：: ')
     if value == str(text or '').strip().rstrip(terminal):
         for fragment_length in range(min(8, len(value) // 2), 1, -1):
             fragment = value[-fragment_length:]
             prefix = value[:-fragment_length]
-            if not fragment.strip() or fragment not in prefix:
+            if not fragment.strip() or not prefix.endswith(('和', '与', '及', '并')):
                 continue
-            if prefix.endswith(('和', '与', '及', '并')):
-                value = prefix[:-1].rstrip('，,；;：: ')
-                break
+            head = prefix[:-1].rstrip('，,；;：: ')
+            if not head.endswith(fragment):
+                continue
+            value = head
+            break
     return f'{value}{terminal}' if value else terminal
 
 
@@ -6714,9 +7124,136 @@ def _merge_split_templates(templates: list[str]) -> list[str]:
     return merged
 
 
+def _email_domains(text: str) -> set[str]:
+    cleaned = str(text or '').replace('\\.', '.')
+    return {item.lower() for item in re.findall(r'@([A-Za-z0-9.-]+\.[A-Za-z]{2,})', cleaned, flags=re.IGNORECASE)}
+
+
+def _should_skip_context_merge(source_core: str, candidate_core: str, overall_similarity: float) -> bool:
+    if overall_similarity >= 0.75:
+        return not _uncovered_trailing_source_clauses(source_core, candidate_core)
+    source_domains = _email_domains(source_core)
+    candidate_domains = _email_domains(candidate_core)
+    return bool(source_domains and candidate_domains and source_domains != candidate_domains)
+
+
+def _trim_duplicated_leading_clause(text: str) -> str:
+    value = str(text or '').strip()
+    split_match = re.search(r'[，,；;、]', value)
+    if not split_match:
+        return value
+    first = value[:split_match.start()].strip()
+    rest = value[split_match.end():].strip()
+    if len(first) < 12 or len(rest) < 12:
+        return value
+    max_stem = min(len(first), 40)
+    for length in range(max_stem, 11, -1):
+        if rest.startswith(first[:length]):
+            return rest
+    return value
+
+
+
+def _restore_stripped_sentence_terminal(original: str, core: str) -> str:
+    core_text = str(core or '').strip()
+    raw = str(original or '').strip()
+    if not core_text or not raw:
+        return core_text
+    if re.search(r'[。.!！？?：:;；]\s*$', core_text):
+        return core_text
+    match = re.search(r'([。.!！？?：:;；]+)\s*$', raw)
+    if not match:
+        return core_text
+    return f'{core_text}{match.group(1)[-1]}'
+
+
+def _has_conflicting_list_intro(source: str, template: str) -> bool:
+    source_text = str(source or '').strip()
+    template_text = str(template or '').strip()
+    if not source_text or not template_text:
+        return False
+    source_is_list_intro = bool(re.search(r'[：:]\s*$', source_text))
+    template_has_colon = ('：' in template_text) or (':' in template_text)
+    template_is_complete = bool(re.search(r'[。.!！？?]\s*$', template_text))
+    return source_is_list_intro and template_is_complete and not template_has_colon
+
+
+def _has_conflicting_list_step_template(source: str, template: str) -> bool:
+    source_text = str(source or '').strip()
+    template_text = str(template or '').strip()
+    if not source_text or not template_text:
+        return False
+    if not re.search(r'[。.!！？?]\s*$', source_text):
+        return False
+    if not re.search(r'[；;]\s*$', template_text):
+        return False
+    if _sentence_similarity(source_text, template_text) >= 0.75:
+        return False
+    extra_numbers = _extract_numeric_markers(template_text) - _extract_numeric_markers(source_text)
+    if extra_numbers:
+        return True
+    return len(_split_sentence_clauses(source_text)) >= 2 and len(_split_sentence_clauses(template_text)) == 1
+
+
+def _source_clause_repeats_in_candidate(clause: str, candidate_core: str) -> bool:
+    clause_text = str(clause or '').strip()
+    candidate_text = str(candidate_core or '').strip()
+    if not clause_text or not candidate_text:
+        return False
+    if _clause_covered_in_text(clause_text, candidate_text, threshold=0.42):
+        return True
+    actions = [item for item in _extract_sentence_intent(clause_text).get('actions', []) if item and len(item) >= 2]
+    return any(action in candidate_text for action in actions)
+
+
+def _is_duplicated_clause_splice(source: str, composed: str, template: str) -> bool:
+    source_clauses = _split_sentence_clauses(source)
+    if len(source_clauses) < 2:
+        return False
+    prefix = source_clauses[0]
+    composed_text = str(composed or '').strip()
+    template_text = str(template or '').strip()
+    if not prefix or not composed_text.startswith(prefix):
+        return False
+    if prefix in template_text:
+        return False
+    template_core = re.sub(r'[；;。.!！？?\s]+$', '', template_text)
+    return bool(template_core) and template_core in composed_text
+
+
+def _finish_cat_composed_text(
+    source_text: str,
+    merged_text: str,
+    trailing_figure_ref: str = '',
+    source_terminal: str = '',
+) -> str:
+    merged_text = _trim_duplicated_leading_clause(str(merged_text or '').strip())
+    merged_text = _trim_redundant_cat_suffix(merged_text)
+    if trailing_figure_ref and trailing_figure_ref not in merged_text:
+        merged_text = f'{merged_text}{trailing_figure_ref}'
+    if source_terminal:
+        merged_text = re.sub(r'[；;]+\s*$', '', merged_text).rstrip()
+        if not re.search(r'[。.!！？?]\s*$', merged_text):
+            merged_text = f'{merged_text}{source_terminal}'
+        merged_text = re.sub(r'[；;]+(?=[。.!！？?]\s*$)', '', merged_text)
+    return _reapply_sentence_prefix(source_text, merged_text)
+
+
 def _compose_cat_candidate_text(original: str, candidate: str) -> str:
     source_text = str(original or '').strip()
     candidate_text = str(candidate or '').strip()
+    if not source_text or not candidate_text:
+        return candidate_text
+    return _finalize_composed_cat_candidate(
+        source_text,
+        candidate_text,
+        _compose_cat_candidate_body(source_text, candidate_text),
+    )
+
+
+def _compose_cat_candidate_body(original: str, candidate: str) -> str:
+    source_text = str(original or '').strip()
+    candidate_text = _unescape_markdown_inline(str(candidate or '').strip())
     if not source_text or not candidate_text:
         return candidate_text
 
@@ -6729,8 +7266,14 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
 
     source_core = _strip_cat_match_prefix(source_text)
     candidate_core = _strip_cat_match_prefix(candidate_text)
+    source_core_raw = source_core
+    candidate_core_raw = candidate_core
     source_core, source_figure_ref = _extract_trailing_figure_ref(source_core)
     candidate_core, candidate_figure_ref = _extract_trailing_figure_ref(candidate_core)
+    if not source_figure_ref:
+        source_core = _restore_stripped_sentence_terminal(source_core_raw, source_core)
+    if not candidate_figure_ref:
+        candidate_core = _restore_stripped_sentence_terminal(candidate_core_raw, candidate_core)
     if not source_core or not candidate_core:
         return _reapply_sentence_prefix(source_text, candidate_text)
 
@@ -6745,28 +7288,25 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
 
     trailing_figure_ref = candidate_figure_ref or source_figure_ref
 
+    candidate_core = candidate_core.lstrip('.。')
+    if _should_skip_context_merge(source_core, candidate_core, overall_similarity):
+        return _finish_cat_composed_text(source_text, candidate_core, trailing_figure_ref, source_terminal)
+
+    if _has_conflicting_list_intro(source_core, candidate_core):
+        return _finish_cat_composed_text(source_text, candidate_core, trailing_figure_ref, source_terminal)
+
     if len(source_clauses) >= 3 and len(candidate_clauses) == 1:
         trailing_clause_matches = sum(1 for clause in source_clauses[1:] if _clause_similarity(clause, candidate_core) >= 0.5)
         leading_clause_similarity = _clause_similarity(source_clauses[0], candidate_core) if source_clauses else 0.0
         if trailing_clause_matches >= 2 and leading_clause_similarity < 0.2 and overall_similarity < 0.55:
-            merged_text = candidate_core
-            if trailing_figure_ref and trailing_figure_ref not in merged_text:
-                merged_text = f'{merged_text}{trailing_figure_ref}'
-            if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
-                merged_text = f'{merged_text}{source_terminal}'
-            return _reapply_sentence_prefix(source_text, merged_text)
+            return _finish_cat_composed_text(source_text, candidate_core, trailing_figure_ref, source_terminal)
 
     if overall_similarity < 0.3 and best_clause_similarity < 0.38:
         return _reapply_sentence_prefix(source_text, candidate_text)
 
     if len(source_clauses) <= 1 or len(candidate_clauses) > 1:
         merged_text = replace_with_context(source_core, candidate_core)
-        merged_text = _trim_redundant_cat_suffix(merged_text)
-        if trailing_figure_ref and trailing_figure_ref not in merged_text:
-            merged_text = f'{merged_text}{trailing_figure_ref}'
-        if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
-            merged_text = f'{merged_text}{source_terminal}'
-        return _reapply_sentence_prefix(source_text, merged_text)
+        return _finish_cat_composed_text(source_text, merged_text, trailing_figure_ref, source_terminal)
 
     clause_parts = re.split(r'([，。；！？,;!?]+)', source_core)
     best_index = None
@@ -6784,19 +7324,20 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
 
     if best_index is None or best_score < 0.45:
         if len(source_clauses) > 1 and len(candidate_clauses) == 1 and overall_similarity < 0.48 and action_overlap <= 0:
-            merged_text = candidate_core
-            if trailing_figure_ref and trailing_figure_ref not in merged_text:
-                merged_text = f'{merged_text}{trailing_figure_ref}'
-            if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
-                merged_text = f'{merged_text}{source_terminal}'
-            return _reapply_sentence_prefix(source_text, merged_text)
+            return _finish_cat_composed_text(source_text, candidate_core, trailing_figure_ref, source_terminal)
         merged_text = replace_with_context(source_core, candidate_core)
-        merged_text = _trim_redundant_cat_suffix(merged_text)
-        if trailing_figure_ref and trailing_figure_ref not in merged_text:
-            merged_text = f'{merged_text}{trailing_figure_ref}'
-        if source_terminal and not re.search(r'[。.!！？?]\s*$', merged_text):
-            merged_text = f'{merged_text}{source_terminal}'
-        return _reapply_sentence_prefix(source_text, merged_text)
+        return _finish_cat_composed_text(source_text, merged_text, trailing_figure_ref, source_terminal)
+
+    kept_repeats_candidate = False
+    for index, part in enumerate(clause_parts):
+        if index % 2 == 1 or index == best_index:
+            continue
+        if _source_clause_repeats_in_candidate(part.strip(), candidate_core):
+            kept_repeats_candidate = True
+            break
+    if kept_repeats_candidate:
+        merged_text = replace_with_context(source_core, candidate_core)
+        return _finish_cat_composed_text(source_text, merged_text, trailing_figure_ref, source_terminal)
 
     rebuilt_parts = []
     for index, part in enumerate(clause_parts):
@@ -6808,12 +7349,7 @@ def _compose_cat_candidate_text(original: str, candidate: str) -> str:
         rebuilt_parts.append(part.replace(clause, _replace_clause_directly(clause, candidate_core, next_separator), 1))
 
     rebuilt_text = ''.join(rebuilt_parts)
-    rebuilt_text = _trim_redundant_cat_suffix(rebuilt_text)
-    if trailing_figure_ref and trailing_figure_ref not in rebuilt_text:
-        rebuilt_text = f'{rebuilt_text}{trailing_figure_ref}'
-    if source_terminal and not re.search(r'[。.!！？?]\s*$', rebuilt_text):
-        rebuilt_text = f'{rebuilt_text}{source_terminal}'
-    return _reapply_sentence_prefix(source_text, rebuilt_text)
+    return _finish_cat_composed_text(source_text, rebuilt_text, trailing_figure_ref, source_terminal)
 
 
 async def _collect_text_polish_cat_items(
@@ -7009,11 +7545,22 @@ def _cat_reason_indicates_no_change(reason: str) -> bool:
 def _should_keep_cat_candidate(original_text: str, candidate: dict, ai_semantic_active: bool = True) -> bool:
     template_text = str((candidate or {}).get('template_text', '') or '').strip()
     if isinstance(candidate, dict):
-        candidate['review_tags'] = []
+        preserved_tags = [tag for tag in (candidate.get('review_tags') or []) if tag == 'entity_changed']
+        candidate['review_tags'] = preserved_tags
         candidate['drop_reason'] = None
     if not template_text:
         if isinstance(candidate, dict):
             candidate['drop_reason'] = 'empty_template'
+        return False
+
+    if _cat_exact_duplicate(original_text, template_text):
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = 'exact_duplicate'
+        return False
+
+    if _is_trivial_cat_artifact_edit(original_text, template_text):
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = 'trivial_artifact'
         return False
 
     if isinstance(candidate, dict) and candidate.get('rule_source') == 'surface_rules':
@@ -7025,11 +7572,6 @@ def _should_keep_cat_candidate(original_text: str, candidate: dict, ai_semantic_
         candidate['needs_review'] = False
         candidate['review_tags'] = []
         return True
-
-    if _cat_exact_duplicate(original_text, template_text):
-        if isinstance(candidate, dict):
-            candidate['drop_reason'] = 'exact_duplicate'
-        return False
 
     if _cat_reason_indicates_no_change((candidate or {}).get('ai_reason', '')):
         if isinstance(candidate, dict):
@@ -7046,7 +7588,7 @@ def _should_keep_cat_candidate(original_text: str, candidate: dict, ai_semantic_
         rescue_penalty = _collect_match_penalties(original_text, template_text)
         rescue_penalty_reasons = list((rescue_penalty or {}).get('reasons', []) or [])
     if isinstance(candidate, dict):
-        review_tags = []
+        review_tags = list(candidate.get('review_tags') or [])
         if ai_semantic_active and _has_negative_reason(candidate.get('ai_reason', '')):
             review_tags.append('negative_ai_reason')
         if _tech_term_overlap(original_text, template_text) < 0.6:
@@ -7063,10 +7605,17 @@ def _should_keep_cat_candidate(original_text: str, candidate: dict, ai_semantic_
         candidate['filtered_semantic_score'] = filtered_score
         candidate['needs_review'] = filtered_score < show_threshold
         if candidate['needs_review']:
-            review_tags.append('needs_review')
+            if 'needs_review' not in review_tags:
+                review_tags.append('needs_review')
         candidate['review_tags'] = review_tags
-        if filtered_score < pending_threshold:
+        keep_score = filtered_score
+        if 'entity_changed' in review_tags:
+            unpenalized = float(candidate.get('unpenalized_string_score') or 0.0)
+            if unpenalized:
+                keep_score = max(filtered_score, unpenalized)
+        if keep_score < pending_threshold:
             candidate['drop_reason'] = 'low_filtered_score'
+        return keep_score >= pending_threshold
     return filtered_score >= pending_threshold
 
 
@@ -7078,7 +7627,7 @@ def _should_keep_text_manual_candidate(original_text: str, candidate: dict, ai_s
     template_text = str(candidate.get('template_text', '') or '').strip()
     if not template_text:
         return False
-    if candidate.get('drop_reason') in {'exact_duplicate', 'ai_no_change', 'empty_template'}:
+    if candidate.get('drop_reason') in {'exact_duplicate', 'ai_no_change', 'empty_template', 'trivial_artifact'}:
         return False
     string_score = float(candidate.get('string_score', 0.0) or 0.0)
     filtered_score = float(candidate.get('filtered_semantic_score', 0.0) or 0.0)
@@ -7146,8 +7695,13 @@ def _simple_match(
     source_ui_operation_markers = _extract_ui_operation_markers(source_match_text)
     if normalized_sentence_text:
         surface_display_text = _compose_cat_candidate_text(display_source_text, normalized_sentence_text)
-        if not _cat_exact_duplicate(display_source_text, surface_display_text):
-            best_by_template['__surface_rule__'] = {
+        if (
+            not _cat_exact_duplicate(display_source_text, surface_display_text)
+            and not _is_trivial_cat_artifact_edit(display_source_text, surface_display_text)
+        ):
+            from app.utils.cat_diagnose import classify_surface_edit
+            surface_kind = classify_surface_edit(display_source_text, surface_display_text)
+            surface_candidate = {
                 "template_text": surface_display_text,
                 "raw_template_text": display_source_text,
                 "normalized_template_text": normalized_sentence_text,
@@ -7157,7 +7711,9 @@ def _simple_match(
                 "effective_semantic_score": 0.95,
                 "match_tier": "surface_rule",
                 "rule_source": "surface_rules",
+                "type": surface_kind,
             }
+            best_by_template['__surface_rule__'] = _apply_cat_entity_change_penalty(display_source_text, surface_candidate)
             if isinstance(debug_stats, dict):
                 debug_stats['surface_rule_candidates'] += 1
     sentence_len = len(re.sub(r'\s+', '', source_match_text))
@@ -7182,6 +7738,15 @@ def _simple_match(
             if raw_len_ratio < 0.45 and not (source_slot_sample_mode and template_slot_sample_mode):
                 _increment_debug_reason(debug_stats, 'pre_length_window')
                 continue
+        if _has_conflicting_list_intro(display_source_text, tpl_text) or _has_conflicting_list_intro(source_match_text, template_match_text):
+            _increment_debug_reason(debug_stats, 'list_intro_conflict')
+            continue
+        if (
+            _has_conflicting_list_step_template(display_source_text, tpl_text)
+            or _has_conflicting_list_step_template(source_match_text, template_match_text)
+        ):
+            _increment_debug_reason(debug_stats, 'list_step_conflict')
+            continue
         display_tpl_text = _compose_cat_candidate_text(display_source_text, normalized_tpl_match_text or tpl_text)
         display_tpl_match_text = _prepare_cat_match_text(display_tpl_text, term_dict, typo_dict).strip() or display_tpl_text
         template_intent = _extract_sentence_intent(template_match_text)
@@ -7190,6 +7755,21 @@ def _simple_match(
         template_ui_operation_markers = _extract_ui_operation_markers(template_match_text)
         if _cat_exact_duplicate(display_source_text, display_tpl_text):
             _increment_debug_reason(debug_stats, 'exact_duplicate')
+            continue
+
+        if _is_trivial_cat_artifact_edit(display_source_text, display_tpl_text):
+            _increment_debug_reason(debug_stats, 'trivial_artifact')
+            continue
+
+        if _is_duplicated_clause_splice(display_source_text, display_tpl_text, tpl_text):
+            _increment_debug_reason(debug_stats, 'duplicated_clause_splice')
+            continue
+
+        if (
+            _has_injected_ui_bracket_labels(display_source_text, display_tpl_text)
+            or _has_injected_ui_bracket_labels(display_source_text, tpl_text)
+        ):
+            _increment_debug_reason(debug_stats, 'injected_ui_label')
             continue
 
         if _is_fragment_candidate(source_match_text, display_tpl_match_text):
@@ -7219,11 +7799,6 @@ def _simple_match(
 
         if score < effective_threshold:
             _increment_debug_reason(debug_stats, 'below_threshold')
-            continue
-
-        entity_ok, entity_reason = _critical_entities_compatible(source_match_text, display_tpl_match_text)
-        if not entity_ok:
-            _increment_debug_reason(debug_stats, f'entity_mismatch:{entity_reason or "other"}')
             continue
 
         if _has_conflicting_ui_destination_with_markers(
@@ -7267,6 +7842,9 @@ def _simple_match(
             "match_tier": tier,
             "rule_source": "sentence_guide",
         }
+        candidate = _apply_cat_entity_change_penalty(display_source_text, candidate)
+        if candidate.get('entity_penalty_reason'):
+            _increment_debug_reason(debug_stats, 'entity_changed')
         dedupe_key = re.sub(r'\s+', '', re.sub(r'[，。！？!?；;：:、,\.\s]+$', '', normalized_tpl_match_text or tpl_text)).strip()
         existing = best_by_template.get(dedupe_key)
         if existing is None or candidate["string_score"] > existing["string_score"]:
@@ -7341,7 +7919,7 @@ def _split_cat_sentences(paragraphs: list[str], source_paragraphs: Optional[list
         for chunk_index, chunk in enumerate(chunks):
             sentence_text = str(chunk or '').strip()
             source_sentence_text = str(source_chunks[chunk_index] or sentence_text).strip() if chunk_index < len(source_chunks) else sentence_text
-            sentence_text = re.sub(r'^\d{1,3}(?:\.\d{1,3}){1,3}\s*', '', sentence_text.strip())
+            sentence_text = re.sub(r'^\d{1,3}(?:\.\d{1,3}){1,3}[.。、)）]?\s*', '', sentence_text.strip())
             if not sentence_text:
                 continue
             normalized = re.sub(r'\s+', '', sentence_text)
@@ -7460,6 +8038,17 @@ def _top_template_candidates(sentence: str, templates: list, limit: int = 8) -> 
     return primary + exploratory + manual_candidates
 
 
+def _should_keep_original_delete_span(text: str) -> bool:
+    value = str(text or '').strip()
+    if not value:
+        return False
+    if re.search(r'[（(][A-Za-z][A-Za-z0-9-]{3,}[）)]', value):
+        return True
+    if re.fullmatch(r'[A-Za-z][A-Za-z0-9-]{4,}', value):
+        return True
+    return False
+
+
 def replace_with_context(original: str, template: str) -> str:
     """将原文与模板逐块融合。
 
@@ -7473,7 +8062,9 @@ def replace_with_context(original: str, template: str) -> str:
             has_before = any(o[0] in ('equal', 'replace') for o in opcodes[:idx])
             has_after = any(o[0] in ('equal', 'replace') for o in opcodes[idx+1:])
             if has_before and has_after:
-                opcodes[idx] = ('replace', i1, i2, j1, j2)
+                deleted = original[i1:i2]
+                if not _should_keep_original_delete_span(deleted):
+                    opcodes[idx] = ('replace', i1, i2, j1, j2)
     chars = list(original)
     offset = 0
     for op, i1, i2, j1, j2 in opcodes:
@@ -7485,7 +8076,10 @@ def replace_with_context(original: str, template: str) -> str:
         elif op == 'insert':
             chars[i1 + offset : i1 + offset] = list(template[j1:j2])
             offset += j2 - j1
-    return ''.join(chars)
+    merged = ''.join(chars)
+    if _is_concatenated_context_merge(original, template, merged):
+        return template
+    return merged
 
 
 def _replace_clause_directly(clause: str, template: str, next_separator: str = '') -> str:
@@ -7688,19 +8282,23 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         annotate_cat_candidates(cat_items)
         if is_ai_diagnose_enabled():
             try:
-                sentence_items = _split_cat_sentences(input_data.text.split('\n'))
+                sentence_items = _filter_cat_artifact_diagnose_pool(
+                    _split_cat_sentences(input_data.text.split('\n'))
+                )
                 ai_diag = await open_diagnose_sentences(
                     sentence_items,
                     resolved_terminology or {},
                     sentence_guide,
                     input_data.product_type or "",
                 )
-                _persist_lab_diagnoses(db, ai_diag, sentence_items, source="text")
+                ai_diag = _filter_cat_artifact_diagnoses(ai_diag, sentence_items)
+                _persist_lab_diagnoses(db, ai_diag, sentence_items, source="text", source_name="文本润色")
                 cat_items, diagnose_items = merge_local_and_diagnoses(
                     cat_items,
                     ai_diag,
                     sentence_items,
                 )
+                diagnose_items = _filter_cat_artifact_diagnose_items(diagnose_items)
             except Exception:
                 diagnose_items = []
     except Exception:
@@ -10091,6 +10689,7 @@ def _serialize_diagnose_record(row) -> dict:
         "id": row.id,
         "analyze_id": row.analyze_id,
         "source": row.source,
+        "source_name": getattr(row, "source_name", None) or "",
         "sentence_index": row.sentence_index,
         "original_text": row.original_text,
         "quote": row.quote,
@@ -10111,7 +10710,7 @@ def _serialize_diagnose_record(row) -> dict:
 def list_diagnose_candidates(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    ruleable: Optional[bool] = Query(True),
+    ruleable: Optional[bool] = Query(None),
     status: Optional[str] = Query("pending"),
     db: Session = Depends(get_db),
 ):
@@ -10119,11 +10718,19 @@ def list_diagnose_candidates(
 
     q = db.query(CatDiagnoseRecordLab)
     if ruleable is not None:
-        q = q.filter(CatDiagnoseRecordLab.ruleable == ruleable)
+        if ruleable:
+            from sqlalchemy import or_
+            q = q.filter(or_(
+                CatDiagnoseRecordLab.ruleable.is_(True),
+                (CatDiagnoseRecordLab.revised.isnot(None) & (CatDiagnoseRecordLab.revised != "")),
+            ))
+        else:
+            q = q.filter(CatDiagnoseRecordLab.ruleable.is_(False))
     if status:
         q = q.filter(CatDiagnoseRecordLab.status == status)
     total = q.count()
     rows = q.order_by(CatDiagnoseRecordLab.id.desc()).offset(skip).limit(limit).all()
+    _fill_diagnose_source_names(db, rows)
     return {"total": total, "items": [_serialize_diagnose_record(row) for row in rows]}
 
 
@@ -10470,21 +11077,176 @@ def _parse_corrections(text: str) -> list[tuple[str, str]]:
 _cat_analyze_cache: dict = {}
 _cat_download_cache: dict = {}
 _cat_cache_timestamps: dict = {}
-_CAT_CACHE_TTL_SECONDS = 3600
+_CAT_CACHE_TTL_SECONDS = 12 * 3600
+_CAT_ANALYZE_CACHE_DIR = os.path.join(UPLOAD_DIR, "cat-analyze-cache")
 
 
 def _cleanup_cat_cache() -> None:
+    return _cleanup_cat_cache_impl()
+
+
+def _cat_cache_safe_id(analyze_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "", analyze_id or "")
+
+
+def _cat_analyze_cache_json_path(analyze_id: str) -> Optional[str]:
+    safe = _cat_cache_safe_id(analyze_id)
+    if not safe:
+        return None
+    return os.path.join(_CAT_ANALYZE_CACHE_DIR, f"{safe}.json")
+
+
+def _filename_from_cat_cache(analyze_id: str) -> str:
+    json_path = _cat_analyze_cache_json_path(analyze_id)
+    if not json_path or not os.path.exists(json_path):
+        return ""
+    try:
+        with open(json_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        payload = data.get("payload") if isinstance(data, dict) and isinstance(data.get("payload"), dict) else data
+        file_info = payload.get("file_info") if isinstance(payload, dict) else {}
+        return str((file_info or {}).get("filename") or "").strip()
+    except Exception:
+        return ""
+
+
+def _fill_diagnose_source_names(db: Session, rows) -> None:
+    pending = [row for row in rows if not str(getattr(row, "source_name", "") or "").strip()]
+    if not pending:
+        return
+    analyze_ids = {row.analyze_id for row in pending if row.analyze_id}
+    session_names = {}
+    if analyze_ids:
+        for session in db.query(CatAnalysisSession).filter(CatAnalysisSession.analyze_id.in_(analyze_ids)).all():
+            name = str(session.source_filename or "").strip()
+            if name:
+                session_names[session.analyze_id] = name
+    changed = False
+    for row in pending:
+        name = session_names.get(row.analyze_id) or _filename_from_cat_cache(row.analyze_id)
+        if not name:
+            continue
+        row.source_name = name
+        changed = True
+    if changed:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
+def _persist_cat_analyze_cache(analyze_id: str, payload: dict) -> None:
+    json_path = _cat_analyze_cache_json_path(analyze_id)
+    if not json_path:
+        return
+    try:
+        os.makedirs(_CAT_ANALYZE_CACHE_DIR, exist_ok=True)
+        payload_copy = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+        file_info = payload_copy.get("file_info") if isinstance(payload_copy.get("file_info"), dict) else {}
+        temp_path = file_info.get("temp_path")
+        if temp_path and os.path.isfile(temp_path):
+            import shutil
+
+            ext = os.path.splitext(temp_path)[1] or ""
+            persisted_source = os.path.join(
+                _CAT_ANALYZE_CACHE_DIR,
+                f"{_cat_cache_safe_id(analyze_id)}.source{ext}",
+            )
+            shutil.copy2(temp_path, persisted_source)
+            file_info["persisted_source_path"] = persisted_source
+            payload_copy["file_info"] = file_info
+            if isinstance(payload.get("file_info"), dict):
+                payload["file_info"]["persisted_source_path"] = persisted_source
+        blob = {"saved_at": time.time(), "payload": payload_copy}
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(blob, f, ensure_ascii=False)
+    except Exception:
+        logger.warning("[CAT_CACHE] 持久化分析结果失败: %s", analyze_id, exc_info=True)
+
+
+def _restore_cat_source_path(payload: dict) -> dict:
+    file_info = payload.get("file_info") if isinstance(payload.get("file_info"), dict) else {}
+    temp_path = file_info.get("temp_path")
+    persisted = file_info.get("persisted_source_path")
+    if temp_path and os.path.isfile(temp_path):
+        return payload
+    if persisted and os.path.isfile(persisted):
+        file_info["temp_path"] = persisted
+        payload["file_info"] = file_info
+    return payload
+
+
+def _load_persisted_cat_analyze_cache(analyze_id: str) -> Optional[dict]:
+    json_path = _cat_analyze_cache_json_path(analyze_id)
+    if not json_path or not os.path.isfile(json_path):
+        return None
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            blob = json.load(f)
+        saved_at = float((blob or {}).get("saved_at") or 0)
+        if time.time() - saved_at > _CAT_CACHE_TTL_SECONDS:
+            return None
+        payload = (blob or {}).get("payload")
+        if not isinstance(payload, dict):
+            return None
+        return _restore_cat_source_path(payload)
+    except Exception:
+        logger.warning("[CAT_CACHE] 读取持久化分析结果失败: %s", analyze_id, exc_info=True)
+        return None
+
+
+def _touch_persisted_cat_analyze_cache(analyze_id: str) -> None:
+    json_path = _cat_analyze_cache_json_path(analyze_id)
+    if not json_path or not os.path.isfile(json_path):
+        return
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            blob = json.load(f)
+        if not isinstance(blob, dict):
+            return
+        blob["saved_at"] = time.time()
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(blob, f, ensure_ascii=False)
+    except Exception:
+        logger.warning("[CAT_CACHE] 续期持久化分析结果失败: %s", analyze_id, exc_info=True)
+
+
+def _store_cat_analyze_cache(analyze_id: str, payload: dict) -> None:
+    _cat_analyze_cache[analyze_id] = payload
+    _cat_cache_timestamps[analyze_id] = time.time()
+    _persist_cat_analyze_cache(analyze_id, payload)
+
+
+def _get_cat_analyze_cache(analyze_id: str) -> Optional[dict]:
+    now = time.time()
+    cached = _cat_analyze_cache.get(analyze_id)
+    last_access = _cat_cache_timestamps.get(analyze_id)
+    if cached and last_access and now - last_access <= _CAT_CACHE_TTL_SECONDS:
+        _cat_cache_timestamps[analyze_id] = now
+        _touch_persisted_cat_analyze_cache(analyze_id)
+        return _restore_cat_source_path(cached)
+    loaded = _load_persisted_cat_analyze_cache(analyze_id)
+    if not loaded:
+        return None
+    _cat_analyze_cache[analyze_id] = loaded
+    _cat_cache_timestamps[analyze_id] = now
+    _touch_persisted_cat_analyze_cache(analyze_id)
+    return loaded
+
+
+def _cleanup_cat_cache_impl() -> None:
     now = time.time()
     expired_ids = [
         analyze_id
-        for analyze_id, created_at in list(_cat_cache_timestamps.items())
-        if now - created_at > _CAT_CACHE_TTL_SECONDS
+        for analyze_id, last_access in list(_cat_cache_timestamps.items())
+        if now - last_access > _CAT_CACHE_TTL_SECONDS
     ]
     for analyze_id in expired_ids:
         cached = _cat_analyze_cache.pop(analyze_id, None)
         _cat_cache_timestamps.pop(analyze_id, None)
         temp_path = ((cached or {}).get("file_info") or {}).get("temp_path")
-        if temp_path and os.path.exists(temp_path):
+        persisted_source = ((cached or {}).get("file_info") or {}).get("persisted_source_path")
+        if temp_path and temp_path != persisted_source and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception:
@@ -10521,8 +11283,256 @@ def _generate_cat_html_report(
     applied_changes: list,
     accuracy: dict,
     failed_replacements: Optional[list] = None,
+    cached_items: Optional[list] = None,
+    ai_semantic_scoring: Optional[bool] = None,
+):
+    return _generate_cat_html_report_impl(
+        report_path,
+        source_filename,
+        analyze_id,
+        decisions,
+        applied_changes,
+        accuracy,
+        failed_replacements,
+        cached_items,
+        ai_semantic_scoring,
+    )
+
+
+_CAT_REPORT_CATEGORY_ORDER = (
+    "grammar",
+    "word",
+    "term",
+    "ambiguity",
+    "redundancy",
+    "logic",
+    "missing",
+    "risk",
+)
+_CAT_REPORT_SEVERITY_ORDER = ("high", "medium", "low")
+_CAT_REPORT_SEVERITY_LABELS = {
+    "high": "高 · 严重问题",
+    "medium": "中 · 建议关注",
+    "low": "低 · 提示性",
+}
+_CAT_REPORT_UNLABELED = "未标注"
+
+
+def _cat_report_category_label(category_key: str) -> str:
+    from app.utils.cat_diagnose import CATEGORIES, CATEGORY_LABELS, canonicalize_category
+
+    raw = str(category_key or "").strip()
+    if not raw:
+        return _CAT_REPORT_UNLABELED
+    key = canonicalize_category(raw, "")
+    if key in CATEGORIES:
+        return CATEGORY_LABELS.get(key, key)
+    return CATEGORY_LABELS.get(raw.lower(), raw)
+
+
+def _cat_report_severity_label(severity_key: str) -> str:
+    key = str(severity_key or "").strip().lower()
+    return _CAT_REPORT_SEVERITY_LABELS.get(key, _CAT_REPORT_UNLABELED)
+
+
+def _cat_match_cached_item(decision, cached_items):
+    key = _cat_decision_key(
+        getattr(decision, "source_paragraph_index", None)
+        if getattr(decision, "source_paragraph_index", None) is not None
+        else getattr(decision, "paragraph_index", 0),
+        getattr(decision, "sentence_index", 0),
+        getattr(decision, "original_text", "") or getattr(decision, "source_sentence_text", "") or "",
+    )
+    for item in cached_items or []:
+        if not isinstance(item, dict):
+            continue
+        item_key = _cat_decision_key(
+            item.get("source_paragraph_index", item.get("paragraph_index")),
+            item.get("sentence_index"),
+            item.get("original_text") or item.get("source_sentence_text") or item.get("text") or "",
+        )
+        if item_key == key:
+            return item
+    return None
+
+
+def _cat_pick_report_candidate(item, decision):
+    candidates = [cand for cand in ((item or {}).get("candidates") or []) if isinstance(cand, dict)]
+    if not candidates:
+        return None
+    wanted = (
+        str(getattr(decision, "candidate_text", "") or "").strip()
+        or str(getattr(decision, "accepted_template", "") or "").strip()
+        or str(getattr(decision, "rejected_template", "") or "").strip()
+    )
+    if wanted:
+        for cand in candidates:
+            text = str(cand.get("template_text") or cand.get("revised") or "").strip()
+            if text == wanted:
+                return cand
+    return candidates[0]
+
+
+def _cat_report_is_ai_diagnose(decision, candidate) -> bool:
+    rule_source = str(getattr(decision, "rule_source", None) or "").strip() or str((candidate or {}).get("rule_source") or "").strip()
+    if rule_source == "ai_diagnose":
+        return True
+    template_id = str(getattr(decision, "accepted_template_id", None) or getattr(decision, "rejected_template_id", None) or "").strip() or str((candidate or {}).get("template_id") or "").strip()
+    if template_id == "ai_diagnose":
+        return True
+    revised = str((candidate or {}).get("revised") or "").strip()
+    problem = str((candidate or {}).get("problem") or "").strip()
+    return bool(revised and problem)
+
+
+def _cat_report_issue_meta(decision, cached_items=None) -> dict:
+    from app.utils.cat_diagnose import CATEGORIES, canonicalize_category
+
+    cached_item = _cat_match_cached_item(decision, cached_items)
+    candidate = _cat_pick_report_candidate(cached_item, decision)
+    category_raw = str(getattr(decision, "category", None) or "").strip() or str((candidate or {}).get("category") or "").strip()
+    severity_raw = str(getattr(decision, "severity", None) or "").strip() or str((candidate or {}).get("severity") or "").strip()
+    category_key = canonicalize_category(category_raw, str((candidate or {}).get("problem") or "")) if category_raw else ""
+    if category_key not in CATEGORIES:
+        category_key = ""
+    is_ai_diagnose = _cat_report_is_ai_diagnose(decision, candidate)
+    if is_ai_diagnose:
+        severity_key = severity_raw.lower() if severity_raw.lower() in _CAT_REPORT_SEVERITY_ORDER else ""
+        severity_label = _cat_report_severity_label(severity_key) if severity_key else _CAT_REPORT_UNLABELED
+    else:
+        severity_key = ""
+        severity_label = "/"
+    candidate_text = str(getattr(decision, "candidate_text", None) or "").strip()
+    if not candidate_text:
+        candidate_text = str((candidate or {}).get("template_text") or (candidate or {}).get("revised") or "").strip()
+    if not candidate_text:
+        action = str(getattr(decision, "action", "") or "")
+        if action == "accept":
+            candidate_text = str(getattr(decision, "accepted_template", "") or "")
+        elif action == "reject":
+            candidate_text = str(getattr(decision, "rejected_template", "") or "")
+    original_text = str(getattr(decision, "original_text", "") or "")
+    action = str(getattr(decision, "action", "") or "")
+    if action == "accept":
+        final_text = str(getattr(decision, "accepted_template", "") or "").strip()
+    elif action == "modify":
+        final_text = str(getattr(decision, "modified_text", "") or "").strip()
+    else:
+        final_text = ""
+    return {
+        "category_key": category_key,
+        "category_label": _cat_report_category_label(category_key) if category_key else _CAT_REPORT_UNLABELED,
+        "severity_key": severity_key,
+        "severity_label": severity_label,
+        "is_ai_diagnose": is_ai_diagnose,
+        "original_text": original_text,
+        "candidate_text": candidate_text,
+        "final_text": final_text,
+    }
+
+
+def _cat_report_diff_token_html(text: str) -> str:
+    return html_escape(str(text or "")).replace(" ", '<span class="diff-space">&#183;</span>')
+
+
+def _cat_report_diff_segments(left_text: str, right_text: str) -> tuple[list, list]:
+    left = str(left_text or "")
+    right = str(right_text or "")
+    left_segs = []
+    right_segs = []
+    matcher = SequenceMatcher(None, left, right, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            if i1 != i2:
+                left_segs.append((left[i1:i2], False))
+            if j1 != j2:
+                right_segs.append((right[j1:j2], False))
+        elif tag == "delete":
+            if i1 != i2:
+                left_segs.append((left[i1:i2], True))
+        elif tag == "insert":
+            if j1 != j2:
+                right_segs.append((right[j1:j2], True))
+        else:
+            if i1 != i2:
+                left_segs.append((left[i1:i2], True))
+            if j1 != j2:
+                right_segs.append((right[j1:j2], True))
+    return left_segs, right_segs
+
+
+def _cat_report_render_segments_html(segments: list, changed_class: str) -> str:
+    parts = []
+    for text, changed in segments:
+        content = _cat_report_diff_token_html(text)
+        if changed:
+            parts.append(f'<span class="{changed_class}">{content}</span>')
+        else:
+            parts.append(content)
+    return "".join(parts)
+
+
+def _cat_report_render_compare_html(original_text: str, candidate_text: str) -> tuple[str, str]:
+    original = str(original_text or "")
+    candidate = str(candidate_text or "")
+    if not candidate:
+        return _cat_report_diff_token_html(original), ""
+    if len(original) + len(candidate) > 20000:
+        return _cat_report_diff_token_html(original), _cat_report_diff_token_html(candidate)
+    left_segs, right_segs = _cat_report_diff_segments(original, candidate)
+    return (
+        _cat_report_render_segments_html(left_segs, "diff-remove"),
+        _cat_report_render_segments_html(right_segs, "diff-add"),
+    )
+
+
+def _cat_report_issue_highlights(category_counts: dict, severity_counts: dict, action_counts: dict, failed_replacements: list) -> list[str]:
+    highlights = []
+    labeled_categories = [
+        (key, category_counts.get(key, 0))
+        for key in _CAT_REPORT_CATEGORY_ORDER
+        if category_counts.get(key, 0)
+    ]
+    labeled_categories.sort(key=lambda item: (-item[1], item[0]))
+    if labeled_categories:
+        top_key, top_count = labeled_categories[0]
+        highlights.append(f'本轮问题类别以“{_cat_report_category_label(top_key)}”最多，共 {top_count} 句。')
+    labeled_severities = [
+        (key, severity_counts.get(key, 0))
+        for key in _CAT_REPORT_SEVERITY_ORDER
+        if severity_counts.get(key, 0)
+    ]
+    labeled_severities.sort(key=lambda item: (-item[1], _CAT_REPORT_SEVERITY_ORDER.index(item[0])))
+    if labeled_severities:
+        top_key, top_count = labeled_severities[0]
+        highlights.append(f'本轮 AI 诊断严重程度以“{_cat_report_severity_label(top_key)}”最多，共 {top_count} 句。')
+    if action_counts.get("modify"):
+        highlights.append(f'共有 {action_counts["modify"]} 条句子采用人工自定义。')
+    if action_counts.get("reject"):
+        highlights.append(f'共有 {action_counts["reject"]} 条句子被人工驳回。')
+    if failed_replacements:
+        highlights.append(f'本轮有 {len(failed_replacements)} 条句子未成功定位原文。')
+    return highlights or ["本轮没有形成足够的问题分类数据。"]
+
+
+def _generate_cat_html_report_impl(
+    report_path: str,
+    source_filename: str,
+    analyze_id: str,
+    decisions: list,
+    applied_changes: list,
+    accuracy: dict,
+    failed_replacements: Optional[list] = None,
+    cached_items: Optional[list] = None,
+    ai_semantic_scoring: Optional[bool] = None,
 ):
     generated_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if ai_semantic_scoring is True:
+        ai_semantic_label = "已开启"
+    elif ai_semantic_scoring is False:
+        ai_semantic_label = "已关闭"
+    else:
+        ai_semantic_label = "未知"
     action_labels = {
         'accept': '接受候选',
         'modify': '自定义润色',
@@ -10531,61 +11541,95 @@ def _generate_cat_html_report(
     }
     action_counts = {key: 0 for key in action_labels}
     decision_rows = []
-    category_counts = defaultdict(int)
+    issue_category_counts = {key: 0 for key in _CAT_REPORT_CATEGORY_ORDER}
+    issue_severity_counts = {key: 0 for key in _CAT_REPORT_SEVERITY_ORDER}
+    unlabeled_category_count = 0
+    unlabeled_severity_count = 0
     category_examples = {}
-    summary_rows = []
-
-    effective_changes = 0
-    total_delta = 0
+    category_summary_rows = []
+    severity_summary_rows = []
 
     for decision in decisions or []:
         action = str(getattr(decision, 'action', '') or '')
         if action in action_counts:
             action_counts[action] += 1
-        replacement_text = ''
-        if action == 'accept':
-            replacement_text = str(getattr(decision, 'accepted_template', '') or '')
-        elif action == 'modify':
-            replacement_text = str(getattr(decision, 'modified_text', '') or '')
-        elif action == 'reject':
-            replacement_text = str(getattr(decision, 'rejected_template', '') or '')
+        issue = _cat_report_issue_meta(decision, cached_items)
+        category_key = issue["category_key"]
+        severity_key = issue["severity_key"]
+        if category_key in issue_category_counts:
+            issue_category_counts[category_key] += 1
+        else:
+            unlabeled_category_count += 1
+        if issue.get("is_ai_diagnose"):
+            if severity_key in issue_severity_counts:
+                issue_severity_counts[severity_key] += 1
+            else:
+                unlabeled_severity_count += 1
+        example_text = issue["final_text"] or issue["candidate_text"] or issue["original_text"]
+        if example_text and category_key and category_key not in category_examples:
+            category_examples[category_key] = example_text[:80]
 
-        original_text = str(getattr(decision, 'original_text', '') or '')
-        category = _cat_report_change_category(original_text, replacement_text, action)
-        summary = _cat_report_change_summary(original_text, replacement_text, action)
-        category_counts[category] += 1
-        if replacement_text and category not in category_examples:
-            category_examples[category] = replacement_text[:80]
-        if action in {'accept', 'modify'} and replacement_text:
-            effective_changes += 1
-            total_delta += len(_normalize_cat_replace_text(replacement_text)) - len(_normalize_cat_replace_text(original_text))
-
+        original_html, candidate_html = _cat_report_render_compare_html(
+            issue["original_text"],
+            issue["candidate_text"],
+        )
         decision_rows.append(
             f"<tr>"
             f"<td>{int(getattr(decision, 'sentence_index', 0)) + 1}</td>"
             f"<td>{int(getattr(decision, 'source_paragraph_index', getattr(decision, 'paragraph_index', 0)) or 0) + 1}</td>"
             f"<td>{html_escape(action_labels.get(action, action or '未标记'))}</td>"
-            f"<td>{html_escape(category)}</td>"
-            f"<td>{html_escape(original_text)}</td>"
-            f"<td>{html_escape(replacement_text)}</td>"
-            f"<td>{html_escape(summary)}</td>"
+            f"<td>{html_escape(issue['category_label'])}</td>"
+            f"<td>{html_escape(issue['severity_label'])}</td>"
+            f"<td>{original_html}</td>"
+            f"<td>{candidate_html}</td>"
+            f"<td>{html_escape(issue['final_text'])}</td>"
             f"</tr>"
         )
 
-    sorted_categories = sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))
-    for category, count in sorted_categories[:6]:
-        share = round(count / max(1, len(decisions or [])) * 100, 1)
-        summary_rows.append(
+    total_decisions = max(1, len(decisions or []))
+    for category_key in _CAT_REPORT_CATEGORY_ORDER:
+        count = issue_category_counts[category_key]
+        category_summary_rows.append(
             f"<tr>"
-            f"<td>{html_escape(category)}</td>"
+            f"<td>{html_escape(_cat_report_category_label(category_key))}</td>"
             f"<td>{count}</td>"
-            f"<td>{share}%</td>"
-            f"<td>{html_escape(_cat_report_category_description(category))}</td>"
-            f"<td>{html_escape(category_examples.get(category, ''))}</td>"
+            f"<td>{round(count / total_decisions * 100, 1)}%</td>"
+            f"<td>{html_escape(category_examples.get(category_key, ''))}</td>"
+            f"</tr>"
+        )
+    if unlabeled_category_count:
+        category_summary_rows.append(
+            f"<tr>"
+            f"<td>{html_escape(_CAT_REPORT_UNLABELED)}</td>"
+            f"<td>{unlabeled_category_count}</td>"
+            f"<td>{round(unlabeled_category_count / total_decisions * 100, 1)}%</td>"
+            f"<td></td>"
+            f"</tr>"
+        )
+    for severity_key in _CAT_REPORT_SEVERITY_ORDER:
+        count = issue_severity_counts[severity_key]
+        severity_summary_rows.append(
+            f"<tr>"
+            f"<td>{html_escape(_cat_report_severity_label(severity_key))}</td>"
+            f"<td>{count}</td>"
+            f"<td>{round(count / total_decisions * 100, 1)}%</td>"
+            f"</tr>"
+        )
+    if unlabeled_severity_count:
+        severity_summary_rows.append(
+            f"<tr>"
+            f"<td>{html_escape(_CAT_REPORT_UNLABELED)}</td>"
+            f"<td>{unlabeled_severity_count}</td>"
+            f"<td>{round(unlabeled_severity_count / total_decisions * 100, 1)}%</td>"
             f"</tr>"
         )
 
-    report_highlights = _cat_report_highlights(action_counts, sorted_categories, effective_changes, total_delta, failed_replacements or [])
+    report_highlights = _cat_report_issue_highlights(
+        issue_category_counts,
+        issue_severity_counts,
+        action_counts,
+        failed_replacements or [],
+    )
 
     applied_rows = []
     for index, change in enumerate(applied_changes or [], start=1):
@@ -10631,6 +11675,9 @@ def _generate_cat_html_report(
     table {{ width: 100%; border-collapse: collapse; margin-top: 12px; table-layout: fixed; }}
     th, td {{ border: 1px solid #e2e8f0; padding: 10px 12px; text-align: left; vertical-align: top; font-size: 13px; line-height: 1.6; word-break: break-word; }}
     th {{ background: #f1f5f9; font-weight: 700; }}
+    .diff-add {{ background: #fecaca; color: #991b1b; padding: 1px 4px; border-radius: 4px; }}
+    .diff-remove {{ background: #bbf7d0; color: #166534; padding: 1px 4px; border-radius: 4px; }}
+    .diff-space {{ display: inline-block; min-width: 0.72em; text-align: center; color: inherit; font-size: 0.9em; }}
     .note {{ margin-top: 24px; padding: 14px 16px; border-radius: 12px; background: #eff6ff; color: #1e3a8a; }}
   </style>
 </head>
@@ -10643,6 +11690,7 @@ def _generate_cat_html_report(
       <p><strong>分析编号：</strong>{html_escape(analyze_id or '')}</p>
       <p><strong>生成时间：</strong>{generated_at}</p>
       <p><strong>准确率：</strong>{html_escape('待评估' if (accuracy or {}).get('accuracy_rate') is None else str((accuracy or {}).get('accuracy_rate')) + '%')}</p>
+      <p><strong>AI语义：</strong>{html_escape(ai_semantic_label)}</p>
     </div>
     <div class=\"summary\">
       <div class=\"card\"><span class=\"label\">总句子决策</span><span class=\"value\">{len(decisions or [])}</span></div>
@@ -10658,13 +11706,23 @@ def _generate_cat_html_report(
       {''.join(f'<li>{html_escape(item)}</li>' for item in report_highlights)}
     </ul>
 
-    <h2>润色句子分类</h2>
+    <h2>问题类别分类</h2>
     <table>
       <thead>
-        <tr><th style=\"width:120px\">类别</th><th style=\"width:70px\">数量</th><th style=\"width:90px\">占比</th><th style=\"width:220px\">特点</th><th>代表句</th></tr>
+        <tr><th style=\"width:120px\">问题类别</th><th style=\"width:70px\">数量</th><th style=\"width:90px\">占比</th><th>代表句</th></tr>
       </thead>
       <tbody>
-        {''.join(summary_rows) if summary_rows else '<tr><td colspan="5">本次没有可分析的润色分类。</td></tr>'}
+        {''.join(category_summary_rows) if category_summary_rows else '<tr><td colspan="4">本次没有可分析的问题类别。</td></tr>'}
+      </tbody>
+    </table>
+
+    <h2>AI诊断严重程度分类</h2>
+    <table>
+      <thead>
+        <tr><th style=\"width:220px\">严重程度</th><th style=\"width:70px\">数量</th><th style=\"width:90px\">占比</th></tr>
+      </thead>
+      <tbody>
+        {''.join(severity_summary_rows) if severity_summary_rows else '<tr><td colspan="3">本次没有可分析的严重程度。</td></tr>'}
       </tbody>
     </table>
 
@@ -10681,10 +11739,10 @@ def _generate_cat_html_report(
     <h2>逐句确认明细</h2>
     <table>
       <thead>
-        <tr><th style=\"width:60px\">句子</th><th style=\"width:60px\">段落</th><th style=\"width:90px\">动作</th><th style=\"width:110px\">类别</th><th>原文</th><th>最终文本</th><th style=\"width:180px\">变化摘要</th></tr>
+        <tr><th style=\"width:50px\">句子</th><th style=\"width:50px\">段落</th><th style=\"width:80px\">动作</th><th style=\"width:80px\">问题类别</th><th style=\"width:110px\">严重程度</th><th>原文</th><th>候选</th><th>最终文本</th></tr>
       </thead>
       <tbody>
-        {''.join(decision_rows) if decision_rows else '<tr><td colspan="7">本次没有可用的句子决策记录。</td></tr>'}
+        {''.join(decision_rows) if decision_rows else '<tr><td colspan="8">本次没有可用的句子决策记录。</td></tr>'}
       </tbody>
     </table>
 
@@ -11144,6 +12202,9 @@ async def cat_analyze(
         diagnose_items = []
         unmatched_sentence_count = sum(1 for item in items if not item.get("has_candidates"))
         candidate_debug_summary["unmatched_sentence_count"] = unmatched_sentence_count
+        diagnose_status = "skipped"
+        diagnose_error = ""
+        analyze_id = str(uuid.uuid4())
         try:
             from app.utils.cat_diagnose import (
                 annotate_cat_candidates,
@@ -11153,7 +12214,8 @@ async def cat_analyze(
             )
             annotate_cat_candidates(items)
             if is_ai_diagnose_enabled():
-                unmatched = [
+                diagnose_status = "completed"
+                unmatched = _filter_cat_artifact_diagnose_pool([
                     {
                         "text": item.get("original_text") or "",
                         "paragraph_index": item.get("paragraph_index"),
@@ -11165,7 +12227,7 @@ async def cat_analyze(
                     }
                     for item in items
                     if not item.get("has_candidates")
-                ]
+                ])
                 try:
                     ai_diag = await open_diagnose_sentences(
                         unmatched,
@@ -11173,12 +12235,28 @@ async def cat_analyze(
                         sentence_guide,
                         product_type or "",
                     )
-                    _persist_lab_diagnoses(db, ai_diag, unmatched, source="document")
-                    diagnose_items = diagnoses_to_cat_items(ai_diag, unmatched)
-                except Exception:
+                    ai_diag = _filter_cat_artifact_diagnoses(ai_diag, unmatched)
+                    _persist_lab_diagnoses(
+                        db,
+                        ai_diag,
+                        unmatched,
+                        analyze_id=analyze_id,
+                        source="document",
+                        source_name=filename,
+                    )
+                    diagnose_items = _filter_cat_artifact_diagnose_items(
+                        diagnoses_to_cat_items(ai_diag, unmatched)
+                    )
+                except Exception as e:
+                    logger.warning("[CAT_ANALYZE] AI 诊断失败: %s", e, exc_info=True)
                     diagnose_items = []
-        except Exception:
+                    diagnose_status = "failed"
+                    diagnose_error = str(e)
+        except Exception as e:
+            logger.warning("[CAT_ANALYZE] 诊断阶段失败: %s", e, exc_info=True)
             diagnose_items = []
+            diagnose_status = "failed"
+            diagnose_error = str(e)
 
         candidate_debug_summary["diagnose_item_count"] = len(diagnose_items)
         from app.utils.cat_diagnose import HINT_ONLY_CATEGORIES as _HINT_ONLY_CATEGORIES
@@ -11199,9 +12277,7 @@ async def cat_analyze(
         candidate_debug_summary["diagnose_hint_count"] = diagnose_hint_count
         candidate_debug_summary["diagnose_rewrite_count"] = diagnose_rewrite_count
         _cleanup_cat_cache()
-        analyze_id = str(uuid.uuid4())
-        _cat_cache_timestamps[analyze_id] = time.time()
-        _cat_analyze_cache[analyze_id] = {
+        _store_cat_analyze_cache(analyze_id, {
             "items": list(items) + list(diagnose_items),
             "templates": guide_templates,
             "file_info": {
@@ -11216,10 +12292,14 @@ async def cat_analyze(
                 "user_id": user.id if user else None,
                 "sentence_file_id": sentence_file_id,
                 "sentence_file_name": _resolve_sentence_file_name(db, sentence_file_id),
+                "ai_semantic_scoring": bool(ai_semantic_scoring),
+                "ai_scoring_status": ai_scoring_status,
             },
-        }
+        })
 
-        total_with_candidates = sum(1 for i in items if i["has_candidates"])
+        total_with_candidates = sum(1 for i in items if i.get("has_candidates")) + sum(
+            1 for i in diagnose_items if i.get("has_candidates")
+        )
         total_paragraphs = len(items)
 
         return {
@@ -11229,6 +12309,8 @@ async def cat_analyze(
             "template_coverage": round(total_with_candidates / total_paragraphs * 100, 1) if total_paragraphs else 0,
             "ai_scoring_status": ai_scoring_status,
             "ai_scoring_error": ai_scoring_error,
+            "diagnose_status": diagnose_status,
+            "diagnose_error": diagnose_error,
             "resolved_term_count": len(resolved_terms or {}),
             "candidate_debug_summary": candidate_debug_summary,
             "items": items,
@@ -11252,7 +12334,7 @@ async def cat_apply(
     第二阶段：用户决策 + 写入 DOCX + 反馈。
     """
     user = current_user or get_default_user(db)
-    cached = _cat_analyze_cache.get(request.analyze_id)
+    cached = _get_cat_analyze_cache(request.analyze_id)
     if not cached:
         raise HTTPException(status_code=404, detail="分析结果已过期，请重新上传分析")
 
@@ -11438,11 +12520,8 @@ async def cat_apply(
     decision_records = []
     for decision in decisions:
         replacement_text = _cat_decision_replacement_text(decision)
-        category = _cat_report_change_category(
-            getattr(decision, 'original_text', '') or '',
-            replacement_text,
-            getattr(decision, 'action', '') or 'pending',
-        )
+        issue = _cat_report_issue_meta(decision, cached.get("items") or [])
+        category = issue["category_label"]
         category_summary[category] = category_summary.get(category, 0) + 1
         decision_records.append(CatDecisionRecord(
             analyze_id=request.analyze_id,
@@ -11495,6 +12574,12 @@ async def cat_apply(
         applied_changes=applied_changes,
         accuracy=accuracy,
         failed_replacements=failed_replacements,
+        cached_items=cached.get("items") or [],
+        ai_semantic_scoring=(
+            request.ai_semantic_scoring
+            if request.ai_semantic_scoring is not None
+            else (cached.get("file_info") or {}).get("ai_semantic_scoring")
+        ),
     )
 
     download_url = None
@@ -11584,7 +12669,7 @@ def cat_get_stats(
     db: Session = Depends(get_db),
 ):
     """查询单次分析的准确率（在用户决策提交后可用）。"""
-    cached = _cat_analyze_cache.get(analyze_id)
+    cached = _get_cat_analyze_cache(analyze_id)
     if not cached:
         raise HTTPException(status_code=404, detail="分析结果已过期")
     items = cached.get("items", [])
