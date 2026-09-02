@@ -51,6 +51,7 @@ _CATEGORY_ALIASES = {
     "register": "word",
     "audience": "word",
     "syntax": "grammar",
+    "other": "logic",
 }
 
 _FUNCTION_POS = {"c", "p", "u", "y", "e", "o", "w", "f", "d", "r", "xc"}
@@ -107,7 +108,7 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
    - high：照做会出错、人员安全、结论被误解
    - medium：费解可能出错、数据风险；错别字默认 medium
    - low：纯风格、标点、冗余
-   术语同义替换、风格统一类问题不得报 high。spelling 归 word；register/audience 归 word；syntax 归 grammar；other 按内容归 logic/term/risk。
+   术语同义替换、风格统一类问题不得报 high。spelling 归 word；register/audience 归 word；syntax 归 grammar；other 归 logic。
    word vs term：word=词形错（错别字、形近字、拼写），如「至于」应为「置于」；term=同一概念的不同写法、术语统一，如「机器」应为「仪器」、「样品」应为「样本」、「枪头」应为「吸头」。不得把术语统一报成 word，也不得把词形错报成 term。
 6. 只输出 JSON，不要任何解释文字。
 7. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
@@ -909,7 +910,7 @@ def canonicalize_category(
     cat = str(category or "").strip().lower()
     if cat in _CATEGORY_ALIASES:
         cat = _CATEGORY_ALIASES[cat]
-    if cat in {"", "other"}:
+    if not cat:
         inferred = _infer_category(problem)
         if inferred in CATEGORIES:
             cat = inferred

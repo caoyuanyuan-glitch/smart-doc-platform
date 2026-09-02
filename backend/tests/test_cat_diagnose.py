@@ -550,7 +550,8 @@ class CatDiagnoseCategoryV08Test(unittest.TestCase):
 
         self.assertEqual(_infer_category("至于为错别字"), "word")
         self.assertEqual(canonicalize_category("other", "“两个”应为“三个”，数值错误"), "logic")
-        self.assertEqual(canonicalize_category("other", "术语与术语表不一致"), "term")
+        self.assertEqual(canonicalize_category("other"), "logic")
+        self.assertEqual(canonicalize_category("other", "术语与术语表不一致"), "logic")
         self.assertEqual(canonicalize_category("risk"), "risk")
         self.assertEqual(_infer_category("风险弱化，冲洗即可"), "risk")
 

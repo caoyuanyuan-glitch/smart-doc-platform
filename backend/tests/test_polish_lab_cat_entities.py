@@ -505,5 +505,103 @@ class PolishLabCatReportTest(unittest.TestCase):
         self.assertFalse(meta['is_ai_diagnose'])
 
 
+class PolishLabCatCategoryG1Test(unittest.TestCase):
+    def test_punctuation_maps_to_grammar(self):
+        self.assertEqual(
+            polish_lab._cat_report_change_category('点击按钮进入界面。', '点击按钮，进入界面。', 'modify'),
+            'grammar',
+        )
+
+    def test_typo_maps_to_word(self):
+        self.assertEqual(
+            polish_lab._cat_report_change_category(
+                '实验前将所有的冷冻试剂至于常温解冻。',
+                '实验前将所有的冷冻试剂置于常温解冻。',
+                'modify',
+            ),
+            'word',
+        )
+
+    def test_term_unification_maps_to_term(self):
+        self.assertEqual(
+            polish_lab._cat_report_change_category(
+                '将制备卡平置于机器上。',
+                '将制备卡平置于仪器上。',
+                'modify',
+            ),
+            'term',
+        )
+
+    def test_reorder_maps_to_logic(self):
+        self.assertEqual(
+            polish_lab._cat_report_change_category('先离心，再混匀。', '先混匀，再离心。', 'modify'),
+            'logic',
+        )
+
+    def test_shorten_maps_to_redundancy(self):
+        self.assertEqual(
+            polish_lab._cat_report_change_category(
+                '本说明书中的所有图片均为示意图，图片内容可能与实物有细微差异，请以购买的产品为准。',
+                '图片为示意图。',
+                'modify',
+            ),
+            'redundancy',
+        )
+
+    def test_lengthen_maps_to_missing(self):
+        self.assertEqual(
+            polish_lab._cat_report_change_category(
+                '混匀后瞬时离心。',
+                '混匀后瞬时离心，便于后续pooling测序。',
+                'modify',
+            ),
+            'missing',
+        )
+
+    def test_imperative_wording_maps_to_term(self):
+        self.assertEqual(
+            polish_lab._cat_report_change_category('点击开始按钮。', '请点击开始按钮。', 'modify'),
+            'term',
+        )
+
+    def test_simple_match_guide_candidate_has_eight_class_category(self):
+        source = '3.8.4将制备卡平置于机器上，制备卡的凹口要与机器推板上的凸出位置对应（图12）。'
+        template = '3.8.4将制备卡平置于仪器上，制备卡的凹口要与仪器载台上的凸出位置对应（图12）。'
+        hits = _simple_match(source, [{'text': template, 'id': 't'}], source_sentence=source)
+        guide_hits = [item for item in hits if item.get('rule_source') == 'sentence_guide']
+        self.assertTrue(guide_hits)
+        self.assertEqual(guide_hits[0].get('category'), 'term')
+        self.assertIn(guide_hits[0].get('category'), {
+            'grammar', 'word', 'term', 'ambiguity', 'redundancy', 'logic', 'missing', 'risk',
+        })
+
+    def test_issue_meta_aggregates_guide_category(self):
+        decision = SimpleNamespace(
+            action='accept',
+            paragraph_index=0,
+            sentence_index=0,
+            source_paragraph_index=0,
+            original_text='将制备卡平置于机器上。',
+            accepted_template='将制备卡平置于仪器上。',
+            category='',
+            severity='',
+            candidate_text='将制备卡平置于仪器上。',
+            rule_source='sentence_guide',
+        )
+        cached_items = [{
+            'source_paragraph_index': 0,
+            'sentence_index': 0,
+            'original_text': '将制备卡平置于机器上。',
+            'candidates': [{
+                'category': 'term',
+                'template_text': '将制备卡平置于仪器上。',
+                'rule_source': 'sentence_guide',
+            }],
+        }]
+        meta = polish_lab._cat_report_issue_meta(decision, cached_items)
+        self.assertEqual(meta['category_key'], 'term')
+        self.assertEqual(meta['category_label'], '术语')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Q
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import timedelta
 from collections import defaultdict
 from difflib import SequenceMatcher
@@ -1170,10 +1170,20 @@ def _build_feedback_correction_items(
     return items
 
 
+def _cat_stats_category_label(category: Any) -> str:
+    from app.utils.cat_diagnose import CATEGORIES, CATEGORY_LABELS, canonicalize_category
+
+    raw = str(category or "").strip() or "其他"
+    key = canonicalize_category(raw, "")
+    if key in CATEGORIES:
+        return CATEGORY_LABELS.get(key, key)
+    return raw
+
+
 def _summarize_categories(items: list[dict]) -> dict:
     counts = defaultdict(int)
     for item in items or []:
-        category = str((item or {}).get("category") or "其他").strip() or "其他"
+        category = _cat_stats_category_label((item or {}).get("category"))
         counts[category] += 1
     return dict(counts)
 
@@ -7187,11 +7197,11 @@ def _has_conflicting_list_step_template(source: str, template: str) -> bool:
         return False
     if not re.search(r'[；;]\s*$', template_text):
         return False
-    if _sentence_similarity(source_text, template_text) >= 0.75:
-        return False
     extra_numbers = _extract_numeric_markers(template_text) - _extract_numeric_markers(source_text)
     if extra_numbers:
         return True
+    if _sentence_similarity(source_text, template_text) >= 0.75:
+        return False
     return len(_split_sentence_clauses(source_text)) >= 2 and len(_split_sentence_clauses(template_text)) == 1
 
 
@@ -7293,6 +7303,12 @@ def _compose_cat_candidate_body(original: str, candidate: str) -> str:
         return _finish_cat_composed_text(source_text, candidate_core, trailing_figure_ref, source_terminal)
 
     if _has_conflicting_list_intro(source_core, candidate_core):
+        return _finish_cat_composed_text(source_text, candidate_core, trailing_figure_ref, source_terminal)
+
+    if (
+        _has_conflicting_list_step_template(source_core, candidate_core)
+        or _has_conflicting_list_step_template(source_text, candidate_text)
+    ):
         return _finish_cat_composed_text(source_text, candidate_core, trailing_figure_ref, source_terminal)
 
     if len(source_clauses) >= 3 and len(candidate_clauses) == 1:
@@ -7843,6 +7859,11 @@ def _simple_match(
             "rule_source": "sentence_guide",
         }
         candidate = _apply_cat_entity_change_penalty(display_source_text, candidate)
+        candidate["category"] = _cat_report_change_category(
+            display_source_text,
+            str(candidate.get("template_text") or display_tpl_text),
+            "modify",
+        )
         if candidate.get('entity_penalty_reason'):
             _increment_debug_reason(debug_stats, 'entity_changed')
         dedupe_key = re.sub(r'\s+', '', re.sub(r'[，。！？!?；;：:、,\.\s]+$', '', normalized_tpl_match_text or tpl_text)).strip()
@@ -10272,7 +10293,7 @@ def get_polish_text_stats(db: Session = Depends(get_db)):
         trend_dates.append(day)
         item_category_counts = defaultdict(int)
         for item in items:
-            category = str((item or {}).get('category') or '其他').strip() or '其他'
+            category = _cat_stats_category_label((item or {}).get('category'))
             category_counts[category] += 1
             trend_map[day][category] += 1
             item_category_counts[category] += 1
@@ -11772,6 +11793,25 @@ def _normalize_cat_replace_text(text: str) -> str:
     return _CAT_REPLACE_NORMALIZE_PATTERN.sub('', str(text or ''))
 
 
+def _cat_content_tokens(text: str) -> list[str]:
+    compact = _normalize_cat_replace_text(text)
+    return re.findall(r'[A-Za-z0-9]+|[\u4e00-\u9fff]', compact)
+
+
+def _cat_is_order_or_condition_change(before: str, after: str) -> bool:
+    before_text = str(before or '')
+    after_text = str(after or '')
+    condition_re = re.compile(r'(若|如果|否则|以免|在.+情况下)')
+    if bool(condition_re.search(before_text)) != bool(condition_re.search(after_text)):
+        return True
+    before_tokens = _cat_content_tokens(before_text)
+    after_tokens = _cat_content_tokens(after_text)
+    if len(before_tokens) >= 4 and len(after_tokens) >= 4:
+        if before_tokens != after_tokens and sorted(before_tokens) == sorted(after_tokens):
+            return True
+    return False
+
+
 def _cat_report_change_category(before: str, after: str, action: str) -> str:
     if action == 'reject':
         return '人工驳回'
@@ -11783,16 +11823,23 @@ def _cat_report_change_category(before: str, after: str, action: str) -> str:
     normalized_before = _normalize_cat_replace_text(before)
     normalized_after = _normalize_cat_replace_text(after)
     if before != after and normalized_before == normalized_after:
-        return '标点格式统一'
+        return 'grammar'
+    from app.utils.cat_diagnose import classify_surface_edit
+
+    kind = classify_surface_edit(before, after)
+    if kind == 'typo':
+        return 'word'
+    if kind == 'term':
+        return 'term'
+    if _cat_is_order_or_condition_change(before, after):
+        return 'logic'
     if len(normalized_after) <= max(4, int(len(normalized_before) * 0.85)):
-        return '表达精简'
+        return 'redundancy'
     if len(normalized_after) >= max(len(normalized_before) + 6, int(len(normalized_before) * 1.15)):
-        return '信息补全'
-    if re.search(r'(请|应|需|必须|不得|确保)', after) and not re.search(r'(请|应|需|必须|不得|确保)', before):
-        return '操作指令规范'
-    if re.search(r'[A-Za-z]{2,}|[0-9]+', before + after):
-        return '术语措辞统一'
-    return '句式重组'
+        return 'missing'
+    if re.search(r'(请|应|需|必须|不得|确保)', after or '') and not re.search(r'(请|应|需|必须|不得|确保)', before or ''):
+        return 'term'
+    return 'grammar'
 
 
 def _cat_report_change_summary(before: str, after: str, action: str) -> str:
@@ -11817,6 +11864,14 @@ def _cat_report_change_summary(before: str, after: str, action: str) -> str:
 
 def _cat_report_category_description(category: str) -> str:
     descriptions = {
+        'grammar': '统一标点格式，或保持原意重组句式。',
+        'word': '修正错别字、形近字或拼写。',
+        'term': '统一术语、型号或专业措辞。',
+        'redundancy': '压缩冗余措辞，让句子更短、更直接。',
+        'missing': '补入限定条件、结果或操作说明。',
+        'logic': '调整步骤顺序或限定条件。',
+        'ambiguity': '消除一词多解或指代不清。',
+        'risk': '补强或纠正风险与安全表述。',
         '表达精简': '压缩冗余措辞，让句子更短、更直接。',
         '信息补全': '补入限定条件、结果或操作说明。',
         '操作指令规范': '把动作句改成更规范的说明书表达。',
