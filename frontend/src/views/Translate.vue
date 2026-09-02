@@ -71,10 +71,16 @@
             />
             <div class="input-actions">
               <span class="char-count">{{ inputText.length }} 字符</span>
-              <el-button type="primary" :loading="translating" @click="translateText" :disabled="!inputText.trim()">
-                <el-icon><Switch /></el-icon>
-                开始翻译
-              </el-button>
+              <div class="input-action-buttons">
+                <el-button type="primary" :loading="translating" @click="translateText" :disabled="!inputText.trim()">
+                  <el-icon><Switch /></el-icon>
+                  开始翻译
+                </el-button>
+                <el-button :disabled="translating || !canClearTranslation" @click="clearTranslationSession">
+                  <el-icon><Delete /></el-icon>
+                  清空
+                </el-button>
+              </div>
             </div>
           </div>
         </el-card>
@@ -87,6 +93,7 @@
               <span class="card-header-title">翻译结果</span>
               <div v-if="result" class="result-meta">
                 <el-tag v-if="resultSourceTag" :type="resultSourceTag.type" size="small">{{ resultSourceTag.label }}</el-tag>
+                <el-tag v-if="fuzzyMatchSummary" type="warning" size="small">{{ fuzzyMatchSummary }}</el-tag>
                 <div class="result-usage-stats">
                   <span>总字数 {{ Number(result.source_word_count || 0).toLocaleString() }}</span>
                   <span>AI {{ Number(result.ai_word_count || 0).toLocaleString() }}</span>
@@ -121,7 +128,29 @@
               resize="none"
               class="translated-editor"
             />
-            <div v-else class="result-text translated-text">{{ currentTranslatedText }}</div>
+            <div
+              v-else
+              class="result-text translated-text"
+              :class="{ 'has-fuzzy-match': fuzzyMatches.length > 0 }"
+              v-html="highlightedTranslatedHtml"
+            />
+            <div v-if="!editingResult && fuzzyMatches.length" class="fuzzy-match-list">
+              <div v-for="(item, index) in fuzzyMatches" :key="index" class="fuzzy-match-card">
+                <div class="fuzzy-match-head">
+                  <el-tag type="warning" size="small">匹配率 {{ formatMatchRate(item.match_rate) }}</el-tag>
+                  <span class="fuzzy-match-reason">{{ matchReasonLabel(item.reason) }}</span>
+                </div>
+                <div class="fuzzy-match-row">
+                  <span class="fuzzy-match-label">当前原文</span>
+                  <p class="fuzzy-match-text" v-html="renderDiffHtml(item.source_spans)"></p>
+                </div>
+                <div class="fuzzy-match-row">
+                  <span class="fuzzy-match-label">记忆库原文</span>
+                  <p class="fuzzy-match-text" v-html="renderDiffHtml(item.candidate_spans)"></p>
+                </div>
+                <p class="fuzzy-match-hint">黄色/红色标记是与记忆库不一致的内容，请据此核对并修改译文。</p>
+              </div>
+            </div>
             <div class="memory-write-section">
               <span class="memory-write-label">写入目标记忆库</span>
               <el-select
@@ -174,7 +203,7 @@
 <script setup>
 import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort } from '@element-plus/icons-vue'
+import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort, Delete } from '@element-plus/icons-vue'
 import { knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
@@ -217,6 +246,8 @@ const editingResult = ref(false)
 const translatedDraft = ref('')
 const writingMemory = ref(false)
 const writableMemoryFileTypes = ['xlsx', 'xlsm', 'xltx', 'xltm']
+
+const canClearTranslation = computed(() => Boolean(inputText.value.trim() || result.value || editingResult.value || translatedDraft.value))
 
 const writableMemoryLibraryFiles = computed(() => {
   return memoryLibraryFiles.value.filter(file => writableMemoryFileTypes.includes(String(file.fileType || '').toLowerCase()))
@@ -284,6 +315,96 @@ const resultSourceTag = computed(() => {
   return null
 })
 
+const fuzzyMatches = computed(() => {
+  const items = Array.isArray(result.value?.memory_matches) ? result.value.memory_matches : []
+  return items.filter((item) => {
+    const rate = Number(item?.match_rate)
+    if (Number.isFinite(rate) && rate < 100) {
+      return true
+    }
+    return String(item?.source_text || '').trim() !== String(item?.candidate_text || '').trim()
+  })
+})
+
+const fuzzyMatchSummary = computed(() => {
+  const items = fuzzyMatches.value
+  if (!items.length) {
+    return ''
+  }
+  if (items.length === 1) {
+    return `匹配率 ${formatMatchRate(items[0].match_rate)}`
+  }
+  const lowest = Math.min(...items.map((item) => Number(item.match_rate) || 0))
+  return `${items.length} 处非完全匹配，最低 ${formatMatchRate(lowest)}`
+})
+
+const highlightedTranslatedHtml = computed(() => highlightTranslatedText(currentTranslatedText.value, fuzzyMatches.value))
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function formatMatchRate(rate) {
+  const value = Number(rate)
+  if (!Number.isFinite(value)) {
+    return '—'
+  }
+  return `${Number.isInteger(value) ? value : value.toFixed(1)}%`
+}
+
+function matchReasonLabel(reason) {
+  const labels = {
+    similarity_ranked: '整句模糊匹配',
+    token_subsequence: '短语嵌入匹配'
+  }
+  return labels[reason] || '记忆库匹配'
+}
+
+function renderDiffHtml(spans) {
+  if (!Array.isArray(spans) || !spans.length) {
+    return ''
+  }
+  return spans.map((span) => {
+    const text = escapeHtml(span.text)
+    const tag = span.tag || 'equal'
+    if (tag === 'equal') {
+      return text
+    }
+    return `<mark class="diff-${tag}">${text}</mark>`
+  }).join('')
+}
+
+function highlightTranslatedText(text, matches) {
+  const source = String(text || '')
+  if (!source) {
+    return ''
+  }
+  const leftovers = []
+  for (const item of matches || []) {
+    for (const fragment of item.leftover_fragments || []) {
+      if (fragment) {
+        leftovers.push(fragment)
+      }
+    }
+  }
+  leftovers.sort((a, b) => b.length - a.length)
+  if (!leftovers.length) {
+    return escapeHtml(source)
+  }
+  const pattern = leftovers.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  const splitter = new RegExp(`(${pattern})`, 'g')
+  return source.split(splitter).map((part) => {
+    if (leftovers.includes(part)) {
+      return `<mark class="diff-leftover">${escapeHtml(part)}</mark>`
+    }
+    return escapeHtml(part)
+  }).join('')
+}
+
 onMounted(async () => {
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
 })
@@ -339,6 +460,17 @@ async function loadMemoryLibraryFiles() {
 
 function onEngineChange(val) {
   syncSelectedModel()
+}
+
+function clearTranslationSession() {
+  if (translating.value) {
+    return
+  }
+  inputText.value = ''
+  result.value = null
+  editingResult.value = false
+  translatedDraft.value = ''
+  ElMessage.success('已清空当前翻译内容')
 }
 
 async function translateText() {
@@ -587,6 +719,12 @@ function downloadResult() {
   margin-top: 12px;
 }
 
+.input-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .char-count {
   font-size: 13px;
   color: #9ca3af;
@@ -676,6 +814,87 @@ function downloadResult() {
   overflow-y: auto;
   color: #1f2937;
   flex: 1;
+}
+
+.translated-text.has-fuzzy-match {
+  border: 1px solid #fbbf24;
+  background: #fffbeb;
+}
+
+.translated-text :deep(mark),
+.fuzzy-match-text :deep(mark) {
+  padding: 0 2px;
+  border-radius: 3px;
+  color: inherit;
+}
+
+.diff-replace,
+.diff-delete {
+  background: #fecaca;
+  box-shadow: inset 0 -1px 0 #ef4444;
+}
+
+.diff-insert {
+  background: #bbf7d0;
+  box-shadow: inset 0 -1px 0 #22c55e;
+}
+
+.diff-leftover {
+  background: #fde68a;
+  box-shadow: inset 0 -1px 0 #d97706;
+}
+
+.fuzzy-match-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fuzzy-match-card {
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.fuzzy-match-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.fuzzy-match-reason {
+  font-size: 12px;
+  color: #92400e;
+}
+
+.fuzzy-match-row {
+  margin-top: 6px;
+}
+
+.fuzzy-match-label {
+  display: block;
+  font-size: 12px;
+  color: #78716c;
+  margin-bottom: 4px;
+}
+
+.fuzzy-match-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1f2937;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fuzzy-match-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #b45309;
+  line-height: 1.5;
 }
 
 .memory-write-section {

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 
@@ -14,6 +14,22 @@ class TranslationRequest(BaseModel):
     memory_file_ids: Optional[list[int]] = None
 
 
+class MemoryMatchDiffSpan(BaseModel):
+    text: str
+    tag: str
+
+
+class MemoryMatchDetail(BaseModel):
+    source_text: str
+    candidate_text: str
+    translated_text: str = ""
+    match_rate: float
+    reason: str = ""
+    source_spans: List[MemoryMatchDiffSpan] = []
+    candidate_spans: List[MemoryMatchDiffSpan] = []
+    leftover_fragments: List[str] = []
+
+
 class TranslationResponse(BaseModel):
     original: str
     translated: str
@@ -23,6 +39,7 @@ class TranslationResponse(BaseModel):
     source_word_count: int = 0
     ai_word_count: int = 0
     memory_word_count: int = 0
+    memory_matches: List[MemoryMatchDetail] = []
 
 
 class MemoryEntry(BaseModel):
@@ -68,6 +85,8 @@ class TranslationDocOut(BaseModel):
     translated_content: str
     batch_id: str = ""
     translated_filename: str = ""
+    file_size: int = 0
+    duration_ms: int = 0
     created_at: Optional[datetime] = None
 
     class Config:

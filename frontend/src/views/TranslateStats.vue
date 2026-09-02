@@ -9,12 +9,12 @@
         </div>
         <div class="stats-cards">
           <div class="stat-card card-text">
-            <div class="stat-label">文本翻译字数</div>
-            <div class="stat-value">{{ stats.text_word_count.toLocaleString() }}</div>
+            <div class="stat-label">总翻译字数</div>
+            <div class="stat-value">{{ stats.total_word_count.toLocaleString() }}</div>
             <div class="stat-unit">字</div>
           </div>
           <div class="stat-card card-doc">
-            <div class="stat-label">已翻译文档数</div>
+            <div class="stat-label">总文档数</div>
             <div class="stat-value">{{ stats.doc_count.toLocaleString() }}</div>
             <div class="stat-unit">个</div>
           </div>
@@ -125,6 +125,7 @@ use([PieChart, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer
 
 const stats = ref({
   text_word_count: 0,
+  total_word_count: 0,
   doc_count: 0,
   doc_word_count: 0,
   ai_word_count: 0,

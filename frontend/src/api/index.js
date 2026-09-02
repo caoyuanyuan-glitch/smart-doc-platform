@@ -423,15 +423,17 @@ export const translationAPI = {
   addMemory: (data) => instance.post('/translation/memory', data),
   writeMemoryFileEntry: (data) => instance.post('/translation/memory/file-entry', data),
   deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
-  getDocs: (skip = 0, limit = 100, batchId = '') => instance.get('/translation/docs', {
+  getDocs: (skip = 0, limit = 100, batchId = '', completedOnly = false) => instance.get('/translation/docs', {
     params: {
       skip,
       limit,
-      ...(batchId ? { batch_id: batchId } : {})
+      ...(batchId ? { batch_id: batchId } : {}),
+      ...(completedOnly ? { completed_only: true } : {})
     }
   }),
   downloadTranslatedDoc: (id, filename) => downloadBlob(`/translation/download/${id}`, filename),
   previewTranslatedDoc: (id) => instance.get(`/translation/docs/${id}/preview`),
+  previewTranslatedDocRaw: (id) => instance.get(`/translation/docs/${id}/raw`, { responseType: 'blob' }),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
   deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
   getStats: (batchId) => instance.get('/translation/stats', {
