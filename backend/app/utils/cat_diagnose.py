@@ -56,7 +56,8 @@ _CATEGORY_ALIASES = {
 
 _FUNCTION_POS = {"c", "p", "u", "y", "e", "o", "w", "f", "d", "r", "xc"}
 _WORD_FORM_PROBLEM_RE = re.compile(r"错别字|拼写|词形")
-_FORMAT_TEXT_RE = re.compile(r"^[\s\dμµA-Za-z.%°℃℉()（）\[\]\-_/±~～=<>]+$")
+_FORMAT_TEXT_RE = re.compile(r"^[\s\dμµA-Za-z.%°℃℉()（）\[\]\-_/±~～=<>，、。；：！？,;:!?【】]+$")
+_FORMAT_ONLY_RE = re.compile(r"[\s\u3000，、。；：！？,;:!?【】\[\]（）()“”\"'‘’《》<>]+")
 
 SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 
@@ -114,6 +115,10 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 7. 若该问题可沉淀为可复用规则，设置 ruleable=true，并给出 rule_hint（匹配模式或替换说明）；否则 ruleable=false、rule_hint 为空。
 8. problem 只写一句结论，不超过 24 字，只描述原文句子本身的问题（如"术语与术语表不一致""逻辑顺序颠倒"），不要引用任何外部依据，不要出现"版本记录""产品信息""章节""图示""表格""标准""规范"等来源字样。
 9. 禁止引用任何外部来源。你只能看到待审查句子、术语表和风格指南，看不到文档章节结构、版本记录、产品信息或文档主题。problem 不得以任何形式提及或暗示外部来源；判断依据只能来自句子本身、术语表或风格指南。
+10. 步骤动词与操作对象必须匹配。若同一句中动作施加的对象与后续录入、处理或目的对象不是同一实体，报 logic，severity 取 high。
+11. 术语不统一但意思相同（如「出库浓度」与「文库浓度」）→ category 取 word，severity 取 low。意思改变或数量错误 → severity 取 high。
+12. 专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta）不得在 revised 中删除，也不得把删除它们当作问题。
+13. 缺少标点、仅改标点或格式 → severity 取 low。
 
 category 枚举：grammar, word, term, ambiguity, redundancy, logic, missing, risk
 
@@ -145,6 +150,7 @@ _REWRITE_PROMPT = """你是文本润色助手。你只负责改写，不解释�
 2. 禁止因为任何句外信息（包括你以为的"文档其他地方应该怎样"）改动本句。
 3. 只改有问题的部分，保持原句语义与术语不变。
 4. 不要解释修改原因。
+5. 不得删除专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta）。
 【输出】只输出修订后的句子文本，不要任何附加内容。
 
 【待改写句子】
@@ -176,6 +182,8 @@ high = 照做会出错、人员安全、结论被误解
 medium = 费解可能出错、数据风险；错别字默认 medium
 low = 纯风格、标点、冗余
 数值、孔位数量、操作对象错误报 high。
+术语不统一但意思相同报 low；删除专业术语成分（如 total RNA、Meta）视为无需修改。
+缺少标点、仅改标点或格式报 low。
 
 【倾向】默认接受修订，除非修订明显更差。
 【输出】"问题描述 | 严重程度"，或"无需修改"。
@@ -281,7 +289,7 @@ def diagnose_mode(explicit: Optional[str] = None) -> str:
     elif _active_diagnose_mode:
         raw = str(_active_diagnose_mode)
     else:
-        raw = str(os.getenv("AI_DIAGNOSE_MODE", "decoupled") or "decoupled")
+        raw = str(os.getenv("AI_DIAGNOSE_MODE", "single") or "single")
     value = raw.strip().lower()
     return "single" if value == "single" else "decoupled"
 
@@ -555,6 +563,23 @@ def _normalize_diagnosis(raw: Any, allowed_indexes: Optional[set] = None) -> Opt
     quote = str(raw.get("quote") or "").strip()
     revised = str(raw.get("revised") or "").strip()
     problem = str(raw.get("problem") or "").strip()
+    if revised and drops_protected_latin_terms(quote, revised):
+        _log_diagnose_drop(
+            "normalize",
+            category,
+            quote,
+            revised,
+            reason="dropped_latin_term",
+            sentence_index=sentence_index,
+        )
+        return None
+    if category == "term" and is_same_meaning_term_unify(quote, revised):
+        category = "word"
+        severity = "low"
+    if is_punctuation_issue(problem, quote, revised):
+        severity = "low"
+        if category in {"logic", "ambiguity"}:
+            category = "word"
     if category == "missing" and _is_icon_placeholder_quote(quote):
         _log_diagnose_drop(
             "normalize",
@@ -869,6 +894,8 @@ def _lexical_replace_pairs(original: str, revised: str) -> list[tuple[str, str]]
 
 def classify_surface_edit(original: str, revised: str, problem: str = "") -> str:
     """term=术语统一；typo=词形错；format=数字/空格/标点。"""
+    if is_format_only_edit(original, revised):
+        return "format"
     if _WORD_FORM_PROBLEM_RE.search(str(problem or "")):
         return "typo"
     pairs = _lexical_replace_pairs(original, revised)
@@ -877,6 +904,22 @@ def classify_surface_edit(original: str, revised: str, problem: str = "") -> str
     if any(_is_content_term_token(src) and _is_content_term_token(dst) for src, dst in pairs):
         return "term"
     return "typo"
+
+
+def is_format_only_edit(original: str, revised: str) -> bool:
+    src = str(original or "").strip()
+    dst = str(revised or "").strip()
+    if not src or not dst or src == dst:
+        return False
+    compact_src = _FORMAT_ONLY_RE.sub("", src)
+    compact_dst = _FORMAT_ONLY_RE.sub("", dst)
+    return bool(compact_src) and compact_src == compact_dst
+
+
+def is_punctuation_issue(problem: str, quote: str = "", revised: str = "") -> bool:
+    if re.search(r"标点", str(problem or "")):
+        return True
+    return bool(revised) and is_format_only_edit(quote, revised)
 
 
 def refine_word_term_category(
@@ -899,6 +942,66 @@ def refine_word_term_category(
         if kind == "typo":
             return "word"
     return cat or "word"
+
+
+_PROTECTED_LATIN_PHRASE_RE = re.compile(
+    r"\b[A-Za-z]{3,}(?:\s+[A-Za-z][A-Za-z0-9+\-]{1,})+\b"
+)
+
+
+def _protected_latin_phrases(text: str) -> set[str]:
+    value = str(text or "")
+    phrases = {
+        re.sub(r"\s+", " ", match.group(0)).lower()
+        for match in _PROTECTED_LATIN_PHRASE_RE.finditer(value)
+    }
+    phrases.update(item.lower() for item in re.findall(r"\b[A-Z][A-Za-z]{3,}\b", value))
+    return phrases
+
+
+def drops_protected_latin_terms(original: str, revised: str) -> bool:
+    if not revised:
+        return False
+    return bool(_protected_latin_phrases(original) - _protected_latin_phrases(revised))
+
+
+def _share_cjk_head(source: str, target: str) -> bool:
+    src = str(source or "")
+    dst = str(target or "")
+    if not src or not dst or src == dst:
+        return False
+    for size in range(min(len(src), len(dst)), 1, -1):
+        suffix = src[-size:]
+        if suffix != dst[-size:] or not re.fullmatch(r"[\u4e00-\u9fff]+", suffix):
+            continue
+        if src[:-size] and dst[:-size] and src[:-size] != dst[:-size]:
+            if len(src[:-size]) >= 2 and len(dst[:-size]) >= 2:
+                return True
+    return False
+
+
+def is_same_meaning_term_unify(original: str, revised: str) -> bool:
+    source = str(original or "")
+    target = str(revised or "")
+    if not source or not target or source == target:
+        return False
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, source, target, autojunk=False).get_opcodes():
+        if tag != "replace":
+            continue
+        followed = 0
+        while (
+            followed < 3
+            and i2 < len(source)
+            and j2 < len(target)
+            and source[i2] == target[j2]
+            and "\u4e00" <= source[i2] <= "\u9fff"
+        ):
+            i2 += 1
+            j2 += 1
+            followed += 1
+        if _share_cjk_head(source[i1:i2], target[j1:j2]):
+            return True
+    return False
 
 
 def canonicalize_category(

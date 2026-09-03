@@ -113,6 +113,91 @@ class CatDiagnoseMergeTest(unittest.TestCase):
 
 
 class CatDiagnoseSwitchTest(unittest.TestCase):
+    def test_diagnose_mode_defaults_to_single(self):
+        from app.utils import cat_diagnose
+
+        with patch.object(cat_diagnose, "_active_diagnose_mode", None):
+            with patch.dict(os.environ, {"AI_DIAGNOSE_MODE": ""}, clear=False):
+                self.assertEqual(cat_diagnose.diagnose_mode(), "single")
+                self.assertEqual(cat_diagnose.diagnose_mode("decoupled"), "decoupled")
+
+    def test_diagnose_prompt_covers_verb_object_mismatch(self):
+        from app.utils.cat_diagnose import _DIAGNOSE_PROMPT
+
+        self.assertIn("步骤动词", _DIAGNOSE_PROMPT)
+        self.assertIn("操作对象", _DIAGNOSE_PROMPT)
+
+    def test_diagnose_prompt_covers_same_meaning_term_and_latin(self):
+        from app.utils.cat_diagnose import _DIAGNOSE_PROMPT
+
+        self.assertIn("意思相同", _DIAGNOSE_PROMPT)
+        self.assertIn("total RNA", _DIAGNOSE_PROMPT)
+
+    def test_same_meaning_term_unify_is_word_low(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 0,
+                "quote": "投入量降低可能会导致出库浓度下降。",
+                "category": "term",
+                "severity": "high",
+                "problem": "术语不统一",
+                "revised": "投入量降低可能会导致文库浓度下降。",
+            }]
+        }, allowed_indexes={0})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["category"], "word")
+        self.assertEqual(parsed[0]["severity"], "low")
+
+    def test_deleting_total_rna_is_dropped(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 0,
+                "quote": "本试剂套装适用于人、鼠 total RNA样本、Meta、病原微生物RNA等。",
+                "category": "word",
+                "severity": "medium",
+                "problem": "删除英文成分",
+                "revised": "本试剂套装适用于人、鼠样本、病原微生物RNA等。",
+            }]
+        }, allowed_indexes={0})
+        self.assertEqual(parsed, [])
+
+    def test_format_only_quantity_claim_is_not_high(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 0,
+                "quote": "A346-WGS-EB代表该试剂应该加载到A3,A4,A6三个孔位。",
+                "category": "logic",
+                "severity": "high",
+                "problem": "“两个”应为“三个”，数值错误",
+                "revised": "A346-WGS-EB代表该试剂应该加载到A3、A4、A6三个孔位。",
+            }]
+        }, allowed_indexes={0})
+        self.assertEqual(len(parsed), 1)
+        self.assertNotEqual(parsed[0]["severity"], "high")
+        self.assertEqual(parsed[0]["category"], "word")
+
+    def test_missing_punctuation_is_low(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 0,
+                "quote": "注意：产物pooling手工制备DNB及测序建议请看附录C",
+                "category": "grammar",
+                "severity": "high",
+                "problem": "缺少标点导致歧义",
+                "revised": "注意：产物pooling、手工制备DNB及测序建议请看附录C。",
+            }]
+        }, allowed_indexes={0})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["severity"], "low")
+
     def test_switch_off_skips_ai_and_returns_empty(self):
         from app.utils import cat_diagnose
 

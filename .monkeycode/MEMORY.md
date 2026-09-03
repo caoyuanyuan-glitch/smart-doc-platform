@@ -199,3 +199,4 @@ WorkBuddy 联动评审目录约定
   - 正式润色入口 `/polish`、`/api/polish`、`Polish.vue`、`polish.py` 保持不动
   - 阶段 2 评测每个文档至少跑 3 次取均值，召回≥70% 以均值判定
   - diagnose 温度试到 0 后若仍波动，停止换 provider/seed，改走多次取均值
+  - DNBelab 句式库用 `backend/eval_docs/DNBelab-D4RS_试剂套装_句子分类汇总.md`（bundled 同名副本）；不要用 `structured_sentence_guide_d4rs_operations.md` 当评测句式库

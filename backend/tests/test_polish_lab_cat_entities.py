@@ -602,6 +602,144 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
         self.assertEqual(meta['category_key'], 'term')
         self.assertEqual(meta['category_label'], '术语')
 
+    def test_colon_only_expiry_rewrite_is_trivial(self):
+        source = '有效期：见试剂盒标签'
+        template = '有效期见试剂盒标签。'
+        self.assertTrue(_is_trivial_cat_artifact_edit(source, template))
+        hits = _simple_match(source, [{'text': template, 'id': 'e'}], source_sentence=source)
+        self.assertFalse(any(item.get('rule_source') == 'sentence_guide' for item in hits))
+
+    def test_short_complete_spec_template_is_valid(self):
+        template = '要求OD₂₆₀/OD₂₈₀=1.8~2.0。'
+        self.assertTrue(polish_lab._is_valid_cat_template(template))
+        self.assertGreaterEqual(len(polish_lab._normalize_cat_length_text(template)), 8)
+
+    def test_embedded_spec_template_matches_long_source(self):
+        source = '推荐使用完整度较好（无明显降解或轻微降解）且纯度良好（OD260/OD280=1.8 ~ 2.1，OD260/OD230＞2.0，RIN值>7）的高质量RNA样本。'
+        template = '要求OD₂₆₀/OD₂₈₀=1.8~2.0，OD₂₆₀/OD₂₃₀＞2.0。'
+        hits = _simple_match(source, [{'text': template, 'id': 'spec'}], source_sentence=source)
+        self.assertTrue(hits)
+        rewritten = polish_lab._normalize_cat_typography(hits[0]['template_text'])
+        self.assertIn('1.8~2.0', rewritten.replace(' ', ''))
+        self.assertIn('OD260/OD230', rewritten.replace(' ', ''))
+        self.assertIn('RIN', rewritten)
+
+    def test_thaw_template_keeps_single_method_and_kit_term(self):
+        source = '试剂套装各组分使用前提前取出，室温解冻。'
+        ice = '试剂盒各组分使用前提前取出，冰上解冻。'
+        hits = _simple_match(source, [{'text': ice, 'id': 'thaw'}], source_sentence=source)
+        for item in hits:
+            text = item.get('template_text') or ''
+            self.assertNotIn('试剂盒', text)
+            self.assertFalse('冰上解冻' in text and '室温解冻' in text)
+
+    def test_barcode_template_keeps_coverb_subject(self):
+        source = '利用双barcode的矫正功能，最大程度上保证了测序数据拆分的均一性和准确性。'
+        template = '利用双barcode的矫正功能，可最大程度保证测序数据拆分的均一性和准确性。'
+        hits = _simple_match(source, [{'text': template, 'id': 'bc'}], source_sentence=source)
+        self.assertTrue(hits)
+        self.assertTrue(hits[0]['template_text'].startswith('利用'))
+
+    def test_nested_card_template_beats_place_on(self):
+        source = '1.操作指示卡使用之前请将操作指示卡正确的嵌套在制备卡上（图8）'
+        nested = '操作指示卡需正确嵌套在样本制备卡上。'
+        placed = '将操作指示卡放在样本制备卡上。'
+        hits = _simple_match(
+            source,
+            [{'text': nested, 'id': 'nested'}, {'text': placed, 'id': 'placed'}],
+            source_sentence=source,
+        )
+        self.assertTrue(hits)
+        rewritten = hits[0]['template_text']
+        self.assertIn('需正确嵌套', rewritten)
+        self.assertNotIn('放在', rewritten)
+        self.assertNotRegex(rewritten, r'。\s*（图8）')
+        self.assertIn('（图8）', rewritten)
+
+    def test_quote_normalized_read_list_template_matches(self):
+        source = '注意：操作前请阅读附录Ⅰ以及附录Ⅱ'
+        template = '操作前请阅读第22页“操作指示卡使用方法”以及第22页“试剂和样本加载介绍”。'
+        hits = _simple_match(source, [{'text': template, 'id': 'read'}], source_sentence=source)
+        self.assertTrue(hits)
+
+    def test_paraphrase_keep_aligns_with_match_threshold(self):
+        source = '将试剂按照下面的表格及体积转移到制备卡的特定孔位。'
+        template = '将试剂按照表格加入到样本制备卡对应孔位。'
+        hits = _simple_match(source, [{'text': template, 'id': 't'}], source_sentence=source)
+        self.assertTrue(hits)
+        kept = polish_lab._should_keep_text_manual_candidate(source, hits[0], ai_semantic_active=False)
+        self.assertTrue(kept)
+
+    def test_numbered_prefix_is_not_clause_splice(self):
+        source = '1.选择合适的移液器，调整移液器至正确的量程，并且正确的插上移液器的枪头。'
+        template = '选择合适的移液器，调整移液器至正确的量程，保证正确插入移液器吸头。'
+        composed = _compose_cat_candidate_text(source, template)
+        self.assertFalse(polish_lab._is_duplicated_clause_splice(source, composed, template))
+        hits = _simple_match(source, [{'text': template, 'id': 'pipette'}], source_sentence=source)
+        self.assertTrue(hits)
+
+    def test_container_paraphrase_is_not_hard_conflict(self):
+        source = '注意：加载样本和试剂时移液器要插到底，但是力气不可过大，避免破坏芯片'
+        template = '加载试剂和样本时，移液器吸头应插到底，不可过于用力，避免损坏样本制备卡。'
+        ok, reason = polish_lab._key_term_anchor_consistent(source, template)
+        self.assertTrue(ok)
+        self.assertEqual(reason, '')
+        hits = _simple_match(source, [{'text': template, 'id': 'chip'}], source_sentence=source)
+        self.assertTrue(hits)
+
+    def test_compose_locks_reagent_name_token(self):
+        source = '如B1-WGS-PCR代表该试剂应加载到操作指示卡上的B1孔位；'
+        template = '如【B1-WGS-DNBB】代表该试剂应加载到操作指示卡上的B1孔位。'
+        composed = _compose_cat_candidate_text(source, template)
+        self.assertIn('B1-WGS-PCR', composed)
+        self.assertNotIn('B1-WGS-DNBB', composed)
+        hits = _simple_match(source, [{'text': template, 'id': 'reagent'}], source_sentence=source)
+        for item in hits:
+            self.assertIn('B1-WGS-PCR', item.get('template_text') or '')
+            self.assertNotIn('B1-WGS-DNBB', item.get('template_text') or '')
+
+    def test_compose_locks_kit_version_token(self):
+        source = '取出DNBelab-D4RS样本制备套件A中的制备卡。'
+        template = '取出DNBelab-D4RS样本制备卡套件B中的制备卡。'
+        composed = _compose_cat_candidate_text(source, template)
+        self.assertIn('样本制备套件A', composed)
+        self.assertNotIn('套件B', composed)
+        hits = _simple_match(source, [{'text': template, 'id': 'kit'}], source_sentence=source)
+        for item in hits:
+            text = item.get('template_text') or ''
+            self.assertIn('套件A', text)
+            self.assertNotIn('套件B', text)
+
+    def test_punctuation_only_well_count_is_grammar(self):
+        source = 'A346-WGS-EB代表该试剂应该加载到A3,A4,A6三个孔位。'
+        revised = 'A346-WGS-EB代表该试剂应该加载到A3、A4、A6三个孔位。'
+        self.assertEqual(
+            polish_lab._cat_report_change_category(source, revised, 'modify'),
+            'grammar',
+        )
+
+    def test_diagnose_locks_reagent_and_kit_tokens(self):
+        reagent = _filter_cat_artifact_diagnoses(
+            [{
+                'sentence_index': 25,
+                'quote': '实验前需提前将冷藏试剂中的两种磁珠（A18-WGS-BE和S1234-WGS-SPB）室温平衡半个小时。',
+                'revised': '实验前需提前将冷藏试剂中的两种磁珠（A57-WGS-BE和S1234-WGS-SPB）室温平衡半个小时。',
+                'category': 'term',
+            }],
+            [{'sentence_index': 25, 'source_sentence_text': '实验前需提前将冷藏试剂中的两种磁珠（A18-WGS-BE和S1234-WGS-SPB）室温平衡半个小时。'}],
+        )
+        self.assertEqual(reagent, [])
+        kit = _filter_cat_artifact_diagnoses(
+            [{
+                'sentence_index': 31,
+                'quote': '取出DNBelab-D4RS样本制备套件A中的制备卡，利用DNBelab-D4RS样本制备系统上的扫码枪扫描制备卡包装上的二维码，录入制备卡信息。',
+                'revised': '取出DNBelab-D4RS样本制备卡套件B中的制备卡，利用DNBelab-D4RS样本制备系统上的扫码枪扫描制备卡包装上的二维码，录入制备卡信息。',
+                'category': 'term',
+            }],
+            [{'sentence_index': 31, 'source_sentence_text': '取出DNBelab-D4RS样本制备套件A中的制备卡，利用DNBelab-D4RS样本制备系统上的扫码枪扫描制备卡包装上的二维码，录入制备卡信息。'}],
+        )
+        self.assertEqual(kit, [])
+
 
 if __name__ == '__main__':
     unittest.main()

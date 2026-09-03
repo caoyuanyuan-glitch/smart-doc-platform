@@ -618,7 +618,7 @@ REFERENCE_SENTENCE_GUIDE_FILENAMES = {
     "句式表达参考手册_建库试剂说明书.md",
 }
 BUNDLED_SENTENCE_GUIDE_RELATIVE_PATHS = [
-    os.path.join("static", "bundled", "structured_sentence_guide_d4rs_operations.md"),
+    os.path.join("static", "bundled", "DNBelab-D4RS_试剂套装_句子分类汇总.md"),
 ]
 
 # 默认写作风格指南文件 ID（写作规范 / 写作风格指南 / 中文技术文档写作风格指南）
@@ -787,6 +787,8 @@ def _looks_like_title_or_noun_phrase(text: str) -> bool:
         '按照', '用于', '适用于', '分为',
     ]
     if _extract_sentence_intent(value).get('actions'):
+        return False
+    if len(value) >= 18 and re.search(r'[，,；;]', value):
         return False
     return not any(marker in value for marker in verb_markers)
 
@@ -1455,6 +1457,12 @@ def _template_replace_guard(sentence: str, template: str, match_level: str, scor
         )
 
     return False
+
+
+def _is_terminal_punct_only_edit(source_text: str, candidate_text: str) -> bool:
+    source_core = re.sub(r'[。.!！？?\s]+$', '', str(source_text or '').strip())
+    candidate_core = re.sub(r'[。.!！？?\s]+$', '', str(candidate_text or '').strip())
+    return bool(source_core) and source_core == candidate_core and str(source_text or '').strip() != str(candidate_text or '').strip()
 
 
 # 核心动词列表（技术文档常见操作动词）
@@ -5195,6 +5203,12 @@ def _preferred_sentence_entries(rule: dict, single_clause_only: bool = False) ->
             clause_text = clause.strip()
             if len(_normalize_sentence_for_match(clause_text)) < 8 or clause_text in seen:
                 continue
+            if not re.search(r'[。！？；!?;]$', clause_text):
+                if len(_normalize_cat_length_text(clause_text)) < 15:
+                    continue
+                clause_text = f'{clause_text}。'
+            if clause_text in seen:
+                continue
             expanded.append(clause_text)
             seen.add(clause_text)
     return expanded
@@ -5326,6 +5340,11 @@ def _filter_candidate_templates(sentence: str, templates: list) -> list:
             clause_score * 10 +
             tech_overlap * 4
         )
+        latin_overlap = len(_extract_latin_ident_tokens(source_sentence) & _extract_latin_ident_tokens(template_text))
+        if latin_overlap:
+            score += latin_overlap * 8
+        if similarity >= 0.32:
+            score += 24
         if source_markers and score < 1.2 and action_overlap <= 0 and clause_score < 0.18:
             continue
         ranked.append((score, clause_score, similarity, pair_overlap, marker_overlap, action_overlap, ui_overlap, -index, template))
@@ -6132,10 +6151,11 @@ _CAT_RULE_ONLY_LEGACY_PENDING_THRESHOLD = 0.54
 
 _CAT_KEYWORD_ENTITY_PATTERNS = [
     (re.compile(r'\b(?:货号|型号|编号|序列号|No\.?|Part\s*#|CAT\s*#)?\s*[:：]?\s*([A-Za-z0-9\-]{6,})\b', re.IGNORECASE), "编号/货号/型号"),
-    (re.compile(r'(?:套件|试剂盒|Kit|制备套件)\s*([A-Z])\b'), "套件版本"),
+    (re.compile(r'[\u4e00-\u9fff]*?(?:套件|试剂盒|Kit)\s*[A-Z](?![A-Za-z0-9])'), "套件版本"),
     (re.compile(r'\b[Vv]\s*(\d+(?:\.\d+)*)\b'), "版本号"),
     (re.compile(r'\b([A-Z]{2,}SEQ-[A-Za-z0-9]+(?:\s+[A-Z]{2}(?![A-Za-z]))?)'), "测序平台"),
     (re.compile(r'\b(DNBelab-[A-Za-z0-9]+(?:\s+[A-Z]{2}(?![A-Za-z]))?)'), "仪器型号"),
+    (re.compile(r'(?<![A-Za-z0-9])([A-Z]\d{1,4}-[A-Z]{2,}-[A-Za-z0-9]+)(?![A-Za-z0-9])'), "试剂名"),
     (re.compile(r'([A-Za-z0-9\-]*[\u4e00-\u9fffA-Za-z0-9\-（）()]{0,24}试剂套装)'), "试剂套装名"),
     (re.compile(r'@([A-Za-z0-9.-]+\.[A-Za-z]{2,})', re.IGNORECASE), "邮箱域名"),
     (re.compile(r'(\d+(?:\.\d+)?)\s*(μL|µL|uL|mL|ng|μg|µg|mg|°C|℃|°)(?![A-Za-z])', re.IGNORECASE), "数值"),
@@ -6147,6 +6167,8 @@ _CAT_ENTITY_BACKFILL_LABELS = {
     '测序平台',
     '仪器型号',
     '试剂套装名',
+    '试剂名',
+    '套件版本',
 }
 _CAT_MODEL_BACKFILL_LABELS = {'测序平台', '仪器型号'}
 _CN_CARDINAL_DIGITS = {
@@ -6269,6 +6291,21 @@ _CAT_CONDITION_ACTION_CONFLICT_GROUPS = {
     'thaw_method': {'室温解冻', '常温解冻', '冰上解冻', '水浴解冻'},
     'post_thaw_placement': {'置于冰上', '冰上备用', '室温放置'},
 }
+
+_CAT_LEADING_COVERBS = ('利用', '通过', '采用')
+_OD_SPEC_RE = re.compile(
+    r'(OD\s*[₂2]60\s*/\s*OD\s*[₂2](?:80|30))\s*([=＝＞>≥])\s*([0-9.]+)(?:\s*[~～\-至]\s*([0-9.]+))?',
+    re.I,
+)
+
+
+def _thaw_method_markers(text: str) -> set[str]:
+    raw = str(text or '')
+    return {
+        label
+        for label in _CAT_CONDITION_ACTION_CONFLICT_GROUPS['thaw_method']
+        if label in raw
+    }
 
 
 def _tokenize_cat_text(text: str) -> list[str]:
@@ -6513,7 +6550,26 @@ def _is_trivial_cat_artifact_edit(source_text: str, candidate_text: str) -> bool
     candidate_norm = _normalize_cat_artifact_text(candidate_text)
     if not source_norm or not candidate_norm:
         return False
-    return source_norm == candidate_norm
+    if source_norm == candidate_norm:
+        return True
+    if _is_compact_field_line(source_text) or _is_compact_field_line(candidate_text):
+        compact_source = re.sub(r'[：:。.!！？?\s]+', '', source_norm)
+        compact_candidate = re.sub(r'[：:。.!！？?\s]+', '', candidate_norm)
+        return bool(compact_source) and compact_source == compact_candidate
+    return False
+
+
+def _is_compact_field_line(text: str) -> bool:
+    value = re.sub(r'[。.!！？?]+$', '', str(text or '').strip())
+    if not value or '，' in value or ',' in value:
+        return False
+    return bool(re.fullmatch(r'.{1,16}[：:].{1,24}', value))
+
+
+def _is_terminal_punct_only_edit(source_text: str, candidate_text: str) -> bool:
+    source_core = re.sub(r'[。.!！？?\s]+$', '', str(source_text or '').strip())
+    candidate_core = re.sub(r'[。.!！？?\s]+$', '', str(candidate_text or '').strip())
+    return bool(source_core) and source_core == candidate_core and str(source_text or '').strip() != str(candidate_text or '').strip()
 
 
 def _has_missing_icon_button_name(text: str) -> bool:
@@ -6581,6 +6637,17 @@ def _filter_cat_artifact_diagnoses(diagnoses: Optional[list], sentence_items: Op
             or _is_dropped_cat_artifact_revision(quote, revised)
         ):
             continue
+        if revised:
+            locked = _backfill_critical_entities(original or quote, revised)
+            if locked != revised:
+                diag = dict(diag)
+                diag['revised'] = locked
+                revised = locked
+            if (
+                _is_dropped_cat_artifact_revision(original, revised)
+                or _is_dropped_cat_artifact_revision(quote, revised)
+            ):
+                continue
         kept.append(diag)
     return kept
 
@@ -6600,6 +6667,19 @@ def _filter_cat_artifact_diagnose_items(diagnose_items: Optional[list]) -> list:
             revised = str(cand.get('template_text') or cand.get('text') or '')
             if revised and _is_dropped_cat_artifact_revision(original, revised):
                 continue
+            if revised:
+                locked = _backfill_critical_entities(original, revised)
+                if locked != revised:
+                    cand = dict(cand)
+                    if cand.get('template_text'):
+                        cand['template_text'] = locked
+                    if cand.get('revised'):
+                        cand['revised'] = locked
+                    if cand.get('text') and not cand.get('template_text'):
+                        cand['text'] = locked
+                    revised = locked
+                if _is_dropped_cat_artifact_revision(original, revised):
+                    continue
             candidates.append(cand)
         if not candidates:
             continue
@@ -6645,8 +6725,19 @@ def _finalize_composed_cat_candidate(original: str, candidate: str, composed: st
     if _is_concatenated_context_merge(source_core, candidate_core, result_core):
         result = _reapply_sentence_prefix(source_text, candidate_text)
         result = _backfill_critical_entities(source_text, result)
-    result = _append_uncovered_trailing_clauses(source_text, result)
+    if _is_embedded_spec_rewrite(source_text, candidate_text):
+        patched = _apply_template_spec_bounds(source_text, candidate_text)
+        if patched:
+            result = patched
+        else:
+            result = _append_uncovered_trailing_clauses(source_text, result)
+    else:
+        result = _append_uncovered_trailing_clauses(source_text, result)
     result = _restore_source_quantity_forms(source_text, result)
+    result = _align_kit_term_to_source(source_text, result)
+    result = _restore_leading_coverb(source_text, result)
+    result = _collapse_conflicting_thaw_methods(source_text, result)
+    result = _restore_protected_latin_terms(source_text, result)
     return result
 
 
@@ -6695,6 +6786,11 @@ def _key_term_anchor_consistent(sentence: str, template: str) -> tuple[bool, str
                     return False, f'{group}:{conflict_label}冲突'
 
         if group in {'container', 'condition_action'} and overlap == 0.0 and sentence_only and template_only:
+            if group == 'container' and (
+                _sentence_similarity(sentence, template) >= 0.32
+                or _clause_alignment_score(sentence, template) >= 0.25
+            ):
+                continue
             return False, f'{group}冲突'
 
         if group == 'workflow' and overlap < 0.5 and sentence_only and template_only:
@@ -6846,6 +6942,7 @@ def _apply_cat_surface_rules(text: str, term_dict: Optional[dict] = None, typo_d
         return value
     value = _apply_cat_terms(value, term_dict)
     value = _apply_cat_terms(value, typo_dict)
+    value = _normalize_cat_typography(value)
     value = value.replace('按要求', '按指示')
     value = re.sub(rf'(?<=\d)\s*(?=({_NUMBER_SPACE_UNITS})(?![A-Za-z]))', ' ', value)
     value = re.sub(r'\s+', ' ', value).strip()
@@ -6998,6 +7095,14 @@ def _append_uncovered_trailing_clauses(source_text: str, result: str) -> str:
     trailing = _uncovered_trailing_source_clauses(source_core, result_text)
     if not trailing or not result_text:
         return result_text
+    kept_thaws = _thaw_method_markers(source_text) or _thaw_method_markers(result_text)
+    if kept_thaws:
+        trailing = [
+            clause for clause in trailing
+            if not (_thaw_method_markers(clause) - kept_thaws)
+        ]
+        if not trailing:
+            return result_text
     terminal = ''
     terminal_match = re.search(r'([。.!！？?]+)\s*$', result_text)
     if terminal_match:
@@ -7073,7 +7178,179 @@ def _trim_redundant_cat_suffix(text: str) -> str:
 
 
 def _normalize_cat_length_text(text: str) -> str:
-    return re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', str(text or ''))
+    return re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', _normalize_cat_typography(text))
+
+
+_CAT_SUBSCRIPT_TRANS = str.maketrans('₀₁₂₃₄₅₆₇₈₉', '0123456789')
+_CAT_SUPERSCRIPT_TRANS = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹', '0123456789')
+
+
+def _normalize_cat_typography(text: str) -> str:
+    value = str(text or '')
+    value = value.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+    value = value.replace('～', '~')
+    return value.translate(_CAT_SUBSCRIPT_TRANS).translate(_CAT_SUPERSCRIPT_TRANS)
+
+
+def _extract_latin_ident_tokens(text: str) -> set[str]:
+    return {token.lower() for token in re.findall(r'[A-Za-z]{2,}[0-9]*', _normalize_cat_typography(text))}
+
+
+def _is_compact_complete_cat_template(text: str) -> bool:
+    value = str(text or '').strip()
+    if not re.search(r'[。！？!]$', value):
+        return False
+    length = len(_normalize_cat_length_text(value))
+    return 8 <= length <= 28
+
+
+def _is_embedded_spec_rewrite(source: str, template: str) -> bool:
+    if not _is_compact_complete_cat_template(template):
+        return False
+    source_len = len(_normalize_cat_length_text(source))
+    template_len = len(_normalize_cat_length_text(template))
+    if template_len == 0 or source_len < template_len * 2:
+        return False
+    return bool(_extract_latin_ident_tokens(source) & _extract_latin_ident_tokens(template))
+
+
+def _od_ratio_key(ratio: str) -> str:
+    return re.sub(r'\s+', '', _normalize_cat_typography(ratio)).lower()
+
+
+def _apply_template_spec_bounds(source: str, template: str) -> str:
+    source_text = str(source or '')
+    template_text = str(template or '')
+    template_specs = list(_OD_SPEC_RE.finditer(template_text))
+    if not source_text or not template_specs:
+        return ''
+    result = source_text
+    replaced = False
+    for spec in template_specs:
+        ratio_key = _od_ratio_key(spec.group(1))
+        operator = spec.group(2)
+        low = spec.group(3)
+        high = spec.group(4)
+
+        def _replace(match, key=ratio_key, op=operator, lo=low, hi=high):
+            nonlocal replaced
+            if _od_ratio_key(match.group(1)) != key:
+                return match.group(0)
+            replaced = True
+            if hi:
+                return f'{match.group(1)}{op}{lo}~{hi}'
+            return f'{match.group(1)}{op}{lo}'
+
+        result = _OD_SPEC_RE.sub(_replace, result)
+    return result if replaced else ''
+
+
+def _has_conflicting_placement_verb(source: str, template: str) -> bool:
+    source_text = str(source or '')
+    template_text = str(template or '')
+    return bool(
+        '嵌套' in source_text
+        and '嵌套' not in template_text
+        and re.search(r'放在|放置', template_text)
+    )
+
+
+def _align_kit_term_to_source(source: str, candidate: str) -> str:
+    source_text = str(source or '')
+    result = str(candidate or '')
+    if '试剂套装' in source_text and '试剂盒' in result:
+        result = result.replace('试剂盒', '试剂套装')
+    return result
+
+
+def _restore_leading_coverb(source: str, candidate: str) -> str:
+    source_text = str(source or '').strip()
+    candidate_text = str(candidate or '').strip()
+    if not source_text or not candidate_text:
+        return candidate_text
+    for coverb in _CAT_LEADING_COVERBS:
+        if not source_text.startswith(coverb) or candidate_text.startswith(coverb):
+            continue
+        rest = source_text[len(coverb):].lstrip('，,')
+        head = rest[:8]
+        if head and (candidate_text.startswith(head) or head in candidate_text[:20]):
+            return f'{coverb}{candidate_text}'
+    return candidate_text
+
+
+def _collapse_conflicting_thaw_methods(source: str, candidate: str) -> str:
+    result = str(candidate or '')
+    result_thaws = _thaw_method_markers(result)
+    if len(result_thaws) <= 1:
+        return result
+    keep = _thaw_method_markers(source)
+    keep_label = next(iter(keep), next(iter(result_thaws)))
+    for label in result_thaws:
+        if label != keep_label:
+            result = result.replace(label, '')
+    result = re.sub(r'[，,]{2,}', '，', result)
+    result = re.sub(r'，(?=[。.!！？?]|$)', '', result)
+    return result
+
+
+def _restore_protected_latin_terms(source: str, candidate: str) -> str:
+    result = str(candidate or '')
+    if not result:
+        return result
+    for phrase in sorted(_protected_latin_phrases(source), key=len, reverse=True):
+        if re.search(re.escape(phrase), result, flags=re.I):
+            continue
+        tokens = phrase.split()
+        if len(tokens) < 2:
+            continue
+        tail = tokens[-1]
+        result = re.sub(
+            rf'(?<![A-Za-z]){re.escape(tail)}(?![A-Za-z])',
+            phrase,
+            result,
+            count=1,
+            flags=re.I,
+        )
+    return result
+
+
+def _protected_latin_phrases(text: str) -> list[str]:
+    value = str(text or '')
+    phrases = [
+        re.sub(r'\s+', ' ', match.group(0))
+        for match in re.finditer(
+            r'\b[A-Za-z]{3,}(?:\s+[A-Za-z][A-Za-z0-9+\-]{1,})+\b',
+            value,
+        )
+    ]
+    phrases.extend(re.findall(r'\b[A-Z][A-Za-z]{3,}\b', value))
+    return list(dict.fromkeys(phrases))
+
+
+def _drops_protected_latin_terms(source: str, candidate: str) -> bool:
+    source_phrases = {item.lower() for item in _protected_latin_phrases(source)}
+    candidate_phrases = {item.lower() for item in _protected_latin_phrases(candidate)}
+    return bool(source_phrases - candidate_phrases)
+
+
+def _has_shared_conjunction_stem(source: str, template: str, conjunction: str = '以及') -> bool:
+    def stem(text: str) -> str:
+        value = re.sub(r'\s+', '', _normalize_cat_typography(_strip_cat_match_prefix(text)))
+        index = value.find(conjunction)
+        if index < 6:
+            return ''
+        return value[:index]
+
+    source_stem = stem(source)
+    template_stem = stem(template)
+    if not source_stem or not template_stem:
+        return False
+    shared = 0
+    for left, right in zip(source_stem, template_stem):
+        if left != right:
+            break
+        shared += 1
+    return shared >= 6
 
 
 def _is_fragment_candidate(source: str, candidate: str, min_ratio: float = 0.65, max_ratio: float = 1.55) -> bool:
@@ -7097,8 +7374,9 @@ def _is_valid_cat_template(text: str) -> bool:
     value = str(text or '').strip()
     if re.search(r'(?:孔位\s*)?[A-Za-z]\d\s*对应\s*(?:sample|样本)\s*[A-Za-z]?\d+', value, re.IGNORECASE):
         return True
-    if len(_normalize_cat_length_text(value)) < 15:
-        return False
+    normalized_len = len(_normalize_cat_length_text(value))
+    if normalized_len < 15:
+        return _is_compact_complete_cat_template(value)
     if re.search(r'[。！？；!?;]$', value):
         return True
     if ('：' in value or ':' in value) and re.search(r'@[A-Za-z0-9.-]+', value):
@@ -7225,7 +7503,8 @@ def _is_duplicated_clause_splice(source: str, composed: str, template: str) -> b
     template_text = str(template or '').strip()
     if not prefix or not composed_text.startswith(prefix):
         return False
-    if prefix in template_text:
+    prefix_core = _strip_cat_match_prefix(prefix) or prefix
+    if prefix in template_text or prefix_core in template_text:
         return False
     template_core = re.sub(r'[；;。.!！？?\s]+$', '', template_text)
     return bool(template_core) and template_core in composed_text
@@ -7240,11 +7519,12 @@ def _finish_cat_composed_text(
     merged_text = _trim_duplicated_leading_clause(str(merged_text or '').strip())
     merged_text = _trim_redundant_cat_suffix(merged_text)
     if trailing_figure_ref and trailing_figure_ref not in merged_text:
+        merged_text = re.sub(r'[。.!！？?]+\s*$', '', merged_text).rstrip('，,;；')
         merged_text = f'{merged_text}{trailing_figure_ref}'
-    if source_terminal:
+    if source_terminal or trailing_figure_ref:
         merged_text = re.sub(r'[；;]+\s*$', '', merged_text).rstrip()
         if not re.search(r'[。.!！？?]\s*$', merged_text):
-            merged_text = f'{merged_text}{source_terminal}'
+            merged_text = f'{merged_text}{source_terminal or "。"}'
         merged_text = re.sub(r'[；;]+(?=[。.!！？?]\s*$)', '', merged_text)
     return _reapply_sentence_prefix(source_text, merged_text)
 
@@ -7599,7 +7879,11 @@ def _should_keep_cat_candidate(original_text: str, candidate: dict, ai_semantic_
     filtered_score = _candidate_filtered_semantic_score(original_text, candidate, ai_semantic_active=ai_semantic_active)
     rescue_penalty = None
     rescue_penalty_reasons: list[str] = []
-    is_rule_rescue_band = (not ai_semantic_active) and filtered_score < _CAT_RULE_ONLY_LEGACY_PENDING_THRESHOLD and filtered_score >= pending_threshold
+    is_rule_rescue_band = (
+        (not ai_semantic_active)
+        and filtered_score < _CAT_RULE_ONLY_LEGACY_PENDING_THRESHOLD
+        and filtered_score >= 0.50
+    )
     if is_rule_rescue_band:
         rescue_penalty = _collect_match_penalties(original_text, template_text)
         rescue_penalty_reasons = list((rescue_penalty or {}).get('reasons', []) or [])
@@ -7647,13 +7931,19 @@ def _should_keep_text_manual_candidate(original_text: str, candidate: dict, ai_s
         return False
     string_score = float(candidate.get('string_score', 0.0) or 0.0)
     filtered_score = float(candidate.get('filtered_semantic_score', 0.0) or 0.0)
+    raw_template = str(candidate.get('raw_template_text', '') or template_text)
+    if (
+        _is_embedded_spec_rewrite(original_text, raw_template)
+        or _has_shared_conjunction_stem(original_text, raw_template)
+    ):
+        return string_score >= 0.34
     source_norm = _normalize_cat_length_text(original_text)
     template_norm = _normalize_cat_length_text(template_text)
     if not source_norm or not template_norm:
         return False
-    if len(template_norm) < len(source_norm):
-        return False
     keyword_overlap = _compare_semantic_keywords(original_text, template_text)
+    if len(template_norm) < len(source_norm) and keyword_overlap < 0.2:
+        return False
     return string_score >= 0.38 and filtered_score >= 0.38 and keyword_overlap >= 0.2
 
 
@@ -7714,6 +8004,7 @@ def _simple_match(
         if (
             not _cat_exact_duplicate(display_source_text, surface_display_text)
             and not _is_trivial_cat_artifact_edit(display_source_text, surface_display_text)
+            and not _is_terminal_punct_only_edit(display_source_text, surface_display_text)
         ):
             from app.utils.cat_diagnose import classify_surface_edit
             surface_kind = classify_surface_edit(display_source_text, surface_display_text)
@@ -7751,7 +8042,15 @@ def _simple_match(
         if sentence_len > 0 and raw_tpl_len > 0:
             raw_len_ratio = min(sentence_len, raw_tpl_len) / max(sentence_len, raw_tpl_len)
             template_slot_sample_mode = bool(_extract_slot_sample_pairs(template_match_text))
-            if raw_len_ratio < 0.45 and not (source_slot_sample_mode and template_slot_sample_mode):
+            skip_length_window = (
+                _is_embedded_spec_rewrite(source_match_text, tpl_text)
+                or _has_shared_conjunction_stem(source_match_text, template_match_text)
+            )
+            if (
+                raw_len_ratio < 0.45
+                and not (source_slot_sample_mode and template_slot_sample_mode)
+                and not skip_length_window
+            ):
                 _increment_debug_reason(debug_stats, 'pre_length_window')
                 continue
         if _has_conflicting_list_intro(display_source_text, tpl_text) or _has_conflicting_list_intro(source_match_text, template_match_text):
@@ -7762,6 +8061,14 @@ def _simple_match(
             or _has_conflicting_list_step_template(source_match_text, template_match_text)
         ):
             _increment_debug_reason(debug_stats, 'list_step_conflict')
+            continue
+        if _has_conflicting_placement_verb(source_match_text, template_match_text) or _has_conflicting_placement_verb(display_source_text, tpl_text):
+            _increment_debug_reason(debug_stats, 'placement_verb_conflict')
+            continue
+        raw_anchor_ok, raw_anchor_reason = _key_term_anchor_consistent(source_match_text, template_match_text)
+        if not raw_anchor_ok:
+            normalized_reason = re.sub(r'\s+', '_', str(raw_anchor_reason or 'other')).strip('_') or 'other'
+            _increment_debug_reason(debug_stats, f'anchor_mismatch:{normalized_reason}')
             continue
         display_tpl_text = _compose_cat_candidate_text(display_source_text, normalized_tpl_match_text or tpl_text)
         display_tpl_match_text = _prepare_cat_match_text(display_tpl_text, term_dict, typo_dict).strip() or display_tpl_text
@@ -7776,6 +8083,9 @@ def _simple_match(
         if _is_trivial_cat_artifact_edit(display_source_text, display_tpl_text):
             _increment_debug_reason(debug_stats, 'trivial_artifact')
             continue
+        if _drops_protected_latin_terms(display_source_text, display_tpl_text):
+            _increment_debug_reason(debug_stats, 'dropped_latin_term')
+            continue
 
         if _is_duplicated_clause_splice(display_source_text, display_tpl_text, tpl_text):
             _increment_debug_reason(debug_stats, 'duplicated_clause_splice')
@@ -7789,8 +8099,12 @@ def _simple_match(
             continue
 
         if _is_fragment_candidate(source_match_text, display_tpl_match_text):
-            _increment_debug_reason(debug_stats, 'fragment_or_length_window')
-            continue
+            if not (
+                _is_embedded_spec_rewrite(source_match_text, tpl_text)
+                or _has_shared_conjunction_stem(source_match_text, template_match_text)
+            ):
+                _increment_debug_reason(debug_stats, 'fragment_or_length_window')
+                continue
         score = _calc_similarity(source_match_text, display_tpl_match_text)
         raw_action_overlap = len(source_actions & template_actions)
         raw_clause_score = _clause_alignment_score(source_match_text, template_match_text)
@@ -7803,15 +8117,26 @@ def _simple_match(
         len_ratio = 0.0
         if sentence_len > 0 and tpl_len > 0:
             len_ratio = min(sentence_len, tpl_len) / max(sentence_len, tpl_len)
-            if len_ratio < 0.10:
+            skip_len_penalty = (
+                _is_embedded_spec_rewrite(source_match_text, tpl_text)
+                or _has_shared_conjunction_stem(source_match_text, template_match_text)
+            )
+            if len_ratio < 0.10 and not skip_len_penalty:
                 _increment_debug_reason(debug_stats, 'length_ratio_too_low')
                 continue
-            if len_ratio < 0.20:
+            if skip_len_penalty:
+                pass
+            elif len_ratio < 0.20:
                 score *= max(len_ratio / 0.20, 0.50)
             elif len_ratio < 0.35:
                 score *= max(len_ratio / 0.35, 0.75)
 
         effective_threshold = round(min_threshold, 4)
+        if (
+            _is_embedded_spec_rewrite(source_match_text, tpl_text)
+            or _has_shared_conjunction_stem(source_match_text, template_match_text)
+        ):
+            score = max(score, effective_threshold)
 
         if score < effective_threshold:
             _increment_debug_reason(debug_stats, 'below_threshold')
@@ -8311,6 +8636,7 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
                     resolved_terminology or {},
                     sentence_guide,
                     input_data.product_type or "",
+                    mode="single",
                 )
                 ai_diag = _filter_cat_artifact_diagnoses(ai_diag, sentence_items)
                 _persist_lab_diagnoses(db, ai_diag, sentence_items, source="text", source_name="文本润色")
@@ -11786,7 +12112,7 @@ def _generate_cat_html_report_impl(
         f.write(html)
 
 
-_CAT_REPLACE_NORMALIZE_PATTERN = re.compile(r'[\s\u3000，。；：！？,;:!?]')
+_CAT_REPLACE_NORMALIZE_PATTERN = re.compile(r'[\s\u3000，、。；：！？,;:!?]')
 
 
 def _normalize_cat_replace_text(text: str) -> str:
@@ -12289,6 +12615,7 @@ async def cat_analyze(
                         resolved_terms or {},
                         sentence_guide,
                         product_type or "",
+                        mode="single",
                     )
                     ai_diag = _filter_cat_artifact_diagnoses(ai_diag, unmatched)
                     _persist_lab_diagnoses(

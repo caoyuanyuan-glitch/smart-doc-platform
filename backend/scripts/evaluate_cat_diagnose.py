@@ -5,7 +5,7 @@
 
 `--prompt-version v0|current` 只替换 `_DIAGNOSE_PROMPT`。`--compare` 在同一输入上对比两个版本。
 
-`--mode single|decoupled` 选择单次调用或改写/校验解耦，默认 decoupled。
+`--mode single|decoupled` 选择单次调用或改写/校验解耦，默认 single。
 `--compare-mode` 在同一输入上对比 single 与 decoupled。
 """
 
@@ -413,8 +413,8 @@ async def main() -> int:
     parser.add_argument(
         "--mode",
         choices=["single", "decoupled"],
-        default="decoupled",
-        help="诊断调用模式，默认 decoupled（改写/校验拆分）",
+        default="single",
+        help="诊断调用模式，默认 single",
     )
     parser.add_argument(
         "--compare-mode",
