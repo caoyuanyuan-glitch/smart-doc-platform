@@ -12575,6 +12575,58 @@ def _run_single_provider_ai_review(review_id: int, content: str, document_langua
         return [], []
 
 
+def _run_staged_ai_windows(review_id, windows, document_language, ai_review_basis_sections, provider=None, document_name=None):
+    stats = {
+        "ai_request_count": 0,
+        "ai_success_count": 0,
+        "ai_fail_count": 0,
+        "ai_timeout_count": 0,
+    }
+    all_issues = []
+    seen = set()
+    for window in windows or []:
+        key = (window.get("start"), window.get("end"), window.get("text"))
+        if key in seen:
+            continue
+        seen.add(key)
+        chunk = str(window.get("text") or "")
+        if not chunk.strip():
+            continue
+        stats["ai_request_count"] += 1
+        selected_basis = _select_snippet_ai_review_basis(
+            chunk, ai_review_basis_sections, document_language=document_language
+        )
+        try:
+            chunk_issues, _cache_hit = _run_cached_ai_chunk_review(
+                review_id,
+                chunk,
+                document_language,
+                selected_basis,
+                _review_ai_chunk_timeout_seconds(chunk),
+                force_provider=provider,
+                document_name=document_name,
+                snippet_review=True,
+            )
+            stats["ai_success_count"] += 1
+            offset = int(window.get("start") or 0)
+            for issue in chunk_issues or []:
+                start, end = _parse_issue_position(issue.get("position"))
+                if end > start:
+                    issue["position"] = f"{start + offset}-{end + offset}"
+                    issue["source_start"] = start + offset
+                    issue["source_end"] = end + offset
+                issue["window_start"] = window.get("start")
+                issue["window_end"] = window.get("end")
+                all_issues.append(issue)
+        except concurrent.futures.TimeoutError:
+            stats["ai_timeout_count"] += 1
+            print(f"[审核] staged AI 窗口超时: start={window.get('start')}")
+        except Exception as exc:
+            stats["ai_fail_count"] += 1
+            print(f"[审核] staged AI 窗口失败: {exc}")
+    return all_issues, stats
+
+
 def _run_review_background(review_id: int, document_id: int, mode: str, provider: str = None, provider_list: list = None, visual_document_id: int = None, pairing_confirmed: bool = False):
     """后台执行审核任务（带进度更新）
     
@@ -12624,6 +12676,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         raw_pdf_content = content
         engine_mode = _review_base_mode(mode)
         snippet_review = _is_snippet_review_mode(mode)
+        from app.review_engine.staged_pipeline import resolve_pipeline_mode, run_staged_snippet_pipeline
+        pipeline_mode = resolve_pipeline_mode(snippet_review)
+        use_staged = snippet_review and pipeline_mode == "staged"
+        staged_diagnostics = {}
+        staged_ai_results = []
+        staged_ai_stats = {}
+        candidate_rule_issues = []
         if document.file_type == 'pdf':
             content = clean_pdf_text(content)
         original_content_length = len(content)
@@ -12708,9 +12767,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         print(f"[审核] AI客户端可用: {has_ai_client}, 模式={mode}, 引擎模式={engine_mode}, 片段审核={snippet_review}")
         use_new_rules = os.getenv("REVIEW_USE_NEW_RULES", "0") == "1"
         from app.review_engine.profile import enabled_rule_engines
-        enabled_engines = enabled_rule_engines(snippet_review=snippet_review, use_new_rules=use_new_rules)
+        enabled_engines = enabled_rule_engines(
+            snippet_review=snippet_review,
+            use_new_rules=use_new_rules,
+            pipeline_mode=pipeline_mode,
+        )
         print(
-            f"[审核] pipeline_mode=legacy enabled_rule_engines={enabled_engines} "
+            f"[审核] pipeline_mode={pipeline_mode} enabled_rule_engines={enabled_engines} "
             f"REVIEW_USE_NEW_RULES={int(use_new_rules)} cn_xref={CN_XREF_ENGINE_ID}"
         )
 
@@ -12902,6 +12965,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             _end_stage("rule_based_audit", output_count=rule_stage_output)
 
             skip_ai_fp_filter = snippet_review and engine_mode == "rule"
+            if use_staged:
+                skip_ai_fp_filter = True
             if has_ai_client and len(candidate_rule_issues) > 0 and not skip_ai_fp_filter:
                 _begin_stage("ai_false_positive_filter")
                 _stage_input_counts["ai_false_positive_filter"] = len(candidate_rule_issues)
@@ -12931,8 +12996,11 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             filter_dropped = rule_stage_output - len(candidate_rule_issues)
             _end_stage("ai_false_positive_filter", output_count=len(candidate_rule_issues), dropped_count=filter_dropped)
 
-            issues.extend(candidate_rule_issues)
-            print(f"[审核] 规则审核阶段共产出问题数={len(candidate_rule_issues)}")
+            if use_staged:
+                print(f"[审核] staged 规则候选={len(candidate_rule_issues)}，等待分层判定")
+            else:
+                issues.extend(candidate_rule_issues)
+                print(f"[审核] 规则审核阶段共产出问题数={len(candidate_rule_issues)}")
 
         ai_review_trace = {"enabled": False, "reason": "not_run"}
         ai_review_basis_sections = []
@@ -12943,7 +13011,72 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             ai_degraded_reason = "未检测到可用 AI provider，当前结果仅包含规则审核输出"
             ai_review_trace = {"enabled": False, "reason": "no_ai_provider"}
             print(f"[审核] AI审核降级: {ai_degraded_reason}")
-        if document.file_type != 'xlsx' and engine_mode in ["ai", "hybrid"] and has_ai_client:
+        if use_staged and document.file_type != 'xlsx' and engine_mode in ["ai", "hybrid"] and has_ai_client:
+            from app.review_engine.language_segments import segment_text_by_language
+            from app.review_engine.staged_pipeline import (
+                merge_context_windows,
+                select_ai_candidates,
+                select_high_risk_spans,
+            )
+            _begin_stage("ai_deep_review")
+            segments = segment_text_by_language(content)
+            staged_windows = merge_context_windows(
+                select_ai_candidates(candidate_rule_issues) + select_high_risk_spans(
+                    segments, candidate_rule_issues, content
+                ),
+                segments,
+                source_text=content,
+            )
+            ai_review_basis_sections = _build_ai_review_basis_sections(spec_texts, document_language)
+            ai_review_basis_sections = [
+                section for section in ai_review_basis_sections
+                if not section.get('is_checklist')
+            ]
+            ai_review_basis_sections.append({
+                "label": "文本片段审核范围",
+                "text": "【文本片段审核范围】\n检查句子和段落中的语法、拼写、术语，以及同一片段内的单位混用、体积/数量计算、时间与保存条件矛盾、步骤顺序问题。不要报告目录、章节结构、版式、交叉引用、安全合规、文件名或发布前自检问题。",
+                "priority": 6,
+                "language": "both",
+                "basis_type": "snippet_scope",
+                "tags": ["snippet", "grammar", "spelling", "term"],
+            })
+            _stage_input_counts["ai_deep_review"] = len(staged_windows)
+            single_provider = None
+            if provider_list:
+                single_provider = provider_list[0]
+            elif provider:
+                single_provider = provider
+            if staged_windows:
+                set_progress(review_id, 'running', 'AI智能审核', 65, f'正在复核 {len(staged_windows)} 个候选窗口...')
+                staged_ai_results, staged_ai_stats = _run_staged_ai_windows(
+                    review_id,
+                    staged_windows,
+                    document_language,
+                    ai_review_basis_sections,
+                    provider=single_provider,
+                    document_name=document.filename,
+                )
+            else:
+                print("[审核] staged 无 AI 窗口，跳过确定性规则的 AI 调用")
+            for issue in staged_ai_results:
+                issue["source"] = "ai"
+                issue["severity"] = issue.get("severity") or "general"
+                issue["category"] = issue.get("category") or "其他"
+                issue["original_text"] = issue.get("original_text") or ""
+                issue["rule"] = issue.get("rule") or "AI"
+            ai_calls = int(staged_ai_stats.get("ai_success_count") or 0)
+            ai_degraded = bool(staged_windows) and ai_calls <= 0
+            ai_degraded_reason = "AI provider 未完成有效调用，当前结果仅包含规则审核输出" if ai_degraded else ""
+            ai_review_trace = {
+                "enabled": bool(staged_windows),
+                "mode": "staged_windows",
+                "window_count": len(staged_windows),
+                "total_issue_count": len(staged_ai_results),
+                **staged_ai_stats,
+            }
+            _end_stage("ai_deep_review", output_count=len(staged_ai_results))
+            print(f"[审核] staged AI 窗口={len(staged_windows)} 结果={len(staged_ai_results)} stats={staged_ai_stats}")
+        elif document.file_type != 'xlsx' and engine_mode in ["ai", "hybrid"] and has_ai_client:
             _begin_stage("ai_deep_review")
             pre_ai_count = len(issues)
             _stage_input_counts["ai_deep_review"] = pre_ai_count
@@ -13094,6 +13227,20 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             ai_new_issues = len(issues) - pre_ai_count
             _end_stage("ai_deep_review", output_count=len(issues), dropped_count=0)
 
+        if use_staged:
+            issues, staged_diagnostics = run_staged_snippet_pipeline(
+                content,
+                candidate_rule_issues,
+                ai_results=staged_ai_results,
+                ai_unavailable=(engine_mode == "rule") or (not has_ai_client) or bool(ai_degraded),
+            )
+            print(
+                f"[审核] staged 最终问题={len(issues)} "
+                f"confirmed={staged_diagnostics.get('confirmed_count')} "
+                f"pending={staged_diagnostics.get('pending_count')} "
+                f"windows={staged_diagnostics.get('ai_window_count')}"
+            )
+
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
@@ -13201,7 +13348,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "general": len([i for i in issues if i.get("severity") == "general"]),
             "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
             "language": document_language,
-            "pipeline_mode": "legacy",
+            "pipeline_mode": pipeline_mode,
             "enabled_rule_engines": enabled_engines,
             "degraded": bool(ai_degraded),
             "degraded_reason": "ai_provider_unavailable" if ai_degraded and not has_ai_client else (ai_degraded_reason or ""),
@@ -13253,6 +13400,11 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             },
             "rule_gate_diagnostics": rule_gate_diagnostics,
             "issue_status_counts": issue_status_counts,
+            "staged": staged_diagnostics or None,
+            "confirmed_count": issue_status_counts.get("confirmed_count", 0),
+            "pending_count": issue_status_counts.get("pending_count", 0),
+            "ignored_count": issue_status_counts.get("ignored_count", 0),
+            "blocked_count": issue_status_counts.get("blocked_count", 0),
         })
 
         completion_message = f'审核完成，发现 {len(issues)} 个问题'

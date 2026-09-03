@@ -19,6 +19,16 @@ class ReviewOrchestrator:
         selected = select_review_issues(issues, **kwargs) if kwargs else select_review_issues(issues)
         return ReviewRunResult(issues=list(selected or []))
 
+    def run_staged(self, text: str, rule_candidates=None, ai_results=None, ai_unavailable: bool = False) -> ReviewRunResult:
+        from app.review_engine.staged_pipeline import run_staged_snippet_pipeline
+        issues, diagnostics = run_staged_snippet_pipeline(
+            text,
+            rule_candidates or [],
+            ai_results=ai_results,
+            ai_unavailable=ai_unavailable,
+        )
+        return ReviewRunResult(issues=issues, diagnostics=[diagnostics])
+
 
 class AICandidateEngine:
     def collect(self, issues) -> list[Any]:

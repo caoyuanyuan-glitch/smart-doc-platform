@@ -62,10 +62,12 @@ def rule_not_applicable_reason(rule_id: str, profile: dict) -> str:
     return ""
 
 
-def enabled_rule_engines(*, snippet_review: bool = False, use_new_rules: bool = False) -> list[str]:
+def enabled_rule_engines(*, snippet_review: bool = False, use_new_rules: bool = False, pipeline_mode: str = "") -> list[str]:
     engines = ["spelling_v1", "cn_xref_v2", "unit_format_v1"]
     if snippet_review:
         engines.append("snippet_content_v1")
+        if (pipeline_mode or "staged") == "staged":
+            engines.append("staged_pipeline_v1")
     if use_new_rules:
         engines.append("deterministic_v2")
     return engines
