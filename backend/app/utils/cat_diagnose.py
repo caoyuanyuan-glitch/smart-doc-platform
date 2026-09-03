@@ -117,7 +117,7 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 9. 禁止引用任何外部来源。你只能看到待审查句子、术语表和风格指南，看不到文档章节结构、版本记录、产品信息或文档主题。problem 不得以任何形式提及或暗示外部来源；判断依据只能来自句子本身、术语表或风格指南。
 10. 步骤动词与操作对象必须匹配。若同一句中动作施加的对象与后续录入、处理或目的对象不是同一实体，报 logic，severity 取 high。
 11. 术语不统一但意思相同（如「出库浓度」与「文库浓度」）→ category 取 word，severity 取 low。意思改变或数量错误 → severity 取 high。
-12. 专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta）不得在 revised 中删除，也不得把删除它们当作问题。
+12. 专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta）不得在 revised 中删除或改变大小写，也不得把删除它们当作问题。
 13. 缺少标点、仅改标点或格式 → severity 取 low。
 
 category 枚举：grammar, word, term, ambiguity, redundancy, logic, missing, risk
@@ -150,7 +150,7 @@ _REWRITE_PROMPT = """你是文本润色助手。你只负责改写，不解释�
 2. 禁止因为任何句外信息（包括你以为的"文档其他地方应该怎样"）改动本句。
 3. 只改有问题的部分，保持原句语义与术语不变。
 4. 不要解释修改原因。
-5. 不得删除专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta）。
+5. 不得删除专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta），也不得改变其大小写。
 【输出】只输出修订后的句子文本，不要任何附加内容。
 
 【待改写句子】
@@ -182,7 +182,7 @@ high = 照做会出错、人员安全、结论被误解
 medium = 费解可能出错、数据风险；错别字默认 medium
 low = 纯风格、标点、冗余
 数值、孔位数量、操作对象错误报 high。
-术语不统一但意思相同报 low；删除专业术语成分（如 total RNA、Meta）视为无需修改。
+术语不统一但意思相同报 low；删除或改变专业术语成分大小写（如 total RNA、Meta）视为无需修改。
 缺少标点、仅改标点或格式报 low。
 
 【倾向】默认接受修订，除非修订明显更差。
@@ -952,17 +952,18 @@ _PROTECTED_LATIN_PHRASE_RE = re.compile(
 def _protected_latin_phrases(text: str) -> set[str]:
     value = str(text or "")
     phrases = {
-        re.sub(r"\s+", " ", match.group(0)).lower()
+        re.sub(r"\s+", " ", match.group(0))
         for match in _PROTECTED_LATIN_PHRASE_RE.finditer(value)
     }
-    phrases.update(item.lower() for item in re.findall(r"\b[A-Z][A-Za-z]{3,}\b", value))
+    phrases.update(re.findall(r"\b[A-Z][A-Za-z]{3,}\b", value))
     return phrases
 
 
 def drops_protected_latin_terms(original: str, revised: str) -> bool:
     if not revised:
         return False
-    return bool(_protected_latin_phrases(original) - _protected_latin_phrases(revised))
+    revised_text = str(revised)
+    return any(phrase not in revised_text for phrase in _protected_latin_phrases(original))
 
 
 def _share_cjk_head(source: str, target: str) -> bool:

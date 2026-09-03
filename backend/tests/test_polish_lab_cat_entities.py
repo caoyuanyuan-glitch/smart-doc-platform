@@ -740,6 +740,37 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
         )
         self.assertEqual(kit, [])
 
+    def test_compose_trims_duplicated_search_clause(self):
+        duplicated = '搜索货号或产品名，搜索货号或产品名，下载说明书。'
+        self.assertEqual(
+            polish_lab._trim_duplicated_leading_clause(duplicated),
+            '搜索货号或产品名，下载说明书。',
+        )
+        source = '搜索货号或产品名，下载最新版说明书。'
+        template = '搜索货号或产品名，下载说明书。'
+        composed = _compose_cat_candidate_text(source, template)
+        self.assertEqual(composed.count('搜索货号或产品名'), 1)
+
+    def test_reapply_collapses_duplicated_notice_prefix(self):
+        original = '注意：操作前请阅读附录Ⅰ以及附录Ⅱ'
+        doubled = _reapply_sentence_prefix(original, '注意:操作前请阅读附录A以及附录B。')
+        self.assertEqual(doubled.count('注意'), 1)
+        self.assertTrue(doubled.startswith('注意：'))
+        collapsed = polish_lab._trim_duplicated_leading_clause('注意：注意：操作前请阅读附录A以及附录B。')
+        self.assertEqual(collapsed, '注意：操作前请阅读附录A以及附录B。')
+
+    def test_compose_restores_meta_case(self):
+        source = '本试剂套装适用于人、鼠 total RNA样本、Meta、病原微生物RNA等。'
+        lowered = '本试剂套装适用于人、鼠 total RNA样本、meta、病原微生物RNA等。'
+        composed = _compose_cat_candidate_text(source, lowered)
+        self.assertIn('Meta', composed)
+        self.assertNotIn('meta', composed)
+        self.assertTrue(polish_lab._drops_protected_latin_terms(source, lowered))
+        hits = _simple_match(source, [{'text': lowered, 'id': 'meta'}], source_sentence=source)
+        for item in hits:
+            self.assertIn('Meta', item.get('template_text') or '')
+            self.assertNotIn('meta', item.get('template_text') or '')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -884,6 +884,11 @@ def _split_notice_prefix(text: str) -> tuple[str, str]:
     return match.group(1), match.group(2).strip()
 
 
+def _collapse_repeated_notice_prefix(text: str) -> str:
+    value = str(text or '').strip()
+    return re.sub(r'^((?:请)?注意[：:])(?:\s*(?:请)?注意[：:])+', r'\1', value)
+
+
 def _should_add_contextual_terminal_punctuation(text: str) -> bool:
     value = str(text or '').strip()
     if not value or value.endswith(('。', '.', '！', '!', '？', '?', '；', ';', '：', ':')):
@@ -937,8 +942,10 @@ def _reapply_sentence_prefix(original: str, suggestion: str) -> str:
         result = f'{list_prefix}{result}'
 
     notice_prefix, _ = _split_notice_prefix(original)
-    if notice_prefix and not result.startswith(notice_prefix):
-        result = f'{notice_prefix}{result}'
+    if notice_prefix:
+        existing_notice, body = _split_notice_prefix(result)
+        result = f'{notice_prefix}{body if existing_notice else result}'
+    result = _collapse_repeated_notice_prefix(result)
 
     result = _normalize_terminal_sentence_punctuation(result)
     return re.sub(r'^(\d+(?:\.\d+)*)\.{2,}', r'\1.', result)
@@ -6566,12 +6573,6 @@ def _is_compact_field_line(text: str) -> bool:
     return bool(re.fullmatch(r'.{1,16}[：:].{1,24}', value))
 
 
-def _is_terminal_punct_only_edit(source_text: str, candidate_text: str) -> bool:
-    source_core = re.sub(r'[。.!！？?\s]+$', '', str(source_text or '').strip())
-    candidate_core = re.sub(r'[。.!！？?\s]+$', '', str(candidate_text or '').strip())
-    return bool(source_core) and source_core == candidate_core and str(source_text or '').strip() != str(candidate_text or '').strip()
-
-
 def _has_missing_icon_button_name(text: str) -> bool:
     """True when extraction dropped the icon button name: 界面上[的]按钮."""
     return bool(re.search(r'界面上\s*的?\s*按钮', str(text or '')))
@@ -6639,6 +6640,8 @@ def _filter_cat_artifact_diagnoses(diagnoses: Optional[list], sentence_items: Op
             continue
         if revised:
             locked = _backfill_critical_entities(original or quote, revised)
+            locked = _restore_protected_latin_terms(original or quote, locked)
+            locked = _trim_duplicated_leading_clause(locked)
             if locked != revised:
                 diag = dict(diag)
                 diag['revised'] = locked
@@ -6669,6 +6672,8 @@ def _filter_cat_artifact_diagnose_items(diagnose_items: Optional[list]) -> list:
                 continue
             if revised:
                 locked = _backfill_critical_entities(original, revised)
+                locked = _restore_protected_latin_terms(original, locked)
+                locked = _trim_duplicated_leading_clause(locked)
                 if locked != revised:
                     cand = dict(cand)
                     if cand.get('template_text'):
@@ -7298,10 +7303,12 @@ def _restore_protected_latin_terms(source: str, candidate: str) -> str:
     if not result:
         return result
     for phrase in sorted(_protected_latin_phrases(source), key=len, reverse=True):
-        if re.search(re.escape(phrase), result, flags=re.I):
+        if not phrase or phrase in result:
             continue
         tokens = phrase.split()
-        if len(tokens) < 2:
+        pattern = rf'(?<![A-Za-z]){re.escape(phrase)}(?![A-Za-z])'
+        result, replaced = re.subn(pattern, phrase, result, count=1, flags=re.I)
+        if replaced or len(tokens) < 2:
             continue
         tail = tokens[-1]
         result = re.sub(
@@ -7328,9 +7335,8 @@ def _protected_latin_phrases(text: str) -> list[str]:
 
 
 def _drops_protected_latin_terms(source: str, candidate: str) -> bool:
-    source_phrases = {item.lower() for item in _protected_latin_phrases(source)}
-    candidate_phrases = {item.lower() for item in _protected_latin_phrases(candidate)}
-    return bool(source_phrases - candidate_phrases)
+    candidate_text = str(candidate or '')
+    return any(phrase not in candidate_text for phrase in _protected_latin_phrases(source) if phrase)
 
 
 def _has_shared_conjunction_stem(source: str, template: str, conjunction: str = '以及') -> bool:
@@ -7426,12 +7432,14 @@ def _should_skip_context_merge(source_core: str, candidate_core: str, overall_si
 
 
 def _trim_duplicated_leading_clause(text: str) -> str:
-    value = str(text or '').strip()
+    value = _collapse_repeated_notice_prefix(str(text or '').strip())
     split_match = re.search(r'[，,；;、]', value)
     if not split_match:
         return value
     first = value[:split_match.start()].strip()
     rest = value[split_match.end():].strip()
+    if len(first) >= 4 and len(rest) >= 4 and rest.startswith(first):
+        return rest
     if len(first) < 12 or len(rest) < 12:
         return value
     max_stem = min(len(first), 40)
@@ -7504,6 +7512,8 @@ def _is_duplicated_clause_splice(source: str, composed: str, template: str) -> b
     if not prefix or not composed_text.startswith(prefix):
         return False
     prefix_core = _strip_cat_match_prefix(prefix) or prefix
+    if composed_text.count(prefix) >= 2 or (prefix_core != prefix and composed_text.count(prefix_core) >= 2):
+        return True
     if prefix in template_text or prefix_core in template_text:
         return False
     template_core = re.sub(r'[；;。.!！？?\s]+$', '', template_text)
@@ -8005,6 +8015,7 @@ def _simple_match(
             not _cat_exact_duplicate(display_source_text, surface_display_text)
             and not _is_trivial_cat_artifact_edit(display_source_text, surface_display_text)
             and not _is_terminal_punct_only_edit(display_source_text, surface_display_text)
+            and not _drops_protected_latin_terms(display_source_text, surface_display_text)
         ):
             from app.utils.cat_diagnose import classify_surface_edit
             surface_kind = classify_surface_edit(display_source_text, surface_display_text)

@@ -132,6 +132,7 @@ class CatDiagnoseSwitchTest(unittest.TestCase):
 
         self.assertIn("意思相同", _DIAGNOSE_PROMPT)
         self.assertIn("total RNA", _DIAGNOSE_PROMPT)
+        self.assertIn("大小写", _DIAGNOSE_PROMPT)
 
     def test_same_meaning_term_unify_is_word_low(self):
         from app.utils.cat_diagnose import parse_diagnoses_payload
@@ -161,6 +162,21 @@ class CatDiagnoseSwitchTest(unittest.TestCase):
                 "severity": "medium",
                 "problem": "删除英文成分",
                 "revised": "本试剂套装适用于人、鼠样本、病原微生物RNA等。",
+            }]
+        }, allowed_indexes={0})
+        self.assertEqual(parsed, [])
+
+    def test_lowering_meta_is_dropped(self):
+        from app.utils.cat_diagnose import parse_diagnoses_payload
+
+        parsed = parse_diagnoses_payload({
+            "diagnoses": [{
+                "sentence_index": 0,
+                "quote": "本试剂套装适用于人、鼠 total RNA样本、Meta、病原微生物RNA等。",
+                "category": "word",
+                "severity": "low",
+                "problem": "英文大小写不规范",
+                "revised": "本试剂套装适用于人、鼠 total RNA样本、meta、病原微生物RNA等。",
             }]
         }, allowed_indexes={0})
         self.assertEqual(parsed, [])
