@@ -1,0 +1,15 @@
+{
+  "sample_id": "zh_technical_001",
+  "language": "zh-CN",
+  "issues": [
+    {"id": "Z01", "text": "涡漩", "category": "spelling", "expected": true, "severity": "high", "occurrence": 1},
+    {"id": "Z02", "text": "涡漩", "category": "spelling", "expected": true, "severity": "high", "occurrence": 2},
+    {"id": "Z03", "text": "或不避免", "category": "grammar", "expected": true, "severity": "high"},
+    {"id": "Z04", "text": "Intergra", "category": "spelling", "expected": true, "severity": "high"},
+    {"id": "Z05", "text": "第75页“标签序列选择”", "category": "cross_reference", "expected": true, "severity": "high", "needs_context": true},
+    {"id": "Z06", "text": "如表 9 所示", "category": "cross_reference", "expected": true, "severity": "high"},
+    {"id": "Z07", "text": "图3-1", "category": "cross_reference", "expected": false, "severity": "low", "note": "compound figure number should match caption"}
+  ],
+  "valid_expressions": ["DNBSEQ", "ssDNA", "fmol", "图 3-1", "表 92"],
+  "protected": ["DNBSEQ", "ssDNA", "Intergra"]
+}

@@ -1,0 +1,11 @@
+{
+  "sample_id": "high_risk_steps_001",
+  "language": "mixed",
+  "issues": [
+    {"id": "H01", "text": "涡漩", "category": "spelling", "expected": true, "severity": "high"},
+    {"id": "H02", "text": "发生化学反应而引起危险", "category": "style", "expected": true, "severity": "medium", "needs_context": true},
+    {"id": "H03", "text": "Do not start the run only if", "category": "logic", "expected": true, "severity": "high", "needs_context": true}
+  ],
+  "valid_expressions": ["FCS PE150", "4 ℃", "立即更新"],
+  "protected": ["FCS PE150"]
+}

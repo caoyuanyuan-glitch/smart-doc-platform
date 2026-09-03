@@ -1,0 +1,171 @@
+{
+  "review_mode": "snippet:rule",
+  "samples": [
+    {
+      "sample_id": "zh_technical_001",
+      "review_mode": "snippet:rule",
+      "actual_status": "completed",
+      "raw_rule_candidates": 8,
+      "raw_ai_candidates": 0,
+      "final_issues": [
+        {
+          "rule": "SNIPPET-TYPO-001",
+          "original_text": "Intergra",
+          "source": "rule"
+        },
+        {
+          "rule": "CYY-CN-SPELL-009",
+          "original_text": "涡漩",
+          "source": "rule"
+        },
+        {
+          "rule": "CYY-CN-SPELL-010",
+          "original_text": "Intergra",
+          "source": "rule"
+        },
+        {
+          "rule": "CYY-CN-GRAMMAR-014",
+          "original_text": "或不避免",
+          "source": "rule"
+        },
+        {
+          "rule": "SNIPPET-TYPO-001",
+          "original_text": "涡漩",
+          "source": "rule"
+        }
+      ],
+      "true_positives": [
+        "Z01",
+        "Z02",
+        "Z03",
+        "Z04",
+        "Z05"
+      ],
+      "false_positives": [],
+      "false_negatives": [
+        "Z06"
+      ],
+      "duplicates": 0,
+      "ai_call_count": 0,
+      "elapsed_ms": 365,
+      "summary_total": 5,
+      "issues_total": 5,
+      "precision": 1.0,
+      "recall": 0.8333,
+      "f1": 0.9091,
+      "document_language": "cn",
+      "expected_count": 6
+    },
+    {
+      "sample_id": "en_technical_001",
+      "review_mode": "snippet:rule",
+      "actual_status": "completed",
+      "raw_rule_candidates": 5,
+      "raw_ai_candidates": 0,
+      "final_issues": [
+        {
+          "rule": "DOC-TM-002",
+          "original_text": "CoreTM",
+          "source": "rule"
+        },
+        {
+          "rule": "SPELL",
+          "original_text": "accomodate",
+          "source": "spellcheck"
+        },
+        {
+          "rule": "UNIT-003",
+          "original_text": "uL",
+          "source": "rule"
+        },
+        {
+          "rule": "DOC-SPACE-003",
+          "original_text": "3000rpm",
+          "source": "rule"
+        }
+      ],
+      "true_positives": [
+        "E01",
+        "E02",
+        "E03"
+      ],
+      "false_positives": [
+        "SPELL"
+      ],
+      "false_negatives": [],
+      "duplicates": 0,
+      "ai_call_count": 0,
+      "elapsed_ms": 207,
+      "summary_total": 4,
+      "issues_total": 4,
+      "precision": 0.75,
+      "recall": 1.0,
+      "f1": 0.8571,
+      "document_language": "en",
+      "expected_count": 3
+    },
+    {
+      "sample_id": "mixed_technical_001",
+      "review_mode": "snippet:rule",
+      "actual_status": "completed",
+      "raw_rule_candidates": 1,
+      "raw_ai_candidates": 0,
+      "final_issues": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "duplicates": 0,
+      "ai_call_count": 0,
+      "elapsed_ms": 1,
+      "summary_total": 0,
+      "issues_total": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "document_language": "both",
+      "expected_count": 0
+    },
+    {
+      "sample_id": "high_risk_steps_001",
+      "review_mode": "snippet:rule",
+      "actual_status": "completed",
+      "raw_rule_candidates": 3,
+      "raw_ai_candidates": 0,
+      "final_issues": [
+        {
+          "rule": "CYY-CN-SPELL-009",
+          "original_text": "涡漩",
+          "source": "rule"
+        }
+      ],
+      "true_positives": [
+        "H01"
+      ],
+      "false_positives": [],
+      "false_negatives": [
+        "H02",
+        "H03"
+      ],
+      "duplicates": 0,
+      "ai_call_count": 0,
+      "elapsed_ms": 2,
+      "summary_total": 1,
+      "issues_total": 1,
+      "precision": 1.0,
+      "recall": 0.3333,
+      "f1": 0.5,
+      "document_language": "both",
+      "expected_count": 3
+    }
+  ],
+  "totals": {
+    "true_positives": 9,
+    "false_positives": 1,
+    "false_negatives": 3,
+    "precision": 0.9,
+    "recall": 0.75,
+    "f1": 0.8182,
+    "elapsed_ms": 575,
+    "ai_call_count": 0
+  }
+}

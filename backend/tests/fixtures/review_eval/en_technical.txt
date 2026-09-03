@@ -1,0 +1,6 @@
+Please accomodate the sample in the DNBSEQ system.
+The instrument can process 10 uL of reagent.
+Use the CoreTM processor if available.
+Do not mix the buffer before testing.
+Please recording the sample ID.
+Incubate at 3000rpm for 5 min.

@@ -1,0 +1,6 @@
+1. 打开仪器电源。
+2. 若未点击【立即更新】则无法关闭弹窗。
+Do not start the run only if the temperature is below 4 ℃.
+After loading, confirm FCS PE150 before you continue.
+禁止使用与设备零部件发生化学反应而引起危险的清洗剂。
+盖上管盖，涡漩振荡 5 秒。

@@ -1,0 +1,11 @@
+{
+  "sample_id": "en_technical_001",
+  "language": "en-US",
+  "issues": [
+    {"id": "E01", "text": "accomodate", "category": "spelling", "expected": true, "severity": "medium"},
+    {"id": "E02", "text": "Please recording", "category": "grammar", "expected": true, "severity": "medium", "needs_context": true},
+    {"id": "E03", "text": "3000rpm", "category": "unit_format", "expected": true, "severity": "low"}
+  ],
+  "valid_expressions": ["CoreTM", "DNBSEQ", "10 uL"],
+  "protected": ["DNBSEQ", "CoreTM", "10 uL"]
+}

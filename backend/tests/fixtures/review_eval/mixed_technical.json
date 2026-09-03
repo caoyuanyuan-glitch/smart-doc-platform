@@ -1,0 +1,9 @@
+{
+  "sample_id": "mixed_technical_001",
+  "language": "mixed",
+  "issues": [
+    {"id": "M01", "text": "文库定量", "category": "english_chinese_mix", "expected": false, "severity": "low", "note": "Chinese in a mixed paragraph is valid"}
+  ],
+  "valid_expressions": ["DNBSEQ", "10 μL", "图3", "文库定量"],
+  "protected": ["DNBSEQ", "10 μL"]
+}

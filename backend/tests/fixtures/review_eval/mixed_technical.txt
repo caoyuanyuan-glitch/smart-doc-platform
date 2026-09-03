@@ -1,0 +1,5 @@
+使用 DNBSEQ 测序仪完成测序。
+Please record the sample ID after 文库定量.
+10 μL Mix was added to each tube.
+如图3所示，完成装载。
+图3 文库定量界面
