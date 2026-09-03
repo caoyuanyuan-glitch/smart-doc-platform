@@ -116,9 +116,11 @@ def score_sample(gold: dict, issues: list) -> dict:
             continue
         false_positives.append(issue.get("rule") or original)
 
-    originals = [(_normalize(issue.get("original_text") or ""), issue.get("rule")) for issue in issues]
-    unique = set(originals)
-    duplicates = max(0, len(originals) - len(unique))
+    span_keys = []
+    for issue in issues:
+        start, end = review_api._parse_issue_position(issue.get("position"))
+        span_keys.append((issue.get("rule"), _normalize(issue.get("original_text") or ""), start, end))
+    duplicates = max(0, len(span_keys) - len(set(span_keys)))
 
     tp = len(true_positives)
     fp = len(false_positives)

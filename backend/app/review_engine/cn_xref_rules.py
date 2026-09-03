@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import re
 
-_AS_SHOWN_RE = re.compile(r'如(图|表)\s*(\d+)\s*所示')
-_NEAR_CAPTION_RE = re.compile(r'(图|表)\s*(\d+)\s+')
+_NUMBER_TOKEN = r'\d+(?:\s*[-–—.．.]\s*\d+)*'
+_AS_SHOWN_RE = re.compile(
+    rf'如\s*(图|表|Figure|Fig\.?|Table)\s*({_NUMBER_TOKEN})\s*所示',
+    re.IGNORECASE,
+)
+_NEAR_CAPTION_RE = re.compile(
+    rf'(图|表|Figure|Fig\.?|Table)\s*({_NUMBER_TOKEN})(?=\s|[“"「]|$)',
+    re.IGNORECASE,
+)
 _PAGE_QUOTE_RE = re.compile(r'第\s*(\d+)\s*页\s*[“"「]\s*([^”"」]{2,40}?)\s*[”"」]')
 _HEADING_LINE_RE = re.compile(r'(?m)^[ \t]*([\u4e00-\u9fffA-Za-z][^\n]{2,36})[ \t]*$')
 _TOC_TITLE_RE = re.compile(r'(?m)\|\s*([^|\n]{4,40}?)\s*\|\s*(\d{1,3})\s*$')
@@ -13,6 +20,31 @@ _STOP_TOKENS = {
     '根据', '参考', '进行', '计算', '每个', '所示', '如下', '以及', '或者',
     '所测得', '所需的', '投入的', '操作', '步骤', '体积',
 }
+
+
+CN_XREF_ENGINE_ID = "cn_xref_v2"
+
+
+def parse_reference_number(value: str) -> tuple[int, ...] | None:
+    """Normalize 3, 3-1, 3.1, 3．1, 3–1 and 3—1 to comparable parts."""
+    parts = [int(item) for item in re.findall(r'\d+', str(value or ''))]
+    return tuple(parts) if parts else None
+
+
+def format_reference_id(value: str) -> str | None:
+    parts = parse_reference_number(value)
+    if not parts:
+        return None
+    return '-'.join(str(part) for part in parts)
+
+
+def reference_kind_family(kind: str) -> str:
+    token = re.sub(r'\s+', '', str(kind or '')).rstrip('.').lower()
+    if token in {'图', 'figure', 'fig'}:
+        return 'figure'
+    if token in {'表', 'table'}:
+        return 'table'
+    return token
 
 
 def _tokens(text: str) -> set[str]:
@@ -85,20 +117,28 @@ def iter_cn_local_xref_hits(raw_content, normalized, page_spans=None):
         return
 
     for match in _AS_SHOWN_RE.finditer(text):
-        kind, cited = match.group(1), int(match.group(2))
+        kind = match.group(1)
+        cited = parse_reference_number(match.group(2))
+        if cited is None:
+            continue
         window = text[match.end(): match.end() + 280]
         caption = _NEAR_CAPTION_RE.search(window)
-        if not caption or caption.group(1) != kind:
+        if not caption or reference_kind_family(caption.group(1)) != reference_kind_family(kind):
             continue
-        actual = int(caption.group(2))
+        actual = parse_reference_number(caption.group(2))
+        if actual is None:
+            continue
         if actual == cited:
             continue
         original = re.sub(r'\s+', ' ', match.group(0)).strip()
+        kind_label = '图' if reference_kind_family(kind) == 'figure' else '表'
+        cited_label = '-'.join(str(part) for part in cited)
+        actual_label = '-'.join(str(part) for part in actual)
         yield (
             match.start(), match.end(), original,
             'CYY-CN-REF-006', '交叉引用',
-            f'建议改为“如下{kind}所示”或“如{kind} {actual} 所示”',
-            f'正文写“如{kind} {cited} 所示”，紧随其后的标题是“{kind} {actual}”，图表编号不一致。',
+            f'建议改为“如下{kind_label}所示”或“如{kind_label} {actual_label} 所示”',
+            f'正文写“如{kind_label} {cited_label} 所示”，紧随其后的标题是“{kind_label} {actual_label}”，图表编号不一致。',
             'CYY人工审核经验基线 - 近邻图表编号核对',
             'serious', 96,
         )

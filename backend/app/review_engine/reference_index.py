@@ -6,6 +6,8 @@ import json
 import re
 from collections import defaultdict
 
+from app.review_engine.cn_xref_rules import format_reference_id
+
 
 TARGET_FOUND = "target_found"
 TARGET_NOT_FOUND = "target_not_found"
@@ -13,11 +15,12 @@ TARGET_NOT_PARSED = "target_not_parsed"
 TARGET_VISUAL_ONLY = "target_visual_only"
 TARGET_AMBIGUOUS = "target_ambiguous"
 
-_FIGURE_CAPTION_RE = re.compile(r"(?im)^\s*(?:Figure|Fig\.?|图)\s*(\d+)\b[^\n]{0,120}")
-_TABLE_CAPTION_RE = re.compile(r"(?im)^\s*(?:Table|表)\s*(\d+)\b[^\n]{0,120}")
+_NUMBER_TOKEN = r"\d+(?:\s*[-–—.．.]\s*\d+)*"
+_FIGURE_CAPTION_RE = re.compile(rf"(?im)^\s*(?:Figure|Fig\.?|图)\s*({_NUMBER_TOKEN})\b[^\n]{{0,120}}")
+_TABLE_CAPTION_RE = re.compile(rf"(?im)^\s*(?:Table|表)\s*({_NUMBER_TOKEN})\b[^\n]{{0,120}}")
 _SECTION_CAPTION_RE = re.compile(r"(?m)^\s*(\d+(?:\.\d+)*)[\.)]?\s+[A-Z\u4e00-\u9fff][^\n]{2,}")
-_FIGURE_REF_RE = re.compile(r"(?i)(?:Figure|Fig\.?|图)\s*(\d+)")
-_TABLE_REF_RE = re.compile(r"(?i)(?:Table|表)\s*(\d+)")
+_FIGURE_REF_RE = re.compile(rf"(?i)(?:Figure|Fig\.?|图)\s*({_NUMBER_TOKEN})")
+_TABLE_REF_RE = re.compile(rf"(?i)(?:Table|表)\s*({_NUMBER_TOKEN})")
 _HEADING_PREFIX = re.compile(r"(?i)^(Figure|Fig\.?|图|Table|表)\s*")
 
 
@@ -78,14 +81,15 @@ def build_reference_index(text: str, *, visual_targets: dict | None = None, pars
 
     if parsed:
         for match in _FIGURE_CAPTION_RE.finditer(source):
-            add_target("figure", match.group(1), match, "docx")
+            add_target("figure", format_reference_id(match.group(1)) or match.group(1), match, "docx")
         for match in _TABLE_CAPTION_RE.finditer(source):
-            add_target("table", match.group(1), match, "docx")
+            add_target("table", format_reference_id(match.group(1)) or match.group(1), match, "docx")
         for match in _SECTION_CAPTION_RE.finditer(source):
             add_target("section", match.group(1), match, "docx")
 
     for ref_type in ("figure", "table"):
         for ref_id in visual_targets.get(ref_type) or []:
+            ref_id = format_reference_id(str(ref_id)) or str(ref_id)
             if ref_id in index[ref_type]:
                 index[ref_type][ref_id]["source_layer"] = "both"
                 continue
@@ -108,9 +112,10 @@ def _collect_refs(text: str, pattern: re.Pattern, ref_type: str) -> list[dict]:
     for match in pattern.finditer(text or ""):
         if _is_caption_line(text, match):
             continue
+        ref_id = format_reference_id(match.group(1)) or match.group(1)
         items.append({
             "reference_type": ref_type,
-            "reference_id": match.group(1),
+            "reference_id": ref_id,
             "original_text": match.group(0).strip(),
             "start": match.start(),
             "end": match.end(),

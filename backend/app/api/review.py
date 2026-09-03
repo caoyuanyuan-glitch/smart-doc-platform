@@ -49,7 +49,8 @@ from app.models.document import Document as DocumentModel
 from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
-from app.review_engine.cn_xref_rules import iter_cn_local_xref_hits
+from app.review_engine.cn_xref_rules import CN_XREF_ENGINE_ID, iter_cn_local_xref_hits
+from app.review_engine.language_segments import segment_text_by_language
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -454,6 +455,8 @@ def _is_snippet_scope_issue(issue):
     rule = str(_issue_value(issue, "rule", "") or "")
     description = str(_issue_value(issue, "description", "") or "")
     blob = f"{category} {rule} {description}"
+    if rule == "CYY-CN-REF-006":
+        return True
     if re.search(
         r"安全合规|交叉引用|主题结构|目录结构|文件名审核|版权年份|copyright.?year|"
         r"发布前自检|CHECKLIST-|CYY-CN-PAGE-|CYY-CN-LAYOUT-|CYY-CN-REVISION-|"
@@ -3320,7 +3323,10 @@ def _finalize_review_issues(issues, content, false_positive_signatures, snippet_
         ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
         print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
     before_cluster = len(issues)
-    issues = _cluster_merge_issues(issues)
+    if snippet_review:
+        print("[审核] 文本片段保留多位置命中，跳过同类问题聚合")
+    else:
+        issues = _cluster_merge_issues(issues)
     ai_filter_diagnostics["after_cluster_ai"] = _count_ai_issues(issues)
     if before_cluster != len(issues):
         print(f"[审核] 同类问题聚类: {before_cluster} -> {len(issues)}")
@@ -7804,12 +7810,12 @@ def _run_snippet_content_audit(content):
         original_text = re.sub(r'\s+', ' ', str(original_text or '')).strip()
         if not original_text:
             return
-        key = (rule, original_text[:80])
+        pos_start = max(int(start or 0), 0)
+        pos_end = max(int(end or 0), pos_start)
+        key = (rule, pos_start, pos_end, original_text[:80])
         if key in seen:
             return
         seen.add(key)
-        pos_start = max(int(start or 0), 0)
-        pos_end = max(int(end or 0), pos_start)
         issues.append({
             'severity': severity,
             'category': category,
@@ -7823,6 +7829,7 @@ def _run_snippet_content_audit(content):
             'confidence': confidence,
             'source': 'rule',
             'position': _encode_issue_position(pos_start, pos_end),
+            'occurrence_id': f'{rule}:{pos_start}:{pos_end}',
         })
 
     from app.utils.typo_dictionary import get_default_typo_dict
@@ -8102,7 +8109,9 @@ def _run_chinese_human_baseline_rules(content):
         original_text = re.sub(r'\s+', ' ', str(original_text or '')).strip()
         if not original_text:
             return
-        key = (rule, _normalize_search_text(original_text))
+        pos_start = max(int(start or 0), 0)
+        pos_end = max(int(end or 0), pos_start)
+        key = (rule, pos_start, pos_end, _normalize_search_text(original_text))
         if key in seen:
             return
         seen.add(key)
@@ -8119,6 +8128,7 @@ def _run_chinese_human_baseline_rules(content):
             'confidence': confidence,
             'source': 'rule',
             'position': _encode_issue_position(start, end),
+            'occurrence_id': f'{rule}:{pos_start}:{pos_end}',
         })
 
     page_offsets = []
@@ -11090,11 +11100,16 @@ def _run_manual_engineering_audit(content, file_type=None):
             )
 
     # English manuals should not contain Chinese residual text.
-    if document_language == "en":
-        for match in list(re.finditer(r"[\u4e00-\u9fff]+", content))[:20]:
+    for segment in segment_text_by_language(content):
+        if segment.get("language") != "en-US":
+            continue
+        for match in list(re.finditer(r"[\u4e00-\u9fff]+", segment.get("text") or ""))[:20]:
+            start = int(segment.get("start") or 0) + match.start()
+            end = int(segment.get("start") or 0) + match.end()
+            before = len(issues)
             add_issue(
-                match.start(),
-                match.end(),
+                start,
+                end,
                 match.group(0),
                 "ENG-CN-001",
                 "英文文档中文混入",
@@ -11104,6 +11119,8 @@ def _run_manual_engineering_audit(content, file_type=None):
                 "serious",
                 95,
             )
+            if len(issues) > before:
+                issues[-1]["segment_language"] = "en-US"
 
     # Revision History should list the latest version/date first.
     revision_match = re.search(r"Revision\s+History([\s\S]{0,2500}?)(?:Contents|Chapter\s+1|1\s+Product)", content, re.IGNORECASE)
@@ -12253,6 +12270,15 @@ def dedupe_issues_by_original(issues):
         b = re.sub(r'\s+', '', str(b_text or ''))
         return bool(a) and a == b
 
+    def _spans_compatible(left, right, near=4):
+        a0, a1 = _parse_issue_position(left.get("position"))
+        b0, b1 = _parse_issue_position(right.get("position"))
+        a_missing = not a0 and not a1
+        b_missing = not b0 and not b1
+        if a_missing or b_missing:
+            return True
+        return not (a1 + near < b0 or b1 + near < a0)
+
     # 第二步：去重（优先按原文+章节聚合，避免规则与 AI 对同一问题重复上报）
     seen = []
     for issue in filtered:
@@ -12268,11 +12294,10 @@ def dedupe_issues_by_original(issues):
             issue_chapter = _norm_chapter(issue.get("chapter"))
             if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
                 continue
-            if issue_identity_key(existing) == key or (
-                _same_issue(original_text, existing.get("original_text", ""))
-                and issue_chapter == existing_chapter
-                and issue_identity_key(existing)[5] == key[5]
-            ):
+            same_text = _same_issue(original_text, existing.get("original_text", ""))
+            same_sig = issue_identity_key(existing)[5] == key[5]
+            same_span = _spans_compatible(existing, issue)
+            if (issue_identity_key(existing) == key or (same_text and same_sig)) and same_span:
                 matched_index = index
                 break
         if matched_index is None:
@@ -12681,6 +12706,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         knowledge_basis = get_knowledge_basis(db)
         has_ai_client = ai_client.has_any_client
         print(f"[审核] AI客户端可用: {has_ai_client}, 模式={mode}, 引擎模式={engine_mode}, 片段审核={snippet_review}")
+        use_new_rules = os.getenv("REVIEW_USE_NEW_RULES", "0") == "1"
+        from app.review_engine.profile import enabled_rule_engines
+        enabled_engines = enabled_rule_engines(snippet_review=snippet_review, use_new_rules=use_new_rules)
+        print(
+            f"[审核] pipeline_mode=legacy enabled_rule_engines={enabled_engines} "
+            f"REVIEW_USE_NEW_RULES={int(use_new_rules)} cn_xref={CN_XREF_ENGINE_ID}"
+        )
 
         if document.file_type == 'xlsx':
             set_progress(review_id, 'running', 'Excel审核', 35, '正在执行 Excel 行级审核...')
@@ -13169,6 +13201,12 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "general": len([i for i in issues if i.get("severity") == "general"]),
             "suggestion": len([i for i in issues if i.get("severity") == "suggestion"]),
             "language": document_language,
+            "pipeline_mode": "legacy",
+            "enabled_rule_engines": enabled_engines,
+            "degraded": bool(ai_degraded),
+            "degraded_reason": "ai_provider_unavailable" if ai_degraded and not has_ai_client else (ai_degraded_reason or ""),
+            "rule_completed": True,
+            "ai_completed": bool(engine_mode in {"ai", "hybrid"} and has_ai_client and not ai_degraded),
             "layers": layer_counts,
             "cache_key": _build_review_cache_key(document, mode, visual_document=visual_doc, pairing=pairing, pairing_confirmed=pairing_confirmed),
             "cache_version": _review_cache_version(),

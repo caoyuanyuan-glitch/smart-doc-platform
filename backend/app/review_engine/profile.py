@@ -62,16 +62,33 @@ def rule_not_applicable_reason(rule_id: str, profile: dict) -> str:
     return ""
 
 
+def enabled_rule_engines(*, snippet_review: bool = False, use_new_rules: bool = False) -> list[str]:
+    engines = ["spelling_v1", "cn_xref_v2", "unit_format_v1"]
+    if snippet_review:
+        engines.append("snippet_content_v1")
+    if use_new_rules:
+        engines.append("deterministic_v2")
+    return engines
+
+
 def apply_rule_gating(issues: list, profile: dict) -> tuple[list, dict]:
     kept = []
     skipped = 0
     blocked = 0
     for issue in issues or []:
+        segment_language = str((issue or {}).get("segment_language") or "")
         reason = rule_not_applicable_reason(str(issue.get("rule") or ""), profile)
+        if segment_language:
+            if str(issue.get("rule") or "").upper() in ENGLISH_ONLY_RULES and segment_language != "en-US":
+                reason = "rule_not_applicable_to_document_profile"
+            elif str(issue.get("rule") or "").upper() in CHINESE_MIXED_RULES and segment_language == "en-US":
+                reason = "rule_not_applicable_to_document_profile"
+            else:
+                reason = ""
         if not reason:
             kept.append(issue)
             continue
-        language = str(profile.get("document_language") or "unknown")
+        language = segment_language or str(profile.get("document_language") or "unknown")
         if language == "unknown":
             issue = dict(issue)
             issue["status"] = "blocked"
