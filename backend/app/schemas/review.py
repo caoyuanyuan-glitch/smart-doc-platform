@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Optional, Union
 from datetime import datetime
 
 
@@ -40,16 +40,21 @@ class Review(BaseModel):
     summary: Optional[str] = ""
     created_at: datetime
     completed_at: Optional[datetime] = None
-    progress: Optional[ReviewProgress] = None
+    progress: Optional[Union[int, ReviewProgress]] = None
     judgment_stats: Optional[ReviewJudgmentStats] = None
     stage: Optional[str] = ""
     message: Optional[str] = ""
     heartbeat_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     input_pairing: Optional[dict] = None
-    diagnostics: Optional[dict] = None
+    diagnostics: Optional[Any] = None
     error_code: Optional[str] = None
     error_detail: Optional[str] = None
+    visual_document_id: Optional[int] = None
+    pairing_confirmed: Optional[bool] = False
+    pairing_status: Optional[str] = None
+    pairing_confidence: Optional[int] = None
+    input_mode: Optional[str] = None
 
     class Config:
         orm_mode = True

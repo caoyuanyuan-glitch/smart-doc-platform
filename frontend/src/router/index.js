@@ -297,4 +297,19 @@ router.beforeEach((to, from, next) => {
   next()
 })
 
+router.onError((error, to) => {
+  const message = error instanceof Error ? error.message : String(error || '')
+  const staleChunk = (
+    message.includes('Failed to fetch dynamically imported module') ||
+    message.includes('error loading dynamically imported module') ||
+    message.includes('Importing a module script failed')
+  )
+  if (!staleChunk) return
+  const key = 'vite-stale-chunk-reload'
+  const last = Number(sessionStorage.getItem(key) || 0)
+  if (Date.now() - last < 8000) return
+  sessionStorage.setItem(key, String(Date.now()))
+  window.location.assign(to?.fullPath || window.location.href)
+})
+
 export default router

@@ -38,8 +38,42 @@ function isUsefulBootstrapError(error) {
   return Boolean(error.message || error.reason || error.filename || error.error)
 }
 
+function errorMessage(error) {
+  if (error instanceof Error) return error.message || ''
+  if (typeof error === 'string') return error
+  return String(error?.message || error?.reason || '')
+}
+
+function isStaleChunkError(error) {
+  const message = errorMessage(error)
+  return (
+    message.includes('Failed to fetch dynamically imported module') ||
+    message.includes('error loading dynamically imported module') ||
+    message.includes('Importing a module script failed')
+  )
+}
+
+function reloadStaleChunkOnce() {
+  const key = 'vite-stale-chunk-reload'
+  const last = Number(sessionStorage.getItem(key) || 0)
+  if (Date.now() - last < 8000) return false
+  sessionStorage.setItem(key, String(Date.now()))
+  window.location.reload()
+  return true
+}
+
+let appReady = false
+
 window.addEventListener('error', (event) => {
   const payload = event.error || event
+  if (appReady && isStaleChunkError(payload) && reloadStaleChunkOnce()) {
+    event.preventDefault()
+    return
+  }
+  if (appReady) {
+    console.error('Runtime error', payload)
+    return
+  }
   if (!isUsefulBootstrapError(payload)) {
     console.warn('Ignored non-fatal window error event', event)
     return
@@ -49,11 +83,24 @@ window.addEventListener('error', (event) => {
 
 window.addEventListener('unhandledrejection', (event) => {
   const payload = event.reason || event
+  if (appReady && isStaleChunkError(payload) && reloadStaleChunkOnce()) {
+    event.preventDefault()
+    return
+  }
+  if (appReady) {
+    console.error('Unhandled rejection', payload)
+    return
+  }
   if (!isUsefulBootstrapError(payload)) {
     console.warn('Ignored non-fatal unhandledrejection event', event)
     return
   }
   renderBootstrapError(payload)
+})
+
+window.addEventListener('vite:preloadError', (event) => {
+  event.preventDefault()
+  reloadStaleChunkOnce()
 })
 
 async function bootstrap() {
@@ -68,6 +115,7 @@ async function bootstrap() {
     app.use(pinia)
     app.use(router)
     app.mount('#app')
+    appReady = true
   } catch (error) {
     console.error('Failed to bootstrap app', error)
     renderBootstrapError(error)

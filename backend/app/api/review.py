@@ -35,7 +35,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from app.database import get_db
 from app.crud.document import create_document, get_document, get_documents_by_ids, update_document_file_size, update_document_status
-from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue, list_false_positive_memory_signatures, delete_false_positive_memory_for_issue, upsert_false_positive_memory_for_issue, list_false_positive_memory, delete_false_positive_memory_entry
+from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue, list_false_positive_memory_signatures, delete_false_positive_memory_for_issue, upsert_false_positive_memory_for_issue, list_false_positive_memory, delete_false_positive_memory_entry, apply_review_pairing
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
 from app.models.term import Term
@@ -49,6 +49,7 @@ from app.models.document import Document as DocumentModel
 from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
+from app.review_engine.cn_xref_rules import iter_cn_local_xref_hits
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -260,16 +261,78 @@ def set_progress(review_id: int, status: str, step: str, progress: int, message:
 
 
 
-def _mark_review_as_failed(db: Session, review, message: str):
-    review = update_review_status(db, review.id, "failed", review.total_issues or 0, message)
-    set_progress(review.id, 'failed', '失败', 0, message, allow_when_cancelled=True)
+def _sanitize_error_detail(message: str) -> str:
+    text = str(message or "")
+    text = re.sub(r"(?i)(api[_-]?key|authorization|bearer|token|secret|password)\s*[:=]\s*\S+", r"\1=***", text)
+    text = re.sub(r"(?i)sk-[A-Za-z0-9]{8,}", "***", text)
+    text = re.sub(r"(?:[A-Za-z]:)?(?:/|\\)(?:[^\s:]{1,80}(?:/|\\))+[^\s:]{0,80}", "[path]", text)
+    return text[:2000]
+
+
+def _persist_review_outcome(db, review_id, status, *, message="", error_code="", error_detail="", stage="", total_issues=0, extra_summary=None):
+    detail = _sanitize_error_detail(error_detail or message)
+    safe_message = _sanitize_error_detail(message or detail)
+    payload = dict(extra_summary) if isinstance(extra_summary, dict) else {}
+    payload.update({
+        "error_code": error_code or payload.get("error_code") or "",
+        "error_detail": detail,
+        "stage": stage or payload.get("stage") or "",
+        "message": safe_message,
+        "total": total_issues,
+    })
+    summary = json.dumps(payload, ensure_ascii=False)
+    review = update_review_status(
+        db,
+        review_id,
+        status,
+        total_issues,
+        summary,
+        error_code=error_code or None,
+        error_message=detail or None,
+        stage=stage or "",
+        message=safe_message,
+    )
+    set_progress(review_id, status, stage or status, 0, safe_message, allow_when_cancelled=True)
     return review
+
+
+def _mark_review_as_failed(db: Session, review, message: str):
+    return _persist_review_outcome(
+        db,
+        review.id,
+        "failed",
+        message=message,
+        error_code="review_failed",
+        error_detail=message,
+        stage="failed",
+        total_issues=review.total_issues or 0,
+    )
 
 
 def _mark_review_as_cancelled(db: Session, review, message: str = "用户已停止审核"):
-    review = update_review_status(db, review.id, "cancelled", review.total_issues or 0, message)
-    set_progress(review.id, 'cancelled', '已停止', 0, message, allow_when_cancelled=True)
-    return review
+    return _persist_review_outcome(
+        db,
+        review.id,
+        "cancelled",
+        message=message,
+        error_code="cancelled",
+        error_detail=message,
+        stage="cancelled",
+        total_issues=review.total_issues or 0,
+    )
+
+
+def _mark_review_as_timeout(db: Session, review, message: str = "审核任务心跳超时，已回收"):
+    return _persist_review_outcome(
+        db,
+        review.id,
+        "timeout",
+        message=message,
+        error_code="timeout",
+        error_detail=message,
+        stage="timeout",
+        total_issues=review.total_issues or 0,
+    )
 
 
 def _reconcile_review_runtime_state(db: Session, review):
@@ -281,7 +344,7 @@ def _reconcile_review_runtime_state(db: Session, review):
         heartbeat = getattr(review, 'heartbeat_at', None) or getattr(review, 'started_at', None) or review.created_at
         timeout = max(30, _review_env_int('REVIEW_TASK_HEARTBEAT_TIMEOUT', '900'))
         if heartbeat and (datetime.utcnow() - heartbeat).total_seconds() > timeout:
-            return _mark_review_as_failed(db, review, '审核任务心跳超时，已回收')
+            return _mark_review_as_timeout(db, review, '审核任务心跳超时，已回收')
         return review
     if progress.get('status') == 'cancelled' or _is_review_cancelled(review.id):
         return _mark_review_as_cancelled(db, review)
@@ -406,6 +469,13 @@ def _is_snippet_scope_issue(issue):
         r"GRAMMAR|SPELL|TERM|CN-TYPO|PUNCT|UNIT-|DOC-SPACE|DOC-TM|DOC-FMT|"
         r"CYY-CN-UNIT|CYY-CN-FORMAT|CYY-CN-PUNCT|CYY-CN-SPELL|CYY-CN-TERM|"
         r"CYY-CN-GRAMMAR|CYY-CN-PRODUCT|DOC-DUP-00[45]|TYPO",
+        blob,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"逻辑|计算|步骤|矛盾|体积|时间|保存|"
+        r"LOGIC-|SNIPPET-",
         blob,
         re.IGNORECASE,
     ):
@@ -1043,6 +1113,29 @@ def _ensure_document_access(document, current_user: UserOut):
     return document
 
 
+def _document_is_deleted(document):
+    if document is None:
+        return True
+    if getattr(document, "deleted_at", None):
+        return True
+    if getattr(document, "is_deleted", False):
+        return True
+    return str(getattr(document, "status", "") or "").strip().lower() == "deleted"
+
+
+def _require_visual_pairing_document(db, visual_document_id, current_user: UserOut):
+    if visual_document_id in (None, "", False):
+        return None
+    visual_doc = get_document(db, document_id=visual_document_id)
+    if visual_doc is None or _document_is_deleted(visual_doc):
+        raise HTTPException(status_code=404, detail="Document not found")
+    if current_user.role != "admin" and getattr(visual_doc, "user_id", None) != current_user.id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if str(getattr(visual_doc, "file_type", "") or "").lower() != "pdf":
+        raise HTTPException(status_code=400, detail="视觉复核文件必须是 PDF")
+    return visual_doc
+
+
 def _require_review_access(db: Session, review_id: int, current_user: UserOut):
     review = get_review(db, review_id=review_id)
     if not review:
@@ -1093,31 +1186,88 @@ def _judgment_stats_map(db: Session, review_ids):
     return stats
 
 
+def _coerce_review_progress(review, review_dict, progress_info=None):
+    source = progress_info if isinstance(progress_info, dict) else review_dict.get("progress")
+    if isinstance(source, dict):
+        return {
+            "status": source.get("status") or getattr(review, "status", None) or "unknown",
+            "step": source.get("step") or review_dict.get("stage") or "",
+            "progress": int(source.get("progress") or 0),
+            "message": source.get("message") or review_dict.get("message") or "",
+            "timestamp": str(source.get("timestamp") or ""),
+        }
+    status = getattr(review, "status", None) or review_dict.get("status") or "unknown"
+    try:
+        percent = int(source or 0)
+    except (TypeError, ValueError):
+        percent = 100 if status == "completed" else 0
+    if status == "completed":
+        percent = 100
+    return {
+        "status": status,
+        "step": review_dict.get("stage") or "",
+        "progress": percent,
+        "message": review_dict.get("message") or "",
+        "timestamp": "",
+    }
+
+
+def _coerce_review_diagnostics(value):
+    if value in (None, "", {}, []):
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return {"raw": value}
+    if isinstance(value, list):
+        return {"stages": value}
+    if isinstance(value, dict):
+        return value
+    return {"value": value}
+
+
 def _serialize_review_list_item(db: Session, review, document_map, judgment_stats=None):
     review = _reconcile_review_runtime_state(db, review)
     doc = document_map.get(review.document_id)
     review_dict = review.__dict__.copy()
+    review_dict.pop("_sa_instance_state", None)
     review_dict['document_name'] = doc.filename if doc else ''
     review_dict['document_file_type'] = doc.file_type if doc else ''
     if not review_dict.get('summary'):
         review_dict['summary'] = '{}'
     progress_info = get_progress(review.id) if review.status == 'running' else None
-    if progress_info:
-        review_dict['progress'] = progress_info
-        review_dict['stage'] = progress_info.get('step') or review_dict.get('stage') or ''
-        if not review_dict.get('message'):
-            review_dict['message'] = progress_info.get('message') or ''
     review_dict['judgment_stats'] = judgment_stats or _empty_judgment_stats()
     summary = _load_review_summary(review.summary)
+    orm_pairing = {
+        "input_mode": getattr(review, "input_mode", None),
+        "pairing_status": getattr(review, "pairing_status", None),
+        "pairing_confidence": getattr(review, "pairing_confidence", None),
+        "visual_document_id": getattr(review, "visual_document_id", None),
+        "pairing_confirmed": bool(getattr(review, "pairing_confirmed", False)),
+        "content_document_id": getattr(review, "document_id", None),
+    }
     if isinstance(summary, dict):
-        review_dict['input_pairing'] = summary.get('input_pairing') or review_dict.get('input_pairing')
-        review_dict['error_code'] = summary.get('error_code') or review_dict.get('error_code')
-        review_dict['error_detail'] = summary.get('error_detail') or summary.get('error') or review_dict.get('error_detail')
+        summary_pairing = summary.get('input_pairing') if isinstance(summary.get('input_pairing'), dict) else {}
+        merged_pairing = {**(summary_pairing or {}), **{k: v for k, v in orm_pairing.items() if v not in (None, "")}}
+        review_dict['input_pairing'] = merged_pairing or review_dict.get('input_pairing')
+        review_dict['error_code'] = getattr(review, "error_code", None) or summary.get('error_code') or review_dict.get('error_code')
+        review_dict['error_detail'] = getattr(review, "error_message", None) or summary.get('error_detail') or summary.get('error') or review_dict.get('error_detail')
         review_dict['diagnostics'] = summary.get('stage_diagnostics') or summary.get('diagnostics') or review_dict.get('diagnostics')
         if not review_dict.get('stage'):
             review_dict['stage'] = summary.get('stage') or summary.get('step') or ''
         if not review_dict.get('message'):
             review_dict['message'] = summary.get('message') or summary.get('error_detail') or summary.get('error') or ''
+    else:
+        review_dict['input_pairing'] = {k: v for k, v in orm_pairing.items() if v not in (None, "")} or review_dict.get('input_pairing')
+        review_dict['error_code'] = getattr(review, "error_code", None) or review_dict.get('error_code')
+        review_dict['error_detail'] = getattr(review, "error_message", None) or review_dict.get('error_detail')
+    if progress_info:
+        review_dict['stage'] = progress_info.get('step') or review_dict.get('stage') or ''
+        if not review_dict.get('message'):
+            review_dict['message'] = progress_info.get('message') or ''
+    review_dict['progress'] = _coerce_review_progress(review, review_dict, progress_info)
+    review_dict['diagnostics'] = _coerce_review_diagnostics(review_dict.get('diagnostics'))
     return review_dict
 
 
@@ -1160,7 +1310,7 @@ async def review_progress_stream(
                 yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
             else:
                 # 如果状态已终结，发送最后一条并关闭
-                if status in ("completed", "failed", "error"):
+                if status in _REVIEW_TERMINAL_STATUSES:
                     yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
                     break
 
@@ -1169,7 +1319,7 @@ async def review_progress_stream(
                     yield f": heartbeat\n\n"
 
             # 状态已终结则关闭连接
-            if status in ("completed", "failed", "error"):
+            if status in _REVIEW_TERMINAL_STATUSES:
                 # 确保终态数据只发送一次
                 if current_hash != last_hash:
                     yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
@@ -2506,7 +2656,7 @@ def _review_ai_budget_reached(review_id, request_label='review.audit_chunk'):
     return total_tokens >= budget, summary
 
 
-def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections, provider=None, document_name=None):
+def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_sections, provider=None, document_name=None, snippet_review=False):
     content = content or ''
     total_length = len(content)
 
@@ -2514,13 +2664,18 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     use_full_doc_review = total_length <= SMALL_DOC_THRESHOLD and _review_ai_token_budget() <= 0
     if use_full_doc_review:
         print(f"[审核] 小文档 ({total_length} 字符)，使用全量不分块审核模式")
-        selected_basis = _select_relevant_ai_review_basis_compat(content, ai_review_basis_sections, document_language=document_language)
+        selected_basis = (
+            _select_snippet_ai_review_basis(content, ai_review_basis_sections, document_language=document_language)
+            if snippet_review else
+            _select_relevant_ai_review_basis_compat(content, ai_review_basis_sections, document_language=document_language)
+        )
         try:
             cache_kwargs = {}
             if provider is not None:
                 cache_kwargs["force_provider"] = provider
             if document_name is not None:
                 cache_kwargs["document_name"] = document_name
+            cache_kwargs["snippet_review"] = snippet_review
             all_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, content, document_language, selected_basis,
                 _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
@@ -2622,12 +2777,17 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             min(82, progress),
             f'正在进行AI快速增强 ({index}/{total})，规则已覆盖全文...',
         )
-        selected_basis = _select_relevant_ai_review_basis_compat(chunk, ai_review_basis_sections, document_language=document_language)
+        selected_basis = (
+            _select_snippet_ai_review_basis(chunk, ai_review_basis_sections, document_language=document_language)
+            if snippet_review else
+            _select_relevant_ai_review_basis_compat(chunk, ai_review_basis_sections, document_language=document_language)
+        )
         prompt_payload = ai_client.build_audit_prompt_payload(
             chunk,
             language=document_language,
             audit_basis=selected_basis,
             document_name=document_name,
+            snippet_review=snippet_review,
         )
         basis_labels = _extract_basis_labels_from_text(selected_basis)
         batch_size = max(1, _review_ai_chunk_limit(total_length))
@@ -2654,6 +2814,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 cache_kwargs["force_provider"] = provider
             if document_name is not None:
                 cache_kwargs["document_name"] = document_name
+            cache_kwargs["snippet_review"] = snippet_review
             chunk_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, chunk, document_language, selected_basis, chunk_timeout,
                 **cache_kwargs,
@@ -3114,7 +3275,7 @@ def _restore_high_value_rule_issues(selected_issues, candidate_issues):
     return restored
 
 
-def _finalize_review_issues(issues, content, false_positive_signatures):
+def _finalize_review_issues(issues, content, false_positive_signatures, snippet_review=False):
     ai_filter_diagnostics = {
         "initial_total": len(issues),
         "initial_ai": _count_ai_issues(issues),
@@ -3147,10 +3308,17 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
 
     pre_pipeline_issues = list(issues)
     before_pipeline_count = len(issues)
-    issues = pipeline_select_review_issues(issues)
-    issues = _restore_high_value_rule_issues(issues, pre_pipeline_issues + initial_issues)
-    ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
-    print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+    if snippet_review:
+        scoped = _filter_snippet_scope_issues(issues)
+        print(f"[审核] 文本片段跳过全文低价值过滤: {before_pipeline_count} -> {len(scoped)}")
+        issues = scoped
+        ai_filter_diagnostics["filter_mode"] = "snippet"
+        ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
+    else:
+        issues = pipeline_select_review_issues(issues)
+        issues = _restore_high_value_rule_issues(issues, pre_pipeline_issues + initial_issues)
+        ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
+        print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
     before_cluster = len(issues)
     issues = _cluster_merge_issues(issues)
     ai_filter_diagnostics["after_cluster_ai"] = _count_ai_issues(issues)
@@ -6156,6 +6324,40 @@ def _fetch_es_relevant_basis_sections(content, basis_sections, document_language
         return []
 
 
+def _select_snippet_ai_review_basis(content, basis_sections, document_language=None, char_budget=3200):
+    if not basis_sections:
+        return ""
+    pinned = []
+    preferred = []
+    for section in basis_sections:
+        basis_type = str(section.get("basis_type") or "")
+        label = str(section.get("label") or "")
+        if basis_type == "snippet_scope" or "文本片段审核范围" in label:
+            pinned.append(section)
+        elif basis_type in {"style_guide", "common_errors"}:
+            preferred.append(section)
+    selected = []
+    total_length = 0
+    for section in pinned + preferred:
+        text = str(section.get("text") or "").strip()
+        if not text:
+            continue
+        available = char_budget - total_length
+        if available <= 0:
+            break
+        clipped = text[:available].rstrip()
+        if not clipped:
+            continue
+        label = str(section.get("label") or "审核依据")
+        selected.append(f"## {label}\n{clipped}")
+        total_length += len(clipped)
+    if selected:
+        return "\n\n".join(selected)
+    return _select_relevant_ai_review_basis_compat(
+        content, basis_sections, document_language=document_language, max_sections=3, char_budget=char_budget
+    )
+
+
 def _select_relevant_ai_review_basis_compat(content, basis_sections, document_language=None, max_sections=3, char_budget=3200):
     try:
         return _select_relevant_ai_review_basis(
@@ -6347,25 +6549,73 @@ def _ai_provider_cache_fingerprint():
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None, review_id=None):
-    from app.review_engine.versions import BASIS_POLICY_VERSION, CHUNKER_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
+def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None, review_id=None, snippet_review=False):
+    from app.review_engine.versions import BASIS_POLICY_VERSION, CHUNKER_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION, VISUAL_POLICY_VERSION
     raw = "||".join([
         hashlib.sha1(str(chunk or "").encode("utf-8")).hexdigest(),
         hashlib.sha1(str(audit_basis or "").encode("utf-8")).hexdigest(),
         str(language or ""),
         str(document_name or ""),
+        "snippet" if snippet_review else "full",
         _review_cache_version(),
         _ai_provider_cache_fingerprint(),
         PROMPT_VERSION,
         FILTER_POLICY_VERSION,
         BASIS_POLICY_VERSION,
         CHUNKER_VERSION,
+        VISUAL_POLICY_VERSION,
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None):
-    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis, document_name=document_name, review_id=review_id)
+_CACHED_ISSUE_META_KEYS = {
+    "review_id", "document_id", "status", "id", "confirmed", "false_positive",
+    "ignored", "visual_verification", "providers", "position_status",
+    "manual_note", "judgment", "bbox", "page", "pdf_page", "page_number",
+}
+
+
+def _content_only_cached_issues(issues):
+    cleaned = []
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            continue
+        item = {}
+        for key, value in issue.items():
+            if key in _CACHED_ISSUE_META_KEYS or str(key).startswith("visual_"):
+                continue
+            item[key] = value
+        if isinstance(item.get("position"), str):
+            try:
+                position = json.loads(item.get("position") or "{}")
+            except Exception:
+                position = None
+            if isinstance(position, dict):
+                for key in list(position):
+                    if key in _CACHED_ISSUE_META_KEYS or str(key).startswith("visual_"):
+                        position.pop(key, None)
+                item["position"] = json.dumps(position, ensure_ascii=False) if position else ""
+        cleaned.append(item)
+    return cleaned
+
+
+def _bind_cached_issues(issues, review_id, document_id=None):
+    bound = []
+    for issue in _content_only_cached_issues(issues):
+        item = dict(issue)
+        item["review_id"] = review_id
+        if document_id is not None:
+            item["document_id"] = document_id
+        item["status"] = "pending"
+        bound.append(item)
+    return bound
+
+
+def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None, snippet_review=False):
+    cache_key = _build_ai_chunk_cache_key(
+        chunk, document_language, audit_basis,
+        document_name=document_name, review_id=review_id, snippet_review=snippet_review,
+    )
     if force_provider:
         cache_key = hashlib.sha1((cache_key + "|provider=" + force_provider).encode("utf-8")).hexdigest()
     cached = _ai_review_chunk_cache.get(cache_key)
@@ -6376,7 +6626,7 @@ def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis
     except (TypeError, ValueError):
         bypass_cache = False
     if cached is not None and not bypass_cache:
-        return deepcopy(cached), True
+        return _bind_cached_issues(deepcopy(cached), review_id), True
 
     # 构建文档上下文（包含文件名），让 AI 能检查文件名与内容的一致性
     chapter_context = {}
@@ -6396,11 +6646,13 @@ def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis
             "review.audit_chunk",
             chapter_context=chapter_context if chapter_context else None,
             force_provider=force_provider,
+            snippet_review=snippet_review,
         )
         chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
         _record_review_observations(review_id, result.get('observations') if isinstance(result, dict) else [])
-        _ai_review_chunk_cache[cache_key] = deepcopy(chunk_issues)
-        return chunk_issues, False
+        cleaned = _content_only_cached_issues(chunk_issues)
+        _ai_review_chunk_cache[cache_key] = cleaned
+        return _bind_cached_issues(cleaned, review_id), False
     finally:
         _AI_REVIEW_SEMAPHORE.release()
 
@@ -7539,6 +7791,203 @@ def _run_logic_integrity_audit(content):
     return issues
 
 
+def _run_snippet_content_audit(content):
+    issues = []
+    seen = set()
+    text = str(content or '')
+    if not text.strip():
+        return issues
+
+    volume_token = re.compile(r'(\d+(?:\.\d+)?)\s*(μL|µL|[uU][lL])')
+
+    def add_issue(start, end, original_text, rule, category, suggestion, description, audit_basis, severity='serious', confidence=92):
+        original_text = re.sub(r'\s+', ' ', str(original_text or '')).strip()
+        if not original_text:
+            return
+        key = (rule, original_text[:80])
+        if key in seen:
+            return
+        seen.add(key)
+        pos_start = max(int(start or 0), 0)
+        pos_end = max(int(end or 0), pos_start)
+        issues.append({
+            'severity': severity,
+            'category': category,
+            'rule': rule,
+            'chapter': '',
+            'original_text': original_text[:240],
+            'context': get_context(text, pos_start, pos_end, 120),
+            'suggestion': suggestion,
+            'description': description,
+            'audit_basis': audit_basis,
+            'confidence': confidence,
+            'source': 'rule',
+            'position': _encode_issue_position(pos_start, pos_end),
+        })
+
+    from app.utils.typo_dictionary import get_default_typo_dict
+    for wrong, right in get_default_typo_dict().items():
+        if not wrong:
+            continue
+        for match in re.finditer(re.escape(wrong), text):
+            add_issue(
+                match.start(), match.end(), match.group(0),
+                'SNIPPET-TYPO-001', '错别字/用词',
+                f'建议改为“{right}”',
+                f'“{wrong}”疑似“{right}”的错别字。',
+                '文本片段校对 - 常见错别字', 'serious', 96,
+            )
+
+    for match in re.finditer(r'\b([A-Z]{1,4}(?: [A-Z]{1,4})+)\b', text):
+        raw = match.group(1)
+        compact = raw.replace(' ', '')
+        if len(compact) < 3:
+            continue
+        if not re.search(r'(?<![A-Za-z])' + re.escape(compact) + r'(?![A-Za-z])', text):
+            continue
+        add_issue(
+            match.start(), match.end(), raw,
+            'SNIPPET-SPACE-001', '空格与排版',
+            f'建议改为“{compact}”',
+            f'大写术语被空格拆开，同一片段中另有连续写法“{compact}”。',
+            '文本片段校对 - 术语内部空格', 'serious', 94,
+        )
+
+    ascii_ul = list(re.finditer(r'\b\d+(?:\.\d+)?\s*[uU][lL]\b', text))
+    greek_ul = list(re.finditer(r'\d+(?:\.\d+)?\s*[μµ][Ll]', text))
+    if ascii_ul and greek_ul:
+        match = ascii_ul[0]
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'SNIPPET-UNIT-001', '单位格式',
+            '请将体积单位统一为 μL',
+            '同一片段中同时出现 ASCII“uL”与希腊字母“μL”，单位写法不一致。',
+            '文本片段校对 - 体积单位混用', 'general', 93,
+        )
+
+    for claim in re.finditer(r'总(?:反应)?体积\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(μL|µL|[uU][lL])', text):
+        claimed = float(claim.group(1))
+        volumes = []
+        window = text[claim.end():claim.end() + 700]
+        for line in window.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                if volumes:
+                    break
+                continue
+            found = list(volume_token.finditer(stripped))
+            if not found:
+                if volumes:
+                    break
+                continue
+            for item in found:
+                value = float(item.group(1))
+                if abs(value - claimed) < 1e-9:
+                    continue
+                volumes.append(value)
+        if len(volumes) >= 2:
+            total = sum(volumes)
+            if abs(total - claimed) > 0.05:
+                add_issue(
+                    claim.start(), claim.end(), claim.group(0),
+                    'SNIPPET-CALC-001', '数量计算',
+                    f'请核对配方加总（当前为 {total:g}）与总体积 {claimed:g}',
+                    f'列出的组分体积之和为 {total:g}，与声称总体积 {claimed:g} 不一致。',
+                    '文本片段校对 - 配方体积加总', 'serious', 95,
+                )
+
+    incubations = list(re.finditer(r'孵育\s*(\d+(?:\.\d+)?)\s*(min|分钟)', text))
+    completions = list(re.finditer(r'(\d+(?:\.\d+)?)\s*(min|分钟)\s*内(?:即可)?完成', text))
+    if incubations and completions:
+        incubate_value = float(incubations[0].group(1))
+        complete_value = float(completions[0].group(1))
+        if abs(incubate_value - complete_value) >= 0.5:
+            match = completions[0]
+            add_issue(
+                match.start(), match.end(), match.group(0),
+                'SNIPPET-TIME-001', '时间矛盾',
+                f'请统一孵育时间与完成时间（当前分别为 {incubate_value:g} 与 {complete_value:g}）',
+                f'前文孵育时间为 {incubate_value:g} {incubations[0].group(2)}，后文写在 {complete_value:g} {completions[0].group(2)} 内完成，两者冲突。',
+                '文本片段校对 - 时间自洽', 'serious', 94,
+            )
+
+    room_temp = re.search(r'室温放置', text)
+    strict_store = re.search(r'严格于', text)
+    cold_store = re.search(r'-?\s*20\s*℃', text)
+    if room_temp and strict_store and cold_store:
+        def _latin_names(anchor):
+            sent_start = max(0, text.rfind('。', 0, anchor.start()) + 1)
+            sent_end = text.find('。', anchor.end())
+            if sent_end < 0:
+                sent_end = min(len(text), anchor.end() + 80)
+            return set(re.findall(r'\b[A-Z][A-Za-z]{1,}\b', text[sent_start:sent_end]))
+        overlap = _latin_names(room_temp) & _latin_names(strict_store)
+        if overlap:
+            cold_after = re.search(r'-?\s*20\s*℃', text[strict_store.start():])
+            store_end = strict_store.start() + (cold_after.end() if cold_after else 12)
+            add_issue(
+                strict_store.start(), store_end,
+                text[strict_store.start():store_end],
+                'SNIPPET-STORE-001', '保存矛盾',
+                '请确认同一试剂是平衡至室温，还是必须保持冷冻保存。',
+                '同一试剂在片段中既出现室温放置，又要求严格于 -20 ℃ 保存，保存条件需要核对。',
+                '文本片段校对 - 保存条件自洽', 'general', 90,
+            )
+
+    per_well = re.search(r'每[孔管]\s*加入\s*(\d+(?:\.\d+)?)\s*(μL|µL|[uU][lL])', text)
+    reaction_count = re.search(r'共(?:进行)?\s*(\d+)\s*个反应', text)
+    prepared = re.search(r'准备\s*(\d+(?:\.\d+)?)\s*(μL|µL|[uU][lL])', text)
+    if per_well and reaction_count and prepared:
+        expected = float(per_well.group(1)) * int(reaction_count.group(1))
+        actual = float(prepared.group(1))
+        if abs(expected - actual) > 0.5:
+            add_issue(
+                prepared.start(), prepared.end(), prepared.group(0),
+                'SNIPPET-CALC-002', '数量计算',
+                f'按每份 {per_well.group(1)} × {reaction_count.group(1)} 份，准备量应为 {expected:g}',
+                f'每份用量 × 反应数 = {expected:g}，与准备量 {actual:g} 不一致。',
+                '文本片段校对 - 准备量与反应数', 'serious', 95,
+            )
+
+    issues.extend(_run_logic_integrity_audit(text))
+    previous_step = None
+    cursor = 0
+    for line in text.replace('\f', '\n').splitlines():
+        match = re.match(r'^(\s*)(?:Step\s+)?(\d+)([\.)])\s+\S', line, re.IGNORECASE)
+        if match and len(match.group(1)) < 2:
+            current = int(match.group(2))
+            if (
+                previous_step is not None
+                and 1 <= current <= 20
+                and 1 <= previous_step <= 20
+                and current < previous_step
+            ):
+                raw = line.strip()
+                pos = cursor + line.find(raw)
+                add_issue(
+                    pos, pos + len(raw), raw,
+                    'SNIPPET-STEP-001', '步骤顺序',
+                    '请按实际操作顺序重新编号步骤。',
+                    f'步骤编号从 {previous_step} 回到 {current}，顺序疑似颠倒。',
+                    '文本片段校对 - 步骤编号顺序', 'serious', 92,
+                )
+            previous_step = current
+        cursor += len(line) + 1
+
+    incubate = re.search(r'混匀后.{0,20}孵育|孵育\s*\d+', text)
+    add_reagent = re.search(r'加入.{0,24}(?:Buffer|Enzyme|Mix|试剂|酶)', text)
+    if incubate and add_reagent and incubate.start() < add_reagent.start():
+        add_issue(
+            incubate.start(), incubate.end(), incubate.group(0),
+            'SNIPPET-STEP-002', '步骤顺序',
+            '请确认加入试剂是否应发生在混匀孵育之前。',
+            '混匀/孵育出现在加入试剂之前，步骤顺序需要核对。',
+            '文本片段校对 - 操作依赖顺序', 'general', 88,
+        )
+
+    return issues
+
+
 def _span_in_tableish_text(text, start, end):
     value = str(text or '')
     line_start = value.rfind('\n', 0, start) + 1
@@ -7912,6 +8361,42 @@ def _run_chinese_human_baseline_rules(content):
             '建议改为“交互”',
             '“交户”疑似“交互”的错别字，界面说明中应使用“用户交互界面”。',
             'CYY人工审核经验基线 - 常见中文错别字', 'serious', 97,
+        )
+
+    for match in re.finditer(r'离新', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-008', '术语拼写',
+            '建议改为“离心”',
+            '“离新”疑似“离心”的错别字。',
+            'CYY人工审核经验基线 - 常见中文错别字', 'serious', 97,
+        )
+
+    for match in re.finditer(r'涡漩', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-009', '术语拼写',
+            '建议改为“涡旋”',
+            '“涡漩”疑似“涡旋”的错别字，操作步骤中应使用规范动词。',
+            'CYY人工审核经验基线 - 常见中文错别字', 'serious', 97,
+        )
+
+    for match in re.finditer(r'(?i)\bIntergra\b', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-010', '术语拼写',
+            '建议改为“Integra”',
+            '“Intergra”疑似品牌名“Integra”的拼写错误。',
+            'CYY人工审核经验基线 - 常见英文品牌拼写', 'serious', 97,
+        )
+
+    for match in re.finditer(r'或不避免', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-GRAMMAR-014', '语法表达',
+            '建议改为“或无法避免”或按语境改为“以避免”',
+            '“或不避免”语义不完整，常见于“如操作不当或不避免交叉污染”一类警告句。',
+            'CYY人工审核经验基线 - 不完整否定表达', 'serious', 96,
         )
 
     for match in re.finditer(r'加入至', normalized):
@@ -9065,6 +9550,9 @@ def _run_chinese_human_baseline_rules(content):
                 f'引用“步骤{cited_step}”指向第 {cited_page} 页，该步骤实际出现在第 {actual_page} 页。',
                 'CYY人工审核经验基线 - 步骤页码交叉引用', 'serious', 95,
             )
+
+    for hit in iter_cn_local_xref_hits(raw_content, normalized, page_spans):
+        add_issue(*hit)
 
     return issues
 
@@ -11296,7 +11784,7 @@ async def list_reviews(
     status: str | None = Query(default=None),
     latest_only: bool = Query(default=False),
     skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
@@ -11304,7 +11792,7 @@ async def list_reviews(
     status = _resolve_param_value(status)
     latest_only = bool(_resolve_param_value(latest_only, False))
     skip = max(0, int(_resolve_param_value(skip, 0) or 0))
-    limit = max(1, min(int(_resolve_param_value(limit, 20) or 20), 100))
+    limit = max(1, min(int(_resolve_param_value(limit, 20) or 20), 500))
     if _has_bound_current_user(current_user):
         reviews = _query_review_rows_for_user(
             db,
@@ -12131,9 +12619,22 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             fallback_reason=fallback_reason,
         )
         visual_doc = get_document(db, document_id=visual_document_id) if visual_document_id else None
+        if visual_doc is not None and _document_is_deleted(visual_doc):
+            visual_doc = None
         content_user = getattr(document, 'user_id', None)
         visual_user = getattr(visual_doc, 'user_id', None) if visual_doc is not None else None
-        same_user = content_user is None or visual_user is None or content_user == visual_user
+        same_user = visual_doc is None or content_user == visual_user
+        if visual_doc is not None and str(getattr(visual_doc, 'file_type', '') or '').lower() != 'pdf':
+            _persist_review_outcome(
+                db,
+                review_id,
+                "failed",
+                message="视觉复核文件必须是 PDF",
+                error_code="pairing_failed",
+                error_detail="视觉复核文件必须是 PDF",
+                stage="pairing",
+            )
+            return
         pairing = resolve_input_pairing(
             document,
             visual_doc,
@@ -12141,16 +12642,19 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             same_user=same_user,
             same_task=True,
         )
+        apply_review_pairing(db, review_id, pairing, pairing_confirmed=pairing_confirmed)
         if visual_document_id and (visual_doc is None or pairing.needs_user_confirm or pairing.pairing_status == 'unpaired'):
             fail_message = pairing.message or 'visual_document_missing'
-            fail_summary = json.dumps({
-                "error_code": "pairing_failed",
-                "error_detail": fail_message,
-                "input_pairing": pairing.to_dict(),
-                "total": 0,
-            }, ensure_ascii=False)
-            set_progress(review_id, 'failed', '配对失败', 0, fail_message)
-            update_review_status(db, review_id, "failed", 0, fail_summary)
+            _persist_review_outcome(
+                db,
+                review_id,
+                "failed",
+                message=fail_message,
+                error_code="pairing_failed",
+                error_detail=fail_message,
+                stage="pairing",
+                extra_summary={"input_pairing": pairing.to_dict()},
+            )
             return
         document_profile = build_document_profile(
             content,
@@ -12334,6 +12838,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     except Exception as e:
                         print(f"[审核] 中文人工基线高置信规则执行失败: {e}")
 
+                if snippet_review:
+                    try:
+                        snippet_content_issues = _run_snippet_content_audit(content)
+                        print(f"[审核] 片段内容规则发现问题: {len(snippet_content_issues)}个")
+                        rule_issues.extend(snippet_content_issues)
+                    except Exception as e:
+                        print(f"[审核] 片段内容规则执行失败: {e}")
+
                 if not snippet_review:
                     try:
                         release_checklist_issues = _run_release_checklist_audit(content, document, spec_texts, document_language)
@@ -12411,7 +12923,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 ]
                 ai_review_basis_sections.append({
                     "label": "文本片段审核范围",
-                    "text": "【文本片段审核范围】\n仅检查句子和段落中的语法、拼写、术语问题。不要报告目录、章节结构、版式、交叉引用、安全合规、文件名或发布前自检问题。",
+                    "text": "【文本片段审核范围】\n检查句子和段落中的语法、拼写、术语，以及同一片段内的单位混用、体积/数量计算、时间与保存条件矛盾、步骤顺序问题。不要报告目录、章节结构、版式、交叉引用、安全合规、文件名或发布前自检问题。",
                     "priority": 6,
                     "language": "both",
                     "basis_type": "snippet_scope",
@@ -12464,7 +12976,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                         review_id, content, document_language,
                         ai_review_basis_sections,
                         provider=single_provider,
-                        document_name=document.filename
+                        document_name=document.filename,
+                        snippet_review=snippet_review,
                     )
                     if isinstance(ai_review_trace, dict):
                         ai_chunk_meta = list(ai_review_trace.get("chunk_meta") or [])
@@ -12552,7 +13065,9 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
-        issues, ai_filter_diagnostics = _finalize_review_issues(issues, content, false_positive_signatures)
+        issues, ai_filter_diagnostics = _finalize_review_issues(
+            issues, content, false_positive_signatures, snippet_review=snippet_review
+        )
 
         validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
@@ -12711,12 +13226,29 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         print(f"[审核] 任务完成, review_id={review_id}, 问题数={len(issues)}")
 
     except ReviewCancelled as e:
-        set_progress(review_id, 'cancelled', '已停止', 0, str(e), allow_when_cancelled=True)
-        update_review_status(db, review_id, "cancelled", 0, str(e))
+        _persist_review_outcome(
+            db,
+            review_id,
+            "cancelled",
+            message=str(e),
+            error_code="cancelled",
+            error_detail=str(e),
+            stage="cancelled",
+        )
         print(f"[审核] 任务已停止, review_id={review_id}")
     except Exception as e:
-        set_progress(review_id, 'failed', '失败', 0, str(e), allow_when_cancelled=True)
-        update_review_status(db, review_id, "failed", 0, str(e))
+        is_timeout = isinstance(e, TimeoutError) or "timeout" in str(e).lower()
+        status = "timeout" if is_timeout else "failed"
+        error_code = "timeout" if is_timeout else "review_failed"
+        _persist_review_outcome(
+            db,
+            review_id,
+            status,
+            message=str(e),
+            error_code=error_code,
+            error_detail=str(e),
+            stage=status,
+        )
         print(f"[审核] 任务失败, review_id={review_id}, 错误={e}")
     finally:
         _clear_review_runtime_flags(review_id)
@@ -12825,16 +13357,22 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     except Exception as exc:
         db_provider = provider_list[0] if provider_list else provider
         review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider))
-        fail_summary = json.dumps({"error_code": "runtime_missing", "error_detail": str(exc), "total": 0}, ensure_ascii=False)
-        update_review_status(db, review.id, "failed", 0, fail_summary)
-        set_progress(review.id, 'failed', '运行时检查失败', 0, str(exc))
+        _persist_review_outcome(
+            db,
+            review.id,
+            "failed",
+            message=str(exc),
+            error_code="runtime_missing",
+            error_detail=str(exc),
+            stage="runtime",
+        )
         return {"review_id": review.id, "status": "failed", "message": str(exc), "error_code": "runtime_missing"}
 
-    visual_doc = get_document(db, document_id=visual_document_id) if visual_document_id else None
+    visual_doc = _require_visual_pairing_document(db, visual_document_id, current_user)
     from app.review_engine.pairing import resolve_input_pairing
     content_user = getattr(document, 'user_id', None)
     visual_user = getattr(visual_doc, 'user_id', None) if visual_doc is not None else None
-    same_user = content_user is None or visual_user is None or content_user == visual_user
+    same_user = visual_doc is None or content_user == visual_user
     pairing = resolve_input_pairing(
         document,
         visual_doc,
@@ -12845,15 +13383,18 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     if visual_document_id and (visual_doc is None or pairing.needs_user_confirm or pairing.pairing_status == 'unpaired'):
         db_provider = provider_list[0] if provider_list else provider
         review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider, visual_document_id=visual_document_id, pairing_confirmed=pairing_confirmed))
+        apply_review_pairing(db, review.id, pairing, pairing_confirmed=pairing_confirmed)
         fail_message = pairing.message if visual_doc is not None else "visual_document_not_found"
-        fail_summary = json.dumps({
-            "error_code": "pairing_failed",
-            "error_detail": fail_message,
-            "input_pairing": pairing.to_dict(),
-            "total": 0,
-        }, ensure_ascii=False)
-        update_review_status(db, review.id, "failed", 0, fail_summary)
-        set_progress(review.id, 'failed', '配对失败', 0, fail_message)
+        _persist_review_outcome(
+            db,
+            review.id,
+            "failed",
+            message=fail_message,
+            error_code="pairing_failed",
+            error_detail=fail_message,
+            stage="pairing",
+            extra_summary={"input_pairing": pairing.to_dict()},
+        )
         return {
             **pairing.to_dict(),
             "review_id": review.id,
@@ -12889,6 +13430,7 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
 
     db_provider = provider_list[0] if provider_list else provider
     review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider, visual_document_id=visual_document_id, pairing_confirmed=pairing_confirmed))
+    apply_review_pairing(db, review.id, pairing, pairing_confirmed=pairing_confirmed)
     update_review_status(db, review.id, "running", 0, "审核任务已创建")
     set_progress(review.id, 'running', '初始化', 0, '审核任务已创建')
     if force:
@@ -14237,18 +14779,33 @@ async def batch_judge_issues(
     current_user: UserOut = Depends(get_current_active_user),
 ):
     """批量人工判定问题: { 'judgments': [{'issue_id': 1, 'status': 'confirmed'}, ...] }"""
-    _require_review_access(db, review_id, current_user)
-    judgments = payload.get("judgments", [])
+    review, _ = _require_review_access(db, review_id, current_user)
+    judgments = payload.get("judgments") or []
+    if not judgments:
+        return {"updated": 0, "total": 0}
+    allowed = {"pending", "confirmed", "false_positive", "ignored"}
+    normalized = []
+    issue_ids = []
+    for item in judgments:
+        issue_id = item.get("issue_id") if isinstance(item, dict) else None
+        status = item.get("status") if isinstance(item, dict) else None
+        try:
+            issue_id = int(issue_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=404, detail="Issue not found")
+        if status not in allowed:
+            raise HTTPException(status_code=400, detail="Invalid judgment payload")
+        issue_ids.append(issue_id)
+        normalized.append((issue_id, status))
+    if len(set(issue_ids)) != len(issue_ids):
+        raise HTTPException(status_code=400, detail="Invalid judgment payload")
+    issues = db.query(IssueModel).filter(IssueModel.id.in_(issue_ids)).all()
+    found = {issue.id: issue for issue in issues}
+    if len(found) != len(issue_ids) or any(issue.review_id != review.id for issue in issues):
+        raise HTTPException(status_code=404, detail="Issue not found")
+    from app.schemas.review import IssueUpdate
     updated = 0
-    for j in judgments:
-        issue_id = j.get("issue_id")
-        status = j.get("status")
-        if not issue_id or not status:
-            continue
-        # 允许的状态: pending, confirmed, false_positive, ignored
-        if status not in ["pending", "confirmed", "false_positive", "ignored"]:
-            continue
-        from app.schemas.review import IssueUpdate
+    for issue_id, status in normalized:
         issue = update_issue(db, issue_id=issue_id, issue_update=IssueUpdate(status=status))
         if issue:
             _sync_false_positive_memory(db, issue)

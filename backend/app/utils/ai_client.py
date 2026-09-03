@@ -2156,10 +2156,68 @@ class AIClient:
     # ------------------------------------------------------------------
     # 文档审核 (AI 驱动的拼写/语法/风格检查)
     # ------------------------------------------------------------------
-    def build_audit_prompt_payload(self, content, language=None, audit_basis="", chapter_context=None, document_name=None):
+    def _build_snippet_audit_prompt_payload(self, content, language=None, audit_basis=""):
+        lang = language or "en"
+        excerpt = (content or "")[:6500]
+        basis = (audit_basis or "未提供额外审核依据。")[:3500]
+        if lang in ("en", "both"):
+            system_prompt = """You are proofreading a short technical excerpt, not doing a full-document release review.
+Check every sentence for:
+- typos and wrong characters
+- broken product/term names and extra spaces inside names (for example "D NB Buffer")
+- missing space between numbers and units (for example "37℃" -> "37 ℃")
+- duplicated wording or ungrammatical phrases
+- mixed volume units such as uL vs μL in the same excerpt
+- recipe volumes that do not add up to the stated total
+- incubation time that conflicts with "complete within X min"
+- the same reagent described as both room-temperature and strictly -20 C storage
+- per-reaction volume times reaction count that does not match the prepared volume
+- reversed or skipped step numbers, or incubation before adding reagents
+Report each distinct original string as its own issue. Do not stop after the first finding.
+Do not report table of contents, layout, cross-references, filenames, or pre-release checklists."""
+            user_prompt = f"""Proofread this excerpt and list every grammar, spelling, terminology, unit, quantity, timing, storage, and step-order issue.
+
+Excerpt:
+{excerpt}
+
+Review basis:
+{basis}
+
+Output strict JSON:
+{{"issues":[{{"severity":"serious|general|suggestion","type":"Grammar","category":"语法|拼写|术语一致性|格式规范","original":"exact text","expected":"correction","context":"nearby text","rule":"rule id or short name","basis":"why","source":"ai","status":"open","confidence":50-100}}],"observations":[],"summary":{{"total":0}}}}"""
+        else:
+            system_prompt = """你正在做文本片段校对，不是整本说明书的发布审核。
+必须逐句检查并尽量列全：
+- 错别字、写错一字的用词（例如把“离心”写成其他字）
+- 术语/产品名被空格拆开（例如“D NB Buffer”“D NB Enzyme”要分别报告）
+- 数字与单位缺空格（例如 37℃ 应为 37 ℃）
+- 同一句里的语法重复或不通顺（例如重复“配制”）
+ - 同一片段混用 uL 与 μL
+ - 配方各组分体积之和与声称总体积不符
+ - 孵育时间与“X min 内完成”互相冲突
+ - 同一试剂既室温放置又要求严格于 -20 ℃ 保存
+ - 每份用量 × 反应数与准备量不符
+ - 步骤编号颠倒/跳号，或混匀孵育出现在加入试剂之前
+同一类问题的不同原文都要各报一条，不要只报最明显的一条。
+不要报告目录、版式、交叉引用、文件名或发布前自检。"""
+            user_prompt = f"""请校对下面这段中文技术文本，列出全部语法、拼写、术语，以及片段内的单位、数量、时间、保存和步骤矛盾。
+
+文档内容：
+{excerpt}
+
+审核依据：
+{basis}
+
+输出严格JSON：
+{{"issues":[{{"severity":"serious|general|suggestion","type":"语法","category":"语法|拼写|术语一致性|格式规范","original":"原文","expected":"正确写法","context":"上下文","rule":"规则","basis":"判断依据","source":"ai","status":"open","confidence":50-100}}],"observations":[],"summary":{{"total":0}}}}"""
+        return {"system_prompt": system_prompt, "user_prompt": user_prompt}
+
+    def build_audit_prompt_payload(self, content, language=None, audit_basis="", chapter_context=None, document_name=None, snippet_review=False):
         global _prompt_builder_fallback_logged
         lang = language or "en"
         is_english = lang in ("en", "both")
+        if snippet_review:
+            return self._build_snippet_audit_prompt_payload(content, language=lang, audit_basis=audit_basis)
         content = content or ""
         try:
             builder = ReviewPromptBuilder(
@@ -2413,7 +2471,7 @@ confidence 评分指南：
             "user_prompt": user_prompt,
         }
 
-    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk", chapter_context=None, force_provider=None):
+    def audit_document(self, content, language=None, audit_basis="", skip_kimi=False, review_id=None, request_label="review.audit_chunk", chapter_context=None, force_provider=None, snippet_review=False):
         lang = language or "en"
 
         content = content or ""
@@ -2425,6 +2483,7 @@ confidence 评分指南：
             language=lang,
             audit_basis=audit_basis,
             chapter_context=chapter_context,
+            snippet_review=snippet_review,
         )
         system_prompt = prompt_payload["system_prompt"]
         user_prompt = prompt_payload["user_prompt"]

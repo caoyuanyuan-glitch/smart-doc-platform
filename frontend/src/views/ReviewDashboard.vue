@@ -45,36 +45,66 @@
     </div>
 
     <div class="summary-grid" v-loading="loading">
-      <div class="summary-card kpi-card blue">
+      <div class="summary-card kpi-card">
         <div class="kpi-label">{{ isPersonalView ? '我的审核任务' : '全员审核任务' }}</div>
-        <div class="kpi-value">{{ kpi.range_tasks }}</div>
+        <div class="kpi-value-row">
+          <span class="kpi-value">{{ kpi.range_tasks }}</span>
+          <span class="kpi-unit">个</span>
+        </div>
         <div class="kpi-desc">已完成 {{ kpi.range_completed || 0 }} 个</div>
       </div>
-      <div class="summary-card kpi-card soft-blue">
+      <div class="summary-card kpi-card">
         <div class="kpi-label">平均单文档问题</div>
-        <div class="kpi-value">{{ kpi.avg_issues_per_doc }}</div>
+        <div class="kpi-value-row">
+          <span class="kpi-value">{{ kpi.avg_issues_per_doc }}</span>
+          <span class="kpi-unit">条</span>
+        </div>
         <div class="kpi-desc">平均耗时 {{ formatMinutes(kpi.avg_review_time) }}</div>
       </div>
-      <div class="summary-card quality-card detection-rate">
+      <div class="summary-card quality-card">
         <div class="quality-label">检出率</div>
-        <div class="quality-value" :class="{ 'is-muted': !quality.detection_rate_available }">{{ detectionRateText }}</div>
-        <div class="quality-desc">平台有效检出 / (平台有效检出 + 人工补录漏检)</div>
-        <div class="quality-subdesc">{{ detectionRateHint }}</div>
+        <div class="kpi-value-row">
+          <span class="quality-value" :class="{ 'is-muted': !quality.detection_rate_available }">{{ detectionRateText }}</span>
+          <span v-if="quality.detection_rate_available" class="kpi-unit">%</span>
+        </div>
+        <div v-if="!quality.detection_rate_available" class="quality-subdesc">需漏检样本数据</div>
+        <el-tooltip placement="top">
+          <template #content>
+            <div>平台有效检出 / (平台有效检出 + 人工补录漏检)</div>
+            <div>{{ detectionRateHint }}</div>
+          </template>
+          <span class="metric-help">i</span>
+        </el-tooltip>
       </div>
-      <div v-if="!isPersonalView" class="summary-card quality-card false-positive-rate">
+      <div v-if="!isPersonalView" class="summary-card quality-card">
         <div class="quality-label">误报率</div>
-        <div class="quality-value">{{ percentText(quality.false_positive_rate) }}</div>
-        <div class="quality-desc">人工标记误报 / 平台上报问题</div>
-        <div class="quality-subdesc">误报 {{ quality.false_positive_count || 0 }} 条 · 平台上报 {{ quality.platform_reported || 0 }} 条</div>
+        <div class="kpi-value-row">
+          <span class="quality-value">{{ percentNumber(quality.false_positive_rate) }}</span>
+          <span class="kpi-unit">%</span>
+        </div>
+        <el-tooltip placement="top">
+          <template #content>
+            <div>人工标记误报 / 平台上报问题</div>
+            <div>误报 {{ quality.false_positive_count || 0 }} 条 · 平台上报 {{ quality.platform_reported || 0 }} 条</div>
+          </template>
+          <span class="metric-help">i</span>
+        </el-tooltip>
       </div>
     </div>
 
-    <div class="chart-card wide">
-      <div class="section-title">
-        <span>{{ isPersonalView ? '我的高占比问题 Top5' : '全员高占比问题 Top5' }}</span>
-        <small>其余合并为其他细碎问题</small>
+    <div class="chart-row" :class="{ single: !otherIssueRows.length }">
+      <div class="chart-card">
+        <div class="section-title">
+          <span>{{ isPersonalView ? '我的高占比问题 Top5' : '全员高占比问题 Top5' }}</span>
+        </div>
+        <v-chart class="chart" :option="issueBarOption" autoresize />
       </div>
-      <v-chart class="chart" :option="issueBarOption" autoresize />
+      <div v-if="otherIssueRows.length" class="chart-card">
+        <div class="section-title">
+          <span>其他组研问题</span>
+        </div>
+        <v-chart class="chart" :option="issuePieOption" autoresize />
+      </div>
     </div>
 
     <div v-if="!isPersonalView" class="chart-card wide">
@@ -125,14 +155,14 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
-import { use } from 'echarts/core'
-import { BarChart, LineChart } from 'echarts/charts'
+import { use, graphic } from 'echarts/core'
+import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { reviewAPI, userAPI, getAPIErrorMessage } from '@/api'
 import { useUserStore } from '@/store/user'
 
-use([BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
+use([BarChart, LineChart, PieChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const loading = ref(false)
 const userStore = useUserStore()
@@ -166,23 +196,30 @@ const pageSubtitle = computed(() => (
 
 let refreshTimer = null
 
-const issueRows = computed(() => {
-  const rows = issueDistribution.value
+const rankedIssueRows = computed(() => (
+  issueDistribution.value
     .map(item => ({ ...item, percent: Math.round((Number(item.percentage || 0) * 100) * 10) / 10 }))
     .sort((left, right) => right.percent - left.percent)
-  const topRows = rows.slice(0, 5)
-  const restRows = rows.slice(5)
-  if (!restRows.length) return topRows
-  const restCount = restRows.reduce((sum, item) => sum + Number(item.count || 0), 0)
-  const restPercent = Math.round(restRows.reduce((sum, item) => sum + item.percent, 0) * 10) / 10
-  return [...topRows, { type: '其他细碎问题', count: restCount, percent: restPercent }]
+))
+
+const issueRows = computed(() => rankedIssueRows.value.slice(0, 5))
+
+const RING_COLORS = ['#4F8CF7', '#8FB0F0', '#B5CCF5', '#D6E3FA', '#E8EFFC']
+
+const otherIssueRows = computed(() => {
+  const restRows = rankedIssueRows.value.slice(5)
+  if (restRows.length <= 5) return restRows
+  const visible = restRows.slice(0, 4)
+  const merged = restRows.slice(4)
+  const count = merged.reduce((sum, item) => sum + Number(item.count || 0), 0)
+  const percent = Math.round(merged.reduce((sum, item) => sum + item.percent, 0) * 10) / 10
+  return [...visible, { type: '其他', count, percent }]
 })
 
-function barColor(percent) {
-  if (percent >= 30) return '#dc2626'
-  if (percent >= 20) return '#f97316'
-  return '#2563eb'
-}
+const barGradient = new graphic.LinearGradient(0, 0, 0, 1, [
+  { offset: 0, color: '#4F8CF7' },
+  { offset: 1, color: '#7AA3F9' }
+])
 
 const issueBarOption = computed(() => ({
   tooltip: {
@@ -200,34 +237,48 @@ const issueBarOption = computed(() => ({
     data: issueRows.value.map(item => item.type),
     axisTick: { show: false },
     axisLine: { lineStyle: { color: '#d9e2ec' } },
-    axisLabel: { interval: 0, rotate: 28, width: 118, overflow: 'break', color: '#64748b', fontSize: 12 }
+    axisLabel: {
+      interval: 0,
+      rotate: issueRows.value.some(item => String(item.type || '').length > 8) ? 30 : 0,
+      width: 118,
+      overflow: 'truncate',
+      color: '#5A6B87',
+      fontSize: 12
+    }
   },
   yAxis: {
     type: 'value',
-    axisLabel: { formatter: '{value}%', color: '#94a3b8' },
+    axisLabel: { formatter: '{value}%', color: '#8C9AB7' },
     splitLine: { lineStyle: { color: '#edf2f7' } }
   },
   series: [
     {
       name: '问题占比',
       type: 'bar',
-      data: issueRows.value.map(item => ({ value: item.percent, itemStyle: { color: barColor(item.percent) } })),
+      data: issueRows.value.map(item => item.percent),
       barMaxWidth: 46,
-      itemStyle: { borderRadius: [5, 5, 0, 0] },
-      label: { show: true, position: 'top', formatter: '{c}%', color: '#1f2937', fontWeight: 700 }
+      itemStyle: { color: barGradient, borderRadius: [5, 5, 0, 0] },
+      label: {
+        show: true,
+        position: 'top',
+        formatter: params => issueRows.value[params.dataIndex]?.count ?? params.value,
+        color: '#1A2D4D',
+        fontSize: 12,
+        fontWeight: 600
+      }
     }
   ]
 }))
 
-function percentText(value) {
+function percentNumber(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return '--'
-  return `${(number * 100).toFixed(1)}%`
+  return (number * 100).toFixed(1)
 }
 
 const detectionRateText = computed(() => {
-  if (!quality.detection_rate_available) return '暂无法计算'
-  return percentText(quality.detection_rate)
+  if (!quality.detection_rate_available) return '--'
+  return percentNumber(quality.detection_rate)
 })
 
 const detectionRateHint = computed(() => {
@@ -238,6 +289,39 @@ const detectionRateHint = computed(() => {
   }
   return `平台有效检出 ${platform} 条 · 人工补录漏检 ${manual} 条`
 })
+
+const issuePieOption = computed(() => ({
+  tooltip: {
+    trigger: 'item',
+    formatter: params => `${params.name}<br/>数量: ${params.value}<br/>占比: ${params.percent}%`
+  },
+  legend: {
+    orient: 'vertical',
+    left: 0,
+    top: 0,
+    itemWidth: 10,
+    itemHeight: 10,
+    itemGap: 8,
+    icon: 'circle',
+    textStyle: { color: '#5A6B87', fontSize: 13 }
+  },
+  series: [
+    {
+      name: '其他组研问题',
+      type: 'pie',
+      radius: ['48%', '72%'],
+      center: ['68%', '52%'],
+      avoidLabelOverlap: true,
+      label: { show: false },
+      labelLine: { show: false },
+      data: otherIssueRows.value.map((item, index) => ({
+        name: item.type,
+        value: Number(item.count || 0),
+        itemStyle: { color: RING_COLORS[index % RING_COLORS.length] }
+      }))
+    }
+  ]
+}))
 
 const trendOption = computed(() => ({
   tooltip: { trigger: 'axis' },
@@ -345,33 +429,31 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.review-dashboard { padding: 28px; color: #303133; background: #f8fafc; min-height: 100%; }
+.review-dashboard { padding: 28px; color: #1A2D4D; background: #F7F9FC; min-height: 100%; font-size: 14px; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; line-height: 1.6; }
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-.page-head h2 { margin: 0 0 6px; font-size: 22px; }
-.page-head p { margin: 0; color: #8c8c8c; }
-.filter-bar { display: flex; align-items: center; gap: 12px; padding: 14px 18px; margin-bottom: 22px; background: #fff; border-radius: 10px; box-shadow: 0 1px 6px rgba(15,23,42,0.04); }
+.page-head h2 { margin: 0 0 6px; font-size: 22px; color: #1A2D4D; font-weight: 700; line-height: 1.3; }
+.page-head p { margin: 0; color: #5A6B87; font-size: 13px; }
+.filter-bar { display: flex; align-items: center; gap: 12px; padding: 14px 18px; margin-bottom: 16px; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
 .filter-bar :deep(.el-tabs__header) { margin: 0; }
-.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-bottom: 24px; }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 16px; }
 .summary-card { min-height: 158px; }
-.kpi-card { padding: 26px 22px; border-radius: 12px; color: #fff; box-shadow: 0 6px 18px rgba(24,144,255,0.10); }
-.kpi-card.blue { background: linear-gradient(135deg, #1890ff, #096dd9); }
-.kpi-card.soft-blue { background: linear-gradient(135deg, #38bdf8, #0f766e); }
-.kpi-label { font-size: 13px; opacity: .9; }
-.kpi-value { margin-top: 12px; font-size: 38px; line-height: 1; font-weight: 900; }
-.kpi-desc { margin-top: 14px; font-size: 12px; opacity: .78; }
-.quality-card { border-radius: 12px; padding: 24px 22px; box-shadow: 0 6px 18px rgba(15,23,42,0.05); border: 1px solid #dfe7f2; background: #fff; }
-.quality-card.detection-rate { background: linear-gradient(135deg, #ecfdf5, #fff); }
-.quality-card.false-positive-rate { background: linear-gradient(135deg, #fff7ed, #fff); }
-.quality-label { color: #64748b; font-size: 13px; font-weight: 700; }
-.quality-value { margin-top: 12px; font-size: 38px; font-weight: 900; color: #1f2937; }
-.quality-value.is-muted { font-size: 26px; color: #94a3b8; }
-.quality-desc { margin-top: 12px; color: #94a3b8; font-size: 12px; line-height: 1.5; }
-.quality-subdesc { margin-top: 8px; color: #64748b; font-size: 12px; }
-.chart-card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 1px 8px rgba(15,23,42,0.05); }
+.kpi-card, .quality-card { position: relative; padding: 20px 24px; border-radius: 8px; color: #1A2D4D; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.kpi-label, .quality-label { font-size: 14px; color: #5A6B87; font-weight: 500; }
+.kpi-value-row { display: flex; align-items: baseline; gap: 6px; margin-top: 12px; }
+.kpi-value, .quality-value { font-size: 32px; line-height: 1; font-weight: 700; color: #1A2D4D; }
+.kpi-unit { font-size: 14px; color: #8C9AB7; }
+.kpi-desc { margin-top: 14px; font-size: 12px; color: #8C9AB7; }
+.metric-help { position: absolute; right: 16px; bottom: 14px; display: inline-flex; width: 16px; height: 16px; align-items: center; justify-content: center; border-radius: 50%; border: 1px solid #c5d0de; color: #8C9AB7; font-size: 11px; font-style: italic; cursor: help; background: #fff; }
+.quality-value.is-muted { color: #8C9AB7; }
+.quality-subdesc { margin-top: 12px; color: #8C9AB7; font-size: 12px; line-height: 1.6; }
+.chart-row { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.9fr); gap: 16px; margin-bottom: 16px; }
+.chart-row.single { grid-template-columns: 1fr; }
+.chart-card { background: #fff; border-radius: 8px; padding: 20px 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
 .chart-card.wide { margin-bottom: 16px; }
 .table-card { overflow: auto; }
-.section-title { display: flex; align-items: baseline; gap: 10px; font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+.section-title { display: flex; align-items: baseline; gap: 10px; font-size: 16px; font-weight: 700; margin-bottom: 16px; color: #1A2D4D; }
 .section-title small { color: #94a3b8; font-size: 12px; font-weight: 500; }
 .chart { height: 360px; }
+@media (max-width: 1100px) { .chart-row { grid-template-columns: 1fr; } }
 @media (max-width: 768px) { .review-dashboard { padding: 16px; } .filter-bar { flex-wrap: wrap; } }
 </style>

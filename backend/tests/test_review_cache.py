@@ -2917,7 +2917,7 @@ def test_run_ai_deep_review_stops_when_budget_reached(monkeypatch):
     monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(review_api, "_select_relevant_ai_review_basis", lambda chunk, sections: "basis")
 
-    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None):
+    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, **kwargs):
         processed.append(chunk)
         usage_state["tokens"] += 120
         return ([{"rule": "AI", "chapter": ""}], False)
@@ -3643,7 +3643,7 @@ def test_run_cached_ai_chunk_review_bypasses_cache_on_force(monkeypatch):
         review_id, "chunk", "cn", "basis", 10
     )
     assert cache_hit is False
-    assert issues == [{"rule": "fresh"}]
+    assert issues == [{"rule": "fresh", "review_id": review_id, "status": "pending"}]
     assert calls == [1]
     review_api._clear_review_runtime_flags(review_id)
     review_api._ai_review_chunk_cache.pop(cache_key, None)

@@ -30,6 +30,8 @@ def test_snippet_scope_keeps_sentence_level_writing_issues():
             'description': '同一文档中同时出现“10 μL”和“10μL”类写法，单位空格风格需要统一。',
         },
         {'category': '可读性', 'rule': 'AI', 'source': 'ai', 'description': '加入组分后未说明是否需要混匀。'},
+        {'category': '逻辑完整性', 'rule': 'LOGIC-001', 'source': 'rule'},
+        {'category': '数量计算', 'rule': 'SNIPPET-CALC-001', 'source': 'rule'},
     ]
     dropped = [
         {'category': '安全合规', 'rule': 'SAFE-001', 'source': 'rule'},
@@ -54,6 +56,8 @@ def test_snippet_scope_keeps_sentence_level_writing_issues():
         'DOC-TM-002',
         'CYY-CN-FORMAT-005',
         'AI',
+        'LOGIC-001',
+        'SNIPPET-CALC-001',
     ]
     assert 'CHECKLIST-TRADEMARK' not in {item['rule'] for item in result}
     assert 'CYY-CN-PAGE-001' not in {item['rule'] for item in result}
@@ -282,3 +286,173 @@ def test_ai_procedure_rewrite_is_kept_for_diagnostic():
     assert dropped == {}
     assert len(kept) == 1
     assert kept[0]['suggestion'].startswith('建议补充')
+
+
+def test_finalize_snippet_keeps_unit_spacing_rule():
+    content = '将上述体系混匀后，37℃孵育 30 min。'
+    issues = review_api._run_chinese_human_baseline_rules(content)
+    assert any(item['rule'] == 'CYY-CN-UNIT-003' for item in issues)
+    kept, diagnostics = review_api._finalize_review_issues(issues, content, set(), snippet_review=True)
+    assert any(item['rule'] == 'CYY-CN-UNIT-003' for item in kept)
+    assert diagnostics['filter_mode'] == 'snippet'
+
+
+def test_finalize_full_doc_still_drops_unit_spacing_as_noise():
+    content = '将上述体系混匀后，37℃孵育 30 min。'
+    issues = review_api._run_chinese_human_baseline_rules(content)
+    kept, diagnostics = review_api._finalize_review_issues(issues, content, set())
+    assert diagnostics['filter_mode'] == 'pipeline'
+    assert not any(item['rule'] == 'CYY-CN-UNIT-003' for item in kept)
+
+
+def test_snippet_basis_keeps_scope_and_style():
+    sections = [
+        {'label': '文本片段审核范围', 'text': '【文本片段审核范围】\n只检查语法拼写术语', 'basis_type': 'snippet_scope', 'priority': 6},
+        {'label': '中文技术文档写作风格指南', 'text': '【中文技术文档写作风格指南】\n数字与单位之间保留空格', 'basis_type': 'style_guide', 'priority': 4},
+        {'label': '技术文档常见错误清单', 'text': '【技术文档常见错误清单】\n错别字必须报告', 'basis_type': 'common_errors', 'priority': 3},
+        {'label': 'CYY人工审核经验基线-表格/版式', 'text': '【CYY人工审核经验基线-表格/版式】\n调整列宽', 'basis_type': 'cyy', 'priority': 2},
+    ]
+    selected = review_api._select_snippet_ai_review_basis('取出 D NB Buffer 后 37℃孵育。', sections, document_language='cn')
+    assert '文本片段审核范围' in selected
+    assert '中文技术文档写作风格指南' in selected
+    assert '技术文档常见错误清单' in selected
+    assert '表格/版式' not in selected
+
+
+def test_snippet_prompt_asks_for_sentence_level_typos():
+    from app.utils.ai_client import ai_client
+    payload = ai_client.build_audit_prompt_payload(
+        '需将样本管离新，37℃孵育。',
+        language='cn',
+        audit_basis='【文本片段审核范围】',
+        snippet_review=True,
+    )
+    blob = payload['system_prompt'] + payload['user_prompt']
+    assert '文本片段校对' in blob
+    assert '不按普通语法校对' not in blob
+    assert '错别字' in blob
+    assert '总体积' in blob
+    assert '步骤编号' in blob
+
+
+PLANTED_SNIPPET = """DNB制备操作流程（测试文本）
+准备工作
+取出试剂盒中的 D NB Buffer 和 D NB Enzyme，室温放置 30 min 使其平衡至室温。
+需将样本管离新（1,000 × g，1 min），收集沉淀。
+配制反应体系按以下比例配制反应液（总体积 100 μL）：
+Buffer 60 uL
+Primer 30 μL
+Enzyme 20 μL
+3. 将上述体系混匀后，37℃孵育 30 min。
+2. 加入 Enzyme。
+本反应在 15 min 内即可完成，无需过度孵育。
+产物保存
+反应结束后，立即将产物置于 -20 ℃ 保存。
+注意：D NB Enzyme 需严格于 -20 ℃ 保存，不可反复冻融超过 5 次。
+上机前准备
+每孔加入 25 μL 反应液，共进行 16 个反应。
+提前准备 500 μL 反应液，确保用量充足。
+"""
+
+
+def test_snippet_content_audit_covers_planted_error_types():
+    issues = review_api._run_snippet_content_audit(PLANTED_SNIPPET)
+    rules = {item['rule'] for item in issues}
+    assert 'SNIPPET-TYPO-001' in rules
+    assert 'SNIPPET-SPACE-001' in rules
+    assert 'SNIPPET-UNIT-001' in rules
+    assert 'SNIPPET-CALC-001' in rules
+    assert 'SNIPPET-TIME-001' in rules
+    assert 'SNIPPET-STORE-001' in rules
+    assert 'SNIPPET-CALC-002' in rules
+    assert 'SNIPPET-STEP-001' in rules
+
+
+def test_finalize_snippet_keeps_planted_content_rules():
+    baseline = review_api._run_chinese_human_baseline_rules(PLANTED_SNIPPET)
+    snippet_issues = review_api._run_snippet_content_audit(PLANTED_SNIPPET)
+    kept, diagnostics = review_api._finalize_review_issues(
+        baseline + snippet_issues, PLANTED_SNIPPET, set(), snippet_review=True,
+    )
+    rules = {item['rule'] for item in kept}
+    assert diagnostics['filter_mode'] == 'snippet'
+    assert 'CYY-CN-SPELL-008' in rules
+    assert 'SNIPPET-SPACE-001' in rules
+    assert 'SNIPPET-CALC-001' in rules
+    assert 'SNIPPET-TIME-001' in rules
+    assert 'SNIPPET-CALC-002' in rules
+
+
+def test_run_chinese_human_baseline_rules_detects_vortex_typo():
+    issues = review_api._run_chinese_human_baseline_rules(
+        '盖上管盖，涡漩振荡 5 秒。',
+    )
+    issue = next(item for item in issues if item['rule'] == 'CYY-CN-SPELL-009')
+    assert issue['original_text'] == '涡漩'
+    assert '涡旋' in issue['suggestion']
+
+
+def test_run_chinese_human_baseline_rules_detects_integra_brand_typo():
+    issues = review_api._run_chinese_human_baseline_rules(
+        '使用 Intergra 移液器转移上清。',
+    )
+    issue = next(item for item in issues if item['rule'] == 'CYY-CN-SPELL-010')
+    assert issue['original_text'] == 'Intergra'
+    assert 'Integra' in issue['suggestion']
+
+
+def test_run_chinese_human_baseline_rules_detects_incomplete_avoid_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        '如操作不当或不避免交叉污染，可能导致检测失败。',
+    )
+    issue = next(item for item in issues if item['rule'] == 'CYY-CN-GRAMMAR-014')
+    assert issue['original_text'] == '或不避免'
+    assert '无法避免' in issue['suggestion'] or '以避免' in issue['suggestion']
+
+
+def test_run_snippet_content_audit_detects_vortex_and_integra_typos():
+    issues = review_api._run_snippet_content_audit(
+        '盖上管盖，涡漩振荡 5 秒后用 Intergra 移液器转移。',
+    )
+    originals = {item['original_text'] for item in issues if item['rule'] == 'SNIPPET-TYPO-001'}
+    assert '涡漩' in originals
+    assert 'Intergra' in originals
+
+
+def test_run_chinese_human_baseline_rules_detects_nearby_table_number_mismatch():
+    issues = review_api._run_chinese_human_baseline_rules(
+        '准确率检测结果如表 9 所示：\n表 92 “基因测序仪准确率企业参考品”检测结果\n',
+    )
+    issue = next(item for item in issues if item['rule'] == 'CYY-CN-REF-006')
+    assert '表 9' in issue['original_text']
+    assert '表 92' in issue['suggestion'] or '如下表' in issue['suggestion']
+
+
+def test_run_chinese_human_baseline_rules_keeps_following_table_phrase():
+    issues = review_api._run_chinese_human_baseline_rules(
+        '准确率检测结果如下表所示：\n表 92 “基因测序仪准确率企业参考品”检测结果\n',
+    )
+    assert not any(item['rule'] == 'CYY-CN-REF-006' for item in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_wrong_quoted_section_target():
+    content = (
+        '计算 ssDNA 文库所需量\n'
+        '根据第75页“标签序列选择”所测得的 ssDNA 文库的浓度及所需的文库 fmol 量，'
+        '计算每个 DNB 制备体系所需投入的 ssDNA 文库体积。\n'
+        '文库浓度及所需量的要求\n'
+        '标签序列选择\n'
+    )
+    issues = review_api._run_chinese_human_baseline_rules(content)
+    issue = next(item for item in issues if item['rule'] == 'CYY-CN-REF-007')
+    assert '标签序列选择' in issue['original_text']
+    assert '文库浓度及所需量的要求' in issue['suggestion']
+
+
+def test_run_chinese_human_baseline_rules_keeps_paired_page_title_refs():
+    issues = review_api._run_chinese_human_baseline_rules(
+        '标签序列和高级设置参考第 75 页“标签序列选择”和第 75 页“高级选项设置”。\n'
+        '标签序列选择\n'
+        '高级设置\n',
+    )
+    assert not any(item['rule'] == 'CYY-CN-REF-007' for item in issues)

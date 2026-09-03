@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,9 @@ from app.api import review as review_api
 from app.review_engine.bounded_cache import BoundedTTLCache
 from app.review_engine.task_state import clear_task_state
 from app.review_engine.versions import PROMPT_VERSION
+from app.schemas.review import ReviewListResponse
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _patch_list_reviews(monkeypatch, reviews, total=None, query_capture=None):
@@ -75,6 +79,16 @@ def test_history_pagination_beyond_500(monkeypatch):
     assert len(result["items"]) == 1
 
 
+def test_list_reviews_accepts_latest_only_limit_500(monkeypatch):
+    captured = {}
+    reviews = [SimpleNamespace(id=1, document_id=1, status="completed", summary="{}", total_issues=1)]
+    _patch_list_reviews(monkeypatch, reviews, query_capture=captured)
+    result = asyncio.run(review_api.list_reviews(db=None, latest_only=True, skip=0, limit=500))
+    assert captured["latest_only"] is True
+    assert captured["limit"] == 500
+    assert result["limit"] == 500
+
+
 def test_normalize_status_keeps_timeout_and_unknown():
     assert review_api._normalize_review_status("timeout") == "timeout"
     assert review_api._normalize_review_status("error") == "error"
@@ -82,14 +96,48 @@ def test_normalize_status_keeps_timeout_and_unknown():
     assert review_api._normalize_review_status(None) is None
 
 
+def test_completed_list_item_coerces_progress_and_diagnostics(monkeypatch):
+    reviews = [
+        SimpleNamespace(
+            id=1,
+            document_id=1,
+            status="completed",
+            mode="hybrid",
+            progress=100,
+            created_at=datetime(2026, 9, 1),
+            summary='{"stage_diagnostics":[{"stage":"ai_deep_review","errors":[]}]}',
+            total_issues=2,
+        )
+    ]
+    _patch_list_reviews(monkeypatch, reviews)
+    result = asyncio.run(review_api.list_reviews(db=None, skip=0, limit=20))
+    item = result["items"][0]
+    assert item["progress"]["progress"] == 100
+    assert item["progress"]["status"] == "completed"
+    assert item["diagnostics"]["stages"][0]["stage"] == "ai_deep_review"
+    ReviewListResponse(**result)
+
+
 def test_frontend_history_does_not_filter_completed_only():
-    vue = Path("/workspace/frontend/src/views/Review.vue").read_text(encoding="utf-8")
+    vue = (REPO_ROOT / "frontend/src/views/Review.vue").read_text(encoding="utf-8")
     assert "historyReviews = computed(() => reviews.value || [])" in vue
     assert "filter(review => review.status === 'completed')" not in vue
     assert "reportRequestSeq" in vue
     assert "reviewAPI.get(id)" in vue
     assert "reviewAPI.getIssues(id)" in vue
     assert "seq !== reportRequestSeq" in vue
+    assert "function reviewListItems(payload)" in vue
+    assert "documentReviews.value = reviewListItems(reviewResp.data)" in vue
+    assert "documentReviews.value = reviewListItems(resp.data)" in vue
+    assert "const runningReviewsResp = reviewListItems(resp.data)" in vue
+    assert "reviewListRequestSerial" in vue
+    assert "documentReviewRequestSerial" in vue
+    assert "serial !== reviewListRequestSerial" in vue
+    assert "from '@/utils/issueDiff'" in vue
+    assert "issueSuggestionDiffHtml" in vue
+    assert '.diff-delete' in vue
+    assert '.diff-insert' in vue
+    assert "const serial = ++documentReviewRequestSerial" in vue
 
 
 def test_runtime_symbols_importable():
@@ -112,7 +160,7 @@ def test_runtime_missing_creates_failed_task(monkeypatch):
     monkeypatch.setattr(review_api, "_ensure_document_access", lambda doc, user: doc)
     monkeypatch.setattr(review_api, "_get_active_review_for_document", lambda *a, **k: None)
     monkeypatch.setattr(review_api, "create_review", lambda db=None, review=None: SimpleNamespace(id=55, document_id=1))
-    monkeypatch.setattr(review_api, "update_review_status", lambda db, rid, status, total, summary: statuses.append((rid, status, summary)))
+    monkeypatch.setattr(review_api, "update_review_status", lambda db, rid, status, total=0, summary="", **k: statuses.append((rid, status, summary)))
     monkeypatch.setattr(review_api, "set_progress", lambda *a, **k: None)
     result = asyncio.run(review_api.create_review_task(
         1,
@@ -217,9 +265,15 @@ def test_task_state_isolated_between_reviews():
 
 
 def test_delete_document_keeps_formal_review_history():
-    api_source = Path("/workspace/backend/app/api/documents.py").read_text(encoding="utf-8")
-    crud_source = Path("/workspace/backend/app/crud/document.py").read_text(encoding="utf-8")
+    api_source = (REPO_ROOT / "backend/app/api/documents.py").read_text(encoding="utf-8")
+    crud_source = (REPO_ROOT / "backend/app/crud/document.py").read_text(encoding="utf-8")
     assert "if filename.startswith(\"文本片段_\"):" in api_source
     assert "delete_reviews_by_document(db, document_id)" in api_source
     assert "deleted_at" in crud_source
     assert "has_reviews" in crud_source
+
+
+def test_sse_terminal_statuses_include_cancelled_and_timeout():
+    assert {"cancelled", "timeout", "completed", "failed", "error"} <= review_api._REVIEW_TERMINAL_STATUSES
+    source = Path(review_api.__file__).read_text(encoding="utf-8")
+    assert source.count("if status in _REVIEW_TERMINAL_STATUSES") >= 2

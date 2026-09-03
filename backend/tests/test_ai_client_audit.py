@@ -250,7 +250,7 @@ def test_audit_document_does_not_rechunk_large_content(monkeypatch):
     monkeypatch.setattr(
         client,
         "build_audit_prompt_payload",
-        lambda content, language=None, audit_basis="", chapter_context=None: {
+        lambda content, language=None, audit_basis="", chapter_context=None, snippet_review=False, **kwargs: {
             "system_prompt": "SYS",
             "user_prompt": f"USER:{len(content)}",
         },

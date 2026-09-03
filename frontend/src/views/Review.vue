@@ -257,7 +257,7 @@
                 show-word-limit
                 placeholder="在此粘贴需要审核的句子或段落..."
               />
-              <div class="upload-tip">只检查语法、拼写和术语，不会报告目录、版式、交叉引用或发布前自检问题。</div>
+              <div class="upload-tip">检查语法、拼写、术语，以及片段内的单位、数量、时间和步骤矛盾；不报告目录、版式、交叉引用或发布前自检问题。</div>
               <div class="review-mode-toolbar">
                 <span class="review-mode-label">审核模式</span>
                 <el-radio-group v-model="reviewMode" size="small">
@@ -265,7 +265,7 @@
                   <el-radio-button label="hybrid">完整审核</el-radio-button>
                 </el-radio-group>
                 <span class="review-mode-hint">
-                  {{ reviewMode === 'rule' ? '规则 + 拼写 + 术语，速度快。' : '规则问题 + AI 深度检查语法/拼写/术语。' }}
+                  {{ reviewMode === 'rule' ? '规则检查语法、拼写、术语和片段内计算/矛盾，速度快。' : '规则问题 + AI 深度检查语法、拼写、术语和片段内矛盾。' }}
                 </span>
               </div>
               <div v-if="reviewMode === 'hybrid'" class="review-mode-toolbar ai-model-toolbar">
@@ -357,7 +357,7 @@
                   <el-table-column prop="original_text" label="原文" min-width="160" show-overflow-tooltip />
                   <el-table-column prop="suggestion" label="建议" min-width="180" show-overflow-tooltip />
                 </el-table>
-                <div v-else class="snippet-preview-empty">未发现语法、拼写或术语问题。</div>
+                <div v-else class="snippet-preview-empty">未发现语法、拼写、术语或片段内逻辑问题。</div>
                 <div v-if="snippetPreviewIssues.length > visibleSnippetPreviewIssues.length" class="snippet-preview-more">
                   还有 {{ snippetPreviewIssues.length - visibleSnippetPreviewIssues.length }} 条，点击“查看问题”看全部。
                 </div>
@@ -1238,6 +1238,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage } from '@/api'
+import { escapeIssueHtml, issueSuggestionDiffHtml } from '@/utils/issueDiff'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
@@ -1274,6 +1275,8 @@ const taskPageSize = ref(20)
 const taskTotal = ref(0)
 const taskStatusFilter = ref('all')
 const historyLoading = ref(false)
+let reviewListRequestSerial = 0
+let documentReviewRequestSerial = 0
 const issueDialogLoading = ref(false)
 let issueDialogRequestSeq = 0
 let reportRequestSeq = 0
@@ -1550,10 +1553,6 @@ function issueSuggestionSummary(issue) {
   if (suggestion) return suggestion
 
   return issueSuggestionFullText(issue)
-}
-
-function issueSuggestionDiffHtml(issue) {
-  return ''
 }
 
 function percentText(value) {
@@ -1856,31 +1855,48 @@ async function loadProviders() {
   }
 }
 
+function reviewListItems(payload) {
+  if (Array.isArray(payload)) return payload
+  if (payload && Array.isArray(payload.items)) return payload.items
+  return []
+}
+
 async function loadDocuments() {
+  const serial = ++documentReviewRequestSerial
   try {
-    const [docResp, reviewResp] = await Promise.all([
-      documentAPI.list(),
-      reviewAPI.list({ latest_only: true, limit: 500 })
-    ])
+    const docResp = await documentAPI.list()
+    if (serial !== documentReviewRequestSerial) return
     const uploadingDocs = documents.value.filter(doc => String(doc.id).startsWith('uploading-'))
     const listedDocs = (docResp.data || []).filter(doc => !isSnippetDocument(doc))
     documents.value = [...uploadingDocs, ...listedDocs]
-    documentReviews.value = reviewResp.data || []
+  } catch (e) {
+    if (serial !== documentReviewRequestSerial) return
+    ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
+    return
+  }
+  try {
+    const reviewResp = await reviewAPI.list({ latest_only: true, limit: 500 })
+    if (serial !== documentReviewRequestSerial) return
+    documentReviews.value = reviewListItems(reviewResp.data)
     syncDocumentStatusesFromReviews(documentReviews.value)
     syncSnippetReviewState(documentReviews.value)
     syncReviewsPolling()
   } catch (e) {
-    ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
+    if (serial !== documentReviewRequestSerial) return
+    documentReviews.value = []
+    ElMessage.error(`加载文档审核状态失败: ${getAPIErrorMessage(e)}`)
   }
 }
 
 async function loadReviews() {
+  const serial = ++reviewListRequestSerial
+  historyLoading.value = true
   try {
-    historyLoading.value = true
     if (currentView.value === 'documents') {
       const resp = await reviewAPI.list({ latest_only: true, limit: 100, skip: 0 })
+      if (serial !== reviewListRequestSerial) return
       const payload = resp.data || {}
-      const items = Array.isArray(payload) ? payload : (payload.items || [])
+      const items = reviewListItems(payload)
       reviews.value = items
       syncDocumentStatusesFromReviews(items)
       syncSnippetReviewState(items)
@@ -1893,20 +1909,20 @@ async function loadReviews() {
       params.status = taskStatusFilter.value
     }
     const resp = await reviewAPI.list(params)
+    if (serial !== reviewListRequestSerial) return
     const payload = resp.data || {}
-    if (Array.isArray(payload)) {
-      reviews.value = payload
-      taskTotal.value = payload.length
-    } else {
-      reviews.value = payload.items || []
-      taskTotal.value = Number(payload.total || 0)
-    }
+    const items = reviewListItems(payload)
+    reviews.value = items
+    taskTotal.value = Array.isArray(payload) ? items.length : Number(payload.total || 0)
     syncSnippetReviewState(reviews.value)
     syncReviewsPolling()
   } catch (e) {
+    if (serial !== reviewListRequestSerial) return
     ElMessage.error(`加载任务列表失败: ${getAPIErrorMessage(e)}`)
   } finally {
-    historyLoading.value = false
+    if (serial === reviewListRequestSerial) {
+      historyLoading.value = false
+    }
   }
 }
 
@@ -2190,14 +2206,18 @@ function syncReviewsPolling() {
 
     try {
       if (currentView.value === 'documents') {
+        const serial = ++documentReviewRequestSerial
         const resp = await reviewAPI.list({ latest_only: true, limit: 500 })
-        documentReviews.value = resp.data || []
+        if (serial !== documentReviewRequestSerial) return
+        documentReviews.value = reviewListItems(resp.data)
         syncDocumentStatusesFromReviews(documentReviews.value)
         syncSnippetReviewState(documentReviews.value)
       } else {
+        const serial = ++reviewListRequestSerial
         const runningIds = new Set((reviews.value || []).filter(review => review.status === 'running').map(review => review.id))
         const resp = await reviewAPI.list({ status: 'running', limit: 500 })
-        const runningReviewsResp = resp.data || []
+        if (serial !== reviewListRequestSerial) return
+        const runningReviewsResp = reviewListItems(resp.data)
         const returnedIds = new Set(runningReviewsResp.map(review => review.id))
         const finishedDuringPolling = [...runningIds].some(reviewId => !returnedIds.has(reviewId))
 
@@ -4725,5 +4745,20 @@ onUnmounted(() => {
   font-size: 20px;
   font-weight: 600;
   color: #303133;
+}
+.suggestion-diff {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+.diff-delete {
+  color: #b42318;
+  background: #fee4e2;
+  text-decoration: line-through;
+}
+.diff-insert {
+  color: #027a48;
+  background: #d1fadf;
 }
 </style>

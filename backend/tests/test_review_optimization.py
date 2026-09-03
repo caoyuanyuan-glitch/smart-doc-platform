@@ -214,4 +214,5 @@ def test_persist_progress_and_reclaim_stale_running():
     reclaimed = reclaim_stale_running_reviews(db, timeout_seconds=30)
     db.refresh(review)
     assert reclaimed == 1
-    assert review.status == "failed"
+    assert review.status == "timeout"
+    assert review.error_code == "timeout"

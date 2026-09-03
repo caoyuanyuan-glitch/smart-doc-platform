@@ -89,6 +89,12 @@ def _ensure_legacy_sqlite_columns():
         'worker_id': "ALTER TABLE reviews ADD COLUMN worker_id VARCHAR",
         'started_at': "ALTER TABLE reviews ADD COLUMN started_at DATETIME",
         'filter_mode': "ALTER TABLE reviews ADD COLUMN filter_mode VARCHAR DEFAULT 'pipeline'",
+        'visual_document_id': "ALTER TABLE reviews ADD COLUMN visual_document_id INTEGER",
+        'pairing_confirmed': "ALTER TABLE reviews ADD COLUMN pairing_confirmed BOOLEAN DEFAULT 0",
+        'pairing_status': "ALTER TABLE reviews ADD COLUMN pairing_status VARCHAR",
+        'pairing_confidence': "ALTER TABLE reviews ADD COLUMN pairing_confidence INTEGER",
+        'input_mode': "ALTER TABLE reviews ADD COLUMN input_mode VARCHAR",
+        'error_code': "ALTER TABLE reviews ADD COLUMN error_code VARCHAR",
     }
     for column_name, stmt in review_extra.items():
         if review_columns and column_name not in review_columns:

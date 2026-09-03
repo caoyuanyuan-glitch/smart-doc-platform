@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from app.database import Base
 from datetime import datetime
 
@@ -23,3 +23,9 @@ class Review(Base):
     worker_id = Column(String, nullable=True)
     started_at = Column(DateTime, nullable=True)
     filter_mode = Column(String, default="pipeline")
+    visual_document_id = Column(Integer, nullable=True)
+    pairing_confirmed = Column(Boolean, default=False)
+    pairing_status = Column(String, nullable=True)
+    pairing_confidence = Column(Integer, nullable=True)
+    input_mode = Column(String, nullable=True)
+    error_code = Column(String, nullable=True)

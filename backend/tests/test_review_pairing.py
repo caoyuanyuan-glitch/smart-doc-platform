@@ -1,9 +1,14 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from pathlib import Path
+
+from fastapi import HTTPException
 
 from app.api import review as review_api
 from app.review_engine.pairing import resolve_input_pairing
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_pairing_module_and_resolve_callable():
@@ -64,9 +69,7 @@ def test_create_review_parses_visual_and_pairing_params(monkeypatch):
     assert result["visual_document_id"] == 2
 
 
-def test_missing_visual_document_creates_failed_review(monkeypatch):
-    statuses = []
-
+def test_missing_visual_document_returns_404(monkeypatch):
     def fake_get_document(db, document_id=None):
         if document_id == 1:
             return SimpleNamespace(id=1, file_type="docx", filename="a.docx", user_id=1, content="word")
@@ -74,27 +77,21 @@ def test_missing_visual_document_creates_failed_review(monkeypatch):
 
     monkeypatch.setattr("app.crud.review.reclaim_stale_running_reviews", lambda *a, **k: None)
     monkeypatch.setattr(review_api, "get_document", fake_get_document)
-    monkeypatch.setattr(review_api, "_ensure_document_access", lambda doc, user: doc)
     monkeypatch.setattr(review_api, "_get_active_review_for_document", lambda *a, **k: None)
     monkeypatch.setattr(review_api, "_assert_review_runtime_ready", lambda: None)
-    monkeypatch.setattr(review_api, "create_review", lambda db=None, review=None: SimpleNamespace(id=77, document_id=1))
-    monkeypatch.setattr(review_api, "update_review_status", lambda db, rid, status, total, summary: statuses.append((rid, status, summary)))
-    monkeypatch.setattr(review_api, "set_progress", lambda *a, **k: None)
 
-    result = asyncio.run(review_api.create_review_task(
-        1,
-        mode="hybrid",
-        visual_document_id=99,
-        pairing_confirmed=True,
-        db=None,
-        current_user=SimpleNamespace(id=1, role="admin"),
-    ))
-    assert result["status"] == "failed"
-    assert result["error_code"] == "pairing_failed"
-    assert statuses[0][0] == 77
-    assert statuses[0][1] == "failed"
-    payload = json.loads(statuses[0][2])
-    assert payload["error_code"] == "pairing_failed"
+    try:
+        asyncio.run(review_api.create_review_task(
+            1,
+            mode="hybrid",
+            visual_document_id=99,
+            pairing_confirmed=True,
+            db=None,
+            current_user=SimpleNamespace(id=1, role="user"),
+        ))
+        raise AssertionError("expected HTTPException")
+    except HTTPException as exc:
+        assert exc.status_code == 404
 
 
 def test_unconfirmed_mismatch_creates_failed_not_word_only(monkeypatch):
@@ -113,7 +110,7 @@ def test_unconfirmed_mismatch_creates_failed_not_word_only(monkeypatch):
     monkeypatch.setattr(review_api, "_get_active_review_for_document", lambda *a, **k: None)
     monkeypatch.setattr(review_api, "_assert_review_runtime_ready", lambda: None)
     monkeypatch.setattr(review_api, "create_review", lambda db=None, review=None: SimpleNamespace(id=70, document_id=1))
-    monkeypatch.setattr(review_api, "update_review_status", lambda db, rid, status, total, summary: statuses.append((status, summary)))
+    monkeypatch.setattr(review_api, "update_review_status", lambda db, rid, status, total=0, summary="", **k: statuses.append((status, summary)))
     monkeypatch.setattr(review_api, "set_progress", lambda *a, **k: None)
 
     result = asyncio.run(review_api.create_review_task(
@@ -130,9 +127,99 @@ def test_unconfirmed_mismatch_creates_failed_not_word_only(monkeypatch):
 
 
 def test_frontend_create_sends_pairing_params():
-    vue = open("/workspace/frontend/src/views/Review.vue", encoding="utf-8").read()
-    api = open("/workspace/frontend/src/api/index.js", encoding="utf-8").read()
+    vue = (REPO_ROOT / "frontend/src/views/Review.vue").read_text(encoding="utf-8")
+    api = (REPO_ROOT / "frontend/src/api/index.js").read_text(encoding="utf-8")
     assert "visual_document_id: visualDocumentId" in vue
     assert "pairing_confirmed: Boolean(visualDocumentId)" in vue
     assert "params.visual_document_id" in api
     assert "params.pairing_confirmed = true" in api
+
+
+def test_cross_user_visual_pdf_rejected_even_if_confirmed(monkeypatch):
+    def fake_get_document(db, document_id=None):
+        if document_id == 1:
+            return SimpleNamespace(id=1, file_type="docx", filename="a.docx", user_id=1, content="word")
+        if document_id == 2:
+            return SimpleNamespace(id=2, file_type="pdf", filename="b.pdf", user_id=9, content="pdf")
+        return None
+
+    monkeypatch.setattr("app.crud.review.reclaim_stale_running_reviews", lambda *a, **k: None)
+    monkeypatch.setattr(review_api, "get_document", fake_get_document)
+    monkeypatch.setattr(review_api, "_get_active_review_for_document", lambda *a, **k: None)
+    monkeypatch.setattr(review_api, "_assert_review_runtime_ready", lambda: None)
+
+    try:
+        asyncio.run(review_api.create_review_task(
+            1,
+            mode="hybrid",
+            visual_document_id=2,
+            pairing_confirmed=True,
+            db=None,
+            current_user=SimpleNamespace(id=1, role="user"),
+        ))
+        raise AssertionError("expected HTTPException")
+    except HTTPException as exc:
+        assert exc.status_code == 404
+
+
+def test_non_pdf_visual_document_rejected(monkeypatch):
+    def fake_get_document(db, document_id=None):
+        if document_id == 1:
+            return SimpleNamespace(id=1, file_type="docx", filename="a.docx", user_id=1, content="word")
+        if document_id == 2:
+            return SimpleNamespace(id=2, file_type="docx", filename="b.docx", user_id=1, content="other")
+        return None
+
+    monkeypatch.setattr("app.crud.review.reclaim_stale_running_reviews", lambda *a, **k: None)
+    monkeypatch.setattr(review_api, "get_document", fake_get_document)
+    monkeypatch.setattr(review_api, "_get_active_review_for_document", lambda *a, **k: None)
+    monkeypatch.setattr(review_api, "_assert_review_runtime_ready", lambda: None)
+
+    try:
+        asyncio.run(review_api.create_review_task(
+            1,
+            mode="hybrid",
+            visual_document_id=2,
+            pairing_confirmed=True,
+            db=None,
+            current_user=SimpleNamespace(id=1, role="user"),
+        ))
+        raise AssertionError("expected HTTPException")
+    except HTTPException as exc:
+        assert exc.status_code == 400
+
+def test_explicit_cannot_bypass_cross_user_pairing():
+    docx = SimpleNamespace(id=1, file_type="docx", filename="manual.docx", user_id=3)
+    pdf = SimpleNamespace(id=2, file_type="pdf", filename="manual.pdf", user_id=9)
+    result = resolve_input_pairing(docx, pdf, explicit=True, same_user=False)
+    assert result.pairing_status == "unpaired"
+
+
+def test_deleted_visual_pdf_returns_404(monkeypatch):
+    from datetime import datetime
+
+    def fake_get_document(db, document_id=None):
+        if document_id == 1:
+            return SimpleNamespace(id=1, file_type="docx", filename="a.docx", user_id=1, content="word")
+        if document_id == 2:
+            return SimpleNamespace(id=2, file_type="pdf", filename="b.pdf", user_id=1, content="pdf", deleted_at=datetime.utcnow())
+        return None
+
+    monkeypatch.setattr("app.crud.review.reclaim_stale_running_reviews", lambda *a, **k: None)
+    monkeypatch.setattr(review_api, "get_document", fake_get_document)
+    monkeypatch.setattr(review_api, "_get_active_review_for_document", lambda *a, **k: None)
+    monkeypatch.setattr(review_api, "_assert_review_runtime_ready", lambda: None)
+
+    try:
+        asyncio.run(review_api.create_review_task(
+            1,
+            mode="hybrid",
+            visual_document_id=2,
+            pairing_confirmed=True,
+            db=None,
+            current_user=SimpleNamespace(id=1, role="user"),
+        ))
+        raise AssertionError("expected HTTPException")
+    except HTTPException as exc:
+        assert exc.status_code == 404
+

@@ -72,17 +72,6 @@ def resolve_input_pairing(
         )
 
     visual_id = getattr(visual_doc, "id", None)
-    if explicit:
-        return PairingResult(
-            input_mode="A",
-            pairing_status="paired",
-            pairing_confidence=100,
-            content_source_file_id=content_id,
-            visual_source_file_id=visual_id,
-            source_format=MODE_DOCX_PDF,
-            message="Word 作为内容输入，PDF 作为视觉复核输入",
-        )
-
     if not same_user or not same_task:
         return PairingResult(
             input_mode="A",
@@ -93,6 +82,17 @@ def resolve_input_pairing(
             source_format="docx",
             message="配对校验失败，请确认 PDF 是否属于本次审核。",
             needs_user_confirm=True,
+        )
+
+    if explicit:
+        return PairingResult(
+            input_mode="A",
+            pairing_status="paired",
+            pairing_confidence=100,
+            content_source_file_id=content_id,
+            visual_source_file_id=visual_id,
+            source_format=MODE_DOCX_PDF,
+            message="Word 作为内容输入，PDF 作为视觉复核输入",
         )
 
     content_name = str(getattr(content_doc, "filename", "") or "")

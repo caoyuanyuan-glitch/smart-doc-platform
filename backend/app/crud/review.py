@@ -81,6 +81,10 @@ def create_review(db: Session, review: ReviewCreate):
         mode=review.mode,
         provider=review.provider,
     )
+    if hasattr(db_review, "visual_document_id"):
+        db_review.visual_document_id = getattr(review, "visual_document_id", None)
+    if hasattr(db_review, "pairing_confirmed"):
+        db_review.pairing_confirmed = bool(getattr(review, "pairing_confirmed", False))
     db.add(db_review)
     db.commit()
     db.refresh(db_review)
@@ -95,7 +99,7 @@ def get_reviews(db: Session, document_id: int = None, skip: int = 0, limit: int 
         query = query.filter(Review.document_id == document_id)
     return query.order_by(Review.id.desc()).offset(skip).limit(limit).all()
 
-def update_review_status(db: Session, review_id: int, status: str, total_issues: int = 0, summary: str = ""):
+def update_review_status(db: Session, review_id: int, status: str, total_issues: int = 0, summary: str = "", **fields):
     review = db.query(Review).filter(Review.id == review_id).first()
     if review:
         review.status = status
@@ -106,6 +110,9 @@ def update_review_status(db: Session, review_id: int, status: str, total_issues:
         review.heartbeat_at = datetime.utcnow()
         if status in {"completed", "failed", "cancelled", "timeout", "error"}:
             review.completed_at = datetime.utcnow()
+        for key, value in fields.items():
+            if hasattr(review, key):
+                setattr(review, key, value)
         db.commit()
         db.refresh(review)
     return review
@@ -288,8 +295,14 @@ def persist_review_progress(db: Session, review_id: int, status: str, step: str,
     review.progress = int(progress or 0)
     review.message = message or ""
     review.heartbeat_at = datetime.utcnow()
-    if status == "failed":
+    if status in {"failed", "timeout", "error", "cancelled"}:
         review.error_message = message
+        if status == "timeout" and hasattr(review, "error_code") and not getattr(review, "error_code", None):
+            review.error_code = "timeout"
+        elif status == "cancelled" and hasattr(review, "error_code") and not getattr(review, "error_code", None):
+            review.error_code = "cancelled"
+        elif status in {"failed", "error"} and hasattr(review, "error_code") and not getattr(review, "error_code", None):
+            review.error_code = "review_failed"
     db.commit()
     db.refresh(review)
     return review
@@ -303,7 +316,8 @@ def reclaim_stale_running_reviews(db: Session, timeout_seconds: int = 900) -> in
         heartbeat = getattr(review, "heartbeat_at", None) or getattr(review, "started_at", None) or review.created_at
         stamp = heartbeat.timestamp() if heartbeat else 0
         if stamp and stamp < cutoff:
-            review.status = "failed"
+            review.status = "timeout"
+            review.error_code = "timeout"
             review.error_message = "审核任务心跳超时，已回收"
             review.message = review.error_message
             review.completed_at = datetime.utcnow()
@@ -311,3 +325,29 @@ def reclaim_stale_running_reviews(db: Session, timeout_seconds: int = 900) -> in
     if count:
         db.commit()
     return count
+
+def apply_review_pairing(db: Session, review_id: int, pairing=None, pairing_confirmed: bool = False):
+    if db is None or review_id is None:
+        return None
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        return None
+    data = pairing.to_dict() if hasattr(pairing, "to_dict") else (pairing or {})
+    if not isinstance(data, dict):
+        data = {}
+    review.visual_document_id = data.get("visual_document_id") or data.get("visual_source_file_id")
+    review.pairing_confirmed = bool(pairing_confirmed)
+    review.pairing_status = data.get("pairing_status") or data.get("status")
+    confidence = data.get("pairing_confidence")
+    try:
+        review.pairing_confidence = int(confidence) if confidence is not None else None
+    except (TypeError, ValueError):
+        review.pairing_confidence = None
+    status = str(review.pairing_status or "")
+    if status in {"docx_only", "pdf_only", "paired", "unpaired"}:
+        review.input_mode = status
+    else:
+        review.input_mode = data.get("input_mode")
+    db.commit()
+    db.refresh(review)
+    return review
