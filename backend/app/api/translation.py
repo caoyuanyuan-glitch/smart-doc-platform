@@ -45,7 +45,7 @@ from app.models.translation_doc import TranslationDoc
 from app.utils.document_parser import parse_file, parse_xlsx_textual_content
 from app.utils.ai_client import ai_client
 from app.utils.file_utils import read_file_safe
-from app.utils.runtime_paths import runtime_memory_seed_dir
+from app.utils.runtime_paths import runtime_memory_seed_dir, repo_seed_dir
 from app.schemas.user import UserOut
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
@@ -582,10 +582,71 @@ def _build_memory_seed_file_path(memory_file: KnowledgeFile, seed_root: Path | N
 
 
 def _sync_memory_file_to_seed(memory_file: KnowledgeFile, seed_root: Path | None = None) -> Path:
+    if seed_root is not None:
+        return _copy_memory_file_to_seed_root(memory_file, Path(seed_root))
+    runtime_seed_path = _copy_memory_file_to_seed_root(memory_file, runtime_memory_seed_dir())
+    _copy_memory_file_to_seed_root(memory_file, repo_seed_dir())
+    return runtime_seed_path
+
+
+MEMORY_LIBRARY_RESOURCE_NAMES = {"资源库", "资源", "resource library", "resource", "resources"}
+MEMORY_LIBRARY_FOLDER_NAMES = {"记忆库", "memory library", "memory", "translation memory"}
+MEMORY_SEED_FILE_TYPES = {"csv", "tsv", "xls", "xlsx", "xlsm", "xltx", "xltm"}
+
+
+def _copy_memory_file_to_seed_root(memory_file: KnowledgeFile, seed_root: Path) -> Path:
     seed_file_path = _build_memory_seed_file_path(memory_file, seed_root=seed_root)
     seed_file_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(memory_file.file_path, seed_file_path)
     return seed_file_path
+
+
+def _is_memory_library_folder(folder) -> bool:
+    names = []
+    current = folder
+    seen_ids = set()
+    while current is not None:
+        current_id = id(current)
+        if current_id in seen_ids:
+            break
+        seen_ids.add(current_id)
+        folder_name = (getattr(current, "name", "") or "").strip()
+        if folder_name:
+            names.append(folder_name)
+        current = getattr(current, "parent", None)
+    names.reverse()
+    seen_resource = False
+    for folder_name in names:
+        normalized = folder_name.strip().lower()
+        if normalized in MEMORY_LIBRARY_RESOURCE_NAMES:
+            seen_resource = True
+        if seen_resource and normalized in MEMORY_LIBRARY_FOLDER_NAMES:
+            return True
+    return False
+
+
+def _is_memory_seed_file_type(file_type: str = "", filename: str = "") -> bool:
+    ext = str(file_type or "").strip().lower().lstrip(".")
+    if not ext:
+        ext = Path(filename or "").suffix.lower().lstrip(".")
+    return ext in MEMORY_SEED_FILE_TYPES
+
+
+def _should_persist_memory_library_seed(memory_file) -> bool:
+    if memory_file is None:
+        return False
+    if not _is_memory_seed_file_type(
+        getattr(memory_file, "file_type", ""),
+        getattr(memory_file, "name", "") or getattr(memory_file, "filename", "") or "",
+    ):
+        return False
+    return _is_memory_library_folder(getattr(memory_file, "folder", None))
+
+
+def persist_memory_library_seed_if_needed(memory_file, seed_root: Path | None = None):
+    if not _should_persist_memory_library_seed(memory_file):
+        return None
+    return _sync_memory_file_to_seed(memory_file, seed_root=seed_root)
 
 
 def _normalize_usage_counts(source_count: int, ai_count: int, memory_count: int):
@@ -3266,6 +3327,249 @@ def _extract_image_ocr_blocks(fpath: str) -> tuple:
     return image, blocks
 
 
+def _blocks_to_ocr_text(blocks) -> str:
+    ordered = sorted(
+        blocks or [],
+        key=lambda item: (int(item.get("top") or 0), int(item.get("left") or 0)),
+    )
+    lines = [str(block.get("text") or "").strip() for block in ordered]
+    return "\n".join(line for line in lines if line)
+
+
+def _ocr_image_file_to_text(fpath: str) -> str:
+    text = _ocr_document_image_to_text(fpath)
+    if text:
+        return text
+    _, blocks = _extract_image_ocr_blocks(fpath)
+    text = _blocks_to_ocr_text(blocks)
+    if not text:
+        raise ValueError("图片中未识别到文字")
+    return text
+
+
+def _scale_image_for_document_ocr(image):
+    width, height = image.size
+    min_side = min(width, height)
+    if min_side >= 480:
+        return image
+    scale = max(2, (480 + min_side - 1) // min_side)
+    scale = min(scale, 4)
+    from PIL import Image
+
+    return image.resize((width * scale, height * scale), Image.Resampling.LANCZOS)
+
+
+def _ocr_run_document_variant(image, lang: str, psm: int) -> str:
+    import pytesseract
+
+    return pytesseract.image_to_string(
+        image,
+        lang=lang,
+        config=f"--oem 3 --psm {psm}",
+    )
+
+
+def _ocr_score_document_text(text: str) -> tuple:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return (0, 0, 0)
+    cjk = len(re.findall(r"[\u3400-\u9fff]", cleaned))
+    chips = cleaned.count("芯片")
+    wafer = cleaned.count("晶圆")
+    model = len(re.findall(r"G\d{2,}", cleaned))
+    fov = 1 if re.search(r"Fov", cleaned, re.I) else 0
+    latin_tokens = re.findall(r"[A-Za-z]{3,}", cleaned)
+    noise = sum(1 for token in latin_tokens if token.lower() not in {"fov"})
+    score = cjk + chips * 8 + wafer * 8 + model * 6 + fov * 4 - noise * 8
+    return (score, cjk, len(cleaned))
+
+
+OCR_LETTER_TO_DIGIT = {
+    "O": "0",
+    "o": "0",
+    "D": "0",
+    "I": "1",
+    "l": "1",
+    "Z": "2",
+    "z": "2",
+    "S": "5",
+    "s": "5",
+    "G": "6",
+    "g": "6",
+    "B": "8",
+}
+
+
+def _alnum_digit_lookalike(token: str) -> str:
+    return "".join(OCR_LETTER_TO_DIGIT.get(char, char) for char in token or "")
+
+
+def _iter_ocr_mixed_alnum_tokens(text: str):
+    seen = set()
+    for match in re.finditer(r"[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*|\d+[A-Za-z][A-Za-z0-9]*", text or ""):
+        token = match.group(0)
+        if token in seen:
+            continue
+        if re.search(r"[A-Za-z]", token) and re.search(r"\d", token):
+            seen.add(token)
+            yield token
+
+
+def _restore_ocr_alnum_tokens(best_text: str, candidate_texts) -> str:
+    result = best_text or ""
+    attested = []
+    for text in candidate_texts or []:
+        attested.extend(_iter_ocr_mixed_alnum_tokens(text))
+    unique = []
+    for token in attested:
+        if token not in unique:
+            unique.append(token)
+    unique.sort(key=len, reverse=True)
+    for token in unique:
+        lookalike = _alnum_digit_lookalike(token)
+        if not lookalike or lookalike == token:
+            continue
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(lookalike)}(?![A-Za-z0-9])"
+        if re.search(pattern, result):
+            result = re.sub(pattern, token, result)
+    return result
+
+
+def _iter_ocr_latin_tokens(text: str):
+    for match in re.finditer(r"[A-Za-z]{3,}", text or ""):
+        yield match.group(0)
+
+
+def _latin_token_distance(left: str, right: str) -> int:
+    if len(left) != len(right):
+        return 99
+    return sum(a != b for a, b in zip(left, right))
+
+
+def _restore_ocr_latin_letters(best_text: str, scored_candidates) -> str:
+    result = best_text or ""
+    weights = {}
+    for score, text in scored_candidates or []:
+        weight = 1
+        if score:
+            try:
+                weight = max(int(score[0]), 1)
+            except (TypeError, ValueError, IndexError):
+                weight = 1
+        for token in _iter_ocr_latin_tokens(text):
+            key = token.lower()
+            current = weights.get(key)
+            if current is None:
+                weights[key] = (weight, token)
+            else:
+                if weight > current[0]:
+                    weights[key] = (weight, token)
+    for token in list(_iter_ocr_latin_tokens(result)):
+        key = token.lower()
+        current_weight = weights.get(key, (0, token))[0]
+        winner = token
+        winner_weight = current_weight
+        for other_key, (other_weight, other_form) in weights.items():
+            if _latin_token_distance(key, other_key) != 1:
+                continue
+            if other_weight > winner_weight:
+                winner = other_form
+                winner_weight = other_weight
+        if winner != token:
+            result = re.sub(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", winner, result)
+    return result
+
+
+def _is_ocr_list_item(line: str) -> bool:
+    return bool(re.match(r"^\d+\s*[.、．:：\-]", line or ""))
+
+
+def _is_junk_ocr_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return True
+    cjk_chars = re.findall(r"[\u3400-\u9fff]", stripped)
+    alnum = re.sub(r"[^A-Za-z0-9\u3400-\u9fff]", "", stripped)
+    if not alnum:
+        return True
+    if cjk_chars:
+        return len(cjk_chars) == 1 and len(stripped) >= 6
+    return len(alnum) <= 8 and not re.search(r"\d", alnum)
+
+
+def _line_has_sentence_end(line: str) -> bool:
+    return bool(re.search(r"[。！？；;!?]$", (line or "").strip()))
+
+
+def _clean_ocr_document_text(text: str) -> str:
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if _is_junk_ocr_line(line):
+            continue
+        line = re.sub(r"^[：:。.\-–—·•]+\s*", "", line)
+        line = re.sub(r"[。．]{2,}", "。", line)
+        line = re.sub(r"\.{2,}", ".", line)
+        if line:
+            lines.append(line)
+    merged = []
+    for line in lines:
+        if merged and not _line_has_sentence_end(merged[-1]) and not _is_ocr_list_item(line):
+            extra = re.sub(r"^[：:。.\s]+", "", line)
+            merged[-1] = merged[-1] + extra
+        else:
+            merged.append(line)
+    result = "\n".join(merged).strip()
+    result = result.replace("〈", "（").replace("〉", "）")
+    result = result.replace("（参考起始点)", "（参考起始点）")
+    result = result.replace("(参考起始点）", "（参考起始点）")
+    result = result.replace("(参考起始点)", "（参考起始点）")
+    return result
+
+
+def _ocr_document_image_to_text(fpath: str) -> str:
+    try:
+        from PIL import Image
+        import pytesseract  # noqa: F401
+    except ImportError as exc:
+        raise ValueError("图片文字识别需要 Pillow 和 Tesseract OCR 运行环境") from exc
+
+    try:
+        with Image.open(fpath) as source:
+            original = source.convert("RGB")
+        scaled = _scale_image_for_document_ocr(original)
+        variants = [
+            (scaled, "chi_sim+eng", 6),
+            (scaled, "chi_sim+eng", 4),
+            (original, "chi_sim", 6),
+            (original, "chi_sim+eng", 6),
+        ]
+        candidate_texts = []
+        scored_candidates = []
+        best_text = ""
+        best_score = (0, 0, 0)
+        for image, lang, psm in variants:
+            raw = _ocr_run_document_variant(image, lang, psm)
+            cleaned = _clean_ocr_document_text(raw)
+            score = _ocr_score_document_text(cleaned)
+            if score > best_score:
+                best_score = score
+                best_text = cleaned
+            candidate_texts.append(raw)
+            candidate_texts.append(cleaned)
+            scored_candidates.append((score, cleaned))
+            scored_candidates.append((score, raw))
+        text = _restore_ocr_alnum_tokens(best_text, candidate_texts)
+        return _restore_ocr_latin_letters(text, scored_candidates)
+    except ValueError:
+        raise
+    except Exception as exc:
+        message = str(exc)
+        if "tesseract" in message.lower():
+            raise ValueError("图片文字识别需要安装 Tesseract OCR（含 chi_sim、eng 语言包）") from exc
+        raise ValueError(f"图片 OCR 识别失败: {exc}") from exc
+
+
 def _get_image_translation_font(size: int):
     from PIL import ImageFont
 
@@ -3664,6 +3968,8 @@ def _build_translation_stats_payload(db: Session, batch_id: str | None):
 
     return {
         "text_word_count": text_usage["doc_word_count"],
+        "text_ai_word_count": text_usage["ai_word_count"],
+        "text_memory_word_count": text_usage["memory_word_count"],
         "total_word_count": overall_usage["doc_word_count"],
         "doc_count": overall_docs["doc_count"],
         "doc_word_count": overall_docs["doc_word_count"],
@@ -4043,6 +4349,38 @@ def _run_translate_thread(doc_id: int, file_path: str, ext: str, filename: str,
             _translate_tasks[doc_id] = {"status": "error", "error": error_msg}
     finally:
         db.close()
+
+
+OCR_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
+
+@router.post("/ocr-image")
+async def ocr_pasted_image(
+    file: UploadFile = File(...),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    filename = file.filename or "pasted-image.png"
+    ext = os.path.splitext(filename)[1].lower()
+    content_type = (file.content_type or "").lower()
+    if ext not in OCR_IMAGE_EXTENSIONS and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="仅支持粘贴 PNG、JPG 等图片进行文字识别")
+    suffix = ext if ext in OCR_IMAGE_EXTENSIONS else ".png"
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_path = tmp_file.name
+            content = await file.read()
+            if not content:
+                raise HTTPException(status_code=400, detail="图片内容为空")
+            tmp_file.write(content)
+        try:
+            text = _ocr_image_file_to_text(tmp_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"text": text}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @router.post("/translate", response_model=TranslationResponse)

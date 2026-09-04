@@ -37,6 +37,11 @@ from app.api.translation import (  # noqa: E402
     _group_image_ocr_data,
     _detect_confirmation_button_blocks,
     _merge_image_ocr_blocks,
+    _blocks_to_ocr_text,
+    _ocr_image_file_to_text,
+    _clean_ocr_document_text,
+    _restore_ocr_alnum_tokens,
+    _restore_ocr_latin_letters,
     _load_memory_file_entries,
     _looks_like_hallucination,
     _looks_like_invalid_translation,
@@ -53,6 +58,7 @@ from app.api.translation import (  # noqa: E402
     _translate_tasks,
     _translate_tasks_lock,
     _sync_memory_file_to_seed,
+    persist_memory_library_seed_if_needed,
     _translate_image,
     _sanitize_translated_filename,
     _translate_filename,
@@ -237,6 +243,77 @@ class ImageTranslationTest(unittest.TestCase):
             with Image.open(__import__("io").BytesIO(translated)) as image:
                 self.assertEqual(image.format, "PNG")
 
+    def test_blocks_to_ocr_text_keeps_reading_order(self):
+        text = _blocks_to_ocr_text([
+            {"text": "second", "top": 40, "left": 10},
+            {"text": "first", "top": 10, "left": 10},
+            {"text": "  ", "top": 80, "left": 10},
+        ])
+        self.assertEqual(text, "first\nsecond")
+
+    def test_ocr_image_file_to_text_uses_document_ocr(self):
+        with patch("app.api.translation._ocr_document_image_to_text", return_value="Hello\nWorld"):
+            self.assertEqual(_ocr_image_file_to_text("/tmp/x.png"), "Hello\nWorld")
+
+    def test_ocr_image_file_to_text_falls_back_to_blocks(self):
+        with patch("app.api.translation._ocr_document_image_to_text", return_value=""), \
+             patch("app.api.translation._extract_image_ocr_blocks", return_value=(None, [
+                 {"text": "Hello", "top": 0, "left": 0},
+                 {"text": "World", "top": 20, "left": 0},
+             ])):
+            self.assertEqual(_ocr_image_file_to_text("/tmp/x.png"), "Hello\nWorld")
+
+    def test_ocr_image_file_to_text_raises_when_empty(self):
+        with patch("app.api.translation._ocr_document_image_to_text", return_value=""), \
+             patch("app.api.translation._extract_image_ocr_blocks", return_value=(None, [])):
+            with self.assertRaises(ValueError):
+                _ocr_image_file_to_text("/tmp/x.png")
+
+    def test_clean_ocr_document_text_joins_wrapped_lines(self):
+        text = _clean_ocr_document_text(
+            "1.G99.测序仪支持多种规格芯片上机，定位芯\n: 。 片的位置。。\n\n2.此位置信息会受到影响。"
+        )
+        self.assertIn("定位芯片的位置。", text)
+        self.assertIn("2.此位置信息会受到影响。", text)
+
+    def test_restore_ocr_alnum_prefers_g99_over_699(self):
+        text = _restore_ocr_alnum_tokens(
+            "1.699.测序仪支持多种规格芯片上机",
+            ["1.G99-测序仪支持多种规格芯片上机", "B12 and 812"],
+        )
+        self.assertIn("G99", text)
+        self.assertNotIn("699", text)
+
+    def test_restore_ocr_alnum_keeps_unrelated_numbers(self):
+        text = _restore_ocr_alnum_tokens("订单号 1699 已发货", ["型号 G99"])
+        self.assertEqual(text, "订单号 1699 已发货")
+
+    def test_restore_ocr_latin_prefers_fov_over_fev(self):
+        text = _restore_ocr_latin_letters(
+            "投射在晶圆所有 Fev 排布",
+            [
+                ((237, 159, 186), "投射在晶圆所有 Fev 排布"),
+                ((259, 159, 186), "投射在晶圆所有 Fov 排布"),
+                ((195, 159, 188), "投射在品圆所有 Fov 排布"),
+            ],
+        )
+        self.assertIn("Fov", text)
+        self.assertNotIn("Fev", text)
+
+    def test_document_ocr_keeps_numbered_paragraphs(self):
+        fixture = Path(__file__).parent / "fixtures" / "ocr_numbered_paragraphs.png"
+        if not fixture.exists():
+            self.skipTest("OCR fixture missing")
+        text = _ocr_image_file_to_text(str(fixture))
+        self.assertIn("测序仪支持多种规格芯片上机", text)
+        self.assertIn("芯片晶圆切割", text)
+        self.assertIn("多芯片融合的拍照起点定位", text)
+        self.assertRegex(text, r"Fov")
+        self.assertIn("G99", text)
+        self.assertNotIn("699", text)
+        self.assertNotIn("Fev", text)
+        self.assertNotIn("TALIA", text)
+        self.assertNotIn("AML", text)
 
 class HybridMemoryFallbackTest(unittest.TestCase):
     def tearDown(self):
@@ -320,6 +397,35 @@ class MemorySeedSyncTest(unittest.TestCase):
     def test_runtime_memory_seed_dir_is_shared_location(self):
         shared_dir = runtime_memory_seed_dir()
         self.assertIn(".smart-doc-platform", str(shared_dir))
+
+    def test_persist_uploaded_csv_under_memory_library_to_seed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_path = tmp_path / "source.csv"
+            source_path.write_text("zh-CN,en-US\n基因,gene\n", encoding="utf-8")
+            root = SimpleNamespace(name="资源库", parent=None)
+            child = SimpleNamespace(name="记忆库", parent=root)
+            memory_file = SimpleNamespace(
+                file_path=str(source_path),
+                name="admin-upload.csv",
+                file_type="csv",
+                folder=child,
+            )
+            seed_file_path = persist_memory_library_seed_if_needed(memory_file, seed_root=tmp_path / "seed")
+            self.assertEqual(seed_file_path, tmp_path / "seed" / "资源库" / "记忆库" / "admin-upload.csv")
+            self.assertTrue(seed_file_path.exists())
+            self.assertIn("基因", seed_file_path.read_text(encoding="utf-8"))
+
+    def test_persist_skips_files_outside_memory_library(self):
+        root = SimpleNamespace(name="资源库", parent=None)
+        other = SimpleNamespace(name="文件资料", parent=root)
+        memory_file = SimpleNamespace(
+            file_path="/tmp/manual.pdf",
+            name="manual.pdf",
+            file_type="pdf",
+            folder=other,
+        )
+        self.assertIsNone(persist_memory_library_seed_if_needed(memory_file, seed_root=Path("/tmp/seed")))
 
 
 class MemoryNormalizationTest(unittest.TestCase):
@@ -769,6 +875,9 @@ class TranslationStatsAggregationTest(unittest.TestCase):
         self.assertEqual(payload["doc_count"], 4)
         self.assertEqual(payload["ai_word_count"], 50)
         self.assertEqual(payload["memory_word_count"], 28)
+        self.assertEqual(payload["text_word_count"], 30)
+        self.assertEqual(payload["text_ai_word_count"], 10)
+        self.assertEqual(payload["text_memory_word_count"], 8)
 
 
 if __name__ == "__main__":

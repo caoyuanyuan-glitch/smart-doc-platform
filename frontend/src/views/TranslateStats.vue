@@ -2,21 +2,14 @@
   <div class="stats-container">
     <h2 class="stats-title">翻译统计面板</h2>
 
-    <div class="stats-layout">
-      <div class="stats-section">
-        <div class="section-header">
-          <h3 class="section-title">累计统计</h3>
-        </div>
-        <div class="stats-cards">
+    <el-tabs v-model="activeTab" class="stats-tabs">
+      <el-tab-pane label="累计" name="overall">
+        <div class="stats-section">
+        <div class="stats-cards overall-cards">
           <div class="stat-card card-text">
-            <div class="stat-label">总翻译字数</div>
+            <div class="stat-label">总字数</div>
             <div class="stat-value">{{ stats.total_word_count.toLocaleString() }}</div>
             <div class="stat-unit">字</div>
-          </div>
-          <div class="stat-card card-doc">
-            <div class="stat-label">总文档数</div>
-            <div class="stat-value">{{ stats.doc_count.toLocaleString() }}</div>
-            <div class="stat-unit">个</div>
           </div>
           <div class="stat-card card-ai">
             <div class="stat-label">AI大模型翻译字数</div>
@@ -39,72 +32,90 @@
           <p>当前还没有累计翻译来源统计数据</p>
         </div>
       </div>
+        </el-tab-pane>
 
-      <div class="stats-section">
-        <div class="section-header">
-          <h3 class="section-title">本次上传统计</h3>
-          <span v-if="stats.current_upload.batch_id" class="section-meta">批次 {{ stats.current_upload.batch_id }}</span>
-        </div>
-        <div class="stats-cards batch-cards">
-          <div class="stat-card card-doc">
-            <div class="stat-label">本次翻译文档数</div>
-            <div class="stat-value">{{ stats.current_upload.doc_count.toLocaleString() }}</div>
-            <div class="stat-unit">个</div>
+        <el-tab-pane label="文本翻译" name="text">
+          <div class="stats-section">
+            <div class="stats-cards">
+              <div class="stat-card card-text">
+                <div class="stat-label">翻译总字数</div>
+                <div class="stat-value">{{ stats.text_word_count.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+              <div class="stat-card card-doc">
+                <div class="stat-label">本次翻译字数</div>
+                <div class="stat-value">{{ latestTextWordCount.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+              <div class="stat-card card-ai">
+                <div class="stat-label">本次 AI 翻译字数</div>
+                <div class="stat-value">{{ latestTextAiWordCount.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+              <div class="stat-card card-memory">
+                <div class="stat-label">本次记忆库匹配字数</div>
+                <div class="stat-value">{{ latestTextMemoryWordCount.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+            </div>
+            <div class="chart-section" v-if="hasTextChartData">
+              <h3 class="chart-title">本次文本翻译来源占比</h3>
+              <div class="chart-wrapper">
+                <v-chart :option="textPieOption" autoresize style="height: 380px" />
+              </div>
+            </div>
+            <div class="chart-section empty-chart" v-else>
+              <p>当前还没有文本翻译来源统计数据</p>
+            </div>
           </div>
-          <div class="stat-card card-text">
-            <div class="stat-label">本次文档总字数</div>
-            <div class="stat-value">{{ stats.current_upload.doc_word_count.toLocaleString() }}</div>
-            <div class="stat-unit">字</div>
-          </div>
-          <div class="stat-card card-ai">
-            <div class="stat-label">本次 AI 翻译字数</div>
-            <div class="stat-value">{{ stats.current_upload.ai_word_count.toLocaleString() }}</div>
-            <div class="stat-unit">字</div>
-          </div>
-          <div class="stat-card card-memory">
-            <div class="stat-label">本次记忆库匹配字数</div>
-            <div class="stat-value">{{ stats.current_upload.memory_word_count.toLocaleString() }}</div>
-            <div class="stat-unit">字</div>
-          </div>
-        </div>
-        <div class="chart-section" v-if="hasCurrentUploadChartData">
-          <h3 class="chart-title">本次上传翻译来源占比</h3>
-          <div class="chart-wrapper">
-            <v-chart :option="currentUploadPieOption" autoresize style="height: 380px" />
-          </div>
-        </div>
-        <div class="chart-section empty-chart" v-else>
-          <p>当前还没有本次上传的文档翻译统计数据</p>
-        </div>
-      </div>
+        </el-tab-pane>
 
-      <div class="stats-section">
-        <div class="section-header">
-          <h3 class="section-title">最近文本翻译</h3>
-          <span v-if="stats.latest_text_translation" class="section-meta">最新一次</span>
-        </div>
-        <div class="stats-cards batch-cards" v-if="stats.latest_text_translation">
-          <div class="stat-card card-text">
-            <div class="stat-label">文本翻译字数</div>
-            <div class="stat-value">{{ stats.latest_text_translation.source_word_count.toLocaleString() }}</div>
-            <div class="stat-unit">字</div>
+        <el-tab-pane label="文档翻译" name="doc">
+          <div class="stats-section">
+            <div class="stats-cards doc-cards">
+              <div class="stat-card card-text">
+                <div class="stat-label">翻译总字数</div>
+                <div class="stat-value">{{ stats.doc_word_count.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+              <div class="stat-card card-doc">
+                <div class="stat-label">总文档数</div>
+                <div class="stat-value">{{ stats.doc_count.toLocaleString() }}</div>
+                <div class="stat-unit">个</div>
+              </div>
+              <div class="stat-card card-doc">
+                <div class="stat-label">本次翻译文档数</div>
+                <div class="stat-value">{{ stats.current_upload.doc_count.toLocaleString() }}</div>
+                <div class="stat-unit">个</div>
+              </div>
+              <div class="stat-card card-text">
+                <div class="stat-label">本次文档总字数</div>
+                <div class="stat-value">{{ stats.current_upload.doc_word_count.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+              <div class="stat-card card-ai">
+                <div class="stat-label">本次 AI 翻译字数</div>
+                <div class="stat-value">{{ stats.current_upload.ai_word_count.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+              <div class="stat-card card-memory">
+                <div class="stat-label">本次记忆库匹配字数</div>
+                <div class="stat-value">{{ stats.current_upload.memory_word_count.toLocaleString() }}</div>
+                <div class="stat-unit">字</div>
+              </div>
+            </div>
+            <div class="chart-section" v-if="hasCurrentUploadChartData">
+              <h3 class="chart-title">本次文档翻译来源占比</h3>
+              <div class="chart-wrapper">
+                <v-chart :option="currentUploadPieOption" autoresize style="height: 380px" />
+              </div>
+            </div>
+            <div class="chart-section empty-chart" v-else>
+              <p>当前还没有文档翻译统计数据</p>
+            </div>
           </div>
-          <div class="stat-card card-ai">
-            <div class="stat-label">AI 翻译字数</div>
-            <div class="stat-value">{{ stats.latest_text_translation.ai_word_count.toLocaleString() }}</div>
-            <div class="stat-unit">字</div>
-          </div>
-          <div class="stat-card card-memory">
-            <div class="stat-label">记忆库匹配字数</div>
-            <div class="stat-value">{{ stats.latest_text_translation.memory_word_count.toLocaleString() }}</div>
-            <div class="stat-unit">字</div>
-          </div>
-        </div>
-        <div class="chart-section empty-chart" v-else>
-          <p>当前还没有文本翻译统计数据</p>
-        </div>
-      </div>
-    </div>
+        </el-tab-pane>
+      </el-tabs>
   </div>
 </template>
 
@@ -123,8 +134,11 @@ const STATS_CACHE_TTL_MS = 10000
 
 use([PieChart, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
+const activeTab = ref('overall')
 const stats = ref({
   text_word_count: 0,
+  text_ai_word_count: 0,
+  text_memory_word_count: 0,
   total_word_count: 0,
   doc_count: 0,
   doc_word_count: 0,
@@ -154,101 +168,87 @@ const hasCurrentUploadChartData = computed(() => {
   return ((currentUpload.ai_word_count || 0) + (currentUpload.memory_word_count || 0)) > 0
 })
 
-const overallPieOption = computed(() => ({
-  tooltip: {
-    trigger: 'item',
-    formatter: '{b}: {c} 字 ({d}%)'
-  },
-  legend: {
-    bottom: 10
-  },
-  series: [
-    {
-      name: '翻译来源',
-      type: 'pie',
-      radius: ['45%', '72%'],
-      center: ['50%', '48%'],
-      avoidLabelOverlap: false,
-      itemStyle: {
-        borderRadius: 6,
-        borderColor: '#fff',
-        borderWidth: 3
-      },
-      label: {
-        show: true,
-        position: 'outside',
-        formatter: '{b}\n{d}%'
-      },
-      emphasis: {
-        label: {
-          show: true,
-          fontSize: 16,
-          fontWeight: 'bold'
-        }
-      },
-      data: [
-        {
-          value: stats.value.ai_word_count,
-          name: 'AI大模型翻译',
-          itemStyle: { color: '#409EFF' }
-        },
-        {
-          value: stats.value.memory_word_count,
-          name: '记忆库匹配',
-          itemStyle: { color: '#67C23A' }
-        }
-      ]
-    }
-  ]
-}))
+const hasTextChartData = computed(() => {
+  const latest = stats.value.latest_text_translation || {}
+  return ((latest.ai_word_count || 0) + (latest.memory_word_count || 0)) > 0
+})
 
-const currentUploadPieOption = computed(() => ({
-  tooltip: {
-    trigger: 'item',
-    formatter: '{b}: {c} 字 ({d}%)'
-  },
-  legend: {
-    bottom: 10
-  },
-  series: [
-    {
-      name: '翻译来源',
-      type: 'pie',
-      radius: ['45%', '72%'],
-      center: ['50%', '48%'],
-      avoidLabelOverlap: false,
-      itemStyle: {
-        borderRadius: 6,
-        borderColor: '#fff',
-        borderWidth: 3
-      },
-      label: {
-        show: true,
-        position: 'outside',
-        formatter: '{b}\n{d}%'
-      },
-      emphasis: {
+function buildSourcePieOption(aiCount, memoryCount) {
+  return {
+    tooltip: {
+      trigger: 'item',
+      formatter: '{b}: {c} 字 ({d}%)'
+    },
+    legend: {
+      bottom: 10
+    },
+    series: [
+      {
+        name: '翻译来源',
+        type: 'pie',
+        radius: ['45%', '72%'],
+        center: ['50%', '48%'],
+        avoidLabelOverlap: false,
+        itemStyle: {
+          borderRadius: 6,
+          borderColor: '#fff',
+          borderWidth: 3
+        },
         label: {
           show: true,
-          fontSize: 16,
-          fontWeight: 'bold'
-        }
-      },
-      data: [
-        {
-          value: stats.value.current_upload.ai_word_count,
-          name: 'AI大模型翻译',
-          itemStyle: { color: '#409EFF' }
+          position: 'outside',
+          formatter: '{b}\n{d}%'
         },
-        {
-          value: stats.value.current_upload.memory_word_count,
-          name: '记忆库匹配',
-          itemStyle: { color: '#67C23A' }
-        }
-      ]
-    }
-  ]
-}))
+        emphasis: {
+          label: {
+            show: true,
+            fontSize: 16,
+            fontWeight: 'bold'
+          }
+        },
+        data: [
+          {
+            value: aiCount || 0,
+            name: 'AI大模型翻译',
+            itemStyle: { color: '#409EFF' }
+          },
+          {
+            value: memoryCount || 0,
+            name: '记忆库匹配',
+            itemStyle: { color: '#67C23A' }
+          }
+        ]
+      }
+    ]
+  }
+}
+
+const overallPieOption = computed(() => buildSourcePieOption(
+  stats.value.ai_word_count,
+  stats.value.memory_word_count
+))
+
+const textPieOption = computed(() => buildSourcePieOption(
+  latestTextAiWordCount.value,
+  latestTextMemoryWordCount.value
+))
+
+const currentUploadPieOption = computed(() => {
+  const currentUpload = stats.value.current_upload || {}
+  return buildSourcePieOption(currentUpload.ai_word_count, currentUpload.memory_word_count)
+})
+
+const latestTextWordCount = computed(() => {
+  return stats.value.latest_text_translation?.source_word_count || 0
+})
+
+const latestTextAiWordCount = computed(() => {
+  return stats.value.latest_text_translation?.ai_word_count || 0
+})
+
+const latestTextMemoryWordCount = computed(() => {
+  return stats.value.latest_text_translation?.memory_word_count || 0
+})
 
 async function loadStats(force = false) {
   if (!force && inflightRequest) {
@@ -360,6 +360,10 @@ onBeforeUnmount(() => {
   color: #303133;
 }
 
+.stats-tabs :deep(.el-tabs__header) {
+  margin-bottom: 20px;
+}
+
 .section-header {
   display: flex;
   align-items: center;
@@ -387,8 +391,12 @@ onBeforeUnmount(() => {
   margin-bottom: 32px;
 }
 
-.batch-cards {
-  margin-bottom: 20px;
+.overall-cards {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.doc-cards {
+  grid-template-columns: repeat(6, 1fr);
 }
 
 .stat-card {
