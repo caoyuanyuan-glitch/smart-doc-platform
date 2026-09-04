@@ -61,22 +61,30 @@
           <template #header>
             <span class="card-header-title">翻译内容</span>
           </template>
-          <div class="text-input-area">
+          <div class="text-input-area" @paste="handlePasteImage">
+            <div class="source-composer">
+              <div v-if="pastedImages.length" class="pasted-image-list">
+                <figure v-for="item in pastedImages" :key="item.id" class="pasted-image-item">
+                  <img :src="item.url" :alt="item.name" />
+                </figure>
+              </div>
+              <div v-if="ocrRecognizing" class="ocr-progress">正在识别图片文字...</div>
             <el-input
               v-model="inputText"
               type="textarea"
               :rows="14"
-              placeholder="请输入需要翻译的文本内容..."
+              placeholder="请输入需要翻译的文本，或直接粘贴图片识别原文..."
               resize="none"
             />
+            </div>
             <div class="input-actions">
-              <span class="char-count">{{ inputText.length }} 字符</span>
+              <span class="char-count">{{ ocrRecognizing ? '正在识别图片文字...' : `${inputText.length} 字符` }}</span>
               <div class="input-action-buttons">
-                <el-button type="primary" :loading="translating" @click="translateText" :disabled="!inputText.trim()">
+                <el-button type="primary" :loading="translating || ocrRecognizing" @click="translateText" :disabled="!inputText.trim() || ocrRecognizing">
                   <el-icon><Switch /></el-icon>
                   开始翻译
                 </el-button>
-                <el-button :disabled="translating || !canClearTranslation" @click="clearTranslationSession">
+                <el-button :disabled="translating || ocrRecognizing || !canClearTranslation" @click="clearTranslationSession">
                   <el-icon><Delete /></el-icon>
                   清空
                 </el-button>
@@ -201,10 +209,10 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort, Delete } from '@element-plus/icons-vue'
-import { knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
+import { knowledgeAPI, translationAPI, getAPIErrorMessage, getKnowledgeLoadErrorMessage } from '@/api'
 import { TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 import {
@@ -241,13 +249,15 @@ const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
 const inputText = ref('')
 const translating = ref(false)
+const ocrRecognizing = ref(false)
 const result = ref(null)
 const editingResult = ref(false)
 const translatedDraft = ref('')
 const writingMemory = ref(false)
 const writableMemoryFileTypes = ['xlsx', 'xlsm', 'xltx', 'xltm']
 
-const canClearTranslation = computed(() => Boolean(inputText.value.trim() || result.value || editingResult.value || translatedDraft.value))
+const pastedImages = ref([])
+const canClearTranslation = computed(() => Boolean(inputText.value.trim() || pastedImages.value.length || result.value || editingResult.value || translatedDraft.value))
 
 const writableMemoryLibraryFiles = computed(() => {
   return memoryLibraryFiles.value.filter(file => writableMemoryFileTypes.includes(String(file.fileType || '').toLowerCase()))
@@ -409,6 +419,10 @@ onMounted(async () => {
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
 })
 
+onUnmounted(() => {
+  revokePastedImages()
+})
+
 function syncSelectedModel() {
   if (engine.value === 'memory') {
     return
@@ -462,18 +476,73 @@ function onEngineChange(val) {
   syncSelectedModel()
 }
 
+function revokePastedImages() {
+  pastedImages.value.forEach(item => {
+    if (item.url) {
+      URL.revokeObjectURL(item.url)
+    }
+  })
+  pastedImages.value = []
+}
+
 function clearTranslationSession() {
-  if (translating.value) {
+  if (translating.value || ocrRecognizing.value) {
     return
   }
   inputText.value = ''
+  revokePastedImages()
   result.value = null
   editingResult.value = false
   translatedDraft.value = ''
   ElMessage.success('已清空当前翻译内容')
 }
 
+function getPastedImageFile(event) {
+  const items = Array.from(event.clipboardData?.items || [])
+  const imageItem = items.find(item => item.type && item.type.startsWith('image/'))
+  return imageItem ? imageItem.getAsFile() : null
+}
+
+async function handlePasteImage(event) {
+  const file = getPastedImageFile(event)
+  if (!file) {
+    return
+  }
+  event.preventDefault()
+  if (ocrRecognizing.value || translating.value) {
+    ElMessage.info('正在处理中，请稍后再粘贴图片')
+    return
+  }
+  const filename = file.name && file.name.includes('.') ? file.name : 'pasted-image.png'
+  pastedImages.value.push({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    url: URL.createObjectURL(file),
+    name: filename
+  })
+  ocrRecognizing.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', file, filename)
+    const { data } = await translationAPI.ocrImage(formData)
+    const text = String(data?.text || '').trim()
+    if (!text) {
+      ElMessage.warning('图片中未识别到文字')
+      return
+    }
+    const current = inputText.value.trimEnd()
+    inputText.value = current ? `${current}\n\n${text}` : text
+    ElMessage.success('图片文字已识别并填入翻译内容')
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '图片文字识别失败'))
+  } finally {
+    ocrRecognizing.value = false
+  }
+}
+
 async function translateText() {
+  if (ocrRecognizing.value) {
+    return
+  }
   if (!inputText.value.trim()) {
     ElMessage.warning('请输入翻译内容')
     return
@@ -700,16 +769,58 @@ function downloadResult() {
   flex-direction: column;
 }
 
+.source-composer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #fff;
+  overflow: auto;
+}
+
+.pasted-image-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+
+.pasted-image-item {
+  margin: 0;
+}
+
+.pasted-image-item img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.ocr-progress {
+  margin: 8px 12px 0;
+  font-size: 13px;
+  color: #2563eb;
+}
+
 .text-input-area :deep(.el-textarea) {
   flex: 1;
 }
 
 .text-input-area :deep(.el-textarea__inner) {
-  border-radius: 8px;
+  border: none;
+  box-shadow: none;
+  border-radius: 0 0 8px 8px;
   font-size: 14px;
   line-height: 1.7;
-  height: 100% !important;
-  min-height: 320px;
+  height: auto !important;
+  min-height: 180px;
 }
 
 .input-actions {

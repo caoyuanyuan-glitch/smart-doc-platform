@@ -59,16 +59,10 @@
       <div class="left-panel">
         <el-card class="source-card" shadow="never">
           <template #header>
-            <div class="card-header-row">
-              <span class="card-header-title">选择文档</span>
-              <el-tabs v-model="docSource" class="source-tabs">
-                <el-tab-pane label="上传文件" name="upload" />
-                <el-tab-pane label="已审核文档" name="reviewed" />
-              </el-tabs>
-            </div>
+            <span class="card-header-title">选择文档</span>
           </template>
 
-          <div v-if="docSource === 'upload'" class="file-upload-area">
+          <div class="file-upload-area">
             <el-upload
               class="upload-dragger"
               drag
@@ -97,24 +91,6 @@
               <el-button class="upload-clear-btn" :disabled="hasActiveJobs || !canClearTranslation" @click="clearTranslationSession">
                 <el-icon><Delete /></el-icon>
                 清空
-              </el-button>
-            </div>
-          </div>
-
-          <div v-if="docSource === 'reviewed'" class="reviewed-area">
-            <div v-if="reviewedDocsLoading" class="loading-hint">加载已审核文档列表...</div>
-            <div v-else-if="reviewedDocs.length === 0" class="empty-hint">暂无可翻译的已审核文档</div>
-            <el-table v-else :data="reviewedDocs" highlight-current-row
-              :row-class-name="tableRowClassName" max-height="320" @row-click="selectReviewedDocRow">
-              <el-table-column prop="filename" label="文档名称" min-width="180" />
-              <el-table-column prop="file_type" label="类型" width="80" />
-              <el-table-column prop="preview" label="预览" min-width="200" show-overflow-tooltip />
-            </el-table>
-            <div v-if="reviewedDocs.length > 0" class="reviewed-doc-hint">已自动排除当前不支持翻译的格式。</div>
-            <div v-if="selectedReviewedDoc" class="selected-doc-hint">
-              已选择: {{ selectedReviewedDoc.filename }}
-              <el-button type="primary" size="small" :loading="hasActiveJobs" @click="translateReviewedDoc" style="margin-left: 12px">
-                翻译此文档
               </el-button>
             </div>
           </div>
@@ -239,14 +215,12 @@ const memoryBanks = ref([])
 const memoryFileIds = ref([])
 const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
-const docSource = ref('upload')
 const translationJobs = ref([])
 const pollingTimers = new Map()
 const hasActiveJobs = computed(() => translationJobs.value.some(job => job.status === 'submitting' || job.status === 'processing'))
 const canClearTranslation = computed(() => (
   selectedUploadCount.value > 0
   || translationJobs.value.length > 0
-  || Boolean(selectedReviewedDoc.value)
   || previewDialogVisible.value
 ))
 const currentBatchId = ref('')
@@ -263,19 +237,13 @@ const providerHintText = computed(() => {
 
 const fileUploadRef = ref(null)
 
-const reviewedDocs = ref([])
 const selectedUploadCount = ref(0)
-const reviewedDocsLoading = ref(false)
-const selectedReviewedDoc = ref(null)
-const selectedReviewedRow = ref(null)
 const previewDialogVisible = ref(false)
 const previewLoading = ref(false)
 const previewContent = ref('')
 const previewJob = ref(null)
-const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 
 onMounted(async () => {
-  loadReviewedDocs()
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
   await restoreLatestBatchJobs()
 })
@@ -344,76 +312,6 @@ function appendSelectedMemoryFileIds(formData) {
   }
 }
 
-function tableRowClassName({ row }) {
-  if (selectedReviewedRow.value && selectedReviewedRow.value.id === row.id) {
-    return 'selected-row'
-  }
-  return ''
-}
-
-function selectReviewedDocRow(row) {
-  if (unsupportedReviewedTypes.has(String(row?.file_type || '').toLowerCase())) {
-    ElMessage.warning('当前文档格式暂不支持翻译')
-    return
-  }
-  selectedReviewedDoc.value = row
-  selectedReviewedRow.value = row
-}
-
-async function loadReviewedDocs() {
-  reviewedDocsLoading.value = true
-  try {
-    const res = await translationAPI.getReviewedDocs()
-    reviewedDocs.value = (res.data || []).filter(doc => !unsupportedReviewedTypes.has(String(doc.file_type || '').toLowerCase()))
-  } catch (e) {
-    ElMessage.error('加载已审核文档失败')
-  } finally {
-    reviewedDocsLoading.value = false
-  }
-}
-
-async function translateReviewedDoc() {
-  if (!selectedReviewedDoc.value) return
-  if (unsupportedReviewedTypes.has(String(selectedReviewedDoc.value.file_type || '').toLowerCase())) {
-    ElMessage.error('当前文档格式暂不支持翻译')
-    return
-  }
-  const job = createJob(selectedReviewedDoc.value.filename)
-  const batchId = createBatchId()
-  currentBatchId.value = batchId
-  sessionStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
-  localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
-  window.dispatchEvent(new CustomEvent(TRANSLATION_BATCH_EVENT, { detail: { batchId } }))
-  try {
-    const res = await translationAPI.getDocument(selectedReviewedDoc.value.id)
-    const content = res.data.content || ''
-    const formData = new FormData()
-    const blob = new Blob([content], { type: 'text/plain' })
-    const fname = selectedReviewedDoc.value.filename
-    formData.append('file', blob, fname)
-    formData.append('engine', engine.value)
-    formData.append('model', model.value)
-    formData.append('source_lang', sourceLang.value)
-    formData.append('target_lang', targetLang.value)
-    formData.append('memory_bank', memoryBank.value || '')
-    formData.append('batch_id', batchId)
-    appendSelectedMemoryFileIds(formData)
-    const tres = await translationAPI.translateFile(formData)
-    updateJob(job.jobKey, {
-      doc_id: tres.data.doc_id,
-      original_filename: tres.data.original_filename || job.original_filename,
-      status: 'processing',
-      pollingCount: 0,
-      error: ''
-    })
-    startPolling(job.jobKey, tres.data.doc_id)
-  } catch (e) {
-    const error = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
-    updateJob(job.jobKey, { status: 'error', error })
-    ElMessage.error(error)
-  }
-}
-
 function beforeFileUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
   const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'png', 'jpg', 'jpeg', 'md', 'txt', 'xlf', 'idml']
@@ -452,8 +350,6 @@ function clearTranslationSession() {
   currentBatchId.value = ''
   sessionStorage.removeItem(TRANSLATION_BATCH_STORAGE_KEY)
   localStorage.removeItem(TRANSLATION_BATCH_STORAGE_KEY)
-  selectedReviewedDoc.value = null
-  selectedReviewedRow.value = null
   previewDialogVisible.value = false
   previewLoading.value = false
   previewContent.value = ''
@@ -853,24 +749,6 @@ async function openTranslatedPreview(job) {
   color: #1f2937;
 }
 
-.card-header-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.source-tabs {
-  margin-bottom: -12px;
-}
-
-.source-tabs :deep(.el-tabs__header) {
-  margin-bottom: 0;
-}
-
-.source-tabs :deep(.el-tabs__nav-wrap::after) {
-  display: none;
-}
-
 .config-card {
   margin-bottom: 16px;
 }
@@ -935,32 +813,6 @@ async function openTranslatedPreview(job) {
 
 .upload-clear-btn {
   flex-shrink: 0;
-}
-
-.reviewed-area {
-  min-height: 100px;
-}
-
-.loading-hint, .empty-hint {
-  text-align: center;
-  color: #9ca3af;
-  padding: 40px 0;
-  font-size: 14px;
-}
-
-.selected-doc-hint {
-  margin-top: 12px;
-  padding: 10px 14px;
-  background: #eff6ff;
-  border-radius: 8px;
-  font-size: 13px;
-  color: #1e40af;
-  display: flex;
-  align-items: center;
-}
-
-.reviewed-area :deep(.el-table .selected-row) {
-  background-color: #eff6ff;
 }
 
 .result-empty {

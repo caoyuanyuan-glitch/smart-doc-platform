@@ -405,6 +405,10 @@ export const convertAPI = {
 
 export const translationAPI = {
   translate: (data) => instance.post('/translation/translate', data),
+  ocrImage: (formData) => instance.post('/translation/ocr-image', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000
+  }),
   getProviderStatus: () => instance.get('/translation/providers/status'),
   translateFile: (formData) => instance.post('/translation/translate/file', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -413,8 +417,6 @@ export const translationAPI = {
   getFileStatus: (docId, params = {}) => instance.get(`/translation/translate/file/${docId}/status`, { params }),
   cancelFileTranslation: (docId) => instance.post(`/translation/translate/file/${docId}/cancel`),
   getMemoryBanks: () => instance.get('/translation/memory/banks'),
-  getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
-  getDocument: (id) => instance.get(`/documents/${id}`),
   getMemory: (skip = 0, limit = 100, keyword) => {
     const params = { skip, limit }
     if (keyword) params.keyword = keyword
