@@ -878,7 +878,7 @@ def _split_list_marker_prefix(text: str) -> tuple[str, str]:
 
 def _split_notice_prefix(text: str) -> tuple[str, str]:
     value = str(text or '').strip()
-    match = re.match(r'^((?:请)?注意[：:])\s*(.+)$', value)
+    match = re.match(r'^((?:请)?(?:注意|提示)[：:])\s*(.+)$', value)
     if not match:
         return '', value
     return match.group(1), match.group(2).strip()
@@ -886,7 +886,7 @@ def _split_notice_prefix(text: str) -> tuple[str, str]:
 
 def _collapse_repeated_notice_prefix(text: str) -> str:
     value = str(text or '').strip()
-    return re.sub(r'^((?:请)?注意[：:])(?:\s*(?:请)?注意[：:])+', r'\1', value)
+    return re.sub(r'^((?:请)?(?:注意|提示)[：:])(?:\s*(?:请)?(?:注意|提示)[：:])+', r'\1', value)
 
 
 def _should_add_contextual_terminal_punctuation(text: str) -> bool:
@@ -6202,6 +6202,8 @@ _CAT_KEY_TERM_ANCHOR_GROUPS = {
         ('cdna', re.compile(r'c\s*dna', re.IGNORECASE)),
         ('gdna', re.compile(r'g\s*dna', re.IGNORECASE)),
         ('cfdna', re.compile(r'cf\s*dna', re.IGNORECASE)),
+        ('dsdna', re.compile(r'ds\s*dna', re.IGNORECASE)),
+        ('dnb', re.compile(r'(?<![a-z])dnb(?![a-z])', re.IGNORECASE)),
         ('rna', re.compile(r'(?<![a-z])rna(?![a-z])', re.IGNORECASE)),
         ('dna', re.compile(r'(?<![a-z])dna(?![a-z])', re.IGNORECASE)),
     ),
@@ -6563,7 +6565,325 @@ def _is_trivial_cat_artifact_edit(source_text: str, candidate_text: str) -> bool
         compact_source = re.sub(r'[：:。.!！？?\s]+', '', source_norm)
         compact_candidate = re.sub(r'[：:。.!！？?\s]+', '', candidate_norm)
         return bool(compact_source) and compact_source == compact_candidate
+    return _is_spacing_or_unit_equivalent_edit(source_text, candidate_text)
+
+
+_CAT_SPACING_UNIT_NAMES = _NUMBER_SPACE_UNITS + r'|sec'
+_CAT_SPACING_UNIT_RE = re.compile(
+    rf'(\d+(?:\.\d+)?)\s*({_CAT_SPACING_UNIT_NAMES})\b',
+    re.IGNORECASE,
+)
+_CAT_WELL_RANGE_RE = re.compile(
+    r'(?<![A-Za-z0-9])([A-Za-z])(\d{1,3})\s*[-~～至]\s*(?:([A-Za-z])\s*)?(\d{1,3})(?![A-Za-z0-9])',
+)
+_CAT_WELL_CONTEXT_RE = re.compile(
+    r'(?:孔位|进样孔|产物孔|加样孔|孔)\s*([A-Za-z])(\d{1,3})(?![A-Za-z0-9])',
+)
+_CAT_WELL_SLOT_RE = re.compile(
+    r'(?<![A-Za-z0-9])([A-Za-z])(\d{1,3})(?![A-Za-z0-9])\s*对应',
+)
+_CAT_WELL_LIST_RE = re.compile(
+    r'(?<![A-Za-z0-9])([A-Za-z]\d{1,3}(?:\s*[,，、/]\s*[A-Za-z]\d{1,3}){1,15})(?![A-Za-z0-9])',
+)
+_CAT_DSDNA_RE = re.compile(r'ds\s*dna', re.IGNORECASE)
+_CAT_DNB_RE = re.compile(r'(?<![a-z])dnb(?![a-z])', re.IGNORECASE)
+
+
+def _normalize_spacing_unit_text(text: str) -> str:
+    value = _normalize_cat_typography(str(text or ''))
+    _, body = _split_step_prefix(value.strip())
+    value = (body or value).lstrip('.。').strip()
+    value = value.replace('µ', 'μ')
+    value = re.sub(r'(?<=\d)\s*uL\b', 'μL', value, flags=re.IGNORECASE)
+    value = _CAT_SPACING_UNIT_RE.sub(lambda match: f'{match.group(1)}{match.group(2)}', value)
+    return re.sub(r'(\d+(?:\.\d+)?)\s*[~～]\s*(\d+(?:\.\d+)?)', r'\1~\2', value)
+
+
+def _is_spacing_or_unit_equivalent_edit(source_text: str, candidate_text: str) -> bool:
+    source_norm = _normalize_spacing_unit_text(source_text)
+    candidate_norm = _normalize_spacing_unit_text(candidate_text)
+    return bool(source_norm) and source_norm == candidate_norm
+
+
+def _add_well_token(wells: set[str], letter: str, number: str) -> None:
+    token_letter = str(letter or '').upper()
+    if not token_letter or token_letter == 'V':
+        return
+    wells.add(f'{token_letter}{int(number)}')
+
+
+def _extract_well_ids(text: str) -> set[str]:
+    raw = str(text or '')
+    wells: set[str] = set()
+    if not raw:
+        return wells
+    for match in _CAT_WELL_RANGE_RE.finditer(raw):
+        letter1 = match.group(1)
+        letter2 = match.group(3) or letter1
+        start = int(match.group(2))
+        end = int(match.group(4))
+        if letter1.upper() == letter2.upper() and 0 <= end - start <= 16:
+            for number in range(start, end + 1):
+                _add_well_token(wells, letter1, str(number))
+        else:
+            _add_well_token(wells, letter1, match.group(2))
+            _add_well_token(wells, letter2, match.group(4))
+    for match in _CAT_WELL_CONTEXT_RE.finditer(raw):
+        _add_well_token(wells, match.group(1), match.group(2))
+    for match in _CAT_WELL_SLOT_RE.finditer(raw):
+        _add_well_token(wells, match.group(1), match.group(2))
+    for match in _CAT_WELL_LIST_RE.finditer(raw):
+        for token in re.finditer(r'([A-Za-z])(\d{1,3})', match.group(1)):
+            _add_well_token(wells, token.group(1), token.group(2))
+    return wells
+
+
+def _extract_library_molecule_families(text: str) -> set[str]:
+    raw = str(text or '')
+    families = set()
+    if _CAT_DSDNA_RE.search(raw):
+        families.add('dsdna')
+    if _CAT_DNB_RE.search(raw):
+        families.add('dnb')
+    return families
+
+
+def _cat_entity_family_mismatch_reason(source_text: str, candidate_text: str) -> str:
+    source_wells = _extract_well_ids(source_text)
+    candidate_wells = _extract_well_ids(candidate_text)
+    if source_wells != candidate_wells and (source_wells or candidate_wells):
+        return 'well_mismatch'
+    source_families = _extract_library_molecule_families(source_text)
+    candidate_families = _extract_library_molecule_families(candidate_text)
+    if source_families != candidate_families and (source_families or candidate_families):
+        return 'molecule_family_mismatch'
+    return ''
+
+
+def _split_dunhao_items(text: str) -> list[str]:
+    raw = str(text or '')
+    if '、' not in raw:
+        return []
+    items = []
+    for part in raw.split('、'):
+        value = part.strip()
+        if not value:
+            continue
+        value = re.sub(r'^(以及|和|与|及)', '', value).strip()
+        value = re.sub(r'等(?:物种|样本)?(?=[。.!！？?；;]|$)', '', value).strip()
+        value = re.sub(r'[。.!！？?；;]+$', '', value).strip()
+        if value:
+            items.append(value)
+    return items
+
+
+def _is_truncated_dunhao_enumeration(source_text: str, candidate_text: str) -> bool:
+    source_items = _split_dunhao_items(source_text)
+    if len(source_items) < 3:
+        return False
+    candidate_items = _split_dunhao_items(candidate_text)
+    if len(candidate_items) >= len(source_items):
+        return False
+    if len(candidate_items) >= 2:
+        return True
+    return len(source_items) >= 5
+
+
+_WRITEBACK_STOPCHARS = set('的了和与及或等在把被将对从到为是有其该本此中上下时后前也都不并且而于以使让向由')
+_CONTENT_TOKEN_LOSS_DROP = 0.80
+_CONTENT_TOKEN_LOSS_SHORT_CANDIDATE = 7
+_BRACKET_ENUM_RE = re.compile(
+    r'[（(]([A-Za-z0-9①-⑳❶-❿]+(?:\s*[,，、/]\s*[A-Za-z0-9①-⑳❶-❿]+)+)[)）]'
+)
+_URL_LIKE_RE = re.compile(
+    r'(?:https?://)?(?:www\.)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/[^\s，。；;、）)）]*)?',
+    re.I,
+)
+
+
+def _writeback_content_tokens(text: str) -> set[str]:
+    value = str(text or '').replace('µ', 'μ')
+    tokens: set[str] = set()
+    for match in re.finditer(r'[A-Za-z][A-Za-z0-9+\-/]*', value):
+        tokens.add(match.group(0).lower())
+    chars = [ch for ch in value if '\u4e00' <= ch <= '\u9fff' and ch not in _WRITEBACK_STOPCHARS]
+    for index in range(len(chars) - 1):
+        tokens.add(chars[index] + chars[index + 1])
+    return tokens
+
+
+def _content_token_loss_ratio(source_text: str, candidate_text: str) -> float:
+    source_tokens = _writeback_content_tokens(source_text)
+    if not source_tokens:
+        return 0.0
+    candidate_tokens = _writeback_content_tokens(candidate_text)
+    return len(source_tokens - candidate_tokens) / len(source_tokens)
+
+
+def _drops_quantity_count_structure(source_text: str, candidate_text: str) -> bool:
+    source_counts = re.findall(r'(\d+)\s*个', source_text)
+    candidate_counts = re.findall(r'(\d+)\s*个', candidate_text)
+    if source_counts and candidate_counts and source_counts != candidate_counts:
+        return True
+    if source_counts and not candidate_counts:
+        return bool(re.search(r'一对|一条|一组|一套', candidate_text)) and not bool(
+            re.search(r'一对|一条|一组|一套', source_text)
+        )
     return False
+
+
+def _drops_volume_transfer_skeleton(source_text: str, candidate_text: str) -> bool:
+    if '体积' not in source_text or '转移' not in source_text:
+        return False
+    return '体积' not in candidate_text and '转移' not in candidate_text
+
+
+def _bracket_enum_groups(text: str) -> list[tuple[str, ...]]:
+    groups = []
+    for match in _BRACKET_ENUM_RE.finditer(str(text or '')):
+        items = tuple(part.strip() for part in re.split(r'[,，、/]', match.group(1)) if part.strip())
+        if len(items) >= 2:
+            groups.append(items)
+    return groups
+
+
+def _is_truncated_bracket_enumeration(source_text: str, candidate_text: str) -> bool:
+    source_groups = _bracket_enum_groups(source_text)
+    if not source_groups:
+        return False
+    candidate_sets = [set(group) for group in _bracket_enum_groups(candidate_text)]
+    for group in source_groups:
+        if not any(set(group) <= kept for kept in candidate_sets):
+            return True
+    return False
+
+
+def _normalized_url_refs(text: str) -> list[str]:
+    refs = []
+    for match in _URL_LIKE_RE.finditer(str(text or '')):
+        value = match.group(0).rstrip('./。.')
+        value = re.sub(r'^https?://', '', value, flags=re.I).lower()
+        if value:
+            refs.append(value)
+    return refs
+
+
+def _url_path_truncated(source_text: str, candidate_text: str) -> bool:
+    source_urls = _normalized_url_refs(source_text)
+    candidate_urls = _normalized_url_refs(candidate_text)
+    if not source_urls or not candidate_urls:
+        return False
+    for source_url in source_urls:
+        if '/' not in source_url:
+            continue
+        host = source_url.split('/', 1)[0]
+        for candidate_url in candidate_urls:
+            if candidate_url.rstrip('/') == source_url.rstrip('/'):
+                continue
+            if candidate_url.rstrip('/') == host:
+                return True
+            if source_url.startswith(candidate_url.rstrip('/') + '/') and candidate_url.count('/') < source_url.count('/'):
+                return True
+    return False
+
+
+def _writeback_leading_clause(text: str) -> str:
+    value = str(text or '').strip()
+    _, value = _split_step_prefix(value)
+    _, value = _split_list_marker_prefix(value)
+    _, value = _split_notice_prefix(value)
+    clauses = _split_sentence_clauses(value)
+    return clauses[0] if clauses else value
+
+
+def _dedupe_repeated_figure_refs(text: str) -> str:
+    """Keep the first （图N） / (图N) for each number; strip later copies."""
+    value = str(text or '')
+    if not value:
+        return value
+    seen: set[str] = set()
+
+    def _keep_first(match: re.Match) -> str:
+        number = match.group(1)
+        if number in seen:
+            return ''
+        seen.add(number)
+        return match.group(0)
+
+    value = re.sub(r'[（(]图\s*(\d+)[)）]', _keep_first, value)
+    value = re.sub(r'，\s*，', '，', value)
+    value = re.sub(r'，\s*。', '。', value)
+    value = re.sub(r'（\s*）|\(\s*\)', '', value)
+    return value
+
+
+def _cat_writeback_hazard_reason(source_text: str, candidate_text: str) -> str:
+    """Drop candidates that would corrupt the document if written back."""
+    source = str(source_text or '').strip()
+    candidate = str(candidate_text or '').strip()
+    if not source or not candidate:
+        return ''
+
+    source_prefix, source_body = _split_notice_prefix(source)
+    candidate_prefix, candidate_body = _split_notice_prefix(candidate)
+    if source_prefix:
+        if not candidate_prefix:
+            return 'notice_prefix'
+        if '提示' in source_prefix and (
+            not _is_trivial_cat_artifact_edit(source, candidate)
+            and re.sub(r'\s+', '', source_body) != re.sub(r'\s+', '', candidate_body)
+        ):
+            return 'notice_rewrite'
+
+    if (
+        '枪头' in source
+        and source.count('枪头') > candidate.count('枪头')
+        and candidate.count('吸头') > source.count('吸头')
+    ):
+        return 'tip_term'
+
+    source_compact = re.sub(r'\s+', '', source)
+    candidate_compact = re.sub(r'\s+', '', candidate)
+    if (
+        'MGI技术支持' in source_compact
+        and 'MGI技术支持' not in candidate_compact
+        and '技术支持' in candidate_compact
+    ):
+        return 'dropped_mgi'
+
+    if (
+        re.search(r'([\u4e00-\u9fff]{2,8})\1', candidate_compact)
+        and not re.search(r'([\u4e00-\u9fff]{2,8})\1', source_compact)
+    ):
+        return 'repeated_span'
+    if re.search(r'([\u4e00-\u9fff]{2,4})是否还有剩余\1', candidate):
+        return 'repeated_span'
+
+    source_lead = _writeback_leading_clause(source)
+    candidate_lead = _writeback_leading_clause(candidate)
+    for token in ('V2.0', '储存温度', '版权所有', '©'):
+        if token in candidate_lead and token not in source:
+            return 'theme_hijack'
+    if '仓门' in candidate and '仓门' not in source:
+        if _clause_similarity(source_lead, candidate_lead) < 0.35:
+            return 'theme_hijack'
+    if _is_truncated_bracket_enumeration(source, candidate):
+        return 'dropped_bracket_enum'
+    if _url_path_truncated(source, candidate):
+        return 'url_path_truncated'
+    source_len = len(source_compact)
+    candidate_len = len(candidate_compact)
+    length_ratio = (
+        min(source_len, candidate_len) / max(source_len, candidate_len)
+        if source_len and candidate_len else 1.0
+    )
+    if length_ratio <= 0.5 and _content_token_loss_ratio(source, candidate) >= _CONTENT_TOKEN_LOSS_DROP:
+        # Short CAT templates (加样体积 / 搭配测序) would otherwise trip the 80% gate.
+        if len(_writeback_content_tokens(candidate)) >= _CONTENT_TOKEN_LOSS_SHORT_CANDIDATE:
+            return 'content_token_loss'
+    if _drops_quantity_count_structure(source, candidate) or _drops_volume_transfer_skeleton(source, candidate):
+        return 'content_token_loss'
+    return ''
 
 
 def _is_compact_field_line(text: str) -> bool:
@@ -6590,6 +6910,8 @@ def _is_dropped_cat_artifact_revision(original: str, revised: str) -> bool:
     if _is_trivial_cat_artifact_edit(original_text, revised_text):
         return True
     if _has_missing_icon_button_name(original_text) and _has_missing_icon_button_name(revised_text):
+        return True
+    if _cat_writeback_hazard_reason(original_text, revised_text):
         return True
     return False
 
@@ -6642,6 +6964,7 @@ def _filter_cat_artifact_diagnoses(diagnoses: Optional[list], sentence_items: Op
             locked = _backfill_critical_entities(original or quote, revised)
             locked = _restore_protected_latin_terms(original or quote, locked)
             locked = _trim_duplicated_leading_clause(locked)
+            locked = _dedupe_repeated_figure_refs(locked)
             if locked != revised:
                 diag = dict(diag)
                 diag['revised'] = locked
@@ -6674,6 +6997,7 @@ def _filter_cat_artifact_diagnose_items(diagnose_items: Optional[list]) -> list:
                 locked = _backfill_critical_entities(original, revised)
                 locked = _restore_protected_latin_terms(original, locked)
                 locked = _trim_duplicated_leading_clause(locked)
+                locked = _dedupe_repeated_figure_refs(locked)
                 if locked != revised:
                     cand = dict(cand)
                     if cand.get('template_text'):
@@ -6743,7 +7067,7 @@ def _finalize_composed_cat_candidate(original: str, candidate: str, composed: st
     result = _restore_leading_coverb(source_text, result)
     result = _collapse_conflicting_thaw_methods(source_text, result)
     result = _restore_protected_latin_terms(source_text, result)
-    return result
+    return _dedupe_repeated_figure_refs(result)
 
 
 def _extract_key_term_anchor_groups(text: str) -> dict[str, set[str]]:
@@ -7528,7 +7852,9 @@ def _finish_cat_composed_text(
 ) -> str:
     merged_text = _trim_duplicated_leading_clause(str(merged_text or '').strip())
     merged_text = _trim_redundant_cat_suffix(merged_text)
-    if trailing_figure_ref and trailing_figure_ref not in merged_text:
+    trailing_compact = re.sub(r'\s+', '', str(trailing_figure_ref or ''))
+    merged_compact = re.sub(r'\s+', '', merged_text)
+    if trailing_figure_ref and trailing_compact and trailing_compact not in merged_compact:
         merged_text = re.sub(r'[。.!！？?]+\s*$', '', merged_text).rstrip('，,;；')
         merged_text = f'{merged_text}{trailing_figure_ref}'
     if source_terminal or trailing_figure_ref:
@@ -7536,7 +7862,7 @@ def _finish_cat_composed_text(
         if not re.search(r'[。.!！？?]\s*$', merged_text):
             merged_text = f'{merged_text}{source_terminal or "。"}'
         merged_text = re.sub(r'[；;]+(?=[。.!！？?]\s*$)', '', merged_text)
-    return _reapply_sentence_prefix(source_text, merged_text)
+    return _dedupe_repeated_figure_refs(_reapply_sentence_prefix(source_text, merged_text))
 
 
 def _compose_cat_candidate_text(original: str, candidate: str) -> str:
@@ -7869,6 +8195,23 @@ def _should_keep_cat_candidate(original_text: str, candidate: dict, ai_semantic_
             candidate['drop_reason'] = 'trivial_artifact'
         return False
 
+    family_reason = _cat_entity_family_mismatch_reason(original_text, template_text)
+    if family_reason:
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = family_reason
+        return False
+
+    if _is_truncated_dunhao_enumeration(original_text, template_text):
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = 'truncated_enumeration'
+        return False
+
+    writeback_reason = _cat_writeback_hazard_reason(original_text, template_text)
+    if writeback_reason:
+        if isinstance(candidate, dict):
+            candidate['drop_reason'] = f'writeback_{writeback_reason}'
+        return False
+
     if isinstance(candidate, dict) and candidate.get('rule_source') == 'surface_rules':
         candidate['filtered_semantic_score'] = max(
             float(candidate.get('effective_semantic_score', 0.0) or 0.0),
@@ -7937,7 +8280,16 @@ def _should_keep_text_manual_candidate(original_text: str, candidate: dict, ai_s
     template_text = str(candidate.get('template_text', '') or '').strip()
     if not template_text:
         return False
-    if candidate.get('drop_reason') in {'exact_duplicate', 'ai_no_change', 'empty_template', 'trivial_artifact'}:
+    drop_reason = str(candidate.get('drop_reason') or '')
+    if drop_reason.startswith('writeback_') or drop_reason in {
+        'exact_duplicate',
+        'ai_no_change',
+        'empty_template',
+        'trivial_artifact',
+        'well_mismatch',
+        'molecule_family_mismatch',
+        'truncated_enumeration',
+    }:
         return False
     string_score = float(candidate.get('string_score', 0.0) or 0.0)
     filtered_score = float(candidate.get('filtered_semantic_score', 0.0) or 0.0)
@@ -8016,6 +8368,9 @@ def _simple_match(
             and not _is_trivial_cat_artifact_edit(display_source_text, surface_display_text)
             and not _is_terminal_punct_only_edit(display_source_text, surface_display_text)
             and not _drops_protected_latin_terms(display_source_text, surface_display_text)
+            and not _cat_entity_family_mismatch_reason(display_source_text, surface_display_text)
+            and not _is_truncated_dunhao_enumeration(display_source_text, surface_display_text)
+            and not _cat_writeback_hazard_reason(display_source_text, surface_display_text)
         ):
             from app.utils.cat_diagnose import classify_surface_edit
             surface_kind = classify_surface_edit(display_source_text, surface_display_text)
@@ -8093,6 +8448,17 @@ def _simple_match(
 
         if _is_trivial_cat_artifact_edit(display_source_text, display_tpl_text):
             _increment_debug_reason(debug_stats, 'trivial_artifact')
+            continue
+        family_reason = _cat_entity_family_mismatch_reason(display_source_text, display_tpl_text)
+        if family_reason:
+            _increment_debug_reason(debug_stats, family_reason)
+            continue
+        if _is_truncated_dunhao_enumeration(display_source_text, display_tpl_text):
+            _increment_debug_reason(debug_stats, 'truncated_enumeration')
+            continue
+        writeback_reason = _cat_writeback_hazard_reason(display_source_text, display_tpl_text)
+        if writeback_reason:
+            _increment_debug_reason(debug_stats, f'writeback_{writeback_reason}')
             continue
         if _drops_protected_latin_terms(display_source_text, display_tpl_text):
             _increment_debug_reason(debug_stats, 'dropped_latin_term')
@@ -9429,6 +9795,9 @@ def _force_apply_feedback_to_document_xml(root, decisions: list[DocumentFeedback
         if not before or not after:
             continue
         if decision.accepted:
+            after = _dedupe_repeated_figure_refs(after)
+            if _cat_writeback_hazard_reason(before, after):
+                continue
             match_text = before
             target_text = after
         elif status == 'rejected':
@@ -9511,6 +9880,9 @@ def _apply_feedback_plaintext_fallback(docx_path: str, decisions: list[DocumentF
         after = (decision.after or '').strip()
         status = (decision.status or '').strip()
         if decision.accepted:
+            after = _dedupe_repeated_figure_refs(after)
+            if _cat_writeback_hazard_reason(before, after):
+                continue
             target_text = after
             match_text = before
         elif status == 'rejected':
@@ -12776,6 +13148,9 @@ async def cat_apply(
         if not replacement_text:
             continue
         source_sentence = d.source_sentence_text or d.original_text or ""
+        replacement_text = _dedupe_repeated_figure_refs(replacement_text)
+        if source_sentence and _cat_writeback_hazard_reason(source_sentence, replacement_text):
+            continue
         normalized_replacement_text = replacement_text
         replacement_completed_from_source = False
         if source_sentence:
@@ -12783,6 +13158,9 @@ async def cat_apply(
                 source_sentence,
                 replacement_text,
             )
+            normalized_replacement_text = _dedupe_repeated_figure_refs(normalized_replacement_text)
+            if _cat_writeback_hazard_reason(source_sentence, normalized_replacement_text):
+                continue
         paragraph_sentence_replacements[para_idx].append({
             "source_sentence": source_sentence,
             "fallback_sentence": d.original_text or "",

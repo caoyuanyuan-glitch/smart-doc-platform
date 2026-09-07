@@ -15,6 +15,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from app.api.polish_lab import (  # noqa: E402
     _apply_cat_entity_change_penalty,
     _backfill_critical_entities,
+    _cat_writeback_hazard_reason,
     _compose_cat_candidate_text,
     _critical_entity_changes,
     _filter_cat_artifact_diagnose_items,
@@ -663,8 +664,8 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
         self.assertTrue(hits)
 
     def test_paraphrase_keep_aligns_with_match_threshold(self):
-        source = '将试剂按照下面的表格及体积转移到制备卡的特定孔位。'
-        template = '将试剂按照表格加入到样本制备卡对应孔位。'
+        source = '注意：产物pooling手工制备DNB及测序建议请看附录C'
+        template = '注意：产物pooling手工制备DNB及测序建议参见附录C。'
         hits = _simple_match(source, [{'text': template, 'id': 't'}], source_sentence=source)
         self.assertTrue(hits)
         kept = polish_lab._should_keep_text_manual_candidate(source, hits[0], ai_semantic_active=False)
@@ -770,6 +771,227 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
         for item in hits:
             self.assertIn('Meta', item.get('template_text') or '')
             self.assertNotIn('meta', item.get('template_text') or '')
+
+    def test_well_family_mismatch_is_dropped(self):
+        source = (
+            '将以上配制好的样品（10μL）全部转移到制备卡上对应的进样孔中（S1-S4），'
+            'S1对应sample1，S2对应sample2，S3对应sample3，S4对应sample4。'
+        )
+        template = (
+            '将以上配制好的样品（10μL）全部转移到制备卡上对应的进样孔中（E1-E4），'
+            '孔位E1对应sample 1，孔位E2对应sample 2，孔位E3对应sample 3，孔位E4对应sample 4。'
+        )
+        self.assertEqual(polish_lab._cat_entity_family_mismatch_reason(source, template), 'well_mismatch')
+        hits = _simple_match(source, [{'text': template, 'id': 'wells'}], source_sentence=source)
+        self.assertFalse(any('E1' in str(item.get('template_text') or '') for item in hits))
+
+    def test_reagent_well_list_mismatch_is_dropped(self):
+        source = 'A346-WGS-EB代表该试剂应该加载到A3,A4,A6三个孔位。'
+        template = 'A346-WGS-EB代表该试剂应该加载到A1、A2、A3、A4、A6五个孔位。'
+        self.assertEqual(polish_lab._cat_entity_family_mismatch_reason(source, template), 'well_mismatch')
+        hits = _simple_match(source, [{'text': template, 'id': 'a346'}], source_sentence=source)
+        self.assertFalse(hits)
+
+    def test_dsdna_dnb_family_mismatch_is_dropped(self):
+        source = '注意：吸取dsDNA文库时会带出封闭液。'
+        template = '注意：吸取DNB时会带出封闭液。'
+        self.assertEqual(
+            polish_lab._cat_entity_family_mismatch_reason(source, template),
+            'molecule_family_mismatch',
+        )
+        hits = _simple_match(source, [{'text': template, 'id': 'dnb'}], source_sentence=source)
+        self.assertFalse(any('DNB' in str(item.get('template_text') or '') for item in hits))
+
+    def test_number_unit_spacing_is_trivial(self):
+        source = '实验前需量取合格的gDNA样本50ng，用Nuclease-Free水补足到20μL。'
+        candidate = '实验前需量取合格的gDNA样本50 ng，用Nuclease-Free水补足到20 μL。'
+        self.assertTrue(_is_trivial_cat_artifact_edit(source, candidate))
+        tilde_source = '推荐使用完整度较好、OD260/OD280在1.8 ~ 2.0之间的基因组DNA。'
+        tilde_candidate = '推荐使用完整度较好、OD260/OD280在1.8~2.0之间的基因组DNA。'
+        self.assertTrue(_is_trivial_cat_artifact_edit(tilde_source, tilde_candidate))
+        model_source = 'DNBelab-D4 RS RNA文库制备试剂盒套装由3个独立盒子包装。'
+        model_candidate = 'DNBelab-D4RS RNA文库制备试剂盒套装由3个独立盒子包装。'
+        self.assertFalse(_is_trivial_cat_artifact_edit(model_source, model_candidate))
+
+    def test_dunhao_enumeration_truncation_is_dropped(self):
+        source = (
+            '本试剂套装适用于所有常见的动物、植物、真菌、细菌等物种，'
+            '包括人、鼠、水稻、拟南芥、酵母、大肠杆菌、Meta等。'
+        )
+        template = '本试剂套装适用于人、大肠杆菌、Meta、酵母等。'
+        self.assertTrue(polish_lab._is_truncated_dunhao_enumeration(source, template))
+        hits = _simple_match(source, [{'text': template, 'id': 'species'}], source_sentence=source)
+        self.assertFalse(hits)
+
+    def test_writeback_protection_drops_theme_hijack(self):
+        source = (
+            '取出DNBelab-D4RS酶切DNA文库制备试剂盒Box1或者Box2，'
+            '利用DNBelab-D4RS样本制备系统上的扫码枪扫描试剂盒包装上的二维码，录入试剂盒信息。'
+        )
+        template = (
+            'DNBelab-D4RS酶切DNA文库制备试剂盒V2.0 Box2储存温度为2 ℃~8 ℃，'
+            '利用DNBelab-D4RS样本制备系统上的扫码枪扫描试剂盒包装上的二维码，录入试剂盒信息。'
+        )
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'theme_hijack')
+        self.assertTrue(_is_dropped_cat_artifact_revision(source, template))
+        hits = _simple_match(source, [{'text': template, 'id': 'box'}], source_sentence=source)
+        self.assertFalse(any('储存温度' in str(item.get('template_text') or '') for item in hits))
+
+    def test_writeback_protection_keeps_source_tip_term(self):
+        source = '利用阔口枪头将产物孔D1-4的DNB吸出（枪头垂直插入产物孔），转移到PCR管中。'
+        template = '利用阔口吸头将产物孔D1-4的DNB吸出（吸头垂直插入产物孔），转移到PCR管中。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'tip_term')
+        hits = _simple_match(source, [{'text': template, 'id': 'tip'}], source_sentence=source)
+        self.assertFalse(any('阔口吸头' in str(item.get('template_text') or '') for item in hits))
+
+    def test_writeback_protection_drops_repeated_dry_ice(self):
+        source = '运输温度为-80℃~-15℃时，需使用干冰运输，且需要在收到产品时检查是否有干冰剩余。'
+        template = '请检查干冰是否还有剩余干冰。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'repeated_span')
+        self.assertTrue(_is_dropped_cat_artifact_revision(source, template))
+
+    def test_writeback_protection_drops_duplicate_figure(self):
+        source = '打开制备卡载台盖板，拉出制备卡载台（图11）。'
+        template = '打开制备卡仓门自动打开，载台自动推出（图11），拉出制备卡载台（图11）。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), '')
+        hits = _simple_match(source, [{'text': template, 'id': 'fig'}], source_sentence=source)
+        self.assertTrue(hits)
+        rewritten = hits[0]['template_text']
+        self.assertEqual(rewritten.count('（图11）') + rewritten.count('(图11)'), 1)
+        self.assertIn('仓门自动打开', rewritten)
+        self.assertIn('载台自动推出', rewritten)
+        self.assertIn('（图11）', rewritten)
+
+    def test_door_upgrade_keeps_single_figure_ref(self):
+        source = '打开制备卡载台盖板，拉出制备卡载台（图11）。'
+        template = '打开制备卡仓门自动打开，载台自动推出（图11），拉出制备卡载台（图11）。'
+        composed = _compose_cat_candidate_text(source, template)
+        self.assertEqual(
+            composed,
+            '打开制备卡仓门自动打开，载台自动推出（图11），拉出制备卡载台。',
+        )
+        self.assertEqual(_cat_writeback_hazard_reason(source, composed), '')
+        self.assertFalse(_is_dropped_cat_artifact_revision(source, composed))
+
+    def test_writeback_protection_keeps_notice_prefix(self):
+        source = '提示：请下载最新版说明书，对照相应版本的试剂盒使用。'
+        template = '请下载最新版说明书，对照相应版本的试剂套装使用。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'notice_prefix')
+        hits = _simple_match(source, [{'text': template, 'id': 'hint'}], source_sentence=source)
+        self.assertFalse(any(not str(item.get('template_text') or '').startswith('提示') for item in hits))
+
+    def test_writeback_protection_keeps_mgi_support(self):
+        source = '若您有其他疑问，请联系MGI技术支持：MGI-service@genomics.cn。'
+        template = '若有其他疑问，请联系技术支持：MGI-service@mgi-tech.com。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'dropped_mgi')
+        hits = _simple_match(source, [{'text': template, 'id': 'mgi'}], source_sentence=source)
+        self.assertFalse(any(
+            '技术支持' in str(item.get('template_text') or '')
+            and 'MGI技术支持' not in str(item.get('template_text') or '')
+            for item in hits
+        ))
+
+    def test_writeback_protection_allows_overlapping_door_upgrade(self):
+        source = '打开制备卡载台盖板，拉出制备卡载台（图11）。'
+        template = '打开制备卡仓门自动打开，载台自动推出（图11）。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), '')
+
+    def test_writeback_protection_allows_kit_name_without_hint_prefix(self):
+        source = '试剂盒中提供的所有试剂都经过严格的质量控制和功能验证。'
+        template = '试剂套装中提供的所有试剂经过严格的质量控制和功能验证。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), '')
+
+    def test_content_token_loss_drops_theme_rewrite(self):
+        source = (
+            '推荐使用完整度较好（无明显降解或轻微降解）且纯度良好'
+            '（OD260/OD280=1.8 ~ 2.0，OD260/OD230＞2.0）的高质量基因组DNA。'
+        )
+        template = '本试剂套装适用于打断型基因组DNA进行文库制备。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'content_token_loss')
+        hits = _simple_match(source, [{'text': template, 'id': 'genome'}], source_sentence=source)
+        self.assertFalse(hits)
+
+        pooling_source = (
+            '3.根据选择的测序平台及对应样品的数据量需求，可以对DNB进行pooling测序，'
+            '样品pooling时，1-4为一组，13-16为一组。'
+        )
+        pooling_template = '3.产物混样、上机前的DNB加载及测序建议。'
+        self.assertEqual(_cat_writeback_hazard_reason(pooling_source, pooling_template), 'content_token_loss')
+        self.assertFalse(_simple_match(
+            pooling_source, [{'text': pooling_template, 'id': 'pool'}], source_sentence=pooling_source
+        ))
+
+    def test_content_token_loss_drops_barcode_and_volume_skeleton(self):
+        barcode_source = '2.每个产物带有2个barcode，D1产物对应的barcode编号为1-2；'
+        barcode_template = '2.每个产物为一对barcode序列组合，D1产物对应的barcode编号为1-2；'
+        self.assertEqual(_cat_writeback_hazard_reason(barcode_source, barcode_template), 'content_token_loss')
+        self.assertFalse(_simple_match(
+            barcode_source, [{'text': barcode_template, 'id': 'barcode'}], source_sentence=barcode_source
+        ))
+
+        count_shift = '2.测序完成后可拆分出4个barcode，D1产物对应的barcode编号为1-2；'
+        self.assertEqual(_cat_writeback_hazard_reason(barcode_source, count_shift), 'content_token_loss')
+        self.assertFalse(_simple_match(
+            barcode_source, [{'text': count_shift, 'id': 'barcode4'}], source_sentence=barcode_source
+        ))
+
+        volume_source = '将试剂按照下面的表格及体积转移到制备卡的特定孔位。'
+        volume_template = '将试剂按照表格加入到样本制备卡对应孔位。'
+        self.assertEqual(_cat_writeback_hazard_reason(volume_source, volume_template), 'content_token_loss')
+        self.assertFalse(_simple_match(
+            volume_source, [{'text': volume_template, 'id': 'vol'}], source_sentence=volume_source
+        ))
+
+    def test_short_template_skips_content_token_loss(self):
+        source = (
+            '实验前需提前将冷藏试剂中的两种磁珠（A18-WGS-BE和S1234-WGS-SPB）'
+            '室温平衡半个小时。'
+        )
+        template = 'A18-WGS-BE加样体积30 μL。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), '')
+        hits = _simple_match(source, [{'text': template, 'id': 'be'}], source_sentence=source)
+        self.assertTrue(hits)
+
+        barcode_source = '2.每个产物带有2个barcode，D1产物对应的barcode编号为1-2；'
+        barcode_fragment = '2.利用双barcode的矫正功能。'
+        self.assertEqual(_cat_writeback_hazard_reason(barcode_source, barcode_fragment), 'content_token_loss')
+        self.assertFalse(_simple_match(
+            barcode_source, [{'text': barcode_fragment, 'id': 'bcfrag'}], source_sentence=barcode_source
+        ))
+
+    def test_bracket_enumeration_truncation_is_dropped(self):
+        source = (
+            '3.试剂加载区（A,B,C）的颜色和该区域对应加载的试剂的管盖的颜色一致，'
+            '可以根据试剂盒中试剂管盖颜色来确定该试剂加载区域。'
+        )
+        template = (
+            '3.试剂加载区的颜色应与该区域对应加载的试剂的管盖颜色一致，'
+            '可以根据试剂盒中试剂管盖颜色来确定该试剂加载区域。'
+        )
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'dropped_bracket_enum')
+        self.assertTrue(polish_lab._is_truncated_bracket_enumeration(source, template))
+        self.assertFalse(_simple_match(source, [{'text': template, 'id': 'abc'}], source_sentence=source))
+
+        rewritten = (
+            '3.操作指示卡上【A】、【B】、【C】三个区域为试剂加载区，'
+            'C）的颜色和该区域对应加载的试剂的管盖的颜色一致，'
+            '可以根据试剂盒中试剂管盖颜色来确定该试剂加载区域。'
+        )
+        self.assertEqual(_cat_writeback_hazard_reason(source, rewritten), 'dropped_bracket_enum')
+
+    def test_url_path_truncation_is_dropped(self):
+        source = '搜索货号或产品名，下载说明书:www.mgi-tech.com/download/files'
+        template = '网址：www.mgi-tech.com。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'url_path_truncated')
+        self.assertFalse(_simple_match(source, [{'text': template, 'id': 'url'}], source_sentence=source))
+
+    def test_dnb_paraphrase_is_not_killed_by_writeback(self):
+        source = '注意：产物pooling手工制备DNB及测序建议请看附录C'
+        template = '注意：产物pooling手工制备DNB及测序建议参见附录C。'
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), '')
+        hits = _simple_match(source, [{'text': template, 'id': 'dnb203'}], source_sentence=source)
+        self.assertTrue(hits)
+        self.assertIn('DNB', hits[0]['template_text'])
 
 
 if __name__ == '__main__':
