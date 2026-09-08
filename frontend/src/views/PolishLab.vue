@@ -197,6 +197,24 @@
 
               <div class="doc-review-panel cat-review-panel">
                 <div class="cat-result-body">
+                <div v-if="termUnifyItems.length" class="term-unify-panel">
+                  <div class="term-unify-header">
+                    <span>全文术语一致性</span>
+                    <span class="term-unify-count">{{ termUnifyItems.length }} 条 · 独立第三轨</span>
+                  </div>
+                  <div v-for="(item, index) in termUnifyItems" :key="`term-unify-${index}`" class="term-unify-item">
+                    <div class="term-unify-meta">
+                      <el-tag size="small" :type="item.strategy === 'force' ? 'success' : 'info'">{{ item.strategy === 'force' ? '强制统一' : '只报不改' }}</el-tag>
+                      <span>{{ item.variant }} → {{ item.canonical }}</span>
+                    </div>
+                    <div class="term-unify-problem">{{ item.problem }}</div>
+                    <div v-if="item.strategy === 'force' && item.revised_text !== item.original_text" class="term-unify-diff">
+                      <div>原文：{{ item.original_text }}</div>
+                      <div>建议：{{ item.revised_text }}</div>
+                    </div>
+                    <div v-else class="term-unify-diff">原文：{{ item.original_text }}</div>
+                  </div>
+                </div>
                 <div v-if="catItems.length" class="cat-item-list">
                 <div v-if="!displayedCatItems.length" class="cat-filter-empty">当前筛选没有匹配的候选句</div>
                 <div v-for="item in displayedCatItems" :key="`cat-${item.sentenceIndex}`" class="cat-item-card" :class="[severityClass(selectedCatCandidate(item)), { 'is-collapsed': item.resultCollapsed }]">
@@ -589,6 +607,19 @@
               <div class="result-grid-vertical">
                 <div class="result-col-v">
                   <div class="col-content col-content-compact issue-diff-content issue-diff-suggested" v-html="highlightedPolishedResultHtml"></div>
+                </div>
+              </div>
+              <div v-if="termUnifyItems.length" class="term-unify-panel">
+                <div class="term-unify-header">
+                  <span>全文术语一致性</span>
+                  <span class="term-unify-count">{{ termUnifyItems.length }} 条 · 独立第三轨</span>
+                </div>
+                <div v-for="(item, index) in termUnifyItems" :key="`text-term-unify-${index}`" class="term-unify-item">
+                  <div class="term-unify-meta">
+                    <el-tag size="small" :type="item.strategy === 'force' ? 'success' : 'info'">{{ item.strategy === 'force' ? '强制统一' : '只报不改' }}</el-tag>
+                    <span>{{ item.variant }} → {{ item.canonical }}</span>
+                  </div>
+                  <div class="term-unify-problem">{{ item.problem }}</div>
                 </div>
               </div>
               <div v-if="textCatPanelItems.length" class="text-cat-panel">
@@ -1069,6 +1100,8 @@ const textCatItems = ref([])
 const docResult = ref(null)
 const catResult = ref(null)
 const catItems = ref([])
+const termUnifyItems = ref([])
+const termUnifySummary = ref([])
 const catCategoryFilter = ref([])
 const catSeverityFilter = ref([])
 const catApplying = ref(false)
@@ -3417,6 +3450,8 @@ function catEmptyStateText() {
 function clearCatResult() {
   catResult.value = null
   catItems.value = []
+  termUnifyItems.value = []
+  termUnifySummary.value = []
   catCategoryFilter.value = []
   catSeverityFilter.value = []
   catApplyResult.value = null
@@ -3812,6 +3847,8 @@ async function submitCatAnalyze() {
     diagnoseError: data.diagnose_error || ''
   }
   catItems.value = normalizeCatItems([...(data.items || []), ...(data.diagnose_items || [])])
+  termUnifyItems.value = Array.isArray(data.term_unify_items) ? data.term_unify_items : []
+  termUnifySummary.value = Array.isArray(data.term_unify_summary) ? data.term_unify_summary : []
   catCategoryFilter.value = []
   catSeverityFilter.value = []
   catResultPageVisible.value = true
@@ -4169,6 +4206,8 @@ async function doPolish() {
       changes: data.changes?.length || 0
     }
     textCatItems.value = normalizeTextCatItems(data.cat_items || [])
+    termUnifyItems.value = Array.isArray(data.term_unify_items) ? data.term_unify_items : []
+    termUnifySummary.value = Array.isArray(data.term_unify_summary) ? data.term_unify_summary : []
     const nextDisplayedText = getDisplayedPolishedText(result.value, textCatItems.value)
     if (!nextDisplayedText || nextDisplayedText === result.value.original) {
       ElMessage.info('润色完成，未检测到需要修改的内容')
@@ -4774,6 +4813,42 @@ watch(currentView, (view) => {
   align-items: center;
   gap: 6px;
   margin-top: 6px;
+}
+
+.term-unify-panel {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.term-unify-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.term-unify-count {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 400;
+}
+.term-unify-item {
+  padding: 8px 0;
+  border-top: 1px solid #e2e8f0;
+}
+.term-unify-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.term-unify-problem,
+.term-unify-diff {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .cat-category-tag {
