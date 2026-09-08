@@ -45,7 +45,7 @@ export const usePolishLabStore = defineStore('polishLab', () => {
     sourceFile: '',
     outputPath: '已润色文档',
     requirements: '',
-    catAiSemanticScoring: false
+    catAiDiagnose: true
   }
 
   const defaultDocumentSession = {

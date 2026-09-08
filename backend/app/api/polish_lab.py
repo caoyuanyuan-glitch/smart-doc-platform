@@ -4137,7 +4137,8 @@ class CatAnalyzeRequest(BaseModel):
     requirements: Optional[str] = None
     min_match_threshold: float = 0.34
     fuzzy_lower_bound: float = 0.70
-    ai_semantic_scoring: bool = True
+    ai_semantic_scoring: bool = False
+    ai_diagnose: bool = True
     ai_reason_max_chars: int = 15
 
 
@@ -12885,7 +12886,8 @@ async def cat_analyze(
     requirements: Optional[str] = Form(None),
     min_match_threshold: float = Form(0.34),
     fuzzy_lower_bound: float = Form(0.70),
-    ai_semantic_scoring: bool = Form(True),
+    ai_semantic_scoring: bool = Form(False),
+    ai_diagnose: bool = Form(True),
     ai_reason_max_chars: int = Form(15),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user_optional),
@@ -13120,11 +13122,10 @@ async def cat_analyze(
             from app.utils.cat_diagnose import (
                 annotate_cat_candidates,
                 diagnoses_to_cat_items,
-                is_ai_diagnose_enabled,
                 open_diagnose_sentences,
             )
             annotate_cat_candidates(items)
-            if is_ai_diagnose_enabled():
+            if ai_diagnose:
                 diagnose_status = "completed"
                 unmatched = _filter_cat_artifact_diagnose_pool([
                     {
@@ -13207,6 +13208,8 @@ async def cat_analyze(
                 "sentence_file_name": _resolve_sentence_file_name(db, sentence_file_id),
                 "ai_semantic_scoring": bool(ai_semantic_scoring),
                 "ai_scoring_status": ai_scoring_status,
+                "ai_diagnose": bool(ai_diagnose),
+                "diagnose_status": diagnose_status,
             },
             "term_unify_items": term_unify.get("items") or [],
             "term_unify_summary": term_unify.get("summary") or [],

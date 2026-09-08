@@ -71,12 +71,12 @@
             </div>
 
             <div v-if="formData.documentWorkflow === 'cat'" class="form-item">
-              <label class="form-label">AI 语义评分</label>
+              <label class="form-label">AI 诊断</label>
               <div class="cat-ai-switch-row">
-                <el-switch v-model="formData.catAiSemanticScoring" inline-prompt active-text="开启" inactive-text="关闭" />
+                <el-switch v-model="formData.catAiDiagnose" inline-prompt active-text="开启" inactive-text="关闭" />
                 <span class="form-helper-text cat-ai-switch-text">
-                  <span v-if="formData.catAiSemanticScoring">匹配率高。调用AI语义评分和排序。</span>
-                  <span v-else>匹配率低。只使用规则召回和字符串匹配，不调用AI语义评分。</span>
+                  <span v-if="formData.catAiDiagnose">对未命中规则候选的句子调用 AI 诊断。</span>
+                  <span v-else>只使用规则召回，不调用 AI 诊断。</span>
                 </span>
               </div>
             </div>
@@ -107,7 +107,7 @@
                 <div class="doc-review-summary">
                   <div class="doc-review-count">当前候选句 {{ catItems.length }} 条，待处理 {{ pendingCatCount }} 条，已确认 {{ confirmedCatCount }} 条</div>
                   <div class="doc-review-summary-actions">
-                    <div class="doc-review-confirmed">AI 评分 {{ formData.catAiSemanticScoring ? catAiStatusLabel : '已关闭' }}</div>
+                    <div class="doc-review-confirmed">AI 诊断 {{ formData.catAiDiagnose ? catAiDiagnoseStatusLabel : '已关闭' }}</div>
                     <el-button v-if="catCandidateDebugSummaryText" text size="small" native-type="button" @click="catDiagnosticExpanded = !catDiagnosticExpanded">{{ catDiagnosticExpanded ? '收起召回诊断' : '展开召回诊断' }}</el-button>
                   </div>
                 </div>
@@ -850,7 +850,7 @@ const knowledgeTreeList = ref([])
 const selectedKnowledgeFile = ref(null)
 const currentPickerField = ref(null)
 const CAT_SESSION_KEY = 'polish-lab-cat-session-v1'
-const CAT_SESSION_VERSION = '2026-08-10-cat-item-collapse-2'
+const CAT_SESSION_VERSION = '2026-09-08-cat-ai-diagnose'
 let knowledgeTreePromise = null
 let catSessionPersistTimer = null
 let activeTextPolishController = null
@@ -1964,7 +1964,7 @@ const formData = ref({
   outputPath: documentDraft.value.outputPath || '已润色文档',
   requirements: documentDraft.value.requirements || '',
   documentWorkflow: normalizeDocumentWorkflow(documentDraft.value.documentWorkflow),
-  catAiSemanticScoring: Boolean(documentDraft.value.catAiSemanticScoring)
+  catAiDiagnose: documentDraft.value.catAiDiagnose !== false
 })
 
 const currentView = computed(() => {
@@ -2023,12 +2023,11 @@ const catDocumentAccuracyRate = computed(() => {
   return Number((acceptedCatCount.value / effectiveDecided * 100).toFixed(1))
 })
 
-const catAiStatusLabel = computed(() => {
-  const status = catResult.value?.aiScoringStatus || ''
+const catAiDiagnoseStatusLabel = computed(() => {
+  const status = catResult.value?.diagnoseStatus || ''
   if (status === 'completed') return '已完成'
-  if (status === 'no_api_key') return '未配置 Key，已降级'
-  if (status === 'skipped') return '已跳过，已降级'
-  if (status === 'failed' || status === 'error' || status === 'parse_error' || status === 'invalid_payload' || status === 'empty') return '调用失败，已降级'
+  if (status === 'skipped') return '已跳过'
+  if (status === 'failed' || status === 'error') return '调用失败'
   return '未知状态'
 })
 
@@ -3809,7 +3808,8 @@ async function submitCatAnalyze() {
   if (formData.value.requirements) {
     payload.append('requirements', formData.value.requirements)
   }
-  payload.append('ai_semantic_scoring', formData.value.catAiSemanticScoring ? 'true' : 'false')
+  payload.append('ai_semantic_scoring', 'false')
+  payload.append('ai_diagnose', formData.value.catAiDiagnose ? 'true' : 'false')
 
   const resp = await polishAPI.catAnalyze(payload)
   const data = resp.data || {}
@@ -3873,7 +3873,7 @@ async function applyCatSelections() {
       analyze_id: catResult.value.analyzeId,
       source_filename: catResult.value.sourceName || formData.value.sourceFile || 'polished.docx',
       decisions: buildCatDecisionPayload(),
-      ai_semantic_scoring: Boolean(formData.value.catAiSemanticScoring)
+      ai_semantic_scoring: false
     }
     const resp = await polishAPI.catApply(payload)
     const data = resp.data || {}
@@ -3973,7 +3973,7 @@ function persistCatSessionSnapshot() {
       sourceFile: formData.value.sourceFile,
       requirements: formData.value.requirements,
       documentWorkflow: formData.value.documentWorkflow || 'cat',
-      catAiSemanticScoring: Boolean(formData.value.catAiSemanticScoring)
+      catAiDiagnose: Boolean(formData.value.catAiDiagnose)
     },
     catResult: catResult.value,
     catItems: catItems.value,
@@ -4010,7 +4010,7 @@ function restoreCatSessionSnapshot() {
     ...formData.value,
     ...restoredFormData,
     documentWorkflow: normalizeDocumentWorkflow(restoredFormData.documentWorkflow),
-    catAiSemanticScoring: Boolean(restoredFormData.catAiSemanticScoring)
+    catAiDiagnose: restoredFormData.catAiDiagnose !== false
   }
   catResult.value = snapshot.catResult || null
   catItems.value = Array.isArray(snapshot.catItems)
@@ -4107,7 +4107,7 @@ function resetForm() {
     outputPath: '已润色文档',
     requirements: '',
     documentWorkflow: normalizeDocumentWorkflow(formData.value.documentWorkflow),
-    catAiSemanticScoring: false
+    catAiDiagnose: true
   }
   formData.value.documentWorkflow = showStandardDocumentWorkflow.value ? normalizeDocumentWorkflow(formData.value.documentWorkflow) : 'cat'
   formData.value.sentenceFile = ''
@@ -4378,7 +4378,7 @@ watch(formData, (value) => {
     outputPath: value.outputPath,
     requirements: value.requirements,
     documentWorkflow: value.documentWorkflow || 'standard',
-    catAiSemanticScoring: Boolean(value.catAiSemanticScoring)
+    catAiDiagnose: Boolean(value.catAiDiagnose)
   })
 }, { deep: true })
 

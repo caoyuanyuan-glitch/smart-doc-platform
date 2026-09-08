@@ -40,3 +40,9 @@ class PolishLabIsolationTest(unittest.TestCase):
     def test_diagnose_candidate_routes_stay_on_lab(self):
         self.assertIn('"/diagnose-candidates"', self.lab_src)
         self.assertNotIn("diagnose-candidates", self.polish_src)
+
+    def test_lab_cat_analyze_ai_diagnose_switch_is_isolated(self):
+        self.assertIn("ai_semantic_scoring: bool = Form(False)", self.lab_src)
+        self.assertIn("ai_diagnose: bool = Form(True)", self.lab_src)
+        self.assertIn("ai_semantic_scoring: bool = Form(True)", self.polish_src)
+        self.assertNotIn("ai_diagnose: bool = Form(True)", self.polish_src)

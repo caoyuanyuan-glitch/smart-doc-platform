@@ -1026,6 +1026,27 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
         finally:
             polish_lab._load_term_unify_entries = original_loader
 
+    def test_cat_analyze_ai_diagnose_defaults_and_cache_key(self):
+        import inspect
+        from app.api.polish_lab import CatAnalyzeRequest, cat_analyze
+
+        req = CatAnalyzeRequest()
+        self.assertFalse(req.ai_semantic_scoring)
+        self.assertTrue(req.ai_diagnose)
+
+        params = inspect.signature(cat_analyze).parameters
+        self.assertFalse(params['ai_semantic_scoring'].default.default)
+        self.assertTrue(params['ai_diagnose'].default.default)
+
+        src = (BACKEND_ROOT / 'app' / 'api' / 'polish_lab.py').read_text(encoding='utf-8')
+        start = src.find('async def cat_analyze(')
+        end = src.find('\nasync def ', start + 1)
+        cat_analyze_src = src[start:end]
+        self.assertIn('if ai_diagnose:', cat_analyze_src)
+        self.assertNotIn('is_ai_diagnose_enabled()', cat_analyze_src)
+        self.assertIn('"ai_diagnose": bool(ai_diagnose)', cat_analyze_src)
+        self.assertIn('"diagnose_status": diagnose_status', cat_analyze_src)
+
 
 if __name__ == '__main__':
     unittest.main()
