@@ -620,7 +620,6 @@ REFERENCE_SENTENCE_GUIDE_FILENAMES = {
 BUNDLED_SENTENCE_GUIDE_RELATIVE_PATHS = [
     os.path.join("static", "bundled", "DNBelab-D4RS_试剂套装_句子分类汇总.md"),
 ]
-TERM_UNIFY_TABLE_RELATIVE_PATH = os.path.join("static", "bundled", "term_unify_table.md")
 
 # 默认写作风格指南文件 ID（写作规范 / 写作风格指南 / 中文技术文档写作风格指南）
 # 内容已升级为 V2 完整规则体系（术语→句式→风格→微调四层 + 前置指令 + 禁用词）
@@ -837,7 +836,6 @@ def _build_polish_debug_info(
 _sentence_guide_cache: dict = {}
 _term_cache: dict = {}
 _typo_cache: dict = {}
-_TERM_UNIFY_CACHE: dict = {'mtime': None, 'entries': None}
 _CANDIDATE_RECALL_GUIDE_MARKER = '## 候选召回句式库'
 _AI_STYLE_GUIDE_MARKER = '## 仅供 AI 润色的通用风格指南'
 _STEP_PREFIX_PATTERN = re.compile(r'^((?:\d+[.、)]?)+)(?:[.。]+)?(?:\s+|(?=[\u4e00-\u9fffA-Za-z(（]))\s*(.+)$')
@@ -6820,144 +6818,6 @@ def _dedupe_repeated_figure_refs(text: str) -> str:
     return value
 
 
-def _term_unify_table_path() -> str:
-    app_root = os.path.dirname(os.path.dirname(__file__))
-    return os.path.join(app_root, TERM_UNIFY_TABLE_RELATIVE_PATH)
-
-
-def _normalize_term_unify_strategy(raw: str) -> str:
-    value = str(raw or '').strip().lower()
-    if value in {'force', '强制', '强制统一'}:
-        return 'force'
-    return 'report'
-
-
-def _load_term_unify_entries() -> list:
-    path = _term_unify_table_path()
-    try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        return []
-    cached = _TERM_UNIFY_CACHE
-    if cached.get('mtime') == mtime and cached.get('entries') is not None:
-        return list(cached['entries'])
-    entries = []
-    try:
-        with open(path, encoding='utf-8') as handle:
-            text = handle.read()
-    except OSError:
-        _TERM_UNIFY_CACHE['mtime'] = mtime
-        _TERM_UNIFY_CACHE['entries'] = []
-        return []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith('|'):
-            continue
-        cells = [cell.strip() for cell in stripped.strip('|').split('|')]
-        if len(cells) < 2:
-            continue
-        variant = cells[0]
-        canonical = cells[1]
-        if not variant or not canonical:
-            continue
-        if variant in {'非标准', '非标准术语'} or canonical in {'标准', '标准术语'}:
-            continue
-        if set(variant.replace(':', '').replace('：', '')) <= set('-—'):
-            continue
-        if variant == canonical:
-            continue
-        entries.append({
-            'variant': variant,
-            'canonical': canonical,
-            'strategy': _normalize_term_unify_strategy(cells[2] if len(cells) > 2 else ''),
-        })
-    entries.sort(key=lambda item: len(item['variant']), reverse=True)
-    _TERM_UNIFY_CACHE['mtime'] = mtime
-    _TERM_UNIFY_CACHE['entries'] = entries
-    return list(entries)
-
-
-def _apply_force_term_unify(text: str) -> str:
-    result = str(text or '')
-    for entry in _load_term_unify_entries():
-        if entry.get('strategy') != 'force':
-            continue
-        result = result.replace(entry['variant'], entry['canonical'])
-    return result
-
-
-def _is_force_authorized_term_swap(source_text: str, candidate_text: str) -> bool:
-    source = str(source_text or '').strip()
-    candidate = str(candidate_text or '').strip()
-    if not source or not candidate:
-        return False
-    forced = _apply_force_term_unify(source)
-    if re.sub(r'\s+', '', forced) == re.sub(r'\s+', '', candidate):
-        return True
-    return _is_trivial_cat_artifact_edit(forced, candidate)
-
-
-def _scan_term_unify_track(sentences: Optional[list] = None) -> dict:
-    items = []
-    summary = []
-    values = [str(sentence or '') for sentence in (sentences or [])]
-    full_text = '\n'.join(values)
-    for entry in _load_term_unify_entries():
-        variant = entry['variant']
-        canonical = entry['canonical']
-        strategy = entry['strategy']
-        variant_count = full_text.count(variant)
-        canonical_count = full_text.count(canonical)
-        mixed = variant_count > 0 and canonical_count > 0
-        summary.append({
-            'variant': variant,
-            'canonical': canonical,
-            'strategy': strategy,
-            'variant_count': variant_count,
-            'canonical_count': canonical_count,
-            'mixed': mixed,
-        })
-        if variant_count <= 0:
-            continue
-        for index, sentence in enumerate(values):
-            if variant not in sentence:
-                continue
-            if strategy == 'force':
-                items.append({
-                    'track': 'term_unify',
-                    'strategy': 'force',
-                    'action': 'apply',
-                    'variant': variant,
-                    'canonical': canonical,
-                    'original_text': sentence,
-                    'revised_text': sentence.replace(variant, canonical),
-                    'sentence_index': index,
-                    'rule_source': 'term_unify',
-                    'category': 'term',
-                    'problem': f'规范术语：将「{variant}」统一为「{canonical}」。',
-                })
-                continue
-            problem = (
-                f'本文同时出现「{variant}」与「{canonical}」，是否统一请人工确认。'
-                if mixed
-                else f'出现术语「{variant}」，规范形为「{canonical}」，是否统一请人工确认。'
-            )
-            items.append({
-                'track': 'term_unify',
-                'strategy': 'report',
-                'action': 'report',
-                'variant': variant,
-                'canonical': canonical,
-                'original_text': sentence,
-                'revised_text': sentence,
-                'sentence_index': index,
-                'rule_source': 'term_unify',
-                'category': 'term',
-                'problem': problem,
-            })
-    return {'items': items, 'summary': summary}
-
-
 def _cat_writeback_hazard_reason(source_text: str, candidate_text: str) -> str:
     """Drop candidates that would corrupt the document if written back."""
     source = str(source_text or '').strip()
@@ -6981,8 +6841,7 @@ def _cat_writeback_hazard_reason(source_text: str, candidate_text: str) -> str:
         and source.count('枪头') > candidate.count('枪头')
         and candidate.count('吸头') > source.count('吸头')
     ):
-        if not _is_force_authorized_term_swap(source, candidate):
-            return 'tip_term'
+        return 'tip_term'
 
     source_compact = re.sub(r'\s+', '', source)
     candidate_compact = re.sub(r'\s+', '', candidate)
@@ -9199,10 +9058,6 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
     final_polished = _reapply_sentence_prefix(input_data.text, polished_text)
     if not changes and _is_low_value_doc_change(input_data.text, final_polished, 'style', '基础规范化'):
         final_polished = input_data.text
-    term_unify = _scan_term_unify_track(
-        [item.get("text") or item.get("sentence") or item.get("original_text") or "" for item in _split_cat_sentences(input_data.text.split('\n'))]
-        or [input_data.text]
-    )
     return {
         "original": input_data.text,
         "base_polished": final_polished,
@@ -9210,8 +9065,6 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         "changes": changes,
         "cat_items": cat_items,
         "diagnose_items": diagnose_items,
-        "term_unify_items": term_unify.get("items") or [],
-        "term_unify_summary": term_unify.get("summary") or [],
     }
 
 
@@ -13190,7 +13043,6 @@ async def cat_analyze(
         candidate_debug_summary["diagnose_hint_count"] = diagnose_hint_count
         candidate_debug_summary["diagnose_rewrite_count"] = diagnose_rewrite_count
         _cleanup_cat_cache()
-        term_unify = _scan_term_unify_track([item.get("original_text") or "" for item in items])
         _store_cat_analyze_cache(analyze_id, {
             "items": list(items) + list(diagnose_items),
             "templates": guide_templates,
@@ -13211,8 +13063,6 @@ async def cat_analyze(
                 "ai_diagnose": bool(ai_diagnose),
                 "diagnose_status": diagnose_status,
             },
-            "term_unify_items": term_unify.get("items") or [],
-            "term_unify_summary": term_unify.get("summary") or [],
         })
 
         total_with_candidates = sum(1 for i in items if i.get("has_candidates")) + sum(
@@ -13233,8 +13083,6 @@ async def cat_analyze(
             "candidate_debug_summary": candidate_debug_summary,
             "items": items,
             "diagnose_items": diagnose_items,
-            "term_unify_items": term_unify.get("items") or [],
-            "term_unify_summary": term_unify.get("summary") or [],
         }
 
     except HTTPException:
@@ -13376,20 +13224,6 @@ async def cat_apply(
         if updated_text.strip() != paragraph_text.strip():
             paragraph_revisions[para_idx] = updated_text
             paragraph_revision_actions[para_idx] = paragraph_actions
-
-    for para_idx, paragraph_text in enumerate(paragraph_texts):
-        current = paragraph_revisions.get(para_idx, paragraph_text)
-        unified = _apply_force_term_unify(current)
-        if unified == current:
-            continue
-        paragraph_revisions[para_idx] = unified
-        paragraph_revision_actions.setdefault(para_idx, []).append('term_unify')
-        applied_changes.append({
-            "paragraph": para_idx + 1,
-            "before": current[:200],
-            "after": unified[:200],
-            "action": "term_unify",
-        })
 
     output_path = None
     report_path = None

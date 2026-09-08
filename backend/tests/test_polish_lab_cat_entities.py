@@ -840,12 +840,9 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
     def test_writeback_protection_keeps_source_tip_term(self):
         source = '利用阔口枪头将产物孔D1-4的DNB吸出（枪头垂直插入产物孔），转移到PCR管中。'
         template = '利用阔口吸头将产物孔D1-4的DNB吸出（吸头垂直插入产物孔），转移到PCR管中。'
-        self.assertEqual(_cat_writeback_hazard_reason(source, template), '')
+        self.assertEqual(_cat_writeback_hazard_reason(source, template), 'tip_term')
         hits = _simple_match(source, [{'text': template, 'id': 'tip'}], source_sentence=source)
-        self.assertTrue(any('阔口吸头' in str(item.get('template_text') or '') for item in hits))
-
-        hijack = '使用吸头将样本加载到制备卡对应孔位。'
-        self.assertEqual(_cat_writeback_hazard_reason(source, hijack), 'tip_term')
+        self.assertFalse(any('阔口吸头' in str(item.get('template_text') or '') for item in hits))
 
     def test_writeback_protection_drops_repeated_dry_ice(self):
         source = '运输温度为-80℃~-15℃时，需使用干冰运输，且需要在收到产品时检查是否有干冰剩余。'
@@ -995,36 +992,6 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
         hits = _simple_match(source, [{'text': template, 'id': 'dnb203'}], source_sentence=source)
         self.assertTrue(hits)
         self.assertIn('DNB', hits[0]['template_text'])
-
-    def test_term_unify_track_force_and_report(self):
-        entries = polish_lab._load_term_unify_entries()
-        self.assertTrue(any(
-            item['variant'] == '枪头' and item['canonical'] == '吸头' and item['strategy'] == 'force'
-            for item in entries
-        ))
-        self.assertFalse(any(item['variant'] in {'试剂盒', '制备卡'} for item in entries))
-
-        source = '利用阔口枪头将产物孔D1-4的DNB吸出。'
-        scanned = polish_lab._scan_term_unify_track([source])
-        force_items = [item for item in scanned['items'] if item['strategy'] == 'force']
-        self.assertEqual(len(force_items), 1)
-        self.assertEqual(force_items[0]['action'], 'apply')
-        self.assertIn('阔口吸头', force_items[0]['revised_text'])
-
-        original_loader = polish_lab._load_term_unify_entries
-        polish_lab._load_term_unify_entries = lambda: [
-            {'variant': '样品', 'canonical': '样本', 'strategy': 'report'},
-        ]
-        try:
-            mixed = polish_lab._scan_term_unify_track(['取样品 50 ng。', '取样本 50 ng。'])
-            report_items = mixed['items']
-            self.assertTrue(report_items)
-            self.assertEqual(report_items[0]['action'], 'report')
-            self.assertEqual(report_items[0]['revised_text'], report_items[0]['original_text'])
-            unmarked = polish_lab._normalize_term_unify_strategy('')
-            self.assertEqual(unmarked, 'report')
-        finally:
-            polish_lab._load_term_unify_entries = original_loader
 
     def test_cat_analyze_ai_diagnose_defaults_and_cache_key(self):
         import inspect
