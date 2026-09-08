@@ -145,7 +145,6 @@
                       multiple
                       collapse-tags
                       collapse-tags-tooltip
-                      clearable
                       size="small"
                       class="cat-filter-select"
                       placeholder="全部类别"
@@ -166,7 +165,7 @@
                       v-model="catSeverityFilter"
                       multiple
                       collapse-tags
-                      clearable
+                      collapse-tags-tooltip
                       size="small"
                       class="cat-filter-select cat-filter-select-severity"
                       placeholder="AI诊断严重程度"
@@ -3512,8 +3511,8 @@ const catSeverityCounts = computed(() => {
 })
 
 const displayedCatItems = computed(() => {
-  const selected = new Set(catCategoryFilter.value)
-  const severities = new Set(catSeverityFilter.value)
+  const selected = new Set(Array.isArray(catCategoryFilter.value) ? catCategoryFilter.value : [])
+  const severities = new Set(Array.isArray(catSeverityFilter.value) ? catSeverityFilter.value : [])
   return catItems.value.filter(item => {
     const candidate = selectedCatCandidate(item)
     if (selected.size && !selected.has(canonicalCategory(candidate))) {
