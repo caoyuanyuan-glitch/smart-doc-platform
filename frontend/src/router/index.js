@@ -108,12 +108,12 @@ const routes = [
   {
     path: '/polish',
     name: 'Polish',
-    component: Polish
+    component: PolishLab
   },
   {
     path: '/polish/document',
     name: 'PolishDocument',
-    component: Polish
+    component: PolishLab
   },
   {
     path: '/polish-lab',
