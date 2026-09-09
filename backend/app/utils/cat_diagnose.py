@@ -119,7 +119,11 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 11. 术语不统一但意思相同（如「出库浓度」与「文库浓度」）→ category 取 word，severity 取 low。意思改变或数量错误 → severity 取 high。
 12. 专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta）不得在 revised 中删除或改变大小写，也不得把删除它们当作问题。
 13. 缺少标点、仅改标点或格式 → severity 取 low。
-14. revised 的安全闸：若 revised 相比 quote 引入了原文没有的新词组，或重复了原文已有的短语，或改变了原文的语义/逻辑 → 判定为"无需修改"，severity 改为 medium。此句必须出现在结果里（不能整句省略），category 改为 logic，problem 描述"修订版引入原文没有的内容"。
+14. revised 的安全闸：revised 相比 quote 出现以下任一情况 → 判定为"无需修改"：
+    (a) 引入了原文没有的新词组，或重复了原文已有的短语（句10/句70类型）
+    (b) 删除了原文的完整语义成分（如物种类别、关键条件、适用范围），导致语义与原文不等价
+    (c) 改变了原文的语义/逻辑
+    满足 (a)(b)(c) 任一，severity 改为 medium（若删除内容导致原文完整语义丢失则为 high），category 改为 logic，problem 描述"修订版删除了原文内容或引入原文没有的内容"。
 
 category 枚举：grammar, word, term, ambiguity, redundancy, logic, missing, risk
 
