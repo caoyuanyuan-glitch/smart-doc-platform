@@ -103,7 +103,7 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 规则（必须遵守）：
 1. 只报告确定的问题。拿不准的不要报，宁缺毋滥。
 2. 没有问题的句子，不要出现在结果里。
-3. 修改必须忠于原意，不得增删事实与参数。
+3. 修改必须忠于原意，不得增删任何事实、词汇或句子成分。
 4. 术语必须与给定术语表一致；术语表没有的，保留原文。
 5. category 只能从枚举取；severity 按以下标准判定：
    - high：照做会出错、人员安全、结论被误解
@@ -119,6 +119,7 @@ _DIAGNOSE_PROMPT = """你是{product}平台的仪器文档资深编辑。请逐�
 11. 术语不统一但意思相同（如「出库浓度」与「文库浓度」）→ category 取 word，severity 取 low。意思改变或数量错误 → severity 取 high。
 12. 专业术语成分（拉丁/英文专名及其组合，如 total RNA、Meta）不得在 revised 中删除或改变大小写，也不得把删除它们当作问题。
 13. 缺少标点、仅改标点或格式 → severity 取 low。
+14. revised 的安全闸：若 revised 相比 quote 引入了原文没有的新词组，或重复了原文已有的短语，或改变了原文的语义/逻辑 → 判定为"无需修改"，severity 改为 medium。此句必须出现在结果里（不能整句省略），category 改为 logic，problem 描述"修订版引入原文没有的内容"。
 
 category 枚举：grammar, word, term, ambiguity, redundancy, logic, missing, risk
 
