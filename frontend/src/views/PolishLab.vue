@@ -1934,8 +1934,8 @@ const formData = ref({
 })
 
 const currentView = computed(() => {
-  if (route.path === '/polish-lab/document') return 'document'
-  if (route.path === '/polish-lab/candidates') return 'candidates'
+  if (route.path === '/polish/document' || route.path === '/polish-lab/document') return 'document'
+  if (route.path === '/polish/candidates' || route.path === '/polish-lab/candidates') return 'candidates'
   return 'text'
 })
 

@@ -116,19 +116,21 @@ const routes = [
     component: PolishLab
   },
   {
-    path: '/polish-lab',
-    name: 'PolishLab',
+    path: '/polish/candidates',
+    name: 'PolishCandidates',
     component: PolishLab
+  },
+  {
+    path: '/polish-lab',
+    redirect: '/polish'
   },
   {
     path: '/polish-lab/document',
-    name: 'PolishLabDocument',
-    component: PolishLab
+    redirect: '/polish/document'
   },
   {
     path: '/polish-lab/candidates',
-    name: 'PolishLabCandidates',
-    component: PolishLab
+    redirect: '/polish/candidates'
   },
   {
     path: '/polish/history',
