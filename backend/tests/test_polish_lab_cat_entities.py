@@ -15,9 +15,12 @@ if str(BACKEND_ROOT) not in sys.path:
 from app.api.polish_lab import (  # noqa: E402
     _apply_cat_entity_change_penalty,
     _backfill_critical_entities,
+    _cat_polished_display_name,
+    _cat_report_display_name,
     _cat_writeback_hazard_reason,
     _compose_cat_candidate_text,
     _critical_entity_changes,
+    _diagnose_import_match_pattern,
     _filter_cat_artifact_diagnose_items,
     _filter_cat_artifact_diagnose_pool,
     _filter_cat_artifact_diagnoses,
@@ -25,11 +28,14 @@ from app.api.polish_lab import (  # noqa: E402
     _has_missing_icon_button_name,
     _is_dropped_cat_artifact_revision,
     _is_trivial_cat_artifact_edit,
+    _polished_file_download_name,
+    _polished_report_download_name,
     _reapply_sentence_prefix,
     _simple_match,
     _split_cat_sentences,
     _split_step_prefix,
     _store_cat_analyze_cache,
+    _unmatched_text_diagnose_pool,
     replace_with_context,
 )
 
@@ -228,6 +234,46 @@ class PolishLabCatEntityTest(unittest.TestCase):
             },
         ])
         self.assertFalse(items)
+
+    def test_unmatched_text_diagnose_pool_skips_matched_sentences(self):
+        matched = {
+            'sentence_index': 0,
+            'has_candidates': True,
+            'original_text': '运输温度为-80℃~-15℃时，需使用干冰运输。',
+        }
+        unmatched_sentence = {
+            'sentence_index': 1,
+            'text': '这是一个完全没有 CAT 模板命中的普通句子。',
+            'source_sentence_text': '这是一个完全没有 CAT 模板命中的普通句子。',
+        }
+        matched_sentence = {
+            'sentence_index': 0,
+            'text': matched['original_text'],
+            'source_sentence_text': matched['original_text'],
+        }
+        pool = _unmatched_text_diagnose_pool([matched], [matched_sentence, unmatched_sentence])
+        self.assertEqual([item['sentence_index'] for item in pool], [1])
+
+    def test_cat_download_names_match_history_list(self):
+        source = '酶切DNA操作说明书.docx'
+        self.assertEqual(_cat_polished_display_name(source), '【润色版】酶切DNA操作说明书.docx')
+        self.assertEqual(_cat_report_display_name(source), '【润色报告】酶切DNA操作说明书.html')
+        storage_id = '11111111-1111-1111-1111-111111111111'
+        doc = SimpleNamespace(
+            name='【润色版】酶切DNA操作说明书.docx',
+            filename=f'{storage_id}.docx',
+            report_filename='【润色报告】酶切DNA操作说明书.html',
+            report_file_path=f'/tmp/{storage_id}.html',
+        )
+        self.assertEqual(_polished_file_download_name(doc), '【润色版】酶切DNA操作说明书.docx')
+        self.assertEqual(_polished_report_download_name(doc), '【润色报告】酶切DNA操作说明书.html')
+        legacy = SimpleNamespace(
+            name='【润色版】酶切DNA操作说明书.docx',
+            filename=f'{storage_id}.docx',
+            report_filename=f'{storage_id}.html',
+            report_file_path=f'/tmp/{storage_id}.html',
+        )
+        self.assertEqual(_polished_report_download_name(legacy), '【润色报告】酶切DNA操作说明书.html')
 
     def test_entity_backfill_keeps_preparation_diff(self):
         source = '6. 四样本混样时，搭配DNBSEQ-G99测序时建议每个样品DNB投入量5.25μL，DNB加载体系参考DNBSEQ-G99RS高通量测序试剂套装使用说明书；'
@@ -1013,6 +1059,34 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
         self.assertNotIn('is_ai_diagnose_enabled()', cat_analyze_src)
         self.assertIn('"ai_diagnose": bool(ai_diagnose)', cat_analyze_src)
         self.assertIn('"diagnose_status": diagnose_status', cat_analyze_src)
+
+    def test_diagnose_import_prefers_escaped_quote_over_hint(self):
+        row = SimpleNamespace(
+            quote="流道池",
+            original_text="将样本加入流道池中。",
+            rule_hint="将流道池改为流道槽",
+        )
+        pattern = _diagnose_import_match_pattern(row, SimpleNamespace(match_pattern=None))
+        self.assertEqual(pattern, "流道池")
+        self.assertRegex("将样本加入流道池中。", pattern)
+
+    def test_imported_custom_rule_creates_surface_candidate(self):
+        rule = SimpleNamespace(
+            id=21,
+            match_pattern="流道池",
+            replacement_text="流道槽",
+            rule_type="replacement_rule",
+            rule_name="流道池",
+            description="",
+        )
+        source = "将样本加入流道池中。"
+        hits = _simple_match(
+            source,
+            [{"text": "将样本加入试剂槽中。", "id": "t"}],
+            source_sentence=source,
+            custom_rules=[rule],
+        )
+        self.assertTrue(any("流道槽" in str(item.get("template_text") or "") for item in hits))
 
 
 if __name__ == '__main__':

@@ -544,7 +544,14 @@ def apply_custom_rules(line: str, rules: list = None) -> tuple:
         'imperative_rule': 'style',
         'format_rule': 'format',
     }
-    replacement_types = {'replacement_rule', 'forbidden_rule', 'sentence_applicability_rule'}
+    replacement_types = {
+        'replacement_rule',
+        'forbidden_rule',
+        'sentence_applicability_rule',
+        'imperative_rule',
+        'format_rule',
+        'typo_rule',
+    }
     result = line
     issues = []
 

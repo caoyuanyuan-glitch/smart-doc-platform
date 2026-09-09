@@ -1825,18 +1825,18 @@ const singleTextCatItem = computed(() => {
   const [item] = textCatItems.value
   return Array.isArray(item?.candidates) && item.candidates.length === 1 ? item : null
 })
-const activeTextCatMatchRate = computed(() => {
+const currentPolishEngineLabel = computed(() => {
   const sourceItem = singleTextCatItem.value || textCatPanelItems.value[0] || null
   const candidate = selectedTextCatCandidate(sourceItem)
-  const matchRate = formatCatCandidateMatchRate(candidate)
-  if (!matchRate) {
-    return ''
+  if (isDiagnoseCandidate(candidate)) {
+    return '当前引擎：AI 诊断'
   }
-  return matchRate
-})
-const currentPolishEngineLabel = computed(() => {
-  if (currentPolishEngine.value === '本地润色' && activeTextCatMatchRate.value) {
-    return `当前引擎：句式匹配/匹配率：${activeTextCatMatchRate.value}`
+  if (String(candidate?.rule_source || '').trim() === 'sentence_guide') {
+    return `当前引擎：句式匹配/匹配率：${formatCatCandidateMatchRate(candidate)}`
+  }
+  const sourceLabel = formatCatCandidateSource(candidate)
+  if (candidate && sourceLabel && sourceLabel !== '候选规则') {
+    return `当前引擎：${sourceLabel}`
   }
   return `当前引擎：${currentPolishEngine.value}`
 })
@@ -3540,6 +3540,23 @@ function getTextCatDisplayText(item) {
   return getTextCatCandidateValue(selectedTextCatCandidate(item))
 }
 
+function mergeTextCatResponseItems(catItems, diagnoseItems) {
+  const merged = []
+  const seen = new Set()
+  for (const item of [...(catItems || []), ...(diagnoseItems || [])]) {
+    if (!item || !Array.isArray(item.candidates) || !item.candidates.length) {
+      continue
+    }
+    const key = `${item.sentence_index ?? ''}::${item.original_text || ''}`
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    merged.push(item)
+  }
+  return merged
+}
+
 function normalizeTextCatItems(items) {
   return (items || [])
     .filter(item => Array.isArray(item?.candidates) && item.candidates.length > 0)
@@ -3852,11 +3869,20 @@ async function applyCatSelections() {
       previewUrl: data.preview_url || '',
       feedback: data.feedback || {}
     }
-    if ((data.failed_count || 0) > 0) {
+    if (data.persist_error || ((data.download_url || data.output_file) && !catApplyResult.value.docId)) {
+      ElMessage.warning('润色文档已生成，但未能保存到已润色文档')
+    } else if ((data.failed_count || 0) > 0) {
       ElMessage.warning(`润色文档已生成，但 ${data.failed_count} 处替换未能定位原文`)
     } else {
       ElMessage.success('润色文档已生成')
     }
+    window.dispatchEvent(new CustomEvent('polish-document-feedback-submitted', {
+      detail: {
+        analyzeId: catResult.value.analyzeId,
+        docId: catApplyResult.value.docId,
+        createdAt: new Date().toISOString(),
+      }
+    }))
   } catch (e) {
     const errorMsg = e.response?.data?.detail || e.message || '未知错误'
     ElMessage.error(`生成失败：${errorMsg}`)
@@ -4167,7 +4193,7 @@ async function doPolish() {
       polished: data.polished || data.original || originalText.value,
       changes: data.changes?.length || 0
     }
-    textCatItems.value = normalizeTextCatItems(data.cat_items || [])
+    textCatItems.value = normalizeTextCatItems(mergeTextCatResponseItems(data.cat_items, data.diagnose_items))
     const nextDisplayedText = getDisplayedPolishedText(result.value, textCatItems.value)
     if (!nextDisplayedText || nextDisplayedText === result.value.original) {
       ElMessage.info('润色完成，未检测到需要修改的内容')

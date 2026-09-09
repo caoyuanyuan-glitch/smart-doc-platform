@@ -4731,6 +4731,10 @@ def _apply_skill_polish(
         has_changes = False
         matched_preferred_sentence = False
         non_tmpl_rules = [r for r in style_rules if r.get("type") != "preferred_sentences"] if style_rules else []
+        early_custom_rules = list(term_custom_rules) + list(other_custom_rules)
+        if early_custom_rules:
+            new_line, custom_issues = apply_custom_rules(new_line, early_custom_rules)
+            _append_custom_issues(custom_issues)
         template_match_line = _normalize_operation_sentence_for_match(new_line)
         
         if style_rules and not is_title and _should_skip_expensive_template_match(template_match_line):
@@ -4937,14 +4941,6 @@ def _apply_skill_polish(
             )
             _append_engine_issues(term_issues)
             new_line = term_line
-
-        if term_custom_rules:
-            new_line, custom_issues = apply_custom_rules(new_line, term_custom_rules)
-            _append_custom_issues(custom_issues)
-
-        if other_custom_rules and not matched_preferred_sentence:
-            new_line, custom_issues = apply_custom_rules(new_line, other_custom_rules)
-            _append_custom_issues(custom_issues)
 
         # ── 应用其余系统规则（从 DB 读取启用的规则） ──
         if not sentence_only_mode and not matched_preferred_sentence:
@@ -6934,6 +6930,21 @@ def _filter_cat_artifact_diagnose_pool(sentence_items: Optional[list]) -> list:
     return kept
 
 
+def _unmatched_text_diagnose_pool(cat_items: Optional[list], sentence_items: Optional[list]) -> list:
+    """Build the AI-diagnose pool for text polish: unmatched sentences only."""
+    matched_indexes = {
+        item.get('sentence_index')
+        for item in cat_items or []
+        if isinstance(item, dict) and item.get('has_candidates')
+    }
+    unmatched = [
+        item
+        for item in sentence_items or []
+        if isinstance(item, dict) and item.get('sentence_index') not in matched_indexes
+    ]
+    return _filter_cat_artifact_diagnose_pool(unmatched)
+
+
 def _filter_cat_artifact_diagnoses(diagnoses: Optional[list], sentence_items: Optional[list] = None) -> list:
     sentence_by_index = {
         item.get('sentence_index'): item
@@ -7266,10 +7277,12 @@ def _apply_cat_terms(text: str, term_dict: Optional[dict]) -> str:
     return result
 
 
-def _apply_cat_surface_rules(text: str, term_dict: Optional[dict] = None, typo_dict: Optional[dict] = None) -> str:
+def _apply_cat_surface_rules(text: str, term_dict: Optional[dict] = None, typo_dict: Optional[dict] = None, custom_rules: Optional[list] = None) -> str:
     value = str(text or '').strip()
     if not value:
         return value
+    if custom_rules:
+        value, _ = apply_custom_rules(value, custom_rules)
     value = _apply_cat_terms(value, term_dict)
     value = _apply_cat_terms(value, typo_dict)
     value = _normalize_cat_typography(value)
@@ -7291,8 +7304,8 @@ def _strip_cat_match_prefix(text: str) -> str:
     return (body or value).strip()
 
 
-def _prepare_cat_match_text(text: str, term_dict: Optional[dict] = None, typo_dict: Optional[dict] = None) -> str:
-    return _apply_cat_surface_rules(_strip_cat_match_prefix(text), term_dict, typo_dict)
+def _prepare_cat_match_text(text: str, term_dict: Optional[dict] = None, typo_dict: Optional[dict] = None, custom_rules: Optional[list] = None) -> str:
+    return _apply_cat_surface_rules(_strip_cat_match_prefix(text), term_dict, typo_dict, custom_rules)
 
 
 def _normalize_cat_duplicate_text(text: str) -> str:
@@ -8019,6 +8032,7 @@ async def _collect_text_polish_cat_items(
 
     terminology = terminology_md or _load_scoped_terminology_source(db, None, None)
     resolved_terms = _resolve_terminology(db, terminology, original_text) if terminology else {}
+    custom_rules = get_enabled_custom_rules(db) if db else []
     original_paragraphs = original_text.split('\n')
     sentence_items = _split_cat_sentences(original_paragraphs, source_paragraphs=original_paragraphs)
     if not sentence_items:
@@ -8054,6 +8068,7 @@ async def _collect_text_polish_cat_items(
             fuzzy_lower=fuzzy_lower_bound,
             term_dict=resolved_terms,
             source_sentence=source_line_stripped,
+            custom_rules=custom_rules,
             debug_stats=simple_match_debug,
         )
         if not candidates and local_templates is not guide_templates:
@@ -8064,6 +8079,7 @@ async def _collect_text_polish_cat_items(
                 fuzzy_lower=fuzzy_lower_bound,
                 term_dict=resolved_terms,
                 source_sentence=source_line_stripped,
+                custom_rules=custom_rules,
                 debug_stats=simple_match_debug,
             )
         cat_items.append({
@@ -8336,6 +8352,7 @@ def _simple_match(
     term_dict: Optional[dict] = None,
     typo_dict: Optional[dict] = None,
     source_sentence: Optional[str] = None,
+    custom_rules: Optional[list] = None,
     debug_stats: Optional[dict] = None,
 ) -> list[dict]:
     """
@@ -8354,7 +8371,7 @@ def _simple_match(
     best_by_template = {}
     sentence_text = sentence.strip()
     display_source_text = str(source_sentence or sentence_text or '').strip() or sentence_text
-    normalized_sentence_text = _prepare_cat_match_text(sentence_text, term_dict, typo_dict).strip()
+    normalized_sentence_text = _prepare_cat_match_text(sentence_text, term_dict, typo_dict, custom_rules).strip()
     source_match_text = normalized_sentence_text or sentence_text
     source_intent = _extract_sentence_intent(source_match_text)
     source_actions = set(source_intent.get('actions', []))
@@ -8967,24 +8984,6 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         product_type=input_data.product_type,
     )
     resolved_terminology = _resolve_terminology(db, terminology_md, input_data.text)
-    ai_polished = input_data.text
-    try:
-        from app.utils.ai_client import ai_client
-        from app.utils.cat_diagnose import use_lab_ai_provider
-        with use_lab_ai_provider():
-            result = ai_client.polish_text(
-                input_data.text,
-                style_guide=sentence_guide,
-                terminology=resolved_terminology if resolved_terminology else None,
-                request_label="polish.text",
-            )
-        ai_polished = _reapply_sentence_prefix(
-            input_data.text,
-            _protect_model_numbers(result.get("polished", input_data.text))
-        )
-    except Exception:
-        pass
-
     cat_items = await _collect_text_polish_cat_items(
         input_data.text,
         db,
@@ -8999,6 +8998,7 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
     try:
         from app.utils.cat_diagnose import (
             annotate_cat_candidates,
+            diagnoses_to_cat_items,
             is_ai_diagnose_enabled,
             merge_local_and_diagnoses,
             open_diagnose_sentences,
@@ -9006,31 +9006,37 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         annotate_cat_candidates(cat_items)
         if is_ai_diagnose_enabled():
             try:
-                sentence_items = _filter_cat_artifact_diagnose_pool(
-                    _split_cat_sentences(input_data.text.split('\n'))
+                original_paragraphs = input_data.text.split('\n')
+                sentence_items = _split_cat_sentences(
+                    original_paragraphs,
+                    source_paragraphs=original_paragraphs,
                 )
-                ai_diag = await open_diagnose_sentences(
-                    sentence_items,
-                    resolved_terminology or {},
-                    sentence_guide,
-                    input_data.product_type or "",
-                    mode="single",
-                )
-                ai_diag = _filter_cat_artifact_diagnoses(ai_diag, sentence_items)
-                _persist_lab_diagnoses(db, ai_diag, sentence_items, source="text", source_name="文本润色")
-                cat_items, diagnose_items = merge_local_and_diagnoses(
-                    cat_items,
-                    ai_diag,
-                    sentence_items,
-                )
-                diagnose_items = _filter_cat_artifact_diagnose_items(diagnose_items)
+                unmatched = _unmatched_text_diagnose_pool(cat_items, sentence_items)
+                if unmatched:
+                    ai_diag = await open_diagnose_sentences(
+                        unmatched,
+                        resolved_terminology or {},
+                        sentence_guide,
+                        input_data.product_type or "",
+                        mode="single",
+                    )
+                    ai_diag = _filter_cat_artifact_diagnoses(ai_diag, unmatched)
+                    _persist_lab_diagnoses(db, ai_diag, unmatched, source="text", source_name="文本润色")
+                    cat_items, kept_diags = merge_local_and_diagnoses(
+                        cat_items,
+                        ai_diag,
+                        unmatched,
+                    )
+                    diagnose_items = _filter_cat_artifact_diagnose_items(
+                        diagnoses_to_cat_items(kept_diags, unmatched)
+                    )
             except Exception:
                 diagnose_items = []
     except Exception:
         diagnose_items = []
 
     polished_text, rule_changes = _apply_skill_polish(
-        ai_polished,
+        input_data.text,
         {},
         db,
         sentence_guide,
@@ -9039,10 +9045,6 @@ async def polish_text_endpoint(input_data: TextPolishInput, db: Session = Depend
         db_terminology=resolved_terminology if resolved_terminology else None,
     )
     changes = []
-    if ai_polished != input_data.text:
-        ai_entry = _build_visible_change_entry(1, input_data.text, ai_polished, "ai", "ai", sentence_guide)
-        if ai_entry:
-            changes.append(ai_entry)
     for change in rule_changes:
         entry = _build_visible_change_entry(
             1,
@@ -11415,6 +11417,29 @@ _DIAGNOSE_RULE_TYPES = {
 }
 
 
+def _diagnose_import_match_pattern(row, payload=None) -> str:
+    raw = str(getattr(payload, "match_pattern", None) or "").strip()
+    if raw:
+        try:
+            re.compile(raw)
+            return raw
+        except re.error:
+            return re.escape(raw)
+    quote = str(getattr(row, "quote", None) or "").strip()
+    original = str(getattr(row, "original_text", None) or "").strip()
+    source = quote or original
+    if source:
+        return re.escape(source)
+    hint = str(getattr(row, "rule_hint", None) or "").strip()
+    if not hint:
+        return ""
+    try:
+        re.compile(hint)
+        return hint
+    except re.error:
+        return re.escape(hint)
+
+
 def _serialize_diagnose_record(row) -> dict:
     return {
         "id": row.id,
@@ -11480,14 +11505,7 @@ def import_diagnose_candidate(
     if not row:
         raise HTTPException(status_code=404, detail="诊断候补不存在")
     payload = body or DiagnoseImportBody()
-    match_pattern = (payload.match_pattern or row.rule_hint or row.quote or "").strip()
-    if match_pattern:
-        try:
-            re.compile(match_pattern)
-        except re.error:
-            match_pattern = re.escape(row.quote or row.original_text or match_pattern)
-    else:
-        match_pattern = re.escape(row.quote or row.original_text or "")
+    match_pattern = _diagnose_import_match_pattern(row, payload)
     if not match_pattern:
         raise HTTPException(status_code=400, detail="缺少可导入的匹配模式")
     from app.utils.cat_diagnose import hint_import_requires_replacement
@@ -11503,7 +11521,10 @@ def import_diagnose_candidate(
     else:
         replacement_text = provided_replacement if provided_replacement is not None else (row.revised or "")
     rule_name = (payload.rule_name or row.problem or "AI 诊断规则").strip()[:128]
-    rule_type = payload.rule_type or _DIAGNOSE_RULE_TYPES.get(row.category or "", "format_rule")
+    if str(replacement_text or "").strip():
+        rule_type = payload.rule_type or "replacement_rule"
+    else:
+        rule_type = payload.rule_type or _DIAGNOSE_RULE_TYPES.get(row.category or "", "format_rule")
     rule_key = f"lab-diag-{row.id}-{uuid.uuid4().hex[:8]}"
     while get_rule_by_key(db, rule_key):
         rule_key = f"lab-diag-{row.id}-{uuid.uuid4().hex[:8]}"
@@ -11560,13 +11581,14 @@ async def list_polished_documents(db: Session = Depends(get_db)):
             created_at_str = (d.created_at + timedelta(hours=8)).strftime("%Y/%m/%d %H:%M:%S")
         result.append({
             "id": d.id,
-            "name": d.name,
+            "name": _polished_file_download_name(d),
             "filename": d.filename,
             "file_size": d.file_size,
             "file_type": d.file_type,
             "created_at": created_at_str,
             "has_polished_content": d.polished_content is not None,
-            "report_file_path": d.report_file_path or None
+            "report_filename": _polished_report_download_name(d) if d.report_file_path else None,
+            "report_file_path": d.report_file_path or None,
         })
     return result
 
@@ -11579,13 +11601,15 @@ async def get_polished_document_info(doc_id: int, db: Session = Depends(get_db))
     
     return {
         "id": doc.id,
-        "name": doc.name,
+        "name": _polished_file_download_name(doc),
         "filename": doc.filename,
         "file_path": doc.file_path,
         "file_size": doc.file_size,
         "file_type": doc.file_type,
         "original_content": doc.original_content,
         "polished_content": doc.polished_content,
+        "report_filename": _polished_report_download_name(doc) if doc.report_file_path else None,
+        "report_file_path": doc.report_file_path or None,
         "created_at": (doc.created_at + timedelta(hours=8)).isoformat() if doc.created_at else None
     }
 
@@ -11601,8 +11625,8 @@ async def download_polished_file(doc_id: int, db: Session = Depends(get_db)):
     
     return FileResponse(
         path=doc.file_path,
-        filename=doc.filename,
-        media_type="application/octet-stream"
+        filename=_polished_file_download_name(doc),
+        media_type=_download_media_type(_polished_file_download_name(doc), "application/octet-stream"),
     )
 
 
@@ -11618,10 +11642,11 @@ async def download_polished_file_report(doc_id: int, db: Session = Depends(get_d
     if not os.path.exists(doc.report_file_path):
         raise HTTPException(status_code=404, detail="服务器文件不存在")
     
+    report_name = _polished_report_download_name(doc)
     return FileResponse(
         path=doc.report_file_path,
-        filename=doc.report_filename or "润色报告.docx",
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename=report_name,
+        media_type=_download_media_type(report_name, "text/html; charset=utf-8"),
     )
 
 
@@ -11713,6 +11738,35 @@ async def get_raw_polished_file(doc_id: int, db: Session = Depends(get_db)):
     )
 
 
+class BatchDeleteRequest(BaseModel):
+    ids: list[int]
+
+
+@router.delete("/batch")
+async def batch_delete_polished_documents(
+    payload: BatchDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    user = get_default_user(db)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可删除文件")
+
+    deleted = 0
+    for doc_id in payload.ids:
+        doc = get_polished_document(db, doc_id)
+        if not doc:
+            continue
+        if doc.file_path and os.path.exists(doc.file_path):
+            os.remove(doc.file_path)
+        if doc.report_file_path and os.path.exists(doc.report_file_path):
+            os.remove(doc.report_file_path)
+        delete_polished_document(db, doc_id)
+        deleted += 1
+
+    return {"message": f"已删除 {deleted} 个文件", "deleted_count": deleted}
+
+
 @router.delete("/{doc_id}")
 async def delete_polished_document_endpoint(
     doc_id: int,
@@ -11727,7 +11781,7 @@ async def delete_polished_document_endpoint(
     if not doc:
         raise HTTPException(status_code=404, detail="文件不存在")
     
-    if os.path.exists(doc.file_path):
+    if doc.file_path and os.path.exists(doc.file_path):
         os.remove(doc.file_path)
     
     # 同时删除关联的润色报告文件
@@ -11736,35 +11790,6 @@ async def delete_polished_document_endpoint(
     
     delete_polished_document(db, doc_id)
     return {"message": "删除成功"}
-
-
-class BatchDeleteRequest(BaseModel):
-    ids: list[int]
-
-
-@router.delete("/batch")
-async def batch_delete_polished_documents(
-    payload: BatchDeleteRequest,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    user = get_default_user(db)
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可删除文件")
-    
-    deleted = 0
-    for doc_id in payload.ids:
-        doc = get_polished_document(db, doc_id)
-        if not doc:
-            continue
-        if os.path.exists(doc.file_path):
-            os.remove(doc.file_path)
-        if doc.report_file_path and os.path.exists(doc.report_file_path):
-            os.remove(doc.report_file_path)
-        delete_polished_document(db, doc_id)
-        deleted += 1
-    
-    return {"message": f"已删除 {deleted} 个文件", "deleted_count": deleted}
 
 
 # ============================================================
@@ -12004,6 +12029,62 @@ def _register_cat_download_asset(file_path: str, filename: str = "", media_type:
         "created_at": time.time(),
     }
     return download_token, f"/api/polish-lab/cat/download/{download_token}"
+
+
+def _looks_like_storage_filename(name: str) -> bool:
+    stem = os.path.splitext(os.path.basename(str(name or '').strip()))[0]
+    if not stem:
+        return True
+    try:
+        uuid.UUID(stem)
+        return True
+    except ValueError:
+        return stem.startswith('tmp') and len(stem) >= 8
+
+
+def _cat_polished_display_name(source_filename: str, fallback: str = '') -> str:
+    source = os.path.basename(str(source_filename or fallback or '润色文档.docx').strip()) or '润色文档.docx'
+    if source.startswith('【'):
+        return source
+    return f'【润色版】{source}'
+
+
+def _cat_report_display_name(source_filename: str, report_path: str = '') -> str:
+    source = os.path.basename(str(source_filename or '润色文档').strip()) or '润色文档'
+    source = re.sub(r'^【润色版】|^【修订标记版】', '', source)
+    base = os.path.splitext(source)[0] or '润色文档'
+    ext = os.path.splitext(str(report_path or '.html'))[1] or '.html'
+    return f'【润色报告】{base}{ext}'
+
+
+def _polished_file_download_name(doc) -> str:
+    name = str(getattr(doc, 'name', '') or '').strip()
+    if name and not _looks_like_storage_filename(name):
+        return name
+    filename = str(getattr(doc, 'filename', '') or '').strip()
+    if filename and not _looks_like_storage_filename(filename):
+        return filename
+    return name or filename or '润色文档.docx'
+
+
+def _polished_report_download_name(doc) -> str:
+    stored = str(getattr(doc, 'report_filename', '') or '').strip()
+    if stored and not _looks_like_storage_filename(stored):
+        return stored
+    report_path = str(getattr(doc, 'report_file_path', '') or '')
+    return _cat_report_display_name(_polished_file_download_name(doc), report_path or stored)
+
+
+def _download_media_type(filename: str, fallback: str = 'application/octet-stream') -> str:
+    guessed = mimetypes.guess_type(filename)[0]
+    if guessed:
+        return guessed
+    ext = os.path.splitext(str(filename or ''))[1].lower()
+    if ext == '.html':
+        return 'text/html; charset=utf-8'
+    if ext == '.docx':
+        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    return fallback
 
 
 def _generate_cat_html_report(
@@ -12818,6 +12899,7 @@ async def cat_analyze(
         terminology = _load_scoped_terminology_source(db, terminology_file_id, product_type)
         resolved_terms = _resolve_terminology(db, terminology, pre_polished) if terminology else {}
         resolved_typo_dict = _load_typo_dict(db)
+        custom_rules = get_enabled_custom_rules(db) if db else []
 
         lines = pre_polished.split('\n')
         if original_lines is None:
@@ -12873,6 +12955,7 @@ async def cat_analyze(
                 term_dict=resolved_terms,
                 typo_dict=resolved_typo_dict,
                 source_sentence=source_line_stripped,
+                custom_rules=custom_rules,
                 debug_stats=simple_match_debug,
             )
             simple_match_debug = _finalize_simple_match_debug(simple_match_debug)
@@ -13337,12 +13420,13 @@ async def cat_apply(
     db.commit()
 
     report_dir = os.path.dirname(temp_path)
-    report_base = os.path.splitext(filename)[0] if filename else "润色文档"
-    report_filename = f"【润色报告】{report_base}.html"
+    source_display_name = request.source_filename or filename
+    download_filename = _cat_polished_display_name(source_display_name, filename)
+    report_filename = _cat_report_display_name(source_display_name)
     report_path = os.path.join(report_dir, report_filename)
     _generate_cat_html_report(
         report_path=report_path,
-        source_filename=request.source_filename or filename,
+        source_filename=source_display_name,
         analyze_id=request.analyze_id,
         decisions=decisions,
         applied_changes=applied_changes,
@@ -13357,19 +13441,17 @@ async def cat_apply(
     )
 
     download_url = None
-    download_filename = None
     if output_path and os.path.exists(output_path):
-        download_filename = os.path.basename(output_path)
         _, download_url = _register_cat_download_asset(output_path, download_filename)
 
     report_download_url = None
-    report_download_filename = None
+    report_download_filename = report_filename
     if report_path and os.path.exists(report_path):
-        report_download_filename = os.path.basename(report_path)
         _, report_download_url = _register_cat_download_asset(report_path, report_download_filename, "text/html; charset=utf-8")
 
     doc_id = None
     preview_url = None
+    persist_error = None
     if output_path and os.path.exists(output_path):
         try:
             import shutil
@@ -13397,7 +13479,7 @@ async def cat_apply(
 
             db_doc = create_polished_document(
                 db=db,
-                name=download_filename or os.path.basename(output_path),
+                name=download_filename,
                 filename=persistent_filename,
                 file_path=persistent_path,
                 file_size=os.path.getsize(persistent_path),
@@ -13405,12 +13487,16 @@ async def cat_apply(
                 original_content='\n'.join(paragraph_texts),
                 polished_content=polished_content,
                 created_by=user.id if user else None,
-                report_filename=persistent_report_filename,
+                report_filename=report_download_filename if persistent_report_path else None,
                 report_file_path=persistent_report_path,
             )
             doc_id = db_doc.id
             preview_url = f"/polish/preview/{doc_id}"
-        except Exception as persist_error:
+            download_url = f"/api/polish-lab/{doc_id}/download"
+            if persistent_report_path:
+                report_download_url = f"/api/polish-lab/{doc_id}/download-report"
+        except Exception as persist_exc:
+            persist_error = str(persist_exc)
             logger.error("[CAT_APPLY] 保存预览记录失败: %s", persist_error, exc_info=True)
 
     _cat_analyze_cache.pop(request.analyze_id, None)
@@ -13430,6 +13516,7 @@ async def cat_apply(
         "accuracy": accuracy,
         "doc_id": doc_id,
         "preview_url": preview_url,
+        "persist_error": persist_error,
         "feedback": {
             "rejected_saved": rejected_count,
             "modified_saved": modified_count,

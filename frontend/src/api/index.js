@@ -474,9 +474,9 @@ export const docPolishAPI = {
 }
 
 export const polishStatsAPI = {
-  getTextStats: () => instance.get('/polish/stats/text'),
-  getDocumentStats: () => instance.get('/polish/stats/document'),
-  getTextSessions: (params = {}) => instance.get('/polish/stats/text/sessions', { params }),
-  getDocumentSessions: (params = {}) => instance.get('/polish/stats/document/sessions', { params }),
-  getDocumentDetail: (analyzeId) => instance.get(`/polish/stats/document/${analyzeId}`)
+  getTextStats: () => instance.get('/polish-lab/stats/text'),
+  getDocumentStats: () => instance.get('/polish-lab/stats/document'),
+  getTextSessions: (params = {}) => instance.get('/polish-lab/stats/text/sessions', { params }),
+  getDocumentSessions: (params = {}) => instance.get('/polish-lab/stats/document/sessions', { params }),
+  getDocumentDetail: (analyzeId) => instance.get(`/polish-lab/stats/document/${analyzeId}`)
 }
