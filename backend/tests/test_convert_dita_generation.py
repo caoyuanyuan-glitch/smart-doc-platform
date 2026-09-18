@@ -10,14 +10,18 @@ from app.api.convert import (  # noqa: E402
     _append_bookmap_topics,
     _append_root_container_xml,
     _build_topic_hierarchy,
+    _clean_title,
     _content_to_dita_xml,
+    _infer_docx_heading_level,
     _extract_template_frontmatter_subset,
     _docx_to_markdown,
+    _docx_numbered_run_continues,
     _docx_table_to_markdown,
     _looks_like_docx_heading_text,
     _parse_md_sections,
     _postprocess_section_tree,
     _reshape_docx_sections,
+    _should_emit_docx_list_marker,
     _generated_topic_code,
     _copy_docx_media_to_output,
     _download_images_for_output,
@@ -115,6 +119,80 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('<note type="warning"><p>吸取上清并丢弃。</p></note>', xml)
         self.assertIn('<note type="warning"><p>触碰磁珠。</p></note>', xml)
 
+    def test_bold_attention_label_becomes_caution_note(self):
+        xml = _content_to_dita_xml(
+            "细胞计数",
+            "[[B]]注意：[[/B]]建议细胞浓度计数时计数活细胞的浓度。",
+            "concept",
+            "DTC041200",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn(
+            '<note type="caution"><p>建议细胞浓度计数时计数活细胞的浓度。</p></note>', xml
+        )
+        self.assertNotIn("<b>注意", xml)
+
+    def test_fully_bold_note_line_keeps_emphasis(self):
+        xml = _content_to_dita_xml(
+            "样本加载",
+            "[[B]]注意：请先进行样本加载，再进行试剂加载[[/B]]",
+            "concept",
+            "DTC041200",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn(
+            '<note type="caution"><p><b>请先进行样本加载，再进行试剂加载</b></p></note>', xml
+        )
+
+    def test_label_only_note_groups_following_enumerated_items(self):
+        xml = _content_to_dita_xml(
+            "细胞计数",
+            "[[B]]注意：[[/B]]\n\n【1】推荐使用阔口吸头。\n\n【2】计数务必准确。",
+            "concept",
+            "DTC041200",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="caution">', xml)
+        self.assertIn("<li>推荐使用阔口吸头。</li>", xml)
+        self.assertIn("<li>计数务必准确。</li>", xml)
+        note_start = xml.index('<note type="caution">')
+        self.assertLess(xml.index("推荐使用阔口吸头。"), xml.index("</note>", note_start))
+        self.assertLess(xml.index("推荐使用阔口吸头。"), xml.index("计数务必准确。"))
+
+    def test_inline_enumerated_note_items_group_into_bullet_list(self):
+        xml = _content_to_dita_xml(
+            "试剂装载",
+            "[[B]]注意：[[/B]]【1】运行8个样本，可直接取1管新试剂。\n\n【2】黑色单圆圈表示用2.0冻存管。\n\n【3】装载完成后盖上盖板。",
+            "concept",
+            "DTC041201",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="caution">', xml)
+        self.assertIn("<ul>", xml)
+        self.assertIn("<li>运行8个样本，可直接取1管新试剂。</li>", xml)
+        self.assertIn("<li>黑色单圆圈表示用2.0冻存管。</li>", xml)
+        self.assertIn("<li>装载完成后盖上盖板。</li>", xml)
+        self.assertEqual(xml.count("<note "), 1)
+
+    def test_table_before_note_stays_outside_note(self):
+        xml = _content_to_dita_xml(
+            "试剂准备",
+            "| 组分 | 体积 |\n| :--- | :--- |\n| Fe (II) Solution | 1 μL |\n\n[[B]]注意：[[/B]]【1】将DNA Clean Beads提前取出。\n\n【2】提前将Lysis Buffer-V3取出。",
+            "concept",
+            "DTC041226",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="caution">', xml)
+        # The table must be emitted before the note, not nested inside it.
+        self.assertLess(xml.index('<table>'), xml.index('<note type="caution">'))
+        self.assertNotIn('<table>\n', xml[xml.index('<note'):])
+        self.assertIn('<li>将DNA Clean Beads提前取出。</li>', xml)
+
     def test_table_heading_becomes_table_title(self):
         xml = _content_to_dita_xml(
             "表 30 Fe (II) 稀释液配置",
@@ -210,7 +288,7 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<fig><title>图 1 示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
         self.assertNotIn('<alt>', xml)
 
     def test_english_figure_caption_drops_number_prefix(self):
@@ -224,6 +302,29 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn('<fig><title>PCR BC Primer-96 layout</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
         self.assertNotIn('Figure 7', xml)
+
+    def test_figure_caption_written_before_image_binds_to_following_image(self):
+        xml = _content_to_dita_xml(
+            "封面示例",
+            "图1 前置图题\n![docx_image_001.png](image/docx_image_001.png)",
+            "concept",
+            "DTC041204",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<fig><title>前置图题</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertNotIn('<p>图1 前置图题</p>', xml)
+
+    def test_unmatched_figure_caption_stays_paragraph(self):
+        xml = _content_to_dita_xml(
+            "无图示例",
+            "图1 孤立图题\n\n正文段落",
+            "concept",
+            "DTC041205",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<p>图1 孤立图题</p>', xml)
 
     def test_inline_sup_markup_becomes_sup_tag(self):
         xml = _content_to_dita_xml(
@@ -258,7 +359,7 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertEqual(xml.count('<ol>'), 1)
         self.assertIn('<li><p>第一步</p>', xml)
-        self.assertIn('<fig><title>图 1 示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
         self.assertIn('<note type="warning"><p>保持低温。</p></note>', xml)
         self.assertIn('<table>\n          <title>参数</title>', xml)
         self.assertIn('<li>第二步</li>', xml)
@@ -297,6 +398,20 @@ class ContentGenerationTest(unittest.TestCase):
             topic_kind="concept",
         )
         self.assertIn('<note type="warning"><p>Keep the tube on ice.</p></note>', xml)
+
+    def test_note_label_prefixed_by_bold_space_still_becomes_note(self):
+        xml = _content_to_dita_xml(
+            "试剂准备",
+            "[[B]] [[/B]][[B]]注意：[[/B]]【1】将DNA Clean Beads提前取出。\n\n【2】提前将Lysis Buffer-V3取出。",
+            "concept",
+            "DTC041225",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="caution">', xml)
+        self.assertIn('<ul>', xml)
+        self.assertIn('将DNA Clean Beads提前取出', xml)
+        self.assertNotIn('<p><b> </b><b>注意：</b>', xml)
 
     def test_stoppoint_paragraph_becomes_note(self):
         xml = _content_to_dita_xml(
@@ -436,6 +551,80 @@ class DocxHeadingDetectionTest(unittest.TestCase):
 
     def test_bold_table_caption_is_not_recognized_as_heading(self):
         self.assertFalse(_looks_like_docx_heading_text('[[B]]Table[[/B]][[B]] [[/B]][[B]]10[[/B]][[B]] [[/B]][[B]]Workflow[[/B]]'))
+
+    def test_letter_numbered_table_caption_is_not_recognized_as_heading(self):
+        self.assertFalse(_looks_like_docx_heading_text('表B-1  Barcode Primer使用规则'))
+
+    def test_product_line_with_two_parentheticals_is_not_recognized_as_heading(self):
+        self.assertFalse(
+            _looks_like_docx_heading_text('MGISEQ-2000RS 高通量测序试剂套装(FCL PE100) (Cat. No. 1000012554)')
+        )
+
+    def test_bold_label_above_table_is_not_inferred_as_heading(self):
+        class StubRun:
+            def __init__(self, text, bold):
+                self.text = text
+                self.bold = bold
+
+        class StubParagraph:
+            def __init__(self, runs):
+                self.runs = runs
+
+        class StubTable:
+            rows = [["试剂名称", "1RXN"]]
+
+        bold_label = StubParagraph([StubRun("常温试剂", True)])
+        self.assertEqual(_infer_docx_heading_level(bold_label, "常温试剂", StubTable(), "Normal"), 0)
+
+        numbered_headline = StubParagraph([StubRun("3.8.1将试剂转移到制备卡的特定孔位。", None)])
+        self.assertEqual(
+            _infer_docx_heading_level(numbered_headline, "3.8.1将试剂转移到制备卡的特定孔位。", StubTable(), "3级正文"),
+            2,
+        )
+
+    def test_numbered_short_list_item_is_not_inferred_as_heading(self):
+        from unittest import mock
+
+        paragraph = object()
+        with mock.patch("app.api.convert._get_docx_numbering_format", return_value=("decimal", 0)):
+            self.assertEqual(
+                _infer_docx_heading_level(paragraph, "cDNA产物扩增循环数参考", None, "List Paragraph"),
+                0,
+            )
+            self.assertEqual(
+                _infer_docx_heading_level(
+                    paragraph, "6.2.3 Sample Barcode 使⽤规则 (96 RXN)", None, "List Paragraph"
+                ),
+                1,
+            )
+
+    def test_short_numbered_list_item_keeps_its_marker(self):
+        from unittest import mock
+
+        paragraph = object()
+        neighbour = object()
+        with mock.patch(
+            "app.api.convert._docx_numbering_id",
+            side_effect=lambda item: 9 if item in (paragraph, neighbour) else None,
+        ), mock.patch("app.api.convert._get_docx_numbering_format", return_value=("decimal", 0)):
+            self.assertTrue(_docx_numbered_run_continues(paragraph, neighbour, None))
+            self.assertTrue(
+                _should_emit_docx_list_marker(paragraph, "cDNA产物扩增循环数参考", neighbour, None)
+            )
+        with mock.patch("app.api.convert._docx_numbering_id", return_value=None):
+            self.assertFalse(_docx_numbered_run_continues(paragraph, neighbour, None))
+
+    def test_clean_title_drops_manual_chapter_section_numbering(self):
+        self.assertEqual(_clean_title("第一章 产品信息"), "产品信息")
+        self.assertEqual(_clean_title("2.1 注意事项及实验前准备工作"), "注意事项及实验前准备工作")
+        self.assertEqual(_clean_title("3.1.1 机器准备"), "机器准备")
+        self.assertEqual(_clean_title("4.1 MGISEQ-2000RS测序平台实验流程"), "MGISEQ-2000RS测序平台实验流程")
+        self.assertEqual(_clean_title("附录A DNA Clean Beads使用前注意事项"), "DNA Clean Beads使用前注意事项")
+        self.assertEqual(_clean_title("附录"), "附录")
+
+    def test_clean_title_keeps_numbers_that_are_content(self):
+        self.assertEqual(_clean_title("3'RNA自动化标准流程"), "3'RNA自动化标准流程")
+        self.assertEqual(_clean_title("细胞相（1.13×）"), "细胞相（1.13×）")
 
     def test_reshape_keeps_numbered_docx_heading_as_separate_topic(self):
         markdown = "# Barcode 引物使⽤注意\n\n1. 规则 A\n\n### 6.2.3 Sample Barcode 使⽤规则 (96 RXN)\n\n1. 规则 B\n"
@@ -606,31 +795,31 @@ class BookmapTreeTest(unittest.TestCase):
 
 
 class TemplateSubsetTest(unittest.TestCase):
-    def test_frontmatter_subset_keeps_cover_and_booklists_only(self):
+    def test_frontmatter_subset_keeps_cover_and_about_but_drops_version_history(self):
         xml = '''<frontmatter navtitle="Preface">
-  <topicref navtitle="Old Cover" href="cover.dita"/>
-  <topicref navtitle="About" href="about.dita"/>
+  <topicref navtitle="封面CN" href="cover.dita"/>
+  <topicref navtitle="关于说明书" href="about.dita"/>
+  <topicref navtitle="版本记录" href="revision.dita"/>
   <booklists><toc/></booklists>
 </frontmatter>'''
         subset = _extract_template_frontmatter_subset(xml)
         self.assertIn('href="cover.dita"', subset)
+        self.assertIn('href="about.dita"', subset)
         self.assertIn('<booklists><toc/></booklists>', subset)
-        self.assertNotIn('href="about.dita"', subset)
+        # The source document supplies its own version history.
+        self.assertNotIn('href="revision.dita"', subset)
 
-    def test_rewrite_frontmatter_attaches_cover_children(self):
-        xml = '<frontmatter><topicref navtitle="Old Cover" href="cover.dita" keys="OLD" cms:title="Old Cover" cms:placeHolder="cover"/></frontmatter>'
+    def test_rewrite_frontmatter_injects_version_history_before_booklists(self):
+        xml = '<frontmatter><topicref navtitle="封面CN" href="cover.dita" keys="OLD" cms:title="封面CN" cms:placeHolder="cover"/><booklists><toc/></booklists></frontmatter>'
         topics = [
-            {"title": "Cover", "filename": "CTT041001.dita", "id": "CTT041001", "topic_kind": "cover", "level": 1},
-            {"title": "About the user manual", "filename": "DTC041002.dita", "id": "DTC041002", "topic_kind": "concept", "level": 2},
-            {"title": "Manufacturer information", "filename": "DTC041003.dita", "id": "DTC041003", "topic_kind": "concept", "level": 2},
-            {"title": "Revision history", "filename": "DTC041004.dita", "id": "DTC041004", "topic_kind": "concept", "level": 2},
+            {"title": "版本历史", "filename": "DTC041004.dita", "id": "DTC041004", "topic_kind": "concept", "level": 2},
         ]
         rewritten, used_files = _rewrite_template_frontmatter(xml, topics)
         self.assertIn('href="cover.dita"', rewritten)
-        self.assertIn('href="DTC041002.dita"', rewritten)
-        self.assertIn('href="DTC041003.dita"', rewritten)
         self.assertIn('href="DTC041004.dita"', rewritten)
-        self.assertEqual(used_files, {"cover.dita", "DTC041002.dita", "DTC041003.dita", "DTC041004.dita"})
+        self.assertIn('navtitle="版本历史"', rewritten)
+        self.assertLess(rewritten.index('href="DTC041004.dita"'), rewritten.index("<booklists"))
+        self.assertEqual(used_files, {"cover.dita", "DTC041004.dita"})
 
 
 class DocxTableMarkdownTest(unittest.TestCase):
