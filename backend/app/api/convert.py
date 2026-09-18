@@ -72,18 +72,63 @@ GENERATED_TOPIC_BASE = 41000
 # Keep these decisions centralized so future source files follow the same
 # structure, note semantics, figure/table title cleanup, and template reuse.
 REUSE_TEMPLATE_COVER_TOPIC = True
-TEMPLATE_FRONTMATTER_CHILDREN = {
+# Titles that belong in the bookmap frontmatter. The source document supplies
+# its own version history, so a version-history topic coming from the template
+# is dropped to avoid duplicating it.
+FRONTMATTER_CHILD_TITLES = {
     "about the user manual",
     "manufacturer information",
+    "关于说明书",
+    "制造商信息",
+}
+VERSION_HISTORY_TITLES = {
     "revision history",
+    "版本历史",
+    "版本记录",
+    "修订历史",
 }
 DOCX_SPECIAL_HEADING_LEVELS = {
     "revision history": 2,
+    "版本历史": 2,
+    "版本记录": 2,
 }
 DOCX_TOC_TITLES = {"目录", "目 录", "⽬录", "Contents"}
-NOTE_LABEL_PATTERN = re.compile(r'^(warning|caution|tips|danger|stop\s*point|stoppoint)[:：]?\s*(.*)$', re.IGNORECASE)
-CHINESE_NOTE_LABEL_PATTERN = re.compile(r'^(注意事项|其他注意事项|注意|提示|警告|小心)[:：]\s*(.*)$')
+NOTE_LABEL_PATTERN = re.compile(
+    r'^(?:\[\[/?(?:B|SUP|SUB)\]\])*(warning|caution|tips|danger|stop\s*point|stoppoint)'
+    r'(?:\[\[/?(?:B|SUP|SUB)\]\])*[:：]?(?:\[\[/?(?:B|SUP|SUB)\]\])*\s*(.*)$',
+    re.IGNORECASE,
+)
+CHINESE_NOTE_LABEL_PATTERN = re.compile(
+    r'^(?:\[\[/?(?:B|SUP|SUB)\]\])*(注意事项|其他注意事项|注意|提示|警告|小心)'
+    r'(?:\[\[/?(?:B|SUP|SUB)\]\])*[:：](?:\[\[/?(?:B|SUP|SUB)\]\])*\s*(.*)$'
+)
 CHINESE_WARNING_ACTION_PATTERN = re.compile(r'^(请勿|切勿)\s*(.*)$')
+# Table/figure caption numbering can be multi-level (表2-3, 表B-1) or plain
+# (Table 13, 图 6). Keep the pattern in one place so title cleanup and heading
+# splitting agree on what a caption prefix looks like.
+CAPTION_PREFIX_PATTERN = r'(?:\d+(?:[-–—.]\d+)*[0-9A-Za-z]*|[A-Za-z]\s*[-–—.]?\s*\d+)'
+TABLE_CAPTION_PREFIX_RE = re.compile(rf'^(?:表|Table)\s*{CAPTION_PREFIX_PATTERN}', re.IGNORECASE)
+FIGURE_CAPTION_PREFIX_RE = re.compile(rf'^(?:图|Figure)\s*{CAPTION_PREFIX_PATTERN}', re.IGNORECASE)
+ANY_CAPTION_PREFIX_RE = re.compile(
+    rf'^(?:表|Table|图|Figure|formula|Formula)\s*{CAPTION_PREFIX_PATTERN}', re.IGNORECASE
+)
+# A block image is a line that contains nothing but one image; inline images
+# (button icons inside a sentence) keep trailing text and must stay inline.
+MD_IMAGE_LINE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)\s*$')
+# IME applies its own numbering to chapters and sections, so manual prefixes
+# such as "第一章", "附录A", "2.1" or "3.1.1" are dropped from titles.
+CHAPTER_APPENDIX_PREFIX_RE = re.compile(
+    r'^(?:'
+    r'第\s*[0-9一二三四五六七八九十百千零〇]+\s*[章節节]\s*'
+    r'|附录\s*[A-Za-zⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ]+\s*[:：]?\s*'
+    r'|(?:Chapter|Appendix)\s*[\dA-Za-z]+\s*[:：.]?\s*'
+    r')',
+    re.IGNORECASE,
+)
+# "2.1" / "3.1.1" only count as numbering when real content follows, so values
+# such as "3'RNA" or "1.13×" keep their leading digits.
+SECTION_NUMBER_PREFIX_RE = re.compile(r'^\d+(?:[.．]\d+)+\s*(?=[\u4e00-\u9fff]|[A-Z])')
+APPENDIX_ITEM_NUMBER_PREFIX_RE = re.compile(r'^[A-Za-z]\s*[-–—]\s*\d+\s*(?=[\u4e00-\u9fff]|[A-Z])')
 
 
 def _get_step_names():
@@ -110,7 +155,7 @@ def _clean_title(title):
     """Clean markdown formatting from section titles.
     - Unescape markdown backslash escapes
     - Strip ** bold markers
-    - Remove leading numbering (1.1, Chapter 1:, etc.)
+    - Remove leading numbering (第一章, 2.1, 3.1.1, 附录A, Chapter 1:, etc.)
     """
     if not title:
         return title
@@ -123,9 +168,13 @@ def _clean_title(title):
 
     # 2. Strip ** bold markers
     t = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', t)
+    # 2b. Drop inline run placeholders; they are markup, not title content
+    t = _clean_navtitle(t)
 
-    # 3. Remove leading chapter markers while preserving source section numbering
-    t = re.sub(r'^(Chapter|Appendix|第)\s*\d+[\.\s:：]*\s*', '', t, flags=re.IGNORECASE)
+    # 3. Drop manual chapter/section numbering; IME adds its own numbering
+    t = CHAPTER_APPENDIX_PREFIX_RE.sub('', t)
+    t = SECTION_NUMBER_PREFIX_RE.sub('', t)
+    t = APPENDIX_ITEM_NUMBER_PREFIX_RE.sub('', t)
 
     # 4. Trim and clean up
     t = re.sub(r'\s+', ' ', t).strip()
@@ -134,6 +183,14 @@ def _clean_title(title):
 
 def _strip_md_bold(text):
     return re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', text or '')
+
+
+def _clean_navtitle(title):
+    """Drop inline run placeholders so map titles stay human readable."""
+    text = title or ""
+    text = re.sub(r'\[\[(B|SUP|SUB)\]\](.*?)\[\[/\1\]\]', r'\2', text)
+    text = re.sub(r'\[\[/?[A-Z]+\]\]', '', text)
+    return text
 
 
 def _parse_md_sections(content):
@@ -292,22 +349,46 @@ def _normalize_docx_text(text):
     return re.sub(r'\s+', ' ', str(text or '')).strip()
 
 
-def _extract_docx_paragraph_text(paragraph):
-    parts = []
+def _format_docx_run_text(run):
+    text = run.text or ''
+    if not text:
+        return ''
+    # A whitespace-only bold run (e.g. the space before a bolded 注意：) is a
+    # Word artifact; wrapping it adds a stray [[B]] [[/B]] that confuses note
+    # detection and text coverage.
+    if run.bold and text.strip():
+        text = f'[[B]]{text}[[/B]]'
+    if run.font.superscript:
+        return f'[[SUP]]{text}[[/SUP]]'
+    if run.font.subscript:
+        return f'[[SUB]]{text}[[/SUB]]'
+    return text
+
+
+def _docx_paragraph_segments(paragraph):
+    """Return text and image segments of a paragraph in run order.
+
+    Images keep their position relative to the surrounding text so inline
+    button icons can be restored inside the sentence instead of becoming a
+    standalone figure.
+    """
+    rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+    segments = []
     for run in paragraph.runs:
-        text = run.text or ''
-        if not text:
-            continue
-        if run.bold:
-            text = f'[[B]]{text}[[/B]]'
-        if run.font.superscript:
-            parts.append(f'[[SUP]]{text}[[/SUP]]')
-            continue
-        if run.font.subscript:
-            parts.append(f'[[SUB]]{text}[[/SUB]]')
-            continue
-        parts.append(text)
-    return _normalize_docx_text(''.join(parts))
+        for blip in run._element.xpath('.//*[local-name()="blip"]'):
+            rel_id = blip.get(rel_ns)
+            if rel_id:
+                segments.append(("image", rel_id))
+        text = _format_docx_run_text(run)
+        if text:
+            segments.append(("text", text))
+    return segments
+
+
+def _extract_docx_paragraph_text(paragraph):
+    return _normalize_docx_text(
+        ''.join(value for kind, value in _docx_paragraph_segments(paragraph) if kind == "text")
+    )
 
 
 def _is_plain_docx_text_line(line):
@@ -505,7 +586,7 @@ def _docx_list_marker(paragraph):
     return f"{indent}1. "
 
 
-def _should_emit_docx_list_marker(paragraph, text, next_block):
+def _should_emit_docx_list_marker(paragraph, text, next_block, prev_block=None):
     marker = _docx_list_marker(paragraph)
     if not marker or not text:
         return False
@@ -513,6 +594,10 @@ def _should_emit_docx_list_marker(paragraph, text, next_block):
     compact = _normalize_docx_text(text)
     if _looks_like_docx_heading_text(compact):
         return False
+    # A numbered paragraph sitting next to another item of the same list is a
+    # real list item even when it is short and unpunctuated.
+    if _docx_numbered_run_continues(paragraph, prev_block, next_block):
+        return True
     if len(compact) <= 20 and not re.search(r'[，。；：:,.()]', compact):
         return False
     if len(compact.split()) <= 6 and not re.search(r'[，。；：:,.()]', compact):
@@ -522,8 +607,30 @@ def _should_emit_docx_list_marker(paragraph, text, next_block):
     return True
 
 
+def _docx_numbered_heading_level(text):
+    """Return the heading level for a "3.2.1 标题" paragraph, or 0.
+
+    The text after the numbering must start with a CJK character or a
+    capitalized English word, so unit-like content such as "2.0 mL" or
+    "1.13× 损耗" is not mistaken for a heading.
+    """
+    compact = _normalize_docx_text(_clean_navtitle(_strip_md_bold(text or "")))
+    match = re.match(r'^(\d+(?:\.\d+){1,5})\s*(.*)$', compact)
+    if not match:
+        return 0
+    rest = match.group(2).strip()
+    if not rest:
+        return 0
+    if not (re.match(r'^[\u4e00-\u9fff]', rest) or re.match(r'^[A-Z][A-Za-z]', rest)):
+        return 0
+    return min(match.group(1).count('.') + 1, 6)
+
+
 def _looks_like_docx_heading_text(text):
-    compact = _normalize_docx_text(_strip_md_bold(text or ''))
+    # Bold run placeholders ([[B]]...[[/B]]) must be removed before matching,
+    # otherwise fully bold numbered headings such as "3.2.1 软件登陆" never look
+    # like headings.
+    compact = _normalize_docx_text(_clean_navtitle(_strip_md_bold(text or '')))
     if not compact:
         return False
     if len(compact) > 80 or len(compact.split()) > 16:
@@ -536,15 +643,60 @@ def _looks_like_docx_heading_text(text):
         return False
     if re.match(r'^[A-Za-z][A-Za-z0-9 ()/μ.-]*\s*=\s*.+$', compact):
         return False
-    if re.match(r'^(table|figure|formula|表|图)\s*\d+', compact, re.IGNORECASE):
+    if ANY_CAPTION_PREFIX_RE.match(compact):
         return False
     if re.match(r'^(试剂|样本|步骤|操作|注意|提示|警告|小心|请勿|切勿)[:：]', compact):
         return False
-    if re.search(r'[.!?;:：，。；]$', compact):
+    is_numbered = bool(_docx_numbered_heading_level(compact))
+    if re.search(r'[.!?;，。；]$', compact):
         return False
-    if re.match(r'^\d+(?:\.\d+){1,5}\s+\S+', compact):
+    if compact.endswith(("：", ":")):
+        # A numbered heading may carry a trailing colon ("4.1.1 仪器、试剂和耗材准备：").
+        if not (is_numbered and len(compact) <= 60):
+            return False
+    if is_numbered:
         return True
-    return bool(re.match(r'^[\u4e00-\u9fffA-Za-z0-9\-+/ ]+\([^\n]+\)$', compact))
+    # A single trailing parenthetical can be part of a heading (for example
+    # "DNBSEQ-G99ARS (SE50/PE50/PE150)"); product lines that stack several
+    # parentheticals are body text.
+    return bool(re.match(r'^[\u4e00-\u9fffA-Za-z0-9\-+/ ]+\([^()\n]+\)$', compact))
+
+
+def _docx_paragraph_is_fully_bold(paragraph):
+    runs = [run for run in paragraph.runs if run.text and run.text.strip()]
+    if not runs:
+        return False
+    return all(run.bold for run in runs)
+
+
+def _docx_numbering_id(paragraph):
+    """Return the Word numbering id, or None when the paragraph is not numbered."""
+    try:
+        ppr = paragraph._p.pPr
+        if ppr is None or ppr.numPr is None or ppr.numPr.numId is None:
+            return None
+        raw_id = ppr.numPr.numId.val
+    except Exception:
+        return None
+    try:
+        num_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    # numId 0 disables numbering for the paragraph.
+    return num_id or None
+
+
+def _docx_numbered_run_continues(paragraph, prev_block, next_block):
+    """True when a numbered paragraph sits next to another item of the same list."""
+    num_id = _docx_numbering_id(paragraph)
+    if num_id is None:
+        return False
+    for neighbour in (prev_block, next_block):
+        if neighbour is None or hasattr(neighbour, "rows"):
+            continue
+        if _docx_numbering_id(neighbour) == num_id:
+            return True
+    return False
 
 
 def _infer_docx_heading_level(paragraph, text, next_block, style_name):
@@ -555,8 +707,8 @@ def _infer_docx_heading_level(paragraph, text, next_block, style_name):
     if not text:
         return 0
 
-    normalized_text = _normalize_docx_text(_strip_md_bold(text))
-    is_table_title = bool(re.match(r'^(table|figure|表|图)\s*\d+', normalized_text, re.IGNORECASE))
+    normalized_text = _normalize_docx_text(_clean_navtitle(_strip_md_bold(text)))
+    is_table_title = bool(ANY_CAPTION_PREFIX_RE.match(normalized_text))
     if is_table_title:
         return 0
 
@@ -564,24 +716,31 @@ def _infer_docx_heading_level(paragraph, text, next_block, style_name):
     compact = normalized_text
     if num_fmt:
         fmt, indent_level = num_fmt
+        # Word often numbers plain list items with the same decimal numbering
+        # used by headings, so only treat it as a heading when the text itself
+        # looks like a heading ("6.2.3 Sample Barcode 使用规则 (96 RXN)").
         looks_like_heading = (
             fmt == "decimal"
             and len(compact) <= 40
             and len(compact.split()) <= 12
             and not re.search(r'[，。；：:,.!?]$', compact)
+            and _looks_like_docx_heading_text(compact)
         )
         if looks_like_heading:
             return min(indent_level + 1, 6)
 
     if _looks_like_docx_heading_text(compact):
-        if re.match(r'^\d+(?:\.\d+){1,5}\s+\S+', compact):
-            return min(compact.count('.') + 1, 6)
+        numbered_level = _docx_numbered_heading_level(compact)
+        if numbered_level:
+            return numbered_level
         return 4
 
     inferred_heading = (
         len(compact) <= 80
         and next_block is not None
         and hasattr(next_block, "rows")
+        # A fully bold line above a table is a table group label, not a heading.
+        and not _docx_paragraph_is_fully_bold(paragraph)
     )
     if inferred_heading:
         return 2
@@ -589,26 +748,59 @@ def _infer_docx_heading_level(paragraph, text, next_block, style_name):
     return 0
 
 
+def _materialize_docx_image(paragraph, rel_id, media_dir, image_index):
+    image_part = paragraph.part.related_parts.get(rel_id)
+    if not image_part:
+        return None, image_index
+    ext = os.path.splitext(str(getattr(image_part, "partname", "")))[1] or ".png"
+    file_name = f"docx_image_{image_index:03d}{ext.lower()}"
+    file_path = os.path.join(media_dir, file_name)
+    if not os.path.exists(file_path):
+        with open(file_path, "wb") as f:
+            f.write(image_part.blob)
+    return file_path, image_index + 1
+
+
 def _extract_docx_paragraph_images(paragraph, media_dir, image_index):
     image_refs = []
-    rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
-    blips = paragraph._element.xpath('.//*[local-name()="blip"]')
-    for blip in blips:
-        rel_id = blip.get(rel_ns)
-        if not rel_id:
+    for kind, value in _docx_paragraph_segments(paragraph):
+        if kind != "image":
             continue
-        image_part = paragraph.part.related_parts.get(rel_id)
-        if not image_part:
-            continue
-        ext = os.path.splitext(str(getattr(image_part, "partname", "")))[1] or ".png"
-        file_name = f"docx_image_{image_index:03d}{ext.lower()}"
-        file_path = os.path.join(media_dir, file_name)
-        if not os.path.exists(file_path):
-            with open(file_path, "wb") as f:
-                f.write(image_part.blob)
-        image_refs.append(file_path)
-        image_index += 1
+        file_path, image_index = _materialize_docx_image(paragraph, value, media_dir, image_index)
+        if file_path:
+            image_refs.append(file_path)
     return image_refs, image_index
+
+
+def _docx_image_size(path):
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            return img.size
+    except Exception:
+        return None
+
+
+def _is_small_docx_image(path, max_width=220, max_height=80):
+    size = _docx_image_size(path)
+    if not size:
+        return False
+    return size[0] <= max_width and size[1] <= max_height
+
+
+def _is_caption_like_docx_text(text):
+    normalized = re.sub(r'\[\[/?(?:B|SUP|SUB)\]\]', '', _normalize_docx_text(text or ""))
+    return bool(TABLE_CAPTION_PREFIX_RE.match(normalized) or FIGURE_CAPTION_PREFIX_RE.match(normalized))
+
+
+def _is_note_like_docx_text(text):
+    stripped = re.sub(r'\[\[/?(?:B|SUP|SUB)\]\]', '', _normalize_docx_text(text or ""))
+    stripped = re.sub(r'^\s*(?:\d+[.)、]\s+|[-*+]\s+)', '', stripped)
+    if stripped in {"注意事项", "其他注意事项"}:
+        return False
+    return bool(CHINESE_NOTE_LABEL_PATTERN.match(stripped) or NOTE_LABEL_PATTERN.match(stripped))
 
 
 def _docx_to_markdown(file_path):
@@ -646,10 +838,41 @@ def _docx_to_markdown(file_path):
         next_block = blocks[idx + 1] if idx + 1 < len(blocks) else None
         if not isinstance(block, Table):
             text = _extract_docx_paragraph_text(block)
-            image_refs, image_index = _extract_docx_paragraph_images(block, media_dir, image_index)
+            ordered_segments = []
+            image_refs = []
+            for kind, value in _docx_paragraph_segments(block):
+                if kind == "text":
+                    ordered_segments.append(("text", value))
+                    continue
+                file_path, image_index = _materialize_docx_image(block, value, media_dir, image_index)
+                if file_path:
+                    image_refs.append(file_path)
+                    ordered_segments.append(("image", file_path))
+
+            # Inline button icons share a paragraph with body text; keep them in
+            # the sentence. Icons next to a note (or alone in their own
+            # paragraph) are decoration and stay out of the output.
+            is_caption_text = _is_caption_like_docx_text(text)
+            is_note_text = _is_note_like_docx_text(text)
+            inline_parts = []
+            block_images = []
+            for kind, value in ordered_segments:
+                if kind == "text":
+                    inline_parts.append(value)
+                    continue
+                if _is_small_docx_image(value):
+                    if not text or is_note_text:
+                        continue
+                    if not is_caption_text:
+                        inline_parts.append(f"![{os.path.basename(value)}]({value})")
+                        continue
+                block_images.append(value)
+            inline_text = _normalize_docx_text(''.join(inline_parts))
             style_name = block.style.name if block.style else ""
             heading_level = _infer_docx_heading_level(block, text, next_block, style_name)
 
+            if re.match(r'(?i)^toc\s*\d+$', (style_name or '').strip()):
+                continue
             if text in DOCX_TOC_TITLES:
                 in_toc_block = True
                 continue
@@ -672,18 +895,28 @@ def _docx_to_markdown(file_path):
 
             if text and heading_level:
                 lines.append(f"{'#' * max(1, heading_level)} {text}")
+                # A heading paragraph can still anchor a figure image; keep it
+                # so captions following the heading can bind to the image.
+                for image_path in image_refs:
+                    ensure_cover_heading()
+                    lines.append(f"![{os.path.basename(image_path)}]({image_path})")
                 lines.append("")
             else:
                 if in_toc_block:
                     continue
-                if text:
+                if inline_text:
                     ensure_cover_heading()
-                    list_marker = _docx_list_marker(block) if _should_emit_docx_list_marker(block, text, next_block) else None
-                    lines.append(f"{list_marker}{text}" if list_marker else text)
-                for image_path in image_refs:
+                    prev_block = blocks[idx - 1] if idx else None
+                    list_marker = (
+                        _docx_list_marker(block)
+                        if _should_emit_docx_list_marker(block, text, next_block, prev_block)
+                        else None
+                    )
+                    lines.append(f"{list_marker}{inline_text}" if list_marker else inline_text)
+                for image_path in block_images:
                     ensure_cover_heading()
                     lines.append(f"![{os.path.basename(image_path)}]({image_path})")
-                if text or image_refs:
+                if inline_text or block_images:
                     lines.append("")
         else:
             if _is_toc_table(block):
@@ -733,7 +966,7 @@ def _normalize_section_key(title):
     text = _clean_title(title or "")
     text = re.sub(r'\[\[/?[A-Z]+\]\]', '', text)
     text = _strip_md_bold(text).lower()
-    text = re.sub(r'^(?:table|figure|formula|表|图)\s*\d+\s*', '', text)
+    text = ANY_CAPTION_PREFIX_RE.sub('', text)
     text = re.sub(r'^\d+(?:\.\d+)*\s*', '', text)
     text = re.sub(r'[^a-z0-9]+', ' ', text).strip()
     return text
@@ -741,7 +974,7 @@ def _normalize_section_key(title):
 
 def _starts_with_table_like_prefix(title):
     normalized = _normalize_docx_text(_strip_md_bold(re.sub(r'\[\[/?[A-Z]+\]\]', '', title or '')))
-    return bool(re.match(r'^(?:table|figure|表|图)\s*\d+\b', normalized, re.IGNORECASE))
+    return bool(TABLE_CAPTION_PREFIX_RE.match(normalized) or FIGURE_CAPTION_PREFIX_RE.match(normalized))
 
 
 def _split_leading_docx_subheading(content):
@@ -754,7 +987,9 @@ def _split_leading_docx_subheading(content):
         return None, content
 
     first_line = lines[first_idx].strip()
-    normalized_line = _normalize_docx_text(_strip_md_bold(first_line))
+    # Strip inline run placeholders before inspecting, otherwise guards such as
+    # the leading-number check miss lines wrapped in [[B]]...[[/B]].
+    normalized_line = _normalize_docx_text(_clean_navtitle(_strip_md_bold(first_line)))
     if (
         not normalized_line
         or len(normalized_line) > 30
@@ -763,7 +998,10 @@ def _split_leading_docx_subheading(content):
         or " = " in normalized_line
         or first_line.startswith(("#", "|", "![", "- ", "* "))
         or re.match(r'^\d+[.)、]\s*', normalized_line)
-        or re.match(r'^(table|figure|formula|表|图)\b', normalized_line, re.IGNORECASE)
+        or TABLE_CAPTION_PREFIX_RE.match(normalized_line)
+        or FIGURE_CAPTION_PREFIX_RE.match(normalized_line)
+        # Table group labels such as "测序仪：MGISEQ-2000RS" are body text.
+        or re.search(r'[:：]', normalized_line)
         or re.match(r'^(试剂|样本|步骤|操作|注意|提示|警告|小心|请勿|切勿)[:：]', normalized_line)
         or re.search(r'[.!?;:：，。)]$', normalized_line)
     ):
@@ -893,11 +1131,14 @@ def _postprocess_section_tree(sections):
                 "about the user manual",
                 "manufacturer information",
                 "revision history",
+                "版本历史",
+                "修订历史",
+                "版本记录",
             }
             leading_cover_meta = True
             for child in current["sections"]:
-                child_key = _normalize_section_key(child.get("title", ""))
-                if leading_cover_meta and child_key not in promoted_titles:
+                child_title = _strip_md_bold(_clean_title(child.get("title", ""))).strip().lower()
+                if leading_cover_meta and child_title not in promoted_titles:
                     cover_body_parts.append(child.get("title", "").strip())
                     if (child.get("content") or "").strip():
                         cover_body_parts.append(child.get("content", "").strip())
@@ -1095,12 +1336,21 @@ def _extract_template_frontmatter_subset(frontmatter_xml):
     if not open_match or not close_match:
         return frontmatter_xml
 
-    cover_match = re.search(r'<topicref\b[^>]*href="[^"]+\.dita"[^>]*/>|<topicref\b[^>]*href="[^"]+\.dita"[^>]*>.*?</topicref>', frontmatter_xml, re.DOTALL)
+    topicrefs = re.findall(
+        r'<topicref\b[^>]*href="[^"]+\.dita"[^>]*/>|<topicref\b[^>]*href="[^"]+\.dita"[^>]*>.*?</topicref>',
+        frontmatter_xml,
+        re.DOTALL,
+    )
     booklists_match = re.search(r'<booklists\b[^>]*>.*?</booklists>', frontmatter_xml, re.DOTALL)
 
     parts = [open_match.group(0)]
-    if cover_match:
-        parts.append(cover_match.group(0))
+    for topicref in topicrefs:
+        navtitle_match = re.search(r'navtitle="([^"]*)"', topicref)
+        navtitle = (navtitle_match.group(1) if navtitle_match else "").strip().lower()
+        if navtitle in VERSION_HISTORY_TITLES:
+            # The source document provides its own version history topic.
+            continue
+        parts.append(topicref)
     if booklists_match:
         parts.append(booklists_match.group(0))
     parts.append(close_match.group(0).strip())
@@ -1234,6 +1484,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     def _restore_inline_run_markup(text):
         restored = text or ''
+        restored = re.sub(
+            r'!\[([^\]]*)\]\(([^)]+)\)',
+            lambda m: f'<image href="{_escape_xml_attr(m.group(2))}"></image>',
+            restored,
+        )
         restored = re.sub(r'\[\[B\]\](.*?)\[\[/B\]\]', r'<b>\1</b>', restored)
         restored = re.sub(r'\[\[SUP\]\](.*?)\[\[/SUP\]\]', r'<sup>\1</sup>', restored)
         restored = re.sub(r'\[\[SUB\]\](.*?)\[\[/SUB\]\]', r'<sub>\1</sub>', restored)
@@ -1270,6 +1525,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     pending_table_title = None
     pending_table_caption_only = None
     pending_image = None
+    pending_figure_caption = None
     skip_next_note_icon_image = False
     pending_note_type = None
     pending_note_label = None
@@ -1298,16 +1554,21 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         return _strip_page_reference(_strip_md_bold(_unescape_md(text or '')))
 
     def _is_figure_caption(text):
-        return bool(re.match(r'^(图|Figure)\s*\d+', _strip_md_bold(_unescape_md((text or '').strip())), re.IGNORECASE))
+        return bool(FIGURE_CAPTION_PREFIX_RE.match(_strip_md_bold(_unescape_md((text or '').strip()))))
 
     def _normalize_figure_title(text):
-        normalized = _strip_md_bold(_unescape_md((text or '').strip()))
-        if re.match(r'^图\s*\d+', normalized, re.IGNORECASE):
-            return normalized
-        return re.sub(r'^(?:图|Figure)\s*\d+\s*[:：.．、-]?\s*', '', normalized, flags=re.IGNORECASE).strip()
+        # Keep any manual 图4-2/Figure 7 prefix here so an orphan caption can
+        # fall back to its verbatim text; _strip_figure_number removes it when
+        # the caption is actually rendered as a figure title.
+        return _strip_md_bold(_unescape_md((text or '').strip()))
+
+    def _strip_figure_number(text):
+        # IME applies its own figure numbering, so only the title body is kept.
+        return FIGURE_CAPTION_PREFIX_RE.sub('', text or '').lstrip(":：.．、- ").strip()
 
     def _is_note_like_text(text):
         stripped_text = _strip_md_bold(_unescape_md(_strip_list_prefix((text or '').strip())))
+        stripped_text = re.sub(r'\[\[/?(?:B|SUP|SUB)\]\]', '', stripped_text)
         if stripped_text in {"注意事项", "其他注意事项"}:
             return False
         if re.match(r'^(注意事项|其他注意事项|注意|提示|警告|小心|请勿|切勿)[:：]?\s*(.*)$', stripped_text):
@@ -1330,6 +1591,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         normalized = _strip_md_bold(_unescape_md(_strip_list_prefix((text or '').strip()))).lower()
         if any(keyword in normalized for keyword in ["warning", "caution", "danger", "请勿", "切勿", "警告", "小心", "do not"]):
             return "warning"
+        if normalized.startswith("注意"):
+            return "caution"
         return "tip"
 
     def _flush_pending_note(text=None):
@@ -1342,7 +1605,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if not pending_note_blocks:
             fallback = pending_note_label or ""
             pending_note_blocks.append(f'          <p>{_restore_inline_run_markup(fallback)}</p>')
-        inner = "\n".join(pending_note_blocks)
+        inner = "\n".join(_group_note_enumerated_blocks(pending_note_blocks))
         note_xml = f'        <note type="{pending_note_type}">\n{inner}\n        </note>'
         pending_note_type = None
         pending_note_label = None
@@ -1350,12 +1613,48 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         note_icon_detected = False
         return note_xml
 
+    def _group_note_enumerated_blocks(blocks):
+        """Turn consecutive 【N】 paragraphs inside a note into a bullet list."""
+        rendered = []
+        pending_items = []
+
+        def flush_items():
+            if not pending_items:
+                return
+            items = "\n".join(f'            <li>{item}</li>' for item in pending_items)
+            rendered.append(f'          <ul>\n{items}\n          </ul>')
+            pending_items.clear()
+
+        for block in blocks:
+            match = re.match(r'^\s*<p>【\d+】(.*)</p>\s*$', block, re.S)
+            if match and match.group(1).strip():
+                pending_items.append(match.group(1).strip())
+                continue
+            flush_items()
+            rendered.append(block)
+        flush_items()
+        return rendered
+
     def _next_nonempty_line(lines, start_idx):
         for next_idx in range(start_idx + 1, len(lines)):
             candidate = lines[next_idx].strip()
             if candidate:
                 return candidate
         return ""
+
+    def _flush_pending_note_to_body():
+        """Emit an open pending note before starting or appending another one.
+
+        Consecutive note lines would otherwise overwrite the pending note (losing
+        content) or reorder notes, so flush the open note first.
+        """
+        note_xml = _flush_pending_note()
+        if note_xml:
+            # Keep notes encountered inside a step list attached to that step.
+            if in_list and list_items:
+                list_items[-1]["blocks"].append(note_xml)
+            else:
+                body_parts.append(note_xml)
 
     def _flush_pending_image():
         nonlocal pending_image
@@ -1369,7 +1668,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     def _normalize_table_title(text):
         normalized = _strip_md_bold(_unescape_md((text or '').strip()))
-        return re.sub(r'^(?:表|Table)\s*\d+\s*[:：.．、-]?\s*', '', normalized, flags=re.IGNORECASE).strip()
+        return TABLE_CAPTION_PREFIX_RE.sub('', normalized).lstrip(":：.．、- ").strip()
 
     def _strip_page_reference(text):
         cleaned = re.sub(r'\s+on\s+page\s+\d+\b', '', text or '', flags=re.IGNORECASE)
@@ -1392,7 +1691,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if not cells:
             return None
         first = _strip_md_bold(_unescape_md((cells[0] or '').strip()))
-        if not re.match(r'^(?:表|Table)\s*\d+\b', first, re.IGNORECASE):
+        if not TABLE_CAPTION_PREFIX_RE.match(first):
             return None
         parts = [first] + [(_strip_md_bold(_unescape_md((cell or '').strip()))) for cell in cells[1:] if (cell or '').strip()]
         return _join_caption_fragments(parts)
@@ -1471,7 +1770,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             return False
         if normalized.startswith(("#", "!", "|")):
             return False
-        if re.match(r'^(Table|表)\s*\d+', normalized, re.IGNORECASE):
+        if TABLE_CAPTION_PREFIX_RE.match(normalized):
             return False
         if re.match(r'^\d+[.)、]?$', normalized):
             return False
@@ -1480,8 +1779,12 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         return len(normalized) <= 160
 
     def _consume_note_line(text, next_nonempty=""):
-        original_text = _strip_md_bold(_unescape_md((text or '').strip()))
-        stripped_text = _strip_md_bold(_unescape_md(_strip_list_prefix(text.strip())))
+        raw_text = (text or '').strip()
+        # A bolded space before the label ("[[B]] [[/B]]注意：") is a Word
+        # artifact; drop it so the note label is still recognised.
+        raw_text = re.sub(r'^(?:\s*\[\[B\]\]\s*\[\[/B\]\])+\s*', '', raw_text)
+        original_text = _strip_md_bold(_unescape_md(raw_text))
+        stripped_text = _strip_md_bold(_unescape_md(_strip_list_prefix(raw_text)))
         normalized_text = re.sub(r'\s+', ' ', stripped_text).strip()
         if stripped_text in {"注意事项", "其他注意事项"}:
             return None
@@ -1494,11 +1797,27 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if note_match:
             label = note_match.group(1)
             detail = note_match.group(2).strip()
-            if detail and not re.sub(r'[.:：;；,，!！?？\-\s]+', '', detail):
+            # When the whole line is bold, the opening marker is consumed with the
+            # label and an unmatched closing marker is left in the detail; re-wrap
+            # it so the emphasis survives as <b>.
+            if detail.endswith("[[/B]]") and "[[B]]" not in detail:
+                detail = f'[[B]]{detail[:-len("[[/B]]")]}[[/B]]'
+            if detail and not re.sub(r'[.:：;；,，!！?？\-\s\[\]/]+', '', detail):
                 detail = ''
             label_key = label.lower()
-            note_type = "warning" if label in {"警告", "小心", "请勿", "切勿"} or label_key in {"warning", "caution", "danger"} else "tip"
-            if detail and not re.match(r'^\s*[-*+]\s+', next_nonempty):
+            if label in {"警告", "小心", "请勿", "切勿"} or label_key in {"warning", "caution", "danger"}:
+                note_type = "warning"
+            elif label == "注意":
+                note_type = "caution"
+            else:
+                note_type = "tip"
+            if (
+                detail
+                and not re.match(r'^\s*[-*+]\s+', next_nonempty)
+                # "注意：【1】..." continues with 【2】【3】 on later lines, so
+                # keep the note open to collect them into one bullet list.
+                and not re.match(r'^【\d+】', detail)
+            ):
                 return f'        <note type="{note_type}"><p>{_restore_inline_run_markup(detail)}</p></note>'
             return {"pending_type": note_type, "label": label, "detail": detail}
         chinese_action_match = CHINESE_WARNING_ACTION_PATTERN.match(normalized_text)
@@ -1511,11 +1830,6 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     for idx, line in enumerate(safe_lines):
         stripped = line.strip()
         if not stripped:
-            if pending_note_type and in_list:
-                result = _flush_list()
-                if result:
-                    _append_block(result)
-                continue
             if pending_note_type and note_icon_detected:
                 continue
             if pending_note_type:
@@ -1525,10 +1839,22 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             _append_body("")
             continue
 
+        current_image_match = MD_IMAGE_LINE_RE.match(stripped)
+        if pending_figure_caption is not None and not current_image_match:
+            # The caption was not followed by an image, so keep it as body text.
+            _append_block(f"        <p>{_restore_inline_run_markup(pending_figure_caption)}</p>")
+            pending_figure_caption = None
+
         next_nonempty = _next_nonempty_line(safe_lines, idx)
         note_xml = _consume_note_line(stripped, next_nonempty)
         if note_xml:
             if isinstance(note_xml, dict):
+                _flush_pending_note_to_body()
+                # A table written before the note must stay ahead of it, not be
+                # swallowed into the note body when the note opens.
+                table_xml = _flush_pending_table()
+                if table_xml:
+                    _append_block(table_xml)
                 pending_note_type = note_xml["pending_type"]
                 pending_note_label = note_xml.get("label")
                 pending_note_blocks = []
@@ -1539,15 +1865,16 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 pending_image = None
                 note_icon_detected = False
                 continue
+            _flush_pending_note_to_body()
             table_xml = _flush_pending_table()
             if table_xml:
                 _append_block(table_xml)
             pending_image = None
             skip_next_note_icon_image = True
-            _append_body(note_xml)
+            _append_block(note_xml)
             continue
 
-        if re.match(r'^(表|Table)\s*\d+', _unescape_md(stripped), re.IGNORECASE):
+        if TABLE_CAPTION_PREFIX_RE.match(_unescape_md(stripped)):
             table_xml = _flush_pending_table()
             if table_xml:
                 _append_block(table_xml)
@@ -1570,7 +1897,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 in_table = True
                 table_rows = []
             cells = [c.strip() for c in stripped.strip("|").split("|")]
-            embedded_caption = _extract_embedded_table_caption(cells) if in_table and table_rows else None
+            # A caption row can also open the table (merged-cell first row).
+            embedded_caption = _extract_embedded_table_caption(cells)
             if embedded_caption:
                 table_xml = _flush_pending_table()
                 if table_xml:
@@ -1593,23 +1921,37 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             pending_table_caption_only = f"{pending_table_caption_only} {continuation}".strip() if pending_table_caption_only else continuation
             continue
 
-        image_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', stripped)
+        image_match = current_image_match
         if image_match:
             href = image_match.group(2)
-            if pending_note_type and _is_note_icon_image(href):
-                skip_next_note_icon_image = False
-                pending_image = None
-                note_icon_detected = True
-                continue
-            if skip_next_note_icon_image:
-                skip_next_note_icon_image = False
+            if pending_figure_caption is not None:
+                # Caption written before the image (图3-3 / 图3-4 style).
+                _append_block(
+                    f'        <fig><title>{_restore_inline_run_markup(_strip_figure_number(pending_figure_caption))}</title><image href="{_escape_xml_attr(href)}" placement="break"></image></fig>'
+                )
+                pending_figure_caption = None
                 pending_image = None
                 continue
             prev_line = safe_lines[idx - 1].strip() if idx > 0 else ""
             next_line = safe_lines[idx + 1].strip() if idx + 1 < len(safe_lines) else ""
-            if _is_note_like_text(prev_line) or _is_note_like_text(next_line) or _is_note_icon_image(href):
-                pending_image = None
+            adjacent_note = _is_note_like_text(prev_line) or _is_note_like_text(next_line)
+            image_exists = os.path.exists(href)
+            # Small images are real button/UI icons only when they sit next to a
+            # note; a figure that merely follows a note is kept.
+            drop_as_icon = (
+                _is_note_icon_image(href)
+                and (adjacent_note or skip_next_note_icon_image or pending_note_type is not None)
+            ) or (not image_exists and (skip_next_note_icon_image or adjacent_note))
+            if drop_as_icon:
+                # Never lose a queued figure while dropping an icon.
+                image_xml = _flush_pending_image()
+                if image_xml:
+                    _append_block(image_xml)
+                skip_next_note_icon_image = False
+                if pending_note_type is not None:
+                    note_icon_detected = True
                 continue
+            skip_next_note_icon_image = False
             alt = image_match.group(1)
             image_xml = _flush_pending_image()
             if image_xml:
@@ -1619,11 +1961,21 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
         if _is_figure_caption(stripped):
             figure_title = _normalize_figure_title(stripped)
+            followed_by_image = bool(
+                MD_IMAGE_LINE_RE.match(_next_nonempty_line(safe_lines, idx))
+            )
+            if pending_figure_caption is not None:
+                _append_block(f"        <p>{_restore_inline_run_markup(pending_figure_caption)}</p>")
+                pending_figure_caption = None
             if pending_image:
+                # Image written before its caption (most common layout).
                 _append_block(
-                    f'        <fig><title>{_restore_inline_run_markup(figure_title)}</title><image href="{_escape_xml_attr(pending_image["href"])}" placement="break"></image></fig>'
+                    f'        <fig><title>{_restore_inline_run_markup(_strip_figure_number(figure_title))}</title><image href="{_escape_xml_attr(pending_image["href"])}" placement="break"></image></fig>'
                 )
                 pending_image = None
+            elif followed_by_image:
+                # Caption written before its image; bind once the image arrives.
+                pending_figure_caption = figure_title
             else:
                 _append_block(f"        <p>{_restore_inline_run_markup(figure_title)}</p>")
             continue
@@ -1633,6 +1985,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             note_xml = _consume_note_line(line, next_nonempty)
             if note_xml:
                 if isinstance(note_xml, dict):
+                    _flush_pending_note_to_body()
+                    table_xml = _flush_pending_table()
+                    if table_xml:
+                        _append_block(table_xml)
                     pending_note_type = note_xml["pending_type"]
                     pending_note_label = note_xml.get("label")
                     pending_note_blocks = []
@@ -1642,6 +1998,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     pending_image = None
                     skip_next_note_icon_image = True
                     continue
+                _flush_pending_note_to_body()
                 pending_image = None
                 skip_next_note_icon_image = True
                 _append_block(note_xml)
@@ -1662,6 +2019,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             note_xml = _consume_note_line(line, next_nonempty)
             if note_xml:
                 if isinstance(note_xml, dict):
+                    _flush_pending_note_to_body()
+                    table_xml = _flush_pending_table()
+                    if table_xml:
+                        _append_block(table_xml)
                     pending_note_type = note_xml["pending_type"]
                     pending_note_label = note_xml.get("label")
                     pending_note_blocks = []
@@ -1671,10 +2032,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     pending_image = None
                     skip_next_note_icon_image = True
                     continue
+                _flush_pending_note_to_body()
                 pending_image = None
                 skip_next_note_icon_image = True
                 _append_block(note_xml)
                 continue
+            if pending_note_type and pending_note_blocks:
+                # Close an open note into the previous step before the next
+                # step starts, so the note stays inside its own step item.
+                _flush_pending_note_to_body()
             if not in_list or list_type != "ol":
                 result = _flush_list()
                 if result:
@@ -1699,7 +2065,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         else:
             clean = _clean_output_text(stripped)
             if pending_note_type:
-                if note_icon_detected and re.match(r'^\d+[.)、]?$', clean):
+                if re.match(r'^【\d+】', clean):
+                    # Enumerated items after a label-only note belong to that note.
+                    pending_note_blocks.append(
+                        f'          <p>{_restore_inline_run_markup(clean)}</p>'
+                    )
+                    continue
+                if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', clean):
+                    # A standalone number inside an open note is page furniture,
+                    # not note content, so drop the line and abandon the empty note.
                     pending_note_type = None
                     pending_note_label = None
                     pending_note_blocks = []
@@ -1707,24 +2081,31 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     note_icon_detected = False
                     continue
                 note_xml = _flush_pending_note(clean)
-                _append_body(note_xml)
+                _append_block(note_xml)
                 continue
             next_line = safe_lines[idx + 1].strip() if idx + 1 < len(safe_lines) else ""
-            next_image_match = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', next_line)
-            if next_image_match and _is_note_icon_image(next_image_match.group(2)):
+            next_image_match = MD_IMAGE_LINE_RE.match(next_line)
+            next_image_href = next_image_match.group(2) if next_image_match else ""
+            # A missing image cannot be measured, so only treat it as a note icon
+            # when the neighbouring text already reads like a note.
+            looks_like_note = _is_note_like_text(clean) or _infer_note_type_from_text(clean) == "warning"
+            if next_image_href and (
+                _is_note_icon_image(next_image_href)
+                or (looks_like_note and not os.path.exists(next_image_href))
+            ):
                 note_type = _infer_note_type_from_text(clean)
                 skip_next_note_icon_image = True
-                _append_body(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
+                _append_block(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
                 continue
             if pending_image and _is_note_icon_image(pending_image.get("href")):
                 note_type = _infer_note_type_from_text(clean)
                 pending_image = None
-                _append_body(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
+                _append_block(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
                 continue
             if note_icon_detected and clean:
                 note_type = _infer_note_type_from_text(clean)
                 note_icon_detected = False
-                _append_body(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
+                _append_block(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
                 continue
             image_xml = _flush_pending_image()
             if image_xml:
@@ -1745,18 +2126,23 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 _append_body(result)
             _append_body(f"        <p>{_restore_inline_run_markup(clean)}</p>")
 
+    if pending_note_type and pending_note_blocks:
+        # Attach a trailing note to the last step before emitting the list.
+        _flush_pending_note_to_body()
     result = _flush_list()
     if result:
         if pending_note_type:
+            # A label-only note still wraps its list as the note body.
             _append_block(result)
         else:
             _append_body(result)
+    if pending_figure_caption is not None:
+        body_parts.append(f"        <p>{_restore_inline_run_markup(pending_figure_caption)}</p>")
+        pending_figure_caption = None
     image_xml = _flush_pending_image()
     if image_xml:
         body_parts.append(image_xml)
-    note_xml = _flush_pending_note()
-    if note_xml:
-        body_parts.append(note_xml)
+    _flush_pending_note_to_body()
     table_xml = _flush_pending_table()
     if table_xml:
         body_parts.append(table_xml)
@@ -1929,19 +2315,23 @@ def _rewrite_template_frontmatter(frontmatter_xml, topics_output):
     rewritten = frontmatter_xml
     used_files = set()
     title_to_topic = {
-        topic["title"].strip().lower(): topic
+        _clean_navtitle(topic["title"]).strip().lower(): topic
         for topic in topics_output
         if topic.get("title") and topic.get("filename")
     }
-    cover_children = [
+    def _frontmatter_title_key(title):
+        return _strip_md_bold(_clean_title(title or "")).strip().lower()
+
+    # Version history topics come from the source document and become siblings
+    # of the template cover inside <frontmatter>.
+    version_history_children = [
         topic for topic in topics_output
         if topic.get("filename")
-        and int(topic.get("level", 1) or 1) == 2
-        and _normalize_section_key(topic.get("title", "")) in TEMPLATE_FRONTMATTER_CHILDREN
+        and _frontmatter_title_key(topic.get("title", "")) in VERSION_HISTORY_TITLES
     ]
 
     for navtitle, topic in title_to_topic.items():
-        escaped_title = _escape_xml_attr(topic["title"])
+        escaped_title = _escape_xml_attr(_clean_navtitle(topic["title"]))
         pattern = re.compile(rf'(<topicref[^>]*navtitle="{re.escape(escaped_title)}"[^>]*href=")([^"]+)(")')
         if pattern.search(rewritten):
             rewritten = pattern.sub(rf'\1{topic["filename"]}\3', rewritten)
@@ -1961,18 +2351,18 @@ def _rewrite_template_frontmatter(frontmatter_xml, topics_output):
         cover_href_match = re.search(r'<topicref\b[^>]*href="([^"]+\.dita)"', rewritten)
         if cover_href_match:
             used_files.add(cover_href_match.group(1))
-        if cover_children and re.search(r'<topicref\b[^>]*href="[^"]+\.dita"[^>]*/>', rewritten):
-            child_xml = []
-            child_node_id_seq = iter(range(900001, 999999))
-            for child in cover_children:
-                _append_topicref_xml(child_xml, child, child_node_id_seq, "    ", 3, "en-US")
-                used_files.add(child["filename"])
-            rewritten = re.sub(
-                r'(<topicref\b[^>]*href="[^"]+\.dita"[^>]*)/>',
-                lambda m: f'{m.group(1)}>\n' + "\n".join(child_xml) + '\n  </topicref>',
-                rewritten,
-                count=1,
-            )
+
+    if version_history_children and '<booklists' in rewritten:
+        child_xml = []
+        child_node_id_seq = iter(range(900001, 999999))
+        for child in version_history_children:
+            _append_topicref_xml(child_xml, child, child_node_id_seq, "  ", 2, "en-US")
+            used_files.add(child["filename"])
+        rewritten = rewritten.replace(
+            '<booklists',
+            "\n".join(child_xml) + '<booklists',
+            1,
+        )
 
     return rewritten, used_files
 
@@ -2108,7 +2498,7 @@ def _topic_kind_for_section(section, title):
 def _append_topicref_xml(lines, topic, node_id_seq, indent, level_attr, dita_lang, template_name=None, children=None):
     topic_kind = topic.get("topic_kind") or "concept"
     template_name = template_name or _topic_template_name(topic_kind)
-    navtitle = _escape_xml_attr(topic["title"])
+    navtitle = _escape_xml_attr(_clean_navtitle(topic["title"]))
     node_id = f"PN{next(node_id_seq):03d}"
     ime_soft_type = template_name
     placeholder = _escape_xml_attr(_topic_placeholder(topic))
@@ -2441,11 +2831,25 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     all_sections = _flatten_sections(sections)
 
             slug_counts = {}
+            # When the template supplies its own cover topic, the source cover is
+            # replaced by it. Emitting the generated cover topic too would leave a
+            # duplicate/orphan file that is never referenced by the ditamap.
+            reuse_template_cover = bool(
+                REUSE_TEMPLATE_COVER_TOPIC
+                and template_parts
+                and re.search(
+                    r'<topicref\b[^>]*href="[^"]+\.dita"',
+                    template_parts.get("frontmatter_xml") or "",
+                )
+            )
             for section in all_sections:
                 title = _clean_title(section["title"])
                 h1_title = _clean_title(section.get("h1", ""))
                 if not title:
                     title = h1_title or f"Section {topic_index + 1}"
+
+                if reuse_template_cover and _normalize_section_key(title) == "cover":
+                    continue
 
                 dita_type = section["dita_type"]
                 for keyword, override_type in special["type_overrides"].items():
@@ -2633,12 +3037,6 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     map_lines.append(f"  {line.strip()}")
 
             referenced_topic_files = frontmatter_used_files | manufacturer_used_files
-            if REUSE_TEMPLATE_COVER_TOPIC:
-                referenced_topic_files |= {
-                    topic["filename"]
-                    for topic in topics_output
-                    if topic.get("topic_kind") == "cover"
-                }
             topic_roots = _build_topic_hierarchy(topics_output, referenced_topic_files)
             _append_bookmap_topics(map_lines, topic_roots, timestamp, dita_lang)
 

@@ -16,6 +16,8 @@ if str(BACKEND_ROOT) not in sys.path:
 
 
 from app.api.convert import (  # noqa: E402
+    FIGURE_CAPTION_PREFIX_RE,
+    TABLE_CAPTION_PREFIX_RE,
     _clean_title,
     _docx_to_markdown,
     _extract_images_md,
@@ -27,8 +29,8 @@ from app.api.convert import (  # noqa: E402
 
 NOTE_PREFIXES = ("注意事项", "其他注意事项", "注意", "提示", "警告", "小心", "请勿", "切勿")
 EN_NOTE_PREFIX_RE = re.compile(r'^(warning|caution|tips|danger|stop\s*point|stoppoint)[:：]?\s*(.*)$', re.IGNORECASE)
-TABLE_CAPTION_RE = re.compile(r'^(表|Table)\s*\d+', re.IGNORECASE)
-FIGURE_CAPTION_RE = re.compile(r'^(图|Figure)\s*\d+', re.IGNORECASE)
+TABLE_CAPTION_RE = TABLE_CAPTION_PREFIX_RE
+FIGURE_CAPTION_RE = FIGURE_CAPTION_PREFIX_RE
 ORDERED_LIST_RE = re.compile(r'^\s*\d+[.)、]\s+')
 UNORDERED_LIST_RE = re.compile(r'^\s*[-*•]\s+')
 
@@ -48,14 +50,19 @@ def _source_title_counts(markdown_text):
     titles = []
     for sec in sections:
         title = _clean_title(sec.get("title", ""))
-        if title in {"940-001527-00 (96 RXN)", "Kit Version: V3.0"}:
+        # The cover is supplied by the reused template cover topic, so the source
+        # cover heading is not part of the converted body structure.
+        if title in {"Cover", "940-001527-00 (96 RXN)", "Kit Version: V3.0"}:
             continue
         titles.append(title)
     return Counter([t for t in titles if t])
 
 
 def _source_expectations(markdown_text):
-    lines = [_normalize_docx_text(line) for line in markdown_text.splitlines()]
+    lines = [
+        re.sub(r'\[\[/?(?:B|SUP|SUB)\]\]', '', _normalize_docx_text(line))
+        for line in markdown_text.splitlines()
+    ]
     note_like = []
     table_titles = []
     figure_titles = []
@@ -139,7 +146,7 @@ def _parse_dita_package(zip_path):
         navtitles = []
         for title, href in re.findall(r'navtitle="([^"]+)"[^>]*href="([^"]+\.dita)"', ditamap_text):
             title = html.unescape(title)
-            if title in {"封面CN", "关于说明书", "版本记录", "编号：H-940-001530-00"}:
+            if title in {"Cover", "封面CN", "关于说明书", "版本记录", "编号：H-940-001530-00"}:
                 continue
             navtitles.append(title)
         dita_files = [name for name in zf.namelist() if name.endswith(".dita")]
