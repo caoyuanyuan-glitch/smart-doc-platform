@@ -33,6 +33,22 @@ def test_normalize_providers_default_single_only():
     assert review_api._normalize_providers(providers="qwen,deepseek") == ["qwen"]
 
 
+def test_heading_normalizers_keep_distinct_semantics():
+    # TOC key normalization strips dot-leader page numbers and lowercases, so
+    # TOC entries and body headings compare case-insensitively.
+    assert review_api._normalize_heading_text("1.2 RNA Extraction.....15") == "1.2 rna extraction"
+    # Display normalization keeps the original casing used in reports.
+    assert review_api._normalize_heading_label("1.2RNA Extraction") == "1.2 RNA Extraction"
+    assert review_api._normalize_heading_label("Table 3 Result") == "Table 3 Result"
+
+
+def test_search_route_registered_before_review_id_route():
+    # "/search" must be matched before "/{review_id}", otherwise it is parsed as
+    # an int review_id and rejected with 422.
+    paths = [getattr(route, "path", "") for route in review_api.router.routes]
+    assert paths.index("/search") < paths.index("/{review_id}")
+
+
 def test_chunker_short_document_and_offsets():
     chunker = create_smart_chunker(max_chunks=8, max_chars=80, overlap=10)
     chunks = chunker.chunk_document("Hello world")

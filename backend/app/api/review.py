@@ -3751,6 +3751,12 @@ def _run_long_sentence_audit(content, file_type=None):
 
 
 def _normalize_heading_text(text):
+    """Normalize a heading into a comparable TOC key.
+
+    Strips dot-leader page numbers and lowercases so TOC entries and body
+    headings can be compared case-insensitively. Display headings must use
+    _normalize_heading_label instead, which preserves the original casing.
+    """
     text = re.sub(r'\.{2,}\s*\d+$', '', str(text or '').strip())
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
@@ -4764,7 +4770,7 @@ def _extract_heading_from_context(text):
         return ''
     table_match = re.search(r'(Table\s+\d+\s+[A-Za-z][A-Za-z0-9×\- ,/&()]{3,120})', normalized, re.IGNORECASE)
     if table_match:
-        heading = _normalize_heading_text(table_match.group(1))
+        heading = _normalize_heading_label(table_match.group(1))
         if heading and not _is_table_cell_like(heading) and not _is_inline_reference_heading(heading):
             return heading
     patterns = [
@@ -4775,7 +4781,7 @@ def _extract_heading_from_context(text):
         matches = re.findall(pattern, normalized)
         if matches:
             for match in reversed(matches):
-                heading = _normalize_heading_text(match)
+                heading = _normalize_heading_label(match)
                 if heading and not _is_table_cell_like(heading) and not _is_inline_reference_heading(heading):
                     return heading
     return ''
@@ -10862,22 +10868,23 @@ def _is_heading_line(line):
     return bool(re.match(r'^\d+(?:\.\d+)*(?:[\).])?\s+[^\n]{2,}$', stripped))
 
 
-def _normalize_heading_text(line):
+def _normalize_heading_label(line):
+    """Normalize a heading for display, keeping its original casing."""
     cleaned = re.sub(r'^(\d+(?:\.\d+)*)([A-Za-z])', r'\1 \2', str(line or '').strip())
     return re.sub(r'\s+', ' ', cleaned).strip(' -:|')
 
 
 def _clean_caption_heading(line):
-    heading = _normalize_heading_text(line)
+    heading = _normalize_heading_label(line)
     if not heading:
         return ''
     heading = re.sub(r'\b(Name|Position|Brand|Cat\.?|Cat No\.?|Quantity|Components)\b.*$', '', heading, flags=re.IGNORECASE).strip(' -:|,')
     heading = re.sub(r'\s+', ' ', heading).strip()
-    return heading or _normalize_heading_text(line)
+    return heading or _normalize_heading_label(line)
 
 
 def _is_inline_reference_heading(text):
-    normalized = _normalize_heading_text(text).lower()
+    normalized = _normalize_heading_label(text).lower()
     if not normalized:
         return False
     patterns = [
@@ -10971,7 +10978,7 @@ def _score_heading_candidate(lines, index):
     if score < 55:
         return None
 
-    heading = _clean_caption_heading(line) if kind == 'caption' else _normalize_heading_text(line)
+    heading = _clean_caption_heading(line) if kind == 'caption' else _normalize_heading_label(line)
     return score, heading
 
 
@@ -11691,65 +11698,6 @@ def _merge_multi_provider_results(all_provider_issues: dict, provider_list: list
     return deduped, chunk_meta
 
 
-def _run_multi_provider_ai_deep_review(review_id: int, content: str, document_language: str,
-                                        ai_review_basis_sections: dict, provider_list: list,
-                                        document_name: str = None) -> tuple:
-    """并发调用多个 AI provider 进行深度审核，合并结果。
-    
-    Args:
-        provider_list: provider 名称列表，如 ['qwen', 'deepseek', 'kimi']
-        document_name: 原始文件名，用于 AI 检查文件名与内容的一致性
-    
-    Returns:
-        (merged_issues, chunk_meta): 去重合并后的问题列表
-    """
-    results = {}
-    errors = []
-    
-    # 使用 ThreadPoolExecutor 并发调用
-    max_workers = min(len(provider_list), 3)  # 最多3个并发
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {}
-        for prov in provider_list:
-            set_progress(review_id, 'running', 'AI智能审核', 68,
-                         f'正在调用 {prov.upper()} 模型审核...')
-            print(f"[多模型] 开始调用 {prov} 模型...")
-            future = executor.submit(
-                _run_single_provider_ai_review,
-                review_id, content, document_language,
-                ai_review_basis_sections, prov, document_name
-            )
-            future_map[future] = prov
-        
-        # 收集结果（带超时）
-        for future in concurrent.futures.as_completed(future_map, timeout=600):
-            prov = future_map[future]
-            try:
-                issues, meta = future.result()
-                results[prov] = issues
-                print(f"[多模型] {prov} 完成，返回 {len(issues)} 个问题")
-            except concurrent.futures.TimeoutError:
-                print(f"[多模型] {prov} 调用超时，跳过")
-                errors.append(f"{prov}: 超时")
-            except ReviewCancelled:
-                raise
-            except Exception as e:
-                print(f"[多模型] {prov} 调用失败: {e}")
-                errors.append(f"{prov}: {e}")
-    
-    if not results:
-        print(f"[多模型] 所有 provider 均失败: {errors}")
-        return [], []
-    
-    # 合并去重
-    merged_issues, chunk_meta = _merge_multi_provider_results(results, list(results.keys()))
-    
-    if errors:
-        print(f"[多模型] 部分 provider 失败: {errors}")
-    
-    return merged_issues, chunk_meta
-
-
 def _run_single_provider_ai_review(review_id: int, content: str, document_language: str,
                                      ai_review_basis_sections: dict, provider: str,
                                      document_name: str = None) -> tuple:
@@ -11897,33 +11845,6 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             
             set_progress(review_id, 'running', '规则审核', 25, '正在执行规则匹配...')
             rule_issues = [] if document.file_type == 'xlsx' else run_rule_audit(content, rules, knowledge_basis, document.file_type)
-
-            # ── 新规则引擎（REVIEW_USE_NEW_RULES=1 时并行运行）──
-            if os.getenv("REVIEW_USE_NEW_RULES", "0") == "1" and document.file_type != 'xlsx':
-                try:
-                    from app.review_engine.rules.engine import DeterministicRuleEngine
-                    engine = DeterministicRuleEngine()
-                    new_rule_issues = engine.run_all(
-                        content,
-                        file_type=document.file_type,
-                        language=document_language,
-                        document_name=getattr(document, 'filename', '') or '',
-                    )
-                    # 去重：按 (rule_id, original_text[:60]) 去重
-                    existing_keys = {
-                        (i.get('rule', ''), (i.get('original_text') or '')[:60].lower())
-                        for i in rule_issues
-                    }
-                    added = 0
-                    for issue in new_rule_issues:
-                        key = (issue.get('rule', ''), (issue.get('original_text') or '')[:60].lower())
-                        if key not in existing_keys:
-                            rule_issues.append(issue)
-                            existing_keys.add(key)
-                            added += 1
-                    print(f"[审核] 新规则引擎产出 {len(new_rule_issues)} 个问题, 去重后新增 {added} 个")
-                except Exception as e:
-                    print(f"[审核] 新规则引擎执行失败: {e}")
 
             if document.file_type == 'pdf':
                 rule_issues = [issue for issue in rule_issues if issue.get('rule') not in {'R011', 'R016', 'R021'}]
@@ -12118,85 +12039,50 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     "tags": ["snippet", "grammar", "spelling", "term"],
                 })
 
-            # 确定实际使用的 provider 列表
-            actual_providers = provider_list if provider_list else ([provider] if provider else [None])
-            is_multi_provider = len(actual_providers) > 1
-
-            if is_multi_provider:
-                # ── 多模型并发审核 ──
-                set_progress(review_id, 'running', 'AI智能审核', 65,
-                             f'正在并发调用 {len(actual_providers)} 个 AI 模型审核...')
-                print(f"[审核] 多模型并发审核，providers={actual_providers}")
-                ai_issues, ai_chunk_meta = [], []  # 初始化为空
-                try:
-                    ai_issues, ai_chunk_meta = _run_multi_provider_ai_deep_review(
-                        review_id, content, document_language,
-                        ai_review_basis_sections,
-                        actual_providers,
-                        document_name=document.filename
-                    )
-                except Exception as e:
-                    print(f"[多模型审核失败] {e}")
-                meta_combined = {
-                    "providers": actual_providers,
-                    "total_chunks": sum(len(m.get("chunk_sizes", [])) for m in (ai_chunk_meta or [])),
-                    "total_issue_count": len(ai_issues),
-                }
-                ai_review_trace = {
-                    "enabled": True,
-                    "mode": "multi_provider",
-                    "providers": actual_providers,
-                    "provider_count": len(actual_providers),
-                    "total_issue_count": len(ai_issues),
-                    "provider_meta": ai_chunk_meta,
-                    "merged_meta": meta_combined,
-                }
-                ai_chunk_meta = [meta_combined]
-            else:
-                # ── 单模型审核（原有逻辑）──
-                single_provider = actual_providers[0]
-                set_progress(review_id, 'running', 'AI智能审核', 65,
-                             f'正在使用 {single_provider or "默认"} 模型审核...')
-                print(f"[审核] 单模型审核，provider={single_provider}")
-                ai_issues, ai_chunk_meta = [], []
-                try:
-                    ai_issues, ai_review_trace = _run_ai_deep_review(
-                        review_id, content, document_language,
-                        ai_review_basis_sections,
-                        provider=single_provider,
-                        document_name=document.filename
-                    )
-                    if isinstance(ai_review_trace, dict):
-                        ai_chunk_meta = list(ai_review_trace.get("chunk_meta") or [])
-                except concurrent.futures.TimeoutError:
-                    print(f"[审核] AI 审核超时({_ai_audit_timeout_seconds(content):.0f}s)")
-                except Exception as e:
-                    print(f"[审核] AI 审核失败: {e}")
-                from app.review_engine.consensus import should_trigger_second_provider
-                require_consensus = _review_env_bool('REVIEW_REQUIRE_CONSENSUS', False)
-                trigger, trigger_reason = should_trigger_second_provider(
-                    ai_issues,
-                    require_consensus=require_consensus,
+            # 单模型审核：provider_list 由 _normalize_providers 保证至多一个元素
+            single_provider = provider_list[0] if provider_list else provider
+            set_progress(review_id, 'running', 'AI智能审核', 65,
+                         f'正在使用 {single_provider or "默认"} 模型审核...')
+            print(f"[审核] 单模型审核，provider={single_provider}")
+            ai_issues, ai_chunk_meta = [], []
+            try:
+                ai_issues, ai_review_trace = _run_ai_deep_review(
+                    review_id, content, document_language,
+                    ai_review_basis_sections,
+                    provider=single_provider,
+                    document_name=document.filename
                 )
-                second_provider = os.getenv('REVIEW_CONSENSUS_PROVIDER', 'deepseek')
-                if trigger and second_provider and second_provider != single_provider:
-                    print(f"[审核] 按需共识触发: {trigger_reason}, second={second_provider}")
-                    extra_issues, extra_meta = _run_single_provider_ai_review(
-                        review_id, content, document_language,
-                        ai_review_basis_sections, second_provider, document.filename
-                    )
-                    merged_issues, merged_meta = _merge_multi_provider_results(
-                        {single_provider or "primary": ai_issues, second_provider: extra_issues},
-                        [single_provider or "primary", second_provider],
-                    )
-                    ai_issues = merged_issues
-                    if isinstance(ai_review_trace, dict):
-                        ai_review_trace["consensus_trigger"] = trigger_reason
-                        ai_review_trace["provider_list"] = [single_provider or "primary", second_provider]
-                        ai_review_trace["consensus_meta"] = merged_meta
-                    ai_chunk_meta = merged_meta or ai_chunk_meta
-                elif isinstance(ai_review_trace, dict):
-                    ai_review_trace["consensus_trigger"] = ""
+                if isinstance(ai_review_trace, dict):
+                    ai_chunk_meta = list(ai_review_trace.get("chunk_meta") or [])
+            except concurrent.futures.TimeoutError:
+                print(f"[审核] AI 审核超时({_ai_audit_timeout_seconds(content):.0f}s)")
+            except Exception as e:
+                print(f"[审核] AI 审核失败: {e}")
+            from app.review_engine.consensus import should_trigger_second_provider
+            require_consensus = _review_env_bool('REVIEW_REQUIRE_CONSENSUS', False)
+            trigger, trigger_reason = should_trigger_second_provider(
+                ai_issues,
+                require_consensus=require_consensus,
+            )
+            second_provider = os.getenv('REVIEW_CONSENSUS_PROVIDER', 'deepseek')
+            if trigger and second_provider and second_provider != single_provider:
+                print(f"[审核] 按需共识触发: {trigger_reason}, second={second_provider}")
+                extra_issues, extra_meta = _run_single_provider_ai_review(
+                    review_id, content, document_language,
+                    ai_review_basis_sections, second_provider, document.filename
+                )
+                merged_issues, merged_meta = _merge_multi_provider_results(
+                    {single_provider or "primary": ai_issues, second_provider: extra_issues},
+                    [single_provider or "primary", second_provider],
+                )
+                ai_issues = merged_issues
+                if isinstance(ai_review_trace, dict):
+                    ai_review_trace["consensus_trigger"] = trigger_reason
+                    ai_review_trace["provider_list"] = [single_provider or "primary", second_provider]
+                    ai_review_trace["consensus_meta"] = merged_meta
+                ai_chunk_meta = merged_meta or ai_chunk_meta
+            elif isinstance(ai_review_trace, dict):
+                ai_review_trace["consensus_trigger"] = ""
 
             print(f"[审核] AI审核返回问题数={len(ai_issues)}")
             _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
@@ -13802,6 +13688,41 @@ async def get_provider_status(_: UserOut = Depends(require_admin)):
         "models": models,
     }
 
+
+# Registered before the "/{review_id}" route below: Starlette matches routes in
+# registration order, so "/search" must come first or it is parsed as an int
+# review_id and rejected with 422.
+@router.get("/search")
+async def search_reviews(
+    q: str = Query(..., description="搜索关键词"),
+    limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    _: UserOut = Depends(require_admin),
+):
+    """全文搜索审核文档"""
+    try:
+        from app.services.fts_search import get_fts_engine
+        engine = get_fts_engine()
+        results = engine.search(q, limit=limit, offset=offset)
+        return {
+            "query": q,
+            "results": [
+                {
+                    "doc_id": r.doc_id,
+                    "title": r.title,
+                    "score": round(r.score, 2),
+                    "snippet": r.snippet,
+                    "highlights": r.highlights,
+                    "metadata": r.metadata,
+                }
+                for r in results
+            ],
+            "count": len(results),
+        }
+    except Exception as e:
+        return {"query": q, "results": [], "count": 0, "error": str(e)}
+
+
 @router.get("/{review_id}", response_model=Review)
 async def read_review(
     review_id: int,
@@ -14044,28 +13965,6 @@ async def get_review_audit_traces(
             for t in traces
         ],
     }
-
-# ── Review Engine: Rule Migration Status ──────────────────────────
-
-@router.get("/engine/rule-migration")
-async def get_rule_migration_status(_: UserOut = Depends(require_admin)):
-    """获取确定性规则迁移状态
-
-    返回已迁移和待迁移的规则分组，用于跟踪审核引擎重构进度。
-    """
-    try:
-        from app.review_engine.rules import get_migration_summary
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"app.review_engine.rules", "app.review_engine.rules.engine"}:
-            raise
-        return {
-            "enabled": False,
-            "migrated": [],
-            "pending": [],
-            "degraded_reason": "review_engine.rules 模块未启用",
-        }
-    return get_migration_summary()
-
 
 @router.get("/{review_id}/stage-diagnostics")
 async def get_stage_diagnostics(
@@ -14316,37 +14215,6 @@ async def reindex_document(
         return {"success": True, "message": "文档已重新索引"}
     except Exception as e:
         return {"success": False, "message": str(e)}
-
-
-@router.get("/search")
-async def search_reviews(
-    q: str = Query(..., description="搜索关键词"),
-    limit: int = Query(10, ge=1, le=50),
-    offset: int = Query(0, ge=0),
-    _: UserOut = Depends(require_admin),
-):
-    """全文搜索审核文档"""
-    try:
-        from app.services.fts_search import get_fts_engine
-        engine = get_fts_engine()
-        results = engine.search(q, limit=limit, offset=offset)
-        return {
-            "query": q,
-            "results": [
-                {
-                    "doc_id": r.doc_id,
-                    "title": r.title,
-                    "score": round(r.score, 2),
-                    "snippet": r.snippet,
-                    "highlights": r.highlights,
-                    "metadata": r.metadata,
-                }
-                for r in results
-            ],
-            "count": len(results),
-        }
-    except Exception as e:
-        return {"query": q, "results": [], "count": 0, "error": str(e)}
 
 
 @router.post("/eval/batch")
