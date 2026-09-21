@@ -11922,7 +11922,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 if document_language == "en":
                     # 页码序列判据与语言无关，中文分支已覆盖 "both" 文档，这里只补纯英文文档
                     try:
-                        page_issues = _detect_page_number_sequence_issues(content)
+                        # 与中文分支一致，页码判据依赖原始分页符，需用未清洗的 PDF 文本
+                        page_issues = _detect_page_number_sequence_issues(raw_pdf_content or content)
                         print(f"[审核] 页码序列规则发现问题: {len(page_issues)}个")
                         rule_issues.extend(page_issues)
                     except Exception as e:
