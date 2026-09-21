@@ -181,27 +181,39 @@ def _longest_common_substring_len(left: str, right: str) -> int:
     return best
 
 
+CJK_PATTERN = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
 def _has_substantive_text_overlap(item: HumanAnnotation, issue: dict[str, Any]) -> bool:
+    """判断批注与问题是否指向同一处文本。
+
+    批注的 selected_text 与问题原文都可能只是 PDF 文本层的碎片，所以用最长公共子串
+    衡量重合程度。仅 2-3 个字符的偶然重合不构成证据：英文里 'nt'、'te' 之类的组合
+    随处可见，实测会让单条拼写批注误命中 135/185 条无关问题。中文的 2 字词本身就是
+    有效信号，因此单独保留中文碎片判断。
+    """
     selected = _norm_for_match(item.selected_text)
     comment = _norm_for_match(item.comment)
     context = _norm_for_match(item.context)
     original = _norm_for_match(issue.get("original_text", ""))
-    if not selected or not original:
-        return bool(original and len(original) >= 4 and (original in comment or original in context))
+    if not original:
+        return False
+    if not selected:
+        return len(original) >= 4 and (original in comment or original in context)
     if len(original) >= 4 and (original in comment or original in context):
+        return True
+    if len(selected) >= 4 and selected in original:
         return True
     if comment and len(comment) >= 4 and (comment in original or original in comment):
         return True
     overlap = _longest_common_substring_len(selected, original)
-    if overlap >= 4:
+    shorter = min(len(selected), len(original))
+    if overlap < 2 or not shorter:
+        return False
+    if overlap / max(len(selected), len(original)) >= 0.5:
         return True
-    if overlap >= 2 and re.search(r"重复|同上|同下|统一", comment):
-        return True
-    if overlap >= 3 and re.search(r"多余字|多余的字|错别字|拼写", comment):
-        return True
-    if overlap >= 2 and re.search(r"错别字|拼写", comment):
-        return True
-    return False
+    # 中文碎片场景：批注只截取了目标文字的一部分，此时看重叠段是否覆盖了批注本身。
+    return bool(CJK_PATTERN.search(selected)) and overlap / shorter >= 0.5
 
 
 def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:

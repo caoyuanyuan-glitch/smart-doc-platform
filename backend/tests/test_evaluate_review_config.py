@@ -162,6 +162,30 @@ def test_evaluate_against_annotations_matches_issue_text_in_human_context_and_co
     assert result['matched_issue_count'] == 3
 
 
+def test_spelling_annotation_does_not_match_issues_sharing_short_substrings():
+    # 英文里 2 个字符的偶然重合（'nt'/'on'/'te'）随处可见，不能据此判定命中，
+    # 否则单条拼写批注会误命中上百条无关问题，评估精确率完全失真。
+    annotations = [
+        HumanAnnotation(
+            'doc.pdf', '37', 'Square', 'Tina', 'consistent 拼写错误', 'consitent', '',
+            '术语拼写', 'deterministic', 'DET-TERM-SPELL-001',
+        ),
+    ]
+    issues = [
+        {'rule': 'Spelling error (consitent→consistent)', 'category': '拼写错误',
+         'original_text': 'The confirm password shoud be consitent with the new password.'},
+        {'rule': 'DOC-GRAM-004', 'category': '表达与句式', 'original_text': 'The environment is not consistent.'},
+        {'rule': 'DOC-DUP-004', 'category': '重复内容', 'original_text': 'to the to the'},
+        {'rule': 'SAFE-002', 'category': '安全合规', 'original_text': 'corrosive'},
+    ]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result['recall'] == 1.0
+    assert result['matched_issue_count'] == 1
+    assert result['precision'] == 0.25
+
+
 def test_batch_evaluate_from_config_preserves_suite_fields(tmp_path, monkeypatch):
     config = {
         "documents": [

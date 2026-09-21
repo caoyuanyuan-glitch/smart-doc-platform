@@ -2455,6 +2455,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 cache_kwargs["document_name"] = document_name
             chunk_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, chunk, document_language, selected_basis, chunk_timeout,
+                excerpt_position=(index, total),
                 **cache_kwargs,
             )
             for issue in chunk_issues:
@@ -6095,7 +6096,7 @@ def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None, 
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None):
+def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None, excerpt_position=None):
     cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis, document_name=document_name, review_id=review_id)
     if force_provider:
         cache_key = hashlib.sha1((cache_key + "|provider=" + force_provider).encode("utf-8")).hexdigest()
@@ -6113,6 +6114,13 @@ def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis
     chapter_context = {}
     if document_name:
         chapter_context["document_name"] = document_name
+    # 告知 AI 当前只是完整文档的一个机械切分片段，避免把切分边界当成内容缺失
+    index, total = excerpt_position or (0, 0)
+    if index and total:
+        chapter_context["context"] = (
+            f"This is excerpt {index} of {total} cut mechanically from a longer document. "
+            "Content before and after this excerpt continues elsewhere and must not be reported as missing."
+        )
 
     _AI_REVIEW_SEMAPHORE.acquire()
     try:
@@ -7374,6 +7382,63 @@ def _find_named_section_start(normalized, section_name):
     return match.start() if match else None
 
 
+# 已知的 UI 用词同义后缀（同一动作的两种界面写法），用于界面按钮文案一致性检查
+UI_LABEL_SYNONYM_SUFFIXES = {
+    frozenset(('开启', '启动')),
+}
+
+
+def _detect_page_number_sequence_issues(content):
+    """检测页脚页码重复或回跳。该判据与文档语言无关，中英文文档通用。"""
+    raw_content = str(content or '')
+    normalized = raw_content.replace('\f', '\n')
+    issues = []
+
+    page_offsets = []
+    offset = 0
+    for page_text in raw_content.split('\f'):
+        page_offsets.append(offset)
+        offset += len(page_text) + 1
+
+    visible_page_numbers = []
+    for page_index, page_text in enumerate(raw_content.split('\f')):
+        lines = [line.strip() for line in str(page_text or '').splitlines() if line.strip()]
+        if not lines:
+            continue
+        for line in reversed(lines[-8:]):
+            if re.fullmatch(r'\d{1,3}', line):
+                page_number = int(line)
+                local_start = page_text.rfind(line)
+                if local_start >= 0:
+                    visible_page_numbers.append((page_index + 1, page_number, page_offsets[page_index] + local_start, line))
+                break
+
+    seen_page_numbers = {}
+    last_page_number = None
+    for page_index, page_number, start, raw in visible_page_numbers:
+        if page_number in seen_page_numbers and last_page_number is not None and page_number <= last_page_number:
+            previous_page = seen_page_numbers[page_number]
+            issue_text = f'页码 {page_number}（第{page_index}个PDF页面）'
+            issues.append({
+                'severity': 'general',
+                'category': '页码异常',
+                'rule': 'CYY-CN-PAGE-001',
+                'chapter': extract_chapter(normalized, start),
+                'original_text': issue_text[:240],
+                'context': get_context(normalized, start, start + len(raw), 180),
+                'suggestion': '请核对全文页脚页码，修正重复或回跳的页码编号',
+                'description': f'页脚页码“{page_number}”已在第 {previous_page} 个 PDF 页面出现，当前第 {page_index} 个 PDF 页面再次出现，页码序列存在重复或回跳。',
+                'audit_basis': 'CYY人工审核经验基线 - 页码序列一致性',
+                'confidence': 93,
+                'source': 'rule',
+                'position': _encode_issue_position(start, start + len(raw)),
+            })
+        seen_page_numbers.setdefault(page_number, page_index)
+        last_page_number = page_number
+
+    return issues
+
+
 def _run_chinese_human_baseline_rules(content):
     issues = []
     seen = set()
@@ -7403,40 +7468,7 @@ def _run_chinese_human_baseline_rules(content):
             'position': _encode_issue_position(start, end),
         })
 
-    page_offsets = []
-    offset = 0
-    for page_text in raw_content.split('\f'):
-        page_offsets.append(offset)
-        offset += len(page_text) + 1
-
-    visible_page_numbers = []
-    for page_index, page_text in enumerate(raw_content.split('\f')):
-        lines = [line.strip() for line in str(page_text or '').splitlines() if line.strip()]
-        if not lines:
-            continue
-        for line in reversed(lines[-8:]):
-            if re.fullmatch(r'\d{1,3}', line):
-                page_number = int(line)
-                local_start = page_text.rfind(line)
-                if local_start >= 0:
-                    visible_page_numbers.append((page_index + 1, page_number, page_offsets[page_index] + local_start, line))
-                break
-
-    seen_page_numbers = {}
-    last_page_number = None
-    for page_index, page_number, start, raw in visible_page_numbers:
-        if page_number in seen_page_numbers and last_page_number is not None and page_number <= last_page_number:
-            previous_page = seen_page_numbers[page_number]
-            issue_text = f'页码 {page_number}（第{page_index}个PDF页面）'
-            add_issue(
-                start, start + len(raw), issue_text,
-                'CYY-CN-PAGE-001', '页码异常',
-                '请核对全文页脚页码，修正重复或回跳的页码编号',
-                f'页脚页码“{page_number}”已在第 {previous_page} 个 PDF 页面出现，当前第 {page_index} 个 PDF 页面再次出现，页码序列存在重复或回跳。',
-                'CYY人工审核经验基线 - 页码序列一致性', 'general', 93,
-            )
-        seen_page_numbers.setdefault(page_number, page_index)
-        last_page_number = page_number
+    issues.extend(_detect_page_number_sequence_issues(raw_content))
 
     for match in re.finditer(r'\b(?:H-020-)?0{2}X{4}-00\b|\b0-00X{4}-00\b', normalized, re.IGNORECASE):
         add_issue(
@@ -8747,11 +8779,17 @@ def _run_chinese_human_baseline_rules(content):
         for right_label, right_span in ui_items[left_index + 1:]:
             if abs(len(left_label) - len(right_label)) > 1:
                 continue
-            if len(os.path.commonprefix([left_label, right_label])) < 2:
+            prefix_len = len(os.path.commonprefix([left_label, right_label]))
+            if prefix_len < 2:
                 continue
-            distance = _short_edit_distance(left_label, right_label)
-            if distance < 1 or distance > 2:
-                continue
+            # 只报单字符差异（如“同步到/同步至”）或已知同义后缀（如“开启/启动”）的用词不统一。
+            # 共享前缀但差异达 2 个字符的标签多是并列菜单项或参数字段
+            # （系统设置/系统时间、测序类型/测序方案、Barcode管理/Barcode位置），
+            # 属于不同功能的正常命名，不是同一动作的用词不统一。
+            if _short_edit_distance(left_label, right_label) != 1:
+                suffix_pair = frozenset((left_label[prefix_len:], right_label[prefix_len:]))
+                if suffix_pair not in UI_LABEL_SYNONYM_SUFFIXES:
+                    continue
             start, end = left_span
             add_issue(
                 start, end, f'{left_label} / {right_label}',
@@ -11880,6 +11918,15 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     rule_issues.extend(heuristic_issues)
                 except Exception as e:
                     print(f"[审核] 英文高置信规则执行失败: {e}")
+
+                if document_language == "en":
+                    # 页码序列判据与语言无关，中文分支已覆盖 "both" 文档，这里只补纯英文文档
+                    try:
+                        page_issues = _detect_page_number_sequence_issues(content)
+                        print(f"[审核] 页码序列规则发现问题: {len(page_issues)}个")
+                        rule_issues.extend(page_issues)
+                    except Exception as e:
+                        print(f"[审核] 页码序列规则执行失败: {e}")
 
                 try:
                     engineering_issues = _run_manual_engineering_audit(content, document.file_type)

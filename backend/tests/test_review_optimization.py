@@ -150,6 +150,23 @@ def test_visual_status_mapping():
     assert map_visual_status("not_required") == "not_required"
 
 
+def test_layer_counts_reconcile_with_issue_source():
+    from app.review_engine.layers import count_issue_layers
+
+    issues = [
+        {"rule": "CYY-CN-UI-002", "category": "术语一致性", "source": "rule"},
+        {"rule": "SPELL", "category": "拼写", "source": "spellcheck"},
+        {"rule": "AI-001", "category": "表达与句式", "source": "ai"},
+        {"rule": "STRUCT-IMAGE-001", "category": "图片/对象缺失", "source": "ai"},
+    ]
+
+    layers = count_issue_layers(issues)
+
+    rule_sourced = sum(1 for item in issues if item["source"] in {"rule", "spellcheck", "term"})
+    assert layers["deterministic"] == rule_sourced
+    assert layers["ai_assisted"] + layers["structural_consistency"] == 2
+
+
 def test_basis_trace_sources():
     none_trace = build_basis_trace(sections=None)
     assert none_trace["basis_source"] == "none"
