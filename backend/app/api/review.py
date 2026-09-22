@@ -3000,7 +3000,10 @@ def _build_review_execution_summary(mode, provider, ai_review_trace, ai_calls, a
         item for item in chunk_meta
         if str(item.get('status') or '') in {'timeout', 'error', 'failed'}
     ]
-    processed_chunks = max(0, selected_chunks - len(degraded_chunks))
+    # 只有真正拿到模型回答（成功调用或有效缓存）的分块才算已覆盖；
+    # provider 不可用时调用会静默返回空结果，不能按"已处理"计入覆盖。
+    covered_chunks = min(selected_chunks, int(ai_calls or 0) + cache_hits)
+    processed_chunks = max(0, covered_chunks - len(degraded_chunks))
     if total_chunks:
         coverage_ratio = round(processed_chunks / total_chunks, 4)
     else:
@@ -3015,6 +3018,8 @@ def _build_review_execution_summary(mode, provider, ai_review_trace, ai_calls, a
         partial_reasons.append(f'{len(degraded_chunks)}_chunk_timeout_or_failed')
     if coverage_ratio < 1.0:
         partial_reasons.append(f'chunk_coverage_{coverage_ratio}')
+    if processed_chunks < selected_chunks:
+        partial_reasons.append(f'uncovered_chunks_{selected_chunks - processed_chunks}')
     if trace.get('fallback_reason'):
         partial_reasons.append(f"chunker_fallback:{trace['fallback_reason']}")
 

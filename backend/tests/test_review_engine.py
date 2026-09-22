@@ -150,6 +150,16 @@ def test_ai_summary_reports_partial_coverage():
     assert degraded["ai_degraded"] is True
     assert degraded["ai_degraded_reason"] == "no provider"
 
+    # provider 不可用时调用会静默返回空结果，覆盖率为 0，不能按"已处理分块"计入
+    silent_failure = review_api._build_review_execution_summary(
+        "hybrid", "", {"enabled": True, "selected_chunk_count": 10, "total_chunk_count": 10,
+                       "chunk_meta": [{} for _ in range(10)]},
+        0, True, "AI provider 未完成有效调用", False,
+    )
+    assert silent_failure["coverage_ratio"] == 0.0
+    assert silent_failure["processed_chunks"] == 0
+    assert silent_failure["full_document_reviewed"] is False
+
 
 def test_pdf_whitespace_normalized_evidence_match():
     client = AIClient.__new__(AIClient)
