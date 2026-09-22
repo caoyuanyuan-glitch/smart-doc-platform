@@ -69,7 +69,7 @@ LOW_VALUE_PATTERN = re.compile(
     r"^an?\s+[a-z](?:\s|$)|^\d+(?:arc|cram|fastq|fq|bam|bcl|nvme|ssd|raid)$|"
     r"^click$|^please\s+contact$|^performing\s+the\s+following\s+steps$|"
     r"\b(?:nt responds|emplate|analysi|the same pr)\b|\[table content\]|check\s+if|"
-    r"Browse|Edit|括号后请添加空格|建议拆分为多个短句|普通语法|冠词|标点|格式微调|"
+    r"Browse|Edit|括号后请添加空格|建议拆分为多个短句|"
     r"formatting\s+artifact|\btab\b|\ban\s+fq\b|\bto\s+to\b|after\s+login|"
     r"no\s+(?:issue|violation|change)\b|no\s+change\s+needed|appears\s+valid|is\s+correct\b|"
     r"verify\s+if\s+this\s+is\s+the\s+correct|preposition\s+'.*?'\s+is\s+ambiguous|is\s+clearer\s+for\s+describing",
@@ -219,6 +219,38 @@ def is_substantive_ai_issue(issue: Any) -> bool:
     return True
 
 
+def is_verifiable_ai_text_issue(issue: Any) -> bool:
+    """AI 产出的、可定位到原文且有明确修改建议的文本问题。
+
+    这类问题有真实证据（original/suggestion），不应被 LOW_VALUE 裸词、
+    英文 Grammar 类目低价值判断等一票否决。
+    """
+    data = issue_to_mapping(issue)
+    if str(data["source"] or "").lower() != "ai":
+        return False
+    original = normalize_text(data["original_text"])
+    suggestion = normalize_text(data["suggestion"])
+    description = normalize_text(data["description"])
+    category = normalize_text(data["category"])
+    confidence = int(data["confidence"] or 0)
+    text_categories = {
+        "grammar", "spelling", "punctuation", "terminology",
+        "英文规范", "英文微编辑", "语法与表达", "拼写/用词错误",
+        "术语一致性", "标点符号", "标点", "中文规范",
+        # P3 prompt 新增的语义质量维度；与 P0-B 白名单联用，避免语义类
+        # 建议问题被 value_score 阈值丢弃。
+        "冗余", "表述不准确", "信息不完整", "一致性", "语气",
+        "图表衔接", "句子成分",
+    }
+    return (
+        confidence >= 70
+        and bool(original)
+        and bool(suggestion or description)
+        and category.lower() in {item.lower() for item in text_categories}
+        and not is_visual_layout_issue(data)
+    )
+
+
 def is_visual_layout_issue(issue: Any) -> bool:
     data = issue_to_mapping(issue)
     rule = str(data["rule"] or "").upper()
@@ -242,7 +274,10 @@ def value_score(issue: Any) -> int:
 
     score = 50
     score += {"fatal": 25, "serious": 18, "general": 6, "suggestion": -8}.get(severity, 0)
-    if is_substantive_ai_issue(data):
+    # 可验证的 AI 文本问题（有原文+建议、类别在白名单、非视觉）同样按实质问题计分；
+    # 纯空格/标点差异类建议会被 is_substantive_ai_issue 的紧凑文本相等判断挡掉，
+    # 需要由 is_verifiable_ai_text_issue 兜住，否则这类真实问题会被 value_score 阈值丢弃。
+    if is_substantive_ai_issue(data) or is_verifiable_ai_text_issue(data):
         score += 6
     else:
         score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 0}.get(source, 0)
@@ -266,8 +301,9 @@ def value_score(issue: Any) -> int:
         score -= 32
     if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data) and not is_substantive_ai_issue(data):
         score -= 26
-    if LOW_VALUE_PATTERN.search(normalize_text(data["original_text"])) or LOW_VALUE_PATTERN.search(issue_blob(data)):
-        score -= 55
+    if not is_verifiable_ai_text_issue(data):
+        if LOW_VALUE_PATTERN.search(normalize_text(data["original_text"])) or LOW_VALUE_PATTERN.search(issue_blob(data)):
+            score -= 55
     if rule in LOW_VALUE_RULES:
         score -= 45
     if source == "spellcheck" and not is_high_value(data):
@@ -296,6 +332,8 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return False
     if is_rulebook_false_positive(data):
         return True
+    if is_verifiable_ai_text_issue(data):
+        return False
     if rule in CYY_LOW_PRECISION_RULES:
         return True
     if rule == "CYY-CN-PLACEHOLDER-001" and re.fullmatch(r"X{1,4}(?::X{1,4}){1,2}", original, re.IGNORECASE):
@@ -452,8 +490,20 @@ def suppress_shadowed_ai(issues: list[Any]) -> list[Any]:
     return filtered
 
 
+_PIPELINE_DROP_COUNTER: Counter = Counter()
+
+
+def drain_pipeline_drop_reasons() -> dict[str, int]:
+    """取出并清空内存中的丢弃归因计数，供审核 summary 汇总（不依赖 REVIEW_DROP_LOG 文件）。"""
+    global _PIPELINE_DROP_COUNTER
+    reasons = dict(_PIPELINE_DROP_COUNTER)
+    _PIPELINE_DROP_COUNTER = Counter()
+    return reasons
+
+
 def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, threshold: int | None = None) -> None:
     """丢弃归因日志：环境变量 REVIEW_DROP_LOG 指向 JSONL 文件时记录每条被丢弃的问题及原因。"""
+    _PIPELINE_DROP_COUNTER[reason] += 1
     path = os.getenv("REVIEW_DROP_LOG", "")
     if not path:
         return

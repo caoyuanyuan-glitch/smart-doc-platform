@@ -1039,10 +1039,11 @@ def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
         {
             "source": "ai",
             "severity": "general",
-            "category": "术语",
+            # P1-A: 只有视觉/版式类问题才进入视觉复核，文本类问题会被入口跳过
+            "category": "表格/版式",
             "original_text": "注册手册号",
             "context": "输入注册手册号后继续。",
-            "description": "疑似术语错误",
+            "description": "截图疑似版式异常",
             "suggestion": "改为注册手机号",
             "position": json.dumps({"page_number": 2}, ensure_ascii=False),
         },
@@ -1185,7 +1186,7 @@ def test_apply_pdf_visual_verification_filters_known_quote_mapping_artifact_afte
         {
             "source": "ai",
             "severity": "general",
-            "category": "格式规范",
+            "category": "表格/版式",
             "original_text": '“Run settings".',
             "context": 'The text layer shows “Run settings". in the UI message.',
             "description": '引号和句号位置疑似异常',
@@ -1226,7 +1227,7 @@ def test_apply_pdf_visual_verification_filters_known_following_status_artifact_a
         {
             "source": "ai",
             "severity": "general",
-            "category": "语言质量",
+            "category": "表格/版式",
             "original_text": 'following status',
             "context": 'Check the following status of the module.',
             "description": '短语表达疑似异常',
@@ -1267,7 +1268,7 @@ def test_apply_pdf_visual_verification_filters_known_turn_on_it_artifact_after_u
         {
             "source": "ai",
             "severity": "general",
-            "category": "语言质量",
+            "category": "表格/版式",
             "original_text": 'turn on it',
             "context": 'Press the switch and turn on it before use.',
             "description": '短语表达疑似异常',
@@ -1348,7 +1349,7 @@ def test_apply_pdf_visual_verification_filters_duplicated_text_layer_artifact_af
         {
             "source": "ai",
             "severity": "general",
-            "category": "重复内容",
+            "category": "表格/版式",
             "original_text": '一旦您开始使',
             "context": '一旦您开始使 一旦您开始使 用本软件',
             "description": '重复文本层伪影',

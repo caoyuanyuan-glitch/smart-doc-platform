@@ -1185,24 +1185,36 @@ class AIClient:
 
             if confidence < min_confidence:
                 continue
-            needs_human_review = bool(item.get("needs_human_review")) or (50 <= confidence < 70)
+            needs_human_review = bool(item.get("needs_human_review")) or (50 <= confidence < 75)
             if not description and not suggestion:
                 continue
             if len(description) < 4 and len(suggestion) < 2:
                 continue
 
-            # 去重逻辑：同一错误内容在同一文档中只报告第一次
+            # 去重逻辑：同一错误内容 + 同一位置/章节才算重复，避免误杀不同页面的同类问题
             error_key = original_text.lower().strip()
-            if error_key in reported_errors:
+            position_key = self._clean_text(item.get("position"), 80) or chapter
+            dedupe_key = f"{error_key}|{position_key}"
+            if dedupe_key in reported_errors:
                 continue
-            if error_key:
-                reported_errors.add(error_key)
+            if dedupe_key:
+                reported_errors.add(dedupe_key)
 
             if original_text:
                 if len(original_text) == 1 and not re.search(r"[\u4e00-\u9fffA-Za-z]", original_text):
                     continue
-                if content and original_text not in content and context and original_text not in context:
-                    continue
+                if content:
+                    # PDF 提取文本与模型输出常有换行/空格差异，用空白归一化后再匹配
+                    compact_original = re.sub(r"\s+", "", original_text)
+                    compact_content = re.sub(r"\s+", "", content)
+                    compact_context = re.sub(r"\s+", "", context or "")
+                    if compact_original not in compact_content and (not context or compact_original not in compact_context):
+                        continue
+                    item["evidence_match_method"] = (
+                        "exact" if original_text in content
+                        else "normalized_whitespace"
+                    )
+                    item["raw_original_text"] = original_text
             elif source == "ai":
                 continue
 
@@ -1226,6 +1238,8 @@ class AIClient:
                 "source_models": list(item.get("source_models") or []),
                 "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
                 "needs_human_review": needs_human_review,
+                "evidence_match_method": item.get("evidence_match_method") or "",
+                "raw_original_text": item.get("raw_original_text") or "",
             })
 
         return normalized

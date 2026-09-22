@@ -63,6 +63,7 @@ from app.review_engine.validation import (
 )
 from app.review_engine.layers import count_issue_layers
 from app.review_engine.pipeline import (
+    drain_pipeline_drop_reasons as pipeline_drain_drop_reasons,
     select_review_issues as pipeline_select_review_issues,
     sort_key as pipeline_sort_key,
     suppress_shadowed_ai as pipeline_suppress_shadowed_ai,
@@ -2947,7 +2948,9 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
 
     pre_pipeline_issues = list(issues)
     before_pipeline_count = len(issues)
+    pipeline_drain_drop_reasons()
     issues = pipeline_select_review_issues(issues)
+    ai_filter_diagnostics["pipeline_drop_reasons"] = pipeline_drain_drop_reasons()
     issues = _restore_high_value_rule_issues(issues, pre_pipeline_issues + initial_issues)
     ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
     print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
@@ -2980,6 +2983,96 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
         ai_filter_diagnostics["recall_floor_applied"] = False
 
     return issues, ai_filter_diagnostics
+
+
+def _build_review_execution_summary(mode, provider, ai_review_trace, ai_calls, ai_degraded, ai_degraded_reason, ai_budget_exceeded):
+    """汇总 AI 调用、分块覆盖、缓存命中等执行状态，供 summary 审计。
+
+    ai_calls==0 或存在超时/失败分块、分块未覆盖全量、Token 预算中断时，
+    明确标记为未完成全文审核，避免用户误以为已完成全文审核。
+    """
+    trace = ai_review_trace if isinstance(ai_review_trace, dict) else {}
+    chunk_meta = [item for item in (trace.get('chunk_meta') or []) if isinstance(item, dict)]
+    total_chunks = int(trace.get('total_chunk_count') or 0)
+    selected_chunks = int(trace.get('selected_chunk_count') or len(chunk_meta) or 0)
+    cache_hits = sum(1 for item in chunk_meta if item.get('cache_hit'))
+    degraded_chunks = [
+        item for item in chunk_meta
+        if str(item.get('status') or '') in {'timeout', 'error', 'failed'}
+    ]
+    processed_chunks = max(0, selected_chunks - len(degraded_chunks))
+    if total_chunks:
+        coverage_ratio = round(processed_chunks / total_chunks, 4)
+    else:
+        coverage_ratio = 1.0 if processed_chunks else 0.0
+
+    partial_reasons = []
+    if ai_degraded:
+        partial_reasons.append(ai_degraded_reason or 'ai_degraded')
+    if ai_budget_exceeded:
+        partial_reasons.append('ai_token_budget_reached')
+    if degraded_chunks:
+        partial_reasons.append(f'{len(degraded_chunks)}_chunk_timeout_or_failed')
+    if coverage_ratio < 1.0:
+        partial_reasons.append(f'chunk_coverage_{coverage_ratio}')
+    if trace.get('fallback_reason'):
+        partial_reasons.append(f"chunker_fallback:{trace['fallback_reason']}")
+
+    actual_providers = [str(item) for item in (trace.get('provider_list') or []) if str(item)]
+    if not actual_providers and provider:
+        actual_providers = [str(provider)]
+
+    return {
+        'mode': mode,
+        'requested_provider': provider or '',
+        'actual_providers': actual_providers,
+        'ai_calls': int(ai_calls or 0),
+        'cache_hits': cache_hits,
+        'total_chunks': total_chunks,
+        'processed_chunks': processed_chunks,
+        'coverage_ratio': coverage_ratio,
+        'full_document_reviewed': bool(
+            trace.get('enabled')
+            and not ai_degraded
+            and not degraded_chunks
+            and not ai_budget_exceeded
+            and coverage_ratio >= 1.0
+        ),
+        'partial_coverage': bool(partial_reasons),
+        'partial_reasons': partial_reasons,
+        'ai_degraded': bool(ai_degraded),
+        'ai_degraded_reason': ai_degraded_reason or '',
+    }
+
+
+def _build_issue_flow_summary(ai_filter_diagnostics, pdf_visual_verification, retained_ai_count):
+    """汇总 AI 问题从输入到最终输出的流转与丢弃归因。"""
+    diagnostics = ai_filter_diagnostics if isinstance(ai_filter_diagnostics, dict) else {}
+    visual = pdf_visual_verification if isinstance(pdf_visual_verification, dict) else {}
+    dropped = Counter(diagnostics.get('pipeline_drop_reasons') or {})
+    evidence_reasons = diagnostics.get('document_evidence_drop_reasons') or {}
+    evidence_dropped = (
+        sum(int(value or 0) for value in evidence_reasons.values())
+        if isinstance(evidence_reasons, dict) else 0
+    )
+    initial_ai = int(diagnostics.get('initial_ai') or 0)
+    after_normalization = diagnostics.get('after_dedup_ai')
+    return {
+        'ai_input_count': initial_ai,
+        'after_normalization': int(after_normalization if after_normalization is not None else initial_ai),
+        'after_pipeline': int(diagnostics.get('after_pipeline_ai') or 0),
+        'after_visual_verification': int(retained_ai_count or 0),
+        'dropped_by_reason': {
+            'noise': int(dropped.get('noise') or 0),
+            'below_threshold': int(dropped.get('below_threshold') or 0),
+            'evidence_missing': evidence_dropped,
+            'visual_reject': int(visual.get('rejected_count') or 0),
+            'dedupe': int(dropped.get('dedupe_shadowed') or 0),
+            'empty_original_text': int(dropped.get('empty_original_text') or 0),
+            'status_filtered': int(dropped.get('status_filtered') or 0),
+        },
+        'pipeline_drop_reasons': dict(dropped),
+    }
 
 
 def _issue_judgment_signature(issue):
@@ -3232,16 +3325,32 @@ def _issue_page_number(issue, content):
 def _should_visual_verify_issue(issue, file_type):
     if str(file_type or '').lower() != 'pdf':
         return False
-    if str(_issue_value(issue, 'source', '') or '').lower() != 'ai':
+
+    source = str(_issue_value(issue, 'source', '') or '').lower()
+    category = str(_issue_value(issue, 'category', '') or '')
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    description = str(_issue_value(issue, 'description', '') or '')
+    blob = ' '.join([category, rule, description]).lower()
+
+    text_markers = (
+        'grammar', 'spelling', 'punctuation', 'terminology',
+        '英文规范', '英文微编辑', '语法', '拼写', '术语', '用词',
+        '口语化', '冗余', '指代不明', '标点', '不通顺', '缺字',
+        '表述不准确', '信息不完整', '一致性', '格式微调', '标点符号',
+    )
+    if any(marker in blob for marker in text_markers):
         return False
-    text_blob = ' '.join([
-        str(_issue_value(issue, 'original_text', '') or ''),
-        str(_issue_value(issue, 'context', '') or ''),
-        str(_issue_value(issue, 'description', '') or ''),
-    ]).strip()
-    if not text_blob:
+
+    if source != 'ai':
         return False
-    return True
+
+    visual_markers = (
+        '表格/版式', '图片/对象缺失', '字体/版式细节',
+        'layout', 'visual', 'font size', 'icon', 'image',
+        'column width', 'cell overflow', '版式', '字号', '图标',
+        '图片显示不全', '图片尺寸', '字体不对', '没有居中', '白边',
+    )
+    return any(marker in blob for marker in visual_markers)
 
 
 def _match_known_pdf_false_positive(issue):
@@ -12143,6 +12252,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         ai_review_trace = {"enabled": False, "reason": "not_run"}
         ai_review_basis_sections = []
+        ai_calls = 0
         ai_degraded = False
         ai_degraded_reason = ""
         if document.file_type != 'xlsx' and engine_mode in ["ai", "hybrid"] and not has_ai_client:
@@ -12392,6 +12502,11 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "ai_degraded_reason": ai_degraded_reason,
             "ai_budget_exceeded": bool(isinstance(ai_review_trace, dict) and ai_review_trace.get("budget_reached")),
             "ai_filter_diagnostics": ai_filter_diagnostics,
+            "review_execution": _build_review_execution_summary(
+                mode, provider, ai_review_trace, ai_calls, ai_degraded, ai_degraded_reason,
+                bool(isinstance(ai_review_trace, dict) and ai_review_trace.get("budget_reached")),
+            ),
+            "issue_flow": _build_issue_flow_summary(ai_filter_diagnostics, pdf_visual_verification, retained_ai_count),
             "pdf_visual_verification": pdf_visual_verification,
             "pdf_page_metadata": pdf_page_metadata,
             "pdf_suspicious_pages": pdf_suspicious_pages,
