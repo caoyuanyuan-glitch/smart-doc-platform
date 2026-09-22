@@ -17,8 +17,6 @@ Compatibility
 -------------
 - Current ``review.py`` routes continue to call the original entry points.
 - New engine modules are additive and keep existing API behaviour stable.
-- Migration happens gradually: deterministic rules move from inline code
-  to ``rules/`` modules one group at a time.
 
 Modules
 -------
@@ -33,7 +31,6 @@ Modules
 - ``reporting.py``       — Report aggregator (display groups, quality scoring)
 - ``evaluation.py``      — Evaluation runner (baseline matching, consistency)
 - ``annotation_baseline.py`` — Human review baseline parsing & evaluation
-- ``rules/``             — Deterministic rule implementations (incremental)
 """
 
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401

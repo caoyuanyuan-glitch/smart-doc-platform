@@ -179,7 +179,6 @@ export const reviewAPI = {
   reindex: (id) => instance.post(`/review/${id}/reindex`),
   search: (q, limit = 10) => instance.get('/review/search', { params: { q, limit } }),
   getAggregatedReport: (id) => instance.get(`/review/${id}/aggregated-report`),
-  getRuleMigration: () => instance.get('/review/engine/rule-migration'),
   runBatchEval: (params) => instance.post('/review/eval/batch', params, {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),

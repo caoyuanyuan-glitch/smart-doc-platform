@@ -18,64 +18,58 @@ SEVERITY_MAP = {
 }
 
 
+DISABLED_RULE_REGEX = r"(?!)"
+
+# 规则描述特征 -> 实际用于扫描文档的正则。第一项为按正则匹配规则描述的键。
+# 只有能确定性表达成模式匹配的规则才给出正则；语义、版式类规则统一返回
+# DISABLED_RULE_REGEX，改由 AI 审核或人工判断，不能靠猜测生成模式。
+RULE_PATTERN_MAP = (
+    # 版式/视觉类规则无法用单一正则判定
+    (r"图标文字底部|图片和图注|图片中标注文字|图片中文字体", DISABLED_RULE_REGEX),
+    (r"产品中有害物质的名称及含有物质表", DISABLED_RULE_REGEX),
+    (r"仅可交互UI元素", DISABLED_RULE_REGEX),
+    (r"统一使用双引号.*单引号", DISABLED_RULE_REGEX),
+    (r"标点符号", DISABLED_RULE_REGEX),
+    (r"公司官网地址", r"https?://[^\s]+mgi[^\s]*"),
+    (r"多余的?空格|空行", r"[ \t]{2,}|\n{3,}"),
+    (r"乘号", r"\*[×xX]?\s*\d+|\d+\s*\*"),
+    (r"现成.*现场", r"现场(?:情况)?"),
+    (r"不避免", r"不避免"),
+    (r"手工冰箱", r"手工冰箱"),
+    (r"使用限期|限期.*期限", r"限期"),
+    (r"成语", r"周而复始|恰如其分|千丝万缕|不言而喻|一目了然|举足轻重"),
+    (r"文言化", r"未尽事宜|鉴于|据此|兹"),
+    (r"Cat\.?\s*No", r"Cat\.?\s*No\.?"),
+)
+
+
 def _convert_rule_content_to_regex(rule_content: str) -> str:
-    """将规则描述转换为可执行的正则表达式。
+    """把外部规则库的规则描述转成可执行正则。
 
-    规则描述如检测关键词/模式的规则，提取核心模式转为正则。
-    无法转为纯正则的复杂语义规则使用高匹配模式。
+    只转换能确定性表达成模式匹配的规则。历史上这里会把规则描述切成 2-4 字的中文
+    片段拼接成正则，这类正则只能匹配规则描述自身的措辞：对文档只会产生误报
+    （例如把正确的“期限”判为问题、匹配到本应存在的表格标题片段），对英文文档
+    则完全无效。
     """
-    if not rule_content or not rule_content.strip():
-        return r"(?!)"
+    content = str(rule_content or "").strip()
+    if not content:
+        return DISABLED_RULE_REGEX
 
-    content = rule_content.strip()
-    patterns = []
+    # 明确声明“不列为错误/问题”的条目属于误报抑制口径，不参与匹配
+    if re.search(r"不列为(?:错误|问题)|不属于错误|属于转换 ?artifact", content):
+        return DISABLED_RULE_REGEX
 
-    if "标点符号" in content:
-        return r"(?!)"
+    for keyword_pattern, scan_pattern in RULE_PATTERN_MAP:
+        if re.search(keyword_pattern, content):
+            return scan_pattern
+    return DISABLED_RULE_REGEX
 
-    if "仅可交互UI元素" in content:
-        return r"(?!)"
 
-    if "统一使用双引号" in content and "单引号" in content:
-        return r"(?!)"
-
-    # 预定义的规则→正则映射（基于29条种子规则手工整理）
-    RULE_PATTERN_MAP = {
-        "公司官网地址": r"https?://[^\s]+mgi[^\s]*",
-        "多余的(空格|空行)": r"[ ]{2,}|\n{3,}",
-        "双引号": r"[\'\"](.*?)[\'\"]",
-        "中英文混用": r"[\u4e00-\u9fff]\s*[a-zA-Z]{2,}\s*[\u4e00-\u9fff]|[a-zA-Z]{2,}\s[\u4e00-\u9fff]{2,}",
-        "乘号": r"\*[×xX]?\s*\d+|\d+\s*\*",
-        "错别字.*现成.*现场": r"现场情况|现场",
-        "错别字.*避免.*不避免": r"不避免",
-        "成语": r"周而复始|恰如其分|千丝万缕|不言而喻|一目了然|举足轻重",
-        "文言化": r"未尽事宜|鉴于|据此|兹",
-        "引号": r"[\'\"]{2,}|[\u201c\u201d\u2018\u2019]",
-        "同义表述": r"(?:点击|轻触|按|按压|长按|双击)",
-        "术语.*不一致": r"(?:试剂盒|试剂|样本|标本)",
-        "统一使用": r"(?:不可以|不能|不应)",
-        "Cat.No": r"Cat\.?\s*No\.?",
-    }
-
-    # 匹配规则映射表
-    for keyword, pattern in RULE_PATTERN_MAP.items():
-        if keyword == "标点符号" and patterns:
-            continue
-        if keyword in content:
-            patterns.append(pattern)
-
-    # 如果映射表中没有匹配，则尝试取出引号中的关键词构建正则
-    if not patterns:
-        quoted = re.findall(r'"([^"]+)"', content)
-        if quoted:
-            patterns.append("|".join(re.escape(q.strip()) for q in quoted if len(q.strip()) >= 2))
-        else:
-            # 提取核心关键词（2-4字的中文词或3+字的英文词）
-            keywords = re.findall(r'[\u4e00-\u9fff]{2,4}|[A-Za-z]{3,}', content)
-            if keywords:
-                patterns.append("|".join(re.escape(kw) for kw in keywords[:5]))
-
-    return "|".join(patterns) if patterns else r"(?!)"
+def _rule_language_for_pattern(pattern: str) -> str:
+    """外部规则库是中文评审规则库，只有模式本身含拉丁字符时才适用于英文文档。"""
+    if pattern == DISABLED_RULE_REGEX:
+        return "cn"
+    return "both" if re.search(r"[A-Za-z0-9]", pattern) else "cn"
 
 
 def seed_external_review_rules(db: Session):
@@ -102,6 +96,7 @@ def seed_external_review_rules(db: Session):
 
         # 将规则内容转为可执行的正则表达式
         regex = _convert_rule_content_to_regex(rule_content)
+        language = _rule_language_for_pattern(regex)
 
         example = f"来源: {source} | 适用场景: {scenarios}"
         audit_basis = f"{source}{' | 导出日期: ' + export_date if export_date else ''}"
@@ -116,7 +111,7 @@ def seed_external_review_rules(db: Session):
                 "suggestion": rule_content,
                 "audit_basis": audit_basis,
                 "severity": severity,
-                "language": "both",
+                "language": language,
             }
             for field, value in updates.items():
                 if getattr(existing, field) != value:
@@ -135,7 +130,7 @@ def seed_external_review_rules(db: Session):
             suggestion=rule_content,
             audit_basis=audit_basis,
             severity=severity,
-            language="both",
+            language=language,
         ))
         created += 1
 

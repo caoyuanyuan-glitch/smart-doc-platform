@@ -328,8 +328,53 @@ def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
     assert existing.description == "标点符号使用必须符合规范"
     assert existing.regex == "(?!)"
     assert existing.severity == "general"
-    assert existing.language == "both"
+    # 外部规则库是中文评审规则库，语义类规则不参与匹配且按中文规则处理
+    assert existing.language == "cn"
     assert commits == [True]
+
+
+def test_convert_rule_content_to_regex_never_derives_pattern_from_prose():
+    # 规则描述本身不能变成扫描模式：这类“正则”只能匹配规则自身的措辞
+    prose_rules = [
+        "表格内容显示不全，提醒修改表格宽度",
+        "需包含产品中有害物质的名称及含有物质表",
+        "警告/提示/危险/注意图标文字底部需与右侧文字底部对齐",
+        "正确表述是 \"For details about xxx, refer to xxx.\" 而不是 \"Details about XXX refer to XXX.\"",
+    ]
+
+    for rule_content in prose_rules:
+        assert crud_rule._convert_rule_content_to_regex(rule_content) == "(?!)"
+
+
+def test_convert_rule_content_to_regex_disables_false_positive_suppression_rules():
+    assert crud_rule._convert_rule_content_to_regex("°C与℃视觉无区别，不列为错误") == "(?!)"
+    assert crud_rule._convert_rule_content_to_regex("PDF转Word导致的格式丢失属于转换 artifact，不列为错误") == "(?!)"
+
+
+def test_convert_rule_content_to_regex_keeps_detectable_rules():
+    assert crud_rule._convert_rule_content_to_regex(
+        "所有文档中涉及的公司官网地址必须使用统一规范的正确地址，不得使用旧版/错误地址"
+    ) == r"https?://[^\s]+mgi[^\s]*"
+    assert crud_rule._convert_rule_content_to_regex(
+        "避免\"不避免\"类语法错误。\"如操作不当或不避免\"不通顺"
+    ) == r"不避免"
+
+
+def test_convert_rule_content_to_regex_does_not_flag_correct_term():
+    # 规则是“限期”应改为“期限”，正则不能反过来命中正确的“期限”
+    regex = crud_rule._convert_rule_content_to_regex(
+        "\"限期\"建议改为\"期限\"或\"使用寿命\"，\"使用限期\"表述不够准确"
+    )
+
+    assert regex == "限期"
+    assert re.search(regex, "使用限期") is not None
+    assert re.search(regex, "服务期限为一年") is None
+
+
+def test_rule_language_for_pattern_marks_chinese_patterns_as_cn():
+    assert crud_rule._rule_language_for_pattern("(?!)") == "cn"
+    assert crud_rule._rule_language_for_pattern("限期") == "cn"
+    assert crud_rule._rule_language_for_pattern(r"https?://[^\s]+mgi[^\s]*") == "both"
 
 
 def test_convert_rule_content_to_regex_disables_ui_bracket_semantic_rule():
@@ -2664,6 +2709,27 @@ def test_run_chinese_human_baseline_rules_ignores_similar_english_ui_codes():
     assert not any(issue["rule"] == "CYY-CN-UI-002" for issue in issues)
 
 
+def test_run_chinese_human_baseline_rules_ignores_parallel_menu_labels():
+    # 共享前缀但差异 2 字的并列菜单项/参数字段属于不同功能命名，不是同一动作的用词不统一
+    issues = review_api._run_chinese_human_baseline_rules(
+        "1. 点击 >【设置】>【系统设置】>【系统时间】。\n\n"
+        "参数 说明\n\n【测序类型】 可选择测序类型。\n\n【测序方案】 输入测序方案名称。\n\n"
+        "【Barcode管理】 管理 Barcode。\n\n【Barcode位置】 根据测序类型自动填充。",
+    )
+
+    assert not any(issue["rule"] == "CYY-CN-UI-002" for issue in issues)
+
+
+def test_detect_page_number_sequence_issues_is_language_neutral():
+    content = "Chapter A\n01\fChapter B\n02\fChapter C\n01\f"
+
+    issues = review_api._detect_page_number_sequence_issues(content)
+
+    assert len(issues) == 1
+    assert issues[0]["rule"] == "CYY-CN-PAGE-001"
+    assert issues[0]["category"] == "页码异常"
+
+
 def test_run_chinese_human_baseline_rules_detects_wrong_step_page_reference():
     content = (
         "具体操作，参考第2页“加载DNB”步骤5。\n01\f"
@@ -2893,7 +2959,7 @@ def test_run_ai_deep_review_stops_when_budget_reached(monkeypatch):
     monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(review_api, "_select_relevant_ai_review_basis", lambda chunk, sections: "basis")
 
-    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None):
+    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, excerpt_position=None):
         processed.append(chunk)
         usage_state["tokens"] += 120
         return ([{"rule": "AI", "chapter": ""}], False)
@@ -3300,6 +3366,41 @@ def test_run_chinese_human_baseline_rules_detects_missing_ml_spacing():
     issues = review_api._run_chinese_human_baseline_rules(content)
 
     assert any(issue['rule'] == 'CYY-CN-FMT-002' and issue['original_text'] == '0.2mL' for issue in issues)
+
+
+def test_english_unit_spacing_rule_survives_pipeline_selection():
+    # DOC-UNIT-001 是英文单位规则，分类同为“单位格式”，不应被中文单位规则的高压制逻辑连带丢弃
+    issue = {
+        'original_text': '24VDC',
+        'rule': 'DOC-UNIT-001',
+        'category': '单位格式',
+        'severity': 'general',
+        'confidence': 94,
+        'source': 'rule',
+        'suggestion': '24 VDC',
+        'description': '英文技术说明书中电源、功率与频率单位建议在数值与单位之间保留空格。',
+        'audit_basis': '说明书审核能力补强方案 - 英文单位格式',
+        'context': 'Main unit 24VDC, 5A',
+    }
+
+    assert review_api.pipeline_select_review_issues([issue]) == [issue]
+
+
+def test_chinese_unit_spacing_rules_stay_suppressed():
+    issue = {
+        'original_text': '24VDC',
+        'rule': 'CYY-CN-UNIT-005',
+        'category': '单位格式',
+        'severity': 'general',
+        'confidence': 94,
+        'source': 'rule',
+        'suggestion': '24 VDC',
+        'description': '电源与功率单位建议在数值与单位之间保留空格。',
+        'audit_basis': 'CYY人工审核经验基线 - 电源单位格式',
+        'context': '主机的供电规格为 24VDC',
+    }
+
+    assert review_api.pipeline_select_review_issues([issue]) == []
 
 
 def test_clean_issue_suggestion_for_display_strips_chinese_quotes():

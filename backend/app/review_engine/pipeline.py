@@ -259,7 +259,8 @@ def value_score(issue: Any) -> int:
             score += 14
         else:
             score -= 18
-    if rule.startswith("CYY-CN-UNIT-") or category == "单位格式":
+    # 单位格式的历史高压制只针对中文规则名；英文单位规则（DOC-UNIT-*）按正常价值评估
+    if rule.startswith("CYY-CN-UNIT-"):
         score -= 42
     if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
         score -= 32
@@ -333,7 +334,7 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return True
     if source == "ai" and category.lower() in {"format", "punctuation"} and re.search(r"space\s+before\s+colon|remove\s+space\s+before\s+colon|punctuation", issue_blob(data), re.IGNORECASE):
         return True
-    if (rule.startswith("CYY-CN-UNIT-") or category == "单位格式") and str(data["severity"] or "").lower() in {"general", "suggestion"}:
+    if rule.startswith("CYY-CN-UNIT-") and str(data["severity"] or "").lower() in {"general", "suggestion"}:
         return True
     if rule == "CHECKLIST-TRADEMARK" and str(data["severity"] or "").lower() in {"general", "suggestion"}:
         return True

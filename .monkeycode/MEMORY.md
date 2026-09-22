@@ -157,6 +157,18 @@ Word 转 DITA 批量转换基线规则
   - 审核模块相关回归命令可直接使用 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py`
   - 修改中文审核规则后，优先复跑 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py -q` 做快速回归
   - 当前环境若缺少测试依赖，先安装 `backend/requirements.txt`，并补装 `pytest` 与 `httpx`
+  - 真实文档端到端审核测试：`cd /workspace/backend && PYTHONPATH=/workspace/backend uvicorn app.main:app --host 127.0.0.1 --port 8000`；启动时会自动建表、种子默认/外部评审规则与预置误报记忆
+  - 开发环境启动后自动创建引导管理员 `admin` / `admin123`（`APP_ENV` 非生产时密码会被强制校正为该值）
+  - 人工批注提取：`python3 backend/scripts/extract_pdf_annotations.py <带批注PDF> <输出.md>`，同编号带 `Tina` 后缀的 PDF 即人工意见来源
+  - 起草流程：`POST /api/documents/upload/` 上传 → `POST /api/review/{document_id}?mode=hybrid` 建任务 → 轮询 `GET /api/review/{id}/progress` 直到 `completed`
+  - 与人工意见对比：`PYTHONPATH=/workspace/backend python3 backend/scripts/evaluate_review.py --review-id <id> --human-baseline <人工意见.md>`，脚本会按文件名自动剥离 ` Tina` 后缀做归属
+  - AI provider 可用性先查 `GET /api/review/provider-status`；全部不可用时审核会降级为纯规则，`layers.ai_assisted` 仍可能非 0，不能据此判断 AI 已生效
+  - AI provider 配置写在 `当前工作区/backend/runtime.env`（`DEFAULT_MODEL_PROVIDER` 与各家 `*_API_KEY/_BASE_URL/_MODEL`），`bootstrap_runtime_env` 只在进程导入时加载一次，改完必须重启后端才生效；`apply_ai_secret_aliases` 会把 kimi/qwen 的别名统一，deepseek 需显式配 `DEEPSEEK_API_KEY`
+  - `evaluate_review.py` 的指标仅供趋势参考：匹配判据已收窄为「包含命中或最长公共子串占比 ≥0.5」，中文碎片单独保留，仍会受 PDF 文本层碎片影响；审核验收必须以人工逐条复核为准
+  - `layers` 与 `source` 是两个口径：`layers` 按检查机制归类（命中结构完整性模式即记 `structural_consistency`，即使来源是 AI），`source` 按产出子系统归类；统计 AI 贡献时直接数 `/api/review/{id}/issues` 的 `source` 字段
+  - PDF 版式复核依赖视觉 provider 链（`REVIEW_VISUAL_PROVIDERS`，默认 `kimi,qwen`），纯文本模型（deepseek）不在链中；视觉 provider 不可用时 `pdf_visual_verification` 的候选全部 failed 且无页级结果
+  - 外部评审规则库（29 条）只在能确定性表达成模式匹配时才生成正则，语义/版式类规则落为 `(?!)`；规则正则与 `language` 在种子阶段写入 rules 表，改完 `app/crud/rule.py` 的转换逻辑必须重启后端重新种子才生效
+  - 排查英文文档漏报时先确认规则挂在哪个语言分支：中文人工基线规则不参与纯英文文档，英文文档只走 `_run_english_heuristic_audit` 与 `_run_manual_engineering_audit`，语言无关的判据需要单独接到英文分支
 
 IFU PDF 回归测试约定
 - Date: 2026-08-19

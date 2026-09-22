@@ -2199,6 +2199,7 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
 - ❌ Issues where the original field is shorter than 2 meaningful characters
 - ❌ Pure formatting differences that are visually identical
+- ❌ Excerpt-boundary artifacts reported as completeness defects: missing sections, headings without body text, truncated sentences, table header cells whose rows fall outside the excerpt, table-of-contents lines, or "the document/excerpt is incomplete"
 
 Quality issues such as punctuation habit, spacing, articles, abbreviation expansion, gerund vs noun, and style preferences SHOULD be reported as severity=suggestion.
 
@@ -2217,6 +2218,7 @@ IMPORTANT REMINDERS:
 - British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
 - Product names, company names, model numbers, and technical abbreviations are VALID unless context proves an error.
 - If the review basis includes CYY human review experience, use it to identify content-level defects. Focus on evidence-backed sentence meaning, revision history, terminology consistency, table content, figure references, page boundary content loss, and topic-structure issues.
+- The text below is ONE mechanically cut excerpt of a longer document. It may begin or end in the middle of a sentence, section, table, or symbol legend, and it may contain only a table of contents or only table header cells. Content before and after the excerpt continues elsewhere, so never report it as missing. Report a content-completeness issue only when the excerpt alone proves it, such as an unreplaced release placeholder (TBD, TODO, XX, 待补充) or two statements inside the excerpt that contradict each other.
 
 FILENAME CHECKING:
 - When the context prompt provides a document filename, verify it against the document content.
@@ -2313,6 +2315,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 - ❌ Unicode 等价字符差异，例如 µ(U+00B5) 与 μ(U+03BC)、全角与半角数字、U+2212 减号与 U+002D 连字符，在视觉呈现一致时不得报错
 - ❌ original 字段长度小于 2 个有意义字符的问题
 - ❌ 纯格式差异但视觉呈现完全一致
+- ❌ 把机械切分产生的边界现象当作完整性缺陷：缺少章节、标题下无正文、句子被截断、表格只有表头、目录行被当成无正文标题、"文档/节选不完整"
 
 标点习惯、空格、冠词、缩写展开、动名词形式和风格偏好等质量类问题应报告，severity=suggestion。
 
@@ -2329,6 +2332,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 - 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
 - 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。
 - 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。
+- 下面给出的是从完整文档中机械切分出来的一个节选，可能从句子、章节、表格或符号说明的中间开始或结束，也可能只包含目录或表格表头；节选前后的正文在别处，不得当成缺失内容报告。只有当节选内部自身就能证明缺陷时才报告内容完整性问题，例如发布版本中残留 TBD、TODO、XX、待补充等占位符，或节选内前后表述互相矛盾。
 
 文件名检查（当上下文提供了文档文件名时）：
 - 检查文件名是否存在拼写错误。
