@@ -215,3 +215,42 @@ def test_force_rerun_bypasses_ai_chunk_cache(monkeypatch):
     finally:
         review_api._review_force_rerun_ids.discard(review_id)
         review_api._ai_review_chunk_cache.clear()
+
+
+def test_english_grammar_verifiable_not_penalized():
+    """英文 Grammar confidence=80 的可验证文本问题不应被 value_score 压死。"""
+    from app.review_engine.pipeline import value_score, is_noise, is_verifiable_ai_text_issue
+    issue = {
+        "source": "ai",
+        "category": "Grammar",
+        "severity": "general",
+        "confidence": 80,
+        # 样例取自 GoSpatial 报告中的真实英文问题；不使用 "following status" 措辞，
+        # 因为该短语已在 origin/main 的误报规则库中被确认为正确用法（人审结论），
+        # is_noise 会按规则库优先将其判为误报，与本测试要验证的 value_score 门槛无关。
+        "original_text": "This sections describes the cleaning procedure.",
+        "suggestion": "This section describes the cleaning procedure.",
+        "description": "Grammar: singular/plural mismatch",
+    }
+    assert is_verifiable_ai_text_issue(issue) is True
+    assert is_noise(issue) is False
+    assert value_score(issue) >= 45, f"value_score={value_score(issue)} should pass threshold"
+
+
+def test_audit_max_tokens_scales_with_content():
+    """输出 token 上限应随内容长度自适应，且不低于默认 4096。"""
+    from app.utils.ai_client import _audit_max_tokens
+    base = _audit_max_tokens(0)
+    assert base >= 4096
+    large = _audit_max_tokens(12000)
+    assert large > base
+    assert large <= base * 2
+
+
+def test_extract_json_marks_truncated():
+    """截断 JSON 应打 _degraded 标记而非静默返回空。"""
+    from app.utils.ai_client import AIClient
+    broken = '{"issues": [{"category": "Grammar", "original_text": "abc", "suggestion": "abd", "confidence": 80'
+    result = AIClient._extract_json(broken, {"issues": []})
+    assert result.get("_degraded") is True
+    assert result.get("_degraded_reason") == "json_truncated"

@@ -247,6 +247,9 @@ def is_verifiable_ai_text_issue(issue: Any) -> bool:
         and bool(original)
         and bool(suggestion or description)
         and category.lower() in {item.lower() for item in text_categories}
+        # 原文本身是 LOW_VALUE 裸词（如 "Browse"/"Edit"）时不算可验证文本问题：
+        # 这类通用 UI 措辞建议没有真实语法证据，仍需被 LOW_VALUE 扣分压掉。
+        and not LOW_VALUE_PATTERN.search(original)
         and not is_visual_layout_issue(data)
     )
 
@@ -299,7 +302,7 @@ def value_score(issue: Any) -> int:
         score -= 42
     if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
         score -= 32
-    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data) and not is_substantive_ai_issue(data):
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data) and not is_substantive_ai_issue(data) and not is_verifiable_ai_text_issue(data):
         score -= 26
     if not is_verifiable_ai_text_issue(data):
         if LOW_VALUE_PATTERN.search(normalize_text(data["original_text"])) or LOW_VALUE_PATTERN.search(issue_blob(data)):
@@ -308,7 +311,7 @@ def value_score(issue: Any) -> int:
         score -= 45
     if source == "spellcheck" and not is_high_value(data):
         score -= 4
-    if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not is_high_value(data) and not is_substantive_ai_issue(data):
+    if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not is_high_value(data) and not is_substantive_ai_issue(data) and not is_verifiable_ai_text_issue(data):
         score -= 20
     if not data["original_text"] or not data["suggestion"]:
         score -= 20
@@ -376,7 +379,7 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return True
     if rule == "CHECKLIST-TRADEMARK" and str(data["severity"] or "").lower() in {"general", "suggestion"}:
         return True
-    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and str(data["severity"] or "").lower() in {"general", "suggestion"} and not is_high_value(data) and not is_substantive_ai_issue(data):
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and str(data["severity"] or "").lower() in {"general", "suggestion"} and not is_high_value(data) and not is_substantive_ai_issue(data) and not is_verifiable_ai_text_issue(data):
         return True
     if source == "ai" and re.search(r"\bcheck\s+if\b|是否使用|是否正确", suggestion, re.IGNORECASE):
         return True

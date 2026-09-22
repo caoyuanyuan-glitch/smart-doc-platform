@@ -73,14 +73,21 @@ class DocumentChunker:
         skipped_chapters: list[str] = []
         chunker_mode = "chapter"
         fallback_reason = ""
-        if self.sampling_enabled() and len(raw_chunks) > self.max_chunks:
-            kept_indexes = _even_indexes(len(raw_chunks), self.max_chunks)
-            skipped_chapters = [
-                raw_chunks[i].chapter for i in range(len(raw_chunks)) if i not in kept_indexes and raw_chunks[i].chapter
-            ]
-            raw_chunks = self._downsample(raw_chunks)
-            chunker_mode = f"sampled:{self.sampling_mode}"
-            fallback_reason = "explicit_sampling_mode"
+        if len(raw_chunks) > self.max_chunks:
+            if self.sampling_enabled():
+                kept_indexes = _even_indexes(len(raw_chunks), self.max_chunks)
+                skipped_chapters = [
+                    raw_chunks[i].chapter for i in range(len(raw_chunks)) if i not in kept_indexes and raw_chunks[i].chapter
+                ]
+                raw_chunks = self._downsample(raw_chunks)
+                chunker_mode = f"sampled:{self.sampling_mode}"
+                fallback_reason = "explicit_sampling_mode"
+            else:
+                # 默认（非采样）模式：把碎片窗口合并到 max_chunks 上限，覆盖原文全量，
+                # 既不放过内容也不产生数百个碎片块。
+                raw_chunks = self._merge_to_limit(text, raw_chunks, self.max_chunks)
+                chunker_mode = "chapter_max"
+                fallback_reason = "max_chunks_cap"
         chunks = []
         for index, chunk in enumerate(raw_chunks):
             chunks.append(DocumentChunk(
@@ -99,6 +106,7 @@ class DocumentChunker:
             all_chapters=[chapter for chapter, *_rest in segments],
             processed_chapters=[item.chapter for item in chunks],
             skipped_chapters=skipped_chapters,
+            infer_skipped_chapters=chunker_mode != "chapter_max",
             chunker_mode=chunker_mode,
             fallback_reason=fallback_reason,
             total_chunk_count=len(chunks),
@@ -198,6 +206,43 @@ class DocumentChunker:
         indexes = sorted(_even_indexes(len(chunks), self.max_chunks))
         return [chunks[i] for i in indexes]
 
+    def _merge_to_limit(self, text: str, chunks: list[DocumentChunk], limit: int) -> list[DocumentChunk]:
+        """把相邻碎片窗口合并成至多 limit 个块，按原文跨度取内容，保证零丢失。
+
+        先按 max_chars 贪心打包，消除数百个碎片窗口并保持每块尺寸合理；
+        若打包后仍超过 limit，再按数量均分为 limit 组继续合并（只合并、不丢弃）。
+        """
+        if limit <= 0 or len(chunks) <= limit:
+            return chunks
+        packed: list[DocumentChunk] = []
+        start = chunks[0].start
+        end = chunks[0].end
+        chapter = chunks[0].chapter
+        parent = chunks[0].parent_chapter
+        for chunk in chunks[1:]:
+            if chunk.end - start > self.max_chars:
+                packed.append(self._make_temp_chunk(text[start:end], start, chapter, parent_chapter=parent))
+                start, end = chunk.start, chunk.end
+                chapter, parent = chunk.chapter, chunk.parent_chapter
+            else:
+                end = chunk.end
+        packed.append(self._make_temp_chunk(text[start:end], start, chapter, parent_chapter=parent))
+        if len(packed) <= limit:
+            return packed
+        count = len(packed)
+        merged: list[DocumentChunk] = []
+        for group in range(limit):
+            low = group * count // limit
+            high = (group + 1) * count // limit
+            if low >= high:
+                continue
+            start = packed[low].start
+            end = packed[high - 1].end
+            merged.append(self._make_temp_chunk(
+                text[start:end], start, packed[low].chapter, parent_chapter=packed[low].parent_chapter
+            ))
+        return merged
+
 
 def create_smart_chunker(
     max_chunks: int = 32,
@@ -260,6 +305,7 @@ def compute_chunk_coverage(
     all_chapters: list[str] | None = None,
     processed_chapters: list[str] | None = None,
     skipped_chapters: list[str] | None = None,
+    infer_skipped_chapters: bool = True,
     chunker_mode: str = "chapter",
     fallback_reason: str = "",
     total_chunk_count: int = 0,
@@ -276,7 +322,7 @@ def compute_chunk_coverage(
     covered = sum(end - start for start, end in merged)
     ratio = (covered / source_len) if source_len else 1.0
     skipped = list(skipped_chapters or [])
-    if not skipped and all_chapters and processed_chapters is not None:
+    if infer_skipped_chapters and not skipped and all_chapters and processed_chapters is not None:
         processed_set = {item for item in processed_chapters if item}
         skipped = [item for item in all_chapters if item and item not in processed_set]
     return {

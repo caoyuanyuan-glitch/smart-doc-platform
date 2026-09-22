@@ -64,6 +64,7 @@ from app.review_engine.validation import (
 from app.review_engine.layers import count_issue_layers
 from app.review_engine.pipeline import (
     drain_pipeline_drop_reasons as pipeline_drain_drop_reasons,
+    is_verifiable_ai_text_issue as pipeline_is_verifiable_ai_text_issue,
     select_review_issues as pipeline_select_review_issues,
     sort_key as pipeline_sort_key,
     suppress_shadowed_ai as pipeline_suppress_shadowed_ai,
@@ -1220,7 +1221,9 @@ def _issue_review_value_score(issue):
     if rule_upper in {"R029", "R035", "HR009", "TENSE-001", "PUNCT-002", "R002", "R003"}:
         score -= 35
     if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not high_value_pattern.search(blob):
-        score -= 15
+        # 可验证的 AI 文本问题（有原文+建议、白名单类目、confidence>=70）不扣分
+        if not pipeline_is_verifiable_ai_text_issue(issue):
+            score -= 15
     if not original or not suggestion:
         score -= 25
 
@@ -1236,6 +1239,10 @@ def _filter_by_issue_value(issues, min_score=45):
             issue["review_value_score"] = score
         severity = str(_issue_value(issue, "severity", "") or "").lower()
         threshold = 38 if severity in {"fatal", "serious"} else min_score
+        # 可验证的 AI 文本问题（英文 Grammar/语义类）降低阈值，避免 70-85 confidence
+        # 区间被 45 分硬门槛整体丢掉
+        if pipeline_is_verifiable_ai_text_issue(issue):
+            threshold = 38
         if score < threshold:
             dropped += 1
             continue
@@ -2362,7 +2369,10 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     chunker_fallback_reason = ""
     if use_smart_chunking and create_smart_chunker is not None and len(content) > 1000:
         try:
-            chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)), sampling_mode=_review_sampling_mode())
+            chunker = create_smart_chunker(
+                max_chunks=_review_ai_chunk_limit(len(content)),
+                sampling_mode="off" if _review_sampling_mode() in {"", "off", "none", "false", "0"} else _review_sampling_mode(),
+            )
             smart_chunks = chunker.chunk_document(content)
             if smart_chunks:
                 chunks = [(c.index + 1, c.start, c.content) for c in smart_chunks]
