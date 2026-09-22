@@ -9648,9 +9648,23 @@ def _run_manual_engineering_audit(content, file_type=None):
         )
 
     # 缺失空格：句末标点后直接连写下一个单词（如 temperature.For these）
-    for match in re.finditer(r'([A-Za-z]{2,}[.!?]|[0-9]+[.!?])([A-Z][a-z]{2,})', content):
+    # a) 标点后接大写单词：覆盖右括号、引号、温度符号收尾等场景；用缩写词与单字母首字母
+    #    缩写（U.S.A / e.g.）排除正常连写。标点前限定为文字或收尾符号，避免 URL 查询串、
+    #    转义点号、Markdown 反引号等误报。
+    _ABBREV_WORDS = {
+        'etc', 'eg', 'ie', 'vs', 'approx', 'fig', 'eq', 'no', 'al', 'dr', 'mr', 'mrs', 'ms', 'prof',
+        'ref', 'sec', 'ver', 'vol', 'cf', 'resp', 'viz', 'ph', 'phd', 'st', 'inc', 'ltd', 'dept',
+        'est', 'ext', 'div', 'mfg', 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept',
+        'oct', 'nov', 'dec', 'am', 'pm',
+    }
+    for match in re.finditer(r'([A-Za-z0-9\)\]\}"\'”’℃℉°%μ][.!?])([A-Z])', content):
         head, tail = match.group(1), match.group(2)
-        if head.lower().rstrip('.!?') in ('etc', 'eg', 'ie', 'vs', 'approx', 'fig', 'eq', 'no'):
+        token_match = re.search(r'[A-Za-z]+(?:\.[A-Za-z]+)*$', content[:match.start() + 1])
+        token = token_match.group(0).replace('.', '').lower() if token_match else ''
+        if token in _ABBREV_WORDS:
+            continue
+        # 单字母首字母缩写（如 U.S / U.S.A）：前一位不是字母，说明点号属于缩写而非句末
+        if head[:-1].isupper() and (match.start() == 0 or not content[match.start() - 1].isalpha()):
             continue
         add_issue(
             match.start(),
@@ -9660,6 +9674,22 @@ def _run_manual_engineering_audit(content, file_type=None):
             '空格与排版',
             f"{head} {tail}",
             '英文句子结束后应有一个空格，句末标点后直接连写下一个单词会影响可读性。',
+            '说明书审核能力补强方案 - 句末标点后空格',
+            'general',
+            92,
+        )
+
+    # b) 单词后多出一个孤立小写字母（如 installation.r.）：仅在字母后紧跟分隔符或行尾时判定，
+    #    从而与 manual.pdf、node.js、runtime.env 这类文件名/标识符区分开。
+    for match in re.finditer(r'\b([A-Za-z]{3,})\.([a-z])(?=[\s.,;:!?)\]]|$)', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-001',
+            '空格与排版',
+            f"{match.group(1)}. {match.group(2)}",
+            '句末标点后疑似多出一个孤立字母，请确认是否缺失空格或误输入。',
             '说明书审核能力补强方案 - 句末标点后空格',
             'general',
             92,
@@ -9739,6 +9769,58 @@ def _run_manual_engineering_audit(content, file_type=None):
             '说明书审核能力补强方案 - 数值与单位间距',
             'general',
             92,
+        )
+
+    # 缺失空格：分句标点（逗号、分号、冒号）后直接连写下一个单词（如 buffer,then、on;Check）
+    # 要求标点后紧跟字母，天然排除时间 10:30、URL 协议等数字/符号相邻场景；
+    # 逗号前为数字时按千分位处理（1,000），冒号/分号则保留（Figure 1:Add -> Figure 1: Add）。
+    for match in re.finditer(r'([A-Za-z0-9]+)([,;:])([A-Za-z])', content):
+        punct = match.group(2)
+        pre_token_match = re.search(r'[A-Za-z0-9-]+$', content[:match.start() + len(match.group(1))])
+        pre_token = pre_token_match.group(0) if pre_token_match else ''
+        # 逗号/分号前是数字或含连字符的编号（如 1,000、H-020-001198-00;D4）属于编号写法
+        if punct in ',;' and (pre_token[-1:].isdigit() or '-' in pre_token):
+            continue
+        # 分号构成的分隔列表（如 更换;吸取;转移;标记）本身不加空格
+        if punct == ';' and content[max(0, match.start() - 40):match.end() + 40].count(';') >= 3:
+            continue
+        # 冒号后接小写字母多为“标签:值/占位符”（如 xx:xx），不做缺失空格判断
+        if punct == ':' and not match.group(3).isupper():
+            continue
+        # 冒号后直接跟邮箱/标识符（如 US:US-TechSupport@example.com）属于标签:值写法
+        if re.match(r'[A-Za-z0-9._%+-]+@', content[match.end() - 1:]):
+            continue
+        # XML 命名空间声明与标签属性（如 xmlns:MadCap、<dc:Title>）不是缺失空格
+        if 'xmlns' in content[max(0, match.start() - 12):match.end()].lower():
+            continue
+        if match.start() > 0 and content[match.start() - 1] == '<':
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-004',
+            '空格与排版',
+            f"{match.group(1)}{match.group(2)} {match.group(3)}",
+            '英文标点符号后应保留一个空格，标点后直接连写下一个单词影响可读性与规范一致性。',
+            '说明书审核能力补强方案 - 标点后空格',
+            'general',
+            91,
+        )
+
+    # 缺失/多余空格：微升符号被空格拆开（如 10 μ L -> 10 μL）
+    for match in re.finditer(r'(?<=\d)\s*(?:µ|μ|u)\s+L\b', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-005',
+            '空格与排版',
+            'μL',
+            '微升单位符号内部被空格拆开，建议合并为 μL。',
+            '说明书审核能力补强方案 - 单位符号完整性',
+            'general',
+            91,
         )
 
     # 基础标点：连续重复标点（如 ',,' '。.'；'..' 排除省略号 '...'）

@@ -2480,6 +2480,71 @@ def test_run_manual_engineering_audit_detects_missing_data_placeholder():
     assert any(issue["rule"] == "DOC-DATA-001" and issue["original_text"] == "About" for issue in issues)
 
 
+def test_run_manual_engineering_audit_detects_missing_space_after_sentence_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "Please check the installation.r before use. Tap [Run Wizard].On the interface. "
+        "Store at -20℃.Do not refreeze. Timeout is 30 min.Then stop.",
+        file_type="pdf",
+    )
+
+    space_issues = [issue for issue in issues if issue["rule"] == "DOC-SPACE-001"]
+    originals = {issue["original_text"] for issue in space_issues}
+
+    assert "installation.r" in originals
+    assert "].O" in originals
+    assert "℃.D" in originals
+    assert "n.T" in originals
+
+
+def test_run_manual_engineering_audit_detects_missing_space_after_clause_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "Add 5 mL of buffer,then incubate. The device is powered on;Check the software. "
+        "Figure 1:Add the reagent. Prepare Fast Wash 2:Remove the cap.",
+        file_type="pdf",
+    )
+
+    space_issues = [issue for issue in issues if issue["rule"] == "DOC-SPACE-004"]
+    originals = {issue["original_text"] for issue in space_issues}
+
+    assert "buffer,t" in originals
+    assert "on;C" in originals
+    assert "1:A" in originals
+    assert "2:R" in originals
+
+
+def test_run_manual_engineering_audit_skips_label_value_and_time_colons():
+    issues = review_api._run_manual_engineering_audit(
+        "Contact support at: US:US-TechSupport@example.com or Canada:CA-TechSupport@example.com. "
+        "Fill in the date as xxxx/xx/xx xx:xx in the form. Ratio 1:2 was used. "
+        "Declare the root element xmlns:MadCap namespace and the <dc:Title> attribute. "
+        "Findings include 吸头;封闭液去除塞;DNB;PCR 管 and 更换;吸取;转移;标记. "
+        "Refer to manual H-020-001198-00;D4 for details.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-SPACE-004" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_abbreviation_and_domain_periods():
+    issues = review_api._run_manual_engineering_audit(
+        "Use a tube (e.g.next tube). Open manual.pdf and visit www.mgi-tech.com. "
+        "Refer to the U.S.A office. Run node.js and read config.yaml or data.json. "
+        "See Fig.3 and Section 3.2. Inc.Ltd approved it. Edit runtime.env before start.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-SPACE-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_split_microliter_symbol():
+    issues = review_api._run_manual_engineering_audit(
+        "Pipette 10 μ L of the sample into the tube.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-SPACE-005" and issue["original_text"] == "μ L" for issue in issues)
+
+
 def test_run_chinese_human_baseline_rules_detects_temperature_range():
     issues = review_api._run_chinese_human_baseline_rules(
         "y Cytoactivity > 80% y Clumping rate < 5% y Impurity rate < 5% y Cytoactivity < 5% y Clumping rate < 5% y Impurity rate < 5% Recommended cell input Recommended cell concentration (cell/μL) 2 ℃ to 8 ℃ (36 ℉) and -25 ℃ to -15 ℃.",

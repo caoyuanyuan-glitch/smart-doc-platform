@@ -363,3 +363,19 @@
 - `距离太近了，4方框调小`
 - 当前仅剩 1 条未命中：`这丽应该是白色，下同`
 - 这条属于纯视觉色彩判断，当前 OCR 文本中没有稳定文本锚点，更适合作为低优先级人工确认项保留
+
+## 2026-09-22 第二轮审核准确率优化（标点空格与单位符号）
+
+- 样本基线：`当前工作区/.monkeycode/docs/cyy-human-review-baseline.json`（603 条人工批注，其中 `DET-SPACE-001` 78 条）
+- 本轮调整内容：
+- 在 `backend/app/api/review.py` 中扩展 `DOC-SPACE-001`：句末标点后接大写单词的判据改为「标点前为文字或收尾符号（含 `)`、`]`、温度符号 `℃/℉/°` 等）+ 标点后接大写字母」，并补充「单词后多出一个孤立小写字母（如 `installation.r.`）」的独立判据；用缩写词表与单字母首字母缩写（`U.S.A`、`e.g.`）排除正常连写
+- 新增 `DOC-SPACE-004`：分句标点（`,` `;` `:`）后直接连写下一个单词（如 `buffer,then`、`on;Check`、`Figure 1:Add`）；排除千分位 `1,000`、编号 `H-020-001198-00;D4`、分隔列表 `更换;吸取;转移;标记`、`标签:值/占位符` `xx:xx`、邮箱 `US:US-TechSupport@example.com`、XML 命名空间 `xmlns:MadCap`
+- 新增 `DOC-SPACE-005`：微升单位符号被空格拆开（`10 μ L` -> `10 μL`）
+- 在 `backend/app/review_engine/annotation_baseline.py` 中把 `DOC-SPACE-004`、`DOC-SPACE-005` 纳入 `DET-SPACE-001` 的对齐规则集合
+- 在 `backend/tests/test_review_cache.py` 中新增 5 个回归用例，覆盖上述命中与不误报口径
+- 本地验证：
+- 回归测试通过：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py -q`（226 passed）
+- 全量后端测试：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests -q`（819 passed；6 个既有失败与本轮无关：4 例缺 docx 固件、1 例模板串不一致、1 例缺 `tesseract`）
+- 基线上下文命中：`DOC-SPACE-001` 18 处、`DOC-SPACE-004` 6 处、`DOC-SPACE-005` 4 处
+- 误报扫描：对仓库内 31 份真实 Markdown 文档（含两份写作风格指南、竞品文档设计/需求说明、结构化模板库样例）运行上述三条规则，命中 0 处
+- 平台侧复评（上传样本 match rate 表）待执行，本轮暂不记录指标
