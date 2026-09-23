@@ -350,7 +350,7 @@
               <div v-if="snippetStatus?.status === 'completed'" class="snippet-preview">
                 <div class="snippet-preview-head">
                   <span>问题预览</span>
-                  <span class="snippet-preview-count">共 {{ snippetPreviewIssues.length }} 条</span>
+                  <span class="snippet-preview-count">{{ snippetPreviewError ? '加载失败' : `共 ${snippetPreviewIssues.length} 条` }}</span>
                 </div>
                 <el-table
                   v-if="snippetPreviewIssues.length"
@@ -365,6 +365,10 @@
                   <el-table-column prop="original_text" label="原文" min-width="160" show-overflow-tooltip />
                   <el-table-column prop="suggestion" label="建议" min-width="180" show-overflow-tooltip />
                 </el-table>
+                <div v-else-if="snippetPreviewError" class="snippet-preview-empty">
+                  问题列表加载失败。
+                  <el-button type="primary" text size="small" @click="retrySnippetPreviewIssues">重新加载</el-button>
+                </div>
                 <div v-else class="snippet-preview-empty">未发现语法、拼写或术语问题。</div>
                 <div v-if="snippetPreviewIssues.length > visibleSnippetPreviewIssues.length" class="snippet-preview-more">
                   还有 {{ snippetPreviewIssues.length - visibleSnippetPreviewIssues.length }} 条，点击“查看问题”看全部。
@@ -1658,6 +1662,7 @@ const snippetReviewState = ref(null)
 const snippetStatus = computed(() => snippetReviewState.value)
 const snippetPreviewIssues = ref([])
 const snippetPreviewReviewId = ref(null)
+const snippetPreviewError = ref(false)
 const visibleSnippetPreviewIssues = computed(() => snippetPreviewIssues.value.slice(0, 8))
 const canStartSnippetReview = computed(() => {
   if (!String(snippetText.value || '').trim()) return false
@@ -1943,7 +1948,7 @@ function applySnippetReviewSnapshot(review, progress = null) {
     status,
     progress: progressValue,
     message,
-    summary: review.summary,
+    summary: review.summary ?? snippetReviewState.value?.summary,
     total_issues: review.total_issues,
     mode: review.mode || snippetReviewState.value?.mode
   }
@@ -1952,20 +1957,30 @@ function applySnippetReviewSnapshot(review, progress = null) {
   }
 }
 
-async function loadSnippetPreviewIssues(reviewId) {
+async function loadSnippetPreviewIssues(reviewId, force = false) {
   if (!reviewId) {
     snippetPreviewIssues.value = []
     snippetPreviewReviewId.value = null
+    snippetPreviewError.value = false
     return
   }
-  if (snippetPreviewReviewId.value === reviewId) return
+  if (!force && snippetPreviewReviewId.value === reviewId && !snippetPreviewError.value) return
   snippetPreviewReviewId.value = reviewId
+  snippetPreviewError.value = false
   try {
     const response = await reviewAPI.getIssues(reviewId)
     snippetPreviewIssues.value = response.data || []
+    snippetPreviewError.value = false
   } catch (_) {
     snippetPreviewIssues.value = []
+    snippetPreviewError.value = true
   }
+}
+
+function retrySnippetPreviewIssues() {
+  const reviewId = snippetReviewState.value?.review_id
+  if (!reviewId) return
+  loadSnippetPreviewIssues(reviewId, true)
 }
 
 function syncSnippetReviewState(reviewList) {
@@ -1986,27 +2001,57 @@ function stopSnippetProgressPolling() {
 function startSnippetProgressPolling(reviewId) {
   stopSnippetProgressPolling()
   if (!reviewId) return
+  const startedAt = Date.now()
+  const MAX_FAILURES = 5
+  const MAX_DURATION_MS = 10 * 60 * 1000
+  let consecutiveFailures = 0
   const tick = async () => {
     try {
       const resp = await reviewAPI.getProgress(reviewId)
       const progress = resp.data || {}
+      consecutiveFailures = 0
+      // status 缺失时按 running 处理，避免陷入 undefined 状态的无效轮询
+      const status = progress.status || 'running'
       applySnippetReviewSnapshot({
         id: reviewId,
         document_id: snippetDocumentId.value,
-        status: progress.status,
-        summary: progress.message,
+        status,
         total_issues: progress.total_issues
       }, progress)
-      if (['completed', 'failed', 'cancelled', 'error', 'timeout'].includes(progress.status)) {
+      if (['completed', 'failed', 'cancelled', 'error', 'timeout'].includes(status)) {
         stopSnippetProgressPolling()
-        if (progress.status === 'completed') {
+        if (status === 'completed') {
           try {
             const detail = await reviewAPI.get(reviewId)
             applySnippetReviewSnapshot(detail.data, { status: 'completed', progress: 100 })
           } catch (_) {}
         }
+        return
       }
-    } catch (_) {}
+    } catch (_) {
+      consecutiveFailures += 1
+      if (consecutiveFailures >= MAX_FAILURES) {
+        stopSnippetProgressPolling()
+        snippetReviewState.value = {
+          ...(snippetReviewState.value || {}),
+          review_id: reviewId,
+          status: 'failed',
+          message: '进度查询连续失败，请稍后重试'
+        }
+        ElMessage.error('审核进度查询失败，请稍后重试')
+        return
+      }
+    }
+    if (Date.now() - startedAt > MAX_DURATION_MS) {
+      stopSnippetProgressPolling()
+      snippetReviewState.value = {
+        ...(snippetReviewState.value || {}),
+        review_id: reviewId,
+        status: 'timeout',
+        message: '审核超时，请到历史任务查看结果'
+      }
+      ElMessage.warning('审核超时，请到历史任务查看结果')
+    }
   }
   tick()
   snippetProgressTimer = setInterval(tick, 1500)
@@ -2529,6 +2574,7 @@ async function startSnippetReview() {
     }
     snippetPreviewIssues.value = []
     snippetPreviewReviewId.value = null
+    snippetPreviewError.value = false
     const response = await reviewAPI.createSnippet({
       text,
       mode: reviewMode.value,
@@ -2599,6 +2645,7 @@ function clearSnippetEditor() {
   snippetReviewState.value = null
   snippetPreviewIssues.value = []
   snippetPreviewReviewId.value = null
+  snippetPreviewError.value = false
 }
 
 function openSnippetIssues() {
@@ -2609,7 +2656,7 @@ function openSnippetIssues() {
   }
   openIssueDialog({
     id: reviewId,
-    mode: `snippet:${reviewMode.value}`,
+    mode: snippetStatus.value?.mode || `snippet:${reviewMode.value}`,
     status: snippetStatus.value?.status
   })
 }
