@@ -231,6 +231,22 @@ def test_build_audit_prompt_payload_english_skips_chinese_base_prompt(monkeypatc
     assert "observations" in payload["user_prompt"]
 
 
+def test_build_audit_prompt_payload_english_declares_semantic_dimensions(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    monkeypatch.setattr("app.utils.ai_client.PROMPT_BUILDER_FALLBACK_ACTIVE", False)
+
+    payload = client.build_audit_prompt_payload(
+        "Reviewing parameters",
+        language="en",
+        audit_basis="basis",
+    )
+
+    system_prompt = payload["system_prompt"]
+    assert "SEMANTIC QUALITY CHECKS" in system_prompt
+    for dimension in ["冗余", "表述不准确", "信息不完整", "一致性", "语气", "图表衔接", "句子成分"]:
+        assert dimension in system_prompt, f"英文提示词缺少语义维度: {dimension}"
+
+
 def test_audit_document_does_not_rechunk_large_content(monkeypatch):
     client = AIClient.__new__(AIClient)
     client.default_provider = "qwen"
