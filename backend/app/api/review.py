@@ -332,7 +332,15 @@ def _is_snippet_scope_issue(issue):
     source = str(_issue_value(issue, "source", "") or "").lower()
     if source in {"spellcheck", "term", "grammar"}:
         return True
-    if source == "ai" and re.search(r"句子|用词|拼写|语法|术语|标点|可读", blob):
+    if source == "ai" and re.search(
+        r"句子|用词|拼写|语法|术语|标点|可读|"
+        r"grammar|spelling|\bspell\b|typo|punctuat|capitali[sz]|"
+        r"subject[- ]verb|\bagreement\b|\btense\b|\bplural\b|\bsingular\b|"
+        r"\bverb\b|\bnoun\b|\bpronoun\b|\bpreposition\b|"
+        r"word choice|wording|terminolog|typograph|readab|clarity|phrasing",
+        blob,
+        re.IGNORECASE,
+    ):
         return True
     return False
 

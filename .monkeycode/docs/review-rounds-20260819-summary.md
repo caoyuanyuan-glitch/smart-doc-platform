@@ -527,3 +527,15 @@
 - 原 `review_rule_library_seed.json` 已删除（git 历史可回溯）。取舍说明：二进制 xlsx 在代码评审时无法直接看 diff，换来人可以在 Excel 里直接维护
 - `test_review_cache.py`：原 seed 用例的假路径（`read_text`）改为用 `tmp_path` 写真 xlsx；新增 2 例——随包种子能读出 29 条规则与元信息、`example`/`audit_basis` 确实取自 `元信息` 工作表
 - 回归：全量 `backend/tests` 874 passed / 6 failed（6 例仍为既有失败）；另用空库直接调用 `seed_external_review_rules` 验证 `created=29`、二次调用 `0`（幂等）；重启真实后端无报错，`GET /api/rules/export` 仍为 29 条且内容、severity、language 不变
+
+## 2026-09-23 修复英文文本片段审核 AI 结果被全部丢弃
+
+- 现象：配置 DeepSeek 后做英文「文本片段审核」，AI 调用成功（`audit_chunk.providers.deepseek=1`、`chunk issue_count=3`），页面却始终 0 条问题
+- 根因：`review.py` `_is_snippet_scope_issue` 对 `source == "ai"` 的问题只匹配中文关键词（`句子|用词|拼写|语法|术语|标点|可读`），且只看 `category + rule + description`。本项目的 AI 在片段模式下把语言问题写进 `rule` 字段（如 `Subject-verb agreement: ...`）、`category` 为「其他」、`description` 为空，于是三条真实语法错误被 `_filter_snippet_scope_issues` 全部判为越界，日志 `文本片段范围过滤: 3 -> 0`
+- 该规则对中文同样脆弱：只要 AI 把描述放在 `rule` 而非 `description`，中文语言问题也会被丢弃
+- 修复：`_is_snippet_scope_issue` 的 AI 分支补充英文语言错误词表（`grammar|spelling|spell|typo|punctuat|capitali[sz]|subject-verb|agreement|tense|plural|singular|verb|noun|pronoun|preposition|word choice|wording|terminolog|typograph|readab|clarity|phrasing`，加 `re.IGNORECASE`），保持在既有的「白名单命中才保留」结构内，越界英文问题（交叉引用、安全合规、版式等）仍被剔除
+- 边界未动：`对比审核` 子页签本就是确定性比对、不调用 AI，因此没有模型下拉属设计如此；`文本片段审核范围` basis 也已明确限定 AI 只报句子级语法/拼写/术语问题
+- 回归测试：`test_snippet_review.py` 新增 `test_snippet_scope_keeps_english_ai_grammar_issues`（3 条英文 AI 语法/拼写问题保留 + 3 条越界英文问题剔除）；`pytest tests/test_snippet_review.py -q` 23 passed
+- 真实端到端（重启后端 + DeepSeek）：同一英文片段 `The instrument are ready for use. Please confirm the settings before you starts the run. This instructions for use describes the installation procedure.` 由修复前 `total=0` 变为 `total=3`，`issue_flow.ai_input_count=3 / after_pipeline=3 / after_visual_verification=3`，三条分别命中主谓一致、`before you` 后动词原形、`This instructions` 指示代词与主谓一致
+- 全量 `backend/tests`：875 passed / 6 failed（6 例仍为既有失败，无新增回归）
+- 顺带发现（未改动，待确认）：`app/utils/ai_client.py` 顶部 `from app.utils.prompt_builder import ...` 指向的 `app/utils/prompt_builder.py` 在仓库中不存在（`git log --all` 无该文件记录），因此 `PROMPT_BUILDER_FALLBACK_ACTIVE=True` 常驻、日志固定打印 `prompt_builder 模块缺失，当前使用保守降级提示词构建`；英文场景下 `build_audit_system_prompt()` 退化为返回空串，提示词质量受损
