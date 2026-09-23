@@ -10100,6 +10100,22 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 基础标点：全角标点相邻误排（如 '：。' '：，'）。仅匹配无空白的紧邻组合，
+    # 避免把 PDF 文本层换行/分栏造成的标点分处两行误判为连排。
+    for match in re.finditer(r'[，、；：]。|[：；]，', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-PUNCT-002',
+            '标点符号',
+            match.group(0)[-1],
+            '出现相邻误排的全角标点，通常是录入或排版残留，建议只保留句末标点。',
+            '说明书审核能力补强方案 - 全角标点连排',
+            'general',
+            92,
+        )
+
     # 基础语法：冠词 a/an 与后续单词读音不一致
     # 缩写词按字母读音判定（an SMS / a USB），juː 音词与不发音 h 词用白名单处理
     _AN_JU_SOUND = {

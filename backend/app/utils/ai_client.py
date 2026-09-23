@@ -2233,6 +2233,16 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 - Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
 
+SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
+- Redundancy: report filler lead-ins with no information value (such as "About this guide" or "The following section will introduce"), redundant auxiliaries ("please click" -> "click"), and the same fact restated in a later section. Use category "冗余".
+- Accuracy: report wording that does not match the actual interface or behavior, and descriptions that resemble but do not name the real object. Use category "表述不准确".
+- Completeness: report operation steps missing a required follow-up action, and step results without a closing action. Use category "信息不完整".
+- Consistency: report the same object, action, term, or abbreviation described inconsistently across sections, including case inconsistency and inconsistent punctuation in parallel list items; cite both occurrences and give the unified form. Use category "一致性".
+- Tone and direction: report honorifics such as "please" added to operation steps, except text shown in the UI itself. Only suggest deleting or correcting text that exists; never suggest adding words the excerpt does not contain. Use category "语气".
+- Figure/table continuity: report a missing sentence-ending mark where a table or figure caption runs straight into the following body text. Use category "图表衔接".
+- Sentence constituents: report missing or extra characters that break the sentence, and name the affected constituent. Use category "句子成分".
+Each semantic issue must quote the complete sentence from the excerpt as evidence, and the same defect must not be reported twice.
+
 🚫 FORBIDDEN issue types (reporting any of these is an error):
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
 - ❌ Issues where the original field is shorter than 2 meaningful characters
@@ -2286,7 +2296,7 @@ Output ONLY strict JSON:
     {{
       "severity": "fatal|serious|general|suggestion",
       "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
-      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
@@ -2300,7 +2310,7 @@ Output ONLY strict JSON:
   ],
   "observations": [
     {{
-      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
       "severity": "fatal|serious|general|suggestion",
       "title": "short title",
       "description": "one-sentence chapter-level evidence",

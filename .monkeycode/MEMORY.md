@@ -102,6 +102,7 @@ Git 与自检工作流
   - 审核模块 LLM provider 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
   - 排查 AI 审核结果异常时，先确认后端启动日志中的 provider 预热状态和审核日志中的 `AI客户端可用`、`providers=`、规范文件长度
   - 提示词分层：`app/utils/prompt_builder.py` 不在本仓库中，`ai_client` 恒走其 fallback 分支；但中文审核仍会经 fallback 的 `ReviewPromptBuilder.build_audit_system_prompt()` 调用 `review_rules.build_system_prompt()`（含 P3 语义规则），英文则使用内置英文 system prompt。看到 `prompt_builder 模块缺失` 告警不等于 P3 语义提示词未生效
+  - 中英文审核语义能力是两条独立链路（中文走 `review_rules.build_system_prompt()`，英文走 `ai_client.build_audit_prompt_payload()` 内置英文 prompt），补语义维度时必须两条都改；英文输出 `category` 枚举需与 `review_engine/pipeline.py` 的 `is_verifiable_ai_text_issue()` 白名单保持一致，否则英文语义类问题会被 `value_score` 阈值丢掉
   - AI 审核输出截断排查：`AI_AUDIT_MAX_TOKENS` 是自适应基准（默认 4096，封顶 base×2）；模型对长中文块偶发"输出饱和"导致 JSON 截断，日志出现 `[AI] <provider> 审核响应 JSON 截断解析失败` 即该块产出为空。单纯调大上限往往无效（模型会把预算写满），优先减小单块内容
 
 审核模块改动范围约束

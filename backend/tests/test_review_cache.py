@@ -2554,6 +2554,27 @@ def test_run_manual_engineering_audit_detects_missing_space_after_sentence_punct
     assert "n.T" in originals
 
 
+def test_run_manual_engineering_audit_detects_adjacent_fullwidth_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "下面显示以下测量结果：。请确认。",
+        file_type="pdf",
+    )
+
+    punct_issues = [issue for issue in issues if issue["rule"] == "DOC-PUNCT-002"]
+
+    assert len(punct_issues) == 1
+    assert punct_issues[0]["original_text"] == "：。"
+
+
+def test_run_manual_engineering_audit_keeps_punctuation_split_by_whitespace():
+    issues = review_api._run_manual_engineering_audit(
+        "下面显示以下测量结果：\n。请确认。",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-PUNCT-002" for issue in issues)
+
+
 def test_run_manual_engineering_audit_detects_missing_space_after_clause_punctuation():
     issues = review_api._run_manual_engineering_audit(
         "Add 5 mL of buffer,then incubate. The device is powered on;Check the software. "

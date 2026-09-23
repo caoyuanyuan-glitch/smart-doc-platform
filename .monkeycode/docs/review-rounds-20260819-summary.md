@@ -539,3 +539,22 @@
 - 真实端到端（重启后端 + DeepSeek）：同一英文片段 `The instrument are ready for use. Please confirm the settings before you starts the run. This instructions for use describes the installation procedure.` 由修复前 `total=0` 变为 `total=3`，`issue_flow.ai_input_count=3 / after_pipeline=3 / after_visual_verification=3`，三条分别命中主谓一致、`before you` 后动词原形、`This instructions` 指示代词与主谓一致
 - 全量 `backend/tests`：875 passed / 6 failed（6 例仍为既有失败，无新增回归）
 - 顺带发现（未改动，待确认）：`app/utils/ai_client.py` 顶部 `from app.utils.prompt_builder import ...` 指向的 `app/utils/prompt_builder.py` 在仓库中不存在（`git log --all` 无该文件记录），因此 `PROMPT_BUILDER_FALLBACK_ACTIVE=True` 常驻、日志固定打印 `prompt_builder 模块缺失，当前使用保守降级提示词构建`；英文场景下 `build_audit_system_prompt()` 退化为返回空串，提示词质量受损
+
+## 2026-09-23 第四轮审核准确率优化（英文语义提示词补齐与全角标点连排）
+
+- 样本基线：`当前工作区/.monkeycode/docs/cyy-human-review-baseline.json`（603 条人工批注）
+- 本轮背景：第三轮 P3 语义 prompt 增强只落在中文分支（`review_rules.SYSTEM_PROMPT_TEMPLATE` + `SEMANTIC_FEWSHOT_EXAMPLES`）；英文审核走 `ai_client.build_audit_prompt_payload()` 的内置英文 system prompt，既没有「语义质量检查」章节，输出 `category` 枚举也不含语义类目。而 `review_engine/pipeline.py` 的 `is_verifiable_ai_text_issue()` 已经把 `冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分` 列入白名单，也就是英文 AI 层「被允许但从未被要求」产出语义类问题，白名单对英文恒为空转。
+- 本轮调整内容：
+- `backend/app/utils/ai_client.py`（英文语义提示词补齐）：英文 system prompt 新增 `SEMANTIC QUALITY CHECKS` 章节，覆盖 7 个语义维度（冗余、表述不准确、信息不完整、一致性、语气、图表衔接、句子成分），逐维度指定目标 `category`；并把上述 7 个语义类目补入英文输出 `category` 枚举（issues 与 observations 两处），与中文 P3 及 pipeline 白名单对齐
+- `backend/app/api/review.py`（全角标点连排）：新增 `DOC-PUNCT-002`，识别全角标点相邻误排（`：。`、`，。`、`、。`、`；。`、`：，`、`；，`）。仅匹配无空白的紧邻组合，避免把 PDF 文本层换行/分栏造成的标点分处两行判为连排
+- `backend/app/review_engine/annotation_baseline.py`：无需改动，`DET-PUNCT-001` 的对齐逻辑用 `rule.startswith("DOC-PUNCT")`，`DOC-PUNCT-002` 自动纳入
+- 回归用例：`backend/tests/test_review_cache.py` 新增 2 例（`：。` 命中、被空白分隔时不报）；`backend/tests/test_ai_client_audit.py` 新增 1 例（英文 prompt 含 `SEMANTIC QUALITY CHECKS` 与 7 个语义类目）
+- 本地验证：
+- 审核相关套件：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py backend/tests/test_ai_client_audit.py backend/tests/test_review_engine.py backend/tests/test_prompt_semantic_dimensions.py backend/tests/test_review_false_positives.py backend/tests/test_review_optimization.py backend/tests/test_snippet_review.py backend/tests/test_review_dual_input.py -q`（334 passed）
+- 全量后端测试：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests -q`（865 passed / 6 failed / 1 skipped；6 例均为既有失败：4 例缺 docx 固件、1 例模板串不一致、1 例缺 `tesseract`）
+- 语法校验：`cd /workspace/backend && python3 -m compileall -q app`（COMPILE_OK）
+- 离线覆盖探针（`/tmp/opencode/baseline_probe.py`，对 603 条批注 context 重建伪文档后跑确定性规则）：`matched 120/603 (0.1990) -> 121/603 (0.2007)`；`DET-PUNCT-001 1/14 -> 2/14`；其余 `expected_rule` 命中数不变，无回归
+- 误报扫描（`DOC-PUNCT-002`）：仓库内全部 markdown/txt/vue 语料仅命中 3 处，其中 2 处是 `.vue` 里正则字符类的源码、1 处是 `技术文档常见错误清单与规范.md` 中列举全角标点的说明文字；真实产品文档语料零命中
+- 指标声明：离线探针只覆盖确定性规则，本轮英文语义提示词改动作用于 AI 层，探针无法体现其增量
+- 未完成项（依赖可用 LLM provider）：英文语义提示词端到端复测。本轮实测 Qwen 返回 `Arrearage`（账户欠费）、Kimi 返回 401 `Incorrect API key provided`，没有可用 AI provider，无法验证英文 AI 审核是否会稳定产出语义类问题及其误报率，留待 provider 可用后按 G99 验收方式复测
+- 风险提示：英文语义章节尚未经验收数据验证。`is_verifiable_ai_text_issue()` 会给这类问题加 6 分，若模型产出的语义问题质量不足，英文文档 Precision 可能下滑，provider 可用后应优先做英文 Precision 抽样
