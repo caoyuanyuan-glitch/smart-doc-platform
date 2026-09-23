@@ -158,8 +158,17 @@ def test_import_rules_creates_new_and_skips_existing(client):
     exported = _sheet_rows(test_client.get("/api/rules/export").content)
     assert {row[0] for row in exported[1:]} == {"R-DUP", "R-NEW"}
     new_row = next(row for row in exported[1:] if row[0] == "R-NEW")
+    # 导出显示中文标签（页面阅读用）
     assert new_row[COLUMN_INDEX["severity"]] == "致命"
     assert new_row[COLUMN_INDEX["language"]] == "中文"
+    # DB 必须存枚举值，否则严重级判断与语言过滤全部失效（P1 回归防护）
+    db = session_local()
+    try:
+        stored = db.query(RuleModel).filter(RuleModel.rule_no == "R-NEW").one()
+        assert stored.severity == "fatal"
+        assert stored.language == "cn"
+    finally:
+        db.close()
 
 
 def test_import_rules_reports_row_errors_without_aborting_valid_rows(client):
@@ -255,3 +264,70 @@ def test_bulk_json_endpoint_still_creates_rules_without_duplicates(client):
     assert response.status_code == 200
     assert response.json()["created"] == 1
     assert response.json()["total"] == 3
+
+
+def test_normalize_choice_accepts_chinese_labels_english_keys_and_uppercase():
+    from app.api.rules import _normalize_choice, SEVERITY_LABELS, LANGUAGE_LABELS
+
+    cases = [
+        # (输入, labels, 期望)
+        ("致命", SEVERITY_LABELS, "fatal"),
+        ("严重", SEVERITY_LABELS, "serious"),
+        ("一般", SEVERITY_LABELS, "general"),
+        ("建议", SEVERITY_LABELS, "suggestion"),
+        ("fatal", SEVERITY_LABELS, "fatal"),
+        ("FATAL", SEVERITY_LABELS, "fatal"),
+        ("Serious", SEVERITY_LABELS, "serious"),
+        ("中文", LANGUAGE_LABELS, "cn"),
+        ("英文", LANGUAGE_LABELS, "en"),
+        ("中英通用", LANGUAGE_LABELS, "both"),
+        ("cn", LANGUAGE_LABELS, "cn"),
+        ("CN", LANGUAGE_LABELS, "cn"),
+        ("", SEVERITY_LABELS, "general"),
+        (None, SEVERITY_LABELS, "general"),
+        ("很重要", SEVERITY_LABELS, None),
+        ("EN-CN", LANGUAGE_LABELS, None),
+    ]
+    for raw, labels, expected in cases:
+        default = "general" if labels is SEVERITY_LABELS else "both"
+        assert _normalize_choice(raw, labels, default) == expected, f"raw={raw!r}"
+
+    # 默认值回落
+    assert _normalize_choice("", SEVERITY_LABELS, "suggestion") == "suggestion"
+
+
+def test_import_export_roundtrip_keeps_enum_values(client):
+    """导出（中文标签文件）直接回导，DB 枚举值必须保持不变。"""
+    test_client, session_local = client
+    db = session_local()
+    try:
+        db.add(RuleModel(
+            rule_no="RT-001", category="拼写", description="回灌测试", regex=r"\bteh\b",
+            example="teh", suggestion="the", audit_basis="依据",
+            severity="serious", language="en",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    # 1. 导出 -> 中文标签 xlsx
+    exported = test_client.get("/api/rules/export")
+    assert exported.status_code == 200
+
+    # 2. 原样回导
+    response = test_client.post(
+        "/api/rules/import",
+        files={"file": ("roundtrip.xlsx", exported.content, XLSX_MEDIA_TYPE)},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["duplicates"] == 1  # 同 rule_no 应全部跳过，不产生污染副本
+
+    # 3. DB 仍为枚举值
+    db = session_local()
+    try:
+        stored = db.query(RuleModel).filter(RuleModel.rule_no == "RT-001").one()
+        assert stored.severity == "serious"
+        assert stored.language == "en"
+    finally:
+        db.close()

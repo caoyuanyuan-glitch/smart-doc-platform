@@ -51,7 +51,10 @@ def _normalize_choice(raw, labels, default):
     if text in labels:
         return text
     lowered = text.lower()
-    if lowered in labels.values():
+    for key, label in labels.items():
+        if label == lowered or label.lower() == lowered:
+            return key  # 中文标签 -> 枚举 key
+    if lowered in labels:
         return lowered
     return None
 
