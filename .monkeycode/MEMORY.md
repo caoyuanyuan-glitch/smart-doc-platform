@@ -69,7 +69,9 @@ Git 与自检工作流
   - 白天可以随时 commit，17:50 统一检查并逐分支执行 `git push origin <branch>`
   - 未收到用户明确推送指令前，不主动执行 `git push`
   - 每次完成代码修改后先做本地自检，再通知用户进行平台侧验证
-  - 若 `git push` 报 `credential helper: server returned status 500`（`/app/agent/bin/agent git-credential-helper` 不可用），改用 `gh auth login --hostname github.com --git-protocol https --web` 设备流授权，用户确认后执行 `gh auth setup-git`，再重新 push
+  - `git push` 报 500 的两种成因：`credential helper: server returned status 500` 表示 `/app/agent/bin/agent git-credential-helper` 不可用，改用 `gh auth login --hostname github.com --git-protocol https --web` 授权后 `gh auth setup-git` 再 push；`send-pack: unexpected disconnect` 表示 push 参数不被支持，GitHub 不认 GitLab 的 `-o merge_request.*` 语法，去掉 `-o` 重推
+  - `gh` 默认未登录，可从 git 凭据助手取 bot token：`TOKEN=$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p')`，再用 `GH_TOKEN="$TOKEN" gh pr create ...`。token 只经环境变量传递，不落盘、不输出
+  - PR 相关查询：`gh pr list --state open --json number,title,url,headRefName` 取链接；`gh pr view <n> --json state,mergedAt,mergeCommit` 看是否合并；`git merge-base --is-ancestor <commit> origin/main` 核验提交是否真进了主干
 
 前后端自验命令
 - Date: 2026-08-25
