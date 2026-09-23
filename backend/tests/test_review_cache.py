@@ -2329,13 +2329,13 @@ def test_pipeline_filters_visual_layout_external_rule_issue():
     assert selected == []
 
 
-def test_run_english_heuristic_audit_detects_this_instructions_grammar_issue():
+def test_run_english_heuristic_audit_keeps_instructions_for_use_title():
     issues = review_api._run_english_heuristic_audit(
         "This instructions for use describes how to perform sequencing.",
         file_type="pdf",
     )
 
-    assert any(issue.get("rule") == "GRAMMAR-007" for issue in issues)
+    assert not any(issue.get("rule") == "GRAMMAR-007" for issue in issues)
 
 
 def test_run_english_heuristic_audit_keeps_official_global_site():

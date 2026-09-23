@@ -9651,17 +9651,6 @@ def _run_english_heuristic_audit(content, file_type=None):
     for match in re.finditer(r"\bmake\s+total\s+volume\b", content, re.IGNORECASE):
         add_issue(match, "GRAMMAR-004", "语法", "建议改为 make a total volume 或 make the total volume", "total volume 前建议添加冠词。", "英语语法规范 - 冠词")
 
-    for match in re.finditer(r"\bThis\s+instructions\s+for\s+use\s+describes\b", content, re.IGNORECASE):
-        add_issue(
-            match,
-            "GRAMMAR-007",
-            "语法",
-            "建议改为 These instructions for use describe",
-            "instructions 为复数名词，谓语和指示代词应保持一致。",
-            "英语语法规范 - 主谓一致",
-            "serious",
-        )
-
     please_replacements = {
         'please contact': 'contact technical support',
         'please use with caution': 'Use with caution',
