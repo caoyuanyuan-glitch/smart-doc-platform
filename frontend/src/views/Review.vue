@@ -2200,21 +2200,27 @@ function formatSize(size) {
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '-'
-  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(dateStr)
-    ? dateStr
-    : `${dateStr}Z`
+  const raw = String(dateStr).trim()
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(raw)
+    ? raw
+    : `${raw}Z`
   const date = new Date(normalized)
-  if (Number.isNaN(date.getTime())) return String(dateStr).replace('T', ' ').slice(0, 19)
-  return new Intl.DateTimeFormat('zh-CN', {
+  if (Number.isNaN(date.getTime())) return raw.replace('T', ' ').slice(0, 19)
+  // 与翻译历史、润色历史、知识库保持一致，统一输出 YYYY/MM/DD HH:mm:ss（北京时间）
+  const parts = new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
     timeZone: 'Asia/Shanghai',
-  }).format(date).replace(/\//g, '-')
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value
+    return acc
+  }, {})
+  return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
 }
 
 function beforeUpload(file) {
