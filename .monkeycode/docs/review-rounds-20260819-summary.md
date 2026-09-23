@@ -489,3 +489,53 @@
 - 同批误报：`Yes is selected by default.` 里的 `is` 也是同一条旧规则（把 `Yes` 的词尾 s 当复数），截图里高亮的 `is`、`Are` 均属此类，新版均为 0 条
 - 结论：该反馈与「are 误报」是同一根因，已在 `run_grammar` 重写中修复，无需再改规则；用户侧需重启后端进程才会生效
 - 附带发现（未改动，待确认）：审核模块另有一条独立规则 `review.py` `GRAMMAR-007`，匹配 `This instructions for use describes` 并建议改为 `These instructions for use describe`。该规则只命中 `describes` 一种续接，同一份文档里同样结构的 `This instructions for use is applicable`、`This instructions for use and the information ... are` 等 10 处均不命中；MGI 句中用 `its contents` 单数指代，属把 Instructions for Use 当作单数标题的固定写法；603 条人工审核基线中无任何一条涉及该句式。据此判断为误报（每份文档各 1 条），是否移除待用户确认
+
+## 2026-09-23 规则管理页导入/导出修复
+
+- 用户反馈三个问题，先确认在最新 `main` 上均未修复，再修复：
+- 创建时间格式：`Review.vue` 规则表 `created_at` 列直接输出原始 ISO 串（`2026-09-23T07:04:23`），未调用同页已有的 `formatDateTime()`；改为该列走 `formatDateTime`，与「上传时间」列口径一致
+- 导出失败（`GET /api/rules/export` 返回 422）：`backend/app/api/rules.py` 把 `/export` 注册在 `/{rule_id}` 之后，FastAPI 按注册顺序匹配，`/api/rules/export` 被 `/{rule_id}` 抢先匹配，`rule_id: int` 解析 `"export"` 抛 `int_parsing`。修复为静态路径（`/bulk`、`/export`）统一注册在 `/{rule_id}` 之前
+- 导出完整性：`GET /rules/export` 原先走 `get_rules(db)`，默认 `limit=100`，规则库超过 100 条会被静默截断，改为 `limit=10000`
+- 导出字段：原导出只含 7 个字段，缺 `severity`/`language`，导出再导入会丢这两项；补入后导出文件可完整回灌
+- 导入失败（双重问题）：导入控件把文件以 multipart POST 到 `/api/rules/bulk`，但该接口签名是 `rules: list[RuleCreate]`（JSON 数组），实测 multipart 返回 422 `list_type`；且 `el-upload` 只配了 `on-success`、没有 `on-error`，失败时页面无任何提示
+- `crud.rule.bulk_create_rules`：增加同批 `rule_no` 去重（`rule_no` 唯一），否则同一文件内重复项会 `add_all + commit` 触发唯一约束错误
+- 排查方法记录：本机验证该接口不能用 `sqlite://` 内存库配 `TestClient`（请求在独立线程，内存库按线程各自新建导致 `no such table`），需 `poolclass=StaticPool` + `check_same_thread=False` 共享同一连接
+
+## 2026-09-23 规则库导入导出改为 Excel
+
+- 用户反馈「规则都是 JSON 文件，本地难以维护」，选定方案：导入导出统一改成 Excel，不再使用 JSON
+- `backend/app/api/rules.py`：导出 `GET /export` 返回 `.xlsx`（`StreamingResponse` + openpyxl），列序与页面字段一致：规则编号/分类/规则描述/正则/示例/建议/审核依据/严重程度/语言，首行冻结、表头加粗、单元格自动换行
+- 导出把 `severity`/`language` 枚举值写成中文标签（致命/严重/一般/建议、中文/英文/中英通用），便于在 Excel 里直接阅读与填写
+- 新增 `GET /import-template`：返回 `rules_import_template.xlsx`，含「规则库」（空表头）与「填写说明」（列名、是否必填、说明、示例值）两个工作表；不再由前端拼 JSON 模板
+- 新增 `POST /import`：接收 multipart 上传的 `.xlsx`，按表头名定位列（不依赖列顺序），逐行校验必填列（规则编号/分类/规则描述/正则）与枚举取值，返回 `created`/`duplicates`/`total`/`errors`；单行错误不中断其它行，`errors` 带行号与中文原因
+- 导入时 `severity`/`language` 同时接受中文标签与英文枚举值，留空分别按 `general`/`both` 处理；非 `.xlsx`、无法解析、缺必需列、内容为空均返回 400 并给出中文提示
+- 前端 `rulesAPI`：`export`/`downloadTemplate` 改 `responseType: 'blob'`，新增 `importExcel`；移除已无调用方的 `bulkCreate`
+- `Review.vue`：导入上传走 `/rules/import`（`accept=".xlsx"`），失败提示改用已有的 `getBlobErrorMessage`（blob 响应里的 `detail` 需先读文本再解析）；导入结果按「成功导入 N 条 / 跳过 M 条已存在 / 若干行未导入（前 3 条带行号）」分别提示
+- `Review.vue` 补齐 `severity`：规则表格新增「严重程度」列，新增/编辑弹窗新增下拉选择，`ruleForm` 与 `editRule` 补字段；顺带修复「添加规则」按钮不复位 `editingRule` 导致新弹窗仍处于编辑态的问题（新增 `openRuleDialog`）
+- `backend/tests/test_rules_api.py` 重写为 10 例（静态路由注册在 `/{rule_id}` 之前、导出 xlsx 含中文 severity/language、导出不被默认分页截断、模板含两个工作表、导入新建并跳过已存在、按行报错且不中断、缺必需列 400、非 xlsx 400、动态 `/{rule_id}` 仍可用、`POST /bulk` JSON 行为保持不变）；`pytest tests/test_rules_api.py -q` 10 passed
+- 真实端到端（uvicorn + 真实种子库，`admin` 登录）：导出 29 条 → 模板含两表 → 导入含 1 新建 + 29 重复 + 2 非法行的文件，返回 `created=1/duplicates=29/errors=2`（行号 32、33）→ 重导 `created=0/duplicates=30` → 导出回读新规则 severity=严重、language=英文，回灌无损 → 非 xlsx 400 → 删除临时规则，库恢复 29 条
+- 验证链路：`/api/rules/export` 与 `/api/rules/import-template` 在直连后端、vite 代理（5173）、预览网关三处均 200；`frontend` `npm run build` 通过
+- 关联：上一节遗留的 `GRAMMAR-007` 已按用户确认移除，随 PR #135 合入 `main`
+
+## 2026-09-23 外部评审规则种子改为 Excel
+
+- 承接上一节：用户指出的「规则都是 JSON 文件，本地难以维护」还包括启动种子 `backend/seed/review_rule_library_seed.json`，一并转为 Excel
+- 新增 `backend/seed/review_rule_library_seed.xlsx`：`规则库` 工作表（规则ID/分类/严重程度/规则内容/适用场景/已同步，29 条）+ `元信息` 工作表（来源、导出日期）两列键值行，无表头
+- 转换无损性已逐项核对：29 条规则的 `rule_id`/`category`/`severity`/`rule_content`/`applicable_scenarios`/`synced` 与 `git show HEAD` 里的原 JSON 完全一致，元信息一致，0 处差异
+- `crud/rule.py`：`REVIEW_RULE_LIBRARY_SEED_PATH` 指向 `.xlsx`；新增 `_load_review_rule_library_seed()` 用 openpyxl 读取，按表头名定位列（不依赖列顺序），`适用场景` 按 `、` 拆回列表；`seed_external_review_rules` 改为消费该结构，`source`/`export_date` 取自 `元信息` 工作表
+- 移除已无引用的 `import json`；`review.py` 的 `REVIEW_CACHE_VERSION_FILES` 与 `test_review_cache.py` 的断言路径同步改为 `.xlsx`（缓存指纹用 mtime+size，二进制文件同样适用；改种子会让既有审核缓存失效，属预期）
+- 原 `review_rule_library_seed.json` 已删除（git 历史可回溯）。取舍说明：二进制 xlsx 在代码评审时无法直接看 diff，换来人可以在 Excel 里直接维护
+- `test_review_cache.py`：原 seed 用例的假路径（`read_text`）改为用 `tmp_path` 写真 xlsx；新增 2 例——随包种子能读出 29 条规则与元信息、`example`/`audit_basis` 确实取自 `元信息` 工作表
+- 回归：全量 `backend/tests` 874 passed / 6 failed（6 例仍为既有失败）；另用空库直接调用 `seed_external_review_rules` 验证 `created=29`、二次调用 `0`（幂等）；重启真实后端无报错，`GET /api/rules/export` 仍为 29 条且内容、severity、language 不变
+
+## 2026-09-23 修复英文文本片段审核 AI 结果被全部丢弃
+
+- 现象：配置 DeepSeek 后做英文「文本片段审核」，AI 调用成功（`audit_chunk.providers.deepseek=1`、`chunk issue_count=3`），页面却始终 0 条问题
+- 根因：`review.py` `_is_snippet_scope_issue` 对 `source == "ai"` 的问题只匹配中文关键词（`句子|用词|拼写|语法|术语|标点|可读`），且只看 `category + rule + description`。本项目的 AI 在片段模式下把语言问题写进 `rule` 字段（如 `Subject-verb agreement: ...`）、`category` 为「其他」、`description` 为空，于是三条真实语法错误被 `_filter_snippet_scope_issues` 全部判为越界，日志 `文本片段范围过滤: 3 -> 0`
+- 该规则对中文同样脆弱：只要 AI 把描述放在 `rule` 而非 `description`，中文语言问题也会被丢弃
+- 修复：`_is_snippet_scope_issue` 的 AI 分支补充英文语言错误词表（`grammar|spelling|spell|typo|punctuat|capitali[sz]|subject-verb|agreement|tense|plural|singular|verb|noun|pronoun|preposition|word choice|wording|terminolog|typograph|readab|clarity|phrasing`，加 `re.IGNORECASE`），保持在既有的「白名单命中才保留」结构内，越界英文问题（交叉引用、安全合规、版式等）仍被剔除
+- 边界未动：`对比审核` 子页签本就是确定性比对、不调用 AI，因此没有模型下拉属设计如此；`文本片段审核范围` basis 也已明确限定 AI 只报句子级语法/拼写/术语问题
+- 回归测试：`test_snippet_review.py` 新增 `test_snippet_scope_keeps_english_ai_grammar_issues`（3 条英文 AI 语法/拼写问题保留 + 3 条越界英文问题剔除）；`pytest tests/test_snippet_review.py -q` 23 passed
+- 真实端到端（重启后端 + DeepSeek）：同一英文片段 `The instrument are ready for use. Please confirm the settings before you starts the run. This instructions for use describes the installation procedure.` 由修复前 `total=0` 变为 `total=3`，`issue_flow.ai_input_count=3 / after_pipeline=3 / after_visual_verification=3`，三条分别命中主谓一致、`before you` 后动词原形、`This instructions` 指示代词与主谓一致
+- 全量 `backend/tests`：875 passed / 6 failed（6 例仍为既有失败，无新增回归）
+- 顺带发现（未改动，待确认）：`app/utils/ai_client.py` 顶部 `from app.utils.prompt_builder import ...` 指向的 `app/utils/prompt_builder.py` 在仓库中不存在（`git log --all` 无该文件记录），因此 `PROMPT_BUILDER_FALLBACK_ACTIVE=True` 常驻、日志固定打印 `prompt_builder 模块缺失，当前使用保守降级提示词构建`；英文场景下 `build_audit_system_prompt()` 退化为返回空串，提示词质量受损

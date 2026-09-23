@@ -162,7 +162,7 @@ def test_review_cache_version_tracks_review_basis_files():
         assert path in review_api.REVIEW_CACHE_VERSION_FILES
 
     assert review_api.PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py" in review_api.REVIEW_CACHE_VERSION_FILES
-    assert review_api.PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json" in review_api.REVIEW_CACHE_VERSION_FILES
+    assert review_api.PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.xlsx" in review_api.REVIEW_CACHE_VERSION_FILES
 
 
 def test_select_relevant_ai_review_basis_prefers_es_sections(monkeypatch):
@@ -287,18 +287,37 @@ def test_find_cached_completed_review_matches_cache_key(monkeypatch):
     assert summary["total"] == 3
 
 
-def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
-    payload = {
-        "source": "外部评审规则库",
-        "export_date": "2026-08-17",
-        "rules": [{
-            "rule_id": "R013",
-            "rule_content": "标点符号使用必须符合规范",
-            "category": "格式",
-            "severity": "一般",
-            "applicable_scenarios": ["PDF"],
-        }],
-    }
+def _write_seed_workbook(path, rules, source="外部评审规则库", export_date="2026-08-17"):
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = crud_rule.REVIEW_RULE_LIBRARY_SEED_SHEET
+    sheet.append([title for title in crud_rule.REVIEW_RULE_LIBRARY_SEED_COLUMNS.values()])
+    for rule in rules:
+        sheet.append([
+            rule["rule_id"],
+            rule.get("category", ""),
+            rule.get("severity", ""),
+            rule.get("rule_content", ""),
+            "、".join(rule.get("applicable_scenarios") or []),
+            "",
+        ])
+    meta = workbook.create_sheet(crud_rule.REVIEW_RULE_LIBRARY_SEED_META_SHEET)
+    meta.append(("来源", source))
+    meta.append(("导出日期", export_date))
+    workbook.save(path)
+    return path
+
+
+def test_seed_external_review_rules_updates_existing_rule(monkeypatch, tmp_path):
+    seed_path = _write_seed_workbook(tmp_path / "seed.xlsx", [{
+        "rule_id": "R013",
+        "rule_content": "标点符号使用必须符合规范",
+        "category": "格式",
+        "severity": "一般",
+        "applicable_scenarios": ["PDF"],
+    }])
     existing = SimpleNamespace(
         rule_no="EXT-R013",
         category="旧分类",
@@ -316,10 +335,7 @@ def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
     monkeypatch.setattr(
         crud_rule,
         "REVIEW_RULE_LIBRARY_SEED_PATH",
-        SimpleNamespace(
-            exists=lambda: True,
-            read_text=lambda encoding="utf-8": json.dumps(payload, ensure_ascii=False),
-        ),
+        seed_path,
     )
     monkeypatch.setattr(crud_rule, "get_rule_by_no", lambda db_obj, rule_no: existing if rule_no == "EXT-R013" else None)
 
@@ -332,6 +348,46 @@ def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
     # 外部规则库是中文评审规则库，语义类规则不参与匹配且按中文规则处理
     assert existing.language == "cn"
     assert commits == [True]
+
+
+def test_shipped_seed_workbook_loads_all_rules():
+    meta, rules = crud_rule._load_review_rule_library_seed()
+
+    assert len(rules) == 29
+    assert meta["来源"] == "飞书多维表格 - 技术文档评审规则库"
+    assert meta["导出日期"] == "2026-06-18"
+    assert rules[0]["rule_id"] == "R001"
+    assert rules[0]["applicable_scenarios"] == ["通用"]
+    assert all(rule["rule_id"] and rule["rule_content"] for rule in rules)
+
+
+def test_seed_external_review_rules_reads_provenance_from_meta_sheet(monkeypatch, tmp_path):
+    seed_path = _write_seed_workbook(
+        tmp_path / "seed.xlsx",
+        [{
+            "rule_id": "R900",
+            "rule_content": "标点符号使用必须符合规范",
+            "category": "格式",
+            "severity": "严重",
+            "applicable_scenarios": ["仪器说明书", "试剂说明书"],
+        }],
+        source="测试规则库",
+        export_date="2026-01-02",
+    )
+    added = []
+    db = SimpleNamespace(add=added.append, commit=lambda: None)
+
+    monkeypatch.setattr(crud_rule, "REVIEW_RULE_LIBRARY_SEED_PATH", seed_path)
+    monkeypatch.setattr(crud_rule, "get_rule_by_no", lambda db_obj, rule_no: None)
+
+    created = crud_rule.seed_external_review_rules(db)
+
+    assert created == 1
+    rule = added[0]
+    assert rule.rule_no == "EXT-R900"
+    assert rule.severity == "serious"
+    assert rule.example == "来源: 测试规则库 | 适用场景: 仪器说明书、试剂说明书"
+    assert rule.audit_basis == "测试规则库 | 导出日期: 2026-01-02"
 
 
 def test_convert_rule_content_to_regex_never_derives_pattern_from_prose():

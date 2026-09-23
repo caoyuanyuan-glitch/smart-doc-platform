@@ -60,6 +60,39 @@ def test_snippet_scope_keeps_sentence_level_writing_issues():
     assert 'DOC-REV-001' not in {item['rule'] for item in result}
 
 
+def test_snippet_scope_keeps_english_ai_grammar_issues():
+    """英文片段里 AI 把语言问题写进 rule 字段（category 为「其他」）时不得被丢弃。"""
+    kept = [
+        {
+            'category': '其他',
+            'rule': "Subject-verb agreement: singular subject 'instrument' requires singular verb 'is'.",
+            'source': 'ai',
+            'description': '',
+        },
+        {
+            'category': '其他',
+            'rule': "Demonstrative and verb agreement: plural noun 'instructions' requires 'These'.",
+            'source': 'ai',
+            'description': '',
+        },
+        {
+            'category': '其他',
+            'rule': 'Spelling: "recieve" should be "receive".',
+            'source': 'ai',
+            'description': '',
+        },
+    ]
+    out_of_scope = [
+        {'category': '其他', 'rule': 'Cross-reference: referenced chapter is missing.', 'source': 'ai', 'description': ''},
+        {'category': '其他', 'rule': 'Safety compliance: bilingual safety notice is missing.', 'source': 'ai', 'description': ''},
+        {'category': '其他', 'rule': 'Layout: font size differs across sections.', 'source': 'ai', 'description': ''},
+    ]
+
+    result = review_api._filter_snippet_scope_issues(kept + out_of_scope)
+
+    assert [item['rule'] for item in result] == [item['rule'] for item in kept]
+
+
 def test_prepare_snippet_text_rejects_empty_and_oversize():
     with pytest.raises(HTTPException) as empty_exc:
         review_api._prepare_snippet_text('   ')

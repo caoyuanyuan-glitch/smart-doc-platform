@@ -99,7 +99,7 @@ REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "document_parser.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "spell_checker.py",
-    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json",
+    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.xlsx",
     Path(__file__).resolve(),
 ] + REVIEW_BASIS_VERSION_FILES
 REVIEW_PROMPT_VERSION = "review-prompt-v3"
@@ -332,7 +332,15 @@ def _is_snippet_scope_issue(issue):
     source = str(_issue_value(issue, "source", "") or "").lower()
     if source in {"spellcheck", "term", "grammar"}:
         return True
-    if source == "ai" and re.search(r"句子|用词|拼写|语法|术语|标点|可读", blob):
+    if source == "ai" and re.search(
+        r"句子|用词|拼写|语法|术语|标点|可读|"
+        r"grammar|spelling|\bspell\b|typo|punctuat|capitali[sz]|"
+        r"subject[- ]verb|\bagreement\b|\btense\b|\bplural\b|\bsingular\b|"
+        r"\bverb\b|\bnoun\b|\bpronoun\b|\bpreposition\b|"
+        r"word choice|wording|terminolog|typograph|readab|clarity|phrasing",
+        blob,
+        re.IGNORECASE,
+    ):
         return True
     return False
 

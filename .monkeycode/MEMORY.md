@@ -69,7 +69,9 @@ Git 与自检工作流
   - 白天可以随时 commit，17:50 统一检查并逐分支执行 `git push origin <branch>`
   - 未收到用户明确推送指令前，不主动执行 `git push`
   - 每次完成代码修改后先做本地自检，再通知用户进行平台侧验证
-  - 若 `git push` 报 `credential helper: server returned status 500`（`/app/agent/bin/agent git-credential-helper` 不可用），改用 `gh auth login --hostname github.com --git-protocol https --web` 设备流授权，用户确认后执行 `gh auth setup-git`，再重新 push
+  - `git push` 报 500 的两种成因：`credential helper: server returned status 500` 表示 `/app/agent/bin/agent git-credential-helper` 不可用，改用 `gh auth login --hostname github.com --git-protocol https --web` 授权后 `gh auth setup-git` 再 push；`send-pack: unexpected disconnect` 表示 push 参数不被支持，GitHub 不认 GitLab 的 `-o merge_request.*` 语法，去掉 `-o` 重推
+  - `gh` 默认未登录，可从 git 凭据助手取 bot token：`TOKEN=$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p')`，再用 `GH_TOKEN="$TOKEN" gh pr create ...`。token 只经环境变量传递，不落盘、不输出
+  - PR 相关查询：`gh pr list --state open --json number,title,url,headRefName` 取链接；`gh pr view <n> --json state,mergedAt,mergeCommit` 看是否合并；`git merge-base --is-ancestor <commit> origin/main` 核验提交是否真进了主干
 
 前后端自验命令
 - Date: 2026-08-25
@@ -80,6 +82,7 @@ Git 与自检工作流
   - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
   - 当前工作区前端预览启动使用 `cd /workspace/frontend && npm run dev -- --host 0.0.0.0 --port 5173`
   - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+  - 后台终端（`background_terminal_create`）的 shell 里没有 `python`，需使用 `python3`；前端 `npm run build` 必须先跑过一次 `npm ci`，否则报 `vite: not found`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
@@ -162,6 +165,7 @@ Word 转 DITA 批量转换基线规则
   - 当前环境若缺少测试依赖，先安装 `backend/requirements.txt`，并补装 `pytest` 与 `httpx`
   - 真实文档端到端审核测试：`cd /workspace/backend && PYTHONPATH=/workspace/backend uvicorn app.main:app --host 127.0.0.1 --port 8000`；启动时会自动建表、种子默认/外部评审规则与预置误报记忆
   - 开发环境启动后自动创建引导管理员 `admin` / `admin123`（`APP_ENV` 非生产时密码会被强制校正为该值）
+  - 登录接口走 OAuth2 表单而非 JSON：`curl -s -X POST http://127.0.0.1:8000/api/auth/login -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=admin&password=admin123'`，取响应里的 `access_token` 作为 `Authorization: Bearer` 头做接口级端到端验证
   - 人工批注提取：`python3 backend/scripts/extract_pdf_annotations.py <带批注PDF> <输出.md>`，同编号带 `Tina` 后缀的 PDF 即人工意见来源
   - 起草流程：`POST /api/documents/upload/` 上传 → `POST /api/review/{document_id}?mode=hybrid` 建任务 → 轮询 `GET /api/review/{id}/progress` 直到 `completed`
   - 与人工意见对比：`PYTHONPATH=/workspace/backend python3 backend/scripts/evaluate_review.py --review-id <id> --human-baseline <人工意见.md>`，脚本会按文件名自动剥离 ` Tina` 后缀做归属

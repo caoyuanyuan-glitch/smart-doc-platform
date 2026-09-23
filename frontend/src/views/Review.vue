@@ -1056,16 +1056,17 @@
       <h2 class="page-title">规则管理</h2>
       <div class="table-section">
         <div class="table-header-actions">
-          <el-button type="primary" @click="showRuleDialog = true">添加规则</el-button>
+          <el-button type="primary" @click="openRuleDialog">添加规则</el-button>
           <el-button @click="exportRules">导出规则库</el-button>
+          <el-button @click="downloadRulesTemplate">下载导入模板</el-button>
           <el-upload
             class="upload-btn"
-            :action="rulesImportUrl"
-            :on-success="handleRulesImport"
-            :before-upload="beforeRulesUpload"
-            accept=".json"
+            :show-file-list="false"
+            :auto-upload="false"
+            :on-change="handleRulesFileChange"
+            accept=".xlsx"
           >
-            <el-button>批量导入规则</el-button>
+            <el-button>导入规则库</el-button>
           </el-upload>
           <el-button v-if="selectedRules.length > 0" type="danger" @click="batchDeleteRules">批量删除</el-button>
         </div>
@@ -1089,10 +1090,15 @@
           <el-table-column prop="example" label="示例" width="160" />
           <el-table-column prop="suggestion" label="建议" width="150" />
           <el-table-column prop="audit_basis" label="审核依据" width="180" />
+          <el-table-column prop="severity" label="严重程度" width="100">
+            <template #default="scope">{{ severityLabel(scope.row.severity) }}</template>
+          </el-table-column>
           <el-table-column prop="language" label="语言" width="100">
             <template #default="scope">{{ languageLabel(scope.row.language) }}</template>
           </el-table-column>
-          <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom" />
+          <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom">
+            <template #default="scope">{{ formatDateTime(scope.row.created_at) }}</template>
+          </el-table-column>
           <el-table-column label="操作" width="180">
             <template #default="scope">
               <el-button size="small" @click="editRule(scope.row)">编辑</el-button>
@@ -1124,6 +1130,14 @@
           </el-form-item>
           <el-form-item label="审核依据">
             <el-input v-model="ruleForm.audit_basis" placeholder="审核依据来源" />
+          </el-form-item>
+          <el-form-item label="严重程度">
+            <el-select v-model="ruleForm.severity" placeholder="请选择严重程度">
+              <el-option label="致命" value="fatal" />
+              <el-option label="严重" value="serious" />
+              <el-option label="一般" value="general" />
+              <el-option label="建议" value="suggestion" />
+            </el-select>
           </el-form-item>
           <el-form-item label="语言">
             <el-select v-model="ruleForm.language" placeholder="请选择语言">
@@ -1243,7 +1257,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage } from '@/api'
+import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage, getBlobErrorMessage } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
@@ -1635,13 +1649,12 @@ function providerDisplayName(provider) {
   return names[provider] || provider.toUpperCase()
 }
 const editingRule = ref(null)
-const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
+const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' })
 const transferRuleDialogVisible = ref(false)
 const transferRuleSourceIssue = ref(null)
 const transferRuleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
 
 const selectedRules = ref([])
-const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
 const reviewMode = ref('hybrid')
@@ -2424,13 +2437,59 @@ function upsertReviewSnapshot(targetList, review) {
   targetList.value = next.sort((left, right) => (right.id || 0) - (left.id || 0))
 }
 
-function beforeRulesUpload(file) {
-  const ext = file.name.split('.').pop().toLowerCase()
-  if (ext !== 'json') {
-    ElMessage.error('仅支持 JSON 格式文件')
-    return false
+function saveBlobResponse(response, fallbackName) {
+  const disposition = response.headers?.['content-disposition'] || ''
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
+  const fileName = match ? decodeURIComponent(match[1]) : fallbackName
+  const url = URL.createObjectURL(response.data)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+async function downloadRulesTemplate() {
+  try {
+    const response = await rulesAPI.downloadTemplate()
+    saveBlobResponse(response, 'rules_import_template.xlsx')
+    ElMessage.success('模板已下载，按模板填写后导入')
+  } catch (error) {
+    ElMessage.error(`下载模板失败: ${await getBlobErrorMessage(error, '下载模板失败')}`)
   }
-  return true
+}
+
+async function handleRulesFileChange(uploadFile) {
+  const file = uploadFile?.raw
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.xlsx')) {
+    ElMessage.error('仅支持 .xlsx 格式的 Excel 文件')
+    return
+  }
+  try {
+    const response = await rulesAPI.importExcel(file)
+    const created = Number(response.data?.created)
+    const duplicates = Number(response.data?.duplicates) || 0
+    const errors = Array.isArray(response.data?.errors) ? response.data.errors : []
+    const imported = Number.isFinite(created) ? created : 0
+    if (imported > 0) {
+      ElMessage.success(`成功导入 ${imported} 条规则${duplicates > 0 ? `，跳过 ${duplicates} 条已存在的规则` : ''}`)
+    } else if (!errors.length && duplicates > 0) {
+      ElMessage.warning(`没有新增规则，${duplicates} 条规则编号已存在`)
+    }
+    if (errors.length) {
+      const detail = errors.slice(0, 3).map(item => `第 ${item.row} 行：${item.message}`).join('；')
+      ElMessage.warning(`${errors.length} 行未导入。${detail}${errors.length > 3 ? ' 等' : ''}`)
+    }
+    if (!imported && !errors.length && !duplicates) {
+      ElMessage.warning('文件中没有可导入的规则')
+    }
+    loadRules()
+  } catch (error) {
+    ElMessage.error(`导入失败: ${getAPIErrorMessage(error)}`)
+  }
 }
 
 async function uploadDocument(options) {
@@ -2466,11 +2525,6 @@ async function uploadDocument(options) {
       uploadProgressText.value = ''
     }, 600)
   }
-}
-
-function handleRulesImport(response) {
-  ElMessage.success(`成功导入 ${response.message || '多条'} 规则`)
-  loadRules()
 }
 
 function findPairedVisualDocumentId(documentId) {
@@ -3459,16 +3513,23 @@ async function deleteDocument(id) {
 
 function editRule(row) {
   editingRule.value = row
-    ruleForm.value = {
-      rule_no: row.rule_no || '',
-      category: row.category || '',
-      description: row.description || '',
-      regex: row.regex || '',
-      example: row.example || '',
-      suggestion: row.suggestion || '',
-      audit_basis: row.audit_basis || '',
-      language: row.language || 'both'
-    }
+  ruleForm.value = {
+    rule_no: row.rule_no || '',
+    category: row.category || '',
+    description: row.description || '',
+    regex: row.regex || '',
+    example: row.example || '',
+    suggestion: row.suggestion || '',
+    audit_basis: row.audit_basis || '',
+    severity: row.severity || 'general',
+    language: row.language || 'both'
+  }
+  showRuleDialog.value = true
+}
+
+function openRuleDialog() {
+  editingRule.value = null
+  ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' }
   showRuleDialog.value = true
 }
 
@@ -3496,7 +3557,7 @@ async function saveRule() {
     }
     showRuleDialog.value = false
     editingRule.value = null
-    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' }
+    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' }
     loadRules()
   } catch (error) {
     ElMessage.error('保存失败: ' + (error.response?.data?.detail || error.message))
@@ -3539,19 +3600,10 @@ async function batchDeleteRules() {
 async function exportRules() {
   try {
     const response = await rulesAPI.export()
-    const dataStr = JSON.stringify(response.data, null, 2)
-    const blob = new Blob([dataStr], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `rules_export_${new Date().toISOString().slice(0, 10)}.json`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
+    saveBlobResponse(response, `rules_export_${new Date().toISOString().slice(0, 10)}.xlsx`)
     ElMessage.success('导出成功')
   } catch (error) {
-    ElMessage.error('导出失败')
+    ElMessage.error(`导出失败: ${await getBlobErrorMessage(error, '导出失败')}`)
   }
 }
 
