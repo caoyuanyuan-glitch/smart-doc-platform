@@ -1293,7 +1293,9 @@ const dialogCategories = computed(() => {
 })
 const filteredDialogIssues = computed(() => {
   const list = taskIssues[currentTaskId.value] || []
+  const showFalsePositives = issueFilter.status === 'false_positive'
   return list.filter(i => {
+    if (issueHiddenByJudgment(i, { showFalsePositives })) return false
     if (issueFilter.category && i.category !== issueFilter.category) return false
     if (issueFilter.status && (i.status || 'pending') !== issueFilter.status) return false
     if (issueFilter.severity && i.severity !== issueFilter.severity) return false
@@ -1313,7 +1315,7 @@ const pagedDialogIssues = computed(() => {
 const historyReviews = computed(() => (reviews.value || []).filter(review => review.status === 'completed'))
 const suspectedFalsePositiveCount = computed(() => {
   const list = taskIssues[currentTaskId.value] || []
-  return list.filter(item => issueHasFlag(item, 'possible_false_positive')).length
+  return list.filter(item => !issueHiddenByJudgment(item) && issueHasFlag(item, 'possible_false_positive')).length
 })
 const pagedReviews = computed(() => {
   const start = (taskPage.value - 1) * taskPageSize.value
@@ -1746,17 +1748,20 @@ const issueStats = computed(() => {
 const reportStats = computed(() => {
   const stats = { fatal: 0, serious: 0, general: 0, suggestion: 0 }
   issues.value.forEach(issue => {
+    if (issueHiddenByJudgment(issue)) return
     if (stats[issue.severity] !== undefined) stats[issue.severity]++
   })
   return stats
 })
 
 const reportIssues = computed(() => {
-  return issues.value.map((issue, index) => ({
-    ...issue,
-    display_id: `#${String(index + 1).padStart(4, '0')}`,
-    db_id: issue.id,
-  }))
+  return issues.value
+    .filter(issue => !issueHiddenByJudgment(issue))
+    .map((issue, index) => ({
+      ...issue,
+      display_id: `#${String(index + 1).padStart(4, '0')}`,
+      db_id: issue.id,
+    }))
 })
 
 const categories = computed(() => {
@@ -2806,6 +2811,14 @@ function issuePositionMeta(issue) {
 function issueHasFlag(issue, flag) {
   if (issue && issue[flag]) return true
   return Boolean(issuePositionMeta(issue)[flag])
+}
+
+function issueHiddenByJudgment(issue, options = {}) {
+  const status = String(issue?.status || '').toLowerCase()
+  if (status === 'ignored') return true
+  // 误报默认从详情列表和报告中移除，仅在显式按“误报”筛选时展示，便于人工复核与撤销
+  if (status === 'false_positive') return options.showFalsePositives !== true
+  return false
 }
 
 function issueOccurrenceCount(issue) {

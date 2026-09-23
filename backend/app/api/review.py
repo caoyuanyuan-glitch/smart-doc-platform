@@ -361,6 +361,14 @@ def _window_has_cjk(content, start, end, radius=24):
     return bool(re.search(r"[\u4e00-\u9fff]", window))
 
 
+_PLACEHOLDER_MASK_TOKEN = re.compile(r'^[Xx]+$')
+
+
+def _is_placeholder_mask_token(token):
+    """占位掩码片段（如 X、XX、XXXXX）：界面示意图中的示例值，不参与排版类规则判定。"""
+    return bool(_PLACEHOLDER_MASK_TOKEN.match(str(token or '')))
+
+
 def _mark_possible_false_positive(issue, reason=""):
     confidence = int(_issue_value(issue, "confidence", 0) or 0)
     _set_issue_value(issue, "confidence", max(50, confidence // 2))
@@ -9691,17 +9699,6 @@ def _run_english_heuristic_audit(content, file_type=None):
     for match in re.finditer(r"\bmake\s+total\s+volume\b", content, re.IGNORECASE):
         add_issue(match, "GRAMMAR-004", "语法", "建议改为 make a total volume 或 make the total volume", "total volume 前建议添加冠词。", "英语语法规范 - 冠词")
 
-    for match in re.finditer(r"\bThis\s+instructions\s+for\s+use\s+describes\b", content, re.IGNORECASE):
-        add_issue(
-            match,
-            "GRAMMAR-007",
-            "语法",
-            "建议改为 These instructions for use describe",
-            "instructions 为复数名词，谓语和指示代词应保持一致。",
-            "英语语法规范 - 主谓一致",
-            "serious",
-        )
-
     please_replacements = {
         'please contact': 'contact technical support',
         'please use with caution': 'Use with caution',
@@ -9973,6 +9970,9 @@ def _run_manual_engineering_audit(content, file_type=None):
         singular = _GRAMMAR_ONE_PLURAL.get(plural)
         if not singular:
             continue
+        # 表格单元格错位拼接会产生 “×1 months” 这类片段（如 tube×1 months），属抽取伪影
+        if match.start() > 0 and content[match.start() - 1] in '×x/':
+            continue
         numeral = '1' if match.group(0).lower().startswith('1') else 'one'
         add_issue(
             match.start(),
@@ -10032,6 +10032,9 @@ def _run_manual_engineering_audit(content, file_type=None):
         if 'xmlns' in content[max(0, match.start() - 12):match.end()].lower():
             continue
         if match.start() > 0 and content[match.start() - 1] == '<':
+            continue
+        # 界面示意图中的时间/字段占位掩码（如 XX:XX:XX）是合法示例值，不做缺失空格判断
+        if _is_placeholder_mask_token(match.group(1)) and _is_placeholder_mask_token(match.group(3)):
             continue
         add_issue(
             match.start(),
@@ -10443,6 +10446,9 @@ def _run_manual_engineering_audit(content, file_type=None):
     for match in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})\(([A-Za-z0-9][A-Za-z0-9 ./%+\-]{0,20})\)', content):
         original = re.sub(r'\s+', ' ', match.group(0)).strip()
         if re.search(r'\b(?:Table|Figure|Chapter)\b', original, re.IGNORECASE):
+            continue
+        # 括号内为纯数值/进度计数（如 Progress(10/302)）时属于界面标签，非术语加括号说明
+        if not re.search(r'[A-Za-z]', match.group(2)):
             continue
         add_issue(
             match.start(),
@@ -14252,7 +14258,7 @@ async def export_review_html(
 ):
     """导出 HTML 报告 (包含所有问题及人工判定状态)"""
     review, doc = _require_review_access(db, review_id, current_user)
-    issues = _normalize_review_issue_display(_review_issues_for_display(get_issues(db, review_id=review_id)), getattr(doc, 'content', None))
+    issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(doc, 'content', None))
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html = _generate_compare_review_html_content(review, doc)
     elif getattr(doc, 'file_type', '') == 'xlsx':
@@ -14270,7 +14276,7 @@ async def export_review_result(
 ):
     review, document = _require_review_access(db, review_id, current_user)
 
-    issues = _normalize_review_issue_display(_review_issues_for_display(get_issues(db, review_id=review_id)), getattr(document, 'content', None))
+    issues = _normalize_review_issue_display(_visible_review_issues(get_issues(db, review_id=review_id)), getattr(document, 'content', None))
     if document.file_type == "docx":
         export_path, export_name, media_type = _export_review_docx(review, document, issues)
     elif document.file_type == "xlsx":
@@ -14289,7 +14295,7 @@ async def generate_report(
 ):
     review, document = _require_review_access(db, review_id, current_user)
 
-    issues = _review_issues_for_display(get_issues(db, review_id=review_id))
+    issues = _visible_review_issues(get_issues(db, review_id=review_id))
     if str(getattr(review, 'mode', '') or '').startswith('compare:'):
         html_content = _generate_compare_review_html_content(review, document)
     elif getattr(document, 'file_type', '') == 'xlsx':
@@ -14312,7 +14318,7 @@ async def get_aggregated_report(
     """
     review, document = _require_review_access(db, review_id, current_user)
 
-    issues = get_issues(db, review_id=review_id)
+    issues = _visible_review_issues(get_issues(db, review_id=review_id))
     issue_dicts = [_report_issue_to_dict(i) for i in issues]
     summary_raw = _load_review_summary(review.summary)
 
