@@ -2231,6 +2231,7 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Step merge suggestion: suggest merging adjacent steps only when the action is identical and the wording overlap is above 90 percent, with only parameter differences.
 - Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
+- Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
 
 🚫 FORBIDDEN issue types (reporting any of these is an error):
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
@@ -2347,6 +2348,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 - 步骤合并建议：相邻步骤动作完全相同且文字重复度高于 90%，仅参数不同，可建议合并。
 - 索引页码准确性：目录或索引中的页码与实际章节页码不符时，报告，category=编号引用。
 - 商标或专有名词大小写：品牌名如 macOS、DNBSEQ、GenSeq 的大小写与官方写法不一致且同文档内混用时，报告，category=术语一致性。
+- 步骤引用逻辑性：当正文出现“参见 Step N”“如第 N 步所示”“完成步骤 N 后”等引用时，除核验该步骤是否存在、编号是否连续外，还需判断被引用步骤的内容与引用处上下文在逻辑上是否相符（如“参见 Step 3 清洗样品”处，Step 3 确实为清洗类操作）。若逻辑不符，按 suggestion 级上报，并写明被引用步骤的实际内容与引用处的预期。若无法确认被引用步骤的实际内容，不得凭猜测上报（置信度需 ≥ 70）。
 
 🚫 严禁输出的问题类型（违反即为错误）：
 - ❌ Unicode 等价字符差异，例如 µ(U+00B5) 与 μ(U+03BC)、全角与半角数字、U+2212 减号与 U+002D 连字符，在视觉呈现一致时不得报错

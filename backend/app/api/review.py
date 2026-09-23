@@ -6703,6 +6703,32 @@ def _build_problem_summary_rows(issues):
     return rows
 
 
+# v2 第 8 节：十项检查项 → 六维度映射，用于「通过项列举」
+TEN_CHECK_ITEMS = [
+    '标点符号', '错别字', '单位', '术语', '语法',
+    '格式', '结构', '索引与交叉引用', '法规', '语义',
+]
+
+_CHECK_ITEM_TO_DIMENSION = {
+    '标点符号': '语言质量', '错别字': '语言质量', '语法': '语言质量',
+    '术语': '术语一致性',
+    '结构': '逻辑完整性',
+    '索引与交叉引用': '交叉引用',
+    '法规': '安全合规',
+    '单位': '格式规范', '格式': '格式规范', '语义': '格式规范',
+}
+
+
+def _build_passed_items_line(issues):
+    """v2 第 8 节：通过项压成一段单行列举，不要展开、不要重复。"""
+    hit_dimensions = {_issue_dimension(issue) for issue in issues}
+    passed = [item for item in TEN_CHECK_ITEMS
+              if _CHECK_ITEM_TO_DIMENSION[item] not in hit_dimensions]
+    if not passed:
+        return '本次审核十项检查项均有检出，无完全通过项。'
+    return '、'.join(passed) + '：本次审核未发现问题。'
+
+
 def _group_issues_by_severity(issues):
     groups = {'fatal': [], 'serious': [], 'general': [], 'suggestion': []}
     for issue in sorted(issues, key=_issue_sort_key):
@@ -7122,6 +7148,12 @@ def _generate_review_html_content(review, doc, issues):
     verdict = _build_report_verdict(report_issues)
     conclusion = _build_report_conclusion(report_issues)
     feedback_advice = _build_feedback_advice(report_issues)
+    passed_items_line = _build_passed_items_line(report_issues)
+    dimension_summary = _build_dimension_summary(report_issues)
+    dimension_rows = ''.join(
+        f'<tr><td>{name}</td><td>{data["count"]}</td><td>{data["fatal"]}</td><td>{data["serious"]}</td></tr>'
+        for name, data in dimension_summary.items()
+    )
     nav_items = []
     for severity in ['fatal', 'serious', 'general', 'suggestion']:
         entries = grouped_issues.get(severity) or []
@@ -7219,15 +7251,34 @@ def _generate_review_html_content(review, doc, issues):
             <p>本报告基于格式规范、语言质量、术语一致性、逻辑完整性、安全合规、交叉引用六个维度输出结构化审核结果，供编辑修订与复审使用。</p>
             <div class="module-tag">REVIEW TASK #{review.id}</div>
         </div>
-        <div class="meta">
+        <div class="section">
+        <h2>一、文档信息</h2>
+        <div class="meta" style="margin:12px 0 0">
             <div class="meta-card"><div class="meta-label">文档名称</div><div class="meta-value">{metadata['name']}</div></div>
             <div class="meta-card"><div class="meta-label">审核日期</div><div class="meta-value">{_format_report_datetime(getattr(review, 'completed_at', None) or getattr(review, 'created_at', None))}</div></div>
             <div class="meta-card"><div class="meta-label">审核人</div><div class="meta-value">技术文档审核AI助理</div></div>
             <div class="meta-card"><div class="meta-label">文档范围</div><div class="meta-value">{metadata['file_type']} · {metadata['page_count']} 页 · {metadata['section_count']} 个章节</div></div>
         </div>
+        </div>
+        <div class="section">
+        <h2>二、审核范围与依据</h2>
+        <div class="callout">
+            <div><strong>审核范围：</strong>全文档（{metadata['page_count']} 页 / {metadata['section_count']} 章节）</div>
+            <div><strong>内容维度：</strong>格式规范、语言质量、术语一致性、逻辑完整性、安全合规、交叉引用</div>
+            <div><strong>审核依据（P0–P5）：</strong></div>
+            <ul>
+                <li>P0 平台规则库（10 大分类）</li>
+                <li>P1 中文风格指南</li>
+                <li>P2 英文风格指南</li>
+                <li>P3 错误清单</li>
+                <li>P4 公司特定规范</li>
+                <li>P5 人工裁定沉淀（CYY 人工审核经验基线）</li>
+            </ul>
+        </div>
+        </div>
 
         <div class="section">
-        <h2>模块 1 · 审核概览</h2>
+        <h2>三、问题概览</h2>
         <div class="summary-grid">
             <div class="summary-card card-fatal"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'fatal')}</div><div class="label">致命</div></div>
             <div class="summary-card card-serious"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'serious')}</div><div class="label">严重</div></div>
@@ -7236,7 +7287,7 @@ def _generate_review_html_content(review, doc, issues):
         </div>
         </div>
         <div class="section">
-        <h2>模块 2 · 问题明细</h2>
+        <h2>四、分级问题清单</h2>
         <div class="report-nav">
             <a href="#summary-table">问题汇总表</a>
             {''.join(f'<a href="#group-{severity}">{html_lib.escape(title)}</a>' for severity, title in nav_items)}
@@ -7310,7 +7361,11 @@ def _generate_review_html_content(review, doc, issues):
     html += f"""
         </div>
         <div class="section">
-        <h2>模块 3 · 审核结论</h2>
+        <h2>五、通过项列举</h2>
+        <div class="callout">{html_lib.escape(passed_items_line)}</div>
+        </div>
+        <div class="section">
+        <h2>六、审核结论</h2>
         <div class="callout">
             <div><strong>判定结果:</strong> {html_lib.escape(verdict)}</div>
             <div><strong>结论说明:</strong> {html_lib.escape(conclusion)}</div>
@@ -7321,6 +7376,17 @@ def _generate_review_html_content(review, doc, issues):
                 <li>{html_lib.escape(feedback_advice[2])}</li>
             </ul>
         </div>
+        </div>
+        <div class="section">
+        <h2>七、附录</h2>
+        <h3>维度统计</h3>
+        <table>
+            <thead><tr><th>维度</th><th>总数</th><th>致命</th><th>严重</th></tr></thead>
+            <tbody>
+                {dimension_rows}
+            </tbody>
+        </table>
+        <div class="subtle">报告生成时间：{_format_report_datetime()} ｜ 审核引擎：智能技术文档审核平台</div>
         </div>
 """
     html += f"""
@@ -13946,6 +14012,48 @@ async def get_provider_status(_: UserOut = Depends(require_admin)):
             "proxy": ai_client.fallback_model,
         },
         "models": models,
+    }
+
+
+@router.post("/knowledge-feedback/import")
+async def import_knowledge_feedback(
+    file: UploadFile = File(...),
+    language: str = Form("cn"),
+    db: Session = Depends(get_db),
+    _: UserOut = Depends(require_admin),
+):
+    """人工审核意见知识库化回流（v2 第 11 节）。
+
+    接收一份人工意见 markdown，去重 → 归类 → 回流到 rules 表。
+    回流规则默认 regex=r"(?!)"（永不匹配），需人工确认后启用。
+    """
+    filename = (file.filename or "").strip().lower()
+    if filename and not filename.endswith((".md", ".markdown", ".txt")):
+        raise HTTPException(status_code=400, detail="仅支持 Markdown（.md/.markdown/.txt）人工意见文件")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    try:
+        markdown_text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="文件需为 UTF-8 编码")
+    language = (language or "cn").strip().lower()
+    if language not in ("cn", "en"):
+        raise HTTPException(status_code=400, detail="language 仅支持 cn 或 en")
+
+    from app.review_engine.knowledge_feedback import import_annotations_markdown_to_rule_library
+
+    try:
+        stats = import_annotations_markdown_to_rule_library(db, markdown_text, language=language)
+    except Exception as exc:
+        print(f"[知识回流] 导入失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"人工意见回流失败: {exc}")
+    return {
+        "status": "ok",
+        "disabled": True,
+        "regex": r"(?!)",
+        "language": language,
+        **stats,
     }
 
 
