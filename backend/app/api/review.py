@@ -3157,16 +3157,64 @@ def _issue_position_start(issue):
     return None
 
 
+def _paragraph_context(content, start, end, min_length=320, max_length=2000):
+    """Return the paragraph around [start, end), widened to at least min_length.
+
+    Paragraphs are separated by blank lines. Table-heavy PDFs often yield very
+    short paragraphs, so grow into neighbouring ones until min_length is met;
+    oversized blocks fall back to a symmetric window around the issue.
+    """
+    text = str(content or '')
+    total = len(text)
+    if not total:
+        return ''
+    start = max(0, min(start, total))
+    end = max(start, min(end, total))
+
+    left = text.rfind('\n\n', 0, start)
+    left = 0 if left < 0 else left + 2
+    right = text.find('\n\n', end)
+    right = total if right < 0 else right
+
+    while right - left < min_length and (left > 0 or right < total):
+        if left > 0:
+            prev_break = text.rfind('\n\n', 0, left - 1)
+            left = 0 if prev_break < 0 else prev_break + 2
+        if right < total and right - left < min_length:
+            next_break = text.find('\n\n', right + 1)
+            right = total if next_break < 0 else next_break
+
+    if right - left > max_length:
+        half = max_length // 2
+        left = max(0, start - half)
+        right = min(total, end + half)
+
+    snippet = text[left:right]
+    if left > 0:
+        snippet = '...' + snippet
+    if right < total:
+        snippet = snippet + '...'
+    return snippet
+
+
 def _expand_issue_context_for_display(issue, content, radius=180):
     text = str(content or '')
     original = str(getattr(issue, 'original_text', '') or '')
     context = str(getattr(issue, 'context', '') or '')
+    if re.match(r'^\s*主文档[：:]', context):
+        # Compare mode stores a structured 主文档/参考 block; keep it intact.
+        return
+    if text:
+        start, end = _parse_issue_position(getattr(issue, 'position', ''))
+        if end <= start and original:
+            pos = text.find(original)
+            if pos >= 0:
+                start, end = pos, pos + len(original)
+        if end > start:
+            issue.context = _paragraph_context(text, start, end)
+            return
     min_len = min(160, max(len(original) + 80, 80))
     if context and original and original in context and len(context) >= min_len:
-        return
-    start, end = _parse_issue_position(getattr(issue, 'position', ''))
-    if text and end > start:
-        issue.context = get_context(text, start, end, radius)
         return
     if text and original:
         pos = text.find(original)

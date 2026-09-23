@@ -405,7 +405,7 @@
               {{ formatDateTime(scope.row.created_at) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="360" fixed="right">
+          <el-table-column label="操作" width="460" fixed="right">
             <template #default="scope">
               <el-button 
                 size="small" 
@@ -414,6 +414,15 @@
                 @click="openIssueDialog(scope.row)"
               >
                 查看问题
+              </el-button>
+              <el-button
+                size="small"
+                type="warning"
+                plain
+                :disabled="scope.row.status !== 'completed'"
+                @click="openManualIssueDialogForTask(scope.row)"
+              >
+                补充上报
               </el-button>
               <el-button 
                 size="small" 
@@ -458,7 +467,7 @@
     <!-- 问题详情弹窗 -->
     <el-dialog v-model="issueDialogVisible" :title="`问题详情 - 任务#${currentTaskId}`" width="95%" top="5vh">
       <div class="issue-dialog-toolbar">
-        <el-input v-model="issueFilter.keyword" placeholder="搜索原文/上下文/建议" style="width:300px" clearable />
+        <el-input v-model="issueFilter.keyword" placeholder="搜索原文/建议" style="width:300px" clearable />
         <el-select v-model="issueFilter.category" placeholder="分类" clearable style="width:140px;margin-left:8px">
           <el-option v-for="cat in dialogCategories" :key="cat" :label="cat" :value="cat" />
         </el-select>
@@ -857,11 +866,6 @@
             <div class="suggestion-wrap">
               <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
               <div v-if="issueSuggestionSummary(scope.row)" class="suggestion-summary">{{ issueSuggestionSummary(scope.row) }}</div>
-              <div
-                v-if="issueSuggestionDiffHtml(scope.row)"
-                class="suggestion-diff"
-                v-html="issueSuggestionDiffHtml(scope.row)"
-              ></div>
             </div>
           </template>
         </el-table-column>
@@ -871,7 +875,9 @@
               <div class="issue-inline-actions">
                 <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
                 <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
-                <el-button size="small" type="warning" plain @click="markSimilarIssuesFalsePositive(scope.row)">同类误报</el-button>
+                <el-tooltip content="仅将当前筛选结果中规则、分类、建议完全一致的待审问题一并标记为误报" placement="top">
+                  <el-button size="small" type="warning" plain @click="markSimilarIssuesFalsePositive(scope.row)">同类误报</el-button>
+                </el-tooltip>
                 <el-button size="small" type="primary" plain @click="openTransferRuleDialog(scope.row)">转规则库</el-button>
               </div>
             </div>
@@ -1293,7 +1299,7 @@ const filteredDialogIssues = computed(() => {
     if (issueFilter.severity && i.severity !== issueFilter.severity) return false
     if (issueFilter.keyword) {
       const k = issueFilter.keyword.toLowerCase()
-      const hay = `${i.original_text || ''} ${i.context || ''} ${issueSuggestionText(i)} ${i.description || ''}`.toLowerCase()
+      const hay = `${i.original_text || ''} ${issueSuggestionText(i)}`.toLowerCase()
       if (!hay.includes(k)) return false
     }
     if (hideSuspectedFalsePositives.value && issueHasFlag(i, 'possible_false_positive')) return false
@@ -1416,20 +1422,11 @@ function compactSuggestionText(text, limit = 36) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
 }
 
-function escapeSuggestionHtml(text) {
-  return String(text || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
 function extractSuggestionReplacement(issue) {
   const suggestion = String(issue?.suggestion || '').trim()
   if (!suggestion) return ''
   const patterns = [
-    /建议(?:改为|替换为|统一为)\s*[:：]?\s*(.+)$/i,
+    /建议(?:改为|替换为|统一为|写为)\s*[:：]?\s*(.+?)(?=[。；;]|$)/i,
     /(?:->|→)\s*(.+)$/,
   ]
   for (const pattern of patterns) {
@@ -1438,36 +1435,14 @@ function extractSuggestionReplacement(issue) {
     const candidate = String(match[1] || '').trim().replace(/[。；;]+$/, '')
     if (candidate && !/[，,。；;].{8,}/.test(candidate)) return candidate
   }
-  if (suggestion.length <= 80 && !/^请|^需|^应|^确认/.test(suggestion)) return suggestion
-  return ''
-}
-
-function buildSuggestionDiffMarkup(before, after) {
-  if (!before || !after || before === after) return ''
-  let prefix = 0
-  const maxPrefix = Math.min(before.length, after.length)
-  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1
-
-  let suffix = 0
-  const maxSuffix = Math.min(before.length - prefix, after.length - prefix)
-  while (
-    suffix < maxSuffix
-    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) {
-    suffix += 1
-  }
-
-  const beforeHead = escapeSuggestionHtml(before.slice(0, prefix))
-  const beforeMid = escapeSuggestionHtml(before.slice(prefix, before.length - suffix || before.length))
-  const beforeTail = escapeSuggestionHtml(before.slice(before.length - suffix))
-  const afterHead = escapeSuggestionHtml(after.slice(0, prefix))
-  const afterMid = escapeSuggestionHtml(after.slice(prefix, after.length - suffix || after.length))
-  const afterTail = escapeSuggestionHtml(after.slice(after.length - suffix))
-
-  return `
-    <div class="suggestion-diff-row"><span class="suggestion-diff-label">原文</span><span>${beforeHead}<span class="diff-remove">${beforeMid || '&nbsp;'}</span>${beforeTail}</span></div>
-    <div class="suggestion-diff-row"><span class="suggestion-diff-label">建议</span><span>${afterHead}<span class="diff-add">${afterMid || '&nbsp;'}</span>${afterTail}</span></div>
-  `
+  // 兜底：仅当整条建议本身就是一个「裸词」时才作为替换文本。
+  // 禁止把「拼写错误：xxx 应为 yyy」这类描述性整句当作替换内容，
+  // 否则会与原文做字符级 diff 产出误导性的错误建议。
+  const bare = suggestion.replace(/[。；;！？]+$/, '')
+  const looksLikeBareTerm = bare.length <= 40
+    && !/[\s，,。；;：:、（）()「」“”]/.test(bare)
+    && !/^(?:请|需|应|确认|建议|核对|检查|删除|补充|补齐|控制|将|使用|保留)/.test(bare)
+  return looksLikeBareTerm ? bare : ''
 }
 
 function describeSuggestionChange(original, replacement) {
@@ -1491,8 +1466,8 @@ function describeSuggestionChange(original, replacement) {
     suffix += 1
   }
 
-  const removed = before.slice(prefix, before.length - suffix || before.length).trim()
-  const added = after.slice(prefix, after.length - suffix || after.length).trim()
+  const removed = before.slice(prefix, before.length - suffix).trim()
+  const added = after.slice(prefix, after.length - suffix).trim()
   if (removed && added) {
     if (removed.length <= 24 && added.length <= 32) {
       return `将“${removed}”改为“${added}”`
@@ -1522,23 +1497,21 @@ function issueSuggestionOverview(issue) {
     return describeSuggestionChange(original, replacement)
   }
 
+  // 无法给出精确替换时直接展示建议原文，避免无信息量的占位文案导致建议内容丢失
   const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return '建议按下方修改。'
+  if (suggestion) return compactSuggestionText(suggestion, 60)
   return ''
 }
 
 function issueSuggestionSummary(issue) {
-  const description = normalizeIssueDescription(issue)
-  if (description) return description
-
   const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return suggestion
-
-  return issueSuggestionFullText(issue)
-}
-
-function issueSuggestionDiffHtml(issue) {
-  return ''
+  const description = normalizeIssueDescription(issue)
+  if (!description) return ''
+  if (!suggestion) return description
+  // Keep the second line only when it explains something beyond the suggestion.
+  const remainder = description.split(suggestion).join('').replace(/[\s，。；;、,.：:（）()“”"'【】\[\]]/g, '')
+  if (!remainder) return ''
+  return description
 }
 
 function percentText(value) {
@@ -1558,6 +1531,17 @@ function openManualIssueDialog() {
   }
   resetManualIssueForm()
   manualIssueDialogVisible.value = true
+}
+
+async function openManualIssueDialogForTask(row) {
+  if (!row?.id) return
+  currentTaskId.value = row.id
+  currentReport.value = row
+  // Load the full issue list first so the new entry is not the only one counted.
+  if (taskIssues[row.id] === undefined) {
+    await loadReviewIssues(row.id)
+  }
+  openManualIssueDialog()
 }
 
 async function saveManualIssue() {
