@@ -196,19 +196,24 @@ def delete_rule(db: Session, rule_id: int):
 
 def bulk_create_rules(db: Session, rules: list[RuleCreate]):
     db_rules = []
+    seen_rule_nos = set()
     for rule in rules:
-        if not get_rule_by_no(db, rule.rule_no):
-            db_rules.append(Rule(
-                rule_no=rule.rule_no,
-                category=rule.category,
-                description=rule.description,
-                regex=rule.regex,
-                example=rule.example,
-                suggestion=rule.suggestion,
-                audit_basis=rule.audit_basis,
-                severity=rule.severity,
-                language=rule.language
-            ))
+        # rule_no 唯一：跳过库中已存在的，也跳过同一批里重复出现的，
+        # 否则 add_all + commit 会触发唯一约束错误。
+        if rule.rule_no in seen_rule_nos or get_rule_by_no(db, rule.rule_no):
+            continue
+        seen_rule_nos.add(rule.rule_no)
+        db_rules.append(Rule(
+            rule_no=rule.rule_no,
+            category=rule.category,
+            description=rule.description,
+            regex=rule.regex,
+            example=rule.example,
+            suggestion=rule.suggestion,
+            audit_basis=rule.audit_basis,
+            severity=rule.severity,
+            language=rule.language
+        ))
     if db_rules:
         db.add_all(db_rules)
         db.commit()

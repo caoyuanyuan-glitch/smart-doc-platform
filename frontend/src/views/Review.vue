@@ -1046,14 +1046,15 @@
         <div class="table-header-actions">
           <el-button type="primary" @click="showRuleDialog = true">添加规则</el-button>
           <el-button @click="exportRules">导出规则库</el-button>
+          <el-button @click="downloadRulesTemplate">下载导入模板</el-button>
           <el-upload
             class="upload-btn"
-            :action="rulesImportUrl"
-            :on-success="handleRulesImport"
-            :before-upload="beforeRulesUpload"
+            :show-file-list="false"
+            :auto-upload="false"
+            :on-change="handleRulesFileChange"
             accept=".json"
           >
-            <el-button>批量导入规则</el-button>
+            <el-button>导入规则库</el-button>
           </el-upload>
           <el-button v-if="selectedRules.length > 0" type="danger" @click="batchDeleteRules">批量删除</el-button>
         </div>
@@ -1080,7 +1081,9 @@
           <el-table-column prop="language" label="语言" width="100">
             <template #default="scope">{{ languageLabel(scope.row.language) }}</template>
           </el-table-column>
-          <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom" />
+          <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom">
+            <template #default="scope">{{ formatDateTime(scope.row.created_at) }}</template>
+          </el-table-column>
           <el-table-column label="操作" width="180">
             <template #default="scope">
               <el-button size="small" @click="editRule(scope.row)">编辑</el-button>
@@ -1629,7 +1632,6 @@ const transferRuleSourceIssue = ref(null)
 const transferRuleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
 
 const selectedRules = ref([])
-const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
 const reviewMode = ref('hybrid')
@@ -2336,13 +2338,92 @@ function upsertReviewSnapshot(targetList, review) {
   targetList.value = next.sort((left, right) => (right.id || 0) - (left.id || 0))
 }
 
-function beforeRulesUpload(file) {
-  const ext = file.name.split('.').pop().toLowerCase()
-  if (ext !== 'json') {
-    ElMessage.error('仅支持 JSON 格式文件')
-    return false
+const RULES_TEMPLATE_ROW = {
+  rule_no: 'R-EXAMPLE-001',
+  category: '拼写',
+  description: '规则描述，说明该规则检查什么问题',
+  regex: '\\bteh\\b',
+  example: '命中示例文本，例如 to return to teh lab',
+  suggestion: '修改建议，例如改为 the',
+  audit_basis: '审核依据来源，例如 英语语法规范 - 拼写',
+  severity: 'general',
+  language: 'both'
+}
+
+function downloadRulesTemplate() {
+  const blob = new Blob([JSON.stringify([RULES_TEMPLATE_ROW], null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'rules_import_template.json'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  ElMessage.success('模板已下载，按模板填写后导入')
+}
+
+// 导入文件与导出格式一致：JSON 数组（也兼容 { rules: [...] }）。
+function normalizeImportedRules(payload) {
+  const list = Array.isArray(payload) ? payload : Array.isArray(payload?.rules) ? payload.rules : null
+  if (!list) {
+    throw new Error('文件内容应为 JSON 数组，或形如 { "rules": [...] } 的对象')
   }
-  return true
+  return list.map((item, index) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`第 ${index + 1} 条不是有效的规则对象`)
+    }
+    const ruleNo = String(item.rule_no ?? '').trim()
+    if (!ruleNo) {
+      throw new Error(`第 ${index + 1} 条缺少必填字段 rule_no`)
+    }
+    const required = ['category', 'description', 'regex']
+    const missing = required.filter((field) => !String(item[field] ?? '').trim())
+    if (missing.length) {
+      throw new Error(`规则 ${ruleNo} 缺少必填字段 ${missing.join('、')}`)
+    }
+    return {
+      rule_no: ruleNo,
+      category: String(item.category).trim(),
+      description: String(item.description).trim(),
+      regex: String(item.regex),
+      example: String(item.example ?? ''),
+      suggestion: String(item.suggestion ?? ''),
+      audit_basis: String(item.audit_basis ?? ''),
+      severity: String(item.severity ?? 'general'),
+      language: String(item.language ?? 'both')
+    }
+  })
+}
+
+async function handleRulesFileChange(uploadFile) {
+  const file = uploadFile?.raw
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.json')) {
+    ElMessage.error('仅支持 JSON 格式文件')
+    return
+  }
+  let rules
+  try {
+    rules = normalizeImportedRules(JSON.parse(await file.text()))
+  } catch (error) {
+    ElMessage.error(`文件解析失败: ${error.message}`)
+    return
+  }
+  if (!rules.length) {
+    ElMessage.warning('文件中没有可导入的规则')
+    return
+  }
+  try {
+    const response = await rulesAPI.bulkCreate(rules)
+    const created = Number(response.data?.created)
+    const imported = Number.isFinite(created) ? created : rules.length
+    const skipped = rules.length - imported
+    ElMessage.success(skipped > 0 ? `成功导入 ${imported} 条规则，跳过 ${skipped} 条已存在的规则` : `成功导入 ${imported} 条规则`)
+    loadRules()
+  } catch (error) {
+    ElMessage.error(`导入失败: ${getAPIErrorMessage(error)}`)
+  }
 }
 
 async function uploadDocument(options) {
@@ -2378,11 +2459,6 @@ async function uploadDocument(options) {
       uploadProgressText.value = ''
     }, 600)
   }
-}
-
-function handleRulesImport(response) {
-  ElMessage.success(`成功导入 ${response.message || '多条'} 规则`)
-  loadRules()
 }
 
 function findPairedVisualDocumentId(documentId) {
@@ -3461,7 +3537,7 @@ async function exportRules() {
     URL.revokeObjectURL(url)
     ElMessage.success('导出成功')
   } catch (error) {
-    ElMessage.error('导出失败')
+    ElMessage.error(`导出失败: ${getAPIErrorMessage(error)}`)
   }
 }
 

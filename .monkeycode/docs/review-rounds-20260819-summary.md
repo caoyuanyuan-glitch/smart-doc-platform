@@ -489,3 +489,19 @@
 - 同批误报：`Yes is selected by default.` 里的 `is` 也是同一条旧规则（把 `Yes` 的词尾 s 当复数），截图里高亮的 `is`、`Are` 均属此类，新版均为 0 条
 - 结论：该反馈与「are 误报」是同一根因，已在 `run_grammar` 重写中修复，无需再改规则；用户侧需重启后端进程才会生效
 - 附带发现（未改动，待确认）：审核模块另有一条独立规则 `review.py` `GRAMMAR-007`，匹配 `This instructions for use describes` 并建议改为 `These instructions for use describe`。该规则只命中 `describes` 一种续接，同一份文档里同样结构的 `This instructions for use is applicable`、`This instructions for use and the information ... are` 等 10 处均不命中；MGI 句中用 `its contents` 单数指代，属把 Instructions for Use 当作单数标题的固定写法；603 条人工审核基线中无任何一条涉及该句式。据此判断为误报（每份文档各 1 条），是否移除待用户确认
+
+## 2026-09-23 规则管理页导入/导出修复
+
+- 用户反馈三个问题，先确认在最新 `main` 上均未修复，再修复：
+- 创建时间格式：`Review.vue` 规则表 `created_at` 列直接输出原始 ISO 串（`2026-09-23T07:04:23`），未调用同页已有的 `formatDateTime()`；改为该列走 `formatDateTime`，与「上传时间」列口径一致
+- 导出失败（`GET /api/rules/export` 返回 422）：`backend/app/api/rules.py` 把 `/export` 注册在 `/{rule_id}` 之后，FastAPI 按注册顺序匹配，`/api/rules/export` 被 `/{rule_id}` 抢先匹配，`rule_id: int` 解析 `"export"` 抛 `int_parsing`。修复为静态路径（`/bulk`、`/export`）统一注册在 `/{rule_id}` 之前
+- 导出完整性：`GET /rules/export` 原先走 `get_rules(db)`，默认 `limit=100`，规则库超过 100 条会被静默截断，改为 `limit=10000`
+- 导出字段：原导出只含 7 个字段，缺 `severity`/`language`，导出再导入会丢这两项；补入后导出文件可完整回灌
+- 导入失败（双重问题）：导入控件把 JSON 文件以 multipart POST 到 `/api/rules/bulk`，但该接口签名是 `rules: list[RuleCreate]`（JSON 数组），实测 multipart 返回 422 `list_type`；且 `el-upload` 只配了 `on-success`、没有 `on-error`，失败时页面无任何提示
+- 导入修复：改为 `auto-upload=false` + `on-change`，前端读取文件内容、`JSON.parse` 后按 JSON 数组提交 `rulesAPI.bulkCreate`；兼容 `{ "rules": [...] }`；缺 `rule_no`/`category`/`description`/`regex` 时给出指明行号与字段的中文报错；提交失败展示后端 `detail`
+- 新增「下载导入模板」按钮：导出单条示例规则（全部 9 字段）为 `rules_import_template.json`，模板格式与导出格式一致，导出文件可直接再导入
+- `backend/app/api/rules.py` 的 `POST /bulk` 响应补 `created`/`total`，前端据此提示「成功导入 N 条、跳过 M 条已存在」
+- `crud.rule.bulk_create_rules`：增加同批 `rule_no` 去重（`rule_no` 唯一），否则同一文件内重复项会 `add_all + commit` 触发唯一约束错误
+- 排查方法记录：本机验证该接口不能用 `sqlite://` 内存库配 `TestClient`（请求在独立线程，内存库按线程各自新建导致 `no such table`），需 `poolclass=StaticPool` + `check_same_thread=False` 共享同一连接
+- 回归：新增 `backend/tests/test_rules_api.py` 6 例（路由顺序、导出含 severity/language、导出不被默认分页截断、动态 `/{rule_id}` 仍可用、批量导入跳过库中与同批重复、multipart 不再被接受）；`pytest test_rules_api.py test_review_cache.py -q` 226 passed；全量 `backend/tests` 868 passed / 6 failed（6 例均为既有失败）；`frontend` `npm run build` 通过
+- 关联：上一节遗留的 `GRAMMAR-007` 已按用户确认移除，随 PR #135 合入 `main`
