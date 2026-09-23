@@ -50,6 +50,41 @@ def test_extract_issue_snippet_keeps_longer_context():
     assert len(snippet) > 80
 
 
+def test_paragraph_context_returns_full_paragraph_around_issue():
+    paragraph = 'The reagent cartridge must stay upright. ' + ('Do not tilt it. ' * 25)
+    content = 'Heading\n\nUnrelated intro line.\n\n' + paragraph + '\n\nNext section.'
+    start = content.find('reagent cartridge')
+    end = start + len('reagent cartridge')
+
+    snippet = review_api._paragraph_context(content, start, end)
+
+    assert 'reagent cartridge' in snippet
+    assert 'Do not tilt it.' in snippet
+    assert 'Next section.' not in snippet
+    assert 'Unrelated intro line.' not in snippet
+
+
+def test_paragraph_context_grows_past_short_paragraphs():
+    content = '\n\n'.join(['cell-%d' % index for index in range(40)])
+    start = content.find('cell-20')
+    end = start + len('cell-20')
+
+    snippet = review_api._paragraph_context(content, start, end, min_length=120)
+
+    assert 'cell-20' in snippet
+    assert len(snippet) >= 120
+    assert 'cell-19' in snippet
+
+
+def test_expand_issue_context_keeps_compare_mode_block():
+    context = '主文档：alpha\n参考文档：beta'
+    issue = SimpleNamespace(original_text='alpha', context=context, position='{}')
+
+    review_api._expand_issue_context_for_display(issue, 'alpha in the main document')
+
+    assert issue.context == context
+
+
 class _FakeQuery:
     def __init__(self, rows):
         self.rows = rows

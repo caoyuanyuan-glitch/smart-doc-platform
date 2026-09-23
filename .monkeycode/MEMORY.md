@@ -69,6 +69,7 @@ Git 与自检工作流
   - 白天可以随时 commit，17:50 统一检查并逐分支执行 `git push origin <branch>`
   - 未收到用户明确推送指令前，不主动执行 `git push`
   - 每次完成代码修改后先做本地自检，再通知用户进行平台侧验证
+  - 若 `git push` 报 `credential helper: server returned status 500`（`/app/agent/bin/agent git-credential-helper` 不可用），改用 `gh auth login --hostname github.com --git-protocol https --web` 设备流授权，用户确认后执行 `gh auth setup-git`，再重新 push
 
 前后端自验命令
 - Date: 2026-08-25
