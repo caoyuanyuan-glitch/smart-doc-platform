@@ -273,6 +273,27 @@ def test_check_grammar_patterns_keeps_a_unified_phrase_valid():
     assert issues == []
 
 
+def test_is_vowel_sound_uses_letter_name_for_abbreviations():
+    # U 开头缩略语按字母名读音（/juː/）判定，前面仍用 a
+    assert spell_checker_utils._is_vowel_sound("UPS") is False
+    assert spell_checker_utils._is_vowel_sound("USB") is False
+    # 元音字母名开头的缩略语仍需 an
+    assert spell_checker_utils._is_vowel_sound("SMS") is True
+    assert spell_checker_utils._is_vowel_sound("LED") is True
+    # 全大写但按单词读音的词不能走字母名判定
+    assert spell_checker_utils._is_vowel_sound("HOME") is False
+
+
+def test_check_spelling_skips_omics_family_terms():
+    issues = spell_checker_utils.check_spelling(
+        "The Spatial Omics workflow covers genomics, proteomics and metabolomics data."
+    )
+
+    assert all(issue["original_text"].lower() not in {
+        "omics", "genomics", "proteomics", "metabolomics",
+    } for issue in issues)
+
+
 def test_find_term_variant_issues_skips_when_correct_form_exists_in_document():
     issues = spell_checker_utils._find_term_variant_issues(
         "The High-throughput workflow is supported. Another note mentions highthroughput only in OCR text.",

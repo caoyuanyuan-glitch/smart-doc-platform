@@ -113,6 +113,8 @@ TECH_TERMS_WHITELIST = {
     'haplotype', 'phylogenetic', 'homologous', 'orthologous', 'paralogous', 'heterologous', 'polymorphism',
     'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
     'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
+    'omics', 'genomics', 'proteomics', 'transcriptomics', 'metabolomics',
+    'epigenomics', 'lipidomics', 'spatialomics',
     'circularization', 'adapter', 'ligation', 'elute', 'enhancer', 'vortexer',
     'vortex', 'vortexes', 'Agilent', 'ALPAQUA', 'Ambion', 'Axygen', 'Covaris',
     'DynaMag', 'PerkinElmer', 'Invitrogen', 'ThermoFisher', 'CompleteGenomics',
@@ -3530,6 +3532,19 @@ def check_spelling(content, min_word_length=3, file_type=None):
     return issues
 
 
+# 全大写缩略语按字母名读音判定 a/an：字母名以元音音开头的字母集合
+# （F /ɛf/、H /eɪtʃ/、L /ɛl/、M /ɛm/、N /ɛn/、R /ɑːr/、S /ɛs/、X /ɛks/）
+_ABBR_VOWEL_SOUND = set('AEFHILMNORSX')
+# 全大写但按单词读音的词（如 HOME HEALTHCARE ENVIRONMENT），不能走字母名判定
+_WORDLIKE_ALL_CAPS = {
+    'home', 'note', 'notes', 'normal', 'no', 'name', 'number', 'manual',
+    'mode', 'model', 'module', 'message', 'max', 'min', 'right', 'left',
+    'room', 'sample', 'slide', 'system', 'level', 'list', 'load', 'light',
+    'start', 'stop', 'save', 'next', 'back', 'open', 'close', 'end', 'run',
+    'power', 'on', 'off', 'fastq', 'bam', 'cram', 'sam', 'tab',
+}
+
+
 def _is_vowel_sound(word):
     token = (word or '').strip('.,;:()[]{}"\'').strip()
     if not token:
@@ -3540,8 +3555,10 @@ def _is_vowel_sound(word):
         return True
     if re.match(r'^(university|universal|unified|union|unilateral|user|unit|unique|european|eucalyptus|one|one-step)', lower):
         return False
-    if token.isupper() and token[0] in set('AEFHILMNORSX'):
-        return True
+    if token.isupper() and lower not in _WORDLIKE_ALL_CAPS:
+        # 缩略语/型号按首字母的字母名读音判定，必须显式返回，
+        # 否则 UPS、USB 等 U 开头缩略语会落到下方元音字母判定被误判为元音开头。
+        return token[0] in _ABBR_VOWEL_SOUND
     return lower[0] in 'aeiou'
 
 

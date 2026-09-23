@@ -1271,8 +1271,8 @@ class AIClient:
         for item in observations:
             if not isinstance(item, dict):
                 continue
-            title = self._clean_text(item.get("title"), 24)
-            description = self._clean_text(item.get("description"), 80)
+            title = self._clean_text(item.get("title"), 60)
+            description = self._clean_text(item.get("description"), 300)
             if not title and not description:
                 continue
             category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
@@ -1282,7 +1282,7 @@ class AIClient:
             payload = {
                 "category": category,
                 "severity": severity,
-                "title": title or description[:80],
+                "title": title or description[:60],
                 "description": description or title,
                 "confidence": confidence,
             }
@@ -2288,7 +2288,7 @@ Requirements:
 3. CYY human review experience baseline is for identifying content issues - report with evidence
 4. Deduplicate: report each error only once per document
 5. If the system prompt provided a document filename, check for filename spelling errors and product name consistency with body content
-6. Also output observations (1-3 chapter-level findings). Do not repeat any fact already covered by issues. Title <= 16 characters, description one sentence.
+6. Also output observations (1-3 chapter-level findings about the document itself). Do not repeat any fact already covered by issues. Do not output observations about the excerpt or chunk itself (for example, that it is mostly table of contents or front matter) - those have no actionable value. Title <= 16 characters for Chinese or <= 60 characters for English, description one sentence.
 
 Output ONLY strict JSON:
 {{
@@ -2404,7 +2404,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
 5. 如果系统提示中给出了文档文件名，请检查文件名拼写、产品名与正文一致性
-6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。title 不超过 16 字，description 只保留一句。
+6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。不要输出关于本片段/摘录本身的观察（例如内容以目录、前置信息为主），这类观察没有可执行价值。title 中文不超过 16 字、英文不超过 60 字符，description 只保留一句。
 
 输出严格JSON：
 {{

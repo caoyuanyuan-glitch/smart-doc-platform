@@ -1444,10 +1444,9 @@ function normalizeIssueDescription(issue) {
   return text
 }
 
-function compactSuggestionText(text, limit = 36) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
-  if (!normalized) return ''
-  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
+// 仅归一化空白，不截断；建议列需要完整展示修改建议
+function compactSuggestionText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim()
 }
 
 function extractSuggestionReplacement(issue) {
@@ -1497,10 +1496,11 @@ function describeSuggestionChange(original, replacement) {
   const removed = before.slice(prefix, before.length - suffix).trim()
   const added = after.slice(prefix, after.length - suffix).trim()
   if (removed && added) {
-    if (removed.length <= 24 && added.length <= 32) {
-      return `将“${removed}”改为“${added}”`
+    // 改动过大时不再内联 diff（会把原文整段复述一遍），直接给出完整的新表述
+    if (Math.max(removed.length, added.length) > 120) {
+      return `建议改为“${added}”`
     }
-    return `将相关表述改为“${compactSuggestionText(added)}”`
+    return `将“${removed}”改为“${added}”`
   }
   if (!removed && added) {
     return `补充“${compactSuggestionText(added)}”`
@@ -1527,7 +1527,7 @@ function issueSuggestionOverview(issue) {
 
   // 无法给出精确替换时直接展示建议原文，避免无信息量的占位文案导致建议内容丢失
   const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return compactSuggestionText(suggestion, 60)
+  if (suggestion) return compactSuggestionText(suggestion)
   return ''
 }
 

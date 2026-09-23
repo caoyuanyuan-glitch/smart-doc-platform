@@ -548,16 +548,42 @@ def _observation_anchors(text):
     return anchors
 
 
-def _observation_first_sentence(text, limit=72):
+# 只描述「本片段/摘录本身」的观察（如内容以目录、前置信息为主）不是文档缺陷，
+# 属于分块策略产物，展示给审核人没有可执行价值，直接剔除。
+_OBS_EXCERPT_META_PATTERNS = (
+    re.compile(r"\b(?:this|the)\s+excerpt\b", re.IGNORECASE),
+    re.compile(r"\btoc[- ]only\b", re.IGNORECASE),
+    re.compile(r"\b(?:this|the)\s+(?:chunk|snippet|passage)\b", re.IGNORECASE),
+    re.compile(r"本(?:片段|摘录|节选)|该(?:片段|摘录|节选)|摘录内容|节选内容"),
+)
+
+
+def _is_excerpt_meta_observation(*texts):
+    blob = " ".join(str(text or "") for text in texts).strip()
+    if not blob:
+        return False
+    return any(pattern.search(blob) for pattern in _OBS_EXCERPT_META_PATTERNS)
+
+
+def _observation_first_sentence(text, limit=200):
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     if not value:
         return ""
-    for sep in ("。", "；"):
+    # 中英文句末标点都作为断句符；命中即返回完整首句，避免英文观察被硬截断
+    for sep in ("。", "；", "．"):
         index = value.find(sep)
-        if 6 <= index <= limit:
+        if index >= 6:
             return value[: index + 1]
+    if not re.search(r"[\u4e00-\u9fff]", value):
+        for match in re.finditer(r"[.!?](?=\s|$)", value):
+            if match.start() >= 6:
+                return value[: match.start() + 1]
     if len(value) > limit:
-        return value[:limit].rstrip("，,、；; ") + "…"
+        head = value[:limit].rstrip("，,、；;:： ")
+        # 尽量在词边界收尾，避免截出半个单词
+        if re.search(r"[A-Za-z]$", head) and " " in head:
+            head = head[: head.rfind(" ")].rstrip("，,、；;:： ")
+        return head + "…"
     return value
 
 
@@ -576,6 +602,8 @@ def _compact_review_observations(observations, issues=None, limit=3):
     for item in _merge_review_observations(observations):
         title = str(item.get("title") or "").strip()
         description = str(item.get("description") or "").strip()
+        if _is_excerpt_meta_observation(title, description):
+            continue
         title_plain = _observation_plain_text(title)
         desc_plain = _observation_plain_text(description)
         if (not description) or title_plain == desc_plain or (
@@ -583,11 +611,11 @@ def _compact_review_observations(observations, issues=None, limit=3):
         ) or (
             desc_plain and title_plain.startswith(desc_plain) and len(desc_plain) >= 12
         ):
-            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(description or title, 72))
+            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(description or title))
             description = ""
         else:
-            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(title, 18))
-            description = _observation_first_sentence(description, 72)
+            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(title, 60))
+            description = _observation_first_sentence(description)
         if not title and not description:
             continue
         payload = {
@@ -638,7 +666,7 @@ def _synthesize_review_observations(issues):
         if count <= 1:
             continue
         category = str(_issue_value(issue, "category", "") or "其他").strip() or "其他"
-        description = _observation_first_sentence(str(_issue_value(issue, "description", "") or "").strip(), 72)
+        description = _observation_first_sentence(str(_issue_value(issue, "description", "") or "").strip())
         title = f"{category}共 {count} 处"
         key = title.lower()
         if key in seen:
@@ -9116,6 +9144,31 @@ def _looks_like_numbered_section_heading(text):
     return words[0].lower() not in action_verbs
 
 
+_SAFETY_LABEL_RE = re.compile(r'(?im)^[ \t]*(WARNING|CAUTION|DANGER)\b')
+# PDF 文本层会把安全标题下的条目拆成多行，风险词常与标题相隔数百字符，
+# 因此回溯范围要覆盖整个安全段落，不能只用风险词附近的小窗口
+_SAFETY_HAZARD_LOOKBACK = 800
+# 段落标题形态：大写开头、无句末标点的短行
+_SAFETY_SECTION_HEADING_RE = re.compile(r'^[A-Z][A-Za-z0-9 ,/&\-]{2,58}$')
+
+
+def _hazard_has_enclosing_safety_label(normalized, position):
+    """判断风险词之前是否已有同级 WARNING/CAUTION/DANGER 标题覆盖该条目。"""
+    window = normalized[max(0, position - _SAFETY_HAZARD_LOOKBACK):position]
+    label = None
+    for match in _SAFETY_LABEL_RE.finditer(window):
+        label = match
+    if label is None:
+        return False
+    # window 结尾即风险词位置，最后一段可能是半截行，只按完整行判断章节边界。
+    # 标题与风险词之间出现新段落标题，说明已跨章节，不再视为同一安全标注
+    for line in window[label.end():].split('\n')[:-1]:
+        stripped = line.strip()
+        if stripped and _SAFETY_SECTION_HEADING_RE.match(stripped):
+            return False
+    return True
+
+
 def _run_safety_compliance_audit(content, document_language='en'):
     issues = []
     normalized = content.replace('\f', '\n')
@@ -9151,6 +9204,8 @@ def _run_safety_compliance_audit(content, document_language='en'):
     for match in hazard_pattern.finditer(normalized):
         window = normalized[max(0, match.start() - 80):min(len(normalized), match.end() + 80)]
         if re.search(r'WARNING|CAUTION|DANGER|警告|注意|危险', window, re.IGNORECASE):
+            continue
+        if _hazard_has_enclosing_safety_label(normalized, match.start()):
             continue
         key = ('SAFE-002', match.start())
         if key in seen:
@@ -9827,6 +9882,38 @@ def _run_english_heuristic_audit(content, file_type=None):
     return issues
 
 
+_SYMBOL_LEGEND_VERB_RE = re.compile(
+    r'^\s*[A-Za-z][A-Za-z0-9 ,/\-]{0,56}?\s+'
+    r'(?:Indicates|Means|Denotes|Represents|Refers\s+to|Stands\s+for|表示|说明|指明|含义)',
+    re.IGNORECASE,
+)
+
+
+_SECTION_HEADING_RE = re.compile(r'^[A-Z][^.!?:;]{2,59}$')
+
+
+def _has_intervening_section_heading(text):
+    """两段步骤之间是否夹着新章节标题（大写开头、无句末标点的短行）。"""
+    for line in str(text or '').splitlines():
+        stripped = line.strip()
+        if stripped and _SECTION_HEADING_RE.match(stripped):
+            return True
+    return False
+
+
+def _is_symbol_legend_entry(content, start, end):
+    """识别符号表定义行，如 “Catalog number Indicates the manufacturer's catalog number”。
+
+    这类文本用于解释符号含义，并非货号标签写法，不应触发标签统一类规则。
+    """
+    block_start = content.rfind('\n\n', 0, start) + 2
+    block_end = content.find('\n\n', end)
+    if block_end == -1:
+        block_end = len(content)
+    block = re.sub(r'\s+', ' ', content[block_start:block_end]).strip()
+    return bool(_SYMBOL_LEGEND_VERB_RE.match(block))
+
+
 def _run_manual_engineering_audit(content, file_type=None):
     issues = []
     seen = set()
@@ -10417,7 +10504,10 @@ def _run_manual_engineering_audit(content, file_type=None):
     if len(lead_in_occurrences) >= 2:
         first = lead_in_occurrences[0]
         second = lead_in_occurrences[1]
-        if second.start() - first.start() < 500:
+        between = content[first.end():second.start()]
+        # 手册中每道流程都会重新引导步骤；中间夹着新章节标题说明是两道独立流程，
+        # 只有引导语之间没有标题分隔时才是编辑残留
+        if second.start() - first.start() < 500 and not _has_intervening_section_heading(between):
             add_issue(
                 second.start(),
                 second.end(),
@@ -10936,6 +11026,8 @@ def _run_manual_engineering_audit(content, file_type=None):
     for match in re.finditer(r"\b(?:cat\.?\s*:|cat\.?\s*number|catalog\s+number)\b", content, re.IGNORECASE):
         original = match.group(0)
         if original == "Cat. No.":
+            continue
+        if _is_symbol_legend_entry(content, match.start(), match.end()):
             continue
         add_issue(
             match.start(),

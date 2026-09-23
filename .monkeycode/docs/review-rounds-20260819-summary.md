@@ -558,3 +558,26 @@
 - 指标声明：离线探针只覆盖确定性规则，本轮英文语义提示词改动作用于 AI 层，探针无法体现其增量
 - 未完成项（依赖可用 LLM provider）：英文语义提示词端到端复测。本轮实测 Qwen 返回 `Arrearage`（账户欠费）、Kimi 返回 401 `Incorrect API key provided`，没有可用 AI provider，无法验证英文 AI 审核是否会稳定产出语义类问题及其误报率，留待 provider 可用后按 G99 验收方式复测
 - 风险提示：英文语义章节尚未经验收数据验证。`is_verifiable_ai_text_issue()` 会给这类问题加 6 分，若模型产出的语义问题质量不足，英文文档 Precision 可能下滑，provider 可用后应优先做英文 Precision 抽样
+
+## 2026-09-23 第五轮审核准确率优化（任务 3 误报与展示修复）
+
+- 样本基线：`H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH_Lijuan.pdf`（document_id=2，rule+AI hybrid）
+- 本轮背景：该文档首次 hybrid 审核产出 20 条问题，逐条人工核对后确认 9 类缺陷（误报 / 解析伪影 / 展示截断），逐项修复
+- 本轮调整内容：
+- `backend/app/utils/spell_checker.py`（冠词 a/an）：`_is_vowel_sound` 的全大写分支原先只判断「命中元音字母名集合即返回 True」，未命中时会继续落到末尾的元音字母判断，导致 U 开头缩略语（`UPS`、`USB`）被误判为元音开头。现改为命中全大写分支即显式返回 `token[0] in _ABBR_VOWEL_SOUND`，并新增 `_WORDLIKE_ALL_CAPS` 白名单放行 `HOME`、`POWER` 等按单词读音的全大写词（如 LOGO 标题 `a HOME`）
+- `backend/app/utils/spell_checker.py`（组学词表）：`omics`、`genomics`、`proteomics`、`transcriptomics`、`metabolomics`、`epigenomics`、`lipidomics`、`spatialomics` 加入 `TECH_TERMS_WHITELIST`，消除 `omics` 被判拼写的误报
+- `backend/app/api/review.py`（SAFE-002 安全标注回溯）：原实现只按风险词前后 ±80 字符找 `WARNING/CAUTION/DANGER`，而 PDF 文本层会把安全标题下的条目拆成多行，风险词常与标题相隔数百字符。新增 `_hazard_has_enclosing_safety_label()`，向前回溯 800 字符查找最近的安全标注；若标题与风险词之间出现新的段落标题（`_SAFETY_SECTION_HEADING_RE`）则视为已跨章节，仍报缺失标注。窗口以风险词位置截断，故只按完整行判定标题
+- `backend/app/api/review.py`（DOC-CATNO-001 货号写法）：新增 `_is_symbol_legend_entry()`，识别「`Catalog number Indicates the manufacturer's catalog number ...`」这类符号表定义行（`_SYMBOL_LEGEND_VERB_RE` 匹配「标签 + Indicates/Means/Denotes/表示/说明/指明」），跳过定义行，避免把符号表图例当成货号标签写法问题；真实标签（`Catalog number: 1000123`）仍照常报出
+- `backend/app/api/review.py`（DOC-PROC-002 步骤引导重复）：原实现只看前两处 `Perform the following steps:` 且间距 < 500 字符即报。手册中每道流程都会重新引导步骤，现新增 `_has_intervening_section_heading()`：两处引导语之间若夹着新章节标题（大写开头、无句末标点的短行）说明是两道独立流程，不再报；真正紧邻的编辑残留仍会命中
+- `backend/app/review_engine/pipeline.py`（商标阅读顺序伪影）：新增 `is_trademark_reading_order_artifact()`。PDF 阅读顺序错乱会把 `®`/`™` 甩到商标名之外（`® are trademarks ...`）或把 `™` 提取成字面量 `TM`（`TM is the trademark ...`），AI 会据此误报商标归属；当原文存在分离的 `®/™/©` 或字面量 `TM`，且建议中含商标符号时判为伪影
+- `backend/app/review_engine/pipeline.py`（断词伪影）：新增 `is_broken_word_extraction_artifact()`。PDF 表格按字符间距断词会产出 `Powe rswi tcha n d` 这类碎片；判定条件是「≥3 个全字母碎片、碎片长度均 ≤4、拼接长度 ≥12、且含 `a/I` 之外的孤立小写单字母」，正常英文短语（`Turn off the tap now`）不会命中。两个伪影判定都放在 `is_verifiable_ai_text_issue()` 早退之前，否则会被语义白名单提前放行
+- `backend/app/api/review.py` + `backend/app/utils/ai_client.py`（整体观察可读性）：`_observation_first_sentence()` 补英文句末标点 `.!?`（仅当文本不含中日韩字符时启用，避免中文里的 `1.` 列表标记被当句末）与词边界收尾，默认长度 72→200；`_is_excerpt_meta_observation()` 剔除「本片段/摘录内容以目录为主」这类分块产物观察；`normalize_audit_observations` 标题 24→60、描述 80→300，中英文 prompt 第 6 条补充「不要输出关于本片段/摘录本身的观察」及标题长度上限
+- `frontend/src/views/Review.vue`（建议列完整展示）：`compactSuggestionText()` 去掉长度截断只保留空白归一化；`describeSuggestionChange()` 的内联 diff 门槛由 24/32 字符改为「改动片段 > 120 字符时退化为 `建议改为“<完整新表述>”`」；`issueSuggestionOverview()` 去掉 60 字符截断
+- 本地验证（重启后端 + DeepSeek 真实调用，`review_id=5`）：
+- 9 类缺陷全部消失：`SAFE-002 flammable`、`SPELL omics`、`DOC-CATNO-001 Catalog number`、`DOC-PROC-002 Perform the following steps`、`GRAMMAR a UPS/a HOME`、商标阅读顺序伪影、断词伪影 `Powe rswi tcha n d` 均不再出现在结果中
+- 真实问题保留：`DOC-DUP-001/007`、`clean→cleaning`、`the the`、`any question→any questions`、`Connects to or disconnect→disconnects` 等仍在；问题总数 20 → 15
+- 观察区恢复正常：`observations` 三条均为完整英文句子（修复前标题/描述带 `…`），无「本片段/摘录」型观察
+- 回归用例：`backend/tests/test_spell_check.py` 新增 2 例（字母名读音判定、组学词不报拼写）；`backend/tests/test_review_cache.py` 新增 6 例（SAFE-002 三例、DOC-CATNO-001 两例、DOC-PROC-002 一例）；`backend/tests/test_review_engine.py` 新增 3 例（商标伪影、断词伪影、伪影问题整链路判为 noise）
+- 全量后端测试：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests -q`（891 passed / 6 failed / 1 skipped）；6 例失败已用 `git worktree add /tmp/opencode/base-check HEAD` 在未改动检出上复现，为既有失败（4 例缺 docx 固件、1 例 `test_polish_match_score` 模板串不一致、1 例缺 `tesseract`），非本轮回归
+- 前端：`cd /workspace/frontend && npm run build` 成功（`✓ built in 34.13s`）
+- 残留未处理（超出本轮 9 项清单，属 AI 判断噪声，待确认）：符号表行 `T10AH250V Fuse specification Indicates the fuse specification to ...` 的 stray fragment 提示、法律免责声明段落的 AI 改写建议、`Figures in this manual are all illustrations.` 的语序建议

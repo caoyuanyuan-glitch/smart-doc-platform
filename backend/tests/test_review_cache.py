@@ -3961,3 +3961,88 @@ def test_run_cached_ai_chunk_review_bypasses_cache_on_force(monkeypatch):
     assert calls == [1]
     review_api._clear_review_runtime_flags(review_id)
     review_api._ai_review_chunk_cache.pop(cache_key, None)
+
+
+def test_run_safety_compliance_audit_skips_hazard_covered_by_earlier_label():
+    # 真实手册中安全标题下的条目被 PDF 拆成多行，风险词距标题数百字符仍属同一标注
+    content = (
+        "General safety\n\n"
+        "DANGER\n\n"
+        "Wear protective equipment before operating the device. "
+        "Failure to do so might cause serious personal injury. "
+        "Keep the working area clean and dry at all times during operation. "
+        "Do not touch the power port while the device is running.\n\n"
+        "The device contains flammable liquid that must be handled with care.\n"
+    )
+
+    issues = review_api._run_safety_compliance_audit(content, "en")
+
+    assert not any(issue["rule"] == "SAFE-002" for issue in issues)
+
+
+def test_run_safety_compliance_audit_keeps_hazard_without_label():
+    content = "The device contains flammable liquid that must be handled with care.\n"
+
+    issues = review_api._run_safety_compliance_audit(content, "en")
+
+    assert any(
+        issue["rule"] == "SAFE-002" and issue["original_text"] == "flammable"
+        for issue in issues
+    )
+
+
+def test_run_safety_compliance_audit_keeps_hazard_after_new_heading():
+    # 标题与风险词之间出现新段落标题说明已跨章节，仍需提示缺少安全标注
+    content = (
+        "DANGER\n\n"
+        "Wear protective equipment before operating the device. "
+        "Failure to do so might cause serious personal injury. "
+        "Keep the working area clean and dry at all times during operation.\n\n"
+        "Power supply specifications\n\n"
+        "The device uses high voltage input.\n"
+    )
+
+    issues = review_api._run_safety_compliance_audit(content, "en")
+
+    assert any(
+        issue["rule"] == "SAFE-002" and issue["original_text"] == "high voltage"
+        for issue in issues
+    )
+
+
+def test_run_manual_engineering_audit_skips_symbol_legend_catalog_number():
+    content = (
+        "Symbol Title Description\n\n"
+        "Catalog number Indicates the manufacturer's catalog number so that the device can be identified.\n\n"
+        "CE marking of conformity Indicates that this device conforms with the specified Council Directive.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert not any(issue["rule"] == "DOC-CATNO-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_keeps_real_catalog_number_label():
+    issues = review_api._run_manual_engineering_audit(
+        "Order the reagent using Catalog number: 1000123 from the catalog.\n",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-CATNO-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_leadin_for_separate_procedures():
+    content = (
+        "Powering on the device\n\n"
+        "Perform the following steps:\n"
+        "1. Connect the power cord.\n"
+        "2. Press the power button.\n\n"
+        "Logging in to the control software\n\n"
+        "Perform the following steps:\n"
+        "1. Double-click the software icon.\n"
+        "2. Input the password.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert not any(issue["rule"] == "DOC-PROC-002" for issue in issues)
