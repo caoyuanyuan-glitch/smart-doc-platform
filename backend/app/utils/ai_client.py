@@ -115,8 +115,18 @@ def _provider_max_attempts():
     return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
 
 
-def _audit_max_tokens():
-    return max(256, _env_int("AI_AUDIT_MAX_TOKENS", "2048"))
+def _audit_max_tokens(content_length: int = 0) -> int:
+    """AI 审核输出 token 上限。
+
+    按输入长度自适应：输入越长，允许的输出越大，避免大分块 JSON 被截断。
+    仍受环境变量 AI_AUDIT_MAX_TOKENS 硬上限约束（默认 4096）。
+    """
+    base = max(1024, _env_int("AI_AUDIT_MAX_TOKENS", "4096"))
+    if content_length <= 0:
+        return base
+    # 输出预算 ≈ 输入字符数 / 3（英文）+ 固定余量，封顶 base 的 2 倍
+    estimated = base + min(base, max(0, content_length // 3))
+    return int(min(estimated, base * 2))
 
 
 def _provider_http_timeout():
@@ -1037,6 +1047,15 @@ class AIClient:
                     return json.loads(m.group(0))
             except Exception:
                 pass
+        # 解析失败：检查是否为截断（无闭合括号），并打标记供调用方感知降级
+        stripped = _strip_code_fence(result) if result else ""
+        truncated = bool(stripped) and stripped.count("{") > stripped.count("}")
+        if truncated:
+            try:
+                default["_degraded"] = True
+                default["_degraded_reason"] = "json_truncated"
+            except (TypeError, AttributeError):
+                pass
         return default
 
     @staticmethod
@@ -1185,24 +1204,36 @@ class AIClient:
 
             if confidence < min_confidence:
                 continue
-            needs_human_review = bool(item.get("needs_human_review")) or (50 <= confidence < 70)
+            needs_human_review = bool(item.get("needs_human_review")) or (50 <= confidence < 75)
             if not description and not suggestion:
                 continue
             if len(description) < 4 and len(suggestion) < 2:
                 continue
 
-            # 去重逻辑：同一错误内容在同一文档中只报告第一次
+            # 去重逻辑：同一错误内容 + 同一位置/章节才算重复，避免误杀不同页面的同类问题
             error_key = original_text.lower().strip()
-            if error_key in reported_errors:
+            position_key = self._clean_text(item.get("position"), 80) or chapter
+            dedupe_key = f"{error_key}|{position_key}"
+            if dedupe_key in reported_errors:
                 continue
-            if error_key:
-                reported_errors.add(error_key)
+            if dedupe_key:
+                reported_errors.add(dedupe_key)
 
             if original_text:
                 if len(original_text) == 1 and not re.search(r"[\u4e00-\u9fffA-Za-z]", original_text):
                     continue
-                if content and original_text not in content and context and original_text not in context:
-                    continue
+                if content:
+                    # PDF 提取文本与模型输出常有换行/空格差异，用空白归一化后再匹配
+                    compact_original = re.sub(r"\s+", "", original_text)
+                    compact_content = re.sub(r"\s+", "", content)
+                    compact_context = re.sub(r"\s+", "", context or "")
+                    if compact_original not in compact_content and (not context or compact_original not in compact_context):
+                        continue
+                    item["evidence_match_method"] = (
+                        "exact" if original_text in content
+                        else "normalized_whitespace"
+                    )
+                    item["raw_original_text"] = original_text
             elif source == "ai":
                 continue
 
@@ -1226,6 +1257,8 @@ class AIClient:
                 "source_models": list(item.get("source_models") or []),
                 "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
                 "needs_human_review": needs_human_review,
+                "evidence_match_method": item.get("evidence_match_method") or "",
+                "raw_original_text": item.get("raw_original_text") or "",
             })
 
         return normalized
@@ -1332,7 +1365,7 @@ class AIClient:
 
     def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
         provider_key = str(provider_key or "").strip().lower()
-        max_tokens = _audit_max_tokens()
+        max_tokens = _audit_max_tokens(len(str(content or "")))
         if provider_key == "qwen":
             result = self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
         elif provider_key == "kimi":
@@ -1350,6 +1383,10 @@ class AIClient:
             return []
 
         data = self._extract_json(result, {"issues": []})
+        if data.get("_degraded"):
+            print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={len(str(result or ''))})")
+            data.pop("_degraded", None)
+            data.pop("_degraded_reason", None)
         issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
         observations = self.normalize_audit_observations(data.get("observations", []))
         pending = getattr(self, "_pending_audit_observations", None)
@@ -2445,7 +2482,7 @@ confidence 评分指南：
             result = self.chat_with_provider(
                 force_provider,
                 messages,
-                max_tokens=2048,
+                max_tokens=_audit_max_tokens(len(str(content or ""))),
                 temperature=0.2,
                 request_label=request_label,
                 review_id=review_id,

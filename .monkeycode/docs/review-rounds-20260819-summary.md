@@ -363,3 +363,38 @@
 - `距离太近了，4方框调小`
 - 当前仅剩 1 条未命中：`这丽应该是白色，下同`
 - 这条属于纯视觉色彩判断，当前 OCR 文本中没有稳定文本锚点，更适合作为低优先级人工确认项保留
+
+## 2026-09-22 第二轮审核准确率优化（标点空格与单位符号）
+
+- 样本基线：`当前工作区/.monkeycode/docs/cyy-human-review-baseline.json`（603 条人工批注，其中 `DET-SPACE-001` 78 条）
+- 本轮调整内容：
+- 在 `backend/app/api/review.py` 中扩展 `DOC-SPACE-001`：句末标点后接大写单词的判据改为「标点前为文字或收尾符号（含 `)`、`]`、温度符号 `℃/℉/°` 等）+ 标点后接大写字母」，并补充「单词后多出一个孤立小写字母（如 `installation.r.`）」的独立判据；用缩写词表与单字母首字母缩写（`U.S.A`、`e.g.`）排除正常连写
+- 新增 `DOC-SPACE-004`：分句标点（`,` `;` `:`）后直接连写下一个单词（如 `buffer,then`、`on;Check`、`Figure 1:Add`）；排除千分位 `1,000`、编号 `H-020-001198-00;D4`、分隔列表 `更换;吸取;转移;标记`、`标签:值/占位符` `xx:xx`、邮箱 `US:US-TechSupport@example.com`、XML 命名空间 `xmlns:MadCap`
+- 新增 `DOC-SPACE-005`：微升单位符号被空格拆开（`10 μ L` -> `10 μL`）
+- 在 `backend/app/review_engine/annotation_baseline.py` 中把 `DOC-SPACE-004`、`DOC-SPACE-005` 纳入 `DET-SPACE-001` 的对齐规则集合
+- 在 `backend/tests/test_review_cache.py` 中新增 5 个回归用例，覆盖上述命中与不误报口径
+- 本地验证：
+- 回归测试通过：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py -q`（226 passed）
+- 全量后端测试：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests -q`（819 passed；6 个既有失败与本轮无关：4 例缺 docx 固件、1 例模板串不一致、1 例缺 `tesseract`）
+- 基线上下文命中：`DOC-SPACE-001` 18 处、`DOC-SPACE-004` 6 处、`DOC-SPACE-005` 4 处
+- 误报扫描：对仓库内 31 份真实 Markdown 文档（含两份写作风格指南、竞品文档设计/需求说明、结构化模板库样例）运行上述三条规则，命中 0 处
+- 平台侧复评（上传样本 match rate 表）待执行，本轮暂不记录指标
+
+## 2026-09-22 第三轮审核准确率优化（误杀修复与语义 prompt 增强）
+
+- 依据交付包 `文档审核修复交付包/01_修改方案/发给Monkey Code的审核逻辑修改方案.md`（P0-P3）执行，commit `b8dff39`
+- 本轮调整内容：
+- `pipeline.py`（P0-A/P0-B）：`LOW_VALUE_PATTERN` 摘除 `标点`、`普通语法`、`冠词`、`格式微调` 四个无边界中文裸词；新增 `is_verifiable_ai_text_issue()`，对「有原文+建议、类别白名单、非视觉」的 AI 文本问题豁免 LOW_VALUE 一票否决；`is_noise()` 中规则库误报判断前置，确保 `following status` 等人工已接受表达仍被过滤
+- `pipeline.py`（P1-B/P3 配套）：新增 `drain_pipeline_drop_reasons()` 内存丢弃计数；`is_verifiable_ai_text_issue` 白名单补入 `冗余`、`表述不准确`、`信息不完整`、`一致性`、`语气`、`图表衔接`、`句子成分` 七个语义类目，使语义类 suggestion 问题不被 45 分阈值丢弃
+- `review.py`（P1-A）：`_should_visual_verify_issue()` 重写为文本审核与 PDF 视觉复核解耦，文本类问题永不进入视觉复核，不再因视觉 provider 不可用被置 `blocked`、或因视觉 `reject` 被删除
+- `review.py`（P1-B）：审核 summary 追加 `review_execution`（模式、provider、调用次数、分块覆盖、缓存命中、降级原因）与 `issue_flow`（AI 输入→规范化→pipeline→视觉复核各阶段数量与 `dropped_by_reason`）两个字段
+- `ai_client.py`（P2）：`normalize_audit_issues()` 原文匹配改为空白归一化匹配并写入 `evidence_match_method`/`raw_original_text`；去重键改为 `原文+位置/章节`；低置信度进人工复核阈值由 70 上调至 75
+- `review_rules.py`（P3-A~D）：`SYSTEM_PROMPT_TEMPLATE` 新增「十、语义质量检查」章节（8 个语义维度）与「语义类误报抑制规则」；输出 `type` 枚举补充语义类型；新增 `SEMANTIC_FEWSHOT_EXAMPLES`，以字符串拼接方式注入 `build_system_prompt()`；语义章节仅对中文文档生效（`en` 分支不变）
+- 回归用例：新增 `backend/tests/test_review_engine.py`（9 例）、`backend/tests/test_prompt_semantic_dimensions.py`（3 例）；`test_review_cache.py` 中 5 个视觉复核用例改用视觉类目，继续覆盖伪影过滤路径
+- 本地验证：
+- G99 中文验收 runner：`python3 g99_acceptance_runner.py --repo /workspace/backend --data <验收数据>`，结果 PASS（20 进 20，基线为 20 进 14；must_keep 6/6、P30 3/3、P75 通过，退出码 0）
+- 审核相关套件：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py backend/tests/test_ai_client_audit.py backend/tests/test_review_engine.py backend/tests/test_prompt_semantic_dimensions.py backend/tests/test_review_false_positives.py backend/tests/test_review_optimization.py backend/tests/test_snippet_review.py backend/tests/test_review_dual_input.py -q`（324 passed）
+- 全量后端测试：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests -q`（831 passed；6 个既有失败与本轮无关：4 例缺 docx 固件、1 例模板串不一致、1 例缺 `tesseract`）
+- 未完成项（依赖可用 LLM provider）：13 条 DeepSeek 英文回归前后数量、G99 13 条 MISS 复测（要求至少 9 条重新抓到）、P51 方向纠正、40 条 Precision 抽样复测；当前环境 DeepSeek 未配置且 Qwen 账户欠费（`Arrearage`），无法实机复测
+- 指标声明：未使用独立测试集实测，本轮不声称文本 Precision/Recall 已达 88%
+- 已识别但未实施的建议项：交付方案 2.6「伪影调用层过滤」未实施，因其验收依赖 40 条抽样复测、且与硬约束「不新增黑名单规则」存在张力，留待用户确认后再做

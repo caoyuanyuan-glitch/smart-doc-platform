@@ -18,12 +18,21 @@ from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.services.chunker import create_smart_chunker
 
 
-def test_chunker_keeps_all_chapters_without_sampling():
+def test_chunker_caps_chunks_without_sampling():
+    # 采样关闭时也遵守 max_chunks 上限（PR #133 修复：此前 off 模式下 max_chunks 形同虚设）。
+    # 收敛方式为"合并相邻碎片"，覆盖原文全量，不得靠丢弃内容来满足上限。
     text = "\n\n".join(f"第{index}章 标题{index}\n" + ("X" * 50) for index in range(1, 7))
     chunker = create_smart_chunker(max_chunks=3, max_chars=80, sampling_mode="off")
     chunks = chunker.chunk_document(text)
-    assert len(chunks) >= 6
-    assert chunker.last_diagnostics.get("skipped_chapters") in (None, [], "")
+    assert len(chunks) <= 3
+    diagnostics = chunker.last_diagnostics
+    assert diagnostics.get("chunker_mode") == "chapter_max"
+    assert diagnostics.get("fallback_reason") == "max_chunks_cap"
+    assert diagnostics.get("coverage_ratio") >= 0.99
+    assert not diagnostics.get("skipped_chapters")
+    merged = "".join(chunk.content for chunk in chunks)
+    for index in range(1, 7):
+        assert f"第{index}章 标题{index}" in merged
 
 
 def test_chunker_even_sampling_skips_chapters_when_enabled():
@@ -153,7 +162,8 @@ def test_orphan_fk_migration_aborts():
 
 def test_chunker_ten_chapters_and_coverage_ratio():
     text = "\n\n".join(f"第{index}章 标题{index}\n" + ("Z" * 40) for index in range(1, 11))
-    chunker = create_smart_chunker(max_chunks=4, max_chars=80, sampling_mode="off")
+    # max_chunks 需大于实际分块数，才能断言"无裁剪时覆盖率完整"。
+    chunker = create_smart_chunker(max_chunks=20, max_chars=80, sampling_mode="off")
     chunks = chunker.chunk_document(text)
     assert len(chunks) >= 10
     coverage = chunker.last_diagnostics

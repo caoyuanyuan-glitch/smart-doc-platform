@@ -63,6 +63,8 @@ from app.review_engine.validation import (
 )
 from app.review_engine.layers import count_issue_layers
 from app.review_engine.pipeline import (
+    drain_pipeline_drop_reasons as pipeline_drain_drop_reasons,
+    is_verifiable_ai_text_issue as pipeline_is_verifiable_ai_text_issue,
     select_review_issues as pipeline_select_review_issues,
     sort_key as pipeline_sort_key,
     suppress_shadowed_ai as pipeline_suppress_shadowed_ai,
@@ -1219,7 +1221,9 @@ def _issue_review_value_score(issue):
     if rule_upper in {"R029", "R035", "HR009", "TENSE-001", "PUNCT-002", "R002", "R003"}:
         score -= 35
     if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not high_value_pattern.search(blob):
-        score -= 15
+        # 可验证的 AI 文本问题（有原文+建议、白名单类目、confidence>=70）不扣分
+        if not pipeline_is_verifiable_ai_text_issue(issue):
+            score -= 15
     if not original or not suggestion:
         score -= 25
 
@@ -1235,6 +1239,10 @@ def _filter_by_issue_value(issues, min_score=45):
             issue["review_value_score"] = score
         severity = str(_issue_value(issue, "severity", "") or "").lower()
         threshold = 38 if severity in {"fatal", "serious"} else min_score
+        # 可验证的 AI 文本问题（英文 Grammar/语义类）降低阈值，避免 70-85 confidence
+        # 区间被 45 分硬门槛整体丢掉
+        if pipeline_is_verifiable_ai_text_issue(issue):
+            threshold = 38
         if score < threshold:
             dropped += 1
             continue
@@ -2361,7 +2369,10 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
     chunker_fallback_reason = ""
     if use_smart_chunking and create_smart_chunker is not None and len(content) > 1000:
         try:
-            chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)), sampling_mode=_review_sampling_mode())
+            chunker = create_smart_chunker(
+                max_chunks=_review_ai_chunk_limit(len(content)),
+                sampling_mode="off" if _review_sampling_mode() in {"", "off", "none", "false", "0"} else _review_sampling_mode(),
+            )
             smart_chunks = chunker.chunk_document(content)
             if smart_chunks:
                 chunks = [(c.index + 1, c.start, c.content) for c in smart_chunks]
@@ -2947,7 +2958,9 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
 
     pre_pipeline_issues = list(issues)
     before_pipeline_count = len(issues)
+    pipeline_drain_drop_reasons()
     issues = pipeline_select_review_issues(issues)
+    ai_filter_diagnostics["pipeline_drop_reasons"] = pipeline_drain_drop_reasons()
     issues = _restore_high_value_rule_issues(issues, pre_pipeline_issues + initial_issues)
     ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
     print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
@@ -2980,6 +2993,101 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
         ai_filter_diagnostics["recall_floor_applied"] = False
 
     return issues, ai_filter_diagnostics
+
+
+def _build_review_execution_summary(mode, provider, ai_review_trace, ai_calls, ai_degraded, ai_degraded_reason, ai_budget_exceeded):
+    """汇总 AI 调用、分块覆盖、缓存命中等执行状态，供 summary 审计。
+
+    ai_calls==0 或存在超时/失败分块、分块未覆盖全量、Token 预算中断时，
+    明确标记为未完成全文审核，避免用户误以为已完成全文审核。
+    """
+    trace = ai_review_trace if isinstance(ai_review_trace, dict) else {}
+    chunk_meta = [item for item in (trace.get('chunk_meta') or []) if isinstance(item, dict)]
+    total_chunks = int(trace.get('total_chunk_count') or 0)
+    selected_chunks = int(trace.get('selected_chunk_count') or len(chunk_meta) or 0)
+    cache_hits = sum(1 for item in chunk_meta if item.get('cache_hit'))
+    degraded_chunks = [
+        item for item in chunk_meta
+        if str(item.get('status') or '') in {'timeout', 'error', 'failed'}
+    ]
+    # 只有真正拿到模型回答（成功调用或有效缓存）的分块才算已覆盖；
+    # provider 不可用时调用会静默返回空结果，不能按"已处理"计入覆盖。
+    covered_chunks = min(selected_chunks, int(ai_calls or 0) + cache_hits)
+    processed_chunks = max(0, covered_chunks - len(degraded_chunks))
+    if total_chunks:
+        coverage_ratio = round(processed_chunks / total_chunks, 4)
+    else:
+        coverage_ratio = 1.0 if processed_chunks else 0.0
+
+    partial_reasons = []
+    if ai_degraded:
+        partial_reasons.append(ai_degraded_reason or 'ai_degraded')
+    if ai_budget_exceeded:
+        partial_reasons.append('ai_token_budget_reached')
+    if degraded_chunks:
+        partial_reasons.append(f'{len(degraded_chunks)}_chunk_timeout_or_failed')
+    if coverage_ratio < 1.0:
+        partial_reasons.append(f'chunk_coverage_{coverage_ratio}')
+    if processed_chunks < selected_chunks:
+        partial_reasons.append(f'uncovered_chunks_{selected_chunks - processed_chunks}')
+    if trace.get('fallback_reason'):
+        partial_reasons.append(f"chunker_fallback:{trace['fallback_reason']}")
+
+    actual_providers = [str(item) for item in (trace.get('provider_list') or []) if str(item)]
+    if not actual_providers and provider:
+        actual_providers = [str(provider)]
+
+    return {
+        'mode': mode,
+        'requested_provider': provider or '',
+        'actual_providers': actual_providers,
+        'ai_calls': int(ai_calls or 0),
+        'cache_hits': cache_hits,
+        'total_chunks': total_chunks,
+        'processed_chunks': processed_chunks,
+        'coverage_ratio': coverage_ratio,
+        'full_document_reviewed': bool(
+            trace.get('enabled')
+            and not ai_degraded
+            and not degraded_chunks
+            and not ai_budget_exceeded
+            and coverage_ratio >= 1.0
+        ),
+        'partial_coverage': bool(partial_reasons),
+        'partial_reasons': partial_reasons,
+        'ai_degraded': bool(ai_degraded),
+        'ai_degraded_reason': ai_degraded_reason or '',
+    }
+
+
+def _build_issue_flow_summary(ai_filter_diagnostics, pdf_visual_verification, retained_ai_count):
+    """汇总 AI 问题从输入到最终输出的流转与丢弃归因。"""
+    diagnostics = ai_filter_diagnostics if isinstance(ai_filter_diagnostics, dict) else {}
+    visual = pdf_visual_verification if isinstance(pdf_visual_verification, dict) else {}
+    dropped = Counter(diagnostics.get('pipeline_drop_reasons') or {})
+    evidence_reasons = diagnostics.get('document_evidence_drop_reasons') or {}
+    evidence_dropped = (
+        sum(int(value or 0) for value in evidence_reasons.values())
+        if isinstance(evidence_reasons, dict) else 0
+    )
+    initial_ai = int(diagnostics.get('initial_ai') or 0)
+    after_normalization = diagnostics.get('after_dedup_ai')
+    return {
+        'ai_input_count': initial_ai,
+        'after_normalization': int(after_normalization if after_normalization is not None else initial_ai),
+        'after_pipeline': int(diagnostics.get('after_pipeline_ai') or 0),
+        'after_visual_verification': int(retained_ai_count or 0),
+        'dropped_by_reason': {
+            'noise': int(dropped.get('noise') or 0),
+            'below_threshold': int(dropped.get('below_threshold') or 0),
+            'evidence_missing': evidence_dropped,
+            'visual_reject': int(visual.get('rejected_count') or 0),
+            'dedupe': int(dropped.get('dedupe_shadowed') or 0),
+            'empty_original_text': int(dropped.get('empty_original_text') or 0),
+            'status_filtered': int(dropped.get('status_filtered') or 0),
+        },
+        'pipeline_drop_reasons': dict(dropped),
+    }
 
 
 def _issue_judgment_signature(issue):
@@ -3232,16 +3340,32 @@ def _issue_page_number(issue, content):
 def _should_visual_verify_issue(issue, file_type):
     if str(file_type or '').lower() != 'pdf':
         return False
-    if str(_issue_value(issue, 'source', '') or '').lower() != 'ai':
+
+    source = str(_issue_value(issue, 'source', '') or '').lower()
+    category = str(_issue_value(issue, 'category', '') or '')
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    description = str(_issue_value(issue, 'description', '') or '')
+    blob = ' '.join([category, rule, description]).lower()
+
+    text_markers = (
+        'grammar', 'spelling', 'punctuation', 'terminology',
+        '英文规范', '英文微编辑', '语法', '拼写', '术语', '用词',
+        '口语化', '冗余', '指代不明', '标点', '不通顺', '缺字',
+        '表述不准确', '信息不完整', '一致性', '格式微调', '标点符号',
+    )
+    if any(marker in blob for marker in text_markers):
         return False
-    text_blob = ' '.join([
-        str(_issue_value(issue, 'original_text', '') or ''),
-        str(_issue_value(issue, 'context', '') or ''),
-        str(_issue_value(issue, 'description', '') or ''),
-    ]).strip()
-    if not text_blob:
+
+    if source != 'ai':
         return False
-    return True
+
+    visual_markers = (
+        '表格/版式', '图片/对象缺失', '字体/版式细节',
+        'layout', 'visual', 'font size', 'icon', 'image',
+        'column width', 'cell overflow', '版式', '字号', '图标',
+        '图片显示不全', '图片尺寸', '字体不对', '没有居中', '白边',
+    )
+    return any(marker in blob for marker in visual_markers)
 
 
 def _match_known_pdf_false_positive(issue):
@@ -9648,9 +9772,23 @@ def _run_manual_engineering_audit(content, file_type=None):
         )
 
     # 缺失空格：句末标点后直接连写下一个单词（如 temperature.For these）
-    for match in re.finditer(r'([A-Za-z]{2,}[.!?]|[0-9]+[.!?])([A-Z][a-z]{2,})', content):
+    # a) 标点后接大写单词：覆盖右括号、引号、温度符号收尾等场景；用缩写词与单字母首字母
+    #    缩写（U.S.A / e.g.）排除正常连写。标点前限定为文字或收尾符号，避免 URL 查询串、
+    #    转义点号、Markdown 反引号等误报。
+    _ABBREV_WORDS = {
+        'etc', 'eg', 'ie', 'vs', 'approx', 'fig', 'eq', 'no', 'al', 'dr', 'mr', 'mrs', 'ms', 'prof',
+        'ref', 'sec', 'ver', 'vol', 'cf', 'resp', 'viz', 'ph', 'phd', 'st', 'inc', 'ltd', 'dept',
+        'est', 'ext', 'div', 'mfg', 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept',
+        'oct', 'nov', 'dec', 'am', 'pm',
+    }
+    for match in re.finditer(r'([A-Za-z0-9\)\]\}"\'”’℃℉°%μ][.!?])([A-Z])', content):
         head, tail = match.group(1), match.group(2)
-        if head.lower().rstrip('.!?') in ('etc', 'eg', 'ie', 'vs', 'approx', 'fig', 'eq', 'no'):
+        token_match = re.search(r'[A-Za-z]+(?:\.[A-Za-z]+)*$', content[:match.start() + 1])
+        token = token_match.group(0).replace('.', '').lower() if token_match else ''
+        if token in _ABBREV_WORDS:
+            continue
+        # 单字母首字母缩写（如 U.S / U.S.A）：前一位不是字母，说明点号属于缩写而非句末
+        if head[:-1].isupper() and (match.start() == 0 or not content[match.start() - 1].isalpha()):
             continue
         add_issue(
             match.start(),
@@ -9660,6 +9798,22 @@ def _run_manual_engineering_audit(content, file_type=None):
             '空格与排版',
             f"{head} {tail}",
             '英文句子结束后应有一个空格，句末标点后直接连写下一个单词会影响可读性。',
+            '说明书审核能力补强方案 - 句末标点后空格',
+            'general',
+            92,
+        )
+
+    # b) 单词后多出一个孤立小写字母（如 installation.r.）：仅在字母后紧跟分隔符或行尾时判定，
+    #    从而与 manual.pdf、node.js、runtime.env 这类文件名/标识符区分开。
+    for match in re.finditer(r'\b([A-Za-z]{3,})\.([a-z])(?=[\s.,;:!?)\]]|$)', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-001',
+            '空格与排版',
+            f"{match.group(1)}. {match.group(2)}",
+            '句末标点后疑似多出一个孤立字母，请确认是否缺失空格或误输入。',
             '说明书审核能力补强方案 - 句末标点后空格',
             'general',
             92,
@@ -9739,6 +9893,58 @@ def _run_manual_engineering_audit(content, file_type=None):
             '说明书审核能力补强方案 - 数值与单位间距',
             'general',
             92,
+        )
+
+    # 缺失空格：分句标点（逗号、分号、冒号）后直接连写下一个单词（如 buffer,then、on;Check）
+    # 要求标点后紧跟字母，天然排除时间 10:30、URL 协议等数字/符号相邻场景；
+    # 逗号前为数字时按千分位处理（1,000），冒号/分号则保留（Figure 1:Add -> Figure 1: Add）。
+    for match in re.finditer(r'([A-Za-z0-9]+)([,;:])([A-Za-z])', content):
+        punct = match.group(2)
+        pre_token_match = re.search(r'[A-Za-z0-9-]+$', content[:match.start() + len(match.group(1))])
+        pre_token = pre_token_match.group(0) if pre_token_match else ''
+        # 逗号/分号前是数字或含连字符的编号（如 1,000、H-020-001198-00;D4）属于编号写法
+        if punct in ',;' and (pre_token[-1:].isdigit() or '-' in pre_token):
+            continue
+        # 分号构成的分隔列表（如 更换;吸取;转移;标记）本身不加空格
+        if punct == ';' and content[max(0, match.start() - 40):match.end() + 40].count(';') >= 3:
+            continue
+        # 冒号后接小写字母多为“标签:值/占位符”（如 xx:xx），不做缺失空格判断
+        if punct == ':' and not match.group(3).isupper():
+            continue
+        # 冒号后直接跟邮箱/标识符（如 US:US-TechSupport@example.com）属于标签:值写法
+        if re.match(r'[A-Za-z0-9._%+-]+@', content[match.end() - 1:]):
+            continue
+        # XML 命名空间声明与标签属性（如 xmlns:MadCap、<dc:Title>）不是缺失空格
+        if 'xmlns' in content[max(0, match.start() - 12):match.end()].lower():
+            continue
+        if match.start() > 0 and content[match.start() - 1] == '<':
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-004',
+            '空格与排版',
+            f"{match.group(1)}{match.group(2)} {match.group(3)}",
+            '英文标点符号后应保留一个空格，标点后直接连写下一个单词影响可读性与规范一致性。',
+            '说明书审核能力补强方案 - 标点后空格',
+            'general',
+            91,
+        )
+
+    # 缺失/多余空格：微升符号被空格拆开（如 10 μ L -> 10 μL）
+    for match in re.finditer(r'(?<=\d)\s*(?:µ|μ|u)\s+L\b', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-005',
+            '空格与排版',
+            'μL',
+            '微升单位符号内部被空格拆开，建议合并为 μL。',
+            '说明书审核能力补强方案 - 单位符号完整性',
+            'general',
+            91,
         )
 
     # 基础标点：连续重复标点（如 ',,' '。.'；'..' 排除省略号 '...'）
@@ -12061,6 +12267,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         ai_review_trace = {"enabled": False, "reason": "not_run"}
         ai_review_basis_sections = []
+        ai_calls = 0
         ai_degraded = False
         ai_degraded_reason = ""
         if document.file_type != 'xlsx' and engine_mode in ["ai", "hybrid"] and not has_ai_client:
@@ -12310,6 +12517,11 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "ai_degraded_reason": ai_degraded_reason,
             "ai_budget_exceeded": bool(isinstance(ai_review_trace, dict) and ai_review_trace.get("budget_reached")),
             "ai_filter_diagnostics": ai_filter_diagnostics,
+            "review_execution": _build_review_execution_summary(
+                mode, provider, ai_review_trace, ai_calls, ai_degraded, ai_degraded_reason,
+                bool(isinstance(ai_review_trace, dict) and ai_review_trace.get("budget_reached")),
+            ),
+            "issue_flow": _build_issue_flow_summary(ai_filter_diagnostics, pdf_visual_verification, retained_ai_count),
             "pdf_visual_verification": pdf_visual_verification,
             "pdf_page_metadata": pdf_page_metadata,
             "pdf_suspicious_pages": pdf_suspicious_pages,

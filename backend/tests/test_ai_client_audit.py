@@ -178,13 +178,14 @@ def test_run_provider_audit_uses_configurable_max_tokens(monkeypatch):
         captured["max_tokens"] = max_tokens
         return '{"issues": []}'
 
-    monkeypatch.setenv("AI_AUDIT_MAX_TOKENS", "512")
+    # _audit_max_tokens 现在按输入长度自适应：空内容时直接返回配置基准值。
+    monkeypatch.setenv("AI_AUDIT_MAX_TOKENS", "2048")
     monkeypatch.setattr(client, "call_qwen", fake_call_qwen)
 
-    result = client._run_provider_audit("qwen", [], "text")
+    result = client._run_provider_audit("qwen", [], "")
 
     assert result == []
-    assert captured["max_tokens"] == 512
+    assert captured["max_tokens"] == 2048
 
 
 def test_qwen3_request_disables_thinking_by_default(monkeypatch):

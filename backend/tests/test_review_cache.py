@@ -1039,10 +1039,11 @@ def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
         {
             "source": "ai",
             "severity": "general",
-            "category": "术语",
+            # P1-A: 只有视觉/版式类问题才进入视觉复核，文本类问题会被入口跳过
+            "category": "表格/版式",
             "original_text": "注册手册号",
             "context": "输入注册手册号后继续。",
-            "description": "疑似术语错误",
+            "description": "截图疑似版式异常",
             "suggestion": "改为注册手机号",
             "position": json.dumps({"page_number": 2}, ensure_ascii=False),
         },
@@ -1185,7 +1186,7 @@ def test_apply_pdf_visual_verification_filters_known_quote_mapping_artifact_afte
         {
             "source": "ai",
             "severity": "general",
-            "category": "格式规范",
+            "category": "表格/版式",
             "original_text": '“Run settings".',
             "context": 'The text layer shows “Run settings". in the UI message.',
             "description": '引号和句号位置疑似异常',
@@ -1226,7 +1227,7 @@ def test_apply_pdf_visual_verification_filters_known_following_status_artifact_a
         {
             "source": "ai",
             "severity": "general",
-            "category": "语言质量",
+            "category": "表格/版式",
             "original_text": 'following status',
             "context": 'Check the following status of the module.',
             "description": '短语表达疑似异常',
@@ -1267,7 +1268,7 @@ def test_apply_pdf_visual_verification_filters_known_turn_on_it_artifact_after_u
         {
             "source": "ai",
             "severity": "general",
-            "category": "语言质量",
+            "category": "表格/版式",
             "original_text": 'turn on it',
             "context": 'Press the switch and turn on it before use.',
             "description": '短语表达疑似异常',
@@ -1348,7 +1349,7 @@ def test_apply_pdf_visual_verification_filters_duplicated_text_layer_artifact_af
         {
             "source": "ai",
             "severity": "general",
-            "category": "重复内容",
+            "category": "表格/版式",
             "original_text": '一旦您开始使',
             "context": '一旦您开始使 一旦您开始使 用本软件',
             "description": '重复文本层伪影',
@@ -2478,6 +2479,71 @@ def test_run_manual_engineering_audit_detects_missing_data_placeholder():
     issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
 
     assert any(issue["rule"] == "DOC-DATA-001" and issue["original_text"] == "About" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_missing_space_after_sentence_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "Please check the installation.r before use. Tap [Run Wizard].On the interface. "
+        "Store at -20℃.Do not refreeze. Timeout is 30 min.Then stop.",
+        file_type="pdf",
+    )
+
+    space_issues = [issue for issue in issues if issue["rule"] == "DOC-SPACE-001"]
+    originals = {issue["original_text"] for issue in space_issues}
+
+    assert "installation.r" in originals
+    assert "].O" in originals
+    assert "℃.D" in originals
+    assert "n.T" in originals
+
+
+def test_run_manual_engineering_audit_detects_missing_space_after_clause_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "Add 5 mL of buffer,then incubate. The device is powered on;Check the software. "
+        "Figure 1:Add the reagent. Prepare Fast Wash 2:Remove the cap.",
+        file_type="pdf",
+    )
+
+    space_issues = [issue for issue in issues if issue["rule"] == "DOC-SPACE-004"]
+    originals = {issue["original_text"] for issue in space_issues}
+
+    assert "buffer,t" in originals
+    assert "on;C" in originals
+    assert "1:A" in originals
+    assert "2:R" in originals
+
+
+def test_run_manual_engineering_audit_skips_label_value_and_time_colons():
+    issues = review_api._run_manual_engineering_audit(
+        "Contact support at: US:US-TechSupport@example.com or Canada:CA-TechSupport@example.com. "
+        "Fill in the date as xxxx/xx/xx xx:xx in the form. Ratio 1:2 was used. "
+        "Declare the root element xmlns:MadCap namespace and the <dc:Title> attribute. "
+        "Findings include 吸头;封闭液去除塞;DNB;PCR 管 and 更换;吸取;转移;标记. "
+        "Refer to manual H-020-001198-00;D4 for details.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-SPACE-004" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_abbreviation_and_domain_periods():
+    issues = review_api._run_manual_engineering_audit(
+        "Use a tube (e.g.next tube). Open manual.pdf and visit www.mgi-tech.com. "
+        "Refer to the U.S.A office. Run node.js and read config.yaml or data.json. "
+        "See Fig.3 and Section 3.2. Inc.Ltd approved it. Edit runtime.env before start.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-SPACE-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_split_microliter_symbol():
+    issues = review_api._run_manual_engineering_audit(
+        "Pipette 10 μ L of the sample into the tube.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-SPACE-005" and issue["original_text"] == "μ L" for issue in issues)
 
 
 def test_run_chinese_human_baseline_rules_detects_temperature_range():
