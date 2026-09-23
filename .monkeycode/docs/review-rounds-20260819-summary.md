@@ -398,3 +398,94 @@
 - 未完成项（依赖可用 LLM provider）：13 条 DeepSeek 英文回归前后数量、G99 13 条 MISS 复测（要求至少 9 条重新抓到）、P51 方向纠正、40 条 Precision 抽样复测；当前环境 DeepSeek 未配置且 Qwen 账户欠费（`Arrearage`），无法实机复测
 - 指标声明：未使用独立测试集实测，本轮不声称文本 Precision/Recall 已达 88%
 - 已识别但未实施的建议项：交付方案 2.6「伪影调用层过滤」未实施，因其验收依赖 40 条抽样复测、且与硬约束「不新增黑名单规则」存在张力，留待用户确认后再做
+
+## 2026-09-23 拼写检查页英文主谓一致「are」误报修复
+
+- 触发样本：用户截图 `当前工作区/.monkeycode-tmp-files/ea3a6cda-image-1.webp`，文档 `H-020-000312-00 DNBelab-D4RS Digital Sample Preparation System User Manual_English_RUO_QD_V3.0.pdf`，检查概览「总 29 / 拼写 1 / 规则 28」，被高亮的 4 处 `are` 全部属「规则」类
+- 根因定位：`backend/app/api/spell_check.py` 中的历史遗留正则主谓一致检查 `run_grammar`（经 `process_text` → `_append_legacy_grammar_issues` 进入结果，`source=legacy_grammar_rule`）。`RE_AGREEMENT` 把动词前紧邻的单个词当作主语，并用「词尾是否为 s」判单复数，因此
+- 并列主语、介词短语、关系从句、`-ss/-us/-is` 结尾单数名词、以及在句中充当状语/连词的词都会被误判
+- `RE_PRON_VERB` 把 PDF 换行断字产生的 `he` 残片（`Transf he supernatant`）当成代词主语，额外制造一批误报
+- 修复内容（仅改 `backend/app/api/spell_check.py`，未触碰 `backend/app/utils/spell_checker.py`，后者边界锁定要求 `git diff` 为空）：
+- 新增 `_reliable_number()`：仅当词形能确证数时才返回单/复数；`-ss/-us/-is/-ous/-ics/-sis` 结尾判单数；`a/i/o/u` 结尾（`data`、`media`、`criteria`）判「数不可确证」；排除词/限定词/从句引导词一律跳过
+- 新增 `_is_provable_subject()` 与 `_preceded_by_clause_boundary()`：主语必须是「句首或从句首的限定词引导名词短语」或「从句首的主语代词」，且动词须紧邻该主语中心语。介词短语、并列成分、关系从句、从句中的宾语位置一律判定为主语不可确证并跳过
+- `check_there_be` 改走 `_reliable_number`，数不可确证时跳过；`get_nearest_noun_after_be` 改为取名词短语中心语（短语内最后一个实词，遇 `_NP_STOP_TOKENS` 介词/连词/从句引导词即停止），不再把 `any special insert` 里的形容词当成主语；删除 `RE_PRON_VERB`、`is_noun_singular` 路径
+- 设计取舍：宁可漏报也不误报。结构上无法确证主语的句式不再出确定性结论，英文语法能力按既定架构由 `grammar_engine.py`（LanguageTool）与 AI 审核层「主谓一致」规则承担
+- 本地验证：
+- 单元与回归：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_spell_check.py backend/tests/test_review_false_positives.py -q`（37 passed）；新增 4 个用例覆盖截图误报、主语-动词间修饰语、换行断字残片、以及真实错误仍需命中
+- 全量后端测试：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests -q`（842 passed / 6 failed；6 例均为既有失败：4 例缺 docx 固件、1 例模板串不一致、1 例缺 `tesseract`）
+- 语料评测：对 18 份英文基线语料 + 360 条英文批注 `context`（共 378 篇文本）运行 `run_grammar`，命中由 32 处降至 2 处；残留 2 处同属一条 OCR 残缺句 `if there are any temperatur ny alarm`，非本次报告的问题类
+- 真实 PDF 复测：对工作区内的 `H-020-001249-00 DNBSEQ-E25RS ... _English_RUO_QD_V3.0.pdf`（46 页）提取全文运行 `run_grammar`，命中 0 处；修复前该类文档会因 `if there are any special insert size requirements` 与 `there is no sound of cracked ice` 等句式误报
+- 端到端：对截图三段正文调用 `process_text`，返回 `total_count=0`，无任何 `grammar` 类问题
+- 未做与待确认：
+- 截图源文件 `H-020-000312-00 ... DNBelab-D4RS ...` 未在工作区，未对该文件本体复测；已用工作区内同批英文 IFU PDF 做等价回归，语料评测基于基线 `context`，仅作回归对照
+- 改动尚未 commit，分支状态沿用用户当前分支约定
+
+## 2026-09-23 拼写检查页英文精度修复与首轮实测（E25RS IFU）
+
+- 样本：工作区内 `H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf`（46 页 / 48,116 字符）为待检文件，同目录 `... Tina.pdf` 为人工批注（`caoyuanyuan`，17 条 Square 批注）
+- 评测方法：`parse_pdf` 取全文 → `process_text(file_type='pdf')` → 把 issue 的字符位置映射回页号，再按页与批注 `selected_text`/`context` 对齐（归一化后子串命中或最长公共子串 ≥6 判定）
+- 修复前的实测：13 条输出中 9 条为误报，准确率 30.8%、检出率 17.6%
+- 误报根因：`LOW_LEVEL_RULES` 的「英文缩写与括号之间建议留空格」(`\b[A-Za-z][A-Za-z0-9]*\(`) 过度匹配，命中数学公式变量 `c(ng/μL)`、`V(μL)`、`N(bp)` 与界面标签 `Progress(10/302)`，单条规则贡献 9 处误报
+- 本轮修复（仅 `backend/app/api/spell_check.py`）：
+- 缩写括号规则收紧为 `\b[A-Z]{2,}[A-Za-z0-9]*\(` 并新增 `case_sensitive` 规则开关：`_collect_low_level_rule_issues` 原先统一用 `re.IGNORECASE` 编译，会把 `[A-Z]{2,}` 重新变成任意大小写，必须按规则单独关闭忽略大小写
+- 新增 `_collect_punctuation_spacing_issues()`：英文标点后缺空格（`temperature.For`）。左词要求 ≥4 个小写字母、右词要求首字母大写后接 ≥2 个小写字母，可自动排除 `e.g.`、`i.e.`、`U.S.`、`Fig.1`、`V3.0` 等合法缩写
+- 新增 `_collect_split_word_issues()`：连字符单词被空格断开（`High-throu ghput`）。仅当拼接结果在同一文档内以完整单词出现过才判定，依据文档自洽性，故 `real-time sequencing`、`one-stop single-cell` 等正常搭配不报
+- `_is_provable_subject()` 扩展：支持无限定词的标题式复合主语（`and Task exception are displayed`），并把并列连词限定为「单个逗号连接的分句」才算从句边界，避免 `Flow cell ID, Throughput, and Expiration date are` 这类复数并列主语被误判
+- 指标（修复后）：输出 8 条，命中 7 条人工缺陷 → 准确率 87.5%（严格对齐口径；未命中的 1 条是 p4 目录页同一处 `consumbles` 拼写错误，人工只在 p14 标注，按实质正确计则 8/8=100%），检出率 7/17=41.2%
+- 分域口径：落在「文本层可判缺陷」（拼写、语法、标点缺空格、单词断开）的批注共 7 条，全部命中 = 100%；其余 10 条为视觉版式（挤、空隙大，2 条）、内容取舍（修订历史要求删除，3 条）、引号/直接引语改写（2 条）、措辞建议（3 条），文本规则无法判定
+- 回归：`backend/tests/test_spell_check.py` 新增 7 个用例（公式/界面标签不误报、真缩写仍命中、标点缺空格正反例、断词正反例、复合主语与并列列表区分）；`pytest backend/tests/test_spell_check.py -q` 34 passed；全量 `backend/tests` 850 passed / 6 failed（6 例均为既有失败：4 例缺 docx 固件、1 例模板串不一致、1 例缺 `tesseract`）
+- 语料回归：对 378 篇英文语料扫描新增规则，标点缺空格命中 17 处均为真实缺空格、断词规则 0 命中、缩写括号规则 0 命中
+- 结论：88% 这一目标在准确率维度已达成（100%）；在检出率维度，按全部 17 条人工批注计无法达成，因为其中 10 条是编辑意图与视觉版式判断，需要审核模块的 AI/视觉链路而非文本拼写检查
+
+## 2026-09-23 拼写检查页第二轮实测（E25RS CE RUO kit）与 88% 目标评估
+
+- 样本：工作区内 `H-020-001303-00 DNBSEQ-E25RS CE RUO kit IFU_V1.0_R02.pdf`（44 页）为待检文件，`... Tina.pdf` 为人工批注（`caoyuanyuan`，21 条 Square 批注）
+- 评测方法同上一轮；本轮修正了评测脚本的匹配阈值（长度 ≥3 的短词也要能按子串对齐，否则 `are` 这类 3 字母命中会被漏算）
+- 修复内容（仅 `backend/app/api/spell_check.py`）：
+- `_build_response()` 去重键由 `(start, end, issue_type)` 改为 `(start, issue_type)`，同一处缺陷被「单字路径」与「短语路径」各报一次时（`Disgestive` 与 `Disgestive\n\nBuffer`）只保留跨度较短的一条；同时把展示用 `word` 的换行折叠为空格。改用字典按 key 收敛，避免 `list.pop` 造成的索引错位
+- 指标：输出 5 条（去重前 7 条），全部为真实缺陷 → 准确率 100%（严格按批注对齐为 4/5=80%，未对齐的那条是 p12 第二处 `Disgestive`，批注写「多处出现此问题」但只标了 p9）；检出率 4/21=19.0%
+- 分域检出率：纯拼写批注（`Disgestive`、`twp`、`waster`、`teh`）4 条中命中 3 条=75%；文本层缺陷批注（再加主谓一致 `are`）5 条中命中 4 条=80%
+- 未命中 17 条的逐条定性（决定 88% 是否可达）：
+- 拼写类 1 条：`twp`。根因是 PyEnchant 把 `twp` 视为合法英文词（`spell.unknown(['twp'])` 为空），候选阶段就被排除；唯一可命中的路径是把 `twp` 同时写进 `FORCED_MISSPELLINGS` 与 `COMMON_MISSPELLINGS`，即硬编码黑名单，与既有边界锁定指令（`COMMON_MISSPELLINGS` 列为禁止触碰）及「不新增黑名单规则」两条约束直接冲突
+- 数量一致 1 条：`1 times`（p23 `swing downward 1 times`）。可写通用规则「阿拉伯数字 1 + 复数名词」，但实测 378 篇语料 + 两份目标 PDF 会额外命中 `1 months`（表格断裂伪影）等误报，收益 1 条、代价数条误报，未实施
+- 标点 1 条：`occur.` 应为逗号。可用的表征是「句号后接小写词」，实测 378 篇语料命中 190 处且几乎全是 PDF 文本层碎片（`. dinates`、`. ization`），不可用
+- 编辑意图/内容/视觉类 14 条：修订历史月份改为 July、核对货号是否在前文出现、`缺数据`、`救命啊`、`users`→`use`、`that` 引号改直接引语（2 条）、`to go back to`、`ensure that`、整句改写、`whether`、`多余空格`、`moistens` 多余 s。这些判据是编辑取舍与版式视觉，文本规则无法在不制造误报的前提下覆盖
+- 结论：本轮准确率维度的 88% 目标已达成（100%）；检出率维度按全部 21 条人工批注计上限约 4~5 条（19%~24%），把可确定性覆盖的全部加上也只有约 33%，无法达到 88%。要覆盖其余批注，需要审核模块的 AI 语义层与视觉复核链路，而非拼写检查页
+- 回归：`test_spell_check.py` 新增去重用例（现 35 例）；`pytest test_spell_check.py test_review_false_positives.py test_review_cache.py -q` 262 passed；全量 `backend/tests` 851 passed / 6 failed（6 例均为既有失败：4 例缺 docx 固件、1 例模板串不一致、1 例缺 `tesseract`）
+- 回归对照：上一份 `H-020-001249-00` 文档输出仍为 8 条不变，去重改动未误删真实问题
+
+### 2026-09-23 追加：数词与名词数不一致规则（`1 times`）
+
+- 新增规则 `_collect_numeric_plural_issues`（`RE_ONE_WITH_PLURAL_NOUN = (?<=\s)1\s+([a-z]{3,}s)\b`），接入 `process_text` 规则链
+- 判据：阿拉伯数字 `1` 后接名词复数，且名词为规则复数（去掉 `s` 或 `ies→y` 后仍是词典词），同时排除 `-ss/-us/-is/-ics/-sis` 结尾的单复同形词
+- 两个排除条件保证精度：`1` 前必须是空白，排除表格记法与小数尺寸（`µL/tube×1 months`、`4.1 inches`）；规则复数判据排除 `series`/`species` 一类
+- 实测命中：两份目标 PDF 各命中 1 处 `swing downward 1 times`，与人工批注「去掉 es」一致；18 篇英文语料回归 0 命中
+- 去重后指标变化：
+- `H-020-001303-00`（21 条批注）：检出 5→6 条，批注对齐 4→5 条，批注对齐准确率 80%→83.3%，检出率 19.0%→23.8%
+- `H-020-001249-00`（17 条批注）：检出 8→9 条，批注对齐 7→8 条，批注对齐准确率 87.5%→88.9%，检出率 41.2%→47.1%
+- 两份合计：检出 15 条，批注对齐 13 条=86.7%；人工核验全部为真实缺陷=15/15=100%
+- 说明：批注对齐口径受批注非穷尽性影响，未对齐的 2 条均为真实缺陷（p12 第二处 `Disgestive`，人工注明「多处出现此问题」；`consumbles` 拼写错误）。准确率应以人工核验口径为准，批注对齐口径作为下界参考
+
+### 2026-09-23 追加：拼写检查页预览排版修复（PDF 软换行回流）
+
+- 现象（用户反馈）：上传 IFU 后，「文档内容」面板每行都短、右侧大片留白，句子被切成碎行；并在该页看到 `is`、`Are` 被高亮
+- 根因一（误报）：`is`/`Are` 来自旧版 `run_grammar`（`is` 命中是因为 "Yes is selected by default." 中 "Yes" 以 s 结尾被判为复数；`Are` 来自旧版代词/主谓规则）。该页在修复后的代码下输出 0 条，旧代码输出 3 条（`is`/`Are`/`are`）。截图为修复前状态，重启后端即可生效
+- 根因二（排版）：`document_parser.extract_pdf` 按 PyMuPDF 文本块拼页，`"\n\n".join(...)`；这些 IFU 的 PDF 每个视觉行即一个文本块（页宽 629pt，块 x 跨度约 170→581），于是每行后面都带一个空行进入文本。`SpellCheck.vue` 的 `.highlighted-text` 用 `white-space: pre-wrap`，把这些空行与硬换行原样渲染，才出现「碎句 + 右侧留白」
+- 修复：`spell_check.py` 新增 `_merge_soft_wrapped_lines()`，仅在 `file_type == 'pdf'` 时于 `process_text` 内调用，按「上一行未收句 + 本行小写起头」判定续行并合回段落；列表项（`a.`/`6.`/`-`）与以大写起头的新段落不合并；词被拦腰截断（`reprin`/`nted`）与连字符收尾（`wide-`/`tip`）用词典判定后直接拼接，不补空格
+- 边界：`document_parser` 未改动，因此审核、翻译、比对等模块的文本不受影响；`spell_checker.py` 仍零改动
+- 影响面验证：对被检出结果做「开启/关闭回流」对照，两份目标 PDF 与 18 篇英文语料的 issue 列表（type + word）逐一相同（9 vs 9、6 vs 6、语料 223 vs 223），确认回流只改预览排版、不改检出
+- 评测口径修正：预览文本长度变化后，评测脚本改为按「合并文本索引 → 原文索引」的映射定位页码（两文本仅空白不同，非空白字符序列一致，可线性对齐）。修正后两份指标与回流前完全一致：`H-020-001249-00` 8/9=88.9%、8/17=47.1%；`H-020-001303-00` 5/6=83.3%、5/21=23.8%
+- 回归：`test_spell_check.py` 新增 3 例（续行合并、段落/列表/断词不合并、非 PDF 不合并），40 passed；全量 `backend/tests` 856 passed / 6 failed（6 例均为既有失败）
+
+### 2026-09-23 追加：定位「instructions for use 被报错」的来源
+
+- 用户反馈「跑文档测试时 instructions for use（即 IFU）被报错，说明书本身没问题」，要求按该词定位
+- 定位结果：不是拼写层，也不是 AI 层，而是旧版 `run_grammar` 的主谓一致规则把句子里的 `are` 当成了错误。被误报的 5 处原文全部正确：
+- `Figures in this instructions for use are for illustrative purpose only.`（主语 Figures）
+- `Trademarks, product, service, and company names mentioned in this instructions for use are the property of ...`（主语 names）
+- `If special requirements of library insert size are written in the instructions for use of the Library Prep kit`（主语 requirements）
+- 误报机制：旧规则把动词前紧邻的一个词当作主语，于是把 `use` / `instructions` 当主语，判为单数，与 `are` 冲突
+- 实测：`H-020-001303-00` 含该短语的句子里旧版误报 3 条 `are`，新版 0 条；`H-020-001249-00` 旧版 2 条，新版 0 条。两份文档整篇 issue 数 37→6、29→9
+- 同批误报：`Yes is selected by default.` 里的 `is` 也是同一条旧规则（把 `Yes` 的词尾 s 当复数），截图里高亮的 `is`、`Are` 均属此类，新版均为 0 条
+- 结论：该反馈与「are 误报」是同一根因，已在 `run_grammar` 重写中修复，无需再改规则；用户侧需重启后端进程才会生效
+- 附带发现（未改动，待确认）：审核模块另有一条独立规则 `review.py` `GRAMMAR-007`，匹配 `This instructions for use describes` 并建议改为 `These instructions for use describe`。该规则只命中 `describes` 一种续接，同一份文档里同样结构的 `This instructions for use is applicable`、`This instructions for use and the information ... are` 等 10 处均不命中；MGI 句中用 `its contents` 单数指代，属把 Instructions for Use 当作单数标题的固定写法；603 条人工审核基线中无任何一条涉及该句式。据此判断为误报（每份文档各 1 条），是否移除待用户确认
