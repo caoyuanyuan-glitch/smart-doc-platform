@@ -1,6 +1,19 @@
 from types import SimpleNamespace
+import unittest
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.api import review as review_api
+from app.api.auth import create_access_token
+from app.database import Base, get_db
+from app.models.document import Document
+from app.models.issue import Issue
+from app.models.review import Review
+from app.models.user import User
 
 
 def test_review_issues_for_display_keeps_false_positives():
@@ -14,6 +27,19 @@ def test_review_issues_for_display_keeps_false_positives():
     visible = review_api._review_issues_for_display(issues)
 
     assert [issue.status for issue in visible] == ['pending', 'false_positive', 'confirmed']
+
+
+def test_visible_review_issues_drops_judged_false_positives():
+    issues = [
+        SimpleNamespace(status='pending', rule='TERM-001', original_text='alpha', context=''),
+        SimpleNamespace(status='false_positive', rule='TERM-001', original_text='beta', context=''),
+        SimpleNamespace(status='ignored', rule='TERM-001', original_text='gamma', context=''),
+        SimpleNamespace(status='confirmed', rule='TERM-001', original_text='delta', context=''),
+    ]
+
+    visible = review_api._visible_review_issues(issues)
+
+    assert [issue.original_text for issue in visible] == ['alpha', 'delta']
 
 
 def test_expand_issue_context_for_display_adds_surrounding_text():
@@ -83,3 +109,125 @@ def test_judgment_stats_map_counts_false_positives_and_manual():
     assert stats[7]['false_positive'] == 1
     assert stats[7]['pending'] == 1
     assert stats[7]['manual'] == 1
+
+
+class ReviewReportFalsePositiveTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+        Base.metadata.create_all(bind=cls.engine)
+
+        app = FastAPI()
+        app.include_router(review_api.router, prefix="/api/review")
+
+        def override_get_db():
+            db = cls.SessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        cls.client = TestClient(app)
+
+    def setUp(self):
+        Base.metadata.drop_all(bind=self.engine)
+        Base.metadata.create_all(bind=self.engine)
+        self.review_id = self._seed_review_with_judged_issue()
+        token = create_access_token({"sub": "report_admin"})
+        self.headers = {"Authorization": f"Bearer {token}"}
+
+    def _seed_review_with_judged_issue(self) -> int:
+        db = self.SessionLocal()
+        try:
+            user = User(
+                username="report_admin",
+                password_hash="test-hash",
+                display_name="report_admin",
+                role="admin",
+                status="active",
+            )
+            db.add(user)
+            db.flush()
+
+            # Keep the two markers far apart so the report context window of one
+            # cannot accidentally contain the other marker.
+            filler = " ".join(["filler"] * 200)
+            content = (
+                "REALMARKERTOKEN appears in the body. "
+                + filler
+                + " FALSEMARKERTOKEN is judged as a false positive."
+            )
+            document = Document(
+                filename="report-demo.pdf",
+                file_type="pdf",
+                file_size=len(content),
+                content=content,
+                status="ready",
+                preview="demo",
+                user_id=user.id,
+            )
+            db.add(document)
+            db.flush()
+
+            review_row = Review(
+                document_id=document.id,
+                mode="hybrid",
+                provider="deepseek",
+                status="completed",
+                total_issues=2,
+                summary="{}",
+            )
+            db.add(review_row)
+            db.flush()
+
+            for severity, rule, original, status in (
+                ("general", "TERM-001", "REALMARKERTOKEN", "pending"),
+                ("general", "TERM-001", "FALSEMARKERTOKEN", "false_positive"),
+            ):
+                start = content.find(original)
+                db.add(Issue(
+                    review_id=review_row.id,
+                    severity=severity,
+                    category="术语一致性",
+                    rule=rule,
+                    chapter="1.1",
+                    original_text=original,
+                    context=content,
+                    suggestion=original.replace("TOKEN", "-TERM"),
+                    description="术语表述前后不一致，建议统一。",
+                    audit_basis="英文技术文档术语一致性规范",
+                    confidence=90,
+                    source="rule",
+                    status=status,
+                    position=f'{{"start": {start}, "end": {start + len(original)}}}',
+                ))
+            db.commit()
+            return review_row.id
+        finally:
+            db.close()
+
+    def test_issue_list_keeps_false_positives_for_manual_review(self):
+        response = self.client.get(f"/api/review/{self.review_id}/issues", headers=self.headers)
+
+        assert response.status_code == 200
+        originals = {issue["original_text"] for issue in response.json()}
+        assert {"REALMARKERTOKEN", "FALSEMARKERTOKEN"} <= originals
+
+    def test_reports_and_exports_exclude_judged_false_positives(self):
+        for path in ("report", "export-html"):
+            response = self.client.get(f"/api/review/{self.review_id}/{path}", headers=self.headers)
+            assert response.status_code == 200, path
+            assert "REALMARKERTOKEN" in response.text, path
+            assert "FALSEMARKERTOKEN" not in response.text, path
+
+        aggregated = self.client.get(f"/api/review/{self.review_id}/aggregated-report", headers=self.headers)
+        assert aggregated.status_code == 200
+        originals = {issue["original_text"] for issue in aggregated.json()["issues"]}
+        assert "REALMARKERTOKEN" in originals
+        assert "FALSEMARKERTOKEN" not in originals

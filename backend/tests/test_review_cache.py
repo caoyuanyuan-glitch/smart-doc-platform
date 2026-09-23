@@ -8,6 +8,7 @@ from app.api import review_rules
 from app.crud import rule as crud_rule
 from app.crud import review as crud_review
 from app.review_engine import pipeline as review_pipeline
+from app.review_engine import false_positives
 from app.review_engine import validation as review_validation
 
 
@@ -2524,6 +2525,99 @@ def test_run_manual_engineering_audit_skips_label_value_and_time_colons():
     )
 
     assert not any(issue["rule"] == "DOC-SPACE-004" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_figure_placeholder_time_masks():
+    issues = review_api._run_manual_engineering_audit(
+        "The interface shows XX/XX/XXXX XX:XX:XX in the header. "
+        "Prepare Fast Wash 2:Remove the cap.",
+        file_type="pdf",
+    )
+
+    originals = {issue["original_text"] for issue in issues if issue["rule"] == "DOC-SPACE-004"}
+
+    assert "2:R" in originals
+    assert not any("X:" in original or ":X" in original for original in originals)
+
+
+def test_run_manual_engineering_audit_skips_numeric_parenthesis_ui_labels():
+    issues = review_api._run_manual_engineering_audit(
+        "The interface shows Progress(10/302) after the first cycle.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-FMT-003" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_table_scramble_one_months():
+    scrambled = review_api._run_manual_engineering_audit(
+        "Stop DNB Reaction Buffer 100 µL/tube×1 months\n\nCat. No.: 940-002927-00",
+        file_type="pdf",
+    )
+    assert not any(issue["rule"] == "DOC-GRAMMAR-001" for issue in scrambled)
+
+    prose = review_api._run_manual_engineering_audit(
+        "Hold the reagent cartridge upright and swing downward 1 times gently.",
+        file_type="pdf",
+    )
+    assert any(issue["rule"] == "DOC-GRAMMAR-001" for issue in prose)
+
+
+def test_pipeline_drops_figure_placeholder_masks_but_keeps_explicit_markers():
+    placeholder_masks = [
+        "XXXXXXXXXXX",
+        "XX/XX/XXXX XX:XX:XX",
+        "Username XXXXXXXX",
+        "Flow cell ID AXXXXXXX",
+        "Read1 Read2 Barcode1 Barcode2 XX XX X X",
+        "SNR Image 1: XX Image 2: XX Q30 XX% FIT XX% BIC XX%",
+        "xxxx xxxx",
+    ]
+    issues = [
+        {
+            "rule": "Unreplaced release placeholder",
+            "category": "格式规范",
+            "source": "ai",
+            "severity": "serious",
+            "original_text": original,
+            "suggestion": "Replace placeholder with a representative example value",
+            "description": "Placeholder text should be replaced before release",
+            "confidence": 90,
+        }
+        for original in placeholder_masks
+    ]
+    issues.append({
+        "rule": "Unreplaced release placeholder",
+        "category": "格式规范",
+        "source": "ai",
+        "severity": "serious",
+        "original_text": "Status TBD before release",
+        "suggestion": "Replace placeholder with actual content",
+        "description": "Unreplaced release placeholder",
+        "confidence": 90,
+    })
+    issues.append({
+        "rule": "Placeholder text preceding figure caption",
+        "category": "格式规范",
+        "source": "ai",
+        "severity": "suggestion",
+        "original_text": "Release note pending 待补充",
+        "suggestion": "Remove placeholder text",
+        "description": "Placeholder text preceding figure caption",
+        "confidence": 60,
+    })
+
+    for issue in issues[:-2]:
+        assert review_pipeline.is_noise(dict(issue)) is True
+    assert false_positives.rulebook_false_positive_reason(issues[-2]) is None
+    assert false_positives.rulebook_false_positive_reason(issues[-1]) is None
+
+    selected = review_pipeline.select_review_issues([dict(issue) for issue in issues])
+    originals = {issue["original_text"] for issue in selected}
+
+    for original in placeholder_masks:
+        assert original not in originals
+    assert "Status TBD before release" in originals
 
 
 def test_run_manual_engineering_audit_skips_abbreviation_and_domain_periods():

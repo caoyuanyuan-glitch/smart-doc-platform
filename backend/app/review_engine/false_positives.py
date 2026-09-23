@@ -69,6 +69,9 @@ def rulebook_false_positive_reason(issue: Any) -> str | None:
     if _is_english_email_only_contact_noise(original, context, complaint, blob):
         return "english_manual_email_only_contact"
 
+    if _is_figure_placeholder_mask_noise(issue):
+        return "figure_placeholder_mask"
+
     if re.search(r'["”’][\.,;:](?:\s|$)', blob) and re.search(
         r"引号|quote|标点|punctuation|句号",
         lowered,
@@ -148,3 +151,39 @@ def _is_english_email_only_contact_noise(original: str, context: str, complaint:
     ):
         return False
     return bool(re.search(r"[\w.+-]+@[\w.-]+\.\w+", evidence))
+
+
+_PLACEHOLDER_EXPLICIT_MARKER = re.compile(
+    r"\b(?:TBD|TBC|TODO|FIXME|待补充|待填写|待确认|待更新)\b",
+    re.IGNORECASE,
+)
+
+
+def is_figure_placeholder_mask_text(text: Any) -> bool:
+    """判断文本是否为示意图/界面截图中合法的占位掩码。
+
+    说明书界面截图常用 XXXXXXXX、XX/XX/XXXX、XX:XX:XX、XX-XX、XX% 表示示例值，
+    属正常发布内容；显式占位标记（TBD/TODO/待补充等）仍应保留问题。
+    """
+    value = str(text or "").strip()
+    if not value or _PLACEHOLDER_EXPLICIT_MARKER.search(value):
+        return False
+    if re.search(r"[\u4e00-\u9fff]", value):
+        return False
+    return bool(re.search(r"[Xx]{2,}", value))
+
+
+def _is_figure_placeholder_mask_noise(issue: Any) -> bool:
+    """仅抑制 AI 对界面截图占位掩码的占位符误报。
+
+    规则层专门的占位符残留规则（如 CYY-CN-PLACEHOLDER-001，source=rule）指向真实
+    未替换内容，必须保留。
+    """
+    if _value(issue, "source").strip().lower() != "ai":
+        return False
+    complaint = " ".join(
+        _value(issue, key) for key in ("suggestion", "description", "category", "rule")
+    )
+    if not re.search(r"placeholder|占位", complaint, re.IGNORECASE):
+        return False
+    return is_figure_placeholder_mask_text(_value(issue, "original_text"))
