@@ -362,6 +362,16 @@ def test_spatial_omics_is_not_reported_as_misspelling():
     ) == []
 
 
+def test_check_spelling_skips_omics_family_terms():
+    issues = spell_checker_utils.check_spelling(
+        "The Spatial Omics workflow covers genomics, proteomics and metabolomics data."
+    )
+
+    assert all(issue["original_text"].lower() not in {
+        "omics", "genomics", "proteomics", "metabolomics",
+    } for issue in issues)
+
+
 def test_find_term_variant_issues_skips_when_correct_form_exists_in_document():
     issues = spell_checker_utils._find_term_variant_issues(
         "The High-throughput workflow is supported. Another note mentions highthroughput only in OCR text.",

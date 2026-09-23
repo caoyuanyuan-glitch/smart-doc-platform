@@ -83,6 +83,33 @@ VISUAL_LAYOUT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_TRADEMARK_SYMBOL_RE = re.compile(r'[®™©]')
+# PDF 阅读顺序错乱会把 ®/™ 甩到商标名之外，形成 “® are trademarks ...” 这类文本；
+# 文本层还可能把 ™ 提取成字面量 TM，同样会与商标名分离
+_DETACHED_TRADEMARK_RE = re.compile(r'(?:^|\s)(?:[®™©]|TM\b)')
+
+
+def is_trademark_reading_order_artifact(original: str, suggestion: str) -> bool:
+    """商标声明段落被 PDF 文本层打乱顺序时，AI 会据错位文本误报商标归属问题。"""
+    if not _TRADEMARK_SYMBOL_RE.search(suggestion or ''):
+        return False
+    return bool(_DETACHED_TRADEMARK_RE.search(original or ''))
+
+
+def is_broken_word_extraction_artifact(original: str) -> bool:
+    """PDF 表格按字符间距断词（如 “Powe rswi tcha n d”）造成的伪影文本。
+
+    正常英文中不会出现孤立小写单字母（a/I 除外）夹杂在短碎片里。
+    """
+    fragments = normalize_text(original).split()
+    if len(fragments) < 3:
+        return False
+    if any(len(fragment) > 4 or not fragment.isalpha() for fragment in fragments):
+        return False
+    if len(''.join(fragments)) < 12:
+        return False
+    return any(len(fragment) == 1 and fragment.islower() and fragment not in {'a', 'i'} for fragment in fragments)
+
 
 def issue_value(issue: Any, key: str, default: Any = "") -> Any:
     if isinstance(issue, dict):
@@ -334,6 +361,11 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
     if source == "spellcheck":
         return False
     if is_rulebook_false_positive(data):
+        return True
+    if source == "ai" and (
+        is_broken_word_extraction_artifact(original)
+        or is_trademark_reading_order_artifact(original, suggestion)
+    ):
         return True
     if is_verifiable_ai_text_issue(data):
         return False

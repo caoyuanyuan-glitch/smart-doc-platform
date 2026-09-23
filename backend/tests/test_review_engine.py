@@ -254,3 +254,45 @@ def test_extract_json_marks_truncated():
     result = AIClient._extract_json(broken, {"issues": []})
     assert result.get("_degraded") is True
     assert result.get("_degraded_reason") == "json_truncated"
+
+
+def test_trademark_reading_order_artifact_filtered():
+    """商标声明被 PDF 阅读顺序打乱时，AI 的商标归属问题属于解析伪影。"""
+    assert pipeline.is_trademark_reading_order_artifact(
+        "® are trademarks or registered trademarks of Microsoft Corporation.",
+        "Microsoft® and Windows® are trademarks or registered trademarks of Microsoft Corporation.",
+    ) is True
+    # 文本层把 ™ 提取成字面量 TM 时同样属于阅读顺序伪影
+    assert pipeline.is_trademark_reading_order_artifact(
+        "TM is the trademark of Intel Corporation or its subsidiaries in the U.S. and/or other countries.",
+        "Intel® and Intel Core™ are trademarks of Intel Corporation or its subsidiaries in the U.S. and/or other countries.",
+    ) is True
+    # 原文商标符号紧跟商标名时属于真实文本，不应误判
+    assert pipeline.is_trademark_reading_order_artifact(
+        "Microsoft® is a trademark of Microsoft Corporation.",
+        "Microsoft® is a registered trademark of Microsoft Corporation.",
+    ) is False
+
+
+def test_broken_word_extraction_artifact_filtered():
+    """PDF 表格按字符间距断词产生的碎片文本不应作为拼写问题上报。"""
+    assert pipeline.is_broken_word_extraction_artifact("Powe rswi tcha n d") is True
+    # 正常英文短语里的短词不应误判
+    assert pipeline.is_broken_word_extraction_artifact("Turn off the tap now") is False
+    assert pipeline.is_broken_word_extraction_artifact("Power switch and") is False
+
+
+def test_extraction_artifact_ai_issue_is_noise():
+    broken_word_issue = {
+        "source": "ai",
+        "rule": "Spelling/word-break integrity in table content",
+        "category": "术语一致性",
+        "severity": "general",
+        "original_text": "Powe rswi tcha n d",
+        "context": "POWE Rswi tcha n d",
+        "suggestion": "Power switch and",
+        "description": "",
+        "confidence": 70,
+    }
+    assert pipeline.is_noise(broken_word_issue) is True
+    assert select_review_issues([broken_word_issue]) == []
