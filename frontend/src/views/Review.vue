@@ -1044,7 +1044,7 @@
       <h2 class="page-title">规则管理</h2>
       <div class="table-section">
         <div class="table-header-actions">
-          <el-button type="primary" @click="showRuleDialog = true">添加规则</el-button>
+          <el-button type="primary" @click="openRuleDialog">添加规则</el-button>
           <el-button @click="exportRules">导出规则库</el-button>
           <el-button @click="downloadRulesTemplate">下载导入模板</el-button>
           <el-upload
@@ -1052,7 +1052,7 @@
             :show-file-list="false"
             :auto-upload="false"
             :on-change="handleRulesFileChange"
-            accept=".json"
+            accept=".xlsx"
           >
             <el-button>导入规则库</el-button>
           </el-upload>
@@ -1078,6 +1078,9 @@
           <el-table-column prop="example" label="示例" width="160" />
           <el-table-column prop="suggestion" label="建议" width="150" />
           <el-table-column prop="audit_basis" label="审核依据" width="180" />
+          <el-table-column prop="severity" label="严重程度" width="100">
+            <template #default="scope">{{ severityLabel(scope.row.severity) }}</template>
+          </el-table-column>
           <el-table-column prop="language" label="语言" width="100">
             <template #default="scope">{{ languageLabel(scope.row.language) }}</template>
           </el-table-column>
@@ -1115,6 +1118,14 @@
           </el-form-item>
           <el-form-item label="审核依据">
             <el-input v-model="ruleForm.audit_basis" placeholder="审核依据来源" />
+          </el-form-item>
+          <el-form-item label="严重程度">
+            <el-select v-model="ruleForm.severity" placeholder="请选择严重程度">
+              <el-option label="致命" value="fatal" />
+              <el-option label="严重" value="serious" />
+              <el-option label="一般" value="general" />
+              <el-option label="建议" value="suggestion" />
+            </el-select>
           </el-form-item>
           <el-form-item label="语言">
             <el-select v-model="ruleForm.language" placeholder="请选择语言">
@@ -1234,7 +1245,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage } from '@/api'
+import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage, getBlobErrorMessage } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
@@ -1626,7 +1637,7 @@ function providerDisplayName(provider) {
   return names[provider] || provider.toUpperCase()
 }
 const editingRule = ref(null)
-const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
+const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' })
 const transferRuleDialogVisible = ref(false)
 const transferRuleSourceIssue = ref(null)
 const transferRuleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
@@ -2338,88 +2349,55 @@ function upsertReviewSnapshot(targetList, review) {
   targetList.value = next.sort((left, right) => (right.id || 0) - (left.id || 0))
 }
 
-const RULES_TEMPLATE_ROW = {
-  rule_no: 'R-EXAMPLE-001',
-  category: '拼写',
-  description: '规则描述，说明该规则检查什么问题',
-  regex: '\\bteh\\b',
-  example: '命中示例文本，例如 to return to teh lab',
-  suggestion: '修改建议，例如改为 the',
-  audit_basis: '审核依据来源，例如 英语语法规范 - 拼写',
-  severity: 'general',
-  language: 'both'
-}
-
-function downloadRulesTemplate() {
-  const blob = new Blob([JSON.stringify([RULES_TEMPLATE_ROW], null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
+function saveBlobResponse(response, fallbackName) {
+  const disposition = response.headers?.['content-disposition'] || ''
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
+  const fileName = match ? decodeURIComponent(match[1]) : fallbackName
+  const url = URL.createObjectURL(response.data)
   const link = document.createElement('a')
   link.href = url
-  link.download = 'rules_import_template.json'
+  link.download = fileName
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
-  ElMessage.success('模板已下载，按模板填写后导入')
 }
 
-// 导入文件与导出格式一致：JSON 数组（也兼容 { rules: [...] }）。
-function normalizeImportedRules(payload) {
-  const list = Array.isArray(payload) ? payload : Array.isArray(payload?.rules) ? payload.rules : null
-  if (!list) {
-    throw new Error('文件内容应为 JSON 数组，或形如 { "rules": [...] } 的对象')
+async function downloadRulesTemplate() {
+  try {
+    const response = await rulesAPI.downloadTemplate()
+    saveBlobResponse(response, 'rules_import_template.xlsx')
+    ElMessage.success('模板已下载，按模板填写后导入')
+  } catch (error) {
+    ElMessage.error(`下载模板失败: ${await getBlobErrorMessage(error, '下载模板失败')}`)
   }
-  return list.map((item, index) => {
-    if (!item || typeof item !== 'object') {
-      throw new Error(`第 ${index + 1} 条不是有效的规则对象`)
-    }
-    const ruleNo = String(item.rule_no ?? '').trim()
-    if (!ruleNo) {
-      throw new Error(`第 ${index + 1} 条缺少必填字段 rule_no`)
-    }
-    const required = ['category', 'description', 'regex']
-    const missing = required.filter((field) => !String(item[field] ?? '').trim())
-    if (missing.length) {
-      throw new Error(`规则 ${ruleNo} 缺少必填字段 ${missing.join('、')}`)
-    }
-    return {
-      rule_no: ruleNo,
-      category: String(item.category).trim(),
-      description: String(item.description).trim(),
-      regex: String(item.regex),
-      example: String(item.example ?? ''),
-      suggestion: String(item.suggestion ?? ''),
-      audit_basis: String(item.audit_basis ?? ''),
-      severity: String(item.severity ?? 'general'),
-      language: String(item.language ?? 'both')
-    }
-  })
 }
 
 async function handleRulesFileChange(uploadFile) {
   const file = uploadFile?.raw
   if (!file) return
-  if (!file.name.toLowerCase().endsWith('.json')) {
-    ElMessage.error('仅支持 JSON 格式文件')
-    return
-  }
-  let rules
-  try {
-    rules = normalizeImportedRules(JSON.parse(await file.text()))
-  } catch (error) {
-    ElMessage.error(`文件解析失败: ${error.message}`)
-    return
-  }
-  if (!rules.length) {
-    ElMessage.warning('文件中没有可导入的规则')
+  if (!file.name.toLowerCase().endsWith('.xlsx')) {
+    ElMessage.error('仅支持 .xlsx 格式的 Excel 文件')
     return
   }
   try {
-    const response = await rulesAPI.bulkCreate(rules)
+    const response = await rulesAPI.importExcel(file)
     const created = Number(response.data?.created)
-    const imported = Number.isFinite(created) ? created : rules.length
-    const skipped = rules.length - imported
-    ElMessage.success(skipped > 0 ? `成功导入 ${imported} 条规则，跳过 ${skipped} 条已存在的规则` : `成功导入 ${imported} 条规则`)
+    const duplicates = Number(response.data?.duplicates) || 0
+    const errors = Array.isArray(response.data?.errors) ? response.data.errors : []
+    const imported = Number.isFinite(created) ? created : 0
+    if (imported > 0) {
+      ElMessage.success(`成功导入 ${imported} 条规则${duplicates > 0 ? `，跳过 ${duplicates} 条已存在的规则` : ''}`)
+    } else if (!errors.length && duplicates > 0) {
+      ElMessage.warning(`没有新增规则，${duplicates} 条规则编号已存在`)
+    }
+    if (errors.length) {
+      const detail = errors.slice(0, 3).map(item => `第 ${item.row} 行：${item.message}`).join('；')
+      ElMessage.warning(`${errors.length} 行未导入。${detail}${errors.length > 3 ? ' 等' : ''}`)
+    }
+    if (!imported && !errors.length && !duplicates) {
+      ElMessage.warning('文件中没有可导入的规则')
+    }
     loadRules()
   } catch (error) {
     ElMessage.error(`导入失败: ${getAPIErrorMessage(error)}`)
@@ -3445,16 +3423,23 @@ async function deleteDocument(id) {
 
 function editRule(row) {
   editingRule.value = row
-    ruleForm.value = {
-      rule_no: row.rule_no || '',
-      category: row.category || '',
-      description: row.description || '',
-      regex: row.regex || '',
-      example: row.example || '',
-      suggestion: row.suggestion || '',
-      audit_basis: row.audit_basis || '',
-      language: row.language || 'both'
-    }
+  ruleForm.value = {
+    rule_no: row.rule_no || '',
+    category: row.category || '',
+    description: row.description || '',
+    regex: row.regex || '',
+    example: row.example || '',
+    suggestion: row.suggestion || '',
+    audit_basis: row.audit_basis || '',
+    severity: row.severity || 'general',
+    language: row.language || 'both'
+  }
+  showRuleDialog.value = true
+}
+
+function openRuleDialog() {
+  editingRule.value = null
+  ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' }
   showRuleDialog.value = true
 }
 
@@ -3482,7 +3467,7 @@ async function saveRule() {
     }
     showRuleDialog.value = false
     editingRule.value = null
-    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' }
+    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' }
     loadRules()
   } catch (error) {
     ElMessage.error('保存失败: ' + (error.response?.data?.detail || error.message))
@@ -3525,19 +3510,10 @@ async function batchDeleteRules() {
 async function exportRules() {
   try {
     const response = await rulesAPI.export()
-    const dataStr = JSON.stringify(response.data, null, 2)
-    const blob = new Blob([dataStr], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `rules_export_${new Date().toISOString().slice(0, 10)}.json`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
+    saveBlobResponse(response, `rules_export_${new Date().toISOString().slice(0, 10)}.xlsx`)
     ElMessage.success('导出成功')
   } catch (error) {
-    ElMessage.error(`导出失败: ${getAPIErrorMessage(error)}`)
+    ElMessage.error(`导出失败: ${await getBlobErrorMessage(error, '导出失败')}`)
   }
 }
 

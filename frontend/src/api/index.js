@@ -229,9 +229,14 @@ export const rulesAPI = {
   create: (rule) => instance.post('/rules/', rule),
   update: (id, rule) => instance.put(`/rules/${id}`, rule),
   delete: (id) => instance.delete(`/rules/${id}`),
-  bulkCreate: (rules) => instance.post('/rules/bulk', rules),
   bulkDelete: (ids) => instance.delete('/rules/bulk', { params: { rule_ids: ids } }),
-  export: () => instance.get('/rules/export')
+  export: () => instance.get('/rules/export', { responseType: 'blob' }),
+  downloadTemplate: () => instance.get('/rules/import-template', { responseType: 'blob' }),
+  importExcel: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/rules/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+  }
 }
 
 export const termsAPI = {

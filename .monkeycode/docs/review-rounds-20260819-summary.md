@@ -497,11 +497,22 @@
 - 导出失败（`GET /api/rules/export` 返回 422）：`backend/app/api/rules.py` 把 `/export` 注册在 `/{rule_id}` 之后，FastAPI 按注册顺序匹配，`/api/rules/export` 被 `/{rule_id}` 抢先匹配，`rule_id: int` 解析 `"export"` 抛 `int_parsing`。修复为静态路径（`/bulk`、`/export`）统一注册在 `/{rule_id}` 之前
 - 导出完整性：`GET /rules/export` 原先走 `get_rules(db)`，默认 `limit=100`，规则库超过 100 条会被静默截断，改为 `limit=10000`
 - 导出字段：原导出只含 7 个字段，缺 `severity`/`language`，导出再导入会丢这两项；补入后导出文件可完整回灌
-- 导入失败（双重问题）：导入控件把 JSON 文件以 multipart POST 到 `/api/rules/bulk`，但该接口签名是 `rules: list[RuleCreate]`（JSON 数组），实测 multipart 返回 422 `list_type`；且 `el-upload` 只配了 `on-success`、没有 `on-error`，失败时页面无任何提示
-- 导入修复：改为 `auto-upload=false` + `on-change`，前端读取文件内容、`JSON.parse` 后按 JSON 数组提交 `rulesAPI.bulkCreate`；兼容 `{ "rules": [...] }`；缺 `rule_no`/`category`/`description`/`regex` 时给出指明行号与字段的中文报错；提交失败展示后端 `detail`
-- 新增「下载导入模板」按钮：导出单条示例规则（全部 9 字段）为 `rules_import_template.json`，模板格式与导出格式一致，导出文件可直接再导入
-- `backend/app/api/rules.py` 的 `POST /bulk` 响应补 `created`/`total`，前端据此提示「成功导入 N 条、跳过 M 条已存在」
+- 导入失败（双重问题）：导入控件把文件以 multipart POST 到 `/api/rules/bulk`，但该接口签名是 `rules: list[RuleCreate]`（JSON 数组），实测 multipart 返回 422 `list_type`；且 `el-upload` 只配了 `on-success`、没有 `on-error`，失败时页面无任何提示
 - `crud.rule.bulk_create_rules`：增加同批 `rule_no` 去重（`rule_no` 唯一），否则同一文件内重复项会 `add_all + commit` 触发唯一约束错误
 - 排查方法记录：本机验证该接口不能用 `sqlite://` 内存库配 `TestClient`（请求在独立线程，内存库按线程各自新建导致 `no such table`），需 `poolclass=StaticPool` + `check_same_thread=False` 共享同一连接
-- 回归：新增 `backend/tests/test_rules_api.py` 6 例（路由顺序、导出含 severity/language、导出不被默认分页截断、动态 `/{rule_id}` 仍可用、批量导入跳过库中与同批重复、multipart 不再被接受）；`pytest test_rules_api.py test_review_cache.py -q` 226 passed；全量 `backend/tests` 868 passed / 6 failed（6 例均为既有失败）；`frontend` `npm run build` 通过
+
+## 2026-09-23 规则库导入导出改为 Excel
+
+- 用户反馈「规则都是 JSON 文件，本地难以维护」，选定方案：导入导出统一改成 Excel，不再使用 JSON
+- `backend/app/api/rules.py`：导出 `GET /export` 返回 `.xlsx`（`StreamingResponse` + openpyxl），列序与页面字段一致：规则编号/分类/规则描述/正则/示例/建议/审核依据/严重程度/语言，首行冻结、表头加粗、单元格自动换行
+- 导出把 `severity`/`language` 枚举值写成中文标签（致命/严重/一般/建议、中文/英文/中英通用），便于在 Excel 里直接阅读与填写
+- 新增 `GET /import-template`：返回 `rules_import_template.xlsx`，含「规则库」（空表头）与「填写说明」（列名、是否必填、说明、示例值）两个工作表；不再由前端拼 JSON 模板
+- 新增 `POST /import`：接收 multipart 上传的 `.xlsx`，按表头名定位列（不依赖列顺序），逐行校验必填列（规则编号/分类/规则描述/正则）与枚举取值，返回 `created`/`duplicates`/`total`/`errors`；单行错误不中断其它行，`errors` 带行号与中文原因
+- 导入时 `severity`/`language` 同时接受中文标签与英文枚举值，留空分别按 `general`/`both` 处理；非 `.xlsx`、无法解析、缺必需列、内容为空均返回 400 并给出中文提示
+- 前端 `rulesAPI`：`export`/`downloadTemplate` 改 `responseType: 'blob'`，新增 `importExcel`；移除已无调用方的 `bulkCreate`
+- `Review.vue`：导入上传走 `/rules/import`（`accept=".xlsx"`），失败提示改用已有的 `getBlobErrorMessage`（blob 响应里的 `detail` 需先读文本再解析）；导入结果按「成功导入 N 条 / 跳过 M 条已存在 / 若干行未导入（前 3 条带行号）」分别提示
+- `Review.vue` 补齐 `severity`：规则表格新增「严重程度」列，新增/编辑弹窗新增下拉选择，`ruleForm` 与 `editRule` 补字段；顺带修复「添加规则」按钮不复位 `editingRule` 导致新弹窗仍处于编辑态的问题（新增 `openRuleDialog`）
+- `backend/tests/test_rules_api.py` 重写为 10 例（静态路由注册在 `/{rule_id}` 之前、导出 xlsx 含中文 severity/language、导出不被默认分页截断、模板含两个工作表、导入新建并跳过已存在、按行报错且不中断、缺必需列 400、非 xlsx 400、动态 `/{rule_id}` 仍可用、`POST /bulk` JSON 行为保持不变）；`pytest tests/test_rules_api.py -q` 10 passed
+- 真实端到端（uvicorn + 真实种子库，`admin` 登录）：导出 29 条 → 模板含两表 → 导入含 1 新建 + 29 重复 + 2 非法行的文件，返回 `created=1/duplicates=29/errors=2`（行号 32、33）→ 重导 `created=0/duplicates=30` → 导出回读新规则 severity=严重、language=英文，回灌无损 → 非 xlsx 400 → 删除临时规则，库恢复 29 条
+- 验证链路：`/api/rules/export` 与 `/api/rules/import-template` 在直连后端、vite 代理（5173）、预览网关三处均 200；`frontend` `npm run build` 通过
 - 关联：上一节遗留的 `GRAMMAR-007` 已按用户确认移除，随 PR #135 合入 `main`

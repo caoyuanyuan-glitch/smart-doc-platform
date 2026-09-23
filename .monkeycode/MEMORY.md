@@ -82,6 +82,7 @@ Git 与自检工作流
   - 当前工作区前端构建校验使用 `cd /workspace/frontend && npm run build`
   - 当前工作区前端预览启动使用 `cd /workspace/frontend && npm run dev -- --host 0.0.0.0 --port 5173`
   - 当前工作区后端语法校验使用 `cd /workspace/backend && python3 -m compileall app`
+  - 后台终端（`background_terminal_create`）的 shell 里没有 `python`，需使用 `python3`；前端 `npm run build` 必须先跑过一次 `npm ci`，否则报 `vite: not found`
 
 产品型号与编号空格规则
 - Date: 2026-06-24
@@ -164,6 +165,7 @@ Word 转 DITA 批量转换基线规则
   - 当前环境若缺少测试依赖，先安装 `backend/requirements.txt`，并补装 `pytest` 与 `httpx`
   - 真实文档端到端审核测试：`cd /workspace/backend && PYTHONPATH=/workspace/backend uvicorn app.main:app --host 127.0.0.1 --port 8000`；启动时会自动建表、种子默认/外部评审规则与预置误报记忆
   - 开发环境启动后自动创建引导管理员 `admin` / `admin123`（`APP_ENV` 非生产时密码会被强制校正为该值）
+  - 登录接口走 OAuth2 表单而非 JSON：`curl -s -X POST http://127.0.0.1:8000/api/auth/login -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=admin&password=admin123'`，取响应里的 `access_token` 作为 `Authorization: Bearer` 头做接口级端到端验证
   - 人工批注提取：`python3 backend/scripts/extract_pdf_annotations.py <带批注PDF> <输出.md>`，同编号带 `Tina` 后缀的 PDF 即人工意见来源
   - 起草流程：`POST /api/documents/upload/` 上传 → `POST /api/review/{document_id}?mode=hybrid` 建任务 → 轮询 `GET /api/review/{id}/progress` 直到 `completed`
   - 与人工意见对比：`PYTHONPATH=/workspace/backend python3 backend/scripts/evaluate_review.py --review-id <id> --human-baseline <人工意见.md>`，脚本会按文件名自动剥离 ` Tina` 后缀做归属
