@@ -129,12 +129,14 @@
               <div class="compare-upload-card">
                 <div class="compare-upload-title">主文档</div>
                 <el-upload
+                  ref="compareMainUploadRef"
                   :auto-upload="false"
                   :show-file-list="true"
                   :limit="1"
                   accept=".pdf,.docx,.xlsx,.xls,.md,.zip,.txt,.idml"
                   :on-change="handleCompareMainChange"
                   :on-remove="clearCompareMainFile"
+                  :on-exceed="handleCompareMainExceed"
                   :file-list="compareMainFileList"
                 >
                   <el-button type="primary" plain>上传主文档</el-button>
@@ -169,6 +171,12 @@
 
             <div class="compare-action-row">
               <el-button type="primary" :loading="compareSubmitting" @click="startCompareAudit">开始对比审核</el-button>
+              <el-button
+                :disabled="compareSubmitting || (!compareMainFileList.length && !compareReferenceFileList.length && !compareResult)"
+                @click="resetCompareAudit"
+              >
+                重置
+              </el-button>
             </div>
           </div>
 
@@ -1670,6 +1678,7 @@ const compareMainFile = ref(null)
 const compareMainFileList = ref([])
 const compareReferenceFiles = ref([])
 const compareReferenceFileList = ref([])
+const compareMainUploadRef = ref(null)
 
 const visibleCompareRows = computed(() => {
   const rows = compareResult.value?.compare_rows || []
@@ -2244,11 +2253,37 @@ function handleCompareMainChange(uploadFile) {
   }
   compareMainFile.value = rawFile
   compareMainFileList.value = [uploadFile]
+  clearCompareResult()
 }
 
 function clearCompareMainFile() {
   compareMainFile.value = null
   compareMainFileList.value = []
+  clearCompareResult()
+}
+
+function handleCompareMainExceed(files) {
+  const rawFile = Array.isArray(files) ? files[0] : files
+  if (!validateCompareUpload(rawFile)) return
+  const upload = compareMainUploadRef.value
+  if (!upload) return
+  // 主文档只保留 1 份：再次选择时替换已选文件，而不是静默忽略
+  upload.clearFiles()
+  upload.handleStart(rawFile)
+}
+
+function clearCompareResult() {
+  compareResult.value = null
+  showCompareConsistent.value = false
+}
+
+function resetCompareAudit() {
+  compareMainFile.value = null
+  compareMainFileList.value = []
+  compareReferenceFiles.value = []
+  compareReferenceFileList.value = []
+  compareMainUploadRef.value?.clearFiles()
+  clearCompareResult()
 }
 
 function handleCompareReferenceChange(_uploadFile, uploadFiles) {
@@ -2264,11 +2299,13 @@ function handleCompareReferenceChange(_uploadFile, uploadFiles) {
   }
   compareReferenceFiles.value = validFiles
   compareReferenceFileList.value = validUploadFiles
+  clearCompareResult()
 }
 
 function handleCompareReferenceRemove(_uploadFile, uploadFiles) {
   compareReferenceFiles.value = uploadFiles.map((item) => item.raw || item).filter(Boolean)
   compareReferenceFileList.value = [...uploadFiles]
+  clearCompareResult()
 }
 
 function formatCompareHits(hits = []) {
