@@ -36,8 +36,20 @@ SING_VERBS = {"is", "was", "has", "does"}
 PLUR_VERBS = {"are", "were", "have", "do"}
 ALL_AUX_VERBS = SING_VERBS | PLUR_VERBS
 MODAL_VERBS = {"can", "could", "may", "might", "will", "would", "shall", "should", "must"}
-SING_PRON = {"he", "she", "this", "that", "someone", "anyone", "everyone", "one"}
-PLUR_PRON = {"we", "they", "these", "those", "both", "many", "few"}
+SING_PRON = {"he", "she", "it", "this", "that", "someone", "anyone", "everyone", "one"}
+PLUR_PRON = {"we", "they", "you", "these", "those", "both", "many", "few"}
+# 可确证主语的句式：从句首的限定词引导的名词短语，或从句首的主语代词。
+DETERMINERS = {
+    "the", "a", "an", "this", "that", "these", "those", "each", "every",
+    "both", "all", "some", "any", "many", "few", "several", "no",
+    "its", "their", "our", "your", "my", "his", "her",
+}
+CLAUSE_LEAD_TOKENS = {
+    "that", "which", "who", "whom", "whose", "if", "when", "while",
+    "because", "since", "although", "though", "unless", "until",
+    "after", "before", "as", "where", "whether",
+}
+COORDINATORS = {"and", "or", "but", "nor"}
 EXCLUDE_WORDS = {
     "guide", "system", "interface", "chapter", "section", "page", "tab",
     "range", "device", "moment", "step", "sample", "problem", "air",
@@ -70,7 +82,7 @@ LOW_LEVEL_RULES = [
     {"category": "unit", "pattern": r"\bpH\d+(?:\.\d+)?\b", "message": "pH 格式错误：建议使用“pH 8.0”样式"},
     {"category": "style", "pattern": r"\bOD\d+\b", "message": "格式错误：建议使用“OD 260”样式"},
     {"category": "style", "pattern": r"\b\d+[xX]\b", "message": "符号格式错误：建议使用乘号“×”"},
-    {"category": "style", "pattern": r"\b[A-Za-z][A-Za-z0-9]*\(", "message": "格式错误：英文缩写与括号之间建议留空格"},
+    {"category": "style", "pattern": r"\b[A-Z]{2,}[A-Za-z0-9]*\(", "message": "格式错误：英文缩写与括号之间建议留空格", "case_sensitive": True},
     {"category": "grammar", "pattern": r"\b[a-zA-Z]\)(?=\S)", "message": "标号后缺少空格"},
     {"category": "style", "pattern": r"如下:(?=\d)", "message": "标点错误：建议使用中文冒号“：”"},
     {"category": "style", "pattern": r"强光下!", "message": "中文语境下建议使用“强光下。”"},
@@ -839,7 +851,14 @@ RE_CASE_ERROR = re.compile(r"([.!?]\s+)([a-z]\w+)")
 RE_SENTENCE = re.compile(r"[^.!?]+[.!?]")
 RE_THERE_BE = re.compile(r"\bthere\s+(is|are|was|were)\b", re.IGNORECASE)
 RE_AGREEMENT = re.compile(r"\b([a-zA-Z]+)\s+(is|are|was|were|has|have|does)\b", re.IGNORECASE)
-RE_PRON_VERB = re.compile(r"\b(he|she)\s+([a-zA-Z]+)\b", re.IGNORECASE)
+# “there be” 之后取名词短语中心语时，遇到介词/并列连词/从句引导词即视为短语结束。
+_NP_STOP_TOKENS = {
+    "of", "in", "to", "on", "up", "into", "with", "at", "for", "by", "from",
+    "over", "under", "between", "among", "during", "after", "before", "than",
+    "through", "across", "within", "about", "above", "below", "near", "per",
+    "via", "onto", "upon", "off", "out", "as", "and", "or", "but", "that",
+    "which", "who", "where", "when",
+}
 # 中文标点混入英文
 RE_CHINESE_PUNCT = re.compile(r"([a-zA-Z])、([a-zA-Z])")
 RE_CHINESE_DOT = re.compile(r"(?<=[a-zA-Z])。(?=[a-zA-Z])")
@@ -1116,19 +1135,20 @@ def _map_issue_type(issue):
 
 
 def _build_response(text, issues):
-    errors = []
-    seen = set()
+    errors_by_key = {}
     for issue in issues:
         start, end = _parse_issue_position(issue.get('position'))
         if start is None or end is None or end > len(text):
             continue
         issue_type = _map_issue_type(issue)
-        dedupe_key = (start, end, issue_type)
-        if dedupe_key in seen:
+        # 同一处缺陷可能被单字路径与短语路径各报一次（Disgestive 与 Disgestive\n\nBuffer），
+        # 起点相同即视为同一处，保留跨度较短的一条，避免重复计数拉低准确率。
+        dedupe_key = (start, issue_type)
+        existing = errors_by_key.get(dedupe_key)
+        if existing is not None and end >= existing['end']:
             continue
-        seen.add(dedupe_key)
-        word = issue.get('original_text') or text[start:end]
-        errors.append({
+        word = re.sub(r'\s+', ' ', str(issue.get('original_text') or text[start:end])).strip()
+        errors_by_key[dedupe_key] = {
             'start': start,
             'end': end,
             'type': issue_type,
@@ -1137,8 +1157,9 @@ def _build_response(text, issues):
             'word': word,
             'context': issue.get('context') or '',
             'suggestions': _extract_suggestions(issue),
-        })
+        }
 
+    errors = list(errors_by_key.values())
     errors.sort(key=lambda item: (item['start'], item['end'], item['type']))
     spell_count = sum(1 for item in errors if item['type'] == 'spell')
     grammar_count = len(errors) - spell_count
@@ -1185,7 +1206,8 @@ def _collect_low_level_rule_issues(text, document_language):
         applies_to = rule.get('applies_to')
         if applies_to and applies_to != document_language:
             continue
-        pattern = re.compile(rule['pattern'], re.IGNORECASE)
+        flags = 0 if rule.get('case_sensitive') else re.IGNORECASE
+        pattern = re.compile(rule['pattern'], flags)
         for match in pattern.finditer(text):
             matched_text = text[match.start():match.end()]
             issues.append({
@@ -1213,13 +1235,93 @@ def _append_languagetool_issues(text, issues, document_language):
     )
 
 
+# 句号/逗号等标点后紧跟下一个句子的首词（Temperature.For），说明缺空格。
+# 左侧要求 4 个以上小写字母、右侧要求首字母大写后接小写，可排除 e.g./i.e./U.S./Fig.1 一类合法缩写。
+RE_MISSING_SPACE_BETWEEN_SENTENCES = re.compile(r"([a-z]{4,})([.,;:!?])([A-Z][a-z]{2,})")
+
+
+def _collect_punctuation_spacing_issues(text):
+    issues = []
+    for match in RE_MISSING_SPACE_BETWEEN_SENTENCES.finditer(text):
+        left, punct, right = match.group(1), match.group(2), match.group(3)
+        issues.append({
+            'severity': 'general',
+            'category': 'style',
+            'source': 'punctuation_spacing_rule',
+            'original_text': match.group(0),
+            'context': text[max(0, match.start() - 50):min(len(text), match.end() + 50)],
+            'description': '缺少空格：英文标点后建议留一个空格',
+            'suggestion': f'{left}{punct} {right}',
+            'position': f"{match.start()}-{match.end()}",
+        })
+    return issues
+
+
+# 连字符单词被空格断开（High-throu ghput）：仅当拼接结果在同一文档中以完整单词形式出现过才判定，
+# 依据的是文档自身一致性，因此 real-time sequencing 一类正常搭配不会被误报。
+RE_SPLIT_HYPHENATED_WORD = re.compile(r"\b([A-Za-z]{2,}-[A-Za-z]{2,})\s+([A-Za-z]{2,})\b")
+
+
+def _collect_split_word_issues(text):
+    seen_tokens = set(re.sub(r"[^a-z0-9-]", " ", text.lower()).split())
+    issues = []
+    for match in RE_SPLIT_HYPHENATED_WORD.finditer(text):
+        joined = f"{match.group(1)}{match.group(2)}"
+        if joined.lower() not in seen_tokens:
+            continue
+        issues.append({
+            'severity': 'general',
+            'category': 'style',
+            'source': 'split_word_rule',
+            'original_text': match.group(0),
+            'context': text[max(0, match.start() - 50):min(len(text), match.end() + 50)],
+            'description': '单词被空格断开：同一文档中该词以完整形式出现，建议合并',
+            'suggestion': joined,
+            'position': f"{match.start()}-{match.end()}",
+        })
+    return issues
+
+
+# 阿拉伯数字 1 后接规则复数名词（swing downward 1 times）：数词与名词的数不一致。
+# 1 前必须是空白，排除表格记法与小数尺寸写法（µL/tube×1 months、4.1 inches）；
+# 名词去掉复数词尾后仍须是词典词，排除 series/species 一类单复同形词。
+RE_ONE_WITH_PLURAL_NOUN = re.compile(r"(?<=\s)1\s+([a-z]{3,}s)\b")
+
+
+def _collect_numeric_plural_issues(text):
+    issues = []
+    for match in RE_ONE_WITH_PLURAL_NOUN.finditer(text):
+        noun = match.group(1)
+        if noun.endswith(_SINGULAR_LOOKING_S):
+            continue
+        singular = f"{noun[:-3]}y" if noun.endswith("ies") else noun[:-1]
+        if singular not in spell_checker_utils.spell:
+            continue
+        issues.append({
+            'severity': 'general',
+            'category': 'grammar',
+            'source': 'numeric_plural_rule',
+            'original_text': match.group(0),
+            'context': text[max(0, match.start() - 50):min(len(text), match.end() + 50)],
+            'description': '数词与名词复数不一致：数字 1 后应使用名词单数',
+            'suggestion': f'1 {singular}',
+            'position': f"{match.start()}-{match.end()}",
+        })
+    return issues
+
+
 def process_text(text, file_type=None):
     """共享处理函数：统一走完整规则链并适配前端结果结构"""
     normalized_text = pre_clean_lines(text)
+    if file_type == 'pdf':
+        normalized_text = _merge_soft_wrapped_lines(normalized_text)
     document_language = _detect_document_language(normalized_text)
     issues = run_spelling_and_grammar_check(normalized_text, file_type=file_type)
     _append_legacy_grammar_issues(normalized_text, issues)
     _append_languagetool_issues(normalized_text, issues, document_language)
+    issues.extend(_collect_punctuation_spacing_issues(normalized_text))
+    issues.extend(_collect_split_word_issues(normalized_text))
+    issues.extend(_collect_numeric_plural_issues(normalized_text))
     issues.extend(_collect_low_level_rule_issues(normalized_text, document_language))
     issues.extend(_collect_consistency_issues(normalized_text, document_language))
     return _build_response(normalized_text, issues)
@@ -1231,27 +1333,85 @@ def _guess_file_type_from_text(text):
     return None
 
 
-def is_noun_singular(word: str) -> bool:
-    w = word.lower().strip()
+# 单数/复数都可写、或词尾不足以判定数的名词属于“数不可确证”，一律跳过。
+_SINGULAR_LOOKING_S = ("ss", "us", "is", "ous", "ics", "sis")
+_PLURAL_SUFFIXES = ("s", "es", "ies", "ves")
+_CLAUSE_BOUNDARY = re.compile(r"[,;:]\s*$")
+_TRAILING_WORD = re.compile(r"([A-Za-z][A-Za-z.\-]*)\s*$")
+
+
+def _reliable_number(word: str):
+    """返回 True=复数 / False=单数 / None=数不可确证。"""
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if not w:
+        return None
     if w in SING_PRON:
-        return True
+        return False
     if w in PLUR_PRON:
-        return False
-    if w in FULL_EXCLUDE:
         return True
-    if w.endswith(("s", "es", "ies", "ves")):
+    if w in FULL_EXCLUDE or w in DETERMINERS or w in CLAUSE_LEAD_TOKENS:
+        return None
+    # 以 -ss/-us/-is 等结尾的词通常是单数（process、analysis、status）。
+    if w.endswith(_SINGULAR_LOOKING_S):
         return False
-    return True
+    if w.endswith(_PLURAL_SUFFIXES):
+        return True
+    # 以 a/i/o/u 结尾的词（data、media、criteria）无法仅凭词形判定数。
+    if w[-1] in "aiou":
+        return None
+    return False
+
+
+def _preceded_by_clause_boundary(sent: str, pos: int) -> bool:
+    """pos 之前的文本是否构成句首或从句首（句首、逗号/分号/冒号后、或从句引导词后）。"""
+    prefix = sent[:pos].rstrip()
+    if not prefix:
+        return True
+    if _CLAUSE_BOUNDARY.search(sent[:pos]):
+        return True
+    trailing = _TRAILING_WORD.search(prefix)
+    if not trailing:
+        return False
+    word = trailing.group(1).lower()
+    if word in CLAUSE_LEAD_TOKENS:
+        return True
+    # 单个逗号连接的并列分句（generated, and Task exception are…）算从句边界；
+    # 逗号列表（ID, Recipe, and Expiration date are…）的主语是复数整体，不算边界。
+    if word in COORDINATORS:
+        return prefix.count(",") == 1
+    return False
+
+
+def _is_provable_subject(sent: str, head_match, head: str) -> bool:
+    """主语代词、限定词引导的名词短语，或从句首的标题式复合名词短语，才认为主语可确证。"""
+    if head in SING_PRON or head in PLUR_PRON:
+        return _preceded_by_clause_boundary(sent, head_match.start())
+    determiner = _TRAILING_WORD.search(sent[:head_match.start()])
+    if not determiner:
+        return False
+    word = determiner.group(1)
+    if word.lower() in DETERMINERS:
+        return _preceded_by_clause_boundary(sent, determiner.start(1))
+    # 无冠词的复合名词主语（Task exception are displayed）：首词为标题式大写且短语位于从句首。
+    if word[:1].isupper() and word.isalpha() and word.lower() not in CLAUSE_LEAD_TOKENS:
+        return _preceded_by_clause_boundary(sent, determiner.start(1))
+    return False
 
 
 def get_nearest_noun_after_be(sent: str) -> str:
-    part = re.sub(r"\s+and\s+.+", "", sent, flags=re.IGNORECASE)
-    words = part.strip().split()
-    for w in words:
-        w_low = w.lower()
-        if w_low not in FULL_EXCLUDE:
-            return w
-    return ""
+    # 取名词短语中心语（短语内最后一个实词），避免把修饰语当成主语。
+    head = ""
+    for raw in sent.strip().split():
+        token = re.sub(r"[^A-Za-z\-]", "", raw)
+        if not token:
+            break
+        w = token.lower()
+        if w in _NP_STOP_TOKENS:
+            break
+        if w in DETERMINERS or w in FULL_EXCLUDE:
+            continue
+        head = token
+    return head
 
 
 def check_there_be(sent: str, offset: int, full_text: str, err_list):
@@ -1261,9 +1421,11 @@ def check_there_be(sent: str, offset: int, full_text: str, err_list):
         nearest_noun = get_nearest_noun_after_be(after_be)
         if not nearest_noun:
             continue
-        sub_sing = is_noun_singular(nearest_noun)
+        number = _reliable_number(nearest_noun)
+        if number is None:
+            continue
         verb_sing = verb in SING_VERBS
-        if (sub_sing and not verb_sing) or (not sub_sing and verb_sing):
+        if (number is False) != verb_sing:
             s = offset + m.start(1)
             e = offset + m.end(1)
             err_list.append({"start": s, "end": e, "type": "grammar", "severity": "general", "message": "主谓不一致"})
@@ -1271,24 +1433,17 @@ def check_there_be(sent: str, offset: int, full_text: str, err_list):
 
 def check_normal_agreement(sent: str, offset: int, full_text: str, err_list):
     for m in RE_AGREEMENT.finditer(sent):
-        sub = m.group(1).lower()
+        head = m.group(1).lower()
         verb = m.group(2).lower()
         if sent.lower().startswith("there "):
             continue
-        if sub in FULL_EXCLUDE:
+        number = _reliable_number(head)
+        if number is None:
             continue
-        sub_sing = is_noun_singular(sub)
+        if not _is_provable_subject(sent, m, head):
+            continue
         verb_sing = verb in SING_VERBS
-        if (sub_sing and not verb_sing) or (not sub_sing and verb_sing):
-            s = offset + m.start(2)
-            e = offset + m.end(2)
-            err_list.append({"start": s, "end": e, "type": "grammar", "severity": "general", "message": "主谓不一致"})
-
-    for m in RE_PRON_VERB.finditer(sent):
-        verb = m.group(2).lower()
-        if verb in ALL_AUX_VERBS or verb in MODAL_VERBS or verb in FULL_EXCLUDE:
-            continue
-        if not verb.endswith(("s", "es")):
+        if (number is False) != verb_sing:
             s = offset + m.start(2)
             e = offset + m.end(2)
             err_list.append({"start": s, "end": e, "type": "grammar", "severity": "general", "message": "主谓不一致"})
@@ -1375,6 +1530,54 @@ def pre_clean_lines(text):
     if 0 < blank < 3:
         res += [""] * blank
     return "\n".join(res)
+
+
+# PDF 的文本块往往按视觉行切分，同一段落被拆成多行并用空行隔开，直接渲染会得到右
+# 侧大片留白的碎句。以下按“上一行未收句 + 本行小写起头”判定续行并合回段落；词被拦
+# 腰截断时（reprin / nted）用词典判断，去掉空格直接拼接。
+_TERMINAL_PUNCTUATION = (".", ":", ";", "?", "!")
+_LIST_ITEM_PREFIX = re.compile(r"^(?:[0-9]+[.)]|[a-z][.)]|[-*\u2022\u00b7])\s", re.IGNORECASE)
+_TRAILING_LETTERS = re.compile(r"([A-Za-z]+)\s*$")
+_LEADING_LETTERS = re.compile(r"^([A-Za-z]+)")
+
+
+def _joins_mid_word(previous, following):
+    tail = _TRAILING_LETTERS.search(previous)
+    head = _LEADING_LETTERS.match(following)
+    if not tail or not head:
+        return False
+    left, right = tail.group(1).lower(), head.group(1).lower()
+    if left in spell_checker_utils.spell and right in spell_checker_utils.spell:
+        return False
+    return f"{left}{right}" in spell_checker_utils.spell
+
+
+def _continues_previous_line(previous, following):
+    if previous.endswith(_TERMINAL_PUNCTUATION):
+        return False
+    if _LIST_ITEM_PREFIX.match(following):
+        return False
+    return following[:1].islower() or _joins_mid_word(previous, following)
+
+
+def _merge_soft_wrapped_lines(text):
+    merged = []
+    pending_blank = 0
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            pending_blank += 1
+            continue
+        if merged and _continues_previous_line(merged[-1], line):
+            # 连字符收尾（wide- / tip）与词被拦腰截断（reprin / nted）都直接拼接，不补空格。
+            separator = "" if merged[-1].endswith("-") or _joins_mid_word(merged[-1], line) else " "
+            merged[-1] = f"{merged[-1]}{separator}{line}"
+        else:
+            if pending_blank and merged:
+                merged.append("")
+            merged.append(line)
+        pending_blank = 0
+    return "\n".join(merged)
 
 
 def _iter_docx_blocks(doc):

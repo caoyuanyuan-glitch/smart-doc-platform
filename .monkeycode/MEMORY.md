@@ -172,6 +172,14 @@ Word 转 DITA 批量转换基线规则
   - PDF 版式复核依赖视觉 provider 链（`REVIEW_VISUAL_PROVIDERS`，默认 `kimi,qwen`），纯文本模型（deepseek）不在链中；视觉 provider 不可用时 `pdf_visual_verification` 的候选全部 failed 且无页级结果
   - 外部评审规则库（29 条）只在能确定性表达成模式匹配时才生成正则，语义/版式类规则落为 `(?!)`；规则正则与 `language` 在种子阶段写入 rules 表，改完 `app/crud/rule.py` 的转换逻辑必须重启后端重新种子才生效
   - 排查英文文档漏报时先确认规则挂在哪个语言分支：中文人工基线规则不参与纯英文文档，英文文档只走 `_run_english_heuristic_audit` 与 `_run_manual_engineering_audit`，语言无关的判据需要单独接到英文分支
+  - 拼写检查页面（`frontend/src/views/SpellCheck.vue`）的口径：拼写类问题来自 `backend/app/utils/spell_checker.py`，其余「规则」类来自 `backend/app/api/spell_check.py` 的确定性规则（`legacy_grammar_rule` 主谓一致、`low_level_rule`、`languagetool`）
+  - 英文语法能力扩展走 `backend/app/utils/grammar_engine.py`（LanguageTool），不要再扩 `backend/app/api/spell_check.py` 里的正则语法规则；历史遗留的 `run_grammar` 只保留结构上可确证主语的句式判定，无法确证时跳过
+  - 拼写检查页准确率/检出率实测方法：把文件名带 `Tina` 后缀的 PDF 当作人工批注来源，用 `backend/scripts/extract_pdf_annotations.py` 或 PyMuPDF 直接读 annot；待检文件用 `app.utils.document_parser.parse_pdf` 取全文后调 `app.api.spell_check.process_text(text, file_type='pdf')`；issue 的 `start` 字符位置按 `full_text.split('\f')` 的页边界映射回页号，再与批注的 `selected_text`/`context` 归一化后按页对齐
+  - `_collect_low_level_rule_issues` 会用 `re.IGNORECASE` 编译规则，凡是依赖大写形式的正则必须在该规则上置 `case_sensitive: True`，否则 `[A-Z]` 会被重新解释为任意大小写
+  - PyEnchant 把部分真实错词当作合法英文词（如 `twp`），`spell.unknown()` 不会返回它们；这类词只能靠 `FORCED_MISSPELLINGS` + `COMMON_MISSPELLINGS` 硬编码命中，而这两处按既有边界锁定指令属禁止触碰，需用户明确放开才能做
+  - 拼写检查页指标口径：必须分域报告，把「全部批注」与「文本层缺陷批注」当作两个分母；视觉版式（间距/挤压）、内容取舍（按修订历史删除、核对货号）、引号改写、措辞建议不属于文本规则可判范围，计入会系统性压低检出率。准确率也有两套口径，批注对齐口径（分子=与批注对齐条数）会把真实但未批注的检出算成误报，作为下界；结论以人工核验口径（分子=确认的真实缺陷数）为准
+  - `spell_checker.py` 的检出上限由硬编码词表决定：`_PDF_FIXED_PHRASE_MISSPELLINGS`、`FORCED_MISSPELLINGS`、`COMMON_MISSPELLINGS`、`TERM_VARIANT_CORRECTIONS` 全为硬编码，唯一 Disk I/O 入口 `WHITELIST_FILE` 只能抑制误报；要提升拼写检出率只能改这个被锁定的文件
+  - `document_parser.extract_pdf` 按 PyMuPDF 文本块 `"\n\n".join` 拼页，MGI 的 IFU（InDesign 导出）每个视觉行即一个文本块，故解析文本行间全是空行，直接渲染会得到碎句 + 右侧大片留白。拼写检查页用 `spell_check.py` 的 `_merge_soft_wrapped_lines`（仅 pdf）回流解决，不动 `document_parser` 以免影响审核/翻译/比对模块；预览文本被改写后，评测脚本不能再按 offset 映射页码，改写只涉及空白，可对「合并文本/原文」按非空白字符线性对齐得到索引映射
 
 IFU PDF 回归测试约定
 - Date: 2026-08-19
