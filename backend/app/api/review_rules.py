@@ -38,7 +38,12 @@ CHINESE_GRAMMAR_RULES = [
 # ============================================
 # 4.4 中文术语规则
 # ============================================
-CHINESE_TERMINOLOGY_RULES = []
+CHINESE_TERMINOLOGY_RULES = [
+    {"pattern": r"手工冰箱", "original": "手工冰箱", "expected": "冰箱", "severity": "serious",
+     "rule": "不规范表述"},
+    {"pattern": r"拍摄模组", "original": "拍摄模组", "expected": "识别模组", "severity": "general",
+     "rule": "术语错误（拍摄模组不含扫码器）"},
+]
 
 # ============================================
 # 4.5 单位规则
@@ -99,8 +104,61 @@ ENGLISH_GRAMMAR_RULES = [
     {"pattern": r"\bfor\s+run\s+\w+", "expected": "for running", "severity": "suggestion", "rule": "for + 动词"},
     {"pattern": r"\bdesk\s+top\b", "expected": "desktop", "severity": "general", "rule": "单词拆分"},
     {"pattern": r"\bat\s+your\s+own\s+risk\b", "expected": "proceed with caution", "severity": "suggestion", "rule": "避免口语化表述"},
-    {"pattern": r"[a-zA-Z]、(?=[a-zA-Z])", "expected": ",", "severity": "serious", "rule": "中文顿号混入英文"},
 ]
+
+
+# ============================================
+# v2 对齐：P0 规则库 10 大分类视图
+# 中文 5 维：字词 / 句子 / 标点 / 段落 / 逻辑
+# 英文 5 维：拼写 / 句式 / 标点 / 语法 / 逻辑
+# ============================================
+
+# --- 中文·段落（v2 新增维度；初期可为空，由 T3 人工意见回流填充）---
+CHINESE_PARAGRAPH_RULES = []
+
+# --- 中文·逻辑（v2 新增维度；确定性部分已由 review.py _run_logic_integrity_audit 覆盖，此处不重复）---
+CHINESE_LOGIC_RULES = []
+
+# --- 英文·句式（v2 新增维度）---
+ENGLISH_SENTENCE_RULES = [
+    {"pattern": r"\bturn\s+on\s+it\b", "expected": "turn it on", "severity": "suggestion",
+     "rule": "短语动词词序（PDF 伪影优先走视觉复核）"},
+]
+
+# --- 英文·标点（v2 新增维度）---
+ENGLISH_PUNCTUATION_RULES = [
+    {"pattern": r"[a-zA-Z]、(?=[a-zA-Z])", "expected": ",", "severity": "serious",
+     "rule": "中文顿号混入英文"},
+]
+
+# --- 英文·逻辑（v2 新增维度；初期可为空）---
+ENGLISH_LOGIC_RULES = []
+
+# --- 10 大分类聚合视图（v2 第 2 节 P0 口径）---
+def _dedupe_rules(rules):
+    """同一维度内按 (原文, 期望) 去重，避免同一规则双跑重复上报。"""
+    seen, unique = set(), []
+    for rule in rules:
+        key = (rule.get("original") or rule.get("pattern"), rule.get("expected"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(rule)
+    return unique
+
+
+V2_RULE_CATEGORIES = {
+    "中文_字词": _dedupe_rules(list(CHINESE_TERMINOLOGY_RULES) + list(CHINESE_SPELLING_RULES)),
+    "中文_句子": list(CHINESE_GRAMMAR_RULES),
+    "中文_标点": list(CHINESE_PUNCTUATION_RULES),
+    "中文_段落": list(CHINESE_PARAGRAPH_RULES),
+    "中文_逻辑": list(CHINESE_LOGIC_RULES),
+    "英文_拼写": list(ENGLISH_CORRECT_SPELLINGS),
+    "英文_句式": list(ENGLISH_SENTENCE_RULES),
+    "英文_标点": list(ENGLISH_PUNCTUATION_RULES),
+    "英文_语法": list(ENGLISH_GRAMMAR_RULES),
+    "英文_逻辑": list(ENGLISH_LOGIC_RULES),
+}
 
 
 # ============================================
@@ -290,4 +348,5 @@ def get_all_rules() -> dict:
         "english_spelling": ENGLISH_CORRECT_SPELLINGS,
         "english_grammar": ENGLISH_GRAMMAR_RULES,
         "british_american": BRITISH_AMERICAN_SPELLINGS,
+        "v2_categories": V2_RULE_CATEGORIES,
     }
