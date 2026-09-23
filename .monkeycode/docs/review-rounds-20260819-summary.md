@@ -516,3 +516,14 @@
 - 真实端到端（uvicorn + 真实种子库，`admin` 登录）：导出 29 条 → 模板含两表 → 导入含 1 新建 + 29 重复 + 2 非法行的文件，返回 `created=1/duplicates=29/errors=2`（行号 32、33）→ 重导 `created=0/duplicates=30` → 导出回读新规则 severity=严重、language=英文，回灌无损 → 非 xlsx 400 → 删除临时规则，库恢复 29 条
 - 验证链路：`/api/rules/export` 与 `/api/rules/import-template` 在直连后端、vite 代理（5173）、预览网关三处均 200；`frontend` `npm run build` 通过
 - 关联：上一节遗留的 `GRAMMAR-007` 已按用户确认移除，随 PR #135 合入 `main`
+
+## 2026-09-23 外部评审规则种子改为 Excel
+
+- 承接上一节：用户指出的「规则都是 JSON 文件，本地难以维护」还包括启动种子 `backend/seed/review_rule_library_seed.json`，一并转为 Excel
+- 新增 `backend/seed/review_rule_library_seed.xlsx`：`规则库` 工作表（规则ID/分类/严重程度/规则内容/适用场景/已同步，29 条）+ `元信息` 工作表（来源、导出日期）两列键值行，无表头
+- 转换无损性已逐项核对：29 条规则的 `rule_id`/`category`/`severity`/`rule_content`/`applicable_scenarios`/`synced` 与 `git show HEAD` 里的原 JSON 完全一致，元信息一致，0 处差异
+- `crud/rule.py`：`REVIEW_RULE_LIBRARY_SEED_PATH` 指向 `.xlsx`；新增 `_load_review_rule_library_seed()` 用 openpyxl 读取，按表头名定位列（不依赖列顺序），`适用场景` 按 `、` 拆回列表；`seed_external_review_rules` 改为消费该结构，`source`/`export_date` 取自 `元信息` 工作表
+- 移除已无引用的 `import json`；`review.py` 的 `REVIEW_CACHE_VERSION_FILES` 与 `test_review_cache.py` 的断言路径同步改为 `.xlsx`（缓存指纹用 mtime+size，二进制文件同样适用；改种子会让既有审核缓存失效，属预期）
+- 原 `review_rule_library_seed.json` 已删除（git 历史可回溯）。取舍说明：二进制 xlsx 在代码评审时无法直接看 diff，换来人可以在 Excel 里直接维护
+- `test_review_cache.py`：原 seed 用例的假路径（`read_text`）改为用 `tmp_path` 写真 xlsx；新增 2 例——随包种子能读出 29 条规则与元信息、`example`/`audit_basis` 确实取自 `元信息` 工作表
+- 回归：全量 `backend/tests` 874 passed / 6 failed（6 例仍为既有失败）；另用空库直接调用 `seed_external_review_rules` 验证 `created=29`、二次调用 `0`（幂等）；重启真实后端无报错，`GET /api/rules/export` 仍为 29 条且内容、severity、language 不变

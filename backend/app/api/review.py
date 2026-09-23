@@ -99,7 +99,7 @@ REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "document_parser.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "spell_checker.py",
-    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json",
+    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.xlsx",
     Path(__file__).resolve(),
 ] + REVIEW_BASIS_VERSION_FILES
 REVIEW_PROMPT_VERSION = "review-prompt-v3"
