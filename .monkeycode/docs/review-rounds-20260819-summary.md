@@ -660,3 +660,24 @@
 - 流程要求数字：
 - 6→9 新增 3 条（`before clean`、`during clean`、`Monthly cleaning`）分别对应 gold set 批注 8/9/10，逐条为 TP（3/3）。
 - AI 来源问题对 gold set 的 FP 占比（proxy，`allow_rule_family=False` 文本证据）：review20 7/7、review21 8/9、review23 9/14，合计 24/30=80%。该比例受 gold set 未补全影响（大量合法但未标注问题被计入 FP），不能直接与交付包的 12% 阈值比较。
+
+## 2026-09-24 第十轮：改用 Issue.status 实测准确率 + 误报记忆回归守卫
+
+- 本轮背景：初版 gold set 的 `selected_text` 多为占位描述，用 `evaluate_review.py --config` 测出的 strict 准确率被严重低估。改走零成本、立即可得的真实标注口径：`Issue.status`（`confirmed`=TP、`false_positive`=FP、其余=未标注）。
+- 新增 `backend/scripts/accuracy_from_status.py`：按 `status` 聚合全库或单文档，输出 `overall`（含 `label_coverage`/`precision_proxy`/`trust`）、`by_document`、`by_source`、`top_false_positive_rules`。计算口径：`label_coverage=(confirmed+false_positive)/total`，`precision_proxy=confirmed/(confirmed+false_positive)`，`share=该规则 false_positive/全部 false_positive`；`label_coverage<0.3` 标记 `trust=low`。
+- 新增 `backend/tests/test_false_positive_memory_regression.py`（4 例）：真实库守卫（遍历 `status != false_positive` 的 Issue，断言未命中 `enabled=1` 误报签名）+ 隔离用例（命中已启用签名必被检出、`enabled=0` 不拦截、误报源问题本身不算复发）。复用现有 `_issue_judgment_signatures`，未重写签名逻辑。
+- 实测数字（`python scripts/accuracy_from_status.py`，全库）：
+
+| 指标 | 数值 |
+| --- | --- |
+| total_issues | 231 |
+| confirmed | 0 |
+| false_positive | 1 |
+| unlabeled | 230 |
+| label_coverage | 0.0043 |
+| precision_proxy | 0.0 |
+| trust | low |
+
+- 误报 Top 规则：`SAFE-002`（false_positive=1，confirmed=0，share=1.0），全库仅此 1 条误报标注。
+- 结论：`confirmed + false_positive = 1 < 30`，**现有标注量不足以支撑 88% 结论**。`precision_proxy=0` 仅说明「已有 1 条标注全是误报」，不代表真实精度；`label_coverage=0.4%` 下该数字只能看趋势。下一步应先在界面上持续标注（确认/误报），覆盖度上来后再用本脚本与 `top_false_positive_rules` 定位优化靶子。
+- 本地验证：新增 4 例测试通过；全量后端测试 `930 passed / 6 failed / 1 skipped`，6 个失败与既有基线一致。
