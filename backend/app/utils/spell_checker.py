@@ -3588,6 +3588,10 @@ def check_grammar_patterns(content):
     for match in re.finditer(r'\b(a|an)\s+([A-Za-z][A-Za-z0-9\-]*)', content):
         article = match.group(1).lower()
         noun = match.group(2)
+        # all-caps 可读词（HOME/END 等 UI 词）冠词读音存在两读（/h/ 与字母名 /eɪtʃ/），
+        # 与 review.py 保持一致：整词跳过冠词判定，a/an 均不报。
+        if noun.isupper() and noun.isalpha() and noun.lower() in _WORDLIKE_CAPS:
+            continue
         vowel_sound = _is_vowel_sound(noun)
         if article == 'a' and vowel_sound:
             add_issue(match.start(), match.end(), match.group(0), f"建议改为: an {noun}", "元音发音开头的单词前应使用 an")

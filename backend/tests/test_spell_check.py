@@ -288,16 +288,12 @@ def test_is_vowel_sound_judges_all_caps_wordlike_terms_by_whole_word_sound():
 
 
 def test_check_grammar_patterns_article_for_home_and_ups():
-    # 正确搭配不报。
+    # HOME 属 all-caps 可读词，冠词有两读（/h/ 与字母名 /eɪtʃ/），与 review.py 一致：a/an 均不报。
     assert spell_checker_utils.check_grammar_patterns("used in a HOME HEALTHCARE ENVIRONMENT") == []
+    assert spell_checker_utils.check_grammar_patterns("used in an HOME HEALTHCARE ENVIRONMENT") == []
+
+    # UPS 不在可读词表内，仍按缩写字母名判定：正确搭配不报，错误搭配报出正确冠词。
     assert spell_checker_utils.check_grammar_patterns("use a UPS for backup power") == []
-
-    # 错误搭配报出，并给出正确冠词。
-    home_issues = spell_checker_utils.check_grammar_patterns("used in an HOME HEALTHCARE ENVIRONMENT")
-    assert [(i["original_text"], i["suggestion"]) for i in home_issues] == [
-        ("an HOME", "建议改为: a HOME")
-    ]
-
     ups_issues = spell_checker_utils.check_grammar_patterns("use an UPS for backup power")
     assert [(i["original_text"], i["suggestion"]) for i in ups_issues] == [
         ("an UPS", "建议改为: a UPS")
