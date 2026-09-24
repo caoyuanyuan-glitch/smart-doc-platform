@@ -4104,6 +4104,11 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
+/* 对比审核：文件行的删除按钮常显，避免必须悬停文件行才出现 */
+.compare-upload-card .el-upload-list__item .el-icon--close {
+  display: inline-flex;
+}
+
 .compare-mode-toolbar {
   margin-top: 0;
 }
