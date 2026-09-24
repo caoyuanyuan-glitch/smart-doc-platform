@@ -366,6 +366,44 @@ def test_run_grammar_uses_noun_head_after_there_be():
         assert errors == [], text
 
 
+def test_run_grammar_accepts_irregular_plural_subjects():
+    # 不规则复数不以 -s/-es 结尾，不得被当成单数而与 are/were 冲突。
+    cases = [
+        "The people are waiting outside.",
+        "The children are playing in the yard.",
+        "Several mice are in the cage.",
+        "The women are here.",
+        "The police are investigating.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+    # 确实用错单数动词时仍要报。
+    flagged = []
+    spell_check_api.run_grammar("The people is waiting outside.", flagged)
+    assert len(flagged) == 1
+
+
+def test_run_grammar_there_be_ignores_trailing_modifier_or_verb():
+    # there be 之后的名词短语常跟形容词或动词，中心语是短语内的名词而不是它们。
+    cases = [
+        "There are several options available.",
+        "If there are any temperature alarms, contact technical support.",
+        "If there are questions, contact us.",
+        "Verify that there are no bubbles remaining.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+
 def test_low_level_acronym_spacing_rule_ignores_math_and_ui_labels():
     text = "Library input V(μL)= c(ng/μL)×106 N(bp)\n\nMetrics\nProgress(10/302)\n"
 
