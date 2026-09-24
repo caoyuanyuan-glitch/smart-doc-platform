@@ -111,10 +111,10 @@ TECH_TERMS_WHITELIST = {
     'cloning', 'fluorescence', 'purification', 'centrifugation', 'electrophoresis', 'chromatography',
     'spectrophotometer', 'restriction', 'fragmentation', 'mutation', 'allele', 'genotype', 'phenotype',
     'haplotype', 'phylogenetic', 'homologous', 'orthologous', 'paralogous', 'heterologous', 'polymorphism',
-     'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
-     'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
-     'omics', 'genomics', 'proteomics', 'transcriptomics', 'metabolomics',
-     'epigenomics', 'lipidomics', 'spatialomics',
+    'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
+    'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
+    'omics', 'genomics', 'proteomics', 'transcriptomics', 'metabolomics',
+    'epigenomics', 'lipidomics', 'spatialomics', 'spatial',
     'circularization', 'adapter', 'ligation', 'elute', 'enhancer', 'vortexer',
     'vortex', 'vortexes', 'Agilent', 'ALPAQUA', 'Ambion', 'Axygen', 'Covaris',
     'DynaMag', 'PerkinElmer', 'Invitrogen', 'ThermoFisher', 'CompleteGenomics',
@@ -225,6 +225,18 @@ def get_exact_whitelist_snapshot():
         return set(_TECH_TERMS_EXACT)
 
 
+_OMICS_SUFFIX = "omics"
+
+
+def _is_omics_family(token: str) -> bool:
+    """组学词族：以 omics 结尾的专业术语一律豁免（proteomics / metabolomics ...）。
+
+    要求长度大于裸词 omics 本身，避免把裸词边界也放进来。
+    """
+    lower = str(token or "").lower()
+    return lower.endswith(_OMICS_SUFFIX) and len(lower) > len(_OMICS_SUFFIX)
+
+
 def is_whitelisted(word: str) -> bool:
     candidate = str(word or '').strip()
     if _is_protected_technical_token(candidate):
@@ -237,6 +249,8 @@ def is_whitelisted(word: str) -> bool:
     for pattern, _ in SPELLCHECK_WHITELIST['pattern']:
         if re.match(pattern, candidate):
             return True
+    if _is_omics_family(candidate):
+        return True
     return False
 
 

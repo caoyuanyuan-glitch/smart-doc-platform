@@ -1,0 +1,34 @@
+{
+  "suite_name": "review_accuracy_88_target",
+  "documents": [
+    {
+      "name": "gospatial_v2_24_en",
+      "review_id": 20,
+      "baseline": "goldset/human_baseline_gospatial_v2_24.md",
+      "allowed_misses": ["AI-STYLE-001"],
+      "explicit_false_positives": []
+    },
+    {
+      "name": "e25rs_cn",
+      "review_id": 21,
+      "baseline": "goldset/human_baseline_e25rs_cn.json",
+      "allowed_misses": [],
+      "explicit_false_positives": []
+    },
+    {
+      "name": "e25rs_en",
+      "review_id": 23,
+      "baseline": "goldset/human_baseline_e25rs_en.json",
+      "allowed_misses": [],
+      "explicit_false_positives": []
+    }
+  ],
+  "thresholds": {
+    "min_recall": 0.88,
+    "min_precision": 0.88,
+    "max_noop_rate": 0.05,
+    "max_numeric_change_rate": 0.0,
+    "max_protected_change_rate": 0.0,
+    "min_high_value_rate": 0.3
+  }
+}

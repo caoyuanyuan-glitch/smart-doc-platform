@@ -415,6 +415,7 @@ def batch_evaluate_from_config(config_path, markers):
     thresholds = config.get("thresholds", {})
 
     results = []
+    per_doc_metrics = []
     summary = {"total": 0, "passed": 0, "failed": 0, "regressions": 0}
 
     for doc_cfg in documents_cfg:
@@ -431,11 +432,39 @@ def batch_evaluate_from_config(config_path, markers):
         protected_rate = result["protected_meaning_changed"] / max(total, 1)
         high_value_rate = result["effectiveness"]["high_value_rate"]
 
+        # 准确率口径：优先取过滤后的严格版，其次严格版，再次宽松版
+        baseline_node = (
+            result.get("human_baseline_filtered")
+            or result.get("human_baseline")
+            or {}
+        )
+        recall = baseline_node.get("strict_recall")
+        if recall is None:
+            recall = baseline_node.get("recall", 0.0)
+        precision = baseline_node.get("strict_precision")
+        if precision is None:
+            precision = baseline_node.get("precision", 0.0)
+
+        min_recall = thresholds.get("min_recall")
+        min_precision = thresholds.get("min_precision")
+        accuracy_checks = {}
+        if min_recall is not None or min_precision is not None:
+            if not baseline_node:
+                # 配了准确率阈值却没给 gold set —— 判不达标，杜绝"没测就算过"
+                accuracy_checks["recall_ok"] = False
+                accuracy_checks["precision_ok"] = False
+                recall = 0.0
+                precision = 0.0
+            else:
+                accuracy_checks["recall_ok"] = recall >= (min_recall or 0.0)
+                accuracy_checks["precision_ok"] = precision >= (min_precision or 0.0)
+
         checks = {
             "noop_rate_ok": noop_rate <= thresholds.get("max_noop_rate", 0.05),
             "numeric_rate_ok": numeric_rate <= thresholds.get("max_numeric_change_rate", 0.0),
             "protected_rate_ok": protected_rate <= thresholds.get("max_protected_change_rate", 0.0),
             "high_value_rate_ok": high_value_rate >= thresholds.get("min_high_value_rate", 0.3),
+            **accuracy_checks,
         }
 
         all_ok = all(checks.values())
@@ -446,8 +475,15 @@ def batch_evaluate_from_config(config_path, markers):
             summary["failed"] += 1
             summary["regressions"] += 1
 
+        doc_name = doc_cfg.get("name", f"review_{review_id}")
+        per_doc_metrics.append({
+            "name": doc_name,
+            "recall": round(recall, 4),
+            "precision": round(precision, 4),
+        })
+
         results.append({
-            "name": doc_cfg.get("name", f"review_{review_id}"),
+            "name": doc_name,
             "review_id": review_id,
             "passed": all_ok,
             "checks": checks,
@@ -457,11 +493,23 @@ def batch_evaluate_from_config(config_path, markers):
                 "numeric_change_rate": round(numeric_rate, 4),
                 "protected_change_rate": round(protected_rate, 4),
                 "high_value_rate": round(high_value_rate, 4),
+                "recall": round(recall, 4),
+                "precision": round(precision, 4),
+                "has_gold_set": bool(baseline_node),
             },
             "config": result.get("config", {}),
             "suite_filters": result.get("suite_filters", {}),
             "result": result,
         })
+
+    summary["per_document"] = per_doc_metrics
+    summary["mean_recall"] = round(sum(m["recall"] for m in per_doc_metrics) / max(len(per_doc_metrics), 1), 4)
+    summary["mean_precision"] = round(sum(m["precision"] for m in per_doc_metrics) / max(len(per_doc_metrics), 1), 4)
+    summary["all_documents_meet"] = all(
+        m["recall"] >= (thresholds.get("min_recall") or 0.0)
+        and m["precision"] >= (thresholds.get("min_precision") or 0.0)
+        for m in per_doc_metrics
+    )
 
     return {"summary": summary, "results": results}
 

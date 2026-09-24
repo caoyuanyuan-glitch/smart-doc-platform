@@ -1,0 +1,112 @@
+{
+  "annotations": [
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "3",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "是这么近的吗\r类似问题参考另外一份中文意见",
+      "selected_text": "装基本信息\n货号\n名",
+      "context": "",
+      "category": "中文残留",
+      "layer": "deterministic",
+      "expected_rule": "DET-CN-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "8",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "这个顺序也跟前面试剂套装章节不一致",
+      "selected_text": "CL App-D FCU S",
+      "context": "",
+      "category": "术语一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-TERM-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "11",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "货号错误，与前面试剂套装那里不一致",
+      "selected_text": "号：940-005203-00",
+      "context": "",
+      "category": "术语一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-TERM-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "13",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "重复",
+      "selected_text": "本试剂盒适用于本试剂盒适用于M\n文库插入片段长度为200 bp~50",
+      "context": "",
+      "category": "重复内容",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-DUP-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "14",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "前面试剂套装章节并没有提到这种测序",
+      "selected_text": "于MGI 接头\n于App-C 测",
+      "context": "",
+      "category": "适用范围/硬件配置",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-SCOPE-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "24",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "测序",
+      "selected_text": "选测试方",
+      "context": "",
+      "category": "术语拼写",
+      "layer": "deterministic",
+      "expected_rule": "DET-TERM-SPELL-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "24",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "（可选）",
+      "selected_text": "书\n4. 如\n如\n品\n5. 如\nB",
+      "context": "",
+      "category": "表达与句式",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-STYLE-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "26",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "前面试剂套装章节根本没有这个载片类型",
+      "selected_text": "型是FCL，",
+      "context": "",
+      "category": "适用范围/硬件配置",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-SCOPE-001"
+    },
+    {
+      "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+      "page": "36",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "其他",
+      "selected_text": "头镊子\n其它胶",
+      "context": "",
+      "category": "人工审核其他项",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-HUMAN-OTHER"
+    }
+  ]
+}
