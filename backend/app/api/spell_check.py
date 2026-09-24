@@ -42,6 +42,7 @@ PLUR_PRON = {"we", "they", "you", "these", "those", "both", "many", "few"}
 IRREGULAR_PLURALS = {
     "people", "children", "women", "men", "mice", "feet", "teeth", "geese",
     "police", "oxen",
+    "staff", "personnel", "crew", "cattle",
     "analyses", "diagnoses", "hypotheses", "theses", "crises", "parentheses",
     "oases", "indices", "matrices", "vertices", "appendices",
 }

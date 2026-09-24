@@ -557,3 +557,69 @@
   - 真实语料：4 份工作区英文说明书全链路 `process_text` 的 `are` 误报 0；916 句语料 `are` 相关 grammar 命中由 1（OCR 残句 `Specific area, click to start the integrated kflow …`）降至 0
   - 测试：`test_spell_check.py` 42 passed（新增 2 例）；改动相关 3 模块 77 passed；全量 `backend/tests` 879 passed / 6 failed（docx 固件 ×4、模板串 ×1、缺 `tesseract` ×1，均既有失败，无新增）
 - 交付：提交 `44c5a8c` 已推送至 `260923-fix-review-rules-manage`；因 #138 已合入，另开跟进 PR #142（base `main`，OPEN / MERGEABLE / CLEAN）
+
+## 2026-09-24 第二轮：人工批注 vs 平台检出逐条比对（001249 / 001303）
+
+- 样本：工作区两份 DNBSEQ-E25RS IFU，均带 `Tina.pdf` 人工批注；平台结果取同目录无批注的 base 文件跑 `process_text`
+  - `H-020-001249-00 ... _V3.0.pdf`：人工批注 17 条、平台 issue 9 条（去重 6 类）
+  - `H-020-001303-00 ... _V1.0_R02.pdf`：人工批注 21 条、平台 issue 6 条
+- 指标口径与 2026-09-23 评测一致（召回按人工批注条数计、精确率按平台 issue 条数计）：
+  - 001249：精确率 8/9 = 88.9%、召回 8/17 = 47.1%
+  - 001303：精确率 5/6 = 83.3%、召回 5/21 = 23.8%
+
+### 001249 逐条（人工 17 条）
+
+| # | 页 | 人工批注 | 平台 | 判定 |
+|---|----|---------|------|------|
+| 1 | p3 | `High-throu ghput` 多了空格 | style `High-throu ghput` | 命中 |
+| 2 | p6 | `WARNING This should` 间距挤 | - | 漏检 |
+| 3 | p10 | `MDA T-Reagent` 修订历史说删掉 | spell `MDA T-Regent`（建议 T-Reagent） | 同位置不同意图，不计 |
+| 4 | p13 | 同上 | 同上（与 #3 同词，平台仅报 1 次） | 不计 |
+| 5 | p14 | `consumbles` 拼写错误 | spell `consumbles` | 命中 |
+| 6 | p17 | `or Make -20 ℃ may vary` 空隙大 | - | 漏检 |
+| 7 | p19 | `temperature.For` 缺少空格 | style `temperature.For` | 命中 |
+| 8 | p21 | `temperature.For` 缺少空格 | style `temperature.For` | 命中 |
+| 9 | p25 | `1 times` 删了 | grammar `1 times` | 命中 |
+| 10 | p27 | `T-Regent from` 拼写错误 | spell `MDA T-Regent` | 命中 |
+| 11 | p30 | `that discarded` 改双引号直接引用 | - | 漏检 |
+| 12 | p31 | `back to` → to go back to | - | 漏检 |
+| 13 | p31 | `please ensure` → ensure that | - | 漏检 |
+| 14 | p34 | `waster` 拼写错误 | spell `waster container` | 命中 |
+| 15 | p37 | `that Are` 引号直接引语 | - | 漏检（平台的 `are` 命中在 #16 句） |
+| 16 | p40 | `are displayed.` 应为单数 | grammar `are` | 命中 |
+| 17 | p43 | `the the` → whether | - | 漏检 |
+
+### 001303 逐条（人工 21 条）
+
+| # | 页 | 人工批注 | 平台 | 判定 |
+|---|----|---------|------|------|
+| 1 | p3 | `June,` → July | - | 漏检（事实/翻译） |
+| 2 | p9 | `Disgestive` 拼写错误 | spell `Disgestive` | 命中 |
+| 3 | p10 | 货号 `940-000567-00` 未出现在 About 章节 | - | 漏检（交叉引用） |
+| 4 | p12 | `PE1500` 缺数据 | - | 漏检（交叉引用） |
+| 5 | p15 | `About` 缺数据 | - | 漏检（交叉引用） |
+| 6 | p15 | `to 400` 多余空格 | - | 漏检 |
+| 7 | p16 | `users` → use | - | 漏检（语法） |
+| 8 | p16 | `the` | spell `Disgestive`（同词第 2 次） | 重复报，不计 |
+| 9 | p22 | `moistens` 去掉 | - | 漏检（风格） |
+| 10 | p23 | `1 times` 去掉 | grammar `1 times` | 命中 |
+| 11 | p29 | `twp` 拼写错误 | - | 漏检（见下根因） |
+| 12 | p29 | `back to` → to go back to | - | 漏检 |
+| 13 | p29 | `please ensure` → ensure that | - | 漏检 |
+| 14 | p31 | `Select a recipe that ...` 改写 | - | 漏检 |
+| 15 | p33 | `waster` 拼写错误 | spell `waster container` | 命中 |
+| 16 | p33 | `that the` 改引号直接引语 | - | 漏检 |
+| 17 | p34 | `to teh` 拼写错误 | spell `to return to teh` | 命中 |
+| 18 | p36 | `occur.` 应为逗号 | - | 漏检（标点） |
+| 19 | p36 | `are` 同上 | - | 漏检（平台 `are` 仅 1 次） |
+| 20 | p39 | `are` 应为单数 | grammar `are` | 命中 |
+| 21 | p43 | `Check` → whether | - | 漏检（用词） |
+
+### 结论
+
+- 精度很高且无误报：两份文档平台共 15 条 issue，13 条对应真实批注点；仅 `MDA T-Regent`（人工意图是删除）与第 2 次 `Disgestive`（同词重复）不计。与第一轮 `_Lijuan.pdf`（精度 1/7，源自型号/版本/日期/电话的编号格式误报 ×4）差异来自模板不同，编号格式误报在这两份未出现
+- 漏检集中在平台能力域之外：跨章节交叉引用（货号/型号/章节号）、中英与事实一致性（`June`→`July`）、可直接删除的冗余（`moistens`/`1 times`）、指代与冗余简化（`users`→`use`）、引号直接引语改写（`that the`/`that Are`/`that discarded`）、可读性建议（`back to`/`please ensure`）
+- 拼写层漏检两类，均非规则疏漏：
+  - `twp`（001303 p29）：`pyspellchecker` 内建词频库已收录 `twp`，`'twp' in spell == True`，`spell.unknown(['twp'])` 不返回它、`spell.candidates('twp')` 只回自身，故整条链路不报。要报它只能加显式已知错词，属黑名单，与「不新增黑名单规则」约束冲突
+  - `moistens` / `users`：`pyspellchecker` 视为合法词（`candidates()` 返回自身），本质不是拼写问题，需要语法/风格能力
+- 待用户拍板的修复项：① 编号格式规则限定到行首/标题（消第一轮 4 条误报）；② 词典补 `omics`/`Hubei` 等（属允许的 disk I/O 扩展点）；③ `before/after/during/without + 动词原形` 确定性语法规则（边界待确认）；④ 交叉引用与中英一致性比对属新能力，需单独立项

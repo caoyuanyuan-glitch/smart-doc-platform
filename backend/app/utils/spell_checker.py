@@ -112,7 +112,7 @@ TECH_TERMS_WHITELIST = {
     'spectrophotometer', 'restriction', 'fragmentation', 'mutation', 'allele', 'genotype', 'phenotype',
     'haplotype', 'phylogenetic', 'homologous', 'orthologous', 'paralogous', 'heterologous', 'polymorphism',
     'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
-    'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
+    'omics', 'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
     'circularization', 'adapter', 'ligation', 'elute', 'enhancer', 'vortexer',
     'vortex', 'vortexes', 'Agilent', 'ALPAQUA', 'Ambion', 'Axygen', 'Covaris',
     'DynaMag', 'PerkinElmer', 'Invitrogen', 'ThermoFisher', 'CompleteGenomics',
@@ -238,6 +238,20 @@ def is_whitelisted(word: str) -> bool:
     return False
 
 
+def _singular_candidates(token):
+    """生成 token 的单数候选形式（用于白名单复数还原匹配）。"""
+    lower = (token or '').lower()
+    cands = []
+    if lower.endswith('ies') and len(lower) > 3:
+        cands.append(lower[:-3] + 'y')
+    if (lower.endswith('ses') or lower.endswith('xes') or lower.endswith('zes')
+            or lower.endswith('ches') or lower.endswith('shes')):
+        cands.append(lower[:-2])
+    if lower.endswith('s') and not lower.endswith('ss') and len(lower) > 1:
+        cands.append(lower[:-1])
+    return cands
+
+
 def _is_protected_technical_token(word: str) -> bool:
     token = str(word or '').strip().strip('.,;:()[]{}"\'®™©')
     if not token:
@@ -247,6 +261,10 @@ def _is_protected_technical_token(word: str) -> bool:
             return True
         if token in _RUNTIME_WHITELIST_TERMS:
             return True
+        # 术语只以单数收录时，其规则复数形式同样视为已保护
+        for candidate in _singular_candidates(token):
+            if candidate in _TECH_TERMS_EXACT:
+                return True
     if re.fullmatch(r'\d+(?:\.\d+)?[xX]', token):
         return True
     if re.fullmatch(r'(?:step|table|figure)\s*\d+', token, re.IGNORECASE):
@@ -2968,7 +2986,6 @@ COMMON_MISSPELLINGS = {
     'resuspension': 'resuspension',
     'demulsification': 'demulsification',
     'standardmps': 'StandardMPS',
-    'omics': 'Omics',
     'schtcr': 'scTCR',
 }
 
@@ -3554,6 +3571,12 @@ def _is_vowel_sound(word):
         if lower in _WORDLIKE_CAPS:
             return lower[0] in 'aeiou'
         return token[0] in _ABBR_VOWEL_SOUND
+    # 连字符复合词的首段若为全大写缩写（FDA-approved），按缩写首字母判定。
+    head = token.split('-', 1)[0]
+    if head and head.isupper() and head.isalpha():
+        if head.lower() in _WORDLIKE_CAPS:
+            return head.lower()[0] in 'aeiou'
+        return head[0] in _ABBR_VOWEL_SOUND
     return lower[0] in 'aeiou'
 
 
@@ -3585,8 +3608,13 @@ def check_grammar_patterns(content):
             "position": f"{start}-{end}"
         })
 
-    for match in re.finditer(r'\b(a|an)\s+([A-Za-z][A-Za-z0-9\-]*)', content):
-        article = match.group(1).lower()
+    for match in re.finditer(r'\b(a|an)\s+([A-Za-z][A-Za-z0-9\-]*)', content, re.IGNORECASE):
+        article_raw = match.group(1)
+        # 单独的大写 A 在技术说明书里多是元件/端口/图注标签（module A of、图注 A + 说明），
+        # 不是冠词；大小写不敏感匹配后需排除，避免引入 "an of" 这类误报。
+        if article_raw == 'A':
+            continue
+        article = article_raw.lower()
         noun = match.group(2)
         # all-caps 可读词（HOME/END 等 UI 词）冠词读音存在两读（/h/ 与字母名 /eɪtʃ/），
         # 与 review.py 保持一致：整词跳过冠词判定，a/an 均不报。
