@@ -7213,11 +7213,6 @@ def _generate_review_html_content(review, doc, issues):
     conclusion = _build_report_conclusion(report_issues)
     feedback_advice = _build_feedback_advice(report_issues)
     passed_items_line = _build_passed_items_line(report_issues)
-    dimension_summary = _build_dimension_summary(report_issues)
-    dimension_rows = ''.join(
-        f'<tr><td>{name}</td><td>{data["count"]}</td><td>{data["fatal"]}</td><td>{data["serious"]}</td></tr>'
-        for name, data in dimension_summary.items()
-    )
     nav_items = []
     for severity in ['fatal', 'serious', 'general', 'suggestion']:
         entries = grouped_issues.get(severity) or []
@@ -7425,32 +7420,13 @@ def _generate_review_html_content(review, doc, issues):
     html += f"""
         </div>
         <div class="section">
-        <h2>五、通过项列举</h2>
-        <div class="callout">{html_lib.escape(passed_items_line)}</div>
-        </div>
-        <div class="section">
-        <h2>六、审核结论</h2>
+        <h2>五、审核结论</h2>
         <div class="callout">
             <div><strong>判定结果:</strong> {html_lib.escape(verdict)}</div>
             <div><strong>结论说明:</strong> {html_lib.escape(conclusion)}</div>
-            <div><strong>复审建议:</strong></div>
-            <ul>
-                <li>{html_lib.escape(feedback_advice[0])}</li>
-                <li>{html_lib.escape(feedback_advice[1])}</li>
-                <li>{html_lib.escape(feedback_advice[2])}</li>
-            </ul>
+            <div><strong>通过项:</strong> {html_lib.escape(passed_items_line)}</div>
+            <div><strong>复审建议:</strong> {html_lib.escape(feedback_advice[0])}</div>
         </div>
-        </div>
-        <div class="section">
-        <h2>七、附录</h2>
-        <h3>维度统计</h3>
-        <table>
-            <thead><tr><th>维度</th><th>总数</th><th>致命</th><th>严重</th></tr></thead>
-            <tbody>
-                {dimension_rows}
-            </tbody>
-        </table>
-        <div class="subtle">报告生成时间：{_format_report_datetime()} ｜ 审核引擎：智能技术文档审核平台</div>
         </div>
 """
     html += f"""
