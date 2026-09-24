@@ -273,6 +273,95 @@ def test_check_grammar_patterns_keeps_a_unified_phrase_valid():
     assert issues == []
 
 
+def test_is_vowel_sound_judges_all_caps_wordlike_terms_by_whole_word_sound():
+    # all-caps 可读词按整词读音判定：HOME 读 /h/，不按字母名 H(/eɪtʃ/) 判为元音音。
+    assert spell_checker_utils._is_vowel_sound('HOME') is False
+    assert spell_checker_utils._is_vowel_sound('END') is True
+    assert spell_checker_utils._is_vowel_sound('OPEN') is True
+    # all-caps 缩写仍按字母名判定：MRI 读 /ɛm/、USB 读 /juː/。
+    assert spell_checker_utils._is_vowel_sound('MRI') is True
+    assert spell_checker_utils._is_vowel_sound('UPS') is False
+    assert spell_checker_utils._is_vowel_sound('USB') is False
+    # 小写词与混合大小写走首字母读音。
+    assert spell_checker_utils._is_vowel_sound('home') is False
+    assert spell_checker_utils._is_vowel_sound('Home') is False
+
+
+def test_check_grammar_patterns_article_for_home_and_ups():
+    # HOME 属 all-caps 可读词，冠词有两读（/h/ 与字母名 /eɪtʃ/），与 review.py 一致：a/an 均不报。
+    assert spell_checker_utils.check_grammar_patterns("used in a HOME HEALTHCARE ENVIRONMENT") == []
+    assert spell_checker_utils.check_grammar_patterns("used in an HOME HEALTHCARE ENVIRONMENT") == []
+
+    # UPS 不在可读词表内，仍按缩写字母名判定：正确搭配不报，错误搭配报出正确冠词。
+    assert spell_checker_utils.check_grammar_patterns("use a UPS for backup power") == []
+    ups_issues = spell_checker_utils.check_grammar_patterns("use an UPS for backup power")
+    assert [(i["original_text"], i["suggestion"]) for i in ups_issues] == [
+        ("an UPS", "建议改为: a UPS")
+    ]
+
+
+def test_check_grammar_patterns_handles_sentence_initial_articles():
+    # 句首大写冠词此前不进入匹配（An UPS 被整句跳过），大小写不敏感后应正常判定；
+    # 建议文本首字母随冠词还原，不输出 a UPS -> an UPS 这类大小写错乱。
+    lower_issues = spell_checker_utils.check_grammar_patterns("an UPS unit is supported")
+    upper_issues = spell_checker_utils.check_grammar_patterns("An UPS unit is supported")
+    assert [(i["original_text"], i["suggestion"]) for i in lower_issues] == [("an UPS", "建议改为: a UPS")]
+    assert [(i["original_text"], i["suggestion"]) for i in upper_issues] == [("An UPS", "建议改为: a UPS")]
+
+
+def test_check_grammar_patterns_skips_lone_uppercase_a_label():
+    # 单独的大写 A 是元件/端口/图注标签，不是冠词，不得按冠词判定产生 "an of" 类误报。
+    assert spell_checker_utils.check_grammar_patterns("Connects to the temperature control module A of module port A.") == []
+    assert spell_checker_utils.check_grammar_patterns("A\n\nAnti-shock label 24") == []
+
+
+def test_check_grammar_patterns_keeps_correct_sentence_initial_articles():
+    # 句首大写的正确用法进入匹配后仍不得误报。
+    cases = [
+        "An honest assessment of data quality is recommended.",
+        "Run the reaction for an hour, then perform an MRI scan.",
+        "An FDA-approved protocol should be followed strictly.",
+        "Wait an 8-hour stabilization period, then use a one-step calibration.",
+        "A user at the university requested the sample preparation protocol.",
+    ]
+    for text in cases:
+        assert spell_checker_utils.check_grammar_patterns(text) == [], text
+
+
+def test_is_vowel_sound_judges_hyphenated_abbreviation_by_head():
+    # 连字符复合词首段为全大写缩写时按缩写首字母判定，避免 An FDA-approved 被误报。
+    assert spell_checker_utils._is_vowel_sound("FDA-approved") is True
+    assert spell_checker_utils._is_vowel_sound("MRI-guided") is True
+    assert spell_checker_utils._is_vowel_sound("UPS-backed") is False
+
+
+def test_run_grammar_accepts_collective_noun_plural_subjects():
+    # 集合名词不带 -s 词尾，此前被判单数与 are 冲突；补入 IRREGULAR_PLURALS 后不再误报。
+    # 注意：这也意味着 "The staff is" 会被判为单数动词搭配复数主语，属该集合名词的已知取舍。
+    cases = [
+        "The staff are available on site.",
+        "All personnel are trained.",
+        "The crew are ready.",
+        "The cattle are grazing.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+
+def test_spatial_omics_is_not_reported_as_misspelling():
+    # omics 经 technical_terms.txt 与 TECH_TERMS_WHITELIST 双重收录，
+    # 且不再被 COMMON_MISSPELLINGS 映射为大写 Omics。
+    assert spell_checker_utils.is_whitelisted("omics") is True
+    assert "omics" not in spell_checker_utils.COMMON_MISSPELLINGS
+    assert spell_checker_utils.check_spelling(
+        "The spatial omics pipeline supports FASTQ input.", file_type=None
+    ) == []
+
+
 def test_find_term_variant_issues_skips_when_correct_form_exists_in_document():
     issues = spell_checker_utils._find_term_variant_issues(
         "The High-throughput workflow is supported. Another note mentions highthroughput only in OCR text.",
@@ -357,6 +446,44 @@ def test_run_grammar_uses_noun_head_after_there_be():
         "There is no sound of cracked ice during shaking.",
         "There are many samples in the rack.",
         "There is ice in the cartridge.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+
+def test_run_grammar_accepts_irregular_plural_subjects():
+    # 不规则复数不以 -s/-es 结尾，不得被当成单数而与 are/were 冲突。
+    cases = [
+        "The people are waiting outside.",
+        "The children are playing in the yard.",
+        "Several mice are in the cage.",
+        "The women are here.",
+        "The police are investigating.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+    # 确实用错单数动词时仍要报。
+    flagged = []
+    spell_check_api.run_grammar("The people is waiting outside.", flagged)
+    assert len(flagged) == 1
+
+
+def test_run_grammar_there_be_ignores_trailing_modifier_or_verb():
+    # there be 之后的名词短语常跟形容词或动词，中心语是短语内的名词而不是它们。
+    cases = [
+        "There are several options available.",
+        "If there are any temperature alarms, contact technical support.",
+        "If there are questions, contact us.",
+        "Verify that there are no bubbles remaining.",
     ]
     for text in cases:
         errors = []

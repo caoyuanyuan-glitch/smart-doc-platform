@@ -183,6 +183,7 @@ Word 转 DITA 批量转换基线规则
   - PyEnchant 把部分真实错词当作合法英文词（如 `twp`），`spell.unknown()` 不会返回它们；这类词只能靠 `FORCED_MISSPELLINGS` + `COMMON_MISSPELLINGS` 硬编码命中，而这两处按既有边界锁定指令属禁止触碰，需用户明确放开才能做
   - 拼写检查页指标口径：必须分域报告，把「全部批注」与「文本层缺陷批注」当作两个分母；视觉版式（间距/挤压）、内容取舍（按修订历史删除、核对货号）、引号改写、措辞建议不属于文本规则可判范围，计入会系统性压低检出率。准确率也有两套口径，批注对齐口径（分子=与批注对齐条数）会把真实但未批注的检出算成误报，作为下界；结论以人工核验口径（分子=确认的真实缺陷数）为准
   - `spell_checker.py` 的检出上限由硬编码词表决定：`_PDF_FIXED_PHRASE_MISSPELLINGS`、`FORCED_MISSPELLINGS`、`COMMON_MISSPELLINGS`、`TERM_VARIANT_CORRECTIONS` 全为硬编码，唯一 Disk I/O 入口 `WHITELIST_FILE` 只能抑制误报；要提升拼写检出率只能改这个被锁定的文件
+  - 2026-09-24 用户明确放开一处边界：允许改动 `_is_protected_technical_token`（可新增 `_singular_candidates`），在精确匹配失败后做三档后缀单复数还原（`ies→y`、`*es→*`、`*s→*`，`-ss` 结尾不还原），使只以单数收录于白名单的术语其规则复数不再误报；`_TECH_TERMS_EXACT` 的构建方式仍禁止改动，还原只在查询侧进行
   - `document_parser.extract_pdf` 按 PyMuPDF 文本块 `"\n\n".join` 拼页，MGI 的 IFU（InDesign 导出）每个视觉行即一个文本块，故解析文本行间全是空行，直接渲染会得到碎句 + 右侧大片留白。拼写检查页用 `spell_check.py` 的 `_merge_soft_wrapped_lines`（仅 pdf）回流解决，不动 `document_parser` 以免影响审核/翻译/比对模块；预览文本被改写后，评测脚本不能再按 offset 映射页码，改写只涉及空白，可对「合并文本/原文」按非空白字符线性对齐得到索引映射
 
 IFU PDF 回归测试约定

@@ -38,6 +38,14 @@ ALL_AUX_VERBS = SING_VERBS | PLUR_VERBS
 MODAL_VERBS = {"can", "could", "may", "might", "will", "would", "shall", "should", "must"}
 SING_PRON = {"he", "she", "it", "this", "that", "someone", "anyone", "everyone", "one"}
 PLUR_PRON = {"we", "they", "you", "these", "those", "both", "many", "few"}
+# 不规则复数：不以 -s/-es 结尾，但确定可判为复数，避免被 _reliable_number 误判为单数。
+IRREGULAR_PLURALS = {
+    "people", "children", "women", "men", "mice", "feet", "teeth", "geese",
+    "police", "oxen",
+    "staff", "personnel", "crew", "cattle",
+    "analyses", "diagnoses", "hypotheses", "theses", "crises", "parentheses",
+    "oases", "indices", "matrices", "vertices", "appendices",
+}
 # 可确证主语的句式：从句首的限定词引导的名词短语，或从句首的主语代词。
 DETERMINERS = {
     "the", "a", "an", "this", "that", "these", "those", "each", "every",
@@ -1349,6 +1357,8 @@ def _reliable_number(word: str):
         return False
     if w in PLUR_PRON:
         return True
+    if w in IRREGULAR_PLURALS:
+        return True
     if w in FULL_EXCLUDE or w in DETERMINERS or w in CLAUSE_LEAD_TOKENS:
         return None
     # 以 -ss/-us/-is 等结尾的词通常是单数（process、analysis、status）。
@@ -1399,8 +1409,11 @@ def _is_provable_subject(sent: str, head_match, head: str) -> bool:
 
 
 def get_nearest_noun_after_be(sent: str) -> str:
-    # 取名词短语中心语（短语内最后一个实词），避免把修饰语当成主语。
+    # 取名词短语中心语。名词短语后面常跟形容词或动词（options available、
+    # alarms, contact support），只按「最后一个实词」会把它们误当中心语；
+    # 故优先取窗口内可确证的复数名词，没有时再退回最后一个实词。
     head = ""
+    plural_head = ""
     for raw in sent.strip().split():
         token = re.sub(r"[^A-Za-z\-]", "", raw)
         if not token:
@@ -1411,7 +1424,9 @@ def get_nearest_noun_after_be(sent: str) -> str:
         if w in DETERMINERS or w in FULL_EXCLUDE:
             continue
         head = token
-    return head
+        if _reliable_number(w) is True:
+            plural_head = token
+    return plural_head or head
 
 
 def check_there_be(sent: str, offset: int, full_text: str, err_list):

@@ -2494,6 +2494,30 @@ def test_run_manual_engineering_audit_detects_a_appropriate():
     assert any(issue["rule"] == "DOC-GRAM-002" for issue in issues)
 
 
+def test_run_manual_engineering_audit_skips_article_rule_for_all_caps_wordlike_terms():
+    # HOME 属 all-caps 可读词，不进入首字母冠词分支，避免 an HOME → a HOME 误报。
+    for text in [
+        "used in a HOME HEALTHCARE ENVIRONMENT",
+        "used in an HOME HEALTHCARE ENVIRONMENT",
+        "Tap HOME to return.",
+        "Tap an HOME button.",
+    ]:
+        issues = review_api._run_manual_engineering_audit(text, file_type="pdf")
+        assert [
+            issue for issue in issues
+            if issue["rule"] == "DOC-GRAMMAR-002" and "HOME" in (issue["original_text"] or "").upper()
+        ] == [], text
+
+    # UPS 不在可读词表内，仍按缩写字母名判定：an UPS 应报为 a UPS。
+    ups_issues = review_api._run_manual_engineering_audit(
+        "Connect an UPS to the port.", file_type="pdf",
+    )
+    assert [
+        (issue["original_text"], issue["suggestion"])
+        for issue in ups_issues if issue["rule"] == "DOC-GRAMMAR-002"
+    ] == [("an UPS", "a UPS")]
+
+
 def test_run_manual_engineering_audit_detects_library_spelling():
     issues = review_api._run_manual_engineering_audit(
         "Table 41 DNBSEQ-G400RS making DNB requirements. Libary type cDNA library, TCR&BCR libraries.",
