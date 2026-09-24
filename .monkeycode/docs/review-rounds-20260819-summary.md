@@ -592,3 +592,14 @@
 - 回归用例：`backend/tests/test_review_engine.py` 新增 3 个章节定位测试；`backend/tests/test_review_cache.py` 新增语法与维护术语测试。
 - 本地验证：目标测试 `251 passed`；完整后端测试 `896 passed / 6 failed / 1 skipped`。6 个失败与此前基线一致，集中在缺少 docx 固件、测试模板串与 tesseract 环境依赖。
 - 真实文档规则复测（`review_id=13`）：章节定位已修正为 `Powering on the device`、`Daily maintenance`、`Troubleshooting`、`Device` 等结构标题；新增命中 `before clean`、`during clean`、`Monthly cleaning`，问题数由 6 条增至 9 条。
+
+## 2026-09-24 第七轮审核准确率优化（臆造术语替换误报）
+
+- 本轮背景：截图反馈 #017 显示平台把目录与正文中的「第5 章 准备测序试剂槽」判为术语问题，规则显示为「试剂舱 → 试剂仓」，建议「将“槽”改为“仓”」。该建议不成立：`试剂槽` 是本文档的正式术语（全文 74 处），`试剂仓` 全文仅 1 处且指仪器仓门，二者指代不同对象。根因是 AI 把知识库条目「试剂舱 → 试剂仓」套用到了并不含「试剂舱」的正文上，属臆造错误。
+- 本轮调整内容：
+- `backend/app/review_engine/pipeline.py`：新增 `hallucinated_substitution_term()`，当 AI 问题的 `rule` 为「错词 → 正词」形式、而 `original_text`/`context` 中并不存在该错词时判定为臆造并丢弃；判定不读取 `rule`/`audit_basis`，因为这两处本来就会写出错词。
+- `backend/app/review_engine/pipeline.py`：在 `is_noise()` 中接入该判据，位置早于 `is_verifiable_ai_text_issue()` 的提前放行，避免被 AI 文本类白名单兜住。
+- 回归用例：`backend/tests/test_review_cache.py` 新增 2 个测试，分别覆盖「原文无错词 → 丢弃」与「原文含错词 → 保留」。
+- 本地验证：`test_review_cache.py + test_review_engine.py` 共 `252 passed`；完整后端测试 `897 passed / 6 failed / 1 skipped`，6 个失败与此前基线一致。
+- 真实数据回放（`review_id=21`，26 条问题）：`select_review_issues` 仅额外丢弃 `id=173`（`试剂舱 → 试剂仓` / `准备测序试剂槽`），Tina 9 条人工批注对应的规则召回保持不变。
+- 本轮未改动（经确认属既有设计或待人工反馈）：图内占位掩码 `XXXXXXXXXXX`/`XX/XX/XXXX`（rule 层占位符需保留，见 `test_finalize_review_issues_*`）、`2 ℃~8 ℃`（CYY 人工基线规则）、AI 空格类建议与 `y` 项目符号伪影。

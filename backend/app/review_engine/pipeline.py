@@ -111,6 +111,27 @@ def is_broken_word_extraction_artifact(original: str) -> bool:
     return any(len(fragment) == 1 and fragment.islower() and fragment not in {'a', 'i'} for fragment in fragments)
 
 
+# 知识库中的“错词 → 正词”类纠错条目，如「试剂舱 → 试剂仓」
+_SUBSTITUTION_RULE_RE = re.compile(r"^\s*([\u4e00-\u9fff]{2,8})\s*(?:→|->|—>|➔|=>)\s*\S")
+
+
+def hallucinated_substitution_term(issue: Any) -> str | None:
+    """AI 引用“错词 → 正词”类规则，但原文并不包含该错词时，属臆造错误。
+
+    例如知识库条目「试剂舱 → 试剂仓」被套用到正文的“试剂槽”上。判定只依据
+    original_text 与 context：rule/audit_basis 里本来就会写出该错词，不能作为证据。
+    """
+    data = issue_to_mapping(issue)
+    match = _SUBSTITUTION_RULE_RE.match(str(data["rule"] or ""))
+    if not match:
+        return None
+    wrong = match.group(1)
+    evidence = compact_text(data["original_text"]) + compact_text(data["context"])
+    if wrong in evidence:
+        return None
+    return wrong
+
+
 def issue_value(issue: Any, key: str, default: Any = "") -> Any:
     if isinstance(issue, dict):
         return issue.get(key, default)
@@ -366,6 +387,9 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         is_broken_word_extraction_artifact(original)
         or is_trademark_reading_order_artifact(original, suggestion)
     ):
+        return True
+    if hallucinated_substitution_term(data):
+        counters["HALLUCINATED_SUBSTITUTION_TERM"] += 1
         return True
     if is_verifiable_ai_text_issue(data):
         return False

@@ -2729,6 +2729,40 @@ def test_pipeline_drops_figure_placeholder_masks_but_keeps_explicit_markers():
     assert "Status TBD before release" in originals
 
 
+def test_pipeline_drops_substitution_rule_without_wrong_term_in_text():
+    # 知识库条目「试剂舱 → 试剂仓」被 AI 套用到正文的“试剂槽”上，属臆造错误。
+    hallucinated = {
+        "source": "ai",
+        "rule": "试剂舱 → 试剂仓",
+        "category": "术语一致性",
+        "severity": "general",
+        "original_text": "准备测序试剂槽",
+        "context": "第5 章 准备测序试剂槽 13",
+        "suggestion": "准备测序试剂仓",
+        "description": "",
+        "audit_basis": "审核规则一：试剂舱/试剂槽应为试剂仓",
+        "confidence": 75,
+    }
+    assert review_pipeline.hallucinated_substitution_term(hallucinated) == "试剂舱"
+    assert review_pipeline.is_noise(dict(hallucinated)) is True
+
+    # 原文确实出现该错词时，纠错建议必须保留。
+    genuine = {
+        "source": "ai",
+        "rule": "试剂舱 → 试剂仓",
+        "category": "术语一致性",
+        "severity": "serious",
+        "original_text": "试剂舱门自动打开",
+        "context": "此时试剂舱门自动打开",
+        "suggestion": "试剂仓门自动打开",
+        "description": "",
+        "audit_basis": "审核规则一：试剂舱 → 试剂仓",
+        "confidence": 90,
+    }
+    assert review_pipeline.hallucinated_substitution_term(genuine) is None
+    assert review_pipeline.is_noise(dict(genuine)) is False
+
+
 def test_run_manual_engineering_audit_skips_abbreviation_and_domain_periods():
     issues = review_api._run_manual_engineering_audit(
         "Use a tube (e.g.next tube). Open manual.pdf and visit www.mgi-tech.com. "
