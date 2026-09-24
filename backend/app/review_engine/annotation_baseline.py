@@ -353,6 +353,43 @@ def _matches_annotation_loosely(
     return False
 
 
+def _match_annotations_injectively(
+    issue_pairs: list[tuple[dict[str, Any], str]],
+    annotations: list[HumanAnnotation],
+) -> set[int]:
+    """二分图最大匹配：一条平台问题最多命中一条人工批注。
+
+    规则族匹配（同一 category 或 rule 前缀）会让一条问题同时"命中"多条批注，
+    从而把 recall 刷高。这里要求命中一对一对齐，漏检才会真实拉低 recall。
+    """
+    adjacency = [
+        [
+            index
+            for index, (issue, blob) in enumerate(issue_pairs)
+            if _matches_annotation_loosely(item, issue, blob)
+        ]
+        for item in annotations
+    ]
+    issue_owner: dict[int, int] = {}
+
+    def _augment(annotation_index: int, visited: set[int]) -> bool:
+        for issue_index in adjacency[annotation_index]:
+            if issue_index in visited:
+                continue
+            visited.add(issue_index)
+            owner = issue_owner.get(issue_index)
+            if owner is None or _augment(owner, visited):
+                issue_owner[issue_index] = annotation_index
+                return True
+        return False
+
+    matched: set[int] = set()
+    for annotation_index in range(len(annotations)):
+        if _augment(annotation_index, set()):
+            matched.add(annotation_index)
+    return matched
+
+
 def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list[HumanAnnotation]) -> dict[str, Any]:
     issue_pairs = [(issue, _issue_blob(issue)) for issue in issues]
 
@@ -360,8 +397,9 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
     misses = []
     strict_hits = []
     strict_misses = []
-    for item in annotations:
-        matched = any(_matches_annotation_loosely(item, issue, blob) for issue, blob in issue_pairs)
+    loose_matched_indexes = _match_annotations_injectively(issue_pairs, annotations)
+    for index, item in enumerate(annotations):
+        matched = index in loose_matched_indexes
         strict_matched = any(_matches_annotation_strictly(item, issue, blob) for issue, blob in issue_pairs)
         record = asdict(item)
         if matched:

@@ -236,7 +236,18 @@ def test_batch_evaluate_from_config_preserves_suite_fields(tmp_path, monkeypatch
 
     result = evaluate_review.batch_evaluate_from_config(str(config_path), ["marker"])
 
-    assert result["summary"] == {"total": 2, "passed": 2, "failed": 0, "regressions": 0}
+    summary = result["summary"]
+    assert {key: summary[key] for key in ("total", "passed", "failed", "regressions")} == {
+        "total": 2,
+        "passed": 2,
+        "failed": 0,
+        "regressions": 0,
+    }
+    # 无 gold set 时准确率取 0；未配准确率阈值时 all_documents_meet 不拦截
+    assert [item["name"] for item in summary["per_document"]] == ["doc-a", "doc-b"]
+    assert summary["mean_recall"] == 0.0
+    assert summary["mean_precision"] == 0.0
+    assert summary["all_documents_meet"] is True
     assert seen[0]["standard_answers"] == ["baseline-a.md", "baseline-b.md"]
     assert seen[0]["allowed_misses"] == ["AI-STYLE-001"]
     assert seen[0]["explicit_false_positives"] == ["R029"]

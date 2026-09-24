@@ -637,3 +637,26 @@
 | p37 引号改直接引语 | 命中（本轮新增） | `DOC-QUOTE-001` |
 | p40 单数 | 同位置 | 规则建议复数 `Task exceptions`，人工标注单数，方向相反 |
 | p43 whether | 命中（本轮新增） | `DOC-GRAM-008` |
+
+## 2026-09-24 第九轮：PR #145 交付包落地（阈值卡口、组学词族、逐文档指标）
+
+- 本轮背景：落地 PR #145 交付包 `代码修订指令.md` 的 3 处代码改动，并把交付包提供的 3 个测试放入 `backend/tests/`。
+- 改动 1（核心）`backend/scripts/evaluate_review.py::batch_evaluate_from_config`：`checks` 新增 `recall_ok`/`precision_ok`。准确率优先取 `human_baseline_filtered`，其次 `human_baseline`；先取 `strict_recall`/`strict_precision`，缺失时退化到 `recall`/`precision`。配了 `min_recall`/`min_precision` 却没有 gold set 时两项直接判不达标，杜绝「没测就算过」。
+- 改动 2 `backend/app/utils/spell_checker.py`：`is_whitelisted` 增加 `-omics` 后缀词族豁免（`_is_omics_family`，要求长度大于裸词 `omics`），`proteomics`/`metabolomics`/`glycomics` 等不再逐个加词；并补齐既有术语 `spatial`。
+- 改动 3 `backend/scripts/evaluate_review.py`：批量结果补 `results[].metrics.recall`/`precision`/`has_gold_set`，`summary` 补 `per_document`/`mean_recall`/`mean_precision`/`all_documents_meet`，避免单份高分掩盖另一份低分。
+- 改动 4（评分口径修正，交付包 `test_accuracy_scoring_semantics.py` 要求）：`backend/app/review_engine/annotation_baseline.py::evaluate_against_annotations` 的 recall 命中改为二分图最大匹配（一条平台问题最多命中一条人工批注）。此前规则族匹配会让一条问题同时「命中」多条批注，使 recall 虚高，漏检无法真实拉低 recall。precision 口径（`allow_rule_family=False`）保持不变。
+- 新增测试：`tests/test_evaluate_review_accuracy_thresholds.py`（6 例）、`tests/test_accuracy_scoring_semantics.py`（5 例）、`tests/test_omics_suffix_whitelist.py`（14 例），交付包测试全部通过；`tests/test_evaluate_review_config.py` 的 `summary` 精确断言按改动 3 的新契约同步更新。
+- 全量后端测试：`926 passed / 6 failed / 1 skipped`，6 个失败与既有基线一致，无新增回归。
+- 批量评测：`backend/config/review-evaluation-suite.accuracy.json`（3 份文档，含中英文，阈值 `min_recall=0.88`/`min_precision=0.88`）实测（strict 口径）：
+
+| 文档 | review_id | recall | precision | 是否达标 |
+| --- | --- | --- | --- | --- |
+| geopatial_v2_24_en | 20 | 0.0385 | 0.1250 | 否 |
+| e25rs_cn | 21 | 0.4444 | 0.1538 | 否 |
+| e25rs_en | 23 | 0.7059 | 0.5714 | 否 |
+
+- `summary`：`mean_recall=0.3963`、`mean_precision=0.2834`、`all_documents_meet=false`、`regressions=3`。
+- 结论与风险：三处代码改动已落地并被交付包测试守住（阈值卡口会真实拦截不达标），但以当前 gold set 实测 strict 准确率未达 0.88。原因是交付包 gold set 为初版（`selected_text`/`context` 多为占位描述、无漏检 FN 项），部分评测文档尚无经人工确认的标准答案。需人工复核补全 gold set（页码、上下文、FN 项）后重跑，`88%` 才是可辩护的度量。
+- 流程要求数字：
+- 6→9 新增 3 条（`before clean`、`during clean`、`Monthly cleaning`）分别对应 gold set 批注 8/9/10，逐条为 TP（3/3）。
+- AI 来源问题对 gold set 的 FP 占比（proxy，`allow_rule_family=False` 文本证据）：review20 7/7、review21 8/9、review23 9/14，合计 24/30=80%。该比例受 gold set 未补全影响（大量合法但未标注问题被计入 FP），不能直接与交付包的 12% 阈值比较。
