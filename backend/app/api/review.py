@@ -10817,14 +10817,15 @@ def _run_manual_engineering_audit(content, file_type=None):
             89,
         )
 
-    for match in re.finditer(r'\ba\s+(?:message\s+prompting|popup\s+message\s+indicating)\s+that\s+[A-Z][^.?!]{8,160}\?', content):
+    for match in re.finditer(r'\ba\s+(?:message\s+prompting|message\s+indicating|message\s+saying|popup\s+message\s+indicating)\s+that\s+[A-Z][^.?!]{8,160}\?', content):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
         add_issue(
             match.start(),
             match.end(),
-            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            raw,
             'DOC-QUOTE-001',
             '标点符号',
-            '建议改为引导语加直接引语，例如 a message prompting "Are you sure you want to quit?"',
+            '建议改为引导语加直接引语，例如 ' + re.sub(r'^(\S.*?)\s+that\s+', r'\1 "', raw, count=1) + '"',
             '界面弹窗文案属于直接引语，建议使用引号承载实际提示语。',
             '说明书审核能力补强方案 - 弹窗直接引语',
             'general',
@@ -11143,6 +11144,10 @@ def _run_manual_engineering_audit(content, file_type=None):
                 window = content[max(0, match.start() - 120):min(len(content), match.end() + 120)]
                 if not re.search(r'DNBSEQ-E25RS|试剂套装|sequencing set', window, re.IGNORECASE):
                     continue
+                # 试剂盒（Kit）与试剂套装（Set）是不同 SKU，货号天然不同，不算总览遗漏；
+                # Kit 货号前紧邻的标题会写明 “Kit (型号)”
+                if re.search(r'\bKit\b|试剂盒', content[max(0, match.start() - 100):match.start()], re.IGNORECASE):
+                    continue
                 add_issue(
                     match.start(),
                     match.end(),
@@ -11156,6 +11161,56 @@ def _run_manual_engineering_audit(content, file_type=None):
                     91,
                 )
                 break
+
+
+    # 修订记录标注删除的条目若仍留在正文，属修订状态前后不一致
+    revision_deleted = list(re.finditer(r'(?m)^[ \t]*(?:y[ \t]+)?Deleted[ \t]+([^\n]{3,80})[ \t]*$', content[:8000]))
+    if revision_deleted:
+        revision_end = None
+        for end_pattern in (r'(?m)^[ \t]*About[ \t]+(?:the|this)\b', r'(?m)^[ \t]*Contents[ \t]*$'):
+            end_match = re.search(end_pattern, content[revision_deleted[0].start():], re.IGNORECASE)
+            if end_match:
+                candidate = revision_deleted[0].start() + end_match.start()
+                revision_end = candidate if revision_end is None else min(revision_end, candidate)
+        if revision_end is None:
+            revision_end = revision_deleted[-1].end()
+        for match in revision_deleted:
+            deleted_item = match.group(1).strip()
+            base_item = re.sub(r'[ \t]*\([^)]*\)[ \t]*$', '', deleted_item).strip()
+            if len(base_item) < 3:
+                continue
+            body_pattern = r'\s+'.join(re.escape(token) for token in base_item.split())
+            body_match = re.search(body_pattern, content[revision_end:], re.IGNORECASE)
+            if not body_match:
+                continue
+            start = revision_end + body_match.start()
+            raw = re.sub(r'\s+', ' ', body_match.group(0)).strip()
+            add_issue(
+                start,
+                start + len(body_match.group(0)),
+                raw,
+                'DOC-REVISION-001',
+                '修订一致性',
+                f'修订记录已标注删除 {deleted_item}，建议确认正文是否仍需保留，或核对修订记录',
+                f'修订记录写明已删除 {deleted_item}，但正文仍然出现该条目，修订状态前后不一致。',
+                '说明书审核能力补强方案 - 修订记录删除项回查',
+                'serious',
+                95,
+            )
+
+    for match in re.finditer(r'\bCheck\s+the\s+well\s+whose\s+rubber\s+stopper\s+falls\s+off\s+or\s+tilts\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-008',
+            '表达与句式',
+            'Check whether the rubber stopper of the well falls off or tilts',
+            'check 后接完整从句时建议使用 whether 引导，句式更通顺。',
+            '说明书审核能力补强方案 - whether 从句',
+            'general',
+            88,
+        )
 
 
     missing_data_match = re.search(

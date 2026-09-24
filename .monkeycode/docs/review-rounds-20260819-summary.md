@@ -603,3 +603,37 @@
 - 本地验证：`test_review_cache.py + test_review_engine.py` 共 `252 passed`；完整后端测试 `897 passed / 6 failed / 1 skipped`，6 个失败与此前基线一致。
 - 真实数据回放（`review_id=21`，26 条问题）：`select_review_issues` 仅额外丢弃 `id=173`（`试剂舱 → 试剂仓` / `准备测序试剂槽`），Tina 9 条人工批注对应的规则召回保持不变。
 - 本轮未改动（经确认属既有设计或待人工反馈）：图内占位掩码 `XXXXXXXXXXX`/`XX/XX/XXXX`（rule 层占位符需保留，见 `test_finalize_review_issues_*`）、`2 ℃~8 ℃`（CYY 人工基线规则）、AI 空格类建议与 `y` 项目符号伪影。
+
+## 2026-09-24 第八轮审核准确率优化（英文说明书人工批注比对）
+
+- 本轮背景：对英文说明书 `H-020-001249-00 DNBSEQ-E25RS ... English_RUO_QD_V3.0`（46 页）执行审核，并与 Tina 的 17 条人工批注逐条比对。首轮（`review_id=22`，21 条问题）命中 9 条批注，另有 1 条误报与 3 条召回缺口。
+- 本轮调整内容：
+- `backend/app/api/review.py`（DOC-CATNO-003 误报）：总览货号覆盖规则误把试剂盒（Kit）货号当作套装（Set）货号缺失上报。新增判定：若货号前 `100` 字符窗口中出现 `Kit`/`试剂盒`，说明该货号为试剂盒 SKU，与套装总览本就不同，跳过。
+- `backend/app/api/review.py`（DOC-QUOTE-001 召回）：弹窗直接引语规则仅匹配 `a message prompting that`，漏掉 `a message indicating that` 等引导语，导致同一问题只报第一处。扩展引导语枚举并改为按命中文本动态生成建议。
+- `backend/app/api/review.py`（新增 DOC-REVISION-001）：修订记录标注 `Deleted X` 但正文仍保留 `X` 时上报，对应人工批注「修订历史说删掉这个来着」。判定以修订历史段结束位置（`About the …` / `Contents` 标题）为界，避开修订记录自身的提及。
+- `backend/app/api/review.py`（新增 DOC-GRAM-008）：`Check the well whose rubber stopper falls off or tilts` 缺少 `whether` 引导，对应人工批注「whether」。
+- 回归用例：`backend/tests/test_review_cache.py` 新增 4 个测试，分别覆盖修订删除项回查、`message indicating` 引语、`whether` 从句、Kit 货号不再误报而 Set 货号仍上报。
+- 本地验证：`test_review_cache.py + test_review_engine.py` 共 `256 passed`；完整后端测试 `901 passed / 6 failed / 1 skipped`，6 个失败与此前基线一致。
+- 真实文档复测（`review_id=23`）：17 条人工批注中 13 条被规则命中，2 条仅覆盖到同一位置但方向待确认，2 条为纯视觉间距问题（当前文本规则不覆盖）；DOC-CATNO-003 误报消除，DOC-QUOTE-001 两处均命中。
+
+### 第八轮批注比对明细
+
+| 人工批注（页/内容） | 概况 | 平台对应 |
+| --- | --- | --- |
+| p3 多了空格 | 命中 | `DOC-SPACE-002`（High-throu ghput） |
+| p6 距离太挤 | 未覆盖 | 纯视觉行距/排版 |
+| p10 修订历史说删掉该条目 | 命中 | `DOC-REVISION-001`（MDA T-Reagent） |
+| p13 同上 | 命中 | `DOC-REVISION-001` 同一问题 |
+| p14 拼写错误 | 命中 | `SPELL`（consumbles） |
+| p17 空隙有点大 | 未覆盖 | 纯视觉间距 |
+| p19 缺少空格 | 命中 | `DOC-SPACE-001`（e.F） |
+| p21 缺少空格 | 命中 | `DOC-SPACE-001`（e.F） |
+| p25 删了 | 同位置 | 规则建议 `1 times → 1 time`，人工意指删除 |
+| p27 拼写错误 | 命中 | `SPELL-PHRASE`（MDA T-Regent） |
+| p30 引号改直接引语 | 命中 | `DOC-QUOTE-001` |
+| p31 to go back to | 命中 | `DOC-GRAM-005` |
+| p31 ensure that | 命中 | `DOC-GRAM-006` |
+| p34 拼写错误 | 命中 | `SPELL-PHRASE`（waster container） |
+| p37 引号改直接引语 | 命中（本轮新增） | `DOC-QUOTE-001` |
+| p40 单数 | 同位置 | 规则建议复数 `Task exceptions`，人工标注单数，方向相反 |
+| p43 whether | 命中（本轮新增） | `DOC-GRAM-008` |

@@ -2553,6 +2553,72 @@ def test_run_manual_engineering_audit_detects_by_use():
     assert any(issue["rule"] == "DOC-GRAM-003" for issue in issues)
 
 
+def test_run_manual_engineering_audit_detects_deleted_item_left_in_body():
+    content = (
+        "Revision history\n"
+        "Version Date Description\n"
+        "3.0 July 14, 2026\n"
+        "y Deleted MDA T-Reagent (App-C)\n"
+        "y Updated the MGI website\n"
+        "About the sequencing set\n"
+        "Cat. No. Name Model Version\n"
+        "940-002933-00 DNBSEQ-E25RS High-throughput Sequencing Set App-C FCL PE150 1.0\n"
+        "Chapter 4 Making DNBs\n"
+        "Component Specification\n"
+        "MDA T-Reagent 0.32 mL/tubex1\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    revision_issues = [issue for issue in issues if issue["rule"] == "DOC-REVISION-001"]
+    assert revision_issues
+    assert revision_issues[0]["original_text"] == "MDA T-Reagent"
+
+
+def test_run_manual_engineering_audit_detects_message_indicating_quote():
+    issues = review_api._run_manual_engineering_audit(
+        "Returning to the Choose scheme interface and selecting X, a message indicating that "
+        "Are you sure you want to quit? Loaded consumables shall be discarded once offloaded is displayed.",
+        file_type="pdf",
+    )
+
+    quote_issues = [issue for issue in issues if issue["rule"] == "DOC-QUOTE-001"]
+    assert quote_issues
+    assert quote_issues[0]["original_text"] == "a message indicating that Are you sure you want to quit?"
+
+
+def test_run_manual_engineering_audit_detects_check_whether_clause():
+    issues = review_api._run_manual_engineering_audit(
+        "2. Check the well whose rubber stopper falls off or tilts.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-GRAM-008" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_kit_cat_no_in_overview_check():
+    content = (
+        "About the sequencing set\n"
+        "Cat. No. Name Model Version\n"
+        "940-002930-00 DNBSEQ-E25RS High-throughput Sequencing Set FCL SE100 1.0\n"
+        "940-002931-00 DNBSEQ-E25RS High-throughput Sequencing Set FCL SE150 1.0\n"
+        "940-002932-00 DNBSEQ-E25RS High-throughput Sequencing Set App-C FCL SE100 1.0\n"
+        "940-002933-00 DNBSEQ-E25RS High-throughput Sequencing Set App-C FCL PE150 1.0\n"
+        "Chapter 4 Making DNBs\n"
+        + "The reagent kit components are listed below for reference only. " * 40 + "\n"
+        "Table 2 DNBSEQ-E25RS High-throughput Sequencing Kit (FCL SE100)\n"
+        "Cat. No.: 940-002926-00\n"
+        "Table 3 DNBSEQ-E25RS High-throughput Sequencing Set (FCL PE150)\n"
+        "Cat. No.: 940-002934-00\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    originals = {issue["original_text"] for issue in issues if issue["rule"] == "DOC-CATNO-003"}
+
+    assert "940-002926-00" not in originals
+    assert "940-002934-00" in originals
+
+
 def test_run_manual_engineering_audit_detects_missing_data_placeholder():
     content = (
         "About the sequencing set\n"
