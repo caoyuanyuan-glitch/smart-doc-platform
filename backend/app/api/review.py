@@ -10152,6 +10152,9 @@ def _run_manual_engineering_audit(content, file_type=None):
                     89,
                 )
             continue
+        # all-caps 可读词（HOME/END 等 UI 词）不按首字母逐字判定冠词，避免 an HOME 误报。
+        if word.isupper() and word.isalpha() and wl in _WORDLIKE_CAPS:
+            continue
         first = wl[0]
         if art == 'a' and first in 'aeiou':
             add_issue(

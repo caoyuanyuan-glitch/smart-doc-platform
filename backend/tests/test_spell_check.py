@@ -273,6 +273,37 @@ def test_check_grammar_patterns_keeps_a_unified_phrase_valid():
     assert issues == []
 
 
+def test_is_vowel_sound_judges_all_caps_wordlike_terms_by_whole_word_sound():
+    # all-caps 可读词按整词读音判定：HOME 读 /h/，不按字母名 H(/eɪtʃ/) 判为元音音。
+    assert spell_checker_utils._is_vowel_sound('HOME') is False
+    assert spell_checker_utils._is_vowel_sound('END') is True
+    assert spell_checker_utils._is_vowel_sound('OPEN') is True
+    # all-caps 缩写仍按字母名判定：MRI 读 /ɛm/、USB 读 /juː/。
+    assert spell_checker_utils._is_vowel_sound('MRI') is True
+    assert spell_checker_utils._is_vowel_sound('UPS') is False
+    assert spell_checker_utils._is_vowel_sound('USB') is False
+    # 小写词与混合大小写走首字母读音。
+    assert spell_checker_utils._is_vowel_sound('home') is False
+    assert spell_checker_utils._is_vowel_sound('Home') is False
+
+
+def test_check_grammar_patterns_article_for_home_and_ups():
+    # 正确搭配不报。
+    assert spell_checker_utils.check_grammar_patterns("used in a HOME HEALTHCARE ENVIRONMENT") == []
+    assert spell_checker_utils.check_grammar_patterns("use a UPS for backup power") == []
+
+    # 错误搭配报出，并给出正确冠词。
+    home_issues = spell_checker_utils.check_grammar_patterns("used in an HOME HEALTHCARE ENVIRONMENT")
+    assert [(i["original_text"], i["suggestion"]) for i in home_issues] == [
+        ("an HOME", "建议改为: a HOME")
+    ]
+
+    ups_issues = spell_checker_utils.check_grammar_patterns("use an UPS for backup power")
+    assert [(i["original_text"], i["suggestion"]) for i in ups_issues] == [
+        ("an UPS", "建议改为: a UPS")
+    ]
+
+
 def test_find_term_variant_issues_skips_when_correct_form_exists_in_document():
     issues = spell_checker_utils._find_term_variant_issues(
         "The High-throughput workflow is supported. Another note mentions highthroughput only in OCR text.",

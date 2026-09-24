@@ -3530,6 +3530,15 @@ def check_spelling(content, min_word_length=3, file_type=None):
     return issues
 
 
+# 字母名以元音音开头的缩写字母（F 读 /ɛf/、H 读 /eɪtʃ/ 等），用于 all-caps 词判定。
+_ABBR_VOWEL_SOUND = set('AEFHILMNORSX')
+# all-caps 但按整词读音的可读词（UI 词与格式标识），不按字母名逐字读。
+_WORDLIKE_CAPS = {
+    'home', 'end', 'start', 'next', 'back', 'stop', 'pause', 'run',
+    'save', 'open', 'close', 'fastq', 'bam', 'cram', 'sam', 'tab',
+}
+
+
 def _is_vowel_sound(word):
     token = (word or '').strip('.,;:()[]{}"\'').strip()
     if not token:
@@ -3540,8 +3549,11 @@ def _is_vowel_sound(word):
         return True
     if re.match(r'^(university|universal|unified|union|unilateral|user|unit|unique|european|eucalyptus|one|one-step)', lower):
         return False
-    if token.isupper() and token[0] in set('AEFHILMNORSX'):
-        return True
+    if token.isupper() and token.isalpha():
+        # all-caps 可读词按整词首字母读音判定（HOME 读 /h/，非 /eɪtʃ/）。
+        if lower in _WORDLIKE_CAPS:
+            return lower[0] in 'aeiou'
+        return token[0] in _ABBR_VOWEL_SOUND
     return lower[0] in 'aeiou'
 
 
