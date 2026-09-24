@@ -539,3 +539,21 @@
 - 真实端到端（重启后端 + DeepSeek）：同一英文片段 `The instrument are ready for use. Please confirm the settings before you starts the run. This instructions for use describes the installation procedure.` 由修复前 `total=0` 变为 `total=3`，`issue_flow.ai_input_count=3 / after_pipeline=3 / after_visual_verification=3`，三条分别命中主谓一致、`before you` 后动词原形、`This instructions` 指示代词与主谓一致
 - 全量 `backend/tests`：875 passed / 6 failed（6 例仍为既有失败，无新增回归）
 - 顺带发现（未改动，待确认）：`app/utils/ai_client.py` 顶部 `from app.utils.prompt_builder import ...` 指向的 `app/utils/prompt_builder.py` 在仓库中不存在（`git log --all` 无该文件记录），因此 `PROMPT_BUILDER_FALLBACK_ACTIVE=True` 常驻、日志固定打印 `prompt_builder 模块缺失，当前使用保守降级提示词构建`；英文场景下 `build_audit_system_prompt()` 退化为返回空串，提示词质量受损
+
+## 2026-09-24 修复主谓一致检查对不规则复数与 there-be 尾部修饰语的 are 误报
+
+- 承接 #138：规则管理页修复已随 #138 合入，本轮回补同类「英文主谓一致 `are` 误报」，单独提交并开跟进 PR #142
+- 触发样本：用户提供的拼写检查页截图（`当前工作区/.monkeycode-tmp-files/54846836-image-1.webp`），概览出现误报；上一轮 `run_grammar` 重写后仍有另一类句式未覆盖
+- 根因一（不规则复数）：`_reliable_number()` 只按词形判数，`people`/`children`/`mice`/`women`/`police` 等不以 `-s`/`-es` 结尾的复数被判为单数，与 `are` 冲突
+  - 实测误报：`The people are waiting outside.`、`The children are playing in the yard.`、`Several mice are in the cage.`、`The women are here.`、`The police are investigating.`
+- 根因二（there-be 尾部修饰语）：`get_nearest_noun_after_be()` 取「be 后最后一个实词」当名词短语中心语，把 `options available`、`alarms, contact support` 里的形容词/动词当成主语
+  - 实测误报：`There are several options available.`、`If there are any temperature alarms, contact support.`、`If there are any doubts, refer to the manual.`、`If there are questions, contact us.`、`Verify that there are no bubbles remaining.`
+- 修复（`backend/app/api/spell_check.py`）：
+  - 新增 `IRREGULAR_PLURALS` 复数白名单（约 21 词），`_reliable_number()` 命中即返回 True；属白名单，不新增黑名单规则
+  - `get_nearest_noun_after_be()` 优先取窗口内可确证的复数名词作中心语，无则退回原「最后一个实词」逻辑；`_NP_STOP_TOKENS` 仍在介词/连词处截断，窗口边界未放宽
+- 边界合规：未触碰边界锁定的 `backend/app/utils/spell_checker.py`（`git diff` 为空）；未新增正则语法规则，仅修正既有 `run_grammar` 逻辑
+- 验证：
+  - 探针：修复前 4 条不规则复数 + 6 条 there-be 尾部修饰语误报，修复后全部为 0；真阳性全部保留（`The tube are ready.`、`The tubes is ready.`、`It indicates that the icon are grayed out.`、`There is many samples.`）
+  - 真实语料：4 份工作区英文说明书全链路 `process_text` 的 `are` 误报 0；916 句语料 `are` 相关 grammar 命中由 1（OCR 残句 `Specific area, click to start the integrated kflow …`）降至 0
+  - 测试：`test_spell_check.py` 42 passed（新增 2 例）；改动相关 3 模块 77 passed；全量 `backend/tests` 879 passed / 6 failed（docx 固件 ×4、模板串 ×1、缺 `tesseract` ×1，均既有失败，无新增）
+- 交付：提交 `44c5a8c` 已推送至 `260923-fix-review-rules-manage`；因 #138 已合入，另开跟进 PR #142（base `main`，OPEN / MERGEABLE / CLEAN）
