@@ -581,3 +581,14 @@
 - 全量后端测试：`PYTHONPATH=/workspace/backend python3 -m pytest backend/tests -q`（891 passed / 6 failed / 1 skipped）；6 例失败已用 `git worktree add /tmp/opencode/base-check HEAD` 在未改动检出上复现，为既有失败（4 例缺 docx 固件、1 例 `test_polish_match_score` 模板串不一致、1 例缺 `tesseract`），非本轮回归
 - 前端：`cd /workspace/frontend && npm run build` 成功（`✓ built in 34.13s`）
 - 残留未处理（超出本轮 9 项清单，属 AI 判断噪声，待确认）：符号表行 `T10AH250V Fuse specification Indicates the fuse specification to ...` 的 stray fragment 提示、法律免责声明段落的 AI 改写建议、`Figures in this manual are all illustrations.` 的语序建议
+
+## 2026-09-24 第六轮审核准确率优化（章节定位、建议具体性与人工批注召回）
+
+- 本轮背景：截图反馈显示重复问题的章节被识别为 Figure/Table 标题或页码区间，DOC-DUP-001 建议缺少重复位置，人工批注中的 `clean` 语法与维护周期术语问题未被规则链路覆盖。
+- 本轮调整内容：
+- `backend/app/api/review.py`（章节定位）：`extract_chapter()` 新增目录标题缓存与匹配评分，优先选择目录中的真实章节标题；图表题注降级为弱候选；忽略 `1 to 36` 这类表格单元页码区间；支持 `(Optional) ...` 小节标题，并调整命中位置前后标题的距离权重。
+- `backend/app/api/review.py`（DOC-DUP-001 建议）：建议中补充前文重复句所在章节，例如「该句与『Powering on the device』章节中的句子完全重复」，帮助审核者快速定位两处内容。
+- `backend/app/api/review.py`（人工批注召回）：新增 `DOC-GRAM-002` 检测 `before/during/after clean`，建议使用 `cleaning`；新增 `DOC-TERM-002` 检测 `Weekly disinfection` 与 `Monthly cleaning` 等维护周期标题的 cleaning/disinfection 术语混用。
+- 回归用例：`backend/tests/test_review_engine.py` 新增 3 个章节定位测试；`backend/tests/test_review_cache.py` 新增语法与维护术语测试。
+- 本地验证：目标测试 `251 passed`；完整后端测试 `896 passed / 6 failed / 1 skipped`。6 个失败与此前基线一致，集中在缺少 docx 固件、测试模板串与 tesseract 环境依赖。
+- 真实文档规则复测（`review_id=13`）：章节定位已修正为 `Powering on the device`、`Daily maintenance`、`Troubleshooting`、`Device` 等结构标题；新增命中 `before clean`、`during clean`、`Monthly cleaning`，问题数由 6 条增至 9 条。
