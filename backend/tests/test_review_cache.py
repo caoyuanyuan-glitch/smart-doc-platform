@@ -2442,6 +2442,38 @@ def test_run_manual_engineering_audit_detects_missing_space_before_parentheses()
     assert any(issue["rule"] == "DOC-FMT-003" and issue["original_text"] == "Distribution(TB)" for issue in issues)
 
 
+def test_run_manual_engineering_audit_detects_clean_as_noun_after_preposition():
+    issues = review_api._run_manual_engineering_audit(
+        "Ensure that the device is powered off before clean or disinfection.",
+        file_type="pdf",
+    )
+
+    assert any(
+        issue["rule"] == "DOC-GRAM-002"
+        and issue["original_text"] == "before clean"
+        and "before cleaning" in issue["suggestion"]
+        for issue in issues
+    )
+
+
+def test_run_manual_engineering_audit_detects_inconsistent_maintenance_terms():
+    content = (
+        "Weekly disinfection\n\n"
+        "Perform the following steps:\n\n"
+        "1. Wipe the device.\n\n"
+        "Monthly cleaning\n\n"
+        "Perform the following steps:\n\n"
+        "1. Wipe the device.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert any(
+        issue["rule"] == "DOC-TERM-002" and issue["original_text"] == "Monthly cleaning"
+        for issue in issues
+    )
+
+
 def test_run_manual_engineering_audit_detects_missing_space_before_units():
     issues = review_api._run_manual_engineering_audit(
         "Description 24VDC, 5A DNBSEQ-E25RS 20VDC, 11.5A DNBSEQ-E25ARS 100-240 V~, 50 /60 Hz, 300 VA ±10% II",
