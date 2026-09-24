@@ -296,3 +296,59 @@ def test_extraction_artifact_ai_issue_is_noise():
     }
     assert pipeline.is_noise(broken_word_issue) is True
     assert select_review_issues([broken_word_issue]) == []
+
+
+_TOC_CONTENT = "\n".join([
+    "Contents",
+    "Safety 1",
+    "Device overview 2",
+    "Device 3",
+    "Specifications 4",
+    "Troubleshooting 5",
+    "Maintaining the device 6",
+    "Daily maintenance 6",
+    "Cleaning the device 7",
+    "Storage and transportation 8",
+    "",
+    "01",
+    "This chapter describes safety information.",
+    "",
+    "Figure 9 Loading interface",
+    "",
+    "Some figure body line here.",
+    "",
+])
+
+
+def test_extract_chapter_prefers_toc_heading_over_figure_caption():
+    content = _TOC_CONTENT + "\n".join([
+        "Troubleshooting",
+        "",
+        "If malfunction occurs, follow the prompt.",
+        "",
+        "the the",
+    ])
+    position = content.index("the the")
+    assert review_api.extract_chapter(content, position) == "Troubleshooting"
+
+
+def test_extract_chapter_recognizes_optional_heading():
+    content = _TOC_CONTENT + "\n".join([
+        "(Optional) Powering off the device",
+        "",
+        "Turn the power switch to the position.",
+    ])
+    position = content.index("Turn the power switch")
+    assert review_api.extract_chapter(content, position) == "(Optional) Powering off the device"
+
+
+def test_extract_chapter_ignores_page_range_table_cell():
+    content = _TOC_CONTENT + "\n".join([
+        "Device",
+        "",
+        "1 to 36",
+        "",
+        "the the",
+    ])
+    position = content.index("the the")
+    assert review_api.extract_chapter(content, position) == "Device"

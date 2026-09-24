@@ -10,6 +10,7 @@ import math
 import re
 import os
 import unicodedata
+from functools import lru_cache
 try:
     from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
 except ModuleNotFoundError as exc:
@@ -10487,13 +10488,21 @@ def _run_manual_engineering_audit(content, file_type=None):
             second_start, second_end, _second_original = occurrences[1]
             if second_start - first_start < 60:
                 continue
+            first_chapter = extract_chapter(content, first_start).strip()
+            if first_chapter:
+                duplicate_suggestion = (
+                    f'该句与「{first_chapter}」章节中的句子完全重复，'
+                    '建议删除本处重复句或仅保留一处规范表述。'
+                )
+            else:
+                duplicate_suggestion = '该句在前文已完整出现，建议删除本处重复句或仅保留一处规范表述。'
             add_issue(
                 second_start,
                 second_end,
                 first_original[:240],
                 'DOC-DUP-001',
                 '重复内容',
-                '建议删除重复句子或仅保留一处规范表述',
+                duplicate_suggestion,
                 '同一完整句子在不同位置重复出现，发布前应确认是否为复制残留。',
                 '说明书审核能力补强方案 - 跨段重复句检查',
                 'serious',
@@ -10540,6 +10549,49 @@ def _run_manual_engineering_audit(content, file_type=None):
             'serious',
             93,
         )
+
+    for match in re.finditer(r'\b(before|during|after)\s+clean\b(?!ing)', content, re.IGNORECASE):
+        preposition = match.group(1)
+        suggestion = f'{preposition} cleaning'
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-002',
+            '英文语法',
+            f'建议改为 {suggestion}',
+            '介词后需要使用动名词，clean 作名词使用不符合英文表达习惯。',
+            '说明书审核能力补强方案 - 动名词用法检查',
+            'general',
+            90,
+        )
+
+    frequency_activity_headings = [
+        (match, re.sub(r'\s+', ' ', match.group(1)).strip(), match.group(2).lower())
+        for match in re.finditer(
+            r'(?m)^\s*((?:Daily|Weekly|Monthly|Quarterly|Annual|Annually)\s+(cleaning|disinfection))\s*$',
+            content,
+            re.IGNORECASE,
+        )
+    ]
+    if len({item[2] for item in frequency_activity_headings}) > 1:
+        base_noun = frequency_activity_headings[0][2]
+        for match, heading_text, noun in frequency_activity_headings:
+            if noun == base_noun:
+                continue
+            add_issue(
+                match.start(),
+                match.end(),
+                heading_text,
+                'DOC-TERM-002',
+                '术语一致性',
+                '维护周期活动的术语不统一，建议统一使用同一术语（如统一为 cleaning 或 disinfection）。',
+                f'维护周期标题混用了不同术语：{heading_text} 与 '
+                f'{frequency_activity_headings[0][1]} 使用的中文对应词不一致。',
+                '说明书审核能力补强方案 - 维护活动术语一致性检查',
+                'general',
+                88,
+            )
 
     for match in re.finditer(r'\b([A-Za-z]{3,})\s+(off|on|up|down)\s+the\s+\1\b', content, re.IGNORECASE):
         verb = match.group(1)
@@ -11337,6 +11389,11 @@ def _is_figure_or_table_caption(line):
     return bool(re.match(r'^(?:Figure|Fig\.?|Table|表|图)\s*\d+\b', stripped, re.IGNORECASE))
 
 
+def _is_page_range_reference(line):
+    stripped = str(line or '').strip()
+    return bool(re.fullmatch(r'\d{1,4}\s*(?:to|[-–—~])\s*\d{1,4}', stripped, re.IGNORECASE))
+
+
 def _is_heading_line(line):
     stripped = str(line or '').strip()
     if not stripped or _is_footer_line(stripped) or _is_step_line(stripped) or _is_table_line(stripped) or _is_material_line(stripped) or _is_version_history_line(stripped):
@@ -11382,7 +11439,7 @@ def _looks_like_standalone_heading(lines, index):
     current = str(lines[index] or '').strip()
     if not current:
         return False
-    if not re.match(r'^[A-Z][A-Za-z0-9\s\-_/]{3,60}$', current):
+    if not re.match(r'^(?:\((?:Optional|optional)\)\s*)?[A-Z][A-Za-z0-9\s\-_/]{3,60}$', current):
         return False
     prev_line = str(lines[index - 1] or '').strip() if index - 1 >= 0 else ''
     next_line = str(lines[index + 1] or '').strip() if index + 1 < len(lines) else ''
@@ -11422,11 +11479,13 @@ def _is_isolated_heading(lines, index):
     return (not prev_line) or (not next_line)
 
 
-def _score_heading_candidate(lines, index):
+def _score_heading_candidate(lines, index, *, min_score=55, short_standalone_penalty=10):
     line = str(lines[index] or '').strip()
     if not line:
         return None
     if _is_footer_line(line) or _is_step_line(line) or _is_material_line(line) or _is_version_history_line(line):
+        return None
+    if _is_page_range_reference(line):
         return None
     score = None
     kind = None
@@ -11454,12 +11513,58 @@ def _score_heading_candidate(lines, index):
     if len(line) > 70:
         score -= 10
     if len(line.split()) <= 2 and kind == 'standalone':
-        score -= 10
-    if score < 55:
+        score -= short_standalone_penalty
+    if score < min_score:
         return None
 
     heading = _clean_caption_heading(line) if kind == 'caption' else _normalize_heading_label(line)
     return score, heading
+
+
+def _normalize_toc_title(text):
+    return re.sub(r'[^a-z0-9]+', ' ', str(text or '').lower()).strip()
+
+
+@lru_cache(maxsize=8)
+def _toc_heading_titles(content):
+    """Collect the chapter/section titles listed in the front-matter table of contents."""
+    normalized = str(content or '').replace('\f', '\n')
+    titles = set()
+    for line in normalized[:16000].split('\n'):
+        match = re.match(r'^([A-Z(][^\n]{2,70}?)\s+(\d{1,3})$', line.strip())
+        if not match:
+            continue
+        page = int(match.group(2))
+        if not 1 <= page <= 400:
+            continue
+        key = _normalize_toc_title(match.group(1))
+        if len(key) >= 3:
+            titles.add(key)
+    return titles if len(titles) >= 8 else set()
+
+
+def _chapter_heading_candidate(lines, index, toc_titles):
+    candidate = _score_heading_candidate(lines, index, min_score=45, short_standalone_penalty=0)
+    if not candidate:
+        return None
+    score, text = candidate
+    line = str(lines[index] or '').strip()
+    standalone = (
+        not line.startswith('#')
+        and not _is_heading_line(line)
+        and not _is_figure_or_table_caption(line)
+    )
+    in_toc = _normalize_toc_title(text) in toc_titles
+    if standalone and not in_toc and len(text.split()) <= 2:
+        # Table header cells such as Name/Description are short standalone lines too;
+        # only trust short headings that the table of contents lists.
+        return None
+    if in_toc:
+        score += 40
+    elif _is_figure_or_table_caption(line):
+        # Figure/Table captions are weak chapter names; keep them only as a fallback.
+        score -= 35
+    return score, text
 
 
 def extract_chapter(content, position):
@@ -11467,23 +11572,31 @@ def extract_chapter(content, position):
     safe_position = max(0, min(int(position or 0), len(normalized)))
     before_lines = normalized[:safe_position].split('\n')
     after_lines = normalized[safe_position:].split('\n')[:12]
+    toc_titles = _toc_heading_titles(normalized)
     candidates = []
 
     start_index = max(0, len(before_lines) - 220)
     for index in range(len(before_lines) - 1, start_index - 1, -1):
-        candidate = _score_heading_candidate(before_lines, index)
+        candidate = _chapter_heading_candidate(before_lines, index, toc_titles)
         if candidate:
             score, text = candidate
             distance_penalty = min(len(before_lines) - 1 - index, 30)
             candidates.append((score - distance_penalty, text))
 
     for index, _line in enumerate(after_lines[:10]):
-        candidate = _score_heading_candidate(after_lines, index)
+        candidate = _chapter_heading_candidate(after_lines, index, toc_titles)
         if candidate:
             score, text = candidate
             if _is_table_cell_like(text):
                 continue
-            candidates.append((score - 24 - index, text))
+            # Headings usually precede the text they title, so a following heading is a
+            # weaker signal than a preceding one at the same distance.
+            if index <= 1 and str(_line).strip():
+                # The position may begin on a heading line, which then names its own section.
+                distance_penalty = 5
+            else:
+                distance_penalty = 30 + min(index, 30)
+            candidates.append((score - distance_penalty, text))
 
     if candidates:
         candidates.sort(key=lambda item: item[0], reverse=True)
