@@ -127,7 +127,20 @@
           <div class="upload-section compare-audit-section">
             <div class="compare-upload-grid">
               <div class="compare-upload-card">
-                <div class="compare-upload-title">主文档</div>
+                <div class="compare-upload-head">
+                  <div class="compare-upload-title">主文档</div>
+                  <el-button
+                    v-if="compareMainFileList.length"
+                    link
+                    type="primary"
+                    size="small"
+                    class="compare-upload-clear"
+                    :disabled="compareSubmitting"
+                    @click="clearCompareMainFile"
+                  >
+                    清空
+                  </el-button>
+                </div>
                 <el-upload
                   ref="compareMainUploadRef"
                   :auto-upload="false"
@@ -145,7 +158,20 @@
               </div>
 
               <div class="compare-upload-card">
-                <div class="compare-upload-title">参考文件</div>
+                <div class="compare-upload-head">
+                  <div class="compare-upload-title">参考文件</div>
+                  <el-button
+                    v-if="compareReferenceFileList.length"
+                    link
+                    type="primary"
+                    size="small"
+                    class="compare-upload-clear"
+                    :disabled="compareSubmitting"
+                    @click="clearCompareReferenceFiles"
+                  >
+                    清空
+                  </el-button>
+                </div>
                 <el-upload
                   :auto-upload="false"
                   :show-file-list="true"
@@ -2326,6 +2352,12 @@ function clearCompareMainFile() {
   clearCompareResult()
 }
 
+function clearCompareReferenceFiles() {
+  compareReferenceFiles.value = []
+  compareReferenceFileList.value = []
+  clearCompareResult()
+}
+
 function handleCompareMainExceed(files) {
   const rawFile = Array.isArray(files) ? files[0] : files
   if (!validateCompareUpload(rawFile)) return
@@ -4053,11 +4085,23 @@ onUnmounted(() => {
   background: #f8fafc;
 }
 
-.compare-upload-title {
+.compare-upload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 12px;
+}
+
+.compare-upload-title {
   font-size: 14px;
   font-weight: 600;
   color: #0f172a;
+}
+
+.compare-upload-clear {
+  padding: 0;
+  height: auto;
+  font-size: 13px;
 }
 
 .compare-mode-toolbar {
