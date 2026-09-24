@@ -877,7 +877,6 @@
           <template #default="scope">
             <div class="suggestion-wrap">
               <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
-              <div v-if="issueSuggestionSummary(scope.row)" class="suggestion-summary">{{ issueSuggestionSummary(scope.row) }}</div>
             </div>
           </template>
         </el-table-column>
@@ -1326,9 +1325,7 @@ const filteredDialogIssues = computed(() => {
     if (issueFilter.status && (i.status || 'pending') !== issueFilter.status) return false
     if (issueFilter.severity && i.severity !== issueFilter.severity) return false
     if (issueFilter.keyword) {
-      const k = issueFilter.keyword.toLowerCase()
-      const hay = `${i.original_text || ''} ${issueSuggestionText(i)}`.toLowerCase()
-      if (!hay.includes(k)) return false
+      if (!issueSearchHaystack(i).includes(issueFilter.keyword.toLowerCase())) return false
     }
     if (hideSuspectedFalsePositives.value && issueHasFlag(i, 'possible_false_positive')) return false
     return true
@@ -1408,14 +1405,6 @@ const traceProviders = computed(() => {
 function formatIssueDisplayId(index) {
   const offset = (issuePage.value - 1) * issuePageSize.value
   return String(offset + index + 1).padStart(3, '0')
-}
-
-function issueSuggestionText(issue) {
-  const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return suggestion
-  const description = normalizeIssueDescription(issue)
-  if (description) return description
-  return '-'
 }
 
 function issueSuggestionFullText(issue) {
@@ -1528,18 +1517,20 @@ function issueSuggestionOverview(issue) {
   // 无法给出精确替换时直接展示建议原文，避免无信息量的占位文案导致建议内容丢失
   const suggestion = String(issue?.suggestion || '').trim()
   if (suggestion) return compactSuggestionText(suggestion, 60)
+  // 单行展示：没有建议时回落到说明，避免「建议」列整格空白
+  const description = normalizeIssueDescription(issue)
+  if (description) return compactSuggestionText(description, 60)
   return ''
 }
 
-function issueSuggestionSummary(issue) {
-  const suggestion = String(issue?.suggestion || '').trim()
-  const description = normalizeIssueDescription(issue)
-  if (!description) return ''
-  if (!suggestion) return description
-  // Keep the second line only when it explains something beyond the suggestion.
-  const remainder = description.split(suggestion).join('').replace(/[\s，。；;、,.：:（）()“”"'【】\[\]]/g, '')
-  if (!remainder) return ''
-  return description
+// 搜索范围与「原文」「建议」两列实际渲染的内容保持一致：
+// 原文列展示的是扩展后的 context（更长时优先），建议列只展示第一行概述。
+// 否则会出现「命中但该行看不到关键词」的误命中，以及看到却搜不到的反向漏检。
+function issueSearchHaystack(issue) {
+  const original = normalizeDisplayText(issue?.original_text)
+  const context = normalizeDisplayText(issue?.context)
+  const shownOriginal = context && context.length > original.length ? context : original
+  return `${shownOriginal} ${issueSuggestionOverview(issue)}`.toLowerCase()
 }
 
 function percentText(value) {
@@ -4247,13 +4238,6 @@ onUnmounted(() => {
 .issue-detail-table :deep(.suggestion-column .cell) {
   overflow: visible;
   white-space: normal;
-}
-
-.suggestion-summary {
-  margin-top: 4px;
-  color: #475467;
-  font-size: 13px;
-  white-space: pre-wrap;
 }
 
 .suggestion-overview {
