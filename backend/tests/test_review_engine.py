@@ -298,6 +298,59 @@ def test_extraction_artifact_ai_issue_is_noise():
     assert select_review_issues([broken_word_issue]) == []
 
 
+def test_symbol_legend_stray_fragment_ai_issue_is_noise():
+    issue = {
+        "source": "ai",
+        "rule": "AI",
+        "category": "可读性",
+        "severity": "general",
+        "original_text": "T10AH250V Fuse specification Indicates the fuse specification to be followed.",
+        "context": "Symbol Title Description T10AH250V Fuse specification Indicates the fuse specification to be followed.",
+        "suggestion": "Remove the stray fragment before Fuse specification.",
+        "description": "Truncated fragment preceding the symbol legend definition.",
+        "confidence": 80,
+    }
+    assert pipeline.is_symbol_legend_extraction_noise(
+        issue["original_text"], issue["suggestion"], issue["description"]
+    ) is True
+    assert pipeline.is_noise(issue) is True
+    assert select_review_issues([issue]) == []
+
+
+def test_legal_disclaimer_rewrite_ai_issue_is_noise():
+    issue = {
+        "source": "ai",
+        "rule": "AI",
+        "category": "表述不准确",
+        "severity": "suggestion",
+        "original_text": "MGI shall not be liable for any loss arising from the use of this product.",
+        "context": "To the maximum extent permitted by law, MGI shall not be liable for any loss arising from the use of this product.",
+        "suggestion": "MGI is not responsible for damages that may occur when customers use the product.",
+        "description": "Rewrite the legal disclaimer for clarity.",
+        "confidence": 80,
+    }
+    assert pipeline.is_legal_disclaimer_rewrite_noise(issue["original_text"], issue["suggestion"]) is True
+    assert pipeline.is_noise(issue) is True
+    assert select_review_issues([issue]) == []
+
+
+def test_figure_illustration_word_order_ai_issue_is_noise():
+    issue = {
+        "source": "ai",
+        "rule": "AI",
+        "category": "可读性",
+        "severity": "suggestion",
+        "original_text": "Figures in this manual are all illustrations.",
+        "context": "Figures in this manual are all illustrations.",
+        "suggestion": "All figures in this manual are illustrations.",
+        "description": "Word order can be improved.",
+        "confidence": 75,
+    }
+    assert pipeline.is_figure_illustration_word_order_noise(issue["original_text"], issue["suggestion"]) is True
+    assert pipeline.is_noise(issue) is True
+    assert select_review_issues([issue]) == []
+
+
 _TOC_CONTENT = "\n".join([
     "Contents",
     "Safety 1",

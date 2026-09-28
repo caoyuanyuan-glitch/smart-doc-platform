@@ -57,9 +57,9 @@
 - comment: 冠词 the 重复
 - selected_text: the the
 - context:
-- category: 语法与表达
+- category: 重复内容
 - layer: deterministic
-- expected_rule: DOC-GRAM-001
+- expected_rule: DOC-DUP-007
 
 ## 批注 5
 

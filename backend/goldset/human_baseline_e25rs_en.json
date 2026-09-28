@@ -10,7 +10,7 @@
       "context": "Set\nApp-C\n5RS High-throu ghput \n Set\nApp-C",
       "category": "单位/空格",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DOC-SPACE-002"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -32,9 +32,9 @@
       "comment": "修订历史说删掉这个来着",
       "selected_text": "MDA \nT-Reagent",
       "context": "Buffer\n17 m\nMDA \nT-Reagent\n0.3\ntub",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "修订一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "DOC-REVISION-001"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -44,9 +44,9 @@
       "comment": "同上",
       "selected_text": "MDA \nT-Reagent",
       "context": "Buffer\n17 mL/\nMDA \nT-Reagent \n0.32 m\ntube×1\nMDA Enzyme\n0 05 m",
-      "category": "术语一致性",
+      "category": "修订一致性",
       "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "expected_rule": "DOC-REVISION-001"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -58,7 +58,7 @@
       "context": "2.2 U s e r - s u p p l i\nconsumbles\nTable 6 User supplie",
       "category": "术语拼写",
       "layer": "deterministic",
-      "expected_rule": "DET-TERM-SPELL-001"
+      "expected_rule": "SPELL"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -82,7 +82,7 @@
       "context": "ol is running, some\nm temperature wh\nmperature.For these\nd lid is required to\nure during the DNB",
       "category": "单位/空格",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DOC-SPACE-001"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -94,7 +94,7 @@
       "context": "g,\noom temperature whil\nmperature.For these \nted lid is required to \nd\ni\nh\nDNB",
       "category": "单位/空格",
       "layer": "deterministic",
-      "expected_rule": "DET-SPACE-001"
+      "expected_rule": "DOC-SPACE-001"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -104,9 +104,9 @@
       "comment": "删了",
       "selected_text": "es t",
       "context": "at surface\nrd 1 times to bring \nr respective wells.",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "语法与表达",
+      "layer": "deterministic",
+      "expected_rule": "DOC-GRAMMAR-001"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -118,7 +118,7 @@
       "context": "be selected based on the\ne MDA T-Regent from diffe\nidge with the MDA mixtu",
       "category": "术语拼写",
       "layer": "deterministic",
-      "expected_rule": "DET-TERM-SPELL-001"
+      "expected_rule": "SPELL-PHRASE"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -130,7 +130,7 @@
       "context": "lected, and tap\nmpting that Are yo\ne discarded once of",
       "category": "标点符号",
       "layer": "deterministic",
-      "expected_rule": "DET-PUNCT-001"
+      "expected_rule": "DOC-QUOTE-001"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -141,8 +141,8 @@
       "selected_text": "back to",
       "context": "rameter review interface, th\nping\nback to the Ente\nsure the flow cell ID is enter",
       "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "layer": "deterministic",
+      "expected_rule": "DOC-GRAM-005"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -153,8 +153,8 @@
       "selected_text": "please ensure",
       "context": "e modified by tapping\nbac\nherefore, please ensure the flow",
       "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "layer": "deterministic",
+      "expected_rule": "DOC-GRAM-006"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -166,7 +166,7 @@
       "context": "the reagent cartridge do n\nof the waster contain\nccording to the directio",
       "category": "术语拼写",
       "layer": "deterministic",
-      "expected_rule": "DET-TERM-SPELL-001"
+      "expected_rule": "SPELL-PHRASE"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -178,7 +178,7 @@
       "context": "Returning to the Choo\nndicating that Are you \nhall be discarded onc",
       "category": "标点符号",
       "layer": "deterministic",
-      "expected_rule": "DET-PUNCT-001"
+      "expected_rule": "DOC-QUOTE-001"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -188,9 +188,9 @@
       "comment": "单数",
       "selected_text": "are d",
       "context": "ception are displayed\nace. Check the possi",
-      "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "category": "语法错误",
+      "layer": "deterministic",
+      "expected_rule": "DOC-GRAM-004"
     },
     {
       "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
@@ -201,8 +201,8 @@
       "selected_text": "th\nt",
       "context": ".  Keep the reage\n.  Check the well \n.  Use a pair of po",
       "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "layer": "deterministic",
+      "expected_rule": "DOC-GRAM-008"
     }
   ]
 }

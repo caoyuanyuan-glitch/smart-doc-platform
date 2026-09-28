@@ -100,3 +100,14 @@ def test_eighty_eight_boundary_is_meaningful():
 
     assert ok["precision"] >= 0.88
     assert bad["precision"] < 0.88
+
+
+def test_goldset_expected_rule_matches_platform_rule_id_exactly():
+    annotations = [_annotation("before clean", rule="DOC-GRAM-002", category="语法与表达")]
+    issues = [_issue("before clean", rule="DOC-GRAM-002", category="语法与表达", issue_id=1)]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result["recall"] == 1.0
+    assert result["precision"] == 1.0
+    assert result["strict_recall"] == 1.0

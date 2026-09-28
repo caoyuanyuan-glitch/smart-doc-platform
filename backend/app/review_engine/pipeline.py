@@ -111,6 +111,60 @@ def is_broken_word_extraction_artifact(original: str) -> bool:
     return any(len(fragment) == 1 and fragment.islower() and fragment not in {'a', 'i'} for fragment in fragments)
 
 
+_SYMBOL_LEGEND_ORIGINAL_RE = re.compile(
+    r'^[A-Za-z0-9][A-Za-z0-9 ,/\-]{0,56}?\s+'
+    r'(?:Indicates|Means|Denotes|Represents|Refers\s+to|Stands\s+for)\b',
+    re.IGNORECASE,
+)
+_FRAGMENT_COMPLAINT_RE = re.compile(
+    r'\b(?:stray|fragment|truncated|garbled|malformed|broken\s+word|incomplete\s+sentence)\b',
+    re.IGNORECASE,
+)
+_DISCLAIMER_RE = re.compile(
+    r'\b(?:shall\s+not\s+be\s+liable|to\s+the\s+(?:maximum|full(?:est)?)\s+extent\s+permitted|'
+    r'hereby\s+disclaims|does\s+not\s+constitute\s+(?:a\s+)?warranty|'
+    r'for\s+illustrative\s+purposes?\s+only)\b',
+    re.IGNORECASE,
+)
+_FIGURE_ILLUSTRATION_RE = re.compile(
+    r'\bfigures?\b.+\b(?:are|is)\b.+\billustrations?\b',
+    re.IGNORECASE,
+)
+
+
+def is_symbol_legend_extraction_noise(original: str, suggestion: str, description: str = "") -> bool:
+    """符号表定义行被 AI 当成 stray fragment / 残句。"""
+    if not _SYMBOL_LEGEND_ORIGINAL_RE.match(normalize_text(original or "")):
+        return False
+    return bool(_FRAGMENT_COMPLAINT_RE.search(f"{suggestion or ''} {description or ''}"))
+
+
+def is_legal_disclaimer_rewrite_noise(original: str, suggestion: str) -> bool:
+    """法律免责声明的整句改写没有文书错误证据。"""
+    original_text = normalize_text(original)
+    suggestion_text = normalize_text(suggestion)
+    if not original_text or not suggestion_text:
+        return False
+    if compact_text(original_text) == compact_text(suggestion_text):
+        return False
+    if not _DISCLAIMER_RE.search(original_text):
+        return False
+    return len(suggestion_text) >= 24
+
+
+def is_figure_illustration_word_order_noise(original: str, suggestion: str) -> bool:
+    """Figures ... illustrations 的语序建议属于风格改写。"""
+    original_text = normalize_text(original)
+    suggestion_text = normalize_text(suggestion)
+    if not _FIGURE_ILLUSTRATION_RE.search(original_text):
+        return False
+    if not re.search(r'\billustrations?\b', suggestion_text, re.IGNORECASE):
+        return False
+    original_tokens = set(re.findall(r'[A-Za-z]+', original_text.lower()))
+    suggestion_tokens = set(re.findall(r'[A-Za-z]+', suggestion_text.lower()))
+    return len(original_tokens & suggestion_tokens) >= 3
+
+
 # 知识库中的“错词 → 正词”类纠错条目，如「试剂舱 → 试剂仓」
 _SUBSTITUTION_RULE_RE = re.compile(r"^\s*([\u4e00-\u9fff]{2,8})\s*(?:→|->|—>|➔|=>)\s*\S")
 
@@ -386,6 +440,9 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
     if source == "ai" and (
         is_broken_word_extraction_artifact(original)
         or is_trademark_reading_order_artifact(original, suggestion)
+        or is_symbol_legend_extraction_noise(original, suggestion, description)
+        or is_legal_disclaimer_rewrite_noise(original, suggestion)
+        or is_figure_illustration_word_order_noise(original, suggestion)
     ):
         return True
     if hallucinated_substitution_term(data):

@@ -220,6 +220,9 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     rule = str(issue.get("rule", "") or "").upper()
     category = str(issue.get("category", "") or "")
     text = " ".join([item.comment, item.selected_text, item.context]).lower()
+    expected = str(item.expected_rule or "").upper()
+    if expected and rule == expected:
+        return True
 
     if item.expected_rule == "DET-REVISION-001":
         return rule.startswith("DOC-REV") or rule.startswith("CYY-CN-REVISION-") or "版本记录" in category or "修订一致性" in category
@@ -286,7 +289,8 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
-            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAMMAR-001",
+            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAM-008",
+            "DOC-GRAMMAR-001",
             "DOC-GRAMMAR-002",
             "CYY-CN-STYLE-003", "CYY-CN-GRAMMAR-009", "CYY-CN-GRAMMAR-010", "CYY-CN-GRAMMAR-011",
         } or "表达与句式" in category

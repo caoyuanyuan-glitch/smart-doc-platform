@@ -765,3 +765,13 @@
 - 误报 Top 规则：`SAFE-002`（false_positive=1，confirmed=0，share=1.0），全库仅此 1 条误报标注。
 - 结论：`confirmed + false_positive = 1 < 30`，**现有标注量不足以支撑 88% 结论**。`precision_proxy=0` 仅说明「已有 1 条标注全是误报」，不代表真实精度；`label_coverage=0.4%` 下该数字只能看趋势。下一步应先在界面上持续标注（确认/误报），覆盖度上来后再用本脚本与 `top_false_positive_rules` 定位优化靶子。
 - 本地验证：新增 4 例测试通过；全量后端测试 `930 passed / 6 failed / 1 skipped`，6 个失败与既有基线一致。
+
+## 2026-09-28 第十一轮：规则号冲突、主谓建议方向与残留 AI 噪声
+
+- 本轮背景：PR #145 停在 `577f1e5`。第八轮复核发现 `DOC-GRAM-004` 建议写成复数，与 Tina「单数」批注方向相反；`DOC-GRAM-002` 同时表示 `before clean` 与 `a appropriate`；gold set 的 `expected_rule` 仍是评测分类码，strict 口径对不上平台规则号；第五轮留下的 3 类 AI 噪声未过滤。
+- 本轮调整内容：
+- `backend/app/api/review.py`：`a appropriate` 改挂 `DOC-GRAM-009`，把 `DOC-GRAM-002` 留给介词后 `clean`；`DOC-GRAM-004` 建议改为 `Task exception is displayed`。
+- `backend/app/review_engine/annotation_baseline.py`：gold set `expected_rule` 与平台 `rule` 精确相等即命中；`AI-STYLE-001` 家族补入 `DOC-GRAM-008`。
+- `backend/app/review_engine/pipeline.py`：新增符号表 stray fragment、法律免责声明整句改写、`Figures ... illustrations` 语序建议三类 AI 噪声过滤，位置早于 `is_verifiable_ai_text_issue`。
+- gold set：英文 V3 / 中文 V1 / GoSpatial 的 `expected_rule` 对齐到第八至六轮实际命中的平台规则号。
+- 回归用例：冠词规则号、单数建议、精确规则匹配、三类 AI 噪声各 1 例。

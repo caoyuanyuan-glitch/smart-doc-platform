@@ -2523,7 +2523,20 @@ def test_run_manual_engineering_audit_detects_a_appropriate():
         file_type="pdf",
     )
 
-    assert any(issue["rule"] == "DOC-GRAM-002" for issue in issues)
+    assert any(issue["rule"] == "DOC-GRAM-009" for issue in issues)
+
+
+def test_run_manual_engineering_audit_suggests_singular_task_exception():
+    issues = review_api._run_manual_engineering_audit(
+        "If no report is generated, and Task exception are displayed.",
+        file_type="pdf",
+    )
+
+    assert any(
+        issue["rule"] == "DOC-GRAM-004"
+        and issue["suggestion"] == "Task exception is displayed"
+        for issue in issues
+    )
 
 
 def test_run_manual_engineering_audit_skips_article_rule_for_all_caps_wordlike_terms():

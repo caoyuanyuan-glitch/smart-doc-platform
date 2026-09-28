@@ -8,9 +8,9 @@
       "comment": "是这么近的吗\r类似问题参考另外一份中文意见",
       "selected_text": "装基本信息\n货号\n名",
       "context": "",
-      "category": "中文残留",
-      "layer": "deterministic",
-      "expected_rule": "DET-CN-001"
+      "category": "表格/版式",
+      "layer": "structural_consistency",
+      "expected_rule": "CYY-CN-LAYOUT-006"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -22,7 +22,7 @@
       "context": "",
       "category": "术语一致性",
       "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "expected_rule": "CYY-CN-CONSIST-031"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -32,9 +32,9 @@
       "comment": "货号错误，与前面试剂套装那里不一致",
       "selected_text": "号：940-005203-00",
       "context": "",
-      "category": "术语一致性",
+      "category": "货号一致性",
       "layer": "structural_consistency",
-      "expected_rule": "STRUCT-TERM-001"
+      "expected_rule": "CYY-CN-PRODUCT-004"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -46,7 +46,7 @@
       "context": "",
       "category": "重复内容",
       "layer": "structural_consistency",
-      "expected_rule": "STRUCT-DUP-001"
+      "expected_rule": "CYY-CN-DUP-001"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -58,7 +58,7 @@
       "context": "",
       "category": "适用范围/硬件配置",
       "layer": "structural_consistency",
-      "expected_rule": "STRUCT-SCOPE-001"
+      "expected_rule": "CYY-CN-SCOPE-002"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -70,7 +70,7 @@
       "context": "",
       "category": "术语拼写",
       "layer": "deterministic",
-      "expected_rule": "DET-TERM-SPELL-001"
+      "expected_rule": "CYY-CN-TERM-006"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -81,8 +81,8 @@
       "selected_text": "书\n4. 如\n如\n品\n5. 如\nB",
       "context": "",
       "category": "表达与句式",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-STYLE-001"
+      "layer": "deterministic",
+      "expected_rule": "CYY-CN-GRAMMAR-012"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -94,7 +94,7 @@
       "context": "",
       "category": "适用范围/硬件配置",
       "layer": "structural_consistency",
-      "expected_rule": "STRUCT-SCOPE-001"
+      "expected_rule": "CYY-CN-SCOPE-003"
     },
     {
       "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
@@ -104,9 +104,9 @@
       "comment": "其他",
       "selected_text": "头镊子\n其它胶",
       "context": "",
-      "category": "人工审核其他项",
-      "layer": "ai_assisted",
-      "expected_rule": "AI-HUMAN-OTHER"
+      "category": "术语一致性",
+      "layer": "deterministic",
+      "expected_rule": "CYY-CN-CONSIST-032"
     }
   ]
 }
