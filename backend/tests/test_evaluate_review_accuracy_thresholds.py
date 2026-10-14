@@ -39,8 +39,13 @@ def _fake_result(human_baseline=None):
 def _run(tmp_path, monkeypatch, fake, thresholds):
     monkeypatch.setattr(
         evaluate_review,
+        "resolve_suite_document",
+        lambda doc_cfg: (doc_cfg.get("review_id"), "ok"),
+    )
+    monkeypatch.setattr(
+        evaluate_review,
         "evaluate_suite_document",
-        lambda doc_cfg, markers: fake,
+        lambda doc_cfg, markers, review_id=None: fake,
     )
     cfg = _write_suite(tmp_path, thresholds, [{"name": "doc-1", "review_id": 1}])
     return evaluate_review.batch_evaluate_from_config(cfg, [])
@@ -130,9 +135,14 @@ def test_per_document_metrics_and_summary_aggregate(tmp_path, monkeypatch):
         2: {"recall": 0.60, "precision": 0.99, "strict_recall": 0.60, "strict_precision": 0.99},
     }
 
-    def fake_eval(doc_cfg, markers):
+    def fake_eval(doc_cfg, markers, review_id=None):
         return _fake_result(docs[doc_cfg["review_id"]])
 
+    monkeypatch.setattr(
+        evaluate_review,
+        "resolve_suite_document",
+        lambda doc_cfg: (doc_cfg.get("review_id"), "ok"),
+    )
     monkeypatch.setattr(evaluate_review, "evaluate_suite_document", fake_eval)
     cfg = _write_suite(
         tmp_path,

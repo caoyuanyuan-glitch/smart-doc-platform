@@ -237,7 +237,10 @@ def test_batch_evaluate_from_config_preserves_suite_fields(tmp_path, monkeypatch
 
     seen = []
 
-    def fake_evaluate_suite_document(doc_cfg, markers):
+    def fake_resolve_suite_document(doc_cfg):
+        return doc_cfg["review_id"], "ok"
+
+    def fake_evaluate_suite_document(doc_cfg, markers, review_id=None):
         seen.append(doc_cfg)
         return {
             "review_id": doc_cfg["review_id"],
@@ -255,6 +258,7 @@ def test_batch_evaluate_from_config_preserves_suite_fields(tmp_path, monkeypatch
             "suite_filters": {},
         }
 
+    monkeypatch.setattr(evaluate_review, "resolve_suite_document", fake_resolve_suite_document)
     monkeypatch.setattr(evaluate_review, "evaluate_suite_document", fake_evaluate_suite_document)
 
     result = evaluate_review.batch_evaluate_from_config(str(config_path), ["marker"])
