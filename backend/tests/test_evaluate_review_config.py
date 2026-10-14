@@ -54,6 +54,12 @@ def test_annotation_classifier_prioritizes_chinese_typo_page_and_address_cases()
     assert classify_human_annotation('确认下吧，是否城南大道', '越南大道', '') == (
         '地址字段确认', 'ai_assisted', 'AI-ADDR-001'
     )
+    assert classify_human_annotation('冒号有问题', '示例 下: 设基', '参数设置示例 操作步骤如下: 1.') == (
+        '标点符号', 'deterministic', 'DET-PUNCT-001'
+    )
+    assert classify_human_annotation('实用工具', '【工具】', '点击 > 【维护】 > 【工具】') == (
+        '术语一致性', 'structural_consistency', 'STRUCT-TERM-001'
+    )
 
 
 def test_evaluate_against_annotations_matches_page_address_and_check_rules():
@@ -103,6 +109,23 @@ def test_evaluate_against_annotations_reports_strict_and_loose_matches_separatel
     assert result['match_rate'] == 1.0
     assert result['strict_match_rate'] == 0.0
     assert result['strict_misses'][0]['expected_rule'] == 'STRUCT-LAYOUT-001'
+
+
+def test_evaluate_against_annotations_prefers_text_overlap_over_rule_family():
+    annotations = [
+        HumanAnnotation('doc.pdf', '126', 'Square', 'Tina', '冒号有问题', '示例 下: 设基', '参数设置示例 操作步骤如下:', '步骤结构', 'structural_consistency', 'STRUCT-STEP-001'),
+        HumanAnnotation('doc.pdf', '185', 'Square', 'Tina', '操作步骤如下：', '义标签序 操作如下： 在标签序', '自定义标签序列界面 操作如下： 1. 在标签序列列表中选择【其他】。', '步骤结构', 'structural_consistency', 'STRUCT-STEP-001'),
+    ]
+    issues = [
+        {'rule': 'CYY-CN-STEP-004', 'category': '步骤结构', 'original_text': '操作如下：', 'suggestion': '操作步骤如下：', 'description': '有序列表前的主干句应使用“操作步骤如下”。'},
+    ]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    miss_pages = {item['page'] for item in result['misses']}
+    assert '126' in miss_pages
+    assert '185' not in miss_pages
+    assert result['matched'] == 1
 
 
 def test_evaluate_against_annotations_reports_precision_recall_and_f1():

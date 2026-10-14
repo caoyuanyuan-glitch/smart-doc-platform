@@ -8,7 +8,12 @@
 - precision = 平台检出的问题中真阳性的比例（误报越多越低）
 """
 
-from app.review_engine.annotation_baseline import HumanAnnotation, evaluate_against_annotations
+from app.review_engine.annotation_baseline import (
+    HumanAnnotation,
+    _issue_blob,
+    _matches_annotation_strictly,
+    evaluate_against_annotations,
+)
 
 
 def _annotation(selected_text, rule="DET-TERM-SPELL-001", category="术语拼写"):
@@ -111,3 +116,35 @@ def test_goldset_expected_rule_matches_platform_rule_id_exactly():
     assert result["recall"] == 1.0
     assert result["precision"] == 1.0
     assert result["strict_recall"] == 1.0
+
+
+def test_exact_rule_id_without_text_overlap_is_not_a_hit():
+    """规则号相同但原文与批注无 token 重叠时，不得算命中。"""
+    annotation = HumanAnnotation(
+        file="doc.pdf",
+        page="1",
+        annotation_type="批注",
+        author="reviewer",
+        comment="介词后 clean 应为 cleaning",
+        selected_text="before clean",
+        context="Before clean the instrument, power it down completely.",
+        category="语法与表达",
+        layer="deterministic",
+        expected_rule="DOC-GRAM-002",
+    )
+    issue = {
+        "id": 99,
+        "source": "rule",
+        "rule": "DOC-GRAM-002",
+        "category": "语法与表达",
+        "severity": "general",
+        "original_text": "completely unrelated cartridge parking sequence",
+        "suggestion": "unrelated suggestion",
+        "description": "unrelated description",
+        "audit_basis": "规范",
+        "context": "dummy run parking sequence on an empty deck",
+    }
+
+    assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is False
+    result = evaluate_against_annotations([issue], [annotation])
+    assert result["strict_recall"] == 0.0

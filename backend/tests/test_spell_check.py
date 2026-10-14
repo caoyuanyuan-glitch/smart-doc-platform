@@ -1,6 +1,7 @@
 from app.api import spell_check as spell_check_api
 from app.utils import spell_checker as spell_checker_utils
 from app.utils import grammar_engine
+from app.utils.article_constants import expected_article, is_vowel_sound
 
 
 class _FakeWordFrequency:
@@ -360,6 +361,41 @@ def test_spatial_omics_is_not_reported_as_misspelling():
     assert spell_checker_utils.check_spelling(
         "The spatial omics pipeline supports FASTQ input.", file_type=None
     ) == []
+
+
+def test_article_judgment_is_shared_across_review_and_spell_checker():
+    from app.api import review as review_api
+    from app.utils.article_constants import abbrev_article
+
+    tokens = ["NOTE", "NAME", "HOME", "UPS", "NOTE1", "FDA-approved"]
+    judgments = {token: expected_article(token) for token in tokens}
+    assert judgments["HOME"] is None
+    assert judgments["UPS"] == "a"
+    assert judgments["NOTE"] == "an"
+    assert judgments["NAME"] == "an"
+    assert judgments["NOTE1"] == "a"
+    assert judgments["FDA-approved"] == "an"
+    for token in tokens:
+        assert spell_checker_utils._is_vowel_sound(token) is is_vowel_sound(token)
+        if token.isupper() and token.isalpha():
+            assert abbrev_article(token) == expected_article(token)
+
+    scan_tokens = ["NOTE", "NAME", "HOME", "UPS"]
+    for token in scan_tokens:
+        expected = expected_article(token)
+        for article in ("a", "an"):
+            text = f"Use {article} {token} before starting the run."
+            spell_hits = spell_checker_utils.check_grammar_patterns(text)
+            review_hits = [
+                issue for issue in review_api._run_manual_engineering_audit(text, file_type="md")
+                if issue.get("rule") == "DOC-GRAMMAR-002"
+            ]
+            if expected is None or article == expected:
+                assert spell_hits == [], (token, article, spell_hits)
+                assert review_hits == [], (token, article, review_hits)
+            else:
+                assert spell_hits, (token, article)
+                assert review_hits, (token, article)
 
 
 def test_check_spelling_skips_omics_family_terms():

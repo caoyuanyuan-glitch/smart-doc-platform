@@ -122,3 +122,67 @@ def test_product_output_filename_is_false_positive():
     }
 
     assert rulebook_false_positive_reason(issue) == "product_output_filename"
+
+
+def test_rule_layer_figure_placeholder_is_false_positive():
+    issue = {
+        "source": "rule",
+        "rule": "CYY-CN-PLACEHOLDER-001",
+        "category": "占位符残留",
+        "severity": "serious",
+        "original_text": "XX/XX/XXXX",
+        "suggestion": "请替换为正式内容或删除该占位符",
+        "description": "文档中仍存在明显占位符残留，发布前需要替换为正式文本。",
+        "audit_basis": "CYY人工审核经验基线 - 占位符残留",
+        "confidence": 97,
+    }
+
+    assert rulebook_false_positive_reason(issue) == "figure_placeholder_mask"
+    assert review_pipeline.select_review_issues([issue]) == []
+
+
+def test_material_code_placeholder_is_kept():
+    issue = {
+        "source": "rule",
+        "rule": "CYY-CN-MATERIAL-001",
+        "category": "物料编码",
+        "severity": "serious",
+        "original_text": "00XXXX-00",
+        "suggestion": "请申请并替换为正式物料编码",
+        "description": "文档中仍存在 00XXXX 类物料编码占位符，发布前需要替换为正式编号。",
+        "audit_basis": "CYY人工审核经验基线 - 物料编码占位",
+        "confidence": 96,
+    }
+
+    assert rulebook_false_positive_reason(issue) is None
+
+
+def test_pdf_trademark_text_layer_is_false_positive():
+    issues = [
+        {
+            "source": "rule",
+            "rule": "DOC-TM-001",
+            "category": "商标格式",
+            "severity": "general",
+            "original_text": "DNBSEQTM",
+            "suggestion": "DNBSEQ™",
+            "description": "DNBSEQ 商标标识应使用 ™ 符号并保持格式一致，避免写成普通 TM 文本。",
+            "audit_basis": "说明书发布前自检 Checklist - 商标标识一致性",
+            "confidence": 93,
+        },
+        {
+            "source": "ai",
+            "rule": "商标需列明且为上标格式，商标归属对应正确",
+            "category": "法规合规",
+            "severity": "serious",
+            "original_text": "® 是微软公司在美国和/ 或其他国家（地区）的商标或注册商标。",
+            "suggestion": "商标声明应完整、正确对应各商标持有者，且上标格式正确",
+            "description": "",
+            "audit_basis": "说明书发布前自检Checklist第5条：文中出现的商标需列明，且为上标格式",
+            "confidence": 90,
+        },
+    ]
+
+    assert rulebook_false_positive_reason(issues[0]) == "pdf_trademark_text_layer"
+    assert rulebook_false_positive_reason(issues[1]) == "pdf_trademark_text_layer"
+    assert review_pipeline.select_review_issues(issues) == []

@@ -37,10 +37,53 @@ def _merge_pdf_paragraph_lines(text: str) -> str:
             if len(line.split()) <= 6 and re.match(r'^[A-Z][A-Za-z0-9 /&()_\-]{0,48}$', line):
                 current += '\n' + line
                 continue
-            current += ' ' + line
+            current += _paragraph_join_separator(current, line) + line
         merged.append(current)
 
     return '\n\n'.join(merged)
+
+
+_CJK_TAIL_RE = re.compile(r'[\u3400-\u9fff]$')
+_CJK_HEAD_RE = re.compile(r'^[\u3400-\u9fff]')
+
+
+def _boundary_repeat_length(previous: str, next_line: str, max_unit: int = 8) -> int:
+    """返回相邻两行在接缝处直接重复片段的最长长度（X 至少 2 个字符）。"""
+    limit = min(len(previous), len(next_line), max_unit)
+    for size in range(limit, 1, -1):
+        if previous[-size:] == next_line[:size]:
+            return size
+    return 0
+
+
+def _has_trailing_doubling(text: str, max_unit: int = 8) -> bool:
+    """判断文本结尾是否为「X+X」形式的重复（X 至少 2 个字符）。"""
+    length = len(text)
+    for size in range(2, min(max_unit, length // 2) + 1):
+        if text[-size:] == text[-2 * size:-size]:
+            return True
+    return False
+
+
+def _paragraph_join_separator(previous: str, next_line: str) -> str:
+    """拼接 PDF 折行时，中文与中文之间不加空格（中文换行处不产生空格）。
+
+    英文/数字折行需要空格分隔，中文折行若补空格会把「再通\\n过ZLIMS」变成
+    「再通 过ZLIMS」，在审核里表现为「中文文字间多余空格」的伪影。
+
+    若去掉空格会让接缝处拼出重复片段（如表格相邻单元格「宿主判定 / 宿主判定」或
+    「状态/空闲/状态/空闲」），说明这些是彼此独立的条目而非同一句的折行，此时保留
+    换行，避免生成「宿主判定宿主判定」「状态空闲状态空闲」这类重复内容伪影。
+    """
+    if not previous or not next_line:
+        return ' '
+    if _CJK_TAIL_RE.search(previous) and _CJK_HEAD_RE.match(next_line):
+        if _boundary_repeat_length(previous, next_line) >= 2:
+            return '\n'
+        if _has_trailing_doubling(previous + next_line):
+            return '\n'
+        return ''
+    return ' '
 
 
 def _normalize_pdf_extraction_artifacts(text: str) -> str:
@@ -101,7 +144,8 @@ def _remove_repeated_page_noise(page_texts: list[str]) -> list[str]:
 def clean_pdf_text(text: str) -> str:
     text = str(text or '')
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    text = text.replace('\f', '\n\f\n')
+    if '\f' in text:
+        return '\f'.join(clean_pdf_text(page) for page in text.split('\f'))
     text = re.sub(r'(?<=\n)\s*y(?=[A-Za-z])', ' ', text)
     text = re.sub(r'(?<=[A-Za-z])\s*-\s*\n\s*(?=[A-Za-z])', '', text)
     text = re.sub(r'[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]', '', text)
@@ -109,10 +153,54 @@ def clean_pdf_text(text: str) -> str:
     text = re.sub(r'\.{4,}', ' ', text)
     text = '\n'.join(line for line in text.splitlines() if not _is_toc_dot_line(line))
     text = _merge_pdf_paragraph_lines(text)
-    text = re.sub(r'\n*\f\n*', '\f', text)
     text = re.sub(r'[ \t]{2,}', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+_TERMINAL_PUNCT_RE = re.compile(r'[。！？；：!?;:…]["\'）)】》]*\s*$')
+
+
+def _should_soft_join(prev: TextBlock, nxt: TextBlock, page_width: float) -> bool:
+    """判断相邻两个正文块是否应视为同一行折行的续写。
+
+    PDF 抽取有时会把一行文字拆成两个块（如「…所设定的配置」+「信息治理…」）。若
+    用空行分隔，审核会把段落间隔误读成「中文文字间多余空格」。仅当两块都是单行正文、
+    上一块不以句末标点结尾、上一块已排到页面右侧、且下一块在同一行内缩进续写时才视为
+    续行，避免误合并目录条目、表格行、流程图节点或独立段落。
+    """
+    if prev.block_type != 'body' or nxt.block_type != 'body':
+        return False
+    if prev.page_num != nxt.page_num:
+        return False
+    if '\n' in (prev.text or '') or '\n' in (nxt.text or ''):
+        return False
+    if _TERMINAL_PUNCT_RE.search(prev.text or ''):
+        return False
+    try:
+        px0, py0, px1, py1 = prev.bbox
+        nx0, ny0, nx1, _ = nxt.bbox
+    except (TypeError, ValueError):
+        return False
+    if page_width and px1 < 0.82 * page_width:
+        return False
+    if not (py0 < ny0 <= py1):
+        return False
+    if not (0.5 < (nx0 - px0) < 60):
+        return False
+    if nx0 > px1:
+        return False
+    return True
+
+
+def _join_page_blocks(blocks: list, page_width: float = 0.0) -> str:
+    ordered = sorted(blocks, key=_block_sort_key)
+    parts = []
+    for index, block in enumerate(ordered):
+        if index:
+            parts.append('\n' if _should_soft_join(ordered[index - 1], block, page_width) else '\n\n')
+        parts.append(block.text)
+    return ''.join(parts)
 
 
 def _extract_pdf_block_text(block: dict) -> str:
@@ -247,7 +335,7 @@ def extract_pdf(file_path):
                 page_blocks.append(text_block)
 
             page_blocks = _merge_table_like_blocks(page_blocks)
-            page_text = "\n\n".join(block.text for block in sorted(page_blocks, key=_block_sort_key))
+            page_text = _join_page_blocks(page_blocks, page.rect.width)
             blocks.extend(page_blocks)
             page_texts.append(page_text)
 

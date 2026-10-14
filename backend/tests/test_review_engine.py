@@ -248,12 +248,26 @@ def test_audit_max_tokens_scales_with_content():
 
 
 def test_extract_json_marks_truncated():
-    """截断 JSON 应打 _degraded 标记而非静默返回空。"""
-    from app.utils.ai_client import AIClient
+    """截断且没有任何已闭合 issue 时，打 _degraded 并保持 issues 为空。"""
     broken = '{"issues": [{"category": "Grammar", "original_text": "abc", "suggestion": "abd", "confidence": 80'
     result = AIClient._extract_json(broken, {"issues": []})
     assert result.get("_degraded") is True
     assert result.get("_degraded_reason") == "json_truncated"
+    assert result.get("issues") == []
+
+
+def test_extract_json_salvages_closed_issues():
+    """截断 JSON 应回收已经闭合的 issue，并标记 json_truncated_salvaged。"""
+    broken = (
+        '{"issues": ['
+        '{"category": "Grammar", "original_text": "abc", "suggestion": "abd", "confidence": 80}, '
+        '{"category": "Terminology", "original_text": "foo", "suggestion": "bar"'
+    )
+    result = AIClient._extract_json(broken, {"issues": []})
+    assert result.get("_degraded") is True
+    assert result.get("_degraded_reason") == "json_truncated_salvaged"
+    assert len(result["issues"]) == 1
+    assert result["issues"][0]["original_text"] == "abc"
 
 
 def test_trademark_reading_order_artifact_filtered():
@@ -280,6 +294,10 @@ def test_broken_word_extraction_artifact_filtered():
     # 正常英文短语里的短词不应误判
     assert pipeline.is_broken_word_extraction_artifact("Turn off the tap now") is False
     assert pipeline.is_broken_word_extraction_artifact("Power switch and") is False
+    assert pipeline.is_broken_word_extraction_artifact("air gap set up a b") is False
+    assert pipeline.is_broken_word_extraction_artifact("set up a p a c k") is False
+    assert pipeline.is_broken_word_extraction_artifact("data a vailable") is False
+    assert pipeline.is_broken_word_extraction_artifact("a b c d e") is False
 
 
 def test_extraction_artifact_ai_issue_is_noise():
@@ -351,6 +369,107 @@ def test_figure_illustration_word_order_ai_issue_is_noise():
     assert select_review_issues([issue]) == []
 
 
+def test_latin_cjk_boundary_space_suggestion_is_noise():
+    # 数字/英文与中文之间的排版空格是中英混排常见风格，不是「中文文字间多余空格」
+    assert pipeline.is_cjk_latin_boundary_space_style("第105 页", "第105页") is True
+    assert pipeline.is_cjk_latin_boundary_space_style("V5.4 及以上", "V5.4及以上") is True
+    assert pipeline.is_cjk_latin_boundary_space_style("AMR 序列", "AMR序列") is True
+    # 反向（补空格）同样是风格问题，收敛到一致性规则，不在单点上报
+    assert pipeline.is_cjk_latin_boundary_space_style("设置Barcode", "设置 Barcode") is True
+    assert pipeline.is_cjk_latin_boundary_space_style("大于500 MB", "大于 500 MB") is True
+    # 中文与中文之间的词内空格是真实问题，保留
+    assert pipeline.is_cjk_latin_boundary_space_style("满 足要求", "满足要求") is False
+    # 英文断词、数字与单位缺空格（非中文-非中文）是真实问题，保留
+    assert pipeline.is_cjk_latin_boundary_space_style("High-throu ghput", "High-throughput") is False
+    assert pipeline.is_cjk_latin_boundary_space_style("5mL", "5 mL") is False
+
+    issue = {
+        "source": "ai",
+        "rule": "中文文字间不能有多余空格",
+        "category": "术语一致性",
+        "severity": "general",
+        "original_text": "第105 页",
+        "context": "参考第105 页“表格导入”步骤3。",
+        "suggestion": "第105页",
+        "description": "",
+        "confidence": 90,
+    }
+    assert pipeline.is_noise(issue) is True
+    assert select_review_issues([issue]) == []
+
+    add_space_issue = {
+        "source": "ai",
+        "rule": "中英文之间应保留空格",
+        "category": "术语一致性",
+        "severity": "general",
+        "original_text": "执行如下步骤设置Barcode",
+        "context": "执行如下步骤设置Barcode。",
+        "suggestion": "执行如下步骤设置 Barcode",
+        "description": "",
+        "confidence": 80,
+    }
+    assert pipeline.is_noise(add_space_issue) is True
+    assert select_review_issues([add_space_issue]) == []
+
+
+def test_ui_object_insertion_without_evidence_is_noise():
+    # 原文图标字形未进入文本层，AI 报「图标缺失」，唯一改动只是插入「对应图标」
+    assert pipeline.is_ui_object_insertion_without_evidence(
+        "点击 找到为该分析流程创建的所有规则。",
+        "点击对应图标找到为该分析流程创建的所有规则。",
+    ) is True
+    assert pipeline.is_ui_object_insertion_without_evidence(
+        "如需删除已录入的样本信息，在待删除样本信息所在记录行，点击 。",
+        "如需删除已录入的样本信息，在待删除样本信息所在记录行，点击对应图标。",
+    ) is True
+    # AI 凭空补一个【查询】之类的按钮名，同样是无证据上报
+    assert pipeline.is_ui_object_insertion_without_evidence(
+        "点击 定位到目标批次。",
+        "点击【查询】定位到目标批次。",
+    ) is True
+    assert pipeline.is_ui_object_insertion_without_evidence(
+        "点击顶部右侧 ，进入消息中心",
+        "点击顶部右侧【消息】图标，进入消息中心",
+    ) is True
+    # 原文已出现图标名、或并非仅插入 UI 对象名词时，不判为无证据
+    assert pipeline.is_ui_object_insertion_without_evidence(
+        "点击【保存】按钮。",
+        "点击【保存】。",
+    ) is False
+
+    issue = {
+        "source": "ai",
+        "rule": "图标缺失导致操作对象不明确",
+        "category": "格式排版",
+        "severity": "general",
+        "original_text": "点击 ，定位到待查看分析任务所在记录行",
+        "context": "点击 ，定位到待查看分析任务所在记录行",
+        "suggestion": "点击对应图标，定位到待查看分析任务所在记录行",
+        "description": "",
+        "confidence": 70,
+    }
+    assert pipeline.is_noise(issue) is True
+    assert select_review_issues([issue]) == []
+
+
+def test_broken_glyph_extraction_ai_issue_is_noise():
+    # PDF 符号字体的项目符号/图标字形在文本层被解析成 U+FFFD，AI 据此误报格式问题
+    issue = {
+        "source": "ai",
+        "rule": "项目符号应为标准无序列表符号",
+        "category": "格式排版",
+        "severity": "suggestion",
+        "original_text": "\ufffd如需录入多个样本信息",
+        "context": "\ufffd如需录入多个样本信息",
+        "suggestion": "将项目符号统一为标准无序列表符号",
+        "description": "",
+        "confidence": 80,
+    }
+    assert pipeline.is_broken_glyph_extraction_artifact(issue["original_text"]) is True
+    assert pipeline.is_noise(issue) is True
+    assert select_review_issues([issue]) == []
+
+
 _TOC_CONTENT = "\n".join([
     "Contents",
     "Safety 1",
@@ -405,3 +524,19 @@ def test_extract_chapter_ignores_page_range_table_cell():
     ])
     position = content.index("the the")
     assert review_api.extract_chapter(content, position) == "Device"
+
+
+def test_intervening_section_heading_ignores_operation_body_lines():
+    body_lines = [
+        "Insert the cartridge into slot A and close it",
+        "Press the Open button to release the cover",
+        "Please refer to the table below for insert size",
+        "Remove the sealing film from the reagent plate",
+        "Step 3 Load the flow cell and start the run",
+    ]
+    for line in body_lines:
+        assert review_api._has_intervening_section_heading(line) is False
+
+    assert review_api._has_intervening_section_heading("Safety Instructions") is True
+    assert review_api._has_intervening_section_heading("WARNING") is True
+    assert review_api._has_intervening_section_heading("警告") is True

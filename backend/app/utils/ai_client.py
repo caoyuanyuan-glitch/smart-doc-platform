@@ -1035,6 +1035,57 @@ class AIClient:
         return None
 
     @staticmethod
+    def _salvage_truncated_audit_json(text):
+        stripped = _strip_code_fence(text) if text else ""
+        match = re.search(r'"issues"\s*:\s*\[', stripped)
+        if not match:
+            return []
+        cursor = match.end()
+        length = len(stripped)
+        issues = []
+        while cursor < length:
+            while cursor < length and stripped[cursor] in " \t\r\n,":
+                cursor += 1
+            if cursor >= length or stripped[cursor] in "]}":
+                break
+            if stripped[cursor] != "{":
+                break
+            depth = 0
+            in_string = False
+            escape = False
+            end = cursor
+            complete = False
+            while end < length:
+                char = stripped[end]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == '"':
+                        in_string = False
+                elif char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            parsed = json.loads(stripped[cursor:end + 1])
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            issues.append(parsed)
+                        cursor = end + 1
+                        complete = True
+                        break
+                end += 1
+            if not complete:
+                break
+        return issues
+
+    @staticmethod
     def _extract_json(result, default):
         if not result:
             return default
@@ -1047,10 +1098,16 @@ class AIClient:
                     return json.loads(m.group(0))
             except Exception:
                 pass
-        # 解析失败：检查是否为截断（无闭合括号），并打标记供调用方感知降级
         stripped = _strip_code_fence(result) if result else ""
         truncated = bool(stripped) and stripped.count("{") > stripped.count("}")
         if truncated:
+            salvaged = AIClient._salvage_truncated_audit_json(stripped)
+            if salvaged:
+                payload = dict(default) if isinstance(default, dict) else {"issues": []}
+                payload["issues"] = salvaged
+                payload["_degraded"] = True
+                payload["_degraded_reason"] = "json_truncated_salvaged"
+                return payload
             try:
                 default["_degraded"] = True
                 default["_degraded_reason"] = "json_truncated"
@@ -1363,28 +1420,53 @@ class AIClient:
                 issue["severity"] = "general"
         return merged
 
+    def _invoke_provider_audit(self, provider_key, messages, max_tokens, request_label=None, review_id=None):
+        if provider_key == "qwen":
+            return self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "kimi":
+            return self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "deepseek":
+            return self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "arkclaw":
+            return self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "proxy":
+            return self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        return None
+
     def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
         provider_key = str(provider_key or "").strip().lower()
         max_tokens = _audit_max_tokens(len(str(content or "")))
-        if provider_key == "qwen":
-            result = self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "kimi":
-            result = self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "deepseek":
-            result = self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "arkclaw":
-            result = self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "proxy":
-            result = self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        else:
-            result = None
+        result = self._invoke_provider_audit(provider_key, messages, max_tokens, request_label=request_label, review_id=review_id)
 
         if not result:
             return []
 
         data = self._extract_json(result, {"issues": []})
         if data.get("_degraded"):
-            print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={len(str(result or ''))})")
+            salvaged_count = len(data.get("issues") or [])
+            raw_len = len(str(result or ""))
+            if salvaged_count:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断, 回收 {salvaged_count} 个已闭合问题 (len={raw_len})")
+            else:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={raw_len})")
+                compact_tokens = min(1024, max_tokens)
+                if compact_tokens:
+                    compact_messages = list(messages) + [{
+                        "role": "user",
+                        "content": '只返回完整 JSON：{"issues":[...]}，最多 8 条最高优先级问题，issues 数组必须闭合。',
+                    }]
+                    retry_result = self._invoke_provider_audit(
+                        provider_key,
+                        compact_messages,
+                        compact_tokens,
+                        request_label=request_label,
+                        review_id=review_id,
+                    )
+                    if retry_result:
+                        retry_data = self._extract_json(retry_result, {"issues": []})
+                        if retry_data.get("issues"):
+                            data = retry_data
+                            print(f"[AI] {provider_key} 截断后紧凑重试回收 {len(retry_data.get('issues') or [])} 个问题")
             data.pop("_degraded", None)
             data.pop("_degraded_reason", None)
         issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")

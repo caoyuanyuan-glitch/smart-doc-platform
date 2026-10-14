@@ -10,7 +10,6 @@ import math
 import re
 import os
 import unicodedata
-from functools import lru_cache
 try:
     from app.services.chunker import create_smart_chunker, CrossChapterConsistencyChecker, AuditResultMerger
 except ModuleNotFoundError as exc:
@@ -58,6 +57,7 @@ from app.review_engine.validation import (
     ai_suggestion_changes_protected_meaning as engine_ai_suggestion_changes_protected_meaning,
     ai_suggestion_violates_number_unit_spacing as engine_ai_suggestion_violates_number_unit_spacing,
     filter_ai_issues_without_document_evidence as engine_filter_ai_issues_without_document_evidence,
+    has_substantive_suggestion as engine_has_substantive_suggestion,
     is_duplicate_punctuation_reduction as engine_is_duplicate_punctuation_reduction,
     normalize_noop_compare_text as engine_normalize_noop_compare_text,
     validate_ai_issue_candidate as engine_validate_ai_issue_candidate,
@@ -314,6 +314,7 @@ def _is_snippet_scope_issue(issue):
     if re.search(
         r"安全合规|交叉引用|主题结构|目录结构|文件名审核|版权年份|copyright.?year|"
         r"发布前自检|CHECKLIST-|CYY-CN-PAGE-|CYY-CN-LAYOUT-|CYY-CN-REVISION-|"
+        r"CYY-CN-ROHS-|CYY-CN-INDEX-|"
         r"DOC-REV-|STRUCT-|SAFE-|XREF-|列宽|字号|图标大小|字体/版式",
         blob,
         re.IGNORECASE,
@@ -1699,6 +1700,8 @@ def validate_suggestion(original: str, suggestion: str) -> bool:
             return True
         if _is_duplicate_punctuation_reduction(original_text, normalized_suggestion):
             return True
+        if engine_has_substantive_suggestion(original_text, normalized_suggestion):
+            return True
     return _normalize_noop_compare_text(original) != _normalize_noop_compare_text(normalized_suggestion)
 
 
@@ -2152,6 +2155,8 @@ def _is_noop_position_or_same_text_issue(issue):
     if _is_number_unit_space_correction(original, suggestion):
         return False
     if _is_duplicate_punctuation_reduction(original, suggestion):
+        return False
+    if engine_has_substantive_suggestion(original, suggestion):
         return False
     if original == suggestion or _normalize_noop_compare_text(original) == _normalize_noop_compare_text(suggestion):
         return True
@@ -7633,12 +7638,13 @@ def _find_named_section_start(normalized, section_name):
     name = re.sub(r'\s+', '', str(section_name or ''))
     if not name:
         return None
-    direct = re.search(re.escape(str(section_name or '').strip()), normalized)
-    if direct:
-        return direct.start()
     pattern = r'(?m)^[ \t]*' + r'\s*'.join(re.escape(char) for char in name) + r'[ \t]*$'
-    match = re.search(pattern, normalized)
-    return match.start() if match else None
+    matches = list(re.finditer(pattern, normalized))
+    if len(matches) == 1:
+        return matches[0].start()
+    # 标题目录/同名章节会让标题在正文中多次出现，无法确定唯一锚点，
+    # 此时放弃页码判断，避免取到错误章节造成误报。
+    return None
 
 
 # 已知的 UI 用词同义后缀（同一动作的两种界面写法），用于界面按钮文案一致性检查
@@ -7696,6 +7702,183 @@ def _detect_page_number_sequence_issues(content):
         last_page_number = page_number
 
     return issues
+
+
+_ROHS_STRUCTURE_PARTS = (
+    ("主体架构", "主体架构"),
+    ("操作系统主机", "操作系统主机"),
+    ("XYZ-平台", "XYZ-平台"),
+    ("XYZ平台", "XYZ-平台"),
+    ("试剂仓", "试剂仓"),
+)
+_INDEX_ENTRY_RE = re.compile(
+    r"([A-Za-z\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff/%\-()]{1,40})[ \t]+(\d{1,3}(?:\s*[,，]\s*\d{1,3})*)"
+)
+
+
+def _compact_cn_text(text):
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _find_last_standalone_heading(text, heading):
+    pattern = rf"(?m)^[ \t]*{re.escape(heading)}[ \t]*$"
+    matches = list(re.finditer(pattern, text))
+    return matches[-1] if matches else None
+
+
+def _heading_window(text, match, max_chars=3500):
+    start = match.start()
+    rest = text[match.end():match.end() + max_chars]
+    next_heading = re.search(
+        r"(?m)^[ \t]*(?:第[一二三四五六七八九十百千0-9]+[章节篇部]|附录\s*[A-Z0-9一二三四五六七八九十]*|术语表)[ \t]*$",
+        rest,
+    )
+    end = match.end() + (next_heading.start() if next_heading else len(rest))
+    return text[start:end], start
+
+
+def _detect_rohs_structure_component_gaps(normalized):
+    structure_match = _find_last_standalone_heading(normalized, "结构组成")
+    rohs_match = None
+    for title in ("产品中有害物质的名称及含有信息表", "产品中有害物质的名称及含有物质表"):
+        rohs_match = _find_last_standalone_heading(normalized, title)
+        if rohs_match:
+            break
+    if structure_match is None or rohs_match is None:
+        return []
+    structure_window, _structure_start = _heading_window(normalized, structure_match)
+    rohs_window, rohs_start = _heading_window(normalized, rohs_match)
+    structure_compact = _compact_cn_text(structure_window)
+    rohs_compact = _compact_cn_text(rohs_window)
+    missing = []
+    for needle, label in _ROHS_STRUCTURE_PARTS:
+        compact_needle = _compact_cn_text(needle)
+        if compact_needle in structure_compact and compact_needle not in rohs_compact and label not in missing:
+            missing.append(label)
+    if not missing:
+        return []
+    marker = re.search(r"部件名称", rohs_window)
+    start = rohs_start + (marker.start() if marker else 0)
+    original = "部件名称"
+    return [{
+        "start": start,
+        "end": start + len(original),
+        "original": original,
+        "missing": missing,
+    }]
+
+
+def _iter_index_entries(index_text, max_page=400):
+    seen = set()
+    for match in _INDEX_ENTRY_RE.finditer(index_text):
+        term = re.sub(r"\s+", " ", match.group(1)).strip(" /")
+        if len(term) < 2 or re.fullmatch(r"[A-Za-z]", term):
+            continue
+        if "..." in term or "…" in term:
+            continue
+        if re.search(r"表示|依据|电话|参考品|基因组", term):
+            continue
+        pages = [int(num) for num in re.findall(r"\d+", match.group(2))]
+        if not pages or any(page > max_page or page <= 0 for page in pages):
+            continue
+        if len(term) > 24 and len(pages) == 1:
+            continue
+        key = (term, pages[0])
+        if key in seen:
+            continue
+        seen.add(key)
+        yield term, pages, match.start(), match.group(0)
+
+
+def _find_alphabetic_index_start(normalized):
+    letter_lines = list(re.finditer(r"(?m)^[ \t]*[A-Z][ \t]*$", normalized))
+    if len(letter_lines) < 3:
+        return None
+    clusters = [[letter_lines[0]]]
+    for prev, current in zip(letter_lines, letter_lines[1:]):
+        if current.start() - prev.start() <= 800:
+            clusters[-1].append(current)
+        else:
+            clusters.append([current])
+    for cluster in reversed(clusters):
+        if len(cluster) >= 3:
+            return cluster[0].start()
+    return None
+
+
+def _index_term_body_pages(body, spans, term):
+    pages = set()
+    pos = 0
+    step = max(len(term), 1)
+    while True:
+        found = body.find(term, pos)
+        if found < 0:
+            break
+        printed = _printed_page_at_offset(spans, found)
+        if printed is not None:
+            pages.add(printed)
+        pos = found + step
+    return pages
+
+
+def _detect_constant_index_page_offset(raw_content, normalized):
+    heading = None
+    for match in re.finditer(r"(?m)^[ \t]*索引[ \t]*$", normalized):
+        heading = match
+    if heading is not None:
+        heading_start = heading.end()
+        index_text = normalized[heading.end():]
+    else:
+        heading_start = _find_alphabetic_index_start(normalized)
+        if heading_start is None:
+            return None
+        index_text = normalized[heading_start:]
+    entries = list(_iter_index_entries(index_text))
+    if len(entries) < 5:
+        return None
+    body = normalized[:heading_start]
+    spans = _printed_page_spans(raw_content)
+    if not spans:
+        return None
+    located = []
+    for term, pages, rel_start, raw in entries:
+        occ = _index_term_body_pages(body, spans, term)
+        if not occ:
+            continue
+        located.append((term, pages, occ, raw))
+    if len(located) < 5:
+        return None
+    offset_hits = Counter()
+    offset_samples = defaultdict(list)
+    for term, cited_pages, occ, raw in located:
+        deltas = {printed - cited for cited in cited_pages for printed in occ}
+        for delta in deltas:
+            offset_hits[delta] += 1
+            if len(offset_samples[delta]) < 4:
+                offset_samples[delta].append(re.sub(r"\s+", " ", raw).strip())
+    nonzero = [(delta, count) for delta, count in offset_hits.items() if abs(delta) >= 2]
+    if not nonzero:
+        return None
+    common_offset, common_count = max(nonzero, key=lambda item: (item[1], -abs(item[0])))
+    checked = len(located)
+    zero_count = offset_hits.get(0, 0)
+    if common_count < max(5, int(checked * 0.35)):
+        return None
+    if zero_count >= int(checked * 0.8) and zero_count > common_count:
+        return None
+    samples = offset_samples.get(common_offset) or []
+    original = samples[0] if samples else "索引"
+    start = heading_start + (index_text.find(samples[0]) if samples else 0)
+    if start < heading_start:
+        start = heading_start
+    return {
+        "start": start,
+        "end": start + len(original),
+        "original": original,
+        "offset": common_offset,
+        "hit_count": common_count,
+        "checked": checked,
+    }
 
 
 def _run_chinese_human_baseline_rules(content):
@@ -9041,6 +9224,10 @@ def _run_chinese_human_baseline_rules(content):
             prefix_len = len(os.path.commonprefix([left_label, right_label]))
             if prefix_len < 2:
                 continue
+            # 差异部分含拉丁字母/数字的标签多为并列枚举项（识别结果（DNA）/（RNA）、
+            # 短读长1链/2链），是带区分意义的正常命名，不是同一动作的用词不统一。
+            if re.search(r'[A-Za-z0-9]', left_label[prefix_len:] + right_label[prefix_len:]):
+                continue
             # 只报单字符差异（如“同步到/同步至”）或已知同义后缀（如“开启/启动”）的用词不统一。
             # 共享前缀但差异达 2 个字符的标签多是并列菜单项或参数字段
             # （系统设置/系统时间、测序类型/测序方案、Barcode管理/Barcode位置），
@@ -9094,6 +9281,89 @@ def _run_chinese_human_baseline_rules(content):
                 'CYY人工审核经验基线 - 步骤页码交叉引用', 'serious', 95,
             )
 
+    for match in re.finditer(r"操作如下[：:]", normalized):
+        following = normalized[match.end():match.end() + 80]
+        if re.search(r"图|所示|所述", following[:6]):
+            continue
+        if not re.search(r"^\s*1\s*[.、．)]", following):
+            continue
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            "CYY-CN-STEP-004", "步骤结构",
+            "建议改为“操作步骤如下：”",
+            "有序列表前的主干句应使用“操作步骤如下”，当前写成了“操作如下”。",
+            "CYY人工审核经验基线 - 操作步骤引导句", "general", 93,
+        )
+
+    for match in re.finditer(
+        r'([\u4e00-\u9fff][^:\n]{1,16}):(?=\s*(?:\r?\n\s*)?(?:1\s*[.、．)]|y\s))',
+        normalized,
+    ):
+        lead = match.group(1).strip()
+        if lead in {'状态', '说明', '备注', '注意'}:
+            continue
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-008', '标点符号',
+            f'建议改为“{lead}：”',
+            '中文引导语后应使用全角冒号。',
+            'CYY人工审核经验基线 - 中文引导语全角冒号', 'general', 94,
+        )
+
+    parent_children = {}
+    for match in re.finditer(
+        r'【([^】]{1,40})】\s*(?:>|，选择)\s*【([^】]{1,40})】',
+        normalized,
+    ):
+        parent = re.sub(r'\s+', '', match.group(1))
+        child = re.sub(r'\s+', '', match.group(2))
+        if not parent or not child:
+            continue
+        parent_children.setdefault(parent, []).append((match.start(2) - 1, match.end(2) + 1, child))
+    for parent, items in parent_children.items():
+        labels = {}
+        for start, end, child in items:
+            labels.setdefault(child, (start, end))
+        names = list(labels)
+        for left_index, left_label in enumerate(names):
+            for right_label in names[left_index + 1:]:
+                shorter, longer = (left_label, right_label) if len(left_label) <= len(right_label) else (right_label, left_label)
+                extra_len = len(longer) - len(shorter)
+                if not longer.endswith(shorter):
+                    continue
+                if not (2 <= len(shorter) <= 6 and 1 <= extra_len <= 4):
+                    continue
+                start, end = labels[shorter]
+                add_issue(
+                    start, end, f'【{shorter}】',
+                    'CYY-CN-UI-003', '术语一致性',
+                    f'建议将【{parent}】下的“{shorter}”统一为“{longer}”',
+                    f'同一菜单【{parent}】下同时出现【{shorter}】和【{longer}】，界面名称需要统一。',
+                    'CYY人工审核经验基线 - 同级菜单名称统一', 'general', 93,
+                )
+
+    for gap in _detect_rohs_structure_component_gaps(normalized):
+        missing = "、".join(gap["missing"])
+        add_issue(
+            gap["start"], gap["end"], gap["original"],
+            "CYY-CN-ROHS-001", "结构完整性",
+            f"请将结构组成章节中的{missing}补入有害物质表",
+            f"有害物质表与结构组成章节部件不一致，缺{missing}。",
+            "CYY人工审核经验基线 - RoHS表与结构组成对照", "serious", 94,
+        )
+
+    index_shift = _detect_constant_index_page_offset(raw_content, normalized)
+    if index_shift:
+        offset = index_shift["offset"]
+        direction = f"+{offset}" if offset > 0 else str(offset)
+        add_issue(
+            index_shift["start"], index_shift["end"], index_shift["original"],
+            "CYY-CN-INDEX-001", "索引一致性",
+            f"请按正文实际页码重生成索引；当前索引页码整体偏移 {direction} 页",
+            f"{index_shift['checked']} 条可核对索引中有 {index_shift['hit_count']} 条相对正文位置恒定偏移 {direction} 页。",
+            "CYY人工审核经验基线 - 索引页码整体偏移", "serious", 95,
+        )
+
     return issues
 
 
@@ -9125,8 +9395,15 @@ _SAFETY_LABEL_RE = re.compile(r'(?im)^[ \t]*(WARNING|CAUTION|DANGER)\b')
 # PDF 文本层会把安全标题下的条目拆成多行，风险词常与标题相隔数百字符，
 # 因此回溯范围要覆盖整个安全段落，不能只用风险词附近的小窗口
 _SAFETY_HAZARD_LOOKBACK = 800
-# 段落标题形态：大写开头、无句末标点的短行
-_SAFETY_SECTION_HEADING_RE = re.compile(r'^[A-Z][A-Za-z0-9 ,/&\-]{2,58}$')
+_HEADING_FUNCTION_WORD_RE = (
+    r'(?:Insert|Press|Please|Remove|Close|Open|Set|Turn|Do|Keep|Avoid|Ensure'
+    r'|Make|Use|Check|Read|Refer|See|After|Before|When|If|To|Connect|Attach|Add'
+    r'|Select|Specify|Perform|Allow|Apply|Store|Place|Position|Repeat|Wait|Step)\b'
+)
+# 段落标题形态：大写开头、无句末标点的短行；排除操作动词/功能词开头的正文
+_SAFETY_SECTION_HEADING_RE = re.compile(
+    rf'^(?!{_HEADING_FUNCTION_WORD_RE})[A-Z][A-Za-z0-9 ,/&\-]{{2,58}}$'
+)
 
 
 def _hazard_has_enclosing_safety_label(normalized, position):
@@ -9141,7 +9418,7 @@ def _hazard_has_enclosing_safety_label(normalized, position):
     # 标题与风险词之间出现新段落标题，说明已跨章节，不再视为同一安全标注
     for line in window[label.end():].split('\n')[:-1]:
         stripped = line.strip()
-        if stripped and _SAFETY_SECTION_HEADING_RE.match(stripped):
+        if stripped and _line_looks_like_section_heading(stripped):
             return False
     return True
 
@@ -9866,14 +10143,35 @@ _SYMBOL_LEGEND_VERB_RE = re.compile(
 )
 
 
-_SECTION_HEADING_RE = re.compile(r'^[A-Z][^.!?:;]{2,59}$')
+_SECTION_HEADING_RE = re.compile(
+    rf'^(?!{_HEADING_FUNCTION_WORD_RE})[A-Z][^.!?;:]{{2,59}}$'
+)
 
 
-def _has_intervening_section_heading(text):
-    """两段步骤之间是否夹着新章节标题（大写开头、无句末标点的短行）。"""
+_CN_SECTION_HEADING_RE = re.compile(
+    r'^(?:第[0-9一二三四五六七八九十百]+[章节篇]|警告|注意|小心|提示|危险|安全说明)'
+)
+
+
+def _line_looks_like_section_heading(stripped, toc_titles=None):
+    if not stripped:
+        return False
+    normalized = _normalize_toc_title(stripped)
+    if toc_titles and normalized in toc_titles:
+        return True
+    if toc_titles:
+        return False
+    if _CN_SECTION_HEADING_RE.match(stripped):
+        return True
+    return bool(_SECTION_HEADING_RE.match(stripped) or _SAFETY_SECTION_HEADING_RE.match(stripped))
+
+
+def _has_intervening_section_heading(text, document_content=None):
+    """两段步骤之间是否夹着新章节标题。优先用 TOC，无 TOC 时才退化到正则兜底。"""
+    toc_titles = _toc_heading_titles(document_content) if document_content else frozenset()
     for line in str(text or '').splitlines():
         stripped = line.strip()
-        if stripped and _SECTION_HEADING_RE.match(stripped):
+        if _line_looks_like_section_heading(stripped, toc_titles):
             return True
     return False
 
@@ -10196,16 +10494,7 @@ def _run_manual_engineering_audit(content, file_type=None):
         'from', 'as', 'is', 'are', 'was', 'be', 'that', 'this', 'the', 'if',
         'ensure', 'not', 'no', 'all', 'any',
     }
-    _ABBR_VOWEL_SOUND = set('AEFHILMNORSX')  # 字母名以元音音开头（F 读 /ɛf/ 等）
-    _WORDLIKE_CAPS = {'home', 'end', 'start', 'next', 'back', 'stop', 'pause', 'run',
-                      'save', 'open', 'close', 'fastq', 'bam', 'cram', 'sam', 'tab'}
-
-    def _abbrev_article(word):
-        if len(word) < 2 or not word.isupper() or not word.isalpha():
-            return None
-        if word.lower() in _WORDLIKE_CAPS:
-            return None
-        return 'an' if word[0] in _ABBR_VOWEL_SOUND else 'a'
+    from app.utils.article_constants import WORDLIKE_ALL_CAPS, abbrev_article as _abbrev_article
 
     for match in re.finditer(r'\b(a|an)[ \t]{1,3}([A-Za-z]+)', content, re.IGNORECASE):
         art, word = match.group(1).lower(), match.group(2)
@@ -10257,7 +10546,7 @@ def _run_manual_engineering_audit(content, file_type=None):
                 )
             continue
         # all-caps 可读词（HOME/END 等 UI 词）不按首字母逐字判定冠词，避免 an HOME 误报。
-        if word.isupper() and word.isalpha() and wl in _WORDLIKE_CAPS:
+        if word.isupper() and word.isalpha() and wl in WORDLIKE_ALL_CAPS:
             continue
         first = wl[0]
         if art == 'a' and first in 'aeiou':
@@ -10495,7 +10784,7 @@ def _run_manual_engineering_audit(content, file_type=None):
         between = content[first.end():second.start()]
         # 手册中每道流程都会重新引导步骤；中间夹着新章节标题说明是两道独立流程，
         # 只有引导语之间没有标题分隔时才是编辑残留
-        if second.start() - first.start() < 500 and not _has_intervening_section_heading(between):
+        if second.start() - first.start() < 500 and not _has_intervening_section_heading(between, content):
             add_issue(
                 second.start(),
                 second.end(),
@@ -11559,12 +11848,19 @@ def _normalize_toc_title(text):
     return re.sub(r'[^a-z0-9]+', ' ', str(text or '').lower()).strip()
 
 
-@lru_cache(maxsize=8)
+_TOC_TITLE_CACHE = {}
+_TOC_TITLE_CACHE_LIMIT = 32
+
+
 def _toc_heading_titles(content):
     """Collect the chapter/section titles listed in the front-matter table of contents."""
-    normalized = str(content or '').replace('\f', '\n')
+    prefix = str(content or '').replace('\f', '\n')[:16000]
+    digest = hashlib.sha1(prefix.encode('utf-8', 'ignore')).hexdigest()
+    cached = _TOC_TITLE_CACHE.get(digest)
+    if cached is not None:
+        return cached
     titles = set()
-    for line in normalized[:16000].split('\n'):
+    for line in prefix.split('\n'):
         match = re.match(r'^([A-Z(][^\n]{2,70}?)\s+(\d{1,3})$', line.strip())
         if not match:
             continue
@@ -11574,7 +11870,11 @@ def _toc_heading_titles(content):
         key = _normalize_toc_title(match.group(1))
         if len(key) >= 3:
             titles.add(key)
-    return titles if len(titles) >= 8 else set()
+    result = frozenset(titles) if len(titles) >= 8 else frozenset()
+    if len(_TOC_TITLE_CACHE) >= _TOC_TITLE_CACHE_LIMIT:
+        _TOC_TITLE_CACHE.pop(next(iter(_TOC_TITLE_CACHE)))
+    _TOC_TITLE_CACHE[digest] = result
+    return result
 
 
 def _chapter_heading_candidate(lines, index, toc_titles):
@@ -12580,7 +12880,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                             }
                             raw_page_issues = [
                                 issue for issue in _run_chinese_human_baseline_rules(raw_pdf_content)
-                                if str(issue.get('rule', '') or '').startswith('CYY-CN-PAGE-')
+                                if str(issue.get('rule', '') or '').startswith(('CYY-CN-PAGE-', 'CYY-CN-INDEX-'))
                             ]
                             for issue in raw_page_issues:
                                 key = (issue.get('rule'), _normalize_search_text(issue.get('original_text', '') or ''))

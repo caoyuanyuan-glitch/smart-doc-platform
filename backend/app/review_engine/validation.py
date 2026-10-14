@@ -88,7 +88,34 @@ def has_substantive_suggestion(original: Any, suggestion: Any) -> bool:
         return True
     if is_duplicate_punctuation_reduction(original, suggestion):
         return True
+    if is_punctuation_shape_correction(original, suggestion):
+        return True
     return bool(normalize_noop_compare_text(original) != normalize_noop_compare_text(suggestion))
+
+
+_PUNCT_SHAPE_TO_FULLWIDTH = str.maketrans({
+    ":": "：",
+    ",": "，",
+    ";": "；",
+    "!": "！",
+    "?": "？",
+    ".": "。",
+    "(": "（",
+    ")": "）",
+})
+
+
+def is_punctuation_shape_correction(original: Any, suggestion: Any) -> bool:
+    """半角/全角标点替换属于实质性修复（如 '如下:' -> '如下：'）。
+
+    noop 比较会剥掉所有标点，导致半角冒号与全角冒号归一化后相同而被误判为
+    no-op；此处显式判定去掉空白后仅标点形态不同来放行此类修复。
+    """
+    a = re.sub(r"\s+", "", str(original or ""))
+    b = re.sub(r"\s+", "", str(suggestion or "").strip('"“”'))
+    if not a or not b or a == b:
+        return False
+    return a.translate(_PUNCT_SHAPE_TO_FULLWIDTH) == b or b.translate(_PUNCT_SHAPE_TO_FULLWIDTH) == a
 
 
 def is_duplicate_punctuation_reduction(original: Any, suggestion: Any) -> bool:
