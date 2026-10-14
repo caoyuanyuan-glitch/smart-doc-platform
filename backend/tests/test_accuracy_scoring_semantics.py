@@ -107,6 +107,36 @@ def test_eighty_eight_boundary_is_meaningful():
     assert bad["precision"] < 0.88
 
 
+def test_strict_recall_is_injective():
+    """一条平台问题不得同时命中多条人工批注（strict 与 recall 同口径）。
+
+    复现场景：人工批注 3 条、文本均与同一条平台问题重叠，平台只报 1 条问题。
+    旧实现 strict 用 any() 判定，strict_recall 会虚高成 1.0；修复后必须为 1/3。
+    """
+    text = "聚散球磁珠法核酸提取试剂"
+    annotations = [_annotation(text), _annotation(text), _annotation(text)]
+    issues = [_issue(text, issue_id=1)]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result["recall"] == round(1 / 3, 4)
+    assert result["strict_recall"] == round(1 / 3, 4), "strict_recall 不得非单射虚高"
+    assert result["strict_matched"] == 1
+
+
+def test_strict_recall_perfect_when_matches_are_one_to_one():
+    """正常场景回归：3 条问题各对应 1 条批注时，strict 仍应满分。"""
+    texts = ["聚散球磁珠法核酸提取试剂", "测序接头连接缓冲液", "文库定量荧光染料"]
+    annotations = [_annotation(text) for text in texts]
+    issues = [_issue(text, issue_id=index + 1) for index, text in enumerate(texts)]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result["strict_recall"] == 1.0
+    assert result["strict_precision"] == 1.0
+    assert result["strict_matched"] == 3
+
+
 def test_goldset_expected_rule_matches_platform_rule_id_exactly():
     annotations = [_annotation("before clean", rule="DOC-GRAM-002", category="语法与表达")]
     issues = [_issue("before clean", rule="DOC-GRAM-002", category="语法与表达", issue_id=1)]

@@ -9367,6 +9367,13 @@ def _run_chinese_human_baseline_rules(content):
     return issues
 
 
+_HEADING_ACTION_VERBS = {
+    'add', 'remove', 'select', 'click', 'tap', 'press', 'open', 'close', 'connect',
+    'disconnect', 'insert', 'restart', 'turn', 'check', 'confirm', 'prepare', 'mix',
+    'incubate', 'centrifuge', 'load', 'scan', 'clean', 'update', 'save', 'delete',
+}
+
+
 def _looks_like_numbered_section_heading(text):
     match = re.match(r'^\d+(?:\.\d+)*\.?\s+(.+)$', str(text or '').strip())
     if not match:
@@ -9383,12 +9390,7 @@ def _looks_like_numbered_section_heading(text):
     words = re.findall(r'[A-Za-z][A-Za-z\-]*|[\u4e00-\u9fff]+', title)
     if not words or len(words) > 8:
         return False
-    action_verbs = {
-        'add', 'remove', 'select', 'click', 'tap', 'press', 'open', 'close', 'connect',
-        'disconnect', 'insert', 'restart', 'turn', 'check', 'confirm', 'prepare', 'mix',
-        'incubate', 'centrifuge', 'load', 'scan', 'clean', 'update', 'save', 'delete',
-    }
-    return words[0].lower() not in action_verbs
+    return words[0].lower() not in _HEADING_ACTION_VERBS
 
 
 _SAFETY_LABEL_RE = re.compile(r'(?im)^[ \t]*(WARNING|CAUTION|DANGER)\b')
@@ -9406,8 +9408,14 @@ _SAFETY_SECTION_HEADING_RE = re.compile(
 )
 
 
-def _hazard_has_enclosing_safety_label(normalized, position):
-    """判断风险词之前是否已有同级 WARNING/CAUTION/DANGER 标题覆盖该条目。"""
+def _hazard_has_enclosing_safety_label(normalized, position, document_content=None):
+    """判断风险词之前是否已有同级 WARNING/CAUTION/DANGER 标题覆盖该条目。
+
+    跨章节判定优先用 TOC（经 `_has_intervening_section_heading`），无 TOC 时退化到
+    结构正则。`document_content` 为含前置目录的完整文档；传入后 TOC 未列的小标题也
+    能通过结构判据识别为标题。降级取舍：无法确认跨章节时倾向保留安全标注（少报）
+    而非漏报真实安全标注。
+    """
     window = normalized[max(0, position - _SAFETY_HAZARD_LOOKBACK):position]
     label = None
     for match in _SAFETY_LABEL_RE.finditer(window):
@@ -9415,11 +9423,11 @@ def _hazard_has_enclosing_safety_label(normalized, position):
     if label is None:
         return False
     # window 结尾即风险词位置，最后一段可能是半截行，只按完整行判断章节边界。
-    # 标题与风险词之间出现新段落标题，说明已跨章节，不再视为同一安全标注
-    for line in window[label.end():].split('\n')[:-1]:
-        stripped = line.strip()
-        if stripped and _line_looks_like_section_heading(stripped):
-            return False
+    # 标题与风险词之间出现新段落标题，说明已跨章节，不再视为同一安全标注。
+    tail_lines = window[label.end():].split('\n')
+    tail = '\n'.join(tail_lines[:-1]).strip()
+    if tail and _has_intervening_section_heading(tail, document_content):
+        return False
     return True
 
 
@@ -9459,7 +9467,7 @@ def _run_safety_compliance_audit(content, document_language='en'):
         window = normalized[max(0, match.start() - 80):min(len(normalized), match.end() + 80)]
         if re.search(r'WARNING|CAUTION|DANGER|警告|注意|危险', window, re.IGNORECASE):
             continue
-        if _hazard_has_enclosing_safety_label(normalized, match.start()):
+        if _hazard_has_enclosing_safety_label(normalized, match.start(), content):
             continue
         key = ('SAFE-002', match.start())
         if key in seen:
@@ -10152,6 +10160,40 @@ _CN_SECTION_HEADING_RE = re.compile(
     r'^(?:第[0-9一二三四五六七八九十百]+[章节篇]|警告|注意|小心|提示|危险|安全说明)'
 )
 
+# 正文句 vs 标题行的结构差异：正文句在行首 1~2 词后紧跟限定词（a/an/the/this/
+# your...）引导宾语，或直接以限定词开头。用这个结构判据替代"枚举操作动词黑名单"，
+# 避免下一批文档换个动词就漏。
+# 注意：此处只认「限定词」，不认「介词」。像 "Logging in to the control software"、
+# "Powering on the device" 这类动名词 + 介词的标题很常见，若把介词也算作正文信号会
+# 把它们误杀。操作句样例（Install the... / Load the sample into... / Dilute the
+# sample with...）都带限定词，限定词判据足以覆盖。
+_HEADING_DETERMINER_RE = (
+    r'(?:a|an|the|this|that|these|those|it|them|your|its|our|their|his|her|we|they|you)'
+)
+_HEADING_PROSE_LEAD_RE = re.compile(
+    rf'^(?:{_HEADING_DETERMINER_RE}\b'
+    rf'|(?:[A-Za-z][A-Za-z0-9\-]*\s+){{1,2}}{_HEADING_DETERMINER_RE}\b)',
+    re.IGNORECASE,
+)
+_HEADING_MAX_WORDS = 6
+
+
+def _looks_like_english_section_heading(stripped):
+    """英文段落标题判据：形态约束 + 结构约束，两者都满足才算标题。
+
+    形态：短行、大写开头、无句末标点、非功能词开头（复用既有正则）。
+    结构：不含「裸动词 + 冠词/代词/介词」的正文句式，且词数不超过 6。
+    """
+    text = str(stripped or '').strip()
+    if not (_SECTION_HEADING_RE.match(text) or _SAFETY_SECTION_HEADING_RE.match(text)):
+        return False
+    if _HEADING_PROSE_LEAD_RE.match(text):
+        return False
+    words = re.findall(r'[A-Za-z][A-Za-z0-9\-]*', text)
+    if not words or len(words) > _HEADING_MAX_WORDS:
+        return False
+    return words[0].lower() not in _HEADING_ACTION_VERBS
+
 
 def _line_looks_like_section_heading(stripped, toc_titles=None):
     if not stripped:
@@ -10160,10 +10202,11 @@ def _line_looks_like_section_heading(stripped, toc_titles=None):
     if toc_titles and normalized in toc_titles:
         return True
     if toc_titles:
+        # 有 TOC 时以 TOC 为准：正则完全不参与，避免目录外的操作正文被误判为标题。
         return False
     if _CN_SECTION_HEADING_RE.match(stripped):
         return True
-    return bool(_SECTION_HEADING_RE.match(stripped) or _SAFETY_SECTION_HEADING_RE.match(stripped))
+    return _looks_like_english_section_heading(stripped)
 
 
 def _has_intervening_section_heading(text, document_content=None):
@@ -11845,7 +11888,8 @@ def _score_heading_candidate(lines, index, *, min_score=55, short_standalone_pen
 
 
 def _normalize_toc_title(text):
-    return re.sub(r'[^a-z0-9]+', ' ', str(text or '').lower()).strip()
+    # 保留 CJK：中文目录标题若被清成空串，会让中文 TOC 完全失效
+    return re.sub(r'[^a-z0-9\u4e00-\u9fff]+', ' ', str(text or '').lower()).strip()
 
 
 _TOC_TITLE_CACHE = {}
@@ -11861,13 +11905,21 @@ def _toc_heading_titles(content):
         return cached
     titles = set()
     for line in prefix.split('\n'):
-        match = re.match(r'^([A-Z(][^\n]{2,70}?)\s+(\d{1,3})$', line.strip())
+        stripped = line.strip()
+        match = re.match(r'^([A-Z(][^\n]{2,70}?)\s+(\d{1,3})$', stripped)
+        if not match:
+            # 中文 TOC：`1 概述 3`、`第一章 概述 3`、`2.1 电源规格 8`
+            match = re.match(
+                r'^(?:第\s*\d+\s*[章节篇]|\d+(?:\.\d+)*)[\s、.．]*(.+?)\s+(\d{1,3})$',
+                stripped,
+            )
         if not match:
             continue
+        title = match.group(1)
         page = int(match.group(2))
         if not 1 <= page <= 400:
             continue
-        key = _normalize_toc_title(match.group(1))
+        key = _normalize_toc_title(title)
         if len(key) >= 3:
             titles.add(key)
     result = frozenset(titles) if len(titles) >= 8 else frozenset()

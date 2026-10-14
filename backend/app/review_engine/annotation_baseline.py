@@ -306,13 +306,26 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     return False
 
 
-def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+def _matches_annotation_strictly(
+    item: HumanAnnotation,
+    issue: dict[str, Any],
+    blob: str,
+    *,
+    allow_rule_family: bool = True,
+) -> bool:
+    """严格匹配：规则号/规则族对齐 **且** 批注文本与问题原文有实质重叠。
+
+    `allow_rule_family=False` 时只接受规则号精确相等，不再使用规则族（同 category
+    或同 rule 前缀）兜底，供二分匹配的"先精确后放宽"两轮使用。
+    """
     expected = str(item.expected_rule or "").upper()
     rule = str(issue.get("rule", "") or "").upper()
     if expected and rule == expected:
         rule_ok = True
-    else:
+    elif allow_rule_family:
         rule_ok = _matches_expected_rule(item, issue, blob)
+    else:
+        rule_ok = False
     if not rule_ok:
         return False
 
@@ -375,12 +388,21 @@ def _matches_annotation_loosely(
 def _match_annotations_injectively(
     issue_pairs: list[tuple[dict[str, Any], str]],
     annotations: list[HumanAnnotation],
-) -> set[int]:
+    *,
+    matcher=None,
+) -> dict[int, int]:
     """二分图最大匹配：一条平台问题最多命中一条人工批注。
 
     规则族匹配（同一 category 或 rule 前缀）会让一条问题同时"命中"多条批注，
     从而把 recall 刷高。这里要求命中一对一对齐，漏检才会真实拉低 recall。
+
+    `matcher` 默认用宽松匹配；传入 `_matches_annotation_strictly` 可对严格口径
+    做同样的单射匹配（strict_recall 与 recall 同口径，不会非单射虚高）。
+
+    返回「批注索引 -> 问题索引」的配对表，匹配为空则为空字典。
     """
+    _matcher = matcher or _matches_annotation_loosely
+
     issue_owner: dict[int, int] = {}
     matched: set[int] = set()
 
@@ -389,9 +411,7 @@ def _match_annotations_injectively(
             [
                 index
                 for index, (issue, blob) in enumerate(issue_pairs)
-                if _matches_annotation_loosely(
-                    item, issue, blob, allow_rule_family=allow_rule_family
-                )
+                if _matcher(item, issue, blob, allow_rule_family=allow_rule_family)
             ]
             for item in annotations
         ]
@@ -414,7 +434,7 @@ def _match_annotations_injectively(
                 continue
             if _augment(annotation_index, set(), adjacency):
                 matched.add(annotation_index)
-    return matched
+    return {annotation_index: issue_index for issue_index, annotation_index in issue_owner.items()}
 
 
 def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list[HumanAnnotation]) -> dict[str, Any]:
@@ -424,10 +444,14 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
     misses = []
     strict_hits = []
     strict_misses = []
-    loose_matched_indexes = _match_annotations_injectively(issue_pairs, annotations)
+    loose_pairs = _match_annotations_injectively(issue_pairs, annotations)
+    # strict 走同一套单射匹配，避免"一条问题命中多条批注"把 strict_recall 刷成 1.0
+    strict_pairs = _match_annotations_injectively(
+        issue_pairs, annotations, matcher=_matches_annotation_strictly
+    )
     for index, item in enumerate(annotations):
-        matched = index in loose_matched_indexes
-        strict_matched = any(_matches_annotation_strictly(item, issue, blob) for issue, blob in issue_pairs)
+        matched = index in loose_pairs
+        strict_matched = index in strict_pairs
         record = asdict(item)
         if matched:
             hits.append(record)
@@ -443,11 +467,7 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         for issue, blob in issue_pairs
         if any(_matches_annotation_loosely(item, issue, blob, allow_rule_family=False) for item in annotations)
     }
-    strict_matched_issue_ids = {
-        id(issue)
-        for issue, blob in issue_pairs
-        if any(_matches_annotation_strictly(item, issue, blob) for item in annotations)
-    }
+    strict_matched_issue_ids = {id(issue_pairs[issue_index][0]) for issue_index in strict_pairs.values()}
     issue_total = len(issues)
     recall = len(hits) / len(annotations) if annotations else 0
     precision = len(matched_issue_ids) / issue_total if issue_total else 0

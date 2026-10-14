@@ -540,3 +540,102 @@ def test_intervening_section_heading_ignores_operation_body_lines():
     assert review_api._has_intervening_section_heading("Safety Instructions") is True
     assert review_api._has_intervening_section_heading("WARNING") is True
     assert review_api._has_intervening_section_heading("警告") is True
+
+
+def test_section_heading_regex_rejects_operation_sentences():
+    """黑名单外动词开头的操作句一律不得判为标题（结构性判据，非枚举）。"""
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Install the reagent cartridge carefully", toc_titles=None
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Wipe the surface with a soft cloth", toc_titles=None
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Verify the connection to the power supply", toc_titles=None
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Load the sample into the tray", toc_titles=None
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Dilute the sample with buffer solution", toc_titles=None
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Record the lot number in the log", toc_titles=None
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Discard the waste according to regulations", toc_titles=None
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Transport the instrument upright only", toc_titles=None
+        )
+        is False
+    )
+
+
+def test_section_heading_regex_accepts_real_headings():
+    real_headings = [
+        "General Information",
+        "Safety Precautions",
+        "Product Specifications",
+        "Installation",
+        "Intended Use",
+        "Ordering Information",
+        "Troubleshooting",
+    ]
+    for line in real_headings:
+        assert review_api._line_looks_like_section_heading(line, toc_titles=None) is True
+
+
+def test_safety_label_survives_intervening_operation_sentence():
+    """WARNING 与风险词之间夹一行操作正文时，安全标注不得被判为已跨章节。"""
+    content = (
+        "WARNING\n"
+        "Keep the reagent away from open flames\n"
+        "Install the reagent cartridge carefully\n"
+        "Keep away from heat and ignition sources"
+    )
+    position = content.index("heat and ignition")
+
+    assert review_api._hazard_has_enclosing_safety_label(content, position, None) is True
+    assert review_api._hazard_has_enclosing_safety_label(content, position) is True
+
+
+def test_section_heading_uses_toc_when_available():
+    """传入含 TOC 的完整文档时，TOC 未列的行不得仅凭正则判为标题。"""
+    toc = "\n".join(f"Section {index} Title {index}" for index in range(1, 10))
+    content = toc + "\n" + "Install the reagent cartridge carefully"
+    toc_titles = review_api._toc_heading_titles(content)
+
+    assert "section 3 title" in toc_titles
+    assert (
+        review_api._line_looks_like_section_heading(
+            "Install the reagent cartridge carefully", toc_titles=toc_titles
+        )
+        is False
+    )
+    assert (
+        review_api._line_looks_like_section_heading("Section 3 Title", toc_titles=toc_titles)
+        is True
+    )
