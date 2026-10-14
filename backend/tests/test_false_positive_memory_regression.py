@@ -40,18 +40,42 @@ def _reappearance_hits(db, signatures):
     return hits
 
 
-def test_no_enabled_false_positive_memory_reappears():
-    """已沉淀的误报不得在后续审核中复现（precision 下限守卫）。"""
-    db = SessionLocal()
+def test_no_enabled_false_positive_memory_reappears(memory_db):
+    """已沉淀的误报不得在后续审核中复现（precision 下限守卫）。
+
+    用内存库复现守卫场景：存在已启用签名，且库中有一条命中该签名、自身
+    status != false_positive 的 Issue。修复前本用例直连 SessionLocal，在无生产库
+    的环境会在建立连接时直接抛错（`pytest.skip` 保护根本走不到），导致新克隆 /
+    CI 必然 failed；改为内存库后与真实库环境解耦。
+    """
+    issue = _seed_issue(memory_db, status="pending")
+    _seed_memory(memory_db, _issue_judgment_signature(issue))
+
+    signatures = list_false_positive_memory_signatures(memory_db)
+    hits = _reappearance_hits(memory_db, signatures)
+
+    assert signatures, "内存库应存在已启用签名"
+    assert [hit["id"] for hit in hits] == [issue.id], "守卫生效：命中已启用签名必须被检出"
+
+
+@pytest.mark.integration
+def test_real_db_false_positive_memory_guard():
+    """真实库集成守卫（默认 CI 不运行，需 `-m integration`）。"""
     try:
+        db = SessionLocal()
         if not inspect(db.get_bind()).has_table(FalsePositiveMemory.__tablename__):
             pytest.skip("误报记忆表不存在，跳过")
         signatures = list_false_positive_memory_signatures(db)
         if not signatures:
             pytest.skip("误报记忆库为空，跳过")
         hits = _reappearance_hits(db, signatures)
+    except Exception as exc:  # noqa: BLE001 - 连接/查询失败一律视为环境不可用
+        pytest.skip(f"无法连接生产库，跳过集成守卫：{exc}")
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     assert not hits, f"已沉淀误报复发：{hits[:10]}"
 
