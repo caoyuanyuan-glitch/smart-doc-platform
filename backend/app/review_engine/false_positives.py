@@ -72,6 +72,9 @@ def rulebook_false_positive_reason(issue: Any) -> str | None:
     if _is_figure_placeholder_mask_noise(issue):
         return "figure_placeholder_mask"
 
+    if _is_pdf_trademark_text_layer_noise(issue):
+        return "pdf_trademark_text_layer"
+
     if re.search(r'["”’][\.,;:](?:\s|$)', blob) and re.search(
         r"引号|quote|标点|punctuation|句号",
         lowered,
@@ -174,12 +177,12 @@ def is_figure_placeholder_mask_text(text: Any) -> bool:
 
 
 def _is_figure_placeholder_mask_noise(issue: Any) -> bool:
-    """仅抑制 AI 对界面截图占位掩码的占位符误报。
+    """抑制界面截图中的 XX 占位掩码误报。
 
-    规则层专门的占位符残留规则（如 CYY-CN-PLACEHOLDER-001，source=rule）指向真实
-    未替换内容，必须保留。
+    说明书截图常用 XXXXXXXX、XX/XX/XXXX、XX:XX:XX 表示示例值，属正常发布内容。
+    物料编码占位（CYY-CN-MATERIAL-001）和显式标记（TBD/TODO/待补充）仍保留。
     """
-    if _value(issue, "source").strip().lower() != "ai":
+    if _value(issue, "rule").strip().upper() == "CYY-CN-MATERIAL-001":
         return False
     complaint = " ".join(
         _value(issue, key) for key in ("suggestion", "description", "category", "rule")
@@ -187,3 +190,32 @@ def _is_figure_placeholder_mask_noise(issue: Any) -> bool:
     if not re.search(r"placeholder|占位", complaint, re.IGNORECASE):
         return False
     return is_figure_placeholder_mask_text(_value(issue, "original_text"))
+
+
+_TRADEMARK_FORMAT_RULES = {
+    "DOC-TM-001",
+    "DOC-TM-002",
+    "CYY-CN-TM-001",
+    "CHECKLIST-TRADEMARK",
+}
+
+
+def _is_pdf_trademark_text_layer_noise(issue: Any) -> bool:
+    """PDF 文本层把 ™/® 抽成 TM 或与商标名拆开，据此改上标或归属属于误报。"""
+    rule = _value(issue, "rule").strip().upper()
+    if rule in _TRADEMARK_FORMAT_RULES:
+        return True
+    complaint = " ".join(
+        _value(issue, key) for key in ("suggestion", "description", "category", "rule")
+    )
+    if not re.search(r"商标|trademark|上标", complaint, re.IGNORECASE):
+        return False
+    original = _value(issue, "original_text")
+    suggestion = _value(issue, "suggestion")
+    if re.search(r"(?:^|\s)(?:[®™©]|TM\b)", original):
+        return True
+    if re.search(r"\b[A-Za-z][A-Za-z0-9]*TM\b", original):
+        return True
+    if re.search(r"[™®]", suggestion) and re.search(r"\bTM\b", original):
+        return True
+    return False

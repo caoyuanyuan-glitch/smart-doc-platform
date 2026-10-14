@@ -48,6 +48,8 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
         (r"物料编码|申请物料编码|0-00x", "物料编码", "deterministic", "DET-MATERIAL-001"),
         (r"母公司|同名|本公司|长光", "公司主体表述", "ai_assisted", "AI-COMPANY-001"),
         (r"nmpa|纸质说明书|电子版说明书", "法规/注册确认", "ai_assisted", "AI-REG-001"),
+        (r"冒号", "标点符号", "deterministic", "DET-PUNCT-001"),
+        (r"实用工具", "术语一致性", "structural_consistency", "STRUCT-TERM-001"),
     ]
     for pattern, category, layer, rule in priority_patterns:
         if re.search(pattern, comment_text, re.IGNORECASE):
@@ -58,10 +60,11 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
         (r"搞到下一页|跨页|下一页|分页|page break", "分页与标题边界", "STRUCT-PAGE-001"),
         (r"topic|主题|页眉跨行|appendix|附录", "主题结构", "STRUCT-TOPIC-001"),
         (r"表格|表头|竖线|多了竖线|边框|列宽|行高|均匀分布列|平均分布列|合并单元格|出框|拉大宽度|拉大列宽|调整列宽|溢出单元格|折线|太密集|挪到右边|样式没有设置对|空隙不对", "表格/版式", "STRUCT-LAYOUT-001"),
+        (r"结构组成|漏列.*部件|缺.*主体架构|主机.*其他部件|其他部件没有介绍|组成.*部件", "结构完整性", "STRUCT-COMPONENT-001"),
+        (r"索引.*页码|索引条目|页码.*偏移", "索引一致性", "STRUCT-INDEX-001"),
         (r"前文都是|统一|一致|同上|同下|同步修改|这个不是试剂名称|平行结构|冒号前面", "术语一致性", "STRUCT-TERM-001"),
         (r"重复出现|重复了|内容重合|意思重复|重复", "重复内容", "STRUCT-DUP-001"),
-        (r"主机.*其他部件|其他部件没有介绍|组成.*部件", "结构完整性", "STRUCT-COMPONENT-001"),
-        (r"有序列表|不是一个步骤|操作步骤如下|合并到上一步|序号不连续|引导句样式|^3）$|^1）$|456合并", "步骤结构", "STRUCT-STEP-001"),
+        (r"有序列表|不是一个步骤|操作步骤如下|操作如下|合并到上一步|序号不连续|引导句样式|^3）$|^1）$|456合并", "步骤结构", "STRUCT-STEP-001"),
     ]
     for pattern, category, rule in structural_patterns:
         if re.search(pattern, text, re.IGNORECASE):
@@ -238,7 +241,11 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-IMAGE-001":
         return rule.startswith("CYY-CN-IMAGE-") or "图片" in category or "对象缺失" in category
     if item.expected_rule == "STRUCT-STEP-001":
-        return rule == "CYY-CN-STRUCT-001" or "步骤结构" in category
+        return rule in {"CYY-CN-STRUCT-001", "CYY-CN-STEP-004"} or "步骤结构" in category
+    if item.expected_rule == "STRUCT-COMPONENT-001":
+        return rule.startswith("CYY-CN-ROHS-") or "结构完整" in category
+    if item.expected_rule == "STRUCT-INDEX-001":
+        return rule.startswith("CYY-CN-INDEX-") or "索引" in category
     if item.expected_rule == "AI-PROC-001":
         return rule == "DOC-PROC-001" or "操作步骤语气" in category
     if item.expected_rule == "DET-TITLE-CASE-001":
@@ -262,7 +269,12 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
             return True
         return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003", "DOC-SPACE-004", "DOC-SPACE-005", "DOC-UNIT-001"} or "格式规范" in category or "空格" in category
     if item.expected_rule == "DET-PUNCT-001":
-        return rule.startswith("DOC-PUNCT") or rule.startswith("DOC-QUOTE") or "标点" in category
+        return (
+            rule.startswith("DOC-PUNCT")
+            or rule.startswith("DOC-QUOTE")
+            or rule.startswith("CYY-CN-PUNCT")
+            or "标点" in category
+        )
     if item.expected_rule == "DET-CATNO-001":
         return rule.startswith("DOC-CATNO") or rule.startswith("CYY-CN-PRODUCT-002") or "货号" in category
     if item.expected_rule == "DET-MATERIAL-001":
@@ -286,15 +298,35 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
-            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAMMAR-001",
+            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAM-008",
+            "DOC-GRAMMAR-001",
             "DOC-GRAMMAR-002",
             "CYY-CN-STYLE-003", "CYY-CN-GRAMMAR-009", "CYY-CN-GRAMMAR-010", "CYY-CN-GRAMMAR-011",
         } or "表达与句式" in category
     return False
 
 
-def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
-    if not _matches_expected_rule(item, issue, blob):
+def _matches_annotation_strictly(
+    item: HumanAnnotation,
+    issue: dict[str, Any],
+    blob: str,
+    *,
+    allow_rule_family: bool = True,
+) -> bool:
+    """严格匹配：规则号/规则族对齐 **且** 批注文本与问题原文有实质重叠。
+
+    `allow_rule_family=False` 时只接受规则号精确相等，不再使用规则族（同 category
+    或同 rule 前缀）兜底，供二分匹配的"先精确后放宽"两轮使用。
+    """
+    expected = str(item.expected_rule or "").upper()
+    rule = str(issue.get("rule", "") or "").upper()
+    if expected and rule == expected:
+        rule_ok = True
+    elif allow_rule_family:
+        rule_ok = _matches_expected_rule(item, issue, blob)
+    else:
+        rule_ok = False
+    if not rule_ok:
         return False
 
     selected = _norm_for_match(item.selected_text)
@@ -353,6 +385,58 @@ def _matches_annotation_loosely(
     return False
 
 
+def _match_annotations_injectively(
+    issue_pairs: list[tuple[dict[str, Any], str]],
+    annotations: list[HumanAnnotation],
+    *,
+    matcher=None,
+) -> dict[int, int]:
+    """二分图最大匹配：一条平台问题最多命中一条人工批注。
+
+    规则族匹配（同一 category 或 rule 前缀）会让一条问题同时"命中"多条批注，
+    从而把 recall 刷高。这里要求命中一对一对齐，漏检才会真实拉低 recall。
+
+    `matcher` 默认用宽松匹配；传入 `_matches_annotation_strictly` 可对严格口径
+    做同样的单射匹配（strict_recall 与 recall 同口径，不会非单射虚高）。
+
+    返回「批注索引 -> 问题索引」的配对表，匹配为空则为空字典。
+    """
+    _matcher = matcher or _matches_annotation_loosely
+
+    issue_owner: dict[int, int] = {}
+    matched: set[int] = set()
+
+    def _adjacency(allow_rule_family: bool) -> list[list[int]]:
+        return [
+            [
+                index
+                for index, (issue, blob) in enumerate(issue_pairs)
+                if _matcher(item, issue, blob, allow_rule_family=allow_rule_family)
+            ]
+            for item in annotations
+        ]
+
+    def _augment(annotation_index: int, visited: set[int], adjacency: list[list[int]]) -> bool:
+        for issue_index in adjacency[annotation_index]:
+            if issue_index in visited:
+                continue
+            visited.add(issue_index)
+            owner = issue_owner.get(issue_index)
+            if owner is None or _augment(owner, visited, adjacency):
+                issue_owner[issue_index] = annotation_index
+                return True
+        return False
+
+    for allow_rule_family in (False, True):
+        adjacency = _adjacency(allow_rule_family)
+        for annotation_index in range(len(annotations)):
+            if annotation_index in matched:
+                continue
+            if _augment(annotation_index, set(), adjacency):
+                matched.add(annotation_index)
+    return {annotation_index: issue_index for issue_index, annotation_index in issue_owner.items()}
+
+
 def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list[HumanAnnotation]) -> dict[str, Any]:
     issue_pairs = [(issue, _issue_blob(issue)) for issue in issues]
 
@@ -360,9 +444,14 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
     misses = []
     strict_hits = []
     strict_misses = []
-    for item in annotations:
-        matched = any(_matches_annotation_loosely(item, issue, blob) for issue, blob in issue_pairs)
-        strict_matched = any(_matches_annotation_strictly(item, issue, blob) for issue, blob in issue_pairs)
+    loose_pairs = _match_annotations_injectively(issue_pairs, annotations)
+    # strict 走同一套单射匹配，避免"一条问题命中多条批注"把 strict_recall 刷成 1.0
+    strict_pairs = _match_annotations_injectively(
+        issue_pairs, annotations, matcher=_matches_annotation_strictly
+    )
+    for index, item in enumerate(annotations):
+        matched = index in loose_pairs
+        strict_matched = index in strict_pairs
         record = asdict(item)
         if matched:
             hits.append(record)
@@ -378,11 +467,7 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         for issue, blob in issue_pairs
         if any(_matches_annotation_loosely(item, issue, blob, allow_rule_family=False) for item in annotations)
     }
-    strict_matched_issue_ids = {
-        id(issue)
-        for issue, blob in issue_pairs
-        if any(_matches_annotation_strictly(item, issue, blob) for item in annotations)
-    }
+    strict_matched_issue_ids = {id(issue_pairs[issue_index][0]) for issue_index in strict_pairs.values()}
     issue_total = len(issues)
     recall = len(hits) / len(annotations) if annotations else 0
     precision = len(matched_issue_ids) / issue_total if issue_total else 0

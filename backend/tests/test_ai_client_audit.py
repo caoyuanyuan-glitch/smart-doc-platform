@@ -170,6 +170,46 @@ def test_audit_document_falls_back_to_kimi_when_qwen_returns_no_issues(monkeypat
     assert result["issues"][0]["source_models"] == ["kimi"]
 
 
+def test_run_provider_audit_salvages_truncated_issues(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    truncated = (
+        '{"issues": ['
+        '{"category": "Grammar", "original_text": "abc", "suggestion": "abd", '
+        '"description": "语法错误", "confidence": 90}, '
+        '{"category": "Terminology", "original_text": "foo"'
+    )
+
+    def fake_call_qwen(messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        return truncated
+
+    monkeypatch.setattr(client, "call_qwen", fake_call_qwen)
+
+    result = client._run_provider_audit("qwen", [], "please fix abc in this sentence")
+
+    assert len(result) == 1
+    assert result[0]["original_text"] == "abc"
+
+
+def test_run_provider_audit_retries_compact_when_salvage_empty(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    calls = []
+
+    def fake_call_qwen(messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        calls.append(max_tokens)
+        if len(calls) == 1:
+            return '{"issues": [{"category": "Grammar", "original_text": "abc", "suggestion": "abd"'
+        return '{"issues": [{"category": "Grammar", "original_text": "abc", "suggestion": "abd", "description": "语法错误", "confidence": 90}]}'
+
+    monkeypatch.setattr(client, "call_qwen", fake_call_qwen)
+
+    result = client._run_provider_audit("qwen", [{"role": "user", "content": "audit"}], "please fix abc")
+
+    assert len(calls) == 2
+    assert calls[1] <= 1024
+    assert len(result) == 1
+    assert result[0]["original_text"] == "abc"
+
+
 def test_run_provider_audit_uses_configurable_max_tokens(monkeypatch):
     client = AIClient.__new__(AIClient)
     captured = {}
@@ -229,6 +269,22 @@ def test_build_audit_prompt_payload_english_skips_chinese_base_prompt(monkeypatc
     assert "Unicode-equivalent character differences" in payload["system_prompt"]
     assert "severity=suggestion" in payload["system_prompt"]
     assert "observations" in payload["user_prompt"]
+
+
+def test_build_audit_prompt_payload_english_declares_semantic_dimensions(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    monkeypatch.setattr("app.utils.ai_client.PROMPT_BUILDER_FALLBACK_ACTIVE", False)
+
+    payload = client.build_audit_prompt_payload(
+        "Reviewing parameters",
+        language="en",
+        audit_basis="basis",
+    )
+
+    system_prompt = payload["system_prompt"]
+    assert "SEMANTIC QUALITY CHECKS" in system_prompt
+    for dimension in ["冗余", "表述不准确", "信息不完整", "一致性", "语气", "图表衔接", "句子成分"]:
+        assert dimension in system_prompt, f"英文提示词缺少语义维度: {dimension}"
 
 
 def test_audit_document_does_not_rechunk_large_content(monkeypatch):

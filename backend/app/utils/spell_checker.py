@@ -7,6 +7,12 @@ import threading
 from pathlib import Path
 from spellchecker import SpellChecker
 from app.paths import WHITELIST_FILE
+from app.utils.article_constants import (
+    ABBR_VOWEL_SOUND,
+    WORDLIKE_ALL_CAPS,
+    WORDLIKE_CAPS,
+    is_vowel_sound as _is_vowel_sound,
+)
 
 # 初始化英文拼写检查器
 spell = SpellChecker(language='en')
@@ -112,7 +118,9 @@ TECH_TERMS_WHITELIST = {
     'spectrophotometer', 'restriction', 'fragmentation', 'mutation', 'allele', 'genotype', 'phenotype',
     'haplotype', 'phylogenetic', 'homologous', 'orthologous', 'paralogous', 'heterologous', 'polymorphism',
     'BMG', 'coli', 'pre', 'tech', 'AXYGEN', 'Thermo Fisher Scientific',
-    'omics', 'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
+    'metagenomics', 'thermocycler', 'thermocyclers', 'multiplexing',
+    'omics', 'genomics', 'proteomics', 'transcriptomics', 'metabolomics',
+    'epigenomics', 'lipidomics', 'spatialomics', 'spatial',
     'circularization', 'adapter', 'ligation', 'elute', 'enhancer', 'vortexer',
     'vortex', 'vortexes', 'Agilent', 'ALPAQUA', 'Ambion', 'Axygen', 'Covaris',
     'DynaMag', 'PerkinElmer', 'Invitrogen', 'ThermoFisher', 'CompleteGenomics',
@@ -223,6 +231,18 @@ def get_exact_whitelist_snapshot():
         return set(_TECH_TERMS_EXACT)
 
 
+_OMICS_SUFFIX = "omics"
+
+
+def _is_omics_family(token: str) -> bool:
+    """组学词族：以 omics 结尾的专业术语一律豁免（proteomics / metabolomics ...）。
+
+    要求长度大于裸词 omics 本身，避免把裸词边界也放进来。
+    """
+    lower = str(token or "").lower()
+    return lower.endswith(_OMICS_SUFFIX) and len(lower) > len(_OMICS_SUFFIX)
+
+
 def is_whitelisted(word: str) -> bool:
     candidate = str(word or '').strip()
     if _is_protected_technical_token(candidate):
@@ -235,6 +255,8 @@ def is_whitelisted(word: str) -> bool:
     for pattern, _ in SPELLCHECK_WHITELIST['pattern']:
         if re.match(pattern, candidate):
             return True
+    if _is_omics_family(candidate):
+        return True
     return False
 
 
@@ -3547,37 +3569,8 @@ def check_spelling(content, min_word_length=3, file_type=None):
     return issues
 
 
-# 字母名以元音音开头的缩写字母（F 读 /ɛf/、H 读 /eɪtʃ/ 等），用于 all-caps 词判定。
-_ABBR_VOWEL_SOUND = set('AEFHILMNORSX')
-# all-caps 但按整词读音的可读词（UI 词与格式标识），不按字母名逐字读。
-_WORDLIKE_CAPS = {
-    'home', 'end', 'start', 'next', 'back', 'stop', 'pause', 'run',
-    'save', 'open', 'close', 'fastq', 'bam', 'cram', 'sam', 'tab',
-}
-
-
-def _is_vowel_sound(word):
-    token = (word or '').strip('.,;:()[]{}"\'').strip()
-    if not token:
-        return False
-
-    lower = token.lower()
-    if re.match(r'^(honest|hour|honor|heir)', lower):
-        return True
-    if re.match(r'^(university|universal|unified|union|unilateral|user|unit|unique|european|eucalyptus|one|one-step)', lower):
-        return False
-    if token.isupper() and token.isalpha():
-        # all-caps 可读词按整词首字母读音判定（HOME 读 /h/，非 /eɪtʃ/）。
-        if lower in _WORDLIKE_CAPS:
-            return lower[0] in 'aeiou'
-        return token[0] in _ABBR_VOWEL_SOUND
-    # 连字符复合词的首段若为全大写缩写（FDA-approved），按缩写首字母判定。
-    head = token.split('-', 1)[0]
-    if head and head.isupper() and head.isalpha():
-        if head.lower() in _WORDLIKE_CAPS:
-            return head.lower()[0] in 'aeiou'
-        return head[0] in _ABBR_VOWEL_SOUND
-    return lower[0] in 'aeiou'
+_ABBR_VOWEL_SOUND = ABBR_VOWEL_SOUND
+_WORDLIKE_CAPS = WORDLIKE_CAPS
 
 
 def check_grammar_patterns(content):
@@ -3618,7 +3611,7 @@ def check_grammar_patterns(content):
         noun = match.group(2)
         # all-caps 可读词（HOME/END 等 UI 词）冠词读音存在两读（/h/ 与字母名 /eɪtʃ/），
         # 与 review.py 保持一致：整词跳过冠词判定，a/an 均不报。
-        if noun.isupper() and noun.isalpha() and noun.lower() in _WORDLIKE_CAPS:
+        if noun.isupper() and noun.isalpha() and noun.lower() in WORDLIKE_ALL_CAPS:
             continue
         vowel_sound = _is_vowel_sound(noun)
         if article == 'a' and vowel_sound:

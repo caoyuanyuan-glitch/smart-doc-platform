@@ -899,7 +899,7 @@
             <div v-if="issueClusterHint(scope.row)" class="cluster-hint">{{ issueClusterHint(scope.row) }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="建议" min-width="340" class-name="suggestion-column">
+        <el-table-column label="建议" min-width="340" class-name="suggestion-column" show-overflow-tooltip>
           <template #default="scope">
             <div class="suggestion-wrap">
               <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
@@ -1513,7 +1513,7 @@ function describeSuggestionChange(original, replacement) {
   const added = after.slice(prefix, after.length - suffix).trim()
   if (removed && added) {
     if (removed.length <= 24 && added.length <= 32) {
-      return `将“${removed}”改为“${added}”`
+      return `将“${compactSuggestionText(removed)}”改为“${compactSuggestionText(added)}”`
     }
     return `将相关表述改为“${compactSuggestionText(added)}”`
   }

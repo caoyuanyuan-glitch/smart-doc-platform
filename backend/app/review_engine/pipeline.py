@@ -83,6 +83,268 @@ VISUAL_LAYOUT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_TRADEMARK_SYMBOL_RE = re.compile(r'[®™©]')
+# PDF 阅读顺序错乱会把 ®/™ 甩到商标名之外，形成 “® are trademarks ...” 这类文本；
+# 文本层还可能把 ™ 提取成字面量 TM，同样会与商标名分离
+_DETACHED_TRADEMARK_RE = re.compile(r'(?:^|\s)(?:[®™©]|TM\b)')
+
+
+def is_trademark_reading_order_artifact(original: str, suggestion: str) -> bool:
+    """商标声明段落被 PDF 文本层打乱顺序时，AI 会据错位文本误报商标归属问题。"""
+    if not _TRADEMARK_SYMBOL_RE.search(suggestion or ''):
+        return False
+    return bool(_DETACHED_TRADEMARK_RE.search(original or ''))
+
+
+_CJK_CHAR_RE = re.compile(r'[\u3400-\u9fff]')
+
+
+def is_broken_glyph_extraction_artifact(original: str) -> bool:
+    """原文含 Unicode 替换字符（U+FFFD）时，说明 PDF/字体该字形未映射到 Unicode。
+
+    符号字体（项目符号、图标字形）在文本层会被解析成 �，AI 会据此误报
+    「项目符号不规范」「UI 对象缺失」等误报。这类问题取决于解析而非文档本身。
+    """
+    return '\ufffd' in str(original or '')
+
+
+def _space_change_boundaries(original: str, suggestion: str):
+    """两串仅空格不同时，返回每处空格增删的边界字符对；否则返回 None。"""
+    orig = normalize_text(original)
+    sugg = normalize_text(suggestion)
+    if compact_text(orig) != compact_text(sugg):
+        return None
+    boundaries = []
+    orig_index = 0
+    sugg_index = 0
+    while orig_index < len(orig) or sugg_index < len(sugg):
+        orig_char = orig[orig_index] if orig_index < len(orig) else None
+        sugg_char = sugg[sugg_index] if sugg_index < len(sugg) else None
+        if orig_char == sugg_char:
+            orig_index += 1
+            sugg_index += 1
+            continue
+        if orig_char == ' ' and sugg_char != ' ':
+            boundaries.append((
+                orig[orig_index - 1] if orig_index > 0 else '',
+                orig[orig_index + 1] if orig_index + 1 < len(orig) else '',
+            ))
+            orig_index += 1
+            continue
+        if sugg_char == ' ' and orig_char != ' ':
+            boundaries.append((
+                sugg[sugg_index - 1] if sugg_index > 0 else '',
+                sugg[sugg_index + 1] if sugg_index + 1 < len(sugg) else '',
+            ))
+            sugg_index += 1
+            continue
+        return None
+    return boundaries
+
+
+def is_cjk_latin_boundary_space_style(original: str, suggestion: str) -> bool:
+    """建议唯一改动是「中文↔拉丁字母/数字」边界上的空格增删时，视为排版风格。
+
+    中英文混排时，中文与英文/数字之间加不加空格属于全文统一即可的风格问题
+    （如「V5.4 及以上」/「设置 Barcode」）。全文一致性交由专门的术语/空格
+    一致性规则判断，单点增删不是可验证错误，因此不在此处逐条上报。
+
+    只有当所有被增删的空格都落在「中文↔非中文」边界时才返回 True。
+    中文-中文（中文词内空格）、非中文-非中文（英文断词 High-throu ghput、
+    数字与单位 5mL→5 mL）都是真实问题，需要保留。
+    """
+    boundaries = _space_change_boundaries(original, suggestion)
+    if not boundaries:
+        return False
+    for before, after in boundaries:
+        if not before or not after:
+            return False
+        if bool(_CJK_CHAR_RE.match(before)) == bool(_CJK_CHAR_RE.match(after)):
+            return False
+    return True
+
+
+_UI_OBJECT_NOUN_RE = re.compile(r'(?:对应)?(?:图标|按钮|控件|对象|元素)')
+_UI_LABEL_RE = re.compile(r'【[^】]*】')
+# 原文中该放图标/按钮名处只剩一个空格（字形未进入文本层）的空位
+_UI_OBJECT_GAP_RE = re.compile(
+    r'(?:点击|点按|轻触|长按|选[择中]|按下?)\s+|[\u4e00-\u9fff]\s+[，。、；：]'
+)
+
+
+def is_ui_object_insertion_without_evidence(original: str, suggestion: str) -> bool:
+    """AI 报「图标/按钮缺失」时，若建议的唯一改动只是补一个对象名词或【…】标签。
+
+    原文里图标/按钮字形常常没进入 PDF 文本层（该处只剩一个空格），AI 据此误报
+    「点击 ，图标缺失」甚至凭空补一个【查询】之类的按钮名。文档本身并不缺图标，
+    缺的是文本层的字形，属于提取伪影；有真实版式证据的问题交由视觉链处理。
+
+    判据：原文存在 UI 对象空位，且建议删去新增的【…】标签与 UI 对象名词后与原文一致。
+    """
+    orig = normalize_text(original)
+    sugg = normalize_text(suggestion)
+    if not orig or not sugg:
+        return False
+    if not _UI_OBJECT_GAP_RE.search(orig):
+        return False
+    if not (_UI_LABEL_RE.search(sugg) or _UI_OBJECT_NOUN_RE.search(sugg)):
+        return False
+    orig_residue = _UI_LABEL_RE.sub('', orig)
+    sugg_residue = _UI_OBJECT_NOUN_RE.sub('', _UI_LABEL_RE.sub('', sugg))
+    return compact_text(orig_residue) == compact_text(sugg_residue)
+
+
+_SPACING_CONSISTENCY_CLAIM_RE = re.compile(r'不一致|不统一|全文.{0,8}统一|统一为.{0,6}写法')
+
+
+def is_spacing_consistency_claim(rule: str, description: str = "") -> bool:
+    """建议是否以「全文空格用法不一致」为判据（而非单点增删空格）。
+
+    空格问题收敛到「文档内一致性」这一条判据：单点加/删空格不作为可验证错误
+    逐条上报，但明确以「同一术语全文空格使用不一致」提出的问题保留。
+    """
+    return bool(_SPACING_CONSISTENCY_CLAIM_RE.search(f"{rule or ''} {description or ''}"))
+
+
+_TECHNICAL_PHRASE_RE = re.compile(
+    r'\b(?:air\s+gap|set\s+up|flow\s+cell|wash\s+buffer|dummy\s+run)\b',
+    re.IGNORECASE,
+)
+
+
+def _edit_distance(left: str, right: str, limit: int = 2) -> int:
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+    previous = list(range(len(right) + 1))
+    for left_char in left:
+        current = [previous[0] + 1]
+        for index, right_char in enumerate(right, start=1):
+            insert_cost = current[-1] + 1
+            delete_cost = previous[index] + 1
+            replace_cost = previous[index - 1] + (left_char != right_char)
+            current.append(min(insert_cost, delete_cost, replace_cost))
+        previous = current
+        if min(previous) > limit:
+            return limit + 1
+    return previous[-1]
+
+
+def _joined_near_dictionary_word(joined: str) -> bool:
+    """拼接后的字母串接近真实英文词时，才视为断词伪影。"""
+    text = joined.lower()
+    if len(text) < 8:
+        return False
+    try:
+        from app.utils.spell_checker import spell
+    except Exception:
+        spell = None
+    if spell is not None:
+        for size in range(min(len(text), 14), 5, -1):
+            for index in range(0, len(text) - size + 1):
+                piece = text[index:index + size]
+                if piece in spell:
+                    return True
+                candidates = spell.candidates(piece) or set()
+                if any(_edit_distance(piece, candidate, 2) <= 2 for candidate in candidates if 6 <= len(candidate) <= 14):
+                    return True
+    compact = re.sub(r'[^a-z]', '', text)
+    return bool(re.search(r'[a-z]{6,}', compact))
+
+
+def is_broken_word_extraction_artifact(original: str) -> bool:
+    """PDF 表格按字符间距断词（如 “Powe rswi tcha n d”）造成的伪影文本。
+
+    正常英文中不会出现孤立小写单字母（a/I 除外）夹杂在短碎片里。
+    """
+    fragments = normalize_text(original).split()
+    if len(fragments) < 4:
+        return False
+    if any(len(fragment) > 4 or not fragment.isalpha() for fragment in fragments):
+        return False
+    joined = ''.join(fragments)
+    if len(joined) < 12:
+        return False
+    if not any(len(fragment) == 1 and fragment.islower() and fragment not in {'a', 'i'} for fragment in fragments):
+        return False
+    if _TECHNICAL_PHRASE_RE.search(normalize_text(original)):
+        return False
+    return _joined_near_dictionary_word(joined)
+
+
+_SYMBOL_LEGEND_ORIGINAL_RE = re.compile(
+    r'^[A-Za-z0-9][A-Za-z0-9 ,/\-]{0,56}?\s+'
+    r'(?:Indicates|Means|Denotes|Represents|Refers\s+to|Stands\s+for)\b',
+    re.IGNORECASE,
+)
+_FRAGMENT_COMPLAINT_RE = re.compile(
+    r'\b(?:stray|fragment|truncated|garbled|malformed|broken\s+word|incomplete\s+sentence)\b',
+    re.IGNORECASE,
+)
+_DISCLAIMER_RE = re.compile(
+    r'\b(?:shall\s+not\s+be\s+liable|to\s+the\s+(?:maximum|full(?:est)?)\s+extent\s+permitted|'
+    r'hereby\s+disclaims|does\s+not\s+constitute\s+(?:a\s+)?warranty|'
+    r'for\s+illustrative\s+purposes?\s+only)\b',
+    re.IGNORECASE,
+)
+_FIGURE_ILLUSTRATION_RE = re.compile(
+    r'\bfigures?\b.+\b(?:are|is)\b.+\billustrations?\b',
+    re.IGNORECASE,
+)
+
+
+def is_symbol_legend_extraction_noise(original: str, suggestion: str, description: str = "") -> bool:
+    """符号表定义行被 AI 当成 stray fragment / 残句。"""
+    if not _SYMBOL_LEGEND_ORIGINAL_RE.match(normalize_text(original or "")):
+        return False
+    return bool(_FRAGMENT_COMPLAINT_RE.search(f"{suggestion or ''} {description or ''}"))
+
+
+def is_legal_disclaimer_rewrite_noise(original: str, suggestion: str) -> bool:
+    """法律免责声明的整句改写没有文书错误证据。"""
+    original_text = normalize_text(original)
+    suggestion_text = normalize_text(suggestion)
+    if not original_text or not suggestion_text:
+        return False
+    if compact_text(original_text) == compact_text(suggestion_text):
+        return False
+    if not _DISCLAIMER_RE.search(original_text):
+        return False
+    return len(suggestion_text) >= 24
+
+
+def is_figure_illustration_word_order_noise(original: str, suggestion: str) -> bool:
+    """Figures ... illustrations 的语序建议属于风格改写。"""
+    original_text = normalize_text(original)
+    suggestion_text = normalize_text(suggestion)
+    if not _FIGURE_ILLUSTRATION_RE.search(original_text):
+        return False
+    if not re.search(r'\billustrations?\b', suggestion_text, re.IGNORECASE):
+        return False
+    original_tokens = set(re.findall(r'[A-Za-z]+', original_text.lower()))
+    suggestion_tokens = set(re.findall(r'[A-Za-z]+', suggestion_text.lower()))
+    return len(original_tokens & suggestion_tokens) >= 3
+
+
+# 知识库中的“错词 → 正词”类纠错条目，如「试剂舱 → 试剂仓」
+_SUBSTITUTION_RULE_RE = re.compile(r"^\s*([\u4e00-\u9fff]{2,8})\s*(?:→|->|—>|➔|=>)\s*\S")
+
+
+def hallucinated_substitution_term(issue: Any) -> str | None:
+    """AI 引用“错词 → 正词”类规则，但原文并不包含该错词时，属臆造错误。
+
+    例如知识库条目「试剂舱 → 试剂仓」被套用到正文的“试剂槽”上。判定只依据
+    original_text 与 context：rule/audit_basis 里本来就会写出该错词，不能作为证据。
+    """
+    data = issue_to_mapping(issue)
+    match = _SUBSTITUTION_RULE_RE.match(str(data["rule"] or ""))
+    if not match:
+        return None
+    wrong = match.group(1)
+    evidence = compact_text(data["original_text"]) + compact_text(data["context"])
+    if wrong in evidence:
+        return None
+    return wrong
+
 
 def issue_value(issue: Any, key: str, default: Any = "") -> Any:
     if isinstance(issue, dict):
@@ -334,6 +596,28 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
     if source == "spellcheck":
         return False
     if is_rulebook_false_positive(data):
+        return True
+    if is_trademark_reading_order_artifact(original, suggestion):
+        return True
+    if source == "ai" and (
+        is_broken_word_extraction_artifact(original)
+        or is_symbol_legend_extraction_noise(original, suggestion, description)
+        or is_legal_disclaimer_rewrite_noise(original, suggestion)
+        or is_figure_illustration_word_order_noise(original, suggestion)
+        or is_broken_glyph_extraction_artifact(original)
+        or is_ui_object_insertion_without_evidence(original, suggestion)
+    ):
+        return True
+    # 空格问题收敛到「全文一致性」单一判据：单点增删空格不作为可验证错误，
+    # 但明确以「全文空格使用不一致」提出的问题保留。
+    if (
+        source == "ai"
+        and not is_spacing_consistency_claim(rule, description)
+        and is_cjk_latin_boundary_space_style(original, suggestion)
+    ):
+        return True
+    if hallucinated_substitution_term(data):
+        counters["HALLUCINATED_SUBSTITUTION_TERM"] += 1
         return True
     if is_verifiable_ai_text_issue(data):
         return False

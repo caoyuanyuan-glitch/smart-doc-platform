@@ -1035,6 +1035,57 @@ class AIClient:
         return None
 
     @staticmethod
+    def _salvage_truncated_audit_json(text):
+        stripped = _strip_code_fence(text) if text else ""
+        match = re.search(r'"issues"\s*:\s*\[', stripped)
+        if not match:
+            return []
+        cursor = match.end()
+        length = len(stripped)
+        issues = []
+        while cursor < length:
+            while cursor < length and stripped[cursor] in " \t\r\n,":
+                cursor += 1
+            if cursor >= length or stripped[cursor] in "]}":
+                break
+            if stripped[cursor] != "{":
+                break
+            depth = 0
+            in_string = False
+            escape = False
+            end = cursor
+            complete = False
+            while end < length:
+                char = stripped[end]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == '"':
+                        in_string = False
+                elif char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            parsed = json.loads(stripped[cursor:end + 1])
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            issues.append(parsed)
+                        cursor = end + 1
+                        complete = True
+                        break
+                end += 1
+            if not complete:
+                break
+        return issues
+
+    @staticmethod
     def _extract_json(result, default):
         if not result:
             return default
@@ -1047,10 +1098,16 @@ class AIClient:
                     return json.loads(m.group(0))
             except Exception:
                 pass
-        # 解析失败：检查是否为截断（无闭合括号），并打标记供调用方感知降级
         stripped = _strip_code_fence(result) if result else ""
         truncated = bool(stripped) and stripped.count("{") > stripped.count("}")
         if truncated:
+            salvaged = AIClient._salvage_truncated_audit_json(stripped)
+            if salvaged:
+                payload = dict(default) if isinstance(default, dict) else {"issues": []}
+                payload["issues"] = salvaged
+                payload["_degraded"] = True
+                payload["_degraded_reason"] = "json_truncated_salvaged"
+                return payload
             try:
                 default["_degraded"] = True
                 default["_degraded_reason"] = "json_truncated"
@@ -1271,8 +1328,8 @@ class AIClient:
         for item in observations:
             if not isinstance(item, dict):
                 continue
-            title = self._clean_text(item.get("title"), 24)
-            description = self._clean_text(item.get("description"), 80)
+            title = self._clean_text(item.get("title"), 60)
+            description = self._clean_text(item.get("description"), 300)
             if not title and not description:
                 continue
             category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
@@ -1282,7 +1339,7 @@ class AIClient:
             payload = {
                 "category": category,
                 "severity": severity,
-                "title": title or description[:80],
+                "title": title or description[:60],
                 "description": description or title,
                 "confidence": confidence,
             }
@@ -1363,28 +1420,53 @@ class AIClient:
                 issue["severity"] = "general"
         return merged
 
+    def _invoke_provider_audit(self, provider_key, messages, max_tokens, request_label=None, review_id=None):
+        if provider_key == "qwen":
+            return self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "kimi":
+            return self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "deepseek":
+            return self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "arkclaw":
+            return self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "proxy":
+            return self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        return None
+
     def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
         provider_key = str(provider_key or "").strip().lower()
         max_tokens = _audit_max_tokens(len(str(content or "")))
-        if provider_key == "qwen":
-            result = self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "kimi":
-            result = self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "deepseek":
-            result = self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "arkclaw":
-            result = self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "proxy":
-            result = self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        else:
-            result = None
+        result = self._invoke_provider_audit(provider_key, messages, max_tokens, request_label=request_label, review_id=review_id)
 
         if not result:
             return []
 
         data = self._extract_json(result, {"issues": []})
         if data.get("_degraded"):
-            print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={len(str(result or ''))})")
+            salvaged_count = len(data.get("issues") or [])
+            raw_len = len(str(result or ""))
+            if salvaged_count:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断, 回收 {salvaged_count} 个已闭合问题 (len={raw_len})")
+            else:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={raw_len})")
+                compact_tokens = min(1024, max_tokens)
+                if compact_tokens:
+                    compact_messages = list(messages) + [{
+                        "role": "user",
+                        "content": '只返回完整 JSON：{"issues":[...]}，最多 8 条最高优先级问题，issues 数组必须闭合。',
+                    }]
+                    retry_result = self._invoke_provider_audit(
+                        provider_key,
+                        compact_messages,
+                        compact_tokens,
+                        request_label=request_label,
+                        review_id=review_id,
+                    )
+                    if retry_result:
+                        retry_data = self._extract_json(retry_result, {"issues": []})
+                        if retry_data.get("issues"):
+                            data = retry_data
+                            print(f"[AI] {provider_key} 截断后紧凑重试回收 {len(retry_data.get('issues') or [])} 个问题")
             data.pop("_degraded", None)
             data.pop("_degraded_reason", None)
         issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
@@ -2233,6 +2315,16 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 - Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
 
+SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
+- Redundancy: report filler lead-ins with no information value (such as "About this guide" or "The following section will introduce"), redundant auxiliaries ("please click" -> "click"), and the same fact restated in a later section. Use category "冗余".
+- Accuracy: report wording that does not match the actual interface or behavior, and descriptions that resemble but do not name the real object. Use category "表述不准确".
+- Completeness: report operation steps missing a required follow-up action, and step results without a closing action. Use category "信息不完整".
+- Consistency: report the same object, action, term, or abbreviation described inconsistently across sections, including case inconsistency and inconsistent punctuation in parallel list items; cite both occurrences and give the unified form. Use category "一致性".
+- Tone and direction: report honorifics such as "please" added to operation steps, except text shown in the UI itself. Only suggest deleting or correcting text that exists; never suggest adding words the excerpt does not contain. Use category "语气".
+- Figure/table continuity: report a missing sentence-ending mark where a table or figure caption runs straight into the following body text. Use category "图表衔接".
+- Sentence constituents: report missing or extra characters that break the sentence, and name the affected constituent. Use category "句子成分".
+Each semantic issue must quote the complete sentence from the excerpt as evidence, and the same defect must not be reported twice.
+
 🚫 FORBIDDEN issue types (reporting any of these is an error):
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
 - ❌ Issues where the original field is shorter than 2 meaningful characters
@@ -2278,7 +2370,7 @@ Requirements:
 3. CYY human review experience baseline is for identifying content issues - report with evidence
 4. Deduplicate: report each error only once per document
 5. If the system prompt provided a document filename, check for filename spelling errors and product name consistency with body content
-6. Also output observations (1-3 chapter-level findings). Do not repeat any fact already covered by issues. Title <= 16 characters, description one sentence.
+6. Also output observations (1-3 chapter-level findings about the document itself). Do not repeat any fact already covered by issues. Do not output observations about the excerpt or chunk itself (for example, that it is mostly table of contents or front matter) - those have no actionable value. Title <= 16 characters for Chinese or <= 60 characters for English, description one sentence.
 
 Output ONLY strict JSON:
 {{
@@ -2286,7 +2378,7 @@ Output ONLY strict JSON:
     {{
       "severity": "fatal|serious|general|suggestion",
       "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
-      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
@@ -2300,7 +2392,7 @@ Output ONLY strict JSON:
   ],
   "observations": [
     {{
-      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
       "severity": "fatal|serious|general|suggestion",
       "title": "short title",
       "description": "one-sentence chapter-level evidence",
@@ -2394,7 +2486,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
 5. 如果系统提示中给出了文档文件名，请检查文件名拼写、产品名与正文一致性
-6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。title 不超过 16 字，description 只保留一句。
+6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。不要输出关于本片段/摘录本身的观察（例如内容以目录、前置信息为主），这类观察没有可执行价值。title 中文不超过 16 字、英文不超过 60 字符，description 只保留一句。
 
 输出严格JSON：
 {{
