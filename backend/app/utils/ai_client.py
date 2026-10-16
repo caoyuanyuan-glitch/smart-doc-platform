@@ -591,6 +591,30 @@ class AIClient:
         return kwargs
 
     # ------------------------------------------------------------------
+    # 视觉链 provider 分派
+    # ------------------------------------------------------------------
+    def _visual_client_for(self, provider: str):
+        """返回该 provider 的视觉调用客户端；不支持则返回 None。"""
+        name = str(provider or "").strip().lower()
+        if name == "kimi":
+            return getattr(self, "kimi_client", None)
+        if name == "qwen":
+            return getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None)
+        if name == "deepseek":
+            return getattr(self, "deepseek_client", None)
+        return None
+
+    def _visual_model_for(self, provider: str) -> str:
+        name = str(provider or "").strip().lower()
+        if name == "kimi":
+            return self.kimi_model
+        if name == "qwen":
+            return self.qwen_model
+        if name == "deepseek":
+            return self.deepseek_model
+        return ""
+
+    # ------------------------------------------------------------------
     # 基础 chat 接口
     # ------------------------------------------------------------------
     def call_qwen(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
@@ -1662,9 +1686,21 @@ class AIClient:
         mime = content_type or mimetypes.guess_type(file_name or "")[0] or "image/png"
         return f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
 
-    def verify_review_issue_from_image(self, image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify"):
-        if not self.kimi_client or not image_bytes:
-            return {"decision": "skipped", "reason": "kimi_unavailable", "confidence": 0}
+    def verify_review_issue_from_image(self, image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi"):
+        # provider 必须可切换：此前这里写死 kimi_client，导致 qwen 在回退链上
+        # 永远拿不到接管机会（review.py 侧还会直接跳过非 kimi）。
+        # 视觉链按 REVIEW_VISUAL_PROVIDERS 顺序尝试，任一 provider 故障即回退下一家。
+        provider = str(provider or "kimi").strip().lower()
+        client = self._visual_client_for(provider)
+        if client is None:
+            return {
+                "decision": "error",
+                "reason": f"{provider}_unavailable",
+                "confidence": 0,
+                "is_extraction_artifact": False,
+            }
+        if not image_bytes:
+            return {"decision": "skipped", "reason": f"{provider}_unavailable", "confidence": 0}
 
         issue_payload = issue_payload or {}
         prompt = f"""
@@ -1709,17 +1745,28 @@ class AIClient:
 
         started_at = time.time()
         try:
-            response = self.kimi_client.with_options(timeout=40, max_retries=0).chat.completions.create(
-                **self._build_kimi_request_kwargs(
-                    model=self.kimi_model,
-                    messages=[{"role": "user", "content": user_content}],
-                    max_tokens=500,
-                    thinking="disabled",
+            model = self._visual_model_for(provider)
+            if provider == "kimi":
+                response = client.with_options(timeout=40, max_retries=0).chat.completions.create(
+                    **self._build_kimi_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": user_content}],
+                        max_tokens=500,
+                        thinking="disabled",
+                    )
                 )
-            )
+            else:
+                response = client.chat.completions.create(
+                    **self._build_qwen_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": user_content}],
+                        max_tokens=500,
+                        temperature=0.3,
+                    )
+                )
             self._record_usage_event(
-                "kimi",
-                self.kimi_model,
+                provider,
+                model,
                 getattr(response, "usage", None),
                 request_label=request_label,
                 review_id=review_id,

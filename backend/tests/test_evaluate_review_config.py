@@ -279,3 +279,146 @@ def test_batch_evaluate_from_config_preserves_suite_fields(tmp_path, monkeypatch
     assert seen[0]["allowed_misses"] == ["AI-STYLE-001"]
     assert seen[0]["explicit_false_positives"] == ["R029"]
     assert result["results"][0]["config"]["standard_answers"] == ["baseline-a.md", "baseline-b.md"]
+
+
+def test_batch_evaluate_observed_document_records_but_does_not_gate(tmp_path, monkeypatch):
+    """enforce=false 的文档只记录成绩：不计入 regressions，也不拖红 all_documents_meet。"""
+    config = {
+        "documents": [
+            {
+                "name": "gated",
+                "review_id": 101,
+                "baseline": "baseline-a.md",
+            },
+            {
+                "name": "observed",
+                "review_id": 202,
+                "baseline": "baseline-b.md",
+                "enforce": False,
+            },
+        ],
+        "thresholds": {
+            "min_recall": 0.88,
+            "min_precision": 0.88,
+            "max_noop_rate": 0.1,
+            "max_numeric_change_rate": 0.0,
+            "max_protected_change_rate": 0.0,
+            "min_high_value_rate": 0.2,
+        },
+    }
+    config_path = tmp_path / "review-suite.json"
+    config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+
+    recalls = {"gated": 0.95, "observed": 0.50}
+
+    def fake_resolve_suite_document(doc_cfg):
+        return doc_cfg["review_id"], "ok"
+
+    def fake_evaluate_suite_document(doc_cfg, markers, review_id=None):
+        annotations = [
+            HumanAnnotation(
+                file="doc.md",
+                page="1",
+                annotation_type="批注",
+                author="Tina",
+                comment="建议优化表达",
+                selected_text="原句",
+                context="上下文",
+                category="表达与句式",
+                layer="ai_assisted",
+                expected_rule="AI-STYLE-001",
+            )
+        ]
+        return {
+            "review_id": doc_cfg["review_id"],
+            "total": 2,
+            "noop_suggestions": 0,
+            "numeric_changed": 0,
+            "protected_meaning_changed": 0,
+            "effectiveness": {
+                "high_value_rate": 0.5,
+                "high_value_items": [],
+                "low_value_noise_items": [],
+            },
+            "marker_hits": {},
+            "human_baseline": {
+                "strict_recall": recalls[doc_cfg["name"]],
+                "strict_precision": recalls[doc_cfg["name"]],
+            },
+            "config": doc_cfg,
+            "suite_filters": {},
+        }
+
+    monkeypatch.setattr(evaluate_review, "resolve_suite_document", fake_resolve_suite_document)
+    monkeypatch.setattr(evaluate_review, "evaluate_suite_document", fake_evaluate_suite_document)
+
+    result = evaluate_review.batch_evaluate_from_config(str(config_path), ["marker"])
+
+    summary = result["summary"]
+    assert summary["failed"] == 0
+    assert summary["regressions"] == 0
+    assert summary["observed"] == 1
+    # 观测文档跌破阈值，但不影响整体达标判定
+    assert summary["all_documents_meet"] is True
+    per_doc = {item["name"]: item for item in summary["per_document"]}
+    assert per_doc["gated"]["enforce"] is True
+    assert per_doc["observed"]["enforce"] is False
+    # 指标照常记录，不因 enforce=false 被抹掉
+    assert per_doc["observed"]["recall"] == 0.5
+    observed_result = {item["name"]: item for item in result["results"]}["observed"]
+    assert observed_result["passed"] is False
+    assert observed_result["status"].endswith("_observed")
+
+
+def test_batch_evaluate_document_without_enforce_key_still_gates(tmp_path, monkeypatch):
+    """未写 enforce 字段的历史文档保持原卡口行为（默认 True），防止默认值被误改为宽松。"""
+    config = {
+        "documents": [
+            {
+                "name": "legacy",
+                "review_id": 303,
+                "baseline": "baseline-a.md",
+            },
+        ],
+        "thresholds": {
+            "min_recall": 0.88,
+            "min_precision": 0.88,
+            "max_noop_rate": 0.1,
+            "max_numeric_change_rate": 0.0,
+            "max_protected_change_rate": 0.0,
+            "min_high_value_rate": 0.2,
+        },
+    }
+    config_path = tmp_path / "review-suite.json"
+    config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+
+    def fake_resolve_suite_document(doc_cfg):
+        return doc_cfg["review_id"], "ok"
+
+    def fake_evaluate_suite_document(doc_cfg, markers, review_id=None):
+        return {
+            "review_id": doc_cfg["review_id"],
+            "total": 2,
+            "noop_suggestions": 0,
+            "numeric_changed": 0,
+            "protected_meaning_changed": 0,
+            "effectiveness": {
+                "high_value_rate": 0.5,
+                "high_value_items": [],
+                "low_value_noise_items": [],
+            },
+            "marker_hits": {},
+            "human_baseline": {"strict_recall": 0.5, "strict_precision": 0.5},
+            "config": doc_cfg,
+            "suite_filters": {},
+        }
+
+    monkeypatch.setattr(evaluate_review, "resolve_suite_document", fake_resolve_suite_document)
+    monkeypatch.setattr(evaluate_review, "evaluate_suite_document", fake_evaluate_suite_document)
+
+    result = evaluate_review.batch_evaluate_from_config(str(config_path), ["marker"])
+
+    summary = result["summary"]
+    assert summary["regressions"] == 1
+    assert summary["observed"] == 0
+    assert summary["all_documents_meet"] is False

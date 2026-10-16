@@ -21,6 +21,27 @@
       "baseline": "goldset/human_baseline_e25rs_en.json",
       "allowed_misses": [],
       "explicit_false_positives": []
+    },
+    {
+      "name": "e25rs_v8_cn_observed",
+      "baseline": "goldset/human_baseline_高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.json",
+      "allowed_misses": [],
+      "explicit_false_positives": [],
+      "enforce": false
+    },
+    {
+      "name": "e25rs_v8_en_observed",
+      "baseline": "goldset/human_baseline_High-throughputSequencingSetInstructionsforUse_English_RUO_QD_V8.0_R01Tina.json",
+      "allowed_misses": [],
+      "explicit_false_positives": [],
+      "enforce": false
+    },
+    {
+      "name": "g99_v9_observed",
+      "baseline": "goldset/human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json",
+      "allowed_misses": [],
+      "explicit_false_positives": [],
+      "enforce": false
     }
   ],
   "thresholds": {

@@ -1,0 +1,124 @@
+{
+  "annotations": [
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "3",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "逗号前面多了一个空格",
+      "selected_text": "",
+      "context": "April 16 , 2026",
+      "category": "单位/空格",
+      "layer": "deterministic",
+      "expected_rule": "DET-SPACE-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "3",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "双引号反向了",
+      "selected_text": "",
+      "context": "Modified the descriptions of  \"Start",
+      "category": "标点符号",
+      "layer": "deterministic",
+      "expected_rule": "DET-PUNCT-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "8",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "建议改为product",
+      "selected_text": "device",
+      "context": "This device is intended only for scientific research and  should not be used for clinical diagnosis.",
+      "category": "术语一致性",
+      "layer": "ai_assisted",
+      "expected_rule": "STRUCT-TERM-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "9",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "中英文不一致，中文是型号",
+      "selected_text": "Sequencing read length",
+      "context": "Sequencing  read length",
+      "category": "术语一致性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-TERM-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "9",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "缺FCL，根据前面表格",
+      "selected_text": "SE100 PE150",
+      "context": "SE100 PE150",
+      "category": "信息完整性",
+      "layer": "structural_consistency",
+      "expected_rule": "STRUCT-COMPONENT-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "10",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "It is not recommended to mix reagents...\n或者\nMixing reagents from... is not recommended.",
+      "selected_text": "mixed",
+      "context": "y The components and packages are batched separately. Keep the components  in the packages until use. It is not recommended to mixed use reagents from",
+      "category": "表达与句式",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-STYLE-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "18",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "take out and",
+      "selected_text": "thaw",
+      "context": "2)  Based on the specific library adapter type, thaw Make DNB Buffer (OS-V2.0- SB), Make DNB Buffer (OS-V2.0-DB), or Make DNB Buffer (OS-App-V4.0) by",
+      "category": "表达与句式",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-STYLE-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "21",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "是否有多余空格",
+      "selected_text": "",
+      "context": "5.  Take the tube out of the thermal cycler when the temperature reaches 4 ℃.",
+      "category": "单位/空格",
+      "layer": "deterministic",
+      "expected_rule": "DET-SPACE-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "27",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "缺定冠词the",
+      "selected_text": "",
+      "context": "The cartridge rack in reagent compartment is being initialized. The  compartment door opens automatically and the rack slides out.",
+      "category": "表达与句式",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-STYLE-001"
+    },
+    {
+      "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+      "page": "30",
+      "annotation_type": "批注",
+      "author": "Tina",
+      "comment": "the",
+      "selected_text": "",
+      "context": "WARNING The flow cell ID will be locked once flow cell loading is completed",
+      "category": "表达与句式",
+      "layer": "ai_assisted",
+      "expected_rule": "AI-STYLE-001"
+    }
+  ]
+}

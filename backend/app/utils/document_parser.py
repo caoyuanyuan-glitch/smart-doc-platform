@@ -145,8 +145,25 @@ def clean_pdf_text(text: str) -> str:
     text = str(text or '')
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     if '\f' in text:
-        return '\f'.join(clean_pdf_text(page) for page in text.split('\f'))
-    text = re.sub(r'(?<=\n)\s*y(?=[A-Za-z])', ' ', text)
+        # 页边界必须补足换行：否则上一页末尾与下一页首行会被拼成同一行
+        # （题注索引、项目符号清理等以行为单位的规则会同时失效）。
+        # 注意不能改用 text.replace('\f', '\n\f\n') —— 那样不是幂等的，
+        # 重复清洗会不断累积换行。只改 join 的分隔符。
+        # 同时保留 \f 本身：reference_index._page_at 依赖它做页码定位。
+        return '\n\f\n'.join(clean_pdf_text(page) for page in text.split('\f'))
+    # PDF 项目符号伪影：形如 "y 载片运输温度……" / "y Modified the descriptions"。
+    # 三点必须同时放宽，否则真实伪影会漏掉：
+    #   1) 前导不限于 \n —— 页首的 y 前面是 \f；
+    #   2) y 与正文之间必须有空白（原正则 y 后直接跟字母，会误伤 yes/you）；
+    #   3) 后继除字母外还要认中文（真实语料多为 "y + 中文"）。
+    # 必须"消费式"匹配：Python re 不支持变长 lookbehind，无法用
+    # (?<=^|\n|\f) 表达"行首或 \n 或 \f 之后"，只能把前缀写成可消费分支。
+    # 后继要求空白 + 字母/中文，即可保证不误伤 yes/you/y axis/y label/y 轴标注。
+    text = re.sub(
+        r'(?:^|(?<=\n)|(?<=\f))[ \t]*y[ \t]+(?=[\u4e00-\u9fffA-Za-z])',
+        ' ',
+        text,
+    )
     text = re.sub(r'(?<=[A-Za-z])\s*-\s*\n\s*(?=[A-Za-z])', '', text)
     text = re.sub(r'[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]', '', text)
     text = _normalize_pdf_extraction_artifacts(text)
@@ -342,7 +359,7 @@ def extract_pdf(file_path):
         return {
             'blocks': blocks,
             'page_texts': page_texts,
-            'full_text': "\f\n\n".join(page_texts),
+            'full_text': "\n\f\n".join(page_texts),
         }
     except Exception as e:
         raise ValueError(f"PDF解析失败: {str(e)}")
@@ -359,7 +376,7 @@ def parse_pdf(file_path):
     if page_texts:
         page_texts = _remove_repeated_page_noise(page_texts)
         cleaned_pages = [clean_pdf_text(page_text) for page_text in page_texts if str(page_text or '').strip()]
-        return '\f'.join(cleaned_pages)
+        return '\n\f\n'.join(cleaned_pages)
     return clean_pdf_text(extracted.get('full_text', ''))
 
 def parse_docx(file_path):

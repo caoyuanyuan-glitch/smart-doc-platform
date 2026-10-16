@@ -1124,7 +1124,7 @@ def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "reject",
             "reason": "重复文本层伪影",
             "confidence": 92,
@@ -1168,7 +1168,7 @@ def test_apply_pdf_visual_verification_adds_confirmed_page_candidate_issue(monke
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "confirm",
             "reason": "表格列宽分布不均，页面显示拥挤",
             "confidence": 88,
@@ -1212,7 +1212,7 @@ def test_apply_pdf_visual_verification_adds_manual_page_issue_on_visual_error(mo
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "error",
             "reason": "visual model unavailable",
             "confidence": 0,
@@ -1260,7 +1260,7 @@ def test_apply_pdf_visual_verification_filters_known_quote_mapping_artifact_afte
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 61,
@@ -1301,7 +1301,7 @@ def test_apply_pdf_visual_verification_filters_known_following_status_artifact_a
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 58,
@@ -1342,7 +1342,7 @@ def test_apply_pdf_visual_verification_filters_known_turn_on_it_artifact_after_u
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 57,
@@ -1383,7 +1383,7 @@ def test_apply_pdf_visual_verification_filters_missing_icon_text_layer_artifact_
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图中控件可见，但文本层无法确认",
             "confidence": 55,
@@ -1423,7 +1423,7 @@ def test_apply_pdf_visual_verification_filters_duplicated_text_layer_artifact_af
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 54,
@@ -3373,10 +3373,13 @@ def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):
     assert "total_tokens=150" in output
 
 
-def test_review_ai_chunk_limit_defaults_to_ten(monkeypatch):
+def test_review_ai_chunk_limit_defaults_to_thirty_two(monkeypatch):
+    # 默认上限由 10 提到 32：MAX10 会把长文档合并成 10 个大块，超过 prompt 的
+    # content[:6500] 后尾部被静默丢弃（实测 12 万字符丢 47.33%），
+    # 提到 32 后 12 万字符以内文档丢尾归零。
     monkeypatch.delenv("REVIEW_AI_MAX_CHUNKS", raising=False)
 
-    assert review_api._review_ai_chunk_limit() == 10
+    assert review_api._review_ai_chunk_limit() == 32
 
 
 def test_review_ai_chunk_limit_uses_dynamic_value_under_budget(monkeypatch):
@@ -3384,7 +3387,8 @@ def test_review_ai_chunk_limit_uses_dynamic_value_under_budget(monkeypatch):
 
     assert review_api._review_ai_chunk_limit(6000) == 3
     assert review_api._review_ai_chunk_limit(12000) == 5
-    assert review_api._review_ai_chunk_limit(30000) == 10
+    # 30000 字符按公式需 11 块，旧默认 10 会在此处截尾，故不再被压到 10。
+    assert review_api._review_ai_chunk_limit(30000) == 11
 
 
 def test_review_ai_chunk_limit_caps_long_documents_by_env_budget(monkeypatch):

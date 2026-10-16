@@ -4,9 +4,30 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
+import re
 
 
 VISUAL_STATUSES = {"verified", "rejected", "skipped", "failed", "provider_unavailable", "not_required"}
+
+# provider 侧故障信号（鉴权失败、限流、网络异常、SDK 超时）。
+# 命中这些必须归到 provider_unavailable，否则回退链会就地中止，
+# 后续 provider 不再尝试 —— qwen 因此永远拿不到接管机会。
+# 与"渲染失败"（图像本身没渲染出来）严格区分，二者在输出中必须可区分。
+_PROVIDER_FAULT_RE = re.compile(
+    r"\b(?:401|403|429)\b"
+    r"|invalid[\s_-]?api[\s_-]?key"
+    r"|unauthori[sz]ed"
+    r"|forbidden"
+    r"|rate[\s_-]?limit"
+    r"|too[\s_-]?many[\s_-]?requests"
+    r"|insufficient[\s_-]?(?:quota|balance)"
+    r"|authentication"
+    r"|connection[\s_-]?(?:error|refused|reset)"
+    r"|(?:timed?\s?out|timeout)"
+    r"|temporarily[\s_-]?unavailable"
+    r"|service[\s_-]?unavailable"
+    r"|bad[\s_-]?gateway"
+)
 
 
 def visual_provider_chain() -> list[str]:
@@ -30,6 +51,13 @@ def map_visual_status(decision: str, reason: str = "") -> str:
         return "verified"
     if value == "reject":
         return "rejected"
+
+    # 顺序很关键：先判 provider 信号，再判渲染失败。
+    # 否则 "401 invalid api key" 会被 decision=error 直接判成 failed，
+    # 回退链随即中止，qwen 无从接管 —— 这正是 qwen 被结构性短路的根因之一。
+    if _PROVIDER_FAULT_RE.search(why):
+        return "provider_unavailable"
+
     if value in {"error", "failed"} or "render" in why:
         return "failed"
     if value in {"skipped", "provider_unavailable"} or "unavailable" in why:

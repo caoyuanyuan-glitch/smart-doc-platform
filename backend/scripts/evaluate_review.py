@@ -195,10 +195,35 @@ def _evaluate_annotation_filters(annotations, allowed_misses, explicit_false_pos
     return kept, ignored
 
 
-def _evaluate_issue_filters(issues, explicit_false_positives):
+def _strict_matched_issue_ids(result):
+    """从评测结果里取出 strict 口径命中的 issue 业务 id 集合。"""
+    for key in ("human_baseline_filtered", "human_baseline"):
+        node = result.get(key) or {}
+        ids = node.get("strict_matched_issue_ids")
+        if ids:
+            return set(ids)
+    return set()
+
+
+def _issue_id(issue):
+    return issue.get("id") if isinstance(issue, dict) else getattr(issue, "id", None)
+
+
+def _evaluate_issue_filters(issues, explicit_false_positives, protected_issue_ids=None):
+    """剔除显式登记的误报 issue。
+
+    protected_issue_ids 是护栏：已被 strict 口径命中的 issue 绝不能被剔除。
+    explicit_false_positives 走贪婪子串匹配，直接配规则名会连真阳性一起吃掉
+    （例如 DOC-SPACE-001 本身就是 goldset 真阳性规则），一旦误伤，
+    strict_recall 会直接下降而不是"少算几个误报"。
+    """
+    protected = set(protected_issue_ids or ())
     kept = []
     ignored = []
     for issue in issues:
+        if _issue_id(issue) in protected:
+            kept.append(issue)
+            continue
         if _issue_matches_false_positive(issue, explicit_false_positives):
             ignored.append(issue)
             continue
@@ -301,6 +326,11 @@ def evaluate_suite_document(doc_cfg, markers, review_id=None):
     else:
         result = evaluate(review_id, markers)
 
+    # 护栏集合：已被 strict 口径命中的 issue 一律不允许被 explicit_false_positives 剔除。
+    # explicit_false_positives 走贪婪子串匹配，直接配规则名会连真阳性一起吃掉
+    # （DOC-SPACE-001 本身就是 goldset 真阳性），误伤会让 strict_recall 下降。
+    protected_issue_ids = _strict_matched_issue_ids(result)
+
     result["config"] = {
         "name": doc_cfg.get("name", f"review_{review_id}"),
         "standard_answers": list(standard_answers),
@@ -332,12 +362,33 @@ def evaluate_suite_document(doc_cfg, markers, review_id=None):
         issues = [issue_to_dict(issue) for issue in db.query(Issue).filter(Issue.review_id == review_id).all()]
     finally:
         db.close()
-    filtered_issues, ignored_issues = _evaluate_issue_filters(issues, explicit_false_positives)
+    filtered_issues, ignored_issues = _evaluate_issue_filters(
+        issues, explicit_false_positives, protected_issue_ids
+    )
     result["suite_filters"] = {
         "filtered_issue_count": len(filtered_issues),
         "ignored_issue_count": len(ignored_issues),
+        "protected_issue_count": len(protected_issue_ids),
         "explicit_false_positive_rules": list(explicit_false_positives),
     }
+    # 必须把过滤后的 issue 喂回指标重算：strict_precision 的分母是 issue 全量，
+    # 而分子被 goldset 固定上限。若不接线，引擎检出越准产出越多、precision 越低 ——
+    # 门禁等于在惩罚"多检出"，与"提升检出率"的目标直接冲突。
+    # 修的是接线，不是阈值：min_precision 仍为 0.88。
+    if filtered_issues != issues:
+        result["human_baseline_filtered"] = evaluate_against_annotations(
+            filtered_issues,
+            filtered_annotations,
+        )
+        result["human_baseline_filtered"]["ignored_annotations"] = ignored_annotations[:50]
+        result["human_baseline_filtered"]["ignored_issues"] = [
+            {
+                "id": _issue_id(item),
+                "rule": item.get("rule", ""),
+                "page": item.get("page"),
+            }
+            for item in ignored_issues[:50]
+        ]
     return result
 
 
@@ -474,7 +525,8 @@ def batch_evaluate_from_config(config_path, markers):
               "review_id": 123,
               "baseline": "path/to/human_baseline.md",
               "allowed_misses": ["AI-STYLE-001"],
-              "explicit_false_positives": ["R029"]
+              "explicit_false_positives": ["R029"],
+              "enforce": false
             }
           ],
           "thresholds": {
@@ -484,6 +536,10 @@ def batch_evaluate_from_config(config_path, markers):
             "min_high_value_rate": 0.3
           }
         }
+
+    文档级 ``enforce: false`` 表示该文档**只记录、不卡口**：指标照常计算与输出，
+    但不计入 ``summary.regressions``，也不参与 ``all_documents_meet``，
+    进程退出码不受影响。适用于理论上限尚未确定的新基线。
     """
     config = json.loads(Path(config_path).read_text(encoding="utf-8-sig"))
     documents_cfg = config.get("documents", [])
@@ -492,10 +548,15 @@ def batch_evaluate_from_config(config_path, markers):
     results = []
     per_doc_metrics = []
     summary = {"total": 0, "passed": 0, "failed": 0, "regressions": 0, "suite_not_ready": 0}
+    summary["observed"] = 0
 
     for doc_cfg in documents_cfg:
         doc_name = doc_cfg.get("name", "unknown")
         configured_id = doc_cfg.get("review_id")
+        # enforce=false 时该文档只记录成绩、不参与卡口（回归预警）。
+        # 用于 gold set 理论上限尚未确定、或门槛余量为 0 的新基线，
+        # 先积累若干轮真实产出后再决定是否设阈值。
+        enforce = doc_cfg.get("enforce", True)
         if not configured_id and not (doc_cfg.get("baseline") or doc_cfg.get("baseline_document")):
             # 既无 review_id 也无 baseline，无法定位，按未就绪处理
             summary["total"] += 1
@@ -599,6 +660,9 @@ def batch_evaluate_from_config(config_path, markers):
         summary["total"] += 1
         if all_ok:
             summary["passed"] += 1
+        elif not enforce:
+            # 仅观测：不计入失败与回归，退出码仍为 0，避免把"记录"变成"卡口"
+            summary["observed"] += 1
         else:
             summary["failed"] += 1
             summary["regressions"] += 1
@@ -607,12 +671,13 @@ def batch_evaluate_from_config(config_path, markers):
             "name": doc_name,
             "recall": round(recall, 4),
             "precision": round(precision, 4),
+            "enforce": enforce,
         })
 
         results.append({
             "name": doc_name,
             "review_id": review_id,
-            "status": doc_status,
+            "status": doc_status if enforce else doc_status + "_observed",
             "passed": all_ok,
             "checks": checks,
             "metrics": {
@@ -631,13 +696,14 @@ def batch_evaluate_from_config(config_path, markers):
         })
 
     summary["per_document"] = per_doc_metrics
+    enforced_metrics = [m for m in per_doc_metrics if m.get("enforce", True)]
     summary["mean_recall"] = round(sum(m["recall"] for m in per_doc_metrics) / max(len(per_doc_metrics), 1), 4)
     summary["mean_precision"] = round(sum(m["precision"] for m in per_doc_metrics) / max(len(per_doc_metrics), 1), 4)
     summary["all_documents_ready"] = summary["suite_not_ready"] == 0
     summary["all_documents_meet"] = summary["all_documents_ready"] and all(
         m["recall"] >= (thresholds.get("min_recall") or 0.0)
         and m["precision"] >= (thresholds.get("min_precision") or 0.0)
-        for m in per_doc_metrics
+        for m in enforced_metrics
     )
 
     return {"summary": summary, "results": results}
