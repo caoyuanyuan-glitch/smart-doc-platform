@@ -28,6 +28,26 @@ def _parse_bullet(block: str, label: str) -> str:
     return _clean(match.group(1)) if match else ""
 
 
+def _parse_bullet_alias(block: str, *labels: str) -> str:
+    """按多个候选字段名依次取值，取第一个非空值。
+
+    不同 goldset 的字段命名不统一（中文：人工意见 / comment）。
+    """
+    for label in labels:
+        value = _parse_bullet(block, label)
+        if value:
+            return value
+    return ""
+
+
+# 兼容两种批注区块头：
+#   旧格式 "## 1. 标题 · 第 3 页"（页码在标题行）
+#   新格式 "## 批注 1"（页码在正文的 page 字段，可能为空）
+_BLOCK_SPLIT_RE = re.compile(r"(?=^## (?:批注\s*)?\d+\b)", flags=re.MULTILINE)
+_BLOCK_HEADER_RE = re.compile(r"^## (?:批注\s*)?\d+\.?\s*(.*)$", flags=re.MULTILINE)
+_PAGE_IN_HEADER_RE = re.compile(r"第\s*(.*?)\s*页")
+
+
 def classify_human_annotation(comment: str, selected_text: str = "", context: str = "") -> tuple[str, str, str]:
     comment_text = str(comment or "").lower()
     text = " ".join([comment, selected_text, context]).lower()
@@ -105,22 +125,45 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
 def parse_human_annotation_markdown(path: str | Path) -> list[HumanAnnotation]:
     text = Path(path).read_text(encoding="utf-8-sig")
     annotations: list[HumanAnnotation] = []
-    blocks = re.split(r"(?=^## \d+\. )", text, flags=re.MULTILINE)
+    blocks = _BLOCK_SPLIT_RE.split(text)
     for block in blocks:
-        header = re.search(r"^## \d+\. (.*?) · 第 (.*?) 页", block, flags=re.MULTILINE)
+        header = _BLOCK_HEADER_RE.search(block)
         if not header:
             continue
-        comment = _parse_bullet(block, "人工意见")
+        # 页码优先级：正文 page 字段 > 标题行里的"第 N 页"。
+        # 新格式的 page 可能为空（待人工补全），此时不得丢弃整条批注。
+        page = _parse_bullet_alias(block, "page", "页码")
+        if not page:
+            inline_page = _PAGE_IN_HEADER_RE.search(header.group(1) or "")
+            page = _clean(inline_page.group(1)) if inline_page else ""
+        file_name = _parse_bullet_alias(block, "file", "文件")
+        if not file_name:
+            file_name = _clean(_PAGE_IN_HEADER_RE.sub("", header.group(1) or ""))
+
+        comment = _parse_bullet_alias(block, "人工意见", "comment", "意见")
         if not comment or comment == "-":
             continue
-        selected_text = _parse_bullet(block, "选中文本")
-        context = _parse_bullet(block, "附近正文")
-        category, layer, expected_rule = classify_human_annotation(comment, selected_text, context)
+        selected_text = _parse_bullet_alias(block, "选中文本", "selected_text", "selected")
+        context = _parse_bullet_alias(block, "附近正文", "context", "上下文")
+
+        # 新格式已显式给出 category / layer / expected_rule，优先采用；
+        # 缺省时才回退到启发式分类，避免把已人工定类的条目改写掉。
+        category = _parse_bullet_alias(block, "category", "类别") or ""
+        layer = _parse_bullet_alias(block, "layer", "图层") or ""
+        expected_rule = _parse_bullet_alias(block, "expected_rule", "期望规则") or ""
+        if not (category and layer and expected_rule):
+            guessed_category, guessed_layer, guessed_rule = classify_human_annotation(
+                comment, selected_text, context
+            )
+            category = category or guessed_category
+            layer = layer or guessed_layer
+            expected_rule = expected_rule or guessed_rule
+
         annotations.append(HumanAnnotation(
-            file=_clean(header.group(1)),
-            page=_clean(header.group(2)),
-            annotation_type=_parse_bullet(block, "批注类型"),
-            author=_parse_bullet(block, "批注人"),
+            file=file_name,
+            page=page,
+            annotation_type=_parse_bullet_alias(block, "批注类型", "annotation_type"),
+            author=_parse_bullet_alias(block, "批注人", "author"),
             comment=comment,
             selected_text=selected_text,
             context=context,
@@ -217,6 +260,21 @@ def _has_substantive_text_overlap(item: HumanAnnotation, issue: dict[str, Any]) 
         return True
     # 中文碎片场景：批注只截取了目标文字的一部分，此时看重叠段是否覆盖了批注本身。
     return bool(CJK_PATTERN.search(selected)) and overlap / shorter >= 0.5
+
+
+# 说明（第 2 档侦察结论，勿重复踩坑）：
+# 引擎输出的 category 是「错误类型」维度（标点符号 / 页码异常 / 术语一致性 /
+# 句子成分…），而下方各 expected_rule 分支的兜底词用的是 goldset 的「文档结构」
+# 维度（表格/版式 / 图片 / 步骤结构 / 表达与句式…）。两套词表不相交，规则族兜底
+# 分支形同虚设（实测 33 条批注仅 12 条能过第一层闸）。
+#
+# 曾试过用「类别别名表」把错误类型词映射到结构维度词。实测结论：
+#   - rule_ok>0 的批注 12 → 14，但**严格命中不变**（strict 还要求文本重叠，
+#     而文本层才是真瓶颈）；
+#   - 反而把宽松通道的 recall 从 0.5758 虚抬到 0.6970 —— 这些新增配对**没有任何
+#     文本证据**，纯靠规则族放行，属"把 recall 刷高"而非真实检出。
+# 因此不采用别名表。taxonomy 不合一是客观事实，但只能在「文本锚点」层面解决，
+# 不能靠放宽规则族口径制造虚高。
 
 
 def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
@@ -335,7 +393,14 @@ def _matches_annotation_strictly(
     original = _norm_for_match(issue.get("original_text", ""))
     description = _norm_for_match(issue.get("description", ""))
 
-    if selected and len(selected) >= 4 and (selected in blob or (original and original in selected)):
+    # 通道①（selected 包含于 blob，或 original 被 selected 包含）与通道②共用
+    # `original in selected` 这一判据，但通道① 此前漏给 original 设长度下限：
+    # 一条 3 字符的碎片（如 'a in'）会被判为"包含于"任意更长的 selected_text。
+    # 实测这会伪造出「建议移到上一页」（版式类）命中「冠词错误 a in」的错配。
+    # 与通道② 对齐为 >= 4，碎片不再具备反向包含能力。
+    if selected and len(selected) >= 4 and (
+        selected in blob or (original and len(original) >= 4 and original in selected)
+    ):
         return True
     if original and len(original) >= 4 and selected and original in selected:
         return True
@@ -468,6 +533,13 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         if any(_matches_annotation_loosely(item, issue, blob, allow_rule_family=False) for item in annotations)
     }
     strict_matched_issue_ids = {id(issue_pairs[issue_index][0]) for issue_index in strict_pairs.values()}
+    # 同一份 strict 匹配结果的业务 id 视图（不能跨函数调用复用 id(issue)，
+    # 那是内存地址）。用于评测脚本保护真阳性，防止 explicit_false_positives 误伤。
+    strict_matched_business_ids = {
+        issue_pairs[issue_index][0].get("id")
+        for issue_index in strict_pairs.values()
+        if issue_pairs[issue_index][0].get("id") is not None
+    }
     issue_total = len(issues)
     recall = len(hits) / len(annotations) if annotations else 0
     precision = len(matched_issue_ids) / issue_total if issue_total else 0
@@ -505,6 +577,10 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         "strict_misses": strict_misses[:50],
         "unmatched_issues": unmatched_issues[:50],
         "strict_unmatched_issues": strict_unmatched_issues[:50],
+        # 完整（不截断）的 strict 命中 issue 业务 id，供评测脚本做"真阳性保护"。
+        # explicit_false_positives 若误伤这些 issue 会直接压低 strict_recall，
+        # 必须能被准确识别出来并加以保护。
+        "strict_matched_issue_ids": sorted(strict_matched_business_ids),
     }
 
 

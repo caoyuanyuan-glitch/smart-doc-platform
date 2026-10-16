@@ -2346,8 +2346,16 @@ def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
 
     短文档全覆盖；长文档受环境预算 REVIEW_AI_MAX_CHUNKS 约束。
+
+    默认值由 10 提到 32：单块上限是 create_smart_chunker(max_chars=2800)，
+    而 prompt 只截 content[:6500]。块数被压到 10 时，_merge_to_limit 会把全文
+    合并成 10 个大块，单块均值 ≈ 全文/10 —— 超过 6500 字符的文档尾部会被
+    prompt 静默丢弃（8 万字符丢 18.75%、10 万丢 35%、12 万丢 45.83%），
+    而 compute_chunk_coverage 仍报 100%，指标上看不出任何衰减。
+    提到 32 后，12 万字符以内文档的丢尾降为 0，检出率上限被解除。
+    成本控制改由 REVIEW_AI_MAX_CHUNKS 环境变量按需下调，不再写死默认值。
     """
-    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '10'))
+    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '32'))
     if total_length <= 0:
         return env_limit
     dynamic_limit = 1 + math.ceil(max(0, total_length - 3000) / 2750)
@@ -3552,14 +3560,16 @@ def _verify_review_issue_visually(png_bytes, issue_payload, page_number, review_
         if not _visual_provider_available(provider):
             attempts.append({"provider": provider, "visual_status": "provider_unavailable"})
             continue
-        if provider != "kimi":
-            attempts.append({"provider": provider, "visual_status": "provider_unavailable", "reason": "vision_adapter_missing"})
-            continue
+        # 不再硬编码跳过非 kimi：原先的 `if provider != "kimi": continue`
+        # 会让 qwen 永远拿不到接管机会，即使客户端已就绪。
+        # 现在按 REVIEW_VISUAL_PROVIDERS 顺序逐个尝试，
+        # 任一 provider 返回 provider_unavailable 就回退到下一家。
         result = ai_client.verify_review_issue_from_image(
             png_bytes,
             issue_payload,
             page_number=page_number,
             review_id=review_id,
+            provider=provider,
         ) or {}
         status = map_visual_status(result.get("decision"), result.get("reason"))
         result["visual_status"] = status
@@ -9555,6 +9565,51 @@ def _run_cross_reference_audit(content):
                 'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='步骤', target=f'Step {ref}', check_result='引用缺失'),
             })
 
+    # 页码引用（on Page N）：跨页引用在排版变动后极易失效，规范做法是引用
+    # 对象编号（Table 39 / Figure 11）或就近表述（the table below）。
+    #
+    # 启用条件：文档**本身具备编号对象引用体系**。若全文连 Table/Figure 编号都不存在，
+    # 「改用对象引用」这条建议没有可替代的目标，建议本身不成立，故整段不启用。
+    #
+    # 只报「对象级页引用」：引用文本里必须已经出现 Table/Figure/reaction mixture
+    # 这类可替代的对象名 —— 此时「改用对象引用」是确定性改进，不依赖人工判断。
+    # 纯章节名/FAQ 的页引用（如 "refer to Loading ... on Page 99"）不报：
+    # 它们在附录索引与交叉导航中是常规写法，报出即为噪声。
+    # 附录图索引（"Refer to Figure N on Page M" 连续成组）也排除，同理。
+    #
+    # 同一目标页只报一次：同段落里对同一目标页的多种写法属同一缺陷的重复表述，
+    # 逐条报出会放大 issue 数并压低准确率。
+    numbered_object_ids = set(
+        re.findall(r'\b(?:Table|Figure)\s*(\d{1,3})\b', normalized, re.IGNORECASE))
+    if len(numbered_object_ids) >= 2:
+        reported_ref_pages = set()
+        for match in re.finditer(r'([^\n]{3,120}?)\s+on\s+Page\s+(\d{1,4})', normalized):
+            original = match.group(0).strip()
+            if not re.search(r'(?:reaction\s+mixture|Table\s*\d+)', original, re.IGNORECASE):
+                continue
+            if re.match(r'^Refer to Figure\s*\d+\s+on\s+Page', original, re.IGNORECASE):
+                continue
+            ref_page = match.group(2)
+            if ref_page in reported_ref_pages:
+                continue
+            reported_ref_pages.add(ref_page)
+            start, end = match.start(), match.end()
+            issues.append({
+                'severity': 'general',
+                'category': '交叉引用',
+                'rule': 'REF-003',
+                'chapter': '',
+                'original_text': original,
+                'context': get_context(normalized, start, end, 120),
+                'suggestion': '建议取消跨页页码引用，改为引用表格/图编号或就近表述（如 the table below）。',
+                'description': f'引用原文：{original}；引用类型：页码；检查结果：建议改为对象级引用。',
+                'audit_basis': '跨页页码引用在文档排版或分页变动后容易失效，应引用可唯一回溯的对象编号。',
+                'confidence': 86,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(
+                    start, end, area='正文', reference_type='页码', target=original, check_result='建议改为对象级引用'),
+            })
+
     return issues
 
 
@@ -12233,10 +12288,15 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
                 return True
 
     if rule_no == "R011":
+        # 规则意图是「单位不应加 s」（5mins -> 5 min）。历史正则写作
+        # r"\b(mins?|hs?|secs?)\b"，三个分组都带可选 s，导致合法的单数单位
+        # （h / min / sec）反而被判为错误，而真正该管的 hrs 又匹配不到。
+        # 实测在某英文手册 PDF 上 13 条命中全部是孤立的 "h"（正确写法被误报）。
+        # 这里只放行复数缩写本身，其余一律跳过——对已按旧正则播种的库同样生效。
         lowered_context = context.lower()
         if "/" in context or "rpm/min" in lowered_context:
             return True
-        if re.search(r'\b(?:min|sec|hr)\b', original_text, re.IGNORECASE):
+        if not re.fullmatch(r"(?:mins|hs|hrs|secs)", original_text, re.IGNORECASE):
             return True
 
     if rule_no == "R013":
@@ -12265,6 +12325,13 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
         if tokens and all(len(token) <= 1 for token in tokens):
             return True
+        # 实测 PDF 表格表头/图例里同一缩写会跨行重复出现（COM\nCOM、HDMI\nHDMI），
+        # 占位符也会成对出现（XXX XXX、XX XX）。这些都是版式结构而非"the the"式
+        # 行文重复。真重复是正文里的小写词，不会被下面两条拦到。
+        if file_type == "pdf" and "\n" in original_text:
+            return True
+        if len(tokens) >= 2 and all(token.isupper() and len(token) >= 2 for token in tokens):
+            return True
 
     # Mixed Chinese-English spacing rule should keep common product names and protocol acronyms intact.
     if rule_no == "R025":
@@ -12280,8 +12347,15 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
 
     # Markdown/code formatting rules only apply when the extracted text still clearly shows markdown structure.
-    if rule_no in {"R030", "R031", "R032", "R033", "R034", "R046", "R047", "R049"}:
+    if rule_no in {"R030", "R031", "R032", "R033", "R034", "R047", "R049"}:
         if "```" not in content and "#" not in content and "[" not in content and "](" not in content:
+            return True
+
+    if rule_no == "R046":
+        # "禁止使用Tab缩进"。PDF 文本层里的 \t 是排版抽取伪影而非作者缩进，
+        # 实测某英文手册 PDF 上 42 条命中全部是表格/图注分隔符。仅对非 PDF
+        # 源（docx/md 等保留真实制表符的格式）保留该规则。
+        if file_type == "pdf":
             return True
 
     # Long-sentence rules are too noisy on table rows, lists, and extracted fragments.
@@ -12750,6 +12824,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         original_content_length = len(content)
         content_limit = _review_content_limit(document.file_type)
         content = content[:content_limit]
+        # 截断必须留痕：否则超长文档被静默截尾，检出率下降在指标上完全不可见。
+        content_truncated_chars = max(0, original_content_length - len(content))
+        if content_truncated_chars:
+            print(
+                f"[review] 内容截断: 原始={original_content_length} "
+                f"上限={content_limit} 丢弃={content_truncated_chars} "
+                f"({content_truncated_chars / original_content_length:.1%})"
+            )
         pdf_page_metadata = _extract_pdf_page_metadata(document, content)
         pdf_suspicious_pages = _collect_pdf_suspicious_pages(pdf_page_metadata)
         document_language = detect_language(content)
