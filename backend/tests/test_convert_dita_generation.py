@@ -195,7 +195,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<note type="caution">', xml)
+        self.assertIn('<note type="tip">', xml)
         self.assertIn("<ul>", xml)
         self.assertIn("<li>Use wide-bore pipette tips.</li>", xml)
         self.assertIn("<li>Count at least three times.</li>", xml)
@@ -211,7 +211,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<note type="caution">', xml)
+        self.assertIn('<note type="tip">', xml)
         self.assertIn("<ul>", xml)
         self.assertIn("<li>Retrieve DNA Clean Beads in advance.</li>", xml)
         self.assertIn("<li>A single black circle indicates a 2.0 mL cryovial.</li>", xml)
@@ -426,6 +426,66 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('<fig><title>前置图题</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
         self.assertNotIn('<p>图1 前置图题</p>', xml)
 
+    def test_caption_with_two_following_images_stays_in_one_fig(self):
+        xml = _content_to_dita_xml(
+            "Consumables Loading",
+            "Figure 3-5 Schematic Diagram of Slide Loading\n"
+            "![image_008.png](image/image_008.png)\n"
+            "![image_009.jpeg](image/image_009.jpeg)",
+            "task",
+            "DTO041029",
+            "en-US",
+            topic_kind="task",
+        )
+        self.assertIn(
+            '<fig><title>Schematic Diagram of Slide Loading</title>'
+            '<image href="image/image_008.png" placement="break"></image>'
+            '<image href="image/image_009.jpeg" placement="break"></image></fig>',
+            xml,
+        )
+        self.assertNotIn('<image href="image/image_009.jpeg" placement="break"></image>\n', xml.split("</fig>")[-1])
+
+    def test_consecutive_figures_keep_separate_images(self):
+        xml = _content_to_dita_xml(
+            "Sequencing",
+            "![image_021.png](image/image_021.png)\n"
+            "Figure 4-1 cDNA Library Structure\n"
+            "![image_022.png](image/image_022.png)\n"
+            "Figure 4-2 Oligo Library Structure\n",
+            "concept",
+            "CTO041037",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn(
+            '<fig><title>cDNA Library Structure</title>'
+            '<image href="image/image_021.png" placement="break"></image></fig>',
+            xml,
+        )
+        self.assertIn(
+            '<fig><title>Oligo Library Structure</title>'
+            '<image href="image/image_022.png" placement="break"></image></fig>',
+            xml,
+        )
+
+    def test_image_followed_by_unnumbered_caption_becomes_fig(self):
+        xml = _content_to_dita_xml(
+            "Silicone Pad for Replacing the PCR Cover Plate",
+            "1. Press below the latch of the PCR module top cover plate.\n"
+            "![image_026.png](image/image_026.png)\n"
+            "PCR module top cover plate latch position\n",
+            "task",
+            "DTO041052",
+            "en-US",
+            topic_kind="task",
+        )
+        self.assertIn(
+            '<fig><title>PCR module top cover plate latch position</title>'
+            '<image href="image/image_026.png" placement="break"></image></fig>',
+            xml,
+        )
+        self.assertNotIn("<p>PCR module top cover plate latch position</p>", xml)
+
     def test_unmatched_figure_caption_stays_paragraph(self):
         xml = _content_to_dita_xml(
             "无图示例",
@@ -510,7 +570,7 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn('<note type="warning"><p>Keep the tube on ice.</p></note>', xml)
 
-    def test_english_note_label_becomes_caution_note(self):
+    def test_english_note_label_becomes_tip_note(self):
         xml = _content_to_dita_xml(
             "Login",
             "Note: Do not click [Login] repeatedly.",
@@ -519,7 +579,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<note type="caution">', xml)
+        self.assertIn('<note type="tip">', xml)
         self.assertIn("<uicontrol>Login</uicontrol>", xml)
         self.assertNotIn("<p>Note:", xml)
 
@@ -532,7 +592,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<note type="caution">', xml)
+        self.assertIn('<note type="tip">', xml)
         self.assertNotIn("<uicontrol>/B</uicontrol>", xml)
         self.assertIn("Please ensure that the sample carrier is pushed in.", xml)
 
@@ -801,6 +861,37 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         self.assertNotIn("Version History", cover["content"])
         self.assertIn("March 10, 2026", cover["sections"][0]["content"])
 
+    def test_version_history_table_stays_with_version_history_heading(self):
+        import tempfile
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "version_history.docx")
+            doc = Document()
+            doc.add_paragraph("Version History")
+            table = doc.add_table(rows=2, cols=3)
+            table.cell(0, 0).text = "Automated Version"
+            table.cell(0, 1).text = "Revision Date"
+            table.cell(0, 2).text = "Revised Summary"
+            table.cell(1, 0).text = "V1.0"
+            table.cell(1, 1).text = "March 10, 2026"
+            table.cell(1, 2).text = "First release"
+            doc.add_paragraph("Tips: Please download the latest version of the Manual.")
+            doc.save(path)
+            markdown = _docx_to_markdown(path)
+
+        self.assertIn("Version History", markdown)
+        self.assertIn("Automated Version", markdown)
+        self.assertLess(markdown.index("Version History"), markdown.index("Automated Version"))
+        self.assertNotIn("# Cover", markdown)
+        sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
+        version_history = next(
+            section for section in sections
+            if "version history" in (section.get("title") or "").lower()
+        )
+        self.assertIn("Automated Version", version_history["content"])
+        self.assertIn("First release", version_history["content"])
+
     def test_real_docx_markdown_contains_expected_split_headings(self):
         markdown = _docx_to_markdown('/workspace/.monkeycode-tmp-files/8a916735-H-940-001530-00 MGIEasy 全基因组甲基化建库试剂盒使用说明书 3.0 -250317-1.docx')
         self.assertIn('## Barcode 引物使⽤注意', markdown)
@@ -862,6 +953,76 @@ class SectionPostprocessTest(unittest.TestCase):
         self.assertIn('| Section | Workflow |', sections[0]["content"])
         self.assertEqual(len(sections[0]["sections"]), 1)
         self.assertEqual(sections[0]["sections"][0]["title"], '[[B]]Table[[/B]][[B]] [[/B]][[B]]10[[/B]][[B]] [[/B]][[B]]Workflow[[/B]]')
+
+    def test_empty_appendix_wrapper_promotes_children(self):
+        sections = _postprocess_section_tree([
+            {
+                "title": "Appendix",
+                "content": "",
+                "sections": [
+                    {
+                        "title": "Precautions Before Using DNA Clean Beads",
+                        "content": "Equilibrate beads to room temperature.",
+                        "sections": [],
+                    },
+                    {
+                        "title": "Rules for the Use of Barcode Primer",
+                        "content": "",
+                        "sections": [
+                            {
+                                "title": "Barcode Primer Use Rules",
+                                "content": "Use unique barcodes.",
+                                "sections": [],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ])
+        self.assertEqual(
+            [sec["title"] for sec in sections],
+            [
+                "Precautions Before Using DNA Clean Beads",
+                "Rules for the Use of Barcode Primer",
+            ],
+        )
+        self.assertTrue(all(sec.get("is_appendix") for sec in sections))
+        self.assertEqual(
+            [child["title"] for child in sections[1]["sections"]],
+            ["Barcode Primer Use Rules"],
+        )
+
+    def test_empty_chinese_appendix_wrapper_promotes_children(self):
+        sections = _postprocess_section_tree([
+            {
+                "title": "附录",
+                "content": "",
+                "sections": [
+                    {
+                        "title": "DNA Clean Beads使用前注意事项",
+                        "content": "磁珠需平衡至室温。",
+                        "sections": [],
+                    }
+                ],
+            }
+        ])
+        self.assertEqual([sec["title"] for sec in sections], ["DNA Clean Beads使用前注意事项"])
+        self.assertTrue(sections[0].get("is_appendix"))
+
+    def test_appendix_with_body_stays_as_parent(self):
+        sections = _postprocess_section_tree([
+            {
+                "title": "Appendix",
+                "content": "See the following items.",
+                "sections": [
+                    {"title": "Notes", "content": "Keep dry.", "sections": []},
+                ],
+            }
+        ])
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0]["title"], "Appendix")
+        self.assertFalse(sections[0].get("is_appendix"))
+        self.assertEqual([child["title"] for child in sections[0]["sections"]], ["Notes"])
 
 
 class BookmapTreeTest(unittest.TestCase):
@@ -953,6 +1114,59 @@ class BookmapTreeTest(unittest.TestCase):
         self.assertIn('navtitle="About the user manual"', frontmatter_xml)
         self.assertIn('navtitle="Manufacturer information"', frontmatter_xml)
         self.assertIn('navtitle="Revision history"', frontmatter_xml)
+
+    def test_each_appendix_emits_independent_container_and_chapter_topic(self):
+        processed = _postprocess_section_tree([
+            {
+                "title": "Appendix",
+                "content": "",
+                "sections": [
+                    {
+                        "title": "Precautions Before Using DNA Clean Beads",
+                        "content": "Equilibrate beads.",
+                        "sections": [],
+                    },
+                    {
+                        "title": "Rules for the Use of Barcode Primer",
+                        "content": "",
+                        "sections": [
+                            {
+                                "title": "Barcode Primer Use Rules",
+                                "content": "Use unique barcodes.",
+                                "sections": [],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ])
+        flat = _flatten_sections(processed)
+        topics = []
+        for index, section in enumerate(flat, start=1):
+            kind = "chapter" if int(section.get("level", 1) or 1) <= 1 else "concept"
+            topics.append({
+                "title": section["title"],
+                "filename": f"T{index:03d}.dita",
+                "id": f"T{index:03d}",
+                "topic_kind": kind,
+                "level": section["level"],
+                "is_appendix": section.get("is_appendix", False),
+            })
+        roots = _build_topic_hierarchy(topics, set())
+        lines = []
+        _append_bookmap_topics(lines, roots, "20261020_120000", "en-US")
+        output = "\n".join(lines)
+
+        self.assertEqual(output.count("<appendix "), 2)
+        self.assertNotIn('navtitle="Appendix"', output)
+        self.assertIn('<appendix navtitle="Precautions Before Using DNA Clean Beads"', output)
+        self.assertIn('<appendix navtitle="Rules for the Use of Barcode Primer"', output)
+        self.assertIn('cms:template="chapterTopic"', output)
+        self.assertIn('navtitle="Barcode Primer Use Rules"', output)
+        self.assertLess(
+            output.index('<appendix navtitle="Rules for the Use of Barcode Primer"'),
+            output.index('navtitle="Barcode Primer Use Rules"'),
+        )
 
 
 class TemplateSubsetTest(unittest.TestCase):
@@ -1076,6 +1290,178 @@ class DocxTableMarkdownTest(unittest.TestCase):
         lines = _docx_table_to_markdown(table)
         self.assertEqual(lines[2], '| Buffer | 10 uL |')
         self.assertEqual(lines[3], '| Buffer | 20 uL |')
+
+    def _real_table(self, rows, cols, fill, merges=None, header_rows=0, heading=""):
+        from docx import Document
+        from docx.oxml import OxmlElement
+
+        doc = Document()
+        table = doc.add_table(rows=rows, cols=cols)
+        for (r, c), text in fill.items():
+            table.cell(r, c).text = text
+        for (r1, c1), (r2, c2) in merges or []:
+            table.cell(r1, c1).merge(table.cell(r2, c2))
+        for row_index in range(header_rows):
+            tr_pr = table.rows[row_index]._tr.get_or_add_trPr()
+            tr_pr.append(OxmlElement("w:tblHeader"))
+        table._convert_heading = heading
+        return table
+
+    def test_vmerge_without_tblheader_has_no_thead(self):
+        table = self._real_table(
+            3,
+            3,
+            {
+                (0, 0): "Kit type",
+                (0, 1): "Kit A",
+                (0, 2): "Cat. 1",
+                (1, 1): "Kit B",
+                (1, 2): "Cat. 2",
+                (2, 1): "Kit C",
+                (2, 2): "Cat. 3",
+            },
+            merges=[((0, 0), (2, 0))],
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[0], "[[THEAD:0]]")
+        self.assertIn("[[SPAN:1,3]]", lines[1])
+        xml = _content_to_dita_xml(
+            "Applicable Reagent Kits",
+            "\n".join(lines),
+            "concept",
+            "DTC041006",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertNotIn("<thead>", xml)
+        self.assertIn('morerows="2"', xml)
+        self.assertEqual(xml.count("Kit type"), 1)
+
+    def test_label_first_row_without_merge_becomes_thead(self):
+        table = self._real_table(
+            2,
+            4,
+            {
+                (0, 0): "Workbench Position",
+                (0, 1): "Plate Position Description",
+                (0, 2): "Official Name",
+                (0, 3): "Displayed Name",
+                (1, 0): "POS11",
+                (1, 1): "PCR Instrument Module",
+                (1, 2): "/",
+                (1, 3): "/",
+            },
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[0], "[[THEAD:1]]")
+
+    def test_all_tblheader_rows_keep_single_thead(self):
+        table = self._real_table(
+            2,
+            5,
+            {
+                (0, 0): "Target Input Cell Count (cells)",
+                (0, 1): "5000",
+                (0, 2): "10000",
+                (0, 3): "20000",
+                (0, 4): "30000",
+                (1, 0): "Recommended Concentration (cells/μL)",
+                (1, 1): "272 <N<1000",
+                (1, 2): "544 <N<2000",
+                (1, 3): "1087 <N<2000",
+                (1, 4): "1631 <N<2000",
+            },
+            header_rows=2,
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[0], "[[THEAD:1]]")
+        xml = _content_to_dita_xml(
+            "Total Cell Count and Concentration Requirement",
+            "Table 2-1 Recommended Cell Input\n" + "\n".join(lines),
+            "concept",
+            "DTC041014",
+            "en-US",
+            topic_kind="concept",
+        )
+        thead = xml.split("<thead>")[1].split("</thead>")[0]
+        tbody = xml.split("<tbody>")[1].split("</tbody>")[0]
+        self.assertIn("Target Input Cell Count", thead)
+        self.assertNotIn("Recommended Concentration", thead)
+        self.assertIn("Recommended Concentration", tbody)
+
+    def test_horizontal_merge_last_row_emits_namest(self):
+        table = self._real_table(
+            2,
+            7,
+            {
+                (0, 0): "Sample size/lane",
+                (0, 1): "Method 1",
+                (0, 2): "Method 2",
+                (0, 3): "Method 3",
+                (0, 4): "Method 4",
+                (0, 5): "Method 5",
+                (0, 6): "Method 6",
+                (1, 0): "8",
+                (1, 1): "Choose any 2 out of 4 sets of barcode primers.",
+                (1, 5): "17~24",
+                (1, 6): "25~32",
+            },
+            merges=[((1, 1), (1, 4))],
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertIn("[[TWIDE:180mm]]", lines)
+        self.assertIn("[[SPAN:4,1]]", "\n".join(lines))
+        xml = _content_to_dita_xml(
+            "Barcode Primer Use Rules",
+            "\n".join(lines),
+            "concept",
+            "DTC041047",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<table outputclass="180mm">', xml)
+        self.assertIn('namest="COLSPEC1" nameend="COLSPEC4"', xml)
+
+    def test_sequencing_parameters_table_is_extra_wide(self):
+        xml = _content_to_dita_xml(
+            "Sequencing Parameters",
+            "| Library Type | cDNA | Oligo |\n| :--- | :--- | :--- |\n| Reads 1 | 47 | 32 |",
+            "concept",
+            "DTC041040",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertIn('<table outputclass="180mm">', xml)
+
+    def test_pcr_module_vmerge_keeps_single_description(self):
+        table = self._real_table(
+            3,
+            4,
+            {
+                (0, 0): "Workbench Position",
+                (0, 1): "Plate Position Description",
+                (0, 2): "Official Name",
+                (0, 3): "Displayed Name",
+                (1, 0): "POS11",
+                (1, 1): "PCR Instrument Module",
+                (1, 2): "/",
+                (1, 3): "/",
+                (2, 0): "POS12",
+                (2, 2): "0.2 mL PCR plate",
+                (2, 3): "PCR Plate",
+            },
+            merges=[((1, 1), (2, 1))],
+        )
+        xml = _content_to_dita_xml(
+            "Consumables Loading",
+            "\n".join(_docx_table_to_markdown(table)),
+            "task",
+            "DTO041029",
+            "en-US",
+            topic_kind="task",
+        )
+        self.assertEqual(xml.count("PCR Instrument Module"), 1)
+        self.assertIn('morerows="1"', xml)
 
 
 class DocxMediaCopyTest(unittest.TestCase):

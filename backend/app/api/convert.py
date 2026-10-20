@@ -494,7 +494,149 @@ def _is_docx_toc_number(text):
     return bool(re.fullmatch(r'\d+(?:\.\d+)*', text or ''))
 
 
-def _docx_table_to_markdown(table):
+def _docx_table_to_markdown(table, heading=""):
+    """Render a Word table, preserving merges and the real header-row count."""
+    from docx.oxml.ns import qn
+    from docx.table import _Cell
+
+    if getattr(table, "_tbl", None) is None:
+        return _docx_table_to_markdown_legacy(table)
+
+    def grid_span(tc):
+        tcPr = tc.find(qn("w:tcPr"))
+        if tcPr is None:
+            return 1
+        node = tcPr.find(qn("w:gridSpan"))
+        if node is None:
+            return 1
+        try:
+            return max(1, int(node.get(qn("w:val")) or 1))
+        except ValueError:
+            return 1
+
+    def vmerge(tc):
+        tcPr = tc.find(qn("w:tcPr"))
+        if tcPr is None:
+            return None
+        node = tcPr.find(qn("w:vMerge"))
+        if node is None:
+            return None
+        return node.get(qn("w:val")) or "continue"
+
+    def is_header_row(tr):
+        trPr = tr.find(qn("w:trPr"))
+        if trPr is None:
+            return False
+        return trPr.find(qn("w:tblHeader")) is not None
+
+    trs = table._tbl.findall(qn("w:tr"))
+    if not trs:
+        return []
+
+    parsed_rows = []
+    max_col = 0
+    for tr in trs:
+        col = 0
+        cells = []
+        for tc in tr.findall(qn("w:tc")):
+            span = grid_span(tc)
+            cells.append((col, span, vmerge(tc), _normalize_docx_text(_Cell(tc, table).text)))
+            col += span
+        max_col = max(max_col, col)
+        parsed_rows.append((is_header_row(tr), cells))
+
+    if max_col <= 0:
+        return []
+
+    def cell_at(row_cells, col):
+        for start, span, merge, text in row_cells:
+            if start <= col < start + span:
+                return start, span, merge, text
+        return None
+
+    def rowspan_for(row_index, col):
+        found = cell_at(parsed_rows[row_index][1], col)
+        if found is None:
+            return 1
+        _, _, merge, _ = found
+        if merge != "restart":
+            return 1
+        span = 1
+        for later in parsed_rows[row_index + 1:]:
+            nxt = cell_at(later[1], col)
+            if nxt is None:
+                break
+            _, _, later_merge, _ = nxt
+            if later_merge != "continue":
+                break
+            span += 1
+        return span
+
+    grid = []
+    for row_index, (_header, row_cells) in enumerate(parsed_rows):
+        rendered = [""] * max_col
+        for start, colspan, merge, text in row_cells:
+            if merge == "continue":
+                for extra in range(colspan):
+                    if start + extra < max_col:
+                        rendered[start + extra] = IDML_SPAN_COVERED
+                continue
+            rowspan = rowspan_for(row_index, start)
+            cell_text = text
+            if colspan > 1 or rowspan > 1:
+                cell_text = (cell_text + " " if cell_text else "") + f"[[SPAN:{colspan},{rowspan}]]"
+            rendered[start] = cell_text
+            for extra in range(1, colspan):
+                if start + extra < max_col:
+                    rendered[start + extra] = IDML_SPAN_COVERED
+        grid.append(rendered)
+
+    header_rows = 0
+    for header_flag, _cells in parsed_rows:
+        if not header_flag:
+            break
+        header_rows += 1
+    if header_rows == 0 and len(grid) > 1:
+        first_has_continuing_merge = any(
+            merge == "restart" and rowspan_for(0, start) > 1
+            for start, _span, merge, _text in parsed_rows[0][1]
+        )
+        if not first_has_continuing_merge:
+            header_rows = 1
+    if header_rows >= len(grid) and len(grid) > 1:
+        header_rows = 1
+
+    heading = heading or getattr(table, "_convert_heading", "") or ""
+    wide = _dita_table_should_be_extra_wide(max_col, heading)
+    md_lines = []
+    md_lines.append(f"[[THEAD:{header_rows}]]")
+    if wide:
+        md_lines.append("[[TWIDE:180mm]]")
+    md_lines.append("| " + " | ".join(grid[0]) + " |")
+    md_lines.append("| " + " | ".join([":---"] * max_col) + " |")
+    for row in grid[1:]:
+        md_lines.append("| " + " | ".join(row) + " |")
+    return md_lines
+
+
+def _dita_table_should_be_extra_wide(cols, *texts):
+    if cols >= 7:
+        return True
+    blob = " ".join(text or "" for text in texts).lower()
+    markers = (
+        "sequencing parameters",
+        "room temperature reagent",
+        "low temperature reagent",
+        "reagent reservoir",
+        "flexible-throughput",
+        "flexible throughput",
+        "consumable usage",
+    )
+    return any(marker in blob for marker in markers)
+
+
+def _docx_table_to_markdown_legacy(table):
+    """Fallback for test doubles that only expose python-docx .rows."""
     rows = []
     for row in table.rows:
         cells = []
@@ -826,6 +968,28 @@ def _is_small_docx_image(path, max_width=220, max_height=120):
     return size[0] <= max_width and size[1] <= max_height
 
 
+def _is_junk_docx_image(path):
+    """Drop Word artifacts: 1-pixel slivers and leftover logo/banner scraps."""
+    size = _docx_image_size(path)
+    if not size:
+        return False
+    width, height = size
+    if min(width, height) <= 12:
+        return True
+    if height <= 120 and width >= 6 * max(height, 1):
+        return True
+    return False
+
+
+def _is_leftover_docx_scrap_image(path):
+    """Empty-paragraph leftovers such as tiny logos after a caption."""
+    size = _docx_image_size(path)
+    if not size:
+        return False
+    width, height = size
+    return max(width, height) <= 280
+
+
 def _append_orphan_icon_to_previous(lines, image_path):
     """Attach a lone button icon to the preceding sentence instead of emitting a block image."""
     prev_idx = len(lines) - 1
@@ -867,12 +1031,14 @@ def _docx_to_markdown(file_path):
     image_index = 1
     cover_started = False
     in_toc_block = False
+    current_heading = ""
     def ensure_cover_heading():
         nonlocal cover_started
-        if not cover_started:
-            lines.append("# Cover")
-            lines.append("")
-            cover_started = True
+        if cover_started or current_heading:
+            return
+        lines.append("# Cover")
+        lines.append("")
+        cover_started = True
 
     def _is_toc_table(table):
         rows = []
@@ -914,6 +1080,15 @@ def _docx_to_markdown(file_path):
                 image_size = _docx_image_size(value)
                 is_small_image = _is_small_docx_image(value)
                 is_unknown_size = image_size is None
+                if _is_junk_docx_image(value) and not is_caption_text:
+                    continue
+                if (
+                    not text
+                    and not is_caption_text
+                    and not is_small_image
+                    and _is_leftover_docx_scrap_image(value)
+                ):
+                    continue
                 if is_small_image:
                     if is_note_text:
                         continue
@@ -959,6 +1134,7 @@ def _docx_to_markdown(file_path):
                 heading_level = 0
 
             if text and heading_level:
+                current_heading = text
                 lines.append(f"{'#' * max(1, heading_level)} {text}")
                 # A heading paragraph can still anchor a figure image; keep it
                 # so captions following the heading can bind to the image.
@@ -990,7 +1166,7 @@ def _docx_to_markdown(file_path):
             if in_toc_block:
                 continue
             ensure_cover_heading()
-            table_lines = _docx_table_to_markdown(block)
+            table_lines = _docx_table_to_markdown(block, heading=current_heading)
             if table_lines:
                 lines.extend(table_lines)
                 lines.append("")
@@ -1172,6 +1348,16 @@ def _append_text_block(base_text, extra_text):
     return base_text or extra_text
 
 
+def _is_empty_appendix_wrapper(section):
+    """Bare 'Appendix'/'附录' headings with children only wrap the real appendices."""
+    title_key = _normalize_section_key(section.get("title", ""))
+    if title_key not in {"appendix", "附录"}:
+        return False
+    if (section.get("content") or "").strip():
+        return False
+    return bool(section.get("sections"))
+
+
 def _postprocess_section_tree(sections):
     processed = []
     for sec in sections:
@@ -1179,6 +1365,7 @@ def _postprocess_section_tree(sections):
             "title": sec.get("title", ""),
             "content": sec.get("content", ""),
             "sections": _postprocess_section_tree(sec.get("sections", [])),
+            "is_appendix": bool(sec.get("is_appendix")),
         }
 
         title_key = _normalize_section_key(current["title"])
@@ -1239,6 +1426,12 @@ def _postprocess_section_tree(sections):
                 kept_children.append(child)
             current["sections"] = kept_children
             current["content"] = "\n\n".join(part for part in cover_body_parts if part)
+
+        if _is_empty_appendix_wrapper(current):
+            for child in current["sections"]:
+                child["is_appendix"] = True
+                processed.append(child)
+            continue
 
         processed.append(current)
 
@@ -2772,6 +2965,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     list_type = None
     list_base_level = 0
     pending_table_header_rows = None
+    pending_table_wide = None
 
     def _flush_list():
         nonlocal in_list, list_items, list_type, list_base_level
@@ -2854,6 +3048,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     pending_table_caption_only = None
     pending_image = None
     pending_figure_caption = None
+    pending_figure_images = []
     skip_next_note_icon_image = False
     pending_note_type = None
     pending_note_label = None
@@ -2936,6 +3131,23 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             return True
         return bool(FIGURE_CAPTION_PREFIX_RE.match(_strip_md_bold(_unescape_md(stripped))))
 
+    def _looks_like_unnumbered_figure_caption(text, href=""):
+        compact = _clean_output_text(text or "")
+        if not compact or len(compact) > 160:
+            return False
+        ext = os.path.splitext((href or "").split("?")[0])[1].lower()
+        if ext and ext not in {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp"}:
+            return False
+        if _is_figure_caption(text) or TABLE_CAPTION_PREFIX_RE.match(compact):
+            return False
+        if _is_note_like_text(compact):
+            return False
+        if re.match(r'^\s*(?:\d+[.)、]|[-*+])\s+', text or ""):
+            return False
+        if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', compact):
+            return False
+        return True
+
     def _normalize_figure_title(text):
         # Keep any manual 图4-2/Figure 7 prefix here so an orphan caption can
         # fall back to its verbatim text; _strip_figure_number removes it when
@@ -2974,7 +3186,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         normalized = _strip_md_bold(_unescape_md(_strip_list_prefix((text or '').strip()))).lower()
         if any(keyword in normalized for keyword in ["warning", "caution", "danger", "请勿", "切勿", "警告", "小心", "do not"]):
             return "warning"
-        if normalized.startswith(("注意", "note")):
+        if normalized.startswith("注意"):
             return "caution"
         return "tip"
 
@@ -3025,6 +3237,17 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 return candidate
         return ""
 
+    def _next_image_belongs_to_following_caption(lines, start_idx):
+        """True when the next image is the lead image of the following figure."""
+        for next_idx in range(start_idx + 1, len(lines)):
+            candidate = lines[next_idx].strip()
+            if not candidate:
+                continue
+            if not MD_IMAGE_LINE_RE.match(candidate):
+                return False
+            return _is_figure_caption(_next_nonempty_line(lines, next_idx))
+        return False
+
     def _flush_pending_note_to_body():
         """Emit an open pending note before starting or appending another one.
 
@@ -3045,6 +3268,32 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         )
         pending_image = None
         return image_xml
+
+    def _figure_xml(title, hrefs):
+        images = "".join(
+            f'<image href="{_escape_xml_attr(href)}" placement="break"></image>'
+            for href in hrefs
+            if href
+        )
+        return (
+            f'        <fig><title>{_restore_inline_run_markup(_strip_figure_number(title))}</title>'
+            f'{images}</fig>'
+        )
+
+    def _flush_pending_figure():
+        nonlocal pending_figure_caption, pending_figure_images, pending_image
+        if pending_figure_caption is None:
+            return None
+        hrefs = list(pending_figure_images)
+        if pending_image:
+            hrefs.append(pending_image["href"])
+            pending_image = None
+        pending_figure_images = []
+        title = pending_figure_caption
+        pending_figure_caption = None
+        if hrefs:
+            return _figure_xml(title, hrefs)
+        return f"        <p>{_restore_inline_run_markup(title)}</p>"
 
     def _normalize_table_title(text):
         normalized = _strip_md_bold(_unescape_md((text or '').strip()))
@@ -3078,11 +3327,12 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     def _flush_pending_table():
         nonlocal in_table, table_rows, pending_table_title, pending_table_caption_only
-        nonlocal pending_table_header_rows
+        nonlocal pending_table_header_rows, pending_table_wide
         if not in_table or not table_rows:
             in_table = False
             table_rows = []
             pending_table_header_rows = None
+            pending_table_wide = None
             return None
 
         in_table = False
@@ -3105,6 +3355,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if header_rows is None:
             header_rows = 1 if len(filtered_rows) > 1 else 0
         header_rows = max(0, min(header_rows, len(filtered_rows)))
+        if header_rows >= len(filtered_rows) and len(filtered_rows) > 1:
+            header_rows = 1
         # IDML tables carry explicit merge info (markers); the Word-oriented
         # heuristics below would otherwise blank/merge cells that the source
         # already marks up, so they only apply to span-free tables.
@@ -3182,6 +3434,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     table_rows = []
                     pending_table_title = None
                     pending_table_caption_only = None
+                    pending_table_wide = None
                     note_blocks = []
                     list_items_pending = []
 
@@ -3215,11 +3468,18 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                         f'{paragraphs}\n'
                         f'        </note>'
                     )
+        title_text = ""
         if has_title:
             title_text = _restore_inline_run_markup(_normalize_table_title(pending_table_title or _strip_tag(prev)))
-            table_xml = ['        <table>', f'          <title>{title_text}</title>']
+        wide = pending_table_wide or (
+            "180mm" if _dita_table_should_be_extra_wide(cols, section_title, title_text) else None
+        )
+        pending_table_wide = None
+        table_attr = f' outputclass="{wide}"' if wide else ""
+        if has_title:
+            table_xml = [f'        <table{table_attr}>', f'          <title>{title_text}</title>']
         else:
-            table_xml = ['        <table>']
+            table_xml = [f'        <table{table_attr}>']
 
         table_xml.append(f'          <tgroup cols="{cols}">')
         # IME needs one <colspec> per column to render and resize column
@@ -3318,7 +3578,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             label_key = label.lower()
             if label in {"警告", "小心", "请勿", "切勿"} or label_key in {"warning", "caution", "danger"}:
                 note_type = "warning"
-            elif label == "注意" or label_key == "note":
+            elif label == "注意":
                 note_type = "caution"
             else:
                 note_type = "tip"
@@ -3353,6 +3613,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     _append_block(table_xml)
                 pending_table_header_rows = int(header_match.group(1))
                 continue
+        if stripped.startswith("[[TWIDE:"):
+            wide_match = re.match(r'^\[\[TWIDE:([^\]]+)\]\]$', stripped)
+            if wide_match:
+                pending_table_wide = wide_match.group(1).strip()
+                continue
         if not stripped:
             if pending_note_type and note_icon_detected:
                 continue
@@ -3380,8 +3645,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         current_image_match = MD_IMAGE_LINE_RE.match(stripped)
         if pending_figure_caption is not None and not current_image_match:
             # The caption was not followed by an image, so keep it as body text.
-            _append_block(f"        <p>{_restore_inline_run_markup(pending_figure_caption)}</p>")
-            pending_figure_caption = None
+            leftover_figure = _flush_pending_figure()
+            if leftover_figure:
+                _append_block(leftover_figure)
 
         next_nonempty = _next_nonempty_line(safe_lines, idx)
         # IDML warnings surface as callout tables, so a bulleted or numbered
@@ -3492,12 +3758,19 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if image_match:
             href = image_match.group(2)
             if pending_figure_caption is not None:
-                # Caption written before the image (图3-3 / 图3-4 style).
-                _append_block(
-                    f'        <fig><title>{_restore_inline_run_markup(_strip_figure_number(pending_figure_caption))}</title><image href="{_escape_xml_attr(href)}" placement="break"></image></fig>'
-                )
-                pending_figure_caption = None
+                if _is_figure_caption(_next_nonempty_line(safe_lines, idx)):
+                    figure_xml = _flush_pending_figure()
+                    if figure_xml:
+                        _append_block(figure_xml)
+                    pending_image = {"alt": image_match.group(1), "href": href}
+                    continue
+                pending_figure_images.append(href)
                 pending_image = None
+                next_image = MD_IMAGE_LINE_RE.match(_next_nonempty_line(safe_lines, idx))
+                if not next_image:
+                    figure_xml = _flush_pending_figure()
+                    if figure_xml:
+                        _append_block(figure_xml)
                 continue
             prev_line = safe_lines[idx - 1].strip() if idx > 0 else ""
             next_line = safe_lines[idx + 1].strip() if idx + 1 < len(safe_lines) else ""
@@ -3532,14 +3805,22 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 MD_IMAGE_LINE_RE.match(_next_nonempty_line(safe_lines, idx))
             )
             if pending_figure_caption is not None:
-                _append_block(f"        <p>{_restore_inline_run_markup(pending_figure_caption)}</p>")
-                pending_figure_caption = None
+                leftover_figure = _flush_pending_figure()
+                if leftover_figure:
+                    _append_block(leftover_figure)
             if pending_image:
                 # Image written before its caption (most common layout).
-                _append_block(
-                    f'        <fig><title>{_restore_inline_run_markup(_strip_figure_number(figure_title))}</title><image href="{_escape_xml_attr(pending_image["href"])}" placement="break"></image></fig>'
-                )
+                hrefs = [pending_image["href"]]
                 pending_image = None
+                extra_images_belong_here = (
+                    followed_by_image
+                    and not _next_image_belongs_to_following_caption(safe_lines, idx)
+                )
+                if extra_images_belong_here:
+                    pending_figure_caption = figure_title
+                    pending_figure_images = hrefs
+                else:
+                    _append_block(_figure_xml(figure_title, hrefs))
             elif followed_by_image:
                 # Caption written before its image; bind once the image arrives.
                 pending_figure_caption = figure_title
@@ -3732,6 +4013,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 note_icon_detected = False
                 _append_block(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
                 continue
+            if pending_image and _looks_like_unnumbered_figure_caption(clean, pending_image.get("href")):
+                fig_xml = _figure_xml(clean, [pending_image["href"]])
+                pending_image = None
+                _append_block(fig_xml)
+                continue
             image_xml = _flush_pending_image()
             if image_xml:
                 if in_list and list_items:
@@ -3768,8 +4054,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         _append_block(f"        <p>{_restore_inline_run_markup(pending_table_caption_only)}</p>")
     if pending_figure_caption is not None:
         # An orphan caption still belongs to the step that produced it.
-        _append_block(f"        <p>{_restore_inline_run_markup(pending_figure_caption)}</p>")
-        pending_figure_caption = None
+        leftover_figure = _flush_pending_figure()
+        if leftover_figure:
+            _append_block(leftover_figure)
     # An inline icon queued on the final step must stay inside that step instead
     # of escaping after the closing </ol>/<ul>.
     image_xml = _flush_pending_image()
@@ -4351,7 +4638,7 @@ def _flatten_sections(sections, parent_h1="", level=1):
         content = sec.get("content", "")
         children = sec.get("sections", [])
 
-        is_appendix = False
+        is_appendix = bool(sec.get("is_appendix"))
         if isinstance(title, str) and IDML_APPENDIX_MARKER in title:
             is_appendix = True
             title = title.replace(IDML_APPENDIX_MARKER, "").strip()
@@ -4520,6 +4807,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             # First pass: assign each section its topic id, so cross-references
             # can be resolved to the target topic during the second pass.
             prepared = []
+            skipped_cover_content = ""
             for section in all_sections:
                 title = _clean_title(section["title"])
                 h1_title = _clean_title(section.get("h1", ""))
@@ -4527,6 +4815,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     title = h1_title or f"Section {topic_index + 1}"
 
                 if reuse_template_cover and _normalize_section_key(title) == "cover":
+                    skipped_cover_content = (section.get("content") or "").strip()
                     continue
 
                 dita_type = section["dita_type"]
@@ -4549,6 +4838,13 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 topic_id = _generated_topic_code(topic_index, topic_kind)
                 topic_filename = f"{topic_id}.dita"
                 prepared.append((section, title, dita_type, topic_id, topic_filename, topic_kind))
+
+            if skipped_cover_content:
+                for section, title, _dtype, _tid, _fname, _kind in prepared:
+                    if _normalize_section_key(title) in VERSION_HISTORY_TITLES:
+                        if not (section.get("content") or "").strip():
+                            section["content"] = skipped_cover_content
+                        break
 
             xref_map = {}
             for _section, _title, _dtype, _tid, _fname, _kind in prepared:

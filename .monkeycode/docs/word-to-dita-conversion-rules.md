@@ -12,6 +12,7 @@
 
 - `Cover` topic 直接复用参考 DITA zip 包中的原始 topic。
 - 复用模板封面 topic 时，源 Word 的封面不再单独生成 topic，也不在 ditamap 中重复挂载。
+- 源 Word 的 `Version History` / `版本记录` 正文（含修订表）必须写进该 topic；复用模板封面时不得把这份内容带进 Cover 后丢掉。
 - 验收时源 Word 的封面标题与封面正文不计入标题结构和内容完整性比对范围。
 - `booklists/toc` 继续复用参考 DITA zip 包。
 - `Manufacturer information` 按源 Word 生成，不复用模板 appendix 内容。
@@ -28,6 +29,8 @@
 ## 标题与结构规则
 
 - DITA 层级按源 Word 标题层级建树，章节结构需要与 Word 层级 100% 一致。
+- 源 Word 里仅作分组、没有正文的 `Appendix` / `附录` 父标题不生成 topic，也不进入 ditamap。
+- 其下每个附录提升为独立 `<appendix>`：容器 `navtitle` 为附录名，先挂同名 `chapterTopic`，再挂该附录的子 topic；叶子附录的正文写在该 `chapterTopic` 中。
 - `Revision history` 视为真实章节。
  - `Version History` 与 `Revision history` 同义，视为真实章节，挂在 `<frontmatter>` 中与 Cover、关于说明书平级；不得随复用封面一起丢弃。
 - `Contents` 视为目录，不视为正文章节。
@@ -69,8 +72,7 @@
 
 - 警告类内容输出 `type="warning"`：文本标签 `警告`、`小心`、`请勿`、`切勿`，以及英文 `Warning`、`Danger`。
 - 注意类内容输出 `type="caution"`：文本标签 `注意`，以及 `Caution`。
- - 英文 Word 的 `Note:` 与中文 `注意` 同类，输出 `type="caution"`。
-- 提示类内容输出 `type="tip"`：文本标签 `提示`、`Tips`，以及无法判定为警告或注意的内容。
+- 提示类内容输出 `type="tip"`：文本标签 `提示`、`Tips`，英文 Word 的 `Note:`，以及无法判定为警告或注意的内容。
 - 未指定类型的普通 note 默认 `type="tip"`。
 - 上面三条对「文本标签类」note 生效；IDML 提示框则以图标判定类型（见下），不按正文文字改类型。
 
@@ -78,7 +80,7 @@
 
 - 中文 note 识别标签词：`注意事项`、`其他注意事项`、`注意`、`提示`、`警告`、`小心`。
 - 英文 note 识别标签词：`Warning`、`Caution`、`Tips`、`Danger`、`StopPoint`、`Stop point`。
- - 英文 Word 另识别 `Note:`，按注意类输出。
+ - 英文 Word 另识别 `Note:`，按提示类输出 `type="tip"`。
 - 英文普通 `Do not ...` 句子保持正文段落。
 - note 图标图片不输出到最终 DITA。
 - 标签词被加粗包裹（如 `[[B]]注意：[[/B]]正文`）时仍按 note 处理，标签词丢弃。
@@ -142,7 +144,11 @@
  - note 段落内的小图视为装饰，丢弃。
  - 句中图标若无法读取尺寸，只要该段同时含正文且不是 note/图题，仍按内联图标保留，不得拆成独立块图。
 - 图像与图题包装为 `<fig><title>图题</title><image href="image/…" placement="break"></image></fig>`；编号由 IME 自动生成，`<title>` 内不放 `图 N`/`Figure N`。
+- 同一图题段落内的多张实质图并入同一个 `<fig>`，不要拆成图题后的裸 `<image>`。
+ - 图题后连续多图仍并入当前 `<fig>`；若下一张图后面紧跟另一条图题，则该图是下一图的配图，不得并入当前图。
+- Word 装饰残图不输出：1 像素细条、扁长横幅，以及图题/说明句之后空段落里的小图。
 - 图题识别：Word 用 `图 N`/`Figure N` 前缀；IDML 用 `Figure-title` 样式（经 `[[FIGCAP]]` 标记传递），图题无需自带编号。
+- 块图后面紧跟的短说明（无 `图 N`/`Figure N` 前缀）包装为 `<fig><title>…</title>`，不要留成图下的普通 `<p>`。
 - 图题后面没有紧跟图片时，回退为普通段落并保留原文编号，避免正文内容丢失。
 - 输出包中的图片文件名保持源图片包（`Links/`）的原始名称，包含空格与中文；不做 `image_NNN` 重命名。参考包亦保留原始名（如 `G002708_image_loading flow cell.svg`）。
 - 同名图片冲突时才追加 `_N` 后缀；图片管线不做压缩，保真优先。
@@ -153,6 +159,11 @@
 - 表题编号前缀支持字母编号形式，例如 `表B-1 Barcode Primer使用规则` 去掉前缀后作为表题，不生成 topic。
 - 仅有表题没有表体时，保留为普通段落，不伪造空表。
 - DOCX 合并单元格按共享 `_tc` 保留真实内容，避免内容被误清空。
+- Word 表头行数尊重 `w:tblHeader`：有 N 行 `tblHeader` 则前 N 行进 `<thead>`；没有 `tblHeader` 且首行存在向下 `vMerge` 时 `header_rows=0`，不得把数据行造成假表头。
+- 若整张表每一行都带 `tblHeader`（常见于只有两行的推荐值表），只保留首行为 `<thead>`，其余进 `<tbody>`。
+- 没有垂直合并的标签首行（如 `Workbench Position`）可作为 1 行 `<thead>`。
+- Word `w:vMerge` / `w:gridSpan` 在解析阶段输出 `[[SPAN:c,r]]` / `[[SPANC]]`，DITA 阶段还原为 `morerows` 与 `namest`/`nameend`。
+- 超宽表输出 `<table outputclass="180mm">`：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` 等宽表章节，或列数 ≥ 7（覆盖 Barcode / Appendix C–E）。
 - Word 表格跨页后重复出现的表头行，需要在转换后自动删除。
 - 若同一 Markdown 表中出现嵌入式 `Table N ...` 行，视为下一张表的标题并拆分为独立表格。
 - 被合并单元格拆碎的英文表题片段需自动拼回完整标题。

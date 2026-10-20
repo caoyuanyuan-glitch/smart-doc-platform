@@ -24,6 +24,7 @@ from app.api.convert import (  # noqa: E402
     _flatten_sections,
     _normalize_docx_text,
     _parse_md_sections,
+    _postprocess_section_tree,
 )
 
 
@@ -46,7 +47,7 @@ def _strip_ns(tag):
 
 
 def _source_title_counts(markdown_text):
-    sections = _flatten_sections(_parse_md_sections(markdown_text))
+    sections = _flatten_sections(_postprocess_section_tree(_parse_md_sections(markdown_text)))
     titles = []
     for sec in sections:
         title = _clean_title(sec.get("title", ""))
