@@ -23,28 +23,16 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - 这有助于避免冗余条目，保持记忆文件整洁
 ## 条目
 
-Word 转 DITA 的 note 图标处理规则
+Word 转 DITA 的内容规则
 - Date: 2026-08-12
-- Context: 用户补充 IME 平台 note 标签自带提示/警告/小心类图标的验收口径
+- Context: 合并 note 图标、目录处理与步骤/图片输出三条规则
 - Category: 行为指令
 - Instructions:
   - 在 Word 转 DITA 的图片完整性校验中，提示、警告、小心等 note 类说明内容配套的小图标不计入“图片不丢失”范围
   - 若内容已经成功转换为 DITA `note` 标签，可不再输出这类 note 图标图片
   - `注意`、`提示` 段落即使标签词被加粗包裹，也必须转成 `note` 标签；未指定类型时默认 `type="tip"`
-
-Word 转 DITA 的目录处理规则
-- Date: 2026-08-12
-- Context: 用户补充 IME 平台已提供 Booklists/toc 结构
-- Category: 行为指令
-- Instructions:
   - Word 源文件中的目录内容不需要转换到 DITA 正文中
   - 验收时不将 Word 目录计入标题结构和内容完整性比对范围
-
-Word 转 DITA 的步骤与图片输出规则
-- Date: 2026-08-12
-- Context: 用户补充 IME 导入测试时对步骤连续性、note 和图片标签的要求
-- Category: 行为指令
-- Instructions:
   - 有序步骤列表转换到 DITA 时，需要保持 `ol` 连续，不因图片、表格或 note 中断
   - 步骤下方的图片、表格、note 内容应放在对应步骤项下，而不是拆成多个独立 `ol`
   - 步骤之间穿插的 note 必须挂到所属步骤项内，不能把整个 `ol` 吞进 note；只有标签的 note（如单独一行 `注意：`）继续包裹其后的列表作为正文
@@ -144,6 +132,24 @@ Word 转 DITA 批量转换基线规则
   - Word 表格跨页产生的重复表头行必须自动删除，不能依赖人工清理
   - 章节结构必须按 Word 原始层级 100% 对齐，结构一致性高于局部样式调整
   - 每次批量转换完成后，都先运行单测和包级验收，再交给用户做平台侧导入验证
+  - 每次转换完成后必须再做一轮与原文核对：按 `word-to-dita-conversion-rules.md` 逐条检查，对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出；不得只交 zip
+  - 用户口述的新转换规则（如 `警告`→`warning`、`注意`→`caution`）必须沉淀到该规则文件，并同步落实现与测试，不能只停留在对话里
+  - 规则文件同时覆盖 Word/WPS 与 IDML 两种源格式，差异只写在“IDML 源解析规则”小节
+    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 138 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
+  - 全量单测中这 6 个失败属环境性预置、非回归，排查时不要浪费时间：4 个 `DocxHeadingDetectionTest`（缺 `.monkeycode-tmp-files/` 下的 `.docx` 样例）、`test_polish_match_score`（润色模块数据）、`test_document_ocr_keeps_numbered_paragraphs`（缺 `tesseract`）
+  - 改完 `backend/app/api/convert.py` 必须重启后端（uvicorn 无 `--reload`），再用 API 端到端跑 617：`POST /api/auth/login`（表单 `admin/admin123`）取 token → `POST /api/convert/`（multipart：`source_file`、`target_format=dita`、`output_language=zh-CN`、`template_file`）→ 轮询 `GET /api/convert/{id}/progress` 到 `completed` → `GET /api/convert/{id}/download`
+  - IDML 端到端要用合并包（`.idml` 与同级 `Links/` 打成一个 zip），因为独立 `.idml` 内不含 `Links/`，直接调 `_idml_to_markdown` 会得到 0 张图
+  - 屏上控件（`uicontrol`）两种源的等价标记：中文源用 `【控件名】` 字面括号，英文源用 `Silk screen` 字符样式（该样式自带 `FontStyle="Bold"`，所以英文侧表现为加粗）；中文 `617` 无 Silk screen 样式，英文 `1249` 无 `【】`，两者都要映射为 `<uicontrol>`，`【N】` 数字序号除外
+  - IDML 的 `Bulleted list`/`Numbered list` 列表项不得因正文字面命中 note 关键词被提升为 note 并折叠进上一条；只有提示框表格转 note
+  - 「出现在界面上的文本」全部用 `<uicontrol>`（含对话框整句提示，不只是短控件名）；中文源靠 `【】`，英文源靠 `Silk screen` 字符样式判定
+     - IDML 交叉引用转 `<xref href="目标topic.dita" cms:title="目标标题">第N 页目标标题</xref>`：页码取自 `ResultText`，页码和标题都写在 xref 体内；IME 样式给整个 xref 加引号和斜体。PDF 为斜体 `“第12 页测定DNB 浓度”`；标记为 `[[XREF:标题#页码]]`
+     - 交叉引用数字/英文后紧跟汉字处加空格；`cms:title` 保持无空格原标题且不含章节编号（如 `9.1`）
+   - 列表项后的说明段落/公式图挂到所属父级 `<li>`，并保持源顺序：嵌套子列表之前的 `<p>`/note/图紧跟步骤正文，之后的说明挂在子列表后面，不得冲出整个 `<ul>`
+  - IDML 列表层级必须保留：解析阶段用行首 `[[LVL:n]]` 传递级别，DITA 阶段构建嵌套 `<ul>`/`<ol>`，不得压平；`[[LVL:n]]` 前缀不得干扰“含编号步骤即任务 DTO”的章节类型判定
+  - IDML 表格 `HeaderRowCount>1` 时用 `[[THEAD:n]]` 传递，DITA 阶段前 n 行全部放入同一个 `<thead>`；单元格内状态图标保留为 `<entry><image/></entry>`，单元格文字与嵌套表格正文只输出一次
+  - IDML “句子列表”提示框（如 `Warning sentence list`）正文的 `<Br/>` 分隔项输出为 note 内 `<ul><li>`；表格单元格内以 `icon` 开头的状态图标按内联 `<image>` 保留在原句位置
+  - 关于说明书等正文段落里的 `<Br/>` 按段落切开，输出多个 `<p>`
+  - 版本记录等表格单元格若是 `Table:Bulleted list`/`Numbered list`，`<Br/>` 分项输出为 `<entry><ul>/<ol>`
 
 前端开发代理端口约定
 - Date: 2026-06-30
@@ -222,3 +228,10 @@ WorkBuddy 联动评审目录约定
 - Instructions:
   - 规则优先使用结构、关系、通用模式和已有抽取能力
   - 避免通过硬编码具体词语扩展匹配或拦截规则
+
+回复语言偏好
+- Date: 2026-10-15
+- Context: 用户明确要求使用中文交流
+- Category: 行为指令
+- Instructions:
+  - 所有对用户的回复、进度说明与总结统一使用简体中文

@@ -24,11 +24,12 @@ from app.api.convert import (  # noqa: E402
     _flatten_sections,
     _normalize_docx_text,
     _parse_md_sections,
+    _postprocess_section_tree,
 )
 
 
 NOTE_PREFIXES = ("注意事项", "其他注意事项", "注意", "提示", "警告", "小心", "请勿", "切勿")
-EN_NOTE_PREFIX_RE = re.compile(r'^(warning|caution|tips|danger|stop\s*point|stoppoint)[:：]?\s*(.*)$', re.IGNORECASE)
+EN_NOTE_PREFIX_RE = re.compile(r'^(warning|caution|tips|danger|stop\s*point|stoppoint|note)[:：]?\s*(.*)$', re.IGNORECASE)
 TABLE_CAPTION_RE = TABLE_CAPTION_PREFIX_RE
 FIGURE_CAPTION_RE = FIGURE_CAPTION_PREFIX_RE
 ORDERED_LIST_RE = re.compile(r'^\s*\d+[.)、]\s+')
@@ -46,7 +47,7 @@ def _strip_ns(tag):
 
 
 def _source_title_counts(markdown_text):
-    sections = _flatten_sections(_parse_md_sections(markdown_text))
+    sections = _flatten_sections(_postprocess_section_tree(_parse_md_sections(markdown_text)))
     titles = []
     for sec in sections:
         title = _clean_title(sec.get("title", ""))
