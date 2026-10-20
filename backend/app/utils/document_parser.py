@@ -375,7 +375,9 @@ def parse_pdf(file_path):
     page_texts = extracted.get('page_texts', []) or []
     if page_texts:
         page_texts = _remove_repeated_page_noise(page_texts)
-        cleaned_pages = [clean_pdf_text(page_text) for page_text in page_texts if str(page_text or '').strip()]
+        cleaned_pages = [clean_pdf_text(page_text) for page_text in page_texts]
+        # 空页必须保留占位：丢弃会让后续所有页码整体前移，
+        # 依据字符偏移反推的 issue 页码全部失真。
         return '\n\f\n'.join(cleaned_pages)
     return clean_pdf_text(extracted.get('full_text', ''))
 

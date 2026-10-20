@@ -20,6 +20,151 @@ _FIGURE_REF_RE = re.compile(r"(?i)(?:Figure|Fig\.?|图)\s*(\d+)")
 _TABLE_REF_RE = re.compile(r"(?i)(?:Table|表)\s*(\d+)")
 _HEADING_PREFIX = re.compile(r"(?i)^(Figure|Fig\.?|图|Table|表)\s*")
 
+# --- 交叉引用「写法规范」维度（REF-STYLE） ---------------------------------
+#
+# REF-001/002 只判定引用目标是否存在：目标存在即 continue，因此对
+# 「引用有效但写法不规范」零产出。而仪器说明书的实际评审要求恰恰是后者——
+# 步骤正文用页码指向表格位置（"… on Page 66"），应改为引用表格本身
+# （"the table below" / "Table N"）。两类写法都指向有效目标，故必须新增维度。
+
+# 步骤级引用：动作词开头的正文引用了页码，而非表格/图编号。
+_STEP_REF_ON_PAGE_RE = re.compile(
+    r"(?i)\b(?:Make|Add|Prepare|Transfer|Mix|Incubate|Wash|Elute|Perform|Collect|Dilute|Pipet|Vortex|Centrifuge)\b"
+    r"[^\n]{0,90}?\bon\s+Page\s+(\d+)"
+)
+# 表格级引用带了裸页码：Table N on Page M。
+_TABLE_REF_ON_PAGE_RE = re.compile(r"(?i)\b(?:Table|表)\s*(\d+)\s+on\s+Page\s+(\d+)")
+
+
+def _page_containing(source: str, page_no: int) -> str:
+    """返回指定页（1-based）的文本，页码越界时返回空串。"""
+    if page_no < 1:
+        return ""
+    pages = source.split("\f")
+    if page_no > len(pages):
+        return ""
+    return pages[page_no - 1]
+
+
+def _page_table_ids(page_text: str) -> set:
+    return {match.group(1) for match in _TABLE_CAPTION_RE.finditer(page_text or "")}
+
+
+def _collect_style_refs(text: str) -> list[dict]:
+    """收集「写法不规范」的交叉引用，供 REF-STYLE 规则使用。
+
+    返回的 start/end 用于定位，不做目标存在性判定——存在性由 REF-001/002 负责。
+    """
+    source = str(text or "")
+    items = []
+
+    for match in _TABLE_REF_ON_PAGE_RE.finditer(source):
+        items.append({
+            "style": "table_reference_carries_page",
+            "reference_type": "table",
+            "reference_id": match.group(1),
+            "target_page": int(match.group(2)),
+            "original_text": match.group(0).strip(),
+            "start": match.start(),
+            "end": match.end(),
+            "chapter": _chapter_at(source, match.start()),
+            "page": _page_at(source, match.start()),
+        })
+
+    for match in _STEP_REF_ON_PAGE_RE.finditer(source):
+        # 已是表格/图级引用的不在本维度处理，避免与上一分支重复上报。
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        line = source[line_start:match.start()]
+        if re.search(r"(?i)\b(?:Table|Figure|Fig\.?|图|表)\s*\d+", line):
+            continue
+        items.append({
+            "style": "step_reference_to_page",
+            "reference_type": "table",
+            "reference_id": "",
+            "target_page": int(match.group(1)),
+            "original_text": match.group(0).strip(),
+            "start": match.start(),
+            "end": match.end(),
+            "chapter": _chapter_at(source, match.start()),
+            "page": _page_at(source, match.start()),
+        })
+
+    seen = set()
+    unique = []
+    for item in items:
+        key = (item["style"], item["start"], item["end"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def check_reference_style(text: str, *, parsed: bool = True) -> list[dict]:
+    """交叉引用写法规范检查（REF-STYLE）。
+
+    与 check_references 的分工：本规则只在「引用目标存在」时仍有意义，
+    因此不做缺失判定，也不产出 blocked 状态，避免与 REF-001/002 重复计数。
+    """
+    source = str(text or "")
+    if not parsed or not source.strip():
+        return []
+
+    issues = []
+    for item in _collect_style_refs(source):
+        target_page_text = _page_containing(source, item["target_page"])
+        if not target_page_text:
+            # 页码越界属引用完整性问题，交 REF-001/002 处理。
+            continue
+
+        target_tables = _page_table_ids(target_page_text)
+        if item["style"] == "table_reference_carries_page":
+            description = (
+                f"引用 {item['original_text']} 同时给出表编号与页码。"
+                "本手册正文对表格统一采用就近引用，页码会随排版变动而失效。"
+            )
+            suggestion = "建议改为就近引用，例如「the table below」或仅保留「Table N」。"
+        else:
+            if not target_tables:
+                # 目标页无表格，属于「指向步骤/正文」而非「本应引用表格」，不判定。
+                continue
+            table_list = "、".join(f"Table {tid}" for tid in sorted(target_tables, key=int))
+            description = (
+                f"引用 {item['original_text']} 以页码指向 Page {item['target_page']}，"
+                f"但该页内容为 {table_list}。正文指向页码而非表格本身，"
+                "排版调整后引用即失效。"
+            )
+            suggestion = f"建议改为引用表格本身，例如「{table_list}」或「the table below」。"
+
+        issues.append({
+            "severity": "general",
+            "category": "交叉引用写法",
+            "rule": "REF-STYLE",
+            "chapter": item.get("chapter") or "",
+            "original_text": item["original_text"],
+            "suggestion": suggestion,
+            "description": description,
+            "audit_basis": "交叉引用写法规范",
+            "confidence": 78,
+            "source": "rule",
+            "status": "pending",
+            "target_status": TARGET_FOUND,
+            "reference_type": item.get("reference_type"),
+            "reference_id": item.get("reference_id"),
+            "reference_style": item.get("style"),
+            "position": _encode_position(
+                int(item.get("start") or 0),
+                int(item.get("end") or 0),
+                reference_type=item.get("reference_type"),
+                target=item.get("original_text"),
+                check_result=TARGET_FOUND,
+                page=item.get("page"),
+                target_page=item.get("target_page"),
+                style=item.get("style"),
+            ),
+        })
+    return issues
+
 
 def _encode_position(start: int, end: int, **meta) -> str:
     payload = {"start": start, "end": end, "area": meta.pop("area", "正文")}

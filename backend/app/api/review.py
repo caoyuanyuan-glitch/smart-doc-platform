@@ -49,6 +49,7 @@ from app.models.document import Document as DocumentModel
 from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
+from app.review_engine.unit_spacing import check_units_and_spacing
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -2342,6 +2343,20 @@ def _review_ai_token_budget():
     return max(0, _review_env_int('REVIEW_AI_TOKEN_BUDGET', '0'))
 
 
+def _review_ai_prompt_body_limit():
+    """prompt 正文区的字符上限，与 ai_client.clip_prompt_body 保持同一口径。
+
+    过去这里没有这个概念，prompt 用硬编码 6500 截断，
+    compute_chunk_coverage 又只按 chunk range 统计，于是长文档丢尾完全不可见。
+    """
+    from app.utils.ai_client import (
+        _PROMPT_BODY_CHAR_LIMIT,
+        _PROMPT_BODY_CHAR_LIMIT_ENV,
+        _env_int,
+    )
+    return _env_int(_PROMPT_BODY_CHAR_LIMIT_ENV, _PROMPT_BODY_CHAR_LIMIT, minimum=1000)
+
+
 def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
 
@@ -2353,6 +2368,11 @@ def _review_ai_chunk_limit(total_length=0):
     prompt 静默丢弃（8 万字符丢 18.75%、10 万丢 35%、12 万丢 45.83%），
     而 compute_chunk_coverage 仍报 100%，指标上看不出任何衰减。
     提到 32 后，12 万字符以内文档的丢尾降为 0，检出率上限被解除。
+
+    但 32 只是"让块均落进 6500"的参数巧合，不是机制保证：
+    临界点 = 正文上限 × 块数 = 6500×32 ≈ 20.8 万字符，超出后尾部依旧丢。
+    因此调用方必须把 prompt_char_limit 一起传给 compute_chunk_coverage，
+    让 truncated_tail_chars 在指标上真实可见，而不是靠人工反推。
     成本控制改由 REVIEW_AI_MAX_CHUNKS 环境变量按需下调，不再写死默认值。
     """
     env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '32'))
@@ -2618,6 +2638,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
         fallback_reason=chunker_fallback_reason,
         total_chunk_count=len(all_chunks),
         processed_chunk_count=len(processed_ok),
+        prompt_char_limit=_review_ai_prompt_body_limit(),
     )
     batch_size = max(1, _review_ai_chunk_limit(total_length))
     coverage["batch_size"] = batch_size
@@ -2853,27 +2874,88 @@ def _filter_low_value_review_issues(issues):
     return filtered
 
 
-def _apply_false_positive_signature_penalty(issues, false_positive_signatures):
-    if not false_positive_signatures:
-        return issues
+def _apply_preset_false_positive_patterns(issues, document_language=None):
+    """按预置误报记忆的结构化指纹标记疑似误报。
+
+    与 `_apply_false_positive_signature_penalty` 的分工：
+      - 后者吃**已存签名集合**，只能拦"人工曾经裁定过的那批具体问题"；
+      - 这里走**结构化模式**，能在问题首次出现时就命中预置人工经验。
+
+    命中只标记 possible_false_positive（降低置信度 + 需人工复核），不删除，
+    因此误伤成本可控；同时输出命中统计，便于后续调参。
+    """
+    try:
+        from app.review_engine.false_positive_fingerprint import match_preset_pattern
+    except ModuleNotFoundError:
+        return issues, {}
+
+    if not issues:
+        return issues, {}
+    language = 'en' if str(document_language or '').lower() in ('en', 'both', 'english') else 'zh'
+    matched: dict[str, int] = {}
+    for issue in issues:
+        if getattr(issue, 'possible_false_positive', False):
+            continue
+        entry_id = match_preset_pattern(issue, language=language)
+        if not entry_id:
+            continue
+        _mark_possible_false_positive(issue, f"preset_false_positive_memory:{entry_id}")
+        matched[entry_id] = matched.get(entry_id, 0) + 1
+    if matched:
+        detail = ', '.join(f'{key}×{value}' for key, value in sorted(matched.items()))
+        print(f'[审核] 预置误报记忆命中（标记疑似误报，未删除）: {detail}')
+    return issues, matched
+
+
+def _apply_false_positive_signature_penalty(issues, false_positive_signatures, memory_payloads=None):
+    """按已存误报记忆标记疑似误报。
+
+    两条路径：
+      - 精确签名比对（历史行为，人工标注意图完全一致时命中）；
+      - 结构化指纹比对（`matches_memory`：同规则族 + token 覆盖相似度 >= 0.62），
+        使同一个问题换措辞时仍能被识别为已裁定误报。
+
+    命中只做标记（`possible_false_positive` + 降低置信度 + 需人工复核），
+    不删除问题，因此误伤成本可控、可回溯。
+    """
+    if not false_positive_signatures and not memory_payloads:
+        return issues, {"exact": 0, "fingerprint": 0}
+
     normalized_false_positive_signatures = {
         str(signature or '').strip().lower()
-        for signature in false_positive_signatures
+        for signature in false_positive_signatures or []
         if str(signature or '').strip()
     }
-    if not normalized_false_positive_signatures:
-        return issues
+    payload_pairs = list(memory_payloads or [])
+    if not normalized_false_positive_signatures and not payload_pairs:
+        return issues, {"exact": 0, "fingerprint": 0}
+
     filtered = []
-    dropped = 0
+    exact_hits = 0
+    fingerprint_hits = 0
+    try:
+        from app.review_engine.false_positive_fingerprint import matches_memory
+    except ModuleNotFoundError:
+        matches_memory = None
+
     for issue in issues:
         issue_signatures = {signature.lower() for signature in _issue_judgment_signatures(issue)}
-        if issue_signatures & normalized_false_positive_signatures:
+        if normalized_false_positive_signatures and (issue_signatures & normalized_false_positive_signatures):
             _mark_possible_false_positive(issue, "false_positive_memory")
-            dropped += 1
+            exact_hits += 1
+        elif matches_memory is not None and payload_pairs:
+            for memory_rule, memory_text in payload_pairs:
+                if matches_memory(issue, memory_rule, memory_text):
+                    _mark_possible_false_positive(issue, "false_positive_memory_fingerprint")
+                    fingerprint_hits += 1
+                    break
         filtered.append(issue)
-    if dropped:
-        print(f'[审核] 误报库过滤: 标记疑似误报 {dropped} 个, 剩余 {len(filtered)} 个')
-    return filtered
+    if exact_hits or fingerprint_hits:
+        print(
+            f'[审核] 误报库过滤: 标记疑似误报 {exact_hits + fingerprint_hits} 个'
+            f'（精确签名 {exact_hits}，结构化指纹 {fingerprint_hits}），剩余 {len(filtered)} 个'
+        )
+    return filtered, {"exact": exact_hits, "fingerprint": fingerprint_hits}
 
 
 _AI_KEEP_REWRITE_HINT = re.compile(r"建议补充|补充说明|未明确|步骤不完整|操作衔接|混匀")
@@ -2983,7 +3065,8 @@ def _restore_high_value_rule_issues(selected_issues, candidate_issues):
     return restored
 
 
-def _finalize_review_issues(issues, content, false_positive_signatures):
+def _finalize_review_issues(issues, content, false_positive_signatures, document_language=None,
+                           false_positive_memory_payloads=None):
     ai_filter_diagnostics = {
         "initial_total": len(issues),
         "initial_ai": _count_ai_issues(issues),
@@ -3011,8 +3094,13 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
     ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
     ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
     ai_filter_diagnostics["document_evidence_drop_samples"] = ai_evidence_drop_samples
-    issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
+    issues, fp_signature_stats = _apply_false_positive_signature_penalty(
+        issues, false_positive_signatures, false_positive_memory_payloads
+    )
     ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
+    ai_filter_diagnostics["false_positive_memory_hits"] = fp_signature_stats
+    issues, preset_fp_hits = _apply_preset_false_positive_patterns(issues, document_language)
+    ai_filter_diagnostics["preset_false_positive_hits"] = preset_fp_hits
 
     pre_pipeline_issues = list(issues)
     before_pipeline_count = len(issues)
@@ -3156,16 +3244,30 @@ def _issue_judgment_signature(issue):
 
 
 def _issue_judgment_signatures(issue):
+    """生成 issue 的误报记忆精确签名集合。
+
+    历史实现只产出唯一一种签名 `rule|category|original`，
+    导致同一问题只要类别字段填法略有差异就匹配不上。
+    这里保留三种降级形态（去 category、去 rule、只留文本），
+    用于「人工标注意图完全一致」的精确比对路径。
+
+    需要容忍措辞差异的场景不走这里 —— 由
+    `app.review_engine.false_positive_fingerprint.matches_memory()`
+    按「同规则族 + token 覆盖相似度」判定，避免在精确签名层面
+    做无法验证的模糊猜测。
+    """
     rule = str(_issue_value(issue, 'rule', '') or '').upper()
     original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip().lower()
     category = re.sub(r'\s+', ' ', str(_issue_value(issue, 'category', '') or '')).strip().lower()
     if not original:
         return set()
-    return {
+
+    signatures = {
         f'{rule}|{category}|{original}',
         f'{rule}|{original}',
         f'{category}|{original}',
     }
+    return {str(item).strip().lower() for item in signatures if str(item).strip()}
 
 
 def _is_issue_hidden_by_judgment(issue):
@@ -3325,12 +3427,24 @@ def _normalize_review_issue_display(issues, content=None):
 
 
 def _load_false_positive_signatures_for_document(db: Session, document_id: int):
+    """加载文档级误报记忆。
+
+    返回 (signatures, memory_payloads)：
+      - signatures  —— 精确签名集合，走历史比对路径；
+      - memory_payloads —— (rule, original_text) 列表，走结构化指纹路径，
+        使"同一个问题换个措辞"也能被识别为已裁定的误报。
+    """
     signatures = set(list_false_positive_memory_signatures(db))
+    try:
+        from app.crud.review import list_false_positive_memory_payloads
+        memory_payloads = list(list_false_positive_memory_payloads(db))
+    except ModuleNotFoundError:
+        memory_payloads = []
     for review in get_reviews(db, document_id=document_id):
         for issue in get_issues(db, review_id=review.id):
             if str(getattr(issue, 'status', '') or '').lower() == 'false_positive':
                 signatures.update(_issue_judgment_signatures(issue))
-    return signatures
+    return signatures, memory_payloads
 
 
 def _sync_false_positive_memory(db: Session, issue):
@@ -12571,6 +12685,11 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         print(f"[审核] 引用完整性规则执行失败: {e}")
 
     try:
+        issues.extend(ReferenceIntegrityRule().check_style(content))
+    except Exception as e:
+        print(f"[审核] 引用写法规范规则执行失败: {e}")
+
+    try:
         for issue in TermConsistencyRule().check(content):
             start, end = _parse_issue_position(issue.get('position', ''))
             issue.setdefault('chapter', extract_chapter(content, start))
@@ -12586,6 +12705,11 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         issues.extend(_run_db_term_consistency_audit(db, content))
     except Exception as e:
         print(f"[审核] 术语库一致性规则执行失败: {e}")
+
+    try:
+        issues.extend(check_units_and_spacing(content))
+    except Exception as e:
+        print(f"[审核] 数值与单位一致性规则执行失败: {e}")
 
     return issues
 
@@ -12873,7 +12997,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         document_profile['pairing_status'] = pairing.pairing_status
         document_profile['input_mode'] = pairing.input_mode
         spec_texts = _load_review_spec_texts(db)
-        false_positive_signatures = _load_false_positive_signatures_for_document(db, document_id)
+        false_positive_signatures, false_positive_memory_payloads = _load_false_positive_signatures_for_document(db, document_id)
         print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}/{original_content_length}字符, 上限={content_limit}")
         print(
             "[审核] 当前规范文件长度: "
@@ -13210,7 +13334,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
-        issues, ai_filter_diagnostics = _finalize_review_issues(issues, content, false_positive_signatures)
+        issues, ai_filter_diagnostics = _finalize_review_issues(
+            issues, content, false_positive_signatures, document_language,
+            false_positive_memory_payloads,
+        )
 
         validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)

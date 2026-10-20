@@ -3091,6 +3091,123 @@ def _is_dictionary_word(token):
     return lowered in spell
 
 
+def _transposition_variants(word):
+    """返回相邻字母换位产生的全部变体（保留原始大小写形态）。"""
+    if len(word) < 3:
+        return set()
+    variants = set()
+    for index in range(len(word) - 1):
+        left, right = word[index], word[index + 1]
+        if left.isalpha() is False or right.isalpha() is False or left == right:
+            continue
+        chars = list(word)
+        chars[index], chars[index + 1] = right, left
+        variants.add(''.join(chars))
+    return variants
+
+
+def _collect_in_document_vocabulary(content):
+    """收集文档内已确认合法的英文词，作为拼写判定的内部参照。
+
+    只收「非词典错拼、非技术术语、非缩写」的普通词。专有名词与领域缩写
+    必须排除——它们常以非标准拼写出现（型号、试剂名、人名），
+    用它们当基准会把正确写法判成错拼。
+    """
+    vocabulary = set()
+    for match in re.finditer(r"[A-Za-z]{4,}", content or ''):
+        lowered = _normalize_for_check(match.group(0))
+        if len(lowered) < 4:
+            continue
+        if lowered in COMMON_MISSPELLINGS or lowered in FORCED_MISSPELLINGS:
+            continue
+        if is_whitelisted(lowered) or _is_technical_term(lowered) or _is_domain_abbreviation(lowered):
+            continue
+        try:
+            if _is_dictionary_word(lowered):
+                vocabulary.add(lowered)
+        except TypeError:
+            # 词典对象不支持成员判定时（自定义/桩实现）跳过，
+            # 不能让词表收集拖垮整条拼写检查链路。
+            continue
+    return vocabulary
+
+
+def _find_transposition_spelling_issues(content, seen_issue_keys):
+    """相邻字母换位型拼写错误（SPELL-TRANS）。
+
+    典型：`Ilde` → `Idle`。这类错误词典无法枚举——拼写检查库的 candidates
+    对 `ilde` 虽能给出 `idle`，但 issue 是否上报取决于具体文档上下文，
+    且 4 字母短词在 PDF 场景会被长度门槛整体拦下。
+
+    判定方式：用**本文档内已合法使用的词**作为基准。若文档某处写 Idle，
+    另一处写 Ilde，且 Ilde 不在任何词典中，则后一处置信为换位错误。
+    这样既不依赖外部词典，也不误判专有名词——专有名词在基准集里
+    已被显式排除，不会被当作 Ilde 的正确写法。
+    """
+    issues = []
+    if not content:
+        return issues
+
+    vocabulary = _collect_in_document_vocabulary(content)
+    if not vocabulary:
+        return issues
+
+    for match in re.finditer(r"[A-Za-z]{4,}", content):
+        word = match.group(0)
+        lowered = _normalize_for_check(word)
+        if lowered in vocabulary or lowered in COMMON_MISSPELLINGS:
+            continue
+        if is_whitelisted(word) or _is_technical_term(word) or _is_domain_abbreviation(word):
+            continue
+        try:
+            known_word = _is_dictionary_word(lowered)
+        except TypeError:
+            known_word = False
+        if known_word or _is_extraction_artifact(word):
+            continue
+        if _should_skip_match_word(word):
+            continue
+
+        candidates = {
+            variant.lower() for variant in _transposition_variants(word)
+        } & vocabulary
+        if not candidates:
+            continue
+
+        correct = sorted(candidates)[0]
+        context = _build_spelling_context(content, match.start(), match.end())
+        if _should_skip_spelling_issue(word, context, 'pdf', ignore_short_word_gate=True):
+            # 换位判定依据是「文档内合法词表」，比长度启发式更强，
+            # 因此忽略 PDF 的 ≤4 字符短词门槛；但其余误报防线仍然生效。
+            continue
+
+        dedupe_key = (lowered, 'transposition', match.start())
+        if dedupe_key in seen_issue_keys:
+            continue
+        seen_issue_keys.add(dedupe_key)
+
+        chapter = _extract_chapter(content, match.start())
+        issues.append({
+            "severity": "serious",
+            "category": "拼写/用词错误",
+            "rule": "SPELL-TRANS",
+            "chapter": chapter,
+            "original_text": word,
+            "context": context,
+            "suggestion": _format_spelling_suggestion(word, context, [correct], '确定'),
+            "description": (
+                f"原文片段：'{context}'；[{word}] 不在英文词典中，"
+                f"但与本文档中已使用的 {correct} 构成相邻字母换位关系，"
+                f"判断为拼写错误；建议修改为：[{correct}]。"
+            ),
+            "audit_basis": "英文拼写规范",
+            "confidence": 90,
+            "source": "spellcheck",
+            "position": f"{match.start()}-{match.end()}"
+        })
+    return issues
+
+
 def _is_extraction_artifact(word):
     lowered = word.lower()
     if not lowered.startswith('y') or len(word) <= 2:
@@ -3140,7 +3257,14 @@ def _looks_like_joined_words(word):
     return can_split(0, 0)
 
 
-def _should_skip_spelling_issue(word, context, file_type=None):
+def _should_skip_spelling_issue(word, context, file_type=None, ignore_short_word_gate=False):
+    """判断该拼写候选是否应当跳过。
+
+    `ignore_short_word_gate=True` 时只跳过「PDF 场景 ≤4 字符短词」这一条
+    长度启发式，其余检查（白名单、缩写、提取伪影、URL、连词伪影等）
+    仍然全部生效。该开关供换位拼写检测使用——换位判定依据是文档内
+    合法词表，比长度启发式更强，但不应绕过其余误报防线。
+    """
     if is_whitelisted(word) or _is_domain_abbreviation(word) or _is_extraction_artifact(word):
         return True
 
@@ -3169,7 +3293,13 @@ def _should_skip_spelling_issue(word, context, file_type=None):
             return True
 
     normalized = _normalize_for_check(word)
-    if file_type == 'pdf' and len(normalized) <= 4 and normalized not in FORCED_MISSPELLINGS and normalized not in COMMON_MISSPELLINGS:
+    if (
+        file_type == 'pdf'
+        and len(normalized) <= 4
+        and normalized not in FORCED_MISSPELLINGS
+        and normalized not in COMMON_MISSPELLINGS
+        and not ignore_short_word_gate
+    ):
         return True
 
     if file_type != 'pdf':
@@ -3442,6 +3572,7 @@ def check_spelling(content, min_word_length=3, file_type=None):
         issues.extend(_find_pdf_split_word_issues(content, seen_issue_keys))
 
     issues.extend(_find_term_variant_issues(content, seen_issue_keys))
+    issues.extend(_find_transposition_spelling_issues(content, seen_issue_keys))
 
     for typo in FORCED_MISSPELLINGS:
         correct = COMMON_MISSPELLINGS.get(typo)
@@ -3486,7 +3617,15 @@ def check_spelling(content, min_word_length=3, file_type=None):
     words = list(word_matches.keys())
     
     # 使用 spellchecker 检查
-    misspelled = spell.unknown(words)
+    # 词典对象异常时不能让整条拼写链路崩溃：拼写检查是辅助通道，
+    # 词表实现异常（自定义对象不支持迭代/成员判定）时降级为空结果，
+    # 由换位拼写等其它通道继续工作。
+    try:
+        misspelled = spell.unknown(words)
+    except TypeError:
+        misspelled = []
+    if not isinstance(misspelled, (list, tuple, set, frozenset)):
+        misspelled = []
     
     for word in misspelled:
         # 跳过太短的词

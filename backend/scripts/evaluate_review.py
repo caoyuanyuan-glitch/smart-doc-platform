@@ -667,11 +667,24 @@ def batch_evaluate_from_config(config_path, markers):
             summary["failed"] += 1
             summary["regressions"] += 1
 
+        # 供 micro 平均使用：TP=严格命中批注数，FN=严格漏检批注数，
+        # FP=未被任何人工批注解释的产出问题数。
+        tp = int(baseline_node.get("strict_matched", 0) or 0) if baseline_node else 0
+        fn = int(baseline_node.get("strict_missed", 0) or 0) if baseline_node else 0
+        fp = int(baseline_node.get("strict_unmatched_issue_count", 0) or 0) if baseline_node else 0
+        if not baseline_node:
+            tp = fn = fp = 0
+
         per_doc_metrics.append({
             "name": doc_name,
             "recall": round(recall, 4),
             "precision": round(precision, 4),
             "enforce": enforce,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "human_total": int(baseline_node.get("human_total", 0) or 0) if baseline_node else 0,
+            "issue_total": int(baseline_node.get("issue_total", 0) or 0) if baseline_node else 0,
         })
 
         results.append({
@@ -697,14 +710,48 @@ def batch_evaluate_from_config(config_path, markers):
 
     summary["per_document"] = per_doc_metrics
     enforced_metrics = [m for m in per_doc_metrics if m.get("enforce", True)]
-    summary["mean_recall"] = round(sum(m["recall"] for m in per_doc_metrics) / max(len(per_doc_metrics), 1), 4)
-    summary["mean_precision"] = round(sum(m["precision"] for m in per_doc_metrics) / max(len(per_doc_metrics), 1), 4)
+    observed_metrics = [m for m in per_doc_metrics if not m.get("enforce", True)]
+
+    def _macro(items, key):
+        return round(sum(m[key] for m in items) / max(len(items), 1), 4) if items else None
+
+    def _micro(items):
+        """Micro-average: pool TP/FP/FN so large gold sets weigh more than small ones."""
+        tp = sum(int(m.get("tp", 0) or 0) for m in items)
+        fp = sum(int(m.get("fp", 0) or 0) for m in items)
+        fn = sum(int(m.get("fn", 0) or 0) for m in items)
+        precision = (tp / (tp + fp)) if (tp + fp) else 0.0
+        recall = (tp / (tp + fn)) if (tp + fn) else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        return {
+            "tp": tp, "fp": fp, "fn": fn,
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1": round(f1, 4),
+        }
+
+    # enforced / observed 必须分开统计：observed 文档尚未写人工基线，
+    # 混进均值会让 mean_recall 与 all_documents_meet 相差数十个百分点。
+    summary["enforced_document_count"] = len(enforced_metrics)
+    summary["observed_document_count"] = len(observed_metrics)
+    summary["mean_recall"] = _macro(enforced_metrics, "recall")
+    summary["mean_precision"] = _macro(enforced_metrics, "precision")
+    summary["enforced_micro"] = _micro(enforced_metrics)
+    summary["observed_micro"] = _micro(observed_metrics)
+    summary["observed_mean_recall"] = _macro(observed_metrics, "recall")
+    summary["observed_mean_precision"] = _macro(observed_metrics, "precision")
     summary["all_documents_ready"] = summary["suite_not_ready"] == 0
     summary["all_documents_meet"] = summary["all_documents_ready"] and all(
         m["recall"] >= (thresholds.get("min_recall") or 0.0)
         and m["precision"] >= (thresholds.get("min_precision") or 0.0)
         for m in enforced_metrics
     )
+    # 无人工基线时无法声称准确率，给出显式 null 而不是用 0 拉低均值。
+    if not enforced_metrics:
+        summary["mean_recall"] = None
+        summary["mean_precision"] = None
+        summary["all_documents_meet"] = False
+        summary["no_enforced_baseline"] = True
 
     return {"summary": summary, "results": results}
 

@@ -879,7 +879,11 @@ def test_finalize_review_issues_defaults_to_pipeline_only(monkeypatch):
         "_filter_ai_issues_without_document_evidence_with_reasons",
         lambda issues, content: (list(issues), {"missing_evidence": 1}),
     )
-    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_apply_false_positive_signature_penalty",
+        lambda issues, signatures, payloads=None: (list(issues), {"exact": 0, "fingerprint": 0}),
+    )
 
     def fake_false_positive(issues):
         calls.append("false_positive")
@@ -952,7 +956,11 @@ def test_finalize_review_issues_records_ai_evidence_drop_samples(monkeypatch):
 
     monkeypatch.setattr(review_api, "dedupe_issues_by_original", lambda issues: list(issues))
     monkeypatch.setattr(review_api, "_sanitize_issue_suggestions", lambda issues: list(issues))
-    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_apply_false_positive_signature_penalty",
+        lambda issues, signatures, payloads=None: (list(issues), {"exact": 0, "fingerprint": 0}),
+    )
     monkeypatch.setattr(review_api, "pipeline_select_review_issues", lambda issues: list(issues))
 
     issues, diagnostics = review_api._finalize_review_issues(
@@ -984,11 +992,13 @@ def test_false_positive_signature_filter_drops_matched_issues():
         {"rule": "SPELL", "category": "拼写", "original_text": "digestive", "source": "spellcheck"},
     ]
 
-    filtered = review_api._apply_false_positive_signature_penalty(
+    filtered, hit_stats = review_api._apply_false_positive_signature_penalty(
         issues,
         {"SPELL|拼写|consumbles"},
     )
 
+    assert hit_stats["exact"] == 1
+    assert hit_stats["fingerprint"] == 0
     assert len(filtered) == 2
     marked = next(item for item in filtered if item["original_text"] == "consumbles")
     kept = next(item for item in filtered if item["original_text"] == "digestive")
@@ -1078,11 +1088,12 @@ def test_false_positive_penalty_keeps_same_text_on_different_rule():
         {"rule": "R013", "category": "术语", "original_text": "consumbles", "source": "ai"},
     ]
 
-    filtered = review_api._apply_false_positive_signature_penalty(
+    filtered, hit_stats = review_api._apply_false_positive_signature_penalty(
         issues,
         {"SPELL|拼写|consumbles"},
     )
 
+    assert hit_stats["exact"] == 1
     assert len(filtered) == 2
     spell_issue = next(item for item in filtered if item["rule"] == "SPELL")
     term_issue = next(item for item in filtered if item["rule"] == "R013")
@@ -1453,7 +1464,11 @@ def test_finalize_review_issues_can_enable_legacy_post_filters(monkeypatch):
         "_filter_ai_issues_without_document_evidence_with_reasons",
         lambda issues, content: (list(issues), {}),
     )
-    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_apply_false_positive_signature_penalty",
+        lambda issues, signatures, payloads=None: (list(issues), {"exact": 0, "fingerprint": 0}),
+    )
 
     def fake_false_positive(issues):
         calls.append("false_positive")

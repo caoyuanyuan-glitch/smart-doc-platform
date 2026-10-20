@@ -27,6 +27,54 @@ logger = logging.getLogger(__name__)
 PROMPT_BUILDER_FALLBACK_ACTIVE = False
 _prompt_builder_fallback_logged = False
 
+# 审核 prompt 正文区的字符预算（不含 system prompt 与 checklist）。
+# 历史实现使用硬编码 content[:6500]，导致超长 chunk 尾部被静默丢弃，
+# 且 compute_chunk_coverage 只按 chunk range 统计，指标上恒为 100%。
+# 这里改为环境变量可配 + 显式告警 + 句子边界回退。
+_PROMPT_BODY_CHAR_LIMIT = 6500
+_PROMPT_BODY_CHAR_LIMIT_ENV = "REVIEW_AI_PROMPT_BODY_CHAR_LIMIT"
+_AUDIT_BASIS_CHAR_LIMIT = 3500
+_AUDIT_BASIS_CHAR_LIMIT_ENV = "REVIEW_AI_AUDIT_BASIS_CHAR_LIMIT"
+_prompt_truncation_warned = False
+
+
+def clip_prompt_body(content: str, label: str = "audit.body") -> str:
+    """按句子边界裁剪 prompt 正文，并记录被丢弃的字符数。
+
+    裁剪发生在句子边界上，避免把半个词/半句话喂给模型——
+    模型会把截断残片当成"原文就是这样"进而报出并不存在的拼写错误。
+    超限时打印一次显式告警，使 prompt 层丢尾在日志里可观测。
+    """
+    global _prompt_truncation_warned
+    text = str(content or "")
+    limit = _env_int(_PROMPT_BODY_CHAR_LIMIT_ENV, _PROMPT_BODY_CHAR_LIMIT, minimum=1000)
+    if len(text) <= limit:
+        return text
+
+    window = text[:limit]
+    # 在窗口内回退到最近的句子/段落边界，避免截断在词中间。
+    for sep in ("\n\n", "。", "！", "？", ". ", ".\n", "\n"):
+        cut = window.rfind(sep)
+        if cut > limit * 0.6:
+            window = window[: cut + len(sep)]
+            break
+    dropped = len(text) - len(window)
+    if not _prompt_truncation_warned:
+        logger.warning(
+            "[review.prompt] %s 超出 %s 字符预算，按句子边界裁剪，丢弃尾部 %s 字符（原 %s）。"
+            "请调高分块上限或提高 %s，避免长文档尾部漏检。",
+            label, limit, dropped, len(text), _PROMPT_BODY_CHAR_LIMIT_ENV,
+        )
+        _prompt_truncation_warned = True
+    return window
+
+
+def clip_audit_basis(audit_basis: str) -> str:
+    """审核依据（checklist）同样可配上限，避免超长 checklist 挤占正文预算。"""
+    text = str(audit_basis or "")
+    limit = _env_int(_AUDIT_BASIS_CHAR_LIMIT_ENV, _AUDIT_BASIS_CHAR_LIMIT, minimum=500)
+    return text[:limit]
+
 try:
     from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
 except ModuleNotFoundError as exc:
@@ -97,11 +145,18 @@ def _env_float(name, default):
         return float(default)
 
 
-def _env_int(name, default):
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """读取整数型环境变量；缺省、非法或低于下限时回退默认值。
+
+    `minimum` 默认取 1（只挡非法负数）；prompt 字符预算这类配置
+    在调用处显式传更大的下限（例如 500/1000），避免把预算配成
+    一两个字符导致正文全丢。
+    """
     try:
-        return int(os.getenv(name, default))
+        value = int(str(os.environ.get(name, "") or "").strip())
     except (TypeError, ValueError):
-        return int(default)
+        return default
+    return value if value >= minimum else default
 
 
 def _env_bool(name, default=False):
@@ -112,7 +167,7 @@ def _env_bool(name, default=False):
 
 
 def _provider_max_attempts():
-    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
+    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", 2))
 
 
 def _audit_max_tokens(content_length: int = 0) -> int:
@@ -121,7 +176,7 @@ def _audit_max_tokens(content_length: int = 0) -> int:
     按输入长度自适应：输入越长，允许的输出越大，避免大分块 JSON 被截断。
     仍受环境变量 AI_AUDIT_MAX_TOKENS 硬上限约束（默认 4096）。
     """
-    base = max(1024, _env_int("AI_AUDIT_MAX_TOKENS", "4096"))
+    base = max(1024, _env_int("AI_AUDIT_MAX_TOKENS", 4096))
     if content_length <= 0:
         return base
     # 输出预算 ≈ 输入字符数 / 3（英文）+ 固定余量，封顶 base 的 2 倍
@@ -2406,10 +2461,10 @@ FILENAME CHECKING:
             user_prompt = f"""Please review the following English technical document.
 
 Document excerpt:
-{content[:6500]}
+{clip_prompt_body(content, label='audit.body.en')}
 
 Release checklist and review basis:
-{audit_basis[:3500] if audit_basis else 'No additional checklist provided.'}
+{clip_audit_basis(audit_basis) if audit_basis else 'No additional checklist provided.'}
 
 Requirements:
 1. Output results in JSON format
@@ -2522,10 +2577,10 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
             user_prompt = f"""请审核下面这段中文技术文档。
 
 文档内容：
-{content[:6500]}
+{clip_prompt_body(content, label='audit.body.zh')}
 
 发布前自检 checklist 和审核依据：
-{audit_basis[:3500] if audit_basis else '未提供额外 checklist。'}
+{clip_audit_basis(audit_basis) if audit_basis else '未提供额外 checklist。'}
 
 输出要求：
 1. 按JSON格式输出审核结果
@@ -2836,10 +2891,10 @@ Only high-confidence false positives may be removed."""
 请作为{lang_desc}技术文档审核专家，审核以下文档：
 
 文档内容：
-{content[:8000]}
+{clip_prompt_body(content, label='audit.body.legacy')}
 
 {"{'审核规则：' + rules_text[:3000] if rules_text else ''}"}
-{"{'审核依据：' + audit_basis[:3000] if audit_basis else ''}"}
+{"{'审核依据：' + clip_audit_basis(audit_basis) if audit_basis else ''}"}
 
 请从以下维度进行审核：
 1. 内容完整性
