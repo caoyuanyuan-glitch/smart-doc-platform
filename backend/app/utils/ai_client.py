@@ -27,6 +27,54 @@ logger = logging.getLogger(__name__)
 PROMPT_BUILDER_FALLBACK_ACTIVE = False
 _prompt_builder_fallback_logged = False
 
+# 审核 prompt 正文区的字符预算（不含 system prompt 与 checklist）。
+# 历史实现使用硬编码 content[:6500]，导致超长 chunk 尾部被静默丢弃，
+# 且 compute_chunk_coverage 只按 chunk range 统计，指标上恒为 100%。
+# 这里改为环境变量可配 + 显式告警 + 句子边界回退。
+_PROMPT_BODY_CHAR_LIMIT = 6500
+_PROMPT_BODY_CHAR_LIMIT_ENV = "REVIEW_AI_PROMPT_BODY_CHAR_LIMIT"
+_AUDIT_BASIS_CHAR_LIMIT = 3500
+_AUDIT_BASIS_CHAR_LIMIT_ENV = "REVIEW_AI_AUDIT_BASIS_CHAR_LIMIT"
+_prompt_truncation_warned = False
+
+
+def clip_prompt_body(content: str, label: str = "audit.body") -> str:
+    """按句子边界裁剪 prompt 正文，并记录被丢弃的字符数。
+
+    裁剪发生在句子边界上，避免把半个词/半句话喂给模型——
+    模型会把截断残片当成"原文就是这样"进而报出并不存在的拼写错误。
+    超限时打印一次显式告警，使 prompt 层丢尾在日志里可观测。
+    """
+    global _prompt_truncation_warned
+    text = str(content or "")
+    limit = _env_int(_PROMPT_BODY_CHAR_LIMIT_ENV, _PROMPT_BODY_CHAR_LIMIT, minimum=1000)
+    if len(text) <= limit:
+        return text
+
+    window = text[:limit]
+    # 在窗口内回退到最近的句子/段落边界，避免截断在词中间。
+    for sep in ("\n\n", "。", "！", "？", ". ", ".\n", "\n"):
+        cut = window.rfind(sep)
+        if cut > limit * 0.6:
+            window = window[: cut + len(sep)]
+            break
+    dropped = len(text) - len(window)
+    if not _prompt_truncation_warned:
+        logger.warning(
+            "[review.prompt] %s 超出 %s 字符预算，按句子边界裁剪，丢弃尾部 %s 字符（原 %s）。"
+            "请调高分块上限或提高 %s，避免长文档尾部漏检。",
+            label, limit, dropped, len(text), _PROMPT_BODY_CHAR_LIMIT_ENV,
+        )
+        _prompt_truncation_warned = True
+    return window
+
+
+def clip_audit_basis(audit_basis: str) -> str:
+    """审核依据（checklist）同样可配上限，避免超长 checklist 挤占正文预算。"""
+    text = str(audit_basis or "")
+    limit = _env_int(_AUDIT_BASIS_CHAR_LIMIT_ENV, _AUDIT_BASIS_CHAR_LIMIT, minimum=500)
+    return text[:limit]
+
 try:
     from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
 except ModuleNotFoundError as exc:
@@ -97,11 +145,18 @@ def _env_float(name, default):
         return float(default)
 
 
-def _env_int(name, default):
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """读取整数型环境变量；缺省、非法或低于下限时回退默认值。
+
+    `minimum` 默认取 1（只挡非法负数）；prompt 字符预算这类配置
+    在调用处显式传更大的下限（例如 500/1000），避免把预算配成
+    一两个字符导致正文全丢。
+    """
     try:
-        return int(os.getenv(name, default))
+        value = int(str(os.environ.get(name, "") or "").strip())
     except (TypeError, ValueError):
-        return int(default)
+        return default
+    return value if value >= minimum else default
 
 
 def _env_bool(name, default=False):
@@ -112,7 +167,7 @@ def _env_bool(name, default=False):
 
 
 def _provider_max_attempts():
-    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
+    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", 2))
 
 
 def _audit_max_tokens(content_length: int = 0) -> int:
@@ -121,7 +176,7 @@ def _audit_max_tokens(content_length: int = 0) -> int:
     按输入长度自适应：输入越长，允许的输出越大，避免大分块 JSON 被截断。
     仍受环境变量 AI_AUDIT_MAX_TOKENS 硬上限约束（默认 4096）。
     """
-    base = max(1024, _env_int("AI_AUDIT_MAX_TOKENS", "4096"))
+    base = max(1024, _env_int("AI_AUDIT_MAX_TOKENS", 4096))
     if content_length <= 0:
         return base
     # 输出预算 ≈ 输入字符数 / 3（英文）+ 固定余量，封顶 base 的 2 倍
@@ -591,6 +646,30 @@ class AIClient:
         return kwargs
 
     # ------------------------------------------------------------------
+    # 视觉链 provider 分派
+    # ------------------------------------------------------------------
+    def _visual_client_for(self, provider: str):
+        """返回该 provider 的视觉调用客户端；不支持则返回 None。"""
+        name = str(provider or "").strip().lower()
+        if name == "kimi":
+            return getattr(self, "kimi_client", None)
+        if name == "qwen":
+            return getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None)
+        if name == "deepseek":
+            return getattr(self, "deepseek_client", None)
+        return None
+
+    def _visual_model_for(self, provider: str) -> str:
+        name = str(provider or "").strip().lower()
+        if name == "kimi":
+            return self.kimi_model
+        if name == "qwen":
+            return self.qwen_model
+        if name == "deepseek":
+            return self.deepseek_model
+        return ""
+
+    # ------------------------------------------------------------------
     # 基础 chat 接口
     # ------------------------------------------------------------------
     def call_qwen(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
@@ -1035,6 +1114,57 @@ class AIClient:
         return None
 
     @staticmethod
+    def _salvage_truncated_audit_json(text):
+        stripped = _strip_code_fence(text) if text else ""
+        match = re.search(r'"issues"\s*:\s*\[', stripped)
+        if not match:
+            return []
+        cursor = match.end()
+        length = len(stripped)
+        issues = []
+        while cursor < length:
+            while cursor < length and stripped[cursor] in " \t\r\n,":
+                cursor += 1
+            if cursor >= length or stripped[cursor] in "]}":
+                break
+            if stripped[cursor] != "{":
+                break
+            depth = 0
+            in_string = False
+            escape = False
+            end = cursor
+            complete = False
+            while end < length:
+                char = stripped[end]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == '"':
+                        in_string = False
+                elif char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            parsed = json.loads(stripped[cursor:end + 1])
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            issues.append(parsed)
+                        cursor = end + 1
+                        complete = True
+                        break
+                end += 1
+            if not complete:
+                break
+        return issues
+
+    @staticmethod
     def _extract_json(result, default):
         if not result:
             return default
@@ -1047,10 +1177,16 @@ class AIClient:
                     return json.loads(m.group(0))
             except Exception:
                 pass
-        # 解析失败：检查是否为截断（无闭合括号），并打标记供调用方感知降级
         stripped = _strip_code_fence(result) if result else ""
         truncated = bool(stripped) and stripped.count("{") > stripped.count("}")
         if truncated:
+            salvaged = AIClient._salvage_truncated_audit_json(stripped)
+            if salvaged:
+                payload = dict(default) if isinstance(default, dict) else {"issues": []}
+                payload["issues"] = salvaged
+                payload["_degraded"] = True
+                payload["_degraded_reason"] = "json_truncated_salvaged"
+                return payload
             try:
                 default["_degraded"] = True
                 default["_degraded_reason"] = "json_truncated"
@@ -1271,8 +1407,8 @@ class AIClient:
         for item in observations:
             if not isinstance(item, dict):
                 continue
-            title = self._clean_text(item.get("title"), 24)
-            description = self._clean_text(item.get("description"), 80)
+            title = self._clean_text(item.get("title"), 60)
+            description = self._clean_text(item.get("description"), 300)
             if not title and not description:
                 continue
             category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
@@ -1282,7 +1418,7 @@ class AIClient:
             payload = {
                 "category": category,
                 "severity": severity,
-                "title": title or description[:80],
+                "title": title or description[:60],
                 "description": description or title,
                 "confidence": confidence,
             }
@@ -1363,28 +1499,53 @@ class AIClient:
                 issue["severity"] = "general"
         return merged
 
+    def _invoke_provider_audit(self, provider_key, messages, max_tokens, request_label=None, review_id=None):
+        if provider_key == "qwen":
+            return self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "kimi":
+            return self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "deepseek":
+            return self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "arkclaw":
+            return self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "proxy":
+            return self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        return None
+
     def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
         provider_key = str(provider_key or "").strip().lower()
         max_tokens = _audit_max_tokens(len(str(content or "")))
-        if provider_key == "qwen":
-            result = self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "kimi":
-            result = self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "deepseek":
-            result = self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "arkclaw":
-            result = self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "proxy":
-            result = self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        else:
-            result = None
+        result = self._invoke_provider_audit(provider_key, messages, max_tokens, request_label=request_label, review_id=review_id)
 
         if not result:
             return []
 
         data = self._extract_json(result, {"issues": []})
         if data.get("_degraded"):
-            print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={len(str(result or ''))})")
+            salvaged_count = len(data.get("issues") or [])
+            raw_len = len(str(result or ""))
+            if salvaged_count:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断, 回收 {salvaged_count} 个已闭合问题 (len={raw_len})")
+            else:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={raw_len})")
+                compact_tokens = min(1024, max_tokens)
+                if compact_tokens:
+                    compact_messages = list(messages) + [{
+                        "role": "user",
+                        "content": '只返回完整 JSON：{"issues":[...]}，最多 8 条最高优先级问题，issues 数组必须闭合。',
+                    }]
+                    retry_result = self._invoke_provider_audit(
+                        provider_key,
+                        compact_messages,
+                        compact_tokens,
+                        request_label=request_label,
+                        review_id=review_id,
+                    )
+                    if retry_result:
+                        retry_data = self._extract_json(retry_result, {"issues": []})
+                        if retry_data.get("issues"):
+                            data = retry_data
+                            print(f"[AI] {provider_key} 截断后紧凑重试回收 {len(retry_data.get('issues') or [])} 个问题")
             data.pop("_degraded", None)
             data.pop("_degraded_reason", None)
         issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
@@ -1580,9 +1741,21 @@ class AIClient:
         mime = content_type or mimetypes.guess_type(file_name or "")[0] or "image/png"
         return f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
 
-    def verify_review_issue_from_image(self, image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify"):
-        if not self.kimi_client or not image_bytes:
-            return {"decision": "skipped", "reason": "kimi_unavailable", "confidence": 0}
+    def verify_review_issue_from_image(self, image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi"):
+        # provider 必须可切换：此前这里写死 kimi_client，导致 qwen 在回退链上
+        # 永远拿不到接管机会（review.py 侧还会直接跳过非 kimi）。
+        # 视觉链按 REVIEW_VISUAL_PROVIDERS 顺序尝试，任一 provider 故障即回退下一家。
+        provider = str(provider or "kimi").strip().lower()
+        client = self._visual_client_for(provider)
+        if client is None:
+            return {
+                "decision": "error",
+                "reason": f"{provider}_unavailable",
+                "confidence": 0,
+                "is_extraction_artifact": False,
+            }
+        if not image_bytes:
+            return {"decision": "skipped", "reason": f"{provider}_unavailable", "confidence": 0}
 
         issue_payload = issue_payload or {}
         prompt = f"""
@@ -1627,17 +1800,28 @@ class AIClient:
 
         started_at = time.time()
         try:
-            response = self.kimi_client.with_options(timeout=40, max_retries=0).chat.completions.create(
-                **self._build_kimi_request_kwargs(
-                    model=self.kimi_model,
-                    messages=[{"role": "user", "content": user_content}],
-                    max_tokens=500,
-                    thinking="disabled",
+            model = self._visual_model_for(provider)
+            if provider == "kimi":
+                response = client.with_options(timeout=40, max_retries=0).chat.completions.create(
+                    **self._build_kimi_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": user_content}],
+                        max_tokens=500,
+                        thinking="disabled",
+                    )
                 )
-            )
+            else:
+                response = client.chat.completions.create(
+                    **self._build_qwen_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": user_content}],
+                        max_tokens=500,
+                        temperature=0.3,
+                    )
+                )
             self._record_usage_event(
-                "kimi",
-                self.kimi_model,
+                provider,
+                model,
                 getattr(response, "usage", None),
                 request_label=request_label,
                 review_id=review_id,
@@ -2233,6 +2417,16 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 - Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
 
+SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
+- Redundancy: report filler lead-ins with no information value (such as "About this guide" or "The following section will introduce"), redundant auxiliaries ("please click" -> "click"), and the same fact restated in a later section. Use category "冗余".
+- Accuracy: report wording that does not match the actual interface or behavior, and descriptions that resemble but do not name the real object. Use category "表述不准确".
+- Completeness: report operation steps missing a required follow-up action, and step results without a closing action. Use category "信息不完整".
+- Consistency: report the same object, action, term, or abbreviation described inconsistently across sections, including case inconsistency and inconsistent punctuation in parallel list items; cite both occurrences and give the unified form. Use category "一致性".
+- Tone and direction: report honorifics such as "please" added to operation steps, except text shown in the UI itself. Only suggest deleting or correcting text that exists; never suggest adding words the excerpt does not contain. Use category "语气".
+- Figure/table continuity: report a missing sentence-ending mark where a table or figure caption runs straight into the following body text. Use category "图表衔接".
+- Sentence constituents: report missing or extra characters that break the sentence, and name the affected constituent. Use category "句子成分".
+Each semantic issue must quote the complete sentence from the excerpt as evidence, and the same defect must not be reported twice.
+
 🚫 FORBIDDEN issue types (reporting any of these is an error):
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
 - ❌ Issues where the original field is shorter than 2 meaningful characters
@@ -2267,10 +2461,10 @@ FILENAME CHECKING:
             user_prompt = f"""Please review the following English technical document.
 
 Document excerpt:
-{content[:6500]}
+{clip_prompt_body(content, label='audit.body.en')}
 
 Release checklist and review basis:
-{audit_basis[:3500] if audit_basis else 'No additional checklist provided.'}
+{clip_audit_basis(audit_basis) if audit_basis else 'No additional checklist provided.'}
 
 Requirements:
 1. Output results in JSON format
@@ -2278,7 +2472,7 @@ Requirements:
 3. CYY human review experience baseline is for identifying content issues - report with evidence
 4. Deduplicate: report each error only once per document
 5. If the system prompt provided a document filename, check for filename spelling errors and product name consistency with body content
-6. Also output observations (1-3 chapter-level findings). Do not repeat any fact already covered by issues. Title <= 16 characters, description one sentence.
+6. Also output observations (1-3 chapter-level findings about the document itself). Do not repeat any fact already covered by issues. Do not output observations about the excerpt or chunk itself (for example, that it is mostly table of contents or front matter) - those have no actionable value. Title <= 16 characters for Chinese or <= 60 characters for English, description one sentence.
 
 Output ONLY strict JSON:
 {{
@@ -2286,7 +2480,7 @@ Output ONLY strict JSON:
     {{
       "severity": "fatal|serious|general|suggestion",
       "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
-      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
@@ -2300,7 +2494,7 @@ Output ONLY strict JSON:
   ],
   "observations": [
     {{
-      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
       "severity": "fatal|serious|general|suggestion",
       "title": "short title",
       "description": "one-sentence chapter-level evidence",
@@ -2383,10 +2577,10 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
             user_prompt = f"""请审核下面这段中文技术文档。
 
 文档内容：
-{content[:6500]}
+{clip_prompt_body(content, label='audit.body.zh')}
 
 发布前自检 checklist 和审核依据：
-{audit_basis[:3500] if audit_basis else '未提供额外 checklist。'}
+{clip_audit_basis(audit_basis) if audit_basis else '未提供额外 checklist。'}
 
 输出要求：
 1. 按JSON格式输出审核结果
@@ -2394,7 +2588,7 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
 5. 如果系统提示中给出了文档文件名，请检查文件名拼写、产品名与正文一致性
-6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。title 不超过 16 字，description 只保留一句。
+6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。不要输出关于本片段/摘录本身的观察（例如内容以目录、前置信息为主），这类观察没有可执行价值。title 中文不超过 16 字、英文不超过 60 字符，description 只保留一句。
 
 输出严格JSON：
 {{
@@ -2697,10 +2891,10 @@ Only high-confidence false positives may be removed."""
 请作为{lang_desc}技术文档审核专家，审核以下文档：
 
 文档内容：
-{content[:8000]}
+{clip_prompt_body(content, label='audit.body.legacy')}
 
 {"{'审核规则：' + rules_text[:3000] if rules_text else ''}"}
-{"{'审核依据：' + audit_basis[:3000] if audit_basis else ''}"}
+{"{'审核依据：' + clip_audit_basis(audit_basis) if audit_basis else ''}"}
 
 请从以下维度进行审核：
 1. 内容完整性

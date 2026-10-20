@@ -310,6 +310,7 @@ def compute_chunk_coverage(
     fallback_reason: str = "",
     total_chunk_count: int = 0,
     processed_chunk_count: int = 0,
+    prompt_char_limit: int = 0,
 ) -> dict:
     merged: list[list[int]] = []
     for start, end in sorted((max(0, int(s)), max(0, int(e))) for s, e in processed_ranges or []):
@@ -325,6 +326,16 @@ def compute_chunk_coverage(
     if infer_skipped_chapters and not skipped and all_chapters and processed_chapters is not None:
         processed_set = {item for item in processed_chapters if item}
         skipped = [item for item in all_chapters if item and item not in processed_set]
+
+    # coverage_ratio 只反映 ranges 是否完整，不代表 AI 实际看到多少。
+    # 在 sampling_mode=off 的主路径里 _merge_to_limit 只合并不丢弃，
+    # ranges 完整，coverage_ratio 恒为 1.0 —— 长文档在 prompt 层的静默丢尾
+    # 在指标上完全不可见。这里补一个按 prompt 上限估算的丢尾量，让衰减可观测。
+    limit = max(0, int(prompt_char_limit or 0))
+    truncated_tail_chars = 0
+    if limit and covered > limit * max(1, int(processed_chunk_count or total_chunk_count or 0)):
+        truncated_tail_chars = max(0, covered - limit * max(1, int(processed_chunk_count or total_chunk_count or 0)))
+
     return {
         "total_source_chars": int(source_len or 0),
         "total_chunk_count": int(total_chunk_count or len(processed_ranges or [])),
@@ -335,6 +346,11 @@ def compute_chunk_coverage(
         "skipped_chapters": skipped,
         "chunker_mode": chunker_mode,
         "fallback_reason": fallback_reason,
+        "prompt_char_limit": limit,
+        "truncated_tail_chars": int(truncated_tail_chars),
+        "prompt_coverage_ratio": (
+            round(max(0.0, (covered - truncated_tail_chars) / covered), 4) if covered else 1.0
+        ),
     }
 
 

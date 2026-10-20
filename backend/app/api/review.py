@@ -49,6 +49,9 @@ from app.models.document import Document as DocumentModel
 from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
+from app.review_engine.unit_spacing import check_units_and_spacing
+from app.review_engine.term_baseline import check_term_baseline
+from app.review_engine.canonical_writing import check_canonical_writing
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -57,6 +60,7 @@ from app.review_engine.validation import (
     ai_suggestion_changes_protected_meaning as engine_ai_suggestion_changes_protected_meaning,
     ai_suggestion_violates_number_unit_spacing as engine_ai_suggestion_violates_number_unit_spacing,
     filter_ai_issues_without_document_evidence as engine_filter_ai_issues_without_document_evidence,
+    has_substantive_suggestion as engine_has_substantive_suggestion,
     is_duplicate_punctuation_reduction as engine_is_duplicate_punctuation_reduction,
     normalize_noop_compare_text as engine_normalize_noop_compare_text,
     validate_ai_issue_candidate as engine_validate_ai_issue_candidate,
@@ -313,6 +317,7 @@ def _is_snippet_scope_issue(issue):
     if re.search(
         r"安全合规|交叉引用|主题结构|目录结构|文件名审核|版权年份|copyright.?year|"
         r"发布前自检|CHECKLIST-|CYY-CN-PAGE-|CYY-CN-LAYOUT-|CYY-CN-REVISION-|"
+        r"CYY-CN-ROHS-|CYY-CN-INDEX-|"
         r"DOC-REV-|STRUCT-|SAFE-|XREF-|列宽|字号|图标大小|字体/版式",
         blob,
         re.IGNORECASE,
@@ -548,16 +553,42 @@ def _observation_anchors(text):
     return anchors
 
 
-def _observation_first_sentence(text, limit=72):
+# 只描述「本片段/摘录本身」的观察（如内容以目录、前置信息为主）不是文档缺陷，
+# 属于分块策略产物，展示给审核人没有可执行价值，直接剔除。
+_OBS_EXCERPT_META_PATTERNS = (
+    re.compile(r"\b(?:this|the)\s+excerpt\b", re.IGNORECASE),
+    re.compile(r"\btoc[- ]only\b", re.IGNORECASE),
+    re.compile(r"\b(?:this|the)\s+(?:chunk|snippet|passage)\b", re.IGNORECASE),
+    re.compile(r"本(?:片段|摘录|节选)|该(?:片段|摘录|节选)|摘录内容|节选内容"),
+)
+
+
+def _is_excerpt_meta_observation(*texts):
+    blob = " ".join(str(text or "") for text in texts).strip()
+    if not blob:
+        return False
+    return any(pattern.search(blob) for pattern in _OBS_EXCERPT_META_PATTERNS)
+
+
+def _observation_first_sentence(text, limit=200):
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     if not value:
         return ""
-    for sep in ("。", "；"):
+    # 中英文句末标点都作为断句符；命中即返回完整首句，避免英文观察被硬截断
+    for sep in ("。", "；", "．"):
         index = value.find(sep)
-        if 6 <= index <= limit:
+        if index >= 6:
             return value[: index + 1]
+    if not re.search(r"[\u4e00-\u9fff]", value):
+        for match in re.finditer(r"[.!?](?=\s|$)", value):
+            if match.start() >= 6:
+                return value[: match.start() + 1]
     if len(value) > limit:
-        return value[:limit].rstrip("，,、；; ") + "…"
+        head = value[:limit].rstrip("，,、；;:： ")
+        # 尽量在词边界收尾，避免截出半个单词
+        if re.search(r"[A-Za-z]$", head) and " " in head:
+            head = head[: head.rfind(" ")].rstrip("，,、；;:： ")
+        return head + "…"
     return value
 
 
@@ -576,6 +607,8 @@ def _compact_review_observations(observations, issues=None, limit=3):
     for item in _merge_review_observations(observations):
         title = str(item.get("title") or "").strip()
         description = str(item.get("description") or "").strip()
+        if _is_excerpt_meta_observation(title, description):
+            continue
         title_plain = _observation_plain_text(title)
         desc_plain = _observation_plain_text(description)
         if (not description) or title_plain == desc_plain or (
@@ -583,11 +616,11 @@ def _compact_review_observations(observations, issues=None, limit=3):
         ) or (
             desc_plain and title_plain.startswith(desc_plain) and len(desc_plain) >= 12
         ):
-            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(description or title, 72))
+            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(description or title))
             description = ""
         else:
-            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(title, 18))
-            description = _observation_first_sentence(description, 72)
+            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(title, 60))
+            description = _observation_first_sentence(description)
         if not title and not description:
             continue
         payload = {
@@ -638,7 +671,7 @@ def _synthesize_review_observations(issues):
         if count <= 1:
             continue
         category = str(_issue_value(issue, "category", "") or "其他").strip() or "其他"
-        description = _observation_first_sentence(str(_issue_value(issue, "description", "") or "").strip(), 72)
+        description = _observation_first_sentence(str(_issue_value(issue, "description", "") or "").strip())
         title = f"{category}共 {count} 处"
         key = title.lower()
         if key in seen:
@@ -1670,6 +1703,8 @@ def validate_suggestion(original: str, suggestion: str) -> bool:
             return True
         if _is_duplicate_punctuation_reduction(original_text, normalized_suggestion):
             return True
+        if engine_has_substantive_suggestion(original_text, normalized_suggestion):
+            return True
     return _normalize_noop_compare_text(original) != _normalize_noop_compare_text(normalized_suggestion)
 
 
@@ -2124,6 +2159,8 @@ def _is_noop_position_or_same_text_issue(issue):
         return False
     if _is_duplicate_punctuation_reduction(original, suggestion):
         return False
+    if engine_has_substantive_suggestion(original, suggestion):
+        return False
     if original == suggestion or _normalize_noop_compare_text(original) == _normalize_noop_compare_text(suggestion):
         return True
     pos_match = re.fullmatch(r'pos\s*(\d+)', original, re.IGNORECASE)
@@ -2308,12 +2345,39 @@ def _review_ai_token_budget():
     return max(0, _review_env_int('REVIEW_AI_TOKEN_BUDGET', '0'))
 
 
+def _review_ai_prompt_body_limit():
+    """prompt 正文区的字符上限，与 ai_client.clip_prompt_body 保持同一口径。
+
+    过去这里没有这个概念，prompt 用硬编码 6500 截断，
+    compute_chunk_coverage 又只按 chunk range 统计，于是长文档丢尾完全不可见。
+    """
+    from app.utils.ai_client import (
+        _PROMPT_BODY_CHAR_LIMIT,
+        _PROMPT_BODY_CHAR_LIMIT_ENV,
+        _env_int,
+    )
+    return _env_int(_PROMPT_BODY_CHAR_LIMIT_ENV, _PROMPT_BODY_CHAR_LIMIT, minimum=1000)
+
+
 def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
 
     短文档全覆盖；长文档受环境预算 REVIEW_AI_MAX_CHUNKS 约束。
+
+    默认值由 10 提到 32：单块上限是 create_smart_chunker(max_chars=2800)，
+    而 prompt 只截 content[:6500]。块数被压到 10 时，_merge_to_limit 会把全文
+    合并成 10 个大块，单块均值 ≈ 全文/10 —— 超过 6500 字符的文档尾部会被
+    prompt 静默丢弃（8 万字符丢 18.75%、10 万丢 35%、12 万丢 45.83%），
+    而 compute_chunk_coverage 仍报 100%，指标上看不出任何衰减。
+    提到 32 后，12 万字符以内文档的丢尾降为 0，检出率上限被解除。
+
+    但 32 只是"让块均落进 6500"的参数巧合，不是机制保证：
+    临界点 = 正文上限 × 块数 = 6500×32 ≈ 20.8 万字符，超出后尾部依旧丢。
+    因此调用方必须把 prompt_char_limit 一起传给 compute_chunk_coverage，
+    让 truncated_tail_chars 在指标上真实可见，而不是靠人工反推。
+    成本控制改由 REVIEW_AI_MAX_CHUNKS 环境变量按需下调，不再写死默认值。
     """
-    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '10'))
+    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '32'))
     if total_length <= 0:
         return env_limit
     dynamic_limit = 1 + math.ceil(max(0, total_length - 3000) / 2750)
@@ -2576,6 +2640,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
         fallback_reason=chunker_fallback_reason,
         total_chunk_count=len(all_chunks),
         processed_chunk_count=len(processed_ok),
+        prompt_char_limit=_review_ai_prompt_body_limit(),
     )
     batch_size = max(1, _review_ai_chunk_limit(total_length))
     coverage["batch_size"] = batch_size
@@ -2811,27 +2876,88 @@ def _filter_low_value_review_issues(issues):
     return filtered
 
 
-def _apply_false_positive_signature_penalty(issues, false_positive_signatures):
-    if not false_positive_signatures:
-        return issues
+def _apply_preset_false_positive_patterns(issues, document_language=None):
+    """按预置误报记忆的结构化指纹标记疑似误报。
+
+    与 `_apply_false_positive_signature_penalty` 的分工：
+      - 后者吃**已存签名集合**，只能拦"人工曾经裁定过的那批具体问题"；
+      - 这里走**结构化模式**，能在问题首次出现时就命中预置人工经验。
+
+    命中只标记 possible_false_positive（降低置信度 + 需人工复核），不删除，
+    因此误伤成本可控；同时输出命中统计，便于后续调参。
+    """
+    try:
+        from app.review_engine.false_positive_fingerprint import match_preset_pattern
+    except ModuleNotFoundError:
+        return issues, {}
+
+    if not issues:
+        return issues, {}
+    language = 'en' if str(document_language or '').lower() in ('en', 'both', 'english') else 'zh'
+    matched: dict[str, int] = {}
+    for issue in issues:
+        if getattr(issue, 'possible_false_positive', False):
+            continue
+        entry_id = match_preset_pattern(issue, language=language)
+        if not entry_id:
+            continue
+        _mark_possible_false_positive(issue, f"preset_false_positive_memory:{entry_id}")
+        matched[entry_id] = matched.get(entry_id, 0) + 1
+    if matched:
+        detail = ', '.join(f'{key}×{value}' for key, value in sorted(matched.items()))
+        print(f'[审核] 预置误报记忆命中（标记疑似误报，未删除）: {detail}')
+    return issues, matched
+
+
+def _apply_false_positive_signature_penalty(issues, false_positive_signatures, memory_payloads=None):
+    """按已存误报记忆标记疑似误报。
+
+    两条路径：
+      - 精确签名比对（历史行为，人工标注意图完全一致时命中）；
+      - 结构化指纹比对（`matches_memory`：同规则族 + token 覆盖相似度 >= 0.62），
+        使同一个问题换措辞时仍能被识别为已裁定误报。
+
+    命中只做标记（`possible_false_positive` + 降低置信度 + 需人工复核），
+    不删除问题，因此误伤成本可控、可回溯。
+    """
+    if not false_positive_signatures and not memory_payloads:
+        return issues, {"exact": 0, "fingerprint": 0}
+
     normalized_false_positive_signatures = {
         str(signature or '').strip().lower()
-        for signature in false_positive_signatures
+        for signature in false_positive_signatures or []
         if str(signature or '').strip()
     }
-    if not normalized_false_positive_signatures:
-        return issues
+    payload_pairs = list(memory_payloads or [])
+    if not normalized_false_positive_signatures and not payload_pairs:
+        return issues, {"exact": 0, "fingerprint": 0}
+
     filtered = []
-    dropped = 0
+    exact_hits = 0
+    fingerprint_hits = 0
+    try:
+        from app.review_engine.false_positive_fingerprint import matches_memory
+    except ModuleNotFoundError:
+        matches_memory = None
+
     for issue in issues:
         issue_signatures = {signature.lower() for signature in _issue_judgment_signatures(issue)}
-        if issue_signatures & normalized_false_positive_signatures:
+        if normalized_false_positive_signatures and (issue_signatures & normalized_false_positive_signatures):
             _mark_possible_false_positive(issue, "false_positive_memory")
-            dropped += 1
+            exact_hits += 1
+        elif matches_memory is not None and payload_pairs:
+            for memory_rule, memory_text in payload_pairs:
+                if matches_memory(issue, memory_rule, memory_text):
+                    _mark_possible_false_positive(issue, "false_positive_memory_fingerprint")
+                    fingerprint_hits += 1
+                    break
         filtered.append(issue)
-    if dropped:
-        print(f'[审核] 误报库过滤: 标记疑似误报 {dropped} 个, 剩余 {len(filtered)} 个')
-    return filtered
+    if exact_hits or fingerprint_hits:
+        print(
+            f'[审核] 误报库过滤: 标记疑似误报 {exact_hits + fingerprint_hits} 个'
+            f'（精确签名 {exact_hits}，结构化指纹 {fingerprint_hits}），剩余 {len(filtered)} 个'
+        )
+    return filtered, {"exact": exact_hits, "fingerprint": fingerprint_hits}
 
 
 _AI_KEEP_REWRITE_HINT = re.compile(r"建议补充|补充说明|未明确|步骤不完整|操作衔接|混匀")
@@ -2941,7 +3067,8 @@ def _restore_high_value_rule_issues(selected_issues, candidate_issues):
     return restored
 
 
-def _finalize_review_issues(issues, content, false_positive_signatures):
+def _finalize_review_issues(issues, content, false_positive_signatures, document_language=None,
+                           false_positive_memory_payloads=None):
     ai_filter_diagnostics = {
         "initial_total": len(issues),
         "initial_ai": _count_ai_issues(issues),
@@ -2969,8 +3096,13 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
     ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
     ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
     ai_filter_diagnostics["document_evidence_drop_samples"] = ai_evidence_drop_samples
-    issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
+    issues, fp_signature_stats = _apply_false_positive_signature_penalty(
+        issues, false_positive_signatures, false_positive_memory_payloads
+    )
     ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
+    ai_filter_diagnostics["false_positive_memory_hits"] = fp_signature_stats
+    issues, preset_fp_hits = _apply_preset_false_positive_patterns(issues, document_language)
+    ai_filter_diagnostics["preset_false_positive_hits"] = preset_fp_hits
 
     pre_pipeline_issues = list(issues)
     before_pipeline_count = len(issues)
@@ -3114,16 +3246,30 @@ def _issue_judgment_signature(issue):
 
 
 def _issue_judgment_signatures(issue):
+    """生成 issue 的误报记忆精确签名集合。
+
+    历史实现只产出唯一一种签名 `rule|category|original`，
+    导致同一问题只要类别字段填法略有差异就匹配不上。
+    这里保留三种降级形态（去 category、去 rule、只留文本），
+    用于「人工标注意图完全一致」的精确比对路径。
+
+    需要容忍措辞差异的场景不走这里 —— 由
+    `app.review_engine.false_positive_fingerprint.matches_memory()`
+    按「同规则族 + token 覆盖相似度」判定，避免在精确签名层面
+    做无法验证的模糊猜测。
+    """
     rule = str(_issue_value(issue, 'rule', '') or '').upper()
     original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip().lower()
     category = re.sub(r'\s+', ' ', str(_issue_value(issue, 'category', '') or '')).strip().lower()
     if not original:
         return set()
-    return {
+
+    signatures = {
         f'{rule}|{category}|{original}',
         f'{rule}|{original}',
         f'{category}|{original}',
     }
+    return {str(item).strip().lower() for item in signatures if str(item).strip()}
 
 
 def _is_issue_hidden_by_judgment(issue):
@@ -3283,12 +3429,24 @@ def _normalize_review_issue_display(issues, content=None):
 
 
 def _load_false_positive_signatures_for_document(db: Session, document_id: int):
+    """加载文档级误报记忆。
+
+    返回 (signatures, memory_payloads)：
+      - signatures  —— 精确签名集合，走历史比对路径；
+      - memory_payloads —— (rule, original_text) 列表，走结构化指纹路径，
+        使"同一个问题换个措辞"也能被识别为已裁定的误报。
+    """
     signatures = set(list_false_positive_memory_signatures(db))
+    try:
+        from app.crud.review import list_false_positive_memory_payloads
+        memory_payloads = list(list_false_positive_memory_payloads(db))
+    except ModuleNotFoundError:
+        memory_payloads = []
     for review in get_reviews(db, document_id=document_id):
         for issue in get_issues(db, review_id=review.id):
             if str(getattr(issue, 'status', '') or '').lower() == 'false_positive':
                 signatures.update(_issue_judgment_signatures(issue))
-    return signatures
+    return signatures, memory_payloads
 
 
 def _sync_false_positive_memory(db: Session, issue):
@@ -3518,14 +3676,16 @@ def _verify_review_issue_visually(png_bytes, issue_payload, page_number, review_
         if not _visual_provider_available(provider):
             attempts.append({"provider": provider, "visual_status": "provider_unavailable"})
             continue
-        if provider != "kimi":
-            attempts.append({"provider": provider, "visual_status": "provider_unavailable", "reason": "vision_adapter_missing"})
-            continue
+        # 不再硬编码跳过非 kimi：原先的 `if provider != "kimi": continue`
+        # 会让 qwen 永远拿不到接管机会，即使客户端已就绪。
+        # 现在按 REVIEW_VISUAL_PROVIDERS 顺序逐个尝试，
+        # 任一 provider 返回 provider_unavailable 就回退到下一家。
         result = ai_client.verify_review_issue_from_image(
             png_bytes,
             issue_payload,
             page_number=page_number,
             review_id=review_id,
+            provider=provider,
         ) or {}
         status = map_visual_status(result.get("decision"), result.get("reason"))
         result["visual_status"] = status
@@ -7604,12 +7764,13 @@ def _find_named_section_start(normalized, section_name):
     name = re.sub(r'\s+', '', str(section_name or ''))
     if not name:
         return None
-    direct = re.search(re.escape(str(section_name or '').strip()), normalized)
-    if direct:
-        return direct.start()
     pattern = r'(?m)^[ \t]*' + r'\s*'.join(re.escape(char) for char in name) + r'[ \t]*$'
-    match = re.search(pattern, normalized)
-    return match.start() if match else None
+    matches = list(re.finditer(pattern, normalized))
+    if len(matches) == 1:
+        return matches[0].start()
+    # 标题目录/同名章节会让标题在正文中多次出现，无法确定唯一锚点，
+    # 此时放弃页码判断，避免取到错误章节造成误报。
+    return None
 
 
 # 已知的 UI 用词同义后缀（同一动作的两种界面写法），用于界面按钮文案一致性检查
@@ -7667,6 +7828,183 @@ def _detect_page_number_sequence_issues(content):
         last_page_number = page_number
 
     return issues
+
+
+_ROHS_STRUCTURE_PARTS = (
+    ("主体架构", "主体架构"),
+    ("操作系统主机", "操作系统主机"),
+    ("XYZ-平台", "XYZ-平台"),
+    ("XYZ平台", "XYZ-平台"),
+    ("试剂仓", "试剂仓"),
+)
+_INDEX_ENTRY_RE = re.compile(
+    r"([A-Za-z\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff/%\-()]{1,40})[ \t]+(\d{1,3}(?:\s*[,，]\s*\d{1,3})*)"
+)
+
+
+def _compact_cn_text(text):
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _find_last_standalone_heading(text, heading):
+    pattern = rf"(?m)^[ \t]*{re.escape(heading)}[ \t]*$"
+    matches = list(re.finditer(pattern, text))
+    return matches[-1] if matches else None
+
+
+def _heading_window(text, match, max_chars=3500):
+    start = match.start()
+    rest = text[match.end():match.end() + max_chars]
+    next_heading = re.search(
+        r"(?m)^[ \t]*(?:第[一二三四五六七八九十百千0-9]+[章节篇部]|附录\s*[A-Z0-9一二三四五六七八九十]*|术语表)[ \t]*$",
+        rest,
+    )
+    end = match.end() + (next_heading.start() if next_heading else len(rest))
+    return text[start:end], start
+
+
+def _detect_rohs_structure_component_gaps(normalized):
+    structure_match = _find_last_standalone_heading(normalized, "结构组成")
+    rohs_match = None
+    for title in ("产品中有害物质的名称及含有信息表", "产品中有害物质的名称及含有物质表"):
+        rohs_match = _find_last_standalone_heading(normalized, title)
+        if rohs_match:
+            break
+    if structure_match is None or rohs_match is None:
+        return []
+    structure_window, _structure_start = _heading_window(normalized, structure_match)
+    rohs_window, rohs_start = _heading_window(normalized, rohs_match)
+    structure_compact = _compact_cn_text(structure_window)
+    rohs_compact = _compact_cn_text(rohs_window)
+    missing = []
+    for needle, label in _ROHS_STRUCTURE_PARTS:
+        compact_needle = _compact_cn_text(needle)
+        if compact_needle in structure_compact and compact_needle not in rohs_compact and label not in missing:
+            missing.append(label)
+    if not missing:
+        return []
+    marker = re.search(r"部件名称", rohs_window)
+    start = rohs_start + (marker.start() if marker else 0)
+    original = "部件名称"
+    return [{
+        "start": start,
+        "end": start + len(original),
+        "original": original,
+        "missing": missing,
+    }]
+
+
+def _iter_index_entries(index_text, max_page=400):
+    seen = set()
+    for match in _INDEX_ENTRY_RE.finditer(index_text):
+        term = re.sub(r"\s+", " ", match.group(1)).strip(" /")
+        if len(term) < 2 or re.fullmatch(r"[A-Za-z]", term):
+            continue
+        if "..." in term or "…" in term:
+            continue
+        if re.search(r"表示|依据|电话|参考品|基因组", term):
+            continue
+        pages = [int(num) for num in re.findall(r"\d+", match.group(2))]
+        if not pages or any(page > max_page or page <= 0 for page in pages):
+            continue
+        if len(term) > 24 and len(pages) == 1:
+            continue
+        key = (term, pages[0])
+        if key in seen:
+            continue
+        seen.add(key)
+        yield term, pages, match.start(), match.group(0)
+
+
+def _find_alphabetic_index_start(normalized):
+    letter_lines = list(re.finditer(r"(?m)^[ \t]*[A-Z][ \t]*$", normalized))
+    if len(letter_lines) < 3:
+        return None
+    clusters = [[letter_lines[0]]]
+    for prev, current in zip(letter_lines, letter_lines[1:]):
+        if current.start() - prev.start() <= 800:
+            clusters[-1].append(current)
+        else:
+            clusters.append([current])
+    for cluster in reversed(clusters):
+        if len(cluster) >= 3:
+            return cluster[0].start()
+    return None
+
+
+def _index_term_body_pages(body, spans, term):
+    pages = set()
+    pos = 0
+    step = max(len(term), 1)
+    while True:
+        found = body.find(term, pos)
+        if found < 0:
+            break
+        printed = _printed_page_at_offset(spans, found)
+        if printed is not None:
+            pages.add(printed)
+        pos = found + step
+    return pages
+
+
+def _detect_constant_index_page_offset(raw_content, normalized):
+    heading = None
+    for match in re.finditer(r"(?m)^[ \t]*索引[ \t]*$", normalized):
+        heading = match
+    if heading is not None:
+        heading_start = heading.end()
+        index_text = normalized[heading.end():]
+    else:
+        heading_start = _find_alphabetic_index_start(normalized)
+        if heading_start is None:
+            return None
+        index_text = normalized[heading_start:]
+    entries = list(_iter_index_entries(index_text))
+    if len(entries) < 5:
+        return None
+    body = normalized[:heading_start]
+    spans = _printed_page_spans(raw_content)
+    if not spans:
+        return None
+    located = []
+    for term, pages, rel_start, raw in entries:
+        occ = _index_term_body_pages(body, spans, term)
+        if not occ:
+            continue
+        located.append((term, pages, occ, raw))
+    if len(located) < 5:
+        return None
+    offset_hits = Counter()
+    offset_samples = defaultdict(list)
+    for term, cited_pages, occ, raw in located:
+        deltas = {printed - cited for cited in cited_pages for printed in occ}
+        for delta in deltas:
+            offset_hits[delta] += 1
+            if len(offset_samples[delta]) < 4:
+                offset_samples[delta].append(re.sub(r"\s+", " ", raw).strip())
+    nonzero = [(delta, count) for delta, count in offset_hits.items() if abs(delta) >= 2]
+    if not nonzero:
+        return None
+    common_offset, common_count = max(nonzero, key=lambda item: (item[1], -abs(item[0])))
+    checked = len(located)
+    zero_count = offset_hits.get(0, 0)
+    if common_count < max(5, int(checked * 0.35)):
+        return None
+    if zero_count >= int(checked * 0.8) and zero_count > common_count:
+        return None
+    samples = offset_samples.get(common_offset) or []
+    original = samples[0] if samples else "索引"
+    start = heading_start + (index_text.find(samples[0]) if samples else 0)
+    if start < heading_start:
+        start = heading_start
+    return {
+        "start": start,
+        "end": start + len(original),
+        "original": original,
+        "offset": common_offset,
+        "hit_count": common_count,
+        "checked": checked,
+    }
 
 
 def _run_chinese_human_baseline_rules(content):
@@ -9012,6 +9350,10 @@ def _run_chinese_human_baseline_rules(content):
             prefix_len = len(os.path.commonprefix([left_label, right_label]))
             if prefix_len < 2:
                 continue
+            # 差异部分含拉丁字母/数字的标签多为并列枚举项（识别结果（DNA）/（RNA）、
+            # 短读长1链/2链），是带区分意义的正常命名，不是同一动作的用词不统一。
+            if re.search(r'[A-Za-z0-9]', left_label[prefix_len:] + right_label[prefix_len:]):
+                continue
             # 只报单字符差异（如“同步到/同步至”）或已知同义后缀（如“开启/启动”）的用词不统一。
             # 共享前缀但差异达 2 个字符的标签多是并列菜单项或参数字段
             # （系统设置/系统时间、测序类型/测序方案、Barcode管理/Barcode位置），
@@ -9065,7 +9407,97 @@ def _run_chinese_human_baseline_rules(content):
                 'CYY人工审核经验基线 - 步骤页码交叉引用', 'serious', 95,
             )
 
+    for match in re.finditer(r"操作如下[：:]", normalized):
+        following = normalized[match.end():match.end() + 80]
+        if re.search(r"图|所示|所述", following[:6]):
+            continue
+        if not re.search(r"^\s*1\s*[.、．)]", following):
+            continue
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            "CYY-CN-STEP-004", "步骤结构",
+            "建议改为“操作步骤如下：”",
+            "有序列表前的主干句应使用“操作步骤如下”，当前写成了“操作如下”。",
+            "CYY人工审核经验基线 - 操作步骤引导句", "general", 93,
+        )
+
+    for match in re.finditer(
+        r'([\u4e00-\u9fff][^:\n]{1,16}):(?=\s*(?:\r?\n\s*)?(?:1\s*[.、．)]|y\s))',
+        normalized,
+    ):
+        lead = match.group(1).strip()
+        if lead in {'状态', '说明', '备注', '注意'}:
+            continue
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-008', '标点符号',
+            f'建议改为“{lead}：”',
+            '中文引导语后应使用全角冒号。',
+            'CYY人工审核经验基线 - 中文引导语全角冒号', 'general', 94,
+        )
+
+    parent_children = {}
+    for match in re.finditer(
+        r'【([^】]{1,40})】\s*(?:>|，选择)\s*【([^】]{1,40})】',
+        normalized,
+    ):
+        parent = re.sub(r'\s+', '', match.group(1))
+        child = re.sub(r'\s+', '', match.group(2))
+        if not parent or not child:
+            continue
+        parent_children.setdefault(parent, []).append((match.start(2) - 1, match.end(2) + 1, child))
+    for parent, items in parent_children.items():
+        labels = {}
+        for start, end, child in items:
+            labels.setdefault(child, (start, end))
+        names = list(labels)
+        for left_index, left_label in enumerate(names):
+            for right_label in names[left_index + 1:]:
+                shorter, longer = (left_label, right_label) if len(left_label) <= len(right_label) else (right_label, left_label)
+                extra_len = len(longer) - len(shorter)
+                if not longer.endswith(shorter):
+                    continue
+                if not (2 <= len(shorter) <= 6 and 1 <= extra_len <= 4):
+                    continue
+                start, end = labels[shorter]
+                add_issue(
+                    start, end, f'【{shorter}】',
+                    'CYY-CN-UI-003', '术语一致性',
+                    f'建议将【{parent}】下的“{shorter}”统一为“{longer}”',
+                    f'同一菜单【{parent}】下同时出现【{shorter}】和【{longer}】，界面名称需要统一。',
+                    'CYY人工审核经验基线 - 同级菜单名称统一', 'general', 93,
+                )
+
+    for gap in _detect_rohs_structure_component_gaps(normalized):
+        missing = "、".join(gap["missing"])
+        add_issue(
+            gap["start"], gap["end"], gap["original"],
+            "CYY-CN-ROHS-001", "结构完整性",
+            f"请将结构组成章节中的{missing}补入有害物质表",
+            f"有害物质表与结构组成章节部件不一致，缺{missing}。",
+            "CYY人工审核经验基线 - RoHS表与结构组成对照", "serious", 94,
+        )
+
+    index_shift = _detect_constant_index_page_offset(raw_content, normalized)
+    if index_shift:
+        offset = index_shift["offset"]
+        direction = f"+{offset}" if offset > 0 else str(offset)
+        add_issue(
+            index_shift["start"], index_shift["end"], index_shift["original"],
+            "CYY-CN-INDEX-001", "索引一致性",
+            f"请按正文实际页码重生成索引；当前索引页码整体偏移 {direction} 页",
+            f"{index_shift['checked']} 条可核对索引中有 {index_shift['hit_count']} 条相对正文位置恒定偏移 {direction} 页。",
+            "CYY人工审核经验基线 - 索引页码整体偏移", "serious", 95,
+        )
+
     return issues
+
+
+_HEADING_ACTION_VERBS = {
+    'add', 'remove', 'select', 'click', 'tap', 'press', 'open', 'close', 'connect',
+    'disconnect', 'insert', 'restart', 'turn', 'check', 'confirm', 'prepare', 'mix',
+    'incubate', 'centrifuge', 'load', 'scan', 'clean', 'update', 'save', 'delete',
+}
 
 
 def _looks_like_numbered_section_heading(text):
@@ -9084,12 +9516,45 @@ def _looks_like_numbered_section_heading(text):
     words = re.findall(r'[A-Za-z][A-Za-z\-]*|[\u4e00-\u9fff]+', title)
     if not words or len(words) > 8:
         return False
-    action_verbs = {
-        'add', 'remove', 'select', 'click', 'tap', 'press', 'open', 'close', 'connect',
-        'disconnect', 'insert', 'restart', 'turn', 'check', 'confirm', 'prepare', 'mix',
-        'incubate', 'centrifuge', 'load', 'scan', 'clean', 'update', 'save', 'delete',
-    }
-    return words[0].lower() not in action_verbs
+    return words[0].lower() not in _HEADING_ACTION_VERBS
+
+
+_SAFETY_LABEL_RE = re.compile(r'(?im)^[ \t]*(WARNING|CAUTION|DANGER)\b')
+# PDF 文本层会把安全标题下的条目拆成多行，风险词常与标题相隔数百字符，
+# 因此回溯范围要覆盖整个安全段落，不能只用风险词附近的小窗口
+_SAFETY_HAZARD_LOOKBACK = 800
+_HEADING_FUNCTION_WORD_RE = (
+    r'(?:Insert|Press|Please|Remove|Close|Open|Set|Turn|Do|Keep|Avoid|Ensure'
+    r'|Make|Use|Check|Read|Refer|See|After|Before|When|If|To|Connect|Attach|Add'
+    r'|Select|Specify|Perform|Allow|Apply|Store|Place|Position|Repeat|Wait|Step)\b'
+)
+# 段落标题形态：大写开头、无句末标点的短行；排除操作动词/功能词开头的正文
+_SAFETY_SECTION_HEADING_RE = re.compile(
+    rf'^(?!{_HEADING_FUNCTION_WORD_RE})[A-Z][A-Za-z0-9 ,/&\-]{{2,58}}$'
+)
+
+
+def _hazard_has_enclosing_safety_label(normalized, position, document_content=None):
+    """判断风险词之前是否已有同级 WARNING/CAUTION/DANGER 标题覆盖该条目。
+
+    跨章节判定优先用 TOC（经 `_has_intervening_section_heading`），无 TOC 时退化到
+    结构正则。`document_content` 为含前置目录的完整文档；传入后 TOC 未列的小标题也
+    能通过结构判据识别为标题。降级取舍：无法确认跨章节时倾向保留安全标注（少报）
+    而非漏报真实安全标注。
+    """
+    window = normalized[max(0, position - _SAFETY_HAZARD_LOOKBACK):position]
+    label = None
+    for match in _SAFETY_LABEL_RE.finditer(window):
+        label = match
+    if label is None:
+        return False
+    # window 结尾即风险词位置，最后一段可能是半截行，只按完整行判断章节边界。
+    # 标题与风险词之间出现新段落标题，说明已跨章节，不再视为同一安全标注。
+    tail_lines = window[label.end():].split('\n')
+    tail = '\n'.join(tail_lines[:-1]).strip()
+    if tail and _has_intervening_section_heading(tail, document_content):
+        return False
+    return True
 
 
 def _run_safety_compliance_audit(content, document_language='en'):
@@ -9127,6 +9592,8 @@ def _run_safety_compliance_audit(content, document_language='en'):
     for match in hazard_pattern.finditer(normalized):
         window = normalized[max(0, match.start() - 80):min(len(normalized), match.end() + 80)]
         if re.search(r'WARNING|CAUTION|DANGER|警告|注意|危险', window, re.IGNORECASE):
+            continue
+        if _hazard_has_enclosing_safety_label(normalized, match.start(), content):
             continue
         key = ('SAFE-002', match.start())
         if key in seen:
@@ -9212,6 +9679,51 @@ def _run_cross_reference_audit(content):
                 'confidence': 88,
                 'source': 'rule',
                 'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='步骤', target=f'Step {ref}', check_result='引用缺失'),
+            })
+
+    # 页码引用（on Page N）：跨页引用在排版变动后极易失效，规范做法是引用
+    # 对象编号（Table 39 / Figure 11）或就近表述（the table below）。
+    #
+    # 启用条件：文档**本身具备编号对象引用体系**。若全文连 Table/Figure 编号都不存在，
+    # 「改用对象引用」这条建议没有可替代的目标，建议本身不成立，故整段不启用。
+    #
+    # 只报「对象级页引用」：引用文本里必须已经出现 Table/Figure/reaction mixture
+    # 这类可替代的对象名 —— 此时「改用对象引用」是确定性改进，不依赖人工判断。
+    # 纯章节名/FAQ 的页引用（如 "refer to Loading ... on Page 99"）不报：
+    # 它们在附录索引与交叉导航中是常规写法，报出即为噪声。
+    # 附录图索引（"Refer to Figure N on Page M" 连续成组）也排除，同理。
+    #
+    # 同一目标页只报一次：同段落里对同一目标页的多种写法属同一缺陷的重复表述，
+    # 逐条报出会放大 issue 数并压低准确率。
+    numbered_object_ids = set(
+        re.findall(r'\b(?:Table|Figure)\s*(\d{1,3})\b', normalized, re.IGNORECASE))
+    if len(numbered_object_ids) >= 2:
+        reported_ref_pages = set()
+        for match in re.finditer(r'([^\n]{3,120}?)\s+on\s+Page\s+(\d{1,4})', normalized):
+            original = match.group(0).strip()
+            if not re.search(r'(?:reaction\s+mixture|Table\s*\d+)', original, re.IGNORECASE):
+                continue
+            if re.match(r'^Refer to Figure\s*\d+\s+on\s+Page', original, re.IGNORECASE):
+                continue
+            ref_page = match.group(2)
+            if ref_page in reported_ref_pages:
+                continue
+            reported_ref_pages.add(ref_page)
+            start, end = match.start(), match.end()
+            issues.append({
+                'severity': 'general',
+                'category': '交叉引用',
+                'rule': 'REF-003',
+                'chapter': '',
+                'original_text': original,
+                'context': get_context(normalized, start, end, 120),
+                'suggestion': '建议取消跨页页码引用，改为引用表格/图编号或就近表述（如 the table below）。',
+                'description': f'引用原文：{original}；引用类型：页码；检查结果：建议改为对象级引用。',
+                'audit_basis': '跨页页码引用在文档排版或分页变动后容易失效，应引用可唯一回溯的对象编号。',
+                'confidence': 86,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(
+                    start, end, area='正文', reference_type='页码', target=original, check_result='建议改为对象级引用'),
             })
 
     return issues
@@ -9803,6 +10315,94 @@ def _run_english_heuristic_audit(content, file_type=None):
     return issues
 
 
+_SYMBOL_LEGEND_VERB_RE = re.compile(
+    r'^\s*[A-Za-z][A-Za-z0-9 ,/\-]{0,56}?\s+'
+    r'(?:Indicates|Means|Denotes|Represents|Refers\s+to|Stands\s+for|表示|说明|指明|含义)',
+    re.IGNORECASE,
+)
+
+
+_SECTION_HEADING_RE = re.compile(
+    rf'^(?!{_HEADING_FUNCTION_WORD_RE})[A-Z][^.!?;:]{{2,59}}$'
+)
+
+
+_CN_SECTION_HEADING_RE = re.compile(
+    r'^(?:第[0-9一二三四五六七八九十百]+[章节篇]|警告|注意|小心|提示|危险|安全说明)'
+)
+
+# 正文句 vs 标题行的结构差异：正文句在行首 1~2 词后紧跟限定词（a/an/the/this/
+# your...）引导宾语，或直接以限定词开头。用这个结构判据替代"枚举操作动词黑名单"，
+# 避免下一批文档换个动词就漏。
+# 注意：此处只认「限定词」，不认「介词」。像 "Logging in to the control software"、
+# "Powering on the device" 这类动名词 + 介词的标题很常见，若把介词也算作正文信号会
+# 把它们误杀。操作句样例（Install the... / Load the sample into... / Dilute the
+# sample with...）都带限定词，限定词判据足以覆盖。
+_HEADING_DETERMINER_RE = (
+    r'(?:a|an|the|this|that|these|those|it|them|your|its|our|their|his|her|we|they|you)'
+)
+_HEADING_PROSE_LEAD_RE = re.compile(
+    rf'^(?:{_HEADING_DETERMINER_RE}\b'
+    rf'|(?:[A-Za-z][A-Za-z0-9\-]*\s+){{1,2}}{_HEADING_DETERMINER_RE}\b)',
+    re.IGNORECASE,
+)
+_HEADING_MAX_WORDS = 6
+
+
+def _looks_like_english_section_heading(stripped):
+    """英文段落标题判据：形态约束 + 结构约束，两者都满足才算标题。
+
+    形态：短行、大写开头、无句末标点、非功能词开头（复用既有正则）。
+    结构：不含「裸动词 + 冠词/代词/介词」的正文句式，且词数不超过 6。
+    """
+    text = str(stripped or '').strip()
+    if not (_SECTION_HEADING_RE.match(text) or _SAFETY_SECTION_HEADING_RE.match(text)):
+        return False
+    if _HEADING_PROSE_LEAD_RE.match(text):
+        return False
+    words = re.findall(r'[A-Za-z][A-Za-z0-9\-]*', text)
+    if not words or len(words) > _HEADING_MAX_WORDS:
+        return False
+    return words[0].lower() not in _HEADING_ACTION_VERBS
+
+
+def _line_looks_like_section_heading(stripped, toc_titles=None):
+    if not stripped:
+        return False
+    normalized = _normalize_toc_title(stripped)
+    if toc_titles and normalized in toc_titles:
+        return True
+    if toc_titles:
+        # 有 TOC 时以 TOC 为准：正则完全不参与，避免目录外的操作正文被误判为标题。
+        return False
+    if _CN_SECTION_HEADING_RE.match(stripped):
+        return True
+    return _looks_like_english_section_heading(stripped)
+
+
+def _has_intervening_section_heading(text, document_content=None):
+    """两段步骤之间是否夹着新章节标题。优先用 TOC，无 TOC 时才退化到正则兜底。"""
+    toc_titles = _toc_heading_titles(document_content) if document_content else frozenset()
+    for line in str(text or '').splitlines():
+        stripped = line.strip()
+        if _line_looks_like_section_heading(stripped, toc_titles):
+            return True
+    return False
+
+
+def _is_symbol_legend_entry(content, start, end):
+    """识别符号表定义行，如 “Catalog number Indicates the manufacturer's catalog number”。
+
+    这类文本用于解释符号含义，并非货号标签写法，不应触发标签统一类规则。
+    """
+    block_start = content.rfind('\n\n', 0, start) + 2
+    block_end = content.find('\n\n', end)
+    if block_end == -1:
+        block_end = len(content)
+    block = re.sub(r'\s+', ' ', content[block_start:block_end]).strip()
+    return bool(_SYMBOL_LEGEND_VERB_RE.match(block))
+
+
 def _run_manual_engineering_audit(content, file_type=None):
     issues = []
     seen = set()
@@ -10076,6 +10676,22 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 基础标点：全角标点相邻误排（如 '：。' '：，'）。仅匹配无空白的紧邻组合，
+    # 避免把 PDF 文本层换行/分栏造成的标点分处两行误判为连排。
+    for match in re.finditer(r'[，、；：]。|[：；]，', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-PUNCT-002',
+            '标点符号',
+            match.group(0)[-1],
+            '出现相邻误排的全角标点，通常是录入或排版残留，建议只保留句末标点。',
+            '说明书审核能力补强方案 - 全角标点连排',
+            'general',
+            92,
+        )
+
     # 基础语法：冠词 a/an 与后续单词读音不一致
     # 缩写词按字母读音判定（an SMS / a USB），juː 音词与不发音 h 词用白名单处理
     _AN_JU_SOUND = {
@@ -10092,16 +10708,7 @@ def _run_manual_engineering_audit(content, file_type=None):
         'from', 'as', 'is', 'are', 'was', 'be', 'that', 'this', 'the', 'if',
         'ensure', 'not', 'no', 'all', 'any',
     }
-    _ABBR_VOWEL_SOUND = set('AEFHILMNORSX')  # 字母名以元音音开头（F 读 /ɛf/ 等）
-    _WORDLIKE_CAPS = {'home', 'end', 'start', 'next', 'back', 'stop', 'pause', 'run',
-                      'save', 'open', 'close', 'fastq', 'bam', 'cram', 'sam', 'tab'}
-
-    def _abbrev_article(word):
-        if len(word) < 2 or not word.isupper() or not word.isalpha():
-            return None
-        if word.lower() in _WORDLIKE_CAPS:
-            return None
-        return 'an' if word[0] in _ABBR_VOWEL_SOUND else 'a'
+    from app.utils.article_constants import WORDLIKE_ALL_CAPS, abbrev_article as _abbrev_article
 
     for match in re.finditer(r'\b(a|an)[ \t]{1,3}([A-Za-z]+)', content, re.IGNORECASE):
         art, word = match.group(1).lower(), match.group(2)
@@ -10153,7 +10760,7 @@ def _run_manual_engineering_audit(content, file_type=None):
                 )
             continue
         # all-caps 可读词（HOME/END 等 UI 词）不按首字母逐字判定冠词，避免 an HOME 误报。
-        if word.isupper() and word.isalpha() and wl in _WORDLIKE_CAPS:
+        if word.isupper() and word.isalpha() and wl in WORDLIKE_ALL_CAPS:
             continue
         first = wl[0]
         if art == 'a' and first in 'aeiou':
@@ -10363,13 +10970,21 @@ def _run_manual_engineering_audit(content, file_type=None):
             second_start, second_end, _second_original = occurrences[1]
             if second_start - first_start < 60:
                 continue
+            first_chapter = extract_chapter(content, first_start).strip()
+            if first_chapter:
+                duplicate_suggestion = (
+                    f'该句与「{first_chapter}」章节中的句子完全重复，'
+                    '建议删除本处重复句或仅保留一处规范表述。'
+                )
+            else:
+                duplicate_suggestion = '该句在前文已完整出现，建议删除本处重复句或仅保留一处规范表述。'
             add_issue(
                 second_start,
                 second_end,
                 first_original[:240],
                 'DOC-DUP-001',
                 '重复内容',
-                '建议删除重复句子或仅保留一处规范表述',
+                duplicate_suggestion,
                 '同一完整句子在不同位置重复出现，发布前应确认是否为复制残留。',
                 '说明书审核能力补强方案 - 跨段重复句检查',
                 'serious',
@@ -10380,7 +10995,10 @@ def _run_manual_engineering_audit(content, file_type=None):
     if len(lead_in_occurrences) >= 2:
         first = lead_in_occurrences[0]
         second = lead_in_occurrences[1]
-        if second.start() - first.start() < 500:
+        between = content[first.end():second.start()]
+        # 手册中每道流程都会重新引导步骤；中间夹着新章节标题说明是两道独立流程，
+        # 只有引导语之间没有标题分隔时才是编辑残留
+        if second.start() - first.start() < 500 and not _has_intervening_section_heading(between, content):
             add_issue(
                 second.start(),
                 second.end(),
@@ -10413,6 +11031,49 @@ def _run_manual_engineering_audit(content, file_type=None):
             'serious',
             93,
         )
+
+    for match in re.finditer(r'\b(before|during|after)\s+clean\b(?!ing)', content, re.IGNORECASE):
+        preposition = match.group(1)
+        suggestion = f'{preposition} cleaning'
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-002',
+            '英文语法',
+            f'建议改为 {suggestion}',
+            '介词后需要使用动名词，clean 作名词使用不符合英文表达习惯。',
+            '说明书审核能力补强方案 - 动名词用法检查',
+            'general',
+            90,
+        )
+
+    frequency_activity_headings = [
+        (match, re.sub(r'\s+', ' ', match.group(1)).strip(), match.group(2).lower())
+        for match in re.finditer(
+            r'(?m)^\s*((?:Daily|Weekly|Monthly|Quarterly|Annual|Annually)\s+(cleaning|disinfection))\s*$',
+            content,
+            re.IGNORECASE,
+        )
+    ]
+    if len({item[2] for item in frequency_activity_headings}) > 1:
+        base_noun = frequency_activity_headings[0][2]
+        for match, heading_text, noun in frequency_activity_headings:
+            if noun == base_noun:
+                continue
+            add_issue(
+                match.start(),
+                match.end(),
+                heading_text,
+                'DOC-TERM-002',
+                '术语一致性',
+                '维护周期活动的术语不统一，建议统一使用同一术语（如统一为 cleaning 或 disinfection）。',
+                f'维护周期标题混用了不同术语：{heading_text} 与 '
+                f'{frequency_activity_headings[0][1]} 使用的中文对应词不一致。',
+                '说明书审核能力补强方案 - 维护活动术语一致性检查',
+                'general',
+                88,
+            )
 
     for match in re.finditer(r'\b([A-Za-z]{3,})\s+(off|on|up|down)\s+the\s+\1\b', content, re.IGNORECASE):
         verb = match.group(1)
@@ -10545,7 +11206,7 @@ def _run_manual_engineering_audit(content, file_type=None):
             match.start(),
             match.end(),
             re.sub(r'\s+', ' ', match.group(0)).strip(),
-            'DOC-GRAM-002',
+            'DOC-GRAM-009',
             '语法错误',
             'an appropriate',
             '元音音标开头的单词前建议使用 an。',
@@ -10603,8 +11264,8 @@ def _run_manual_engineering_audit(content, file_type=None):
             re.sub(r'\s+', ' ', match.group(0)).strip(),
             'DOC-GRAM-004',
             '语法错误',
-            'Task exceptions are displayed',
-            'Task exception 与 are 搭配不一致，建议统一为复数表达或改为单数谓语。',
+            'Task exception is displayed',
+            'Task exception 为单数主语，谓语应使用 is，与界面提示单数口径一致。',
             '说明书审核能力补强方案 - 主谓一致',
             'general',
             90,
@@ -10638,14 +11299,15 @@ def _run_manual_engineering_audit(content, file_type=None):
             89,
         )
 
-    for match in re.finditer(r'\ba\s+(?:message\s+prompting|popup\s+message\s+indicating)\s+that\s+[A-Z][^.?!]{8,160}\?', content):
+    for match in re.finditer(r'\ba\s+(?:message\s+prompting|message\s+indicating|message\s+saying|popup\s+message\s+indicating)\s+that\s+[A-Z][^.?!]{8,160}\?', content):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
         add_issue(
             match.start(),
             match.end(),
-            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            raw,
             'DOC-QUOTE-001',
             '标点符号',
-            '建议改为引导语加直接引语，例如 a message prompting "Are you sure you want to quit?"',
+            '建议改为引导语加直接引语，例如 ' + re.sub(r'^(\S.*?)\s+that\s+', r'\1 "', raw, count=1) + '"',
             '界面弹窗文案属于直接引语，建议使用引号承载实际提示语。',
             '说明书审核能力补强方案 - 弹窗直接引语',
             'general',
@@ -10900,6 +11562,8 @@ def _run_manual_engineering_audit(content, file_type=None):
         original = match.group(0)
         if original == "Cat. No.":
             continue
+        if _is_symbol_legend_entry(content, match.start(), match.end()):
+            continue
         add_issue(
             match.start(),
             match.end(),
@@ -10962,6 +11626,10 @@ def _run_manual_engineering_audit(content, file_type=None):
                 window = content[max(0, match.start() - 120):min(len(content), match.end() + 120)]
                 if not re.search(r'DNBSEQ-E25RS|试剂套装|sequencing set', window, re.IGNORECASE):
                     continue
+                # 试剂盒（Kit）与试剂套装（Set）是不同 SKU，货号天然不同，不算总览遗漏；
+                # Kit 货号前紧邻的标题会写明 “Kit (型号)”
+                if re.search(r'\bKit\b|试剂盒', content[max(0, match.start() - 100):match.start()], re.IGNORECASE):
+                    continue
                 add_issue(
                     match.start(),
                     match.end(),
@@ -10975,6 +11643,56 @@ def _run_manual_engineering_audit(content, file_type=None):
                     91,
                 )
                 break
+
+
+    # 修订记录标注删除的条目若仍留在正文，属修订状态前后不一致
+    revision_deleted = list(re.finditer(r'(?m)^[ \t]*(?:y[ \t]+)?Deleted[ \t]+([^\n]{3,80})[ \t]*$', content[:8000]))
+    if revision_deleted:
+        revision_end = None
+        for end_pattern in (r'(?m)^[ \t]*About[ \t]+(?:the|this)\b', r'(?m)^[ \t]*Contents[ \t]*$'):
+            end_match = re.search(end_pattern, content[revision_deleted[0].start():], re.IGNORECASE)
+            if end_match:
+                candidate = revision_deleted[0].start() + end_match.start()
+                revision_end = candidate if revision_end is None else min(revision_end, candidate)
+        if revision_end is None:
+            revision_end = revision_deleted[-1].end()
+        for match in revision_deleted:
+            deleted_item = match.group(1).strip()
+            base_item = re.sub(r'[ \t]*\([^)]*\)[ \t]*$', '', deleted_item).strip()
+            if len(base_item) < 3:
+                continue
+            body_pattern = r'\s+'.join(re.escape(token) for token in base_item.split())
+            body_match = re.search(body_pattern, content[revision_end:], re.IGNORECASE)
+            if not body_match:
+                continue
+            start = revision_end + body_match.start()
+            raw = re.sub(r'\s+', ' ', body_match.group(0)).strip()
+            add_issue(
+                start,
+                start + len(body_match.group(0)),
+                raw,
+                'DOC-REVISION-001',
+                '修订一致性',
+                f'修订记录已标注删除 {deleted_item}，建议确认正文是否仍需保留，或核对修订记录',
+                f'修订记录写明已删除 {deleted_item}，但正文仍然出现该条目，修订状态前后不一致。',
+                '说明书审核能力补强方案 - 修订记录删除项回查',
+                'serious',
+                95,
+            )
+
+    for match in re.finditer(r'\bCheck\s+the\s+well\s+whose\s+rubber\s+stopper\s+falls\s+off\s+or\s+tilts\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-008',
+            '表达与句式',
+            'Check whether the rubber stopper of the well falls off or tilts',
+            'check 后接完整从句时建议使用 whether 引导，句式更通顺。',
+            '说明书审核能力补强方案 - whether 从句',
+            'general',
+            88,
+        )
 
 
     missing_data_match = re.search(
@@ -11208,6 +11926,11 @@ def _is_figure_or_table_caption(line):
     return bool(re.match(r'^(?:Figure|Fig\.?|Table|表|图)\s*\d+\b', stripped, re.IGNORECASE))
 
 
+def _is_page_range_reference(line):
+    stripped = str(line or '').strip()
+    return bool(re.fullmatch(r'\d{1,4}\s*(?:to|[-–—~])\s*\d{1,4}', stripped, re.IGNORECASE))
+
+
 def _is_heading_line(line):
     stripped = str(line or '').strip()
     if not stripped or _is_footer_line(stripped) or _is_step_line(stripped) or _is_table_line(stripped) or _is_material_line(stripped) or _is_version_history_line(stripped):
@@ -11253,7 +11976,7 @@ def _looks_like_standalone_heading(lines, index):
     current = str(lines[index] or '').strip()
     if not current:
         return False
-    if not re.match(r'^[A-Z][A-Za-z0-9\s\-_/]{3,60}$', current):
+    if not re.match(r'^(?:\((?:Optional|optional)\)\s*)?[A-Z][A-Za-z0-9\s\-_/]{3,60}$', current):
         return False
     prev_line = str(lines[index - 1] or '').strip() if index - 1 >= 0 else ''
     next_line = str(lines[index + 1] or '').strip() if index + 1 < len(lines) else ''
@@ -11293,11 +12016,13 @@ def _is_isolated_heading(lines, index):
     return (not prev_line) or (not next_line)
 
 
-def _score_heading_candidate(lines, index):
+def _score_heading_candidate(lines, index, *, min_score=55, short_standalone_penalty=10):
     line = str(lines[index] or '').strip()
     if not line:
         return None
     if _is_footer_line(line) or _is_step_line(line) or _is_material_line(line) or _is_version_history_line(line):
+        return None
+    if _is_page_range_reference(line):
         return None
     score = None
     kind = None
@@ -11325,12 +12050,78 @@ def _score_heading_candidate(lines, index):
     if len(line) > 70:
         score -= 10
     if len(line.split()) <= 2 and kind == 'standalone':
-        score -= 10
-    if score < 55:
+        score -= short_standalone_penalty
+    if score < min_score:
         return None
 
     heading = _clean_caption_heading(line) if kind == 'caption' else _normalize_heading_label(line)
     return score, heading
+
+
+def _normalize_toc_title(text):
+    # 保留 CJK：中文目录标题若被清成空串，会让中文 TOC 完全失效
+    return re.sub(r'[^a-z0-9\u4e00-\u9fff]+', ' ', str(text or '').lower()).strip()
+
+
+_TOC_TITLE_CACHE = {}
+_TOC_TITLE_CACHE_LIMIT = 32
+
+
+def _toc_heading_titles(content):
+    """Collect the chapter/section titles listed in the front-matter table of contents."""
+    prefix = str(content or '').replace('\f', '\n')[:16000]
+    digest = hashlib.sha1(prefix.encode('utf-8', 'ignore')).hexdigest()
+    cached = _TOC_TITLE_CACHE.get(digest)
+    if cached is not None:
+        return cached
+    titles = set()
+    for line in prefix.split('\n'):
+        stripped = line.strip()
+        match = re.match(r'^([A-Z(][^\n]{2,70}?)\s+(\d{1,3})$', stripped)
+        if not match:
+            # 中文 TOC：`1 概述 3`、`第一章 概述 3`、`2.1 电源规格 8`
+            match = re.match(
+                r'^(?:第\s*\d+\s*[章节篇]|\d+(?:\.\d+)*)[\s、.．]*(.+?)\s+(\d{1,3})$',
+                stripped,
+            )
+        if not match:
+            continue
+        title = match.group(1)
+        page = int(match.group(2))
+        if not 1 <= page <= 400:
+            continue
+        key = _normalize_toc_title(title)
+        if len(key) >= 3:
+            titles.add(key)
+    result = frozenset(titles) if len(titles) >= 8 else frozenset()
+    if len(_TOC_TITLE_CACHE) >= _TOC_TITLE_CACHE_LIMIT:
+        _TOC_TITLE_CACHE.pop(next(iter(_TOC_TITLE_CACHE)))
+    _TOC_TITLE_CACHE[digest] = result
+    return result
+
+
+def _chapter_heading_candidate(lines, index, toc_titles):
+    candidate = _score_heading_candidate(lines, index, min_score=45, short_standalone_penalty=0)
+    if not candidate:
+        return None
+    score, text = candidate
+    line = str(lines[index] or '').strip()
+    standalone = (
+        not line.startswith('#')
+        and not _is_heading_line(line)
+        and not _is_figure_or_table_caption(line)
+    )
+    in_toc = _normalize_toc_title(text) in toc_titles
+    if standalone and not in_toc and len(text.split()) <= 2:
+        # Table header cells such as Name/Description are short standalone lines too;
+        # only trust short headings that the table of contents lists.
+        return None
+    if in_toc:
+        score += 40
+    elif _is_figure_or_table_caption(line):
+        # Figure/Table captions are weak chapter names; keep them only as a fallback.
+        score -= 35
+    return score, text
 
 
 def extract_chapter(content, position):
@@ -11338,23 +12129,31 @@ def extract_chapter(content, position):
     safe_position = max(0, min(int(position or 0), len(normalized)))
     before_lines = normalized[:safe_position].split('\n')
     after_lines = normalized[safe_position:].split('\n')[:12]
+    toc_titles = _toc_heading_titles(normalized)
     candidates = []
 
     start_index = max(0, len(before_lines) - 220)
     for index in range(len(before_lines) - 1, start_index - 1, -1):
-        candidate = _score_heading_candidate(before_lines, index)
+        candidate = _chapter_heading_candidate(before_lines, index, toc_titles)
         if candidate:
             score, text = candidate
             distance_penalty = min(len(before_lines) - 1 - index, 30)
             candidates.append((score - distance_penalty, text))
 
     for index, _line in enumerate(after_lines[:10]):
-        candidate = _score_heading_candidate(after_lines, index)
+        candidate = _chapter_heading_candidate(after_lines, index, toc_titles)
         if candidate:
             score, text = candidate
             if _is_table_cell_like(text):
                 continue
-            candidates.append((score - 24 - index, text))
+            # Headings usually precede the text they title, so a following heading is a
+            # weaker signal than a preceding one at the same distance.
+            if index <= 1 and str(_line).strip():
+                # The position may begin on a heading line, which then names its own section.
+                distance_penalty = 5
+            else:
+                distance_penalty = 30 + min(index, 30)
+            candidates.append((score - distance_penalty, text))
 
     if candidates:
         candidates.sort(key=lambda item: item[0], reverse=True)
@@ -11605,10 +12404,15 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
                 return True
 
     if rule_no == "R011":
+        # 规则意图是「单位不应加 s」（5mins -> 5 min）。历史正则写作
+        # r"\b(mins?|hs?|secs?)\b"，三个分组都带可选 s，导致合法的单数单位
+        # （h / min / sec）反而被判为错误，而真正该管的 hrs 又匹配不到。
+        # 实测在某英文手册 PDF 上 13 条命中全部是孤立的 "h"（正确写法被误报）。
+        # 这里只放行复数缩写本身，其余一律跳过——对已按旧正则播种的库同样生效。
         lowered_context = context.lower()
         if "/" in context or "rpm/min" in lowered_context:
             return True
-        if re.search(r'\b(?:min|sec|hr)\b', original_text, re.IGNORECASE):
+        if not re.fullmatch(r"(?:mins|hs|hrs|secs)", original_text, re.IGNORECASE):
             return True
 
     if rule_no == "R013":
@@ -11637,6 +12441,13 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
         if tokens and all(len(token) <= 1 for token in tokens):
             return True
+        # 实测 PDF 表格表头/图例里同一缩写会跨行重复出现（COM\nCOM、HDMI\nHDMI），
+        # 占位符也会成对出现（XXX XXX、XX XX）。这些都是版式结构而非"the the"式
+        # 行文重复。真重复是正文里的小写词，不会被下面两条拦到。
+        if file_type == "pdf" and "\n" in original_text:
+            return True
+        if len(tokens) >= 2 and all(token.isupper() and len(token) >= 2 for token in tokens):
+            return True
 
     # Mixed Chinese-English spacing rule should keep common product names and protocol acronyms intact.
     if rule_no == "R025":
@@ -11652,8 +12463,15 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
 
     # Markdown/code formatting rules only apply when the extracted text still clearly shows markdown structure.
-    if rule_no in {"R030", "R031", "R032", "R033", "R034", "R046", "R047", "R049"}:
+    if rule_no in {"R030", "R031", "R032", "R033", "R034", "R047", "R049"}:
         if "```" not in content and "#" not in content and "[" not in content and "](" not in content:
+            return True
+
+    if rule_no == "R046":
+        # "禁止使用Tab缩进"。PDF 文本层里的 \t 是排版抽取伪影而非作者缩进，
+        # 实测某英文手册 PDF 上 42 条命中全部是表格/图注分隔符。仅对非 PDF
+        # 源（docx/md 等保留真实制表符的格式）保留该规则。
+        if file_type == "pdf":
             return True
 
     # Long-sentence rules are too noisy on table rows, lists, and extracted fragments.
@@ -11869,6 +12687,11 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         print(f"[审核] 引用完整性规则执行失败: {e}")
 
     try:
+        issues.extend(ReferenceIntegrityRule().check_style(content))
+    except Exception as e:
+        print(f"[审核] 引用写法规范规则执行失败: {e}")
+
+    try:
         for issue in TermConsistencyRule().check(content):
             start, end = _parse_issue_position(issue.get('position', ''))
             issue.setdefault('chapter', extract_chapter(content, start))
@@ -11884,6 +12707,21 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         issues.extend(_run_db_term_consistency_audit(db, content))
     except Exception as e:
         print(f"[审核] 术语库一致性规则执行失败: {e}")
+
+    try:
+        issues.extend(check_units_and_spacing(content))
+    except Exception as e:
+        print(f"[审核] 数值与单位一致性规则执行失败: {e}")
+
+    try:
+        issues.extend(check_term_baseline(content))
+    except Exception as e:
+        print(f"[审核] 文档内术语基线规则执行失败: {e}")
+
+    try:
+        issues.extend(check_canonical_writing(content))
+    except Exception as e:
+        print(f"[审核] 外部规范写法库规则执行失败: {e}")
 
     return issues
 
@@ -12122,6 +12960,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         original_content_length = len(content)
         content_limit = _review_content_limit(document.file_type)
         content = content[:content_limit]
+        # 截断必须留痕：否则超长文档被静默截尾，检出率下降在指标上完全不可见。
+        content_truncated_chars = max(0, original_content_length - len(content))
+        if content_truncated_chars:
+            print(
+                f"[review] 内容截断: 原始={original_content_length} "
+                f"上限={content_limit} 丢弃={content_truncated_chars} "
+                f"({content_truncated_chars / original_content_length:.1%})"
+            )
         pdf_page_metadata = _extract_pdf_page_metadata(document, content)
         pdf_suspicious_pages = _collect_pdf_suspicious_pages(pdf_page_metadata)
         document_language = detect_language(content)
@@ -12163,7 +13009,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         document_profile['pairing_status'] = pairing.pairing_status
         document_profile['input_mode'] = pairing.input_mode
         spec_texts = _load_review_spec_texts(db)
-        false_positive_signatures = _load_false_positive_signatures_for_document(db, document_id)
+        false_positive_signatures, false_positive_memory_payloads = _load_false_positive_signatures_for_document(db, document_id)
         print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}/{original_content_length}字符, 上限={content_limit}")
         print(
             "[审核] 当前规范文件长度: "
@@ -12304,7 +13150,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                             }
                             raw_page_issues = [
                                 issue for issue in _run_chinese_human_baseline_rules(raw_pdf_content)
-                                if str(issue.get('rule', '') or '').startswith('CYY-CN-PAGE-')
+                                if str(issue.get('rule', '') or '').startswith(('CYY-CN-PAGE-', 'CYY-CN-INDEX-'))
                             ]
                             for issue in raw_page_issues:
                                 key = (issue.get('rule'), _normalize_search_text(issue.get('original_text', '') or ''))
@@ -12500,7 +13346,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
-        issues, ai_filter_diagnostics = _finalize_review_issues(issues, content, false_positive_signatures)
+        issues, ai_filter_diagnostics = _finalize_review_issues(
+            issues, content, false_positive_signatures, document_language,
+            false_positive_memory_payloads,
+        )
 
         validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)

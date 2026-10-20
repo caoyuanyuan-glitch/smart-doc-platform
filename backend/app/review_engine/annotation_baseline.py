@@ -28,6 +28,26 @@ def _parse_bullet(block: str, label: str) -> str:
     return _clean(match.group(1)) if match else ""
 
 
+def _parse_bullet_alias(block: str, *labels: str) -> str:
+    """按多个候选字段名依次取值，取第一个非空值。
+
+    不同 goldset 的字段命名不统一（中文：人工意见 / comment）。
+    """
+    for label in labels:
+        value = _parse_bullet(block, label)
+        if value:
+            return value
+    return ""
+
+
+# 兼容两种批注区块头：
+#   旧格式 "## 1. 标题 · 第 3 页"（页码在标题行）
+#   新格式 "## 批注 1"（页码在正文的 page 字段，可能为空）
+_BLOCK_SPLIT_RE = re.compile(r"(?=^## (?:批注\s*)?\d+\b)", flags=re.MULTILINE)
+_BLOCK_HEADER_RE = re.compile(r"^## (?:批注\s*)?\d+\.?\s*(.*)$", flags=re.MULTILINE)
+_PAGE_IN_HEADER_RE = re.compile(r"第\s*(.*?)\s*页")
+
+
 def classify_human_annotation(comment: str, selected_text: str = "", context: str = "") -> tuple[str, str, str]:
     comment_text = str(comment or "").lower()
     text = " ".join([comment, selected_text, context]).lower()
@@ -48,6 +68,8 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
         (r"物料编码|申请物料编码|0-00x", "物料编码", "deterministic", "DET-MATERIAL-001"),
         (r"母公司|同名|本公司|长光", "公司主体表述", "ai_assisted", "AI-COMPANY-001"),
         (r"nmpa|纸质说明书|电子版说明书", "法规/注册确认", "ai_assisted", "AI-REG-001"),
+        (r"冒号", "标点符号", "deterministic", "DET-PUNCT-001"),
+        (r"实用工具", "术语一致性", "structural_consistency", "STRUCT-TERM-001"),
     ]
     for pattern, category, layer, rule in priority_patterns:
         if re.search(pattern, comment_text, re.IGNORECASE):
@@ -58,10 +80,11 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
         (r"搞到下一页|跨页|下一页|分页|page break", "分页与标题边界", "STRUCT-PAGE-001"),
         (r"topic|主题|页眉跨行|appendix|附录", "主题结构", "STRUCT-TOPIC-001"),
         (r"表格|表头|竖线|多了竖线|边框|列宽|行高|均匀分布列|平均分布列|合并单元格|出框|拉大宽度|拉大列宽|调整列宽|溢出单元格|折线|太密集|挪到右边|样式没有设置对|空隙不对", "表格/版式", "STRUCT-LAYOUT-001"),
+        (r"结构组成|漏列.*部件|缺.*主体架构|主机.*其他部件|其他部件没有介绍|组成.*部件", "结构完整性", "STRUCT-COMPONENT-001"),
+        (r"索引.*页码|索引条目|页码.*偏移", "索引一致性", "STRUCT-INDEX-001"),
         (r"前文都是|统一|一致|同上|同下|同步修改|这个不是试剂名称|平行结构|冒号前面", "术语一致性", "STRUCT-TERM-001"),
         (r"重复出现|重复了|内容重合|意思重复|重复", "重复内容", "STRUCT-DUP-001"),
-        (r"主机.*其他部件|其他部件没有介绍|组成.*部件", "结构完整性", "STRUCT-COMPONENT-001"),
-        (r"有序列表|不是一个步骤|操作步骤如下|合并到上一步|序号不连续|引导句样式|^3）$|^1）$|456合并", "步骤结构", "STRUCT-STEP-001"),
+        (r"有序列表|不是一个步骤|操作步骤如下|操作如下|合并到上一步|序号不连续|引导句样式|^3）$|^1）$|456合并", "步骤结构", "STRUCT-STEP-001"),
     ]
     for pattern, category, rule in structural_patterns:
         if re.search(pattern, text, re.IGNORECASE):
@@ -102,22 +125,45 @@ def classify_human_annotation(comment: str, selected_text: str = "", context: st
 def parse_human_annotation_markdown(path: str | Path) -> list[HumanAnnotation]:
     text = Path(path).read_text(encoding="utf-8-sig")
     annotations: list[HumanAnnotation] = []
-    blocks = re.split(r"(?=^## \d+\. )", text, flags=re.MULTILINE)
+    blocks = _BLOCK_SPLIT_RE.split(text)
     for block in blocks:
-        header = re.search(r"^## \d+\. (.*?) · 第 (.*?) 页", block, flags=re.MULTILINE)
+        header = _BLOCK_HEADER_RE.search(block)
         if not header:
             continue
-        comment = _parse_bullet(block, "人工意见")
+        # 页码优先级：正文 page 字段 > 标题行里的"第 N 页"。
+        # 新格式的 page 可能为空（待人工补全），此时不得丢弃整条批注。
+        page = _parse_bullet_alias(block, "page", "页码")
+        if not page:
+            inline_page = _PAGE_IN_HEADER_RE.search(header.group(1) or "")
+            page = _clean(inline_page.group(1)) if inline_page else ""
+        file_name = _parse_bullet_alias(block, "file", "文件")
+        if not file_name:
+            file_name = _clean(_PAGE_IN_HEADER_RE.sub("", header.group(1) or ""))
+
+        comment = _parse_bullet_alias(block, "人工意见", "comment", "意见")
         if not comment or comment == "-":
             continue
-        selected_text = _parse_bullet(block, "选中文本")
-        context = _parse_bullet(block, "附近正文")
-        category, layer, expected_rule = classify_human_annotation(comment, selected_text, context)
+        selected_text = _parse_bullet_alias(block, "选中文本", "selected_text", "selected")
+        context = _parse_bullet_alias(block, "附近正文", "context", "上下文")
+
+        # 新格式已显式给出 category / layer / expected_rule，优先采用；
+        # 缺省时才回退到启发式分类，避免把已人工定类的条目改写掉。
+        category = _parse_bullet_alias(block, "category", "类别") or ""
+        layer = _parse_bullet_alias(block, "layer", "图层") or ""
+        expected_rule = _parse_bullet_alias(block, "expected_rule", "期望规则") or ""
+        if not (category and layer and expected_rule):
+            guessed_category, guessed_layer, guessed_rule = classify_human_annotation(
+                comment, selected_text, context
+            )
+            category = category or guessed_category
+            layer = layer or guessed_layer
+            expected_rule = expected_rule or guessed_rule
+
         annotations.append(HumanAnnotation(
-            file=_clean(header.group(1)),
-            page=_clean(header.group(2)),
-            annotation_type=_parse_bullet(block, "批注类型"),
-            author=_parse_bullet(block, "批注人"),
+            file=file_name,
+            page=page,
+            annotation_type=_parse_bullet_alias(block, "批注类型", "annotation_type"),
+            author=_parse_bullet_alias(block, "批注人", "author"),
             comment=comment,
             selected_text=selected_text,
             context=context,
@@ -216,6 +262,21 @@ def _has_substantive_text_overlap(item: HumanAnnotation, issue: dict[str, Any]) 
     return bool(CJK_PATTERN.search(selected)) and overlap / shorter >= 0.5
 
 
+# 说明（第 2 档侦察结论，勿重复踩坑）：
+# 引擎输出的 category 是「错误类型」维度（标点符号 / 页码异常 / 术语一致性 /
+# 句子成分…），而下方各 expected_rule 分支的兜底词用的是 goldset 的「文档结构」
+# 维度（表格/版式 / 图片 / 步骤结构 / 表达与句式…）。两套词表不相交，规则族兜底
+# 分支形同虚设（实测 33 条批注仅 12 条能过第一层闸）。
+#
+# 曾试过用「类别别名表」把错误类型词映射到结构维度词。实测结论：
+#   - rule_ok>0 的批注 12 → 14，但**严格命中不变**（strict 还要求文本重叠，
+#     而文本层才是真瓶颈）；
+#   - 反而把宽松通道的 recall 从 0.5758 虚抬到 0.6970 —— 这些新增配对**没有任何
+#     文本证据**，纯靠规则族放行，属"把 recall 刷高"而非真实检出。
+# 因此不采用别名表。taxonomy 不合一是客观事实，但只能在「文本锚点」层面解决，
+# 不能靠放宽规则族口径制造虚高。
+
+
 def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
     rule = str(issue.get("rule", "") or "").upper()
     category = str(issue.get("category", "") or "")
@@ -238,7 +299,11 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-IMAGE-001":
         return rule.startswith("CYY-CN-IMAGE-") or "图片" in category or "对象缺失" in category
     if item.expected_rule == "STRUCT-STEP-001":
-        return rule == "CYY-CN-STRUCT-001" or "步骤结构" in category
+        return rule in {"CYY-CN-STRUCT-001", "CYY-CN-STEP-004"} or "步骤结构" in category
+    if item.expected_rule == "STRUCT-COMPONENT-001":
+        return rule.startswith("CYY-CN-ROHS-") or "结构完整" in category
+    if item.expected_rule == "STRUCT-INDEX-001":
+        return rule.startswith("CYY-CN-INDEX-") or "索引" in category
     if item.expected_rule == "AI-PROC-001":
         return rule == "DOC-PROC-001" or "操作步骤语气" in category
     if item.expected_rule == "DET-TITLE-CASE-001":
@@ -262,7 +327,12 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
             return True
         return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003", "DOC-SPACE-004", "DOC-SPACE-005", "DOC-UNIT-001"} or "格式规范" in category or "空格" in category
     if item.expected_rule == "DET-PUNCT-001":
-        return rule.startswith("DOC-PUNCT") or rule.startswith("DOC-QUOTE") or "标点" in category
+        return (
+            rule.startswith("DOC-PUNCT")
+            or rule.startswith("DOC-QUOTE")
+            or rule.startswith("CYY-CN-PUNCT")
+            or "标点" in category
+        )
     if item.expected_rule == "DET-CATNO-001":
         return rule.startswith("DOC-CATNO") or rule.startswith("CYY-CN-PRODUCT-002") or "货号" in category
     if item.expected_rule == "DET-MATERIAL-001":
@@ -275,26 +345,49 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
             return True
-        return rule.startswith("CYY-CN-SPELL-") or rule in {"CYY-CN-TERM-006", "CYY-CN-CONSIST-032", "SPELL", "SPELL-PHRASE"} or "术语拼写" in category or "拼写错误" in category or "术语一致性" in category
+        # SPELL-PROP：专有名词拼写确证通道（P1 新增），与 SPELL 同属术语拼写族
+        return rule.startswith("CYY-CN-SPELL-") or rule in {"CYY-CN-TERM-006", "CYY-CN-CONSIST-032", "SPELL", "SPELL-PHRASE", "SPELL-PROP"} or "术语拼写" in category or "拼写错误" in category or "术语一致性" in category
     if item.expected_rule == "STRUCT-DUP-001":
         return rule.startswith("DOC-DUP") or rule == "CYY-CN-DUP-002" or "重复" in category
     if item.expected_rule == "STRUCT-TERM-001":
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 4 and selected in blob:
             return True
-        return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or "术语一致性" in category
+        # DET-TERM-BASELINE-001 / DET-TERM-CASE-001：文档内术语基线比对（P1 新增）
+        # DET-TERM-CANON-001：外部规范写法库（P1 新增）
+        return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or rule in {"STRUCT-TERM-001", "DET-TERM-BASELINE-001", "DET-TERM-CASE-001", "DET-TERM-CANON-001"} or "术语一致性" in category
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
-            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAMMAR-001",
+            "DOC-GRAM-004", "DOC-GRAM-005", "DOC-GRAM-006", "DOC-GRAM-007", "DOC-GRAM-008",
+            "DOC-GRAMMAR-001",
             "DOC-GRAMMAR-002",
             "CYY-CN-STYLE-003", "CYY-CN-GRAMMAR-009", "CYY-CN-GRAMMAR-010", "CYY-CN-GRAMMAR-011",
         } or "表达与句式" in category
     return False
 
 
-def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
-    if not _matches_expected_rule(item, issue, blob):
+def _matches_annotation_strictly(
+    item: HumanAnnotation,
+    issue: dict[str, Any],
+    blob: str,
+    *,
+    allow_rule_family: bool = True,
+) -> bool:
+    """严格匹配：规则号/规则族对齐 **且** 批注文本与问题原文有实质重叠。
+
+    `allow_rule_family=False` 时只接受规则号精确相等，不再使用规则族（同 category
+    或同 rule 前缀）兜底，供二分匹配的"先精确后放宽"两轮使用。
+    """
+    expected = str(item.expected_rule or "").upper()
+    rule = str(issue.get("rule", "") or "").upper()
+    if expected and rule == expected:
+        rule_ok = True
+    elif allow_rule_family:
+        rule_ok = _matches_expected_rule(item, issue, blob)
+    else:
+        rule_ok = False
+    if not rule_ok:
         return False
 
     selected = _norm_for_match(item.selected_text)
@@ -303,7 +396,14 @@ def _matches_annotation_strictly(item: HumanAnnotation, issue: dict[str, Any], b
     original = _norm_for_match(issue.get("original_text", ""))
     description = _norm_for_match(issue.get("description", ""))
 
-    if selected and len(selected) >= 4 and (selected in blob or (original and original in selected)):
+    # 通道①（selected 包含于 blob，或 original 被 selected 包含）与通道②共用
+    # `original in selected` 这一判据，但通道① 此前漏给 original 设长度下限：
+    # 一条 3 字符的碎片（如 'a in'）会被判为"包含于"任意更长的 selected_text。
+    # 实测这会伪造出「建议移到上一页」（版式类）命中「冠词错误 a in」的错配。
+    # 与通道② 对齐为 >= 4，碎片不再具备反向包含能力。
+    if selected and len(selected) >= 4 and (
+        selected in blob or (original and len(original) >= 4 and original in selected)
+    ):
         return True
     if original and len(original) >= 4 and selected and original in selected:
         return True
@@ -353,6 +453,58 @@ def _matches_annotation_loosely(
     return False
 
 
+def _match_annotations_injectively(
+    issue_pairs: list[tuple[dict[str, Any], str]],
+    annotations: list[HumanAnnotation],
+    *,
+    matcher=None,
+) -> dict[int, int]:
+    """二分图最大匹配：一条平台问题最多命中一条人工批注。
+
+    规则族匹配（同一 category 或 rule 前缀）会让一条问题同时"命中"多条批注，
+    从而把 recall 刷高。这里要求命中一对一对齐，漏检才会真实拉低 recall。
+
+    `matcher` 默认用宽松匹配；传入 `_matches_annotation_strictly` 可对严格口径
+    做同样的单射匹配（strict_recall 与 recall 同口径，不会非单射虚高）。
+
+    返回「批注索引 -> 问题索引」的配对表，匹配为空则为空字典。
+    """
+    _matcher = matcher or _matches_annotation_loosely
+
+    issue_owner: dict[int, int] = {}
+    matched: set[int] = set()
+
+    def _adjacency(allow_rule_family: bool) -> list[list[int]]:
+        return [
+            [
+                index
+                for index, (issue, blob) in enumerate(issue_pairs)
+                if _matcher(item, issue, blob, allow_rule_family=allow_rule_family)
+            ]
+            for item in annotations
+        ]
+
+    def _augment(annotation_index: int, visited: set[int], adjacency: list[list[int]]) -> bool:
+        for issue_index in adjacency[annotation_index]:
+            if issue_index in visited:
+                continue
+            visited.add(issue_index)
+            owner = issue_owner.get(issue_index)
+            if owner is None or _augment(owner, visited, adjacency):
+                issue_owner[issue_index] = annotation_index
+                return True
+        return False
+
+    for allow_rule_family in (False, True):
+        adjacency = _adjacency(allow_rule_family)
+        for annotation_index in range(len(annotations)):
+            if annotation_index in matched:
+                continue
+            if _augment(annotation_index, set(), adjacency):
+                matched.add(annotation_index)
+    return {annotation_index: issue_index for issue_index, annotation_index in issue_owner.items()}
+
+
 def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list[HumanAnnotation]) -> dict[str, Any]:
     issue_pairs = [(issue, _issue_blob(issue)) for issue in issues]
 
@@ -360,9 +512,14 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
     misses = []
     strict_hits = []
     strict_misses = []
-    for item in annotations:
-        matched = any(_matches_annotation_loosely(item, issue, blob) for issue, blob in issue_pairs)
-        strict_matched = any(_matches_annotation_strictly(item, issue, blob) for issue, blob in issue_pairs)
+    loose_pairs = _match_annotations_injectively(issue_pairs, annotations)
+    # strict 走同一套单射匹配，避免"一条问题命中多条批注"把 strict_recall 刷成 1.0
+    strict_pairs = _match_annotations_injectively(
+        issue_pairs, annotations, matcher=_matches_annotation_strictly
+    )
+    for index, item in enumerate(annotations):
+        matched = index in loose_pairs
+        strict_matched = index in strict_pairs
         record = asdict(item)
         if matched:
             hits.append(record)
@@ -378,10 +535,13 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         for issue, blob in issue_pairs
         if any(_matches_annotation_loosely(item, issue, blob, allow_rule_family=False) for item in annotations)
     }
-    strict_matched_issue_ids = {
-        id(issue)
-        for issue, blob in issue_pairs
-        if any(_matches_annotation_strictly(item, issue, blob) for item in annotations)
+    strict_matched_issue_ids = {id(issue_pairs[issue_index][0]) for issue_index in strict_pairs.values()}
+    # 同一份 strict 匹配结果的业务 id 视图（不能跨函数调用复用 id(issue)，
+    # 那是内存地址）。用于评测脚本保护真阳性，防止 explicit_false_positives 误伤。
+    strict_matched_business_ids = {
+        issue_pairs[issue_index][0].get("id")
+        for issue_index in strict_pairs.values()
+        if issue_pairs[issue_index][0].get("id") is not None
     }
     issue_total = len(issues)
     recall = len(hits) / len(annotations) if annotations else 0
@@ -420,6 +580,10 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         "strict_misses": strict_misses[:50],
         "unmatched_issues": unmatched_issues[:50],
         "strict_unmatched_issues": strict_unmatched_issues[:50],
+        # 完整（不截断）的 strict 命中 issue 业务 id，供评测脚本做"真阳性保护"。
+        # explicit_false_positives 若误伤这些 issue 会直接压低 strict_recall，
+        # 必须能被准确识别出来并加以保护。
+        "strict_matched_issue_ids": sorted(strict_matched_business_ids),
     }
 
 

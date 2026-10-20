@@ -90,7 +90,8 @@ Git 与自检工作流
   - 审核模块 LLM provider 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
   - 排查 AI 审核结果异常时，先确认后端启动日志中的 provider 预热状态和审核日志中的 `AI客户端可用`、`providers=`、规范文件长度
   - 提示词分层：`app/utils/prompt_builder.py` 不在本仓库中，`ai_client` 恒走其 fallback 分支；但中文审核仍会经 fallback 的 `ReviewPromptBuilder.build_audit_system_prompt()` 调用 `review_rules.build_system_prompt()`（含 P3 语义规则），英文则使用内置英文 system prompt。看到 `prompt_builder 模块缺失` 告警不等于 P3 语义提示词未生效
-  - AI 审核输出截断排查：`AI_AUDIT_MAX_TOKENS` 是自适应基准（默认 4096，封顶 base×2）；模型对长中文块偶发"输出饱和"导致 JSON 截断，日志出现 `[AI] <provider> 审核响应 JSON 截断解析失败` 即该块产出为空。单纯调大上限往往无效（模型会把预算写满），优先减小单块内容
+  - 中英文审核语义能力是两条独立链路（中文走 `review_rules.build_system_prompt()`，英文走 `ai_client.build_audit_prompt_payload()` 内置英文 prompt），补语义维度时必须两条都改；英文输出 `category` 枚举需与 `review_engine/pipeline.py` 的 `is_verifiable_ai_text_issue()` 白名单保持一致，否则英文语义类问题会被 `value_score` 阈值丢掉
+  - AI 审核输出截断排查：`AI_AUDIT_MAX_TOKENS` 是自适应基准（默认 4096，封顶 base×2）；模型对长中文块偶发"输出饱和"导致 JSON 截断。`_extract_json` 会先 salvage 已闭合的 issue（`_degraded_reason=json_truncated_salvaged`）；salvage 为空才打 `json_truncated` 并做一次 `max_tokens<=1024` 的紧凑重试。日志出现“截断, 回收 N 个已闭合问题”表示该块仍有产出。单纯调大上限往往无效（模型会把预算写满），优先减小单块内容
 
 审核模块改动范围约束
 - Date: 2026-06-25
@@ -100,6 +101,16 @@ Git 与自检工作流
   - 本次任务仅修改审核模块相关实现
   - 其他业务模块保持现状，除非用户明确要求联动修改
   - 当前阶段不投入飞书上传相关功能，优先提升审核有效性和实质问题命中率
+
+说明书截图占位符与 PDF 商标文本层
+- Date: 2026-10-13
+- Context: 用户复核 USCISEQ / G99 审核结果时明确：界面截图里的 XX 掩码和商标上标不是问题
+- Category: 行为指令
+- Instructions:
+  - 说明书图片/界面截图中的 `XXXXXXXX`、`XX/XX/XXXX`、`XX:XX:XX` 等是合法示例占位，不得报「占位符残留」
+  - 物料编码占位（`CYY-CN-MATERIAL-001`）和显式标记（TBD/TODO/待补充）仍要报
+  - PDF 文本层把 ™/® 抽成 `TM` 或与商标名拆开，据此改上标或改商标归属属于误报；审核看不到渲染后的 PDF
+  - 过滤入口：`false_positives.py` 的 `figure_placeholder_mask` 与 `pdf_trademark_text_layer`
 
 AI 翻译引擎排查规则
 - Date: 2026-06-26
@@ -173,6 +184,8 @@ Word 转 DITA 批量转换基线规则
   - 开发环境启动后自动创建引导管理员 `admin` / `admin123`（`APP_ENV` 非生产时密码会被强制校正为该值）
   - 登录接口走 OAuth2 表单而非 JSON：`curl -s -X POST http://127.0.0.1:8000/api/auth/login -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=admin&password=admin123'`，取响应里的 `access_token` 作为 `Authorization: Bearer` 头做接口级端到端验证
   - 人工批注提取：`python3 backend/scripts/extract_pdf_annotations.py <带批注PDF> <输出.md>`，同编号带 `Tina` 后缀的 PDF 即人工意见来源
+  - 直接从 FDF 解析批注时，`/Page` 是 0-based，物理页号 = `/Page` + 1（`/Page 80` 对应 PDF 第 81 页）
+  - 分卷 7z（`.7z.001`、`.002`…）需先 `cat a.7z.00* > combined.7z` 再解压，单独解 `.001` 会抛 `py7zr.exceptions.Bad7zFile`
   - 起草流程：`POST /api/documents/upload/` 上传 → `POST /api/review/{document_id}?mode=hybrid` 建任务 → 轮询 `GET /api/review/{id}/progress` 直到 `completed`
   - 与人工意见对比：`PYTHONPATH=/workspace/backend python3 backend/scripts/evaluate_review.py --review-id <id> --human-baseline <人工意见.md>`，脚本会按文件名自动剥离 ` Tina` 后缀做归属
   - AI provider 可用性先查 `GET /api/review/provider-status`；全部不可用时审核会降级为纯规则，`layers.ai_assisted` 仍可能非 0，不能据此判断 AI 已生效
@@ -220,6 +233,14 @@ WorkBuddy 联动评审目录约定
   - workbuddy 审查结果统一写入 `当前工作区/smart-doc-platform/.monkeycode/reviews/`
   - 文件名使用 `round-001-<commit>.md` 这类按轮次并带提交号的格式
   - 我处理 review 时以该目录中的最新轮次文件为准
+
+回复语言偏好
+- Date: 2026-10-14
+- Context: 用户明确要求用中文答复
+- Category: 行为指令
+- Instructions:
+  - 与用户的对话、说明和总结统一使用中文
+  - 代码、命令、路径、报错原文保持原样，不翻译
 
 规则设计约束
 - Date: 2026-08-06

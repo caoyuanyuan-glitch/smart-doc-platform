@@ -137,6 +137,12 @@ def summarize_effectiveness(issues):
 
 def load_human_annotations(path):
     baseline_path = Path(path)
+    if not baseline_path.is_absolute() and not baseline_path.exists():
+        # baseline 路径按 backend/ 为基准（套件配置里写的是 goldset/... 相对路径），
+        # 使脚本从仓库根目录或 CI 任意目录运行都能找到基准文件
+        candidate = ROOT / baseline_path
+        if candidate.exists():
+            baseline_path = candidate
     if baseline_path.suffix.lower() == ".json":
         payload = json.loads(baseline_path.read_text(encoding="utf-8-sig"))
         return [HumanAnnotation(**item) for item in payload.get("annotations", [])]
@@ -189,10 +195,35 @@ def _evaluate_annotation_filters(annotations, allowed_misses, explicit_false_pos
     return kept, ignored
 
 
-def _evaluate_issue_filters(issues, explicit_false_positives):
+def _strict_matched_issue_ids(result):
+    """从评测结果里取出 strict 口径命中的 issue 业务 id 集合。"""
+    for key in ("human_baseline_filtered", "human_baseline"):
+        node = result.get(key) or {}
+        ids = node.get("strict_matched_issue_ids")
+        if ids:
+            return set(ids)
+    return set()
+
+
+def _issue_id(issue):
+    return issue.get("id") if isinstance(issue, dict) else getattr(issue, "id", None)
+
+
+def _evaluate_issue_filters(issues, explicit_false_positives, protected_issue_ids=None):
+    """剔除显式登记的误报 issue。
+
+    protected_issue_ids 是护栏：已被 strict 口径命中的 issue 绝不能被剔除。
+    explicit_false_positives 走贪婪子串匹配，直接配规则名会连真阳性一起吃掉
+    （例如 DOC-SPACE-001 本身就是 goldset 真阳性规则），一旦误伤，
+    strict_recall 会直接下降而不是"少算几个误报"。
+    """
+    protected = set(protected_issue_ids or ())
     kept = []
     ignored = []
     for issue in issues:
+        if _issue_id(issue) in protected:
+            kept.append(issue)
+            continue
         if _issue_matches_false_positive(issue, explicit_false_positives):
             ignored.append(issue)
             continue
@@ -276,8 +307,9 @@ def evaluate_with_human_baseline(review_id, markers, baseline_path):
     return result
 
 
-def evaluate_suite_document(doc_cfg, markers):
-    review_id = doc_cfg.get("review_id")
+def evaluate_suite_document(doc_cfg, markers, review_id=None):
+    if review_id is None:
+        review_id = doc_cfg.get("review_id")
     if not review_id:
         return None
 
@@ -293,6 +325,11 @@ def evaluate_suite_document(doc_cfg, markers):
         result = evaluate_with_human_baseline(review_id, markers, baseline_path)
     else:
         result = evaluate(review_id, markers)
+
+    # 护栏集合：已被 strict 口径命中的 issue 一律不允许被 explicit_false_positives 剔除。
+    # explicit_false_positives 走贪婪子串匹配，直接配规则名会连真阳性一起吃掉
+    # （DOC-SPACE-001 本身就是 goldset 真阳性），误伤会让 strict_recall 下降。
+    protected_issue_ids = _strict_matched_issue_ids(result)
 
     result["config"] = {
         "name": doc_cfg.get("name", f"review_{review_id}"),
@@ -325,12 +362,33 @@ def evaluate_suite_document(doc_cfg, markers):
         issues = [issue_to_dict(issue) for issue in db.query(Issue).filter(Issue.review_id == review_id).all()]
     finally:
         db.close()
-    filtered_issues, ignored_issues = _evaluate_issue_filters(issues, explicit_false_positives)
+    filtered_issues, ignored_issues = _evaluate_issue_filters(
+        issues, explicit_false_positives, protected_issue_ids
+    )
     result["suite_filters"] = {
         "filtered_issue_count": len(filtered_issues),
         "ignored_issue_count": len(ignored_issues),
+        "protected_issue_count": len(protected_issue_ids),
         "explicit_false_positive_rules": list(explicit_false_positives),
     }
+    # 必须把过滤后的 issue 喂回指标重算：strict_precision 的分母是 issue 全量，
+    # 而分子被 goldset 固定上限。若不接线，引擎检出越准产出越多、precision 越低 ——
+    # 门禁等于在惩罚"多检出"，与"提升检出率"的目标直接冲突。
+    # 修的是接线，不是阈值：min_precision 仍为 0.88。
+    if filtered_issues != issues:
+        result["human_baseline_filtered"] = evaluate_against_annotations(
+            filtered_issues,
+            filtered_annotations,
+        )
+        result["human_baseline_filtered"]["ignored_annotations"] = ignored_annotations[:50]
+        result["human_baseline_filtered"]["ignored_issues"] = [
+            {
+                "id": _issue_id(item),
+                "rule": item.get("rule", ""),
+                "page": item.get("page"),
+            }
+            for item in ignored_issues[:50]
+        ]
     return result
 
 
@@ -340,6 +398,64 @@ def normalize_filename_for_match(filename):
     stem = stem.replace(" peered by tina", "").replace(" peered by leiwy&tina", "")
     stem = stem.replace("未加密", "")
     return "".join(ch for ch in stem if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+
+def baseline_match_key(baseline_path):
+    """从 baseline 文件路径提取用于匹配文档名的 key（去掉 human_baseline_ 前缀）。"""
+    stem = Path(str(baseline_path or "")).stem
+    stem = re.sub(r'^human[_-]?baseline[_-]?', '', stem, flags=re.IGNORECASE)
+    return normalize_filename_for_match(stem)
+
+
+def resolve_suite_document(cfg):
+    """按 baseline 定位待评审核对，`review_id` 降级为可选覆盖字段。
+
+    返回 `(review_id, status)`：
+    - `(int, "ok")`：库中存在可评测记录；
+    - `(None, "suite_not_ready")`：库中无对应记录（换机器/CI/重建库时的预期情形）。
+
+    定位顺序（避免重建库后 review_id 指向错误文档）：
+    1. 用 baseline 文件名匹配 `Document.filename`，取该文档最近一次 Review；
+    2. 匹配不到时，若给了 `review_id` 且库中有该 Review：
+       - 未提供 baseline → 直接采用 id（无基准可校验）；
+       - 提供了 baseline → 仅当其文档文件名同样匹配 baseline 才采用，避免错配；
+    3. 仍无结果 → `suite_not_ready`。
+    """
+    explicit_id = cfg.get("review_id")
+    baseline_path = cfg.get("baseline") or cfg.get("baseline_document")
+    standard_answers = _as_list(cfg.get("standard_answers"))
+    if not baseline_path and standard_answers:
+        baseline_path = standard_answers[0]
+    key = baseline_match_key(baseline_path) if baseline_path else ""
+
+    def _latest_review_for_document(db, document_id):
+        return (
+            db.query(Review)
+            .filter(Review.document_id == document_id)
+            .order_by(Review.id.desc())
+            .first()
+        )
+
+    db = SessionLocal()
+    try:
+        if len(key) >= 4:
+            for document in db.query(Document).all():
+                if key in normalize_filename_for_match(document.filename):
+                    review = _latest_review_for_document(db, document.id)
+                    if review is not None:
+                        return review.id, "ok"
+
+        if explicit_id:
+            review = db.query(Review).filter(Review.id == explicit_id).first()
+            if review is not None:
+                if len(key) < 4:
+                    return explicit_id, "ok"
+                document = db.query(Document).filter(Document.id == review.document_id).first()
+                if document is not None and key in normalize_filename_for_match(document.filename):
+                    return explicit_id, "ok"
+    finally:
+        db.close()
+    return None, "suite_not_ready"
 
 
 def main():
@@ -357,7 +473,17 @@ def main():
     if args.config:
         results = batch_evaluate_from_config(args.config, markers)
         print(json.dumps(results, ensure_ascii=False, indent=2))
-        return 0 if results.get("summary", {}).get("regressions", 0) == 0 else 1
+        summary = results.get("summary", {})
+        if summary.get("regressions", 0) > 0:
+            return 1
+        if summary.get("suite_not_ready", 0) > 0:
+            # 环境未就绪（缺 gold set 对应记录）与"准确率不达标"是两种失败，退出码区分
+            print(
+                "ERROR: 评测套件未就绪：库中缺少与 baseline 匹配的审核记录，非准确率不达标。",
+                file=sys.stderr,
+            )
+            return 2
+        return 0
 
     # Consistency check mode
     if args.consistency_check:
@@ -399,7 +525,8 @@ def batch_evaluate_from_config(config_path, markers):
               "review_id": 123,
               "baseline": "path/to/human_baseline.md",
               "allowed_misses": ["AI-STYLE-001"],
-              "explicit_false_positives": ["R029"]
+              "explicit_false_positives": ["R029"],
+              "enforce": false
             }
           ],
           "thresholds": {
@@ -409,20 +536,73 @@ def batch_evaluate_from_config(config_path, markers):
             "min_high_value_rate": 0.3
           }
         }
+
+    文档级 ``enforce: false`` 表示该文档**只记录、不卡口**：指标照常计算与输出，
+    但不计入 ``summary.regressions``，也不参与 ``all_documents_meet``，
+    进程退出码不受影响。适用于理论上限尚未确定的新基线。
     """
     config = json.loads(Path(config_path).read_text(encoding="utf-8-sig"))
     documents_cfg = config.get("documents", [])
     thresholds = config.get("thresholds", {})
 
     results = []
-    summary = {"total": 0, "passed": 0, "failed": 0, "regressions": 0}
+    per_doc_metrics = []
+    summary = {"total": 0, "passed": 0, "failed": 0, "regressions": 0, "suite_not_ready": 0}
+    summary["observed"] = 0
 
     for doc_cfg in documents_cfg:
-        review_id = doc_cfg.get("review_id")
-        if not review_id:
+        doc_name = doc_cfg.get("name", "unknown")
+        configured_id = doc_cfg.get("review_id")
+        # enforce=false 时该文档只记录成绩、不参与卡口（回归预警）。
+        # 用于 gold set 理论上限尚未确定、或门槛余量为 0 的新基线，
+        # 先积累若干轮真实产出后再决定是否设阈值。
+        enforce = doc_cfg.get("enforce", True)
+        if not configured_id and not (doc_cfg.get("baseline") or doc_cfg.get("baseline_document")):
+            # 既无 review_id 也无 baseline，无法定位，按未就绪处理
+            summary["total"] += 1
+            summary["suite_not_ready"] += 1
+            results.append({
+                "name": doc_name,
+                "review_id": None,
+                "status": "suite_not_ready",
+                "passed": False,
+                "checks": {},
+                "metrics": {"has_gold_set": False},
+                "reason": "未配置 review_id 或 baseline，无法定位待评文档",
+            })
             continue
-        result = evaluate_suite_document(doc_cfg, markers)
+
+        review_id, suite_status = resolve_suite_document(doc_cfg)
+        if review_id is None:
+            summary["total"] += 1
+            summary["suite_not_ready"] += 1
+            results.append({
+                "name": doc_name,
+                "review_id": configured_id,
+                "status": "suite_not_ready",
+                "passed": False,
+                "checks": {},
+                "metrics": {"has_gold_set": False},
+                "reason": (
+                    "库中无与 baseline 匹配的已完成审核记录，套件未就绪；"
+                    "请先导入 gold set 对应文档并完成审核，不要据此判定准确率不达标"
+                ),
+            })
+            continue
+
+        result = evaluate_suite_document(doc_cfg, markers, review_id=review_id)
         if not result:
+            summary["total"] += 1
+            summary["suite_not_ready"] += 1
+            results.append({
+                "name": doc_name,
+                "review_id": review_id,
+                "status": "suite_not_ready",
+                "passed": False,
+                "checks": {},
+                "metrics": {"has_gold_set": False},
+                "reason": "无法生成该文档的评测结果",
+            })
             continue
 
         total = result["total"]
@@ -431,24 +611,86 @@ def batch_evaluate_from_config(config_path, markers):
         protected_rate = result["protected_meaning_changed"] / max(total, 1)
         high_value_rate = result["effectiveness"]["high_value_rate"]
 
+        # 准确率口径：优先取过滤后的严格版，其次严格版，再次宽松版
+        baseline_node = (
+            result.get("human_baseline_filtered")
+            or result.get("human_baseline")
+            or {}
+        )
+        recall = baseline_node.get("strict_recall")
+        if recall is None:
+            recall = baseline_node.get("recall", 0.0)
+        precision = baseline_node.get("strict_precision")
+        if precision is None:
+            precision = baseline_node.get("precision", 0.0)
+
+        min_recall = thresholds.get("min_recall")
+        min_precision = thresholds.get("min_precision")
+        accuracy_checks = {}
+        accuracy_failed = False
+        if min_recall is not None or min_precision is not None:
+            if not baseline_node:
+                # 配了准确率阈值却没给 gold set —— 判不达标，杜绝"没测就算过"
+                accuracy_checks["recall_ok"] = False
+                accuracy_checks["precision_ok"] = False
+                accuracy_failed = True
+                recall = 0.0
+                precision = 0.0
+            else:
+                accuracy_checks["recall_ok"] = recall >= (min_recall or 0.0)
+                accuracy_checks["precision_ok"] = precision >= (min_precision or 0.0)
+                accuracy_failed = not all(accuracy_checks.values())
+
         checks = {
             "noop_rate_ok": noop_rate <= thresholds.get("max_noop_rate", 0.05),
             "numeric_rate_ok": numeric_rate <= thresholds.get("max_numeric_change_rate", 0.0),
             "protected_rate_ok": protected_rate <= thresholds.get("max_protected_change_rate", 0.0),
             "high_value_rate_ok": high_value_rate >= thresholds.get("min_high_value_rate", 0.3),
+            **accuracy_checks,
         }
 
         all_ok = all(checks.values())
+        if all_ok:
+            doc_status = "ok"
+        elif accuracy_failed:
+            doc_status = "accuracy_below_threshold"
+        else:
+            doc_status = "below_threshold"
+
         summary["total"] += 1
         if all_ok:
             summary["passed"] += 1
+        elif not enforce:
+            # 仅观测：不计入失败与回归，退出码仍为 0，避免把"记录"变成"卡口"
+            summary["observed"] += 1
         else:
             summary["failed"] += 1
             summary["regressions"] += 1
 
+        # 供 micro 平均使用：TP=严格命中批注数，FN=严格漏检批注数，
+        # FP=未被任何人工批注解释的产出问题数。
+        tp = int(baseline_node.get("strict_matched", 0) or 0) if baseline_node else 0
+        fn = int(baseline_node.get("strict_missed", 0) or 0) if baseline_node else 0
+        fp = int(baseline_node.get("strict_unmatched_issue_count", 0) or 0) if baseline_node else 0
+        if not baseline_node:
+            tp = fn = fp = 0
+
+        per_doc_metrics.append({
+            "name": doc_name,
+            "recall": round(recall, 4),
+            "precision": round(precision, 4),
+            "enforce": enforce,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "human_total": int(baseline_node.get("human_total", 0) or 0) if baseline_node else 0,
+            "issue_total": int(baseline_node.get("issue_total", 0) or 0) if baseline_node else 0,
+        })
+
         results.append({
-            "name": doc_cfg.get("name", f"review_{review_id}"),
+            "name": doc_name,
             "review_id": review_id,
+            "status": doc_status if enforce else doc_status + "_observed",
             "passed": all_ok,
             "checks": checks,
             "metrics": {
@@ -457,11 +699,59 @@ def batch_evaluate_from_config(config_path, markers):
                 "numeric_change_rate": round(numeric_rate, 4),
                 "protected_change_rate": round(protected_rate, 4),
                 "high_value_rate": round(high_value_rate, 4),
+                "recall": round(recall, 4),
+                "precision": round(precision, 4),
+                "has_gold_set": bool(baseline_node),
             },
             "config": result.get("config", {}),
             "suite_filters": result.get("suite_filters", {}),
             "result": result,
         })
+
+    summary["per_document"] = per_doc_metrics
+    enforced_metrics = [m for m in per_doc_metrics if m.get("enforce", True)]
+    observed_metrics = [m for m in per_doc_metrics if not m.get("enforce", True)]
+
+    def _macro(items, key):
+        return round(sum(m[key] for m in items) / max(len(items), 1), 4) if items else None
+
+    def _micro(items):
+        """Micro-average: pool TP/FP/FN so large gold sets weigh more than small ones."""
+        tp = sum(int(m.get("tp", 0) or 0) for m in items)
+        fp = sum(int(m.get("fp", 0) or 0) for m in items)
+        fn = sum(int(m.get("fn", 0) or 0) for m in items)
+        precision = (tp / (tp + fp)) if (tp + fp) else 0.0
+        recall = (tp / (tp + fn)) if (tp + fn) else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        return {
+            "tp": tp, "fp": fp, "fn": fn,
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1": round(f1, 4),
+        }
+
+    # enforced / observed 必须分开统计：observed 文档尚未写人工基线，
+    # 混进均值会让 mean_recall 与 all_documents_meet 相差数十个百分点。
+    summary["enforced_document_count"] = len(enforced_metrics)
+    summary["observed_document_count"] = len(observed_metrics)
+    summary["mean_recall"] = _macro(enforced_metrics, "recall")
+    summary["mean_precision"] = _macro(enforced_metrics, "precision")
+    summary["enforced_micro"] = _micro(enforced_metrics)
+    summary["observed_micro"] = _micro(observed_metrics)
+    summary["observed_mean_recall"] = _macro(observed_metrics, "recall")
+    summary["observed_mean_precision"] = _macro(observed_metrics, "precision")
+    summary["all_documents_ready"] = summary["suite_not_ready"] == 0
+    summary["all_documents_meet"] = summary["all_documents_ready"] and all(
+        m["recall"] >= (thresholds.get("min_recall") or 0.0)
+        and m["precision"] >= (thresholds.get("min_precision") or 0.0)
+        for m in enforced_metrics
+    )
+    # 无人工基线时无法声称准确率，给出显式 null 而不是用 0 拉低均值。
+    if not enforced_metrics:
+        summary["mean_recall"] = None
+        summary["mean_precision"] = None
+        summary["all_documents_meet"] = False
+        summary["no_enforced_baseline"] = True
 
     return {"summary": summary, "results": results}
 

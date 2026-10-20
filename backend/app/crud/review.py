@@ -175,6 +175,25 @@ def list_false_positive_memory_signatures(db: Session):
     return {str(row.signature or '').strip().lower() for row in rows if str(row.signature or '').strip()}
 
 
+def list_false_positive_memory_payloads(db: Session):
+    """返回可用于结构化指纹匹配的 (rule, original_text) 列表。
+
+    历史实现只回传 signature 字符串，只能做精确相等比对，
+    换一个措辞（`Add 5 min` vs `Add 5 mins`）就失效。
+    这里同时回传规则号与问题原文，让调用方可以按
+    「同规则族 + token 覆盖相似度」判定是否属于同一问题。
+    """
+    rows = db.query(FalsePositiveMemory).filter(FalsePositiveMemory.enabled.is_(True)).all()
+    payloads = []
+    for row in rows:
+        rule = str(getattr(row, 'rule', '') or '').strip()
+        text = str(getattr(row, 'original_text', '') or '').strip()
+        if not text:
+            continue
+        payloads.append((rule, text))
+    return payloads
+
+
 def delete_false_positive_memory_for_issue(db: Session, source_issue_id: int):
     db.query(FalsePositiveMemory).filter(FalsePositiveMemory.source_issue_id == source_issue_id).delete(synchronize_session=False)
     db.commit()

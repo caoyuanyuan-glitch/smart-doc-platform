@@ -115,6 +115,12 @@
       "word": "Fluostar Omega",
       "category": "品牌名",
       "description": "荧光读数仪"
+    },
+    {
+      "id": "b10",
+      "word": "Integra",
+      "category": "品牌名",
+      "description": "Integra Biosciences（电子移液器品牌）"
     }
   ],
   "document_ids": [
