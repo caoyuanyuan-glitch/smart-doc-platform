@@ -3573,6 +3573,25 @@ def check_spelling(content, min_word_length=3, file_type=None):
 
     issues.extend(_find_term_variant_issues(content, seen_issue_keys))
     issues.extend(_find_transposition_spelling_issues(content, seen_issue_keys))
+    # 专有名词拼写（SPELL-PROP）：普通词典对品牌/产品名无效，
+    # 需借助外部专有名词库确证。放在此处可复用统一的 issue 键去重。
+    try:
+        from app.review_engine.proper_noun_spelling import find_proper_noun_spelling_issues
+
+        for issue in find_proper_noun_spelling_issues(
+            content, file_type=file_type, min_word_length=min_word_length
+        ):
+            key = (
+                _normalize_for_check(issue.get("original_text", "")),
+                'prop',
+                str(issue.get("position", "")),
+            )
+            if key in seen_issue_keys:
+                continue
+            seen_issue_keys.add(key)
+            issues.append(issue)
+    except Exception as e:
+        print(f"[拼写检查] 专有名词拼写规则执行失败: {e}")
 
     for typo in FORCED_MISSPELLINGS:
         correct = COMMON_MISSPELLINGS.get(typo)

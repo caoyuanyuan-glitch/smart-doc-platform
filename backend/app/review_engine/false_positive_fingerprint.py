@@ -137,17 +137,29 @@ RULE_FAMILY_RULES: dict[str, tuple[str, ...]] = {
         "DOC-GRAM-001", "DOC-SPACE", "DOC-FORMAT", "R025", "R027", "R046",
         "DOC-INDENT", "DOC-ALIGN",
     ),
-    "unit_plural": ("R011", "R023", "DOC-UNIT"),
+    "unit_plural": ("R011", "R023", "DOC-UNIT", "DET-SPACE-UNIT"),
     "list_numbering": ("DOC-NUM-001", "DOC-LIST", "DOC-ORDER"),
-    "reference_numbering": ("REF-001", "REF-002", "REF-003", "DOC-REF"),
+    "reference_numbering": (
+        "REF-001", "REF-002", "REF-003", "DOC-REF", "REF-STYLE",
+    ),
     "terminology_consistency": (
         "CYY-CN-CONSIST-001", "CYY-CN-CONSIST-002", "CYY-TERM-001",
         "DOC-TERM-001", "DOC-TERM", "DOC-SPELL-001", "DOC-PROPER",
+        # P0/P1 新增：文档内术语基线比对（整体写法 + 大小写变体）
+        "STRUCT-TERM-001", "DET-TERM-BASELINE-001", "DET-TERM-CASE-001",
+        # P1 新增：外部规范写法库（与通行写法不一致）
+        "DET-TERM-CANON-001",
     ),
     "trademark_symbol": ("DOC-TM", "R033", "DOC-TRADEMARK"),
     "contact_info": ("DOC-CONTACT", "DOC-MAIL", "DOC-PHONE"),
     "blank_separator_page": ("DOC-PAGE-001", "DOC-BLANK", "DOC-PAGE"),
     "layout_visual": ("DOC-LAYOUT", "DOC-TABLE-LAYOUT", "DOC-FIGURE-SIZE"),
+    # P0/P1 新增：拼写类（换位/插入/专有名词等文档内确证型）与间距类
+    "spelling_evidence": (
+        "SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE",
+        "SPELL-TRANS", "SPELL-INS", "SPELL-PROP",
+    ),
+    "spacing_gap": ("DET-SPACE-GAP",),
 }
 
 

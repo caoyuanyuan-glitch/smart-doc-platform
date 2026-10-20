@@ -99,6 +99,68 @@ def is_trademark_reading_order_artifact(original: str, suggestion: str) -> bool:
 _CJK_CHAR_RE = re.compile(r'[\u3400-\u9fff]')
 
 
+# ----------------------------------------------------------------------
+# 拼写类问题的证据分级
+# ----------------------------------------------------------------------
+#
+# 拼写问题天然分两类，混在一起评分是 #17 误杀的根因：
+#
+# 1. **猜测型**：拼写库给出一组候选词，作者从里挑一个。像
+#    `Intergra` 这种，普通词典只能给出 integral/intergrade/interwar
+#    ——全是错的，采纳任何一个都是误导。这类问题必须继续被压低分数。
+#
+# 2. **确证型**：有唯一且可靠的依据能证明「正确写法就是 X」。
+#    包括：
+#    - SPELL-TRANS：文档内已合法使用了某个词，另一种写法是它的
+#      相邻换位（Ilde vs 文档内的 Idle）——依据在文档内，可自证；
+#    - SPELL-PROP：与外部专有名词库中的规范名编辑距离 <= 1
+#      （Intergra vs Integra）——依据在专有名词库，可确证；
+#    - SPELL 且 confidence >= 95：命中了人工维护的错拼映射表。
+#
+# 确证型问题若与猜测型同等扣分（-18），就会被 value_score 阈值整体筛掉，
+# 导致**真实且已确证的拼写错误反而不出现在报告里**。
+# 这正是 Intergra（人工批注 #9，明确指出应为 Integra）被漏掉的原因。
+
+# 确证型拼写规则：这些规则的正确写法有唯一可靠依据。
+CONFIRMED_SPELLING_RULES = {
+    "SPELL-TRANS",   # 文档内词表确证（相邻换位）
+    "SPELL-PROP",    # 外部专有名词库确证（编辑距离 <= 1）
+    "SPELL-INS",     # 文档内词表确证（插入/删除字符）
+    "SPELL-SPLIT",   # PDF 固定短语确证
+    "SPELL-PHRASE",  # PDF 固定短语确证
+}
+
+# 猜测型拼写规则：仅凭词典候选，无法确定正确写法。
+GUESSED_SPELLING_RULES = {
+    "SPELL",
+    "SPELL-TERM",
+}
+
+
+def is_confirmed_spelling_issue(issue: Any) -> bool:
+    """判断一条拼写问题是否属于「有确凿证据」的类型。
+
+    确证型的拼写错误不应与「拼写库猜一个词」同等对待——
+    前者的正确写法是确定的，后者是猜测。
+
+    注意 SPELL 规则本身有两条产出路径：命中人工错拼表时
+    confidence=95（确证），走词典候选分支时 confidence=80（猜测）。
+    因此不能只看 rule，必须同时看 confidence。
+    """
+    data = issue_to_mapping(issue)
+    rule = str(data["rule"] or "").upper()
+    confidence = int(data["confidence"] or 0)
+    severity = str(data["severity"] or "general").lower()
+
+    if rule in CONFIRMED_SPELLING_RULES:
+        return True
+    if rule in GUESSED_SPELLING_RULES:
+        # 命中人工维护的错拼映射表（confidence=95）或 serious 级别
+        # 时，视为确证；其余（词典候选猜测）不算。
+        return severity == "serious" or confidence >= 95
+    return False
+
+
 def is_broken_glyph_extraction_artifact(original: str) -> bool:
     """原文含 Unicode 替换字符（U+FFFD）时，说明 PDF/字体该字形未映射到 Unicode。
 
@@ -554,10 +616,14 @@ def value_score(issue: Any) -> int:
         score -= 12
     if is_high_value(data):
         score += 30
-    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE"}:
-        if severity == "serious" or confidence >= 95:
+    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE", "SPELL-TRANS", "SPELL-PROP"}:
+        if is_confirmed_spelling_issue(data):
+            # 确证型拼写错误：正确写法有唯一可靠依据（文档内词表 /
+            # 专有名词库 / 人工错拼表），应当与猜测型区别对待。
             score += 14
         else:
+            # 猜测型：拼写库只是给出一组候选，无法确定正确写法，
+            # 继续压低分数以抑制误报。
             score -= 18
     # 单位格式的历史高压制只针对中文规则名；英文单位规则（DOC-UNIT-*）按正常价值评估
     if rule.startswith("CYY-CN-UNIT-"):

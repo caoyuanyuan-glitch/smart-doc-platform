@@ -345,14 +345,17 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
             return True
-        return rule.startswith("CYY-CN-SPELL-") or rule in {"CYY-CN-TERM-006", "CYY-CN-CONSIST-032", "SPELL", "SPELL-PHRASE"} or "术语拼写" in category or "拼写错误" in category or "术语一致性" in category
+        # SPELL-PROP：专有名词拼写确证通道（P1 新增），与 SPELL 同属术语拼写族
+        return rule.startswith("CYY-CN-SPELL-") or rule in {"CYY-CN-TERM-006", "CYY-CN-CONSIST-032", "SPELL", "SPELL-PHRASE", "SPELL-PROP"} or "术语拼写" in category or "拼写错误" in category or "术语一致性" in category
     if item.expected_rule == "STRUCT-DUP-001":
         return rule.startswith("DOC-DUP") or rule == "CYY-CN-DUP-002" or "重复" in category
     if item.expected_rule == "STRUCT-TERM-001":
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 4 and selected in blob:
             return True
-        return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or "术语一致性" in category
+        # DET-TERM-BASELINE-001 / DET-TERM-CASE-001：文档内术语基线比对（P1 新增）
+        # DET-TERM-CANON-001：外部规范写法库（P1 新增）
+        return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or rule in {"STRUCT-TERM-001", "DET-TERM-BASELINE-001", "DET-TERM-CASE-001", "DET-TERM-CANON-001"} or "术语一致性" in category
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
