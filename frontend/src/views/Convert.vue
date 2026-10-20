@@ -114,10 +114,10 @@
         <el-form label-width="130px" style="max-width: 800px;">
           <el-form-item label="源文件">
             <div class="upload-area" @click="triggerSourceUpload" @dragover.prevent @drop.prevent="onSourceDrop">
-              <input ref="sourceInput" type="file" accept=".md,.markdown,.csv,.docx,.doc" style="display:none"
+              <input ref="sourceInput" type="file" accept=".md,.markdown,.csv,.docx,.doc,.zip,.idml" style="display:none"
                 @change="onSourceChange" />
               <el-icon class="upload-icon"><Upload /></el-icon>
-              <p v-if="!sourceFile">拖拽或点击上传 (.md / .csv / .docx / .doc, &le; 50MB)</p>
+              <p v-if="!sourceFile">拖拽或点击上传 (.md / .csv / .docx / .doc / 含 IDML 的 .zip, &le; 50MB)</p>
               <div v-else class="file-info">
                 <el-icon><Document /></el-icon>
                 <span>{{ sourceFile.name }}</span>
