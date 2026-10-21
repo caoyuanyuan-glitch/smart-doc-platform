@@ -135,7 +135,10 @@ Word 转 DITA 批量转换基线规则
   - 每次转换完成后必须再做一轮与原文核对：按 `word-to-dita-conversion-rules.md` 逐条检查，对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出；不得只交 zip
   - 用户口述的新转换规则（如 `警告`→`warning`、`注意`→`caution`）必须沉淀到该规则文件，并同步落实现与测试，不能只停留在对话里
   - 规则文件同时覆盖 Word/WPS 与 IDML 两种源格式，差异只写在“IDML 源解析规则”小节
-    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 138 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
+    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 175 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
+  - IME 按编号前缀显示主题类型：`DTO` 显示「主题 Topic」，`DTC` 显示「主题 Concept」。正文小节统一输出 `sDitaTopic` + `DTO`
+  - 改写已导入的 IME zip 时，必须同步 `.dita` 文件名/`cms:number`、ditamap、`xref`、`jsonData.json`、`infotree.xml`（含 `out/` 副本）。只改 `.dita` 时 IME 仍显示旧类型
+  - 把已有节点的 `DTC` 前缀改成 `DTO` 后，IME 更新匹配不到原编号，导入选新增
   - 全量单测中这 6 个失败属环境性预置、非回归，排查时不要浪费时间：4 个 `DocxHeadingDetectionTest`（缺 `.monkeycode-tmp-files/` 下的 `.docx` 样例）、`test_polish_match_score`（润色模块数据）、`test_document_ocr_keeps_numbered_paragraphs`（缺 `tesseract`）
   - 改完 `backend/app/api/convert.py` 必须重启后端（uvicorn 无 `--reload`），再用 API 端到端跑 617：`POST /api/auth/login`（表单 `admin/admin123`）取 token → `POST /api/convert/`（multipart：`source_file`、`target_format=dita`、`output_language=zh-CN`、`template_file`）→ 轮询 `GET /api/convert/{id}/progress` 到 `completed` → `GET /api/convert/{id}/download`
   - IDML 端到端要用合并包（`.idml` 与同级 `Links/` 打成一个 zip），因为独立 `.idml` 内不含 `Links/`，直接调 `_idml_to_markdown` 会得到 0 张图

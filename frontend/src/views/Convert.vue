@@ -168,11 +168,7 @@
             >
               <template #default>
                 <div class="rule-list">
-                  <div>参考包只复用 <code>Cover</code> 和 <code>booklists/toc</code>。</div>
-                  <div><code>Manufacturer information</code> 按源 Word 生成。</div>
-                  <div>章节层级按 Word 原始结构对齐。</div>
-                  <div>步骤中的加粗、上标、下标保留。</div>
-                  <div>重复表头、页码、note 图标会自动清理。</div>
+                  <div v-for="(item, idx) in convertRuleItems" :key="idx">{{ item }}</div>
                 </div>
               </template>
             </el-alert>
@@ -306,6 +302,26 @@ const availableTargetFormats = computed(() => {
 })
 
 const showDitaOptions = computed(() => targetFormat.value === 'dita')
+
+const isMarkdownSource = computed(() => sourceExt.value === '.md' || sourceExt.value === '.markdown')
+
+const convertRuleItems = computed(() => {
+  if (isMarkdownSource.value) {
+    return [
+      'Markdown 按 ATX/Setext 标题层级拆 topic；无标题文档输出为单个 topic。',
+      '加粗、斜体、链接、围栏代码块会转成对应 DITA 标记；格式名如 .fq.gz 转为斜体，行内代码不再使用 codeph。',
+      '引用块中的注意/提示/警告按 note 规则输出；缩进列表保持嵌套。',
+      '参考包只复用 Cover 和 booklists/toc。',
+    ]
+  }
+  return [
+    '参考包只复用 Cover 和 booklists/toc。',
+    'Manufacturer information 按源 Word 生成。',
+    '章节层级按 Word 原始结构对齐。',
+    '步骤中的加粗、上标、下标保留。',
+    '重复表头、页码、note 图标会自动清理。',
+  ]
+})
 
 const resultItemLabel = computed(() => {
   if (targetFormat.value === 'csv') return 'CSV 文件'

@@ -182,11 +182,22 @@ def _clean_title(title):
     t = CHAPTER_APPENDIX_PREFIX_RE.sub('', t)
     t = SECTION_NUMBER_PREFIX_RE.sub('', t)
     t = APPENDIX_ITEM_NUMBER_PREFIX_RE.sub('', t)
+    # Single-level "1. Title" chapter numbers; keep "2.0 mL" / "3'RNA".
+    t = re.sub(r'^\d+\.\s+(?=[\u4e00-\u9fff]|[A-Z])', '', t)
 
     # 4. Trim and clean up
     t = re.sub(r'\s+', ' ', t).strip()
     t = t.rstrip(':：').strip()
     return t
+
+
+HEADING_NUMBER_RE = re.compile(r'^(\d+(?:\.\d+)*)(?:[.\s]|、)+')
+
+
+def _heading_number(title):
+    """Return the leading section number (``3.2``) from a Markdown heading."""
+    match = HEADING_NUMBER_RE.match((title or "").strip())
+    return match.group(1) if match else None
 
 
 def _clean_xref_title(title):
@@ -215,9 +226,131 @@ def _strip_md_bold(text):
 def _clean_navtitle(title):
     """Drop inline run placeholders so map titles stay human readable."""
     text = title or ""
-    text = re.sub(r'\[\[(B|SUP|SUB)\]\](.*?)\[\[/\1\]\]', r'\2', text)
-    text = re.sub(r'\[\[/?[A-Z]+\]\]', '', text)
+    text = re.sub(r'\[\[(B|SUP|SUB|I|CODE)\]\](.*?)\[\[/\1\]\]', r'\2', text)
+    text = re.sub(r'\[\[LINK:[^\]]+\]\](.*?)\[\[/LINK\]\]', r'\1', text)
+    text = re.sub(r'\[\[/?[A-Z]+(?::[^\]]+)?\]\]', '', text)
     return text
+
+
+def _extract_md_frontmatter(content):
+    """Split optional YAML front matter from a native Markdown document."""
+    text = content or ""
+    if not text.startswith("---"):
+        return text, None
+    match = re.match(r'^---[ \t]*\n(.*?)\n---[ \t]*\n?', text, re.S)
+    if not match:
+        return text, None
+    title = None
+    title_match = re.search(r'(?im)^title:\s*[\'"]?(.+?)[\'"]?\s*$', match.group(1))
+    if title_match:
+        title = title_match.group(1).strip().strip('"').strip("'")
+    return text[match.end():], title
+
+
+def _promote_setext_headings(content):
+    """Rewrite Setext headings to ATX so section parsing sees a single syntax."""
+    lines = (content or "").split("\n")
+    out = []
+    idx = 0
+    while idx < len(lines):
+        current = lines[idx]
+        nxt = lines[idx + 1] if idx + 1 < len(lines) else None
+        looks_like_heading = (
+            nxt is not None
+            and current.strip()
+            and not current.lstrip().startswith(("#", "|", ">", "`", "~", "!", "-", "*"))
+        )
+        if looks_like_heading and re.match(r'^=+[ \t]*$', nxt):
+            out.append("# " + current.strip())
+            idx += 2
+            continue
+        if looks_like_heading and re.match(r'^-{3,}[ \t]*$', nxt):
+            out.append("## " + current.strip())
+            idx += 2
+            continue
+        out.append(current)
+        idx += 1
+    return "\n".join(out)
+
+
+def _normalize_md_emphasis_and_links(text):
+    """Convert native Markdown emphasis and links into intermediate markers."""
+    if not text:
+        return text
+
+    def _link_repl(match):
+        return f'[[LINK:{match.group(2)}]]{match.group(1)}[[/LINK]]'
+
+    converted = re.sub(r'(?<!!)\[([^\]]+)\]\(([^)]+)\)', _link_repl, text)
+    converted = re.sub(r'\*\*(.+?)\*\*', r'[[B]]\1[[/B]]', converted)
+    converted = re.sub(
+        r'(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)',
+        r'[[I]]\1[[/I]]',
+        converted,
+    )
+    return _wrap_file_format_tokens(converted)
+
+
+def _normalize_native_markdown_span(text):
+    """Protect inline code, then convert remaining native Markdown syntax."""
+    if not text:
+        return text
+    parts = []
+    last = 0
+    for match in re.finditer(r'`([^`]+)`', text):
+        parts.append(_normalize_md_emphasis_and_links(text[last:match.start()]))
+        parts.append(_inline_code_to_marker(match.group(1)))
+        last = match.end()
+    parts.append(_normalize_md_emphasis_and_links(text[last:]))
+    return "".join(parts)
+
+
+_FILE_FORMAT_TOKEN_RE = re.compile(
+    r'(?<![A-Za-z0-9_/])(\.[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)(?![A-Za-z0-9])'
+)
+
+
+def _looks_like_file_format(text):
+    value = (text or "").strip()
+    return bool(re.fullmatch(r'\.[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*', value))
+
+
+def _wrap_file_format_tokens(text):
+    if not text:
+        return text
+    return _FILE_FORMAT_TOKEN_RE.sub(r'[[I]]\1[[/I]]', text)
+
+
+def _inline_code_to_marker(code):
+    if _looks_like_file_format(code):
+        return f'[[I]]{code}[[/I]]'
+    return code
+
+
+_FENCED_BLOCK_RE = re.compile(
+    r'^[ \t]*(```|~~~)[^\n]*\n[\s\S]*?\n[ \t]*\1[ \t]*$',
+    re.M,
+)
+
+
+def _normalize_native_markdown(content):
+    """Turn native Markdown into the intermediate markers the DITA layer already understands.
+
+    Word/IDML pipelines already emit [[B]] / [[UI]] / [[LVL:n]]. A hand-written
+    .md file uses **bold**, `code`, [text](url), > notes and fenced code; this
+    step makes those equivalent without changing Word/IDML input.
+    """
+    text = content or ""
+    pieces = []
+    last = 0
+    for match in _FENCED_BLOCK_RE.finditer(text):
+        pieces.append(_normalize_native_markdown_span(text[last:match.start()]))
+        pieces.append(match.group(0))
+        last = match.end()
+    pieces.append(_normalize_native_markdown_span(text[last:]))
+    normalized = "".join(pieces)
+    # Drop one blockquote marker so note/list detectors see the inner text.
+    return re.sub(r'(?m)^[ \t]*>[ \t]?', '', normalized)
 
 
 def _parse_md_sections(content):
@@ -229,8 +362,25 @@ def _parse_md_sections(content):
     # Stack entries: {"title": str, "level": int, "sections": list, "content_lines": list}
     stack = []
     pending_lines = []
+    preamble_lines = []
+    in_fence = False
+    fence_marker = None
 
     for line in lines:
+        fence_match = re.match(r'^[ \t]*(```|~~~)', line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif line.strip().startswith(fence_marker):
+                in_fence = False
+                fence_marker = None
+            pending_lines.append(line)
+            continue
+        if in_fence:
+            pending_lines.append(line)
+            continue
         heading_match = re.match(r'^(#{1,6})\s+(.*)', line)
         if heading_match:
             level = len(heading_match.group(1))
@@ -242,6 +392,8 @@ def _parse_md_sections(content):
                     if ck not in stack[-1]:
                         stack[-1][ck] = []
                     stack[-1][ck].extend(pending_lines)
+                else:
+                    preamble_lines.extend(pending_lines)
                 pending_lines = []
 
             while stack and stack[-1]["level"] >= level:
@@ -268,6 +420,8 @@ def _parse_md_sections(content):
     if pending_lines:
         if stack:
             stack[-1].setdefault("content_lines", []).extend(pending_lines)
+        else:
+            preamble_lines.extend(pending_lines)
         pending_lines = []
 
     while stack:
@@ -283,6 +437,11 @@ def _parse_md_sections(content):
         else:
             root_sections.append(entry)
 
+    preamble = "\n".join(preamble_lines).strip()
+    if not root_sections:
+        return [{"title": "文档", "sections": [], "content": preamble}]
+    if preamble:
+        root_sections.insert(0, {"title": "正文", "sections": [], "content": preamble})
     return root_sections
 
 
@@ -1197,7 +1356,14 @@ def _get_heading_level(style_name):
 
 def _parse_content(source_format, file_path, content):
     if source_format == "md":
-        return _parse_md_sections(content)
+        body, fm_title = _extract_md_frontmatter(content)
+        body = _promote_setext_headings(body)
+        body = _normalize_native_markdown(body)
+        sections = _parse_md_sections(body)
+        if fm_title and sections:
+            if sections[0].get("title") in {"文档", "正文"}:
+                sections[0]["title"] = fm_title
+        return sections
     elif source_format in ("docx", "idml"):
         return _parse_md_sections(content)
     raise ValueError(f"不支持的文件格式: {source_format}")
@@ -2876,9 +3042,16 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     # run inside an operation step becomes <uicontrol> in English output.
     is_english = str(dita_lang or "").lower().startswith("en")
     is_idml = source_format == "idml"
+    is_native_md = source_format == "md"
+    if is_native_md:
+        title_text = _normalize_native_markdown(title_text)
+        section_content = _normalize_native_markdown(section_content)
     title_text = re.sub(r'\[\[B\]\](.*?)\[\[/B\]\]', r'\1', title_text)
     title_text = re.sub(r'\[\[SUP\]\](.*?)\[\[/SUP\]\]', r'\1', title_text)
     title_text = re.sub(r'\[\[SUB\]\](.*?)\[\[/SUB\]\]', r'\1', title_text)
+    title_text = re.sub(r'\[\[I\]\](.*?)\[\[/I\]\]', r'\1', title_text)
+    title_text = re.sub(r'\[\[CODE\]\](.*?)\[\[/CODE\]\]', r'\1', title_text)
+    title_text = re.sub(r'\[\[LINK:[^\]]+\]\](.*?)\[\[/LINK\]\]', r'\1', title_text)
     title_text = _strip_tag(title_text)
     safe_title = title_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     safe_title_attr = _escape_xml_attr(title_text)
@@ -2909,13 +3082,30 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             lambda m: f'<image href="{_escape_xml_attr(m.group(2))}"></image>',
             restored,
         )
-        if in_step and is_english:
+        if in_step and is_english and not is_native_md:
             # In English operation steps a bold run names a UI control.
             restored = re.sub(r'\[\[B\]\](.*?)\[\[/B\]\]', r'<uicontrol>\1</uicontrol>', restored)
         else:
             restored = re.sub(r'\[\[B\]\](.*?)\[\[/B\]\]', r'<b>\1</b>', restored)
         restored = re.sub(r'\[\[SUP\]\](.*?)\[\[/SUP\]\]', r'<sup>\1</sup>', restored)
         restored = re.sub(r'\[\[SUB\]\](.*?)\[\[/SUB\]\]', r'<sub>\1</sub>', restored)
+        restored = re.sub(r'\[\[I\]\](.*?)\[\[/I\]\]', r'<i>\1</i>', restored)
+        def _code_repl(match):
+            inner = match.group(1)
+            if _looks_like_file_format(inner):
+                return f'<i>{inner}</i>'
+            return inner
+        restored = re.sub(r'\[\[CODE\]\](.*?)\[\[/CODE\]\]', _code_repl, restored)
+        def _md_link_repl(match):
+            url = match.group(1).strip()
+            label = match.group(2)
+            if url.lower().startswith(("http://", "https://")):
+                return (
+                    f'<xref href="{url.replace(chr(34), "&quot;")}" scope="external" '
+                    f'format="html">{label}</xref>'
+                )
+            return f'<xref href="{url.replace(chr(34), "&quot;")}">{label}</xref>'
+        restored = re.sub(r'\[\[LINK:([^\]]+)\]\](.*?)\[\[/LINK\]\]', _md_link_repl, restored)
         # English on-screen UI text (Silk screen character style) -> <uicontrol>.
         def _ui_repl(match):
             inner = match.group(1)
@@ -2926,12 +3116,17 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         restored = re.sub(r'\[\[/?B\]\]', '', restored)
         restored = re.sub(r'\[\[/?SUP\]\]', '', restored)
         restored = re.sub(r'\[\[/?SUB\]\]', '', restored)
+        restored = re.sub(r'\[\[/?I\]\]', '', restored)
+        restored = re.sub(r'\[\[/?CODE\]\]', '', restored)
         restored = re.sub(r'\[\[/?UI\]\]', '', restored)
         restored = UI_CONTROL_RE.sub(r'<uicontrol>\1</uicontrol>', restored)
         if is_english:
             def _en_bracket_ui(match):
                 inner = match.group(1).strip()
-                if not inner or inner in {"B", "/B", "SUP", "/SUP", "SUB", "/SUB", "UI", "/UI"}:
+                if not inner or inner in {
+                    "B", "/B", "SUP", "/SUP", "SUB", "/SUB", "UI", "/UI",
+                    "I", "/I", "CODE", "/CODE", "LINK", "/LINK",
+                }:
                     return match.group(0)
                 return f'<uicontrol>{inner}</uicontrol>'
             restored = EN_BRACKET_UI_RE.sub(_en_bracket_ui, restored)
@@ -2954,6 +3149,24 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 return f'{prefix}\u201c{spaced_title}\u201d'
             return spaced_title
         restored = XREF_RE.sub(_xref_repl, restored)
+        if is_native_md and xref_map:
+            def _md_section_xref(match):
+                num = match.group(1)
+                target_id = xref_map.get(num)
+                if not target_id:
+                    return match.group(0)
+                display = xref_map.get(target_id) or target_id
+                return (
+                    f'<xref href="{_escape_xml_attr(target_id)}.dita" '
+                    f'cms:title="{_escape_xml_attr(display)}">{_escape_xml_attr(display)}</xref>'
+                )
+            restored = re.sub(
+                r'(?i)(?:Section|Sec\.)\s+(\d+(?:\.\d+)*)',
+                _md_section_xref,
+                restored,
+            )
+            restored = re.sub(r'(\d+(?:\.\d+)*)\s*节', _md_section_xref, restored)
+            restored = restored.replace('</xref>第', '</xref> 第')
         return restored
 
     safe_content = section_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("<br>", "")
@@ -2966,6 +3179,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     list_base_level = 0
     pending_table_header_rows = None
     pending_table_wide = None
+    in_codeblock = False
+    codeblock_lang = ""
+    codeblock_lines = []
+    codeblock_indent = ""
 
     def _flush_list():
         nonlocal in_list, list_items, list_type, list_base_level
@@ -3030,7 +3247,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                         rendered.append(trailing)
                     rendered.append(f"{indent}  </li>")
                 else:
-                    rendered.append(f"{indent}  <li>{item['text']}</li>")
+                    rendered.append(f"{indent}  <li><p>{item['text']}</p></li>")
             rendered.append(f"{indent}</{tag}>")
             return "\n".join(rendered)
 
@@ -3216,7 +3433,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         def flush_items():
             if not pending_items:
                 return
-            items = "\n".join(f'            <li>{item}</li>' for item in pending_items)
+            items = "\n".join(f'            <li><p>{item}</p></li>' for item in pending_items)
             rendered.append(f'          <ul>\n{items}\n          </ul>')
             pending_items.clear()
 
@@ -3395,9 +3612,14 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                                  -len(IDML_CELL_UL_CLOSE if ul else IDML_CELL_OL_CLOSE)]
                 items = [i for i in inner.split(IDML_CELL_LIST_SEP) if i.strip()]
                 tag = "ul" if ul else "ol"
-                lis = "".join(f"<li>{_restore_inline_run_markup(i)}</li>" for i in items)
+                lis = "".join(
+                    f"<li><p>{_restore_inline_run_markup(i)}</p></li>" for i in items
+                )
                 return f"<entry{attrs}><{tag}>{lis}</{tag}></entry>"
-            return f"<entry{attrs}>{_restore_inline_run_markup(cell_text or '')}</entry>"
+            restored = _restore_inline_run_markup(cell_text or "")
+            if not restored.strip():
+                return f"<entry{attrs}></entry>"
+            return f"<entry{attrs}><p>{restored}</p></entry>"
 
         def _emit_span_row_entries(row, indent):
             entries = []
@@ -3442,7 +3664,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                         if not list_items_pending:
                             return
                         items = "\n".join(
-                            f'            <li>{item}</li>'
+                            f'            <li><p>{item}</p></li>'
                             for item in list_items_pending
                         )
                         note_blocks.append(
@@ -3597,6 +3819,18 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             return f'        <note type="warning"><p>{_restore_inline_run_markup(detail)}</p></note>'
         return None
 
+    def _flush_codeblock():
+        nonlocal in_codeblock, codeblock_lang, codeblock_lines, codeblock_indent
+        if not in_codeblock:
+            return
+        code_text = "\n".join(codeblock_lines)
+        lang_attr = f' outputclass="{codeblock_lang}"' if codeblock_lang else ""
+        _append_block(f'        <codeblock{lang_attr} xml:space="preserve">{code_text}</codeblock>')
+        in_codeblock = False
+        codeblock_lang = ""
+        codeblock_lines = []
+        codeblock_indent = ""
+
     safe_lines = safe_content.split("\n")
     for idx, line in enumerate(safe_lines):
         line_level = None
@@ -3605,6 +3839,31 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             line_level = int(level_match.group(1))
             line = line[level_match.end():]
         stripped = line.strip()
+        fence_match = re.match(r'^(```|~~~)(.*)$', stripped)
+        if in_codeblock:
+            if fence_match:
+                _flush_codeblock()
+            else:
+                if codeblock_indent and line.startswith(codeblock_indent):
+                    codeblock_lines.append(line[len(codeblock_indent):])
+                else:
+                    codeblock_lines.append(line)
+            continue
+        if fence_match:
+            table_xml = _flush_pending_table()
+            if table_xml:
+                _append_block(table_xml)
+            in_codeblock = True
+            codeblock_lang = (fence_match.group(2) or "").strip()
+            codeblock_lines = []
+            indent_match = re.match(r'^[ \t]*', line)
+            codeblock_indent = indent_match.group(0) if indent_match else ""
+            continue
+        if line_level is None and re.match(r'^[ \t]+(?:[-*+]\s+|\d+[.)]\s+)', line):
+            leading = len(re.match(r'^[ \t]*', line).group(0).replace('\t', '    '))
+            line_level = max(1, leading // 2)
+        if re.match(r'^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$', stripped):
+            continue
         if stripped.startswith("[[THEAD:"):
             header_match = re.match(r'^\[\[THEAD:(\d+)\]\]$', stripped)
             if header_match:
@@ -4031,10 +4290,12 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             if in_list and list_items:
                 if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', clean):
                     continue
-                _append_list_continuation(
-                    f"        <p>{_restore_inline_run_markup(clean)}</p>"
-                )
-                continue
+                hang_on_item = (not is_native_md) or bool(re.match(r'^[ \t]+', line))
+                if hang_on_item:
+                    _append_list_continuation(
+                        f"        <p>{_restore_inline_run_markup(clean)}</p>"
+                    )
+                    continue
             if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', clean):
                 continue
             result = _flush_list()
@@ -4042,6 +4303,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 _append_body(result)
             _append_body(f"        <p>{_restore_inline_run_markup(clean)}</p>")
 
+    _flush_codeblock()
     if pending_note_type and pending_note_blocks:
         # Attach a trailing note to the last step before emitting the list.
         _flush_pending_note_to_body()
@@ -4076,7 +4338,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     body_content = "\n".join(p for p in body_parts if p)
 
-    if topic_kind in {"chapter", "concept"}:
+    if topic_kind == "chapter":
         root_tag = "concept"
         body_tag = "conbody"
         doctype = '<!DOCTYPE concept PUBLIC "-//OASIS//DTD DITA Concept//EN" "concept.dtd">'
@@ -4096,8 +4358,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     ime_topic_type = {
         "cover": "sCoverTopic",
         "chapter": "chapterTopic",
-        "task": "sDitaTopic",
-    }.get(topic_kind, "sDitaConcept")
+    }.get(topic_kind, "sDitaTopic")
     outputclass = ' outputclass="cover A4"' if topic_kind == "cover" else ""
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -4396,10 +4657,10 @@ def _topic_code_prefix(topic_kind):
     return {
         "cover": "CTT",
         "chapter": "CTO",
-        "concept": "DTC",
-        "reference": "DTC",
+        "concept": "DTO",
+        "reference": "DTO",
         "task": "DTO",
-    }.get(topic_kind, "DTC")
+    }.get(topic_kind, "DTO")
 
 
 def _generated_topic_code(topic_index, topic_kind="concept"):
@@ -4415,8 +4676,7 @@ def _topic_template_name(topic_kind):
     return {
         "cover": "sCoverTopic",
         "chapter": "chapterTopic",
-        "task": "sDitaTopic",
-    }.get(topic_kind, "sDitaConcept")
+    }.get(topic_kind, "sDitaTopic")
 
 
 def _topic_kind_for_section(section, title):
@@ -4424,7 +4684,8 @@ def _topic_kind_for_section(section, title):
         if _normalize_section_key(title) == "cover":
             return "cover"
         return "chapter"
-    return "task" if section.get("dita_type") == "task" else "concept"
+    # IME shows 主题 Topic for DTO + sDitaTopic; DTC is shown as 主题 Concept.
+    return "task"
 
 
 def _append_topicref_xml(lines, topic, node_id_seq, indent, level_attr, dita_lang, template_name=None, children=None):
@@ -4551,7 +4812,7 @@ def _append_frontmatter_xml(lines, cover_node, frontmatter_nodes, node_id_seq, i
             indent + "  ",
             2,
             dita_lang,
-            template_name="sDitaConcept",
+            template_name="sDitaTopic",
             children=node.get("children"),
         )
 
@@ -4601,7 +4862,7 @@ def _append_bookmap_topics(lines, topic_roots, timestamp, dita_lang):
 
 
 def _derive_map_title(source_format, file_path, sections):
-    if source_format in ("docx", "idml"):
+    if source_format in ("docx", "idml", "md") and file_path:
         stem = os.path.splitext(os.path.basename(file_path))[0]
         stem = re.sub(r'^src_\d+_', '', stem)
         stem = re.sub(r'^idml_\d+_', '', stem)
@@ -4712,6 +4973,8 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             sections = _parse_content(source_format, file_path, source_content)
             if source_format in ("docx", "idml"):
                 sections = _reshape_docx_sections(sections)
+                sections = _postprocess_section_tree(sections)
+            elif source_format == "md":
                 sections = _postprocess_section_tree(sections)
             images = _extract_images_md(source_content)
 
@@ -4833,8 +5096,8 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     slug = f"{slug}_{slug_count + 1}"
                 topic_kind = _topic_kind_for_section(section, title)
                 if int(section.get("level", 1) or 1) <= 1 and _is_frontmatter_title(title):
-                    # Front-matter topics are concept (DTC/sDitaConcept).
-                    topic_kind = "concept"
+                    # Front-matter topics use DTO + sDitaTopic so IME shows 主题 Topic.
+                    topic_kind = "task"
                 topic_id = _generated_topic_code(topic_index, topic_kind)
                 topic_filename = f"{topic_id}.dita"
                 prepared.append((section, title, dita_type, topic_id, topic_filename, topic_kind))
@@ -4853,6 +5116,11 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 _raw_title = _clean_title(_section["title"])
                 if _raw_title:
                     xref_map.setdefault(_raw_title, _tid)
+                _num = _heading_number(_section.get("title") or "")
+                if _num:
+                    xref_map.setdefault(_num, _tid)
+                if _tid and _title:
+                    xref_map.setdefault(_tid, _title)
 
             for section, title, dita_type, topic_id, topic_filename, topic_kind in prepared:
                 dita_content = _content_to_dita_xml(

@@ -19,6 +19,8 @@ from app.api.convert import (  # noqa: E402
     _docx_table_to_markdown,
     _looks_like_docx_heading_text,
     _parse_md_sections,
+    _parse_content,
+    _normalize_native_markdown,
     _postprocess_section_tree,
     _reshape_docx_sections,
     _should_emit_docx_list_marker,
@@ -28,6 +30,7 @@ from app.api.convert import (  # noqa: E402
     _download_images_for_output,
     _topic_placeholder,
     _rewrite_template_frontmatter,
+    _topic_kind_for_section,
     _idml_to_markdown,
     _idml_table_to_markdown,
     _idml_walk,
@@ -51,11 +54,16 @@ class GeneratedTopicCodeTest(unittest.TestCase):
     def test_root_chapter_uses_cto_prefix(self):
         self.assertTrue(_generated_topic_code(2, "chapter").startswith("CTO"))
 
-    def test_concept_uses_dtc_prefix(self):
-        self.assertTrue(_generated_topic_code(3, "concept").startswith("DTC"))
+    def test_concept_uses_dto_prefix(self):
+        self.assertTrue(_generated_topic_code(3, "concept").startswith("DTO"))
 
     def test_task_uses_dto_prefix(self):
         self.assertTrue(_generated_topic_code(4, "task").startswith("DTO"))
+
+    def test_subsection_without_steps_uses_task_kind(self):
+        kind = _topic_kind_for_section({"level": 2, "dita_type": "concept"}, "Parameter description")
+        self.assertEqual(kind, "task")
+        self.assertTrue(_generated_topic_code(10, kind).startswith("DTO"))
 
 
 class TopicPlaceholderTest(unittest.TestCase):
@@ -91,6 +99,22 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn("<body ", xml)
         self.assertIn('cms:imesofttype="sDitaTopic"', xml)
         self.assertIn('id="topic-DTO041002"', xml)
+
+    def test_concept_topics_use_sdita_topic_shell(self):
+        xml = _content_to_dita_xml(
+            "产品概述",
+            "ZARC 用于基因数据压缩。",
+            "concept",
+            "DTC041002",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn("<topic ", xml)
+        self.assertIn("<body ", xml)
+        self.assertIn('cms:imesofttype="sDitaTopic"', xml)
+        self.assertIn('id="topic-DTC041002"', xml)
+        self.assertNotIn("<concept ", xml)
+        self.assertNotIn("sDitaConcept", xml)
 
     def test_cover_topics_use_cover_metadata(self):
         xml = _content_to_dita_xml(
@@ -164,8 +188,8 @@ class ContentGenerationTest(unittest.TestCase):
             topic_kind="concept",
         )
         self.assertIn('<note type="caution">', xml)
-        self.assertIn("<li>推荐使用阔口吸头。</li>", xml)
-        self.assertIn("<li>计数务必准确。</li>", xml)
+        self.assertIn("<li><p>推荐使用阔口吸头。</p></li>", xml)
+        self.assertIn("<li><p>计数务必准确。</p></li>", xml)
         note_start = xml.index('<note type="caution">')
         self.assertLess(xml.index("推荐使用阔口吸头。"), xml.index("</note>", note_start))
         self.assertLess(xml.index("推荐使用阔口吸头。"), xml.index("计数务必准确。"))
@@ -181,9 +205,9 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn('<note type="caution">', xml)
         self.assertIn("<ul>", xml)
-        self.assertIn("<li>运行8个样本，可直接取1管新试剂。</li>", xml)
-        self.assertIn("<li>黑色单圆圈表示用2.0冻存管。</li>", xml)
-        self.assertIn("<li>装载完成后盖上盖板。</li>", xml)
+        self.assertIn("<li><p>运行8个样本，可直接取1管新试剂。</p></li>", xml)
+        self.assertIn("<li><p>黑色单圆圈表示用2.0冻存管。</p></li>", xml)
+        self.assertIn("<li><p>装载完成后盖上盖板。</p></li>", xml)
         self.assertEqual(xml.count("<note "), 1)
 
     def test_english_label_only_note_groups_bracket_items(self):
@@ -197,8 +221,8 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn('<note type="tip">', xml)
         self.assertIn("<ul>", xml)
-        self.assertIn("<li>Use wide-bore pipette tips.</li>", xml)
-        self.assertIn("<li>Count at least three times.</li>", xml)
+        self.assertIn("<li><p>Use wide-bore pipette tips.</p></li>", xml)
+        self.assertIn("<li><p>Count at least three times.</p></li>", xml)
         self.assertEqual(xml.count("<note "), 1)
         self.assertNotIn("<p>[2]", xml)
 
@@ -213,9 +237,9 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn('<note type="tip">', xml)
         self.assertIn("<ul>", xml)
-        self.assertIn("<li>Retrieve DNA Clean Beads in advance.</li>", xml)
-        self.assertIn("<li>A single black circle indicates a 2.0 mL cryovial.</li>", xml)
-        self.assertIn("<li>Place the low temperature cover plate.</li>", xml)
+        self.assertIn("<li><p>Retrieve DNA Clean Beads in advance.</p></li>", xml)
+        self.assertIn("<li><p>A single black circle indicates a 2.0 mL cryovial.</p></li>", xml)
+        self.assertIn("<li><p>Place the low temperature cover plate.</p></li>", xml)
         self.assertEqual(xml.count("<note "), 1)
         self.assertNotIn("<p>[2]", xml)
 
@@ -232,7 +256,7 @@ class ContentGenerationTest(unittest.TestCase):
         # The table must be emitted before the note, not nested inside it.
         self.assertLess(xml.index('<table>'), xml.index('<note type="caution">'))
         self.assertNotIn('<table>\n', xml[xml.index('<note'):])
-        self.assertIn('<li>将DNA Clean Beads提前取出。</li>', xml)
+        self.assertIn('<li><p>将DNA Clean Beads提前取出。</p></li>', xml)
 
     def test_table_heading_becomes_table_title(self):
         xml = _content_to_dita_xml(
@@ -533,7 +557,31 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
         self.assertIn('<note type="warning"><p>保持低温。</p></note>', xml)
         self.assertIn('<table>\n          <title>参数</title>', xml)
-        self.assertIn('<li>第二步</li>', xml)
+        self.assertIn('<li><p>第二步</p></li>', xml)
+
+    def test_plain_list_items_wrap_text_in_p(self):
+        xml = _content_to_dita_xml(
+            "适用场景",
+            "- 大规模归档\n- 降低存储成本",
+            "concept",
+            "DTC041240",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn("<li><p>大规模归档</p></li>", xml)
+        self.assertIn("<li><p>降低存储成本</p></li>", xml)
+
+    def test_table_cell_text_wraps_in_p(self):
+        xml = _content_to_dita_xml(
+            "参数",
+            "| 参数 | 说明 |\n| :--- | :--- |\n| -c | 压缩 |",
+            "concept",
+            "DTC041241",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn("<entry><p>参数</p></entry>", xml)
+        self.assertIn("<entry><p>-c</p></entry>", xml)
 
     def test_standalone_image_has_no_alt_tag(self):
         xml = _content_to_dita_xml(
@@ -691,8 +739,8 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertEqual(xml.count('<entry>Section</entry>'), 1)
-        self.assertIn('<entry>2.2</entry>', xml)
+        self.assertEqual(xml.count('<entry><p>Section</p></entry>'), 1)
+        self.assertIn('<entry><p>2.2</p></entry>', xml)
 
     def test_repeated_grouped_first_column_is_collapsed_in_table_body(self):
         xml = _content_to_dita_xml(
@@ -703,8 +751,8 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<entry>Module A</entry>', xml)
-        self.assertIn('<entry></entry>\n                <entry>Enzyme</entry>', xml)
+        self.assertIn('<entry><p>Module A</p></entry>', xml)
+        self.assertIn('<entry></entry>\n                <entry><p>Enzyme</p></entry>', xml)
 
     def test_first_body_row_that_only_repeats_header_prefix_is_removed(self):
         xml = _content_to_dita_xml(
@@ -719,8 +767,8 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertEqual(xml.count('<entry>S220</entry>'), 1)
-        self.assertIn('<entry>Sample Volume</entry>', xml)
+        self.assertEqual(xml.count('<entry><p>S220</p></entry>'), 1)
+        self.assertIn('<entry><p>Sample Volume</p></entry>', xml)
 
     def test_do_not_sentence_stays_paragraph(self):
         xml = _content_to_dita_xml(
@@ -822,6 +870,8 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         self.assertEqual(_clean_title("2.1 注意事项及实验前准备工作"), "注意事项及实验前准备工作")
         self.assertEqual(_clean_title("3.1.1 机器准备"), "机器准备")
         self.assertEqual(_clean_title("4.1 MGISEQ-2000RS测序平台实验流程"), "MGISEQ-2000RS测序平台实验流程")
+        self.assertEqual(_clean_title("1. 产品概述"), "产品概述")
+        self.assertEqual(_clean_title("1. Product Overview"), "Product Overview")
         self.assertEqual(_clean_title("附录A DNA Clean Beads使用前注意事项"), "DNA Clean Beads使用前注意事项")
         self.assertEqual(_clean_title("附录"), "附录")
         self.assertEqual(_clean_title("4.1.1 仪器、试剂和耗材准备："), "仪器、试剂和耗材准备")
@@ -829,6 +879,7 @@ class DocxHeadingDetectionTest(unittest.TestCase):
     def test_clean_title_keeps_numbers_that_are_content(self):
         self.assertEqual(_clean_title("3'RNA自动化标准流程"), "3'RNA自动化标准流程")
         self.assertEqual(_clean_title("细胞相（1.13×）"), "细胞相（1.13×）")
+        self.assertEqual(_clean_title("2.0 mL"), "2.0 mL")
 
     def test_reshape_keeps_numbered_docx_heading_as_separate_topic(self):
         markdown = "# Barcode 引物使⽤注意\n\n1. 规则 A\n\n### 6.2.3 Sample Barcode 使⽤规则 (96 RXN)\n\n1. 规则 B\n"
@@ -1073,9 +1124,9 @@ class BookmapTreeTest(unittest.TestCase):
         self.assertIn('href="CTO041001.dita"', output)
         self.assertIn('cms:template="chapterTopic"', output)
         self.assertIn('href="DTC041002.dita"', output)
-        self.assertIn('cms:template="sDitaConcept"', output)
+        self.assertNotIn('sDitaConcept', output)
         self.assertIn('href="DTO041003.dita"', output)
-        self.assertIn('cms:template="sDitaTopic"', output)
+        self.assertEqual(output.count('cms:template="sDitaTopic"'), 2)
 
     def test_topic_hierarchy_uses_levels_for_nesting(self):
         topics = [
@@ -2156,7 +2207,7 @@ class IdmlConversionTest(unittest.TestCase):
         """【1】 is a note enumeration marker, not a UI control name."""
         md = "注意：\n\n【1】提前取出DNA Clean Beads。\n\n【2】提前取出Lysis Buffer。\n"
         xml = _content_to_dita_xml("试剂准备", md, "concept", "DTC041217", "zh-CN", topic_kind="concept")
-        self.assertIn("<li>提前取出DNA Clean Beads。</li>", xml)
+        self.assertIn("<li><p>提前取出DNA Clean Beads。</p></li>", xml)
         self.assertNotIn("<uicontrol>1</uicontrol>", xml)
 
     def test_english_step_bold_becomes_uicontrol(self):
@@ -2558,7 +2609,7 @@ class IdmlConversionTest(unittest.TestCase):
             topic_kind="concept", source_format="idml",
         )
         self.assertIn(
-            "<entry><ul><li>载片运输温度由10 ℃~25 ℃ 改为2 ℃~25 ℃</li><li>仪器操作描述优化</li></ul></entry>",
+            "<entry><ul><li><p>载片运输温度由10 ℃~25 ℃ 改为2 ℃~25 ℃</p></li><li><p>仪器操作描述优化</p></li></ul></entry>",
             xml,
         )
 
@@ -2869,6 +2920,249 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertNotIn('<note type="warning">', nested_li)
         self.assertLess(parent.index("</ul>"), parent.index("如下界面显示后"))
         self.assertLess(parent.index("如下界面显示后"), parent.index('<note type="warning">'))
+
+
+class NativeMarkdownToDitaTest(unittest.TestCase):
+    def test_headingless_markdown_becomes_one_section(self):
+        sections = _parse_content("md", None, "试剂使用前请平衡至室温。\n\n请勿反复冻融。")
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0]["title"], "文档")
+        self.assertIn("试剂使用前请平衡至室温。", sections[0]["content"])
+
+    def test_preamble_before_first_heading_is_kept(self):
+        md = "本手册说明仪器操作。\n\n# 装载试剂\n\n将试剂取出。\n"
+        sections = _parse_content("md", None, md)
+        self.assertEqual(sections[0]["title"], "正文")
+        self.assertIn("本手册说明仪器操作。", sections[0]["content"])
+        self.assertEqual(sections[1]["title"], "装载试剂")
+
+    def test_setext_and_yaml_title(self):
+        md = "---\ntitle: Yellow 16 用户手册\n---\n\n操作说明\n======\n\n第一步。\n"
+        sections = _parse_content("md", None, md)
+        self.assertEqual(sections[0]["title"], "操作说明")
+        self.assertIn("第一步。", sections[0]["content"])
+
+    def test_yaml_title_used_when_document_has_no_heading(self):
+        md = "---\ntitle: 产品简介\n---\n\n这是正文。\n"
+        sections = _parse_content("md", None, md)
+        self.assertEqual(sections[0]["title"], "产品简介")
+        self.assertIn("这是正文。", sections[0]["content"])
+
+    def test_native_bold_italic_code_and_link(self):
+        md = "点击 **确定** 后查看 *结果*，命令为 `dnb seq`，详见 [手册](https://example.com/manual)。"
+        xml = _content_to_dita_xml(
+            "操作", md, "concept", "DTC041301", "zh-CN",
+            topic_kind="concept", source_format="md",
+        )
+        self.assertIn("<b>确定</b>", xml)
+        self.assertIn("<i>结果</i>", xml)
+        self.assertIn("dnb seq", xml)
+        self.assertNotIn("<codeph>", xml)
+        self.assertIn(
+            '<xref href="https://example.com/manual" scope="external" format="html">手册</xref>',
+            xml,
+        )
+
+    def test_file_format_inline_code_becomes_italic(self):
+        md = "输入支持 `.fq` 或 `.fq.gz`，输出为 `.arc`，命令为 `zarc -c`。"
+        xml = _content_to_dita_xml(
+            "压缩", md, "concept", "DTC041320", "zh-CN",
+            topic_kind="concept", source_format="md",
+        )
+        self.assertIn("<i>.fq</i>", xml)
+        self.assertIn("<i>.fq.gz</i>", xml)
+        self.assertIn("<i>.arc</i>", xml)
+        self.assertIn("zarc -c", xml)
+        self.assertNotIn("<codeph>", xml)
+
+    def test_plain_file_format_token_becomes_italic(self):
+        xml = _content_to_dita_xml(
+            "参数", "输出文件名称（.arc后缀）\n", "concept", "DTC041321", "zh-CN",
+            topic_kind="concept", source_format="md",
+        )
+        self.assertIn("<i>.arc</i>后缀", xml)
+        self.assertNotIn("<codeph>", xml)
+
+    def test_blockquote_note_becomes_caution(self):
+        xml = _content_to_dita_xml(
+            "准备",
+            "> **注意：** 请先平衡试剂。\n",
+            "concept",
+            "DTC041302",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="md",
+        )
+        self.assertIn('<note type="caution">', xml)
+        self.assertIn("请先平衡试剂。", xml)
+
+    def test_fenced_code_becomes_codeblock(self):
+        md = "示例：\n\n```python\nprint(1)\nprint(2)\n```\n"
+        xml = _content_to_dita_xml(
+            "示例", md, "concept", "DTC041303", "zh-CN",
+            topic_kind="concept", source_format="md",
+        )
+        self.assertIn('<codeblock outputclass="python" xml:space="preserve">', xml)
+        self.assertIn("print(1)", xml)
+        self.assertIn("print(2)", xml)
+        self.assertNotIn("<b>", xml.split("<codeblock", 1)[1].split("</codeblock>", 1)[0])
+
+    def test_indented_nested_list_stays_nested(self):
+        md = (
+            "1. 确认方案。\n"
+            "   - 如需退出，点击取消。\n"
+            "   - 如需继续，点击确定。\n"
+            "2. 开始测序。\n"
+        )
+        xml = _content_to_dita_xml(
+            "回顾参数", md, "task", "DTO041304", "zh-CN",
+            topic_kind="task", source_format="md",
+        )
+        self.assertIn("<ul>", xml)
+        self.assertLess(xml.index("<ol>"), xml.index("<ul>"))
+        self.assertLess(xml.index("如需退出"), xml.index("</ol>"))
+        self.assertGreater(xml.index("</ul>"), xml.index("如需退出"))
+        self.assertLess(xml.index("</ul>"), xml.rindex("</ol>"))
+        self.assertLess(xml.index("如需退出"), xml.index("开始测序。"))
+
+    def test_horizontal_rule_is_dropped(self):
+        xml = _content_to_dita_xml(
+            "说明",
+            "上一段。\n\n---\n\n下一段。\n",
+            "concept",
+            "DTC041305",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="md",
+        )
+        self.assertIn("上一段。", xml)
+        self.assertIn("下一段。", xml)
+        self.assertNotIn("<p>---</p>", xml)
+
+    def test_normalize_skips_fenced_bold(self):
+        md = "```\n**not bold**\n```\n"
+        normalized = _normalize_native_markdown(md)
+        self.assertIn("**not bold**", normalized)
+        self.assertNotIn("[[B]]", normalized)
+
+    def test_indented_fenced_code_stays_codeblock(self):
+        md = (
+            "1. 执行安装命令\n"
+            "   ```bash\n"
+            "   cd /path/to/script_dir\n"
+            "   bash zarc_install.sh -P /opt/\n"
+            "   ```\n"
+        )
+        xml = _content_to_dita_xml(
+            "安装步骤", md, "task", "DTO041306", "zh-CN",
+            topic_kind="task", source_format="md",
+        )
+        self.assertIn('<codeblock outputclass="bash" xml:space="preserve">', xml)
+        self.assertIn("bash zarc_install.sh -P /opt/", xml)
+        self.assertNotIn("<p>cd /path/to/script_dir</p>", xml)
+        self.assertNotIn("[[B]]", _normalize_native_markdown("   ```\n   **not bold**\n   ```\n"))
+
+    def test_hash_comments_inside_fence_are_not_headings(self):
+        md = (
+            "## 压缩示例\n\n"
+            "**使用自定义参考基因组**\n"
+            "```bash\n"
+            "# 先为自定义参考基因组建索引\n"
+            "zarc -i -r /path/to/hg19.fa\n"
+            "\n"
+            "# 再进行压缩\n"
+            "zarc -c -t 16 -1 sample.fq -r /path/to/hg19.fa -o sample.arc\n"
+            "```\n"
+        )
+        sections = _parse_content("md", None, md)
+        titles = [sec["title"] for sec in sections]
+        self.assertEqual(titles, ["压缩示例"])
+        xml = _content_to_dita_xml(
+            "压缩示例", sections[0]["content"], "concept", "DTC041307", "zh-CN",
+            topic_kind="concept", source_format="md",
+        )
+        self.assertIn("# 先为自定义参考基因组建索引", xml)
+        self.assertIn("zarc -i -r /path/to/hg19.fa", xml)
+        self.assertIn("zarc -c -t 16 -1 sample.fq", xml)
+
+    def test_english_markdown_bold_stays_bold_in_steps(self):
+        xml = _content_to_dita_xml(
+            "Installation Steps",
+            "1. **Place the installation script**\n   Copy `zarc_install.sh`.\n",
+            "task",
+            "DTO041308",
+            "en-US",
+            topic_kind="task",
+            source_format="md",
+        )
+        self.assertIn("<b>Place the installation script</b>", xml)
+        self.assertNotIn("<uicontrol>Place the installation script</uicontrol>", xml)
+
+    def test_unindented_paragraph_closes_native_markdown_list(self):
+        md = (
+            "试用版限制如下：\n"
+            "- 上限 15 TB\n"
+            "- 有效期 90 天\n"
+            "\n"
+            "若已购买正式授权，请按以下步骤激活：\n"
+            "\n"
+            "1. 申请许可证文件\n"
+        )
+        xml = _content_to_dita_xml(
+            "软件激活", md, "task", "DTO041309", "zh-CN",
+            topic_kind="task", source_format="md",
+        )
+        last_li = xml.split("<ul>", 1)[1].split("</ul>", 1)[0]
+        self.assertNotIn("若已购买正式授权", last_li)
+        self.assertLess(xml.index("</ul>"), xml.index("若已购买正式授权"))
+        self.assertLess(xml.index("若已购买正式授权"), xml.index("<ol>"))
+
+    def test_indented_paragraph_stays_inside_native_markdown_list_item(self):
+        md = (
+            "1. **申请许可证文件**\n"
+            "   联系技术支持。\n"
+        )
+        xml = _content_to_dita_xml(
+            "软件激活", md, "task", "DTO041310", "zh-CN",
+            topic_kind="task", source_format="md",
+        )
+        first_li = xml.split("<li>", 1)[1].split("</li>", 1)[0]
+        self.assertIn("申请许可证文件", first_li)
+        self.assertIn("联系技术支持。", first_li)
+
+    def test_markdown_section_reference_becomes_xref(self):
+        xml = _content_to_dita_xml(
+            "常见问题",
+            "手动安装对应依赖包（参见 3.2 节第 5 点）。\n",
+            "concept",
+            "DTC041311",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="md",
+            xref_map={"3.2": "DTO041007", "DTO041007": "安装步骤"},
+        )
+        self.assertIn(
+            '<xref href="DTO041007.dita" cms:title="安装步骤">安装步骤</xref>',
+            xml,
+        )
+        self.assertIn("第 5 点", xml)
+
+    def test_english_section_reference_becomes_xref(self):
+        xml = _content_to_dita_xml(
+            "FAQ",
+            "Manually install the packages (see Section 3.2, step 5).\n",
+            "concept",
+            "DTC041312",
+            "en-US",
+            topic_kind="concept",
+            source_format="md",
+            xref_map={"3.2": "DTO041007", "DTO041007": "Installation steps"},
+        )
+        self.assertIn(
+            '<xref href="DTO041007.dita" cms:title="Installation steps">Installation steps</xref>',
+            xml,
+        )
+        self.assertIn("step 5", xml)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Word to DITA Conversion Rules
 
-适用范围：当前项目的 Word/WPS 转 DITA 批量转换，以及 InDesign（IDML）转 DITA 批量转换。两套源格式共用下面的 Note、列表、表格、图片与验收规则，差异仅在源格式解析章节。
+适用范围：当前项目的 Word/WPS 转 DITA 批量转换、InDesign（IDML）转 DITA 批量转换，以及原生 Markdown（`.md` / `.markdown`）转 DITA。Note、列表、表格、图片与验收规则共用；源格式差异写在各自的解析章节。
 
 ## 目标
 
@@ -18,6 +18,11 @@
 - `Manufacturer information` 按源 Word 生成，不复用模板 appendix 内容。
 - `<frontmatter>` 内顺序为：封面（Cover）、`关于说明书`、`版本记录`；`关于说明书`、`版本记录` 与封面平级，排在封面之后，不嵌套在封面下。
 - `制造商信息` 不是固定前部 topic，按源文档框架放置：IDML 中 `Title-Appen. n` 样式输出为正文之后的 `<appendix>`；Word 中按源章节位置生成。
+
+ - 参考包若是快速操作指南（frontmatter 只有封面 topic，没有关于说明书和 toc），输出包跟随参考包：封面 topic 复用参考包结构，不生成关于说明书，不挂 booklists/toc。源 MD 标题前的适用平台并入第一章正文；文档日期写入封面「修订日期」，不再并入第一章。用户已填的封面字段（手册名称、编号、修订日期、版本）按该封面输出。
+
+- 英文输出的章节、topic 标题使用 sentence style：首字母大写，其余小写；ZARC、FASTQ、GZIP、CLI 等专有名词和缩写保留。封面标题与书名不改。
+- 快速操作指南英文包的命令速查表输出为 `<chapter>`，下挂 chapterTopic，不用 `<appendix>`。
 
 ## Word 预处理规则
 
@@ -42,7 +47,19 @@
   - 紧跟表格的整行加粗标签，例如 `常温试剂`、`低温试剂`、`试剂槽试剂`、`细胞相（1.13×）`。
   - 英文同类表格分组标签同样保留为正文，例如 `Cell phase (1.13×)`、`Magnetic bead phase (1.13×)`。
   - 产品套装型号行，例如 `MGISEQ-2000RS 高通量测序试剂套装(FCL PE100) (Cat. No. 1000012554)`。
-  - 带 Word 编号的短段落，例如 `cDNA产物扩增循环数参考`；它属于编号列表项，不是章节标题。
+- 带 Word 编号的短段落，例如 `cDNA产物扩增循环数参考`；它属于编号列表项，不是章节标题。
+
+## IME 主题类型
+
+- 封面使用 `sCoverTopic`。
+- 章容器下挂的章级 topic 使用 `chapterTopic`。
+- 其余所有生成 topic 一律使用 IME 主题类型 `sDitaTopic`（根元素 `<topic>` / `<body>`）和编号前缀 `DTO`，包括原按标题关键词判为 concept / task / reference 的小节。
+- IME 按编号前缀显示类型：`DTO` 为「主题 Topic」，`DTC` 为「主题 Concept」。正文小节不得再生成 `DTC` 或 `sDitaConcept`。
+ - XML 已是 `sDitaTopic` 但文件名 / `cms:number` 仍为 `DTC` 时，IME 仍显示「主题 Concept」，必须把 IME 编号前缀改成 `DTO`。
+ - 改写已有 IME 导出包时，下列位置必须一起改前缀与模板：`.dita` 文件名、`cms:number`、ditamap 的 `href` / `keys` / `cms:template` / `cms:imesofttype`、正文 `<xref>` 的 `href` / `keyref`、`jsonData.json`（`code`、`fileName`、`softType`、`iba_keys`）、`infotree.xml` 及其 `out/` 副本。只改 `.dita` 时 IME 仍按 jsonData / infotree 的旧前缀显示类型。
+ - 占位编号（如 `cms:keys="DTC041001"`、`cms:placeHolder`）可保留；已分配的 IME 编号（如 `DTC048831`）改为 `DTO048831`。
+ - 封面与章级保持 `sCoverTopic` / `chapterTopic`，不改成 Topic。
+ - 编号前缀从 `DTC` 改为 `DTO` 后，IME 按原编号匹配不到节点，导入时选新增。
 
 ## 列表规则
 
@@ -55,6 +72,9 @@
 - Word 操作步骤中的加粗强调文本需要保留并转换为 `b` 标签。
 - IDML 的 `Bulleted list`/`Numbered list` 列表项即使正文字面命中 note 关键词（如 `警告`、`注意`、`切勿`），也必须保留为普通列表项：IDML 的警告/注意以提示框表格表达，列表项不得被提升为 note 并折叠进上一条。
 - 一个 IDML 列表段落里的每一项（含 `<Br/>` 分隔出的步骤）必须各自成项，不得把多项合并进同一个 `<li>`。
+
+- `ul` / `ol` 的每个条目文本都包在 `<p>` 里：`<li><p>…</p></li>`。嵌套列表、note、图片、续段仍挂在该 `<li>` 内、条目 `<p>` 之后。
+ - 原生 Markdown 中，列表项后缩进的续段仍挂在该 `<li>` 内；空行之后未缩进的独立段落结束当前列表，不得挂到上一项。Word/IDML 的列表续段策略不变。
 
 ### UI 控件（`uicontrol`）
 
@@ -89,7 +109,8 @@
 - 只有标签的 note（如单独一行 `注意：`）吸收其后连续的 `【N】` 条目，合并为同一个 note。
 - note 内的 `【N】` 条目合并为同一个 `ul`，每项转为 `li`。
  - 英文 `Note:` 同样吸收其后连续的 `[N]` 条目（含 `Note: [1] ...` 写在同一行、`[2]` 另起一行的写法），合并为同一个 note 内的 `ul`/`li`。
-- IDML 提示框正文若采用 `Warning sentence list` 等“句子列表”样式，段落内由 `<Br/>` 分隔的每句话各成一个列表项，整体输出为 note 内的 `<ul><li>…</li></ul>`；普通提示框正文仍按 `<p>` 输出。
+- note 内每个句段各自一个 `<p>`；note 内 `ul` / `ol` 的每个条目同样写成 `<li><p>…</p></li>`。
+- IDML 提示框正文若采用 `Warning sentence list` 等“句子列表”样式，段落内由 `<Br/>` 分隔的每句话各成一个列表项，整体输出为 note 内的 `<ul><li><p>…</p></li></ul>`；普通提示框正文仍按 `<p>` 输出。
 
 ### IDML 提示框（callout box）
 
@@ -122,10 +143,10 @@
 - 步骤列表内穿插的提示框表格、图片按其在段落中的顺序输出到所属步骤项，保证 `ol` 编号连续（`准备DNB制备混合液`、`回顾参数`、`DNB浓度不合格` 等步骤数须与源一致）。
 - 源文档的列表层级（`Level n` 样式）必须保留：解析阶段在列表项行首输出 `[[LVL:n]]` 标记，DITA 阶段按层级构建嵌套 `<ul>`/`<ol>`。例如步骤下的 `Level 3` 项目符号成为该 `<li>` 内的 `<ul>`，其下 `Level 4` 编号项成为嵌套的 `<ol>`；不得把子列表压平到父级。
  - 列表项之后的说明段落、公式图必须挂在所属 `<li>` 内，并保持源文档顺序：出现在嵌套子列表之前的 `<p>`/note/图紧跟步骤正文；出现在嵌套子列表之后的说明挂在子列表后面。这些内容不能冲出整个 `<ul>` 变成兄弟节点。
-- 列表层级标记不得影响章节类型判定：行首带 `[[LVL:n]]` 的编号步骤仍须识别为任务（DTO），不能误判为概念（DTC）。
+- 列表层级标记不得影响章节类型判定：行首带 `[[LVL:n]]` 的编号步骤仍须识别为任务（DTO）。
 - 步骤内联按钮图标必须留在它所属的步骤项内：出现在列表项文本之后的 `<Link>` 图标挂到该 `<li>`；出现在最后一个步骤之后的图标，也要在 `</ol>` 关闭前挂进最后一个 `<li>`，不能落到列表之外。
 - 内联图标若排在提示框（note）之前，输出顺序须保持“图标 → note”，不能因为提示框先冲刷而把图标挤到 note 之后。
-- 内联按钮图标必须保持它在句中的原始位置，不能下沉到段落/列表项末尾：例如源为「点击[icon]，托盘将自动收回…」时，输出须为 `<li>点击<image href="…"/>，托盘将自动收回…</li>`，图标夹在 `点击` 与 `，` 之间。图标在解析阶段以占位符随文本一起传递，避免位置丢失。
+- 内联按钮图标必须保持它在句中的原始位置，不能下沉到段落/列表项末尾：例如源为「点击[icon]，托盘将自动收回…」时，输出须为 `<li><p>点击<image href="…"/>，托盘将自动收回…</p></li>`，图标夹在 `点击` 与 `，` 之间。图标在解析阶段以占位符随文本一起传递，避免位置丢失。
 - 段落正文中的状态图标（文件名以 `icon` 开头，如 `icon_status sequencing_1_1.ai`）按内联图片输出，段落保持为正文而不是被拆成独立的块级图片。
   - 交叉引用（`CrossReferenceSource`，源文形态为 `第<页码>页“目标标题”`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。DITA 阶段输出 `<xref href="目标topic.dita" cms:title="目标标题">第N 页目标标题</xref>`，页码和标题都在 xref 体内。找不到对应 topic 时回退为纯文本 `第N 页“标题”`，不产出无效 `<xref>`。
   - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`）。页码和标题都写在 `<xref>` 体内：`<xref href="…" cms:title="测定DNB浓度">第12 页测定DNB 浓度</xref>`。IME 交叉引用样式给整个 xref 加引号和斜体。数字/英文后紧跟汉字处加空格（`第12 页`、`测定DNB 浓度`），页码与标题之间不加空格。
@@ -168,6 +189,10 @@
 - 若同一 Markdown 表中出现嵌入式 `Table N ...` 行，视为下一张表的标题并拆分为独立表格。
 - 被合并单元格拆碎的英文表题片段需自动拼回完整标题。
 
+- 表格单元格内每个句段包在 `<p>`：`<entry><p>…</p></entry>`。空单元格保持 `<entry></entry>`。
+- 单元格内列表同样每个 `<li>` 包 `<p>`。
+- 正文每个句段各自一个 `<p>`，含 note 内文字。
+
 ## 验收口径
 
 - 标题数量与结构和源 Word 对齐。
@@ -177,6 +202,22 @@
 - 内容完整性：源文档全部段落必须出现在输出 DITA 中（用“源段落 → 输出全文”归一化比对，缺失数应为 0）。
 - 结构合法性：输出的每个 `.dita` / `.ditamap` 必须可解析，ditamap 中所有 `href` 必须可达。
  - 每次转换完成后必须做一轮与原文核对：按本文件逐条检查模板复用、标题树、列表、note、uicontrol、图题/表题、图片和扉页；先跑单测与 `verify_word_to_dita_package.py`，再人工对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出后再交给用户。
+
+## Markdown 源解析规则
+
+- 原生 `.md` / `.markdown` 先归一成与 Word/IDML 相同的中间标记，再走同一套 DITA 生成逻辑。
+- ATX（`#` 到 `######`）与 Setext（`===` / `---`）标题都生成 topic；层级与源标题一致。
+- 无标题文档输出为单个 topic，标题为 `文档`；第一个标题之前的引言单独输出为 `正文` topic。
+- YAML front matter 的 `title` 在无标题或仅有引言时作为 topic 标题。
+- `**加粗**` 转为 `<b>`；`*斜体*` 转为 `<i>`。行内代码不用 `<codeph>`；`.fq.gz`、`.arc` 这类格式名转为 `<i>`，其余行内代码输出为普通文本。
+- `[文本](url)` 转为 `<xref>`；`http://` / `https://` 链接带 `scope="external" format="html"`。
+- 围栏代码块（` ``` ` / `~~~`）转为 `<codeblock xml:space="preserve">`，语言写入 `outputclass`。
+- 引用行去掉 `>` 后按正文处理；`注意` / `Note:` / `警告` / `Warning` 等标签仍按 Note 规则输出。
+- 缩进列表按缩进层级构建嵌套 `<ul>` / `<ol>`，不得把子列表冲出父步骤。
+- 单独一行的 `---` / `***` / `___` 视为分隔线，不输出段落。
+- 围栏代码块内部的加粗、链接和引用标记保持原文，不做二次转换。
+ - 正文中的 `Section 3.2` / `3.2 节` 转为指向该编号标题对应 topic 的 `<xref>`；其后的 step / 第 N 点保持原文。
+ - 英文快速操作指南中，章容器标题 `Frequently asked questions & support` 保持不变，其下 chapterTopic 的可见标题改为 `Frequently asked questions & solutions`。
 
 ## 当前批量转换基线
 
@@ -190,3 +231,7 @@
 - 转换实现的回归测试见 `当前工作区/backend/tests/test_convert_dita_generation.py`；修改规则后必须同步补充/更新用例。
 - 每次批量转换完成后，先跑单测与包级验收，再交给用户做平台侧导入验证。
  - 包级验收通过仍须做原文核对；不得只交 zip、不对照源文档和本规则。
+
+原生 Markdown（`.md` / `.markdown`）转 DITA 共用同一套 Note、列表、表格、图片与验收规则；Markdown 特有语法写在“Markdown 源解析规则”小节。
+ - 本文件是 Word/WPS、IDML 与 Markdown 转 DITA 转换规则的唯一基线，新增或调整转换规则时先更新本文件，再落实现与测试。
+ - 原生 Markdown 的 `**加粗**` 即使出现在英文步骤列表中也转为 `<b>`，不按 Word 英文屏上控件处理。
