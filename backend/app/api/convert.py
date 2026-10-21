@@ -3402,14 +3402,23 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         def _emit_span_row_entries(row, indent):
             entries = []
             col = 0
+            # [[SPANC]] after a same-row colspan already advanced `col`;
+            # only leftover vMerge continues should bump the column index.
+            pending_hspan = 0
             for cell in row:
                 text, colspan, rowspan, covered = _parse_span_cell(cell)
                 if covered:
+                    if pending_hspan > 0:
+                        pending_hspan -= 1
+                        continue
                     col += 1
                     continue
                 attrs = ""
                 if colspan > 1:
-                    attrs += f' namest="COLSPEC{col}" nameend="COLSPEC{col + colspan - 1}"'
+                    end = min(col + colspan - 1, cols - 1)
+                    if end > col:
+                        attrs += f' namest="COLSPEC{col}" nameend="COLSPEC{end}"'
+                    pending_hspan += max(0, colspan - 1)
                 if rowspan > 1:
                     attrs += f' morerows="{rowspan - 1}"'
                 entries.append(f'{indent}{_dita_table_entry_xml(text, attrs)}')

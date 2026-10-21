@@ -1436,6 +1436,50 @@ class DocxTableMarkdownTest(unittest.TestCase):
         self.assertIn('<table outputclass="180mm">', xml)
         self.assertIn('namest="COLSPEC1" nameend="COLSPEC4"', xml)
 
+    def test_horizontal_span_placeholders_do_not_shift_later_columns(self):
+        table = self._real_table(
+            2,
+            9,
+            {
+                (0, 0): "Consumable Name",
+                (0, 1): "1RXN",
+                (0, 2): "2RXN",
+                (0, 3): "3RXN",
+                (0, 4): "4RXN",
+                (0, 5): "5RXN",
+                (0, 6): "6RXN",
+                (0, 7): "7RXN",
+                (0, 8): "8RXN",
+                (1, 0): "M8 slide (each)",
+                (1, 1): "1",
+                (1, 3): "2",
+                (1, 5): "3",
+                (1, 7): "4",
+            },
+            merges=[
+                ((1, 1), (1, 2)),
+                ((1, 3), (1, 4)),
+                ((1, 5), (1, 6)),
+                ((1, 7), (1, 8)),
+            ],
+        )
+        xml = _content_to_dita_xml(
+            "Reference Table of Consumable Usage for 1-8 Throughputs in the Entire Workflow",
+            "\n".join(_docx_table_to_markdown(table)),
+            "concept",
+            "CTO041050",
+            "en-US",
+            topic_kind="chapter",
+        )
+        self.assertIn('namest="COLSPEC1" nameend="COLSPEC2"', xml)
+        self.assertIn('namest="COLSPEC3" nameend="COLSPEC4"', xml)
+        self.assertIn('namest="COLSPEC5" nameend="COLSPEC6"', xml)
+        self.assertIn('namest="COLSPEC7" nameend="COLSPEC8"', xml)
+        self.assertNotIn("COLSPEC10", xml)
+        self.assertNotIn("COLSPEC11", xml)
+        self.assertIn(">1</entry>", xml)
+        self.assertIn(">4</entry>", xml)
+
     def test_sequencing_parameters_table_is_extra_wide(self):
         xml = _content_to_dita_xml(
             "Sequencing Parameters",

@@ -164,6 +164,7 @@
 - 若整张表每一行都带 `tblHeader`（常见于只有两行的推荐值表），只保留首行为 `<thead>`，其余进 `<tbody>`。
 - 没有垂直合并的标签首行（如 `Workbench Position`）可作为 1 行 `<thead>`。
 - Word `w:vMerge` / `w:gridSpan` 在解析阶段输出 `[[SPAN:c,r]]` / `[[SPANC]]`，DITA 阶段还原为 `morerows` 与 `namest`/`nameend`。
+- 同一行里横向合并的 `[[SPANC]]` 只占位、不再推进列号；`namest`/`nameend` 必须落在已有 `colspec` 范围内。列号越界时 IME 打开该 topic 会报「加载文档内容失败:undefined」。
 - 超宽表输出 `<table outputclass="180mm">`：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` 等宽表章节，或列数 ≥ 7（覆盖 Barcode / Appendix C–E）。
 - Word 表格跨页后重复出现的表头行，需要在转换后自动删除。
 - 若同一 Markdown 表中出现嵌入式 `Table N ...` 行，视为下一张表的标题并拆分为独立表格。
