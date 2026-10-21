@@ -78,6 +78,19 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('cms:imesofttype="chapterTopic"', xml)
         self.assertIn('id="concept-CTO041001"', xml)
 
+    def test_empty_topic_body_keeps_openable_paragraph(self):
+        xml = _content_to_dita_xml(
+            "Product Information",
+            "",
+            "concept",
+            "CTO041002",
+            "en-US",
+            topic_kind="chapter",
+        )
+        self.assertIn("<conbody ", xml)
+        self.assertIn("<p></p>", xml)
+        self.assertNotRegex(xml, r"<conbody[^>]*>\s*</conbody>")
+
     def test_task_topics_use_topic_shell(self):
         xml = _content_to_dita_xml(
             "进行磁珠分选",

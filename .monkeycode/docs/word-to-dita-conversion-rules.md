@@ -29,6 +29,7 @@
 ## 标题与结构规则
 
 - DITA 层级按源 Word 标题层级建树，章节结构需要与 Word 层级 100% 一致。
+- 无正文的真实父 topic 仍输出 `conbody`/`body`，并至少放一个空 `<p>`，避免 IME 打开时报「加载文档内容失败:undefined」。
 - 源 Word 里仅作分组、没有正文的 `Appendix` / `附录` 父标题不生成 topic，也不进入 ditamap。
 - 其下每个附录提升为独立 `<appendix>`：容器 `navtitle` 为附录名，先挂同名 `chapterTopic`，再挂该附录的子 topic；叶子附录的正文写在该 `chapterTopic` 中。
 - `Revision history` 视为真实章节。

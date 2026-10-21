@@ -4075,6 +4075,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     _flush_pending_note_to_body()
 
     body_content = "\n".join(p for p in body_parts if p)
+    if not str(body_content).strip():
+        # IME structured editor binds the first body child. An empty
+        # <conbody>/<body> yields "加载文档内容失败:undefined".
+        body_content = "        <p></p>"
 
     if topic_kind in {"chapter", "concept"}:
         root_tag = "concept"
