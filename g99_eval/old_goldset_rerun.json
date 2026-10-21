@@ -1,0 +1,47 @@
+{
+ "pdf_hits": [],
+ "documents": [
+  {
+   "name": "gospatial_v2_24_en",
+   "review_id": 20,
+   "baseline": "/workspace/backend/goldset/human_baseline_gospatial_v2_24.md",
+   "status": "skipped",
+   "error": "db_unavailable:OperationalError"
+  },
+  {
+   "name": "e25rs_cn",
+   "review_id": 21,
+   "baseline": "/workspace/backend/goldset/human_baseline_e25rs_cn.json",
+   "status": "skipped",
+   "error": "db_unavailable:OperationalError"
+  },
+  {
+   "name": "e25rs_en",
+   "review_id": 23,
+   "baseline": "/workspace/backend/goldset/human_baseline_e25rs_en.json",
+   "status": "skipped",
+   "error": "db_unavailable:OperationalError"
+  },
+  {
+   "name": "e25rs_v8_cn_observed",
+   "review_id": null,
+   "baseline": "/workspace/backend/goldset/human_baseline_高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.json",
+   "status": "skipped",
+   "error": "no_review_id"
+  },
+  {
+   "name": "e25rs_v8_en_observed",
+   "review_id": null,
+   "baseline": "/workspace/backend/goldset/human_baseline_High-throughputSequencingSetInstructionsforUse_English_RUO_QD_V8.0_R01Tina.json",
+   "status": "skipped",
+   "error": "no_review_id"
+  },
+  {
+   "name": "g99_v9_observed",
+   "review_id": null,
+   "baseline": "/workspace/backend/goldset/human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json",
+   "status": "skipped",
+   "error": "no_review_id"
+  }
+ ]
+}

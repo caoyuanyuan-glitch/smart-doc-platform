@@ -98,7 +98,12 @@ def test_pdf_page_metadata_collects_suspicious_table_pages(monkeypatch):
         },
     )
 
-    metadata = review_api._extract_pdf_page_metadata(document, "fallback")
+    content = (
+        "版本  日期\n2.0  2026年7月15日\n1.0  2025年11月17日\n3"
+        "\n\f\n"
+        "正文内容\n图 1 系统组成\nDoc. No. H-020-001246-00"
+    )
+    metadata = review_api._extract_pdf_page_metadata(document, content)
     suspicious = review_api._collect_pdf_suspicious_pages(metadata)
 
     assert metadata["enabled"] is True
@@ -4450,3 +4455,47 @@ def test_run_manual_engineering_audit_skips_leadin_for_separate_procedures():
     issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
 
     assert not any(issue["rule"] == "DOC-PROC-002" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_chinese_residual_in_english():
+    content = (
+        "This chapter describes the sequencing workflow and reagent storage conditions. "
+        "Store the kit at room temperature。Do not freeze the reagents.\n"
+        "Please refer to 请参见下表 for reagent details and handling steps.\n"
+    )
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    cn_issues = [item for item in issues if item["rule"] == "ENG-CN-001"]
+    originals = {item["original_text"] for item in cn_issues}
+    assert any("请参见下表" in text for text in originals)
+    assert any("。" in text and re.search(r"[A-Za-z]", text) for text in originals)
+
+
+def test_run_manual_engineering_audit_detects_skipped_table_number():
+    content = "\n".join([
+        "This chapter describes reagent setup and adapter layout for the instrument.",
+        "Table 1 Reagent components",
+        "Buffer A is listed with the required volume for each reaction.",
+        "Table 2 Consumable list",
+        "Filter tips are listed with the catalog identifiers.",
+        "Table 4 Adapter plate layout",
+        "Well A1 is reserved for the positive control sample.",
+    ])
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    assert any(
+        item["rule"] == "DOC-FIGTAB-001" and "Table 3" in item["suggestion"]
+        for item in issues
+    )
+
+
+def test_run_manual_engineering_audit_skips_continuous_table_numbers():
+    content = "\n".join([
+        "This chapter describes reagent setup and adapter layout for the instrument.",
+        "Table 1 Reagent components",
+        "Buffer A is listed with the required volume for each reaction.",
+        "Table 2 Consumable list",
+        "Filter tips are listed with the catalog identifiers.",
+        "Table 3 Adapter plate layout",
+        "Well A1 is reserved for the positive control sample.",
+    ])
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    assert not any(item["rule"] == "DOC-FIGTAB-001" for item in issues)
