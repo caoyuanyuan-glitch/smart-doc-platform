@@ -3264,14 +3264,14 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if not pending_image:
             return None
         image_xml = (
-            f'        <image href="{_escape_xml_attr(pending_image["href"])}" placement="break"></image>'
+            f'        <image href="{_escape_xml_attr(pending_image["href"])}"></image>'
         )
         pending_image = None
         return image_xml
 
     def _figure_xml(title, hrefs):
         images = "".join(
-            f'<image href="{_escape_xml_attr(href)}" placement="break"></image>'
+            f'<image href="{_escape_xml_attr(href)}"></image>'
             for href in hrefs
             if href
         )

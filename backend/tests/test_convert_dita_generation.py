@@ -399,7 +399,7 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertNotIn('<alt>', xml)
 
     def test_english_figure_caption_drops_number_prefix(self):
@@ -411,7 +411,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<fig><title>PCR BC Primer-96 layout</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>PCR BC Primer-96 layout</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertNotIn('Figure 7', xml)
 
     def test_figure_caption_written_before_image_binds_to_following_image(self):
@@ -423,7 +423,7 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<fig><title>前置图题</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>前置图题</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertNotIn('<p>图1 前置图题</p>', xml)
 
     def test_caption_with_two_following_images_stays_in_one_fig(self):
@@ -439,11 +439,11 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn(
             '<fig><title>Schematic Diagram of Slide Loading</title>'
-            '<image href="image/image_008.png" placement="break"></image>'
-            '<image href="image/image_009.jpeg" placement="break"></image></fig>',
+            '<image href="image/image_008.png"></image>'
+            '<image href="image/image_009.jpeg"></image></fig>',
             xml,
         )
-        self.assertNotIn('<image href="image/image_009.jpeg" placement="break"></image>\n', xml.split("</fig>")[-1])
+        self.assertNotIn('<image href="image/image_009.jpeg"></image>\n', xml.split("</fig>")[-1])
 
     def test_consecutive_figures_keep_separate_images(self):
         xml = _content_to_dita_xml(
@@ -459,12 +459,12 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn(
             '<fig><title>cDNA Library Structure</title>'
-            '<image href="image/image_021.png" placement="break"></image></fig>',
+            '<image href="image/image_021.png"></image></fig>',
             xml,
         )
         self.assertIn(
             '<fig><title>Oligo Library Structure</title>'
-            '<image href="image/image_022.png" placement="break"></image></fig>',
+            '<image href="image/image_022.png"></image></fig>',
             xml,
         )
 
@@ -481,7 +481,7 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn(
             '<fig><title>PCR module top cover plate latch position</title>'
-            '<image href="image/image_026.png" placement="break"></image></fig>',
+            '<image href="image/image_026.png"></image></fig>',
             xml,
         )
         self.assertNotIn("<p>PCR module top cover plate latch position</p>", xml)
@@ -530,7 +530,7 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertEqual(xml.count('<ol>'), 1)
         self.assertIn('<li><p>第一步</p>', xml)
-        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertIn('<note type="warning"><p>保持低温。</p></note>', xml)
         self.assertIn('<table>\n          <title>参数</title>', xml)
         self.assertIn('<li>第二步</li>', xml)
@@ -544,8 +544,9 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<image href="image/docx_image_003.png" placement="break"></image>', xml)
+        self.assertIn('<image href="image/docx_image_003.png"></image>', xml)
         self.assertNotIn('<alt>', xml)
+        self.assertNotIn('placement="break"', xml)
 
     def test_note_icon_image_is_skipped_when_adjacent_to_warning_text(self):
         xml = _content_to_dita_xml(
@@ -2365,7 +2366,7 @@ class IdmlConversionTest(unittest.TestCase):
             topic_kind="task",
         )
         self.assertIn(
-            '<fig><title>竖直放置试剂槽</title><image href="image/试剂槽.svg" placement="break"></image></fig>',
+            '<fig><title>竖直放置试剂槽</title><image href="image/试剂槽.svg"></image></fig>',
             xml,
         )
 
