@@ -60,8 +60,16 @@
           </div>
 
           <div class="table-section">
-            <h3>文档列表</h3>
-            <el-table :data="documents" border>
+            <div class="table-section-head">
+              <h3>文档列表</h3>
+              <el-input
+                v-model="documentKeyword"
+                placeholder="搜索文件名 / ID"
+                style="width:260px"
+                clearable
+              />
+            </div>
+            <el-table :data="filteredDocuments" border>
               <el-table-column prop="id" label="ID" width="80" />
               <el-table-column prop="filename" label="文件名" />
               <el-table-column prop="file_type" label="类型" width="100" />
@@ -410,7 +418,26 @@
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">历史审核任务</h2>
       <div class="table-section">
+          <div class="history-toolbar">
+            <el-input
+              v-model="taskFilter.keyword"
+              placeholder="搜索文档名 / 任务ID"
+              style="width:280px"
+              clearable
+            />
+            <el-select v-model="taskFilter.status" placeholder="状态" clearable style="width:140px">
+              <el-option label="排队中" value="pending" />
+              <el-option label="进行中" value="running" />
+              <el-option label="已完成" value="completed" />
+              <el-option label="失败" value="failed" />
+              <el-option label="已停止" value="cancelled" />
+            </el-select>
+            <span class="history-toolbar-hint">全部审核任务都会保留。失败任务若已产出问题，仍可打开查看。</span>
+          </div>
           <el-table :data="pagedReviews" border>
+          <template #empty>
+            <el-empty description="还没有审核任务。上传文档并开始审核后，任务会保存在此，刷新页面后仍可查看。" />
+          </template>
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
           <el-table-column prop="id" label="任务ID" width="80" />
           <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
@@ -421,9 +448,15 @@
           </el-table-column>
           <el-table-column prop="status" label="状态" width="90">
             <template #default="scope">
-              <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : scope.row.status === 'cancelled' ? 'warning' : 'info'">
-                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : scope.row.status === 'cancelled' ? '已停止' : '进行中' }}
-              </el-tag>
+              <el-tooltip
+                :disabled="!reviewFailureHint(scope.row)"
+                :content="reviewFailureHint(scope.row)"
+                placement="top"
+              >
+                <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : scope.row.status === 'cancelled' ? 'warning' : 'info'">
+                  {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : scope.row.status === 'cancelled' ? '已停止' : scope.row.status === 'pending' ? '排队中' : '进行中' }}
+                </el-tag>
+              </el-tooltip>
             </template>
           </el-table-column>
           <el-table-column prop="total_issues" label="问题数" width="100" />
@@ -448,7 +481,7 @@
               <el-button 
                 size="small" 
                 type="primary" 
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canViewReviewIssues(scope.row)"
                 @click="openIssueDialog(scope.row)"
               >
                 查看问题
@@ -457,7 +490,7 @@
                 size="small"
                 type="warning"
                 plain
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canViewReviewIssues(scope.row)"
                 @click="openManualIssueDialogForTask(scope.row)"
               >
                 补充上报
@@ -482,7 +515,7 @@
                 size="small" 
                 type="success" 
                 plain
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canViewReviewIssues(scope.row)"
                 @click="exportReviewHtml(scope.row.id)"
               >
                 HTML报告
@@ -505,7 +538,7 @@
     <!-- 问题详情弹窗 -->
     <el-dialog v-model="issueDialogVisible" :title="`问题详情 - 任务#${currentTaskId}`" width="95%" top="5vh">
       <div class="issue-dialog-toolbar">
-        <el-input v-model="issueFilter.keyword" placeholder="搜索原文/建议" style="width:300px" clearable />
+        <el-input v-model="issueFilter.keyword" placeholder="搜索原文 / 建议 / 规则 / 章节" style="width:300px" clearable />
         <el-select v-model="issueFilter.category" placeholder="分类" clearable style="width:140px;margin-left:8px">
           <el-option v-for="cat in dialogCategories" :key="cat" :label="cat" :value="cat" />
         </el-select>
@@ -519,6 +552,14 @@
           <el-option label="严重" value="serious" />
           <el-option label="一般" value="general" />
           <el-option label="建议" value="suggestion" />
+        </el-select>
+        <el-select v-model="issueFilter.source" placeholder="来源" clearable style="width:120px;margin-left:8px">
+          <el-option
+            v-for="src in dialogSources"
+            :key="src"
+            :label="sourceLabel(src)"
+            :value="src"
+          />
         </el-select>
         <el-button size="small" type="info" plain style="margin-left:8px" @click="showAuditTraces = !showAuditTraces">
           {{ showAuditTraces ? '隐藏AI追踪' : 'AI调用追踪' }}
@@ -891,7 +932,12 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="category" label="分类" width="110" />
+        <el-table-column prop="category" label="分类" width="140">
+          <template #default="scope">
+            <div>{{ scope.row.category || '-' }}</div>
+            <div v-if="scope.row.rule" class="issue-rule-id">{{ scope.row.rule }}</div>
+          </template>
+        </el-table-column>
         <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
         <el-table-column label="原文" min-width="450">
           <template #default="scope">
@@ -899,10 +945,11 @@
             <div v-if="issueClusterHint(scope.row)" class="cluster-hint">{{ issueClusterHint(scope.row) }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="建议" min-width="340" class-name="suggestion-column" show-overflow-tooltip>
+        <el-table-column label="建议" min-width="340" class-name="suggestion-column">
           <template #default="scope">
             <div class="suggestion-wrap">
               <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
+              <div v-if="issueSuggestionDetail(scope.row)" class="suggestion-detail">{{ issueSuggestionDetail(scope.row) }}</div>
             </div>
           </template>
         </el-table-column>
@@ -1280,11 +1327,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, watch, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage, getBlobErrorMessage } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
+
+defineOptions({ name: 'Review' })
 
 const route = useRoute()
 const router = useRouter()
@@ -1309,13 +1358,15 @@ let sseConnections = new Map()  // reviewId → EventSource
 // 问题详情弹窗
 const issueDialogVisible = ref(false)
 const currentTaskId = ref(null)
-const issueFilter = reactive({ keyword: '', category: '', status: '', severity: '' })
+const issueFilter = reactive({ keyword: '', category: '', status: '', severity: '', source: '' })
 const selectedIssueIds = ref([])
 const issueTableRef = ref(null)
 const issuePage = ref(1)
 const issuePageSize = ref(50)
 const taskPage = ref(1)
 const taskPageSize = ref(20)
+const documentKeyword = ref('')
+const taskFilter = reactive({ keyword: '', status: '' })
 const manualIssueDialogVisible = ref(false)
 const manualIssueSaving = ref(false)
 const manualIssueForm = ref({ severity: 'general', category: '人工补充', chapter: '', original_text: '', suggestion: '', description: '' })
@@ -1342,6 +1393,14 @@ const dialogCategories = computed(() => {
   }
   return Array.from(set).sort()
 })
+const dialogSources = computed(() => {
+  const set = new Set()
+  const list = taskIssues[currentTaskId.value] || []
+  for (const item of list) {
+    if (item.source) set.add(item.source)
+  }
+  return Array.from(set).sort()
+})
 const filteredDialogIssues = computed(() => {
   const list = taskIssues[currentTaskId.value] || []
   const showFalsePositives = issueFilter.status === 'false_positive'
@@ -1350,6 +1409,7 @@ const filteredDialogIssues = computed(() => {
     if (issueFilter.category && i.category !== issueFilter.category) return false
     if (issueFilter.status && (i.status || 'pending') !== issueFilter.status) return false
     if (issueFilter.severity && i.severity !== issueFilter.severity) return false
+    if (issueFilter.source && String(i.source || '') !== issueFilter.source) return false
     if (issueFilter.keyword) {
       if (!issueSearchHaystack(i).includes(issueFilter.keyword.toLowerCase())) return false
     }
@@ -1361,7 +1421,17 @@ const pagedDialogIssues = computed(() => {
   const start = (issuePage.value - 1) * issuePageSize.value
   return filteredDialogIssues.value.slice(start, start + issuePageSize.value)
 })
-const historyReviews = computed(() => (reviews.value || []).filter(review => review.status === 'completed'))
+const historyReviews = computed(() => {
+  const keyword = String(taskFilter.keyword || '').trim().toLowerCase()
+  return (reviews.value || []).filter(review => {
+    if (taskFilter.status && review.status !== taskFilter.status) return false
+    if (keyword) {
+      const haystack = `${review.id || ''} ${review.document_name || ''} ${reviewModeLabel(review.mode)}`.toLowerCase()
+      if (!haystack.includes(keyword)) return false
+    }
+    return true
+  })
+})
 const suspectedFalsePositiveCount = computed(() => {
   const list = taskIssues[currentTaskId.value] || []
   return list.filter(item => !issueHiddenByJudgment(item) && issueHasFlag(item, 'possible_false_positive')).length
@@ -1369,6 +1439,14 @@ const suspectedFalsePositiveCount = computed(() => {
 const pagedReviews = computed(() => {
   const start = (taskPage.value - 1) * taskPageSize.value
   return historyReviews.value.slice(start, start + taskPageSize.value)
+})
+const filteredDocuments = computed(() => {
+  const keyword = String(documentKeyword.value || '').trim().toLowerCase()
+  if (!keyword) return documents.value
+  return documents.value.filter(doc => {
+    const filename = String(doc.filename || '').toLowerCase()
+    return filename.includes(keyword) || String(doc.id).includes(keyword)
+  })
 })
 const topRuleHits = computed(() => {
   const hits = coverageData.value?.rule_hits || {}
@@ -1459,10 +1537,8 @@ function normalizeIssueDescription(issue) {
   return text
 }
 
-function compactSuggestionText(text, limit = 36) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
-  if (!normalized) return ''
-  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
+function compactSuggestionText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim()
 }
 
 function extractSuggestionReplacement(issue) {
@@ -1512,18 +1588,18 @@ function describeSuggestionChange(original, replacement) {
   const removed = before.slice(prefix, before.length - suffix).trim()
   const added = after.slice(prefix, after.length - suffix).trim()
   if (removed && added) {
-    if (removed.length <= 24 && added.length <= 32) {
-      return `将“${compactSuggestionText(removed)}”改为“${compactSuggestionText(added)}”`
+    if (removed.length > 120 || added.length > 120) {
+      return `建议改为“${after}”`
     }
-    return `将相关表述改为“${compactSuggestionText(added)}”`
+    return `将“${removed}”改为“${added}”`
   }
   if (!removed && added) {
-    return `补充“${compactSuggestionText(added)}”`
+    return `补充“${added}”`
   }
   if (removed && !added) {
-    return `删除“${compactSuggestionText(removed)}”`
+    return `删除“${removed}”`
   }
-  return `建议改为“${compactSuggestionText(after)}”`
+  return `建议改为“${after}”`
 }
 
 function isNumericUnitSpacingChange(before, after) {
@@ -1537,26 +1613,41 @@ function issueSuggestionOverview(issue) {
   const replacement = extractSuggestionReplacement(issue)
   const original = String(issue?.original_text || '').trim()
   if (replacement && original && replacement !== original) {
-    return describeSuggestionChange(original, replacement)
+    const change = describeSuggestionChange(original, replacement)
+    if (change) return change
   }
 
   // 无法给出精确替换时直接展示建议原文，避免无信息量的占位文案导致建议内容丢失
-  const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return compactSuggestionText(suggestion, 60)
+  const suggestion = compactSuggestionText(issue?.suggestion)
+  if (suggestion) return suggestion
   // 单行展示：没有建议时回落到说明，避免「建议」列整格空白
   const description = normalizeIssueDescription(issue)
-  if (description) return compactSuggestionText(description, 60)
+  if (description) return description
   return ''
 }
 
+function issueSuggestionDetail(issue) {
+  const full = compactSuggestionText(issue?.suggestion)
+  if (!full) return ''
+  const overview = issueSuggestionOverview(issue)
+  if (!overview || full === overview) return ''
+  if (overview.includes(full) && full.length >= 8) return ''
+  return full
+}
+
 // 搜索范围与「原文」「建议」两列实际渲染的内容保持一致：
-// 原文列展示的是扩展后的 context（更长时优先），建议列只展示第一行概述。
-// 否则会出现「命中但该行看不到关键词」的误命中，以及看到却搜不到的反向漏检。
+// 原文列展示扩展后的 context，建议列展示完整建议与规则号，避免搜到却看不见。
 function issueSearchHaystack(issue) {
   const original = normalizeDisplayText(issue?.original_text)
   const context = normalizeDisplayText(issue?.context)
   const shownOriginal = context && context.length > original.length ? context : original
-  return `${shownOriginal} ${issueSuggestionOverview(issue)}`.toLowerCase()
+  const suggestion = compactSuggestionText(issue?.suggestion)
+  const description = normalizeIssueDescription(issue)
+  const chapter = String(issue?.chapter || '')
+  const category = String(issue?.category || '')
+  const rule = String(issue?.rule || '')
+  const source = sourceLabel(issue?.source)
+  return `${shownOriginal} ${suggestion} ${description} ${chapter} ${category} ${rule} ${source}`.toLowerCase()
 }
 
 function percentText(value) {
@@ -1736,7 +1827,7 @@ watch(reviewSubTab, (tab) => {
 })
 
 watch(
-  () => [issueFilter.keyword, issueFilter.category, issueFilter.status, issueFilter.severity],
+  () => [issueFilter.keyword, issueFilter.category, issueFilter.status, issueFilter.severity, issueFilter.source],
   () => {
     issuePage.value = 1
   }
@@ -1749,12 +1840,19 @@ watch(filteredDialogIssues, (list) => {
   }
 })
 
-watch(reviews, (list) => {
-  const maxPage = Math.max(1, Math.ceil(historyReviews.value.length / taskPageSize.value) || 1)
+watch(historyReviews, (list) => {
+  const maxPage = Math.max(1, Math.ceil(list.length / taskPageSize.value) || 1)
   if (taskPage.value > maxPage) {
     taskPage.value = maxPage
   }
 })
+
+watch(
+  () => [taskFilter.keyword, taskFilter.status],
+  () => {
+    taskPage.value = 1
+  }
+)
 
 function goReviewTasks() {
   router.push('/review/tasks')
@@ -1839,6 +1937,10 @@ watch(() => route.path, () => {
 onMounted(() => {
   loadByView()
   loadProviders()
+})
+
+onActivated(() => {
+  loadByView()
 })
 
 function loadByView() {
@@ -2943,6 +3045,27 @@ function reviewModeLabel(mode) {
   }[mode] || mode || '-'
 }
 
+function sourceLabel(source) {
+  return {
+    rule: '规则',
+    ai: 'AI',
+    spellcheck: '拼写',
+    term: '术语',
+    grammar: '语法',
+    manual: '人工'
+  }[source] || source || '-'
+}
+
+function canViewReviewIssues(row) {
+  if (row?.status === 'completed') return true
+  return row?.status === 'failed' && Number(row.total_issues || 0) > 0
+}
+
+function reviewFailureHint(row) {
+  if (row?.status !== 'failed') return ''
+  return row?.progress?.message || row?.error_message || ''
+}
+
 function compareLevelTagType(level) {
   return {
     P0: 'danger',
@@ -3065,6 +3188,7 @@ async function openIssueDialog(row) {
   issueFilter.category = ''
   issueFilter.status = ''
   issueFilter.severity = ''
+  issueFilter.source = ''
   selectedIssueIds.value = []
   issuePage.value = 1
   showAuditTraces.value = false
@@ -3096,6 +3220,7 @@ async function openIssueDialogByDoc(documentId) {
   issueFilter.category = ''
   issueFilter.status = ''
   issueFilter.severity = ''
+  issueFilter.source = ''
   selectedIssueIds.value = []
   issuePage.value = 1
   showAuditTraces.value = false
@@ -4294,6 +4419,47 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.6;
+}
+
+.suggestion-detail {
+  margin-top: 6px;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.issue-rule-id {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #909399;
+  word-break: break-all;
+}
+
+.table-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.table-section-head h3 {
+  margin: 0;
+}
+
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.history-toolbar-hint {
+  font-size: 12px;
+  color: #909399;
 }
 
 .suggestion-diff {
