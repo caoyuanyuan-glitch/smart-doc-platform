@@ -12,12 +12,26 @@ SUITE = BACKEND / "config" / "review-evaluation-suite.accuracy.json"
 OUT = ROOT / "g99_eval" / "old_goldset_rerun.json"
 
 
+def repo_rel(value) -> str:
+    text = str(value or "")
+    for prefix in (str(ROOT.resolve()), str(ROOT)):
+        prefix = prefix.rstrip("/")
+        if text == prefix:
+            return "."
+        text = text.replace(prefix + "/", "")
+        if text == prefix:
+            return "."
+    return text
+
+
 def find_pdfs():
     hits = []
     for path in ROOT.rglob("*.pdf"):
+        if "node_modules" in path.parts:
+            continue
         name = path.name.lower()
         if "e25" in name or "gospatial" in name or "high-throughput" in name or "高通量" in name:
-            hits.append(str(path))
+            hits.append(repo_rel(path))
     return hits
 
 
@@ -62,13 +76,13 @@ def main():
         review_id = item.get("review_id")
         baseline = BACKEND / item.get("baseline")
         item_pdfs = pdfs_for_goldset(name, pdf_hits)
-        expected = expected_pdf_path(name, ROOT)
+        expected = repo_rel(expected_pdf_path(name, ROOT))
         row = {
             "name": name,
             "review_id": review_id,
-            "baseline": str(baseline),
+            "baseline": repo_rel(baseline),
             "expected_pdf": expected,
-            "pdf_hits": item_pdfs,
+            "pdf_hits": [repo_rel(path) for path in item_pdfs],
             "dsn": dsn,
         }
         review = None
@@ -89,7 +103,7 @@ def main():
         )
         row["status"] = status
         if error:
-            row["error"] = error
+            row["error"] = repo_rel(error)
         if status == "rerun" and review is not None:
             issues = [issue_row_to_dict(issue) for issue in db.query(Issue).filter(Issue.review_id == review_id).all()]
             if baseline.suffix == ".json":

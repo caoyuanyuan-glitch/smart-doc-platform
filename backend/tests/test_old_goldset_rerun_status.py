@@ -1,5 +1,6 @@
 """R2: old goldset rerun must emit four explicit statuses, never generic skipped."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -81,3 +82,14 @@ def test_pdfs_for_goldset_filters_by_name():
 def test_redact_database_dsn_hides_password():
     assert redact_database_dsn("postgresql://user:secret@localhost/db") == "postgresql://user:***@localhost/db"
     assert redact_database_dsn("sqlite:////tmp/app.db") == "sqlite:////tmp/app.db"
+
+
+def test_committed_old_goldset_rerun_json_uses_legal_relative_paths():
+    payload = json.loads((ROOT / "g99_eval" / "old_goldset_rerun.json").read_text(encoding="utf-8"))
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert "/workspace" not in blob
+    legal = {"rerun", "missing_pdf", "db_unavailable", "no_review_id"}
+    documents = payload.get("documents") or []
+    assert documents
+    for doc in documents:
+        assert doc.get("status") in legal
