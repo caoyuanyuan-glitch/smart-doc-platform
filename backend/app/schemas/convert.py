@@ -43,6 +43,7 @@ class ProgressOut(BaseModel):
     progress: int
     current_step: Optional[str] = None
     steps: List[StepStatus] = []
+    error_message: Optional[str] = None
 
 
 class CheckItem(BaseModel):

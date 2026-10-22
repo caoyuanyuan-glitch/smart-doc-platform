@@ -18,7 +18,7 @@ from app.schemas.user import UserOut
 from app.crud.convert import (
     create_convert_task, get_convert_task, get_convert_tasks,
     update_convert_task_status, update_convert_task_result, update_convert_task_failed,
-    update_convert_task_progress, delete_convert_task
+    update_convert_task_progress, delete_convert_task, update_convert_task_revised
 )
 from app.schemas.convert import (
     ConvertTaskOut, ConvertTaskCreate, ProgressOut, ReportOut,
@@ -5234,7 +5234,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 })
                 conversion_detail.append({
                     "source_section": title,
-                    "target_type": dita_type,
+                    "target_type": _topic_template_name(topic_kind),
                     "topic_file": topic_filename,
                     "status": "ok",
                 })
@@ -5502,7 +5502,7 @@ async def start_conversion(
 
     ext = os.path.splitext(source_file.filename)[1].lower()
     if ext not in [".md", ".markdown", ".docx", ".doc", ".csv", ".zip", ".idml"]:
-        raise HTTPException(status_code=400, detail="不支持的文件格式，请上传 .md、.csv、.docx 或包含 IDML 的 .zip 文件")
+        raise HTTPException(status_code=400, detail="不支持的文件格式，请上传 .md、.csv、.docx、.idml 或包含 IDML 的 .zip 文件")
 
     if ext in [".md", ".markdown"]:
         source_format = "md"
@@ -5622,6 +5622,130 @@ async def start_conversion(
     return {"task_id": task.task_id, "status": "processing"}
 
 
+def _convert_output_disk_path(task):
+    path = task.output_zip_path or ""
+    if path.startswith("/static/"):
+        return f".{path}"
+    return path
+
+
+def _run_revise_pipeline(task_id, feedback, screenshot_path=None):
+    from app.database import SessionLocal
+    from app.utils.convert_feedback import apply_convert_feedback
+
+    db = SessionLocal()
+    work_dir = None
+    try:
+        def _set_progress(pct, step):
+            with _tasks_lock:
+                _task_store[task_id] = {
+                    "progress": pct, "current_step": step, "status": "processing"
+                }
+            try:
+                update_convert_task_progress(db, task_id, pct, step)
+            except Exception:
+                pass
+
+        _set_progress(15, "按反馈修改")
+        task = get_convert_task(db, task_id)
+        if not task:
+            raise RuntimeError("任务不存在")
+        src_zip = _convert_output_disk_path(task)
+        if not src_zip or not os.path.exists(src_zip):
+            raise RuntimeError("找不到已生成的转换包")
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        work_dir = os.path.join(OUTPUT_DIR, f"revise_{timestamp}_{task_id}")
+        _ensure_dir(work_dir)
+        with zipfile.ZipFile(src_zip, "r") as zf:
+            zf.extractall(work_dir)
+
+        _set_progress(45, "按反馈修改")
+        chat_fn = None
+        try:
+            from app.utils.ai_client import ai_client
+            chat_fn = ai_client.chat
+        except Exception:
+            chat_fn = None
+
+        apply_convert_feedback(work_dir, feedback, chat_fn=chat_fn)
+
+        _set_progress(80, "打包")
+        zip_filename = f"output_revised_{timestamp}_{task_id}.zip"
+        zip_path = os.path.join(OUTPUT_DIR, zip_filename)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(work_dir):
+                for fname in files:
+                    abs_path = os.path.join(root, fname)
+                    arcname = os.path.relpath(abs_path, work_dir)
+                    zf.write(abs_path, arcname)
+
+        output_public_path = f"/static/uploads/outputs/{zip_filename}"
+        update_convert_task_revised(
+            db, task_id,
+            output_zip_path=output_public_path,
+            output_size=os.path.getsize(zip_path),
+            retry_feedback=feedback,
+            retry_screenshot_path=screenshot_path,
+        )
+        _set_progress(100, "打包")
+        with _tasks_lock:
+            _task_store[task_id] = {
+                "progress": 100, "current_step": "打包", "status": "completed"
+            }
+    except Exception as e:
+        try:
+            update_convert_task_failed(db, task_id, str(e))
+        except Exception:
+            pass
+        with _tasks_lock:
+            _task_store[task_id] = {
+                "progress": 0, "current_step": "按反馈修改", "status": "failed"
+            }
+    finally:
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        db.close()
+
+
+@router.post("/{task_id}/revise", response_model=dict)
+async def revise_conversion(
+    task_id: str,
+    feedback: str = Form(...),
+    screenshot: UploadFile = File(None),
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    task = _require_convert_task_access(db, task_id, current_user)
+    if task.target_format != "dita":
+        raise HTTPException(status_code=400, detail="目前只支持按反馈修改 DITA 转换包")
+    if task.status != "completed" or not task.output_zip_path:
+        raise HTTPException(status_code=400, detail="请先完成一次转换，再按反馈修改转换包")
+    if not (feedback or "").strip():
+        raise HTTPException(status_code=400, detail="请填写反馈内容")
+
+    screenshot_path = None
+    if screenshot and screenshot.filename:
+        _ensure_dir(UPLOAD_DIR)
+        screenshot_path = os.path.join(UPLOAD_DIR, f"ss_{int(time.time() * 1000)}_{screenshot.filename}")
+        with open(screenshot_path, "wb") as handle:
+            handle.write(await screenshot.read())
+
+    update_convert_task_status(db, task_id, "processing", progress=5, current_step="按反馈修改")
+    with _tasks_lock:
+        _task_store[task_id] = {
+            "progress": 5, "current_step": "按反馈修改", "status": "processing"
+        }
+
+    thread = threading.Thread(
+        target=_run_revise_pipeline,
+        args=(task_id, feedback.strip(), screenshot_path),
+        daemon=True,
+    )
+    thread.start()
+    return {"task_id": task_id, "status": "processing"}
+
+
 @router.get("/{task_id}/progress", response_model=ProgressOut)
 async def query_progress(task_id: str, db: Session = Depends(get_db), current_user: UserOut = Depends(get_current_active_user)):
     task = _require_convert_task_access(db, task_id, current_user)
@@ -5657,13 +5781,14 @@ async def query_progress(task_id: str, db: Session = Depends(get_db), current_us
         progress=task.progress,
         current_step=task.current_step,
         steps=steps,
+        error_message=task.error_message,
     )
 
 
 @router.get("/{task_id}/download")
 async def download_zip(task_id: str, db: Session = Depends(get_db), current_user: UserOut = Depends(get_current_active_user)):
     task = _require_convert_task_access(db, task_id, current_user)
-    if task.status != "completed":
+    if task.status == "processing":
         raise HTTPException(status_code=400, detail="转换尚未完成")
     if not task.output_zip_path:
         raise HTTPException(status_code=500, detail="输出文件不存在")
