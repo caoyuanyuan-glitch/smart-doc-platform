@@ -63,6 +63,12 @@ export default defineConfig({
     allowedHosts: true,
     // 预览网关下关闭 HMR，避免 WebSocket 断连和按需依赖发现导致整页刷新
     hmr: false,
+    warmup: {
+      clientFiles: [
+        './src/views/Review.vue',
+        './src/views/Polish.vue'
+      ]
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

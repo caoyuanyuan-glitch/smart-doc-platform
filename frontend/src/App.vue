@@ -261,7 +261,7 @@
 
       <main class="main-content" :class="{ collapsed: isCollapsed }">
         <router-view v-slot="{ Component }">
-          <keep-alive :include="['Compare', 'CompareParams', 'QA', 'QAHistory', 'QADoc', 'PolishHistory', 'SpellCheckHistory']">
+          <keep-alive :include="['Compare', 'CompareParams', 'QA', 'QAHistory', 'QADoc', 'PolishHistory', 'SpellCheckHistory', 'Review', 'Polish']">
             <component :is="Component" />
           </keep-alive>
         </router-view>
