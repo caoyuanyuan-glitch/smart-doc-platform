@@ -393,6 +393,12 @@ export const convertAPI = {
     if (retryScreenshot) formData.append('retry_screenshot', retryScreenshot)
     return instance.post('/convert/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
+  revise: (taskId, feedback, screenshot) => {
+    const formData = new FormData()
+    formData.append('feedback', feedback)
+    if (screenshot) formData.append('screenshot', screenshot)
+    return instance.post(`/convert/${taskId}/revise`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+  },
   getProgress: (taskId) => instance.get(`/convert/${taskId}/progress`),
   download: (taskId) => {
     return instance.get(`/convert/${taskId}/download`, {

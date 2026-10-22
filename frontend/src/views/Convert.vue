@@ -5,9 +5,10 @@
 
       <div v-if="converting || taskResult" class="panel">
         <div class="panel-header">
-          <span>转换进度</span>
+          <span>{{ converting ? '转换进度' : '转换结果' }}</span>
+          <el-button v-if="converting" size="small" @click="cancelPolling">取消</el-button>
         </div>
-        <el-steps :active="activeStep" finish-status="success" align-center>
+        <el-steps :active="activeStep" finish-status="success" align-center class="pipeline-steps">
           <el-step
             v-for="(step, idx) in pipelineSteps"
             :key="idx"
@@ -21,8 +22,8 @@
             </template>
           </el-step>
         </el-steps>
-        <div class="progress-bar-wrap">
-          <el-progress :percentage="taskProgress" :color="progressColor" />
+        <div v-if="converting" class="progress-compact">
+          <el-progress :percentage="taskProgress" :color="progressColor" :stroke-width="8" />
         </div>
 
         <div v-if="taskResult && converting === false" class="result-section">
@@ -30,29 +31,17 @@
             <el-icon><CircleCheck /></el-icon>
             <span>转换完成！共生成 {{ conversionDetail.length }} 个{{ resultItemLabel }}，点击下方下载{{ downloadSuffixLabel }}</span>
           </div>
+          <div v-else-if="taskResult.overall === 'failed'" class="result-banner warning">
+            <el-icon><Warning /></el-icon>
+            <span>转换失败{{ convertError ? '：' + convertError : '，请检查源文件、模板后再次转换' }}</span>
+          </div>
           <div v-else class="result-banner warning">
             <el-icon><Warning /></el-icon>
             <span>转换完成，但存在验证警告</span>
           </div>
 
-          <div v-if="conversionDetail.length > 0" class="detail-table-wrap">
-            <h4>转换详情</h4>
-            <el-table :data="conversionDetail" border size="small" :header-cell-style="tableHeaderStyle">
-              <el-table-column prop="source_section" label="源章节" />
-              <el-table-column prop="target_type" label="目标类型" width="100" />
-              <el-table-column prop="topic_file" :label="outputFileLabel" />
-              <el-table-column prop="status" label="状态" width="80">
-                <template #default="scope">
-                  <el-tag :type="scope.row.status === 'ok' ? 'success' : 'warning'" size="small">
-                    {{ scope.row.status === 'ok' ? 'OK' : scope.row.status }}
-                  </el-tag>
-              </template>
-            </el-table-column>
-            </el-table>
-          </div>
-
           <div class="result-actions">
-            <div class="download-row">
+            <div v-if="taskResult.overall === 'passed' || packageReady" class="download-row">
               <span class="download-label">文件名：</span>
               <el-input v-model="customFilename" size="small" style="width: 260px;" :placeholder="downloadPlaceholder" />
               <span class="download-ext">{{ downloadExtLabel }}</span>
@@ -63,51 +52,45 @@
             </div>
             <el-button @click="resetConvert">
               <el-icon><Refresh /></el-icon>
-              重新转换
+              {{ sourceFile ? '用当前文件再转一次' : '重新转换' }}
             </el-button>
+            <el-button @click="changeSource">更换文件</el-button>
           </div>
 
-          <div v-if="showImeFeedback" class="ime-feedback-panel">
+          <div v-if="showConvertFeedback" class="feedback-panel" tabindex="0" @paste="onScreenshotPaste">
             <div class="panel-header">
-              <span>IME 导入反馈</span>
-              <el-tag size="small" type="warning">仅用于 DITA 导入 IME 失败场景</el-tag>
+              <span>按反馈修改转换包</span>
             </div>
-            <div class="form-tip ime-tip">请在 DITA 包导入 IME 平台报错时填写，系统会结合反馈和截图重新生成。</div>
-            <el-form-item label="问题描述">
-              <el-input
-                v-model="imeFeedback"
-                type="textarea"
-                :rows="3"
-                placeholder="例如: dita中缺少imesofttype属性、主题结构缺失封面章节、缺少bookmeta元数据等"
-              />
-            </el-form-item>
-            <el-form-item label="报错截图">
-              <div class="upload-area upload-area-small" @click="triggerScreenshotUpload"
-                @dragover.prevent @drop.prevent="onScreenshotDrop"
-                @paste="onScreenshotPaste" tabindex="0">
-                <input ref="screenshotInput" type="file" accept="image/*" style="display:none"
-                  @change="onScreenshotChange" />
-                <p v-if="!imeScreenshot">
-                  <el-icon><Upload /></el-icon>
-                  拖拽、粘贴或点击上传报错截图</p>
-                <div v-else class="file-info">
-                  <el-icon><Picture /></el-icon>
-                  <span>{{ imeScreenshot.name }}</span>
-                  <el-button size="small" type="danger" link @click.stop="imeScreenshot = null">移除</el-button>
-                </div>
+            <div class="form-tip">针对当前这份 DITA 包填写 IME 导入报错或要改的结构。系统会直接改包并更新下载，不会重跑源文件。</div>
+            <el-input
+              v-model="convertFeedback"
+              type="textarea"
+              :rows="4"
+              placeholder="例如：DTO41003.dita 缺少 cms:imesofttype；列表项和表格单元格要包 p；把安装改成安装步骤"
+            />
+            <div class="upload-area upload-area-small" @click="triggerScreenshotUpload"
+              @dragover.prevent @drop.prevent="onScreenshotDrop"
+              @paste="onScreenshotPaste">
+              <input ref="screenshotInput" type="file" accept="image/*" style="display:none"
+                @change="onScreenshotChange" />
+              <p v-if="!convertScreenshot">
+                <el-icon><Upload /></el-icon>
+                可粘贴、拖拽或点击上传报错截图
+              </p>
+              <div v-else class="file-info">
+                <el-icon><Document /></el-icon>
+                <span>{{ convertScreenshot.name }}</span>
+                <el-button size="small" type="danger" link @click.stop="convertScreenshot = null">移除</el-button>
               </div>
-            </el-form-item>
-            <el-form-item>
-              <el-button type="warning" :loading="retrying" :disabled="!sourceFile && !imeFeedback" @click="retryConvert">
-                <el-icon><Refresh /></el-icon>
-                反馈并重新转换
-              </el-button>
-            </el-form-item>
+            </div>
+            <el-button type="primary" class="feedback-submit" :disabled="!convertFeedback.trim()" @click="reviseConvert">
+              应用反馈
+            </el-button>
           </div>
         </div>
       </div>
 
-      <div class="panel">
+      <div v-if="!converting && !taskResult" class="panel">
         <div class="panel-header">
           <span>上传文档并选择目标格式</span>
         </div>
@@ -117,7 +100,7 @@
               <input ref="sourceInput" type="file" accept=".md,.markdown,.csv,.docx,.doc,.zip,.idml" style="display:none"
                 @change="onSourceChange" />
               <el-icon class="upload-icon"><Upload /></el-icon>
-              <p v-if="!sourceFile">拖拽或点击上传 (.md / .csv / .docx / .doc / 含 IDML 的 .zip, &le; 50MB)</p>
+              <p v-if="!sourceFile">拖拽或点击上传 (.md / .csv / .docx / .doc / .idml / 含 IDML 与 Links 的 .zip, &le; 50MB)</p>
               <div v-else class="file-info">
                 <el-icon><Document /></el-icon>
                 <span>{{ sourceFile.name }}</span>
@@ -125,6 +108,7 @@
                 <el-button size="small" type="danger" link @click.stop="clearTaskState(); sourceFile = null">移除</el-button>
               </div>
             </div>
+            <div v-if="isIdmlSource" class="form-tip">带图请将 .idml 与 Links 打成同一个 zip 上传；独立 .idml 不含图。</div>
           </el-form-item>
 
           <el-form-item label="目标格式">
@@ -135,7 +119,7 @@
             </el-radio-group>
           </el-form-item>
 
-          <el-form-item v-if="showDitaOptions" label="参考模板 (IME DITA包)">
+          <el-form-item v-if="showDitaOptions" label="参考模板">
             <div class="upload-area upload-area-small" @click="triggerTemplateUpload"
               @dragover.prevent @drop.prevent="onTemplateDrop">
               <input ref="templateInput" type="file" accept=".zip" style="display:none"
@@ -147,16 +131,7 @@
               <div v-else class="file-info">
                 <el-icon><FolderOpened /></el-icon>
                 <span>{{ templateFile.name }}</span>
-                <el-button size="small" type="danger" link @click.stop="templateFile = null; templateTree = null">移除</el-button>
-              </div>
-            </div>
-            <div v-if="templateTree" class="template-tree">
-              <div class="tree-title">模板包内容解析：</div>
-              <div v-for="(val, key) in templateTree" :key="key" class="tree-entry">
-                <span class="tree-folder">📁 {{ key }}/</span>
-                <div v-for="file in getTemplateFiles(val)" :key="file" class="tree-file">
-                  📄 {{ file }}
-                </div>
+                <el-button size="small" type="danger" link @click.stop="templateFile = null">移除</el-button>
               </div>
             </div>
             <el-alert
@@ -178,21 +153,11 @@
             <el-select v-model="outputLanguage" placeholder="自动识别" style="width: 260px;">
               <el-option v-for="option in outputLanguageOptions" :key="option.value" :label="option.label" :value="option.value" />
             </el-select>
-            <div class="form-tip">建议英文手册显式选择 `English (en-US)`，避免 topic 语言与源文件不一致。</div>
-          </el-form-item>
-
-          <el-form-item v-if="showDitaOptions" label="特殊需求">
-            <el-input
-              v-model="requirements"
-              type="textarea"
-              :rows="3"
-              placeholder="例如: product_overview.dita的topic结构直接沿用模板包中的结构"
-            />
-            <div class="form-tip">支持自然语言描述转换映射规则</div>
+            <div class="form-tip">建议英文手册显式选择 English (en-US)，避免 topic 语言与源文件不一致。</div>
           </el-form-item>
 
           <el-form-item v-else label="转换说明">
-            <div class="form-tip">`md -> csv` 使用逐行无损映射，可完整回转；`csv -> markdown` 优先按平台导出的无损 CSV 还原原文。</div>
+            <div class="form-tip">md 转 csv 使用逐行无损映射，可完整回转；csv 转 markdown 优先按平台导出的无损 CSV 还原原文。</div>
           </el-form-item>
 
           <el-form-item>
@@ -255,7 +220,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { convertAPI } from '@/api'
-import { Upload, Document, FolderOpened, CircleCheck, Warning, Download, Refresh, Picture } from '@element-plus/icons-vue'
+import { Upload, Document, FolderOpened, CircleCheck, Warning, Download, Refresh } from '@element-plus/icons-vue'
 
 const route = useRoute()
 
@@ -265,10 +230,9 @@ const sourceInput = ref(null)
 const sourceFile = ref(null)
 const templateInput = ref(null)
 const templateFile = ref(null)
-const templateTree = ref(null)
 const targetFormat = ref('dita')
-const requirements = ref('')
 const outputLanguage = ref('')
+const convertError = ref('')
 
 const outputLanguageOptions = [
   { value: 'en-US', label: 'English (en-US)' },
@@ -304,21 +268,42 @@ const availableTargetFormats = computed(() => {
 const showDitaOptions = computed(() => targetFormat.value === 'dita')
 
 const isMarkdownSource = computed(() => sourceExt.value === '.md' || sourceExt.value === '.markdown')
+const isIdmlSource = computed(() => sourceExt.value === '.idml' || sourceExt.value === '.zip')
 
 const convertRuleItems = computed(() => {
+  if (!sourceExt.value) {
+    return [
+      '封面 sCoverTopic，章级 chapterTopic，其余 sDitaTopic + DTO。',
+      '参考包只复用 Cover 和 booklists/toc。',
+      '列表项、单元格、正文和 Note 句段包 p。',
+      'Word、IDML、Markdown 均可转 DITA；IDML 带图请上传含 Links 的 zip。',
+    ]
+  }
   if (isMarkdownSource.value) {
     return [
+      '封面 sCoverTopic，章级 chapterTopic，其余 sDitaTopic + DTO。',
       'Markdown 按 ATX/Setext 标题层级拆 topic；无标题文档输出为单个 topic。',
-      '加粗、斜体、链接、围栏代码块会转成对应 DITA 标记；格式名如 .fq.gz 转为斜体，行内代码不再使用 codeph。',
-      '引用块中的注意/提示/警告按 note 规则输出；缩进列表保持嵌套。',
+      '加粗、斜体、链接、围栏代码块会转成对应 DITA 标记；格式名如 .fq.gz 转为斜体。',
+      '列表项、单元格、正文和 Note 句段包 p；引用块中的注意/提示/警告按 note 输出。',
       '参考包只复用 Cover 和 booklists/toc。',
     ]
   }
+  if (isIdmlSource.value) {
+    return [
+      '封面 sCoverTopic，章级 chapterTopic，其余 sDitaTopic + DTO。',
+      '参考包只复用 Cover 和 booklists/toc。',
+      '交叉引用输出空 xref，页码由 IME 生成；斜体样式转 i。',
+      '表格列宽按 IDML 占比输出；提示框表格转 note。',
+      '列表项、单元格、正文和 Note 句段包 p。',
+      '带图请上传含 .idml 与 Links 的 zip。',
+    ]
+  }
   return [
+    '封面 sCoverTopic，章级 chapterTopic，其余 sDitaTopic + DTO。',
     '参考包只复用 Cover 和 booklists/toc。',
     'Manufacturer information 按源 Word 生成。',
     '章节层级按 Word 原始结构对齐。',
-    '步骤中的加粗、上标、下标保留。',
+    '列表项、单元格、正文和 Note 句段包 p；步骤中的加粗、上标、下标保留。',
     '重复表头、页码、note 图标会自动清理。',
   ]
 })
@@ -329,17 +314,16 @@ const resultItemLabel = computed(() => {
   return 'topic'
 })
 
-const outputFileLabel = computed(() => {
-  if (targetFormat.value === 'csv') return 'CSV 文件'
-  if (targetFormat.value === 'markdown') return '输出文件'
-  return 'topic文件'
-})
-
 const isDirectFileDownload = computed(() => {
   return (sourceExt.value === '.md' || sourceExt.value === '.markdown') && targetFormat.value === 'csv'
     || sourceExt.value === '.csv' && targetFormat.value === 'markdown'
 })
-const showImeFeedback = computed(() => targetFormat.value === 'dita' && taskResult.value && converting.value === false)
+const showConvertFeedback = computed(() => {
+  return targetFormat.value === 'dita'
+    && taskResult.value
+    && converting.value === false
+    && (taskResult.value.overall === 'passed' || packageReady.value)
+})
 
 const downloadExtLabel = computed(() => {
   if (targetFormat.value === 'csv') return '.csv'
@@ -356,6 +340,10 @@ const taskId = ref('')
 const taskProgress = ref(0)
 const taskResult = ref(null)
 const customFilename = ref('')
+const convertFeedback = ref('')
+const convertScreenshot = ref(null)
+const screenshotInput = ref(null)
+const packageReady = ref(false)
 const pipelineSteps = ref([
   { name: '解析', status: 'pending' },
   { name: '结构映射', status: 'pending' },
@@ -378,11 +366,6 @@ let pollTimer = null
 
 const history = ref([])
 const historyLoading = ref(false)
-
-const imeFeedback = ref('')
-const imeScreenshot = ref(null)
-const retrying = ref(false)
-const screenshotInput = ref(null)
 const tableHeaderStyle = {
   background: '#f8fafc',
   color: '#111827',
@@ -402,10 +385,6 @@ function getTemplatePayload() {
   return showDitaOptions.value ? templateFile.value : null
 }
 
-function getRequirementsPayload() {
-  return showDitaOptions.value ? (requirements.value || null) : null
-}
-
 function getOutputLanguagePayload() {
   return showDitaOptions.value ? (outputLanguage.value || null) : null
 }
@@ -418,11 +397,10 @@ function clearTaskState() {
   report.value = null
   conversionDetail.value = []
   customFilename.value = ''
-  imeFeedback.value = ''
-  imeScreenshot.value = null
   pipelineSteps.value = pipelineSteps.value.map(s => ({ ...s, status: 'pending' }))
   converting.value = false
-  retrying.value = false
+  convertError.value = ''
+  packageReady.value = false
 }
 
 function setSourceFile(file) {
@@ -449,7 +427,6 @@ function onTemplateChange(e) {
   const f = e.target.files[0]
   if (f) {
     templateFile.value = f
-    parseTemplate(f)
   }
 }
 
@@ -457,56 +434,13 @@ function onTemplateDrop(e) {
   const f = e.dataTransfer.files[0]
   if (f) {
     templateFile.value = f
-    parseTemplate(f)
   }
-}
-
-async function parseTemplate(file) {
-  try {
-    const JSZip = (await import('jszip')).default
-    const zip = await JSZip.loadAsync(file)
-    const tree = {}
-    zip.forEach((relativePath, zipEntry) => {
-      if (zipEntry.dir) return
-      const parts = relativePath.split('/')
-      let current = tree
-      for (let i = 0; i < parts.length - 1; i++) {
-        const p = parts[i]
-        if (!current[p]) current[p] = { _files: [] }
-        current = current[p]
-      }
-      const leaf = parts[parts.length - 1]
-      if (leaf) {
-        if (!current._files) current._files = []
-        current._files.push(leaf)
-      }
-    })
-    templateTree.value = tree
-  } catch (e) {
-    ElMessage.warning('模板包解析失败，请确认是有效的 ZIP 文件')
-    templateTree.value = null
-  }
-}
-
-function getTemplateFiles(node) {
-  if (!node) return []
-  if (Array.isArray(node._files)) return node._files
-  if (typeof node === 'object') {
-    const files = []
-    for (const key of Object.keys(node)) {
-      if (key === '_files' && Array.isArray(node[key])) {
-        files.push(...node[key])
-      } else if (typeof node[key] === 'object') {
-        files.push(...getTemplateFiles(node[key]))
-      }
-    }
-    return files
-  }
-  return []
 }
 
 async function startConvert() {
   if (!sourceFile.value) { ElMessage.info('请先选择源文件'); return }
+  stopPolling()
+  convertError.value = ''
   converting.value = true
   taskResult.value = null
   taskProgress.value = 0
@@ -521,7 +455,7 @@ async function startConvert() {
       sourceFile.value,
       targetFormat.value,
       getTemplatePayload(),
-      getRequirementsPayload(),
+      null,
       getOutputLanguagePayload()
     )
     taskId.value = resp.data.task_id
@@ -548,13 +482,15 @@ function startPolling() {
         stopPolling()
         converting.value = false
         taskResult.value = { overall: 'passed' }
+        packageReady.value = true
         await loadTaskResult()
         ElMessage.success('转换完成')
       } else if (data.status === 'failed') {
         stopPolling()
         converting.value = false
+        convertError.value = data.error_message || ''
         taskResult.value = { overall: 'failed' }
-        ElMessage.error('转换失败')
+        ElMessage.error(convertError.value || '转换失败')
       }
     } catch (e) {
       stopPolling()
@@ -630,28 +566,30 @@ function inferHistoryDownloadExt(row) {
 }
 
 function resetConvert() {
+  if (sourceFile.value) {
+    startConvert()
+    return
+  }
   clearTaskState()
+}
+
+function changeSource() {
+  stopPolling()
+  converting.value = false
+  taskResult.value = null
+  taskProgress.value = 0
 }
 
 function triggerScreenshotUpload() { screenshotInput.value?.click() }
 
 function onScreenshotChange(e) {
   const f = e.target.files[0]
-  if (f) imeScreenshot.value = f
+  if (f) convertScreenshot.value = f
 }
 
 function onScreenshotDrop(e) {
-  const items = e.dataTransfer.items
-  if (items && items.length) {
-    for (const item of items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        imeScreenshot.value = item.getAsFile()
-        return
-      }
-    }
-  }
   const f = e.dataTransfer.files[0]
-  if (f && f.type.startsWith('image/')) imeScreenshot.value = f
+  if (f && f.type.startsWith('image/')) convertScreenshot.value = f
 }
 
 function onScreenshotPaste(e) {
@@ -659,44 +597,39 @@ function onScreenshotPaste(e) {
   if (!items) return
   for (const item of items) {
     if (item.kind === 'file' && item.type.startsWith('image/')) {
-      imeScreenshot.value = item.getAsFile()
+      convertScreenshot.value = item.getAsFile()
+      e.preventDefault()
+      ElMessage.success('已粘贴截图')
       return
     }
   }
 }
 
-async function retryConvert() {
-  if (!sourceFile.value && !imeFeedback.value) {
-    ElMessage.info('请先选择源文件或填写IME反馈')
+async function reviseConvert() {
+  if (!taskId.value) {
+    ElMessage.info('请先完成一次转换')
     return
   }
-  retrying.value = true
+  const feedback = convertFeedback.value.trim()
+  if (!feedback) {
+    ElMessage.info('请填写反馈内容')
+    return
+  }
+  stopPolling()
+  convertError.value = ''
+  converting.value = true
   taskResult.value = null
   taskProgress.value = 0
-  report.value = null
-  conversionDetail.value = []
-  const baseName = sourceFile.value ? sourceFile.value.name.replace(/\.[^.]+$/, '') : 'output'
-  customFilename.value = `output_${baseName}`
   pipelineSteps.value = pipelineSteps.value.map(s => ({ ...s, status: 'pending' }))
-
   try {
-    const resp = await convertAPI.convert(
-      sourceFile.value,
-      targetFormat.value,
-      getTemplatePayload(),
-      getRequirementsPayload(),
-      getOutputLanguagePayload(),
-      imeFeedback.value || null,
-      imeScreenshot.value || null
-    )
-    taskId.value = resp.data.task_id
-    converting.value = true
-    retrying.value = false
-    ElMessage.success('反馈已提交，重新转换中...')
+    await convertAPI.revise(taskId.value, feedback, convertScreenshot.value)
+    ElMessage.success('正在按反馈修改转换包')
     startPolling()
   } catch (e) {
-    retrying.value = false
-    ElMessage.error('重新转换失败: ' + (e.response?.data?.detail || e.message))
+    converting.value = false
+    convertError.value = e.response?.data?.detail || e.message || '按反馈修改失败'
+    taskResult.value = { overall: 'failed' }
+    ElMessage.error(convertError.value)
   }
 }
 
@@ -773,11 +706,7 @@ watch(availableTargetFormats, (options) => {
 watch(targetFormat, (val) => {
   if (val !== 'dita') {
     templateFile.value = null
-    templateTree.value = null
-    requirements.value = ''
     outputLanguage.value = ''
-    imeFeedback.value = ''
-    imeScreenshot.value = null
   }
 })
 
@@ -790,6 +719,10 @@ onBeforeUnmount(() => stopPolling())
 
 <style>
 .convert-container { padding: 0; }
+
+.convert-container .el-form-item__label {
+  white-space: nowrap;
+}
 
 .page-title {
   font-size: 20px;
@@ -862,27 +795,16 @@ onBeforeUnmount(() => stopPolling())
 
 .file-size { color: #9ca3af; font-weight: 400; }
 
-.template-tree {
-  margin-top: 12px;
-  padding: 12px;
-  background: #f9fafb;
-  border-radius: 6px;
-  border: 1px solid #e5e7eb;
-}
-
-.tree-title { font-weight: 600; margin-bottom: 8px; color: #374151; }
-
-.tree-entry { margin-bottom: 4px; }
-
-.tree-folder { font-weight: 600; color: #1e40af; }
-
-.tree-file { padding-left: 24px; color: #6b7280; font-size: 13px; }
-
 .form-tip { color: #9ca3af; font-size: 12px; margin-top: 4px; }
 
-.ime-tip { margin-bottom: 12px; }
-
-.progress-bar-wrap { margin-top: 20px; padding: 0 40px; }
+.pipeline-steps {
+  max-width: 720px;
+  margin: 0 auto;
+}
+.progress-compact {
+  max-width: 240px;
+  margin: 16px auto 0;
+}
 
 .result-overview { margin: 12px 0; }
 
@@ -951,10 +873,6 @@ onBeforeUnmount(() => stopPolling())
 
 .suggestion { font-size: 13px; color: #92400e; margin-top: 6px; }
 
-.detail-table-wrap { margin: 16px 0; }
-
-.detail-table-wrap h4 { margin-bottom: 8px; color: #374151; }
-
 .result-actions {
   display: flex;
   flex-direction: column;
@@ -962,6 +880,9 @@ onBeforeUnmount(() => stopPolling())
   margin: 16px 0;
   padding: 12px 0;
   border-top: 1px solid #f0f0f0;
+}
+.result-actions > .el-button {
+  align-self: flex-start;
 }
 
 .download-row {
@@ -988,18 +909,24 @@ onBeforeUnmount(() => stopPolling())
   padding: 40px;
 }
 
-.ime-feedback-panel {
-  margin-top: 16px;
+.feedback-panel {
+  margin-top: 8px;
   padding: 16px;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
   border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.ime-feedback-panel .panel-header {
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.feedback-panel .panel-header {
+  margin-bottom: 0;
+}
+.feedback-submit {
+  align-self: flex-start;
+}
+.feedback-panel:focus {
+  outline: none;
 }
 </style>
