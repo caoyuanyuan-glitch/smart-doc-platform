@@ -286,6 +286,19 @@ class ContentGenerationTest(unittest.TestCase):
         # colspec must precede the row groups.
         self.assertLess(xml.index("<colspec "), xml.index("<tbody>"))
 
+    def test_colw_marker_sets_relative_colspec_widths(self):
+        xml = _content_to_dita_xml(
+            "组分清单",
+            "[[COLW:0.30*,0.70*]]\n| 组分 | 体积 |\n| :--- | :--- |\n| A | 1 μL |",
+            "concept",
+            "DTC041202",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<colspec colname="COLSPEC0" colwidth="0.30*"/>', xml)
+        self.assertIn('<colspec colname="COLSPEC1" colwidth="0.70*"/>', xml)
+        self.assertNotIn("[[COLW:", xml)
+
     def test_empty_header_single_cell_callout_defaults_to_tip(self):
         """IDML tip boxes surface as a 1-column table with an empty header; they
         must render as <note type="tip"> instead of a title-less table."""
@@ -2285,6 +2298,38 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertIn("<uicontrol>Login</uicontrol>", xml)
         self.assertNotIn("[[UI]]", xml)
 
+    def test_idml_italic_character_style_becomes_i(self):
+        """Cross reference character styles (N/c/V, book titles) become <i>."""
+        import tempfile
+
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Body">'
+            '<CharacterStyleRange><Content>其中，</Content></CharacterStyleRange>'
+            '<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/Cross reference">'
+            "<Content>N</Content></CharacterStyleRange>"
+            '<CharacterStyleRange><Content>为长度，</Content></CharacterStyleRange>'
+            '<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/Cross reference-in para.-CN">'
+            "<Content>c</Content></CharacterStyleRange>"
+            '<CharacterStyleRange><Content>为浓度。</Content></CharacterStyleRange>'
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_italic.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("[[I]]N[[/I]]", md)
+        self.assertIn("[[I]]c[[/I]]", md)
+        xml = _content_to_dita_xml(
+            "文库定量", md, "concept", "DTC041240", "zh-CN",
+            topic_kind="concept", source_format="idml",
+        )
+        self.assertIn("<i>N</i>为长度", xml)
+        self.assertIn("<i>c</i>为浓度", xml)
+
     def test_idml_icon_stays_inline_between_text(self):
         """An inline button icon keeps its position inside the step text."""
         import tempfile
@@ -2313,8 +2358,8 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertEqual(xml.count("<li>"), 1)
 
     def test_idml_cross_reference_becomes_xref(self):
-        """An InDesign cross-reference (第<page>页“目标标题”) parses to a
-        [[XREF:目标标题#page]] marker that keeps the InDesign page number."""
+        """An InDesign cross-reference parses to [[XREF:title#page]]; DITA
+        emits an empty xref and leaves page text to IME."""
         import tempfile
 
         body = (
@@ -2347,9 +2392,10 @@ class IdmlConversionTest(unittest.TestCase):
             xref_map={"准备测序试剂槽": "DTO041031"},
         )
         self.assertIn(
-            '<xref href="DTO041031.dita" cms:title="准备测序试剂槽">第12 页准备测序试剂槽</xref>',
+            '<xref href="DTO041031.dita" cms:title="准备测序试剂槽"/>',
             xml,
         )
+        self.assertNotIn("第12 页准备测序试剂槽", xml)
         self.assertNotIn("[[XREF:", xml)
 
     def test_unresolved_cross_reference_falls_back_to_title_text(self):
@@ -2364,7 +2410,7 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertNotIn("[[XREF:", xml)
 
     def test_xref_inside_table_cell_keeps_page_number(self):
-        """Page-bearing xref markers must not split markdown table cells."""
+        """Page-bearing xref markers stay in one table cell as an empty xref."""
         md = (
             "| 说明 |\n| :--- |\n"
             "| 具体操作可参考[[XREF:试剂槽底部胶塞歪斜或脱落#30]]。 |\n"
@@ -2375,10 +2421,43 @@ class IdmlConversionTest(unittest.TestCase):
             xref_map={"试剂槽底部胶塞歪斜或脱落": "DTC041040"},
         )
         self.assertIn(
-            '<xref href="DTC041040.dita" cms:title="试剂槽底部胶塞歪斜或脱落">第30 页试剂槽底部胶塞歪斜或脱落</xref>',
+            '<xref href="DTC041040.dita" cms:title="试剂槽底部胶塞歪斜或脱落"/>',
             xml,
         )
+        self.assertNotIn("第30 页", xml)
         self.assertNotIn("[[XREF:", xml)
+
+    def test_idml_table_column_widths_become_colspec(self):
+        """IDML Column/@SingleColumnWidth maps to relative CALS colwidth."""
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="2">'
+            '<Row Self="r0" Name="0"/><Row Self="r1" Name="1"/>'
+            '<Column Self="co0" Name="0" SingleColumnWidth="87.37"/>'
+            '<Column Self="co1" Name="1" SingleColumnWidth="203.86"/>'
+            '<Cell Self="c0" Name="0:0" RowSpan="1" ColumnSpan="1">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>组分</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0" RowSpan="1" ColumnSpan="1">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>体积</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c2" Name="0:1" RowSpan="1" ColumnSpan="1">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>A</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c3" Name="1:1" RowSpan="1" ColumnSpan="1">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>1 μL</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        self.assertEqual(lines[0], "[[COLW:0.30*,0.70*]]")
+        xml = _content_to_dita_xml(
+            "组分", "\n".join(lines), "concept", "DTC041241", "zh-CN",
+            topic_kind="concept", source_format="idml",
+        )
+        self.assertIn('<colspec colname="COLSPEC0" colwidth="0.30*"/>', xml)
+        self.assertIn('<colspec colname="COLSPEC1" colwidth="0.70*"/>', xml)
 
     def test_figure_title_style_marks_caption_and_wraps_image(self):
         """A Figure-title paragraph becomes a <fig><title> bound to its image."""
@@ -2833,7 +2912,7 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertNotIn("ng与fmol换算公式如下", xml.rsplit("</ul>", 1)[-1])
 
     def test_xref_link_text_omits_section_number(self):
-        """Cross-reference link text keeps 第N页“标题” and drops 9.1 numbering."""
+        """Resolved xref is empty; cms:title drops 9.1 numbering."""
         xml = _content_to_dita_xml(
             "测定DNB浓度",
             "否则，参考[[XREF:9.1DNB浓度不合格#30]]。\n",
@@ -2845,13 +2924,14 @@ class IdmlConversionTest(unittest.TestCase):
             xref_map={"DNB浓度不合格": "DTO041034"},
         )
         self.assertIn(
-            '<xref href="DTO041034.dita" cms:title="DNB浓度不合格">第30 页DNB 浓度不合格</xref>',
+            '<xref href="DTO041034.dita" cms:title="DNB浓度不合格"/>',
             xml,
         )
         self.assertNotIn("9.1", xml)
+        self.assertNotIn("第30 页", xml)
 
     def test_xref_link_text_spaces_alnum_before_cjk(self):
-        """Page number stays inside xref; alnum/CJK boundaries get a space."""
+        """cms:title keeps the compact title; unresolved fallback spaces alnum/CJK."""
         xml = _content_to_dita_xml(
             "DNB浓度不合格",
             "当DNB浓度不符合[[XREF:测定DNB浓度#12]]的要求时。\n",
@@ -2863,9 +2943,23 @@ class IdmlConversionTest(unittest.TestCase):
             xref_map={"测定DNB浓度": "DTC041021"},
         )
         self.assertIn(
-            '<xref href="DTC041021.dita" cms:title="测定DNB浓度">第12 页测定DNB 浓度</xref>',
+            '<xref href="DTC041021.dita" cms:title="测定DNB浓度"/>',
             xml,
         )
+        self.assertNotIn("第12 页测定DNB 浓度", xml)
+
+        unresolved = _content_to_dita_xml(
+            "DNB浓度不合格",
+            "当DNB浓度不符合[[XREF:测定DNB浓度#12]]的要求时。\n",
+            "task",
+            "DTO041034",
+            "zh-CN",
+            topic_kind="task",
+            source_format="idml",
+            xref_map={},
+        )
+        self.assertIn("第12 页“测定DNB 浓度”", unresolved)
+        self.assertNotIn("<xref", unresolved)
 
     def test_list_body_paragraph_stays_before_note_and_figure(self):
         """A step continuation paragraph stays ahead of the following note/fig."""

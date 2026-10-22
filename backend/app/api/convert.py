@@ -1802,9 +1802,15 @@ IDML_UI_STYLE_RE = re.compile(r'(?i)silk\s*screen')
 IDML_UI_MARK_OPEN = "[[UI]]"
 IDML_UI_MARK_CLOSE = "[[/UI]]"
 
-# InDesign cross-references read 第<page>页“<target title>”; the page number is
-# a text variable (ResultText). Carry title and page as [[XREF:title#page]]
-# so the DITA layer can emit 第N页“标题” as link text.
+# Italic character styles in 617: Cross reference* (N/c/V, book titles) and
+# Subtle Emphasis (FontStyle Italic). UI styles take precedence.
+IDML_ITALIC_STYLE_RE = re.compile(r'(?i)italic|subtle\s*emphasis|^cross\s*reference')
+IDML_I_MARK_OPEN = "[[I]]"
+IDML_I_MARK_CLOSE = "[[/I]]"
+
+# InDesign cross-references read 第<page>页“<target title>”. Carry title and
+# page as [[XREF:title#page]]; resolved DITA xrefs are empty elements with
+# cms:title, and the page is only used when the target cannot be resolved.
 XREF_RE = re.compile(r'\[\[XREF:([^\[\]#]+)(?:#([^\[\]]+))?\]\]')
 
 
@@ -1814,12 +1820,74 @@ def _strip_xml_ns(tag):
     return tag
 
 
-def _idml_collect_text(elem, ui_styles=None, ui=False):
+def _idml_style_is_italic(style_key, font_style=""):
+    if re.search(r"(?i)italic", font_style or ""):
+        return True
+    key = (style_key or "").strip()
+    return bool(key and IDML_ITALIC_STYLE_RE.search(key))
+
+
+def _idml_wrap_run_text(text, ui=False, italic=False):
+    if not text:
+        return text
+    if ui:
+        return f"{IDML_UI_MARK_OPEN}{text}{IDML_UI_MARK_CLOSE}"
+    if italic and text.strip():
+        return f"{IDML_I_MARK_OPEN}{text}{IDML_I_MARK_CLOSE}"
+    return text
+
+
+def _idml_merge_adjacent_i_marks(text):
+    if not text:
+        return text
+    return text.replace(f"{IDML_I_MARK_CLOSE}{IDML_I_MARK_OPEN}", "")
+
+
+def _idml_table_column_widths(table_elem):
+    widths = {}
+    for child in table_elem:
+        if _strip_xml_ns(child.tag) != "Column":
+            continue
+        try:
+            widths[int(child.get("Name"))] = float(child.get("SingleColumnWidth"))
+        except (TypeError, ValueError):
+            continue
+    return widths
+
+
+def _idml_relative_colwidths(widths, col_count):
+    """Turn IDML point widths into CALS relative colwidth values summing to 1.00*."""
+    if col_count <= 0:
+        return None
+    vals = [widths.get(i) for i in range(col_count)]
+    if any(value is None or value <= 0 for value in vals):
+        return None
+    total = sum(vals)
+    if total <= 0:
+        return None
+    parts = []
+    acc = 0.0
+    for index, value in enumerate(vals):
+        if index == col_count - 1:
+            rest = round(1.0 - acc, 2)
+            if rest <= 0:
+                rest = 0.01
+            parts.append(f"{rest:.2f}*")
+        else:
+            frac = round(value / total, 2)
+            if frac <= 0:
+                frac = 0.01
+            acc += frac
+            parts.append(f"{frac:.2f}*")
+    return parts
+
+
+def _idml_collect_text(elem, ui_styles=None, ui=False, italic=False):
     """Collect paragraph text from an element, skipping nested tables.
 
     When ``ui_styles`` is given, runs carrying an on-screen ("Silk screen")
     character style are wrapped in ``[[UI]]...[[/UI]]`` so the DITA layer can
-    turn them into ``<uicontrol>``.
+    turn them into ``<uicontrol>``. Italic character styles become ``[[I]]``.
     """
     parts = []
     for child in list(elem):
@@ -1828,32 +1896,32 @@ def _idml_collect_text(elem, ui_styles=None, ui=False):
             continue
         child_style = _idml_style_key(child.get("AppliedCharacterStyle", ""))
         child_ui = ui or bool(child_style and ui_styles and child_style in ui_styles)
+        child_italic = italic or _idml_style_is_italic(
+            child_style, child.get("FontStyle") or ""
+        )
         if tag == "CrossReferenceSource":
             marker = _idml_xref_marker(child)
             if marker:
                 parts.append(marker)
             else:
-                parts.append(_idml_collect_text(child, ui_styles, child_ui))
+                parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic))
             continue
         if tag == "Content":
             if child.text:
-                if child_ui:
-                    parts.append(f"{IDML_UI_MARK_OPEN}{child.text}{IDML_UI_MARK_CLOSE}")
-                else:
-                    parts.append(child.text)
+                parts.append(_idml_wrap_run_text(child.text, child_ui, child_italic))
         elif tag == "Br":
             parts.append(" ")
         else:
-            parts.append(_idml_collect_text(child, ui_styles, child_ui))
-    return "".join(parts)
+            parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic))
+    return _idml_merge_adjacent_i_marks("".join(parts))
 
 
 def _idml_xref_marker(elem):
     """Return an ``[[XREF:title]]`` marker for a ``<CrossReferenceSource>``.
 
     The source text reads 第<page>页“<target title>”. The page comes from the
-    InDesign ResultText variable; both title and page are carried so the DITA
-    layer can emit 第N页“标题” as the xref link text.
+    InDesign ResultText variable. The page is kept on the marker so unresolved
+    targets can still show 第N页“标题”; resolved xrefs stay empty.
     """
     contents = [
         sub.text
@@ -2206,6 +2274,11 @@ def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None):
             return lines
     render = lambda r: [grid.get((r, c), "") for c in range(width)]
     lines = []
+    relative_widths = _idml_relative_colwidths(
+        _idml_table_column_widths(table_elem), width
+    )
+    if relative_widths:
+        lines.append("[[COLW:" + ",".join(relative_widths) + "]]")
     if header_row_count != 1:
         # GFM only has one header row; carry the real IDML header count so a
         # two-row header stays in <thead> instead of leaking into <tbody>.
@@ -2316,6 +2389,7 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
 
     def flush():
         text = re.sub(r'[ \t\u00a0]+', ' ', "".join(buffer)).strip()
+        text = _idml_merge_adjacent_i_marks(text)
         if text:
             pieces.append(("text", text, list(images)))
         else:
@@ -2324,17 +2398,17 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
         buffer.clear()
         images.clear()
 
-    def visit(node, ui=False):
+    def visit(node, ui=False, italic=False):
         for sub in list(node):
             sub_tag = _strip_xml_ns(sub.tag)
             sub_style = _idml_style_key(sub.get("AppliedCharacterStyle", ""))
             sub_ui = ui or bool(sub_style and ui_styles and sub_style in ui_styles)
+            sub_italic = italic or _idml_style_is_italic(
+                sub_style, sub.get("FontStyle") or ""
+            )
             if sub_tag == "Content":
                 if sub.text:
-                    if sub_ui:
-                        buffer.append(f"{IDML_UI_MARK_OPEN}{sub.text}{IDML_UI_MARK_CLOSE}")
-                    else:
-                        buffer.append(sub.text)
+                    buffer.append(_idml_wrap_run_text(sub.text, sub_ui, sub_italic))
             elif sub_tag == "Br":
                 if split_on_br:
                     flush()
@@ -2359,9 +2433,9 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
                 if marker:
                     buffer.append(marker)
                 else:
-                    visit(sub, sub_ui)
+                    visit(sub, sub_ui, sub_italic)
             else:
-                visit(sub, sub_ui)
+                visit(sub, sub_ui, sub_italic)
 
     visit(para)
     flush()
@@ -3130,8 +3204,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     return match.group(0)
                 return f'<uicontrol>{inner}</uicontrol>'
             restored = EN_BRACKET_UI_RE.sub(_en_bracket_ui, restored)
-        # InDesign cross-reference -> <xref>. Page prefix and title both go
-        # inside the xref so IME quote+italic style covers 第12 页测定DNB 浓度.
+        # InDesign cross-reference -> empty <xref cms:title="..."/>. IME fills
+        # the visible quote/page text from the target topic.
         def _xref_repl(match):
             target = match.group(1).strip()
             page = (match.group(2) or "").strip()
@@ -3140,10 +3214,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             spaced_title = _space_alnum_cjk(display)
             prefix = _space_alnum_cjk(f'第{page}页') if page else ''
             if target_id:
-                inner = f'{prefix}{spaced_title}' if prefix else spaced_title
                 return (
                     f'<xref href="{_escape_xml_attr(target_id)}.dita" '
-                    f'cms:title="{_escape_xml_attr(display)}">{_escape_xml_attr(inner)}</xref>'
+                    f'cms:title="{_escape_xml_attr(display)}"/>'
                 )
             if prefix:
                 return f'{prefix}\u201c{spaced_title}\u201d'
@@ -3179,6 +3252,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     list_base_level = 0
     pending_table_header_rows = None
     pending_table_wide = None
+    pending_table_colwidths = None
     in_codeblock = False
     codeblock_lang = ""
     codeblock_lines = []
@@ -3544,12 +3618,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     def _flush_pending_table():
         nonlocal in_table, table_rows, pending_table_title, pending_table_caption_only
-        nonlocal pending_table_header_rows, pending_table_wide
+        nonlocal pending_table_header_rows, pending_table_wide, pending_table_colwidths
         if not in_table or not table_rows:
             in_table = False
             table_rows = []
             pending_table_header_rows = None
-            pending_table_wide = None
             return None
 
         in_table = False
@@ -3657,6 +3730,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     pending_table_title = None
                     pending_table_caption_only = None
                     pending_table_wide = None
+                    pending_table_colwidths = None
                     note_blocks = []
                     list_items_pending = []
 
@@ -3706,9 +3780,14 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         table_xml.append(f'          <tgroup cols="{cols}">')
         # IME needs one <colspec> per column to render and resize column
         # widths; a <tgroup> without them yields a table with fixed columns.
+        colwidths = pending_table_colwidths
+        pending_table_colwidths = None
         for col_index in range(cols):
+            width = "1.00*"
+            if colwidths and len(colwidths) == cols:
+                width = colwidths[col_index]
             table_xml.append(
-                f'            <colspec colname="COLSPEC{col_index}" colwidth="1.00*"/>'
+                f'            <colspec colname="COLSPEC{col_index}" colwidth="{width}"/>'
             )
         if header_rows:
             table_xml.append('            <thead>')
@@ -3871,6 +3950,13 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 if table_xml:
                     _append_block(table_xml)
                 pending_table_header_rows = int(header_match.group(1))
+                continue
+        if stripped.startswith("[[COLW:"):
+            colw_match = re.match(r'^\[\[COLW:([^\]]+)\]\]$', stripped)
+            if colw_match:
+                pending_table_colwidths = [
+                    part.strip() for part in colw_match.group(1).split(",") if part.strip()
+                ]
                 continue
         if stripped.startswith("[[TWIDE:"):
             wide_match = re.match(r'^\[\[TWIDE:([^\]]+)\]\]$', stripped)

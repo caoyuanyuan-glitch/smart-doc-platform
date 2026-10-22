@@ -136,7 +136,8 @@
 - 表头行数由 `HeaderRowCount` 决定：解析阶段输出 `[[THEAD:n]]` 标记，DITA 阶段把前 n 行全部放入同一个 `<thead>`。两行表头必须保留两行，不能只取第一行或把第二行降到 `<tbody>`。
 - 表格单元格内的图标（如 `icon_emergencystop.ai` 状态图标）必须保留为该 `<entry>` 内的 `<image>`，不得因为单元格没有正文而丢弃；单元格文字与嵌套表格正文只输出一次。
 - 段落内可锚定提示框表格（`ParagraphStyleRange → CharacterStyleRange → Table`）：必须先输出段落自身文字，再输出锚定表格，不能因嵌套表格跳过段落正文。
-- 图片由外部链接引用（`Link` 元素），常见 `.ai`/`.png`；同名 `.svg` 视为其可用的替代资源。图片管线按用户约定延后，源文件无同集 `.svg` 时对应图片不输出。
+ - 图片由外部链接引用（`Link` 元素），常见 `.ai`/`.png`；同名 `.svg` 视为其可用的替代资源。源 zip 含 `.idml` 与同级 `Links/`，`Links/` 放与链接主干同名的 `.svg`（`.ai` 按同名 `.svg` 替换）。无对应资源的链接不输出图片。
+ - 无原生 InDesign `Links/` 时，可用 IME 导出包 `image/` 中的 SVG：去掉文件名 `G\d+_` 前缀，按主干（大小写不敏感）对齐 IDML `Link` 主干，写入源 zip 的 `Links/{主干}.svg`。note 图标（`icon_note`、`Warning` 等）仍不输出。
 - 链接 URI 必须先做百分号解码（`urllib.parse.unquote`）再匹配资源；InDesign 会把名称中的空格与中文编码成 `%20`/`%xx`，不解码会导致这些图片全部漏配。
 - 图题段落以 `Figure-title` 样式标识（如 `For reagent kit only:Figure-title-CN/-EN`），转换时打上 `[[FIGCAP]]` 标记，供 DITA 层包装为图。
 - IDML 有序/无序列表的 `<Br/>` 是**步骤分隔符**：同一个 `Numbered list`/`Bulleted list` 段落里由 `<Br/>` 分开的多段文本代表多个步骤，必须各自输出为独立的 `1. `/`- ` 列表项，不能拼成一行。步骤之间内嵌的图标 `<Link>` 属于当前步骤，不拆分该步骤。
@@ -148,8 +149,9 @@
 - 内联图标若排在提示框（note）之前，输出顺序须保持“图标 → note”，不能因为提示框先冲刷而把图标挤到 note 之后。
 - 内联按钮图标必须保持它在句中的原始位置，不能下沉到段落/列表项末尾：例如源为「点击[icon]，托盘将自动收回…」时，输出须为 `<li><p>点击<image href="…"/>，托盘将自动收回…</p></li>`，图标夹在 `点击` 与 `，` 之间。图标在解析阶段以占位符随文本一起传递，避免位置丢失。
 - 段落正文中的状态图标（文件名以 `icon` 开头，如 `icon_status sequencing_1_1.ai`）按内联图片输出，段落保持为正文而不是被拆成独立的块级图片。
-  - 交叉引用（`CrossReferenceSource`，源文形态为 `第<页码>页“目标标题”`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。DITA 阶段输出 `<xref href="目标topic.dita" cms:title="目标标题">第N 页目标标题</xref>`，页码和标题都在 xref 体内。找不到对应 topic 时回退为纯文本 `第N 页“标题”`，不产出无效 `<xref>`。
-  - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`）。页码和标题都写在 `<xref>` 体内：`<xref href="…" cms:title="测定DNB浓度">第12 页测定DNB 浓度</xref>`。IME 交叉引用样式给整个 xref 加引号和斜体。数字/英文后紧跟汉字处加空格（`第12 页`、`测定DNB 浓度`），页码与标题之间不加空格。
+  - 交叉引用（`CrossReferenceSource`，源文形态为 `第<页码>页“目标标题”`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。DITA 阶段输出空标签 `<xref href="目标topic.dita" cms:title="目标标题"/>`，不把「第N 页标题」写进 xref 体内，页码由 IME 按目标 topic 生成。找不到对应 topic 时回退为纯文本 `第N 页“标题”`，不产出无效 `<xref>`。
+  - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`），也不含页码。数字/英文后紧跟汉字处的空格只用于未解析回退文本（`第12 页`、`测定DNB 浓度`）。
+  - IDML 斜体字符样式转为 `<i>`：`Cross reference` / `Cross reference-in para.-CN` 等（公式变量 `N`/`c`/`V`、书名）以及 `Subtle Emphasis`、`FontStyle="Italic"`。相邻斜体 run 合并。屏上控件样式优先于斜体。
  - 页码变量解析失败时省略“第N页”，只输出标题；不得残留 `第页“目标标题”` 这类空页码形式。
  - 非列表正文段落里的 `<Br/>` 是段落分隔（如 `关于说明书` 的 `Text in first page` 用一个段落样式写下多段声明）：每一截输出独立 `<p>`，不能拼成一个 `<p>`。
  - 表格单元格若使用 `Table:Bulleted list` / `Table:Numbered list` / `sentence list` 样式，单元格内由 `<Br/>` 分开的各项输出为该 `<entry>` 内的 `<ul>`/`<ol>`（版本记录的修订摘要即此结构）；`Table:Single sentence` 仍为纯文本。
@@ -192,6 +194,7 @@
 - 表格单元格内每个句段包在 `<p>`：`<entry><p>…</p></entry>`。空单元格保持 `<entry></entry>`。
 - 单元格内列表同样每个 `<li>` 包 `<p>`。
 - 正文每个句段各自一个 `<p>`，含 note 内文字。
+ - IDML 表格列宽取自 `Column/@SingleColumnWidth`，按列宽占比写成 `<colspec colwidth="0.30*"/>` 这类相对宽度（各列之和为 `1.00*`）。解析阶段用 `[[COLW:0.30*,0.70*]]` 传递。缺少列宽时仍用 `1.00*`。提示框表格不写 colwidth。
 
 ## 验收口径
 

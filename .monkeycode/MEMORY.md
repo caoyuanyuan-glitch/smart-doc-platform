@@ -121,8 +121,8 @@ DITA 父子节点兼容规则
   - 若中间父节点被生成为信息结构组件，IME 中其子 topic 可能出现右键加载错误
 
 Word 转 DITA 批量转换基线规则
-- Date: 2026-08-13
-- Context: Agent 在收敛英文 Word 转 DITA 转换规则并准备后续批量处理时发现
+- Date: 2026-10-22
+- Context: Agent 在收敛英文 Word 转 DITA 转换规则并准备后续批量处理时发现；2026-10-22 补 IDML 空 xref / 斜体 / 列宽，以及用 IME 包图顶替 Links
 - Category: 工作流协作
 - Instructions:
   - 后续批量 Word/WPS 转 DITA 时，统一以 `当前工作区/.monkeycode/docs/word-to-dita-conversion-rules.md` 作为转换与验收基线
@@ -135,18 +135,23 @@ Word 转 DITA 批量转换基线规则
   - 每次转换完成后必须再做一轮与原文核对：按 `word-to-dita-conversion-rules.md` 逐条检查，对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出；不得只交 zip
   - 用户口述的新转换规则（如 `警告`→`warning`、`注意`→`caution`）必须沉淀到该规则文件，并同步落实现与测试，不能只停留在对话里
   - 规则文件同时覆盖 Word/WPS 与 IDML 两种源格式，差异只写在“IDML 源解析规则”小节
-    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 175 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
-  - IME 按编号前缀显示主题类型：`DTO` 显示「主题 Topic」，`DTC` 显示「主题 Concept」。正文小节统一输出 `sDitaTopic` + `DTO`
+    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 178 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
+  - IME 主题类型：封面 `sCoverTopic`，章级 `chapterTopic`，其余一律 `sDitaTopic` + `DTO`。IME 按编号前缀显示：`DTO` 为「主题 Topic」，`DTC` 为「主题 Concept」
+  - `ul`/`ol` 条目、表格单元格、正文与 Note 句段都包 `<p>`：`<li><p>…</p></li>`、`<entry><p>…</p></entry>`；空单元格保持空 `<entry>`
   - 改写已导入的 IME zip 时，必须同步 `.dita` 文件名/`cms:number`、ditamap、`xref`、`jsonData.json`、`infotree.xml`（含 `out/` 副本）。只改 `.dita` 时 IME 仍显示旧类型
   - 把已有节点的 `DTC` 前缀改成 `DTO` 后，IME 更新匹配不到原编号，导入选新增
   - 全量单测中这 6 个失败属环境性预置、非回归，排查时不要浪费时间：4 个 `DocxHeadingDetectionTest`（缺 `.monkeycode-tmp-files/` 下的 `.docx` 样例）、`test_polish_match_score`（润色模块数据）、`test_document_ocr_keeps_numbered_paragraphs`（缺 `tesseract`）
   - 改完 `backend/app/api/convert.py` 必须重启后端（uvicorn 无 `--reload`），再用 API 端到端跑 617：`POST /api/auth/login`（表单 `admin/admin123`）取 token → `POST /api/convert/`（multipart：`source_file`、`target_format=dita`、`output_language=zh-CN`、`template_file`）→ 轮询 `GET /api/convert/{id}/progress` 到 `completed` → `GET /api/convert/{id}/download`
   - IDML 端到端要用合并包（`.idml` 与同级 `Links/` 打成一个 zip），因为独立 `.idml` 内不含 `Links/`，直接调 `_idml_to_markdown` 会得到 0 张图
+  - 无原生 InDesign `Links/` 时，用 IME 导出包 `image/` 下的 SVG：去掉文件名 `G\d+_` 前缀，按主干（大小写不敏感）对齐 IDML `Link` 的 `.ai`/`.png` 主干，写入合并 zip 的 `Links/{idml主干}.svg`；`.ai` 由转换器按同名 `.svg` 替换
+  - `_run_pipeline` 结束会删掉它处理的 `.idml` 副本，源文件用合并 zip 或 seed 的拷贝，勿把 seed 路径直接交给 pipeline
   - 屏上控件（`uicontrol`）两种源的等价标记：中文源用 `【控件名】` 字面括号，英文源用 `Silk screen` 字符样式（该样式自带 `FontStyle="Bold"`，所以英文侧表现为加粗）；中文 `617` 无 Silk screen 样式，英文 `1249` 无 `【】`，两者都要映射为 `<uicontrol>`，`【N】` 数字序号除外
   - IDML 的 `Bulleted list`/`Numbered list` 列表项不得因正文字面命中 note 关键词被提升为 note 并折叠进上一条；只有提示框表格转 note
   - 「出现在界面上的文本」全部用 `<uicontrol>`（含对话框整句提示，不只是短控件名）；中文源靠 `【】`，英文源靠 `Silk screen` 字符样式判定
-     - IDML 交叉引用转 `<xref href="目标topic.dita" cms:title="目标标题">第N 页目标标题</xref>`：页码取自 `ResultText`，页码和标题都写在 xref 体内；IME 样式给整个 xref 加引号和斜体。PDF 为斜体 `“第12 页测定DNB 浓度”`；标记为 `[[XREF:标题#页码]]`
-     - 交叉引用数字/英文后紧跟汉字处加空格；`cms:title` 保持无空格原标题且不含章节编号（如 `9.1`）
+     - IDML 交叉引用转空标签 `<xref href="目标topic.dita" cms:title="目标标题"/>`：页码取自 `ResultText` 仅用于未解析回退文本 `第N 页“标题”`；解析标记仍为 `[[XREF:标题#页码]]`。页码由 IME 生成，不要写进 xref 体内
+     - `cms:title` 保持无空格原标题且不含章节编号（如 `9.1`）
+     - IDML 斜体：`Cross reference*` 字符样式与 `FontStyle="Italic"` / `Subtle Emphasis` 输出 `<i>`（如 `N`/`c`/`V`、书名）
+     - IDML 表格 `Column/@SingleColumnWidth` 转为相对 `colspec colwidth`（如 `0.30*`/`0.70*`），标记 `[[COLW:...]]`；缺宽时用 `1.00*`
    - 列表项后的说明段落/公式图挂到所属父级 `<li>`，并保持源顺序：嵌套子列表之前的 `<p>`/note/图紧跟步骤正文，之后的说明挂在子列表后面，不得冲出整个 `<ul>`
   - IDML 列表层级必须保留：解析阶段用行首 `[[LVL:n]]` 传递级别，DITA 阶段构建嵌套 `<ul>`/`<ol>`，不得压平；`[[LVL:n]]` 前缀不得干扰“含编号步骤即任务 DTO”的章节类型判定
   - IDML 表格 `HeaderRowCount>1` 时用 `[[THEAD:n]]` 传递，DITA 阶段前 n 行全部放入同一个 `<thead>`；单元格内状态图标保留为 `<entry><image/></entry>`，单元格文字与嵌套表格正文只输出一次
