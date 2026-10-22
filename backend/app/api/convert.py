@@ -3555,14 +3555,14 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if not pending_image:
             return None
         image_xml = (
-            f'        <image href="{_escape_xml_attr(pending_image["href"])}" placement="break"></image>'
+            f'        <image href="{_escape_xml_attr(pending_image["href"])}"></image>'
         )
         pending_image = None
         return image_xml
 
     def _figure_xml(title, hrefs):
         images = "".join(
-            f'<image href="{_escape_xml_attr(href)}" placement="break"></image>'
+            f'<image href="{_escape_xml_attr(href)}"></image>'
             for href in hrefs
             if href
         )
@@ -3697,14 +3697,23 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         def _emit_span_row_entries(row, indent):
             entries = []
             col = 0
+            # [[SPANC]] after a same-row colspan already advanced `col`;
+            # only leftover vMerge continues should bump the column index.
+            pending_hspan = 0
             for cell in row:
                 text, colspan, rowspan, covered = _parse_span_cell(cell)
                 if covered:
+                    if pending_hspan > 0:
+                        pending_hspan -= 1
+                        continue
                     col += 1
                     continue
                 attrs = ""
                 if colspan > 1:
-                    attrs += f' namest="COLSPEC{col}" nameend="COLSPEC{col + colspan - 1}"'
+                    end = min(col + colspan - 1, cols - 1)
+                    if end > col:
+                        attrs += f' namest="COLSPEC{col}" nameend="COLSPEC{end}"'
+                    pending_hspan += max(0, colspan - 1)
                 if rowspan > 1:
                     attrs += f' morerows="{rowspan - 1}"'
                 entries.append(f'{indent}{_dita_table_entry_xml(text, attrs)}')
@@ -4423,6 +4432,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     _flush_pending_note_to_body()
 
     body_content = "\n".join(p for p in body_parts if p)
+    if not str(body_content).strip():
+        # IME structured editor binds the first body child. An empty
+        # <conbody>/<body> yields "加载文档内容失败:undefined".
+        body_content = "        <p></p>"
 
     if topic_kind == "chapter":
         root_tag = "concept"

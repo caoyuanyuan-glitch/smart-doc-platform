@@ -34,6 +34,7 @@
 ## 标题与结构规则
 
 - DITA 层级按源 Word 标题层级建树，章节结构需要与 Word 层级 100% 一致。
+- 无正文的真实父 topic 仍输出 `conbody`/`body`，并至少放一个空 `<p>`，避免 IME 打开时报「加载文档内容失败:undefined」。
 - 源 Word 里仅作分组、没有正文的 `Appendix` / `附录` 父标题不生成 topic，也不进入 ditamap。
 - 其下每个附录提升为独立 `<appendix>`：容器 `navtitle` 为附录名，先挂同名 `chapterTopic`，再挂该附录的子 topic；叶子附录的正文写在该 `chapterTopic` 中。
 - `Revision history` 视为真实章节。
@@ -166,7 +167,7 @@
  - 内联保留的判定范围：小图（尺寸不超过 220×120）所在段落同时含正文文本时内联输出；紧跟在上一句正文之后的孤立小图标也并入该句，不得拆成独立块图。
  - note 段落内的小图视为装饰，丢弃。
  - 句中图标若无法读取尺寸，只要该段同时含正文且不是 note/图题，仍按内联图标保留，不得拆成独立块图。
-- 图像与图题包装为 `<fig><title>图题</title><image href="image/…" placement="break"></image></fig>`；编号由 IME 自动生成，`<title>` 内不放 `图 N`/`Figure N`。
+- 图像与图题包装为 `<fig><title>图题</title><image href="image/…"></image></fig>`；块级图只保留 `href`，与 IME 官方包一致。编号由 IME 自动生成，`<title>` 内不放 `图 N`/`Figure N`。
 - 同一图题段落内的多张实质图并入同一个 `<fig>`，不要拆成图题后的裸 `<image>`。
  - 图题后连续多图仍并入当前 `<fig>`；若下一张图后面紧跟另一条图题，则该图是下一图的配图，不得并入当前图。
 - Word 装饰残图不输出：1 像素细条、扁长横幅，以及图题/说明句之后空段落里的小图。
@@ -186,6 +187,7 @@
 - 若整张表每一行都带 `tblHeader`（常见于只有两行的推荐值表），只保留首行为 `<thead>`，其余进 `<tbody>`。
 - 没有垂直合并的标签首行（如 `Workbench Position`）可作为 1 行 `<thead>`。
 - Word `w:vMerge` / `w:gridSpan` 在解析阶段输出 `[[SPAN:c,r]]` / `[[SPANC]]`，DITA 阶段还原为 `morerows` 与 `namest`/`nameend`。
+- 同一行里横向合并的 `[[SPANC]]` 只占位、不再推进列号；`namest`/`nameend` 必须落在已有 `colspec` 范围内。列号越界时 IME 打开该 topic 会报「加载文档内容失败:undefined」。
 - 超宽表输出 `<table outputclass="180mm">`：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` 等宽表章节，或列数 ≥ 7（覆盖 Barcode / Appendix C–E）。
 - Word 表格跨页后重复出现的表头行，需要在转换后自动删除。
 - 若同一 Markdown 表中出现嵌入式 `Table N ...` 行，视为下一张表的标题并拆分为独立表格。

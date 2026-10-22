@@ -86,6 +86,19 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn('cms:imesofttype="chapterTopic"', xml)
         self.assertIn('id="concept-CTO041001"', xml)
 
+    def test_empty_topic_body_keeps_openable_paragraph(self):
+        xml = _content_to_dita_xml(
+            "Product Information",
+            "",
+            "concept",
+            "CTO041002",
+            "en-US",
+            topic_kind="chapter",
+        )
+        self.assertIn("<conbody ", xml)
+        self.assertIn("<p></p>", xml)
+        self.assertNotRegex(xml, r"<conbody[^>]*>\s*</conbody>")
+
     def test_task_topics_use_topic_shell(self):
         xml = _content_to_dita_xml(
             "进行磁珠分选",
@@ -436,7 +449,7 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertNotIn('<alt>', xml)
 
     def test_english_figure_caption_drops_number_prefix(self):
@@ -448,7 +461,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<fig><title>PCR BC Primer-96 layout</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>PCR BC Primer-96 layout</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertNotIn('Figure 7', xml)
 
     def test_figure_caption_written_before_image_binds_to_following_image(self):
@@ -460,7 +473,7 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<fig><title>前置图题</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>前置图题</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertNotIn('<p>图1 前置图题</p>', xml)
 
     def test_caption_with_two_following_images_stays_in_one_fig(self):
@@ -476,11 +489,11 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn(
             '<fig><title>Schematic Diagram of Slide Loading</title>'
-            '<image href="image/image_008.png" placement="break"></image>'
-            '<image href="image/image_009.jpeg" placement="break"></image></fig>',
+            '<image href="image/image_008.png"></image>'
+            '<image href="image/image_009.jpeg"></image></fig>',
             xml,
         )
-        self.assertNotIn('<image href="image/image_009.jpeg" placement="break"></image>\n', xml.split("</fig>")[-1])
+        self.assertNotIn('<image href="image/image_009.jpeg"></image>\n', xml.split("</fig>")[-1])
 
     def test_consecutive_figures_keep_separate_images(self):
         xml = _content_to_dita_xml(
@@ -496,12 +509,12 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn(
             '<fig><title>cDNA Library Structure</title>'
-            '<image href="image/image_021.png" placement="break"></image></fig>',
+            '<image href="image/image_021.png"></image></fig>',
             xml,
         )
         self.assertIn(
             '<fig><title>Oligo Library Structure</title>'
-            '<image href="image/image_022.png" placement="break"></image></fig>',
+            '<image href="image/image_022.png"></image></fig>',
             xml,
         )
 
@@ -518,7 +531,7 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertIn(
             '<fig><title>PCR module top cover plate latch position</title>'
-            '<image href="image/image_026.png" placement="break"></image></fig>',
+            '<image href="image/image_026.png"></image></fig>',
             xml,
         )
         self.assertNotIn("<p>PCR module top cover plate latch position</p>", xml)
@@ -567,7 +580,7 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertEqual(xml.count('<ol>'), 1)
         self.assertIn('<li><p>第一步</p>', xml)
-        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png" placement="break"></image></fig>', xml)
+        self.assertIn('<fig><title>示例图片</title><image href="image/docx_image_001.png"></image></fig>', xml)
         self.assertIn('<note type="warning"><p>保持低温。</p></note>', xml)
         self.assertIn('<table>\n          <title>参数</title>', xml)
         self.assertIn('<li><p>第二步</p></li>', xml)
@@ -605,8 +618,9 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<image href="image/docx_image_003.png" placement="break"></image>', xml)
+        self.assertIn('<image href="image/docx_image_003.png"></image>', xml)
         self.assertNotIn('<alt>', xml)
+        self.assertNotIn('placement="break"', xml)
 
     def test_note_icon_image_is_skipped_when_adjacent_to_warning_text(self):
         xml = _content_to_dita_xml(
@@ -1485,6 +1499,50 @@ class DocxTableMarkdownTest(unittest.TestCase):
         )
         self.assertIn('<table outputclass="180mm">', xml)
         self.assertIn('namest="COLSPEC1" nameend="COLSPEC4"', xml)
+
+    def test_horizontal_span_placeholders_do_not_shift_later_columns(self):
+        table = self._real_table(
+            2,
+            9,
+            {
+                (0, 0): "Consumable Name",
+                (0, 1): "1RXN",
+                (0, 2): "2RXN",
+                (0, 3): "3RXN",
+                (0, 4): "4RXN",
+                (0, 5): "5RXN",
+                (0, 6): "6RXN",
+                (0, 7): "7RXN",
+                (0, 8): "8RXN",
+                (1, 0): "M8 slide (each)",
+                (1, 1): "1",
+                (1, 3): "2",
+                (1, 5): "3",
+                (1, 7): "4",
+            },
+            merges=[
+                ((1, 1), (1, 2)),
+                ((1, 3), (1, 4)),
+                ((1, 5), (1, 6)),
+                ((1, 7), (1, 8)),
+            ],
+        )
+        xml = _content_to_dita_xml(
+            "Reference Table of Consumable Usage for 1-8 Throughputs in the Entire Workflow",
+            "\n".join(_docx_table_to_markdown(table)),
+            "concept",
+            "CTO041050",
+            "en-US",
+            topic_kind="chapter",
+        )
+        self.assertIn('namest="COLSPEC1" nameend="COLSPEC2"', xml)
+        self.assertIn('namest="COLSPEC3" nameend="COLSPEC4"', xml)
+        self.assertIn('namest="COLSPEC5" nameend="COLSPEC6"', xml)
+        self.assertIn('namest="COLSPEC7" nameend="COLSPEC8"', xml)
+        self.assertNotIn("COLSPEC10", xml)
+        self.assertNotIn("COLSPEC11", xml)
+        self.assertIn(">1</entry>", xml)
+        self.assertIn(">4</entry>", xml)
 
     def test_sequencing_parameters_table_is_extra_wide(self):
         xml = _content_to_dita_xml(
@@ -2495,7 +2553,7 @@ class IdmlConversionTest(unittest.TestCase):
             topic_kind="task",
         )
         self.assertIn(
-            '<fig><title>竖直放置试剂槽</title><image href="image/试剂槽.svg" placement="break"></image></fig>',
+            '<fig><title>竖直放置试剂槽</title><image href="image/试剂槽.svg"></image></fig>',
             xml,
         )
 

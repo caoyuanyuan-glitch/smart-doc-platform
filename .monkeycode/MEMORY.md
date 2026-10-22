@@ -123,13 +123,15 @@ AI 翻译引擎排查规则
   - 仓库内只保留 `.env.example` 模板，实际服务配置以部署环境注入为准
 
 DITA 父子节点兼容规则
-- Date: 2026-06-30
-- Context: Agent 在执行 Word 转 DITA 的 IME 右键报错排查时发现
+- Date: 2026-10-21
+- Context: Agent 在执行 Word 转 DITA 的 IME 右键报错排查时发现；2026-10-21 补充空 body 导致无法打开
 - Category: 排错调试
 - Instructions:
   - DITA 生成时，顶层空父节点可以保留为结构容器
   - 带子节点的中间父节点必须输出为真实 topic，并生成自己的 `href` 和 `keys`
   - 若中间父节点被生成为信息结构组件，IME 中其子 topic 可能出现右键加载错误
+  - 真实 topic 的 `conbody`/`body` 不能为空；IME 打开空 body 会报「加载文档内容失败:undefined」，元素路径为空
+  - 无正文的父 topic 至少输出一个空 `<p>`，不要只留空白 `conbody`
 
 Word 转 DITA 批量转换基线规则
 - Date: 2026-10-22
