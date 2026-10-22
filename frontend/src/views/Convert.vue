@@ -5,10 +5,10 @@
 
       <div v-if="converting || taskResult" class="panel">
         <div class="panel-header">
-          <span>转换进度</span>
+          <span>{{ converting ? '转换进度' : '转换结果' }}</span>
           <el-button v-if="converting" size="small" @click="cancelPolling">取消</el-button>
         </div>
-        <el-steps :active="activeStep" finish-status="success" align-center>
+        <el-steps :active="activeStep" finish-status="success" align-center class="pipeline-steps">
           <el-step
             v-for="(step, idx) in pipelineSteps"
             :key="idx"
@@ -22,8 +22,8 @@
             </template>
           </el-step>
         </el-steps>
-        <div class="progress-bar-wrap">
-          <el-progress :percentage="taskProgress" :color="progressColor" />
+        <div v-if="converting" class="progress-compact">
+          <el-progress :percentage="taskProgress" :color="progressColor" :stroke-width="8" />
         </div>
 
         <div v-if="taskResult && converting === false" class="result-section">
@@ -38,22 +38,6 @@
           <div v-else class="result-banner warning">
             <el-icon><Warning /></el-icon>
             <span>转换完成，但存在验证警告</span>
-          </div>
-
-          <div v-if="conversionDetail.length > 0" class="detail-table-wrap">
-            <h4>转换详情</h4>
-            <el-table :data="conversionDetail" border size="small" :header-cell-style="tableHeaderStyle">
-              <el-table-column prop="source_section" label="源章节" />
-              <el-table-column prop="target_type" label="目标类型" width="130" />
-              <el-table-column prop="topic_file" :label="outputFileLabel" />
-              <el-table-column prop="status" label="状态" width="80">
-                <template #default="scope">
-                  <el-tag :type="scope.row.status === 'ok' ? 'success' : 'warning'" size="small">
-                    {{ scope.row.status === 'ok' ? 'OK' : scope.row.status }}
-                  </el-tag>
-              </template>
-            </el-table-column>
-            </el-table>
           </div>
 
           <div class="result-actions">
@@ -147,16 +131,7 @@
               <div v-else class="file-info">
                 <el-icon><FolderOpened /></el-icon>
                 <span>{{ templateFile.name }}</span>
-                <el-button size="small" type="danger" link @click.stop="templateFile = null; templateTree = null">移除</el-button>
-              </div>
-            </div>
-            <div v-if="templateTree" class="template-tree">
-              <div class="tree-title">模板包内容解析：</div>
-              <div v-for="(val, key) in templateTree" :key="key" class="tree-entry">
-                <span class="tree-folder">📁 {{ key }}/</span>
-                <div v-for="file in getTemplateFiles(val)" :key="file" class="tree-file">
-                  📄 {{ file }}
-                </div>
+                <el-button size="small" type="danger" link @click.stop="templateFile = null">移除</el-button>
               </div>
             </div>
             <el-alert
@@ -255,7 +230,6 @@ const sourceInput = ref(null)
 const sourceFile = ref(null)
 const templateInput = ref(null)
 const templateFile = ref(null)
-const templateTree = ref(null)
 const targetFormat = ref('dita')
 const outputLanguage = ref('')
 const convertError = ref('')
@@ -338,12 +312,6 @@ const resultItemLabel = computed(() => {
   if (targetFormat.value === 'csv') return 'CSV 文件'
   if (targetFormat.value === 'markdown') return 'Markdown 文件'
   return 'topic'
-})
-
-const outputFileLabel = computed(() => {
-  if (targetFormat.value === 'csv') return 'CSV 文件'
-  if (targetFormat.value === 'markdown') return '输出文件'
-  return 'topic文件'
 })
 
 const isDirectFileDownload = computed(() => {
@@ -459,7 +427,6 @@ function onTemplateChange(e) {
   const f = e.target.files[0]
   if (f) {
     templateFile.value = f
-    parseTemplate(f)
   }
 }
 
@@ -467,52 +434,7 @@ function onTemplateDrop(e) {
   const f = e.dataTransfer.files[0]
   if (f) {
     templateFile.value = f
-    parseTemplate(f)
   }
-}
-
-async function parseTemplate(file) {
-  try {
-    const JSZip = (await import('jszip')).default
-    const zip = await JSZip.loadAsync(file)
-    const tree = {}
-    zip.forEach((relativePath, zipEntry) => {
-      if (zipEntry.dir) return
-      const parts = relativePath.split('/')
-      let current = tree
-      for (let i = 0; i < parts.length - 1; i++) {
-        const p = parts[i]
-        if (!current[p]) current[p] = { _files: [] }
-        current = current[p]
-      }
-      const leaf = parts[parts.length - 1]
-      if (leaf) {
-        if (!current._files) current._files = []
-        current._files.push(leaf)
-      }
-    })
-    templateTree.value = tree
-  } catch (e) {
-    ElMessage.warning('模板包解析失败，请确认是有效的 ZIP 文件')
-    templateTree.value = null
-  }
-}
-
-function getTemplateFiles(node) {
-  if (!node) return []
-  if (Array.isArray(node._files)) return node._files
-  if (typeof node === 'object') {
-    const files = []
-    for (const key of Object.keys(node)) {
-      if (key === '_files' && Array.isArray(node[key])) {
-        files.push(...node[key])
-      } else if (typeof node[key] === 'object') {
-        files.push(...getTemplateFiles(node[key]))
-      }
-    }
-    return files
-  }
-  return []
 }
 
 async function startConvert() {
@@ -784,7 +706,6 @@ watch(availableTargetFormats, (options) => {
 watch(targetFormat, (val) => {
   if (val !== 'dita') {
     templateFile.value = null
-    templateTree.value = null
     outputLanguage.value = ''
   }
 })
@@ -874,25 +795,16 @@ onBeforeUnmount(() => stopPolling())
 
 .file-size { color: #9ca3af; font-weight: 400; }
 
-.template-tree {
-  margin-top: 12px;
-  padding: 12px;
-  background: #f9fafb;
-  border-radius: 6px;
-  border: 1px solid #e5e7eb;
-}
-
-.tree-title { font-weight: 600; margin-bottom: 8px; color: #374151; }
-
-.tree-entry { margin-bottom: 4px; }
-
-.tree-folder { font-weight: 600; color: #1e40af; }
-
-.tree-file { padding-left: 24px; color: #6b7280; font-size: 13px; }
-
 .form-tip { color: #9ca3af; font-size: 12px; margin-top: 4px; }
 
-.progress-bar-wrap { margin-top: 20px; padding: 0 40px; }
+.pipeline-steps {
+  max-width: 720px;
+  margin: 0 auto;
+}
+.progress-compact {
+  max-width: 240px;
+  margin: 16px auto 0;
+}
 
 .result-overview { margin: 12px 0; }
 
@@ -960,10 +872,6 @@ onBeforeUnmount(() => stopPolling())
 .unmapped-warn li { font-size: 13px; color: #92400e; }
 
 .suggestion { font-size: 13px; color: #92400e; margin-top: 6px; }
-
-.detail-table-wrap { margin: 16px 0; }
-
-.detail-table-wrap h4 { margin-bottom: 8px; color: #374151; }
 
 .result-actions {
   display: flex;
