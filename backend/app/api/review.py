@@ -1172,10 +1172,13 @@ def _page_number_from_position(content, position):
     start, _ = _parse_issue_position(position)
     if not content:
         return None
-    separator = _content_page_separator(content)
-    offsets = _page_offsets_from_pages(_split_content_pages(content), separator=separator)
+    offsets = _page_offsets_from_pages(content)
+    last = len(offsets)
     for index, (s, e) in enumerate(offsets, start=1):
-        if s <= start <= e:
+        if index == last:
+            if s <= start <= e:
+                return index
+        elif s <= start < e:
             return index
     return None
 
@@ -1185,11 +1188,14 @@ def _review_pdf_visual_verify_enabled():
 
 
 def _review_pdf_visual_verify_limit():
-    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LIMIT', '24'))
+    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LIMIT', '6'))
 
 
 def _review_pdf_visual_verify_layout_limit():
-    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT', '48'))
+    # 注意：这是页级 issue 的【真实上限】。
+    # 生效逻辑是 page_limit = max(remaining_limit, layout_limit)，
+    # 只调 LIMIT 不会把页级 issue 压下来（实测 LIMIT=6 / LAYOUT=48 仍是 48 条）。
+    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT', '6'))
 
 
 def _review_pdf_visual_verify_page_budget():
@@ -3609,8 +3615,8 @@ def _issue_page_number(issue, content):
 def _backfill_issue_page_numbers(issues, content):
     """为缺少页码的 issue 按 position.start 反查页码并回填。"""
     filled = 0
-    pages = _split_content_pages(content)
-    offsets = _page_offsets_from_pages(pages, separator=_content_page_separator(content))
+    offsets = _page_offsets_from_pages(content)
+    last = len(offsets)
     for issue in issues:
         meta = _issue_meta(issue)
         if any(meta.get(key) for key in ("page_number", "page", "page_no")):
@@ -3622,7 +3628,11 @@ def _backfill_issue_page_numbers(issues, content):
             continue
         page_no = None
         for idx, (s, e) in enumerate(offsets, start=1):
-            if s <= start <= e:
+            if idx == last:
+                if s <= start <= e:
+                    page_no = idx
+                    break
+            elif s <= start < e:
                 page_no = idx
                 break
         if page_no:
@@ -4511,13 +4521,14 @@ def _get_document_upload_path(document):
     return candidate if candidate.exists() else None
 
 
-def _page_offsets_from_pages(pages: list[str], separator: str = "\f") -> list[tuple[int, int]]:
-    offsets = []
-    cursor = 0
-    for page in pages:
-        page_text = str(page or "")
-        offsets.append((cursor, cursor + len(page_text)))
-        cursor += len(page_text) + len(separator)
+def _page_offsets_from_pages(content) -> list[tuple[int, int]]:
+    """直接返回原文坐标区间 [(start, end), ...]，不再用「累加 + 分隔符长度」推算。"""
+    text = str(content or "")
+    offsets, pos = [], 0
+    for match in _PAGE_BREAK_RE.finditer(text):
+        offsets.append((pos, match.start()))
+        pos = match.end()
+    offsets.append((pos, len(text)))
     return offsets
 
 
@@ -4559,7 +4570,7 @@ def _extract_pdf_page_metadata(document, content: str) -> dict:
                 diagnostics["error"] = str(exc)[:200]
 
     pages = _split_content_pages(content)
-    offsets = _page_offsets_from_pages(pages, separator=_content_page_separator(content))
+    offsets = _page_offsets_from_pages(content)
     page_records = []
     for index, page_text in enumerate(pages, start=1):
         lines = [line.strip() for line in str(page_text or "").splitlines() if line.strip()]
@@ -4787,7 +4798,10 @@ def _build_pdf_page_visual_issue(page_candidate: dict, result: dict) -> dict:
                 "confidence": int(result.get("confidence") or 0),
                 "page_candidate": True,
             },
+            needs_human_review=True,
         ),
+        "needs_human_review": True,
+        "page_number": page_number,
     }
 
 
@@ -5167,10 +5181,17 @@ def _content_page_separator(content):
     return "\f"
 
 
+_PAGE_BREAK_RE = re.compile(r"\n\f\n|\f")
+
+
 def _split_content_pages(content):
     text = str(content or "")
-    pages = text.split(_content_page_separator(text))
-    return pages if pages else [""]
+    pages, pos = [], 0
+    for match in _PAGE_BREAK_RE.finditer(text):
+        pages.append(text[pos:match.start()])
+        pos = match.end()
+    pages.append(text[pos:])
+    return pages or [""]
 
 
 def _extract_document_metadata(doc, content):
@@ -5253,7 +5274,7 @@ def _format_issue_location(issue, content):
             if found >= 0:
                 position = _encode_issue_position(found, found + len(original))
 
-    page_no = _page_number_from_position(content, position)
+    page_no = _issue_page_number(issue, content)
     page_text = f'第{page_no}页' if page_no else ''
     rule = _report_rule(_issue_value(issue, 'rule', ''))
     if rule in {'DOC-REV-001', 'DOC-REV-002', 'CHECKLIST-COPYRIGHT-YEAR', 'CHECKLIST-YEAR'}:
@@ -5718,7 +5739,16 @@ def _report_issue_to_dict(issue):
         'context', 'suggestion', 'description', 'audit_basis', 'confidence', 'source',
         'position', 'status', 'created_at', 'updated_at'
     ]
-    return {key: _issue_value(issue, key, '') for key in keys}
+    payload = {key: _issue_value(issue, key, '') for key in keys}
+    # page_number / needs_human_review 在 ORM 上没有对应列，只能从 position meta 投影
+    meta = _decode_issue_position(payload.get('position', ''))
+    page_number = meta.get('page_number') or meta.get('page') or meta.get('page_no')
+    try:
+        payload['page_number'] = int(page_number) if page_number not in (None, '') else None
+    except (TypeError, ValueError):
+        payload['page_number'] = None
+    payload['needs_human_review'] = bool(meta.get('needs_human_review'))
+    return payload
 
 
 def _report_rule(rule):
@@ -5804,6 +5834,10 @@ def _report_resolve_chapter(issue, content):
     original = str(_issue_value(issue, 'original_text', '') or '').strip()
     if rule == 'CHECKLIST-TRADEMARK' and original.upper() == 'DNBSEQ':
         return '1. Introduction'
+    if rule == 'PDF-VISUAL-001':
+        page_no = _issue_page_number(issue, content)
+        if page_no:
+            return f'第{page_no}页'
 
     raw_existing = re.sub(r'\s+', ' ', str(_issue_value(issue, 'chapter', '') or '')).strip()
     existing = _format_issue_chapter(issue)
@@ -10790,6 +10824,11 @@ def _run_manual_engineering_audit(content, file_type=None):
 
     # 英文文档中 ℃ 前的空格：人工批注常标「多余空格」；°C 的 SI 空格不在此列。
     for match in re.finditer(r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)([ \t\u00a0\u202f]+)℃', content):
+        # 局部语境判定：前后 8 字符内有汉字视为中文排版，跳过。
+        # detect_language 对混排返回 both，外层语言门控拦不住中英说明书里的中文温度写法。
+        ctx = content[max(0, match.start() - 8):min(len(content), match.end() + 8)]
+        if re.search(r'[\u4e00-\u9fff]', ctx):
+            continue
         raw = match.group(0)
         add_issue(
             match.start(),
@@ -10798,7 +10837,8 @@ def _run_manual_engineering_audit(content, file_type=None):
             'DOC-SPACE-006',
             '空格与排版',
             f"{match.group(1)}℃",
-            '英文文档使用 ℃ 时，数值与单位之间的空格属于多余空格，建议写成连写形式。',
+            '英文文档正文中，数值与 ℃ 之间通常不保留空格（试剂盒标签/仪器界面除外）；'
+            '若为标签排版约定可忽略本条。',
             '说明书审核能力补强方案 - 温度单位空格',
             'general',
             92,
@@ -11602,9 +11642,34 @@ def _run_manual_engineering_audit(content, file_type=None):
             r"(?:(?<=[A-Za-z0-9])[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09\uff1f\uff01]"
             r"|[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09\uff1f\uff01](?=[A-Za-z0-9]))"
         )
+        # 试剂盒标签 / 仪器铭牌的排版约定：REF：MODEL：LOT：EXP：SN：
+        # 这类全角冒号来自 PDF 真实文本层（矢量绘制，非 OCR 伪影），改掉反而是错的。
+        #
+        # 实现要点（踩过的坑）：
+        #  1. Python re 不支持变长 lookbehind，不能写 (?<=\b[A-Za-z]{1,8})。
+        #  2. 不要用固定窗口（content[start-8:end]）判断——窗口起点会切在单词中间，
+        #     导致 'Exp：' 漏判、'at：' 误判。
+        #  3. 不要只认全大写——'Exp：'（大小写变体）也是标签，漏掉它会白占 20 条上限。
+        #  4. 不要用过宽的通用规则（如 \b[A-Za-z]{1,8}：）——会误伤
+        #     'Heating：' / 'Note：' / 'at：' 这类**真实的**全角冒号误用问题。
+        # 正确做法：全文预扫一次得到标签冒号的位置集合，循环内按位置判定，
+        # 不依赖任何固定窗口长度；且只认「已知标签词表」，不认通用形态。
+        # 剩余全角标点命中多为仪器 UI 文本层伪影（如 Completion at：），后续单独优化。
+        _LABEL_COLON_WORDS = {
+            'ref', 'model', 'lot', 'exp', 'sn', 'cat', 'catno', 'vol', 'batch', 'type',
+            'item', 'no', 'pn', 'rev', 'nd', 'ltd', 'co', 'mfg', 'serial', 'id', 'mfd',
+            'ce', 'ifu', 'dd', 'lo', 'qry', 'tml',
+        }
+        _label_colon_positions = set()
+        for _m in re.finditer(r"\b[A-Za-z]{1,8}\uff1a", content):
+            if _m.group(0)[:-1].lower() in _LABEL_COLON_WORDS:
+                _label_colon_positions.add(_m.start() + len(_m.group(0)) - 1)
+
         for match in re.finditer(punct_pattern, content):
             if cn_issue_count >= 20:
                 break
+            if match.group(0) == "\uff1a" and match.start() in _label_colon_positions:
+                continue
             if re.search(r"[\u4e00-\u9fff]", content[max(0, match.start() - 8):min(len(content), match.end() + 8)]):
                 continue
             mapped = cn_punct_to_en.get(match.group(0), "")
@@ -13686,6 +13751,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             _end_stage("ai_deep_review", output_count=len(issues), dropped_count=0)
 
         if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
+            # 第一次回填：去重键的第 4 位是页码槽位，必须在 _finalize_review_issues 之前填好
             filled = _backfill_issue_page_numbers(issues, content)
             if filled:
                 print(f"[审核] 页码回填(去重前): {filled} 条")
@@ -13702,6 +13768,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
 
         if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
+            # 第二次回填：_finalize_review_issues 会丢弃/重排部分 issue，
+            # 过滤后新产生的 issue 需要再补一次；函数本身幂等（已有页码的直接跳过）。
             filled = _backfill_issue_page_numbers(issues, content)
             if filled:
                 print(f"[审核] 页码回填: {filled} 条")

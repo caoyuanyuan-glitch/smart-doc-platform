@@ -6,8 +6,8 @@ from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path("/workspace")
-BACKEND = ROOT / "backend"
+ROOT = Path(os.environ.get("SDP_ROOT", Path(__file__).resolve().parents[1]))
+BACKEND = Path(os.environ.get("SDP_BACKEND", ROOT / "backend"))
 PDF = ROOT / "g99_eval" / "g99_noannot.pdf"
 GOLD = BACKEND / "goldset" / "human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json"
 ISSUES_PATH = ROOT / "g99_eval" / "ab_p1.db.issues.json"
@@ -19,7 +19,7 @@ LAYOUT_PAGES = {69, 70, 76, 79, 90, 158, 159, 213}
 def main():
     sys.path.insert(0, str(BACKEND))
     os.chdir(str(BACKEND))
-    os.environ.setdefault("DATABASE_URL", "sqlite:////workspace/g99_eval/ab_p1.db")
+    os.environ.setdefault("DATABASE_URL", "sqlite:///" + str(ROOT / "g99_eval" / "ab_p1.db"))
     os.environ["REVIEW_PDF_VISUAL_VERIFY"] = "1"
     os.environ["REVIEW_VISUAL_PROVIDERS"] = "deepseek"
     os.environ.setdefault("REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT", "168")
@@ -99,6 +99,8 @@ def main():
         "precision": res["precision"],
         "strict_recall": res["strict_recall"],
         "strict_precision": res["strict_precision"],
+        "manual_issue_count": res["manual_issue_count"],
+        "manual_review_ratio": res["manual_review_ratio"],
         "strict_matched": res["strict_matched"],
         "strict_missed": res["strict_missed"],
         "matched": res["matched"],

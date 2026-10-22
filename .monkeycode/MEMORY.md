@@ -101,6 +101,7 @@ Git 与自检工作流
   - 本次任务仅修改审核模块相关实现
   - 其他业务模块保持现状，除非用户明确要求联动修改
   - 当前阶段不投入飞书上传相关功能，优先提升审核有效性和实质问题命中率
+  - 审核页 `frontend/src/views/Review.vue` 与后端审核契约修复分 PR 提交；后端 PR 保持纯 backend
 
 说明书截图占位符与 PDF 商标文本层
 - Date: 2026-10-13
@@ -180,6 +181,9 @@ Word 转 DITA 批量转换基线规则
   - 审核模块相关回归命令可直接使用 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py backend/tests/test_review_gold_compare.py`
   - 修改中文审核规则后，优先复跑 `PYTHONPATH=/workspace/backend python3 -m pytest backend/tests/test_review_cache.py -q` 做快速回归
   - 当前环境若缺少测试依赖，先安装 `backend/requirements.txt`，并补装 `pytest` 与 `httpx`
+  - `strict_precision` 口径不动；`manual_review_ratio = needs_human_review 条数 / 同一 issue 池`，报告必须同时给出 `strict_precision`、`manual_review_ratio`、`recall`，不得为人工确认 issue 单开宽松匹配
+  - 旧 goldset 补跑状态只能是 `rerun` / `missing_pdf` / `db_unavailable` / `no_review_id`；`e25rs_en` 守门：`strict_recall ≥ 0.85` 且 issue ≤ 17，issue ≥ 18 即破线
+  - G99 成本实测必须钉在 `(REVIEW_PDF_VISUAL_VERIFY_LIMIT=6, LAYOUT_LIMIT=6, PAGE_BUDGET=0)`，同时记录 token、时延、分块数、页级 issue 条数、疑点页数
   - 真实文档端到端审核测试：`cd /workspace/backend && PYTHONPATH=/workspace/backend uvicorn app.main:app --host 127.0.0.1 --port 8000`；启动时会自动建表、种子默认/外部评审规则与预置误报记忆
   - 开发环境启动后自动创建引导管理员 `admin` / `admin123`（`APP_ENV` 非生产时密码会被强制校正为该值）
   - 登录接口走 OAuth2 表单而非 JSON：`curl -s -X POST http://127.0.0.1:8000/api/auth/login -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=admin&password=admin123'`，取响应里的 `access_token` 作为 `Authorization: Bearer` 头做接口级端到端验证

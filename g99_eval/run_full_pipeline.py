@@ -7,8 +7,8 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path("/workspace")
-BACKEND = ROOT / "backend"
+ROOT = Path(os.environ.get("SDP_ROOT", Path(__file__).resolve().parents[1]))
+BACKEND = Path(os.environ.get("SDP_BACKEND", ROOT / "backend"))
 PDF = ROOT / "g99_eval" / "g99_noannot.pdf"
 DB_PATH = ROOT / "g99_eval" / "full_pipeline.db"
 OUT = ROOT / "g99_eval" / "full_pipeline_result.json"
@@ -21,7 +21,9 @@ def main():
     os.environ["DATABASE_URL"] = "sqlite:///" + str(DB_PATH)
     os.environ["REVIEW_PDF_VISUAL_VERIFY"] = "1"
     os.environ["REVIEW_VISUAL_PROVIDERS"] = "deepseek"
-    os.environ.setdefault("REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT", "168")
+    os.environ.setdefault("REVIEW_PDF_VISUAL_VERIFY_LIMIT", "6")
+    os.environ.setdefault("REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT", "6")
+    os.environ.setdefault("REVIEW_PDF_VISUAL_PAGE_BUDGET", "0")
 
     from app.database import Base, engine, SessionLocal
     from app.models.document import Document

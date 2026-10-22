@@ -8,6 +8,8 @@
 - precision = 平台检出的问题中真阳性的比例（误报越多越低）
 """
 
+import json
+
 from app.review_engine.annotation_baseline import (
     HumanAnnotation,
     _issue_blob,
@@ -178,3 +180,28 @@ def test_exact_rule_id_without_text_overlap_is_not_a_hit():
     assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is False
     result = evaluate_against_annotations([issue], [annotation])
     assert result["strict_recall"] == 0.0
+
+
+def test_manual_review_ratio_uses_same_strict_pool():
+    """manual_review_ratio 与 strict_precision 共用同一 issue 池，不另开匹配通道。"""
+    annotations = [_annotation("聚散球磁珠法核酸提取试剂")]
+    issues = [
+        _issue("聚散球磁珠法核酸提取试剂", issue_id=1),
+        {
+            **_issue("无关视觉占位文本", rule="PDF-VISUAL-001", category="表格/版式", issue_id=2),
+            "needs_human_review": True,
+        },
+        {
+            **_issue("另一无关占位文本", rule="PDF-VISUAL-001", category="表格/版式", issue_id=3),
+            "position": json.dumps({"needs_human_review": True}),
+        },
+    ]
+
+    result = evaluate_against_annotations(issues, annotations)
+
+    assert result["issue_total"] == 3
+    assert result["strict_precision"] == round(1 / 3, 4)
+    assert result["manual_issue_count"] == 2
+    assert result["manual_review_ratio"] == round(2 / 3, 4)
+    assert result["strict_recall"] == 1.0
+    assert result["recall"] == 1.0

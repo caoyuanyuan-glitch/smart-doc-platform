@@ -114,7 +114,7 @@ def test_t4_offsets_use_production_content_not_extract_pdf(monkeypatch):
 
     metadata = review_api._extract_pdf_page_metadata(document, production)
     pages = review_api._split_content_pages(production)
-    offsets = review_api._page_offsets_from_pages(pages, separator=review_api._content_page_separator(production))
+    offsets = review_api._page_offsets_from_pages(production)
 
     assert metadata["page_count"] == 3
     for index, (start, end) in enumerate(offsets):
@@ -196,9 +196,10 @@ def test_t9_same_page_layout_issue_strict_hits_p69():
         position=json.dumps({"page_number": 69}),
     )
 
-    assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is True
+    # F6b: 页级 issue 禁止走页码通道，同页不能当成文本命中
+    assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is False
     result = evaluate_against_annotations([issue], [annotation])
-    assert result["strict_matched"] == 1
+    assert result["strict_matched"] == 0
 
 
 def test_t10_page_anchor_is_or_not_and():
@@ -261,8 +262,8 @@ def test_t12_injective_matching_still_pairs_one_issue_to_one_annotation():
     )
 
     result = evaluate_against_annotations([issue], annotations)
-    assert result["strict_matched"] == 1
-    assert result["strict_matched_issue_count"] == 1
+    assert result["strict_matched"] == 0
+    assert result["strict_matched_issue_count"] == 0
 
 
 def test_t13_provider_unavailable_emits_manual_review_issue(monkeypatch):
@@ -298,10 +299,7 @@ def test_t13_provider_unavailable_emits_manual_review_issue(monkeypatch):
 def test_t14_page_backfill_coverage_and_no_conflict():
     pages = [f"page-{index}-content" for index in range(1, 11)]
     content = "\n\f\n".join(pages)
-    offsets = review_api._page_offsets_from_pages(
-        review_api._split_content_pages(content),
-        separator=review_api._content_page_separator(content),
-    )
+    offsets = review_api._page_offsets_from_pages(content)
 
     issues = []
     for index, (start, end) in enumerate(offsets, start=1):
@@ -356,6 +354,24 @@ def test_t16_english_celsius_extra_space_rule():
     assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is True
 
 
+def test_r3_celsius_skips_chinese_local_context():
+    mixed = "保存温度 95 ℃，Store the cartridge at 4 ℃ overnight."
+    mixed_issues = review_api._run_manual_engineering_audit(mixed, "pdf")
+    mixed_space = {item.get("original_text") for item in mixed_issues if item.get("rule") == "DOC-SPACE-006"}
+    assert "95 ℃" not in mixed_space
+    assert "4 ℃" in mixed_space
+
+    chinese = "试剂应在 95 ℃ 水浴中加热 5 分钟，随后置于 25 ℃。"
+    chinese_issues = review_api._run_manual_engineering_audit(chinese, "pdf")
+    chinese_space = [item for item in chinese_issues if item.get("rule") == "DOC-SPACE-006"]
+    assert chinese_space == []
+
+    english = "Incubate at 95 ℃ for 5 min, then keep at 25 ℃ and 4 ℃."
+    english_issues = review_api._run_manual_engineering_audit(english, "pdf")
+    english_space = {item.get("original_text") for item in english_issues if item.get("rule") == "DOC-SPACE-006"}
+    assert {"95 ℃", "25 ℃", "4 ℃"} <= english_space
+
+
 def test_t17_visual_selection_fills_high_layout_score_pages():
     candidates = []
     for page in range(1, 21):
@@ -375,8 +391,9 @@ def test_t17_visual_selection_fills_high_layout_score_pages():
     assert len(picked) == 6
 
 
-def test_t18_layout_visual_limit_defaults_to_48():
-    assert review_api._review_pdf_visual_verify_layout_limit() == 48
+def test_t18_layout_visual_limit_defaults_to_6():
+    assert review_api._review_pdf_visual_verify_limit() == 6
+    assert review_api._review_pdf_visual_verify_layout_limit() == 6
 
 
 def test_t19_visual_selection_keeps_same_bucket_table_pages():
@@ -526,3 +543,118 @@ def test_t23_pipeline_keeps_space_issues_on_different_pages():
         payload = json.loads(item["position"])
         deduped_pages.add(int(payload.get("page_number") or 0))
     assert deduped_pages == {82, 88}
+
+
+def test_split_content_pages_mixed_separators():
+    text = "page1\n\f\npage2\fpage3\n\f\npage4"
+    pages = review_api._split_content_pages(text)
+    assert pages == ["page1", "page2", "page3", "page4"]
+    offsets = review_api._page_offsets_from_pages(text)
+    assert len(offsets) == 4
+    assert offsets[0] == (0, text.index("page1") + len("page1"))
+    assert offsets[-1][1] == len(text)
+
+
+def test_page_issue_whitelist_survives_select():
+    from app.review_engine.pipeline import is_noise, select_review_issues
+
+    categories = ["表格/版式", "目录一致性", "页脚异常", "图表编号", "页面复核"]
+    for category in categories:
+        for confidence in (72, 88, 92):
+            issue = {
+                "rule": "PDF-VISUAL-001",
+                "category": category,
+                "severity": "general",
+                "confidence": confidence,
+                "source": "rule",
+                "original_text": f"page preview {category}",
+                "suggestion": "请人工复核该页版式、页脚、图表编号或目录一致性",
+                "description": "PDF 页级渲染复核确认疑点，原因: layout",
+                "audit_basis": "PDF 页级渲染复核",
+                "context": "page preview",
+            }
+            assert is_noise(issue) is False
+            assert select_review_issues([issue])
+
+    blocked = [
+        {"rule": "STRUCT-LAYOUT-001", "category": "表格/版式", "confidence": 90},
+        {"rule": "DET-TYPO-001", "category": "字体/版式细节", "confidence": 90},
+        {"rule": "EXT-R015", "category": "表格/版式", "confidence": 90},
+        {"rule": "EXT-R017", "category": "表格/版式", "confidence": 90},
+        {"rule": "EXT-R018", "category": "表格/版式", "confidence": 90},
+        {"rule": "CYY-CN-LAYOUT-001", "category": "表格/版式", "confidence": 70},
+    ]
+    for item in blocked:
+        issue = {
+            "severity": "general",
+            "source": "rule",
+            "original_text": "layout noise",
+            "suggestion": "fix layout",
+            "description": "visual layout noise",
+            **item,
+        }
+        assert is_noise(issue) is True
+        assert select_review_issues([issue]) == []
+
+
+def test_page_issue_meta_flags():
+    candidate = {
+        "page_number": 2,
+        "char_start": 10,
+        "char_end": 40,
+        "text_preview": "Revision History table",
+        "reasons": ["table_layout"],
+    }
+    issue = review_api._build_pdf_page_visual_issue(
+        candidate,
+        {"decision": "confirm", "reason": "layout issue", "confidence": 88, "source": "ai"},
+    )
+    assert issue["needs_human_review"] is True
+    assert issue["page_number"] == 2
+    meta = review_api._decode_issue_position(issue["position"])
+    assert meta.get("needs_human_review") is True
+    assert int(meta.get("page_number") or 0) == 2
+
+    manual = review_api._build_pdf_page_manual_review_issue(candidate, "visual_model_unavailable")
+    assert manual["needs_human_review"] is True
+    assert manual["page_number"] == 2
+    manual_meta = review_api._decode_issue_position(manual["position"])
+    assert manual_meta.get("needs_human_review") is True
+    assert int(manual_meta.get("page_number") or 0) == 2
+
+
+def test_report_issue_dict_projects_page_meta():
+    with_meta = {
+        "rule": "PDF-VISUAL-001",
+        "position": json.dumps({"start": 10, "end": 40, "page_number": 2, "needs_human_review": True}),
+    }
+    payload = review_api._report_issue_to_dict(with_meta)
+    assert payload["page_number"] == 2
+    assert payload["needs_human_review"] is True
+
+    no_meta = {"rule": "DOC-SPACE-006", "position": json.dumps({"start": 10, "end": 20})}
+    payload = review_api._report_issue_to_dict(no_meta)
+    assert payload["page_number"] is None
+    assert payload["needs_human_review"] is False
+
+    old = {"rule": "DOC-SPACE-006", "position": "100-120"}
+    payload = review_api._report_issue_to_dict(old)
+    assert payload["page_number"] is None
+    assert payload["needs_human_review"] is False
+
+
+def test_visual_issue_location_and_chapter_use_meta_page():
+    content = "Chapter 1 Overview\nAAA\n\f\nChapter 2 Overview\nBBB"
+    issue = review_api._build_pdf_page_visual_issue(
+        {
+            "page_number": 2,
+            "char_start": 0,
+            "char_end": 3,
+            "text_preview": "Chapter 2 Overview BBB",
+            "reasons": ["table_layout"],
+        },
+        {"decision": "confirm", "reason": "layout", "confidence": 88},
+    )
+    assert review_api._report_resolve_chapter(issue, content) == "第2页"
+    location = review_api._format_issue_location(issue, content)
+    assert "第2页" in location

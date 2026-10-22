@@ -499,6 +499,11 @@ def is_whitelisted_layout_issue(issue: Any) -> bool:
     data = issue_to_mapping(issue)
     rule = str(data["rule"] or "").upper()
     confidence = int(data["confidence"] or 0)
+    if rule == "PDF-VISUAL-001":
+        # 页面级视觉复核：已由多模态模型逐页判定，不是文本层版式噪声。
+        # 放行的同时必须限制注入量（REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT），
+        # 否则会把整页判断混进"具体文字位置"的评测分母。
+        return True
     return rule.startswith("CYY-CN-LAYOUT-") and confidence >= 86
 
 

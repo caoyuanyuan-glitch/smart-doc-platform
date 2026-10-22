@@ -9,8 +9,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path("/workspace")
-BACKEND = ROOT / "backend"
+ROOT = Path(os.environ.get("SDP_ROOT", Path(__file__).resolve().parents[1]))
+BACKEND = Path(os.environ.get("SDP_BACKEND", ROOT / "backend"))
 PDF = ROOT / "g99_eval" / "g99_noannot.pdf"
 GOLD = BACKEND / "goldset" / "human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json"
 OUT = ROOT / "g99_eval" / "ab_result.json"
@@ -121,6 +121,8 @@ def main():
         "f1": res["f1"],
         "strict_recall": res["strict_recall"],
         "strict_precision": res["strict_precision"],
+        "manual_issue_count": res["manual_issue_count"],
+        "manual_review_ratio": res["manual_review_ratio"],
         "strict_f1": res["strict_f1"],
         "strict_matched": res["strict_matched"],
         "strict_missed": res["strict_missed"],
@@ -135,6 +137,11 @@ def main():
         f"  recall={res['recall']} strict_recall={res['strict_recall']} "
         f"precision={res['precision']} strict_precision={res['strict_precision']} "
         f"issues={res['issue_total']} unmatched={res['unmatched_issue_count']}"
+    )
+    print(
+        f"  strict_precision={res['strict_precision']} "
+        f"manual_review_ratio={res['manual_review_ratio']} "
+        f"recall={res['recall']}"
     )
     print(f"  strict_matched={res['strict_matched']}/{res['human_total']}")
     OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")

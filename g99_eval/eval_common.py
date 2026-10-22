@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
-BACKEND = Path("/workspace/backend")
+ROOT = Path(os.environ.get("SDP_ROOT", Path(__file__).resolve().parents[1]))
+BACKEND = Path(os.environ.get("SDP_BACKEND", ROOT / "backend"))
 GOLD = BACKEND / "goldset" / "human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json"
 
 
@@ -66,6 +68,8 @@ def compact_eval(res: dict) -> dict:
         "strict_matched": res.get("strict_matched"),
         "strict_recall": res.get("strict_recall"),
         "strict_precision": res.get("strict_precision"),
+        "manual_issue_count": res.get("manual_issue_count"),
+        "manual_review_ratio": res.get("manual_review_ratio"),
         "recall": res.get("recall"),
         "precision": res.get("precision"),
         "matched": res.get("matched"),
@@ -79,3 +83,58 @@ def score_channels(issues: list[dict], annotations) -> dict:
     for name, subset in split_channels(issues).items():
         payload[name] = compact_eval(evaluate_against_annotations(subset, annotations))
     return payload
+
+
+def redact_database_dsn(url: str) -> str:
+    import re
+
+    return re.sub(r"(://[^:/]+):([^@]+)@", r"\1:***@", str(url or ""))
+
+
+def pdfs_for_goldset(name: str, pdf_hits: list[str]) -> list[str]:
+    key = str(name or "").lower()
+    if "gospatial" in key:
+        tokens = ["gospatial"]
+    elif "g99" in key:
+        tokens = ["g99"]
+    elif "e25" in key:
+        tokens = ["e25", "high-throughput", "高通量"]
+    else:
+        tokens = [key]
+    matched = []
+    for path in pdf_hits:
+        low = path.lower()
+        if any(token in low for token in tokens):
+            matched.append(path)
+    return matched
+
+
+def expected_pdf_path(name: str, root: Path) -> str:
+    return str(Path(root) / "**" / f"*{name}*.pdf")
+
+
+def classify_old_goldset_status(
+    *,
+    baseline_exists: bool,
+    review_id,
+    db_error: str | None,
+    review_found: bool,
+    pdf_hits: list[str],
+    expected_pdf: str,
+) -> tuple[str, str | None]:
+    """Map a goldset rerun attempt to one of four explicit statuses.
+
+    rerun / missing_pdf / db_unavailable / no_review_id.
+    Generic "skipped" is not a legal status.
+    """
+    if db_error:
+        return "db_unavailable", str(db_error)
+    if review_id and review_found and baseline_exists:
+        return "rerun", None
+    if not pdf_hits:
+        err = expected_pdf
+        if not baseline_exists:
+            err = f"baseline_missing; expected_pdf={expected_pdf}"
+        return "missing_pdf", err
+    err = None if baseline_exists else "baseline_missing"
+    return "no_review_id", err
