@@ -1172,12 +1172,14 @@ def _page_number_from_position(content, position):
     start, _ = _parse_issue_position(position)
     if not content:
         return None
-    cursor = 0
-    for index, page in enumerate(_split_content_pages(content), start=1):
-        page_len = len(page)
-        if start <= cursor + page_len:
+    offsets = _page_offsets_from_pages(content)
+    last = len(offsets)
+    for index, (s, e) in enumerate(offsets, start=1):
+        if index == last:
+            if s <= start <= e:
+                return index
+        elif s <= start < e:
             return index
-        cursor += page_len + 1
     return None
 
 
@@ -1187,6 +1189,17 @@ def _review_pdf_visual_verify_enabled():
 
 def _review_pdf_visual_verify_limit():
     return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LIMIT', '6'))
+
+
+def _review_pdf_visual_verify_layout_limit():
+    # 注意：这是页级 issue 的【真实上限】。
+    # 生效逻辑是 page_limit = max(remaining_limit, layout_limit)，
+    # 只调 LIMIT 不会把页级 issue 压下来（实测 LIMIT=6 / LAYOUT=48 仍是 48 条）。
+    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT', '6'))
+
+
+def _review_pdf_visual_verify_page_budget():
+    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_PAGE_BUDGET', '0'))
 
 
 def _review_pdf_visual_verify_scale():
@@ -1859,7 +1872,7 @@ def _is_table_or_figure_caption_line(line, label, number_start=0):
             return False
 
     caption = line[number_start:].strip()
-    pattern = rf'^{re.escape(label)}\s*\d+[-–]\d+\s+[^,.;:()\[\]]{{3,}}$'
+    pattern = rf'^{re.escape(label)}\s*\d+(?:[-–]\d+)?\s+[^,.;:()\[\]]{{3,}}$'
     return bool(re.match(pattern, caption, re.IGNORECASE))
 
 
@@ -2319,7 +2332,7 @@ def _review_env_bool(name, default=False):
 def _review_content_limit(file_type):
     file_type = str(file_type or '').lower()
     if file_type == 'pdf':
-        return _review_env_int('REVIEW_PDF_CONTENT_LIMIT', '120000')
+        return _review_env_int('REVIEW_PDF_CONTENT_LIMIT', '500000')
     if file_type in {'docx', 'doc', 'txt', 'md', 'markdown'}:
         return _review_env_int('REVIEW_TEXT_CONTENT_LIMIT', '120000')
     return _review_env_int('REVIEW_CONTENT_LIMIT', '120000')
@@ -2327,6 +2340,46 @@ def _review_content_limit(file_type):
 
 def _review_sampling_mode():
     return str(os.getenv('REVIEW_SAMPLING_MODE', 'off') or 'off').strip().lower()
+
+
+def _truncate_content_at_page_boundary(content, limit):
+    """按页边界截断，并记录未审核页码范围。"""
+    text = str(content or "")
+    pages = _split_content_pages(text)
+    total_pages = len(pages)
+    if limit <= 0 or len(text) <= limit:
+        return text, {
+            "truncated": False,
+            "original_chars": len(text),
+            "kept_chars": len(text),
+            "unscanned_page_start": None,
+            "unscanned_page_end": None,
+            "kept_pages": total_pages,
+            "total_pages": total_pages,
+        }
+    separator = _content_page_separator(text)
+    kept = []
+    current_len = 0
+    for page in pages:
+        extra = 0 if not kept else len(separator)
+        if current_len + extra + len(page) > limit and kept:
+            break
+        if kept:
+            current_len += extra
+        kept.append(page)
+        current_len += len(page)
+    kept_text = separator.join(kept)
+    kept_pages = len(kept)
+    unscanned = kept_pages < total_pages
+    return kept_text, {
+        "truncated": True,
+        "original_chars": len(text),
+        "kept_chars": len(kept_text),
+        "unscanned_page_start": (kept_pages + 1) if unscanned else None,
+        "unscanned_page_end": total_pages if unscanned else None,
+        "kept_pages": kept_pages,
+        "total_pages": total_pages,
+    }
 
 
 def _select_ai_audit_chunks(chunks, max_chunks):
@@ -3559,6 +3612,35 @@ def _issue_page_number(issue, content):
     return _page_number_from_position(content, _issue_value(issue, 'position', ''))
 
 
+def _backfill_issue_page_numbers(issues, content):
+    """为缺少页码的 issue 按 position.start 反查页码并回填。"""
+    filled = 0
+    offsets = _page_offsets_from_pages(content)
+    last = len(offsets)
+    for issue in issues:
+        meta = _issue_meta(issue)
+        if any(meta.get(key) for key in ("page_number", "page", "page_no")):
+            continue
+        start = meta.get("start")
+        try:
+            start = int(start)
+        except (TypeError, ValueError):
+            continue
+        page_no = None
+        for idx, (s, e) in enumerate(offsets, start=1):
+            if idx == last:
+                if s <= start <= e:
+                    page_no = idx
+                    break
+            elif s <= start < e:
+                page_no = idx
+                break
+        if page_no:
+            _normalize_issue_position_meta(issue, page_number=page_no)
+            filled += 1
+    return filled
+
+
 def _should_visual_verify_issue(issue, file_type):
     if str(file_type or '').lower() != 'pdf':
         return False
@@ -3734,6 +3816,9 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
     if limit <= 0:
         diagnostics['reason'] = 'limit_zero'
         return issues, diagnostics
+    page_budget = _review_pdf_visual_verify_page_budget()
+    if page_budget > 0:
+        limit = min(limit, page_budget)
 
     candidates = []
     for issue in issues:
@@ -3747,19 +3832,29 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         candidates.append((issue, page_number))
 
     covered_pages = {page_number for _, page_number in candidates}
-    page_candidates = []
     remaining_limit = max(0, limit - len(candidates))
+    eligible_pages = []
     for page_candidate in (suspicious_pages or {}).get('candidates') or []:
-        if len(page_candidates) >= remaining_limit:
-            break
         page_number = int(page_candidate.get('page_number') or 0)
         if page_number <= 0 or page_number in covered_pages:
             continue
         reasons = set(page_candidate.get('reasons') or [])
-        if not reasons.intersection({'table_layout', 'dense_table_or_layout', 'figure_table_numbering', 'footer_or_page_number', 'toc_or_index', 'layout_keyword'}):
+        if not reasons.intersection({
+            'table_layout', 'dense_table_or_layout', 'figure_table_numbering',
+            'footer_or_page_number', 'toc_or_index', 'layout_keyword',
+            'crowded_lines', 'thick_rules', 'image_off_center',
+        }):
             continue
-        page_candidates.append(page_candidate)
+        eligible_pages.append(page_candidate)
         covered_pages.add(page_number)
+    total_pages = int((suspicious_pages or {}).get('page_count') or 0)
+    if total_pages <= 0:
+        total_pages = max((int(item.get('page_number') or 0) for item in eligible_pages), default=0)
+    layout_limit = _review_pdf_visual_verify_layout_limit()
+    if page_budget > 0 and layout_limit > 0:
+        layout_limit = min(layout_limit, page_budget)
+    page_limit = max(remaining_limit, layout_limit)
+    page_candidates = _select_visual_page_candidates(eligible_pages, page_limit, total_pages)
 
     diagnostics['enabled'] = True
     diagnostics['candidate_count'] = len(candidates)
@@ -3901,7 +3996,7 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
                 'category': _page_visual_issue_category(page_candidate.get('reasons') or []),
                 'original_text': page_candidate.get('text_preview') or '',
                 'context': page_candidate.get('text_preview') or '',
-                'description': f"页级疑点: {', '.join(page_candidate.get('reasons') or [])}",
+                'description': _page_visual_review_brief(page_candidate),
                 'suggestion': '请人工复核该页实际显示',
             },
             page_number=page_number,
@@ -3936,6 +4031,8 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             diagnostics['skipped_count'] += 1
             continue
         diagnostics['uncertain_count'] += 1
+        # C3: geometry/visual uncertainty may only emit 待人工复核, confidence < 85.
+        page_issues.append(_build_pdf_page_manual_review_issue(page_candidate, 'visual_uncertain'))
 
     if page_issues:
         diagnostics['page_issue_count'] = len(page_issues)
@@ -4424,13 +4521,14 @@ def _get_document_upload_path(document):
     return candidate if candidate.exists() else None
 
 
-def _page_offsets_from_pages(pages: list[str]) -> list[tuple[int, int]]:
-    offsets = []
-    cursor = 0
-    for page in pages:
-        page_text = str(page or "")
-        offsets.append((cursor, cursor + len(page_text)))
-        cursor += len(page_text) + 1
+def _page_offsets_from_pages(content) -> list[tuple[int, int]]:
+    """直接返回原文坐标区间 [(start, end), ...]，不再用「累加 + 分隔符长度」推算。"""
+    text = str(content or "")
+    offsets, pos = [], 0
+    for match in _PAGE_BREAK_RE.finditer(text):
+        offsets.append((pos, match.start()))
+        pos = match.end()
+    offsets.append((pos, len(text)))
     return offsets
 
 
@@ -4452,12 +4550,11 @@ def _extract_pdf_page_metadata(document, content: str) -> dict:
         return diagnostics
 
     source_path = _get_document_upload_path(document)
-    extracted_pages = []
     block_counts_by_page: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    layout_signals_by_page: dict[int, dict] = {}
     if source_path and source_path.exists():
         try:
             extracted = extract_pdf(str(source_path))
-            extracted_pages = [str(page or "") for page in extracted.get("page_texts", [])]
             for block in extracted.get("blocks", []) or []:
                 page_num = int(getattr(block, "page_num", 0) or 0) + 1
                 block_type = str(getattr(block, "block_type", "body") or "body")
@@ -4465,9 +4562,15 @@ def _extract_pdf_page_metadata(document, content: str) -> dict:
             diagnostics["source"] = "pdf_blocks"
         except Exception as exc:
             diagnostics["error"] = str(exc)[:200]
+        try:
+            from app.review_engine.pdf_layout_signals import collect_pdf_layout_signals
+            layout_signals_by_page = collect_pdf_layout_signals(source_path)
+        except Exception as exc:
+            if not diagnostics.get("error"):
+                diagnostics["error"] = str(exc)[:200]
 
-    pages = extracted_pages or [page for page in _split_content_pages(content) if str(page or "").strip()]
-    offsets = _page_offsets_from_pages(pages)
+    pages = _split_content_pages(content)
+    offsets = _page_offsets_from_pages(content)
     page_records = []
     for index, page_text in enumerate(pages, start=1):
         lines = [line.strip() for line in str(page_text or "").splitlines() if line.strip()]
@@ -4485,11 +4588,12 @@ def _extract_pdf_page_metadata(document, content: str) -> dict:
             "table_like_line_count": len(table_like_lines),
             "footer_preview": footer_candidates,
             "text_preview": _compact_page_preview(page_text),
+            "layout_signals": layout_signals_by_page.get(index) or {},
         })
 
     diagnostics["enabled"] = True
     diagnostics["page_count"] = len(page_records)
-    diagnostics["pages"] = page_records[:80]
+    diagnostics["pages"] = page_records
     return diagnostics
 
 
@@ -4513,12 +4617,22 @@ def _collect_pdf_suspicious_pages(page_metadata: dict) -> dict:
             reasons.append("dense_table_or_layout")
         if re.search(r"(?:^|\s)(?:图|Figure|Fig\.)\s*\d+|(?:^|\s)(?:表|Table)\s*\d+", text, re.IGNORECASE):
             reasons.append("figure_table_numbering")
+        if int(block_counts.get("caption", 0) or 0) >= 1:
+            reasons.append("figure_table_numbering")
         if re.search(r"(?:第\s*\d+\s*页|page\s+\d+|doc\.?\s*no\.?|h-\d{3}|copyright|版权)", text, re.IGNORECASE):
             reasons.append("footer_or_page_number")
         if re.search(r"(?:目录|contents|索引|index|\.\.\.|…{2,})", text, re.IGNORECASE):
             reasons.append("toc_or_index")
         if re.search(r"(?:跨页|分页|列宽|行高|表头|页脚|图号|页码|平均分布列|均匀分布列)", text, re.IGNORECASE):
             reasons.append("layout_keyword")
+
+        signals = page.get("layout_signals") or {}
+        if float(signals.get("crowding_score") or 0) >= 0.55:
+            reasons.append("crowded_lines")
+        if float(signals.get("thick_line_ratio") or 0) >= 0.2:
+            reasons.append("thick_rules")
+        if float(signals.get("image_offset_ratio") or 0) >= 0.12:
+            reasons.append("image_off_center")
 
         if reasons:
             candidates.append({
@@ -4527,25 +4641,101 @@ def _collect_pdf_suspicious_pages(page_metadata: dict) -> dict:
                 "char_start": page.get("char_start"),
                 "char_end": page.get("char_end"),
                 "text_preview": page.get("text_preview"),
+                "table_blocks": table_blocks,
+                "line_count": line_count,
+                "layout_signals": signals,
             })
 
     return {
         "enabled": bool(page_metadata.get("enabled")),
         "candidate_count": len(candidates),
-        "candidates": candidates[:30],
+        "candidates": candidates,
+        "page_count": int(page_metadata.get("page_count") or 0),
     }
+
+
+def _select_visual_page_candidates(candidates: list, limit: int, total_pages: int) -> list:
+    """分层覆盖：每桶取最强，剩余名额优先补同桶次强。几何分只用于排序。"""
+    if limit <= 0 or not candidates:
+        return []
+    from app.review_engine.pdf_layout_signals import layout_candidate_score
+
+    strat_limit = max(1, (limit + 1) // 2)
+    buckets = max(1, min(strat_limit, len(candidates)))
+    total_pages = max(1, int(total_pages or 0))
+    grouped = defaultdict(list)
+    for cand in candidates:
+        page = int(cand.get("page_number") or 0)
+        if page <= 0:
+            continue
+        bucket = min(buckets - 1, int((page - 1) / total_pages * buckets))
+        grouped[bucket].append(cand)
+    picked = []
+    picked_pages = set()
+    seconds = []
+    for bucket in sorted(grouped):
+        ranked = sorted(grouped[bucket], key=layout_candidate_score, reverse=True)
+        best = ranked[0]
+        picked.append(best)
+        picked_pages.add(int(best.get("page_number") or 0))
+        if len(ranked) > 1:
+            seconds.append(ranked[1])
+    for item in seconds:
+        page = int(item.get("page_number") or 0)
+        if page in picked_pages:
+            continue
+        if len(picked) >= limit:
+            break
+        picked.append(item)
+        picked_pages.add(page)
+    leftover = [
+        item for item in candidates
+        if int(item.get("page_number") or 0) not in picked_pages
+    ]
+    leftover.sort(key=layout_candidate_score, reverse=True)
+    for item in leftover:
+        page = int(item.get("page_number") or 0)
+        if page in picked_pages:
+            continue
+        if len(picked) >= limit:
+            break
+        picked.append(item)
+        picked_pages.add(page)
+    return picked[:limit]
+
+
+def _page_visual_review_brief(page_candidate: dict) -> str:
+    reasons = [str(item) for item in (page_candidate.get("reasons") or []) if item]
+    signals = page_candidate.get("layout_signals") or {}
+    bits = [
+        "请核对截图中是否存在真实版式问题：单元格过挤、表线过粗、图片未居中、列宽不均或样式不一致。",
+        f"候选原因: {', '.join(reasons) or 'layout'}。",
+    ]
+    crowding = signals.get("crowding_score")
+    thick = signals.get("thick_line_ratio")
+    offset = signals.get("image_offset_ratio")
+    if crowding not in (None, 0, 0.0):
+        bits.append(f"crowding={crowding}")
+    if thick not in (None, 0, 0.0):
+        bits.append(f"thick_line_ratio={thick}")
+    if offset not in (None, 0, 0.0):
+        bits.append(f"image_offset={offset}")
+    return " ".join(bits)
 
 
 def _page_visual_issue_category(reasons: list[str]) -> str:
     reasons = {str(reason or "") for reason in (reasons or [])}
+    if reasons.intersection({
+        "table_layout", "dense_table_or_layout", "layout_keyword",
+        "crowded_lines", "thick_rules", "image_off_center",
+    }):
+        return "表格/版式"
     if "toc_or_index" in reasons:
         return "目录一致性"
     if "footer_or_page_number" in reasons:
         return "页脚异常"
     if "figure_table_numbering" in reasons:
         return "图表编号"
-    if "table_layout" in reasons or "dense_table_or_layout" in reasons or "layout_keyword" in reasons:
-        return "表格/版式"
     return "页面复核"
 
 
@@ -4565,6 +4755,14 @@ def _should_promote_page_candidate_without_visual(page_candidate: dict) -> bool:
 
     preview = str(page_candidate.get("text_preview") or "")
     if re.search(r"版本记录|(?:日期.{0,16}版本)|(?:版本.{0,16}修订)|平均分布列|均匀分布列|列宽", preview, re.IGNORECASE):
+        return True
+    if re.search(
+        r"version\s+history|revision\s+history|(?:version|revision)\s+date"
+        r"|column\s+width|equal(?:ly)?\s+(?:distributed|spaced)\s+columns"
+        r"|header\s+row|footer\s+row|page\s+break|table\s+header",
+        preview,
+        re.IGNORECASE,
+    ):
         return True
     return False
 
@@ -4600,7 +4798,10 @@ def _build_pdf_page_visual_issue(page_candidate: dict, result: dict) -> dict:
                 "confidence": int(result.get("confidence") or 0),
                 "page_candidate": True,
             },
+            needs_human_review=True,
         ),
+        "needs_human_review": True,
+        "page_number": page_number,
     }
 
 
@@ -4973,9 +5174,24 @@ def _highlight_issue_context(issue):
     return highlighted.replace("\n", "<br>")
 
 
+def _content_page_separator(content):
+    text = str(content or "")
+    if "\n\f\n" in text:
+        return "\n\f\n"
+    return "\f"
+
+
+_PAGE_BREAK_RE = re.compile(r"\n\f\n|\f")
+
+
 def _split_content_pages(content):
-    pages = str(content or '').split('\f')
-    return pages if pages else ['']
+    text = str(content or "")
+    pages, pos = [], 0
+    for match in _PAGE_BREAK_RE.finditer(text):
+        pages.append(text[pos:match.start()])
+        pos = match.end()
+    pages.append(text[pos:])
+    return pages or [""]
 
 
 def _extract_document_metadata(doc, content):
@@ -5058,7 +5274,7 @@ def _format_issue_location(issue, content):
             if found >= 0:
                 position = _encode_issue_position(found, found + len(original))
 
-    page_no = _page_number_from_position(content, position)
+    page_no = _issue_page_number(issue, content)
     page_text = f'第{page_no}页' if page_no else ''
     rule = _report_rule(_issue_value(issue, 'rule', ''))
     if rule in {'DOC-REV-001', 'DOC-REV-002', 'CHECKLIST-COPYRIGHT-YEAR', 'CHECKLIST-YEAR'}:
@@ -5523,7 +5739,16 @@ def _report_issue_to_dict(issue):
         'context', 'suggestion', 'description', 'audit_basis', 'confidence', 'source',
         'position', 'status', 'created_at', 'updated_at'
     ]
-    return {key: _issue_value(issue, key, '') for key in keys}
+    payload = {key: _issue_value(issue, key, '') for key in keys}
+    # page_number / needs_human_review 在 ORM 上没有对应列，只能从 position meta 投影
+    meta = _decode_issue_position(payload.get('position', ''))
+    page_number = meta.get('page_number') or meta.get('page') or meta.get('page_no')
+    try:
+        payload['page_number'] = int(page_number) if page_number not in (None, '') else None
+    except (TypeError, ValueError):
+        payload['page_number'] = None
+    payload['needs_human_review'] = bool(meta.get('needs_human_review'))
+    return payload
 
 
 def _report_rule(rule):
@@ -5609,6 +5834,10 @@ def _report_resolve_chapter(issue, content):
     original = str(_issue_value(issue, 'original_text', '') or '').strip()
     if rule == 'CHECKLIST-TRADEMARK' and original.upper() == 'DNBSEQ':
         return '1. Introduction'
+    if rule == 'PDF-VISUAL-001':
+        page_no = _issue_page_number(issue, content)
+        if page_no:
+            return f'第{page_no}页'
 
     raw_existing = re.sub(r'\s+', ' ', str(_issue_value(issue, 'chapter', '') or '')).strip()
     existing = _format_issue_chapter(issue)
@@ -10593,6 +10822,28 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 英文文档中 ℃ 前的空格：人工批注常标「多余空格」；°C 的 SI 空格不在此列。
+    for match in re.finditer(r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)([ \t\u00a0\u202f]+)℃', content):
+        # 局部语境判定：前后 8 字符内有汉字视为中文排版，跳过。
+        # detect_language 对混排返回 both，外层语言门控拦不住中英说明书里的中文温度写法。
+        ctx = content[max(0, match.start() - 8):min(len(content), match.end() + 8)]
+        if re.search(r'[\u4e00-\u9fff]', ctx):
+            continue
+        raw = match.group(0)
+        add_issue(
+            match.start(),
+            match.end(),
+            raw,
+            'DOC-SPACE-006',
+            '空格与排版',
+            f"{match.group(1)}℃",
+            '英文文档正文中，数值与 ℃ 之间通常不保留空格（试剂盒标签/仪器界面除外）；'
+            '若为标签排版约定可忽略本条。',
+            '说明书审核能力补强方案 - 温度单位空格',
+            'general',
+            92,
+        )
+
     # 缺失空格：分句标点（逗号、分号、冒号）后直接连写下一个单词（如 buffer,then、on;Check）
     # 要求标点后紧跟字母，天然排除时间 10:30、URL 协议等数字/符号相邻场景；
     # 逗号前为数字时按千分位处理（1,000），冒号/分号则保留（Figure 1:Add -> Figure 1: Add）。
@@ -11347,11 +11598,36 @@ def _run_manual_engineering_audit(content, file_type=None):
 
     # English manuals should not contain Chinese residual text.
     if document_language == "en":
-        for match in list(re.finditer(r"[\u4e00-\u9fff]+", content))[:20]:
+        cn_issue_count = 0
+        cn_punct_to_en = {
+            "\u3001": ",",
+            "\u3002": ".",
+            "\uff0c": ",",
+            "\uff1b": ";",
+            "\uff1a": ":",
+            "\uff08": "(",
+            "\uff09": ")",
+            "\uff1f": "?",
+            "\uff01": "!",
+        }
+
+        def residual_excerpt(start, end, radius=24):
+            original = content[start:end]
+            if re.search(r"[\u4e00-\u9fff]", original):
+                return original[:240]
+            left = content[max(0, start - radius):start]
+            right = content[end:min(len(content), end + radius)]
+            left_token = re.split(r"\s+", left)[-1] if left else ""
+            right_token = re.split(r"\s+", right)[0] if right else ""
+            return f"{left_token}{original}{right_token}".strip()[:240] or original
+
+        for match in re.finditer(r"[\u4e00-\u9fff]+", content):
+            if cn_issue_count >= 20:
+                break
             add_issue(
                 match.start(),
                 match.end(),
-                match.group(0),
+                residual_excerpt(match.start(), match.end()),
                 "ENG-CN-001",
                 "英文文档中文混入",
                 "建议删除中文残留或替换为英文表达",
@@ -11360,6 +11636,57 @@ def _run_manual_engineering_audit(content, file_type=None):
                 "serious",
                 95,
             )
+            cn_issue_count += 1
+
+        punct_pattern = (
+            r"(?:(?<=[A-Za-z0-9])[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09\uff1f\uff01]"
+            r"|[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09\uff1f\uff01](?=[A-Za-z0-9]))"
+        )
+        # 试剂盒标签 / 仪器铭牌的排版约定：REF：MODEL：LOT：EXP：SN：
+        # 这类全角冒号来自 PDF 真实文本层（矢量绘制，非 OCR 伪影），改掉反而是错的。
+        #
+        # 实现要点（踩过的坑）：
+        #  1. Python re 不支持变长 lookbehind，不能写 (?<=\b[A-Za-z]{1,8})。
+        #  2. 不要用固定窗口（content[start-8:end]）判断——窗口起点会切在单词中间，
+        #     导致 'Exp：' 漏判、'at：' 误判。
+        #  3. 不要只认全大写——'Exp：'（大小写变体）也是标签，漏掉它会白占 20 条上限。
+        #  4. 不要用过宽的通用规则（如 \b[A-Za-z]{1,8}：）——会误伤
+        #     'Heating：' / 'Note：' / 'at：' 这类**真实的**全角冒号误用问题。
+        # 正确做法：全文预扫一次得到标签冒号的位置集合，循环内按位置判定，
+        # 不依赖任何固定窗口长度；且只认「已知标签词表」，不认通用形态。
+        # 剩余全角标点命中多为仪器 UI 文本层伪影（如 Completion at：），后续单独优化。
+        _LABEL_COLON_WORDS = {
+            'ref', 'model', 'lot', 'exp', 'sn', 'cat', 'catno', 'vol', 'batch', 'type',
+            'item', 'no', 'pn', 'rev', 'nd', 'ltd', 'co', 'mfg', 'serial', 'id', 'mfd',
+            'ce', 'ifu', 'dd', 'lo', 'qry', 'tml',
+        }
+        _label_colon_positions = set()
+        for _m in re.finditer(r"\b[A-Za-z]{1,8}\uff1a", content):
+            if _m.group(0)[:-1].lower() in _LABEL_COLON_WORDS:
+                _label_colon_positions.add(_m.start() + len(_m.group(0)) - 1)
+
+        for match in re.finditer(punct_pattern, content):
+            if cn_issue_count >= 20:
+                break
+            if match.group(0) == "\uff1a" and match.start() in _label_colon_positions:
+                continue
+            if re.search(r"[\u4e00-\u9fff]", content[max(0, match.start() - 8):min(len(content), match.end() + 8)]):
+                continue
+            mapped = cn_punct_to_en.get(match.group(0), "")
+            suggestion = f"建议改为 {mapped}" if mapped else "建议将中文标点替换为对应的英文标点"
+            add_issue(
+                match.start(),
+                match.end(),
+                residual_excerpt(match.start(), match.end()),
+                "ENG-CN-001",
+                "英文文档中文混入",
+                suggestion,
+                "英文说明书中不应混入中文标点。",
+                "说明书审核能力补强方案 - 英文文档中文混入",
+                "serious",
+                94,
+            )
+            cn_issue_count += 1
 
     # Revision History should list the latest version/date first.
     revision_match = re.search(r"Revision\s+History([\s\S]{0,2500}?)(?:Contents|Chapter\s+1|1\s+Product)", content, re.IGNORECASE)
@@ -11556,6 +11883,61 @@ def _run_manual_engineering_audit(content, file_type=None):
                         "general",
                         82,
                     )
+        if chapter_numbers:
+            continue
+        simple_rows = []
+        for match in re.finditer(rf"\b{label}\s+(\d+)\b(?![-–])", content, re.IGNORECASE):
+            line_start = max(0, content.rfind('\n', 0, match.start()) + 1)
+            line_end = content.find('\n', match.end())
+            if line_end < 0:
+                line_end = min(len(content), match.end() + 120)
+            line = content[line_start:line_end]
+            if len(line) > 120 or not _is_table_or_figure_caption_line(line, label, match.start() - line_start):
+                continue
+            rest = re.sub(
+                rf'^{re.escape(label)}\s+\d+\s+',
+                '',
+                line[match.start() - line_start:].strip(),
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            if rest[:1].islower():
+                continue
+            simple_rows.append((int(match.group(1)), match.start(), match.group(0)))
+        unique = sorted({number for number, _, _ in simple_rows})
+        if unique and unique[0] <= 2 and len(unique) >= 3:
+            expected = list(range(unique[0], unique[-1] + 1))
+            missing = [number for number in expected if number not in unique]
+            if 0 < len(missing) <= 3:
+                first = simple_rows[0]
+                add_issue(
+                    first[1],
+                    first[1] + len(first[2]),
+                    f"{label} {unique[0]} ... {label} {unique[-1]}",
+                    "DOC-FIGTAB-001",
+                    "表图编号",
+                    f"建议检查 {label} {', '.join(str(n) for n in missing)} 是否缺失或编号跳号",
+                    "表图编号应按顺序连续，缺号或跳号需要确认。",
+                    "说明书审核能力补强方案 - 表图编号连续性",
+                    "general",
+                    84,
+                )
+        counts = Counter(number for number, _, _ in simple_rows)
+        for number, count in counts.items():
+            if count > 1:
+                repeated = next(item for item in simple_rows if item[0] == number)
+                add_issue(
+                    repeated[1],
+                    repeated[1] + len(repeated[2]),
+                    repeated[2],
+                    "DOC-FIGTAB-002",
+                    "表图编号",
+                    f"建议确认 {label} {number} 是否重复编号",
+                    "同一文档内表图编号不应重复。",
+                    "说明书审核能力补强方案 - 表图编号连续性",
+                    "general",
+                    82,
+                )
 
     # Cat. No. wording and variants.
     for match in re.finditer(r"\b(?:cat\.?\s*:|cat\.?\s*number|catalog\s+number)\b", content, re.IGNORECASE):
@@ -12663,6 +13045,10 @@ def dedupe_issues_by_original(issues):
             issue_chapter = _norm_chapter(issue.get("chapter"))
             if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
                 continue
+            existing_page = issue_identity_key(existing)[3]
+            issue_page = key[3]
+            if existing_page and issue_page and existing_page != issue_page:
+                continue
             if issue_identity_key(existing) == key or (
                 _same_issue(original_text, existing.get("original_text", ""))
                 and issue_chapter == existing_chapter
@@ -12959,7 +13345,21 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             content = clean_pdf_text(content)
         original_content_length = len(content)
         content_limit = _review_content_limit(document.file_type)
-        content = content[:content_limit]
+        content_truncation = {
+            "truncated": False,
+            "original_chars": original_content_length,
+            "kept_chars": original_content_length,
+            "unscanned_page_start": None,
+            "unscanned_page_end": None,
+            "kept_pages": None,
+            "total_pages": None,
+        }
+        if document.file_type == 'pdf':
+            content, content_truncation = _truncate_content_at_page_boundary(content, content_limit)
+        else:
+            content = content[:content_limit]
+            content_truncation["truncated"] = original_content_length > len(content)
+            content_truncation["kept_chars"] = len(content)
         # 截断必须留痕：否则超长文档被静默截尾，检出率下降在指标上完全不可见。
         content_truncated_chars = max(0, original_content_length - len(content))
         if content_truncated_chars:
@@ -12968,7 +13368,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 f"上限={content_limit} 丢弃={content_truncated_chars} "
                 f"({content_truncated_chars / original_content_length:.1%})"
             )
+            if content_truncation.get("unscanned_page_start"):
+                print(
+                    f"[审核] 未审核页码: {content_truncation['unscanned_page_start']}"
+                    f"-{content_truncation['unscanned_page_end']}"
+                )
         pdf_page_metadata = _extract_pdf_page_metadata(document, content)
+        if content_truncation.get("truncated"):
+            pdf_page_metadata["content_truncation"] = content_truncation
         pdf_suspicious_pages = _collect_pdf_suspicious_pages(pdf_page_metadata)
         document_language = detect_language(content)
         from app.review_engine.document_model import build_document_model
@@ -13343,6 +13750,12 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             ai_new_issues = len(issues) - pre_ai_count
             _end_stage("ai_deep_review", output_count=len(issues), dropped_count=0)
 
+        if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
+            # 第一次回填：去重键的第 4 位是页码槽位，必须在 _finalize_review_issues 之前填好
+            filled = _backfill_issue_page_numbers(issues, content)
+            if filled:
+                print(f"[审核] 页码回填(去重前): {filled} 条")
+
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
@@ -13353,6 +13766,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
+
+        if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
+            # 第二次回填：_finalize_review_issues 会丢弃/重排部分 issue，
+            # 过滤后新产生的 issue 需要再补一次；函数本身幂等（已有页码的直接跳过）。
+            filled = _backfill_issue_page_numbers(issues, content)
+            if filled:
+                print(f"[审核] 页码回填: {filled} 条")
 
         _begin_stage("pdf_visual_verification")
         _stage_input_counts["pdf_visual_verification"] = len(issues)

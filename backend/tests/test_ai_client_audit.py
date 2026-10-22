@@ -369,3 +369,21 @@ def test_normalize_audit_observations_dedupes_by_title():
     first = next(item for item in observations if item["title"] == "占位符过多")
     assert first["confidence"] == 88
     assert first["description"] == "高置信"
+
+
+def test_normalize_audit_issues_uses_type_when_category_is_placeholder():
+    client = AIClient.__new__(AIClient)
+    issues = client.normalize_audit_issues(
+        [{
+            "original": "The samples was placed",
+            "expected": "The samples were placed",
+            "description": "subject-verb disagreement",
+            "confidence": 88,
+            "severity": "general",
+            "category": "其他",
+            "type": "Grammar",
+        }],
+        "The samples was placed into the tube.",
+    )
+    assert len(issues) == 1
+    assert issues[0]["category"] == "Grammar"

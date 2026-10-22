@@ -325,7 +325,7 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         selected = _norm_for_match(item.selected_text)
         if selected and len(selected) >= 2 and selected in blob:
             return True
-        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003", "DOC-SPACE-004", "DOC-SPACE-005", "DOC-UNIT-001"} or "格式规范" in category or "空格" in category
+        return rule in {"R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006", "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003", "DOC-SPACE-004", "DOC-SPACE-005", "DOC-SPACE-006", "DOC-UNIT-001"} or "格式规范" in category or "空格" in category
     if item.expected_rule == "DET-PUNCT-001":
         return (
             rule.startswith("DOC-PUNCT")
@@ -346,7 +346,16 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
         if selected and len(selected) >= 2 and selected in blob:
             return True
         # SPELL-PROP：专有名词拼写确证通道（P1 新增），与 SPELL 同属术语拼写族
-        return rule.startswith("CYY-CN-SPELL-") or rule in {"CYY-CN-TERM-006", "CYY-CN-CONSIST-032", "SPELL", "SPELL-PHRASE", "SPELL-PROP"} or "术语拼写" in category or "拼写错误" in category or "术语一致性" in category
+        return rule.startswith("CYY-CN-SPELL-") or rule in {
+            "CYY-CN-TERM-006",
+            "CYY-CN-CONSIST-032",
+            "SPELL",
+            "SPELL-PHRASE",
+            "SPELL-PROP",
+            "SPELL-TRANS",
+            "SPELL-INS",
+            "SPELL-SPLIT",
+        } or "术语拼写" in category or "拼写错误" in category or "术语一致性" in category
     if item.expected_rule == "STRUCT-DUP-001":
         return rule.startswith("DOC-DUP") or rule == "CYY-CN-DUP-002" or "重复" in category
     if item.expected_rule == "STRUCT-TERM-001":
@@ -374,10 +383,13 @@ def _matches_annotation_strictly(
     *,
     allow_rule_family: bool = True,
 ) -> bool:
-    """严格匹配：规则号/规则族对齐 **且** 批注文本与问题原文有实质重叠。
+    """严格匹配：规则号/规则族对齐 **且**（文本实质重叠 **或** 页码锚点一致）。
 
     `allow_rule_family=False` 时只接受规则号精确相等，不再使用规则族（同 category
     或同 rule 前缀）兜底，供二分匹配的"先精确后放宽"两轮使用。
+
+    页码锚点只对"文本通道已经判负"的候选做二次确认，且要求页码一致；
+    页码冲突时直接判否（排除跨处误配）。
     """
     expected = str(item.expected_rule or "").upper()
     rule = str(issue.get("rule", "") or "").upper()
@@ -419,7 +431,56 @@ def _matches_annotation_strictly(
         original_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", str(issue.get("original_text", "")).lower())}
         if original_tokens and len(context_tokens & original_tokens) / len(original_tokens) >= 0.5:
             return True
+    # 页级 issue（整页判断，rule=PDF-VISUAL-001）不构成"同一处文本"的证据。
+    # 它的 page_number 天然等于页号，若允许走页码通道，会与同页任意批注
+    # 假命中（实测限额 24 时净增 4 条，3 条是错配）。
+    if str(issue.get("rule", "")).upper() == "PDF-VISUAL-001":
+        return False
+    # 页码冲突排除：issue 明确标了页码且与批注页不一致 ⇒ 一定不是同一处文本。
+    # 注意这里是"只用来排除、不用来命中"——把页码当独立命中通道会让
+    # 同页不同处的 issue 也算命中（V4 实测会引入 page=69 的跨页错配）。
+    _exp_page = str(item.page or "").strip()
+    _iss_page = _issue_page_from_position(issue)
+    if _exp_page and _iss_page and _iss_page != _exp_page:
+        return False
+    if _annotation_page_anchor_matches(item, issue):
+        return True
     return False
+
+
+def _issue_page_from_position(issue: dict[str, Any]) -> str:
+    """从 issue 顶层或 position 元数据取出页码。"""
+    for key in ("page_number", "page", "page_no"):
+        value = issue.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    position = issue.get("position")
+    data: dict[str, Any] = {}
+    if isinstance(position, dict):
+        data = position
+    elif isinstance(position, str) and position.strip().startswith("{"):
+        try:
+            parsed = json.loads(position)
+            if isinstance(parsed, dict):
+                data = parsed
+        except Exception:
+            data = {}
+    for key in ("page_number", "page", "page_no"):
+        value = data.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _annotation_page_anchor_matches(item: HumanAnnotation, issue: dict[str, Any]) -> bool:
+    """页码锚点通道：issue 页码与批注页码一致。"""
+    expected_page = str(item.page or "").strip()
+    if not expected_page:
+        return False
+    issue_page = _issue_page_from_position(issue)
+    if not issue_page:
+        return False
+    return issue_page == expected_page
 
 
 def _matches_annotation_loosely(
@@ -505,6 +566,27 @@ def _match_annotations_injectively(
     return {annotation_index: issue_index for issue_index, annotation_index in issue_owner.items()}
 
 
+def _issue_needs_human_review(issue: dict[str, Any]) -> bool:
+    """Read needs_human_review from the issue or its position JSON.
+
+    ORM has no dedicated column; page-level visual issues store the flag in
+    position meta. This is a count over the same issue pool as strict_precision,
+    not a second matching channel.
+    """
+    if issue.get("needs_human_review"):
+        return True
+    position = issue.get("position")
+    meta: Any = {}
+    if isinstance(position, dict):
+        meta = position
+    elif isinstance(position, str) and position.strip().startswith("{"):
+        try:
+            meta = json.loads(position)
+        except json.JSONDecodeError:
+            meta = {}
+    return bool(isinstance(meta, dict) and meta.get("needs_human_review"))
+
+
 def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list[HumanAnnotation]) -> dict[str, Any]:
     issue_pairs = [(issue, _issue_blob(issue)) for issue in issues]
 
@@ -552,6 +634,9 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
     strict_f1 = (2 * strict_precision * strict_recall / (strict_precision + strict_recall)) if strict_precision + strict_recall else 0
     unmatched_issues = [issue for issue, _blob in issue_pairs if id(issue) not in matched_issue_ids]
     strict_unmatched_issues = [issue for issue, _blob in issue_pairs if id(issue) not in strict_matched_issue_ids]
+    # 与 strict_precision 同一 issue 池计数，不得为 needs_human_review 另开匹配通道。
+    manual_issue_count = sum(1 for issue, _blob in issue_pairs if _issue_needs_human_review(issue))
+    manual_review_ratio = manual_issue_count / issue_total if issue_total else 0
 
     return {
         "human_total": len(annotations),
@@ -572,6 +657,8 @@ def evaluate_against_annotations(issues: list[dict[str, Any]], annotations: list
         "strict_f1": round(strict_f1, 4),
         "strict_matched_issue_count": len(strict_matched_issue_ids),
         "strict_unmatched_issue_count": len(strict_unmatched_issues),
+        "manual_issue_count": manual_issue_count,
+        "manual_review_ratio": round(manual_review_ratio, 4),
         "misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in misses])["by_category"] if misses else {},
         "strict_misses_by_category": summarize_annotations([HumanAnnotation(**item) for item in strict_misses])["by_category"] if strict_misses else {},
         "unmatched_issues_by_category": _summarize_issue_categories(unmatched_issues),

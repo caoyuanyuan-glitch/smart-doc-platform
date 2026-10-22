@@ -61,7 +61,7 @@ HIGH_VALUE_PATTERN = re.compile(
     r"missing\s+(?:object|icon|button|step|entry|field)|incomplete\s+sentence|"
     r"trademark|copyright|compliance|ROHS|DNBSEQ|CYY|人工审核|发布前自检|Checklist|"
     r"默认账号|默认密码|密码|内网|端口|版本记录|空表|缺失|不完整|合规|法规|商标|版权|"
-    r"重复|物料编码|术语一致|图文引用|图号|表格内容|操作步骤|信息完整",
+    r"重复|物料编码|术语一致|图文引用|图号|编号引用|表格内容|操作步骤|信息完整|结构完整",
     re.IGNORECASE,
 )
 
@@ -499,6 +499,11 @@ def is_whitelisted_layout_issue(issue: Any) -> bool:
     data = issue_to_mapping(issue)
     rule = str(data["rule"] or "").upper()
     confidence = int(data["confidence"] or 0)
+    if rule == "PDF-VISUAL-001":
+        # 页面级视觉复核：已由多模态模型逐页判定，不是文本层版式噪声。
+        # 放行的同时必须限制注入量（REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT），
+        # 否则会把整页判断混进"具体文字位置"的评测分母。
+        return True
     return rule.startswith("CYY-CN-LAYOUT-") and confidence >= 86
 
 
@@ -566,6 +571,13 @@ def is_verifiable_ai_text_issue(issue: Any) -> bool:
         "冗余", "表述不准确", "信息不完整", "一致性", "语气",
         "图表衔接", "句子成分",
     }
+    # Keep aligned with backend/app/utils/ai_client.py English/Chinese prompt categories.
+    text_categories.update({
+        "编号引用", "结构完整", "法规合规", "可读性",
+        "clarity", "consistency", "completeness", "redundancy",
+        "accuracy", "tone", "figure-table", "sentence-structure",
+        "numbering", "structure", "compliance", "readability",
+    })
     return (
         confidence >= 70
         and bool(original)
@@ -765,6 +777,20 @@ def normalize_issue(issue: Any) -> Any:
     return issue
 
 
+def _page_token_from_position(position: Any) -> str:
+    if isinstance(position, dict):
+        return str(position.get("page") or position.get("page_number") or "")
+    text = str(position or "").strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return ""
+        if isinstance(parsed, dict):
+            return str(parsed.get("page") or parsed.get("page_number") or "")
+    return ""
+
+
 def dedupe_key(issue: Any) -> str:
     data = issue_to_mapping(issue)
     topic = issue_topic(data)
@@ -778,11 +804,12 @@ def dedupe_key(issue: Any) -> str:
         return f"topic|{topic}|{original[:80]}"
     if rule in {"CYY-CN-PLACEHOLDER-001", "CYY-CN-MATERIAL-001"}:
         return rule
+    page = _page_token_from_position(data.get("position"))
     if source == "spellcheck" or rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT"}:
-        return f"spell|{rule}|{original}"
+        return f"spell|{rule}|{original}|{page}"
     if rule in {"UNIT-003", "UNIT-004", "HR011", "STYLE-003", "HR008", "GRAMMAR-001", "GRAMMAR-002"}:
-        return f"{rule}|{original}|{data['position']}"
-    return f"{rule}|{original}|{compact_text(data['chapter'])}"
+        return f"{rule}|{original}|{data['position']}|{page}"
+    return f"{rule}|{original}|{compact_text(data['chapter'])}|{page}"
 
 
 def issue_rank(issue: Any) -> tuple[int, int, int, int, int, int]:

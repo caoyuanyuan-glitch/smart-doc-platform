@@ -1330,7 +1330,13 @@ class AIClient:
             suggestion = self._clean_text(item.get("suggestion") or item.get("expected"), 300)
             description = self._clean_text(item.get("description") or item.get("rule_description"), 300)
             chapter = self._clean_text(item.get("chapter") or item.get("section") or item.get("location"), 120)
-            category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
+            raw_category = self._clean_text(item.get("category"), 80)
+            raw_type = self._clean_text(item.get("type"), 80)
+            placeholder_categories = {"", "其他", "其它", "other"}
+            if raw_category.lower() in placeholder_categories:
+                category = raw_type or raw_category or "其他"
+            else:
+                category = raw_category
             rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
             audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
             issue_source = self._clean_text(item.get("source"), 40) or source
@@ -1773,6 +1779,9 @@ class AIClient:
 1. `confirm`：页面中能直接看到该问题，或能看到足够强的支持证据。
 2. `reject`：页面中看不到该问题，且更像 PDF 文本提取伪影、重复文本层、断行噪声、图标丢失或 OCR 误识别。
 3. `uncertain`：图片证据不足，无法稳定确认。
+
+版式问题只要截图里肉眼可见，必须 `confirm`：表格单元格过挤、表线明显偏粗、图片未居中、列宽不均、相邻单元格样式不一致。表格对齐整齐不能作为 reject 拥挤/粗线/未居中的理由。
+对「表格/版式」：截图中只要有表格或图，且看不到提取伪影，不要因为“排版整齐”而 `reject`；证据不够强时用 `uncertain`。
 
 已知优先按伪影或可接受差异处理的场景：
 - 双层文本层重复，例如同一句或同一短语重复叠加。

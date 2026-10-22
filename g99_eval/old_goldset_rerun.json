@@ -1,0 +1,66 @@
+{
+ "pdf_hits": [],
+ "dsn": "sqlite:////root/.smart-doc-platform/app.db",
+ "documents": [
+  {
+   "name": "gospatial_v2_24_en",
+   "review_id": 20,
+   "baseline": "backend/goldset/human_baseline_gospatial_v2_24.md",
+   "expected_pdf": "**/*gospatial_v2_24_en*.pdf",
+   "pdf_hits": [],
+   "dsn": "sqlite:////root/.smart-doc-platform/app.db",
+   "status": "missing_pdf",
+   "error": "**/*gospatial_v2_24_en*.pdf"
+  },
+  {
+   "name": "e25rs_cn",
+   "review_id": 21,
+   "baseline": "backend/goldset/human_baseline_e25rs_cn.json",
+   "expected_pdf": "**/*e25rs_cn*.pdf",
+   "pdf_hits": [],
+   "dsn": "sqlite:////root/.smart-doc-platform/app.db",
+   "status": "missing_pdf",
+   "error": "**/*e25rs_cn*.pdf"
+  },
+  {
+   "name": "e25rs_en",
+   "review_id": 23,
+   "baseline": "backend/goldset/human_baseline_e25rs_en.json",
+   "expected_pdf": "**/*e25rs_en*.pdf",
+   "pdf_hits": [],
+   "dsn": "sqlite:////root/.smart-doc-platform/app.db",
+   "status": "missing_pdf",
+   "error": "**/*e25rs_en*.pdf"
+  },
+  {
+   "name": "e25rs_v8_cn_observed",
+   "review_id": null,
+   "baseline": "backend/goldset/human_baseline_高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.json",
+   "expected_pdf": "**/*e25rs_v8_cn_observed*.pdf",
+   "pdf_hits": [],
+   "dsn": "sqlite:////root/.smart-doc-platform/app.db",
+   "status": "missing_pdf",
+   "error": "**/*e25rs_v8_cn_observed*.pdf"
+  },
+  {
+   "name": "e25rs_v8_en_observed",
+   "review_id": null,
+   "baseline": "backend/goldset/human_baseline_High-throughputSequencingSetInstructionsforUse_English_RUO_QD_V8.0_R01Tina.json",
+   "expected_pdf": "**/*e25rs_v8_en_observed*.pdf",
+   "pdf_hits": [],
+   "dsn": "sqlite:////root/.smart-doc-platform/app.db",
+   "status": "missing_pdf",
+   "error": "**/*e25rs_v8_en_observed*.pdf"
+  },
+  {
+   "name": "g99_v9_observed",
+   "review_id": null,
+   "baseline": "backend/goldset/human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json",
+   "expected_pdf": "**/*g99_v9_observed*.pdf",
+   "pdf_hits": [],
+   "dsn": "sqlite:////root/.smart-doc-platform/app.db",
+   "status": "missing_pdf",
+   "error": "**/*g99_v9_observed*.pdf"
+  }
+ ]
+}

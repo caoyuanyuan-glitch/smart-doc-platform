@@ -639,3 +639,24 @@ def test_section_heading_uses_toc_when_available():
         review_api._line_looks_like_section_heading("Section 3 Title", toc_titles=toc_titles)
         is True
     )
+
+
+def test_english_prompt_categories_are_verifiable():
+    """英文 prompt 的高价值类目应进入可验证白名单，避免被 value_score 丢掉。"""
+    categories = ("编号引用", "结构完整", "法规合规", "可读性")
+    for category in categories:
+        issue = {
+            "source": "ai",
+            "rule": "AI",
+            "category": category,
+            "severity": "general",
+            "original_text": "See Figure 12 for the workflow details.",
+            "context": "See Figure 12 for the workflow details.",
+            "suggestion": "See Figure 2 for the workflow details.",
+            "description": "Referenced figure does not exist in this chapter.",
+            "confidence": 80,
+        }
+        assert pipeline.is_verifiable_ai_text_issue(issue) is True
+        assert pipeline.is_noise(issue) is False
+        selected = select_review_issues([issue])
+        assert len(selected) == 1, category
