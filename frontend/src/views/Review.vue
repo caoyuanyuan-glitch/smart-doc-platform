@@ -538,7 +538,7 @@
     <!-- 问题详情弹窗 -->
     <el-dialog v-model="issueDialogVisible" :title="`问题详情 - 任务#${currentTaskId}`" width="95%" top="5vh">
       <div class="issue-dialog-toolbar">
-        <el-input v-model="issueFilter.keyword" placeholder="搜索原文 / 建议 / 规则 / 章节" style="width:300px" clearable />
+        <el-input v-model="issueFilter.keyword" placeholder="搜索原文 / 建议 / 规则 / 章节 / 页码" style="width:300px" clearable />
         <el-select v-model="issueFilter.category" placeholder="分类" clearable style="width:140px;margin-left:8px">
           <el-option v-for="cat in dialogCategories" :key="cat" :label="cat" :value="cat" />
         </el-select>
@@ -938,7 +938,11 @@
             <div v-if="scope.row.rule" class="issue-rule-id">{{ scope.row.rule }}</div>
           </template>
         </el-table-column>
-        <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
+        <el-table-column label="章节名称" width="180" show-overflow-tooltip>
+          <template #default="scope">
+            {{ issueChapterLabel(scope.row) }}
+          </template>
+        </el-table-column>
         <el-table-column label="原文" min-width="450">
           <template #default="scope">
             <span class="context-cell" v-html="renderIssueOriginalCell(scope.row, currentTaskMode)"></span>
@@ -1306,7 +1310,11 @@
                 </template>
               </el-table-column>
               <el-table-column prop="category" label="分类" width="120" />
-              <el-table-column prop="chapter" label="章节" width="180" />
+              <el-table-column label="章节" width="180">
+                <template #default="scope">
+                  {{ issueChapterLabel(scope.row) }}
+                </template>
+              </el-table-column>
               <el-table-column label="上下文" min-width="500">
                 <template #default="scope">
                   <span class="context-text" v-html="renderIssueContext(scope.row, currentReport?.mode)"></span>
@@ -1327,7 +1335,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, onActivated, watch, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage, getBlobErrorMessage } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -1647,7 +1655,8 @@ function issueSearchHaystack(issue) {
   const category = String(issue?.category || '')
   const rule = String(issue?.rule || '')
   const source = sourceLabel(issue?.source)
-  return `${shownOriginal} ${suggestion} ${description} ${chapter} ${category} ${rule} ${source}`.toLowerCase()
+  const page = issuePageLabel(issue)
+  return `${shownOriginal} ${suggestion} ${description} ${chapter} ${page} ${category} ${rule} ${source}`.toLowerCase()
 }
 
 function percentText(value) {
@@ -1941,6 +1950,11 @@ onMounted(() => {
 
 onActivated(() => {
   loadByView()
+})
+
+onDeactivated(() => {
+  stopReviewsPolling()
+  stopSnippetProgressPolling()
 })
 
 function loadByView() {
@@ -3052,7 +3066,8 @@ function sourceLabel(source) {
     spellcheck: '拼写',
     term: '术语',
     grammar: '语法',
-    manual: '人工'
+    manual: '人工',
+    excel: 'Excel'
   }[source] || source || '-'
 }
 
@@ -3096,6 +3111,28 @@ function parseMaybeJson(value) {
 function issuePositionMeta(issue) {
   const parsed = parseMaybeJson(issue?.position)
   return parsed && typeof parsed === 'object' ? parsed : {}
+}
+
+function issuePageNumber(issue) {
+  const top = Number(issue?.page_number || issue?.page || issue?.page_no)
+  if (Number.isFinite(top) && top > 0) return top
+  const meta = issuePositionMeta(issue)
+  const nested = Number(meta.page_number || meta.page || meta.page_no)
+  if (Number.isFinite(nested) && nested > 0) return nested
+  return null
+}
+
+function issuePageLabel(issue) {
+  const page = issuePageNumber(issue)
+  return page ? `第${page}页` : ''
+}
+
+function issueChapterLabel(issue) {
+  const chapter = String(issue?.chapter || '').trim()
+  const pageText = issuePageLabel(issue)
+  if (chapter && pageText && !chapter.includes(pageText)) return `${pageText} ${chapter}`
+  if (chapter) return chapter
+  return pageText || '-'
 }
 
 function issueHasFlag(issue, flag) {
