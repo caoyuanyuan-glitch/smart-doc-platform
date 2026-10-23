@@ -301,6 +301,19 @@ class CompetitorUrlApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("http/https", response.json()["detail"])
 
+    def test_create_competitor_task_from_url_wraps_unexpected_crawl_error(self):
+        """爬取阶段未预期异常应返回分析失败详情，避免前端只看到 HTTP 500。"""
+        with patch("app.utils.competitor_html.socket.getaddrinfo", return_value=_FAKE_PUBLIC_ADDRINFO), \
+             patch("app.utils.competitor_crawl.crawl_site", side_effect=ModuleNotFoundError("No module named 'bs4'")):
+            response = self.client.post(
+                "/api/competitor/url",
+                headers=self._auth_headers("writer_user"),
+                json={"url": "https://docs.example.com/Content/IN/Topic.htm"},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"], "分析失败: No module named 'bs4'")
+
     def test_create_competitor_task_from_url_rejects_loopback(self):
         """SSRF 防护：禁止访问环回地址。"""
         response = self.client.post(

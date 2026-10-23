@@ -213,7 +213,7 @@ export const competitorAPI = {
       timeout: 600000
     })
   },
-  createFromUrl: (url) => instance.post('/competitor/url', { url }, { timeout: 600000 }),
+  createFromUrl: (url) => instance.post('/competitor/url', { url }, { timeout: 120000 }),
   list: (params = {}) => instance.get('/competitor/', { params }),
   get: (id) => instance.get(`/competitor/${id}`),
   delete: (id) => instance.delete(`/competitor/${id}`),

@@ -104,7 +104,7 @@ class _SafeRedirectHandler(request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def fetch_html(raw_url: str) -> Dict:
+def fetch_html(raw_url: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> Dict:
     """抓取网页并返回 {html, final_url, content_type, size}。
 
     校验失败抛 UrlNotAllowedError；抓取/内容问题抛 RuntimeError（由 API 层转 HTTP 状态码）。
@@ -119,7 +119,7 @@ def fetch_html(raw_url: str) -> Dict:
     )
     opener = request.build_opener(_SafeRedirectHandler)
     try:
-        with opener.open(req, timeout=FETCH_TIMEOUT_SECONDS) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             content_type = (resp.headers.get_content_type() or "").lower()
             if content_type not in ALLOWED_CONTENT_TYPES:
                 raise RuntimeError(f"链接内容类型不支持: {content_type or 'unknown'}")

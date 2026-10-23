@@ -11,6 +11,22 @@
         <el-form-item label="对比标题">
           <el-input v-model="title" placeholder="例如：Illumina vs 华大智造 操作手册（留空自动命名）" maxlength="120" style="max-width: 420px;" />
         </el-form-item>
+        <el-form-item label="我方手册">
+          <div class="ours-upload">
+            <el-upload
+              action="#"
+              :auto-upload="false"
+              :show-file-list="false"
+              :disabled="uploadingOurs"
+              :on-change="handleOursFile"
+              :before-upload="() => false"
+              accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm"
+            >
+              <el-button :loading="uploadingOurs">上传并分析我方手册</el-button>
+            </el-upload>
+            <span class="ours-hint">分析完成后会自动勾选，并标为「我方基线」</span>
+          </div>
+        </el-form-item>
       </el-form>
       <el-table :data="tasks" v-loading="loadingTasks" size="small" max-height="360"
                 @selection-change="onSelectionChange" ref="taskTable">
@@ -107,7 +123,7 @@ import { use } from 'echarts/core'
 import { RadarChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { competitorAPI } from '@/api'
+import { competitorAPI, getAPIErrorMessage } from '@/api'
 
 use([RadarChart, TooltipComponent, LegendComponent, CanvasRenderer])
 
@@ -115,6 +131,7 @@ const loadingTasks = ref(false)
 const loadingList = ref(false)
 const loadingDetail = ref(false)
 const creating = ref(false)
+const uploadingOurs = ref(false)
 const tasks = ref([])
 const comparisons = ref([])
 const selectedRows = ref([])
@@ -178,6 +195,45 @@ const fetchComparisons = async () => {
     ElMessage.error('对比列表加载失败')
   } finally {
     loadingList.value = false
+  }
+}
+
+const handleOursFile = async (file) => {
+  const raw = file?.raw || file
+  if (!raw || uploadingOurs.value) return
+  const name = raw.name || ''
+  if (!/\.(pdf|docx|md|markdown|txt|html|htm)$/i.test(name)) {
+    ElMessage.warning('仅支持 PDF / DOCX / MD / TXT / HTML 格式')
+    return
+  }
+  if (raw.size > 50 * 1024 * 1024) {
+    ElMessage.warning('文件大小不能超过 50MB')
+    return
+  }
+  uploadingOurs.value = true
+  try {
+    const resp = await competitorAPI.create(raw)
+    const task = resp.data
+    ElMessage.success('我方手册分析完成，已设为基线')
+    await fetchTasks()
+    const target = tasks.value.find((t) => t.id === task.id)
+    if (!target) return
+    if (selectedIds.value.length >= 5 && !selectedIds.value.includes(target.id)) {
+      ElMessage.warning('已选满 5 份，请先取消一份后再把我方手册加入对比')
+      return
+    }
+    await nextTick()
+    taskTable.value?.toggleRowSelection(target, true)
+    await nextTick()
+    baselineTaskId.value = target.id
+  } catch (e) {
+    if (e?.code === 'ECONNABORTED') {
+      ElMessage.error('分析超时，请稍后重试')
+    } else {
+      ElMessage.error(getAPIErrorMessage(e, '我方手册分析失败'))
+    }
+  } finally {
+    uploadingOurs.value = false
   }
 }
 
@@ -333,6 +389,8 @@ onMounted(async () => {
 .page-header .sub { margin: 0 0 16px; color: #909399; font-size: 13px; }
 .mb16 { margin-bottom: 16px; }
 .baseline-tip { margin: 10px 0 0; color: #606266; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.ours-upload { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ours-hint { color: #909399; font-size: 12px; }
 .actions { margin-top: 14px; }
 .radar-wrap { margin-bottom: 8px; }
 .report-actions { margin-bottom: 8px; }
