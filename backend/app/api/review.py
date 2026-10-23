@@ -5747,7 +5747,9 @@ def _report_issue_to_dict(issue):
         payload['page_number'] = int(page_number) if page_number not in (None, '') else None
     except (TypeError, ValueError):
         payload['page_number'] = None
-    payload['needs_human_review'] = bool(meta.get('needs_human_review'))
+    payload['needs_human_review'] = bool(
+        _issue_value(issue, 'needs_human_review', False) or meta.get('needs_human_review')
+    )
     return payload
 
 
@@ -7649,6 +7651,7 @@ def _generate_review_html_content(review, doc, issues):
         .badge-false {{ background: #909399; }}
         .badge-pending {{ background: var(--serious); }}
         .badge-ignored {{ background: #c0c4cc; }}
+        .badge-manual {{ background: #e6a23c; }}
         .badge-severity-fatal {{ background: var(--fatal); }}
         .badge-severity-serious {{ background: var(--serious); }}
         .badge-severity-general {{ background: var(--general); }}
@@ -7789,13 +7792,16 @@ def _generate_review_html_content(review, doc, issues):
                     'pending': '待确认',
                 }.get(issue_status, '待确认')
                 example_html = _build_inline_example_html(issue)
+                manual_badge = ''
+                if _issue_value(issue, 'needs_human_review', False):
+                    manual_badge = '<span class="badge badge-manual">需人工复核</span>'
                 html += f"""
         <div id="issue-{display_no:04d}" class="issue {issue_status}">
             <div class="issue-header">
                 <div class="issue-title">{_format_issue_display_id(display_no)} · {_issue_dimension(issue)} · {_issue_value(issue, 'category', '') or '未分类'}</div>
                 <div>
                     <span class="badge {sev_class}">{_format_issue_severity(_issue_value(issue, 'severity', 'general'))}</span>
-                    <span class="badge {status_class}">{status_text}</span>
+                    <span class="badge {status_class}">{status_text}</span>{manual_badge}
                 </div>
             </div>
             <div class="issue-field"><span class="issue-label">位置:</span> {_format_issue_location(issue, content)}</div>

@@ -642,6 +642,14 @@ def test_report_issue_dict_projects_page_meta():
     assert payload["page_number"] is None
     assert payload["needs_human_review"] is False
 
+    top_only = {
+        "rule": "PDF-VISUAL-001",
+        "needs_human_review": True,
+        "position": json.dumps({"start": 10, "end": 40}),
+    }
+    payload = review_api._report_issue_to_dict(top_only)
+    assert payload["needs_human_review"] is True
+
 
 def test_visual_issue_location_and_chapter_use_meta_page():
     content = "Chapter 1 Overview\nAAA\n\f\nChapter 2 Overview\nBBB"
@@ -658,3 +666,38 @@ def test_visual_issue_location_and_chapter_use_meta_page():
     assert review_api._report_resolve_chapter(issue, content) == "第2页"
     location = review_api._format_issue_location(issue, content)
     assert "第2页" in location
+
+
+def test_html_report_renders_needs_human_review_badge():
+    content = "Revision History table\nAAA\n\f\nChapter 2 Overview\nBBB"
+    review = SimpleNamespace(id=7, document_id=1, created_at=None, completed_at=None)
+    doc = SimpleNamespace(filename="demo.pdf", file_type="pdf", content=content)
+    flagged = review_api._build_pdf_page_visual_issue(
+        {
+            "page_number": 1,
+            "char_start": 0,
+            "char_end": 22,
+            "text_preview": "Revision History table",
+            "reasons": ["table_layout"],
+        },
+        {"decision": "confirm", "reason": "layout issue", "confidence": 90, "source": "ai"},
+    )
+    ordinary = {
+        "severity": "general",
+        "category": "术语一致性",
+        "rule": "TERM-001",
+        "chapter": "1.1",
+        "original_text": "Chapter 2 Overview",
+        "context": "Chapter 2 Overview BBB",
+        "suggestion": "keep wording",
+        "description": "ordinary term issue",
+        "audit_basis": "术语规范",
+        "confidence": 92,
+        "source": "rule",
+        "status": "pending",
+        "position": json.dumps({"start": content.find("Chapter 2 Overview"), "end": content.find("Chapter 2 Overview") + 18}),
+    }
+    html = review_api._generate_review_html_content(review, doc, [flagged, ordinary])
+    assert "badge-manual" in html
+    assert "需人工复核" in html
+    assert html.count("需人工复核") == 1

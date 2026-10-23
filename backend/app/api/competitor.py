@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 import os
 import re
 import uuid
+import asyncio
 from datetime import datetime
 
 from app.api.auth import get_current_active_user
@@ -103,6 +104,8 @@ def _parse_web_document(source_url: str) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"分析失败: {exc}")
 
     if not crawl["combined_text"].strip():
         # 全站均无可提取正文（纯 JS 渲染/空骨架）：与单页口径一致，明确报错
@@ -120,6 +123,10 @@ def _parse_web_document(source_url: str) -> dict:
     # 入口页/封面页识别（外部评审 P1 采纳项）：命中时并入 warnings，报告显著提示
     entry_hints = competitor_html.entry_page_hints(final_url, full_text)
     warnings = list(entry_extraction.get("notes", [])) + entry_hints
+    if crawl.get("budget_hit"):
+        warnings.append(
+            f"站点页面较多，已在时限内抓取 {len(crawl['pages'])} 页后停止，结果基于已抓取页面"
+        )
     # 结构统计用全站累加（替换单页计数）
     struct = crawl["structure"]
     html_context = {
@@ -402,7 +409,8 @@ async def create_competitor_task_from_url(
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
-    parsed = _parse_web_document(payload.url)
+    # 全站抓取与分析是同步阻塞逻辑，放到线程以免卡住整个 API 事件循环
+    parsed = await asyncio.to_thread(_parse_web_document, payload.url)
 
     from app.crud.competitor import create_competitor_task as db_create
     from app.crud.competitor import get_competitor_task
@@ -416,15 +424,16 @@ async def create_competitor_task_from_url(
         source_type="url",
     )
     try:
-        result = _run_analysis(
+        result = await asyncio.to_thread(
+            _run_analysis,
             parsed["filename"],
             parsed["filename"],
             parsed["full_text"],
             parsed["pages_text"],
-            source_meta=parsed["source_meta"],
-            html_context=parsed.get("html_context"),
-            warnings=parsed.get("warnings"),
-            pages_html=parsed.get("pages_html"),
+            parsed["source_meta"],
+            parsed.get("html_context"),
+            parsed.get("warnings"),
+            parsed.get("pages_html"),
         )
         update_competitor_task(
             db,
