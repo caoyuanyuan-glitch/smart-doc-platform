@@ -509,12 +509,12 @@ async function doAnalyze() {
     detail.value = resp.data
     activeTab.value = 'result'
     ElMessage.success('分析完成')
-    } catch (e) {
-      if (e?.code === 'ECONNABORTED') {
-        ElMessage.error('分析超时，请换更短的手册入口页或稍后重试')
-      } else {
-        ElMessage.error(getAPIErrorMessage(e, '分析失败'))
-      }
+  } catch (e) {
+    if (e?.code === 'ECONNABORTED') {
+      ElMessage.error('分析超时，请换更短的手册入口页或稍后重试')
+    } else {
+      ElMessage.error(getAPIErrorMessage(e, '分析失败'))
+    }
   } finally {
     analyzing.value = false
   }

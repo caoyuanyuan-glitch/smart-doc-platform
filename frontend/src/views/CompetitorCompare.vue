@@ -214,10 +214,12 @@ const handleOursFile = async (file) => {
   try {
     const resp = await competitorAPI.create(raw)
     const task = resp.data
-    ElMessage.success('我方手册分析完成，已设为基线')
     await fetchTasks()
     const target = tasks.value.find((t) => t.id === task.id)
-    if (!target) return
+    if (!target) {
+      ElMessage.warning('我方手册已上传，但未在任务列表中找到，基线未设置')
+      return
+    }
     if (selectedIds.value.length >= 5 && !selectedIds.value.includes(target.id)) {
       ElMessage.warning('已选满 5 份，请先取消一份后再把我方手册加入对比')
       return
@@ -226,6 +228,7 @@ const handleOursFile = async (file) => {
     taskTable.value?.toggleRowSelection(target, true)
     await nextTick()
     baselineTaskId.value = target.id
+    ElMessage.success('我方手册分析完成，已设为基线')
   } catch (e) {
     if (e?.code === 'ECONNABORTED') {
       ElMessage.error('分析超时，请稍后重试')
