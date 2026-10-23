@@ -132,12 +132,12 @@ def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_
     prefetched = {_norm_key(base_url): entry}
 
     while queue and len(pages) < max_pages:
-        if time.monotonic() >= deadline:
-            budget_hit = True
-            break
         url, depth = queue.popleft()
         fetched = prefetched.pop(_norm_key(url), None)
         if fetched is None:
+            if time.monotonic() >= deadline:
+                budget_hit = True
+                break
             try:
                 fetched = competitor_html.fetch_html(url, timeout=PAGE_FETCH_TIMEOUT)
             except Exception:

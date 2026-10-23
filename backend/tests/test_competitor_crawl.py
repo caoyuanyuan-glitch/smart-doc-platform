@@ -157,6 +157,15 @@ class TestCrawlSite(unittest.TestCase):
         self.assertGreaterEqual(len(result["pages"]), 1)
         self.assertLess(len(result["pages"]), 5)
 
+    def test_crawl_keeps_entry_page_when_budget_is_zero(self):
+        """budget_seconds=0 时入口页已在 prefetched 中，应保留而非丢弃。"""
+        with mock.patch.object(competitor_html, "fetch_html", side_effect=_mock_fetch):
+            result = competitor_crawl.crawl_site("https://docs.example.com/", budget_seconds=0.0)
+
+        self.assertTrue(result["budget_hit"])
+        self.assertGreaterEqual(len(result["pages"]), 1)
+        self.assertEqual(result["pages"][0]["url"], "https://docs.example.com/")
+
 class TestUrlNormalize(unittest.TestCase):
     """URL 规范化与链接判定。"""
 
