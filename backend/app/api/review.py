@@ -41,7 +41,7 @@ from app.crud.term import get_terms
 from app.models.term import Term
 from app.crud.audit_basis import get_audit_basis
 from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files, get_file
-from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate, FalsePositiveMemoryListResponse
+from app.schemas.review import Review, Issue, IssueUpdate, ReviewCreate, IssueCreate, FalsePositiveMemoryListResponse, SnippetReviewCreate
 from app.schemas.document import DocumentCreate
 from app.models.review import Review as ReviewModel
 from app.models.issue import Issue as IssueModel
@@ -49,6 +49,9 @@ from app.models.document import Document as DocumentModel
 from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
 from app.rules.term_consistency_rule import TermConsistencyRule
+from app.review_engine.unit_spacing import check_units_and_spacing
+from app.review_engine.term_baseline import check_term_baseline
+from app.review_engine.canonical_writing import check_canonical_writing
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -57,23 +60,30 @@ from app.review_engine.validation import (
     ai_suggestion_changes_protected_meaning as engine_ai_suggestion_changes_protected_meaning,
     ai_suggestion_violates_number_unit_spacing as engine_ai_suggestion_violates_number_unit_spacing,
     filter_ai_issues_without_document_evidence as engine_filter_ai_issues_without_document_evidence,
+    has_substantive_suggestion as engine_has_substantive_suggestion,
     is_duplicate_punctuation_reduction as engine_is_duplicate_punctuation_reduction,
     normalize_noop_compare_text as engine_normalize_noop_compare_text,
     validate_ai_issue_candidate as engine_validate_ai_issue_candidate,
 )
 from app.review_engine.layers import count_issue_layers
 from app.review_engine.pipeline import (
+    drain_pipeline_drop_reasons as pipeline_drain_drop_reasons,
+    is_verifiable_ai_text_issue as pipeline_is_verifiable_ai_text_issue,
     select_review_issues as pipeline_select_review_issues,
     sort_key as pipeline_sort_key,
     suppress_shadowed_ai as pipeline_suppress_shadowed_ai,
     value_score as pipeline_value_score,
 )
+from app.review_engine.false_positives import is_rulebook_false_positive
 from app.api.auth import get_current_active_user, require_admin
 from app.services.audit_basis_search import get_audit_basis_search_service
 from app.schemas.user import UserOut
 
 _review_progress = {}  # 全局进度存储: {review_id: {'status': 'running', 'step': 'xxx', 'progress': 0-100, 'message': 'xxx'}}
 _ai_review_chunk_cache = {}
+_review_cancel_flags = {}
+_review_force_rerun_ids = set()
+_REVIEW_TERMINAL_STATUSES = {"completed", "failed", "error", "cancelled", "timeout"}
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "static" / "uploads"
 REVIEW_EXPORT_DIR = Path(__file__).resolve().parents[2] / "static" / "review_exports"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -89,19 +99,90 @@ REVIEW_BASIS_VERSION_FILES = [
 ]
 REVIEW_CACHE_VERSION_FILES = [
     PROJECT_ROOT / "backend" / "app" / "review_engine" / "pipeline.py",
+    PROJECT_ROOT / "backend" / "app" / "review_engine" / "false_positives.py",
     PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "document_parser.py",
     PROJECT_ROOT / "backend" / "app" / "utils" / "spell_checker.py",
-    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json",
+    PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.xlsx",
     Path(__file__).resolve(),
 ] + REVIEW_BASIS_VERSION_FILES
+REVIEW_PROMPT_VERSION = "review-prompt-v3"
+REVIEW_FILTER_POLICY_VERSION = "review-filter-v2"
+_AI_REVIEW_SEMAPHORE = threading.BoundedSemaphore(max(1, int(os.getenv("REVIEW_AI_MAX_CONCURRENCY", "4") or 4)))
 
 
 def get_progress(review_id: int):
-    return _review_progress.get(review_id, {'status': 'unknown', 'step': '', 'progress': 0, 'message': ''})
+    cached = _review_progress.get(review_id)
+    if cached and cached.get('status') not in {None, '', 'unknown'}:
+        return cached
+    try:
+        from app.database import SessionLocal
+        from app.crud.review import get_review
+        db = SessionLocal()
+        try:
+            review = get_review(db, review_id)
+        finally:
+            db.close()
+        if not review:
+            return {'status': 'unknown', 'step': '', 'progress': 0, 'message': ''}
+        return {
+            'status': review.status or 'unknown',
+            'step': getattr(review, 'stage', '') or '',
+            'progress': int(getattr(review, 'progress', 0) or 0),
+            'message': getattr(review, 'message', None) or review.summary or '',
+            'timestamp': (getattr(review, 'heartbeat_at', None) or datetime.utcnow()).isoformat(),
+        }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("读取审核进度失败 review_id=%s: %s", review_id, exc)
+        return _review_progress.get(review_id, {'status': 'unknown', 'step': '', 'progress': 0, 'message': ''})
 
 
-def set_progress(review_id: int, status: str, step: str, progress: int, message: str = ''):
+class ReviewCancelled(Exception):
+    """Raised when a user stops an in-flight review."""
+
+
+def _is_review_cancelled(review_id: int) -> bool:
+    try:
+        return bool(_review_cancel_flags.get(int(review_id)))
+    except (TypeError, ValueError):
+        return False
+
+
+def request_review_cancel(review_id: int) -> None:
+    _review_cancel_flags[int(review_id)] = True
+
+
+def _clear_review_runtime_flags(review_id: int) -> None:
+    try:
+        review_id = int(review_id)
+    except (TypeError, ValueError):
+        return
+    _review_cancel_flags.pop(review_id, None)
+    _review_force_rerun_ids.discard(review_id)
+    from app.review_engine.task_state import clear_task_state
+    clear_task_state(review_id)
+    _review_observation_store.pop(str(review_id), None)
+    _review_observation_store.pop(f"{review_id}:basis_trace", None)
+    _review_observation_store.pop(f"{review_id}:diagnostics", None)
+    _review_observation_store.pop(f"{review_id}:visual", None)
+
+
+def _ensure_review_not_cancelled(review_id: int) -> None:
+    if _is_review_cancelled(review_id):
+        raise ReviewCancelled("用户已停止审核")
+
+
+def _should_reuse_cached_review(cached_review, provider=None, providers=None, force=False) -> bool:
+    if force or not cached_review:
+        return False
+    if provider or providers:
+        return False
+    return True
+
+
+def set_progress(review_id: int, status: str, step: str, progress: int, message: str = '', allow_when_cancelled: bool = False):
+    if not allow_when_cancelled:
+        _ensure_review_not_cancelled(review_id)
     _review_progress[review_id] = {
         'status': status,
         'step': step,
@@ -109,12 +190,28 @@ def set_progress(review_id: int, status: str, step: str, progress: int, message:
         'message': message,
         'timestamp': datetime.now().isoformat()
     }
+    try:
+        from app.database import SessionLocal
+        from app.crud.review import persist_review_progress
+        db = SessionLocal()
+        try:
+            persist_review_progress(db, review_id, status, step, progress, message)
+        finally:
+            db.close()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("持久化审核进度失败 review_id=%s: %s", review_id, exc)
 
 
 
 def _mark_review_as_failed(db: Session, review, message: str):
     review = update_review_status(db, review.id, "failed", review.total_issues or 0, message)
-    set_progress(review.id, 'failed', '失败', 0, message)
+    set_progress(review.id, 'failed', '失败', 0, message, allow_when_cancelled=True)
+    return review
+
+
+def _mark_review_as_cancelled(db: Session, review, message: str = "用户已停止审核"):
+    review = update_review_status(db, review.id, "cancelled", review.total_issues or 0, message)
+    set_progress(review.id, 'cancelled', '已停止', 0, message, allow_when_cancelled=True)
     return review
 
 
@@ -124,7 +221,13 @@ def _reconcile_review_runtime_state(db: Session, review):
 
     progress = get_progress(review.id)
     if progress.get('status') == 'running':
+        heartbeat = getattr(review, 'heartbeat_at', None) or getattr(review, 'started_at', None) or review.created_at
+        timeout = max(30, _review_env_int('REVIEW_TASK_HEARTBEAT_TIMEOUT', '900'))
+        if heartbeat and (datetime.utcnow() - heartbeat).total_seconds() > timeout:
+            return _mark_review_as_failed(db, review, '审核任务心跳超时，已回收')
         return review
+    if progress.get('status') == 'cancelled' or _is_review_cancelled(review.id):
+        return _mark_review_as_cancelled(db, review)
 
     return _mark_review_as_failed(db, review, '审核任务已中断，请重新发起审核')
 
@@ -152,6 +255,7 @@ def _review_cache_version():
 def _build_review_cache_key(document, mode: str):
     content = str(getattr(document, "content", "") or "")
     content_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()
+    from app.review_engine.versions import BASIS_POLICY_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
     fingerprint = "||".join([
         str(getattr(document, "id", "") or ""),
         str(getattr(document, "filename", "") or ""),
@@ -160,8 +264,513 @@ def _build_review_cache_key(document, mode: str):
         content_hash,
         str(mode or "hybrid"),
         _review_cache_version(),
+        PROMPT_VERSION,
+        FILTER_POLICY_VERSION,
+        BASIS_POLICY_VERSION,
+        str(getattr(ai_client, "default_provider", "") or ""),
+        _ai_provider_cache_fingerprint(),
     ])
     return hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()
+
+
+SNIPPET_REVIEW_TEXT_LIMIT = 12000
+SNIPPET_DOCUMENT_PREFIX = "文本片段_"
+
+_review_observation_store = {}
+
+
+def _current_review_id():
+    from app.review_engine.task_state import get_current_review_id
+    return get_current_review_id()
+
+
+def _store_basis_trace(review_id, payload):
+    if review_id is None:
+        return
+    from app.review_engine.task_state import set_task_value
+    set_task_value(review_id, "basis_trace", payload)
+    _review_observation_store[f"{review_id}:basis_trace"] = payload
+
+
+def _load_basis_trace(review_id):
+    from app.review_engine.task_state import get_task_value
+    return get_task_value(review_id, "basis_trace") or _review_observation_store.get(f"{review_id}:basis_trace")
+
+
+def _review_base_mode(mode):
+    text = str(mode or "hybrid").strip()
+    if text.startswith("snippet:"):
+        base = text.split(":", 1)[1].strip() or "hybrid"
+        return base if base in {"rule", "ai", "hybrid"} else "hybrid"
+    return text
+
+
+def _is_snippet_review_mode(mode):
+    return str(mode or "").startswith("snippet:")
+
+
+def _is_snippet_scope_issue(issue):
+    category = str(_issue_value(issue, "category", "") or "")
+    rule = str(_issue_value(issue, "rule", "") or "")
+    description = str(_issue_value(issue, "description", "") or "")
+    blob = f"{category} {rule} {description}"
+    if re.search(
+        r"安全合规|交叉引用|主题结构|目录结构|文件名审核|版权年份|copyright.?year|"
+        r"发布前自检|CHECKLIST-|CYY-CN-PAGE-|CYY-CN-LAYOUT-|CYY-CN-REVISION-|"
+        r"CYY-CN-ROHS-|CYY-CN-INDEX-|"
+        r"DOC-REV-|STRUCT-|SAFE-|XREF-|列宽|字号|图标大小|字体/版式",
+        blob,
+        re.IGNORECASE,
+    ):
+        return False
+    if re.search(r"英文文档中文混入|ENG-CN-001", blob, re.IGNORECASE):
+        return False
+    if re.search(
+        r"语法|拼写|术语|错别字|用词|标点|单位|空格|可读性|格式规范|商标|"
+        r"GRAMMAR|SPELL|TERM|CN-TYPO|PUNCT|UNIT-|DOC-SPACE|DOC-TM|DOC-FMT|"
+        r"CYY-CN-UNIT|CYY-CN-FORMAT|CYY-CN-PUNCT|CYY-CN-SPELL|CYY-CN-TERM|"
+        r"CYY-CN-GRAMMAR|CYY-CN-PRODUCT|DOC-DUP-00[45]|TYPO",
+        blob,
+        re.IGNORECASE,
+    ):
+        return True
+    source = str(_issue_value(issue, "source", "") or "").lower()
+    if source in {"spellcheck", "term", "grammar"}:
+        return True
+    if source == "ai" and re.search(
+        r"句子|用词|拼写|语法|术语|标点|可读|"
+        r"grammar|spelling|\bspell\b|typo|punctuat|capitali[sz]|"
+        r"subject[- ]verb|\bagreement\b|\btense\b|\bplural\b|\bsingular\b|"
+        r"\bverb\b|\bnoun\b|\bpronoun\b|\bpreposition\b|"
+        r"word choice|wording|terminolog|typograph|readab|clarity|phrasing",
+        blob,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def _filter_snippet_scope_issues(issues):
+    return [issue for issue in issues or [] if _is_snippet_scope_issue(issue)]
+
+
+def _is_primarily_chinese(content):
+    text = str(content or "")
+    chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
+    latin = len(re.findall(r"[A-Za-z]", text))
+    return chinese >= 20 and chinese >= latin
+
+
+def _ai_prompt_language(document_language, content):
+    lang = str(document_language or "en").strip().lower()
+    if lang == "both":
+        return "cn" if _is_primarily_chinese(content) else "en"
+    return lang or "en"
+
+
+def _window_has_cjk(content, start, end, radius=24):
+    text = str(content or "")
+    window = text[max(0, int(start or 0) - radius):min(len(text), int(end or 0) + radius)]
+    return bool(re.search(r"[\u4e00-\u9fff]", window))
+
+
+_PLACEHOLDER_MASK_TOKEN = re.compile(r'^[Xx]+$')
+
+
+def _is_placeholder_mask_token(token):
+    """占位掩码片段（如 X、XX、XXXXX）：界面示意图中的示例值，不参与排版类规则判定。"""
+    return bool(_PLACEHOLDER_MASK_TOKEN.match(str(token or '')))
+
+
+def _mark_possible_false_positive(issue, reason=""):
+    confidence = int(_issue_value(issue, "confidence", 0) or 0)
+    _set_issue_value(issue, "confidence", max(50, confidence // 2))
+    _set_issue_value(issue, "possible_false_positive", True)
+    _set_issue_value(issue, "needs_human_review", True)
+    position = _decode_issue_position(_issue_value(issue, "position", ""))
+    position["possible_false_positive"] = True
+    position["needs_human_review"] = True
+    if reason:
+        position["fp_reason"] = reason
+    start = int(position.get("start") or 0)
+    end = int(position.get("end") or 0)
+    meta = {key: value for key, value in position.items() if key not in {"start", "end"}}
+    _set_issue_value(issue, "position", _encode_issue_position_with_meta(start, end, **meta))
+    return issue
+
+
+def _normalize_cluster_original(text):
+    value = str(text or "")
+    value = re.sub(r"X{2,}", "[X…]", value, flags=re.IGNORECASE)
+    value = re.sub(r"[０-９]+", "[全角数字]", value)
+    return re.sub(r"\s+", "", value).lower()
+
+
+def _cluster_merge_key(issue):
+    rule = str(_issue_value(issue, "rule", "") or "").upper()
+    category = str(_issue_value(issue, "category", "") or "")
+    original = _normalize_cluster_original(_issue_value(issue, "original_text", ""))
+    from app.review_engine.matching.identity import issue_identity_key
+    return "|".join(str(part) for part in issue_identity_key({
+        "rule": rule,
+        "category": category,
+        "type": _issue_value(issue, "type", ""),
+        "chapter": _issue_value(issue, "chapter", ""),
+        "original_text": original or _issue_value(issue, "original_text", ""),
+        "position": _issue_value(issue, "position", ""),
+        "page": _issue_value(issue, "page", ""),
+    }))
+
+
+def _cluster_merge_issues(issues):
+    grouped = {}
+    order = []
+    for issue in issues or []:
+        key = _cluster_merge_key(issue)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(issue)
+    merged = []
+    for index, key in enumerate(order, start=1):
+        items = grouped[key]
+        primary = items[0]
+        if len(items) == 1:
+            merged.append(primary)
+            continue
+        chapters = []
+        positions = []
+        for item in items:
+            chapter = str(_issue_value(item, "chapter", "") or "").strip()
+            if chapter and chapter not in chapters:
+                chapters.append(chapter)
+            pos = _decode_issue_position(_issue_value(item, "position", ""))
+            positions.append({"chapter": chapter, "offset": int(pos.get("start") or 0)})
+        description = str(_issue_value(primary, "description", "") or "").strip()
+        chapter_hint = "、".join(chapters[:6]) if chapters else "多处"
+        count_text = f"全文共 {len(items)} 处同类问题，分布于：{chapter_hint}"
+        _set_issue_value(primary, "description", f"{count_text}。{description}" if description else count_text)
+        _set_issue_value(primary, "count", len(items))
+        _set_issue_value(primary, "cluster_id", f"C-{index:03d}")
+        _set_issue_value(primary, "cluster_key", key)
+        pos = _decode_issue_position(_issue_value(primary, "position", ""))
+        start = int(pos.get("start") or 0)
+        end = int(pos.get("end") or 0)
+        meta = {key_name: value for key_name, value in pos.items() if key_name not in {"start", "end"}}
+        meta.update({
+            "count": len(items),
+            "cluster_key": key,
+            "cluster_id": f"C-{index:03d}",
+            "positions": positions[:20],
+        })
+        _set_issue_value(primary, "position", _encode_issue_position_with_meta(start, end, **meta))
+        merged.append(primary)
+    return merged
+
+
+def _record_review_observations(review_id, observations):
+    if review_id is None:
+        return
+    bucket = _review_observation_store.setdefault(str(review_id), [])
+    for item in observations or []:
+        if isinstance(item, dict) and (item.get("title") or item.get("description")):
+            bucket.append(item)
+
+
+def _merge_review_observations(items):
+    best = {}
+    order = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if not title and not description:
+            continue
+        key = (title or description[:80]).lower()
+        try:
+            confidence = int(item.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0
+        if title and description and _observation_plain_text(title) == _observation_plain_text(description):
+            description = ""
+        elif not title:
+            title = description
+            description = ""
+        payload = {
+            "category": str(item.get("category") or "其他").strip() or "其他",
+            "severity": str(item.get("severity") or "suggestion").strip() or "suggestion",
+            "title": title,
+            "description": description,
+            "confidence": max(0, min(100, confidence)),
+        }
+        if key not in best:
+            best[key] = payload
+            order.append(key)
+            continue
+        if payload["confidence"] > int(best[key].get("confidence") or 0):
+            best[key] = payload
+    return [best[key] for key in order]
+
+
+_OBS_STOPWORDS = {
+    "建议", "使用", "统一", "文档", "全文", "出现", "需要", "进行", "可能", "以及", "或者",
+    "这个", "章节", "问题", "内容", "后续", "首次", "说明", "方式", "the", "and", "for", "with",
+}
+
+
+def _observation_plain_text(text):
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _observation_tokens(text):
+    tokens = set(re.findall(r"[a-z][a-z0-9\-]{1,}|[\u4e00-\u9fff]{2,}", _observation_plain_text(text)))
+    return {token for token in tokens if token not in _OBS_STOPWORDS}
+
+
+def _observation_token_overlap(left, right):
+    if not left or not right:
+        return False
+    shared = left & right
+    if not shared:
+        return False
+    if any(re.fullmatch(r"[a-z][a-z0-9\-]{1,}", token) for token in shared):
+        return True
+    return len(shared) >= 2 and len(shared) / min(len(left), len(right)) >= 0.45
+
+
+def _observation_anchors(text):
+    value = str(text or "")
+    anchors = set()
+    for match in re.findall(r"[“\"']([^”\"']{1,40})[”\"']", value):
+        compact = _observation_plain_text(match)
+        if len(compact) >= 2:
+            anchors.add(compact)
+    for match in re.findall(r"\d+\s*(?:天|小时|h|min|分钟|℃|°c|rxn)", value, flags=re.I):
+        anchors.add(_observation_plain_text(match))
+    if "・" in value or "日文中点" in value:
+        anchors.add("・")
+    return anchors
+
+
+# 只描述「本片段/摘录本身」的观察（如内容以目录、前置信息为主）不是文档缺陷，
+# 属于分块策略产物，展示给审核人没有可执行价值，直接剔除。
+_OBS_EXCERPT_META_PATTERNS = (
+    re.compile(r"\b(?:this|the)\s+excerpt\b", re.IGNORECASE),
+    re.compile(r"\btoc[- ]only\b", re.IGNORECASE),
+    re.compile(r"\b(?:this|the)\s+(?:chunk|snippet|passage)\b", re.IGNORECASE),
+    re.compile(r"本(?:片段|摘录|节选)|该(?:片段|摘录|节选)|摘录内容|节选内容"),
+)
+
+
+def _is_excerpt_meta_observation(*texts):
+    blob = " ".join(str(text or "") for text in texts).strip()
+    if not blob:
+        return False
+    return any(pattern.search(blob) for pattern in _OBS_EXCERPT_META_PATTERNS)
+
+
+def _observation_first_sentence(text, limit=200):
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value:
+        return ""
+    # 中英文句末标点都作为断句符；命中即返回完整首句，避免英文观察被硬截断
+    for sep in ("。", "；", "．"):
+        index = value.find(sep)
+        if index >= 6:
+            return value[: index + 1]
+    if not re.search(r"[\u4e00-\u9fff]", value):
+        for match in re.finditer(r"[.!?](?=\s|$)", value):
+            if match.start() >= 6:
+                return value[: match.start() + 1]
+    if len(value) > limit:
+        head = value[:limit].rstrip("，,、；;:： ")
+        # 尽量在词边界收尾，避免截出半个单词
+        if re.search(r"[A-Za-z]$", head) and " " in head:
+            head = head[: head.rfind(" ")].rstrip("，,、；;:： ")
+        return head + "…"
+    return value
+
+
+def _compact_review_observations(observations, issues=None, limit=3):
+    compact = []
+    issue_packs = []
+    for issue in issues or []:
+        blob = " ".join([
+            str(_issue_value(issue, "original_text", "") or ""),
+            str(_issue_value(issue, "description", "") or ""),
+            str(_issue_value(issue, "suggestion", "") or ""),
+            str(_issue_value(issue, "category", "") or ""),
+        ])
+        issue_packs.append((_observation_plain_text(blob), _observation_tokens(blob)))
+
+    for item in _merge_review_observations(observations):
+        title = str(item.get("title") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if _is_excerpt_meta_observation(title, description):
+            continue
+        title_plain = _observation_plain_text(title)
+        desc_plain = _observation_plain_text(description)
+        if (not description) or title_plain == desc_plain or (
+            title_plain and desc_plain.startswith(title_plain) and len(title_plain) >= 12
+        ) or (
+            desc_plain and title_plain.startswith(desc_plain) and len(desc_plain) >= 12
+        ):
+            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(description or title))
+            description = ""
+        else:
+            title = re.sub(r"[。．.]+$", "", _observation_first_sentence(title, 60))
+            description = _observation_first_sentence(description)
+        if not title and not description:
+            continue
+        payload = {
+            "category": item.get("category") or "其他",
+            "severity": item.get("severity") or "suggestion",
+            "title": title or description[:18],
+            "description": description,
+            "confidence": int(item.get("confidence") or 0),
+        }
+        combined = payload["title"] + " " + payload["description"]
+        tokens = _observation_tokens(combined)
+        plain = _observation_plain_text(combined)
+        anchors = _observation_anchors(combined)
+        if any(plain and plain in issue_plain for issue_plain, _issue_tokens in issue_packs):
+            continue
+        if any(_observation_token_overlap(tokens, issue_tokens) for _issue_plain, issue_tokens in issue_packs):
+            continue
+        if any(anchor in issue_plain for issue_plain, _issue_tokens in issue_packs for anchor in anchors if len(anchor) >= 2):
+            continue
+        if any(_observation_token_overlap(tokens, _observation_tokens(kept["title"] + " " + kept["description"])) for kept in compact):
+            continue
+        compact.append(payload)
+        if len(compact) >= limit:
+            break
+    return compact
+
+
+def _take_review_observations(review_id):
+    if review_id is None:
+        return []
+    items = _review_observation_store.pop(str(review_id), [])
+    return _merge_review_observations(items)
+
+
+def _synthesize_review_observations(issues):
+    severity_rank = {"fatal": 0, "serious": 1, "general": 2, "suggestion": 3}
+    ranked = sorted(
+        issues or [],
+        key=lambda item: (
+            -_issue_count(item),
+            severity_rank.get(str(_issue_value(item, "severity", "") or "").lower(), 9),
+        ),
+    )
+    observations = []
+    seen = set()
+    for issue in ranked:
+        count = _issue_count(issue)
+        if count <= 1:
+            continue
+        category = str(_issue_value(issue, "category", "") or "其他").strip() or "其他"
+        description = _observation_first_sentence(str(_issue_value(issue, "description", "") or "").strip())
+        title = f"{category}共 {count} 处"
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            confidence = int(_issue_value(issue, "confidence", 70) or 70)
+        except (TypeError, ValueError):
+            confidence = 70
+        observations.append({
+            "category": category,
+            "severity": str(_issue_value(issue, "severity", "suggestion") or "suggestion"),
+            "title": title,
+            "description": description or title,
+            "confidence": max(0, min(100, confidence)),
+        })
+        if len(observations) >= 3:
+            break
+    return observations
+
+
+def _issue_count(issue):
+    try:
+        count = int(_issue_value(issue, "count", 1) or 1)
+    except (TypeError, ValueError):
+        count = 1
+    if count > 1:
+        return count
+    meta = _decode_issue_position(_issue_value(issue, "position", ""))
+    try:
+        return max(1, int(meta.get("count") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _persist_diagnostic_flags(issues):
+    for issue in issues or []:
+        meta = {}
+        if _issue_value(issue, "possible_false_positive", False):
+            meta["possible_false_positive"] = True
+        if _issue_value(issue, "needs_human_review", False):
+            meta["needs_human_review"] = True
+        if _issue_value(issue, "model_disagreement", False):
+            meta["model_disagreement"] = True
+        count = _issue_value(issue, "count", None)
+        try:
+            count_value = int(count)
+        except (TypeError, ValueError):
+            count_value = 0
+        if count_value > 1:
+            meta["count"] = count_value
+        cluster_id = _issue_value(issue, "cluster_id", None)
+        if cluster_id:
+            meta["cluster_id"] = cluster_id
+        cluster_key = _issue_value(issue, "cluster_key", None)
+        if cluster_key:
+            meta["cluster_key"] = cluster_key
+        if meta:
+            _normalize_issue_position_meta(issue, **meta)
+    return issues
+
+
+def _prepare_snippet_text(text):
+    value = str(text or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="请先粘贴要审核的句子或段落")
+    if len(value) > SNIPPET_REVIEW_TEXT_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文本超过 {SNIPPET_REVIEW_TEXT_LIMIT} 字上限",
+        )
+    return value
+
+
+def _snippet_review_mode(mode):
+    base = _review_base_mode(mode)
+    if base not in {"rule", "hybrid"}:
+        raise HTTPException(status_code=400, detail="Unsupported review mode")
+    return f"snippet:{base}"
+
+
+def _create_snippet_document(db: Session, text: str, user_id: int):
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    filename = f"{SNIPPET_DOCUMENT_PREFIX}{stamp}_{digest}.txt"
+    preview = text[:500] + "..." if len(text) > 500 else text
+    document = create_document(
+        db=db,
+        document=DocumentCreate(
+            filename=filename,
+            file_type="txt",
+            content=text,
+            preview=preview,
+        ),
+        user_id=user_id,
+    )
+    document = update_document_status(db, document.id, "ready")
+    document = update_document_file_size(db, document.id, len(text.encode("utf-8")))
+    return document
 
 
 def _find_cached_completed_review(db: Session, document, mode: str):
@@ -179,7 +788,7 @@ def _normalize_review_status(status: str | None):
     value = str(status or "").strip().lower()
     if not value or value == "all":
         return None
-    if value not in {"pending", "running", "completed", "failed"}:
+    if value not in {"pending", "running", "completed", "failed", "cancelled"}:
         raise HTTPException(status_code=400, detail="Unsupported review status")
     return value
 
@@ -222,10 +831,33 @@ def _query_review_rows_for_user(
     latest_only: bool = False,
     limit: int = 100,
 ):
-    rows = _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
     if current_user.role == "admin":
-        return rows
-    return [review for review in rows if getattr(get_document(db, review.document_id), "user_id", None) == current_user.id]
+        return _query_review_rows(db, document_id=document_id, status=status, latest_only=latest_only, limit=limit)
+    normalized_status = _normalize_review_status(status)
+    normalized_limit = max(1, min(int(limit or 100), 500))
+    if latest_only:
+        latest_query = db.query(
+            ReviewModel.document_id.label("document_id"),
+            func.max(ReviewModel.id).label("latest_id"),
+        ).join(DocumentModel, DocumentModel.id == ReviewModel.document_id).filter(DocumentModel.user_id == current_user.id)
+        if document_id is not None:
+            latest_query = latest_query.filter(ReviewModel.document_id == document_id)
+        if normalized_status:
+            latest_query = latest_query.filter(ReviewModel.status == normalized_status)
+        latest_subquery = latest_query.group_by(ReviewModel.document_id).subquery()
+        return (
+            db.query(ReviewModel)
+            .join(latest_subquery, ReviewModel.id == latest_subquery.c.latest_id)
+            .order_by(ReviewModel.id.desc())
+            .limit(normalized_limit)
+            .all()
+        )
+    query = db.query(ReviewModel).join(DocumentModel, DocumentModel.id == ReviewModel.document_id).filter(DocumentModel.user_id == current_user.id)
+    if document_id is not None:
+        query = query.filter(ReviewModel.document_id == document_id)
+    if normalized_status:
+        query = query.filter(ReviewModel.status == normalized_status)
+    return query.order_by(ReviewModel.id.desc()).limit(normalized_limit).all()
 
 
 def _has_bound_current_user(current_user) -> bool:
@@ -292,7 +924,41 @@ def _require_issue_access(db: Session, issue_id: int, current_user: UserOut):
     return issue
 
 
-def _serialize_review_list_item(db: Session, review, document_map):
+def _empty_judgment_stats():
+    return {
+        "confirmed": 0,
+        "false_positive": 0,
+        "pending": 0,
+        "manual": 0,
+    }
+
+
+def _judgment_stats_map(db: Session, review_ids):
+    stats = {int(review_id): _empty_judgment_stats() for review_id in review_ids or []}
+    if db is None or not stats:
+        return stats
+    rows = (
+        db.query(IssueModel.review_id, IssueModel.status, IssueModel.source)
+        .filter(IssueModel.review_id.in_(list(stats.keys())))
+        .all()
+    )
+    for review_id, status, source in rows:
+        bucket = stats.get(int(review_id))
+        if not bucket:
+            continue
+        status_value = str(status or "pending").strip().lower() or "pending"
+        if str(source or "").strip().lower() == "manual":
+            bucket["manual"] += 1
+        if status_value == "confirmed":
+            bucket["confirmed"] += 1
+        elif status_value == "false_positive":
+            bucket["false_positive"] += 1
+        elif status_value != "ignored":
+            bucket["pending"] += 1
+    return stats
+
+
+def _serialize_review_list_item(db: Session, review, document_map, judgment_stats=None):
     review = _reconcile_review_runtime_state(db, review)
     doc = document_map.get(review.document_id)
     review_dict = review.__dict__.copy()
@@ -300,8 +966,8 @@ def _serialize_review_list_item(db: Session, review, document_map):
     review_dict['document_file_type'] = doc.file_type if doc else ''
     if not review_dict.get('summary'):
         review_dict['summary'] = '{}'
-    if review.status == 'running':
-        review_dict['progress'] = get_progress(review.id)
+    review_dict['progress'] = get_progress(review.id)
+    review_dict['judgment_stats'] = judgment_stats or _empty_judgment_stats()
     return review_dict
 
 
@@ -506,12 +1172,14 @@ def _page_number_from_position(content, position):
     start, _ = _parse_issue_position(position)
     if not content:
         return None
-    cursor = 0
-    for index, page in enumerate(_split_content_pages(content), start=1):
-        page_len = len(page)
-        if start <= cursor + page_len:
+    offsets = _page_offsets_from_pages(content)
+    last = len(offsets)
+    for index, (s, e) in enumerate(offsets, start=1):
+        if index == last:
+            if s <= start <= e:
+                return index
+        elif s <= start < e:
             return index
-        cursor += page_len + 1
     return None
 
 
@@ -521,6 +1189,17 @@ def _review_pdf_visual_verify_enabled():
 
 def _review_pdf_visual_verify_limit():
     return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LIMIT', '6'))
+
+
+def _review_pdf_visual_verify_layout_limit():
+    # 注意：这是页级 issue 的【真实上限】。
+    # 生效逻辑是 page_limit = max(remaining_limit, layout_limit)，
+    # 只调 LIMIT 不会把页级 issue 压下来（实测 LIMIT=6 / LAYOUT=48 仍是 48 条）。
+    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT', '6'))
+
+
+def _review_pdf_visual_verify_page_budget():
+    return max(0, _review_env_int('REVIEW_PDF_VISUAL_VERIFY_PAGE_BUDGET', '0'))
 
 
 def _review_pdf_visual_verify_scale():
@@ -604,7 +1283,9 @@ def _issue_review_value_score(issue):
     if rule_upper in {"R029", "R035", "HR009", "TENSE-001", "PUNCT-002", "R002", "R003"}:
         score -= 35
     if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not high_value_pattern.search(blob):
-        score -= 15
+        # 可验证的 AI 文本问题（有原文+建议、白名单类目、confidence>=70）不扣分
+        if not pipeline_is_verifiable_ai_text_issue(issue):
+            score -= 15
     if not original or not suggestion:
         score -= 25
 
@@ -620,6 +1301,10 @@ def _filter_by_issue_value(issues, min_score=45):
             issue["review_value_score"] = score
         severity = str(_issue_value(issue, "severity", "") or "").lower()
         threshold = 38 if severity in {"fatal", "serious"} else min_score
+        # 可验证的 AI 文本问题（英文 Grammar/语义类）降低阈值，避免 70-85 confidence
+        # 区间被 45 分硬门槛整体丢掉
+        if pipeline_is_verifiable_ai_text_issue(issue):
+            threshold = 38
         if score < threshold:
             dropped += 1
             continue
@@ -861,10 +1546,10 @@ def _inject_comments_to_docx(docx_path, comments_data):
     temp_output = os.path.join(temp_dir, 'output.docx')
 
     try:
-        with zipfile.ZipFile(docx_path, 'r') as zin:
-            zin.extractall(temp_dir)
-
-        word_dir = os.path.join(temp_dir, 'word')
+        from app.review_engine.safe_zip import safe_extract_zip
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        safe_extract_zip(docx_path, extract_dir, allowed_prefixes=('word/', '[Content_Types].xml', '_rels/', 'docProps/'))
+        word_dir = os.path.join(extract_dir, 'word')
         with open(os.path.join(word_dir, 'comments.xml'), 'wb') as f:
             f.write(comments_bytes)
 
@@ -913,10 +1598,10 @@ def _inject_comments_to_docx(docx_path, comments_data):
                 f.write(etree.tostring(doc_tree, xml_declaration=True, encoding='UTF-8', standalone=True))
 
         with zipfile.ZipFile(temp_output, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for dirpath, _, filenames in os.walk(temp_dir):
+            for dirpath, _, filenames in os.walk(extract_dir):
                 for fname in filenames:
                     full_path = os.path.join(dirpath, fname)
-                    arcname = os.path.relpath(full_path, temp_dir)
+                    arcname = os.path.relpath(full_path, extract_dir)
                     zout.write(full_path, arcname)
 
         if os.path.exists(docx_path):
@@ -1030,6 +1715,8 @@ def validate_suggestion(original: str, suggestion: str) -> bool:
         if compact_original == compact_suggestion and (re.search(r'\s', normalized_suggestion) or re.search(r'\s', original_text)):
             return True
         if _is_duplicate_punctuation_reduction(original_text, normalized_suggestion):
+            return True
+        if engine_has_substantive_suggestion(original_text, normalized_suggestion):
             return True
     return _normalize_noop_compare_text(original) != _normalize_noop_compare_text(normalized_suggestion)
 
@@ -1185,7 +1872,7 @@ def _is_table_or_figure_caption_line(line, label, number_start=0):
             return False
 
     caption = line[number_start:].strip()
-    pattern = rf'^{re.escape(label)}\s*\d+[-–]\d+\s+[^,.;:()\[\]]{{3,}}$'
+    pattern = rf'^{re.escape(label)}\s*\d+(?:[-–]\d+)?\s+[^,.;:()\[\]]{{3,}}$'
     return bool(re.match(pattern, caption, re.IGNORECASE))
 
 
@@ -1485,6 +2172,8 @@ def _is_noop_position_or_same_text_issue(issue):
         return False
     if _is_duplicate_punctuation_reduction(original, suggestion):
         return False
+    if engine_has_substantive_suggestion(original, suggestion):
+        return False
     if original == suggestion or _normalize_noop_compare_text(original) == _normalize_noop_compare_text(suggestion):
         return True
     pos_match = re.fullmatch(r'pos\s*(\d+)', original, re.IGNORECASE)
@@ -1643,13 +2332,60 @@ def _review_env_bool(name, default=False):
 def _review_content_limit(file_type):
     file_type = str(file_type or '').lower()
     if file_type == 'pdf':
-        return _review_env_int('REVIEW_PDF_CONTENT_LIMIT', '120000')
+        return _review_env_int('REVIEW_PDF_CONTENT_LIMIT', '500000')
     if file_type in {'docx', 'doc', 'txt', 'md', 'markdown'}:
         return _review_env_int('REVIEW_TEXT_CONTENT_LIMIT', '120000')
     return _review_env_int('REVIEW_CONTENT_LIMIT', '120000')
 
 
+def _review_sampling_mode():
+    return str(os.getenv('REVIEW_SAMPLING_MODE', 'off') or 'off').strip().lower()
+
+
+def _truncate_content_at_page_boundary(content, limit):
+    """按页边界截断，并记录未审核页码范围。"""
+    text = str(content or "")
+    pages = _split_content_pages(text)
+    total_pages = len(pages)
+    if limit <= 0 or len(text) <= limit:
+        return text, {
+            "truncated": False,
+            "original_chars": len(text),
+            "kept_chars": len(text),
+            "unscanned_page_start": None,
+            "unscanned_page_end": None,
+            "kept_pages": total_pages,
+            "total_pages": total_pages,
+        }
+    separator = _content_page_separator(text)
+    kept = []
+    current_len = 0
+    for page in pages:
+        extra = 0 if not kept else len(separator)
+        if current_len + extra + len(page) > limit and kept:
+            break
+        if kept:
+            current_len += extra
+        kept.append(page)
+        current_len += len(page)
+    kept_text = separator.join(kept)
+    kept_pages = len(kept)
+    unscanned = kept_pages < total_pages
+    return kept_text, {
+        "truncated": True,
+        "original_chars": len(text),
+        "kept_chars": len(kept_text),
+        "unscanned_page_start": (kept_pages + 1) if unscanned else None,
+        "unscanned_page_end": total_pages if unscanned else None,
+        "kept_pages": kept_pages,
+        "total_pages": total_pages,
+    }
+
+
 def _select_ai_audit_chunks(chunks, max_chunks):
+    mode = _review_sampling_mode()
+    if mode in {'', 'off', 'none', 'false', '0'}:
+        return list(chunks or [])
     if max_chunks <= 0 or len(chunks) <= max_chunks:
         return chunks
     if max_chunks == 1:
@@ -1662,12 +2398,39 @@ def _review_ai_token_budget():
     return max(0, _review_env_int('REVIEW_AI_TOKEN_BUDGET', '0'))
 
 
+def _review_ai_prompt_body_limit():
+    """prompt 正文区的字符上限，与 ai_client.clip_prompt_body 保持同一口径。
+
+    过去这里没有这个概念，prompt 用硬编码 6500 截断，
+    compute_chunk_coverage 又只按 chunk range 统计，于是长文档丢尾完全不可见。
+    """
+    from app.utils.ai_client import (
+        _PROMPT_BODY_CHAR_LIMIT,
+        _PROMPT_BODY_CHAR_LIMIT_ENV,
+        _env_int,
+    )
+    return _env_int(_PROMPT_BODY_CHAR_LIMIT_ENV, _PROMPT_BODY_CHAR_LIMIT, minimum=1000)
+
+
 def _review_ai_chunk_limit(total_length=0):
     """返回AI审核最大分块数。
 
     短文档全覆盖；长文档受环境预算 REVIEW_AI_MAX_CHUNKS 约束。
+
+    默认值由 10 提到 32：单块上限是 create_smart_chunker(max_chars=2800)，
+    而 prompt 只截 content[:6500]。块数被压到 10 时，_merge_to_limit 会把全文
+    合并成 10 个大块，单块均值 ≈ 全文/10 —— 超过 6500 字符的文档尾部会被
+    prompt 静默丢弃（8 万字符丢 18.75%、10 万丢 35%、12 万丢 45.83%），
+    而 compute_chunk_coverage 仍报 100%，指标上看不出任何衰减。
+    提到 32 后，12 万字符以内文档的丢尾降为 0，检出率上限被解除。
+
+    但 32 只是"让块均落进 6500"的参数巧合，不是机制保证：
+    临界点 = 正文上限 × 块数 = 6500×32 ≈ 20.8 万字符，超出后尾部依旧丢。
+    因此调用方必须把 prompt_char_limit 一起传给 compute_chunk_coverage，
+    让 truncated_tail_chars 在指标上真实可见，而不是靠人工反推。
+    成本控制改由 REVIEW_AI_MAX_CHUNKS 环境变量按需下调，不再写死默认值。
     """
-    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '10'))
+    env_limit = max(1, _review_env_int('REVIEW_AI_MAX_CHUNKS', '32'))
     if total_length <= 0:
         return env_limit
     dynamic_limit = 1 + math.ceil(max(0, total_length - 3000) / 2750)
@@ -1735,27 +2498,41 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             print(f"[审核] 小文档全量审核失败 ({e})，回退到分块模式")
 
     use_smart_chunking = os.getenv('REVIEW_SMART_CHUNKING', '1') == '1'
+    chunker_mode = "fallback"
+    chunker_fallback_reason = ""
     if use_smart_chunking and create_smart_chunker is not None and len(content) > 1000:
         try:
-            chunker = create_smart_chunker(max_chunks=_review_ai_chunk_limit(len(content)))
+            chunker = create_smart_chunker(
+                max_chunks=_review_ai_chunk_limit(len(content)),
+                sampling_mode="off" if _review_sampling_mode() in {"", "off", "none", "false", "0"} else _review_sampling_mode(),
+            )
             smart_chunks = chunker.chunk_document(content)
             if smart_chunks:
                 chunks = [(c.index + 1, c.start, c.content) for c in smart_chunks]
                 all_chunks = chunks
+                chunker_mode = "smart"
                 print(f"[审核] 智能分块: {len(chunks)} 个章节感知分块, 覆盖 {sum(len(c[2]) for c in chunks)} 字符")
             else:
                 all_chunks = _iter_ai_audit_chunks(content)
                 chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+                chunker_fallback_reason = "empty_smart_chunks"
         except Exception as e:
             print(f"[审核] 智能分块失败 ({e}), 回退到滑动窗口分块")
             all_chunks = _iter_ai_audit_chunks(content)
             chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+            chunker_fallback_reason = str(e)
     else:
         all_chunks = _iter_ai_audit_chunks(content)
         chunks = _select_ai_audit_chunks(all_chunks, _review_ai_chunk_limit(len(content)))
+        if create_smart_chunker is None:
+            chunker_fallback_reason = "chunker_module_missing"
+        elif not use_smart_chunking:
+            chunker_fallback_reason = "smart_chunking_disabled"
+        else:
+            chunker_fallback_reason = "content_too_short"
 
     if not chunks:
-        return [], {"enabled": False, "selected_chunk_count": 0, "total_chunk_count": 0, "chunks": [], "chunk_meta": []}
+        return [], {"enabled": False, "selected_chunk_count": 0, "total_chunk_count": 0, "chunks": [], "chunk_meta": [], "chunker_mode": chunker_mode, "fallback_reason": chunker_fallback_reason}
 
     all_issues = []
     total = len(chunks)
@@ -1766,6 +2543,8 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
         "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
         "chunks": [],
         "chunk_meta": [],
+        "chunker_mode": chunker_mode,
+        "fallback_reason": chunker_fallback_reason,
     })
     for index, start, chunk in chunks:
         budget_reached, budget_summary = _review_ai_budget_reached(review_id)
@@ -1794,9 +2573,13 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             document_name=document_name,
         )
         basis_labels = _extract_basis_labels_from_text(selected_basis)
+        batch_size = max(1, _review_ai_chunk_limit(total_length))
         chunk_trace = {
             "chunk_index": index,
+            "batch_index": (index - 1) // batch_size,
+            "total_batches": max(1, (total - 1) // batch_size + 1),
             "start": start,
+            "end": start + len(chunk),
             "length": len(chunk),
             "basis_labels": basis_labels,
             "basis_preview": _compact_prompt_text(selected_basis, 240),
@@ -1816,6 +2599,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 cache_kwargs["document_name"] = document_name
             chunk_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, chunk, document_language, selected_basis, chunk_timeout,
+                excerpt_position=(index, total),
                 **cache_kwargs,
             )
             for issue in chunk_issues:
@@ -1889,64 +2673,66 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
             }
 
     trace["issue_count"] = len(all_issues)
+    from app.services.chunker import compute_chunk_coverage
+    processed_ok = [item for item in trace.get("chunks") or [] if item.get("status") in (None, "ok")]
+    processed_ranges = [
+        (int(item.get("start") or 0), int(item.get("start") or 0) + int(item.get("length") or 0))
+        for item in processed_ok
+    ]
+    skipped = []
+    if trace.get("budget_reached"):
+        processed_indexes = {int(item.get("chunk_index") or 0) for item in processed_ok}
+        for index, start, chunk in chunks:
+            if index not in processed_indexes:
+                skipped.append(f"AI chunk {index}")
+    coverage = compute_chunk_coverage(
+        total_length,
+        processed_ranges,
+        skipped_chapters=skipped,
+        chunker_mode=chunker_mode,
+        fallback_reason=chunker_fallback_reason,
+        total_chunk_count=len(all_chunks),
+        processed_chunk_count=len(processed_ok),
+        prompt_char_limit=_review_ai_prompt_body_limit(),
+    )
+    batch_size = max(1, _review_ai_chunk_limit(total_length))
+    coverage["batch_size"] = batch_size
+    coverage["total_batches"] = max(1, (len(all_chunks) + batch_size - 1) // batch_size)
+    coverage["sampling_mode"] = _review_sampling_mode()
+    if coverage["skipped_chunk_count"] or coverage["skipped_chapters"]:
+        coverage["full_document_reviewed"] = False
+    else:
+        coverage["full_document_reviewed"] = True
+    trace.update(coverage)
     return all_issues, trace
 
 
 def _dedup_across_chunks(issues: list) -> list:
-    """跨分块去重：合并不同chunk中发现的同一问题。
-    
-    策略：
-    1. 完全相同 original_text → 合并
-    2. 高度重叠（一个包含另一个且长度比 > 0.7）→ 合并
-    3. 同一规则(rules match) + 原文高度相似(编辑距离 ≤ 2) → 合并
-    4. 合并时保留较高的置信度和严重级别
-    """
+    """跨分块去重：仅合并身份键相同的问题，不同章节或保护字面量不同时保留。"""
     if len(issues) <= 1:
         return issues
-    
+    from app.review_engine.matching.identity import issue_identity_key
     result = []
-    for issue in issues:
-        original = str(issue.get("original_text", "") or "").strip().lower()
-        rule = str(issue.get("rule", "") or "").strip().lower()
-        
+    for index, issue in enumerate(issues):
+        original = str(issue.get("original_text", "") or "").strip()
         if not original:
             result.append(issue)
             continue
-        
+        issue.setdefault("candidate_id", f"cand-{index}")
+        key = issue_identity_key(issue)
         matched = False
         for existing in result:
-            existing_original = str(existing.get("original_text", "") or "").strip().lower()
-            existing_rule = str(existing.get("rule", "") or "").strip().lower()
-            
-            if not existing_original:
+            if issue_identity_key(existing) != key:
                 continue
-            
-            # 策略1: 完全相同
-            if original == existing_original:
-                matched = True
-                break
-            
-            # 策略2: 高度重叠（短文本用编辑距离）
-            len_o = len(original)
-            len_e = len(existing_original)
-            
-            if len_o >= 3 and len_e >= 3:
-                shorter = original if len_o <= len_e else existing_original
-                longer = existing_original if len_o <= len_e else original
-                if shorter in longer and len(shorter) / len(longer) > 0.6:
-                    matched = True
-                    break
-            
-            # 策略3: 同一规则 + 高度相似原文
-            if rule and existing_rule and rule == existing_rule:
-                if len_o <= 10 and len_e <= 10 and abs(len_o - len_e) <= 3:
-                    if _edit_distance(original, existing_original) <= 2:
-                        matched = True
-                        break
-        
+            keep_id = existing.get("candidate_id") or existing.get("rule") or ""
+            existing["dedupe_reason"] = "same_identity_key"
+            existing.setdefault("merged_into", keep_id)
+            issue["merged_into"] = keep_id
+            issue["dedupe_reason"] = "same_identity_key"
+            matched = True
+            break
         if not matched:
             result.append(issue)
-    
     return result
 
 
@@ -1961,11 +2747,11 @@ def _filter_review_false_positives(issues):
             or _should_drop_known_false_positive_issue(issue)
             or _should_drop_unicode_equivalent_issue(issue)
         ):
+            _mark_possible_false_positive(issue, "legacy_false_positive")
             dropped += 1
-            continue
         filtered.append(issue)
     if dropped:
-        print(f'[审核] 拼写白名单最终过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
+        print(f'[审核] 拼写白名单最终过滤: 标记疑似误报 {dropped} 个, 剩余 {len(filtered)} 个')
     return filtered
 
 
@@ -1973,16 +2759,19 @@ def _filter_known_review_false_positives(issues):
     filtered = []
     dropped = 0
     for issue in issues:
+        if _is_noop_chinese_baseline_issue(issue):
+            dropped += 1
+            continue
         if (
             _is_forbidden_space_term_false_positive(issue)
             or _is_rohs_table_title_fragment_false_positive(issue)
-            or _is_noop_chinese_baseline_issue(issue)
+            or is_rulebook_false_positive(issue)
         ):
+            _mark_possible_false_positive(issue, "known_false_positive")
             dropped += 1
-            continue
         filtered.append(issue)
     if dropped:
-        print(f'[审核] 已知误报过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
+        print(f'[审核] 已知误报过滤: 删除空操作 {dropped} 个, 其余改为标记后剩余 {len(filtered)} 个')
     return filtered
 
 
@@ -2140,43 +2929,139 @@ def _filter_low_value_review_issues(issues):
     return filtered
 
 
-def _apply_false_positive_signature_penalty(issues, false_positive_signatures):
-    if not false_positive_signatures:
-        return issues
+def _apply_preset_false_positive_patterns(issues, document_language=None):
+    """按预置误报记忆的结构化指纹标记疑似误报。
+
+    与 `_apply_false_positive_signature_penalty` 的分工：
+      - 后者吃**已存签名集合**，只能拦"人工曾经裁定过的那批具体问题"；
+      - 这里走**结构化模式**，能在问题首次出现时就命中预置人工经验。
+
+    命中只标记 possible_false_positive（降低置信度 + 需人工复核），不删除，
+    因此误伤成本可控；同时输出命中统计，便于后续调参。
+    """
+    try:
+        from app.review_engine.false_positive_fingerprint import match_preset_pattern
+    except ModuleNotFoundError:
+        return issues, {}
+
+    if not issues:
+        return issues, {}
+    language = 'en' if str(document_language or '').lower() in ('en', 'both', 'english') else 'zh'
+    matched: dict[str, int] = {}
+    for issue in issues:
+        if getattr(issue, 'possible_false_positive', False):
+            continue
+        entry_id = match_preset_pattern(issue, language=language)
+        if not entry_id:
+            continue
+        _mark_possible_false_positive(issue, f"preset_false_positive_memory:{entry_id}")
+        matched[entry_id] = matched.get(entry_id, 0) + 1
+    if matched:
+        detail = ', '.join(f'{key}×{value}' for key, value in sorted(matched.items()))
+        print(f'[审核] 预置误报记忆命中（标记疑似误报，未删除）: {detail}')
+    return issues, matched
+
+
+def _apply_false_positive_signature_penalty(issues, false_positive_signatures, memory_payloads=None):
+    """按已存误报记忆标记疑似误报。
+
+    两条路径：
+      - 精确签名比对（历史行为，人工标注意图完全一致时命中）；
+      - 结构化指纹比对（`matches_memory`：同规则族 + token 覆盖相似度 >= 0.62），
+        使同一个问题换措辞时仍能被识别为已裁定误报。
+
+    命中只做标记（`possible_false_positive` + 降低置信度 + 需人工复核），
+    不删除问题，因此误伤成本可控、可回溯。
+    """
+    if not false_positive_signatures and not memory_payloads:
+        return issues, {"exact": 0, "fingerprint": 0}
+
     normalized_false_positive_signatures = {
         str(signature or '').strip().lower()
-        for signature in false_positive_signatures
+        for signature in false_positive_signatures or []
         if str(signature or '').strip()
     }
-    if not normalized_false_positive_signatures:
-        return issues
+    payload_pairs = list(memory_payloads or [])
+    if not normalized_false_positive_signatures and not payload_pairs:
+        return issues, {"exact": 0, "fingerprint": 0}
+
     filtered = []
-    dropped = 0
+    exact_hits = 0
+    fingerprint_hits = 0
+    try:
+        from app.review_engine.false_positive_fingerprint import matches_memory
+    except ModuleNotFoundError:
+        matches_memory = None
+
     for issue in issues:
         issue_signatures = {signature.lower() for signature in _issue_judgment_signatures(issue)}
-        if issue_signatures & normalized_false_positive_signatures:
-            dropped += 1
-            continue
+        if normalized_false_positive_signatures and (issue_signatures & normalized_false_positive_signatures):
+            _mark_possible_false_positive(issue, "false_positive_memory")
+            exact_hits += 1
+        elif matches_memory is not None and payload_pairs:
+            for memory_rule, memory_text in payload_pairs:
+                if matches_memory(issue, memory_rule, memory_text):
+                    _mark_possible_false_positive(issue, "false_positive_memory_fingerprint")
+                    fingerprint_hits += 1
+                    break
         filtered.append(issue)
-    if dropped:
-        print(f'[审核] 误报库过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个')
-    return filtered
+    if exact_hits or fingerprint_hits:
+        print(
+            f'[审核] 误报库过滤: 标记疑似误报 {exact_hits + fingerprint_hits} 个'
+            f'（精确签名 {exact_hits}，结构化指纹 {fingerprint_hits}），剩余 {len(filtered)} 个'
+        )
+    return filtered, {"exact": exact_hits, "fingerprint": fingerprint_hits}
+
+
+_AI_KEEP_REWRITE_HINT = re.compile(r"建议补充|补充说明|未明确|步骤不完整|操作衔接|混匀")
+
+
+def _filter_ai_evidence_keep_diagnostic(issues, content):
+    filtered = []
+    dropped_by_reason = {}
+    marked = 0
+    kept_rewrite = 0
+    for issue in issues or []:
+        if str(_issue_value(issue, "source", "") or "").lower() != "ai":
+            filtered.append(issue)
+            continue
+        result = engine_validate_ai_issue_candidate(issue, content)
+        if result.accepted:
+            filtered.append(issue)
+            continue
+        blob = " ".join([
+            str(_issue_value(issue, "suggestion", "") or ""),
+            str(_issue_value(issue, "description", "") or ""),
+            str(_issue_value(issue, "rule", "") or ""),
+        ])
+        if result.reason == "aggressive_rewrite" and _AI_KEEP_REWRITE_HINT.search(blob):
+            filtered.append(issue)
+            kept_rewrite += 1
+            continue
+        if result.reason in {"aggressive_rewrite", "speculative_completion"}:
+            _mark_possible_false_positive(issue, result.reason)
+            confidence = int(_issue_value(issue, "confidence", 0) or 0)
+            if confidence < 70:
+                _set_issue_value(issue, "confidence", 70)
+            filtered.append(issue)
+            marked += 1
+            continue
+        dropped_by_reason[result.reason] = dropped_by_reason.get(result.reason, 0) + 1
+    if kept_rewrite or marked or dropped_by_reason:
+        print(
+            f"[审核] AI证据兜底过滤: 过滤 {sum(dropped_by_reason.values())} 个, "
+            f"步骤类保留 {kept_rewrite} 个, 标记 {marked} 个, 剩余 {len(filtered)} 个, 原因={dropped_by_reason}"
+        )
+    return filtered, dropped_by_reason
 
 
 def _filter_ai_issues_without_document_evidence(issues, content):
-    filtered, dropped_by_reason = engine_filter_ai_issues_without_document_evidence(issues, content)
-    dropped = sum(dropped_by_reason.values())
-    if dropped:
-        print(f'[审核] AI证据兜底过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个, 原因={dropped_by_reason}')
+    filtered, dropped_by_reason = _filter_ai_evidence_keep_diagnostic(issues, content)
     return filtered
 
 
 def _filter_ai_issues_without_document_evidence_with_reasons(issues, content):
-    filtered, dropped_by_reason = engine_filter_ai_issues_without_document_evidence(issues, content)
-    dropped = sum(dropped_by_reason.values())
-    if dropped:
-        print(f'[审核] AI证据兜底过滤: 过滤 {dropped} 个, 剩余 {len(filtered)} 个, 原因={dropped_by_reason}')
-    return filtered, dropped_by_reason
+    return _filter_ai_evidence_keep_diagnostic(issues, content)
 
 
 def _compact_ai_filter_issue_sample(issue, reason):
@@ -2235,7 +3120,8 @@ def _restore_high_value_rule_issues(selected_issues, candidate_issues):
     return restored
 
 
-def _finalize_review_issues(issues, content, false_positive_signatures):
+def _finalize_review_issues(issues, content, false_positive_signatures, document_language=None,
+                           false_positive_memory_payloads=None):
     ai_filter_diagnostics = {
         "initial_total": len(issues),
         "initial_ai": _count_ai_issues(issues),
@@ -2250,26 +3136,41 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
 
     use_legacy_post_filters = _review_env_bool('REVIEW_USE_LEGACY_POST_FILTERS', False)
     ai_filter_diagnostics["legacy_post_filters_enabled"] = use_legacy_post_filters
+    ai_filter_diagnostics["filter_mode"] = "legacy" if use_legacy_post_filters else "pipeline"
     if use_legacy_post_filters:
         issues = _filter_review_false_positives(issues)
         ai_filter_diagnostics["after_false_positive_ai"] = _count_ai_issues(issues)
         issues = _filter_low_value_review_issues(issues)
         ai_filter_diagnostics["after_low_value_ai"] = _count_ai_issues(issues)
+        print("[审核] 兼容模式 REVIEW_USE_LEGACY_POST_FILTERS 已启用，结果可能与默认流水线不同")
 
     ai_evidence_drop_samples = _sample_ai_evidence_filter_drops(issues, content)
     issues, ai_evidence_drop_reasons = _filter_ai_issues_without_document_evidence_with_reasons(issues, content)
     ai_filter_diagnostics["after_document_evidence_ai"] = _count_ai_issues(issues)
     ai_filter_diagnostics["document_evidence_drop_reasons"] = ai_evidence_drop_reasons
     ai_filter_diagnostics["document_evidence_drop_samples"] = ai_evidence_drop_samples
-    issues = _apply_false_positive_signature_penalty(issues, false_positive_signatures)
+    issues, fp_signature_stats = _apply_false_positive_signature_penalty(
+        issues, false_positive_signatures, false_positive_memory_payloads
+    )
     ai_filter_diagnostics["after_false_positive_penalty_ai"] = _count_ai_issues(issues)
+    ai_filter_diagnostics["false_positive_memory_hits"] = fp_signature_stats
+    issues, preset_fp_hits = _apply_preset_false_positive_patterns(issues, document_language)
+    ai_filter_diagnostics["preset_false_positive_hits"] = preset_fp_hits
 
     pre_pipeline_issues = list(issues)
     before_pipeline_count = len(issues)
+    pipeline_drain_drop_reasons()
     issues = pipeline_select_review_issues(issues)
+    ai_filter_diagnostics["pipeline_drop_reasons"] = pipeline_drain_drop_reasons()
     issues = _restore_high_value_rule_issues(issues, pre_pipeline_issues + initial_issues)
     ai_filter_diagnostics["after_pipeline_ai"] = _count_ai_issues(issues)
     print(f"[审核] 统一审核流水线过滤: 过滤 {before_pipeline_count - len(issues)} 个, 剩余 {len(issues)} 个")
+    before_cluster = len(issues)
+    issues = _cluster_merge_issues(issues)
+    ai_filter_diagnostics["after_cluster_ai"] = _count_ai_issues(issues)
+    if before_cluster != len(issues):
+        print(f"[审核] 同类问题聚类: {before_cluster} -> {len(issues)}")
+    issues = _persist_diagnostic_flags(issues)
 
     recall_floor_enabled = _review_env_bool('REVIEW_RECALL_FLOOR', False)
     ai_filter_diagnostics["recall_floor_enabled"] = recall_floor_enabled
@@ -2295,6 +3196,101 @@ def _finalize_review_issues(issues, content, false_positive_signatures):
     return issues, ai_filter_diagnostics
 
 
+def _build_review_execution_summary(mode, provider, ai_review_trace, ai_calls, ai_degraded, ai_degraded_reason, ai_budget_exceeded):
+    """汇总 AI 调用、分块覆盖、缓存命中等执行状态，供 summary 审计。
+
+    ai_calls==0 或存在超时/失败分块、分块未覆盖全量、Token 预算中断时，
+    明确标记为未完成全文审核，避免用户误以为已完成全文审核。
+    """
+    trace = ai_review_trace if isinstance(ai_review_trace, dict) else {}
+    chunk_meta = [item for item in (trace.get('chunk_meta') or []) if isinstance(item, dict)]
+    total_chunks = int(trace.get('total_chunk_count') or 0)
+    selected_chunks = int(trace.get('selected_chunk_count') or len(chunk_meta) or 0)
+    cache_hits = sum(1 for item in chunk_meta if item.get('cache_hit'))
+    degraded_chunks = [
+        item for item in chunk_meta
+        if str(item.get('status') or '') in {'timeout', 'error', 'failed'}
+    ]
+    # 只有真正拿到模型回答（成功调用或有效缓存）的分块才算已覆盖；
+    # provider 不可用时调用会静默返回空结果，不能按"已处理"计入覆盖。
+    covered_chunks = min(selected_chunks, int(ai_calls or 0) + cache_hits)
+    processed_chunks = max(0, covered_chunks - len(degraded_chunks))
+    if total_chunks:
+        coverage_ratio = round(processed_chunks / total_chunks, 4)
+    else:
+        coverage_ratio = 1.0 if processed_chunks else 0.0
+
+    partial_reasons = []
+    if ai_degraded:
+        partial_reasons.append(ai_degraded_reason or 'ai_degraded')
+    if ai_budget_exceeded:
+        partial_reasons.append('ai_token_budget_reached')
+    if degraded_chunks:
+        partial_reasons.append(f'{len(degraded_chunks)}_chunk_timeout_or_failed')
+    if coverage_ratio < 1.0:
+        partial_reasons.append(f'chunk_coverage_{coverage_ratio}')
+    if processed_chunks < selected_chunks:
+        partial_reasons.append(f'uncovered_chunks_{selected_chunks - processed_chunks}')
+    if trace.get('fallback_reason'):
+        partial_reasons.append(f"chunker_fallback:{trace['fallback_reason']}")
+
+    actual_providers = [str(item) for item in (trace.get('provider_list') or []) if str(item)]
+    if not actual_providers and provider:
+        actual_providers = [str(provider)]
+
+    return {
+        'mode': mode,
+        'requested_provider': provider or '',
+        'actual_providers': actual_providers,
+        'ai_calls': int(ai_calls or 0),
+        'cache_hits': cache_hits,
+        'total_chunks': total_chunks,
+        'processed_chunks': processed_chunks,
+        'coverage_ratio': coverage_ratio,
+        'full_document_reviewed': bool(
+            trace.get('enabled')
+            and not ai_degraded
+            and not degraded_chunks
+            and not ai_budget_exceeded
+            and coverage_ratio >= 1.0
+        ),
+        'partial_coverage': bool(partial_reasons),
+        'partial_reasons': partial_reasons,
+        'ai_degraded': bool(ai_degraded),
+        'ai_degraded_reason': ai_degraded_reason or '',
+    }
+
+
+def _build_issue_flow_summary(ai_filter_diagnostics, pdf_visual_verification, retained_ai_count):
+    """汇总 AI 问题从输入到最终输出的流转与丢弃归因。"""
+    diagnostics = ai_filter_diagnostics if isinstance(ai_filter_diagnostics, dict) else {}
+    visual = pdf_visual_verification if isinstance(pdf_visual_verification, dict) else {}
+    dropped = Counter(diagnostics.get('pipeline_drop_reasons') or {})
+    evidence_reasons = diagnostics.get('document_evidence_drop_reasons') or {}
+    evidence_dropped = (
+        sum(int(value or 0) for value in evidence_reasons.values())
+        if isinstance(evidence_reasons, dict) else 0
+    )
+    initial_ai = int(diagnostics.get('initial_ai') or 0)
+    after_normalization = diagnostics.get('after_dedup_ai')
+    return {
+        'ai_input_count': initial_ai,
+        'after_normalization': int(after_normalization if after_normalization is not None else initial_ai),
+        'after_pipeline': int(diagnostics.get('after_pipeline_ai') or 0),
+        'after_visual_verification': int(retained_ai_count or 0),
+        'dropped_by_reason': {
+            'noise': int(dropped.get('noise') or 0),
+            'below_threshold': int(dropped.get('below_threshold') or 0),
+            'evidence_missing': evidence_dropped,
+            'visual_reject': int(visual.get('rejected_count') or 0),
+            'dedupe': int(dropped.get('dedupe_shadowed') or 0),
+            'empty_original_text': int(dropped.get('empty_original_text') or 0),
+            'status_filtered': int(dropped.get('status_filtered') or 0),
+        },
+        'pipeline_drop_reasons': dict(dropped),
+    }
+
+
 def _issue_judgment_signature(issue):
     rule = str(_issue_value(issue, 'rule', '') or '').upper()
     original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip().lower()
@@ -2303,16 +3299,30 @@ def _issue_judgment_signature(issue):
 
 
 def _issue_judgment_signatures(issue):
+    """生成 issue 的误报记忆精确签名集合。
+
+    历史实现只产出唯一一种签名 `rule|category|original`，
+    导致同一问题只要类别字段填法略有差异就匹配不上。
+    这里保留三种降级形态（去 category、去 rule、只留文本），
+    用于「人工标注意图完全一致」的精确比对路径。
+
+    需要容忍措辞差异的场景不走这里 —— 由
+    `app.review_engine.false_positive_fingerprint.matches_memory()`
+    按「同规则族 + token 覆盖相似度」判定，避免在精确签名层面
+    做无法验证的模糊猜测。
+    """
     rule = str(_issue_value(issue, 'rule', '') or '').upper()
     original = re.sub(r'\s+', ' ', str(_issue_value(issue, 'original_text', '') or '')).strip().lower()
     category = re.sub(r'\s+', ' ', str(_issue_value(issue, 'category', '') or '')).strip().lower()
     if not original:
         return set()
-    return {
+
+    signatures = {
         f'{rule}|{category}|{original}',
         f'{rule}|{original}',
         f'{category}|{original}',
     }
+    return {str(item).strip().lower() for item in signatures if str(item).strip()}
 
 
 def _is_issue_hidden_by_judgment(issue):
@@ -2337,6 +3347,14 @@ def _visible_review_issues(issues):
     return [issue for issue in issues if not _is_issue_hidden_by_judgment(issue) and not _is_pdf_duplicate_word_extraction_noise(issue)]
 
 
+def _review_issues_for_display(issues):
+    return [
+        issue for issue in issues
+        if str(getattr(issue, 'status', '') or '').lower() != 'ignored'
+        and not _is_pdf_duplicate_word_extraction_noise(issue)
+    ]
+
+
 def _issue_position_start(issue):
     raw_position = getattr(issue, 'position', None)
     if not raw_position:
@@ -2354,12 +3372,78 @@ def _issue_position_start(issue):
     return None
 
 
+def _paragraph_context(content, start, end, min_length=320, max_length=2000):
+    """Return the paragraph around [start, end), widened to at least min_length.
+
+    Paragraphs are separated by blank lines. Table-heavy PDFs often yield very
+    short paragraphs, so grow into neighbouring ones until min_length is met;
+    oversized blocks fall back to a symmetric window around the issue.
+    """
+    text = str(content or '')
+    total = len(text)
+    if not total:
+        return ''
+    start = max(0, min(start, total))
+    end = max(start, min(end, total))
+
+    left = text.rfind('\n\n', 0, start)
+    left = 0 if left < 0 else left + 2
+    right = text.find('\n\n', end)
+    right = total if right < 0 else right
+
+    while right - left < min_length and (left > 0 or right < total):
+        if left > 0:
+            prev_break = text.rfind('\n\n', 0, left - 1)
+            left = 0 if prev_break < 0 else prev_break + 2
+        if right < total and right - left < min_length:
+            next_break = text.find('\n\n', right + 1)
+            right = total if next_break < 0 else next_break
+
+    if right - left > max_length:
+        half = max_length // 2
+        left = max(0, start - half)
+        right = min(total, end + half)
+
+    snippet = text[left:right]
+    if left > 0:
+        snippet = '...' + snippet
+    if right < total:
+        snippet = snippet + '...'
+    return snippet
+
+
+def _expand_issue_context_for_display(issue, content, radius=180):
+    text = str(content or '')
+    original = str(getattr(issue, 'original_text', '') or '')
+    context = str(getattr(issue, 'context', '') or '')
+    if re.match(r'^\s*主文档[：:]', context):
+        # Compare mode stores a structured 主文档/参考 block; keep it intact.
+        return
+    if text:
+        start, end = _parse_issue_position(getattr(issue, 'position', ''))
+        if end <= start and original:
+            pos = text.find(original)
+            if pos >= 0:
+                start, end = pos, pos + len(original)
+        if end > start:
+            issue.context = _paragraph_context(text, start, end)
+            return
+    min_len = min(160, max(len(original) + 80, 80))
+    if context and original and original in context and len(context) >= min_len:
+        return
+    if text and original:
+        pos = text.find(original)
+        if pos >= 0:
+            issue.context = get_context(text, pos, pos + len(original), radius)
+
+
 def _normalize_review_issue_display(issues, content=None):
     for issue in issues:
         _normalize_known_rule_issue_display(issue)
         display_suggestion = _fallback_issue_suggestion_for_display(issue)
         if display_suggestion != (getattr(issue, 'suggestion', '') or ''):
             issue.suggestion = display_suggestion
+        _expand_issue_context_for_display(issue, content)
         if getattr(issue, 'rule', None) == 'CHECKLIST-COPYRIGHT-YEAR' and getattr(issue, 'category', None) == '发布前自检':
             issue.chapter = '版本记录'
             continue
@@ -2398,12 +3482,24 @@ def _normalize_review_issue_display(issues, content=None):
 
 
 def _load_false_positive_signatures_for_document(db: Session, document_id: int):
+    """加载文档级误报记忆。
+
+    返回 (signatures, memory_payloads)：
+      - signatures  —— 精确签名集合，走历史比对路径；
+      - memory_payloads —— (rule, original_text) 列表，走结构化指纹路径，
+        使"同一个问题换个措辞"也能被识别为已裁定的误报。
+    """
     signatures = set(list_false_positive_memory_signatures(db))
+    try:
+        from app.crud.review import list_false_positive_memory_payloads
+        memory_payloads = list(list_false_positive_memory_payloads(db))
+    except ModuleNotFoundError:
+        memory_payloads = []
     for review in get_reviews(db, document_id=document_id):
         for issue in get_issues(db, review_id=review.id):
             if str(getattr(issue, 'status', '') or '').lower() == 'false_positive':
                 signatures.update(_issue_judgment_signatures(issue))
-    return signatures
+    return signatures, memory_payloads
 
 
 def _sync_false_positive_memory(db: Session, issue):
@@ -2516,19 +3612,64 @@ def _issue_page_number(issue, content):
     return _page_number_from_position(content, _issue_value(issue, 'position', ''))
 
 
+def _backfill_issue_page_numbers(issues, content):
+    """为缺少页码的 issue 按 position.start 反查页码并回填。"""
+    filled = 0
+    offsets = _page_offsets_from_pages(content)
+    last = len(offsets)
+    for issue in issues:
+        meta = _issue_meta(issue)
+        if any(meta.get(key) for key in ("page_number", "page", "page_no")):
+            continue
+        start = meta.get("start")
+        try:
+            start = int(start)
+        except (TypeError, ValueError):
+            continue
+        page_no = None
+        for idx, (s, e) in enumerate(offsets, start=1):
+            if idx == last:
+                if s <= start <= e:
+                    page_no = idx
+                    break
+            elif s <= start < e:
+                page_no = idx
+                break
+        if page_no:
+            _normalize_issue_position_meta(issue, page_number=page_no)
+            filled += 1
+    return filled
+
+
 def _should_visual_verify_issue(issue, file_type):
     if str(file_type or '').lower() != 'pdf':
         return False
-    if str(_issue_value(issue, 'source', '') or '').lower() != 'ai':
+
+    source = str(_issue_value(issue, 'source', '') or '').lower()
+    category = str(_issue_value(issue, 'category', '') or '')
+    rule = str(_issue_value(issue, 'rule', '') or '').upper()
+    description = str(_issue_value(issue, 'description', '') or '')
+    blob = ' '.join([category, rule, description]).lower()
+
+    text_markers = (
+        'grammar', 'spelling', 'punctuation', 'terminology',
+        '英文规范', '英文微编辑', '语法', '拼写', '术语', '用词',
+        '口语化', '冗余', '指代不明', '标点', '不通顺', '缺字',
+        '表述不准确', '信息不完整', '一致性', '格式微调', '标点符号',
+    )
+    if any(marker in blob for marker in text_markers):
         return False
-    text_blob = ' '.join([
-        str(_issue_value(issue, 'original_text', '') or ''),
-        str(_issue_value(issue, 'context', '') or ''),
-        str(_issue_value(issue, 'description', '') or ''),
-    ]).strip()
-    if not text_blob:
+
+    if source != 'ai':
         return False
-    return True
+
+    visual_markers = (
+        '表格/版式', '图片/对象缺失', '字体/版式细节',
+        'layout', 'visual', 'font size', 'icon', 'image',
+        'column width', 'cell overflow', '版式', '字号', '图标',
+        '图片显示不全', '图片尺寸', '字体不对', '没有居中', '白边',
+    )
+    return any(marker in blob for marker in visual_markers)
 
 
 def _match_known_pdf_false_positive(issue):
@@ -2590,7 +3731,62 @@ def _render_pdf_page_png_bytes(file_path: Path, page_number: int, scale: float |
         return None
 
 
+def _visual_provider_available(provider: str) -> bool:
+    name = str(provider or "").strip().lower()
+    if name == "kimi":
+        return bool(getattr(ai_client, "kimi_client", None))
+    if name == "qwen":
+        return bool(getattr(ai_client, "qwen_client", None) or getattr(ai_client, "dashscope_client", None))
+    if name == "deepseek":
+        return bool(getattr(ai_client, "deepseek_client", None))
+    return False
+
+
+def _verify_review_issue_visually(png_bytes, issue_payload, page_number, review_id):
+    from app.review_engine.visual import map_visual_status, visual_provider_chain
+
+    attempts = []
+    last = {
+        "decision": "skipped",
+        "reason": "provider_unavailable",
+        "confidence": 0,
+        "visual_status": "provider_unavailable",
+        "provider": "",
+        "attempts": 0,
+    }
+    for provider in visual_provider_chain():
+        if not _visual_provider_available(provider):
+            attempts.append({"provider": provider, "visual_status": "provider_unavailable"})
+            continue
+        # 不再硬编码跳过非 kimi：原先的 `if provider != "kimi": continue`
+        # 会让 qwen 永远拿不到接管机会，即使客户端已就绪。
+        # 现在按 REVIEW_VISUAL_PROVIDERS 顺序逐个尝试，
+        # 任一 provider 返回 provider_unavailable 就回退到下一家。
+        result = ai_client.verify_review_issue_from_image(
+            png_bytes,
+            issue_payload,
+            page_number=page_number,
+            review_id=review_id,
+            provider=provider,
+        ) or {}
+        status = map_visual_status(result.get("decision"), result.get("reason"))
+        result["visual_status"] = status
+        result["provider"] = provider
+        attempts.append({"provider": provider, "visual_status": status, "reason": str(result.get("reason") or "")[:180]})
+        result["attempts"] = len(attempts)
+        if status != "provider_unavailable":
+            result["attempts"] = attempts
+            return result
+        last = result
+    last["attempts"] = attempts
+    last["visual_status"] = "provider_unavailable"
+    last["provider"] = ",".join(item["provider"] for item in attempts) if attempts else ""
+    return last
+
+
 def _apply_pdf_visual_verification(review_id: int, document, content: str, issues: list, suspicious_pages: dict | None = None):
+    from app.review_engine.visual import map_visual_status, visual_provider_chain
+
     diagnostics = {
         'enabled': False,
         'candidate_count': 0,
@@ -2603,17 +3799,26 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         'page_issue_count': 0,
         'items': [],
     }
+    from app.review_engine.visual import apply_visual_verification, build_visual_verification, map_visual_status, visual_provider_chain
     if not _review_pdf_visual_verify_enabled():
         diagnostics['reason'] = 'disabled'
+        for issue in issues:
+            apply_visual_verification(issue, build_visual_verification(status='skipped', error_code='disabled'))
+            issue['visual_verification'] = build_visual_verification(status='skipped', error_code='disabled')
         return issues, diagnostics
     if str(getattr(document, 'file_type', '') or '').lower() != 'pdf':
         diagnostics['reason'] = 'not_pdf'
+        for issue in issues:
+            issue['visual_verification'] = build_visual_verification(status='not_required')
         return issues, diagnostics
 
     limit = _review_pdf_visual_verify_limit()
     if limit <= 0:
         diagnostics['reason'] = 'limit_zero'
         return issues, diagnostics
+    page_budget = _review_pdf_visual_verify_page_budget()
+    if page_budget > 0:
+        limit = min(limit, page_budget)
 
     candidates = []
     for issue in issues:
@@ -2627,19 +3832,29 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         candidates.append((issue, page_number))
 
     covered_pages = {page_number for _, page_number in candidates}
-    page_candidates = []
     remaining_limit = max(0, limit - len(candidates))
+    eligible_pages = []
     for page_candidate in (suspicious_pages or {}).get('candidates') or []:
-        if len(page_candidates) >= remaining_limit:
-            break
         page_number = int(page_candidate.get('page_number') or 0)
         if page_number <= 0 or page_number in covered_pages:
             continue
         reasons = set(page_candidate.get('reasons') or [])
-        if not reasons.intersection({'table_layout', 'dense_table_or_layout', 'figure_table_numbering', 'footer_or_page_number', 'toc_or_index', 'layout_keyword'}):
+        if not reasons.intersection({
+            'table_layout', 'dense_table_or_layout', 'figure_table_numbering',
+            'footer_or_page_number', 'toc_or_index', 'layout_keyword',
+            'crowded_lines', 'thick_rules', 'image_off_center',
+        }):
             continue
-        page_candidates.append(page_candidate)
+        eligible_pages.append(page_candidate)
         covered_pages.add(page_number)
+    total_pages = int((suspicious_pages or {}).get('page_count') or 0)
+    if total_pages <= 0:
+        total_pages = max((int(item.get('page_number') or 0) for item in eligible_pages), default=0)
+    layout_limit = _review_pdf_visual_verify_layout_limit()
+    if page_budget > 0 and layout_limit > 0:
+        layout_limit = min(layout_limit, page_budget)
+    page_limit = max(remaining_limit, layout_limit)
+    page_candidates = _select_visual_page_candidates(eligible_pages, page_limit, total_pages)
 
     diagnostics['enabled'] = True
     diagnostics['candidate_count'] = len(candidates)
@@ -2653,15 +3868,24 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         for page_candidate in page_candidates
         if _should_promote_page_candidate_without_visual(page_candidate)
     ]
-    if not ai_client.kimi_client:
-        diagnostics['reason'] = 'kimi_unavailable'
+    visual_chain = visual_provider_chain()
+    if not any(_visual_provider_available(name) for name in visual_chain):
+        diagnostics['reason'] = 'provider_unavailable'
+        diagnostics['visual_status'] = 'provider_unavailable'
+        diagnostics['provider_chain'] = visual_chain
         diagnostics['skipped_count'] = len(candidates) + len(page_candidates)
+        for issue, page_number in candidates:
+            visual = build_visual_verification(status='provider_unavailable', evidence_page=page_number)
+            issue['visual_verification'] = visual
+            issue['status'] = 'blocked'
+            _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=visual)
         diagnostics['page_issue_count'] = len(fallback_page_issues)
         diagnostics['items'].extend([
             {
                 'page_number': int(page_candidate.get('page_number') or 0),
                 'decision': 'needs_manual_review',
                 'reason': 'visual_model_unavailable',
+                'visual_status': 'provider_unavailable',
                 'page_candidate': True,
                 'candidate_reasons': page_candidate.get('reasons') or [],
             }
@@ -2683,12 +3907,15 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
     for issue, page_number in candidates:
         png_bytes = _render_pdf_page_png_bytes(source_path, page_number)
         if not png_bytes:
-            _normalize_issue_position_meta(issue, page_number=page_number, visual_verification={'decision': 'skipped', 'reason': 'render_failed'})
+            visual = build_visual_verification(status='failed', error_code='render_failed', evidence_page=page_number)
+            issue['visual_verification'] = visual
+            issue['status'] = 'blocked'
+            _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=visual)
             diagnostics['skipped_count'] += 1
-            diagnostics['items'].append({'page_number': page_number, 'decision': 'skipped', 'reason': 'render_failed'})
+            diagnostics['items'].append({'page_number': page_number, 'decision': 'failed', 'reason': 'render_failed', 'status': 'failed'})
             continue
 
-        result = ai_client.verify_review_issue_from_image(
+        result = _verify_review_issue_visually(
             png_bytes,
             {
                 'severity': _issue_value(issue, 'severity', ''),
@@ -2707,7 +3934,25 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             'confidence': int(result.get('confidence') or 0),
             'reason': str(result.get('reason') or '')[:180],
             'is_extraction_artifact': bool(result.get('is_extraction_artifact')),
+            'visual_status': result.get('visual_status') or map_visual_status(decision, result.get('reason')),
+            'provider': result.get('provider') or '',
+            'attempts': result.get('attempts') or 1,
+            'evidence_page': page_number,
         }
+        visual = build_visual_verification(
+            status=compact_result['visual_status'],
+            provider=compact_result['provider'],
+            attempts=compact_result['attempts'],
+            error_code=compact_result['reason'],
+            evidence_page=page_number,
+            decision=decision,
+            reason=compact_result['reason'],
+            is_extraction_artifact=compact_result['is_extraction_artifact'],
+        )
+        compact_result.update(visual)
+        issue['visual_verification'] = visual
+        if visual['status'] in {'failed', 'provider_unavailable'}:
+            issue['status'] = 'blocked'
         _normalize_issue_position_meta(issue, page_number=page_number, visual_verification=compact_result)
 
         diagnostics['verified_count'] += 1
@@ -2744,14 +3989,14 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             diagnostics['skipped_count'] += 1
             diagnostics['items'].append({'page_number': page_number, 'decision': 'skipped', 'reason': 'render_failed', 'page_candidate': True})
             continue
-        result = ai_client.verify_review_issue_from_image(
+        result = _verify_review_issue_visually(
             png_bytes,
             {
                 'severity': _page_visual_issue_severity(page_candidate.get('reasons') or []),
                 'category': _page_visual_issue_category(page_candidate.get('reasons') or []),
                 'original_text': page_candidate.get('text_preview') or '',
                 'context': page_candidate.get('text_preview') or '',
-                'description': f"页级疑点: {', '.join(page_candidate.get('reasons') or [])}",
+                'description': _page_visual_review_brief(page_candidate),
                 'suggestion': '请人工复核该页实际显示',
             },
             page_number=page_number,
@@ -2766,6 +4011,8 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             'is_extraction_artifact': bool(result.get('is_extraction_artifact')),
             'page_candidate': True,
             'candidate_reasons': page_candidate.get('reasons') or [],
+            'visual_status': result.get('visual_status') or map_visual_status(decision, result.get('reason')),
+            'provider': result.get('provider') or '',
         }
         diagnostics['verified_count'] += 1
         diagnostics['items'].append(compact_result)
@@ -2784,6 +4031,8 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
             diagnostics['skipped_count'] += 1
             continue
         diagnostics['uncertain_count'] += 1
+        # C3: geometry/visual uncertainty may only emit 待人工复核, confidence < 85.
+        page_issues.append(_build_pdf_page_manual_review_issue(page_candidate, 'visual_uncertain'))
 
     if page_issues:
         diagnostics['page_issue_count'] = len(page_issues)
@@ -2948,6 +4197,12 @@ def _run_long_sentence_audit(content, file_type=None):
 
 
 def _normalize_heading_text(text):
+    """Normalize a heading into a comparable TOC key.
+
+    Strips dot-leader page numbers and lowercases so TOC entries and body
+    headings can be compared case-insensitively. Display headings must use
+    _normalize_heading_label instead, which preserves the original casing.
+    """
     text = re.sub(r'\.{2,}\s*\d+$', '', str(text or '').strip())
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
@@ -3258,19 +4513,22 @@ def _build_review_export_filename(doc_name, review_id, suffix):
 
 
 def _get_document_upload_path(document):
-    candidate = UPLOAD_DIR / (document.filename or "")
-    if candidate.exists():
-        return candidate
-    return None
+    from app.review_engine.paths import ReviewPathError, resolve_review_file_path
+    try:
+        candidate = resolve_review_file_path(UPLOAD_DIR, getattr(document, "filename", "") or "")
+    except ReviewPathError:
+        return None
+    return candidate if candidate.exists() else None
 
 
-def _page_offsets_from_pages(pages: list[str]) -> list[tuple[int, int]]:
-    offsets = []
-    cursor = 0
-    for page in pages:
-        page_text = str(page or "")
-        offsets.append((cursor, cursor + len(page_text)))
-        cursor += len(page_text) + 1
+def _page_offsets_from_pages(content) -> list[tuple[int, int]]:
+    """直接返回原文坐标区间 [(start, end), ...]，不再用「累加 + 分隔符长度」推算。"""
+    text = str(content or "")
+    offsets, pos = [], 0
+    for match in _PAGE_BREAK_RE.finditer(text):
+        offsets.append((pos, match.start()))
+        pos = match.end()
+    offsets.append((pos, len(text)))
     return offsets
 
 
@@ -3292,12 +4550,11 @@ def _extract_pdf_page_metadata(document, content: str) -> dict:
         return diagnostics
 
     source_path = _get_document_upload_path(document)
-    extracted_pages = []
     block_counts_by_page: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    layout_signals_by_page: dict[int, dict] = {}
     if source_path and source_path.exists():
         try:
             extracted = extract_pdf(str(source_path))
-            extracted_pages = [str(page or "") for page in extracted.get("page_texts", [])]
             for block in extracted.get("blocks", []) or []:
                 page_num = int(getattr(block, "page_num", 0) or 0) + 1
                 block_type = str(getattr(block, "block_type", "body") or "body")
@@ -3305,9 +4562,15 @@ def _extract_pdf_page_metadata(document, content: str) -> dict:
             diagnostics["source"] = "pdf_blocks"
         except Exception as exc:
             diagnostics["error"] = str(exc)[:200]
+        try:
+            from app.review_engine.pdf_layout_signals import collect_pdf_layout_signals
+            layout_signals_by_page = collect_pdf_layout_signals(source_path)
+        except Exception as exc:
+            if not diagnostics.get("error"):
+                diagnostics["error"] = str(exc)[:200]
 
-    pages = extracted_pages or [page for page in _split_content_pages(content) if str(page or "").strip()]
-    offsets = _page_offsets_from_pages(pages)
+    pages = _split_content_pages(content)
+    offsets = _page_offsets_from_pages(content)
     page_records = []
     for index, page_text in enumerate(pages, start=1):
         lines = [line.strip() for line in str(page_text or "").splitlines() if line.strip()]
@@ -3325,11 +4588,12 @@ def _extract_pdf_page_metadata(document, content: str) -> dict:
             "table_like_line_count": len(table_like_lines),
             "footer_preview": footer_candidates,
             "text_preview": _compact_page_preview(page_text),
+            "layout_signals": layout_signals_by_page.get(index) or {},
         })
 
     diagnostics["enabled"] = True
     diagnostics["page_count"] = len(page_records)
-    diagnostics["pages"] = page_records[:80]
+    diagnostics["pages"] = page_records
     return diagnostics
 
 
@@ -3353,12 +4617,22 @@ def _collect_pdf_suspicious_pages(page_metadata: dict) -> dict:
             reasons.append("dense_table_or_layout")
         if re.search(r"(?:^|\s)(?:图|Figure|Fig\.)\s*\d+|(?:^|\s)(?:表|Table)\s*\d+", text, re.IGNORECASE):
             reasons.append("figure_table_numbering")
+        if int(block_counts.get("caption", 0) or 0) >= 1:
+            reasons.append("figure_table_numbering")
         if re.search(r"(?:第\s*\d+\s*页|page\s+\d+|doc\.?\s*no\.?|h-\d{3}|copyright|版权)", text, re.IGNORECASE):
             reasons.append("footer_or_page_number")
         if re.search(r"(?:目录|contents|索引|index|\.\.\.|…{2,})", text, re.IGNORECASE):
             reasons.append("toc_or_index")
         if re.search(r"(?:跨页|分页|列宽|行高|表头|页脚|图号|页码|平均分布列|均匀分布列)", text, re.IGNORECASE):
             reasons.append("layout_keyword")
+
+        signals = page.get("layout_signals") or {}
+        if float(signals.get("crowding_score") or 0) >= 0.55:
+            reasons.append("crowded_lines")
+        if float(signals.get("thick_line_ratio") or 0) >= 0.2:
+            reasons.append("thick_rules")
+        if float(signals.get("image_offset_ratio") or 0) >= 0.12:
+            reasons.append("image_off_center")
 
         if reasons:
             candidates.append({
@@ -3367,25 +4641,101 @@ def _collect_pdf_suspicious_pages(page_metadata: dict) -> dict:
                 "char_start": page.get("char_start"),
                 "char_end": page.get("char_end"),
                 "text_preview": page.get("text_preview"),
+                "table_blocks": table_blocks,
+                "line_count": line_count,
+                "layout_signals": signals,
             })
 
     return {
         "enabled": bool(page_metadata.get("enabled")),
         "candidate_count": len(candidates),
-        "candidates": candidates[:30],
+        "candidates": candidates,
+        "page_count": int(page_metadata.get("page_count") or 0),
     }
+
+
+def _select_visual_page_candidates(candidates: list, limit: int, total_pages: int) -> list:
+    """分层覆盖：每桶取最强，剩余名额优先补同桶次强。几何分只用于排序。"""
+    if limit <= 0 or not candidates:
+        return []
+    from app.review_engine.pdf_layout_signals import layout_candidate_score
+
+    strat_limit = max(1, (limit + 1) // 2)
+    buckets = max(1, min(strat_limit, len(candidates)))
+    total_pages = max(1, int(total_pages or 0))
+    grouped = defaultdict(list)
+    for cand in candidates:
+        page = int(cand.get("page_number") or 0)
+        if page <= 0:
+            continue
+        bucket = min(buckets - 1, int((page - 1) / total_pages * buckets))
+        grouped[bucket].append(cand)
+    picked = []
+    picked_pages = set()
+    seconds = []
+    for bucket in sorted(grouped):
+        ranked = sorted(grouped[bucket], key=layout_candidate_score, reverse=True)
+        best = ranked[0]
+        picked.append(best)
+        picked_pages.add(int(best.get("page_number") or 0))
+        if len(ranked) > 1:
+            seconds.append(ranked[1])
+    for item in seconds:
+        page = int(item.get("page_number") or 0)
+        if page in picked_pages:
+            continue
+        if len(picked) >= limit:
+            break
+        picked.append(item)
+        picked_pages.add(page)
+    leftover = [
+        item for item in candidates
+        if int(item.get("page_number") or 0) not in picked_pages
+    ]
+    leftover.sort(key=layout_candidate_score, reverse=True)
+    for item in leftover:
+        page = int(item.get("page_number") or 0)
+        if page in picked_pages:
+            continue
+        if len(picked) >= limit:
+            break
+        picked.append(item)
+        picked_pages.add(page)
+    return picked[:limit]
+
+
+def _page_visual_review_brief(page_candidate: dict) -> str:
+    reasons = [str(item) for item in (page_candidate.get("reasons") or []) if item]
+    signals = page_candidate.get("layout_signals") or {}
+    bits = [
+        "请核对截图中是否存在真实版式问题：单元格过挤、表线过粗、图片未居中、列宽不均或样式不一致。",
+        f"候选原因: {', '.join(reasons) or 'layout'}。",
+    ]
+    crowding = signals.get("crowding_score")
+    thick = signals.get("thick_line_ratio")
+    offset = signals.get("image_offset_ratio")
+    if crowding not in (None, 0, 0.0):
+        bits.append(f"crowding={crowding}")
+    if thick not in (None, 0, 0.0):
+        bits.append(f"thick_line_ratio={thick}")
+    if offset not in (None, 0, 0.0):
+        bits.append(f"image_offset={offset}")
+    return " ".join(bits)
 
 
 def _page_visual_issue_category(reasons: list[str]) -> str:
     reasons = {str(reason or "") for reason in (reasons or [])}
+    if reasons.intersection({
+        "table_layout", "dense_table_or_layout", "layout_keyword",
+        "crowded_lines", "thick_rules", "image_off_center",
+    }):
+        return "表格/版式"
     if "toc_or_index" in reasons:
         return "目录一致性"
     if "footer_or_page_number" in reasons:
         return "页脚异常"
     if "figure_table_numbering" in reasons:
         return "图表编号"
-    if "table_layout" in reasons or "dense_table_or_layout" in reasons or "layout_keyword" in reasons:
-        return "表格/版式"
     return "页面复核"
 
 
@@ -3405,6 +4755,14 @@ def _should_promote_page_candidate_without_visual(page_candidate: dict) -> bool:
 
     preview = str(page_candidate.get("text_preview") or "")
     if re.search(r"版本记录|(?:日期.{0,16}版本)|(?:版本.{0,16}修订)|平均分布列|均匀分布列|列宽", preview, re.IGNORECASE):
+        return True
+    if re.search(
+        r"version\s+history|revision\s+history|(?:version|revision)\s+date"
+        r"|column\s+width|equal(?:ly)?\s+(?:distributed|spaced)\s+columns"
+        r"|header\s+row|footer\s+row|page\s+break|table\s+header",
+        preview,
+        re.IGNORECASE,
+    ):
         return True
     return False
 
@@ -3440,7 +4798,10 @@ def _build_pdf_page_visual_issue(page_candidate: dict, result: dict) -> dict:
                 "confidence": int(result.get("confidence") or 0),
                 "page_candidate": True,
             },
+            needs_human_review=True,
         ),
+        "needs_human_review": True,
+        "page_number": page_number,
     }
 
 
@@ -3741,6 +5102,8 @@ def _format_review_mode(mode):
         "compare:both": "对比审核（数字 + 步骤）",
         "compare:numbers": "对比审核（数字）",
         "compare:steps": "对比审核（步骤）",
+        "snippet:hybrid": "文本片段审核（完整）",
+        "snippet:rule": "文本片段审核（快速）",
     }.get(mode or "", mode or "-")
 
 
@@ -3811,9 +5174,24 @@ def _highlight_issue_context(issue):
     return highlighted.replace("\n", "<br>")
 
 
+def _content_page_separator(content):
+    text = str(content or "")
+    if "\n\f\n" in text:
+        return "\n\f\n"
+    return "\f"
+
+
+_PAGE_BREAK_RE = re.compile(r"\n\f\n|\f")
+
+
 def _split_content_pages(content):
-    pages = str(content or '').split('\f')
-    return pages if pages else ['']
+    text = str(content or "")
+    pages, pos = [], 0
+    for match in _PAGE_BREAK_RE.finditer(text):
+        pages.append(text[pos:match.start()])
+        pos = match.end()
+    pages.append(text[pos:])
+    return pages or [""]
 
 
 def _extract_document_metadata(doc, content):
@@ -3896,7 +5274,7 @@ def _format_issue_location(issue, content):
             if found >= 0:
                 position = _encode_issue_position(found, found + len(original))
 
-    page_no = _page_number_from_position(content, position)
+    page_no = _issue_page_number(issue, content)
     page_text = f'第{page_no}页' if page_no else ''
     rule = _report_rule(_issue_value(issue, 'rule', ''))
     if rule in {'DOC-REV-001', 'DOC-REV-002', 'CHECKLIST-COPYRIGHT-YEAR', 'CHECKLIST-YEAR'}:
@@ -3957,7 +5335,7 @@ def _extract_heading_from_context(text):
         return ''
     table_match = re.search(r'(Table\s+\d+\s+[A-Za-z][A-Za-z0-9×\- ,/&()]{3,120})', normalized, re.IGNORECASE)
     if table_match:
-        heading = _normalize_heading_text(table_match.group(1))
+        heading = _normalize_heading_label(table_match.group(1))
         if heading and not _is_table_cell_like(heading) and not _is_inline_reference_heading(heading):
             return heading
     patterns = [
@@ -3968,7 +5346,7 @@ def _extract_heading_from_context(text):
         matches = re.findall(pattern, normalized)
         if matches:
             for match in reversed(matches):
-                heading = _normalize_heading_text(match)
+                heading = _normalize_heading_label(match)
                 if heading and not _is_table_cell_like(heading) and not _is_inline_reference_heading(heading):
                     return heading
     return ''
@@ -4159,7 +5537,7 @@ def _resolve_issue_heading(issue, content):
     return '-'
 
 
-def _extract_issue_snippet(issue, content, radius=28):
+def _extract_issue_snippet(issue, content, radius=140):
     original = str(_issue_value(issue, 'original_text', '') or '').strip()
     start, end = _parse_issue_position(_issue_value(issue, 'position', ''))
     if content and original and end > start:
@@ -4178,7 +5556,7 @@ def _extract_issue_snippet(issue, content, radius=28):
     if not context:
         return original or '-'
     if not original or original not in context:
-        return context[:100] + ('...' if len(context) > 100 else '')
+        return context[:280] + ('...' if len(context) > 280 else '')
 
     pos = context.find(original)
     left = max(0, pos - radius)
@@ -4361,7 +5739,16 @@ def _report_issue_to_dict(issue):
         'context', 'suggestion', 'description', 'audit_basis', 'confidence', 'source',
         'position', 'status', 'created_at', 'updated_at'
     ]
-    return {key: _issue_value(issue, key, '') for key in keys}
+    payload = {key: _issue_value(issue, key, '') for key in keys}
+    # page_number / needs_human_review 在 ORM 上没有对应列，只能从 position meta 投影
+    meta = _decode_issue_position(payload.get('position', ''))
+    page_number = meta.get('page_number') or meta.get('page') or meta.get('page_no')
+    try:
+        payload['page_number'] = int(page_number) if page_number not in (None, '') else None
+    except (TypeError, ValueError):
+        payload['page_number'] = None
+    payload['needs_human_review'] = bool(meta.get('needs_human_review'))
+    return payload
 
 
 def _report_rule(rule):
@@ -4447,6 +5834,10 @@ def _report_resolve_chapter(issue, content):
     original = str(_issue_value(issue, 'original_text', '') or '').strip()
     if rule == 'CHECKLIST-TRADEMARK' and original.upper() == 'DNBSEQ':
         return '1. Introduction'
+    if rule == 'PDF-VISUAL-001':
+        page_no = _issue_page_number(issue, content)
+        if page_no:
+            return f'第{page_no}页'
 
     raw_existing = re.sub(r'\s+', ' ', str(_issue_value(issue, 'chapter', '') or '')).strip()
     existing = _format_issue_chapter(issue)
@@ -4611,10 +6002,12 @@ def _aggregate_report_issues(issues, content):
 
 
 def _prepare_report_issues(issues, content):
-    issues = pipeline_select_review_issues(issues, status_filter=True)
+    issues = pipeline_select_review_issues(issues, status_filter=False)
     prepared = []
     for issue in issues:
         item = _report_issue_to_dict(issue)
+        if str(item.get('status') or '').lower() == 'ignored':
+            continue
         if _should_drop_punctuation_issue(item):
             continue
         if _should_drop_known_false_positive_issue(item):
@@ -5039,11 +6432,36 @@ def _deduplicate_basis_sections(sections):
 def _fetch_es_relevant_basis_sections(content, basis_sections, document_language, limit=4):
     try:
         service = get_audit_basis_search_service()
-        return _deduplicate_basis_sections(
+        from app.review_engine.basis_trace import build_basis_trace
+        es_available = bool(service.is_available())
+        hits = _deduplicate_basis_sections(
             service.search(content, basis_sections, document_language=document_language, limit=limit)
-        )
+        ) if es_available else []
+        review_id = _current_review_id()
+        if hits:
+            _store_basis_trace(review_id, build_basis_trace(
+                review_id=review_id, sections=hits, es_available=True, es_hit=True
+            ))
+            return hits
+        _store_basis_trace(review_id, build_basis_trace(
+            review_id=review_id,
+            sections=basis_sections,
+            es_available=es_available,
+            fallback=True,
+            fallback_reason="es_unavailable" if not es_available else "es_empty",
+        ))
+        return []
     except Exception as exc:
         print(f"[审核] ES 审核依据召回失败，回退本地匹配: {exc}")
+        from app.review_engine.basis_trace import build_basis_trace
+        review_id = _current_review_id()
+        _store_basis_trace(review_id, build_basis_trace(
+            review_id=review_id,
+            sections=basis_sections,
+            es_available=False,
+            fallback=True,
+            fallback_reason=str(exc)[:180],
+        ))
         return []
 
 
@@ -5238,46 +6656,69 @@ def _ai_provider_cache_fingerprint():
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None):
+def _build_ai_chunk_cache_key(chunk, language, audit_basis, document_name=None, review_id=None):
+    from app.review_engine.versions import BASIS_POLICY_VERSION, FILTER_POLICY_VERSION, PROMPT_VERSION
     raw = "||".join([
+        str(review_id or ""),
         hashlib.sha1(str(chunk or "").encode("utf-8")).hexdigest(),
         hashlib.sha1(str(audit_basis or "").encode("utf-8")).hexdigest(),
         str(language or ""),
         str(document_name or ""),
         _review_cache_version(),
         _ai_provider_cache_fingerprint(),
+        PROMPT_VERSION,
+        FILTER_POLICY_VERSION,
+        BASIS_POLICY_VERSION,
     ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None):
-    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis, document_name=document_name)
+def _run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, document_name=None, excerpt_position=None):
+    cache_key = _build_ai_chunk_cache_key(chunk, document_language, audit_basis, document_name=document_name, review_id=review_id)
     if force_provider:
         cache_key = hashlib.sha1((cache_key + "|provider=" + force_provider).encode("utf-8")).hexdigest()
     cached = _ai_review_chunk_cache.get(cache_key)
-    if cached is not None:
+    _ensure_review_not_cancelled(review_id)
+    bypass_cache = False
+    try:
+        bypass_cache = int(review_id) in _review_force_rerun_ids
+    except (TypeError, ValueError):
+        bypass_cache = False
+    if cached is not None and not bypass_cache:
         return deepcopy(cached), True
 
     # 构建文档上下文（包含文件名），让 AI 能检查文件名与内容的一致性
     chapter_context = {}
     if document_name:
         chapter_context["document_name"] = document_name
+    # 告知 AI 当前只是完整文档的一个机械切分片段，避免把切分边界当成内容缺失
+    index, total = excerpt_position or (0, 0)
+    if index and total:
+        chapter_context["context"] = (
+            f"This is excerpt {index} of {total} cut mechanically from a longer document. "
+            "Content before and after this excerpt continues elsewhere and must not be reported as missing."
+        )
 
-    result = _call_with_timeout(
-        ai_client.audit_document,
-        chunk_timeout,
-        chunk,
-        document_language,
-        audit_basis,
-        True,
-        review_id,
-        "review.audit_chunk",
-        chapter_context=chapter_context if chapter_context else None,
-        force_provider=force_provider,
-    )
-    chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
-    _ai_review_chunk_cache[cache_key] = deepcopy(chunk_issues)
-    return chunk_issues, False
+    _AI_REVIEW_SEMAPHORE.acquire()
+    try:
+        result = _call_with_timeout(
+            ai_client.audit_document,
+            chunk_timeout,
+            chunk,
+            _ai_prompt_language(document_language, chunk),
+            audit_basis,
+            True,
+            review_id,
+            "review.audit_chunk",
+            chapter_context=chapter_context if chapter_context else None,
+            force_provider=force_provider,
+        )
+        chunk_issues = result.get('issues', []) if isinstance(result, dict) else []
+        _record_review_observations(review_id, result.get('observations') if isinstance(result, dict) else [])
+        _ai_review_chunk_cache[cache_key] = deepcopy(chunk_issues)
+        return chunk_issues, False
+    finally:
+        _AI_REVIEW_SEMAPHORE.release()
 
 
 def _log_review_ai_usage(review_id, request_label, title):
@@ -5394,6 +6835,24 @@ _FILENAME_SPELLING_FIXES = {
 }
 
 
+_FILENAME_PRODUCT_RE = re.compile(r'[A-Z][A-Za-z0-9]+(?:-[A-Za-z0-9]+)+')
+
+
+def _normalize_filename_product_token(token):
+    return re.sub(r'[\s_\-]+', '', str(token or '')).casefold()
+
+
+def _is_filename_control_token(token):
+    text = str(token or '').strip()
+    if not text:
+        return True
+    if re.fullmatch(r'[A-Z](?:-\d{2,6})+(?:-\d{2,6})*', text):
+        return True
+    if re.fullmatch(r'(?:[A-Z]{1,4}-)?R\d{2,3}', text, re.IGNORECASE):
+        return True
+    return False
+
+
 def _is_known_product_output_filename(stem: str) -> bool:
     normalized = str(stem or "").strip()
     if not normalized:
@@ -5455,35 +6914,47 @@ def _run_filename_audit(filename: str, content: str, document_language: str) -> 
     product_patterns = re.findall(r'[A-Z][A-Za-z0-9]+(?:-[A-Za-z0-9]+)+', stem)
     # 过滤掉常见非产品名词（如 Notification, Product, Upgrade, User, For）
     stop_words = {'Notification', 'Product', 'Upgrade', 'Update', 'User', 'Users', 'For', 'Document', 'Notice'}
-    candidate_products = [p for p in product_patterns if p not in stop_words and len(p) >= 3]
-    
+    candidate_products = [
+        token for token in product_patterns
+        if token not in stop_words and len(token) >= 3 and not _is_filename_control_token(token)
+    ]
+    compact_content = _normalize_filename_product_token(content)
+    body_products = [
+        token for token in _FILENAME_PRODUCT_RE.findall(str(content or ''))
+        if not _is_filename_control_token(token)
+    ]
+
     for product in candidate_products:
-        # 在正文内容中搜索该产品名
-        if product not in content:
-            # 尝试模糊匹配：忽略大小写和空格变体
-            pattern_variants = [
-                product,
-                product.replace('-', ' '),
-                product.replace('-', ''),
-                product.replace(' ', '-'),
-                product.replace(' ', ''),
-            ]
-            found = any(v in content for v in pattern_variants)
-            if not found and len(product) >= 4:
-                issues.append({
-                    "severity": "general",
-                    "category": "文件名错误",
-                    "rule": "FILENAME-002",
-                    "chapter": "文件名",
-                    "original_text": product,
-                    "context": f"文件名: {basename}",
-                    "suggestion": f"确认产品名「{product}」是否与正文一致",
-                    "description": f"文件名中的产品名「{product}」在正文内容中未找到，请确认文件名和内容的产品名是否一致",
-                    "audit_basis": "文件名与内容一致性检查",
-                    "confidence": 70,
-                    "source": "rule",
-                    "position": "filename",
-                })
+        compact_product = _normalize_filename_product_token(product)
+        if compact_product and compact_product in compact_content:
+            continue
+        conflicts = []
+        seen_conflicts = set()
+        for body_product in body_products:
+            compact_body = _normalize_filename_product_token(body_product)
+            if not compact_body or compact_body == compact_product:
+                continue
+            if compact_body in seen_conflicts:
+                continue
+            seen_conflicts.add(compact_body)
+            conflicts.append(body_product)
+        if not conflicts:
+            continue
+        conflict_text = conflicts[0]
+        issues.append({
+            "severity": "general",
+            "category": "文件名错误",
+            "rule": "FILENAME-002",
+            "chapter": "文件名",
+            "original_text": product,
+            "context": f"文件名: {basename}",
+            "suggestion": f"请将文件名或正文统一为「{product}」或「{conflict_text}」",
+            "description": f"文件名产品名「{product}」与正文「{conflict_text}」不一致",
+            "audit_basis": "文件名与内容一致性检查",
+            "confidence": 82,
+            "source": "rule",
+            "position": "filename",
+        })
     
     # ── 3. 日期格式检查 ──
     # 检测 YYYYMMDD 格式（无分隔符）
@@ -5683,6 +7154,32 @@ def _build_problem_summary_rows(issues):
             row[f'{key}_label'] = labels[key]
         rows.append(row)
     return rows
+
+
+# v2 第 8 节：十项检查项 → 六维度映射，用于「通过项列举」
+TEN_CHECK_ITEMS = [
+    '标点符号', '错别字', '单位', '术语', '语法',
+    '格式', '结构', '索引与交叉引用', '法规', '语义',
+]
+
+_CHECK_ITEM_TO_DIMENSION = {
+    '标点符号': '语言质量', '错别字': '语言质量', '语法': '语言质量',
+    '术语': '术语一致性',
+    '结构': '逻辑完整性',
+    '索引与交叉引用': '交叉引用',
+    '法规': '安全合规',
+    '单位': '格式规范', '格式': '格式规范', '语义': '格式规范',
+}
+
+
+def _build_passed_items_line(issues):
+    """v2 第 8 节：通过项压成一段单行列举，不要展开、不要重复。"""
+    hit_dimensions = {_issue_dimension(issue) for issue in issues}
+    passed = [item for item in TEN_CHECK_ITEMS
+              if _CHECK_ITEM_TO_DIMENSION[item] not in hit_dimensions]
+    if not passed:
+        return '本次审核十项检查项均有检出，无完全通过项。'
+    return '、'.join(passed) + '：本次审核未发现问题。'
 
 
 def _group_issues_by_severity(issues):
@@ -6104,6 +7601,7 @@ def _generate_review_html_content(review, doc, issues):
     verdict = _build_report_verdict(report_issues)
     conclusion = _build_report_conclusion(report_issues)
     feedback_advice = _build_feedback_advice(report_issues)
+    passed_items_line = _build_passed_items_line(report_issues)
     nav_items = []
     for severity in ['fatal', 'serious', 'general', 'suggestion']:
         entries = grouped_issues.get(severity) or []
@@ -6201,15 +7699,34 @@ def _generate_review_html_content(review, doc, issues):
             <p>本报告基于格式规范、语言质量、术语一致性、逻辑完整性、安全合规、交叉引用六个维度输出结构化审核结果，供编辑修订与复审使用。</p>
             <div class="module-tag">REVIEW TASK #{review.id}</div>
         </div>
-        <div class="meta">
+        <div class="section">
+        <h2>一、文档信息</h2>
+        <div class="meta" style="margin:12px 0 0">
             <div class="meta-card"><div class="meta-label">文档名称</div><div class="meta-value">{metadata['name']}</div></div>
             <div class="meta-card"><div class="meta-label">审核日期</div><div class="meta-value">{_format_report_datetime(getattr(review, 'completed_at', None) or getattr(review, 'created_at', None))}</div></div>
             <div class="meta-card"><div class="meta-label">审核人</div><div class="meta-value">技术文档审核AI助理</div></div>
             <div class="meta-card"><div class="meta-label">文档范围</div><div class="meta-value">{metadata['file_type']} · {metadata['page_count']} 页 · {metadata['section_count']} 个章节</div></div>
         </div>
+        </div>
+        <div class="section">
+        <h2>二、审核范围与依据</h2>
+        <div class="callout">
+            <div><strong>审核范围：</strong>全文档（{metadata['page_count']} 页 / {metadata['section_count']} 章节）</div>
+            <div><strong>内容维度：</strong>格式规范、语言质量、术语一致性、逻辑完整性、安全合规、交叉引用</div>
+            <div><strong>审核依据（P0–P5）：</strong></div>
+            <ul>
+                <li>P0 平台规则库（10 大分类）</li>
+                <li>P1 中文风格指南</li>
+                <li>P2 英文风格指南</li>
+                <li>P3 错误清单</li>
+                <li>P4 公司特定规范</li>
+                <li>P5 人工裁定沉淀（CYY 人工审核经验基线）</li>
+            </ul>
+        </div>
+        </div>
 
         <div class="section">
-        <h2>模块 1 · 审核概览</h2>
+        <h2>三、问题概览</h2>
         <div class="summary-grid">
             <div class="summary-card card-fatal"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'fatal')}</div><div class="label">致命</div></div>
             <div class="summary-card card-serious"><div class="num">{sum(1 for issue in report_issues if _issue_value(issue, 'severity', '') == 'serious')}</div><div class="label">严重</div></div>
@@ -6218,7 +7735,7 @@ def _generate_review_html_content(review, doc, issues):
         </div>
         </div>
         <div class="section">
-        <h2>模块 2 · 问题明细</h2>
+        <h2>四、分级问题清单</h2>
         <div class="report-nav">
             <a href="#summary-table">问题汇总表</a>
             {''.join(f'<a href="#group-{severity}">{html_lib.escape(title)}</a>' for severity, title in nav_items)}
@@ -6292,16 +7809,12 @@ def _generate_review_html_content(review, doc, issues):
     html += f"""
         </div>
         <div class="section">
-        <h2>模块 3 · 审核结论</h2>
+        <h2>五、审核结论</h2>
         <div class="callout">
             <div><strong>判定结果:</strong> {html_lib.escape(verdict)}</div>
             <div><strong>结论说明:</strong> {html_lib.escape(conclusion)}</div>
-            <div><strong>复审建议:</strong></div>
-            <ul>
-                <li>{html_lib.escape(feedback_advice[0])}</li>
-                <li>{html_lib.escape(feedback_advice[1])}</li>
-                <li>{html_lib.escape(feedback_advice[2])}</li>
-            </ul>
+            <div><strong>通过项:</strong> {html_lib.escape(passed_items_line)}</div>
+            <div><strong>复审建议:</strong> {html_lib.escape(feedback_advice[0])}</div>
         </div>
         </div>
 """
@@ -6384,6 +7897,345 @@ def _run_logic_integrity_audit(content):
     return issues
 
 
+def _span_in_tableish_text(text, start, end):
+    value = str(text or '')
+    line_start = value.rfind('\n', 0, start) + 1
+    line_end = value.find('\n', end)
+    if line_end < 0:
+        line_end = len(value)
+    line = value[line_start:line_end]
+    if line.count('|') >= 2:
+        return True
+    if re.search(r'-{3,}', line) and '|' in line:
+        return True
+    neighborhood = value[max(0, start - 120):min(len(value), end + 120)]
+    return neighborhood.count('|') >= 4
+
+
+def _short_edit_distance(left, right):
+    if left == right:
+        return 0
+    if abs(len(left) - len(right)) > 2:
+        return 99
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, 1):
+        current = [i]
+        for j, right_char in enumerate(right, 1):
+            current.append(min(
+                current[-1] + 1,
+                previous[j] + 1,
+                previous[j - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
+
+
+def _extract_printed_page_number(page_text):
+    lines = [line.strip() for line in str(page_text or '').splitlines() if line.strip()]
+    for line in reversed(lines[-8:]):
+        if re.fullmatch(r'0*\d{1,3}', line):
+            return int(line)
+    return None
+
+
+def _printed_page_spans(raw_content):
+    text = str(raw_content or '')
+    if not text:
+        return []
+    if '\f' in text:
+        spans = []
+        offset = 0
+        pages = text.split('\f')
+        for page_index, page_text in enumerate(pages):
+            printed = _extract_printed_page_number(page_text)
+            start = offset
+            end = offset + len(page_text)
+            spans.append({
+                'printed': printed if printed is not None else page_index + 1,
+                'start': start,
+                'end': end,
+            })
+            offset = end + 1
+        return spans
+
+    markers = list(re.finditer(r'(?m)^[ \t]*0*(\d{2,3})[ \t]*$', text))
+    if len(markers) < 2:
+        return []
+    numbers = [int(match.group(1)) for match in markers]
+    increasing = sum(1 for index in range(1, len(numbers)) if numbers[index] >= numbers[index - 1])
+    if increasing < len(numbers) - 1:
+        return []
+
+    spans = []
+    start = 0
+    for index, match in enumerate(markers):
+        spans.append({
+            'printed': int(match.group(1)),
+            'start': start,
+            'end': match.end(),
+        })
+        start = match.end()
+    if spans:
+        spans[-1]['end'] = len(text)
+    return spans
+
+
+def _printed_page_at_offset(spans, offset):
+    for span in spans:
+        if span['start'] <= offset < span['end']:
+            return span['printed']
+        if offset == span['end'] and span is spans[-1]:
+            return span['printed']
+    return None
+
+
+def _find_named_section_start(normalized, section_name):
+    name = re.sub(r'\s+', '', str(section_name or ''))
+    if not name:
+        return None
+    pattern = r'(?m)^[ \t]*' + r'\s*'.join(re.escape(char) for char in name) + r'[ \t]*$'
+    matches = list(re.finditer(pattern, normalized))
+    if len(matches) == 1:
+        return matches[0].start()
+    # 标题目录/同名章节会让标题在正文中多次出现，无法确定唯一锚点，
+    # 此时放弃页码判断，避免取到错误章节造成误报。
+    return None
+
+
+# 已知的 UI 用词同义后缀（同一动作的两种界面写法），用于界面按钮文案一致性检查
+UI_LABEL_SYNONYM_SUFFIXES = {
+    frozenset(('开启', '启动')),
+}
+
+
+def _detect_page_number_sequence_issues(content):
+    """检测页脚页码重复或回跳。该判据与文档语言无关，中英文文档通用。"""
+    raw_content = str(content or '')
+    normalized = raw_content.replace('\f', '\n')
+    issues = []
+
+    page_offsets = []
+    offset = 0
+    for page_text in raw_content.split('\f'):
+        page_offsets.append(offset)
+        offset += len(page_text) + 1
+
+    visible_page_numbers = []
+    for page_index, page_text in enumerate(raw_content.split('\f')):
+        lines = [line.strip() for line in str(page_text or '').splitlines() if line.strip()]
+        if not lines:
+            continue
+        for line in reversed(lines[-8:]):
+            if re.fullmatch(r'\d{1,3}', line):
+                page_number = int(line)
+                local_start = page_text.rfind(line)
+                if local_start >= 0:
+                    visible_page_numbers.append((page_index + 1, page_number, page_offsets[page_index] + local_start, line))
+                break
+
+    seen_page_numbers = {}
+    last_page_number = None
+    for page_index, page_number, start, raw in visible_page_numbers:
+        if page_number in seen_page_numbers and last_page_number is not None and page_number <= last_page_number:
+            previous_page = seen_page_numbers[page_number]
+            issue_text = f'页码 {page_number}（第{page_index}个PDF页面）'
+            issues.append({
+                'severity': 'general',
+                'category': '页码异常',
+                'rule': 'CYY-CN-PAGE-001',
+                'chapter': extract_chapter(normalized, start),
+                'original_text': issue_text[:240],
+                'context': get_context(normalized, start, start + len(raw), 180),
+                'suggestion': '请核对全文页脚页码，修正重复或回跳的页码编号',
+                'description': f'页脚页码“{page_number}”已在第 {previous_page} 个 PDF 页面出现，当前第 {page_index} 个 PDF 页面再次出现，页码序列存在重复或回跳。',
+                'audit_basis': 'CYY人工审核经验基线 - 页码序列一致性',
+                'confidence': 93,
+                'source': 'rule',
+                'position': _encode_issue_position(start, start + len(raw)),
+            })
+        seen_page_numbers.setdefault(page_number, page_index)
+        last_page_number = page_number
+
+    return issues
+
+
+_ROHS_STRUCTURE_PARTS = (
+    ("主体架构", "主体架构"),
+    ("操作系统主机", "操作系统主机"),
+    ("XYZ-平台", "XYZ-平台"),
+    ("XYZ平台", "XYZ-平台"),
+    ("试剂仓", "试剂仓"),
+)
+_INDEX_ENTRY_RE = re.compile(
+    r"([A-Za-z\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff/%\-()]{1,40})[ \t]+(\d{1,3}(?:\s*[,，]\s*\d{1,3})*)"
+)
+
+
+def _compact_cn_text(text):
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _find_last_standalone_heading(text, heading):
+    pattern = rf"(?m)^[ \t]*{re.escape(heading)}[ \t]*$"
+    matches = list(re.finditer(pattern, text))
+    return matches[-1] if matches else None
+
+
+def _heading_window(text, match, max_chars=3500):
+    start = match.start()
+    rest = text[match.end():match.end() + max_chars]
+    next_heading = re.search(
+        r"(?m)^[ \t]*(?:第[一二三四五六七八九十百千0-9]+[章节篇部]|附录\s*[A-Z0-9一二三四五六七八九十]*|术语表)[ \t]*$",
+        rest,
+    )
+    end = match.end() + (next_heading.start() if next_heading else len(rest))
+    return text[start:end], start
+
+
+def _detect_rohs_structure_component_gaps(normalized):
+    structure_match = _find_last_standalone_heading(normalized, "结构组成")
+    rohs_match = None
+    for title in ("产品中有害物质的名称及含有信息表", "产品中有害物质的名称及含有物质表"):
+        rohs_match = _find_last_standalone_heading(normalized, title)
+        if rohs_match:
+            break
+    if structure_match is None or rohs_match is None:
+        return []
+    structure_window, _structure_start = _heading_window(normalized, structure_match)
+    rohs_window, rohs_start = _heading_window(normalized, rohs_match)
+    structure_compact = _compact_cn_text(structure_window)
+    rohs_compact = _compact_cn_text(rohs_window)
+    missing = []
+    for needle, label in _ROHS_STRUCTURE_PARTS:
+        compact_needle = _compact_cn_text(needle)
+        if compact_needle in structure_compact and compact_needle not in rohs_compact and label not in missing:
+            missing.append(label)
+    if not missing:
+        return []
+    marker = re.search(r"部件名称", rohs_window)
+    start = rohs_start + (marker.start() if marker else 0)
+    original = "部件名称"
+    return [{
+        "start": start,
+        "end": start + len(original),
+        "original": original,
+        "missing": missing,
+    }]
+
+
+def _iter_index_entries(index_text, max_page=400):
+    seen = set()
+    for match in _INDEX_ENTRY_RE.finditer(index_text):
+        term = re.sub(r"\s+", " ", match.group(1)).strip(" /")
+        if len(term) < 2 or re.fullmatch(r"[A-Za-z]", term):
+            continue
+        if "..." in term or "…" in term:
+            continue
+        if re.search(r"表示|依据|电话|参考品|基因组", term):
+            continue
+        pages = [int(num) for num in re.findall(r"\d+", match.group(2))]
+        if not pages or any(page > max_page or page <= 0 for page in pages):
+            continue
+        if len(term) > 24 and len(pages) == 1:
+            continue
+        key = (term, pages[0])
+        if key in seen:
+            continue
+        seen.add(key)
+        yield term, pages, match.start(), match.group(0)
+
+
+def _find_alphabetic_index_start(normalized):
+    letter_lines = list(re.finditer(r"(?m)^[ \t]*[A-Z][ \t]*$", normalized))
+    if len(letter_lines) < 3:
+        return None
+    clusters = [[letter_lines[0]]]
+    for prev, current in zip(letter_lines, letter_lines[1:]):
+        if current.start() - prev.start() <= 800:
+            clusters[-1].append(current)
+        else:
+            clusters.append([current])
+    for cluster in reversed(clusters):
+        if len(cluster) >= 3:
+            return cluster[0].start()
+    return None
+
+
+def _index_term_body_pages(body, spans, term):
+    pages = set()
+    pos = 0
+    step = max(len(term), 1)
+    while True:
+        found = body.find(term, pos)
+        if found < 0:
+            break
+        printed = _printed_page_at_offset(spans, found)
+        if printed is not None:
+            pages.add(printed)
+        pos = found + step
+    return pages
+
+
+def _detect_constant_index_page_offset(raw_content, normalized):
+    heading = None
+    for match in re.finditer(r"(?m)^[ \t]*索引[ \t]*$", normalized):
+        heading = match
+    if heading is not None:
+        heading_start = heading.end()
+        index_text = normalized[heading.end():]
+    else:
+        heading_start = _find_alphabetic_index_start(normalized)
+        if heading_start is None:
+            return None
+        index_text = normalized[heading_start:]
+    entries = list(_iter_index_entries(index_text))
+    if len(entries) < 5:
+        return None
+    body = normalized[:heading_start]
+    spans = _printed_page_spans(raw_content)
+    if not spans:
+        return None
+    located = []
+    for term, pages, rel_start, raw in entries:
+        occ = _index_term_body_pages(body, spans, term)
+        if not occ:
+            continue
+        located.append((term, pages, occ, raw))
+    if len(located) < 5:
+        return None
+    offset_hits = Counter()
+    offset_samples = defaultdict(list)
+    for term, cited_pages, occ, raw in located:
+        deltas = {printed - cited for cited in cited_pages for printed in occ}
+        for delta in deltas:
+            offset_hits[delta] += 1
+            if len(offset_samples[delta]) < 4:
+                offset_samples[delta].append(re.sub(r"\s+", " ", raw).strip())
+    nonzero = [(delta, count) for delta, count in offset_hits.items() if abs(delta) >= 2]
+    if not nonzero:
+        return None
+    common_offset, common_count = max(nonzero, key=lambda item: (item[1], -abs(item[0])))
+    checked = len(located)
+    zero_count = offset_hits.get(0, 0)
+    if common_count < max(5, int(checked * 0.35)):
+        return None
+    if zero_count >= int(checked * 0.8) and zero_count > common_count:
+        return None
+    samples = offset_samples.get(common_offset) or []
+    original = samples[0] if samples else "索引"
+    start = heading_start + (index_text.find(samples[0]) if samples else 0)
+    if start < heading_start:
+        start = heading_start
+    return {
+        "start": start,
+        "end": start + len(original),
+        "original": original,
+        "offset": common_offset,
+        "hit_count": common_count,
+        "checked": checked,
+    }
+
+
 def _run_chinese_human_baseline_rules(content):
     issues = []
     seen = set()
@@ -6413,40 +8265,7 @@ def _run_chinese_human_baseline_rules(content):
             'position': _encode_issue_position(start, end),
         })
 
-    page_offsets = []
-    offset = 0
-    for page_text in raw_content.split('\f'):
-        page_offsets.append(offset)
-        offset += len(page_text) + 1
-
-    visible_page_numbers = []
-    for page_index, page_text in enumerate(raw_content.split('\f')):
-        lines = [line.strip() for line in str(page_text or '').splitlines() if line.strip()]
-        if not lines:
-            continue
-        for line in reversed(lines[-8:]):
-            if re.fullmatch(r'\d{1,3}', line):
-                page_number = int(line)
-                local_start = page_text.rfind(line)
-                if local_start >= 0:
-                    visible_page_numbers.append((page_index + 1, page_number, page_offsets[page_index] + local_start, line))
-                break
-
-    seen_page_numbers = {}
-    last_page_number = None
-    for page_index, page_number, start, raw in visible_page_numbers:
-        if page_number in seen_page_numbers and last_page_number is not None and page_number <= last_page_number:
-            previous_page = seen_page_numbers[page_number]
-            issue_text = f'页码 {page_number}（第{page_index}个PDF页面）'
-            add_issue(
-                start, start + len(raw), issue_text,
-                'CYY-CN-PAGE-001', '页码异常',
-                '请核对全文页脚页码，修正重复或回跳的页码编号',
-                f'页脚页码“{page_number}”已在第 {previous_page} 个 PDF 页面出现，当前第 {page_index} 个 PDF 页面再次出现，页码序列存在重复或回跳。',
-                'CYY人工审核经验基线 - 页码序列一致性', 'general', 93,
-            )
-        seen_page_numbers.setdefault(page_number, page_index)
-        last_page_number = page_number
+    issues.extend(_detect_page_number_sequence_issues(raw_content))
 
     for match in re.finditer(r'\b(?:H-020-)?0{2}X{4}-00\b|\b0-00X{4}-00\b', normalized, re.IGNORECASE):
         add_issue(
@@ -6529,6 +8348,18 @@ def _run_chinese_human_baseline_rules(content):
             'CYY人工审核经验基线 - 体积单位格式', 'general', 95,
         )
 
+    for match in re.finditer(r'\b([A-Za-z][A-Za-z0-9]*)TM\b', normalized):
+        stem = match.group(1)
+        if stem.upper() in {'HTML', 'HTTP', 'HTTPS', 'ATM', 'GMT', 'STM', 'RTM', 'PTM', 'CTM', 'NTM'}:
+            continue
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-TM-001', '商标格式',
+            f'{stem}™',
+            f'{stem} 商标标识应使用 ™ 符号，避免写成普通 TM 文本。',
+            'CYY人工审核经验基线 - 商标标识格式', 'general', 93,
+        )
+
     for match in re.finditer(r'\b\d+(?:\.\d+)?\s+mins\b', normalized, re.IGNORECASE):
         raw = match.group(0)
         minutes = re.match(r'(\d+(?:\.\d+)?)', raw, re.IGNORECASE)
@@ -6543,13 +8374,15 @@ def _run_chinese_human_baseline_rules(content):
 
     for match in re.finditer(r'\b\d+(?:\.\d+)?\s*℃', normalized):
         raw = match.group(0)
+        if re.search(r'\d\s+℃', raw):
+            continue
         temperature = re.match(r'(\d+(?:\.\d+)?)', raw)
-        suggestion = f'{temperature.group(1)} °C' if temperature else '请统一温度单位写法'
+        suggestion = f'{temperature.group(1)} ℃' if temperature else '请统一温度单位写法'
         add_issue(
             match.start(), match.end(), raw,
             'CYY-CN-UNIT-003', '单位格式',
             suggestion,
-            '温度建议统一写为“°C”，并在数值与单位之间保留空格。',
+            '中文说明书中温度单位建议使用“℃”，并在数值与单位之间保留空格。',
             'CYY人工审核经验基线 - 温度单位格式', 'general', 94,
         )
 
@@ -6630,6 +8463,15 @@ def _run_chinese_human_baseline_rules(content):
             '建议改为“线缆”',
             '“线揽”疑似“线缆”的错别字，物料或部件表中应使用规范部件名称。',
             'CYY人工审核经验基线 - 常见中文错别字', 'general', 96,
+        )
+
+    for match in re.finditer(r'交户', normalized):
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-SPELL-007', '术语拼写',
+            '建议改为“交互”',
+            '“交户”疑似“交互”的错别字，界面说明中应使用“用户交互界面”。',
+            'CYY人工审核经验基线 - 常见中文错别字', 'serious', 97,
         )
 
     for match in re.finditer(r'加入至', normalized):
@@ -6778,6 +8620,38 @@ def _run_chinese_human_baseline_rules(content):
             '同一文档中同时出现“10 μL”和“10μL”类写法，单位空格风格需要统一。',
             'CYY人工审核经验基线 - 数字与单位空格统一', 'general', 94,
         )
+
+    katakana_hits = [
+        match for match in re.finditer(r'(?m)^[\t \u3000]*・\s*\S+', normalized)
+        if not _span_in_tableish_text(normalized, match.start(), match.end())
+    ]
+    if katakana_hits:
+        match = katakana_hits[0]
+        add_issue(
+            match.start(), match.start() + 1, '・',
+            'CYY-CN-FORMAT-006', '格式规范',
+            '•',
+            f'片段中出现 {len(katakana_hits)} 处日文中点“・”作为列表标记，中文说明书应改用 “•” 或 “-”。',
+            'CYY人工审核经验基线 - 列表标记格式', 'general', 92,
+        )
+
+    if re.search(r'[\u4e00-\u9fff]', normalized):
+        for hour_match in re.finditer(r'(?<![~～≈])\b\d+\s*h\b', normalized):
+            if _span_in_tableish_text(normalized, hour_match.start(), hour_match.end()):
+                continue
+            window = normalized[max(0, hour_match.start() - 80):hour_match.end() + 80]
+            day_match = re.search(r'\d+\s*天', window)
+            if not day_match:
+                continue
+            hour_raw = hour_match.group(0)
+            add_issue(
+                hour_match.start(), hour_match.end(), hour_raw,
+                'CYY-CN-FORMAT-007', '格式规范',
+                re.sub(r'\s*h\b', ' 小时', hour_raw, flags=re.IGNORECASE),
+                f'同一处同时使用“{day_match.group(0)}”和“{hour_raw}”，时间单位中英混用，建议统一。',
+                'CYY人工审核经验基线 - 时间单位语种统一', 'general', 90,
+            )
+            break
 
     for match in re.finditer(r'37°C 或室温', normalized):
         add_issue(
@@ -7041,6 +8915,9 @@ def _run_chinese_human_baseline_rules(content):
         )
 
     for match in re.finditer(r'\bRXN\b', normalized):
+        prefix = normalized[max(0, match.start() - 12):match.start()]
+        if re.search(r'\d+\s*$', prefix):
+            continue
         add_issue(
             match.start(), match.end(), match.group(0),
             'CYY-CN-PRODUCT-003', '产品信息',
@@ -7678,7 +9555,178 @@ def _run_chinese_human_baseline_rules(content):
                 89,
             )
 
+    ui_labels = []
+    for match in re.finditer(r'【([^】]{1,40})】', normalized):
+        compact = re.sub(r'\s+', '', match.group(1))
+        if compact:
+            ui_labels.append((match.start(), match.end(), compact))
+    for match in re.finditer(r'(?m)^[ \t]*(长按[\u4e00-\u9fff]{2})[ \t]*$', normalized):
+        ui_labels.append((match.start(), match.end(), match.group(1)))
+
+    unique_ui_labels = {}
+    for start, end, compact in ui_labels:
+        if not re.search(r'[\u4e00-\u9fff]', compact):
+            continue
+        if not (2 <= len(compact) <= 12):
+            continue
+        unique_ui_labels.setdefault(compact, (start, end))
+
+    ui_items = list(unique_ui_labels.items())
+    for left_index, (left_label, left_span) in enumerate(ui_items):
+        for right_label, right_span in ui_items[left_index + 1:]:
+            if abs(len(left_label) - len(right_label)) > 1:
+                continue
+            prefix_len = len(os.path.commonprefix([left_label, right_label]))
+            if prefix_len < 2:
+                continue
+            # 差异部分含拉丁字母/数字的标签多为并列枚举项（识别结果（DNA）/（RNA）、
+            # 短读长1链/2链），是带区分意义的正常命名，不是同一动作的用词不统一。
+            if re.search(r'[A-Za-z0-9]', left_label[prefix_len:] + right_label[prefix_len:]):
+                continue
+            # 只报单字符差异（如“同步到/同步至”）或已知同义后缀（如“开启/启动”）的用词不统一。
+            # 共享前缀但差异达 2 个字符的标签多是并列菜单项或参数字段
+            # （系统设置/系统时间、测序类型/测序方案、Barcode管理/Barcode位置），
+            # 属于不同功能的正常命名，不是同一动作的用词不统一。
+            if _short_edit_distance(left_label, right_label) != 1:
+                suffix_pair = frozenset((left_label[prefix_len:], right_label[prefix_len:]))
+                if suffix_pair not in UI_LABEL_SYNONYM_SUFFIXES:
+                    continue
+            start, end = left_span
+            add_issue(
+                start, end, f'{left_label} / {right_label}',
+                'CYY-CN-UI-002', '术语一致性',
+                f'建议将界面文案统一为“{left_label}”或“{right_label}”中的一种',
+                f'同一操作在界面文案中同时出现“{left_label}”和“{right_label}”，用词需要统一。',
+                'CYY人工审核经验基线 - 界面按钮文案一致性', 'general', 94,
+            )
+
+    page_spans = _printed_page_spans(raw_content)
+    procedure_steps = [
+        (int(match.group(1)), match.start())
+        for match in re.finditer(r'(?m)^[ \t]*(\d{1,2})\.\s+\S', normalized)
+    ]
+    page_step_ref_re = re.compile(
+        r'第\s*(\d+)\s*页\s*[“"「]?\s*([^”"」步骤]{0,40}?)\s*[”"」]?\s*步骤\s*(\d+)'
+    )
+    if page_spans and procedure_steps:
+        for match in page_step_ref_re.finditer(normalized):
+            cited_page = int(match.group(1))
+            section_name = re.sub(r'\s+', '', match.group(2) or '')
+            cited_step = int(match.group(3))
+            search_from = 0
+            if section_name:
+                heading_start = _find_named_section_start(normalized, match.group(2))
+                if heading_start is None:
+                    continue
+                search_from = heading_start
+            step_pos = next(
+                (pos for number, pos in procedure_steps if number == cited_step and pos >= search_from),
+                None,
+            )
+            if step_pos is None:
+                continue
+            actual_page = _printed_page_at_offset(page_spans, step_pos)
+            if actual_page is None or actual_page == cited_page:
+                continue
+            add_issue(
+                match.start(), match.end(), re.sub(r'\s+', ' ', match.group(0)).strip(),
+                'CYY-CN-REF-005', '交叉引用',
+                f'请将页码改为第 {actual_page} 页，或核对该步骤所在页',
+                f'引用“步骤{cited_step}”指向第 {cited_page} 页，该步骤实际出现在第 {actual_page} 页。',
+                'CYY人工审核经验基线 - 步骤页码交叉引用', 'serious', 95,
+            )
+
+    for match in re.finditer(r"操作如下[：:]", normalized):
+        following = normalized[match.end():match.end() + 80]
+        if re.search(r"图|所示|所述", following[:6]):
+            continue
+        if not re.search(r"^\s*1\s*[.、．)]", following):
+            continue
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            "CYY-CN-STEP-004", "步骤结构",
+            "建议改为“操作步骤如下：”",
+            "有序列表前的主干句应使用“操作步骤如下”，当前写成了“操作如下”。",
+            "CYY人工审核经验基线 - 操作步骤引导句", "general", 93,
+        )
+
+    for match in re.finditer(
+        r'([\u4e00-\u9fff][^:\n]{1,16}):(?=\s*(?:\r?\n\s*)?(?:1\s*[.、．)]|y\s))',
+        normalized,
+    ):
+        lead = match.group(1).strip()
+        if lead in {'状态', '说明', '备注', '注意'}:
+            continue
+        add_issue(
+            match.start(), match.end(), match.group(0),
+            'CYY-CN-PUNCT-008', '标点符号',
+            f'建议改为“{lead}：”',
+            '中文引导语后应使用全角冒号。',
+            'CYY人工审核经验基线 - 中文引导语全角冒号', 'general', 94,
+        )
+
+    parent_children = {}
+    for match in re.finditer(
+        r'【([^】]{1,40})】\s*(?:>|，选择)\s*【([^】]{1,40})】',
+        normalized,
+    ):
+        parent = re.sub(r'\s+', '', match.group(1))
+        child = re.sub(r'\s+', '', match.group(2))
+        if not parent or not child:
+            continue
+        parent_children.setdefault(parent, []).append((match.start(2) - 1, match.end(2) + 1, child))
+    for parent, items in parent_children.items():
+        labels = {}
+        for start, end, child in items:
+            labels.setdefault(child, (start, end))
+        names = list(labels)
+        for left_index, left_label in enumerate(names):
+            for right_label in names[left_index + 1:]:
+                shorter, longer = (left_label, right_label) if len(left_label) <= len(right_label) else (right_label, left_label)
+                extra_len = len(longer) - len(shorter)
+                if not longer.endswith(shorter):
+                    continue
+                if not (2 <= len(shorter) <= 6 and 1 <= extra_len <= 4):
+                    continue
+                start, end = labels[shorter]
+                add_issue(
+                    start, end, f'【{shorter}】',
+                    'CYY-CN-UI-003', '术语一致性',
+                    f'建议将【{parent}】下的“{shorter}”统一为“{longer}”',
+                    f'同一菜单【{parent}】下同时出现【{shorter}】和【{longer}】，界面名称需要统一。',
+                    'CYY人工审核经验基线 - 同级菜单名称统一', 'general', 93,
+                )
+
+    for gap in _detect_rohs_structure_component_gaps(normalized):
+        missing = "、".join(gap["missing"])
+        add_issue(
+            gap["start"], gap["end"], gap["original"],
+            "CYY-CN-ROHS-001", "结构完整性",
+            f"请将结构组成章节中的{missing}补入有害物质表",
+            f"有害物质表与结构组成章节部件不一致，缺{missing}。",
+            "CYY人工审核经验基线 - RoHS表与结构组成对照", "serious", 94,
+        )
+
+    index_shift = _detect_constant_index_page_offset(raw_content, normalized)
+    if index_shift:
+        offset = index_shift["offset"]
+        direction = f"+{offset}" if offset > 0 else str(offset)
+        add_issue(
+            index_shift["start"], index_shift["end"], index_shift["original"],
+            "CYY-CN-INDEX-001", "索引一致性",
+            f"请按正文实际页码重生成索引；当前索引页码整体偏移 {direction} 页",
+            f"{index_shift['checked']} 条可核对索引中有 {index_shift['hit_count']} 条相对正文位置恒定偏移 {direction} 页。",
+            "CYY人工审核经验基线 - 索引页码整体偏移", "serious", 95,
+        )
+
     return issues
+
+
+_HEADING_ACTION_VERBS = {
+    'add', 'remove', 'select', 'click', 'tap', 'press', 'open', 'close', 'connect',
+    'disconnect', 'insert', 'restart', 'turn', 'check', 'confirm', 'prepare', 'mix',
+    'incubate', 'centrifuge', 'load', 'scan', 'clean', 'update', 'save', 'delete',
+}
 
 
 def _looks_like_numbered_section_heading(text):
@@ -7697,12 +9745,45 @@ def _looks_like_numbered_section_heading(text):
     words = re.findall(r'[A-Za-z][A-Za-z\-]*|[\u4e00-\u9fff]+', title)
     if not words or len(words) > 8:
         return False
-    action_verbs = {
-        'add', 'remove', 'select', 'click', 'tap', 'press', 'open', 'close', 'connect',
-        'disconnect', 'insert', 'restart', 'turn', 'check', 'confirm', 'prepare', 'mix',
-        'incubate', 'centrifuge', 'load', 'scan', 'clean', 'update', 'save', 'delete',
-    }
-    return words[0].lower() not in action_verbs
+    return words[0].lower() not in _HEADING_ACTION_VERBS
+
+
+_SAFETY_LABEL_RE = re.compile(r'(?im)^[ \t]*(WARNING|CAUTION|DANGER)\b')
+# PDF 文本层会把安全标题下的条目拆成多行，风险词常与标题相隔数百字符，
+# 因此回溯范围要覆盖整个安全段落，不能只用风险词附近的小窗口
+_SAFETY_HAZARD_LOOKBACK = 800
+_HEADING_FUNCTION_WORD_RE = (
+    r'(?:Insert|Press|Please|Remove|Close|Open|Set|Turn|Do|Keep|Avoid|Ensure'
+    r'|Make|Use|Check|Read|Refer|See|After|Before|When|If|To|Connect|Attach|Add'
+    r'|Select|Specify|Perform|Allow|Apply|Store|Place|Position|Repeat|Wait|Step)\b'
+)
+# 段落标题形态：大写开头、无句末标点的短行；排除操作动词/功能词开头的正文
+_SAFETY_SECTION_HEADING_RE = re.compile(
+    rf'^(?!{_HEADING_FUNCTION_WORD_RE})[A-Z][A-Za-z0-9 ,/&\-]{{2,58}}$'
+)
+
+
+def _hazard_has_enclosing_safety_label(normalized, position, document_content=None):
+    """判断风险词之前是否已有同级 WARNING/CAUTION/DANGER 标题覆盖该条目。
+
+    跨章节判定优先用 TOC（经 `_has_intervening_section_heading`），无 TOC 时退化到
+    结构正则。`document_content` 为含前置目录的完整文档；传入后 TOC 未列的小标题也
+    能通过结构判据识别为标题。降级取舍：无法确认跨章节时倾向保留安全标注（少报）
+    而非漏报真实安全标注。
+    """
+    window = normalized[max(0, position - _SAFETY_HAZARD_LOOKBACK):position]
+    label = None
+    for match in _SAFETY_LABEL_RE.finditer(window):
+        label = match
+    if label is None:
+        return False
+    # window 结尾即风险词位置，最后一段可能是半截行，只按完整行判断章节边界。
+    # 标题与风险词之间出现新段落标题，说明已跨章节，不再视为同一安全标注。
+    tail_lines = window[label.end():].split('\n')
+    tail = '\n'.join(tail_lines[:-1]).strip()
+    if tail and _has_intervening_section_heading(tail, document_content):
+        return False
+    return True
 
 
 def _run_safety_compliance_audit(content, document_language='en'):
@@ -7741,6 +9822,8 @@ def _run_safety_compliance_audit(content, document_language='en'):
         window = normalized[max(0, match.start() - 80):min(len(normalized), match.end() + 80)]
         if re.search(r'WARNING|CAUTION|DANGER|警告|注意|危险', window, re.IGNORECASE):
             continue
+        if _hazard_has_enclosing_safety_label(normalized, match.start(), content):
+            continue
         key = ('SAFE-002', match.start())
         if key in seen:
             continue
@@ -7768,8 +9851,6 @@ def _run_cross_reference_audit(content):
     normalized = content.replace('\f', '\n')
     section_numbers = set(re.findall(r'(?m)^\s*(\d+(?:\.\d+)*)[\.)]?\s+[A-Z][^\n]{2,}', normalized))
     step_numbers = {int(num) for num in re.findall(r'(?im)^\s*(?:Step\s+)?(\d+)[\.)]\s+.+$', normalized)}
-    table_numbers = set(re.findall(r'(?im)^\s*(?:Table|表)\s*(\d+)\b', normalized))
-    figure_numbers = set(re.findall(r'(?im)^\s*(?:Figure|Fig\.|图)\s*(\d+)\b', normalized))
     structured_section_numbers = {num for num in section_numbers if '.' in num}
     seen = set()
 
@@ -7801,52 +9882,7 @@ def _run_cross_reference_audit(content):
                     'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='章节', target=f'Section {ref}', check_result='引用缺失'),
                 })
 
-    for match in re.finditer(r'\b(?:according to|refer to|see)?\s*(?:Table|table|表)\s*(\d+)\b', normalized):
-        ref = match.group(1)
-        if ref in table_numbers:
-            continue
-        key = ('REF-TABLE', ref, match.start())
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-            'severity': 'serious',
-            'category': '交叉引用',
-            'rule': 'REF-003',
-            'chapter': '',
-            'original_text': match.group(0).strip(),
-            'context': get_context(normalized, match.start(), match.end(), 120),
-            'suggestion': f'补充 Table {ref}，或删除该引用。',
-            'description': f'引用原文：{match.group(0).strip()}；引用类型：表；目标对象：Table {ref}；检查结果：引用缺失。文档中没有 Table {ref} 的标题。',
-            'audit_basis': '表格引用应能定位到唯一的表格标题。',
-            'confidence': 92,
-            'source': 'rule',
-            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='表', target=f'Table {ref}', check_result='引用缺失'),
-        })
-
-    for match in re.finditer(r'\b(?:Figure|Fig\.|图)\s*(\d+)\b', normalized, re.IGNORECASE):
-        ref = match.group(1)
-        if ref in figure_numbers:
-            continue
-        key = ('REF-FIGURE', ref, match.start())
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-            'severity': 'general',
-            'category': '交叉引用',
-            'rule': 'REF-004',
-            'chapter': '',
-            'original_text': match.group(0),
-            'context': get_context(normalized, match.start(), match.end(), 120),
-            'suggestion': f'补充 Figure {ref} 对应标题，或删除该引用。',
-            'description': f'引用原文：{match.group(0)}；引用类型：图；目标对象：Figure {ref}；检查结果：引用缺失。文档中没有对应图标题。',
-            'audit_basis': '图引用应能定位到唯一的图标题。',
-            'confidence': 88,
-            'source': 'rule',
-            'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='图', target=f'Figure {ref}', check_result='引用缺失'),
-        })
-
+    # Figure/Table checks live only in ReferenceIntegrityRule / reference_index.
     if len(step_numbers) >= 3:
         for match in re.finditer(r'\bStep\s+(\d+)\b', normalized, re.IGNORECASE):
             ref = int(match.group(1))
@@ -7872,6 +9908,51 @@ def _run_cross_reference_audit(content):
                 'confidence': 88,
                 'source': 'rule',
                 'position': _encode_issue_position_with_meta(match.start(), match.end(), area='正文', reference_type='步骤', target=f'Step {ref}', check_result='引用缺失'),
+            })
+
+    # 页码引用（on Page N）：跨页引用在排版变动后极易失效，规范做法是引用
+    # 对象编号（Table 39 / Figure 11）或就近表述（the table below）。
+    #
+    # 启用条件：文档**本身具备编号对象引用体系**。若全文连 Table/Figure 编号都不存在，
+    # 「改用对象引用」这条建议没有可替代的目标，建议本身不成立，故整段不启用。
+    #
+    # 只报「对象级页引用」：引用文本里必须已经出现 Table/Figure/reaction mixture
+    # 这类可替代的对象名 —— 此时「改用对象引用」是确定性改进，不依赖人工判断。
+    # 纯章节名/FAQ 的页引用（如 "refer to Loading ... on Page 99"）不报：
+    # 它们在附录索引与交叉导航中是常规写法，报出即为噪声。
+    # 附录图索引（"Refer to Figure N on Page M" 连续成组）也排除，同理。
+    #
+    # 同一目标页只报一次：同段落里对同一目标页的多种写法属同一缺陷的重复表述，
+    # 逐条报出会放大 issue 数并压低准确率。
+    numbered_object_ids = set(
+        re.findall(r'\b(?:Table|Figure)\s*(\d{1,3})\b', normalized, re.IGNORECASE))
+    if len(numbered_object_ids) >= 2:
+        reported_ref_pages = set()
+        for match in re.finditer(r'([^\n]{3,120}?)\s+on\s+Page\s+(\d{1,4})', normalized):
+            original = match.group(0).strip()
+            if not re.search(r'(?:reaction\s+mixture|Table\s*\d+)', original, re.IGNORECASE):
+                continue
+            if re.match(r'^Refer to Figure\s*\d+\s+on\s+Page', original, re.IGNORECASE):
+                continue
+            ref_page = match.group(2)
+            if ref_page in reported_ref_pages:
+                continue
+            reported_ref_pages.add(ref_page)
+            start, end = match.start(), match.end()
+            issues.append({
+                'severity': 'general',
+                'category': '交叉引用',
+                'rule': 'REF-003',
+                'chapter': '',
+                'original_text': original,
+                'context': get_context(normalized, start, end, 120),
+                'suggestion': '建议取消跨页页码引用，改为引用表格/图编号或就近表述（如 the table below）。',
+                'description': f'引用原文：{original}；引用类型：页码；检查结果：建议改为对象级引用。',
+                'audit_basis': '跨页页码引用在文档排版或分页变动后容易失效，应引用可唯一回溯的对象编号。',
+                'confidence': 86,
+                'source': 'rule',
+                'position': _encode_issue_position_with_meta(
+                    start, end, area='正文', reference_type='页码', target=original, check_result='建议改为对象级引用'),
             })
 
     return issues
@@ -8343,17 +10424,6 @@ def _run_english_heuristic_audit(content, file_type=None):
     for match in re.finditer(r"\bmake\s+total\s+volume\b", content, re.IGNORECASE):
         add_issue(match, "GRAMMAR-004", "语法", "建议改为 make a total volume 或 make the total volume", "total volume 前建议添加冠词。", "英语语法规范 - 冠词")
 
-    for match in re.finditer(r"\bThis\s+instructions\s+for\s+use\s+describes\b", content, re.IGNORECASE):
-        add_issue(
-            match,
-            "GRAMMAR-007",
-            "语法",
-            "建议改为 These instructions for use describe",
-            "instructions 为复数名词，谓语和指示代词应保持一致。",
-            "英语语法规范 - 主谓一致",
-            "serious",
-        )
-
     please_replacements = {
         'please contact': 'contact technical support',
         'please use with caution': 'Use with caution',
@@ -8456,6 +10526,8 @@ def _run_english_heuristic_audit(content, file_type=None):
     for match in re.finditer(r"[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09]", content):
         if official_global_site_pattern.search(get_context(content, match.start(), match.end(), 40)):
             continue
+        if _window_has_cjk(content, match.start(), match.end()) or _is_primarily_chinese(content):
+            continue
         add_issue(match, 'PUNCT-001', '标点符号', '建议改为对应的半角英文标点', '英文文档中不应混入全角或中文标点。', '英文标点规范', 'serious')
 
     if file_type != 'pdf':
@@ -8470,6 +10542,94 @@ def _run_english_heuristic_audit(content, file_type=None):
             add_issue(match, 'TERM-001', '术语一致性', '建议统一为 Tap', '触屏设备中的操作用语建议统一使用 Tap。', '触屏交互术语规范', 'general')
 
     return issues
+
+
+_SYMBOL_LEGEND_VERB_RE = re.compile(
+    r'^\s*[A-Za-z][A-Za-z0-9 ,/\-]{0,56}?\s+'
+    r'(?:Indicates|Means|Denotes|Represents|Refers\s+to|Stands\s+for|表示|说明|指明|含义)',
+    re.IGNORECASE,
+)
+
+
+_SECTION_HEADING_RE = re.compile(
+    rf'^(?!{_HEADING_FUNCTION_WORD_RE})[A-Z][^.!?;:]{{2,59}}$'
+)
+
+
+_CN_SECTION_HEADING_RE = re.compile(
+    r'^(?:第[0-9一二三四五六七八九十百]+[章节篇]|警告|注意|小心|提示|危险|安全说明)'
+)
+
+# 正文句 vs 标题行的结构差异：正文句在行首 1~2 词后紧跟限定词（a/an/the/this/
+# your...）引导宾语，或直接以限定词开头。用这个结构判据替代"枚举操作动词黑名单"，
+# 避免下一批文档换个动词就漏。
+# 注意：此处只认「限定词」，不认「介词」。像 "Logging in to the control software"、
+# "Powering on the device" 这类动名词 + 介词的标题很常见，若把介词也算作正文信号会
+# 把它们误杀。操作句样例（Install the... / Load the sample into... / Dilute the
+# sample with...）都带限定词，限定词判据足以覆盖。
+_HEADING_DETERMINER_RE = (
+    r'(?:a|an|the|this|that|these|those|it|them|your|its|our|their|his|her|we|they|you)'
+)
+_HEADING_PROSE_LEAD_RE = re.compile(
+    rf'^(?:{_HEADING_DETERMINER_RE}\b'
+    rf'|(?:[A-Za-z][A-Za-z0-9\-]*\s+){{1,2}}{_HEADING_DETERMINER_RE}\b)',
+    re.IGNORECASE,
+)
+_HEADING_MAX_WORDS = 6
+
+
+def _looks_like_english_section_heading(stripped):
+    """英文段落标题判据：形态约束 + 结构约束，两者都满足才算标题。
+
+    形态：短行、大写开头、无句末标点、非功能词开头（复用既有正则）。
+    结构：不含「裸动词 + 冠词/代词/介词」的正文句式，且词数不超过 6。
+    """
+    text = str(stripped or '').strip()
+    if not (_SECTION_HEADING_RE.match(text) or _SAFETY_SECTION_HEADING_RE.match(text)):
+        return False
+    if _HEADING_PROSE_LEAD_RE.match(text):
+        return False
+    words = re.findall(r'[A-Za-z][A-Za-z0-9\-]*', text)
+    if not words or len(words) > _HEADING_MAX_WORDS:
+        return False
+    return words[0].lower() not in _HEADING_ACTION_VERBS
+
+
+def _line_looks_like_section_heading(stripped, toc_titles=None):
+    if not stripped:
+        return False
+    normalized = _normalize_toc_title(stripped)
+    if toc_titles and normalized in toc_titles:
+        return True
+    if toc_titles:
+        # 有 TOC 时以 TOC 为准：正则完全不参与，避免目录外的操作正文被误判为标题。
+        return False
+    if _CN_SECTION_HEADING_RE.match(stripped):
+        return True
+    return _looks_like_english_section_heading(stripped)
+
+
+def _has_intervening_section_heading(text, document_content=None):
+    """两段步骤之间是否夹着新章节标题。优先用 TOC，无 TOC 时才退化到正则兜底。"""
+    toc_titles = _toc_heading_titles(document_content) if document_content else frozenset()
+    for line in str(text or '').splitlines():
+        stripped = line.strip()
+        if _line_looks_like_section_heading(stripped, toc_titles):
+            return True
+    return False
+
+
+def _is_symbol_legend_entry(content, start, end):
+    """识别符号表定义行，如 “Catalog number Indicates the manufacturer's catalog number”。
+
+    这类文本用于解释符号含义，并非货号标签写法，不应触发标签统一类规则。
+    """
+    block_start = content.rfind('\n\n', 0, start) + 2
+    block_end = content.find('\n\n', end)
+    if block_end == -1:
+        block_end = len(content)
+    block = re.sub(r'\s+', ' ', content[block_start:block_end]).strip()
+    return bool(_SYMBOL_LEGEND_VERB_RE.match(block))
 
 
 def _run_manual_engineering_audit(content, file_type=None):
@@ -8536,9 +10696,23 @@ def _run_manual_engineering_audit(content, file_type=None):
         )
 
     # 缺失空格：句末标点后直接连写下一个单词（如 temperature.For these）
-    for match in re.finditer(r'([A-Za-z]{2,}[.!?]|[0-9]+[.!?])([A-Z][a-z]{2,})', content):
+    # a) 标点后接大写单词：覆盖右括号、引号、温度符号收尾等场景；用缩写词与单字母首字母
+    #    缩写（U.S.A / e.g.）排除正常连写。标点前限定为文字或收尾符号，避免 URL 查询串、
+    #    转义点号、Markdown 反引号等误报。
+    _ABBREV_WORDS = {
+        'etc', 'eg', 'ie', 'vs', 'approx', 'fig', 'eq', 'no', 'al', 'dr', 'mr', 'mrs', 'ms', 'prof',
+        'ref', 'sec', 'ver', 'vol', 'cf', 'resp', 'viz', 'ph', 'phd', 'st', 'inc', 'ltd', 'dept',
+        'est', 'ext', 'div', 'mfg', 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept',
+        'oct', 'nov', 'dec', 'am', 'pm',
+    }
+    for match in re.finditer(r'([A-Za-z0-9\)\]\}"\'”’℃℉°%μ][.!?])([A-Z])', content):
         head, tail = match.group(1), match.group(2)
-        if head.lower().rstrip('.!?') in ('etc', 'eg', 'ie', 'vs', 'approx', 'fig', 'eq', 'no'):
+        token_match = re.search(r'[A-Za-z]+(?:\.[A-Za-z]+)*$', content[:match.start() + 1])
+        token = token_match.group(0).replace('.', '').lower() if token_match else ''
+        if token in _ABBREV_WORDS:
+            continue
+        # 单字母首字母缩写（如 U.S / U.S.A）：前一位不是字母，说明点号属于缩写而非句末
+        if head[:-1].isupper() and (match.start() == 0 or not content[match.start() - 1].isalpha()):
             continue
         add_issue(
             match.start(),
@@ -8548,6 +10722,22 @@ def _run_manual_engineering_audit(content, file_type=None):
             '空格与排版',
             f"{head} {tail}",
             '英文句子结束后应有一个空格，句末标点后直接连写下一个单词会影响可读性。',
+            '说明书审核能力补强方案 - 句末标点后空格',
+            'general',
+            92,
+        )
+
+    # b) 单词后多出一个孤立小写字母（如 installation.r.）：仅在字母后紧跟分隔符或行尾时判定，
+    #    从而与 manual.pdf、node.js、runtime.env 这类文件名/标识符区分开。
+    for match in re.finditer(r'\b([A-Za-z]{3,})\.([a-z])(?=[\s.,;:!?)\]]|$)', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-001',
+            '空格与排版',
+            f"{match.group(1)}. {match.group(2)}",
+            '句末标点后疑似多出一个孤立字母，请确认是否缺失空格或误输入。',
             '说明书审核能力补强方案 - 句末标点后空格',
             'general',
             92,
@@ -8593,6 +10783,9 @@ def _run_manual_engineering_audit(content, file_type=None):
         singular = _GRAMMAR_ONE_PLURAL.get(plural)
         if not singular:
             continue
+        # 表格单元格错位拼接会产生 “×1 months” 这类片段（如 tube×1 months），属抽取伪影
+        if match.start() > 0 and content[match.start() - 1] in '×x/':
+            continue
         numeral = '1' if match.group(0).lower().startswith('1') else 'one'
         add_issue(
             match.start(),
@@ -8629,6 +10822,83 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 英文文档中 ℃ 前的空格：人工批注常标「多余空格」；°C 的 SI 空格不在此列。
+    for match in re.finditer(r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)([ \t\u00a0\u202f]+)℃', content):
+        # 局部语境判定：前后 8 字符内有汉字视为中文排版，跳过。
+        # detect_language 对混排返回 both，外层语言门控拦不住中英说明书里的中文温度写法。
+        ctx = content[max(0, match.start() - 8):min(len(content), match.end() + 8)]
+        if re.search(r'[\u4e00-\u9fff]', ctx):
+            continue
+        raw = match.group(0)
+        add_issue(
+            match.start(),
+            match.end(),
+            raw,
+            'DOC-SPACE-006',
+            '空格与排版',
+            f"{match.group(1)}℃",
+            '英文文档正文中，数值与 ℃ 之间通常不保留空格（试剂盒标签/仪器界面除外）；'
+            '若为标签排版约定可忽略本条。',
+            '说明书审核能力补强方案 - 温度单位空格',
+            'general',
+            92,
+        )
+
+    # 缺失空格：分句标点（逗号、分号、冒号）后直接连写下一个单词（如 buffer,then、on;Check）
+    # 要求标点后紧跟字母，天然排除时间 10:30、URL 协议等数字/符号相邻场景；
+    # 逗号前为数字时按千分位处理（1,000），冒号/分号则保留（Figure 1:Add -> Figure 1: Add）。
+    for match in re.finditer(r'([A-Za-z0-9]+)([,;:])([A-Za-z])', content):
+        punct = match.group(2)
+        pre_token_match = re.search(r'[A-Za-z0-9-]+$', content[:match.start() + len(match.group(1))])
+        pre_token = pre_token_match.group(0) if pre_token_match else ''
+        # 逗号/分号前是数字或含连字符的编号（如 1,000、H-020-001198-00;D4）属于编号写法
+        if punct in ',;' and (pre_token[-1:].isdigit() or '-' in pre_token):
+            continue
+        # 分号构成的分隔列表（如 更换;吸取;转移;标记）本身不加空格
+        if punct == ';' and content[max(0, match.start() - 40):match.end() + 40].count(';') >= 3:
+            continue
+        # 冒号后接小写字母多为“标签:值/占位符”（如 xx:xx），不做缺失空格判断
+        if punct == ':' and not match.group(3).isupper():
+            continue
+        # 冒号后直接跟邮箱/标识符（如 US:US-TechSupport@example.com）属于标签:值写法
+        if re.match(r'[A-Za-z0-9._%+-]+@', content[match.end() - 1:]):
+            continue
+        # XML 命名空间声明与标签属性（如 xmlns:MadCap、<dc:Title>）不是缺失空格
+        if 'xmlns' in content[max(0, match.start() - 12):match.end()].lower():
+            continue
+        if match.start() > 0 and content[match.start() - 1] == '<':
+            continue
+        # 界面示意图中的时间/字段占位掩码（如 XX:XX:XX）是合法示例值，不做缺失空格判断
+        if _is_placeholder_mask_token(match.group(1)) and _is_placeholder_mask_token(match.group(3)):
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-004',
+            '空格与排版',
+            f"{match.group(1)}{match.group(2)} {match.group(3)}",
+            '英文标点符号后应保留一个空格，标点后直接连写下一个单词影响可读性与规范一致性。',
+            '说明书审核能力补强方案 - 标点后空格',
+            'general',
+            91,
+        )
+
+    # 缺失/多余空格：微升符号被空格拆开（如 10 μ L -> 10 μL）
+    for match in re.finditer(r'(?<=\d)\s*(?:µ|μ|u)\s+L\b', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-SPACE-005',
+            '空格与排版',
+            'μL',
+            '微升单位符号内部被空格拆开，建议合并为 μL。',
+            '说明书审核能力补强方案 - 单位符号完整性',
+            'general',
+            91,
+        )
+
     # 基础标点：连续重复标点（如 ',,' '。.'；'..' 排除省略号 '...'）
     for match in re.finditer(r'([,;:!?])\s*\1', content):
         add_issue(
@@ -8657,6 +10927,22 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
+    # 基础标点：全角标点相邻误排（如 '：。' '：，'）。仅匹配无空白的紧邻组合，
+    # 避免把 PDF 文本层换行/分栏造成的标点分处两行误判为连排。
+    for match in re.finditer(r'[，、；：]。|[：；]，', content):
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            'DOC-PUNCT-002',
+            '标点符号',
+            match.group(0)[-1],
+            '出现相邻误排的全角标点，通常是录入或排版残留，建议只保留句末标点。',
+            '说明书审核能力补强方案 - 全角标点连排',
+            'general',
+            92,
+        )
+
     # 基础语法：冠词 a/an 与后续单词读音不一致
     # 缩写词按字母读音判定（an SMS / a USB），juː 音词与不发音 h 词用白名单处理
     _AN_JU_SOUND = {
@@ -8673,16 +10959,7 @@ def _run_manual_engineering_audit(content, file_type=None):
         'from', 'as', 'is', 'are', 'was', 'be', 'that', 'this', 'the', 'if',
         'ensure', 'not', 'no', 'all', 'any',
     }
-    _ABBR_VOWEL_SOUND = set('AEFHILMNORSX')  # 字母名以元音音开头（F 读 /ɛf/ 等）
-    _WORDLIKE_CAPS = {'home', 'end', 'start', 'next', 'back', 'stop', 'pause', 'run',
-                      'save', 'open', 'close', 'fastq', 'bam', 'cram', 'sam', 'tab'}
-
-    def _abbrev_article(word):
-        if len(word) < 2 or not word.isupper() or not word.isalpha():
-            return None
-        if word.lower() in _WORDLIKE_CAPS:
-            return None
-        return 'an' if word[0] in _ABBR_VOWEL_SOUND else 'a'
+    from app.utils.article_constants import WORDLIKE_ALL_CAPS, abbrev_article as _abbrev_article
 
     for match in re.finditer(r'\b(a|an)[ \t]{1,3}([A-Za-z]+)', content, re.IGNORECASE):
         art, word = match.group(1).lower(), match.group(2)
@@ -8732,6 +11009,9 @@ def _run_manual_engineering_audit(content, file_type=None):
                     'general',
                     89,
                 )
+            continue
+        # all-caps 可读词（HOME/END 等 UI 词）不按首字母逐字判定冠词，避免 an HOME 误报。
+        if word.isupper() and word.isalpha() and wl in WORDLIKE_ALL_CAPS:
             continue
         first = wl[0]
         if art == 'a' and first in 'aeiou':
@@ -8839,6 +11119,26 @@ def _run_manual_engineering_audit(content, file_type=None):
         )
         break
 
+    _tm_false_positives = {
+        "HTML", "HTTP", "HTTPS", "ATM", "GMT", "STM", "RTM", "PTM", "CTM", "NTM",
+    }
+    for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9]*)TM\b", content):
+        stem = match.group(1)
+        if stem.upper() in _tm_false_positives or stem.upper() == "DNBSEQ":
+            continue
+        add_issue(
+            match.start(),
+            match.end(),
+            match.group(0),
+            "DOC-TM-002",
+            "商标格式",
+            f"{stem}™",
+            f"{stem} 商标标识应使用 ™ 符号，避免把商标写成普通 TM 文本。",
+            "说明书审核能力补强方案 - 商标标识格式",
+            "general",
+            93,
+        )
+
     revision_match = re.search(r'Revision\s+history\s+Contents\s+Contents\s+User\s+manual', content[:4000], re.IGNORECASE)
     if revision_match:
         add_issue(
@@ -8921,13 +11221,21 @@ def _run_manual_engineering_audit(content, file_type=None):
             second_start, second_end, _second_original = occurrences[1]
             if second_start - first_start < 60:
                 continue
+            first_chapter = extract_chapter(content, first_start).strip()
+            if first_chapter:
+                duplicate_suggestion = (
+                    f'该句与「{first_chapter}」章节中的句子完全重复，'
+                    '建议删除本处重复句或仅保留一处规范表述。'
+                )
+            else:
+                duplicate_suggestion = '该句在前文已完整出现，建议删除本处重复句或仅保留一处规范表述。'
             add_issue(
                 second_start,
                 second_end,
                 first_original[:240],
                 'DOC-DUP-001',
                 '重复内容',
-                '建议删除重复句子或仅保留一处规范表述',
+                duplicate_suggestion,
                 '同一完整句子在不同位置重复出现，发布前应确认是否为复制残留。',
                 '说明书审核能力补强方案 - 跨段重复句检查',
                 'serious',
@@ -8938,7 +11246,10 @@ def _run_manual_engineering_audit(content, file_type=None):
     if len(lead_in_occurrences) >= 2:
         first = lead_in_occurrences[0]
         second = lead_in_occurrences[1]
-        if second.start() - first.start() < 500:
+        between = content[first.end():second.start()]
+        # 手册中每道流程都会重新引导步骤；中间夹着新章节标题说明是两道独立流程，
+        # 只有引导语之间没有标题分隔时才是编辑残留
+        if second.start() - first.start() < 500 and not _has_intervening_section_heading(between, content):
             add_issue(
                 second.start(),
                 second.end(),
@@ -8972,6 +11283,49 @@ def _run_manual_engineering_audit(content, file_type=None):
             93,
         )
 
+    for match in re.finditer(r'\b(before|during|after)\s+clean\b(?!ing)', content, re.IGNORECASE):
+        preposition = match.group(1)
+        suggestion = f'{preposition} cleaning'
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-002',
+            '英文语法',
+            f'建议改为 {suggestion}',
+            '介词后需要使用动名词，clean 作名词使用不符合英文表达习惯。',
+            '说明书审核能力补强方案 - 动名词用法检查',
+            'general',
+            90,
+        )
+
+    frequency_activity_headings = [
+        (match, re.sub(r'\s+', ' ', match.group(1)).strip(), match.group(2).lower())
+        for match in re.finditer(
+            r'(?m)^\s*((?:Daily|Weekly|Monthly|Quarterly|Annual|Annually)\s+(cleaning|disinfection))\s*$',
+            content,
+            re.IGNORECASE,
+        )
+    ]
+    if len({item[2] for item in frequency_activity_headings}) > 1:
+        base_noun = frequency_activity_headings[0][2]
+        for match, heading_text, noun in frequency_activity_headings:
+            if noun == base_noun:
+                continue
+            add_issue(
+                match.start(),
+                match.end(),
+                heading_text,
+                'DOC-TERM-002',
+                '术语一致性',
+                '维护周期活动的术语不统一，建议统一使用同一术语（如统一为 cleaning 或 disinfection）。',
+                f'维护周期标题混用了不同术语：{heading_text} 与 '
+                f'{frequency_activity_headings[0][1]} 使用的中文对应词不一致。',
+                '说明书审核能力补强方案 - 维护活动术语一致性检查',
+                'general',
+                88,
+            )
+
     for match in re.finditer(r'\b([A-Za-z]{3,})\s+(off|on|up|down)\s+the\s+\1\b', content, re.IGNORECASE):
         verb = match.group(1)
         particle = match.group(2)
@@ -8991,6 +11345,9 @@ def _run_manual_engineering_audit(content, file_type=None):
     for match in re.finditer(r'\b([A-Za-z][A-Za-z0-9/\-]{2,})\(([A-Za-z0-9][A-Za-z0-9 ./%+\-]{0,20})\)', content):
         original = re.sub(r'\s+', ' ', match.group(0)).strip()
         if re.search(r'\b(?:Table|Figure|Chapter)\b', original, re.IGNORECASE):
+            continue
+        # 括号内为纯数值/进度计数（如 Progress(10/302)）时属于界面标签，非术语加括号说明
+        if not re.search(r'[A-Za-z]', match.group(2)):
             continue
         add_issue(
             match.start(),
@@ -9100,7 +11457,7 @@ def _run_manual_engineering_audit(content, file_type=None):
             match.start(),
             match.end(),
             re.sub(r'\s+', ' ', match.group(0)).strip(),
-            'DOC-GRAM-002',
+            'DOC-GRAM-009',
             '语法错误',
             'an appropriate',
             '元音音标开头的单词前建议使用 an。',
@@ -9158,8 +11515,8 @@ def _run_manual_engineering_audit(content, file_type=None):
             re.sub(r'\s+', ' ', match.group(0)).strip(),
             'DOC-GRAM-004',
             '语法错误',
-            'Task exceptions are displayed',
-            'Task exception 与 are 搭配不一致，建议统一为复数表达或改为单数谓语。',
+            'Task exception is displayed',
+            'Task exception 为单数主语，谓语应使用 is，与界面提示单数口径一致。',
             '说明书审核能力补强方案 - 主谓一致',
             'general',
             90,
@@ -9193,14 +11550,15 @@ def _run_manual_engineering_audit(content, file_type=None):
             89,
         )
 
-    for match in re.finditer(r'\ba\s+(?:message\s+prompting|popup\s+message\s+indicating)\s+that\s+[A-Z][^.?!]{8,160}\?', content):
+    for match in re.finditer(r'\ba\s+(?:message\s+prompting|message\s+indicating|message\s+saying|popup\s+message\s+indicating)\s+that\s+[A-Z][^.?!]{8,160}\?', content):
+        raw = re.sub(r'\s+', ' ', match.group(0)).strip()
         add_issue(
             match.start(),
             match.end(),
-            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            raw,
             'DOC-QUOTE-001',
             '标点符号',
-            '建议改为引导语加直接引语，例如 a message prompting "Are you sure you want to quit?"',
+            '建议改为引导语加直接引语，例如 ' + re.sub(r'^(\S.*?)\s+that\s+', r'\1 "', raw, count=1) + '"',
             '界面弹窗文案属于直接引语，建议使用引号承载实际提示语。',
             '说明书审核能力补强方案 - 弹窗直接引语',
             'general',
@@ -9239,19 +11597,96 @@ def _run_manual_engineering_audit(content, file_type=None):
             )
 
     # English manuals should not contain Chinese residual text.
-    for match in list(re.finditer(r"[\u4e00-\u9fff]+", content))[:20]:
-        add_issue(
-            match.start(),
-            match.end(),
-            match.group(0),
-            "ENG-CN-001",
-            "英文文档中文混入",
-            "建议删除中文残留或替换为英文表达",
-            "英文说明书中不应残留中文字符。",
-            "说明书审核能力补强方案 - 英文文档中文混入",
-            "serious",
-            95,
+    if document_language == "en":
+        cn_issue_count = 0
+        cn_punct_to_en = {
+            "\u3001": ",",
+            "\u3002": ".",
+            "\uff0c": ",",
+            "\uff1b": ";",
+            "\uff1a": ":",
+            "\uff08": "(",
+            "\uff09": ")",
+            "\uff1f": "?",
+            "\uff01": "!",
+        }
+
+        def residual_excerpt(start, end, radius=24):
+            original = content[start:end]
+            if re.search(r"[\u4e00-\u9fff]", original):
+                return original[:240]
+            left = content[max(0, start - radius):start]
+            right = content[end:min(len(content), end + radius)]
+            left_token = re.split(r"\s+", left)[-1] if left else ""
+            right_token = re.split(r"\s+", right)[0] if right else ""
+            return f"{left_token}{original}{right_token}".strip()[:240] or original
+
+        for match in re.finditer(r"[\u4e00-\u9fff]+", content):
+            if cn_issue_count >= 20:
+                break
+            add_issue(
+                match.start(),
+                match.end(),
+                residual_excerpt(match.start(), match.end()),
+                "ENG-CN-001",
+                "英文文档中文混入",
+                "建议删除中文残留或替换为英文表达",
+                "英文说明书中不应残留中文字符。",
+                "说明书审核能力补强方案 - 英文文档中文混入",
+                "serious",
+                95,
+            )
+            cn_issue_count += 1
+
+        punct_pattern = (
+            r"(?:(?<=[A-Za-z0-9])[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09\uff1f\uff01]"
+            r"|[\u3001\u3002\uff0c\uff1b\uff1a\uff08\uff09\uff1f\uff01](?=[A-Za-z0-9]))"
         )
+        # 试剂盒标签 / 仪器铭牌的排版约定：REF：MODEL：LOT：EXP：SN：
+        # 这类全角冒号来自 PDF 真实文本层（矢量绘制，非 OCR 伪影），改掉反而是错的。
+        #
+        # 实现要点（踩过的坑）：
+        #  1. Python re 不支持变长 lookbehind，不能写 (?<=\b[A-Za-z]{1,8})。
+        #  2. 不要用固定窗口（content[start-8:end]）判断——窗口起点会切在单词中间，
+        #     导致 'Exp：' 漏判、'at：' 误判。
+        #  3. 不要只认全大写——'Exp：'（大小写变体）也是标签，漏掉它会白占 20 条上限。
+        #  4. 不要用过宽的通用规则（如 \b[A-Za-z]{1,8}：）——会误伤
+        #     'Heating：' / 'Note：' / 'at：' 这类**真实的**全角冒号误用问题。
+        # 正确做法：全文预扫一次得到标签冒号的位置集合，循环内按位置判定，
+        # 不依赖任何固定窗口长度；且只认「已知标签词表」，不认通用形态。
+        # 剩余全角标点命中多为仪器 UI 文本层伪影（如 Completion at：），后续单独优化。
+        _LABEL_COLON_WORDS = {
+            'ref', 'model', 'lot', 'exp', 'sn', 'cat', 'catno', 'vol', 'batch', 'type',
+            'item', 'no', 'pn', 'rev', 'nd', 'ltd', 'co', 'mfg', 'serial', 'id', 'mfd',
+            'ce', 'ifu', 'dd', 'lo', 'qry', 'tml',
+        }
+        _label_colon_positions = set()
+        for _m in re.finditer(r"\b[A-Za-z]{1,8}\uff1a", content):
+            if _m.group(0)[:-1].lower() in _LABEL_COLON_WORDS:
+                _label_colon_positions.add(_m.start() + len(_m.group(0)) - 1)
+
+        for match in re.finditer(punct_pattern, content):
+            if cn_issue_count >= 20:
+                break
+            if match.group(0) == "\uff1a" and match.start() in _label_colon_positions:
+                continue
+            if re.search(r"[\u4e00-\u9fff]", content[max(0, match.start() - 8):min(len(content), match.end() + 8)]):
+                continue
+            mapped = cn_punct_to_en.get(match.group(0), "")
+            suggestion = f"建议改为 {mapped}" if mapped else "建议将中文标点替换为对应的英文标点"
+            add_issue(
+                match.start(),
+                match.end(),
+                residual_excerpt(match.start(), match.end()),
+                "ENG-CN-001",
+                "英文文档中文混入",
+                suggestion,
+                "英文说明书中不应混入中文标点。",
+                "说明书审核能力补强方案 - 英文文档中文混入",
+                "serious",
+                94,
+            )
+            cn_issue_count += 1
 
     # Revision History should list the latest version/date first.
     revision_match = re.search(r"Revision\s+History([\s\S]{0,2500}?)(?:Contents|Chapter\s+1|1\s+Product)", content, re.IGNORECASE)
@@ -9448,11 +11883,68 @@ def _run_manual_engineering_audit(content, file_type=None):
                         "general",
                         82,
                     )
+        if chapter_numbers:
+            continue
+        simple_rows = []
+        for match in re.finditer(rf"\b{label}\s+(\d+)\b(?![-–])", content, re.IGNORECASE):
+            line_start = max(0, content.rfind('\n', 0, match.start()) + 1)
+            line_end = content.find('\n', match.end())
+            if line_end < 0:
+                line_end = min(len(content), match.end() + 120)
+            line = content[line_start:line_end]
+            if len(line) > 120 or not _is_table_or_figure_caption_line(line, label, match.start() - line_start):
+                continue
+            rest = re.sub(
+                rf'^{re.escape(label)}\s+\d+\s+',
+                '',
+                line[match.start() - line_start:].strip(),
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            if rest[:1].islower():
+                continue
+            simple_rows.append((int(match.group(1)), match.start(), match.group(0)))
+        unique = sorted({number for number, _, _ in simple_rows})
+        if unique and unique[0] <= 2 and len(unique) >= 3:
+            expected = list(range(unique[0], unique[-1] + 1))
+            missing = [number for number in expected if number not in unique]
+            if 0 < len(missing) <= 3:
+                first = simple_rows[0]
+                add_issue(
+                    first[1],
+                    first[1] + len(first[2]),
+                    f"{label} {unique[0]} ... {label} {unique[-1]}",
+                    "DOC-FIGTAB-001",
+                    "表图编号",
+                    f"建议检查 {label} {', '.join(str(n) for n in missing)} 是否缺失或编号跳号",
+                    "表图编号应按顺序连续，缺号或跳号需要确认。",
+                    "说明书审核能力补强方案 - 表图编号连续性",
+                    "general",
+                    84,
+                )
+        counts = Counter(number for number, _, _ in simple_rows)
+        for number, count in counts.items():
+            if count > 1:
+                repeated = next(item for item in simple_rows if item[0] == number)
+                add_issue(
+                    repeated[1],
+                    repeated[1] + len(repeated[2]),
+                    repeated[2],
+                    "DOC-FIGTAB-002",
+                    "表图编号",
+                    f"建议确认 {label} {number} 是否重复编号",
+                    "同一文档内表图编号不应重复。",
+                    "说明书审核能力补强方案 - 表图编号连续性",
+                    "general",
+                    82,
+                )
 
     # Cat. No. wording and variants.
     for match in re.finditer(r"\b(?:cat\.?\s*:|cat\.?\s*number|catalog\s+number)\b", content, re.IGNORECASE):
         original = match.group(0)
         if original == "Cat. No.":
+            continue
+        if _is_symbol_legend_entry(content, match.start(), match.end()):
             continue
         add_issue(
             match.start(),
@@ -9516,6 +12008,10 @@ def _run_manual_engineering_audit(content, file_type=None):
                 window = content[max(0, match.start() - 120):min(len(content), match.end() + 120)]
                 if not re.search(r'DNBSEQ-E25RS|试剂套装|sequencing set', window, re.IGNORECASE):
                     continue
+                # 试剂盒（Kit）与试剂套装（Set）是不同 SKU，货号天然不同，不算总览遗漏；
+                # Kit 货号前紧邻的标题会写明 “Kit (型号)”
+                if re.search(r'\bKit\b|试剂盒', content[max(0, match.start() - 100):match.start()], re.IGNORECASE):
+                    continue
                 add_issue(
                     match.start(),
                     match.end(),
@@ -9529,6 +12025,56 @@ def _run_manual_engineering_audit(content, file_type=None):
                     91,
                 )
                 break
+
+
+    # 修订记录标注删除的条目若仍留在正文，属修订状态前后不一致
+    revision_deleted = list(re.finditer(r'(?m)^[ \t]*(?:y[ \t]+)?Deleted[ \t]+([^\n]{3,80})[ \t]*$', content[:8000]))
+    if revision_deleted:
+        revision_end = None
+        for end_pattern in (r'(?m)^[ \t]*About[ \t]+(?:the|this)\b', r'(?m)^[ \t]*Contents[ \t]*$'):
+            end_match = re.search(end_pattern, content[revision_deleted[0].start():], re.IGNORECASE)
+            if end_match:
+                candidate = revision_deleted[0].start() + end_match.start()
+                revision_end = candidate if revision_end is None else min(revision_end, candidate)
+        if revision_end is None:
+            revision_end = revision_deleted[-1].end()
+        for match in revision_deleted:
+            deleted_item = match.group(1).strip()
+            base_item = re.sub(r'[ \t]*\([^)]*\)[ \t]*$', '', deleted_item).strip()
+            if len(base_item) < 3:
+                continue
+            body_pattern = r'\s+'.join(re.escape(token) for token in base_item.split())
+            body_match = re.search(body_pattern, content[revision_end:], re.IGNORECASE)
+            if not body_match:
+                continue
+            start = revision_end + body_match.start()
+            raw = re.sub(r'\s+', ' ', body_match.group(0)).strip()
+            add_issue(
+                start,
+                start + len(body_match.group(0)),
+                raw,
+                'DOC-REVISION-001',
+                '修订一致性',
+                f'修订记录已标注删除 {deleted_item}，建议确认正文是否仍需保留，或核对修订记录',
+                f'修订记录写明已删除 {deleted_item}，但正文仍然出现该条目，修订状态前后不一致。',
+                '说明书审核能力补强方案 - 修订记录删除项回查',
+                'serious',
+                95,
+            )
+
+    for match in re.finditer(r'\bCheck\s+the\s+well\s+whose\s+rubber\s+stopper\s+falls\s+off\s+or\s+tilts\b', content, re.IGNORECASE):
+        add_issue(
+            match.start(),
+            match.end(),
+            re.sub(r'\s+', ' ', match.group(0)).strip(),
+            'DOC-GRAM-008',
+            '表达与句式',
+            'Check whether the rubber stopper of the well falls off or tilts',
+            'check 后接完整从句时建议使用 whether 引导，句式更通顺。',
+            '说明书审核能力补强方案 - whether 从句',
+            'general',
+            88,
+        )
 
 
     missing_data_match = re.search(
@@ -9762,6 +12308,11 @@ def _is_figure_or_table_caption(line):
     return bool(re.match(r'^(?:Figure|Fig\.?|Table|表|图)\s*\d+\b', stripped, re.IGNORECASE))
 
 
+def _is_page_range_reference(line):
+    stripped = str(line or '').strip()
+    return bool(re.fullmatch(r'\d{1,4}\s*(?:to|[-–—~])\s*\d{1,4}', stripped, re.IGNORECASE))
+
+
 def _is_heading_line(line):
     stripped = str(line or '').strip()
     if not stripped or _is_footer_line(stripped) or _is_step_line(stripped) or _is_table_line(stripped) or _is_material_line(stripped) or _is_version_history_line(stripped):
@@ -9773,22 +12324,23 @@ def _is_heading_line(line):
     return bool(re.match(r'^\d+(?:\.\d+)*(?:[\).])?\s+[^\n]{2,}$', stripped))
 
 
-def _normalize_heading_text(line):
+def _normalize_heading_label(line):
+    """Normalize a heading for display, keeping its original casing."""
     cleaned = re.sub(r'^(\d+(?:\.\d+)*)([A-Za-z])', r'\1 \2', str(line or '').strip())
     return re.sub(r'\s+', ' ', cleaned).strip(' -:|')
 
 
 def _clean_caption_heading(line):
-    heading = _normalize_heading_text(line)
+    heading = _normalize_heading_label(line)
     if not heading:
         return ''
     heading = re.sub(r'\b(Name|Position|Brand|Cat\.?|Cat No\.?|Quantity|Components)\b.*$', '', heading, flags=re.IGNORECASE).strip(' -:|,')
     heading = re.sub(r'\s+', ' ', heading).strip()
-    return heading or _normalize_heading_text(line)
+    return heading or _normalize_heading_label(line)
 
 
 def _is_inline_reference_heading(text):
-    normalized = _normalize_heading_text(text).lower()
+    normalized = _normalize_heading_label(text).lower()
     if not normalized:
         return False
     patterns = [
@@ -9806,7 +12358,7 @@ def _looks_like_standalone_heading(lines, index):
     current = str(lines[index] or '').strip()
     if not current:
         return False
-    if not re.match(r'^[A-Z][A-Za-z0-9\s\-_/]{3,60}$', current):
+    if not re.match(r'^(?:\((?:Optional|optional)\)\s*)?[A-Z][A-Za-z0-9\s\-_/]{3,60}$', current):
         return False
     prev_line = str(lines[index - 1] or '').strip() if index - 1 >= 0 else ''
     next_line = str(lines[index + 1] or '').strip() if index + 1 < len(lines) else ''
@@ -9846,11 +12398,13 @@ def _is_isolated_heading(lines, index):
     return (not prev_line) or (not next_line)
 
 
-def _score_heading_candidate(lines, index):
+def _score_heading_candidate(lines, index, *, min_score=55, short_standalone_penalty=10):
     line = str(lines[index] or '').strip()
     if not line:
         return None
     if _is_footer_line(line) or _is_step_line(line) or _is_material_line(line) or _is_version_history_line(line):
+        return None
+    if _is_page_range_reference(line):
         return None
     score = None
     kind = None
@@ -9878,12 +12432,78 @@ def _score_heading_candidate(lines, index):
     if len(line) > 70:
         score -= 10
     if len(line.split()) <= 2 and kind == 'standalone':
-        score -= 10
-    if score < 55:
+        score -= short_standalone_penalty
+    if score < min_score:
         return None
 
-    heading = _clean_caption_heading(line) if kind == 'caption' else _normalize_heading_text(line)
+    heading = _clean_caption_heading(line) if kind == 'caption' else _normalize_heading_label(line)
     return score, heading
+
+
+def _normalize_toc_title(text):
+    # 保留 CJK：中文目录标题若被清成空串，会让中文 TOC 完全失效
+    return re.sub(r'[^a-z0-9\u4e00-\u9fff]+', ' ', str(text or '').lower()).strip()
+
+
+_TOC_TITLE_CACHE = {}
+_TOC_TITLE_CACHE_LIMIT = 32
+
+
+def _toc_heading_titles(content):
+    """Collect the chapter/section titles listed in the front-matter table of contents."""
+    prefix = str(content or '').replace('\f', '\n')[:16000]
+    digest = hashlib.sha1(prefix.encode('utf-8', 'ignore')).hexdigest()
+    cached = _TOC_TITLE_CACHE.get(digest)
+    if cached is not None:
+        return cached
+    titles = set()
+    for line in prefix.split('\n'):
+        stripped = line.strip()
+        match = re.match(r'^([A-Z(][^\n]{2,70}?)\s+(\d{1,3})$', stripped)
+        if not match:
+            # 中文 TOC：`1 概述 3`、`第一章 概述 3`、`2.1 电源规格 8`
+            match = re.match(
+                r'^(?:第\s*\d+\s*[章节篇]|\d+(?:\.\d+)*)[\s、.．]*(.+?)\s+(\d{1,3})$',
+                stripped,
+            )
+        if not match:
+            continue
+        title = match.group(1)
+        page = int(match.group(2))
+        if not 1 <= page <= 400:
+            continue
+        key = _normalize_toc_title(title)
+        if len(key) >= 3:
+            titles.add(key)
+    result = frozenset(titles) if len(titles) >= 8 else frozenset()
+    if len(_TOC_TITLE_CACHE) >= _TOC_TITLE_CACHE_LIMIT:
+        _TOC_TITLE_CACHE.pop(next(iter(_TOC_TITLE_CACHE)))
+    _TOC_TITLE_CACHE[digest] = result
+    return result
+
+
+def _chapter_heading_candidate(lines, index, toc_titles):
+    candidate = _score_heading_candidate(lines, index, min_score=45, short_standalone_penalty=0)
+    if not candidate:
+        return None
+    score, text = candidate
+    line = str(lines[index] or '').strip()
+    standalone = (
+        not line.startswith('#')
+        and not _is_heading_line(line)
+        and not _is_figure_or_table_caption(line)
+    )
+    in_toc = _normalize_toc_title(text) in toc_titles
+    if standalone and not in_toc and len(text.split()) <= 2:
+        # Table header cells such as Name/Description are short standalone lines too;
+        # only trust short headings that the table of contents lists.
+        return None
+    if in_toc:
+        score += 40
+    elif _is_figure_or_table_caption(line):
+        # Figure/Table captions are weak chapter names; keep them only as a fallback.
+        score -= 35
+    return score, text
 
 
 def extract_chapter(content, position):
@@ -9891,23 +12511,31 @@ def extract_chapter(content, position):
     safe_position = max(0, min(int(position or 0), len(normalized)))
     before_lines = normalized[:safe_position].split('\n')
     after_lines = normalized[safe_position:].split('\n')[:12]
+    toc_titles = _toc_heading_titles(normalized)
     candidates = []
 
     start_index = max(0, len(before_lines) - 220)
     for index in range(len(before_lines) - 1, start_index - 1, -1):
-        candidate = _score_heading_candidate(before_lines, index)
+        candidate = _chapter_heading_candidate(before_lines, index, toc_titles)
         if candidate:
             score, text = candidate
             distance_penalty = min(len(before_lines) - 1 - index, 30)
             candidates.append((score - distance_penalty, text))
 
     for index, _line in enumerate(after_lines[:10]):
-        candidate = _score_heading_candidate(after_lines, index)
+        candidate = _chapter_heading_candidate(after_lines, index, toc_titles)
         if candidate:
             score, text = candidate
             if _is_table_cell_like(text):
                 continue
-            candidates.append((score - 24 - index, text))
+            # Headings usually precede the text they title, so a following heading is a
+            # weaker signal than a preceding one at the same distance.
+            if index <= 1 and str(_line).strip():
+                # The position may begin on a heading line, which then names its own section.
+                distance_penalty = 5
+            else:
+                distance_penalty = 30 + min(index, 30)
+            candidates.append((score - distance_penalty, text))
 
     if candidates:
         candidates.sort(key=lambda item: item[0], reverse=True)
@@ -9961,7 +12589,11 @@ async def list_reviews(
         doc.id: doc
         for doc in get_documents_by_ids(db, [review.document_id for review in reviews])
     }
-    return [_serialize_review_list_item(db, review, document_map) for review in reviews]
+    stats_map = _judgment_stats_map(db, [review.id for review in reviews])
+    return [
+        _serialize_review_list_item(db, review, document_map, stats_map.get(review.id))
+        for review in reviews
+    ]
 
 
 @router.get("/false-positive-memory", response_model=FalsePositiveMemoryListResponse)
@@ -9993,6 +12625,26 @@ async def remove_false_positive_memory(
     return {"success": True}
 
 
+@router.post("/{review_id}/cancel")
+async def cancel_review_task(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    review, _ = _require_review_access(db, review_id, current_user)
+    review = _reconcile_review_runtime_state(db, review)
+    if not review or review.status != "running":
+        raise HTTPException(status_code=400, detail="当前审核不在进行中")
+
+    request_review_cancel(review.id)
+    review = _mark_review_as_cancelled(db, review)
+    return {
+        "review_id": review.id,
+        "status": "cancelled",
+        "message": "审核已停止",
+    }
+
+
 @router.get("/{review_id}/progress")
 async def get_review_progress(
     review_id: int,
@@ -10007,9 +12659,11 @@ async def get_review_progress(
 
     return {
         'status': review.status,
-        'step': '完成' if review.status == 'completed' else '失败',
+        'step': '完成' if review.status == 'completed' else ('已停止' if review.status == 'cancelled' else '失败'),
         'progress': 100 if review.status == 'completed' else 0,
-        'message': review.summary or ('审核完成' if review.status == 'completed' else '审核失败'),
+        'message': review.summary or (
+            '审核完成' if review.status == 'completed' else ('审核已停止' if review.status == 'cancelled' else '审核失败')
+        ),
         'timestamp': datetime.now().isoformat(),
     }
 
@@ -10132,10 +12786,15 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
                 return True
 
     if rule_no == "R011":
+        # 规则意图是「单位不应加 s」（5mins -> 5 min）。历史正则写作
+        # r"\b(mins?|hs?|secs?)\b"，三个分组都带可选 s，导致合法的单数单位
+        # （h / min / sec）反而被判为错误，而真正该管的 hrs 又匹配不到。
+        # 实测在某英文手册 PDF 上 13 条命中全部是孤立的 "h"（正确写法被误报）。
+        # 这里只放行复数缩写本身，其余一律跳过——对已按旧正则播种的库同样生效。
         lowered_context = context.lower()
         if "/" in context or "rpm/min" in lowered_context:
             return True
-        if re.search(r'\b(?:min|sec|hr)\b', original_text, re.IGNORECASE):
+        if not re.fullmatch(r"(?:mins|hs|hrs|secs)", original_text, re.IGNORECASE):
             return True
 
     if rule_no == "R013":
@@ -10164,6 +12823,13 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
         if tokens and all(len(token) <= 1 for token in tokens):
             return True
+        # 实测 PDF 表格表头/图例里同一缩写会跨行重复出现（COM\nCOM、HDMI\nHDMI），
+        # 占位符也会成对出现（XXX XXX、XX XX）。这些都是版式结构而非"the the"式
+        # 行文重复。真重复是正文里的小写词，不会被下面两条拦到。
+        if file_type == "pdf" and "\n" in original_text:
+            return True
+        if len(tokens) >= 2 and all(token.isupper() and len(token) >= 2 for token in tokens):
+            return True
 
     # Mixed Chinese-English spacing rule should keep common product names and protocol acronyms intact.
     if rule_no == "R025":
@@ -10179,8 +12845,15 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
             return True
 
     # Markdown/code formatting rules only apply when the extracted text still clearly shows markdown structure.
-    if rule_no in {"R030", "R031", "R032", "R033", "R034", "R046", "R047", "R049"}:
+    if rule_no in {"R030", "R031", "R032", "R033", "R034", "R047", "R049"}:
         if "```" not in content and "#" not in content and "[" not in content and "](" not in content:
+            return True
+
+    if rule_no == "R046":
+        # "禁止使用Tab缩进"。PDF 文本层里的 \t 是排版抽取伪影而非作者缩进，
+        # 实测某英文手册 PDF 上 42 条命中全部是表格/图注分隔符。仅对非 PDF
+        # 源（docx/md 等保留真实制表符的格式）保留该规则。
+        if file_type == "pdf":
             return True
 
     # Long-sentence rules are too noisy on table rows, lists, and extracted fragments.
@@ -10343,7 +13016,11 @@ def dedupe_issues_by_original(issues):
         return (source_rank, severity_rank, confidence)
 
     def _norm_chapter(chapter):
-        return re.sub(r'\s+', '', str(chapter or '')).lower()[:60]
+        text = re.sub(r'\s+', '', str(chapter or '')).lower()
+        match = re.search(r'(\d+(?:\.\d+)*)', text)
+        if match:
+            return match.group(1)
+        return text[:60]
 
     def _norm_suggestion(issue):
         return re.sub(r'\s+', ' ', str(issue.get('suggestion', '') or '')).strip().lower()
@@ -10360,9 +13037,23 @@ def dedupe_issues_by_original(issues):
         norm = re.sub(r"\s+", "", str(original_text)).lower()
         if not norm.strip():
             continue
+        from app.review_engine.matching.identity import issue_identity_key
+        key = issue_identity_key(issue)
         matched_index = None
         for index, existing in enumerate(seen):
-            if _same_issue(original_text, existing.get("original_text", "")):
+            existing_chapter = _norm_chapter(existing.get("chapter"))
+            issue_chapter = _norm_chapter(issue.get("chapter"))
+            if issue_chapter and existing_chapter and issue_chapter != existing_chapter:
+                continue
+            existing_page = issue_identity_key(existing)[3]
+            issue_page = key[3]
+            if existing_page and issue_page and existing_page != issue_page:
+                continue
+            if issue_identity_key(existing) == key or (
+                _same_issue(original_text, existing.get("original_text", ""))
+                and issue_chapter == existing_chapter
+                and issue_identity_key(existing)[5] == key[5]
+            ):
                 matched_index = index
                 break
         if matched_index is None:
@@ -10382,6 +13073,11 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         print(f"[审核] 引用完整性规则执行失败: {e}")
 
     try:
+        issues.extend(ReferenceIntegrityRule().check_style(content))
+    except Exception as e:
+        print(f"[审核] 引用写法规范规则执行失败: {e}")
+
+    try:
         for issue in TermConsistencyRule().check(content):
             start, end = _parse_issue_position(issue.get('position', ''))
             issue.setdefault('chapter', extract_chapter(content, start))
@@ -10397,6 +13093,21 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         issues.extend(_run_db_term_consistency_audit(db, content))
     except Exception as e:
         print(f"[审核] 术语库一致性规则执行失败: {e}")
+
+    try:
+        issues.extend(check_units_and_spacing(content))
+    except Exception as e:
+        print(f"[审核] 数值与单位一致性规则执行失败: {e}")
+
+    try:
+        issues.extend(check_term_baseline(content))
+    except Exception as e:
+        print(f"[审核] 文档内术语基线规则执行失败: {e}")
+
+    try:
+        issues.extend(check_canonical_writing(content))
+    except Exception as e:
+        print(f"[审核] 外部规范写法库规则执行失败: {e}")
 
     return issues
 
@@ -10450,8 +13161,13 @@ def _filter_low_quality_ai_issues(issues: list) -> list:
         
         # 规则5: 低置信度且未被多模型交叉验证
         if confidence < 50 and not cross_validated:
-            dropped_count += 1
-            continue
+            issue["needs_human_review"] = True
+            position = _decode_issue_position(issue.get("position"))
+            position["needs_human_review"] = True
+            start = int(position.get("start") or 0)
+            end = int(position.get("end") or 0)
+            meta = {key: value for key, value in position.items() if key not in {"start", "end"}}
+            issue["position"] = _encode_issue_position_with_meta(start, end, **meta)
         
         filtered.append(issue)
     
@@ -10514,6 +13230,13 @@ def _merge_multi_provider_results(all_provider_issues: dict, provider_list: list
                 existing["_providers"] = sorted(existing_providers)
                 # 提升置信度（多模型交叉验证 +15）
                 existing["confidence"] = min(100, (existing.get("confidence") or 80) + 15)
+                existing_severity = str(existing.get("severity") or "").strip()
+                incoming_severity = str(issue.get("severity") or "").strip()
+                existing_suggestion = str(existing.get("suggestion") or "").strip()
+                incoming_suggestion = str(issue.get("suggestion") or "").strip()
+                if existing_severity != incoming_severity or existing_suggestion != incoming_suggestion:
+                    existing["model_disagreement"] = True
+                    existing["needs_human_review"] = True
                 break
         
         if not is_dup:
@@ -10550,63 +13273,6 @@ def _merge_multi_provider_results(all_provider_issues: dict, provider_list: list
     return deduped, chunk_meta
 
 
-def _run_multi_provider_ai_deep_review(review_id: int, content: str, document_language: str,
-                                        ai_review_basis_sections: dict, provider_list: list,
-                                        document_name: str = None) -> tuple:
-    """并发调用多个 AI provider 进行深度审核，合并结果。
-    
-    Args:
-        provider_list: provider 名称列表，如 ['qwen', 'deepseek', 'kimi']
-        document_name: 原始文件名，用于 AI 检查文件名与内容的一致性
-    
-    Returns:
-        (merged_issues, chunk_meta): 去重合并后的问题列表
-    """
-    results = {}
-    errors = []
-    
-    # 使用 ThreadPoolExecutor 并发调用
-    max_workers = min(len(provider_list), 3)  # 最多3个并发
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {}
-        for prov in provider_list:
-            set_progress(review_id, 'running', 'AI智能审核', 68,
-                         f'正在调用 {prov.upper()} 模型审核...')
-            print(f"[多模型] 开始调用 {prov} 模型...")
-            future = executor.submit(
-                _run_single_provider_ai_review,
-                review_id, content, document_language,
-                ai_review_basis_sections, prov, document_name
-            )
-            future_map[future] = prov
-        
-        # 收集结果（带超时）
-        for future in concurrent.futures.as_completed(future_map, timeout=600):
-            prov = future_map[future]
-            try:
-                issues, meta = future.result()
-                results[prov] = issues
-                print(f"[多模型] {prov} 完成，返回 {len(issues)} 个问题")
-            except concurrent.futures.TimeoutError:
-                print(f"[多模型] {prov} 调用超时，跳过")
-                errors.append(f"{prov}: 超时")
-            except Exception as e:
-                print(f"[多模型] {prov} 调用失败: {e}")
-                errors.append(f"{prov}: {e}")
-    
-    if not results:
-        print(f"[多模型] 所有 provider 均失败: {errors}")
-        return [], []
-    
-    # 合并去重
-    merged_issues, chunk_meta = _merge_multi_provider_results(results, list(results.keys()))
-    
-    if errors:
-        print(f"[多模型] 部分 provider 失败: {errors}")
-    
-    return merged_issues, chunk_meta
-
-
 def _run_single_provider_ai_review(review_id: int, content: str, document_language: str,
                                      ai_review_basis_sections: dict, provider: str,
                                      document_name: str = None) -> tuple:
@@ -10619,12 +13285,14 @@ def _run_single_provider_ai_review(review_id: int, content: str, document_langua
         )
         chunk_meta = list(ai_review_trace.get("chunk_meta") or []) if isinstance(ai_review_trace, dict) else []
         return (issues or []), chunk_meta
+    except ReviewCancelled:
+        raise
     except Exception as e:
         print(f"[单模型] {provider} 审核异常: {e}")
         return [], []
 
 
-def _run_review_background(review_id: int, document_id: int, mode: str, provider: str = None, provider_list: list = None):
+def _run_review_background(review_id: int, document_id: int, mode: str, provider: str = None, provider_list: list = None, visual_document_id: int = None, pairing_confirmed: bool = False):
     """后台执行审核任务（带进度更新）
     
     Args:
@@ -10657,6 +13325,10 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
     try:
         set_progress(review_id, 'running', '加载文档', 5, '正在读取文档内容...')
+        _review_observation_store.pop(str(review_id), None)
+        from app.review_engine.task_state import set_current_review_id, clear_task_state
+        clear_task_state(review_id)
+        set_current_review_id(review_id)
 
         document = get_document(db, document_id=document_id)
         if not document:
@@ -10667,16 +13339,84 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         issues = []
         content = document.content or ""
         raw_pdf_content = content
+        engine_mode = _review_base_mode(mode)
+        snippet_review = _is_snippet_review_mode(mode)
         if document.file_type == 'pdf':
             content = clean_pdf_text(content)
         original_content_length = len(content)
         content_limit = _review_content_limit(document.file_type)
-        content = content[:content_limit]
+        content_truncation = {
+            "truncated": False,
+            "original_chars": original_content_length,
+            "kept_chars": original_content_length,
+            "unscanned_page_start": None,
+            "unscanned_page_end": None,
+            "kept_pages": None,
+            "total_pages": None,
+        }
+        if document.file_type == 'pdf':
+            content, content_truncation = _truncate_content_at_page_boundary(content, content_limit)
+        else:
+            content = content[:content_limit]
+            content_truncation["truncated"] = original_content_length > len(content)
+            content_truncation["kept_chars"] = len(content)
+        # 截断必须留痕：否则超长文档被静默截尾，检出率下降在指标上完全不可见。
+        content_truncated_chars = max(0, original_content_length - len(content))
+        if content_truncated_chars:
+            print(
+                f"[review] 内容截断: 原始={original_content_length} "
+                f"上限={content_limit} 丢弃={content_truncated_chars} "
+                f"({content_truncated_chars / original_content_length:.1%})"
+            )
+            if content_truncation.get("unscanned_page_start"):
+                print(
+                    f"[审核] 未审核页码: {content_truncation['unscanned_page_start']}"
+                    f"-{content_truncation['unscanned_page_end']}"
+                )
         pdf_page_metadata = _extract_pdf_page_metadata(document, content)
+        if content_truncation.get("truncated"):
+            pdf_page_metadata["content_truncation"] = content_truncation
         pdf_suspicious_pages = _collect_pdf_suspicious_pages(pdf_page_metadata)
         document_language = detect_language(content)
+        from app.review_engine.document_model import build_document_model
+        from app.review_engine.pairing import resolve_input_pairing
+        from app.review_engine.profile import build_document_profile
+        source_format = 'pdf' if str(document.file_type or '').lower() == 'pdf' else 'docx'
+        fallback_reason = 'pdf_only' if source_format == 'pdf' else ''
+        document_model = build_document_model(
+            content,
+            source_format=source_format,
+            document_language=document_language,
+            fallback_reason=fallback_reason,
+        )
+        visual_doc = get_document(db, document_id=visual_document_id) if visual_document_id else None
+        content_user = getattr(document, 'user_id', None)
+        visual_user = getattr(visual_doc, 'user_id', None) if visual_doc is not None else None
+        same_user = content_user is None or visual_user is None or content_user == visual_user
+        pairing = resolve_input_pairing(
+            document,
+            visual_doc,
+            explicit=bool(pairing_confirmed),
+            same_user=same_user,
+            same_task=True,
+        )
+        if pairing.needs_user_confirm or pairing.pairing_status == 'unpaired':
+            visual_doc = None
+            fallback_reason = pairing.message or 'pairing_unconfirmed'
+            document_model.fallback_reason = fallback_reason
+        document_profile = build_document_profile(
+            content,
+            file_type=document.file_type,
+            language=document_language,
+            model=document_model,
+        )
+        document_profile['visual_layer_available'] = bool(
+            pairing.pairing_status == 'paired' or pairing.input_mode == 'C'
+        )
+        document_profile['pairing_status'] = pairing.pairing_status
+        document_profile['input_mode'] = pairing.input_mode
         spec_texts = _load_review_spec_texts(db)
-        false_positive_signatures = _load_false_positive_signatures_for_document(db, document_id)
+        false_positive_signatures, false_positive_memory_payloads = _load_false_positive_signatures_for_document(db, document_id)
         print(f"[审核] 文档ID={document_id}, 语言检测={document_language}, 内容长度={len(content)}/{original_content_length}字符, 上限={content_limit}")
         print(
             "[审核] 当前规范文件长度: "
@@ -10688,14 +13428,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         knowledge_basis = get_knowledge_basis(db)
         has_ai_client = ai_client.has_any_client
-        print(f"[审核] AI客户端可用: {has_ai_client}, 模式={mode}")
+        print(f"[审核] AI客户端可用: {has_ai_client}, 模式={mode}, 引擎模式={engine_mode}, 片段审核={snippet_review}")
 
         if document.file_type == 'xlsx':
             set_progress(review_id, 'running', 'Excel审核', 35, '正在执行 Excel 行级审核...')
             issues.extend(_run_excel_review_audit(db, document))
             print(f"[审核] Excel审核发现问题: {len(issues)}个")
 
-        if mode in ["rule", "hybrid"]:
+        if engine_mode in ["rule", "hybrid"]:
             _begin_stage("document_loading")
             _stage_input_counts["document_loading"] = len(content)
             _end_stage("document_loading", output_count=len(content))
@@ -10710,33 +13450,6 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             set_progress(review_id, 'running', '规则审核', 25, '正在执行规则匹配...')
             rule_issues = [] if document.file_type == 'xlsx' else run_rule_audit(content, rules, knowledge_basis, document.file_type)
 
-            # ── 新规则引擎（REVIEW_USE_NEW_RULES=1 时并行运行）──
-            if os.getenv("REVIEW_USE_NEW_RULES", "0") == "1" and document.file_type != 'xlsx':
-                try:
-                    from app.review_engine.rules.engine import DeterministicRuleEngine
-                    engine = DeterministicRuleEngine()
-                    new_rule_issues = engine.run_all(
-                        content,
-                        file_type=document.file_type,
-                        language=document_language,
-                        document_name=getattr(document, 'filename', '') or '',
-                    )
-                    # 去重：按 (rule_id, original_text[:60]) 去重
-                    existing_keys = {
-                        (i.get('rule', ''), (i.get('original_text') or '')[:60].lower())
-                        for i in rule_issues
-                    }
-                    added = 0
-                    for issue in new_rule_issues:
-                        key = (issue.get('rule', ''), (issue.get('original_text') or '')[:60].lower())
-                        if key not in existing_keys:
-                            rule_issues.append(issue)
-                            existing_keys.add(key)
-                            added += 1
-                    print(f"[审核] 新规则引擎产出 {len(new_rule_issues)} 个问题, 去重后新增 {added} 个")
-                except Exception as e:
-                    print(f"[审核] 新规则引擎执行失败: {e}")
-
             if document.file_type == 'pdf':
                 rule_issues = [issue for issue in rule_issues if issue.get('rule') not in {'R011', 'R016', 'R021'}]
             print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
@@ -10746,6 +13459,15 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             print(f"[审核] 加载术语数量: {len(terms)}")
             term_issues = [] if document.file_type == 'xlsx' else run_term_check(content, terms)
             print(f"[审核] 术语匹配到问题: {len(term_issues)}个")
+
+            if snippet_review and document.file_type != 'xlsx' and document_language == "cn":
+                set_progress(review_id, 'running', '拼写检查', 45, '正在进行拼写和语法检查...')
+                try:
+                    spelling_issues = run_spelling_and_grammar_check(content, document.file_type)
+                    print(f"[审核] 片段审核中文拼写/语法检查发现问题: {len(spelling_issues)}个")
+                    rule_issues.extend(spelling_issues)
+                except Exception as e:
+                    print(f"[审核] 片段审核拼写/语法检查失败: {e}")
 
             if document.file_type != 'xlsx' and document_language in ("en", "both"):
                 set_progress(review_id, 'running', '拼写检查', 45, '正在进行拼写和语法检查...')
@@ -10763,6 +13485,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 except Exception as e:
                     print(f"[审核] 英文高置信规则执行失败: {e}")
 
+                if document_language == "en":
+                    # 页码序列判据与语言无关，中文分支已覆盖 "both" 文档，这里只补纯英文文档
+                    try:
+                        # 与中文分支一致，页码判据依赖原始分页符，需用未清洗的 PDF 文本
+                        page_issues = _detect_page_number_sequence_issues(raw_pdf_content or content)
+                        print(f"[审核] 页码序列规则发现问题: {len(page_issues)}个")
+                        rule_issues.extend(page_issues)
+                    except Exception as e:
+                        print(f"[审核] 页码序列规则执行失败: {e}")
+
                 try:
                     engineering_issues = _run_manual_engineering_audit(content, document.file_type)
                     print(f"[审核] 说明书工程质量规则发现问题: {len(engineering_issues)}个")
@@ -10770,48 +13502,49 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 except Exception as e:
                     print(f"[审核] 说明书工程质量规则执行失败: {e}")
 
-                if document.file_type == 'pdf':
+                if not snippet_review:
+                    if document.file_type == 'pdf':
+                        try:
+                            structural_issues = _run_pdf_structure_audit(content)
+                            print(f"[审核] PDF结构规则发现问题: {len(structural_issues)}个")
+                            rule_issues.extend(structural_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF结构规则执行失败: {e}")
+
                     try:
-                        structural_issues = _run_pdf_structure_audit(content)
-                        print(f"[审核] PDF结构规则发现问题: {len(structural_issues)}个")
-                        rule_issues.extend(structural_issues)
+                        supplemental_issues = _run_reference_and_term_consistency_audit(db, content)
+                        print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
+                        rule_issues.extend(supplemental_issues)
                     except Exception as e:
-                        print(f"[审核] PDF结构规则执行失败: {e}")
+                        print(f"[审核] 引用/术语规则执行失败: {e}")
 
-                try:
-                    supplemental_issues = _run_reference_and_term_consistency_audit(db, content)
-                    print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
-                    rule_issues.extend(supplemental_issues)
-                except Exception as e:
-                    print(f"[审核] 引用/术语规则执行失败: {e}")
+                    try:
+                        logic_issues = _run_logic_integrity_audit(content)
+                        print(f"[审核] 逻辑完整性规则发现问题: {len(logic_issues)}个")
+                        rule_issues.extend(logic_issues)
+                    except Exception as e:
+                        print(f"[审核] 逻辑完整性规则执行失败: {e}")
 
-                try:
-                    logic_issues = _run_logic_integrity_audit(content)
-                    print(f"[审核] 逻辑完整性规则发现问题: {len(logic_issues)}个")
-                    rule_issues.extend(logic_issues)
-                except Exception as e:
-                    print(f"[审核] 逻辑完整性规则执行失败: {e}")
+                    try:
+                        safety_issues = _run_safety_compliance_audit(content, document_language)
+                        print(f"[审核] 安全合规规则发现问题: {len(safety_issues)}个")
+                        rule_issues.extend(safety_issues)
+                    except Exception as e:
+                        print(f"[审核] 安全合规规则执行失败: {e}")
 
-                try:
-                    safety_issues = _run_safety_compliance_audit(content, document_language)
-                    print(f"[审核] 安全合规规则发现问题: {len(safety_issues)}个")
-                    rule_issues.extend(safety_issues)
-                except Exception as e:
-                    print(f"[审核] 安全合规规则执行失败: {e}")
+                    try:
+                        cross_ref_issues = _run_cross_reference_audit(content)
+                        print(f"[审核] 交叉引用规则发现问题: {len(cross_ref_issues)}个")
+                        rule_issues.extend(cross_ref_issues)
+                    except Exception as e:
+                        print(f"[审核] 交叉引用规则执行失败: {e}")
 
-                try:
-                    cross_ref_issues = _run_cross_reference_audit(content)
-                    print(f"[审核] 交叉引用规则发现问题: {len(cross_ref_issues)}个")
-                    rule_issues.extend(cross_ref_issues)
-                except Exception as e:
-                    print(f"[审核] 交叉引用规则执行失败: {e}")
-
-                try:
-                    long_sentence_issues = _run_long_sentence_audit(content, document.file_type)
-                    print(f"[审核] 长句规则发现问题: {len(long_sentence_issues)}个")
-                    rule_issues.extend(long_sentence_issues)
-                except Exception as e:
-                    print(f"[审核] 长句规则执行失败: {e}")
+                    try:
+                        long_sentence_issues = _run_long_sentence_audit(content, document.file_type)
+                        print(f"[审核] 长句规则发现问题: {len(long_sentence_issues)}个")
+                        rule_issues.extend(long_sentence_issues)
+                    except Exception as e:
+                        print(f"[审核] 长句规则执行失败: {e}")
 
             if document.file_type != 'xlsx':
                 if document_language in ("cn", "both"):
@@ -10824,7 +13557,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                             }
                             raw_page_issues = [
                                 issue for issue in _run_chinese_human_baseline_rules(raw_pdf_content)
-                                if str(issue.get('rule', '') or '').startswith('CYY-CN-PAGE-')
+                                if str(issue.get('rule', '') or '').startswith(('CYY-CN-PAGE-', 'CYY-CN-INDEX-'))
                             ]
                             for issue in raw_page_issues:
                                 key = (issue.get('rule'), _normalize_search_text(issue.get('original_text', '') or ''))
@@ -10836,14 +13569,15 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     except Exception as e:
                         print(f"[审核] 中文人工基线高置信规则执行失败: {e}")
 
-                try:
-                    release_checklist_issues = _run_release_checklist_audit(content, document, spec_texts, document_language)
-                    print(f"[审核] 发布前自检 Checklist 发现问题: {len(release_checklist_issues)}个")
-                    rule_issues.extend(release_checklist_issues)
-                except Exception as e:
-                    print(f"[审核] 发布前自检 Checklist 执行失败: {e}")
+                if not snippet_review:
+                    try:
+                        release_checklist_issues = _run_release_checklist_audit(content, document, spec_texts, document_language)
+                        print(f"[审核] 发布前自检 Checklist 发现问题: {len(release_checklist_issues)}个")
+                        rule_issues.extend(release_checklist_issues)
+                    except Exception as e:
+                        print(f"[审核] 发布前自检 Checklist 执行失败: {e}")
 
-            if document.file_type != 'xlsx':
+            if document.file_type != 'xlsx' and not snippet_review:
                 # ── 文件名审核 ──
                 try:
                     filename_issues = _run_filename_audit(document.filename or '', content, document_language)
@@ -10858,7 +13592,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             rule_stage_output = len(candidate_rule_issues)
             _end_stage("rule_based_audit", output_count=rule_stage_output)
 
-            if has_ai_client and len(candidate_rule_issues) > 0:
+            skip_ai_fp_filter = snippet_review and engine_mode == "rule"
+            if has_ai_client and len(candidate_rule_issues) > 0 and not skip_ai_fp_filter:
                 _begin_stage("ai_false_positive_filter")
                 _stage_input_counts["ai_false_positive_filter"] = len(candidate_rule_issues)
                 set_progress(review_id, 'running', 'AI二次验证', 55, f'正在AI验证 {len(candidate_rule_issues)} 个候选问题...')
@@ -10892,73 +13627,77 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         ai_review_trace = {"enabled": False, "reason": "not_run"}
         ai_review_basis_sections = []
+        ai_calls = 0
         ai_degraded = False
         ai_degraded_reason = ""
-        if document.file_type != 'xlsx' and mode in ["ai", "hybrid"] and not has_ai_client:
+        if document.file_type != 'xlsx' and engine_mode in ["ai", "hybrid"] and not has_ai_client:
             ai_degraded = True
             ai_degraded_reason = "未检测到可用 AI provider，当前结果仅包含规则审核输出"
             ai_review_trace = {"enabled": False, "reason": "no_ai_provider"}
             print(f"[审核] AI审核降级: {ai_degraded_reason}")
-        if document.file_type != 'xlsx' and mode in ["ai", "hybrid"] and has_ai_client:
+        if document.file_type != 'xlsx' and engine_mode in ["ai", "hybrid"] and has_ai_client:
             _begin_stage("ai_deep_review")
             pre_ai_count = len(issues)
             _stage_input_counts["ai_deep_review"] = pre_ai_count
             ai_review_basis_sections = _build_ai_review_basis_sections(spec_texts, document_language)
+            if snippet_review:
+                ai_review_basis_sections = [
+                    section for section in ai_review_basis_sections
+                    if not section.get('is_checklist')
+                ]
+                ai_review_basis_sections.append({
+                    "label": "文本片段审核范围",
+                    "text": "【文本片段审核范围】\n仅检查句子和段落中的语法、拼写、术语问题。不要报告目录、章节结构、版式、交叉引用、安全合规、文件名或发布前自检问题。",
+                    "priority": 6,
+                    "language": "both",
+                    "basis_type": "snippet_scope",
+                    "tags": ["snippet", "grammar", "spelling", "term"],
+                })
 
-            # 确定实际使用的 provider 列表
-            actual_providers = provider_list if provider_list else ([provider] if provider else [None])
-            is_multi_provider = len(actual_providers) > 1
-
-            if is_multi_provider:
-                # ── 多模型并发审核 ──
-                set_progress(review_id, 'running', 'AI智能审核', 65,
-                             f'正在并发调用 {len(actual_providers)} 个 AI 模型审核...')
-                print(f"[审核] 多模型并发审核，providers={actual_providers}")
-                ai_issues, ai_chunk_meta = [], []  # 初始化为空
-                try:
-                    ai_issues, ai_chunk_meta = _run_multi_provider_ai_deep_review(
-                        review_id, content, document_language,
-                        ai_review_basis_sections,
-                        actual_providers,
-                        document_name=document.filename
-                    )
-                except Exception as e:
-                    print(f"[多模型审核失败] {e}")
-                meta_combined = {
-                    "providers": actual_providers,
-                    "total_chunks": sum(len(m.get("chunk_sizes", [])) for m in (ai_chunk_meta or [])),
-                    "total_issue_count": len(ai_issues),
-                }
-                ai_review_trace = {
-                    "enabled": True,
-                    "mode": "multi_provider",
-                    "providers": actual_providers,
-                    "provider_count": len(actual_providers),
-                    "total_issue_count": len(ai_issues),
-                    "provider_meta": ai_chunk_meta,
-                    "merged_meta": meta_combined,
-                }
-                ai_chunk_meta = [meta_combined]
-            else:
-                # ── 单模型审核（原有逻辑）──
-                single_provider = actual_providers[0]
-                set_progress(review_id, 'running', 'AI智能审核', 65,
-                             f'正在使用 {single_provider or "默认"} 模型审核...')
-                print(f"[审核] 单模型审核，provider={single_provider}")
-                ai_issues, ai_chunk_meta = [], []
-                try:
-                    ai_issues, ai_review_trace = _run_ai_deep_review(
-                        review_id, content, document_language,
-                        ai_review_basis_sections,
-                        provider=single_provider,
-                        document_name=document.filename
-                    )
-                    if isinstance(ai_review_trace, dict):
-                        ai_chunk_meta = list(ai_review_trace.get("chunk_meta") or [])
-                except concurrent.futures.TimeoutError:
-                    print(f"[审核] AI 审核超时({_ai_audit_timeout_seconds(content):.0f}s)")
-                except Exception as e:
-                    print(f"[审核] AI 审核失败: {e}")
+            # 单模型审核：provider_list 由 _normalize_providers 保证至多一个元素
+            single_provider = provider_list[0] if provider_list else provider
+            set_progress(review_id, 'running', 'AI智能审核', 65,
+                         f'正在使用 {single_provider or "默认"} 模型审核...')
+            print(f"[审核] 单模型审核，provider={single_provider}")
+            ai_issues, ai_chunk_meta = [], []
+            try:
+                ai_issues, ai_review_trace = _run_ai_deep_review(
+                    review_id, content, document_language,
+                    ai_review_basis_sections,
+                    provider=single_provider,
+                    document_name=document.filename
+                )
+                if isinstance(ai_review_trace, dict):
+                    ai_chunk_meta = list(ai_review_trace.get("chunk_meta") or [])
+            except concurrent.futures.TimeoutError:
+                print(f"[审核] AI 审核超时({_ai_audit_timeout_seconds(content):.0f}s)")
+            except Exception as e:
+                print(f"[审核] AI 审核失败: {e}")
+            from app.review_engine.consensus import should_trigger_second_provider
+            require_consensus = _review_env_bool('REVIEW_REQUIRE_CONSENSUS', False)
+            trigger, trigger_reason = should_trigger_second_provider(
+                ai_issues,
+                require_consensus=require_consensus,
+            )
+            second_provider = os.getenv('REVIEW_CONSENSUS_PROVIDER', 'deepseek')
+            if trigger and second_provider and second_provider != single_provider:
+                print(f"[审核] 按需共识触发: {trigger_reason}, second={second_provider}")
+                extra_issues, extra_meta = _run_single_provider_ai_review(
+                    review_id, content, document_language,
+                    ai_review_basis_sections, second_provider, document.filename
+                )
+                merged_issues, merged_meta = _merge_multi_provider_results(
+                    {single_provider or "primary": ai_issues, second_provider: extra_issues},
+                    [single_provider or "primary", second_provider],
+                )
+                ai_issues = merged_issues
+                if isinstance(ai_review_trace, dict):
+                    ai_review_trace["consensus_trigger"] = trigger_reason
+                    ai_review_trace["provider_list"] = [single_provider or "primary", second_provider]
+                    ai_review_trace["consensus_meta"] = merged_meta
+                ai_chunk_meta = merged_meta or ai_chunk_meta
+            elif isinstance(ai_review_trace, dict):
+                ai_review_trace["consensus_trigger"] = ""
 
             print(f"[审核] AI审核返回问题数={len(ai_issues)}")
             _log_review_ai_usage(review_id, "review.audit_chunk", "AI深度审核Token统计")
@@ -10969,7 +13708,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 limit=200,
             )
             ai_calls = int(audit_chunk_usage.get("calls") or 0)
-            ai_degraded = mode in {"ai", "hybrid"} and ai_calls <= 0
+            ai_degraded = engine_mode in {"ai", "hybrid"} and ai_calls <= 0
             ai_degraded_reason = "AI provider 未完成有效调用，当前结果仅包含规则审核输出" if ai_degraded else ""
             if ai_degraded:
                 print(f"[审核] AI审核降级: {ai_degraded_reason}")
@@ -11011,17 +13750,50 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             ai_new_issues = len(issues) - pre_ai_count
             _end_stage("ai_deep_review", output_count=len(issues), dropped_count=0)
 
+        if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
+            # 第一次回填：去重键的第 4 位是页码槽位，必须在 _finalize_review_issues 之前填好
+            filled = _backfill_issue_page_numbers(issues, content)
+            if filled:
+                print(f"[审核] 页码回填(去重前): {filled} 条")
+
         _begin_stage("dedup_and_validation")
         _stage_input_counts["dedup_and_validation"] = len(issues)
         set_progress(review_id, 'running', '结果处理', 85, '正在去重和保存结果...')
-        issues, ai_filter_diagnostics = _finalize_review_issues(issues, content, false_positive_signatures)
+        issues, ai_filter_diagnostics = _finalize_review_issues(
+            issues, content, false_positive_signatures, document_language,
+            false_positive_memory_payloads,
+        )
 
         validation_dropped = _stage_input_counts.get("dedup_and_validation", len(issues)) - len(issues)
         _end_stage("dedup_and_validation", output_count=len(issues), dropped_count=validation_dropped)
 
+        if str(getattr(document, 'file_type', '') or '').lower() == 'pdf' and not snippet_review:
+            # 第二次回填：_finalize_review_issues 会丢弃/重排部分 issue，
+            # 过滤后新产生的 issue 需要再补一次；函数本身幂等（已有页码的直接跳过）。
+            filled = _backfill_issue_page_numbers(issues, content)
+            if filled:
+                print(f"[审核] 页码回填: {filled} 条")
+
         _begin_stage("pdf_visual_verification")
         _stage_input_counts["pdf_visual_verification"] = len(issues)
-        issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, document, content, issues, pdf_suspicious_pages)
+        if snippet_review:
+            pdf_visual_verification = {}
+            before_scope = len(issues)
+            issues = _filter_snippet_scope_issues(issues)
+            print(f"[审核] 文本片段范围过滤: {before_scope} -> {len(issues)}")
+        else:
+            visual_target = document
+            visual_content = content
+            visual_pages = pdf_suspicious_pages
+            if pairing.pairing_status == 'paired' and visual_doc is not None and str(getattr(visual_doc, 'file_type', '') or '').lower() == 'pdf':
+                visual_target = visual_doc
+                visual_content = visual_doc.content or content
+                visual_pages = _collect_pdf_suspicious_pages(_extract_pdf_page_metadata(visual_doc, visual_content))
+            issues, pdf_visual_verification = _apply_pdf_visual_verification(review_id, visual_target, visual_content, issues, visual_pages)
+            from app.review_engine.visual import build_visual_verification
+            for issue in issues:
+                if not issue.get('visual_verification'):
+                    issue['visual_verification'] = build_visual_verification(status='not_required')
         visual_dropped = _stage_input_counts.get("pdf_visual_verification", len(issues)) - len(issues)
         _end_stage("pdf_visual_verification", output_count=len(issues), dropped_count=visual_dropped)
 
@@ -11030,6 +13802,24 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             print(f"[审核] AI问题最终保留数量={retained_ai_count}")
         if document.file_type == 'docx':
             issues = _enrich_docx_issue_positions(document, issues)
+        from app.review_engine.evidence import enrich_issue_evidence
+        from app.review_engine.profile import apply_rule_gating
+        from app.review_engine.issue_status import compute_status_counts
+        gated, rule_gate_diagnostics = apply_rule_gating(issues, document_profile)
+        issues = [enrich_issue_evidence(issue, document_model, source_format=pairing.source_format) for issue in gated]
+        if pairing.input_mode == 'B':
+            from app.review_engine.visual import build_visual_verification
+            for issue in issues:
+                issue['visual_verification'] = build_visual_verification(status='not_required', error_code='no_pdf')
+                position_object = issue.get('position_object') or {}
+                position_object['bbox'] = None
+                issue['position_object'] = position_object
+        if pairing.input_mode == 'C' and str(document_profile.get('text_layer_quality') or '') == 'poor':
+            for issue in issues:
+                if str(issue.get('status') or '') not in {'confirmed', 'false_positive', 'ignored'}:
+                    issue['status'] = 'blocked'
+                    issue['rejected_reason'] = 'pdf_text_layer_unreliable'
+        issue_status_counts = compute_status_counts(issues)
         print(f"[审核] 去重后最终问题数={len(issues)}")
         if len(issues) > 0:
             categories = {}
@@ -11042,7 +13832,14 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
         else:
             layer_counts = {}
 
+        _ensure_review_not_cancelled(review_id)
         for issue in issues:
+            persisted_position = _decode_issue_position(issue.get("position", ""))
+            persisted_position.update({
+                key: issue.get(key)
+                for key in ("evidence", "position_object", "visual_verification", "source_format", "target_status", "rejected_reason")
+                if issue.get(key) not in (None, "", {}, [])
+            })
             create_issue(db=db, issue=IssueCreate(
                 review_id=review_id,
                 severity=issue["severity"],
@@ -11056,7 +13853,8 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 audit_basis=issue.get("audit_basis", ""),
                 confidence=issue.get("confidence", 0),
                 source=issue.get("source", "rule"),
-                position=issue.get("position", ""),
+                position=json.dumps(persisted_position, ensure_ascii=False) if persisted_position else issue.get("position", ""),
+                status=str(issue.get("status") or "pending"),
                 providers=issue.get("providers", None),
             ))
 
@@ -11093,7 +13891,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             "ai_review": ai_review_trace,
             "ai_degraded": bool(ai_degraded),
             "ai_degraded_reason": ai_degraded_reason,
+            "ai_budget_exceeded": bool(isinstance(ai_review_trace, dict) and ai_review_trace.get("budget_reached")),
             "ai_filter_diagnostics": ai_filter_diagnostics,
+            "review_execution": _build_review_execution_summary(
+                mode, provider, ai_review_trace, ai_calls, ai_degraded, ai_degraded_reason,
+                bool(isinstance(ai_review_trace, dict) and ai_review_trace.get("budget_reached")),
+            ),
+            "issue_flow": _build_issue_flow_summary(ai_filter_diagnostics, pdf_visual_verification, retained_ai_count),
             "pdf_visual_verification": pdf_visual_verification,
             "pdf_page_metadata": pdf_page_metadata,
             "pdf_suspicious_pages": pdf_suspicious_pages,
@@ -11103,21 +13907,53 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 "count": len(knowledge_labels),
             },
             "stage_diagnostics": _stage_diagnostics,
+            "basis_trace": _load_basis_trace(review_id) or {
+                "review_id": review_id,
+                "basis_source": "local" if ai_review_basis_sections else "none",
+                "basis_labels": knowledge_labels,
+                "basis_version": "review-basis-v1",
+                "es_available": False,
+                "fallback": False,
+                "fallback_reason": "",
+            },
+            "prompt_version": REVIEW_PROMPT_VERSION,
+            "filter_policy_version": REVIEW_FILTER_POLICY_VERSION,
+            "observations": _compact_review_observations(
+                _take_review_observations(review_id), issues
+            ),
             "engine_version": "review-engine-v2",
+            "input_pairing": pairing.to_dict(),
+            "document_profile": document_profile,
+            "document_model": {
+                "source_format": document_model.source_format,
+                "document_language": document_model.document_language,
+                "document_type": document_model.document_type,
+                "heading_count": len(document_model.headings),
+                "paragraph_count": len(document_model.paragraphs),
+                "fallback_reason": document_model.fallback_reason,
+            },
+            "rule_gate_diagnostics": rule_gate_diagnostics,
+            "issue_status_counts": issue_status_counts,
         })
 
         completion_message = f'审核完成，发现 {len(issues)} 个问题'
         if ai_degraded:
             completion_message += '（AI 未参与，本次为规则审核结果）'
+        _ensure_review_not_cancelled(review_id)
         set_progress(review_id, 'completed', '完成', 100, completion_message)
         update_review_status(db, review_id, "completed", len(issues), summary)
         print(f"[审核] 任务完成, review_id={review_id}, 问题数={len(issues)}")
 
+    except ReviewCancelled as e:
+        set_progress(review_id, 'cancelled', '已停止', 0, str(e), allow_when_cancelled=True)
+        update_review_status(db, review_id, "cancelled", 0, str(e))
+        print(f"[审核] 任务已停止, review_id={review_id}")
     except Exception as e:
-        set_progress(review_id, 'failed', '失败', 0, str(e))
+        set_progress(review_id, 'failed', '失败', 0, str(e), allow_when_cancelled=True)
         update_review_status(db, review_id, "failed", 0, str(e))
         print(f"[审核] 任务失败, review_id={review_id}, 错误={e}")
     finally:
+        _clear_review_runtime_flags(review_id)
         db.close()
 
 
@@ -11146,9 +13982,49 @@ def _normalize_providers(provider: str = None, providers: str = None) -> list:
     return unique[:1]
 
 
+@router.post("/snippet")
+async def create_snippet_review_task(
+    payload: SnippetReviewCreate,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    text = _prepare_snippet_text(payload.text)
+    mode = _snippet_review_mode(payload.mode)
+    provider_list = _normalize_providers(payload.provider)
+    db_provider = provider_list[0] if provider_list else payload.provider
+    document = _create_snippet_document(db, text, current_user.id)
+    review = create_review(
+        db=db,
+        review=ReviewCreate(document_id=document.id, mode=mode, provider=db_provider),
+    )
+    update_review_status(db, review.id, "running", 0, "文本片段审核已启动")
+    set_progress(review.id, "running", "初始化", 0, "文本片段审核已启动")
+    if payload.force:
+        _review_force_rerun_ids.add(int(review.id))
+    if background_tasks:
+        background_tasks.add_task(
+            _run_review_background,
+            review.id,
+            document.id,
+            mode,
+            payload.provider,
+            provider_list,
+        )
+    return {
+        "review_id": review.id,
+        "document_id": document.id,
+        "status": "running",
+        "message": "正在审核，请稍候",
+    }
+
+
 @router.post("/{document_id}")
 async def create_review_task(document_id: int, mode: str = "hybrid",
                              provider: str = None, providers: str = None,
+                             force: bool = Query(False),
+                             visual_document_id: int = Query(None),
+                             pairing_confirmed: bool = Query(False),
                              background_tasks: BackgroundTasks = None,
                              db: Session = Depends(get_db),
                              current_user: UserOut = Depends(get_current_active_user)):
@@ -11158,27 +14034,28 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
         provider: 单个 provider（向后兼容），如 'qwen'
         providers: 兼容旧请求的多个 provider 参数，当前仅取第一个有效模型。
     """
-    print(f"[DEBUG create_review_task] provider={provider!r} providers={providers!r} mode={mode!r}")
+    print(f"[DEBUG create_review_task] provider={provider!r} providers={providers!r} mode={mode!r} force={force!r}")
 
     if mode not in {"rule", "ai", "hybrid"}:
         raise HTTPException(status_code=400, detail="Unsupported review mode")
 
+    from app.crud.review import reclaim_stale_running_reviews
+    reclaim_stale_running_reviews(db, timeout_seconds=_review_env_int('REVIEW_TASK_HEARTBEAT_TIMEOUT', '900'))
     document = _ensure_document_access(get_document(db, document_id=document_id), current_user)
 
     active_review = _get_active_review_for_document(db, document_id)
     if active_review:
         set_progress(active_review.id, 'running', '初始化', 0, '已有审核任务正在执行')
-        return {"review_id": active_review.id, "status": "running", "message": "已有审核任务正在执行，请轮询进度"}
+        return {"review_id": active_review.id, "status": "running", "message": "已有审核任务正在执行，请稍候"}
 
     # 规范化 providers 列表
     provider_list = _normalize_providers(provider, providers)
 
     cached_review, cached_summary = _find_cached_completed_review(db, document, mode)
-    # 指定 provider(s) 时不使用通用缓存（不同 provider 结果不同）
-    if cached_review and (provider or providers):
+    if not _should_reuse_cached_review(cached_review, provider=provider, providers=providers, force=force):
         cached_review = None
         cached_summary = None
-    if cached_review:
+    if cached_review and cached_summary is not None:
         total = cached_summary.get("total", cached_review.total_issues or 0) if isinstance(cached_summary, dict) else (cached_review.total_issues or 0)
         message = f"复用缓存结果，共 {total} 个问题"
         return {
@@ -11193,12 +14070,14 @@ async def create_review_task(document_id: int, mode: str = "hybrid",
     review = create_review(db=db, review=ReviewCreate(document_id=document_id, mode=mode, provider=db_provider))
     update_review_status(db, review.id, "running", 0, "审核任务已创建")
     set_progress(review.id, 'running', '初始化', 0, '审核任务已创建')
+    if force:
+        _review_force_rerun_ids.add(int(review.id))
     
     # 启动后台审核任务（传递 provider_list）
     if background_tasks:
-        background_tasks.add_task(_run_review_background, review.id, document_id, mode, provider, provider_list)
+        background_tasks.add_task(_run_review_background, review.id, document_id, mode, provider, provider_list, visual_document_id, pairing_confirmed)
     
-    return {"review_id": review.id, "status": "running", "message": "审核任务已启动，请轮询进度"}
+    return {"review_id": review.id, "status": "running", "message": "审核已开始，请稍候"}
 
 
 def _dashboard_date_range(time_range='7d', start_date=None, end_date=None):
@@ -11288,23 +14167,23 @@ def _dashboard_average_review_minutes(completed_reviews, issues):
 
 
 def _dashboard_quality_metrics(raw_issues):
-    visible_issues = _dashboard_visible_issues(raw_issues)
-    platform_issues = [issue for issue in visible_issues if str(getattr(issue, 'source', '') or '').lower() != 'manual']
-    manual_issues = [issue for issue in visible_issues if str(getattr(issue, 'source', '') or '').lower() == 'manual']
+    from app.review_engine.dashboard_metrics import compute_quality_rates
+
+    scored_issues = [
+        issue for issue in raw_issues
+        if not _should_drop_known_false_positive_issue(issue)
+    ]
+    platform_issues = [issue for issue in scored_issues if str(getattr(issue, 'source', '') or '').lower() != 'manual']
+    manual_issues = [issue for issue in scored_issues if str(getattr(issue, 'source', '') or '').lower() == 'manual']
     false_positive = [issue for issue in platform_issues if str(getattr(issue, 'status', '') or '').lower() == 'false_positive']
     valid_platform = [issue for issue in platform_issues if str(getattr(issue, 'status', '') or '').lower() not in {'false_positive', 'ignored'}]
     valid_manual = [issue for issue in manual_issues if str(getattr(issue, 'status', '') or '').lower() not in {'false_positive', 'ignored'}]
-    expected = len(valid_platform) + len(valid_manual)
-    return {
-        'platform_detected': len(valid_platform),
-        'manual_supplemented': len(valid_manual),
-        'expected_issues': expected,
-        'false_positive_count': len(false_positive),
-        'platform_reported': len(platform_issues),
-        'accuracy_rate': _dashboard_pct(len(valid_platform), len(platform_issues)),
-        'false_positive_rate': _dashboard_pct(len(false_positive), len(platform_issues)),
-        'detection_rate': _dashboard_pct(len(valid_platform), expected),
-}
+    return compute_quality_rates(
+        platform_detected=len(valid_platform),
+        manual_supplemented=len(valid_manual),
+        false_positive_count=len(false_positive),
+        platform_reported=len(platform_issues),
+    )
 
 
 def _dashboard_visible_issues(raw_issues):
@@ -11362,7 +14241,8 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
         })
 
     doc_type_stats = {}
-    for review, document, _ in rows:
+    user_stats_map = {}
+    for review, document, user in rows:
         key = _dashboard_format_doc_type(document.file_type)
         item = doc_type_stats.setdefault(key, {'type': key, 'total': 0, 'passed': 0, 'issues': 0, 'confirm': 0})
         item['total'] += 1
@@ -11374,6 +14254,19 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
             item['confirm'] += 1
         else:
             item['issues'] += 1
+        submitter_name = (getattr(user, 'display_name', None) or getattr(user, 'username', None) or '未知用户') if user else '未知用户'
+        user_key = getattr(document, 'user_id', None) or submitter_name
+        user_item = user_stats_map.setdefault(user_key, {
+            'user_id': getattr(document, 'user_id', None),
+            'username': submitter_name,
+            'tasks': 0,
+            'completed': 0,
+            'issues': 0,
+        })
+        user_item['tasks'] += 1
+        if review.status == 'completed':
+            user_item['completed'] += 1
+        user_item['issues'] += review_issue_count
 
     return {
         'filters': {
@@ -11398,18 +14291,20 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
         },
         'issue_distribution': issue_distribution,
         'doc_type_distribution': list(doc_type_stats.values()),
+        'user_stats': sorted(user_stats_map.values(), key=lambda item: item['tasks'], reverse=True),
         'task_list': [
             {
                 'review_id': review.id,
                 'document_id': document.id,
                 'document_name': document.filename,
                 'document_type': _dashboard_format_doc_type(document.file_type),
+                'submitted_by': (getattr(user, 'display_name', None) or getattr(user, 'username', None) or '未知用户') if user else '未知用户',
                 'submitted_at': review.created_at.isoformat() if review.created_at else '',
                 'status': review.status,
                 'issue_count': issues_by_review.get(review.id, 0),
                 'priority': '中',
             }
-            for review, document, _ in sorted(rows, key=lambda item: item[0].created_at or datetime.min, reverse=True)[:50]
+            for review, document, user in sorted(rows, key=lambda item: item[0].created_at or datetime.min, reverse=True)[:50]
         ],
     }
 
@@ -12429,6 +15324,83 @@ async def get_provider_status(_: UserOut = Depends(require_admin)):
         "models": models,
     }
 
+
+@router.post("/knowledge-feedback/import")
+async def import_knowledge_feedback(
+    file: UploadFile = File(...),
+    language: str = Form("cn"),
+    db: Session = Depends(get_db),
+    _: UserOut = Depends(require_admin),
+):
+    """人工审核意见知识库化回流（v2 第 11 节）。
+
+    接收一份人工意见 markdown，去重 → 归类 → 回流到 rules 表。
+    回流规则默认 regex=r"(?!)"（永不匹配），需人工确认后启用。
+    """
+    filename = (file.filename or "").strip().lower()
+    if filename and not filename.endswith((".md", ".markdown", ".txt")):
+        raise HTTPException(status_code=400, detail="仅支持 Markdown（.md/.markdown/.txt）人工意见文件")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    try:
+        markdown_text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="文件需为 UTF-8 编码")
+    language = (language or "cn").strip().lower()
+    if language not in ("cn", "en"):
+        raise HTTPException(status_code=400, detail="language 仅支持 cn 或 en")
+
+    from app.review_engine.knowledge_feedback import import_annotations_markdown_to_rule_library
+
+    try:
+        stats = import_annotations_markdown_to_rule_library(db, markdown_text, language=language)
+    except Exception as exc:
+        print(f"[知识回流] 导入失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"人工意见回流失败: {exc}")
+    return {
+        "status": "ok",
+        "disabled": True,
+        "regex": r"(?!)",
+        "language": language,
+        **stats,
+    }
+
+
+# Registered before the "/{review_id}" route below: Starlette matches routes in
+# registration order, so "/search" must come first or it is parsed as an int
+# review_id and rejected with 422.
+@router.get("/search")
+async def search_reviews(
+    q: str = Query(..., description="搜索关键词"),
+    limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    _: UserOut = Depends(require_admin),
+):
+    """全文搜索审核文档"""
+    try:
+        from app.services.fts_search import get_fts_engine
+        engine = get_fts_engine()
+        results = engine.search(q, limit=limit, offset=offset)
+        return {
+            "query": q,
+            "results": [
+                {
+                    "doc_id": r.doc_id,
+                    "title": r.title,
+                    "score": round(r.score, 2),
+                    "snippet": r.snippet,
+                    "highlights": r.highlights,
+                    "metadata": r.metadata,
+                }
+                for r in results
+            ],
+            "count": len(results),
+        }
+    except Exception as e:
+        return {"query": q, "results": [], "count": 0, "error": str(e)}
+
+
 @router.get("/{review_id}", response_model=Review)
 async def read_review(
     review_id: int,
@@ -12436,7 +15408,8 @@ async def read_review(
     current_user: UserOut = Depends(get_current_active_user),
 ):
     review, doc = _require_review_access(db, review_id, current_user)
-    return _serialize_review_list_item(db, review, {getattr(doc, 'id', None): doc} if doc else {})
+    stats = _judgment_stats_map(db, [review.id]).get(review.id)
+    return _serialize_review_list_item(db, review, {getattr(doc, 'id', None): doc} if doc else {}, stats)
 
 
 @router.get("/{review_id}/issues", response_model=list[Issue])
@@ -12447,7 +15420,7 @@ async def read_review_issues(
 ):
     review, doc = _require_review_access(db, review_id, current_user)
     issues = get_issues(db, review_id=review_id)
-    return _normalize_review_issue_display(_visible_review_issues(issues), getattr(doc, 'content', None))
+    return _normalize_review_issue_display(_review_issues_for_display(issues), getattr(doc, 'content', None))
 
 
 @router.post("/{review_id}/issues/manual", response_model=Issue)
@@ -12601,7 +15574,7 @@ async def get_aggregated_report(
     """
     review, document = _require_review_access(db, review_id, current_user)
 
-    issues = get_issues(db, review_id=review_id)
+    issues = _visible_review_issues(get_issues(db, review_id=review_id))
     issue_dicts = [_report_issue_to_dict(i) for i in issues]
     summary_raw = _load_review_summary(review.summary)
 
@@ -12670,28 +15643,6 @@ async def get_review_audit_traces(
             for t in traces
         ],
     }
-
-# ── Review Engine: Rule Migration Status ──────────────────────────
-
-@router.get("/engine/rule-migration")
-async def get_rule_migration_status(_: UserOut = Depends(require_admin)):
-    """获取确定性规则迁移状态
-
-    返回已迁移和待迁移的规则分组，用于跟踪审核引擎重构进度。
-    """
-    try:
-        from app.review_engine.rules import get_migration_summary
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"app.review_engine.rules", "app.review_engine.rules.engine"}:
-            raise
-        return {
-            "enabled": False,
-            "migrated": [],
-            "pending": [],
-            "degraded_reason": "review_engine.rules 模块未启用",
-        }
-    return get_migration_summary()
-
 
 @router.get("/{review_id}/stage-diagnostics")
 async def get_stage_diagnostics(
@@ -12942,37 +15893,6 @@ async def reindex_document(
         return {"success": True, "message": "文档已重新索引"}
     except Exception as e:
         return {"success": False, "message": str(e)}
-
-
-@router.get("/search")
-async def search_reviews(
-    q: str = Query(..., description="搜索关键词"),
-    limit: int = Query(10, ge=1, le=50),
-    offset: int = Query(0, ge=0),
-    _: UserOut = Depends(require_admin),
-):
-    """全文搜索审核文档"""
-    try:
-        from app.services.fts_search import get_fts_engine
-        engine = get_fts_engine()
-        results = engine.search(q, limit=limit, offset=offset)
-        return {
-            "query": q,
-            "results": [
-                {
-                    "doc_id": r.doc_id,
-                    "title": r.title,
-                    "score": round(r.score, 2),
-                    "snippet": r.snippet,
-                    "highlights": r.highlights,
-                    "metadata": r.metadata,
-                }
-                for r in results
-            ],
-            "count": len(results),
-        }
-    except Exception as e:
-        return {"query": q, "results": [], "count": 0, "error": str(e)}
 
 
 @router.post("/eval/batch")

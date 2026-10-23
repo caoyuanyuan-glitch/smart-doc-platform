@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from app.database import Base
 from datetime import datetime
 
@@ -6,7 +6,7 @@ class Issue(Base):
     __tablename__ = "issues"
     
     id = Column(Integer, primary_key=True, index=True)
-    review_id = Column(Integer)
+    review_id = Column(Integer, ForeignKey("reviews.id", ondelete="CASCADE"), nullable=False, index=True)
     severity = Column(String)
     category = Column(String)
     rule = Column(String)

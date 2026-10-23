@@ -4,6 +4,8 @@ import re
 from collections import Counter
 from typing import Any
 
+from app.review_engine.false_positives import is_rulebook_false_positive
+
 
 SEVERITY_RANK = {"fatal": 4, "serious": 3, "general": 2, "suggestion": 1}
 SOURCE_RANK = {"rule": 4, "term": 3, "grammar": 2, "ai": 1, "spellcheck": 0}
@@ -59,7 +61,7 @@ HIGH_VALUE_PATTERN = re.compile(
     r"missing\s+(?:object|icon|button|step|entry|field)|incomplete\s+sentence|"
     r"trademark|copyright|compliance|ROHS|DNBSEQ|CYY|人工审核|发布前自检|Checklist|"
     r"默认账号|默认密码|密码|内网|端口|版本记录|空表|缺失|不完整|合规|法规|商标|版权|"
-    r"重复|物料编码|术语一致|图文引用|图号|表格内容|操作步骤|信息完整",
+    r"重复|物料编码|术语一致|图文引用|图号|编号引用|表格内容|操作步骤|信息完整|结构完整",
     re.IGNORECASE,
 )
 
@@ -67,7 +69,7 @@ LOW_VALUE_PATTERN = re.compile(
     r"^an?\s+[a-z](?:\s|$)|^\d+(?:arc|cram|fastq|fq|bam|bcl|nvme|ssd|raid)$|"
     r"^click$|^please\s+contact$|^performing\s+the\s+following\s+steps$|"
     r"\b(?:nt responds|emplate|analysi|the same pr)\b|\[table content\]|check\s+if|"
-    r"Browse|Edit|括号后请添加空格|建议拆分为多个短句|普通语法|冠词|标点|格式微调|"
+    r"Browse|Edit|括号后请添加空格|建议拆分为多个短句|"
     r"formatting\s+artifact|\btab\b|\ban\s+fq\b|\bto\s+to\b|after\s+login|"
     r"no\s+(?:issue|violation|change)\b|no\s+change\s+needed|appears\s+valid|is\s+correct\b|"
     r"verify\s+if\s+this\s+is\s+the\s+correct|preposition\s+'.*?'\s+is\s+ambiguous|is\s+clearer\s+for\s+describing",
@@ -80,6 +82,330 @@ VISUAL_LAYOUT_PATTERN = re.compile(
     r"table/layout|layout|column\s+width|cell\s+overflow|font\s+size|icon\s+size|image\s+size|visual",
     re.IGNORECASE,
 )
+
+_TRADEMARK_SYMBOL_RE = re.compile(r'[®™©]')
+# PDF 阅读顺序错乱会把 ®/™ 甩到商标名之外，形成 “® are trademarks ...” 这类文本；
+# 文本层还可能把 ™ 提取成字面量 TM，同样会与商标名分离
+_DETACHED_TRADEMARK_RE = re.compile(r'(?:^|\s)(?:[®™©]|TM\b)')
+
+
+def is_trademark_reading_order_artifact(original: str, suggestion: str) -> bool:
+    """商标声明段落被 PDF 文本层打乱顺序时，AI 会据错位文本误报商标归属问题。"""
+    if not _TRADEMARK_SYMBOL_RE.search(suggestion or ''):
+        return False
+    return bool(_DETACHED_TRADEMARK_RE.search(original or ''))
+
+
+_CJK_CHAR_RE = re.compile(r'[\u3400-\u9fff]')
+
+
+# ----------------------------------------------------------------------
+# 拼写类问题的证据分级
+# ----------------------------------------------------------------------
+#
+# 拼写问题天然分两类，混在一起评分是 #17 误杀的根因：
+#
+# 1. **猜测型**：拼写库给出一组候选词，作者从里挑一个。像
+#    `Intergra` 这种，普通词典只能给出 integral/intergrade/interwar
+#    ——全是错的，采纳任何一个都是误导。这类问题必须继续被压低分数。
+#
+# 2. **确证型**：有唯一且可靠的依据能证明「正确写法就是 X」。
+#    包括：
+#    - SPELL-TRANS：文档内已合法使用了某个词，另一种写法是它的
+#      相邻换位（Ilde vs 文档内的 Idle）——依据在文档内，可自证；
+#    - SPELL-PROP：与外部专有名词库中的规范名编辑距离 <= 1
+#      （Intergra vs Integra）——依据在专有名词库，可确证；
+#    - SPELL 且 confidence >= 95：命中了人工维护的错拼映射表。
+#
+# 确证型问题若与猜测型同等扣分（-18），就会被 value_score 阈值整体筛掉，
+# 导致**真实且已确证的拼写错误反而不出现在报告里**。
+# 这正是 Intergra（人工批注 #9，明确指出应为 Integra）被漏掉的原因。
+
+# 确证型拼写规则：这些规则的正确写法有唯一可靠依据。
+CONFIRMED_SPELLING_RULES = {
+    "SPELL-TRANS",   # 文档内词表确证（相邻换位）
+    "SPELL-PROP",    # 外部专有名词库确证（编辑距离 <= 1）
+    "SPELL-INS",     # 文档内词表确证（插入/删除字符）
+    "SPELL-SPLIT",   # PDF 固定短语确证
+    "SPELL-PHRASE",  # PDF 固定短语确证
+}
+
+# 猜测型拼写规则：仅凭词典候选，无法确定正确写法。
+GUESSED_SPELLING_RULES = {
+    "SPELL",
+    "SPELL-TERM",
+}
+
+
+def is_confirmed_spelling_issue(issue: Any) -> bool:
+    """判断一条拼写问题是否属于「有确凿证据」的类型。
+
+    确证型的拼写错误不应与「拼写库猜一个词」同等对待——
+    前者的正确写法是确定的，后者是猜测。
+
+    注意 SPELL 规则本身有两条产出路径：命中人工错拼表时
+    confidence=95（确证），走词典候选分支时 confidence=80（猜测）。
+    因此不能只看 rule，必须同时看 confidence。
+    """
+    data = issue_to_mapping(issue)
+    rule = str(data["rule"] or "").upper()
+    confidence = int(data["confidence"] or 0)
+    severity = str(data["severity"] or "general").lower()
+
+    if rule in CONFIRMED_SPELLING_RULES:
+        return True
+    if rule in GUESSED_SPELLING_RULES:
+        # 命中人工维护的错拼映射表（confidence=95）或 serious 级别
+        # 时，视为确证；其余（词典候选猜测）不算。
+        return severity == "serious" or confidence >= 95
+    return False
+
+
+def is_broken_glyph_extraction_artifact(original: str) -> bool:
+    """原文含 Unicode 替换字符（U+FFFD）时，说明 PDF/字体该字形未映射到 Unicode。
+
+    符号字体（项目符号、图标字形）在文本层会被解析成 �，AI 会据此误报
+    「项目符号不规范」「UI 对象缺失」等误报。这类问题取决于解析而非文档本身。
+    """
+    return '\ufffd' in str(original or '')
+
+
+def _space_change_boundaries(original: str, suggestion: str):
+    """两串仅空格不同时，返回每处空格增删的边界字符对；否则返回 None。"""
+    orig = normalize_text(original)
+    sugg = normalize_text(suggestion)
+    if compact_text(orig) != compact_text(sugg):
+        return None
+    boundaries = []
+    orig_index = 0
+    sugg_index = 0
+    while orig_index < len(orig) or sugg_index < len(sugg):
+        orig_char = orig[orig_index] if orig_index < len(orig) else None
+        sugg_char = sugg[sugg_index] if sugg_index < len(sugg) else None
+        if orig_char == sugg_char:
+            orig_index += 1
+            sugg_index += 1
+            continue
+        if orig_char == ' ' and sugg_char != ' ':
+            boundaries.append((
+                orig[orig_index - 1] if orig_index > 0 else '',
+                orig[orig_index + 1] if orig_index + 1 < len(orig) else '',
+            ))
+            orig_index += 1
+            continue
+        if sugg_char == ' ' and orig_char != ' ':
+            boundaries.append((
+                sugg[sugg_index - 1] if sugg_index > 0 else '',
+                sugg[sugg_index + 1] if sugg_index + 1 < len(sugg) else '',
+            ))
+            sugg_index += 1
+            continue
+        return None
+    return boundaries
+
+
+def is_cjk_latin_boundary_space_style(original: str, suggestion: str) -> bool:
+    """建议唯一改动是「中文↔拉丁字母/数字」边界上的空格增删时，视为排版风格。
+
+    中英文混排时，中文与英文/数字之间加不加空格属于全文统一即可的风格问题
+    （如「V5.4 及以上」/「设置 Barcode」）。全文一致性交由专门的术语/空格
+    一致性规则判断，单点增删不是可验证错误，因此不在此处逐条上报。
+
+    只有当所有被增删的空格都落在「中文↔非中文」边界时才返回 True。
+    中文-中文（中文词内空格）、非中文-非中文（英文断词 High-throu ghput、
+    数字与单位 5mL→5 mL）都是真实问题，需要保留。
+    """
+    boundaries = _space_change_boundaries(original, suggestion)
+    if not boundaries:
+        return False
+    for before, after in boundaries:
+        if not before or not after:
+            return False
+        if bool(_CJK_CHAR_RE.match(before)) == bool(_CJK_CHAR_RE.match(after)):
+            return False
+    return True
+
+
+_UI_OBJECT_NOUN_RE = re.compile(r'(?:对应)?(?:图标|按钮|控件|对象|元素)')
+_UI_LABEL_RE = re.compile(r'【[^】]*】')
+# 原文中该放图标/按钮名处只剩一个空格（字形未进入文本层）的空位
+_UI_OBJECT_GAP_RE = re.compile(
+    r'(?:点击|点按|轻触|长按|选[择中]|按下?)\s+|[\u4e00-\u9fff]\s+[，。、；：]'
+)
+
+
+def is_ui_object_insertion_without_evidence(original: str, suggestion: str) -> bool:
+    """AI 报「图标/按钮缺失」时，若建议的唯一改动只是补一个对象名词或【…】标签。
+
+    原文里图标/按钮字形常常没进入 PDF 文本层（该处只剩一个空格），AI 据此误报
+    「点击 ，图标缺失」甚至凭空补一个【查询】之类的按钮名。文档本身并不缺图标，
+    缺的是文本层的字形，属于提取伪影；有真实版式证据的问题交由视觉链处理。
+
+    判据：原文存在 UI 对象空位，且建议删去新增的【…】标签与 UI 对象名词后与原文一致。
+    """
+    orig = normalize_text(original)
+    sugg = normalize_text(suggestion)
+    if not orig or not sugg:
+        return False
+    if not _UI_OBJECT_GAP_RE.search(orig):
+        return False
+    if not (_UI_LABEL_RE.search(sugg) or _UI_OBJECT_NOUN_RE.search(sugg)):
+        return False
+    orig_residue = _UI_LABEL_RE.sub('', orig)
+    sugg_residue = _UI_OBJECT_NOUN_RE.sub('', _UI_LABEL_RE.sub('', sugg))
+    return compact_text(orig_residue) == compact_text(sugg_residue)
+
+
+_SPACING_CONSISTENCY_CLAIM_RE = re.compile(r'不一致|不统一|全文.{0,8}统一|统一为.{0,6}写法')
+
+
+def is_spacing_consistency_claim(rule: str, description: str = "") -> bool:
+    """建议是否以「全文空格用法不一致」为判据（而非单点增删空格）。
+
+    空格问题收敛到「文档内一致性」这一条判据：单点加/删空格不作为可验证错误
+    逐条上报，但明确以「同一术语全文空格使用不一致」提出的问题保留。
+    """
+    return bool(_SPACING_CONSISTENCY_CLAIM_RE.search(f"{rule or ''} {description or ''}"))
+
+
+_TECHNICAL_PHRASE_RE = re.compile(
+    r'\b(?:air\s+gap|set\s+up|flow\s+cell|wash\s+buffer|dummy\s+run)\b',
+    re.IGNORECASE,
+)
+
+
+def _edit_distance(left: str, right: str, limit: int = 2) -> int:
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+    previous = list(range(len(right) + 1))
+    for left_char in left:
+        current = [previous[0] + 1]
+        for index, right_char in enumerate(right, start=1):
+            insert_cost = current[-1] + 1
+            delete_cost = previous[index] + 1
+            replace_cost = previous[index - 1] + (left_char != right_char)
+            current.append(min(insert_cost, delete_cost, replace_cost))
+        previous = current
+        if min(previous) > limit:
+            return limit + 1
+    return previous[-1]
+
+
+def _joined_near_dictionary_word(joined: str) -> bool:
+    """拼接后的字母串接近真实英文词时，才视为断词伪影。"""
+    text = joined.lower()
+    if len(text) < 8:
+        return False
+    try:
+        from app.utils.spell_checker import spell
+    except Exception:
+        spell = None
+    if spell is not None:
+        for size in range(min(len(text), 14), 5, -1):
+            for index in range(0, len(text) - size + 1):
+                piece = text[index:index + size]
+                if piece in spell:
+                    return True
+                candidates = spell.candidates(piece) or set()
+                if any(_edit_distance(piece, candidate, 2) <= 2 for candidate in candidates if 6 <= len(candidate) <= 14):
+                    return True
+    compact = re.sub(r'[^a-z]', '', text)
+    return bool(re.search(r'[a-z]{6,}', compact))
+
+
+def is_broken_word_extraction_artifact(original: str) -> bool:
+    """PDF 表格按字符间距断词（如 “Powe rswi tcha n d”）造成的伪影文本。
+
+    正常英文中不会出现孤立小写单字母（a/I 除外）夹杂在短碎片里。
+    """
+    fragments = normalize_text(original).split()
+    if len(fragments) < 4:
+        return False
+    if any(len(fragment) > 4 or not fragment.isalpha() for fragment in fragments):
+        return False
+    joined = ''.join(fragments)
+    if len(joined) < 12:
+        return False
+    if not any(len(fragment) == 1 and fragment.islower() and fragment not in {'a', 'i'} for fragment in fragments):
+        return False
+    if _TECHNICAL_PHRASE_RE.search(normalize_text(original)):
+        return False
+    return _joined_near_dictionary_word(joined)
+
+
+_SYMBOL_LEGEND_ORIGINAL_RE = re.compile(
+    r'^[A-Za-z0-9][A-Za-z0-9 ,/\-]{0,56}?\s+'
+    r'(?:Indicates|Means|Denotes|Represents|Refers\s+to|Stands\s+for)\b',
+    re.IGNORECASE,
+)
+_FRAGMENT_COMPLAINT_RE = re.compile(
+    r'\b(?:stray|fragment|truncated|garbled|malformed|broken\s+word|incomplete\s+sentence)\b',
+    re.IGNORECASE,
+)
+_DISCLAIMER_RE = re.compile(
+    r'\b(?:shall\s+not\s+be\s+liable|to\s+the\s+(?:maximum|full(?:est)?)\s+extent\s+permitted|'
+    r'hereby\s+disclaims|does\s+not\s+constitute\s+(?:a\s+)?warranty|'
+    r'for\s+illustrative\s+purposes?\s+only)\b',
+    re.IGNORECASE,
+)
+_FIGURE_ILLUSTRATION_RE = re.compile(
+    r'\bfigures?\b.+\b(?:are|is)\b.+\billustrations?\b',
+    re.IGNORECASE,
+)
+
+
+def is_symbol_legend_extraction_noise(original: str, suggestion: str, description: str = "") -> bool:
+    """符号表定义行被 AI 当成 stray fragment / 残句。"""
+    if not _SYMBOL_LEGEND_ORIGINAL_RE.match(normalize_text(original or "")):
+        return False
+    return bool(_FRAGMENT_COMPLAINT_RE.search(f"{suggestion or ''} {description or ''}"))
+
+
+def is_legal_disclaimer_rewrite_noise(original: str, suggestion: str) -> bool:
+    """法律免责声明的整句改写没有文书错误证据。"""
+    original_text = normalize_text(original)
+    suggestion_text = normalize_text(suggestion)
+    if not original_text or not suggestion_text:
+        return False
+    if compact_text(original_text) == compact_text(suggestion_text):
+        return False
+    if not _DISCLAIMER_RE.search(original_text):
+        return False
+    return len(suggestion_text) >= 24
+
+
+def is_figure_illustration_word_order_noise(original: str, suggestion: str) -> bool:
+    """Figures ... illustrations 的语序建议属于风格改写。"""
+    original_text = normalize_text(original)
+    suggestion_text = normalize_text(suggestion)
+    if not _FIGURE_ILLUSTRATION_RE.search(original_text):
+        return False
+    if not re.search(r'\billustrations?\b', suggestion_text, re.IGNORECASE):
+        return False
+    original_tokens = set(re.findall(r'[A-Za-z]+', original_text.lower()))
+    suggestion_tokens = set(re.findall(r'[A-Za-z]+', suggestion_text.lower()))
+    return len(original_tokens & suggestion_tokens) >= 3
+
+
+# 知识库中的“错词 → 正词”类纠错条目，如「试剂舱 → 试剂仓」
+_SUBSTITUTION_RULE_RE = re.compile(r"^\s*([\u4e00-\u9fff]{2,8})\s*(?:→|->|—>|➔|=>)\s*\S")
+
+
+def hallucinated_substitution_term(issue: Any) -> str | None:
+    """AI 引用“错词 → 正词”类规则，但原文并不包含该错词时，属臆造错误。
+
+    例如知识库条目「试剂舱 → 试剂仓」被套用到正文的“试剂槽”上。判定只依据
+    original_text 与 context：rule/audit_basis 里本来就会写出该错词，不能作为证据。
+    """
+    data = issue_to_mapping(issue)
+    match = _SUBSTITUTION_RULE_RE.match(str(data["rule"] or ""))
+    if not match:
+        return None
+    wrong = match.group(1)
+    evidence = compact_text(data["original_text"]) + compact_text(data["context"])
+    if wrong in evidence:
+        return None
+    return wrong
 
 
 def issue_value(issue: Any, key: str, default: Any = "") -> Any:
@@ -173,6 +499,11 @@ def is_whitelisted_layout_issue(issue: Any) -> bool:
     data = issue_to_mapping(issue)
     rule = str(data["rule"] or "").upper()
     confidence = int(data["confidence"] or 0)
+    if rule == "PDF-VISUAL-001":
+        # 页面级视觉复核：已由多模态模型逐页判定，不是文本层版式噪声。
+        # 放行的同时必须限制注入量（REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT），
+        # 否则会把整页判断混进"具体文字位置"的评测分母。
+        return True
     return rule.startswith("CYY-CN-LAYOUT-") and confidence >= 86
 
 
@@ -217,6 +548,48 @@ def is_substantive_ai_issue(issue: Any) -> bool:
     return True
 
 
+def is_verifiable_ai_text_issue(issue: Any) -> bool:
+    """AI 产出的、可定位到原文且有明确修改建议的文本问题。
+
+    这类问题有真实证据（original/suggestion），不应被 LOW_VALUE 裸词、
+    英文 Grammar 类目低价值判断等一票否决。
+    """
+    data = issue_to_mapping(issue)
+    if str(data["source"] or "").lower() != "ai":
+        return False
+    original = normalize_text(data["original_text"])
+    suggestion = normalize_text(data["suggestion"])
+    description = normalize_text(data["description"])
+    category = normalize_text(data["category"])
+    confidence = int(data["confidence"] or 0)
+    text_categories = {
+        "grammar", "spelling", "punctuation", "terminology",
+        "英文规范", "英文微编辑", "语法与表达", "拼写/用词错误",
+        "术语一致性", "标点符号", "标点", "中文规范",
+        # P3 prompt 新增的语义质量维度；与 P0-B 白名单联用，避免语义类
+        # 建议问题被 value_score 阈值丢弃。
+        "冗余", "表述不准确", "信息不完整", "一致性", "语气",
+        "图表衔接", "句子成分",
+    }
+    # Keep aligned with backend/app/utils/ai_client.py English/Chinese prompt categories.
+    text_categories.update({
+        "编号引用", "结构完整", "法规合规", "可读性",
+        "clarity", "consistency", "completeness", "redundancy",
+        "accuracy", "tone", "figure-table", "sentence-structure",
+        "numbering", "structure", "compliance", "readability",
+    })
+    return (
+        confidence >= 70
+        and bool(original)
+        and bool(suggestion or description)
+        and category.lower() in {item.lower() for item in text_categories}
+        # 原文本身是 LOW_VALUE 裸词（如 "Browse"/"Edit"）时不算可验证文本问题：
+        # 这类通用 UI 措辞建议没有真实语法证据，仍需被 LOW_VALUE 扣分压掉。
+        and not LOW_VALUE_PATTERN.search(original)
+        and not is_visual_layout_issue(data)
+    )
+
+
 def is_visual_layout_issue(issue: Any) -> bool:
     data = issue_to_mapping(issue)
     rule = str(data["rule"] or "").upper()
@@ -240,7 +613,10 @@ def value_score(issue: Any) -> int:
 
     score = 50
     score += {"fatal": 25, "serious": 18, "general": 6, "suggestion": -8}.get(severity, 0)
-    if is_substantive_ai_issue(data):
+    # 可验证的 AI 文本问题（有原文+建议、类别在白名单、非视觉）同样按实质问题计分；
+    # 纯空格/标点差异类建议会被 is_substantive_ai_issue 的紧凑文本相等判断挡掉，
+    # 需要由 is_verifiable_ai_text_issue 兜住，否则这类真实问题会被 value_score 阈值丢弃。
+    if is_substantive_ai_issue(data) or is_verifiable_ai_text_issue(data):
         score += 6
     else:
         score += {"rule": 8, "term": 6, "ai": -2, "spellcheck": 0}.get(source, 0)
@@ -252,24 +628,30 @@ def value_score(issue: Any) -> int:
         score -= 12
     if is_high_value(data):
         score += 30
-    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE"}:
-        if severity == "serious" or confidence >= 95:
+    if rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT", "SPELL-PHRASE", "SPELL-TRANS", "SPELL-PROP"}:
+        if is_confirmed_spelling_issue(data):
+            # 确证型拼写错误：正确写法有唯一可靠依据（文档内词表 /
+            # 专有名词库 / 人工错拼表），应当与猜测型区别对待。
             score += 14
         else:
+            # 猜测型：拼写库只是给出一组候选，无法确定正确写法，
+            # 继续压低分数以抑制误报。
             score -= 18
-    if rule.startswith("CYY-CN-UNIT-") or category == "单位格式":
+    # 单位格式的历史高压制只针对中文规则名；英文单位规则（DOC-UNIT-*）按正常价值评估
+    if rule.startswith("CYY-CN-UNIT-"):
         score -= 42
     if rule == "CHECKLIST-TRADEMARK" and severity in {"general", "suggestion"}:
         score -= 32
-    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data) and not is_substantive_ai_issue(data):
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and not is_high_value(data) and not is_substantive_ai_issue(data) and not is_verifiable_ai_text_issue(data):
         score -= 26
-    if LOW_VALUE_PATTERN.search(normalize_text(data["original_text"])) or LOW_VALUE_PATTERN.search(issue_blob(data)):
-        score -= 55
+    if not is_verifiable_ai_text_issue(data):
+        if LOW_VALUE_PATTERN.search(normalize_text(data["original_text"])) or LOW_VALUE_PATTERN.search(issue_blob(data)):
+            score -= 55
     if rule in LOW_VALUE_RULES:
         score -= 45
     if source == "spellcheck" and not is_high_value(data):
         score -= 4
-    if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not is_high_value(data) and not is_substantive_ai_issue(data):
+    if source == "ai" and category.lower() in {"spelling", "grammar", "punctuation"} and not is_high_value(data) and not is_substantive_ai_issue(data) and not is_verifiable_ai_text_issue(data):
         score -= 20
     if not data["original_text"] or not data["suggestion"]:
         score -= 20
@@ -290,6 +672,32 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
     severity = str(data["severity"] or "general").lower()
 
     if source == "spellcheck":
+        return False
+    if is_rulebook_false_positive(data):
+        return True
+    if is_trademark_reading_order_artifact(original, suggestion):
+        return True
+    if source == "ai" and (
+        is_broken_word_extraction_artifact(original)
+        or is_symbol_legend_extraction_noise(original, suggestion, description)
+        or is_legal_disclaimer_rewrite_noise(original, suggestion)
+        or is_figure_illustration_word_order_noise(original, suggestion)
+        or is_broken_glyph_extraction_artifact(original)
+        or is_ui_object_insertion_without_evidence(original, suggestion)
+    ):
+        return True
+    # 空格问题收敛到「全文一致性」单一判据：单点增删空格不作为可验证错误，
+    # 但明确以「全文空格使用不一致」提出的问题保留。
+    if (
+        source == "ai"
+        and not is_spacing_consistency_claim(rule, description)
+        and is_cjk_latin_boundary_space_style(original, suggestion)
+    ):
+        return True
+    if hallucinated_substitution_term(data):
+        counters["HALLUCINATED_SUBSTITUTION_TERM"] += 1
+        return True
+    if is_verifiable_ai_text_issue(data):
         return False
     if rule in CYY_LOW_PRECISION_RULES:
         return True
@@ -329,11 +737,11 @@ def is_noise(issue: Any, counters: Counter | None = None) -> bool:
         return True
     if source == "ai" and category.lower() in {"format", "punctuation"} and re.search(r"space\s+before\s+colon|remove\s+space\s+before\s+colon|punctuation", issue_blob(data), re.IGNORECASE):
         return True
-    if (rule.startswith("CYY-CN-UNIT-") or category == "单位格式") and str(data["severity"] or "").lower() in {"general", "suggestion"}:
+    if rule.startswith("CYY-CN-UNIT-") and str(data["severity"] or "").lower() in {"general", "suggestion"}:
         return True
     if rule == "CHECKLIST-TRADEMARK" and str(data["severity"] or "").lower() in {"general", "suggestion"}:
         return True
-    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and str(data["severity"] or "").lower() in {"general", "suggestion"} and not is_high_value(data) and not is_substantive_ai_issue(data):
+    if category in {"Grammar", "操作步骤语气", "英文微编辑", "英文规范"} and str(data["severity"] or "").lower() in {"general", "suggestion"} and not is_high_value(data) and not is_substantive_ai_issue(data) and not is_verifiable_ai_text_issue(data):
         return True
     if source == "ai" and re.search(r"\bcheck\s+if\b|是否使用|是否正确", suggestion, re.IGNORECASE):
         return True
@@ -369,6 +777,20 @@ def normalize_issue(issue: Any) -> Any:
     return issue
 
 
+def _page_token_from_position(position: Any) -> str:
+    if isinstance(position, dict):
+        return str(position.get("page") or position.get("page_number") or "")
+    text = str(position or "").strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return ""
+        if isinstance(parsed, dict):
+            return str(parsed.get("page") or parsed.get("page_number") or "")
+    return ""
+
+
 def dedupe_key(issue: Any) -> str:
     data = issue_to_mapping(issue)
     topic = issue_topic(data)
@@ -382,11 +804,12 @@ def dedupe_key(issue: Any) -> str:
         return f"topic|{topic}|{original[:80]}"
     if rule in {"CYY-CN-PLACEHOLDER-001", "CYY-CN-MATERIAL-001"}:
         return rule
+    page = _page_token_from_position(data.get("position"))
     if source == "spellcheck" or rule in {"SPELL", "SPELL-TERM", "SPELL-SPLIT"}:
-        return f"spell|{rule}|{original}"
+        return f"spell|{rule}|{original}|{page}"
     if rule in {"UNIT-003", "UNIT-004", "HR011", "STYLE-003", "HR008", "GRAMMAR-001", "GRAMMAR-002"}:
-        return f"{rule}|{original}|{data['position']}"
-    return f"{rule}|{original}|{compact_text(data['chapter'])}"
+        return f"{rule}|{original}|{data['position']}|{page}"
+    return f"{rule}|{original}|{compact_text(data['chapter'])}|{page}"
 
 
 def issue_rank(issue: Any) -> tuple[int, int, int, int, int, int]:
@@ -447,8 +870,20 @@ def suppress_shadowed_ai(issues: list[Any]) -> list[Any]:
     return filtered
 
 
+_PIPELINE_DROP_COUNTER: Counter = Counter()
+
+
+def drain_pipeline_drop_reasons() -> dict[str, int]:
+    """取出并清空内存中的丢弃归因计数，供审核 summary 汇总（不依赖 REVIEW_DROP_LOG 文件）。"""
+    global _PIPELINE_DROP_COUNTER
+    reasons = dict(_PIPELINE_DROP_COUNTER)
+    _PIPELINE_DROP_COUNTER = Counter()
+    return reasons
+
+
 def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, threshold: int | None = None) -> None:
     """丢弃归因日志：环境变量 REVIEW_DROP_LOG 指向 JSONL 文件时记录每条被丢弃的问题及原因。"""
+    _PIPELINE_DROP_COUNTER[reason] += 1
     path = os.getenv("REVIEW_DROP_LOG", "")
     if not path:
         return
@@ -476,32 +911,56 @@ def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, thresh
 def select_review_issues(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> list[Any]:
     counters: Counter = Counter()
     selected_by_key: dict[str, Any] = {}
+    drop_reasons: Counter = Counter()
     for raw_issue in issues or []:
         issue = normalize_issue(raw_issue)
         data = issue_to_mapping(issue)
         status = str(data["status"] or "").lower()
         if status_filter and status not in {"", "pending", "confirmed", "converted_to_rule"}:
             _log_pipeline_drop("status_filtered", issue)
+            drop_reasons["status_filtered"] += 1
             continue
         if not data["original_text"]:
             _log_pipeline_drop("empty_original_text", issue)
+            drop_reasons["empty_original_text"] += 1
             continue
         if is_noise(issue, counters):
             _log_pipeline_drop("noise", issue)
+            drop_reasons["noise"] += 1
             continue
         threshold = 38 if str(data["severity"] or "").lower() in {"fatal", "serious"} else min_score
         score = value_score(issue)
         if score < threshold:
             _log_pipeline_drop("below_threshold", issue, score=score, threshold=threshold)
+            drop_reasons["below_threshold"] += 1
             continue
         key = dedupe_key(issue)
         existing = selected_by_key.get(key)
         if existing is None or issue_rank(issue) > issue_rank(existing):
             if existing is not None:
                 _log_pipeline_drop("dedupe_shadowed", existing)
+                drop_reasons["dedupe_shadowed"] += 1
             selected_by_key[key] = issue
         else:
             _log_pipeline_drop("dedupe_shadowed", issue)
+            drop_reasons["dedupe_shadowed"] += 1
 
     selected = suppress_shadowed_ai(list(selected_by_key.values()))
     return sorted(selected, key=sort_key)
+
+
+def select_review_issues_with_diagnostics(issues: list[Any], min_score: int = 45, status_filter: bool = False) -> tuple[list[Any], dict[str, Any]]:
+    import time
+    from app.review_engine.models import ReviewStageDiagnostics
+
+    started = time.perf_counter()
+    input_count = len(issues or [])
+    selected = select_review_issues(issues, min_score=min_score, status_filter=status_filter)
+    diagnostics = ReviewStageDiagnostics(
+        stage="select_review_issues",
+        input_count=input_count,
+        output_count=len(selected),
+        dropped_count=max(0, input_count - len(selected)),
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )
+    return selected, diagnostics.to_dict()

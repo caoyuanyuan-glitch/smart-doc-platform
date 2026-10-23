@@ -20,11 +20,14 @@ const DocGenerator = () => import('@/views/DocGenerator.vue')
 const Compare = () => import('@/views/Compare.vue')
 const CompareParams = () => import('@/views/CompareParams.vue')
 const Competitor = () => import('@/views/Competitor.vue')
+const CompetitorCompare = () => import('@/views/CompetitorCompare.vue')
 const Convert = () => import('@/views/Convert.vue')
 const Terms = () => import('@/views/Terms.vue')
 const Users = () => import('@/views/Users.vue')
 const Translate = () => import('@/views/Translate.vue')
 const TranslateDoc = () => import('@/views/TranslateDoc.vue')
+const TranslateHistory = () => import('@/views/TranslateHistory.vue')
+const TranslatePreview = () => import('@/views/TranslatePreview.vue')
 const TranslateStats = () => import('@/views/TranslateStats.vue')
 const Knowledge = () => import('@/views/Knowledge.vue')
 const PolishPreview = () => import('@/views/PolishPreview.vue')
@@ -235,6 +238,11 @@ const routes = [
     component: Competitor
   },
   {
+    path: '/competitor/compare',
+    name: 'CompetitorCompare',
+    component: CompetitorCompare
+  },
+  {
     path: '/competitor/tasks',
     name: 'CompetitorTasks',
     component: Competitor
@@ -268,6 +276,16 @@ const routes = [
     path: '/translate/docs',
     name: 'TranslateDocs',
     component: TranslateDoc
+  },
+  {
+    path: '/translate/history',
+    name: 'TranslateHistory',
+    component: TranslateHistory
+  },
+  {
+    path: '/translate/preview/:id',
+    name: 'TranslatePreview',
+    component: TranslatePreview
   },
   {
     path: '/translate/stats',

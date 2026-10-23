@@ -37,6 +37,42 @@ def _to_beijing_iso(dt):
     return dt.replace(tzinfo=timezone.utc).astimezone(BEIJING_TZ).isoformat(timespec="seconds")
 
 
+def _to_utc_naive(dt):
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=BEIJING_TZ)
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _beijing_date_expr(column):
+    return func.date(column, "+8 hours")
+
+
+def _iter_beijing_dates(start_bj, end_bj):
+    day = start_bj.astimezone(BEIJING_TZ).date()
+    last = end_bj.astimezone(BEIJING_TZ).date()
+    while day <= last:
+        yield day.isoformat()
+        day += timedelta(days=1)
+
+
+_QA_FAIL_MARKERS = (
+    "未检索到",
+    "未找到相关",
+    "官网未找到",
+    "当前知识范围内没有可用文档",
+    "文档中未找到相关信息",
+)
+
+
+def _answer_success(answer_text: str) -> bool:
+    text = (answer_text or "").strip()
+    if not text:
+        return False
+    return not any(marker in text for marker in _QA_FAIL_MARKERS)
+
+
 def _get_user_id_from_token(token: str, db: Session):
     if not token:
         return None
@@ -159,12 +195,13 @@ def _split_content_to_chunks(content: str, chunk_size: int = 500, overlap: int =
     return chunks
 
 
-def _score_chunk(question: str, chunk: str, title: str = ""):
+def _score_chunk(question: str, chunk: str, title: str = "", folder_path: str = ""):
     q_tokens = set(_tokenize(question))
     c_tokens = set(_tokenize(chunk))
     title_tokens = set(_tokenize(title))
     token_overlap = len(q_tokens & c_tokens)
     title_overlap = len(q_tokens & title_tokens)
+    path_overlap = len(q_tokens & set(_tokenize(folder_path)))
 
     q_ngrams = _char_ngrams(question)
     c_ngrams = _char_ngrams(chunk)
@@ -175,7 +212,7 @@ def _score_chunk(question: str, chunk: str, title: str = ""):
         if len(token) >= 2:
             keyword_hits += chunk.lower().count(token)
 
-    score = token_overlap * 3.5 + title_overlap * 2.0 + min(keyword_hits, 10) * 0.8 + min(ngram_overlap, 30) * 0.25
+    score = token_overlap * 3.5 + title_overlap * 2.0 + path_overlap * 2.5 + min(keyword_hits, 10) * 0.8 + min(ngram_overlap, 30) * 0.25
     return round(score, 4)
 
 
@@ -186,13 +223,17 @@ def _rank_document_chunks(question: str, documents: list, limit: int = 5):
         if not content:
             continue
         chunks = _split_content_to_chunks(content)
+        folder_path = doc.get("folder_path", "") or ""
+        title = doc.get("title") or "未命名文档"
+        display_title = f"{folder_path} / {title}" if folder_path else title
         for idx, chunk in enumerate(chunks):
-            score = _score_chunk(question, chunk, doc.get("title", ""))
+            score = _score_chunk(question, chunk, title, folder_path)
             if score <= 0:
                 continue
             ranked.append({
                 "document_id": doc.get("document_id"),
-                "title": doc.get("title") or "未命名文档",
+                "title": display_title,
+                "folder_path": folder_path,
                 "chunk": chunk,
                 "score": score,
                 "chunk_index": idx,
@@ -539,6 +580,21 @@ def _random_hex():
     return hex(random.getrandbits(32))[2:]
 
 
+def _shorten_suggestion(text: str) -> str:
+    s = (text or "").strip()
+    prefix = re.compile(
+        r"^(我想知道|我想了解|我想问的是|我想问|请问一下|请问|请告诉我|请帮我|"
+        r"能帮我解释一下|能帮我|可以帮我|能不能告诉我|能不能|帮我解释一下|帮我)"
+    )
+    prev = None
+    while s and s != prev:
+        prev = s
+        s = prefix.sub("", s).strip()
+    if len(s) > 18:
+        s = s[:18]
+    return s
+
+
 def _parse_json_array(text: str):
     if not text:
         return []
@@ -573,14 +629,14 @@ def _generate_suggestions(context: str = "", question: str = "", answer: str = "
 AI的回答摘要：{answer[:2000]}
 
 要求：
-1. 每条问题必须从用户视角出发，使用"我"、"我想知道"、"能帮我"等第一人称语气
-2. 问题要具体、自然，与回答中提到的具体知识点、术语、概念紧密关联
-3. 问题要有吸引力，让人想继续深入了解
-4. 问题尽量多样化，覆盖不同方面
-5. 问题文本中不要包含任何标点符号（如引号、逗号、句号、问号、顿号、书名号等），纯文字即可
+1. 每条不超过16个字，像检索词一样短
+2. 直接问知识点，不要「我想知道」「能帮我」「请解释一下」这类套话
+3. 紧扣回答里出现的术语、步骤或概念
+4. 几条覆盖不同角度，不要重复
+5. 不要标点符号
 
 请直接返回JSON数组：
-["用户视角的问题1", "用户视角的问题2"]"""
+["短问题1", "短问题2"]"""
     else:
         prompt = f"""你是知识库的导读助手。以下是从知识库中抽取的文档片段，请仔细阅读后，找出其中用户最可能关心的具体话题，以用户第一人称生成{max_count}条推荐问题（本次随机种子：{_random_hex()}）。
 
@@ -588,14 +644,14 @@ AI的回答摘要：{answer[:2000]}
 {context[:6000]}
 
 要求：
-1. 问题必须紧密关联文档中提到的具体知识点、术语、概念、规范或产品名称
-2. 问题尽量多样化，覆盖不同方面，避免每次生成相同或相似的问题
-3. 使用第一人称：我、我想知道、我该如何、为什么我的、能帮我解释一下
-4. 语气自然，像真实用户面对知识库时会提出的问题
-5. 问题文本中不要包含任何标点符号（如引号、逗号、句号、问号、顿号、书名号、括号等），纯文字即可
+1. 每条不超过16个字，像检索词一样短
+2. 紧扣文档中的术语、规范或产品名
+3. 直接问，不要「我想知道」「能帮我」「请解释一下」这类套话
+4. 几条覆盖不同角度，不要重复
+5. 不要标点符号
 
 请直接返回JSON数组：
-["提及具体知识点的用户视角问题1", "提及具体知识点的用户视角问题2", "提及具体知识点的用户视角问题3"]"""
+["短问题1", "短问题2", "短问题3"]"""
 
     def _call():
         try:
@@ -603,7 +659,9 @@ AI的回答摘要：{answer[:2000]}
             messages = [{"role": "user", "content": prompt}]
             result = ai_client.chat(messages, max_tokens=512, temperature=0.8, request_label="qa.suggestions")
             parsed = _parse_json_array(result)
-            return parsed[:max_count] if parsed else []
+            shortened = [_shorten_suggestion(item) for item in (parsed or [])]
+            shortened = [item for item in shortened if item]
+            return shortened[:max_count]
         except Exception:
             return []
 
@@ -617,6 +675,62 @@ AI的回答摘要：{answer[:2000]}
 
 # ─── 知识库问答 ────────────────────────────────────────────
 
+def _load_qa_documents(db, knowledge_ids):
+    """Collect QA documents. Empty knowledge_ids searches all user folders and always skips AI agent KB."""
+    from app.models.knowledge import Folder
+    from app.crud.knowledge import get_folder_files
+    from app.utils.qa_knowledge_scope import folder_path_names, is_agent_kb_folder, user_root_folder_ids
+
+    def _collect_files_recursive(folder_id):
+        files = []
+        folder = db.query(Folder).filter(Folder.id == folder_id).first()
+        if not folder or is_agent_kb_folder(folder):
+            return files
+        folder_path = folder_path_names(folder)
+        for item in get_folder_files(db, folder_id):
+            item["_folder_path"] = folder_path
+            files.append(item)
+        for child in folder.children:
+            files.extend(_collect_files_recursive(child.id))
+        return files
+
+    folder_ids = []
+    if knowledge_ids:
+        for fid in knowledge_ids:
+            try:
+                folder_ids.append(int(fid))
+            except (TypeError, ValueError):
+                continue
+    else:
+        roots = db.query(Folder).filter(Folder.parent_id.is_(None)).all()
+        folder_ids = user_root_folder_ids(roots)
+
+    documents = []
+    seen = set()
+    for fid in folder_ids:
+        try:
+            for f in _collect_files_recursive(fid):
+                fid_unique = f.get("id")
+                if fid_unique in seen:
+                    continue
+                seen.add(fid_unique)
+                file_path = f.get("file_path", "")
+                file_name = f.get("name", "")
+                file_type = f.get("file_type", "")
+                if file_path and os.path.exists(file_path):
+                    content = _extract_file_content(file_path, file_type)
+                    if _normalize_text(content):
+                        documents.append({
+                            "document_id": fid_unique,
+                            "title": file_name,
+                            "content": content,
+                            "folder_path": f.get("_folder_path", ""),
+                        })
+        except Exception:
+            continue
+    return documents
+
+
 @router.post("/general")
 async def ask_general_question(
     input_data: GeneralQAInput,
@@ -627,54 +741,18 @@ async def ask_general_question(
     knowledge_ids = input_data.knowledge_ids or []
     user_id = _get_user_id_from_token(token, db)
 
-    documents = []
-
-    from app.models.knowledge import KnowledgeFile, Folder
-    from app.crud.knowledge import get_folder_files
-
-    def _collect_files_recursive(folder_id):
-        files = []
-        folder = db.query(Folder).filter(Folder.id == folder_id).first()
-        if folder:
-            files.extend(get_folder_files(db, folder_id))
-            for child in folder.children:
-                files.extend(_collect_files_recursive(child.id))
-        return files
-
-    if knowledge_ids:
-        seen = set()
-        for fid in knowledge_ids:
-            try:
-                all_files = _collect_files_recursive(int(fid))
-                for f in all_files:
-                    fid_unique = f.get("id")
-                    if fid_unique in seen:
-                        continue
-                    seen.add(fid_unique)
-                    file_path = f.get("file_path", "")
-                    file_name = f.get("name", "")
-                    file_type = f.get("file_type", "")
-                    if file_path and os.path.exists(file_path):
-                        content = _extract_file_content(file_path, file_type)
-                        if _normalize_text(content):
-                            documents.append({
-                                "document_id": fid_unique,
-                                "title": file_name,
-                                "content": content,
-                            })
-            except Exception:
-                continue
-
+    documents = _load_qa_documents(db, knowledge_ids)
     if not documents:
         result = {
-            "answer": "未选择知识库或所选知识库中没有文档内容。请在左侧选择一个包含文档的知识库。",
+            "answer": "当前知识范围内没有可用文档。请换一个场景，或检查写作规范 / 资源库是否已同步。",
             "source": ""
         }
         sources = []
         search_hit = 0
         relevance_score = 0.0
     else:
-        ranked_sources = _rank_document_chunks(question, documents)
+        rank_limit = 8 if not knowledge_ids else 5
+        ranked_sources = _rank_document_chunks(question, documents, limit=rank_limit)
         top_score = ranked_sources[0]["score"] if ranked_sources else 0.0
         needs_clarify = _needs_clarification(question, ranked_sources)
         search_hit = 1 if (ranked_sources and not needs_clarify) else 0
@@ -714,42 +792,7 @@ async def get_initial_suggestions(
     if not kb_id_list:
         return {"code": 0, "data": {"suggestions": [], "refreshable": False}}
 
-    from app.models.knowledge import KnowledgeFile, Folder
-    from app.crud.knowledge import get_folder_files
-
-    def _collect_files_recursive(folder_id):
-        files = []
-        folder = db.query(Folder).filter(Folder.id == folder_id).first()
-        if folder:
-            files.extend(get_folder_files(db, folder_id))
-            for child in folder.children:
-                files.extend(_collect_files_recursive(child.id))
-        return files
-
-    documents = []
-    seen = set()
-    for fid_str in kb_id_list:
-        try:
-            all_files = _collect_files_recursive(int(fid_str))
-            for f in all_files:
-                fid_unique = f.get("id")
-                if fid_unique in seen:
-                    continue
-                seen.add(fid_unique)
-                file_path = f.get("file_path", "")
-                file_name = f.get("name", "")
-                file_type = f.get("file_type", "")
-                if file_path and os.path.exists(file_path):
-                    content = _extract_file_content(file_path, file_type)
-                    if _normalize_text(content):
-                        documents.append({
-                            "document_id": fid_unique,
-                            "title": file_name,
-                            "content": content,
-                        })
-        except Exception:
-            continue
-
+    documents = _load_qa_documents(db, kb_id_list)
     if not documents:
         return {"code": 0, "data": {"suggestions": [], "refreshable": False}}
 
@@ -1113,7 +1156,7 @@ async def delete_qa_session(
 async def get_qa_dashboard(
     start_date: str = Query(None, description="起始日期 YYYY-MM-DD"),
     end_date: str = Query(None, description="结束日期 YYYY-MM-DD"),
-    period: str = Query("yesterday", description="快捷时间范围: today, yesterday, this_week, this_month, last_7_days, last_30_days"),
+    period: str = Query("today", description="快捷时间范围: today, yesterday, this_week, this_month, last_7_days, last_30_days"),
     user_name: str = Query(None, description="筛选用户"),
     session_type: str = Query(None, description="筛选场域"),
     rating: int = Query(None, description="筛选评分"),
@@ -1122,9 +1165,6 @@ async def get_qa_dashboard(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可访问")
-
     now = datetime.now(BEIJING_TZ)
     today = now.date()
 
@@ -1193,18 +1233,25 @@ async def get_qa_dashboard(
             ce = s - timedelta(seconds=1)
             return s, e, cs, ce
 
-    period_label = PERIOD_LABELS.get(period, "昨日")
-    compare_label = COMPARE_LABELS.get(period, "较前一日")
+    period_label = PERIOD_LABELS.get(period, "今日")
+    compare_label = COMPARE_LABELS.get(period, "较昨日")
     overview_start, overview_end, compare_start, compare_end = _period_range(period)
+    overview_start_utc = _to_utc_naive(overview_start)
+    overview_end_utc = _to_utc_naive(overview_end)
+    compare_start_utc = _to_utc_naive(compare_start)
+    compare_end_utc = _to_utc_naive(compare_end)
 
     def _count_active_users(s, e):
-        return db.query(func.count(func.distinct(QaSession.user_id))).filter(
-            QaSession.created_at >= s, QaSession.created_at <= e,
+        return db.query(func.count(func.distinct(QaSession.user_id))).join(
+            QaMessage, QaMessage.session_id == QaSession.id
+        ).filter(
+            QaMessage.created_at >= s, QaMessage.created_at <= e,
         ).scalar() or 0
 
     def _count_conversations(s, e):
-        return db.query(func.count(QaSession.id)).filter(
-            QaSession.created_at >= s, QaSession.created_at <= e,
+        return db.query(func.count(QaMessage.id)).filter(
+            QaMessage.role == "user",
+            QaMessage.created_at >= s, QaMessage.created_at <= e,
         ).scalar() or 0
 
     def _get_hit_rate(s, e):
@@ -1219,168 +1266,157 @@ async def get_qa_dashboard(
         ).scalar() or 0
         return round(hits / total * 100, 1) if total > 0 else 0.0
 
-    active_users = _count_active_users(overview_start, overview_end)
-    conversations = _count_conversations(overview_start, overview_end)
-    compare_active_users = _count_active_users(compare_start, compare_end)
-    compare_conversations = _count_conversations(compare_start, compare_end)
-    hit_rate = _get_hit_rate(overview_start, overview_end)
-    compare_hit_rate = _get_hit_rate(compare_start, compare_end)
+    active_users = _count_active_users(overview_start_utc, overview_end_utc)
+    conversations = _count_conversations(overview_start_utc, overview_end_utc)
+    compare_active_users = _count_active_users(compare_start_utc, compare_end_utc)
+    compare_conversations = _count_conversations(compare_start_utc, compare_end_utc)
+    hit_rate = _get_hit_rate(overview_start_utc, overview_end_utc)
+    compare_hit_rate = _get_hit_rate(compare_start_utc, compare_end_utc)
 
     # ── 图表数据 ──
     if start_date and end_date:
         try:
-            sd = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-            ed = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=BEIJING_TZ)
+            sd_bj = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+            ed_bj = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=BEIJING_TZ)
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误，应为 YYYY-MM-DD")
     else:
-        ed = datetime.now(BEIJING_TZ)
-        sd = ed - timedelta(days=29)
+        sd_bj, ed_bj = overview_start, overview_end
+
+    sd = _to_utc_naive(sd_bj)
+    ed = _to_utc_naive(ed_bj)
+    msg_bj_date = _beijing_date_expr(QaMessage.created_at).label("d")
 
     daily_users = db.query(
-        func.date(QaSession.created_at).label("d"),
+        msg_bj_date,
         func.count(func.distinct(QaSession.user_id)).label("c"),
-    ).filter(
-        QaSession.created_at >= sd, QaSession.created_at <= ed,
-    ).group_by("d").order_by("d").all()
-    active_users_chart = [{"date": str(row.d), "count": row.c} for row in daily_users]
+    ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
+        QaMessage.created_at >= sd, QaMessage.created_at <= ed,
+    ).group_by(msg_bj_date).order_by(msg_bj_date).all()
+    users_by_date = {str(row.d): int(row.c or 0) for row in daily_users}
+    active_users_chart = [{"date": d, "count": users_by_date.get(d, 0)} for d in _iter_beijing_dates(sd_bj, ed_bj)]
 
     daily_msgs = db.query(
-        func.date(QaMessage.created_at).label("d"),
+        msg_bj_date,
         func.count(QaMessage.id).label("c"),
     ).filter(
         QaMessage.role == "user",
         QaMessage.created_at >= sd, QaMessage.created_at <= ed,
-    ).group_by("d").order_by("d").all()
-    conversations_chart = [{"date": str(row.d), "count": row.c} for row in daily_msgs]
+    ).group_by(msg_bj_date).order_by(msg_bj_date).all()
+    conv_by_date = {str(row.d): int(row.c or 0) for row in daily_msgs}
+    conversations_chart = [{"date": d, "count": conv_by_date.get(d, 0)} for d in _iter_beijing_dates(sd_bj, ed_bj)]
 
     daily_hits = db.query(
-        func.date(QaMessage.created_at).label("d"),
+        msg_bj_date,
         func.count(QaMessage.id).label("total"),
         func.sum(QaMessage.search_hit).label("hits"),
     ).filter(
         QaMessage.role == "assistant",
         QaMessage.created_at >= sd, QaMessage.created_at <= ed,
-    ).group_by("d").order_by("d").all()
-    hit_rate_chart = []
+    ).group_by(msg_bj_date).order_by(msg_bj_date).all()
+    hit_by_date = {}
     for row in daily_hits:
-        rate = round((row.hits or 0) / row.total * 100, 1) if row.total > 0 else 0.0
-        hit_rate_chart.append({"date": str(row.d), "rate": rate})
+        hit_by_date[str(row.d)] = round((row.hits or 0) / row.total * 100, 1) if row.total else 0.0
+    hit_rate_chart = [{"date": d, "rate": hit_by_date.get(d, 0.0)} for d in _iter_beijing_dates(sd_bj, ed_bj)]
 
     daily_type_hits = db.query(
-        func.date(QaMessage.created_at).label("d"),
+        msg_bj_date,
         QaSession.session_type,
         func.count(QaMessage.id).label("total"),
         func.sum(QaMessage.search_hit).label("hits"),
     ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
         QaMessage.role == "assistant",
         QaMessage.created_at >= sd, QaMessage.created_at <= ed,
-    ).group_by("d", QaSession.session_type).order_by("d").all()
-
-    def _build_type_hit_chart(daily_rows, stype):
-        result = []
-        idx = 0
-        for row in daily_hits:
-            d = str(row.d)
-            rate = 0.0
-            while idx < len(daily_rows) and str(daily_rows[idx].d) < d:
-                idx += 1
-            if idx < len(daily_rows) and str(daily_rows[idx].d) == d and daily_rows[idx].session_type == stype:
-                r = daily_rows[idx]
-                rate = round((r.hits or 0) / r.total * 100, 1) if r.total > 0 else 0.0
-                idx += 1
-            result.append({"date": d, "rate": rate})
-        return result
-
-    general_hit_rate_chart = _build_type_hit_chart(daily_type_hits, "general")
-    manual_hit_rate_chart = _build_type_hit_chart(daily_type_hits, "manual")
+    ).group_by(msg_bj_date, QaSession.session_type).order_by(msg_bj_date).all()
+    type_hit_by_date = {}
+    for row in daily_type_hits:
+        rate = round((row.hits or 0) / row.total * 100, 1) if row.total else 0.0
+        type_hit_by_date[(str(row.d), row.session_type)] = rate
+    general_hit_rate_chart = [{"date": d, "rate": type_hit_by_date.get((d, "general"), 0.0)} for d in _iter_beijing_dates(sd_bj, ed_bj)]
+    manual_hit_rate_chart = [{"date": d, "rate": type_hit_by_date.get((d, "manual"), 0.0)} for d in _iter_beijing_dates(sd_bj, ed_bj)]
 
     # ── 明细列表 ──
-    detail_query = db.query(
-        QaMessage.id, QaMessage.session_id, QaMessage.content,
-        QaMessage.sources, QaMessage.rating, QaMessage.created_at,
-        QaSession.session_type, QaSession.title,
-    ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
-        QaMessage.role == "user"
-    )
-
-    user_map = {}
-    if user_name:
-        from app.models.user import User
-        detail_query = detail_query.join(User, QaSession.user_id == User.id)
-        detail_query = detail_query.filter(
-            (User.username.contains(user_name)) | (User.display_name.contains(user_name))
+    items = []
+    total = 0
+    if current_user.role == "admin":
+        detail_query = db.query(
+            QaMessage.id, QaMessage.session_id, QaMessage.content,
+            QaMessage.sources, QaMessage.rating, QaMessage.created_at,
+            QaSession.session_type, QaSession.title,
+        ).join(QaSession, QaMessage.session_id == QaSession.id).filter(
+            QaMessage.role == "user"
         )
-        users = db.query(User.id, User.username, User.display_name).all()
-        user_map = {u.id: (u.display_name or u.username) for u in users}
-    else:
+
         from app.models.user import User
         users = db.query(User.id, User.username, User.display_name).all()
         user_map = {u.id: (u.display_name or u.username) for u in users}
+        if user_name:
+            detail_query = detail_query.join(User, QaSession.user_id == User.id)
+            detail_query = detail_query.filter(
+                (User.username.contains(user_name)) | (User.display_name.contains(user_name))
+            )
 
-    if session_type:
-        detail_query = detail_query.filter(QaSession.session_type == session_type)
-    if rating is not None:
-        detail_query = detail_query.filter(QaMessage.rating == rating)
-    if start_date and end_date:
+        if session_type:
+            detail_query = detail_query.filter(QaSession.session_type == session_type)
+        if rating is not None:
+            detail_query = detail_query.filter(QaMessage.rating == rating)
         detail_query = detail_query.filter(QaMessage.created_at >= sd, QaMessage.created_at <= ed)
 
-    total = detail_query.count()
-    records = detail_query.order_by(QaMessage.created_at.desc()).offset(
-        (page - 1) * page_size
-    ).limit(page_size).all()
+        total = detail_query.count()
+        records = detail_query.order_by(QaMessage.created_at.desc()).offset(
+            (page - 1) * page_size
+        ).limit(page_size).all()
 
-    session_ids = list(set(r.session_id for r in records))
-    session_user_map = {}
-    if session_ids:
-        sessions_with_user = db.query(QaSession.id, QaSession.user_id).filter(
-            QaSession.id.in_(session_ids)
-        ).all()
-        session_user_map = {s.id: s.user_id for s in sessions_with_user}
+        session_ids = list(set(r.session_id for r in records))
+        session_user_map = {}
+        if session_ids:
+            sessions_with_user = db.query(QaSession.id, QaSession.user_id).filter(
+                QaSession.id.in_(session_ids)
+            ).all()
+            session_user_map = {s.id: s.user_id for s in sessions_with_user}
 
-    ai_replies = {}
-    if session_ids:
-        replies = db.query(
-            QaMessage.session_id, QaMessage.id, QaMessage.content, QaMessage.created_at, QaMessage.search_hit
-        ).filter(
-            QaMessage.role == "assistant",
-            QaMessage.session_id.in_(session_ids),
-        ).order_by(QaMessage.created_at.asc()).all()
-        session_replies = {}
-        for r in replies:
-            session_replies.setdefault(r.session_id, []).append(r)
-        for rec in records:
-            session_reps = session_replies.get(rec.session_id, [])
-            best_reply = None
-            for rep in session_reps:
-                if rep.created_at > rec.created_at:
-                    best_reply = rep
-                    break
-            if best_reply:
-                ai_replies[rec.id] = best_reply
+        ai_replies = {}
+        if session_ids:
+            replies = db.query(
+                QaMessage.session_id, QaMessage.id, QaMessage.content, QaMessage.created_at, QaMessage.search_hit
+            ).filter(
+                QaMessage.role == "assistant",
+                QaMessage.session_id.in_(session_ids),
+            ).order_by(QaMessage.created_at.asc()).all()
+            session_replies = {}
+            for r in replies:
+                session_replies.setdefault(r.session_id, []).append(r)
+            for rec in records:
+                session_reps = session_replies.get(rec.session_id, [])
+                best_reply = None
+                for rep in session_reps:
+                    if rep.created_at > rec.created_at:
+                        best_reply = rep
+                        break
+                if best_reply:
+                    ai_replies[rec.id] = best_reply
 
-    items = []
-    for r in records:
-        uid = session_user_map.get(r.session_id)
-        user_name_display = user_map.get(uid, "未知")
-        reply = ai_replies.get(r.id)
-        answer_text = reply.content if reply else ""
-        search_hit_val = bool(reply.search_hit) if reply else False
-        success = bool(answer_text and "未检索到" not in answer_text and "定位到" not in answer_text)
-        items.append({
-            "id": r.id,
-            "session_id": r.session_id,
-            "user_name": user_name_display,
-            "session_type": r.session_type or "general",
-            "session_title": r.title or "",
-            "question": r.content,
-            "answer": answer_text,
-            "sources": r.sources or "[]",
-            "rating": r.rating,
-            "success": success,
-            "search_hit": search_hit_val,
-            "created_at": _to_beijing_iso(r.created_at),
-        })
+        for r in records:
+            uid = session_user_map.get(r.session_id)
+            user_name_display = user_map.get(uid, "未知")
+            reply = ai_replies.get(r.id)
+            answer_text = reply.content if reply else ""
+            search_hit_val = bool(reply.search_hit) if reply else False
+            success = _answer_success(answer_text)
+            items.append({
+                "id": r.id,
+                "session_id": r.session_id,
+                "user_name": user_name_display,
+                "session_type": r.session_type or "general",
+                "session_title": r.title or "",
+                "question": r.content,
+                "answer": answer_text,
+                "sources": r.sources or "[]",
+                "rating": r.rating,
+                "success": success,
+                "search_hit": search_hit_val,
+                "created_at": _to_beijing_iso(r.created_at),
+            })
 
     return {
         "overview": {

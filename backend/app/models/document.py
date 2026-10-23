@@ -14,3 +14,4 @@ class Document(Base):
     preview = Column(Text)
     user_id = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)

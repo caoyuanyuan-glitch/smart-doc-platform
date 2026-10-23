@@ -19,6 +19,7 @@ from app.schemas.user import UserOut
 from app.api.auth import get_current_active_user, require_admin
 from app.utils.file_utils import read_file_safe
 from app.utils.runtime_paths import runtime_knowledge_dir
+from app.api.translation import persist_memory_library_seed_if_needed
 
 PERMISSION_READ = "read"
 PERMISSION_EDIT = "edit"
@@ -320,6 +321,9 @@ async def upload_file_to_folder(
         created_by=current_user.id
     )
     
+    db_file.folder = folder
+    persist_memory_library_seed_if_needed(db_file)
+
     return {"message": "文件上传成功", "id": db_file.id}
 
 @router.get("/files/{file_id}")
@@ -360,6 +364,10 @@ async def move_file_to_target(
         raise HTTPException(status_code=404, detail="目标文件夹不存在")
 
     move_file(db, file_id, file_move.folder_id)
+    moved_file = get_file(db, file_id)
+    if moved_file is not None:
+        moved_file.folder = target_folder
+        persist_memory_library_seed_if_needed(moved_file)
     return {"message": "文件移动完成", "id": file_id, "folder_id": file_move.folder_id}
 
 @router.get("/files/{file_id}/download")
@@ -561,6 +569,7 @@ async def update_file_content(
     db.query(KnowledgeFile).filter(KnowledgeFile.id == file_id).update({"file_size": new_size})
     db.commit()
 
+    persist_memory_library_seed_if_needed(file)
     return {"message": "保存成功", "file_size": new_size}
 
 @router.put("/files/{file_id}/permission")

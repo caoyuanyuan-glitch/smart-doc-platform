@@ -242,11 +242,11 @@
         <div class="continuation-card">
           <div class="continuation-card-head">
             <div class="continuation-icon">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 2a4 4 0 0 1 4 4v2h1a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h1V6a4 4 0 0 1 4-4Z"/>
-                <circle cx="9" cy="15" r="1" fill="currentColor"/>
-                <circle cx="15" cy="15" r="1" fill="currentColor"/>
-                <path d="M9 11h6"/>
+              <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true">
+                <circle cx="24" cy="24" r="24" fill="#409EFF"/>
+                <path fill="#fff" d="M17.2 12.5h9.4L32.8 18.8V34.2c0 1.1-.9 2-2 2H17.2c-1.1 0-2-.9-2-2V14.5c0-1.1.9-2 2-2Z"/>
+                <path fill="#409EFF" d="M26.4 12.5V18.6h6.2"/>
+                <path stroke="#409EFF" stroke-width="1.8" stroke-linecap="round" d="M19.4 24.2h9.2M19.4 28.2h6.6"/>
               </svg>
             </div>
             <div class="continuation-title-wrap">
@@ -292,7 +292,16 @@
                 :rows="7"
                 placeholder="例如：将样本放入样本槽中，关闭槽盖。"
               />
-              <div class="field-hint">已输入 {{ continuationCharCount }} 字</div>
+              <div class="source-text-toolbar">
+                <span class="field-hint">已输入 {{ continuationCharCount }} 字</span>
+                <el-button
+                  class="clear-source-btn"
+                  text
+                  type="primary"
+                  :disabled="!continuationCharCount"
+                  @click="clearSourceText"
+                >清空</el-button>
+              </div>
             </el-form-item>
 
             <el-form-item label="当前标题/章节名">
@@ -354,7 +363,6 @@
           <div class="panel-actions">
             <el-tag v-if="paragraphResult.model" size="small" type="info">模型：{{ paragraphResult.model }}</el-tag>
             <el-button size="small" @click="copyText(currentContinuationText)">复制</el-button>
-            <el-button size="small" type="primary" @click="saveContinuationToDocument">保存到文档</el-button>
           </div>
         </div>
 
@@ -377,7 +385,7 @@
           </div>
           <div class="panel-actions continuation-actions">
             <el-button @click="continueContinuation">继续续写</el-button>
-            <el-button @click="saveContinuationToDocument">保存到文档</el-button>
+            <el-button @click="exportContinuationAsWord">导出</el-button>
             <el-button @click="goToPolish">去润色</el-button>
           </div>
         </div>
@@ -442,6 +450,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Close } from '@element-plus/icons-vue'
 import { generateAPI } from '@/api'
+import JSZip from 'jszip'
 
 const route = useRoute()
 const router = useRouter()
@@ -1224,13 +1233,49 @@ function toggleParagraphEdit() {
   paragraphEditing.value = true
 }
 
-function saveContinuationToDocument() {
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function continuationToDocxParagraphs(text) {
+  return String(text || '').split(/\r?\n/).map((line) => {
+    const xml = escapeXml(line)
+    if (!xml) return '<w:p><w:pPr><w:spacing w:after="160"/></w:pPr></w:p>'
+    return `<w:p><w:pPr><w:spacing w:after="160"/><w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="宋体" w:hAnsi="Calibri"/><w:sz w:val="24"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="宋体" w:hAnsi="Calibri"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">${xml}</w:t></w:r></w:p>`
+  }).join('')
+}
+
+async function exportContinuationAsWord() {
   const content = currentContinuationText.value
   if (!content.trim()) {
-    ElMessage.warning('暂无可保存内容')
+    ElMessage.warning('暂无可导出内容')
     return
   }
-  downloadText('智能续写结果.txt', content)
+  try {
+    const zip = new JSZip()
+    zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    zip.folder('_rels').file('.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+    const word = zip.folder('word')
+    word.folder('_rels').file('document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
+    word.file('document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${continuationToDocxParagraphs(content)}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`)
+    const blob = await zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = '智能续写结果.docx'
+    link.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('已导出 Word 文档')
+  } catch (error) {
+    ElMessage.error('导出 Word 失败，请稍后重试')
+  }
 }
 
 function goToPolish() {
@@ -1239,6 +1284,12 @@ function goToPolish() {
     sessionStorage.setItem('pendingPolishText', content)
   }
   router.push('/polish')
+}
+
+function clearSourceText() {
+  if (!paragraphForm.value.sourceText) return
+  paragraphForm.value.sourceText = ''
+  ElMessage.success('现有内容已清空')
 }
 
 function resetParagraphForm() {
@@ -1477,10 +1528,27 @@ onBeforeUnmount(() => {
   justify-content: center;
   width: 44px;
   height: 44px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: #fff;
-  border-radius: 12px;
+  background: transparent;
+  border-radius: 50%;
+  overflow: hidden;
   flex-shrink: 0;
+}
+
+.source-text-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.source-text-toolbar .field-hint {
+  margin-top: 0;
+}
+
+.clear-source-btn {
+  padding: 0;
+  height: auto;
 }
 
 .continuation-title-wrap {

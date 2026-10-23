@@ -1,4 +1,5 @@
 metagenomics
+omics
 thermocycler
 thermocyclers
 multiplexing

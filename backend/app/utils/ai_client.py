@@ -27,6 +27,54 @@ logger = logging.getLogger(__name__)
 PROMPT_BUILDER_FALLBACK_ACTIVE = False
 _prompt_builder_fallback_logged = False
 
+# 审核 prompt 正文区的字符预算（不含 system prompt 与 checklist）。
+# 历史实现使用硬编码 content[:6500]，导致超长 chunk 尾部被静默丢弃，
+# 且 compute_chunk_coverage 只按 chunk range 统计，指标上恒为 100%。
+# 这里改为环境变量可配 + 显式告警 + 句子边界回退。
+_PROMPT_BODY_CHAR_LIMIT = 6500
+_PROMPT_BODY_CHAR_LIMIT_ENV = "REVIEW_AI_PROMPT_BODY_CHAR_LIMIT"
+_AUDIT_BASIS_CHAR_LIMIT = 3500
+_AUDIT_BASIS_CHAR_LIMIT_ENV = "REVIEW_AI_AUDIT_BASIS_CHAR_LIMIT"
+_prompt_truncation_warned = False
+
+
+def clip_prompt_body(content: str, label: str = "audit.body") -> str:
+    """按句子边界裁剪 prompt 正文，并记录被丢弃的字符数。
+
+    裁剪发生在句子边界上，避免把半个词/半句话喂给模型——
+    模型会把截断残片当成"原文就是这样"进而报出并不存在的拼写错误。
+    超限时打印一次显式告警，使 prompt 层丢尾在日志里可观测。
+    """
+    global _prompt_truncation_warned
+    text = str(content or "")
+    limit = _env_int(_PROMPT_BODY_CHAR_LIMIT_ENV, _PROMPT_BODY_CHAR_LIMIT, minimum=1000)
+    if len(text) <= limit:
+        return text
+
+    window = text[:limit]
+    # 在窗口内回退到最近的句子/段落边界，避免截断在词中间。
+    for sep in ("\n\n", "。", "！", "？", ". ", ".\n", "\n"):
+        cut = window.rfind(sep)
+        if cut > limit * 0.6:
+            window = window[: cut + len(sep)]
+            break
+    dropped = len(text) - len(window)
+    if not _prompt_truncation_warned:
+        logger.warning(
+            "[review.prompt] %s 超出 %s 字符预算，按句子边界裁剪，丢弃尾部 %s 字符（原 %s）。"
+            "请调高分块上限或提高 %s，避免长文档尾部漏检。",
+            label, limit, dropped, len(text), _PROMPT_BODY_CHAR_LIMIT_ENV,
+        )
+        _prompt_truncation_warned = True
+    return window
+
+
+def clip_audit_basis(audit_basis: str) -> str:
+    """审核依据（checklist）同样可配上限，避免超长 checklist 挤占正文预算。"""
+    text = str(audit_basis or "")
+    limit = _env_int(_AUDIT_BASIS_CHAR_LIMIT_ENV, _AUDIT_BASIS_CHAR_LIMIT, minimum=500)
+    return text[:limit]
+
 try:
     from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
 except ModuleNotFoundError as exc:
@@ -97,11 +145,18 @@ def _env_float(name, default):
         return float(default)
 
 
-def _env_int(name, default):
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """读取整数型环境变量；缺省、非法或低于下限时回退默认值。
+
+    `minimum` 默认取 1（只挡非法负数）；prompt 字符预算这类配置
+    在调用处显式传更大的下限（例如 500/1000），避免把预算配成
+    一两个字符导致正文全丢。
+    """
     try:
-        return int(os.getenv(name, default))
+        value = int(str(os.environ.get(name, "") or "").strip())
     except (TypeError, ValueError):
-        return int(default)
+        return default
+    return value if value >= minimum else default
 
 
 def _env_bool(name, default=False):
@@ -112,11 +167,21 @@ def _env_bool(name, default=False):
 
 
 def _provider_max_attempts():
-    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", "2"))
+    return max(1, _env_int("AI_PROVIDER_MAX_ATTEMPTS", 2))
 
 
-def _audit_max_tokens():
-    return max(256, _env_int("AI_AUDIT_MAX_TOKENS", "2048"))
+def _audit_max_tokens(content_length: int = 0) -> int:
+    """AI 审核输出 token 上限。
+
+    按输入长度自适应：输入越长，允许的输出越大，避免大分块 JSON 被截断。
+    仍受环境变量 AI_AUDIT_MAX_TOKENS 硬上限约束（默认 4096）。
+    """
+    base = max(1024, _env_int("AI_AUDIT_MAX_TOKENS", 4096))
+    if content_length <= 0:
+        return base
+    # 输出预算 ≈ 输入字符数 / 3（英文）+ 固定余量，封顶 base 的 2 倍
+    estimated = base + min(base, max(0, content_length // 3))
+    return int(min(estimated, base * 2))
 
 
 def _provider_http_timeout():
@@ -581,6 +646,30 @@ class AIClient:
         return kwargs
 
     # ------------------------------------------------------------------
+    # 视觉链 provider 分派
+    # ------------------------------------------------------------------
+    def _visual_client_for(self, provider: str):
+        """返回该 provider 的视觉调用客户端；不支持则返回 None。"""
+        name = str(provider or "").strip().lower()
+        if name == "kimi":
+            return getattr(self, "kimi_client", None)
+        if name == "qwen":
+            return getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None)
+        if name == "deepseek":
+            return getattr(self, "deepseek_client", None)
+        return None
+
+    def _visual_model_for(self, provider: str) -> str:
+        name = str(provider or "").strip().lower()
+        if name == "kimi":
+            return self.kimi_model
+        if name == "qwen":
+            return self.qwen_model
+        if name == "deepseek":
+            return self.deepseek_model
+        return ""
+
+    # ------------------------------------------------------------------
     # 基础 chat 接口
     # ------------------------------------------------------------------
     def call_qwen(self, messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
@@ -1025,6 +1114,57 @@ class AIClient:
         return None
 
     @staticmethod
+    def _salvage_truncated_audit_json(text):
+        stripped = _strip_code_fence(text) if text else ""
+        match = re.search(r'"issues"\s*:\s*\[', stripped)
+        if not match:
+            return []
+        cursor = match.end()
+        length = len(stripped)
+        issues = []
+        while cursor < length:
+            while cursor < length and stripped[cursor] in " \t\r\n,":
+                cursor += 1
+            if cursor >= length or stripped[cursor] in "]}":
+                break
+            if stripped[cursor] != "{":
+                break
+            depth = 0
+            in_string = False
+            escape = False
+            end = cursor
+            complete = False
+            while end < length:
+                char = stripped[end]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == '"':
+                        in_string = False
+                elif char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            parsed = json.loads(stripped[cursor:end + 1])
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            issues.append(parsed)
+                        cursor = end + 1
+                        complete = True
+                        break
+                end += 1
+            if not complete:
+                break
+        return issues
+
+    @staticmethod
     def _extract_json(result, default):
         if not result:
             return default
@@ -1036,6 +1176,21 @@ class AIClient:
                 if m:
                     return json.loads(m.group(0))
             except Exception:
+                pass
+        stripped = _strip_code_fence(result) if result else ""
+        truncated = bool(stripped) and stripped.count("{") > stripped.count("}")
+        if truncated:
+            salvaged = AIClient._salvage_truncated_audit_json(stripped)
+            if salvaged:
+                payload = dict(default) if isinstance(default, dict) else {"issues": []}
+                payload["issues"] = salvaged
+                payload["_degraded"] = True
+                payload["_degraded_reason"] = "json_truncated_salvaged"
+                return payload
+            try:
+                default["_degraded"] = True
+                default["_degraded_reason"] = "json_truncated"
+            except (TypeError, AttributeError):
                 pass
         return default
 
@@ -1158,7 +1313,7 @@ class AIClient:
         text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
         return text.strip()
 
-    def normalize_audit_issues(self, issues, content, source="ai", min_confidence=70):
+    def normalize_audit_issues(self, issues, content, source="ai", min_confidence=50):
         normalized = []
         if not isinstance(issues, list):
             return normalized
@@ -1175,7 +1330,13 @@ class AIClient:
             suggestion = self._clean_text(item.get("suggestion") or item.get("expected"), 300)
             description = self._clean_text(item.get("description") or item.get("rule_description"), 300)
             chapter = self._clean_text(item.get("chapter") or item.get("section") or item.get("location"), 120)
-            category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
+            raw_category = self._clean_text(item.get("category"), 80)
+            raw_type = self._clean_text(item.get("type"), 80)
+            placeholder_categories = {"", "其他", "其它", "other"}
+            if raw_category.lower() in placeholder_categories:
+                category = raw_type or raw_category or "其他"
+            else:
+                category = raw_category
             rule = self._clean_text(item.get("rule") or item.get("rule_id"), 80) or ("AI" if source == "ai" else "")
             audit_basis = self._clean_text(item.get("audit_basis") or item.get("basis"), 200)
             issue_source = self._clean_text(item.get("source"), 40) or source
@@ -1185,23 +1346,36 @@ class AIClient:
 
             if confidence < min_confidence:
                 continue
+            needs_human_review = bool(item.get("needs_human_review")) or (50 <= confidence < 75)
             if not description and not suggestion:
                 continue
             if len(description) < 4 and len(suggestion) < 2:
                 continue
 
-            # 去重逻辑：同一错误内容在同一文档中只报告第一次
+            # 去重逻辑：同一错误内容 + 同一位置/章节才算重复，避免误杀不同页面的同类问题
             error_key = original_text.lower().strip()
-            if error_key in reported_errors:
+            position_key = self._clean_text(item.get("position"), 80) or chapter
+            dedupe_key = f"{error_key}|{position_key}"
+            if dedupe_key in reported_errors:
                 continue
-            if error_key:
-                reported_errors.add(error_key)
+            if dedupe_key:
+                reported_errors.add(dedupe_key)
 
             if original_text:
                 if len(original_text) == 1 and not re.search(r"[\u4e00-\u9fffA-Za-z]", original_text):
                     continue
-                if content and original_text not in content and context and original_text not in context:
-                    continue
+                if content:
+                    # PDF 提取文本与模型输出常有换行/空格差异，用空白归一化后再匹配
+                    compact_original = re.sub(r"\s+", "", original_text)
+                    compact_content = re.sub(r"\s+", "", content)
+                    compact_context = re.sub(r"\s+", "", context or "")
+                    if compact_original not in compact_content and (not context or compact_original not in compact_context):
+                        continue
+                    item["evidence_match_method"] = (
+                        "exact" if original_text in content
+                        else "normalized_whitespace"
+                    )
+                    item["raw_original_text"] = original_text
             elif source == "ai":
                 continue
 
@@ -1224,9 +1398,48 @@ class AIClient:
                 "position": self._clean_text(item.get("position"), 80),
                 "source_models": list(item.get("source_models") or []),
                 "consensus_score": max(0, min(100, int(item.get("consensus_score") or confidence))),
+                "needs_human_review": needs_human_review,
+                "evidence_match_method": item.get("evidence_match_method") or "",
+                "raw_original_text": item.get("raw_original_text") or "",
             })
 
         return normalized
+
+    def normalize_audit_observations(self, observations):
+        normalized = []
+        seen = {}
+        if not isinstance(observations, list):
+            return normalized
+        for item in observations:
+            if not isinstance(item, dict):
+                continue
+            title = self._clean_text(item.get("title"), 60)
+            description = self._clean_text(item.get("description"), 300)
+            if not title and not description:
+                continue
+            category = self._clean_text(item.get("category") or item.get("type"), 80) or "其他"
+            severity = self._normalize_severity(item.get("severity"), self._normalize_confidence(item.get("confidence"), 70))
+            confidence = self._normalize_confidence(item.get("confidence"), 70)
+            key = (title or description[:80]).lower()
+            payload = {
+                "category": category,
+                "severity": severity,
+                "title": title or description[:60],
+                "description": description or title,
+                "confidence": confidence,
+            }
+            if key not in seen:
+                seen[key] = payload
+                normalized.append(payload)
+                continue
+            if confidence > int(seen[key].get("confidence") or 0):
+                seen[key].update(payload)
+        return normalized
+
+    def _take_pending_observations(self):
+        items = getattr(self, "_pending_audit_observations", None) or []
+        self._pending_audit_observations = []
+        return self.normalize_audit_observations(items)
 
     @staticmethod
     def _audit_issue_merge_key(issue):
@@ -1292,27 +1505,60 @@ class AIClient:
                 issue["severity"] = "general"
         return merged
 
+    def _invoke_provider_audit(self, provider_key, messages, max_tokens, request_label=None, review_id=None):
+        if provider_key == "qwen":
+            return self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "kimi":
+            return self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "deepseek":
+            return self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "arkclaw":
+            return self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        if provider_key == "proxy":
+            return self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
+        return None
+
     def _run_provider_audit(self, provider_key, messages, content, request_label=None, review_id=None):
         provider_key = str(provider_key or "").strip().lower()
-        max_tokens = _audit_max_tokens()
-        if provider_key == "qwen":
-            result = self.call_qwen(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "kimi":
-            result = self.call_kimi(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "deepseek":
-            result = self.call_deepseek(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "arkclaw":
-            result = self.call_arkclaw(messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        elif provider_key == "proxy":
-            result = self.chat_with_provider(provider_key, messages, max_tokens=max_tokens, temperature=0.2, request_label=request_label, review_id=review_id)
-        else:
-            result = None
+        max_tokens = _audit_max_tokens(len(str(content or "")))
+        result = self._invoke_provider_audit(provider_key, messages, max_tokens, request_label=request_label, review_id=review_id)
 
         if not result:
             return []
 
         data = self._extract_json(result, {"issues": []})
+        if data.get("_degraded"):
+            salvaged_count = len(data.get("issues") or [])
+            raw_len = len(str(result or ""))
+            if salvaged_count:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断, 回收 {salvaged_count} 个已闭合问题 (len={raw_len})")
+            else:
+                print(f"[AI] {provider_key} 审核响应 JSON 截断解析失败, 该分块产出为空 (len={raw_len})")
+                compact_tokens = min(1024, max_tokens)
+                if compact_tokens:
+                    compact_messages = list(messages) + [{
+                        "role": "user",
+                        "content": '只返回完整 JSON：{"issues":[...]}，最多 8 条最高优先级问题，issues 数组必须闭合。',
+                    }]
+                    retry_result = self._invoke_provider_audit(
+                        provider_key,
+                        compact_messages,
+                        compact_tokens,
+                        request_label=request_label,
+                        review_id=review_id,
+                    )
+                    if retry_result:
+                        retry_data = self._extract_json(retry_result, {"issues": []})
+                        if retry_data.get("issues"):
+                            data = retry_data
+                            print(f"[AI] {provider_key} 截断后紧凑重试回收 {len(retry_data.get('issues') or [])} 个问题")
+            data.pop("_degraded", None)
+            data.pop("_degraded_reason", None)
         issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
+        observations = self.normalize_audit_observations(data.get("observations", []))
+        pending = getattr(self, "_pending_audit_observations", None)
+        if isinstance(pending, list):
+            pending.extend(observations)
         for issue in issues:
             issue["source_models"] = [provider_key] if provider_key else []
             issue["consensus_score"] = int(issue.get("confidence") or 0)
@@ -1501,9 +1747,21 @@ class AIClient:
         mime = content_type or mimetypes.guess_type(file_name or "")[0] or "image/png"
         return f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
 
-    def verify_review_issue_from_image(self, image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify"):
-        if not self.kimi_client or not image_bytes:
-            return {"decision": "skipped", "reason": "kimi_unavailable", "confidence": 0}
+    def verify_review_issue_from_image(self, image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi"):
+        # provider 必须可切换：此前这里写死 kimi_client，导致 qwen 在回退链上
+        # 永远拿不到接管机会（review.py 侧还会直接跳过非 kimi）。
+        # 视觉链按 REVIEW_VISUAL_PROVIDERS 顺序尝试，任一 provider 故障即回退下一家。
+        provider = str(provider or "kimi").strip().lower()
+        client = self._visual_client_for(provider)
+        if client is None:
+            return {
+                "decision": "error",
+                "reason": f"{provider}_unavailable",
+                "confidence": 0,
+                "is_extraction_artifact": False,
+            }
+        if not image_bytes:
+            return {"decision": "skipped", "reason": f"{provider}_unavailable", "confidence": 0}
 
         issue_payload = issue_payload or {}
         prompt = f"""
@@ -1521,6 +1779,9 @@ class AIClient:
 1. `confirm`：页面中能直接看到该问题，或能看到足够强的支持证据。
 2. `reject`：页面中看不到该问题，且更像 PDF 文本提取伪影、重复文本层、断行噪声、图标丢失或 OCR 误识别。
 3. `uncertain`：图片证据不足，无法稳定确认。
+
+版式问题只要截图里肉眼可见，必须 `confirm`：表格单元格过挤、表线明显偏粗、图片未居中、列宽不均、相邻单元格样式不一致。表格对齐整齐不能作为 reject 拥挤/粗线/未居中的理由。
+对「表格/版式」：截图中只要有表格或图，且看不到提取伪影，不要因为“排版整齐”而 `reject`；证据不够强时用 `uncertain`。
 
 已知优先按伪影或可接受差异处理的场景：
 - 双层文本层重复，例如同一句或同一短语重复叠加。
@@ -1548,17 +1809,28 @@ class AIClient:
 
         started_at = time.time()
         try:
-            response = self.kimi_client.with_options(timeout=40, max_retries=0).chat.completions.create(
-                **self._build_kimi_request_kwargs(
-                    model=self.kimi_model,
-                    messages=[{"role": "user", "content": user_content}],
-                    max_tokens=500,
-                    thinking="disabled",
+            model = self._visual_model_for(provider)
+            if provider == "kimi":
+                response = client.with_options(timeout=40, max_retries=0).chat.completions.create(
+                    **self._build_kimi_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": user_content}],
+                        max_tokens=500,
+                        thinking="disabled",
+                    )
                 )
-            )
+            else:
+                response = client.chat.completions.create(
+                    **self._build_qwen_request_kwargs(
+                        model=model,
+                        messages=[{"role": "user", "content": user_content}],
+                        max_tokens=500,
+                        temperature=0.3,
+                    )
+                )
             self._record_usage_event(
-                "kimi",
-                self.kimi_model,
+                provider,
+                model,
                 getattr(response, "usage", None),
                 request_label=request_label,
                 review_id=review_id,
@@ -2143,7 +2415,7 @@ class AIClient:
 REVIEW GOAL:
 - Behave like a human release reviewer, not a grammar checker.
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
-- Ordinary grammar, article usage, punctuation, capitalization, spacing, and style preferences are low value. Report them only when they make an instruction ambiguous, incomplete, or impossible to perform.
+- Style, readability, redundancy, punctuation habits, spacing, and similar quality issues SHOULD be reported with severity=suggestion. Keep fatal/serious/general for safety, compliance, operability, completeness, and consistency problems.
 
 ADDITIONAL MANUAL REVIEW CHECKS:
 - Cross-reference semantics: report when a reference such as Section X.X, Figure X, or Table X points to missing content or clearly mismatched topic content. Use category "编号引用".
@@ -2152,18 +2424,25 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Step merge suggestion: suggest merging adjacent steps only when the action is identical and the wording overlap is above 90 percent, with only parameter differences.
 - Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
+- Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
+
+SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
+- Redundancy: report filler lead-ins with no information value (such as "About this guide" or "The following section will introduce"), redundant auxiliaries ("please click" -> "click"), and the same fact restated in a later section. Use category "冗余".
+- Accuracy: report wording that does not match the actual interface or behavior, and descriptions that resemble but do not name the real object. Use category "表述不准确".
+- Completeness: report operation steps missing a required follow-up action, and step results without a closing action. Use category "信息不完整".
+- Consistency: report the same object, action, term, or abbreviation described inconsistently across sections, including case inconsistency and inconsistent punctuation in parallel list items; cite both occurrences and give the unified form. Use category "一致性".
+- Tone and direction: report honorifics such as "please" added to operation steps, except text shown in the UI itself. Only suggest deleting or correcting text that exists; never suggest adding words the excerpt does not contain. Use category "语气".
+- Figure/table continuity: report a missing sentence-ending mark where a table or figure caption runs straight into the following body text. Use category "图表衔接".
+- Sentence constituents: report missing or extra characters that break the sentence, and name the affected constituent. Use category "句子成分".
+Each semantic issue must quote the complete sentence from the excerpt as evidence, and the same defect must not be reported twice.
 
 🚫 FORBIDDEN issue types (reporting any of these is an error):
-- ❌ Single punctuation marks (e.g. "." → "," or ":" → ";")
-- ❌ Single characters or letters (e.g. "a" → "an" with only one char)
-- ❌ Issues where original differs from expected only by one punctuation or space
-- ❌ Pure formatting differences (fullwidth/halfwidth, spacing preferences)
-- ❌ Issues where the original field is shorter than 2 meaningful characters
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
-- ❌ Rewriting compliance / legal / regulatory statements, product names, or warning text to a more standard template, unless the document text itself proves an objective error
-- ❌ Suggesting to expand a well-known abbreviation (e.g. DNB → DNA Nanoball) unless this is the first occurrence in the document and no definition exists anywhere in the document
-- ❌ Gerund vs noun form differences in figure captions or UI labels (e.g. Reviewing parameters vs Review parameters) unless the same UI element uses both forms inconsistently within the same context
-- ❌ Adding/removing articles (a/an/the) when the meaning is unambiguous and the sentence remains grammatical
+- ❌ Issues where the original field is shorter than 2 meaningful characters
+- ❌ Pure formatting differences that are visually identical
+- ❌ Excerpt-boundary artifacts reported as completeness defects: missing sections, headings without body text, truncated sentences, table header cells whose rows fall outside the excerpt, table-of-contents lines, or "the document/excerpt is incomplete"
+
+Quality issues such as punctuation habit, spacing, articles, abbreviation expansion, gerund vs noun, and style preferences SHOULD be reported as severity=suggestion.
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
@@ -2180,20 +2459,21 @@ IMPORTANT REMINDERS:
 - British/American spellings: {', '.join(f'{k}→{v}' for k, v in list(BRITISH_AMERICAN_SPELLINGS.items())[:5])}...
 - Product names, company names, model numbers, and technical abbreviations are VALID unless context proves an error.
 - If the review basis includes CYY human review experience, use it to identify content-level defects. Focus on evidence-backed sentence meaning, revision history, terminology consistency, table content, figure references, page boundary content loss, and topic-structure issues.
+- The text below is ONE mechanically cut excerpt of a longer document. It may begin or end in the middle of a sentence, section, table, or symbol legend, and it may contain only a table of contents or only table header cells. Content before and after the excerpt continues elsewhere, so never report it as missing. Report a content-completeness issue only when the excerpt alone proves it, such as an unreplaced release placeholder (TBD, TODO, XX, 待补充) or two statements inside the excerpt that contradict each other.
 
 FILENAME CHECKING:
 - When the context prompt provides a document filename, verify it against the document content.
 - Check for: spelling errors in filename, product name mismatch between filename and content, incorrect version/date format in filename, missing or extra spaces/underscores in product names in filename.
-- If the filename contains a product name (e.g. "DNBSEQ-T7"), verify that the same product name appears consistently in the document body.
+- If the filename contains a product name (e.g. "DNBSEQ-T7"), flag FILENAME-002 only when the body contains a different product model. Do not flag mere absence, revision tokens, or document-number tokens.
 - Flag filename issues with type "FilenameError" and rule "FILENAME-001" (spelling), "FILENAME-002" (product mismatch), or "FILENAME-003" (version/date format)."""
 
             user_prompt = f"""Please review the following English technical document.
 
 Document excerpt:
-{content[:6500]}
+{clip_prompt_body(content, label='audit.body.en')}
 
 Release checklist and review basis:
-{audit_basis[:3500] if audit_basis else 'No additional checklist provided.'}
+{clip_audit_basis(audit_basis) if audit_basis else 'No additional checklist provided.'}
 
 Requirements:
 1. Output results in JSON format
@@ -2201,6 +2481,7 @@ Requirements:
 3. CYY human review experience baseline is for identifying content issues - report with evidence
 4. Deduplicate: report each error only once per document
 5. If the system prompt provided a document filename, check for filename spelling errors and product name consistency with body content
+6. Also output observations (1-3 chapter-level findings about the document itself). Do not repeat any fact already covered by issues. Do not output observations about the excerpt or chunk itself (for example, that it is mostly table of contents or front matter) - those have no actionable value. Title <= 16 characters for Chinese or <= 60 characters for English, description one sentence.
 
 Output ONLY strict JSON:
 {{
@@ -2208,7 +2489,7 @@ Output ONLY strict JSON:
     {{
       "severity": "fatal|serious|general|suggestion",
       "type": "Compliance|ReleaseRisk|Operation|InformationCompleteness|Terminology|Table|FigureReference|Grammar|FilenameError",
-      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
       "location": "section or line",
       "original": "exact text from excerpt",
       "expected": "correct form",
@@ -2217,6 +2498,15 @@ Output ONLY strict JSON:
       "basis": "review basis or checklist clause used for the judgment",
       "source": "ai",
       "status": "open",
+      "confidence": 50-100
+    }}
+  ],
+  "observations": [
+    {{
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分|其他",
+      "severity": "fatal|serious|general|suggestion",
+      "title": "short title",
+      "description": "one-sentence chapter-level evidence",
       "confidence": 50-100
     }}
   ],
@@ -2243,16 +2533,16 @@ Use severity=fatal only for missing or wrong safety warnings, contraindications,
 Confidence scoring guide:
 - 90-100: Definite error (misspelling, wrong terminology, factual error)
 - 70-89: Likely error (non-standard grammar, inconsistent formatting)
-- 50-69: Uncertain / needs human review (report only if safety or compliance related)
+- 50-69: Uncertain / needs human review. Still report these issues and set needs_human_review=true.
 
-Return empty issues array if no issues with confidence >= 70. Only report confidence 50-69 issues when they affect operational safety or regulatory compliance."""
+Return all issues with confidence >= 50. Do not return an empty issues array only because confidence is below 70."""
         else:
             system_prompt = f"""{base_system_prompt}
 
 审核目标：
 - 按人工发布审核的思路检查，不按普通语法校对检查。
 - 优先输出影响发布审批、法规合规、用户操作、信息完整性、术语一致性、表格内容完整性、图文引用、版本记录、默认账号密码、IP/URL 暴露、法律声明的内容问题。
-- 普通语法、冠词、标点、大小写、空格、风格偏好属于低价值问题；只有会导致说明不清、步骤不可执行或合规风险时才输出。
+- 风格、可读性、表述冗余、标点习惯等属于质量类问题，允许报告，统一归入 severity=suggestion；仍需报告 fatal/serious/general 的安全、合规、可操作性和一致性问题。
 
 附加人工审核检查项（按需报告，不得为凑数而报）：
 - 交叉引用语义检查：文中“参见 X.X 节 / 图 X / 表 X”等引用，若被引用对象不存在或指向内容与描述主题明显不符，报告，category=编号引用。
@@ -2261,18 +2551,15 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 - 步骤合并建议：相邻步骤动作完全相同且文字重复度高于 90%，仅参数不同，可建议合并。
 - 索引页码准确性：目录或索引中的页码与实际章节页码不符时，报告，category=编号引用。
 - 商标或专有名词大小写：品牌名如 macOS、DNBSEQ、GenSeq 的大小写与官方写法不一致且同文档内混用时，报告，category=术语一致性。
+- 步骤引用逻辑性：当正文出现“参见 Step N”“如第 N 步所示”“完成步骤 N 后”等引用时，除核验该步骤是否存在、编号是否连续外，还需判断被引用步骤的内容与引用处上下文在逻辑上是否相符（如“参见 Step 3 清洗样品”处，Step 3 确实为清洗类操作）。若逻辑不符，按 suggestion 级上报，并写明被引用步骤的实际内容与引用处的预期。若无法确认被引用步骤的实际内容，不得凭猜测上报（置信度需 ≥ 70）。
 
 🚫 严禁输出的问题类型（违反即为错误）：
-- ❌ 单个标点符号（如 "。" → "，" 或 "." → ","）
-- ❌ 单个中文字符或英文字母（如 "的" → "地" 且仅有一个字）
-- ❌ 原文与建议仅差一个标点或空格
-- ❌ 纯格式差异（全角/半角标点互换、中英文空格增减）
-- ❌ original 字段长度小于 2 个有意义字符的问题
 - ❌ Unicode 等价字符差异，例如 µ(U+00B5) 与 μ(U+03BC)、全角与半角数字、U+2212 减号与 U+002D 连字符，在视觉呈现一致时不得报错
-- ❌ 仅为了更标准而改写合规、法律、法规声明、产品名称、警告文本；只有原文能证明存在客观错误时才允许报告
-- ❌ 要求展开公认缩写，例如 DNB → DNA Nanoball；只有全文第一次出现且全文其他位置都没有定义时才允许报告
-- ❌ 图注或 UI 标签中动名词与名词形式差异，例如 Reviewing parameters 与 Review parameters；只有同一对象在同一上下文内前后不一致时才允许报告
-- ❌ 在句义明确且句子仍然成立时，仅因冠词 a/an/the 的增删而报错
+- ❌ original 字段长度小于 2 个有意义字符的问题
+- ❌ 纯格式差异但视觉呈现完全一致
+- ❌ 把机械切分产生的边界现象当作完整性缺陷：缺少章节、标题下无正文、句子被截断、表格只有表头、目录行被当成无正文标题、"文档/节选不完整"
+
+标点习惯、空格、冠词、缩写展开、动名词形式和风格偏好等质量类问题应报告，severity=suggestion。
 
 重要提醒：
 - 只报告有明确文本证据的问题。
@@ -2287,10 +2574,11 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 - 产品名、公司名、型号、技术缩写词，除非上下文明确显示错误，默认视为正确。
 - 对于结构完整性、法规完整性问题，只有当前节选里存在直接证据时才报告。
 - 如果审核依据包含 CYY 人工审核经验基线，用它识别内容层面的缺陷。重点关注有证据的句义问题、版本记录、术语一致性、表格内容、图文引用、分页导致的内容缺失和主题结构问题。
+- 下面给出的是从完整文档中机械切分出来的一个节选，可能从句子、章节、表格或符号说明的中间开始或结束，也可能只包含目录或表格表头；节选前后的正文在别处，不得当成缺失内容报告。只有当节选内部自身就能证明缺陷时才报告内容完整性问题，例如发布版本中残留 TBD、TODO、XX、待补充等占位符，或节选内前后表述互相矛盾。
 
 文件名检查（当上下文提供了文档文件名时）：
 - 检查文件名是否存在拼写错误。
-- 检查文件名中的产品名称是否与正文一致（如文件名含"DNBSEQ-T7"但正文写"DNBSEQ-T10"则为错误）。
+- 仅当正文出现另一个不同产品型号时，才报告文件名产品名不一致；正文未出现该型号、或文件名片段是版本号/物料编码时不要报。
 - 检查文件名中的版本号、日期格式是否规范。
 - 检查文件名中产品名称的拼写、大小写、空格/下划线是否与正文一致。
 - 文件名问题类型标记为 "文件名错误"，规则用 FILENAME-001（拼写）、FILENAME-002（产品名不一致）、FILENAME-003（版本/日期格式）。"""
@@ -2298,10 +2586,10 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
             user_prompt = f"""请审核下面这段中文技术文档。
 
 文档内容：
-{content[:6500]}
+{clip_prompt_body(content, label='audit.body.zh')}
 
 发布前自检 checklist 和审核依据：
-{audit_basis[:3500] if audit_basis else '未提供额外 checklist。'}
+{clip_audit_basis(audit_basis) if audit_basis else '未提供额外 checklist。'}
 
 输出要求：
 1. 按JSON格式输出审核结果
@@ -2309,6 +2597,7 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
 3. CYY 人工审核经验基线用于辅助识别内容问题，有明确证据时需要报告
 4. 去重：同一错误在同一文档中只报告第一次出现
 5. 如果系统提示中给出了文档文件名，请检查文件名拼写、产品名与正文一致性
+6. 额外输出 observations（1-3 条）。只写 issues 无法覆盖的全文/结构判断，不要重复 issues 已写过的同一事实。不要输出关于本片段/摘录本身的观察（例如内容以目录、前置信息为主），这类观察没有可执行价值。title 中文不超过 16 字、英文不超过 60 字符，description 只保留一句。
 
 输出严格JSON：
 {{
@@ -2325,6 +2614,15 @@ Return empty issues array if no issues with confidence >= 70. Only report confid
       "basis": "判断依据或引用的规则条款",
       "source": "ai",
       "status": "open",
+      "confidence": 50-100
+    }}
+  ],
+  "observations": [
+    {{
+      "category": "结构完整|法规合规|术语一致性|编号引用|可读性|格式排版|其他",
+      "severity": "fatal|serious|general|suggestion",
+      "title": "短标题",
+      "description": "一句证据说明",
       "confidence": 50-100
     }}
   ],
@@ -2351,9 +2649,9 @@ severity=fatal 仅用于：安全警告、禁忌、警示信息缺失或错误�
 confidence 评分指南：
 - 90-100：确凿错误（拼写错误、术语用错、事实性错误）
 - 70-89：很可能有误（语法不规范、格式不一致）
-- 50-69：可疑/需人工确认（只有强烈怀疑时才报告，否则不报告）
+- 50-69：可疑/需人工确认，仍需报告并标记 needs_human_review=true
 
-如果没有高置信度(≥70)问题，返回空数组。50-69的问题只在影响操作安全或法规合规时才报告。"""
+置信度 ≥50 的问题都要输出。不要因为没有 ≥70 的问题就返回空数组。"""
 
         return {
             "language": lang,
@@ -2366,6 +2664,7 @@ confidence 评分指南：
 
         content = content or ""
         # 上层审核流程已做滑动窗口分块，这里保持单次模型调用，避免二次分块打散上下文。
+        self._pending_audit_observations = []
 
         prompt_payload = self.build_audit_prompt_payload(
             content,
@@ -2384,23 +2683,24 @@ confidence 评分指南：
         if force_provider:
             forced_issues = self._run_provider_audit(force_provider, messages, content, request_label=request_label, review_id=review_id)
             if forced_issues:
-                return {"issues": forced_issues}
+                return {"issues": forced_issues, "observations": self._take_pending_observations()}
             result = self.chat_with_provider(
                 force_provider,
                 messages,
-                max_tokens=2048,
+                max_tokens=_audit_max_tokens(len(str(content or ""))),
                 temperature=0.2,
                 request_label=request_label,
                 review_id=review_id,
             )
             if not result:
-                return {"issues": []}
+                return {"issues": [], "observations": self._take_pending_observations()}
             data = self._extract_json(result, {"issues": []})
             issues = self.normalize_audit_issues(data.get("issues", []), content, source="ai")
             for issue in issues:
                 issue["source_models"] = [str(force_provider or "")]
                 issue["consensus_score"] = int(issue.get("confidence") or 0)
-            return {"issues": issues}
+            observations = self.normalize_audit_observations(data.get("observations", []))
+            return {"issues": issues, "observations": observations}
 
         primary_provider = ""
         primary_issues = []
@@ -2415,19 +2715,19 @@ confidence 评分指南：
                 break
 
         if not primary_issues and not self.deepseek_client:
-            return {"issues": []}
+            return {"issues": [], "observations": self._take_pending_observations()}
 
         secondary_issues = []
         if self.deepseek_client and primary_provider != "deepseek":
             secondary_issues = self._run_provider_audit("deepseek", messages, content, request_label=f"{request_label}.deepseek", review_id=review_id)
 
         if not primary_issues:
-            return {"issues": secondary_issues}
+            return {"issues": secondary_issues, "observations": self._take_pending_observations()}
         if not secondary_issues:
-            return {"issues": primary_issues}
+            return {"issues": primary_issues, "observations": self._take_pending_observations()}
 
         merged_issues = self._merge_audit_issue_sets(primary_issues, secondary_issues, primary_provider or "primary", "deepseek")
-        return {"issues": merged_issues}
+        return {"issues": merged_issues, "observations": self._take_pending_observations()}
 
     # ------------------------------------------------------------------
     # 规则审核的二次验证
@@ -2600,10 +2900,10 @@ Only high-confidence false positives may be removed."""
 请作为{lang_desc}技术文档审核专家，审核以下文档：
 
 文档内容：
-{content[:8000]}
+{clip_prompt_body(content, label='audit.body.legacy')}
 
 {"{'审核规则：' + rules_text[:3000] if rules_text else ''}"}
-{"{'审核依据：' + audit_basis[:3000] if audit_basis else ''}"}
+{"{'审核依据：' + clip_audit_basis(audit_basis) if audit_basis else ''}"}
 
 请从以下维度进行审核：
 1. 内容完整性

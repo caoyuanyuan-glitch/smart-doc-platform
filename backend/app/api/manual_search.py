@@ -20,12 +20,26 @@ from app.api.qa import (
     _get_user_id_from_token, _save_qa_history, _to_beijing_iso,
 )
 from app.utils.ai_client import ai_client
+from app.utils.official_manual import (
+    cache_file_id,
+    download_official_pdf,
+    extract_search_keyword,
+    filter_manuals_by_keyword,
+    needs_user_choice,
+    pick_from_candidates,
+    public_item,
+    rank_manuals,
+    search_official_manuals,
+    select_manuals,
+)
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "manual_uploads")
 os.makedirs(TEMP_DIR, exist_ok=True)
+OFFICIAL_DIR = os.path.join(TEMP_DIR, "official")
+os.makedirs(OFFICIAL_DIR, exist_ok=True)
 
 UPLOAD_SESSIONS = {}
 
@@ -37,6 +51,14 @@ class StartSessionInput(BaseModel):
 class AskInput(BaseModel):
     session_id: int
     question: str
+
+
+class QueryInput(BaseModel):
+    question: str
+    product: str = ""
+    session_id: Optional[int] = None
+    official_ids: Optional[List[int]] = None
+    file_ids: Optional[List[str]] = None
 
 
 def _extract_pdf_pages(file_path: str) -> Optional[List[dict]]:
@@ -199,6 +221,267 @@ def _call_ai_with_citations(question: str, context: str, titles: List[str]) -> d
 
 
 
+
+
+def _session_store():
+    return UPLOAD_SESSIONS.setdefault("sessions", {})
+
+
+def _materialize_official(item: dict, user_key: str) -> dict:
+    file_id = cache_file_id(item)
+    uploads = UPLOAD_SESSIONS.setdefault(user_key, {})
+    cached = uploads.get(file_id)
+    if cached and cached.get("pages"):
+        return cached
+    dest = os.path.join(OFFICIAL_DIR, f"{file_id}.pdf")
+    if not os.path.exists(dest):
+        files_path = item.get("files") or ""
+        download_official_pdf(files_path, dest)
+    pages = _extract_pdf_pages(dest)
+    if not pages:
+        raise HTTPException(status_code=400, detail="说明书解析失败，请更换手册或补充上传")
+    title = item.get("title") or file_id
+    rec = {
+        "file_id": file_id,
+        "filename": f"{title}.pdf",
+        "title": title,
+        "pages": pages,
+        "total_pages": len(pages),
+        "file_path": dest,
+        "file_size": os.path.getsize(dest),
+        "official_item": item,
+    }
+    uploads[file_id] = rec
+    return rec
+
+
+def _docs_from_uploads(user_key: str, file_ids: List[str]) -> List[dict]:
+    uploads = UPLOAD_SESSIONS.get(user_key, {})
+    selected = []
+    for fid in file_ids:
+        if fid in uploads:
+            selected.append(uploads[fid])
+    if not selected:
+        raise HTTPException(status_code=400, detail="未找到上传文件，请重新上传")
+    return selected
+
+
+def _answer_from_docs(question: str, documents: List[dict]) -> dict:
+    titles = [d.get("title", "") for d in documents]
+    file_by_title = {d.get("title", ""): d.get("file_id") for d in documents}
+    ranked = _rank_page_chunks(question, documents, limit=10)
+    context = _build_context(ranked, max_chars=10000)
+    result = _call_ai_with_citations(question, context, titles)
+    is_fallback = result.get("answer") in ("当前已选文档中未检索到相关内容。", "文档中未找到相关信息")
+    search_hit = 1 if (ranked and not is_fallback) else 0
+    relevance_score = round(ranked[0]["score"], 4) if ranked else 0.0
+    return_sources = []
+    if not is_fallback and ranked:
+        seen = set()
+        for s in ranked[:4]:
+            key = f"{s['title']}_{s['page_num']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            return_sources.append({
+                "title": s["title"],
+                "page": s["page_num"],
+                "content": s.get("chunk", "")[:150],
+                "file_id": file_by_title.get(s["title"]),
+            })
+    source_for_db = [{"title": s["title"], "page": s["page"], "file_id": s.get("file_id")} for s in return_sources]
+    return {
+        "answer": result["answer"],
+        "sources": return_sources,
+        "source_for_db": source_for_db,
+        "search_hit": search_hit,
+        "relevance_score": relevance_score,
+        "titles": titles,
+    }
+
+
+@router.post("/query")
+async def query_official_manual(
+    input_data: QueryInput,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+):
+    user_id = _get_user_id_from_token(token, db)
+    question = (input_data.question or "").strip()
+    product = (input_data.product or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="问题不能为空")
+
+    user_key = user_id or "anonymous"
+    store = _session_store()
+    sess = None
+    sess_data = {}
+    if input_data.session_id:
+        sess = db.query(QaSession).filter(
+            QaSession.id == input_data.session_id,
+            QaSession.user_id == user_id,
+        ).first()
+        if not sess:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        sess_data = store.get(str(sess.id), {})
+
+    keyword = extract_search_keyword(question, product)
+    candidates = sess_data.get("candidates") or []
+    selected_meta = []
+    documents = []
+    miss_message = ""
+    status = "answered"
+    ranked = []
+
+    if input_data.file_ids:
+        documents = _docs_from_uploads(user_key, input_data.file_ids)
+    elif input_data.official_ids:
+        raw_candidates = sess_data.get("official_candidates") or sess_data.get("candidates") or []
+        picked = pick_from_candidates(raw_candidates, input_data.official_ids)
+        if not picked:
+            items = search_official_manuals(keyword, limit=10)
+            ranked = rank_manuals(items, question, keyword)
+            ranked = filter_manuals_by_keyword(ranked, keyword)
+            candidates = [public_item(x) for x in ranked]
+            picked = pick_from_candidates(ranked, input_data.official_ids)
+        if not picked:
+            status = "miss"
+            miss_message = "未找到指定说明书，请重新选择或改问。"
+        else:
+            selected_meta = picked
+            try:
+                documents = [_materialize_official(item, user_key) for item in picked]
+            except HTTPException:
+                raise
+            except Exception:
+                status = "miss"
+                miss_message = "已定位手册，但下载或解析失败。可更换手册或补充上传后再问。"
+    elif sess_data.get("documents") and (not product or product == sess_data.get("product")):
+        documents = sess_data.get("documents") or []
+        selected_meta = sess_data.get("official_items") or []
+        candidates = sess_data.get("candidates") or []
+    else:
+        try:
+            items = search_official_manuals(keyword, limit=10)
+        except Exception:
+            items = []
+        ranked = rank_manuals(items, question, keyword)
+        ranked = filter_manuals_by_keyword(ranked, keyword)
+        candidates = [public_item(x) for x in ranked]
+        if needs_user_choice(ranked, keyword):
+            status = "choose"
+            miss_message = "找到多本相关说明书，请选择一本后再作答。"
+        else:
+            picked = select_manuals(ranked, question, max_count=1)
+            if not picked:
+                status = "miss"
+                miss_message = f"官网未找到与「{keyword}」匹配的说明书。可改型号后再试，或补充说明书后继续问。"
+            else:
+                selected_meta = picked
+                try:
+                    documents = [_materialize_official(item, user_key) for item in picked]
+                except HTTPException:
+                    raise
+                except Exception:
+                    status = "miss"
+                    miss_message = "已定位手册，但下载或解析失败。可更换手册或补充上传后再问。"
+
+    titles = [d.get("title", "") for d in documents] if documents else [m.get("title", "") for m in selected_meta]
+    summary_title = (titles[0] if titles else keyword)[:80]
+    if not sess:
+        sess = QaSession(user_id=user_id, session_type="manual", title=summary_title)
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+    elif titles:
+        sess.title = summary_title
+        db.commit()
+
+    selected_public = [public_item(x) if "title" in x else x for x in selected_meta]
+    payload = {
+        "session_id": sess.id,
+        "status": status,
+        "keyword": keyword,
+        "selected": selected_public,
+        "candidates": candidates[:8],
+        "titles": titles,
+        "answer": "",
+        "sources": [],
+        "message": miss_message,
+    }
+
+    if status == "choose":
+        payload["status"] = "choose"
+        payload["answer"] = miss_message or "找到多本相关说明书，请选择一本后再作答。"
+        _save_qa_history(
+            db=db, session_type="manual", question=question,
+            answer_data={"answer": payload["answer"], "sources": []},
+            user_id=user_id, session_id=sess.id,
+            sources=[], search_hit=0, relevance_score=0.0,
+        )
+        store[str(sess.id)] = {
+            "session_id": sess.id,
+            "title": sess.title,
+            "titles": titles,
+            "documents": documents,
+            "candidates": candidates[:8],
+            "official_candidates": ranked or sess_data.get("official_candidates") or selected_meta,
+            "official_items": selected_meta,
+            "keyword": keyword,
+            "product": product,
+        }
+        return payload
+
+    if status == "miss" or not documents:
+        payload["status"] = "miss"
+        payload["answer"] = miss_message or "官网未找到匹配的说明书。"
+        _save_qa_history(
+            db=db, session_type="manual", question=question,
+            answer_data={"answer": payload["answer"], "sources": []},
+            user_id=user_id, session_id=sess.id,
+            sources=[], search_hit=0, relevance_score=0.0,
+        )
+        store[str(sess.id)] = {
+            "session_id": sess.id,
+            "title": sess.title,
+            "titles": titles,
+            "documents": documents,
+            "candidates": candidates[:8],
+            "official_candidates": ranked or sess_data.get("official_candidates") or selected_meta,
+            "official_items": selected_meta,
+            "keyword": keyword,
+            "product": product,
+        }
+        return payload
+
+    result = _answer_from_docs(question, documents)
+    payload["answer"] = result["answer"]
+    payload["sources"] = result["sources"]
+    payload["titles"] = result["titles"]
+    payload["message"] = f"本次依据《{result['titles'][0]}》作答" if result["titles"] else ""
+
+    _save_qa_history(
+        db=db, session_type="manual", question=question,
+        answer_data={"answer": result["answer"], "sources": result["source_for_db"]},
+        user_id=user_id, session_id=sess.id,
+        sources=result["source_for_db"],
+        search_hit=result["search_hit"],
+        relevance_score=result["relevance_score"],
+    )
+
+    store[str(sess.id)] = {
+        "session_id": sess.id,
+        "title": sess.title,
+        "titles": result["titles"],
+        "documents": documents,
+        "candidates": candidates[:8],
+        "official_candidates": ranked or sess_data.get("official_candidates") or selected_meta,
+        "official_items": selected_meta,
+        "keyword": keyword,
+        "product": product,
+        "total_pages": sum(d.get("total_pages", 0) for d in documents),
+    }
+    return payload
 
 
 @router.post("/upload")
@@ -516,6 +799,7 @@ async def get_session_detail(
             "updated_at": _to_beijing_iso(sess.updated_at),
             "titles": sess_data.get("titles", []),
             "total_pages": sess_data.get("total_pages", 0),
+            "candidates": sess_data.get("candidates", []),
         },
         "messages": [{
             "id": m.id,

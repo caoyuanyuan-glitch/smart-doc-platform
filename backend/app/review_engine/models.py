@@ -58,3 +58,15 @@ class ReviewStageDiagnostics:
     dropped_count: int = 0
     duration_ms: int = 0
     errors: list[str] = field(default_factory=list)
+    drop_reasons: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "input_count": self.input_count,
+            "output_count": self.output_count,
+            "dropped_count": self.dropped_count,
+            "duration_ms": self.duration_ms,
+            "errors": list(self.errors or []),
+            "drop_reasons": dict(self.drop_reasons or {}),
+        }

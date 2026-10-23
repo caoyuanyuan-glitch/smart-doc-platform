@@ -134,11 +134,15 @@ export const documentAPI = {
 }
 
 export const reviewAPI = {
-  create: (documentId, mode, provider) => {
+  create: (documentId, mode, provider, options = {}) => {
     const params = { mode, timeout: 300000 }
     if (provider) params.provider = provider
+    if (options.force) params.force = true
+    if (options.visual_document_id) params.visual_document_id = options.visual_document_id
+    if (options.pairing_confirmed) params.pairing_confirmed = true
     return instance.post(`/review/${documentId}`, {}, { params })
   },
+  createSnippet: (payload) => instance.post('/review/snippet', payload, { timeout: 300000 }),
   compareAudit: (mainFile, referenceFiles = [], mode = 'both') => {
     const formData = new FormData()
     formData.append('main_file', mainFile)
@@ -159,6 +163,7 @@ export const reviewAPI = {
     return instance.post(`/review/${id}/gold-compare`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   getProgress: (reviewId) => instance.get(`/review/${reviewId}/progress`),
+  cancel: (reviewId) => instance.post(`/review/${reviewId}/cancel`),
   getDashboardOverview: (params = {}) => instance.get('/review/dashboard/overview', { params }),
   getDashboardPersonal: (params = {}) => instance.get('/review/dashboard/personal', { params }),
   list: (params = {}) => instance.get('/review/', { params }),
@@ -174,7 +179,6 @@ export const reviewAPI = {
   reindex: (id) => instance.post(`/review/${id}/reindex`),
   search: (q, limit = 10) => instance.get('/review/search', { params: { q, limit } }),
   getAggregatedReport: (id) => instance.get(`/review/${id}/aggregated-report`),
-  getRuleMigration: () => instance.get('/review/engine/rule-migration'),
   runBatchEval: (params) => instance.post('/review/eval/batch', params, {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),
@@ -214,6 +218,10 @@ export const competitorAPI = {
   get: (id) => instance.get(`/competitor/${id}`),
   delete: (id) => instance.delete(`/competitor/${id}`),
   getReport: (id, format = 'md') => instance.get(`/competitor/${id}/report`, { params: { format } }),
+  createComparison: (data) => instance.post('/competitor/compare', data, { timeout: 120000 }),
+  listComparisons: (params = {}) => instance.get('/competitor/compare', { params }),
+  getComparison: (id) => instance.get(`/competitor/compare/${id}`),
+  deleteComparison: (id) => instance.delete(`/competitor/compare/${id}`),
 }
 
 export const rulesAPI = {
@@ -221,9 +229,14 @@ export const rulesAPI = {
   create: (rule) => instance.post('/rules/', rule),
   update: (id, rule) => instance.put(`/rules/${id}`, rule),
   delete: (id) => instance.delete(`/rules/${id}`),
-  bulkCreate: (rules) => instance.post('/rules/bulk', rules),
   bulkDelete: (ids) => instance.delete('/rules/bulk', { params: { rule_ids: ids } }),
-  export: () => instance.get('/rules/export')
+  export: () => instance.get('/rules/export', { responseType: 'blob' }),
+  downloadTemplate: () => instance.get('/rules/import-template', { responseType: 'blob' }),
+  importExcel: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/rules/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+  }
 }
 
 export const termsAPI = {
@@ -346,7 +359,9 @@ export const manualAPI = {
   deleteUpload: (fileId) => instance.delete(`/manual/uploads/${fileId}`),
   start: (fileIds) => instance.post('/manual/start', { file_ids: fileIds }),
   ask: (sessionId, question) => instance.post('/manual/ask', { session_id: sessionId, question }),
+  query: (payload) => instance.post('/manual/query', payload, { timeout: 600000 }),
   getPreviewUrl: (fileId) => `/api/manual/preview/${fileId}`,
+  previewBlob: (fileId) => instance.get(`/manual/preview/${fileId}`, { responseType: 'blob' }),
   getDownloadUrl: (fileId) => `/api/manual/download/${fileId}`,
   getSessions: () => instance.get('/manual/sessions'),
   getSessionDetail: (sessionId) => instance.get(`/manual/sessions/${sessionId}`),
@@ -388,6 +403,12 @@ export const convertAPI = {
     if (retryScreenshot) formData.append('retry_screenshot', retryScreenshot)
     return instance.post('/convert/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
+  revise: (taskId, feedback, screenshot) => {
+    const formData = new FormData()
+    formData.append('feedback', feedback)
+    if (screenshot) formData.append('screenshot', screenshot)
+    return instance.post(`/convert/${taskId}/revise`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+  },
   getProgress: (taskId) => instance.get(`/convert/${taskId}/progress`),
   download: (taskId) => {
     return instance.get(`/convert/${taskId}/download`, {
@@ -404,6 +425,10 @@ export const convertAPI = {
 
 export const translationAPI = {
   translate: (data) => instance.post('/translation/translate', data),
+  ocrImage: (formData) => instance.post('/translation/ocr-image', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000
+  }),
   getProviderStatus: () => instance.get('/translation/providers/status'),
   translateFile: (formData) => instance.post('/translation/translate/file', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -412,8 +437,6 @@ export const translationAPI = {
   getFileStatus: (docId, params = {}) => instance.get(`/translation/translate/file/${docId}/status`, { params }),
   cancelFileTranslation: (docId) => instance.post(`/translation/translate/file/${docId}/cancel`),
   getMemoryBanks: () => instance.get('/translation/memory/banks'),
-  getReviewedDocs: () => instance.get('/translation/reviewed-docs'),
-  getDocument: (id) => instance.get(`/documents/${id}`),
   getMemory: (skip = 0, limit = 100, keyword) => {
     const params = { skip, limit }
     if (keyword) params.keyword = keyword
@@ -422,15 +445,17 @@ export const translationAPI = {
   addMemory: (data) => instance.post('/translation/memory', data),
   writeMemoryFileEntry: (data) => instance.post('/translation/memory/file-entry', data),
   deleteMemory: (id) => instance.delete(`/translation/memory/${id}`),
-  getDocs: (skip = 0, limit = 100, batchId = '') => instance.get('/translation/docs', {
+  getDocs: (skip = 0, limit = 100, batchId = '', completedOnly = false) => instance.get('/translation/docs', {
     params: {
       skip,
       limit,
-      ...(batchId ? { batch_id: batchId } : {})
+      ...(batchId ? { batch_id: batchId } : {}),
+      ...(completedOnly ? { completed_only: true } : {})
     }
   }),
   downloadTranslatedDoc: (id, filename) => downloadBlob(`/translation/download/${id}`, filename),
   previewTranslatedDoc: (id) => instance.get(`/translation/docs/${id}/preview`),
+  previewTranslatedDocRaw: (id) => instance.get(`/translation/docs/${id}/raw`, { responseType: 'blob' }),
   getDoc: (id) => instance.get(`/translation/docs/${id}`),
   deleteDoc: (id) => instance.delete(`/translation/docs/${id}`),
   getStats: (batchId) => instance.get('/translation/stats', {

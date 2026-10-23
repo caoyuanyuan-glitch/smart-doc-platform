@@ -170,6 +170,46 @@ def test_audit_document_falls_back_to_kimi_when_qwen_returns_no_issues(monkeypat
     assert result["issues"][0]["source_models"] == ["kimi"]
 
 
+def test_run_provider_audit_salvages_truncated_issues(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    truncated = (
+        '{"issues": ['
+        '{"category": "Grammar", "original_text": "abc", "suggestion": "abd", '
+        '"description": "语法错误", "confidence": 90}, '
+        '{"category": "Terminology", "original_text": "foo"'
+    )
+
+    def fake_call_qwen(messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        return truncated
+
+    monkeypatch.setattr(client, "call_qwen", fake_call_qwen)
+
+    result = client._run_provider_audit("qwen", [], "please fix abc in this sentence")
+
+    assert len(result) == 1
+    assert result[0]["original_text"] == "abc"
+
+
+def test_run_provider_audit_retries_compact_when_salvage_empty(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    calls = []
+
+    def fake_call_qwen(messages, max_tokens=2048, temperature=0.3, request_label=None, review_id=None):
+        calls.append(max_tokens)
+        if len(calls) == 1:
+            return '{"issues": [{"category": "Grammar", "original_text": "abc", "suggestion": "abd"'
+        return '{"issues": [{"category": "Grammar", "original_text": "abc", "suggestion": "abd", "description": "语法错误", "confidence": 90}]}'
+
+    monkeypatch.setattr(client, "call_qwen", fake_call_qwen)
+
+    result = client._run_provider_audit("qwen", [{"role": "user", "content": "audit"}], "please fix abc")
+
+    assert len(calls) == 2
+    assert calls[1] <= 1024
+    assert len(result) == 1
+    assert result[0]["original_text"] == "abc"
+
+
 def test_run_provider_audit_uses_configurable_max_tokens(monkeypatch):
     client = AIClient.__new__(AIClient)
     captured = {}
@@ -178,13 +218,14 @@ def test_run_provider_audit_uses_configurable_max_tokens(monkeypatch):
         captured["max_tokens"] = max_tokens
         return '{"issues": []}'
 
-    monkeypatch.setenv("AI_AUDIT_MAX_TOKENS", "512")
+    # _audit_max_tokens 现在按输入长度自适应：空内容时直接返回配置基准值。
+    monkeypatch.setenv("AI_AUDIT_MAX_TOKENS", "2048")
     monkeypatch.setattr(client, "call_qwen", fake_call_qwen)
 
-    result = client._run_provider_audit("qwen", [], "text")
+    result = client._run_provider_audit("qwen", [], "")
 
     assert result == []
-    assert captured["max_tokens"] == 512
+    assert captured["max_tokens"] == 2048
 
 
 def test_qwen3_request_disables_thinking_by_default(monkeypatch):
@@ -226,7 +267,24 @@ def test_build_audit_prompt_payload_english_skips_chinese_base_prompt(monkeypatc
 
     assert "中文静态规则" not in payload["system_prompt"]
     assert "Unicode-equivalent character differences" in payload["system_prompt"]
-    assert "Gerund vs noun form differences" in payload["system_prompt"]
+    assert "severity=suggestion" in payload["system_prompt"]
+    assert "observations" in payload["user_prompt"]
+
+
+def test_build_audit_prompt_payload_english_declares_semantic_dimensions(monkeypatch):
+    client = AIClient.__new__(AIClient)
+    monkeypatch.setattr("app.utils.ai_client.PROMPT_BUILDER_FALLBACK_ACTIVE", False)
+
+    payload = client.build_audit_prompt_payload(
+        "Reviewing parameters",
+        language="en",
+        audit_basis="basis",
+    )
+
+    system_prompt = payload["system_prompt"]
+    assert "SEMANTIC QUALITY CHECKS" in system_prompt
+    for dimension in ["冗余", "表述不准确", "信息不完整", "一致性", "语气", "图表衔接", "句子成分"]:
+        assert dimension in system_prompt, f"英文提示词缺少语义维度: {dimension}"
 
 
 def test_audit_document_does_not_rechunk_large_content(monkeypatch):
@@ -258,7 +316,8 @@ def test_audit_document_does_not_rechunk_large_content(monkeypatch):
 
     result = client.audit_document("A" * 9000, language="en", audit_basis="basis", review_id=7)
 
-    assert result == {"issues": []}
+    assert result["issues"] == []
+    assert result["observations"] == []
     assert captured == [("qwen", 9000, "review.audit_chunk", 7)]
 
 
@@ -280,3 +339,51 @@ def test_provider_limits_can_be_overridden(monkeypatch):
 
     assert ai_client_module._provider_max_attempts() == 4
     assert timeout.read == 20.0
+
+
+def test_normalize_audit_issues_keeps_mid_confidence_for_human_review():
+    client = AIClient.__new__(AIClient)
+    issues = client.normalize_audit_issues(
+        [{
+            "original": "Buffer A",
+            "expected": "Buffer B",
+            "description": "术语可能不一致",
+            "confidence": 62,
+            "severity": "general",
+            "category": "术语一致性",
+        }],
+        "Use Buffer A before mixing.",
+    )
+    assert len(issues) == 1
+    assert issues[0]["needs_human_review"] is True
+
+
+def test_normalize_audit_observations_dedupes_by_title():
+    client = AIClient.__new__(AIClient)
+    observations = client.normalize_audit_observations([
+        {"title": "占位符过多", "description": "低置信", "confidence": 55, "category": "格式排版"},
+        {"title": "占位符过多", "description": "高置信", "confidence": 88, "category": "格式排版"},
+        {"title": "引用断裂", "description": "见图 3", "confidence": 70, "category": "编号引用"},
+    ])
+    assert len(observations) == 2
+    first = next(item for item in observations if item["title"] == "占位符过多")
+    assert first["confidence"] == 88
+    assert first["description"] == "高置信"
+
+
+def test_normalize_audit_issues_uses_type_when_category_is_placeholder():
+    client = AIClient.__new__(AIClient)
+    issues = client.normalize_audit_issues(
+        [{
+            "original": "The samples was placed",
+            "expected": "The samples were placed",
+            "description": "subject-verb disagreement",
+            "confidence": 88,
+            "severity": "general",
+            "category": "其他",
+            "type": "Grammar",
+        }],
+        "The samples was placed into the tube.",
+    )
+    assert len(issues) == 1
+    assert issues[0]["category"] == "Grammar"

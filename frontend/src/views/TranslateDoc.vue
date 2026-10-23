@@ -59,16 +59,10 @@
       <div class="left-panel">
         <el-card class="source-card" shadow="never">
           <template #header>
-            <div class="card-header-row">
-              <span class="card-header-title">选择文档</span>
-              <el-tabs v-model="docSource" class="source-tabs">
-                <el-tab-pane label="上传文件" name="upload" />
-                <el-tab-pane label="已审核文档" name="reviewed" />
-              </el-tabs>
-            </div>
+            <span class="card-header-title">选择文档</span>
           </template>
 
-          <div v-if="docSource === 'upload'" class="file-upload-area">
+          <div class="file-upload-area">
             <el-upload
               class="upload-dragger"
               drag
@@ -79,6 +73,8 @@
               multiple
               ref="fileUploadRef"
               accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.pdf,.png,.jpg,.jpeg,.md,.txt,.xlf,.idml"
+              :on-change="syncUploadFileCount"
+              :on-remove="syncUploadFileCount"
             >
               <el-icon class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
@@ -87,26 +83,14 @@
                 <p class="upload-tip">温馨提示：PDF直接翻译易出现排版错乱。建议先转换为Word格式上传，可获得更好的排版效果。</p>
               </div>
             </el-upload>
-            <el-button class="upload-submit-btn" type="primary" :loading="hasActiveJobs" @click="submitFileUpload">
-              <el-icon><Switch /></el-icon>
-              上传并翻译
-            </el-button>
-          </div>
-
-          <div v-if="docSource === 'reviewed'" class="reviewed-area">
-            <div v-if="reviewedDocsLoading" class="loading-hint">加载已审核文档列表...</div>
-            <div v-else-if="reviewedDocs.length === 0" class="empty-hint">暂无可翻译的已审核文档</div>
-            <el-table v-else :data="reviewedDocs" highlight-current-row
-              :row-class-name="tableRowClassName" max-height="320" @row-click="selectReviewedDocRow">
-              <el-table-column prop="filename" label="文档名称" min-width="180" />
-              <el-table-column prop="file_type" label="类型" width="80" />
-              <el-table-column prop="preview" label="预览" min-width="200" show-overflow-tooltip />
-            </el-table>
-            <div v-if="reviewedDocs.length > 0" class="reviewed-doc-hint">已自动排除当前不支持翻译的格式。</div>
-            <div v-if="selectedReviewedDoc" class="selected-doc-hint">
-              已选择: {{ selectedReviewedDoc.filename }}
-              <el-button type="primary" size="small" :loading="hasActiveJobs" @click="translateReviewedDoc" style="margin-left: 12px">
-                翻译此文档
+            <div class="upload-submit-row">
+              <el-button class="upload-submit-btn" type="primary" :loading="hasActiveJobs" @click="submitFileUpload">
+                <el-icon><Switch /></el-icon>
+                开始翻译
+              </el-button>
+              <el-button class="upload-clear-btn" :disabled="hasActiveJobs || !canClearTranslation" @click="clearTranslationSession">
+                <el-icon><Delete /></el-icon>
+                清空
               </el-button>
             </div>
           </div>
@@ -193,7 +177,7 @@
 <script setup>
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled, Switch, FolderOpened, Download, Sort } from '@element-plus/icons-vue'
+import { UploadFilled, Switch, FolderOpened, Download, Sort, Delete } from '@element-plus/icons-vue'
 import { getBlobErrorMessage, knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
 import { TRANSLATION_BATCH_EVENT, TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
@@ -231,10 +215,14 @@ const memoryBanks = ref([])
 const memoryFileIds = ref([])
 const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
-const docSource = ref('upload')
 const translationJobs = ref([])
 const pollingTimers = new Map()
 const hasActiveJobs = computed(() => translationJobs.value.some(job => job.status === 'submitting' || job.status === 'processing'))
+const canClearTranslation = computed(() => (
+  selectedUploadCount.value > 0
+  || translationJobs.value.length > 0
+  || previewDialogVisible.value
+))
 const currentBatchId = ref('')
 const availableModelOptions = computed(() => {
   const options = buildAvailableTranslationModels(providerStatus.value)
@@ -249,18 +237,13 @@ const providerHintText = computed(() => {
 
 const fileUploadRef = ref(null)
 
-const reviewedDocs = ref([])
-const reviewedDocsLoading = ref(false)
-const selectedReviewedDoc = ref(null)
-const selectedReviewedRow = ref(null)
+const selectedUploadCount = ref(0)
 const previewDialogVisible = ref(false)
 const previewLoading = ref(false)
 const previewContent = ref('')
 const previewJob = ref(null)
-const unsupportedReviewedTypes = new Set(['dita', 'zip'])
 
 onMounted(async () => {
-  loadReviewedDocs()
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
   await restoreLatestBatchJobs()
 })
@@ -329,76 +312,6 @@ function appendSelectedMemoryFileIds(formData) {
   }
 }
 
-function tableRowClassName({ row }) {
-  if (selectedReviewedRow.value && selectedReviewedRow.value.id === row.id) {
-    return 'selected-row'
-  }
-  return ''
-}
-
-function selectReviewedDocRow(row) {
-  if (unsupportedReviewedTypes.has(String(row?.file_type || '').toLowerCase())) {
-    ElMessage.warning('当前文档格式暂不支持翻译')
-    return
-  }
-  selectedReviewedDoc.value = row
-  selectedReviewedRow.value = row
-}
-
-async function loadReviewedDocs() {
-  reviewedDocsLoading.value = true
-  try {
-    const res = await translationAPI.getReviewedDocs()
-    reviewedDocs.value = (res.data || []).filter(doc => !unsupportedReviewedTypes.has(String(doc.file_type || '').toLowerCase()))
-  } catch (e) {
-    ElMessage.error('加载已审核文档失败')
-  } finally {
-    reviewedDocsLoading.value = false
-  }
-}
-
-async function translateReviewedDoc() {
-  if (!selectedReviewedDoc.value) return
-  if (unsupportedReviewedTypes.has(String(selectedReviewedDoc.value.file_type || '').toLowerCase())) {
-    ElMessage.error('当前文档格式暂不支持翻译')
-    return
-  }
-  const job = createJob(selectedReviewedDoc.value.filename)
-  const batchId = createBatchId()
-  currentBatchId.value = batchId
-  sessionStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
-  localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, batchId)
-  window.dispatchEvent(new CustomEvent(TRANSLATION_BATCH_EVENT, { detail: { batchId } }))
-  try {
-    const res = await translationAPI.getDocument(selectedReviewedDoc.value.id)
-    const content = res.data.content || ''
-    const formData = new FormData()
-    const blob = new Blob([content], { type: 'text/plain' })
-    const fname = selectedReviewedDoc.value.filename
-    formData.append('file', blob, fname)
-    formData.append('engine', engine.value)
-    formData.append('model', model.value)
-    formData.append('source_lang', sourceLang.value)
-    formData.append('target_lang', targetLang.value)
-    formData.append('memory_bank', memoryBank.value || '')
-    formData.append('batch_id', batchId)
-    appendSelectedMemoryFileIds(formData)
-    const tres = await translationAPI.translateFile(formData)
-    updateJob(job.jobKey, {
-      doc_id: tres.data.doc_id,
-      original_filename: tres.data.original_filename || job.original_filename,
-      status: 'processing',
-      pollingCount: 0,
-      error: ''
-    })
-    startPolling(job.jobKey, tres.data.doc_id)
-  } catch (e) {
-    const error = '提交翻译失败: ' + (e.response?.data?.detail || e.message)
-    updateJob(job.jobKey, { status: 'error', error })
-    ElMessage.error(error)
-  }
-}
-
 function beforeFileUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase()
   const allowed = ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'pdf', 'png', 'jpg', 'jpeg', 'md', 'txt', 'xlf', 'idml']
@@ -420,6 +333,30 @@ function submitFileUpload() {
   localStorage.setItem(TRANSLATION_BATCH_STORAGE_KEY, currentBatchId.value)
   window.dispatchEvent(new CustomEvent(TRANSLATION_BATCH_EVENT, { detail: { batchId: currentBatchId.value } }))
   fileUploadRef.value.submit()
+}
+
+function syncUploadFileCount(_file, fileList) {
+  selectedUploadCount.value = Array.isArray(fileList) ? fileList.length : 0
+}
+
+function clearTranslationSession() {
+  if (hasActiveJobs.value) {
+    return
+  }
+  for (const jobKey of [...pollingTimers.keys()]) {
+    stopPolling(jobKey)
+  }
+  translationJobs.value = []
+  currentBatchId.value = ''
+  sessionStorage.removeItem(TRANSLATION_BATCH_STORAGE_KEY)
+  localStorage.removeItem(TRANSLATION_BATCH_STORAGE_KEY)
+  previewDialogVisible.value = false
+  previewLoading.value = false
+  previewContent.value = ''
+  previewJob.value = null
+  fileUploadRef.value?.clearFiles()
+  selectedUploadCount.value = 0
+  ElMessage.success('已清空当前翻译文档')
 }
 
 function handleFileTranslate(options) {
@@ -812,24 +749,6 @@ async function openTranslatedPreview(job) {
   color: #1f2937;
 }
 
-.card-header-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.source-tabs {
-  margin-bottom: -12px;
-}
-
-.source-tabs :deep(.el-tabs__header) {
-  margin-bottom: 0;
-}
-
-.source-tabs :deep(.el-tabs__nav-wrap::after) {
-  display: none;
-}
-
 .config-card {
   margin-bottom: 16px;
 }
@@ -879,30 +798,21 @@ async function openTranslatedPreview(job) {
   width: 100%;
 }
 
-.reviewed-area {
-  min-height: 100px;
-}
-
-.loading-hint, .empty-hint {
-  text-align: center;
-  color: #9ca3af;
-  padding: 40px 0;
-  font-size: 14px;
-}
-
-.selected-doc-hint {
-  margin-top: 12px;
-  padding: 10px 14px;
-  background: #eff6ff;
-  border-radius: 8px;
-  font-size: 13px;
-  color: #1e40af;
+.upload-submit-row {
+  margin-top: 16px;
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 
-.reviewed-area :deep(.el-table .selected-row) {
-  background-color: #eff6ff;
+.upload-submit-row .upload-submit-btn {
+  margin-top: 0;
+  flex: 1;
+  width: auto;
+}
+
+.upload-clear-btn {
+  flex-shrink: 0;
 }
 
 .result-empty {

@@ -60,8 +60,16 @@
           </div>
 
           <div class="table-section">
-            <h3>文档列表</h3>
-            <el-table :data="documents" border>
+            <div class="table-section-head">
+              <h3>文档列表</h3>
+              <el-input
+                v-model="documentKeyword"
+                placeholder="搜索文件名 / ID"
+                style="width:260px"
+                clearable
+              />
+            </div>
+            <el-table :data="filteredDocuments" border>
               <el-table-column prop="id" label="ID" width="80" />
               <el-table-column prop="filename" label="文件名" />
               <el-table-column prop="file_type" label="类型" width="100" />
@@ -70,7 +78,11 @@
                   {{ formatSize(scope.row.file_size) }}
                 </template>
               </el-table-column>
-              <el-table-column prop="created_at" label="上传时间" width="180" />
+              <el-table-column prop="created_at" label="上传时间" width="180">
+                <template #default="scope">
+                  {{ formatDateTime(scope.row.created_at) }}
+                </template>
+              </el-table-column>
               <el-table-column label="审核状态" width="200">
                 <template #default="scope">
                   <div v-if="docReviewStatus[scope.row.id]">
@@ -79,14 +91,14 @@
                       :percentage="docReviewStatus[scope.row.id].progress"
                       :text-inside="true"
                       :stroke-width="18"
-                      :status="docReviewStatus[scope.row.id].status === 'failed' ? 'exception' : ''"
+                      :status="docReviewStatus[scope.row.id].status === 'failed' || docReviewStatus[scope.row.id].status === 'cancelled' ? 'exception' : ''"
                     />
                     <span style="font-size:12px;color:#666">{{ reviewStatusText(docReviewStatus[scope.row.id]) }}</span>
                   </div>
                   <span v-else style="color:#999">未审核</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="260">
+              <el-table-column label="操作" width="340">
                 <template #default="scope">
                   <el-button
                     size="small"
@@ -94,6 +106,14 @@
                     @click="startReview(scope.row.id)"
                   >
                     {{ docReviewStatus[scope.row.id]?.status === 'running' ? '审核中...' : '开始审核' }}
+                  </el-button>
+                  <el-button
+                    v-if="docReviewStatus[scope.row.id]?.status === 'running'"
+                    size="small"
+                    type="warning"
+                    @click="stopReview(scope.row.id)"
+                  >
+                    停止审核
                   </el-button>
                   <el-button
                     size="small"
@@ -115,14 +135,29 @@
           <div class="upload-section compare-audit-section">
             <div class="compare-upload-grid">
               <div class="compare-upload-card">
-                <div class="compare-upload-title">主文档</div>
+                <div class="compare-upload-head">
+                  <div class="compare-upload-title">主文档</div>
+                  <el-button
+                    v-if="compareMainFileList.length"
+                    link
+                    type="primary"
+                    size="small"
+                    class="compare-upload-clear"
+                    :disabled="compareSubmitting"
+                    @click="clearCompareMainFile"
+                  >
+                    清空
+                  </el-button>
+                </div>
                 <el-upload
+                  ref="compareMainUploadRef"
                   :auto-upload="false"
                   :show-file-list="true"
                   :limit="1"
                   accept=".pdf,.docx,.xlsx,.xls,.md,.zip,.txt,.idml"
                   :on-change="handleCompareMainChange"
                   :on-remove="clearCompareMainFile"
+                  :on-exceed="handleCompareMainExceed"
                   :file-list="compareMainFileList"
                 >
                   <el-button type="primary" plain>上传主文档</el-button>
@@ -131,7 +166,20 @@
               </div>
 
               <div class="compare-upload-card">
-                <div class="compare-upload-title">参考文件</div>
+                <div class="compare-upload-head">
+                  <div class="compare-upload-title">参考文件</div>
+                  <el-button
+                    v-if="compareReferenceFileList.length"
+                    link
+                    type="primary"
+                    size="small"
+                    class="compare-upload-clear"
+                    :disabled="compareSubmitting"
+                    @click="clearCompareReferenceFiles"
+                  >
+                    清空
+                  </el-button>
+                </div>
                 <el-upload
                   :auto-upload="false"
                   :show-file-list="true"
@@ -157,6 +205,12 @@
 
             <div class="compare-action-row">
               <el-button type="primary" :loading="compareSubmitting" @click="startCompareAudit">开始对比审核</el-button>
+              <el-button
+                :disabled="compareSubmitting || (!compareMainFileList.length && !compareReferenceFileList.length && !compareResult)"
+                @click="resetCompareAudit"
+              >
+                重置
+              </el-button>
             </div>
           </div>
 
@@ -233,6 +287,130 @@
             </div>
           </div>
         </el-tab-pane>
+
+        <el-tab-pane label="文本片段审核" name="snippet">
+          <div class="upload-section snippet-audit-section">
+            <div class="snippet-editor-card">
+              <el-input
+                v-model="snippetText"
+                type="textarea"
+                :rows="12"
+                maxlength="12000"
+                show-word-limit
+                placeholder="在此粘贴需要审核的句子或段落..."
+              />
+              <div class="upload-tip">只检查语法、拼写和术语，不会报告目录、版式、交叉引用或发布前自检问题。</div>
+              <div class="review-mode-toolbar">
+                <span class="review-mode-label">审核模式</span>
+                <el-radio-group v-model="reviewMode" size="small">
+                  <el-radio-button label="rule">快速审核</el-radio-button>
+                  <el-radio-button label="hybrid">完整审核</el-radio-button>
+                </el-radio-group>
+                <span class="review-mode-hint">
+                  {{ reviewMode === 'rule' ? '规则 + 拼写 + 术语，速度快。' : '规则问题 + AI 深度检查语法/拼写/术语。' }}
+                </span>
+              </div>
+              <div v-if="reviewMode === 'hybrid'" class="review-mode-toolbar ai-model-toolbar">
+                <span class="review-mode-label">AI 模型</span>
+                <el-select
+                  v-model="selectedProvider"
+                  size="small"
+                  style="width: 280px"
+                  :disabled="providerLoading"
+                  placeholder="选择模型"
+                >
+                  <el-option
+                    v-for="m in availableModels"
+                    :key="m.name"
+                    :label="m.label"
+                    :value="m.name"
+                  />
+                </el-select>
+                <span v-if="providerLoading" class="review-mode-hint">正在检测可用模型...</span>
+                <span v-else-if="availableModels.length === 0" class="review-mode-hint" style="color: #e6a23c">
+                  AI 模型健康检查未通过，请检查 API Key 或服务连通性
+                </span>
+                <span v-else class="review-mode-hint">
+                  {{ `当前使用 ${selectedProviderLabel}` }}
+                </span>
+              </div>
+              <div class="snippet-actions">
+                <el-button
+                  type="primary"
+                  :loading="snippetSubmitting"
+                  :disabled="!canStartSnippetReview"
+                  @click="startSnippetReview"
+                >
+                  {{ snippetStatus?.status === 'running' ? '审核中...' : '开始审核' }}
+                </el-button>
+                <el-button
+                  v-if="snippetStatus?.status === 'running'"
+                  type="warning"
+                  @click="stopSnippetReview"
+                >
+                  停止审核
+                </el-button>
+                <el-button
+                  type="primary"
+                  plain
+                  :disabled="snippetStatus?.status !== 'completed' || !snippetStatus?.review_id"
+                  @click="openSnippetIssues"
+                >
+                  查看问题
+                </el-button>
+                <el-button
+                  :disabled="snippetStatus?.status !== 'completed' || !snippetStatus?.review_id"
+                  @click="goReviewTasks"
+                >
+                  去历史任务处理
+                </el-button>
+                <el-button :disabled="!canClearSnippet" @click="clearSnippetEditor">清空</el-button>
+              </div>
+              <div v-if="snippetStatus?.status === 'running'" class="snippet-progress">
+                <el-progress
+                  :percentage="snippetStatus.progress || 0"
+                  :stroke-width="16"
+                  :status="snippetStatus.status === 'failed' || snippetStatus.status === 'cancelled' ? 'exception' : ''"
+                />
+                <div class="task-progress-text">{{ reviewStatusText(snippetStatus) }}</div>
+              </div>
+              <div
+                v-else-if="snippetStatus?.status === 'completed' || snippetStatus?.status === 'failed' || snippetStatus?.status === 'cancelled'"
+                class="snippet-result"
+                :class="{ 'is-error': snippetStatus.status === 'failed' || snippetStatus.status === 'cancelled' }"
+              >
+                {{ reviewStatusText(snippetStatus) }}
+              </div>
+              <div v-if="snippetStatus?.status === 'completed'" class="snippet-preview">
+                <div class="snippet-preview-head">
+                  <span>问题预览</span>
+                  <span class="snippet-preview-count">{{ snippetPreviewError ? '加载失败' : `共 ${snippetPreviewIssues.length} 条` }}</span>
+                </div>
+                <el-table
+                  v-if="snippetPreviewIssues.length"
+                  :data="visibleSnippetPreviewIssues"
+                  border
+                  size="small"
+                >
+                  <el-table-column label="级别" width="80">
+                    <template #default="scope">{{ severityLabel(scope.row.severity) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="category" label="类别" width="120" show-overflow-tooltip />
+                  <el-table-column prop="original_text" label="原文" min-width="160" show-overflow-tooltip />
+                  <el-table-column prop="suggestion" label="建议" min-width="180" show-overflow-tooltip />
+                </el-table>
+                <div v-else-if="snippetPreviewError" class="snippet-preview-empty">
+                  问题列表加载失败。
+                  <el-button type="primary" text size="small" @click="retrySnippetPreviewIssues">重新加载</el-button>
+                </div>
+                <div v-else class="snippet-preview-empty">未发现语法、拼写或术语问题。</div>
+                <div v-if="snippetPreviewIssues.length > visibleSnippetPreviewIssues.length" class="snippet-preview-more">
+                  还有 {{ snippetPreviewIssues.length - visibleSnippetPreviewIssues.length }} 条，点击“查看问题”看全部。
+                </div>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </div>
 
@@ -240,7 +418,26 @@
     <div v-if="currentView === 'tasks'">
       <h2 class="page-title">历史审核任务</h2>
       <div class="table-section">
-          <el-table :data="reviews" border>
+          <div class="history-toolbar">
+            <el-input
+              v-model="taskFilter.keyword"
+              placeholder="搜索文档名 / 任务ID"
+              style="width:280px"
+              clearable
+            />
+            <el-select v-model="taskFilter.status" placeholder="状态" clearable style="width:140px">
+              <el-option label="排队中" value="pending" />
+              <el-option label="进行中" value="running" />
+              <el-option label="已完成" value="completed" />
+              <el-option label="失败" value="failed" />
+              <el-option label="已停止" value="cancelled" />
+            </el-select>
+            <span class="history-toolbar-hint">全部审核任务都会保留。失败任务若已产出问题，仍可打开查看。</span>
+          </div>
+          <el-table :data="pagedReviews" border>
+          <template #empty>
+            <el-empty description="还没有审核任务。上传文档并开始审核后，任务会保存在此，刷新页面后仍可查看。" />
+          </template>
           <!-- 问题详情已迁移到下方弹窗 (openIssueDialog) -->
           <el-table-column prop="id" label="任务ID" width="80" />
           <el-table-column prop="document_name" label="文档名" min-width="200" show-overflow-tooltip />
@@ -251,24 +448,19 @@
           </el-table-column>
           <el-table-column prop="status" label="状态" width="90">
             <template #default="scope">
-              <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'info'">
-                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : '进行中' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="进度" min-width="220">
-            <template #default="scope">
-              <div v-if="scope.row.status === 'running' && scope.row.progress">
-                <el-progress :percentage="scope.row.progress.progress || 0" :stroke-width="16" />
-                <div class="task-progress-text">{{ reviewProgressText(scope.row.progress) }}</div>
-              </div>
-              <span v-else-if="scope.row.status === 'completed'">审核完成</span>
-              <span v-else-if="scope.row.status === 'failed'">{{ reviewFailureText(scope.row) }}</span>
-              <span v-else style="color:#999">-</span>
+              <el-tooltip
+                :disabled="!reviewFailureHint(scope.row)"
+                :content="reviewFailureHint(scope.row)"
+                placement="top"
+              >
+                <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : scope.row.status === 'cancelled' ? 'warning' : 'info'">
+                  {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : scope.row.status === 'cancelled' ? '已停止' : scope.row.status === 'pending' ? '排队中' : '进行中' }}
+                </el-tag>
+              </el-tooltip>
             </template>
           </el-table-column>
           <el-table-column prop="total_issues" label="问题数" width="100" />
-          <el-table-column label="判定状态" width="180">
+          <el-table-column label="判定状态" width="260">
             <template #default="scope">
               <span v-if="judgmentStats[scope.row.id]">
                 <el-tag type="success" size="small" effect="plain" style="margin-right:4px">已确认 {{ judgmentStats[scope.row.id].confirmed }}</el-tag>
@@ -284,15 +476,24 @@
               {{ formatDateTime(scope.row.created_at) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="360" fixed="right">
+          <el-table-column label="操作" width="460" fixed="right">
             <template #default="scope">
               <el-button 
                 size="small" 
                 type="primary" 
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canViewReviewIssues(scope.row)"
                 @click="openIssueDialog(scope.row)"
               >
                 查看问题
+              </el-button>
+              <el-button
+                size="small"
+                type="warning"
+                plain
+                :disabled="!canViewReviewIssues(scope.row)"
+                @click="openManualIssueDialogForTask(scope.row)"
+              >
+                补充上报
               </el-button>
               <el-button 
                 size="small" 
@@ -314,7 +515,7 @@
                 size="small" 
                 type="success" 
                 plain
-                :disabled="scope.row.status !== 'completed'"
+                :disabled="!canViewReviewIssues(scope.row)"
                 @click="exportReviewHtml(scope.row.id)"
               >
                 HTML报告
@@ -322,13 +523,22 @@
             </template>
           </el-table-column>
         </el-table>
+        <div class="table-pagination">
+          <el-pagination
+            v-model:current-page="taskPage"
+            v-model:page-size="taskPageSize"
+            :page-sizes="[10, 20, 50]"
+            :total="historyReviews.length"
+            layout="total, sizes, prev, pager, next"
+          />
+        </div>
       </div>
     </div>
 
     <!-- 问题详情弹窗 -->
     <el-dialog v-model="issueDialogVisible" :title="`问题详情 - 任务#${currentTaskId}`" width="95%" top="5vh">
       <div class="issue-dialog-toolbar">
-        <el-input v-model="issueFilter.keyword" placeholder="搜索原文/上下文/建议" style="width:300px" clearable />
+        <el-input v-model="issueFilter.keyword" placeholder="搜索原文 / 建议 / 规则 / 章节 / 页码" style="width:300px" clearable />
         <el-select v-model="issueFilter.category" placeholder="分类" clearable style="width:140px;margin-left:8px">
           <el-option v-for="cat in dialogCategories" :key="cat" :label="cat" :value="cat" />
         </el-select>
@@ -342,6 +552,14 @@
           <el-option label="严重" value="serious" />
           <el-option label="一般" value="general" />
           <el-option label="建议" value="suggestion" />
+        </el-select>
+        <el-select v-model="issueFilter.source" placeholder="来源" clearable style="width:120px;margin-left:8px">
+          <el-option
+            v-for="src in dialogSources"
+            :key="src"
+            :label="sourceLabel(src)"
+            :value="src"
+          />
         </el-select>
         <el-button size="small" type="info" plain style="margin-left:8px" @click="showAuditTraces = !showAuditTraces">
           {{ showAuditTraces ? '隐藏AI追踪' : 'AI调用追踪' }}
@@ -493,7 +711,7 @@
           <div class="coverage-section" v-if="Object.keys(coverageData.rule_hits || {}).length > 0">
             <h4>规则命中 Top 10</h4>
             <div style="display:flex;flex-direction:column;gap:4px;font-size:12px">
-              <div v-for="(count, rule, idx) in Object.entries(coverageData.rule_hits).slice(0,10)" :key="rule" style="display:flex;align-items:center">
+              <div v-for="([rule, count], idx) in topRuleHits" :key="rule" style="display:flex;align-items:center">
                 <span style="width:24px;color:#999">{{ idx + 1 }}</span>
                 <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ rule }}</span>
                 <el-tag size="small" type="primary">{{ count }}次</el-tag>
@@ -520,7 +738,7 @@
       </el-card>
 
       <!-- 术语匹配率分析面板 -->
-      <el-card v-if="terminologyData" class="terminology-card" shadow="hover" style="margin-bottom:12px">
+      <el-card v-if="terminologyData && !terminologyUnavailable" class="terminology-card" shadow="hover" style="margin-bottom:12px">
         <template #header>
           <div style="display:flex;justify-content:space-between;align-items:center">
             <div>
@@ -628,8 +846,41 @@
         </div>
       </el-card>
 
+      <el-card v-if="reviewObservations.length" class="observation-card" shadow="never" style="margin-bottom:12px">
+        <template #header>
+          <span style="font-weight:600">整体观察</span>
+          <el-tag size="small" type="info" style="margin-left:8px">{{ reviewObservations.length }}</el-tag>
+        </template>
+        <div v-for="(item, index) in reviewObservations" :key="item.title + index" class="observation-item">
+          <div class="observation-title">
+            {{ item.title }}
+            <el-tag v-if="item.severity" size="small" :type="severityTagType(item.severity)" effect="plain" style="margin-left:8px">
+              {{ severityLabel(item.severity) }}
+            </el-tag>
+            <el-tag v-if="item.category" size="small" type="info" effect="plain" style="margin-left:6px">{{ item.category }}</el-tag>
+          </div>
+          <div v-if="observationExtra(item)" class="observation-desc">{{ observationExtra(item) }}</div>
+        </div>
+      </el-card>
+
+      <el-alert
+        v-if="suspectedFalsePositiveCount"
+        class="suspected-fp-alert"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom:12px"
+      >
+        <template #title>
+          {{ hideSuspectedFalsePositives ? `已折叠 ${suspectedFalsePositiveCount} 条疑似误报` : `正在显示 ${suspectedFalsePositiveCount} 条疑似误报` }}
+          <el-button size="small" text type="primary" @click="hideSuspectedFalsePositives = !hideSuspectedFalsePositives">
+            {{ hideSuspectedFalsePositives ? '展开' : '折叠' }}
+          </el-button>
+        </template>
+      </el-alert>
+
       <el-table
-        :data="filteredDialogIssues"
+        :data="pagedDialogIssues"
         border
         height="60vh"
         @selection-change="onIssueSelectionChange"
@@ -643,11 +894,17 @@
             {{ formatIssueDisplayId(scope.$index) }}
           </template>
         </el-table-column>
-        <el-table-column prop="severity" label="级别" width="80">
+        <el-table-column prop="severity" label="级别" width="150">
           <template #default="scope">
             <el-tag size="small" :type="severityTagType(scope.row.severity)" effect="plain">
               {{ severityLabel(scope.row.severity) }}
             </el-tag>
+            <div class="issue-flag-row">
+              <el-tag v-if="issueHasFlag(scope.row, 'needs_human_review')" size="small" type="warning" effect="plain">需人工确认</el-tag>
+              <el-tag v-if="issueHasFlag(scope.row, 'possible_false_positive')" size="small" type="info" effect="plain">疑似误报</el-tag>
+              <el-tag v-if="issueHasFlag(scope.row, 'model_disagreement')" size="small" type="warning" effect="dark">模型分歧</el-tag>
+              <el-tag v-if="issueOccurrenceCount(scope.row)" size="small" type="primary" effect="plain">{{ issueOccurrenceCount(scope.row) }} 处</el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="模型" width="110" v-if="showProviderColumn">
@@ -675,23 +932,28 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="category" label="分类" width="110" />
-        <el-table-column prop="chapter" label="章节名称" width="180" show-overflow-tooltip />
+        <el-table-column prop="category" label="分类" width="140">
+          <template #default="scope">
+            <div>{{ scope.row.category || '-' }}</div>
+            <div v-if="scope.row.rule" class="issue-rule-id">{{ scope.row.rule }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="章节名称" width="180" show-overflow-tooltip>
+          <template #default="scope">
+            {{ issueChapterLabel(scope.row) }}
+          </template>
+        </el-table-column>
         <el-table-column label="原文" min-width="450">
           <template #default="scope">
             <span class="context-cell" v-html="renderIssueOriginalCell(scope.row, currentTaskMode)"></span>
+            <div v-if="issueClusterHint(scope.row)" class="cluster-hint">{{ issueClusterHint(scope.row) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="建议" min-width="340" class-name="suggestion-column">
           <template #default="scope">
             <div class="suggestion-wrap">
               <div v-if="issueSuggestionOverview(scope.row)" class="suggestion-overview">{{ issueSuggestionOverview(scope.row) }}</div>
-              <div v-if="issueSuggestionSummary(scope.row)" class="suggestion-summary">{{ issueSuggestionSummary(scope.row) }}</div>
-              <div
-                v-if="issueSuggestionDiffHtml(scope.row)"
-                class="suggestion-diff"
-                v-html="issueSuggestionDiffHtml(scope.row)"
-              ></div>
+              <div v-if="issueSuggestionDetail(scope.row)" class="suggestion-detail">{{ issueSuggestionDetail(scope.row) }}</div>
             </div>
           </template>
         </el-table-column>
@@ -701,7 +963,9 @@
               <div class="issue-inline-actions">
                 <el-button size="small" type="success" @click="judgeSingle(scope.row, 'confirmed')">确认</el-button>
                 <el-button size="small" type="danger" plain @click="judgeSingle(scope.row, 'false_positive')">误报</el-button>
-                <el-button size="small" type="warning" plain @click="markSimilarIssuesFalsePositive(scope.row)">同类误报</el-button>
+                <el-tooltip content="仅将当前筛选结果中规则、分类、建议完全一致的待审问题一并标记为误报" placement="top">
+                  <el-button size="small" type="warning" plain @click="markSimilarIssuesFalsePositive(scope.row)">同类误报</el-button>
+                </el-tooltip>
                 <el-button size="small" type="primary" plain @click="openTransferRuleDialog(scope.row)">转规则库</el-button>
               </div>
             </div>
@@ -710,6 +974,13 @@
       </el-table>
       <div class="dialog-footer">
         <span>共 {{ filteredDialogIssues.length }} 条<span v-if="filteredDialogExcelRowCount">，涉及 {{ filteredDialogExcelRowCount }} 行</span> (已选 {{ selectedIssueIds.length }} 条)</span>
+        <el-pagination
+          v-model:current-page="issuePage"
+          v-model:page-size="issuePageSize"
+          :page-sizes="[20, 50, 100]"
+          :total="filteredDialogIssues.length"
+          layout="sizes, prev, pager, next"
+        />
         <el-button @click="issueDialogVisible = false">关闭</el-button>
       </div>
     </el-dialog>
@@ -861,16 +1132,17 @@
       <h2 class="page-title">规则管理</h2>
       <div class="table-section">
         <div class="table-header-actions">
-          <el-button type="primary" @click="showRuleDialog = true">添加规则</el-button>
+          <el-button type="primary" @click="openRuleDialog">添加规则</el-button>
           <el-button @click="exportRules">导出规则库</el-button>
+          <el-button @click="downloadRulesTemplate">下载导入模板</el-button>
           <el-upload
             class="upload-btn"
-            :action="rulesImportUrl"
-            :on-success="handleRulesImport"
-            :before-upload="beforeRulesUpload"
-            accept=".json"
+            :show-file-list="false"
+            :auto-upload="false"
+            :on-change="handleRulesFileChange"
+            accept=".xlsx"
           >
-            <el-button>批量导入规则</el-button>
+            <el-button>导入规则库</el-button>
           </el-upload>
           <el-button v-if="selectedRules.length > 0" type="danger" @click="batchDeleteRules">批量删除</el-button>
         </div>
@@ -894,10 +1166,15 @@
           <el-table-column prop="example" label="示例" width="160" />
           <el-table-column prop="suggestion" label="建议" width="150" />
           <el-table-column prop="audit_basis" label="审核依据" width="180" />
+          <el-table-column prop="severity" label="严重程度" width="100">
+            <template #default="scope">{{ severityLabel(scope.row.severity) }}</template>
+          </el-table-column>
           <el-table-column prop="language" label="语言" width="100">
             <template #default="scope">{{ languageLabel(scope.row.language) }}</template>
           </el-table-column>
-          <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom" />
+          <el-table-column prop="created_at" label="创建时间" width="180" sortable="custom">
+            <template #default="scope">{{ formatDateTime(scope.row.created_at) }}</template>
+          </el-table-column>
           <el-table-column label="操作" width="180">
             <template #default="scope">
               <el-button size="small" @click="editRule(scope.row)">编辑</el-button>
@@ -930,6 +1207,14 @@
           <el-form-item label="审核依据">
             <el-input v-model="ruleForm.audit_basis" placeholder="审核依据来源" />
           </el-form-item>
+          <el-form-item label="严重程度">
+            <el-select v-model="ruleForm.severity" placeholder="请选择严重程度">
+              <el-option label="致命" value="fatal" />
+              <el-option label="严重" value="serious" />
+              <el-option label="一般" value="general" />
+              <el-option label="建议" value="suggestion" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="语言">
             <el-select v-model="ruleForm.language" placeholder="请选择语言">
               <el-option label="中英通用" value="both" />
@@ -949,14 +1234,14 @@
     <div v-if="currentView === 'reports'">
       <h2 class="page-title">审核报告</h2>
       <div class="table-section">
-        <el-table :data="reviews" border>
+          <el-table :data="reviews" border>
           <el-table-column prop="id" label="任务ID" width="100" />
           <el-table-column prop="document_id" label="文档ID" width="100" />
           <el-table-column prop="document_name" label="文档名" />
           <el-table-column prop="status" label="状态" width="100">
             <template #default="scope">
-              <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'info'">
-                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : '进行中' }}
+              <el-tag :type="scope.row.status === 'completed' ? 'success' : scope.row.status === 'failed' ? 'danger' : scope.row.status === 'cancelled' ? 'warning' : 'info'">
+                {{ scope.row.status === 'completed' ? '已完成' : scope.row.status === 'failed' ? '失败' : scope.row.status === 'cancelled' ? '已停止' : '进行中' }}
               </el-tag>
             </template>
           </el-table-column>
@@ -977,7 +1262,7 @@
             <div><strong>任务 ID：</strong>{{ currentReport.id }}</div>
             <div><strong>文档：</strong>{{ currentReport.document_name }}</div>
             <div><strong>模式：</strong>{{ currentReport.mode }}</div>
-            <div><strong>状态：</strong>{{ currentReport.status === 'completed' ? '已完成' : currentReport.status === 'failed' ? '失败' : '进行中' }}</div>
+            <div><strong>状态：</strong>{{ currentReport.status === 'completed' ? '已完成' : currentReport.status === 'failed' ? '失败' : currentReport.status === 'cancelled' ? '已停止' : '进行中' }}</div>
             <div><strong>问题总数：</strong>{{ currentReport.total_issues }}</div>
             <div><strong>创建时间：</strong>{{ formatDateTime(currentReport.created_at) }}</div>
           </div>
@@ -1025,7 +1310,11 @@
                 </template>
               </el-table-column>
               <el-table-column prop="category" label="分类" width="120" />
-              <el-table-column prop="chapter" label="章节" width="180" />
+              <el-table-column label="章节" width="180">
+                <template #default="scope">
+                  {{ issueChapterLabel(scope.row) }}
+                </template>
+              </el-table-column>
               <el-table-column label="上下文" min-width="500">
                 <template #default="scope">
                   <span class="context-text" v-html="renderIssueContext(scope.row, currentReport?.mode)"></span>
@@ -1046,11 +1335,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage } from '@/api'
+import { documentAPI, reviewAPI, rulesAPI, getAPIErrorMessage, getBlobErrorMessage } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
+
+defineOptions({ name: 'Review' })
 
 const route = useRoute()
 const router = useRouter()
@@ -1059,6 +1350,8 @@ const reviews = ref([])
 const documentReviews = ref([])
 const issues = ref([])
 const rules = ref([])
+const showReport = ref(false)
+const currentReport = ref(null)
 
 // 行内报告：按任务ID存储问题列表和筛选条件
 const taskIssues = reactive({})
@@ -1067,14 +1360,21 @@ const rowFilters = reactive({})
 // 文档审核状态 (按文档ID存储)
 const docReviewStatus = reactive({})
 let reviewsPollingTimer = null
+let snippetProgressTimer = null
 let sseConnections = new Map()  // reviewId → EventSource
 
 // 问题详情弹窗
 const issueDialogVisible = ref(false)
 const currentTaskId = ref(null)
-const issueFilter = reactive({ keyword: '', category: '', status: '', severity: '' })
+const issueFilter = reactive({ keyword: '', category: '', status: '', severity: '', source: '' })
 const selectedIssueIds = ref([])
 const issueTableRef = ref(null)
+const issuePage = ref(1)
+const issuePageSize = ref(50)
+const taskPage = ref(1)
+const taskPageSize = ref(20)
+const documentKeyword = ref('')
+const taskFilter = reactive({ keyword: '', status: '' })
 const manualIssueDialogVisible = ref(false)
 const manualIssueSaving = ref(false)
 const manualIssueForm = ref({ severity: 'general', category: '人工补充', chapter: '', original_text: '', suggestion: '', description: '' })
@@ -1090,6 +1390,8 @@ const coverageData = ref(null) // 审核覆盖率数据
 const showCoverage = ref(false) // 是否展示覆盖率面板
 const terminologyData = ref(null) // 术语匹配率分析数据
 const showTerminology = ref(false) // 是否展示术语面板
+const reviewObservations = ref([])
+const hideSuspectedFalsePositives = ref(true)
 const showAuditTraces = ref(false)  // 是否展开AI追踪面板
 const dialogCategories = computed(() => {
   const set = new Set()
@@ -1099,19 +1401,66 @@ const dialogCategories = computed(() => {
   }
   return Array.from(set).sort()
 })
+const dialogSources = computed(() => {
+  const set = new Set()
+  const list = taskIssues[currentTaskId.value] || []
+  for (const item of list) {
+    if (item.source) set.add(item.source)
+  }
+  return Array.from(set).sort()
+})
 const filteredDialogIssues = computed(() => {
   const list = taskIssues[currentTaskId.value] || []
+  const showFalsePositives = issueFilter.status === 'false_positive'
   return list.filter(i => {
+    if (issueHiddenByJudgment(i, { showFalsePositives })) return false
     if (issueFilter.category && i.category !== issueFilter.category) return false
     if (issueFilter.status && (i.status || 'pending') !== issueFilter.status) return false
     if (issueFilter.severity && i.severity !== issueFilter.severity) return false
+    if (issueFilter.source && String(i.source || '') !== issueFilter.source) return false
     if (issueFilter.keyword) {
-      const k = issueFilter.keyword.toLowerCase()
-      const hay = `${i.original_text || ''} ${i.context || ''} ${issueSuggestionText(i)} ${i.description || ''}`.toLowerCase()
-      if (!hay.includes(k)) return false
+      if (!issueSearchHaystack(i).includes(issueFilter.keyword.toLowerCase())) return false
+    }
+    if (hideSuspectedFalsePositives.value && issueHasFlag(i, 'possible_false_positive')) return false
+    return true
+  })
+})
+const pagedDialogIssues = computed(() => {
+  const start = (issuePage.value - 1) * issuePageSize.value
+  return filteredDialogIssues.value.slice(start, start + issuePageSize.value)
+})
+const historyReviews = computed(() => {
+  const keyword = String(taskFilter.keyword || '').trim().toLowerCase()
+  return (reviews.value || []).filter(review => {
+    if (taskFilter.status && review.status !== taskFilter.status) return false
+    if (keyword) {
+      const haystack = `${review.id || ''} ${review.document_name || ''} ${reviewModeLabel(review.mode)}`.toLowerCase()
+      if (!haystack.includes(keyword)) return false
     }
     return true
   })
+})
+const suspectedFalsePositiveCount = computed(() => {
+  const list = taskIssues[currentTaskId.value] || []
+  return list.filter(item => !issueHiddenByJudgment(item) && issueHasFlag(item, 'possible_false_positive')).length
+})
+const pagedReviews = computed(() => {
+  const start = (taskPage.value - 1) * taskPageSize.value
+  return historyReviews.value.slice(start, start + taskPageSize.value)
+})
+const filteredDocuments = computed(() => {
+  const keyword = String(documentKeyword.value || '').trim().toLowerCase()
+  if (!keyword) return documents.value
+  return documents.value.filter(doc => {
+    const filename = String(doc.filename || '').toLowerCase()
+    return filename.includes(keyword) || String(doc.id).includes(keyword)
+  })
+})
+const topRuleHits = computed(() => {
+  const hits = coverageData.value?.rule_hits || {}
+  return Object.entries(hits)
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
+    .slice(0, 10)
 })
 const terminologyDistItems = computed(() => {
   const d = terminologyData.value?.distribution
@@ -1166,15 +1515,8 @@ const traceProviders = computed(() => {
 })
 
 function formatIssueDisplayId(index) {
-  return String(index + 1).padStart(3, '0')
-}
-
-function issueSuggestionText(issue) {
-  const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return suggestion
-  const description = normalizeIssueDescription(issue)
-  if (description) return description
-  return '-'
+  const offset = (issuePage.value - 1) * issuePageSize.value
+  return String(offset + index + 1).padStart(3, '0')
 }
 
 function issueSuggestionFullText(issue) {
@@ -1203,26 +1545,15 @@ function normalizeIssueDescription(issue) {
   return text
 }
 
-function compactSuggestionText(text, limit = 36) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim()
-  if (!normalized) return ''
-  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized
-}
-
-function escapeSuggestionHtml(text) {
-  return String(text || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
+function compactSuggestionText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim()
 }
 
 function extractSuggestionReplacement(issue) {
   const suggestion = String(issue?.suggestion || '').trim()
   if (!suggestion) return ''
   const patterns = [
-    /建议(?:改为|替换为|统一为)\s*[:：]?\s*(.+)$/i,
+    /建议(?:改为|替换为|统一为|写为)\s*[:：]?\s*(.+?)(?=[。；;]|$)/i,
     /(?:->|→)\s*(.+)$/,
   ]
   for (const pattern of patterns) {
@@ -1231,36 +1562,14 @@ function extractSuggestionReplacement(issue) {
     const candidate = String(match[1] || '').trim().replace(/[。；;]+$/, '')
     if (candidate && !/[，,。；;].{8,}/.test(candidate)) return candidate
   }
-  if (suggestion.length <= 80 && !/^请|^需|^应|^确认/.test(suggestion)) return suggestion
-  return ''
-}
-
-function buildSuggestionDiffMarkup(before, after) {
-  if (!before || !after || before === after) return ''
-  let prefix = 0
-  const maxPrefix = Math.min(before.length, after.length)
-  while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1
-
-  let suffix = 0
-  const maxSuffix = Math.min(before.length - prefix, after.length - prefix)
-  while (
-    suffix < maxSuffix
-    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) {
-    suffix += 1
-  }
-
-  const beforeHead = escapeSuggestionHtml(before.slice(0, prefix))
-  const beforeMid = escapeSuggestionHtml(before.slice(prefix, before.length - suffix || before.length))
-  const beforeTail = escapeSuggestionHtml(before.slice(before.length - suffix))
-  const afterHead = escapeSuggestionHtml(after.slice(0, prefix))
-  const afterMid = escapeSuggestionHtml(after.slice(prefix, after.length - suffix || after.length))
-  const afterTail = escapeSuggestionHtml(after.slice(after.length - suffix))
-
-  return `
-    <div class="suggestion-diff-row"><span class="suggestion-diff-label">原文</span><span>${beforeHead}<span class="diff-remove">${beforeMid || '&nbsp;'}</span>${beforeTail}</span></div>
-    <div class="suggestion-diff-row"><span class="suggestion-diff-label">建议</span><span>${afterHead}<span class="diff-add">${afterMid || '&nbsp;'}</span>${afterTail}</span></div>
-  `
+  // 兜底：仅当整条建议本身就是一个「裸词」时才作为替换文本。
+  // 禁止把「拼写错误：xxx 应为 yyy」这类描述性整句当作替换内容，
+  // 否则会与原文做字符级 diff 产出误导性的错误建议。
+  const bare = suggestion.replace(/[。；;！？]+$/, '')
+  const looksLikeBareTerm = bare.length <= 40
+    && !/[\s，,。；;：:、（）()「」“”]/.test(bare)
+    && !/^(?:请|需|应|确认|建议|核对|检查|删除|补充|补齐|控制|将|使用|保留)/.test(bare)
+  return looksLikeBareTerm ? bare : ''
 }
 
 function describeSuggestionChange(original, replacement) {
@@ -1284,21 +1593,21 @@ function describeSuggestionChange(original, replacement) {
     suffix += 1
   }
 
-  const removed = before.slice(prefix, before.length - suffix || before.length).trim()
-  const added = after.slice(prefix, after.length - suffix || after.length).trim()
+  const removed = before.slice(prefix, before.length - suffix).trim()
+  const added = after.slice(prefix, after.length - suffix).trim()
   if (removed && added) {
-    if (removed.length <= 24 && added.length <= 32) {
-      return `将“${removed}”改为“${added}”`
+    if (removed.length > 120 || added.length > 120) {
+      return `建议改为“${after}”`
     }
-    return `将相关表述改为“${compactSuggestionText(added)}”`
+    return `将“${removed}”改为“${added}”`
   }
   if (!removed && added) {
-    return `补充“${compactSuggestionText(added)}”`
+    return `补充“${added}”`
   }
   if (removed && !added) {
-    return `删除“${compactSuggestionText(removed)}”`
+    return `删除“${removed}”`
   }
-  return `建议改为“${compactSuggestionText(after)}”`
+  return `建议改为“${after}”`
 }
 
 function isNumericUnitSpacingChange(before, after) {
@@ -1312,26 +1621,42 @@ function issueSuggestionOverview(issue) {
   const replacement = extractSuggestionReplacement(issue)
   const original = String(issue?.original_text || '').trim()
   if (replacement && original && replacement !== original) {
-    return describeSuggestionChange(original, replacement)
+    const change = describeSuggestionChange(original, replacement)
+    if (change) return change
   }
 
-  const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return '建议按下方修改。'
-  return ''
-}
-
-function issueSuggestionSummary(issue) {
+  // 无法给出精确替换时直接展示建议原文，避免无信息量的占位文案导致建议内容丢失
+  const suggestion = compactSuggestionText(issue?.suggestion)
+  if (suggestion) return suggestion
+  // 单行展示：没有建议时回落到说明，避免「建议」列整格空白
   const description = normalizeIssueDescription(issue)
   if (description) return description
-
-  const suggestion = String(issue?.suggestion || '').trim()
-  if (suggestion) return suggestion
-
-  return issueSuggestionFullText(issue)
+  return ''
 }
 
-function issueSuggestionDiffHtml(issue) {
-  return ''
+function issueSuggestionDetail(issue) {
+  const full = compactSuggestionText(issue?.suggestion)
+  if (!full) return ''
+  const overview = issueSuggestionOverview(issue)
+  if (!overview || full === overview) return ''
+  if (overview.includes(full) && full.length >= 8) return ''
+  return full
+}
+
+// 搜索范围与「原文」「建议」两列实际渲染的内容保持一致：
+// 原文列展示扩展后的 context，建议列展示完整建议与规则号，避免搜到却看不见。
+function issueSearchHaystack(issue) {
+  const original = normalizeDisplayText(issue?.original_text)
+  const context = normalizeDisplayText(issue?.context)
+  const shownOriginal = context && context.length > original.length ? context : original
+  const suggestion = compactSuggestionText(issue?.suggestion)
+  const description = normalizeIssueDescription(issue)
+  const chapter = String(issue?.chapter || '')
+  const category = String(issue?.category || '')
+  const rule = String(issue?.rule || '')
+  const source = sourceLabel(issue?.source)
+  const page = issuePageLabel(issue)
+  return `${shownOriginal} ${suggestion} ${description} ${chapter} ${page} ${category} ${rule} ${source}`.toLowerCase()
 }
 
 function percentText(value) {
@@ -1351,6 +1676,17 @@ function openManualIssueDialog() {
   }
   resetManualIssueForm()
   manualIssueDialogVisible.value = true
+}
+
+async function openManualIssueDialogForTask(row) {
+  if (!row?.id) return
+  currentTaskId.value = row.id
+  currentReport.value = row
+  // Load the full issue list first so the new entry is not the only one counted.
+  if (taskIssues[row.id] === undefined) {
+    await loadReviewIssues(row.id)
+  }
+  openManualIssueDialog()
 }
 
 async function saveManualIssue() {
@@ -1380,17 +1716,15 @@ async function saveManualIssue() {
 // 判定状态统计 (按任务ID)
 const judgmentStats = computed(() => {
   const stats = {}
-  for (const key in taskIssues) {
-    const list = taskIssues[key]
-    let confirmed = 0, false_positive = 0, pending = 0, manual = 0
-    for (const i of list) {
-      const s = i.status || 'pending'
-      if (i.source === 'manual') manual++
-      if (s === 'confirmed') confirmed++
-      else if (s === 'false_positive') false_positive++
-      else pending++
+  for (const review of reviews.value || []) {
+    if (review?.id != null) {
+      stats[review.id] = review.judgment_stats || emptyJudgmentStats()
     }
-    stats[key] = { confirmed, false_positive, pending, manual }
+  }
+  for (const key in taskIssues) {
+    if (Array.isArray(taskIssues[key])) {
+      stats[key] = computeJudgmentStats(taskIssues[key])
+    }
   }
   return stats
 })
@@ -1432,13 +1766,12 @@ function providerDisplayName(provider) {
   return names[provider] || provider.toUpperCase()
 }
 const editingRule = ref(null)
-const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
+const ruleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' })
 const transferRuleDialogVisible = ref(false)
 const transferRuleSourceIssue = ref(null)
 const transferRuleForm = ref({ rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' })
 
 const selectedRules = ref([])
-const rulesImportUrl = '/api/rules/bulk'
 
 const uploadUrl = '/api/documents/upload/'
 const reviewMode = ref('hybrid')
@@ -1452,6 +1785,26 @@ const selectedProviderLabel = computed(() => {
   return model ? model.label : selectedProvider.value
 })
 const reviewSubTab = ref('single')
+const snippetText = ref('')
+const snippetSubmitting = ref(false)
+const snippetDocumentId = ref(null)
+const snippetReviewState = ref(null)
+const snippetStatus = computed(() => snippetReviewState.value)
+const snippetPreviewIssues = ref([])
+const snippetPreviewReviewId = ref(null)
+const snippetPreviewError = ref(false)
+const visibleSnippetPreviewIssues = computed(() => snippetPreviewIssues.value.slice(0, 8))
+const canStartSnippetReview = computed(() => {
+  if (!String(snippetText.value || '').trim()) return false
+  if (snippetSubmitting.value) return false
+  if (snippetStatus.value?.status === 'running') return false
+  if (reviewMode.value === 'hybrid' && (providerLoading.value || availableModels.value.length === 0 || !selectedProvider.value)) return false
+  return true
+})
+const canClearSnippet = computed(() => {
+  if (snippetStatus.value?.status === 'running' || snippetSubmitting.value) return false
+  return Boolean(String(snippetText.value || '').trim() || snippetReviewState.value)
+})
 const compareMode = ref('both')
 const compareSubmitting = ref(false)
 const compareResult = ref(null)
@@ -1460,6 +1813,7 @@ const compareMainFile = ref(null)
 const compareMainFileList = ref([])
 const compareReferenceFiles = ref([])
 const compareReferenceFileList = ref([])
+const compareMainUploadRef = ref(null)
 
 const visibleCompareRows = computed(() => {
   const rows = compareResult.value?.compare_rows || []
@@ -1480,6 +1834,34 @@ watch(reviewSubTab, (tab) => {
     showCompareConsistent.value = false
   }
 })
+
+watch(
+  () => [issueFilter.keyword, issueFilter.category, issueFilter.status, issueFilter.severity, issueFilter.source],
+  () => {
+    issuePage.value = 1
+  }
+)
+
+watch(filteredDialogIssues, (list) => {
+  const maxPage = Math.max(1, Math.ceil(list.length / issuePageSize.value) || 1)
+  if (issuePage.value > maxPage) {
+    issuePage.value = maxPage
+  }
+})
+
+watch(historyReviews, (list) => {
+  const maxPage = Math.max(1, Math.ceil(list.length / taskPageSize.value) || 1)
+  if (taskPage.value > maxPage) {
+    taskPage.value = maxPage
+  }
+})
+
+watch(
+  () => [taskFilter.keyword, taskFilter.status],
+  () => {
+    taskPage.value = 1
+  }
+)
 
 function goReviewTasks() {
   router.push('/review/tasks')
@@ -1517,17 +1899,20 @@ const issueStats = computed(() => {
 const reportStats = computed(() => {
   const stats = { fatal: 0, serious: 0, general: 0, suggestion: 0 }
   issues.value.forEach(issue => {
+    if (issueHiddenByJudgment(issue)) return
     if (stats[issue.severity] !== undefined) stats[issue.severity]++
   })
   return stats
 })
 
 const reportIssues = computed(() => {
-  return issues.value.map((issue, index) => ({
-    ...issue,
-    display_id: `#${String(index + 1).padStart(4, '0')}`,
-    db_id: issue.id,
-  }))
+  return issues.value
+    .filter(issue => !issueHiddenByJudgment(issue))
+    .map((issue, index) => ({
+      ...issue,
+      display_id: `#${String(index + 1).padStart(4, '0')}`,
+      db_id: issue.id,
+    }))
 })
 
 const categories = computed(() => {
@@ -1561,6 +1946,15 @@ watch(() => route.path, () => {
 onMounted(() => {
   loadByView()
   loadProviders()
+})
+
+onActivated(() => {
+  loadByView()
+})
+
+onDeactivated(() => {
+  stopReviewsPolling()
+  stopSnippetProgressPolling()
 })
 
 function loadByView() {
@@ -1604,9 +1998,11 @@ async function loadDocuments() {
       reviewAPI.list({ latest_only: true, limit: 500 })
     ])
     const uploadingDocs = documents.value.filter(doc => String(doc.id).startsWith('uploading-'))
-    documents.value = [...uploadingDocs, ...(docResp.data || [])]
+    const listedDocs = (docResp.data || []).filter(doc => !isSnippetDocument(doc))
+    documents.value = [...uploadingDocs, ...listedDocs]
     documentReviews.value = reviewResp.data || []
     syncDocumentStatusesFromReviews(documentReviews.value)
+    syncSnippetReviewState(documentReviews.value)
     syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载文档列表失败: ${getAPIErrorMessage(e)}`)
@@ -1620,6 +2016,7 @@ async function loadReviews() {
     if (currentView.value === 'documents') {
       syncDocumentStatusesFromReviews(reviews.value)
     }
+    syncSnippetReviewState(reviews.value)
     syncReviewsPolling()
   } catch (e) {
     ElMessage.error(`加载任务列表失败: ${getAPIErrorMessage(e)}`)
@@ -1656,7 +2053,9 @@ function syncDocumentStatusesFromReviews(reviewList) {
       ? reviewCompletionText(latestReview)
       : latestReview.status === 'failed'
         ? reviewFailureText(latestReview)
-        : reviewProgressText(progressInfo)
+        : latestReview.status === 'cancelled'
+          ? '审核已停止'
+          : reviewProgressText(progressInfo)
 
     docReviewStatus[doc.id] = {
       review_id: latestReview.id,
@@ -1674,6 +2073,134 @@ function syncDocumentStatusesFromReviews(reviewList) {
       delete docReviewStatus[docId]
     }
   })
+}
+
+function applySnippetReviewSnapshot(review, progress = null) {
+  if (!review) return
+  const progressInfo = progress || review.progress || null
+  const status = progressInfo?.status || review.status
+  const progressValue = status === 'completed' ? 100 : (progressInfo?.progress || 0)
+  const message = status === 'completed'
+    ? reviewCompletionText({ ...review, message: progressInfo?.message || review.message })
+    : status === 'failed'
+      ? reviewFailureText(review)
+      : status === 'cancelled'
+        ? '审核已停止'
+        : (progressInfo?.message || progressInfo?.step || reviewProgressText(progressInfo))
+  snippetDocumentId.value = review.document_id || snippetDocumentId.value
+  snippetReviewState.value = {
+    review_id: review.id,
+    document_id: snippetDocumentId.value,
+    status,
+    progress: progressValue,
+    message,
+    summary: review.summary ?? snippetReviewState.value?.summary,
+    total_issues: review.total_issues,
+    mode: review.mode || snippetReviewState.value?.mode
+  }
+  if (status === 'completed' && review.id) {
+    loadSnippetPreviewIssues(review.id)
+  }
+}
+
+async function loadSnippetPreviewIssues(reviewId, force = false) {
+  if (!reviewId) {
+    snippetPreviewIssues.value = []
+    snippetPreviewReviewId.value = null
+    snippetPreviewError.value = false
+    return
+  }
+  if (!force && snippetPreviewReviewId.value === reviewId && !snippetPreviewError.value) return
+  snippetPreviewReviewId.value = reviewId
+  snippetPreviewError.value = false
+  try {
+    const response = await reviewAPI.getIssues(reviewId)
+    snippetPreviewIssues.value = response.data || []
+    snippetPreviewError.value = false
+  } catch (_) {
+    snippetPreviewIssues.value = []
+    snippetPreviewError.value = true
+  }
+}
+
+function retrySnippetPreviewIssues() {
+  const reviewId = snippetReviewState.value?.review_id
+  if (!reviewId) return
+  loadSnippetPreviewIssues(reviewId, true)
+}
+
+function syncSnippetReviewState(reviewList) {
+  const reviewId = snippetReviewState.value?.review_id
+  const documentId = snippetDocumentId.value
+  if (!reviewId && !documentId) return
+  const latest = (reviewList || []).find(review => reviewId && review.id === reviewId)
+    || (reviewList || []).find(review => documentId && review.document_id === documentId)
+  if (latest) applySnippetReviewSnapshot(latest)
+}
+
+function stopSnippetProgressPolling() {
+  if (!snippetProgressTimer) return
+  clearInterval(snippetProgressTimer)
+  snippetProgressTimer = null
+}
+
+function startSnippetProgressPolling(reviewId) {
+  stopSnippetProgressPolling()
+  if (!reviewId) return
+  const startedAt = Date.now()
+  const MAX_FAILURES = 5
+  const MAX_DURATION_MS = 10 * 60 * 1000
+  let consecutiveFailures = 0
+  const tick = async () => {
+    try {
+      const resp = await reviewAPI.getProgress(reviewId)
+      const progress = resp.data || {}
+      consecutiveFailures = 0
+      // status 缺失时按 running 处理，避免陷入 undefined 状态的无效轮询
+      const status = progress.status || 'running'
+      applySnippetReviewSnapshot({
+        id: reviewId,
+        document_id: snippetDocumentId.value,
+        status,
+        total_issues: progress.total_issues
+      }, progress)
+      if (['completed', 'failed', 'cancelled', 'error', 'timeout'].includes(status)) {
+        stopSnippetProgressPolling()
+        if (status === 'completed') {
+          try {
+            const detail = await reviewAPI.get(reviewId)
+            applySnippetReviewSnapshot(detail.data, { status: 'completed', progress: 100 })
+          } catch (_) {}
+        }
+        return
+      }
+    } catch (_) {
+      consecutiveFailures += 1
+      if (consecutiveFailures >= MAX_FAILURES) {
+        stopSnippetProgressPolling()
+        snippetReviewState.value = {
+          ...(snippetReviewState.value || {}),
+          review_id: reviewId,
+          status: 'failed',
+          message: '进度查询连续失败，请稍后重试'
+        }
+        ElMessage.error('审核进度查询失败，请稍后重试')
+        return
+      }
+    }
+    if (Date.now() - startedAt > MAX_DURATION_MS) {
+      stopSnippetProgressPolling()
+      snippetReviewState.value = {
+        ...(snippetReviewState.value || {}),
+        review_id: reviewId,
+        status: 'timeout',
+        message: '审核超时，请到历史任务查看结果'
+      }
+      ElMessage.warning('审核超时，请到历史任务查看结果')
+    }
+  }
+  tick()
+  snippetProgressTimer = setInterval(tick, 1500)
 }
 
 function _getSSEBaseURL() {
@@ -1697,9 +2224,11 @@ function _connectSSEForReview(reviewId) {
         const status = progress.status
 
         // 同步当前页面和文档页中的审核任务快照
+        let matchedReview = null
         for (const reviewList of [reviews.value, documentReviews.value]) {
           const review = (reviewList || []).find(r => r.id === reviewId)
           if (review) {
+            matchedReview = review
             review.progress = progress
             review.status = status
             if (status === 'completed') {
@@ -1710,25 +2239,33 @@ function _connectSSEForReview(reviewId) {
 
         // 同步到文档状态
         if (currentView.value === 'documents') {
-          // 找到对应文档并更新
-          for (const doc of documents.value) {
-            const ds = docReviewStatus[doc.id]
-            if (ds && ds.review_id === reviewId) {
-              ds.status = status
-              ds.progress = progress?.progress || 0
-              ds.message = status === 'completed'
-                ? reviewCompletionText(review)
-                : status === 'failed'
-                  ? reviewFailureText(review)
+          Object.keys(docReviewStatus).forEach((docId) => {
+            const ds = docReviewStatus[docId]
+            if (!ds || ds.review_id !== reviewId) return
+            ds.status = status
+            ds.progress = progress?.progress || 0
+            ds.message = status === 'completed'
+              ? reviewCompletionText(matchedReview)
+              : status === 'failed'
+                ? reviewFailureText(matchedReview)
+                : status === 'cancelled'
+                  ? '审核已停止'
                   : (progress?.message || progress?.step || '审核中...')
-              if (progress?.summary) ds.summary = progress.summary
-              break
-            }
-          }
+            if (progress?.summary) ds.summary = progress.summary
+          })
+        }
+
+        if (snippetReviewState.value?.review_id === reviewId) {
+          applySnippetReviewSnapshot(matchedReview || {
+            id: reviewId,
+            document_id: snippetDocumentId.value,
+            status,
+            total_issues: progress?.total_issues
+          }, progress)
         }
 
         // 审核完成/失败时断开 SSE
-        if (status === 'completed' || status === 'failed' || status === 'error' || status === 'timeout') {
+        if (status === 'completed' || status === 'failed' || status === 'error' || status === 'timeout' || status === 'cancelled') {
           es.close()
           sseConnections.delete(reviewId)
 
@@ -1738,6 +2275,11 @@ function _connectSSEForReview(reviewId) {
               if (currentView.value === 'documents') loadDocuments()
               else loadReviews()
             }, 500)
+          } else if (status === 'cancelled') {
+            setTimeout(() => {
+              if (currentView.value === 'documents') loadDocuments()
+              else loadReviews()
+            }, 300)
           }
         }
       } catch (_) { /* 忽略解析错误 */ }
@@ -1762,6 +2304,7 @@ function _disconnectAllSSE() {
 
 function _hasRunningReviews() {
   const activeReviews = currentView.value === 'documents' ? documentReviews.value : reviews.value
+  if (snippetReviewState.value?.status === 'running') return true
   return (activeReviews || []).some(review => review.status === 'running')
 }
 
@@ -1773,6 +2316,13 @@ function syncReviewsPolling() {
   // 优先使用 SSE 实时推送
   const activeReviews = currentView.value === 'documents' ? documentReviews.value : reviews.value
   const runningReviews = (activeReviews || []).filter(r => r.status === 'running')
+  if (
+    snippetReviewState.value?.status === 'running'
+    && snippetReviewState.value.review_id
+    && !runningReviews.some(review => review.id === snippetReviewState.value.review_id)
+  ) {
+    runningReviews.push({ id: snippetReviewState.value.review_id, status: 'running' })
+  }
   const supportsSSE = typeof EventSource !== 'undefined'
 
   if (supportsSSE) {
@@ -1796,6 +2346,7 @@ function syncReviewsPolling() {
         const resp = await reviewAPI.list({ latest_only: true, limit: 500 })
         documentReviews.value = resp.data || []
         syncDocumentStatusesFromReviews(documentReviews.value)
+        syncSnippetReviewState(documentReviews.value)
       } else {
         const runningIds = new Set((reviews.value || []).filter(review => review.status === 'running').map(review => review.id))
         const resp = await reviewAPI.list({ status: 'running', limit: 500 })
@@ -1849,20 +2400,27 @@ function formatSize(size) {
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '-'
-  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(dateStr)
-    ? dateStr
-    : `${dateStr}Z`
+  const raw = String(dateStr).trim()
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(raw)
+    ? raw
+    : `${raw}Z`
   const date = new Date(normalized)
-  if (Number.isNaN(date.getTime())) return String(dateStr).replace('T', ' ').slice(0, 19)
-  return new Intl.DateTimeFormat('zh-CN', {
+  if (Number.isNaN(date.getTime())) return raw.replace('T', ' ').slice(0, 19)
+  // 与翻译历史、润色历史、知识库保持一致，统一输出 YYYY/MM/DD HH:mm:ss（北京时间）
+  const parts = new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
-  }).format(date).replace(/\//g, '-')
+    hourCycle: 'h23',
+    timeZone: 'Asia/Shanghai',
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value
+    return acc
+  }, {})
+  return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
 }
 
 function beforeUpload(file) {
@@ -1892,11 +2450,43 @@ function handleCompareMainChange(uploadFile) {
   }
   compareMainFile.value = rawFile
   compareMainFileList.value = [uploadFile]
+  clearCompareResult()
 }
 
 function clearCompareMainFile() {
   compareMainFile.value = null
   compareMainFileList.value = []
+  clearCompareResult()
+}
+
+function clearCompareReferenceFiles() {
+  compareReferenceFiles.value = []
+  compareReferenceFileList.value = []
+  clearCompareResult()
+}
+
+function handleCompareMainExceed(files) {
+  const rawFile = Array.isArray(files) ? files[0] : files
+  if (!validateCompareUpload(rawFile)) return
+  const upload = compareMainUploadRef.value
+  if (!upload) return
+  // 主文档只保留 1 份：再次选择时替换已选文件，而不是静默忽略
+  upload.clearFiles()
+  upload.handleStart(rawFile)
+}
+
+function clearCompareResult() {
+  compareResult.value = null
+  showCompareConsistent.value = false
+}
+
+function resetCompareAudit() {
+  compareMainFile.value = null
+  compareMainFileList.value = []
+  compareReferenceFiles.value = []
+  compareReferenceFileList.value = []
+  compareMainUploadRef.value?.clearFiles()
+  clearCompareResult()
 }
 
 function handleCompareReferenceChange(_uploadFile, uploadFiles) {
@@ -1912,11 +2502,13 @@ function handleCompareReferenceChange(_uploadFile, uploadFiles) {
   }
   compareReferenceFiles.value = validFiles
   compareReferenceFileList.value = validUploadFiles
+  clearCompareResult()
 }
 
 function handleCompareReferenceRemove(_uploadFile, uploadFiles) {
   compareReferenceFiles.value = uploadFiles.map((item) => item.raw || item).filter(Boolean)
   compareReferenceFileList.value = [...uploadFiles]
+  clearCompareResult()
 }
 
 function formatCompareHits(hits = []) {
@@ -1984,13 +2576,59 @@ function upsertReviewSnapshot(targetList, review) {
   targetList.value = next.sort((left, right) => (right.id || 0) - (left.id || 0))
 }
 
-function beforeRulesUpload(file) {
-  const ext = file.name.split('.').pop().toLowerCase()
-  if (ext !== 'json') {
-    ElMessage.error('仅支持 JSON 格式文件')
-    return false
+function saveBlobResponse(response, fallbackName) {
+  const disposition = response.headers?.['content-disposition'] || ''
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
+  const fileName = match ? decodeURIComponent(match[1]) : fallbackName
+  const url = URL.createObjectURL(response.data)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+async function downloadRulesTemplate() {
+  try {
+    const response = await rulesAPI.downloadTemplate()
+    saveBlobResponse(response, 'rules_import_template.xlsx')
+    ElMessage.success('模板已下载，按模板填写后导入')
+  } catch (error) {
+    ElMessage.error(`下载模板失败: ${await getBlobErrorMessage(error, '下载模板失败')}`)
   }
-  return true
+}
+
+async function handleRulesFileChange(uploadFile) {
+  const file = uploadFile?.raw
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.xlsx')) {
+    ElMessage.error('仅支持 .xlsx 格式的 Excel 文件')
+    return
+  }
+  try {
+    const response = await rulesAPI.importExcel(file)
+    const created = Number(response.data?.created)
+    const duplicates = Number(response.data?.duplicates) || 0
+    const errors = Array.isArray(response.data?.errors) ? response.data.errors : []
+    const imported = Number.isFinite(created) ? created : 0
+    if (imported > 0) {
+      ElMessage.success(`成功导入 ${imported} 条规则${duplicates > 0 ? `，跳过 ${duplicates} 条已存在的规则` : ''}`)
+    } else if (!errors.length && duplicates > 0) {
+      ElMessage.warning(`没有新增规则，${duplicates} 条规则编号已存在`)
+    }
+    if (errors.length) {
+      const detail = errors.slice(0, 3).map(item => `第 ${item.row} 行：${item.message}`).join('；')
+      ElMessage.warning(`${errors.length} 行未导入。${detail}${errors.length > 3 ? ' 等' : ''}`)
+    }
+    if (!imported && !errors.length && !duplicates) {
+      ElMessage.warning('文件中没有可导入的规则')
+    }
+    loadRules()
+  } catch (error) {
+    ElMessage.error(`导入失败: ${getAPIErrorMessage(error)}`)
+  }
 }
 
 async function uploadDocument(options) {
@@ -2028,9 +2666,19 @@ async function uploadDocument(options) {
   }
 }
 
-function handleRulesImport(response) {
-  ElMessage.success(`成功导入 ${response.message || '多条'} 规则`)
-  loadRules()
+function findPairedVisualDocumentId(documentId) {
+  const current = documents.value.find(doc => String(doc.id) === String(documentId))
+  if (!current) return null
+  const fileType = String(current.file_type || current.fileType || '').toLowerCase()
+  if (fileType !== 'docx') return null
+  const stem = String(current.filename || current.name || '').replace(/\.[^.]+$/, '').toLowerCase()
+  if (!stem) return null
+  const paired = documents.value.find(doc => {
+    const otherType = String(doc.file_type || doc.fileType || '').toLowerCase()
+    const otherStem = String(doc.filename || doc.name || '').replace(/\.[^.]+$/, '').toLowerCase()
+    return otherType === 'pdf' && otherStem === stem && String(doc.id) !== String(documentId)
+  })
+  return paired ? paired.id : null
 }
 
 async function startReview(documentId) {
@@ -2042,7 +2690,11 @@ async function startReview(documentId) {
     const provider = reviewMode.value === 'hybrid' && selectedProvider.value
       ? selectedProvider.value
       : null
-    const response = await reviewAPI.create(documentId, reviewMode.value, provider)
+    const visualDocumentId = findPairedVisualDocumentId(documentId)
+    const response = await reviewAPI.create(documentId, reviewMode.value, provider, {
+      force: true,
+      visual_document_id: visualDocumentId || undefined
+    })
     const reviewId = response.data.review_id
     const statusMessage = response.data.message || '审核任务已创建，正在初始化...'
 
@@ -2085,6 +2737,148 @@ async function startReview(documentId) {
       message: getAPIErrorMessage(error, '创建审核任务失败')
     }
     ElMessage.error(`审核失败，请重试: ${getAPIErrorMessage(error, '创建审核任务失败')}`)
+  }
+}
+
+function isSnippetDocument(doc) {
+  return String(doc?.file_type || '').toLowerCase() === 'txt' && String(doc?.filename || '').startsWith('文本片段_')
+}
+
+async function startSnippetReview() {
+  const text = String(snippetText.value || '').trim()
+  if (!text) {
+    ElMessage.warning('请先粘贴要审核的句子或段落')
+    return
+  }
+  if (reviewMode.value === 'hybrid' && (providerLoading.value || availableModels.value.length === 0 || !selectedProvider.value)) {
+    ElMessage.warning('完整审核需要可用的 AI 模型')
+    return
+  }
+  snippetSubmitting.value = true
+  try {
+    const provider = reviewMode.value === 'hybrid' && selectedProvider.value
+      ? selectedProvider.value
+      : null
+    snippetReviewState.value = {
+      review_id: null,
+      status: 'running',
+      progress: 0,
+      message: '正在启动审核...'
+    }
+    snippetPreviewIssues.value = []
+    snippetPreviewReviewId.value = null
+    snippetPreviewError.value = false
+    const response = await reviewAPI.createSnippet({
+      text,
+      mode: reviewMode.value,
+      provider,
+      force: true
+    })
+    const reviewId = response.data.review_id
+    const documentId = response.data.document_id
+    const statusMessage = response.data.message || '正在审核，请稍候'
+    snippetDocumentId.value = documentId
+    snippetReviewState.value = {
+      review_id: reviewId,
+      document_id: documentId,
+      status: response.data.status || 'running',
+      progress: 0,
+      message: statusMessage,
+      mode: `snippet:${reviewMode.value}`
+    }
+    upsertReviewSnapshot(documentReviews, {
+      id: reviewId,
+      document_id: documentId,
+      status: 'running',
+      mode: `snippet:${reviewMode.value}`,
+      progress: { status: 'running', progress: 0, message: statusMessage },
+      total_issues: 0,
+      created_at: new Date().toISOString(),
+    })
+    syncReviewsPolling()
+    startSnippetProgressPolling(reviewId)
+    ElMessage.success(statusMessage)
+  } catch (error) {
+    stopSnippetProgressPolling()
+    snippetReviewState.value = null
+    ElMessage.error(`文本片段审核失败: ${getAPIErrorMessage(error, '创建审核任务失败')}`)
+  } finally {
+    snippetSubmitting.value = false
+  }
+}
+
+async function stopSnippetReview() {
+  const reviewId = snippetReviewState.value?.review_id
+  if (!reviewId) {
+    ElMessage.warning('没有正在进行的审核任务')
+    return
+  }
+  try {
+    await reviewAPI.cancel(reviewId)
+    stopSnippetProgressPolling()
+    snippetReviewState.value = {
+      ...(snippetReviewState.value || {}),
+      review_id: reviewId,
+      status: 'cancelled',
+      progress: 0,
+      message: '审核已停止'
+    }
+    ElMessage.success('审核已停止')
+    syncReviewsPolling()
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '停止审核失败'))
+  }
+}
+
+function clearSnippetEditor() {
+  if (snippetSubmitting.value || snippetReviewState.value?.status === 'running') return
+  stopSnippetProgressPolling()
+  snippetText.value = ''
+  snippetDocumentId.value = null
+  snippetReviewState.value = null
+  snippetPreviewIssues.value = []
+  snippetPreviewReviewId.value = null
+  snippetPreviewError.value = false
+}
+
+function openSnippetIssues() {
+  const reviewId = snippetStatus.value?.review_id
+  if (!reviewId) {
+    ElMessage.warning('暂无审核结果')
+    return
+  }
+  openIssueDialog({
+    id: reviewId,
+    mode: snippetStatus.value?.mode || `snippet:${reviewMode.value}`,
+    status: snippetStatus.value?.status
+  })
+}
+
+async function stopReview(documentId) {
+  const reviewId = docReviewStatus[documentId]?.review_id
+  if (!reviewId) {
+    ElMessage.warning('没有正在进行的审核任务')
+    return
+  }
+  try {
+    await reviewAPI.cancel(reviewId)
+    const current = docReviewStatus[documentId] || {}
+    docReviewStatus[documentId] = {
+      ...current,
+      review_id: reviewId,
+      status: 'cancelled',
+      progress: 0,
+      message: '审核已停止'
+    }
+    ElMessage.success('审核已停止')
+    if (currentView.value === 'documents') {
+      await loadDocuments()
+    } else {
+      await loadReviews()
+    }
+    syncReviewsPolling()
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '停止审核失败'))
   }
 }
 
@@ -2133,6 +2927,22 @@ function computeIssueStats(issueList) {
     { label: '一般', value: stats.general, class: 'stat-general' },
     { label: '建议', value: stats.suggestion, class: 'stat-suggestion' }
   ]
+}
+
+function emptyJudgmentStats() {
+  return { confirmed: 0, false_positive: 0, pending: 0, manual: 0 }
+}
+
+function computeJudgmentStats(issueList) {
+  const stats = emptyJudgmentStats()
+  for (const issue of issueList || []) {
+    const status = String(issue.status || 'pending').toLowerCase()
+    if (issue.source === 'manual') stats.manual++
+    if (status === 'confirmed') stats.confirmed++
+    else if (status === 'false_positive') stats.false_positive++
+    else if (status !== 'ignored') stats.pending++
+  }
+  return stats
 }
 
 // 筛选任务问题
@@ -2194,7 +3004,7 @@ th{background:#f8f9fa;font-weight:bold}
 <div><strong>任务 ID：</strong>${row.id}</div>
 <div><strong>文档名称：</strong>${row.document_name || '-'}</div>
 <div><strong>审核模式：</strong>${row.mode || '-'}</div>
-<div><strong>审核状态：</strong>${row.status === 'completed' ? '已完成' : row.status === 'failed' ? '失败' : '进行中'}</div>
+<div><strong>审核状态：</strong>${row.status === 'completed' ? '已完成' : row.status === 'failed' ? '失败' : row.status === 'cancelled' ? '已停止' : '进行中'}</div>
 <div><strong>问题总数：</strong>${row.total_issues || 0}</div>
 <div><strong>创建时间：</strong>${formatDateTime(row.created_at)}</div>
 </div>
@@ -2243,8 +3053,32 @@ function reviewModeLabel(mode) {
     ai: 'AI审核',
     'compare:both': '对比审核',
     'compare:numbers': '对比审核',
-    'compare:steps': '对比审核'
+    'compare:steps': '对比审核',
+    'snippet:rule': '文本片段审核',
+    'snippet:hybrid': '文本片段审核'
   }[mode] || mode || '-'
+}
+
+function sourceLabel(source) {
+  return {
+    rule: '规则',
+    ai: 'AI',
+    spellcheck: '拼写',
+    term: '术语',
+    grammar: '语法',
+    manual: '人工',
+    excel: 'Excel'
+  }[source] || source || '-'
+}
+
+function canViewReviewIssues(row) {
+  if (row?.status === 'completed') return true
+  return row?.status === 'failed' && Number(row.total_issues || 0) > 0
+}
+
+function reviewFailureHint(row) {
+  if (row?.status !== 'failed') return ''
+  return row?.progress?.message || row?.error_message || ''
 }
 
 function compareLevelTagType(level) {
@@ -2258,7 +3092,9 @@ function compareLevelTagType(level) {
 
 function shouldShowDownloadResult(row) {
   if (String(row?.mode || '').startsWith('compare:')) return false
-  return String(row?.document_file_type || '').toLowerCase() !== 'md'
+  if (String(row?.mode || '').startsWith('snippet:')) return false
+  const fileType = String(row?.document_file_type || '').toLowerCase()
+  return fileType !== 'md' && fileType !== 'pdf'
 }
 
 function parseMaybeJson(value) {
@@ -2270,6 +3106,65 @@ function parseMaybeJson(value) {
   } catch {
     return null
   }
+}
+
+function issuePositionMeta(issue) {
+  const parsed = parseMaybeJson(issue?.position)
+  return parsed && typeof parsed === 'object' ? parsed : {}
+}
+
+function issuePageNumber(issue) {
+  const top = Number(issue?.page_number || issue?.page || issue?.page_no)
+  if (Number.isFinite(top) && top > 0) return top
+  const meta = issuePositionMeta(issue)
+  const nested = Number(meta.page_number || meta.page || meta.page_no)
+  if (Number.isFinite(nested) && nested > 0) return nested
+  return null
+}
+
+function issuePageLabel(issue) {
+  const page = issuePageNumber(issue)
+  return page ? `第${page}页` : ''
+}
+
+function issueChapterLabel(issue) {
+  const chapter = String(issue?.chapter || '').trim()
+  const pageText = issuePageLabel(issue)
+  if (chapter && pageText && !chapter.includes(pageText)) return `${pageText} ${chapter}`
+  if (chapter) return chapter
+  return pageText || '-'
+}
+
+function issueHasFlag(issue, flag) {
+  if (issue && issue[flag]) return true
+  return Boolean(issuePositionMeta(issue)[flag])
+}
+
+function issueHiddenByJudgment(issue, options = {}) {
+  const status = String(issue?.status || '').toLowerCase()
+  if (status === 'ignored') return true
+  // 误报默认从详情列表和报告中移除，仅在显式按“误报”筛选时展示，便于人工复核与撤销
+  if (status === 'false_positive') return options.showFalsePositives !== true
+  return false
+}
+
+function issueOccurrenceCount(issue) {
+  const count = Number(issuePositionMeta(issue).count || issue?.count || 1)
+  return Number.isFinite(count) && count > 1 ? count : 0
+}
+
+function issueClusterHint(issue) {
+  const meta = issuePositionMeta(issue)
+  const positions = Array.isArray(meta.positions) ? meta.positions : []
+  if (positions.length < 2 && issueOccurrenceCount(issue) < 2) return ''
+  const chapters = []
+  positions.forEach((item) => {
+    const chapter = String(item?.chapter || '').trim()
+    if (chapter && !chapters.includes(chapter)) chapters.push(chapter)
+  })
+  if (chapters.length) return `分布于：${chapters.slice(0, 6).join('、')}`
+  const count = issueOccurrenceCount(issue) || positions.length
+  return count > 1 ? `全文共 ${count} 处` : ''
 }
 
 function reviewProgressText(progress) {
@@ -2310,6 +3205,9 @@ function reviewStatusText(statusInfo) {
   if (statusInfo.status === 'failed') {
     return reviewFailureText(statusInfo)
   }
+  if (statusInfo.status === 'cancelled') {
+    return '审核已停止'
+  }
   return reviewProgressText(statusInfo)
 }
 
@@ -2322,11 +3220,14 @@ function clearFilters() {
 // 打开问题详情弹窗
 async function openIssueDialog(row) {
   currentTaskId.value = row.id
+  currentReport.value = row
   issueFilter.keyword = ''
   issueFilter.category = ''
   issueFilter.status = ''
   issueFilter.severity = ''
+  issueFilter.source = ''
   selectedIssueIds.value = []
+  issuePage.value = 1
   showAuditTraces.value = false
   auditTraces.value = []
   coverageData.value = null
@@ -2340,6 +3241,7 @@ async function openIssueDialog(row) {
   loadAuditTraces(row.id)
   loadCoverage(row.id)
   loadTerminology(row.id)
+  loadReviewObservations(row.id)
 }
 
 // 通过文档ID打开问题详情弹窗
@@ -2355,7 +3257,9 @@ async function openIssueDialogByDoc(documentId) {
   issueFilter.category = ''
   issueFilter.status = ''
   issueFilter.severity = ''
+  issueFilter.source = ''
   selectedIssueIds.value = []
+  issuePage.value = 1
   showAuditTraces.value = false
   auditTraces.value = []
   coverageData.value = null
@@ -2369,6 +3273,7 @@ async function openIssueDialogByDoc(documentId) {
   loadAuditTraces(reviewId)
   loadCoverage(reviewId)
   loadTerminology(reviewId)
+  loadReviewObservations(reviewId)
 }
 
 async function loadAuditTraces(reviewId) {
@@ -2398,6 +3303,27 @@ async function loadTerminology(reviewId) {
   } catch (e) {
     console.log('术语匹配率分析加载失败:', e)
     terminologyData.value = null
+  }
+}
+
+function observationExtra(item) {
+  const normalize = (value) => String(value || '').replace(/\s+/g, '').replace(/[。．.]+$/g, '')
+  const title = normalize(item?.title)
+  const description = normalize(item?.description)
+  if (!description || description === title) return ''
+  if (title && (description.startsWith(title) || title.startsWith(description))) return ''
+  return item.description
+}
+
+async function loadReviewObservations(reviewId) {
+  reviewObservations.value = []
+  try {
+    const response = await reviewAPI.get(reviewId)
+    const summary = parseMaybeJson(response.data?.summary) || {}
+    const items = Array.isArray(summary.observations) ? summary.observations : []
+    reviewObservations.value = items.filter(item => item && (item.title || item.description))
+  } catch (e) {
+    reviewObservations.value = []
   }
 }
 
@@ -2460,22 +3386,21 @@ async function downloadReviewResultByDoc(document) {
 async function judgeSingle(issue, status) {
   try {
     await reviewAPI.updateIssue(issue.id, status)
-    if (status === 'false_positive') {
-      removeLocalIssues(currentTaskId.value, [issue.id])
-    } else {
-      issue.status = status
-    }
+    issue.status = status
     ElMessage.success(`已标记为${statusLabel(status)}`)
   } catch (err) {
     ElMessage.error('判定失败: ' + (err.response?.data?.detail || err.message))
   }
 }
 
-function removeLocalIssues(taskId, issueIds) {
-  const removeIds = new Set(issueIds)
-  taskIssues[taskId] = (taskIssues[taskId] || []).filter(issue => !removeIds.has(issue.id))
-  issues.value = issues.value.filter(issue => !removeIds.has(issue.id))
-  selectedIssueIds.value = selectedIssueIds.value.filter(id => !removeIds.has(id))
+function applyLocalIssueStatus(taskId, issueIds, status) {
+  const targetIds = new Set(issueIds)
+  for (const issue of taskIssues[taskId] || []) {
+    if (targetIds.has(issue.id)) issue.status = status
+  }
+  for (const issue of issues.value || []) {
+    if (targetIds.has(issue.id)) issue.status = status
+  }
 }
 
 function normalizeIssueText(text) {
@@ -2512,7 +3437,7 @@ async function markSimilarIssuesFalsePositive(issue) {
     const ids = similarIssues.map(item => item.id)
     const judgments = ids.map(id => ({ issue_id: id, status: 'false_positive' }))
     const res = await reviewAPI.batchJudge(currentTaskId.value, judgments)
-    removeLocalIssues(currentTaskId.value, ids)
+    applyLocalIssueStatus(currentTaskId.value, ids, 'false_positive')
     ElMessage.success(`已标记 ${res.data.updated} 条同类问题为误报`)
   } catch (err) {
     ElMessage.error('同类误报失败: ' + (err.response?.data?.detail || err.message))
@@ -2591,15 +3516,8 @@ async function batchSetStatus(status) {
     const judgments = selectedIssueIds.value.map(id => ({ issue_id: id, status }))
     const res = await reviewAPI.batchJudge(currentTaskId.value, judgments)
     // 更新本地状态
-    const list = taskIssues[currentTaskId.value] || []
     const selectedIds = [...selectedIssueIds.value]
-    if (status === 'false_positive') {
-      removeLocalIssues(currentTaskId.value, selectedIds)
-    } else {
-      for (const i of list) {
-        if (selectedIds.includes(i.id)) i.status = status
-      }
-    }
+    applyLocalIssueStatus(currentTaskId.value, selectedIds, status)
     ElMessage.success(`已更新 ${res.data.updated} 条问题为${statusLabel(status)}`)
   } catch (err) {
     ElMessage.error('批量判定失败: ' + (err.response?.data?.detail || err.message))
@@ -2780,16 +3698,23 @@ async function deleteDocument(id) {
 
 function editRule(row) {
   editingRule.value = row
-    ruleForm.value = {
-      rule_no: row.rule_no || '',
-      category: row.category || '',
-      description: row.description || '',
-      regex: row.regex || '',
-      example: row.example || '',
-      suggestion: row.suggestion || '',
-      audit_basis: row.audit_basis || '',
-      language: row.language || 'both'
-    }
+  ruleForm.value = {
+    rule_no: row.rule_no || '',
+    category: row.category || '',
+    description: row.description || '',
+    regex: row.regex || '',
+    example: row.example || '',
+    suggestion: row.suggestion || '',
+    audit_basis: row.audit_basis || '',
+    severity: row.severity || 'general',
+    language: row.language || 'both'
+  }
+  showRuleDialog.value = true
+}
+
+function openRuleDialog() {
+  editingRule.value = null
+  ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' }
   showRuleDialog.value = true
 }
 
@@ -2817,7 +3742,7 @@ async function saveRule() {
     }
     showRuleDialog.value = false
     editingRule.value = null
-    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', language: 'both' }
+    ruleForm.value = { rule_no: '', category: '', description: '', regex: '', example: '', suggestion: '', audit_basis: '', severity: 'general', language: 'both' }
     loadRules()
   } catch (error) {
     ElMessage.error('保存失败: ' + (error.response?.data?.detail || error.message))
@@ -2860,19 +3785,10 @@ async function batchDeleteRules() {
 async function exportRules() {
   try {
     const response = await rulesAPI.export()
-    const dataStr = JSON.stringify(response.data, null, 2)
-    const blob = new Blob([dataStr], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `rules_export_${new Date().toISOString().slice(0, 10)}.json`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
+    saveBlobResponse(response, `rules_export_${new Date().toISOString().slice(0, 10)}.xlsx`)
     ElMessage.success('导出成功')
   } catch (error) {
-    ElMessage.error('导出失败')
+    ElMessage.error(`导出失败: ${await getBlobErrorMessage(error, '导出失败')}`)
   }
 }
 
@@ -2959,8 +3875,10 @@ function renderIssueOriginalCell(issue, mode = '') {
   if (!originalText) {
     return highlightOriginalText(contextText, issue?.original_text)
   }
-
-  return `<div class="issue-original-main">${highlightOriginalText(originalText, originalText)}</div>`
+  const displayText = contextText && contextText.length > originalText.length
+    ? contextText
+    : originalText
+  return `<div class="issue-original-main">${highlightOriginalText(displayText, originalText)}</div>`
 }
 
 function normalizeDisplayText(text) {
@@ -2969,7 +3887,11 @@ function normalizeDisplayText(text) {
 
 const currentTaskMode = computed(() => {
   const currentReview = reviews.value.find(item => item.id === currentTaskId.value)
-  return currentReview?.mode || currentReport.value?.mode || ''
+  if (currentReview?.mode) return currentReview.mode
+  if (snippetReviewState.value?.review_id === currentTaskId.value) {
+    return snippetReviewState.value.mode || ''
+  }
+  return currentReport.value?.mode || ''
 })
 
 function renderCompareIssueContext(issue) {
@@ -3143,6 +4065,7 @@ function escapeHtml(text) {
 
 onUnmounted(() => {
   stopReviewsPolling()
+  stopSnippetProgressPolling()
 })
 </script>
 
@@ -3210,6 +4133,98 @@ onUnmounted(() => {
   gap: 18px;
 }
 
+.snippet-audit-section {
+  padding-top: 8px;
+}
+
+.snippet-editor-card {
+  border: 1px solid #dbe4f0;
+  border-radius: 16px;
+  padding: 24px 24px 20px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.96), #f7fafc 140px),
+    repeating-linear-gradient(-12deg, rgba(47,118,201,0.04) 0 12px, transparent 12px 24px);
+}
+
+.snippet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.snippet-progress {
+  margin-top: 16px;
+}
+
+.snippet-result {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f0f9eb;
+  color: #3d6b1f;
+  font-size: 14px;
+}
+
+.snippet-result.is-error {
+  background: #fef0f0;
+  color: #b42318;
+}
+
+.snippet-preview {
+  margin-top: 16px;
+}
+
+.snippet-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: #303133;
+}
+
+.snippet-preview-count {
+  color: #909399;
+  font-size: 13px;
+}
+
+.snippet-preview-empty,
+.snippet-preview-more {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #909399;
+}
+
+.issue-flag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.observation-item + .observation-item {
+  margin-top: 10px;
+}
+
+.observation-title {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.observation-desc {
+  margin-top: 4px;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+.cluster-hint {
+  margin-top: 6px;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .compare-upload-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3223,11 +4238,28 @@ onUnmounted(() => {
   background: #f8fafc;
 }
 
-.compare-upload-title {
+.compare-upload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 12px;
+}
+
+.compare-upload-title {
   font-size: 14px;
   font-weight: 600;
   color: #0f172a;
+}
+
+.compare-upload-clear {
+  padding: 0;
+  height: auto;
+  font-size: 13px;
+}
+
+/* 对比审核：文件行的删除按钮常显，避免必须悬停文件行才出现 */
+.compare-upload-card .el-upload-list__item .el-icon--close {
+  display: inline-flex;
 }
 
 .compare-mode-toolbar {
@@ -3419,18 +4451,52 @@ onUnmounted(() => {
   white-space: normal;
 }
 
-.suggestion-summary {
-  margin-top: 4px;
-  color: #475467;
-  font-size: 13px;
-  white-space: pre-wrap;
-}
-
 .suggestion-overview {
   color: #101828;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.6;
+}
+
+.suggestion-detail {
+  margin-top: 6px;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.issue-rule-id {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #909399;
+  word-break: break-all;
+}
+
+.table-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.table-section-head h3 {
+  margin: 0;
+}
+
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.history-toolbar-hint {
+  font-size: 12px;
+  color: #909399;
 }
 
 .suggestion-diff {
@@ -3656,6 +4722,13 @@ onUnmounted(() => {
   margin-top: 12px;
   padding: 8px 0;
   color: #606266;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 .task-progress-text {
   margin-top: 6px;

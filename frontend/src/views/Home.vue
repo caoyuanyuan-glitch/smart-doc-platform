@@ -71,7 +71,7 @@
               </svg>
             </div>
             <h3 class="feature-title">格式转换</h3>
-            <p class="feature-desc">Word/Markdown 转 DITA 结构化文档，保持格式和内容完整性</p>
+            <p class="feature-desc">Word / IDML / Markdown 转 DITA 结构化文档，保持格式和内容完整性</p>
             <div class="feature-enter">进入 <el-icon><ArrowRight /></el-icon></div>
           </div>
 

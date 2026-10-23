@@ -41,7 +41,9 @@ def classify_issue_layer(issue: dict[str, Any]) -> str:
         return STRUCTURAL_LAYER
 
     if source:
-        return AI_ASSISTED_LAYER
+        # ai_assisted 表示问题由 AI 语义分析产出；确定性来源（规则/拼写等）
+        # 即使没有命中上面的模式，也不能归入 AI 辅助层，否则分层统计与 source 口径互相矛盾。
+        return DETERMINISTIC_LAYER
     return UNKNOWN_LAYER
 
 

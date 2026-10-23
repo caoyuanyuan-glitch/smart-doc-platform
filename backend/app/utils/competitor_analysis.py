@@ -1,10 +1,11 @@
 """竞品文档分析引擎（MVP，纯规则实现）。
 
-两个分析能力：
+三个分析能力：
 1. 编辑工具识别：读取 PDF 元数据（producer/creator）、嵌入字体与文本指纹，
    推断文档由何种工具制作（InDesign / FrameMaker / Word / LaTeX 等）。
 2. 可读性分析：基于统计规则的量化评分，维度包括
    平均句长(25%) / 术语密度(20%) / 被动句比例(20%) / 段落长度(15%) / 修饰词堆叠(20%)。
+3. 结构统计：页数/章节数/图片数/表格数/安全警告数等客观指标（不做主观评分）。
 
 说明：本模块为 MVP 规则引擎，不调用 AI；语义级增强（如 AI 术语表、语境被动句判断）
 预留到 Phase 2，由 app/utils/ai_client.py 统一接入。
@@ -45,6 +46,13 @@ _TOOL_PATTERNS: List[Tuple[str, str, str]] = [
     ("frame maker", "Adobe FrameMaker", "结构化写作/排版工具"),
     ("quarkxpress", "QuarkXPress", "排版工具"),
     ("pandoc", "Pandoc", "文档转换工具"),
+    # DITA-OT：producer/creator 常见形态 "DITA Open Toolkit [x.y]" / "dita-ot" / "ditaot"
+    # （评审意见采纳项：补齐 DITA 发布链识别，竞品结构化写作主流工具之一）
+    ("dita open toolkit", "DITA-OT", "结构化写作/DITA 发布工具"),
+    ("dita-ot", "DITA-OT", "结构化写作/DITA 发布工具"),
+    ("ditaot", "DITA-OT", "结构化写作/DITA 发布工具"),
+    # oXygen XML Editor：DITA 侧最常见的创作工具（creator 字段）
+    ("oxygen xml", "oXygen XML Editor", "结构化 XML 编辑器（DITA 常用）"),
     ("pdflatex", "LaTeX (pdfTeX)", "排版工具"),
     ("xelatex", "LaTeX (XeTeX)", "排版工具"),
     ("lualatex", "LaTeX (LuaTeX)", "排版工具"),
@@ -54,6 +62,7 @@ _TOOL_PATTERNS: List[Tuple[str, str, str]] = [
     ("openoffice", "Apache OpenOffice", "文字处理工具"),
     ("wps", "WPS Office", "文字处理工具"),
     ("distiller", "Adobe Acrobat Distiller", "PDF 转换工具"),
+    ("prince", "Prince XML", "HTML 转 PDF 排版工具"),
     ("acrobat", "Adobe Acrobat", "PDF 工具"),
     ("pdfium", "PDFium", "浏览器/PDF 渲染内核"),
     ("chrome", "Google Chrome 打印", "浏览器打印"),
@@ -87,9 +96,6 @@ _TEXT_SIGNALS: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"[\u00ad]{3,}"), "InDesign 排版", "出现大量软连字符（InDesign 断行特征）"),
     (re.compile(r"[\u201c\u201d\u2018\u2019]{5,}"), "通用文字处理器", "出现密集弯引号（Word/文字处理器特征）"),
 ]
-
-_WARNING_LINE_RE = re.compile(r"(?im)^\s*(?:warning|caution|danger|notice|警告|注意|危险)\b")
-_CHAPTER_LINE_RE = re.compile(r"(?im)^\s*(?:chapter\s+\d+|section\s+\d+|part\s+\d+|第[一二三四五六七八九十0-9]+章)\b")
 
 
 def _match_producer(producer: str, creator: str) -> List[Dict]:
@@ -131,10 +137,73 @@ def _analyze_text_signals(full_text: str) -> List[Dict]:
     return signals
 
 
+# 浏览器打印链路的 PDF 导出特征（Producer 关键片段）：出现时工具识别仅代表"打印导出"，
+# 原创工具需通过内嵌链接等间接证据反查（外部评审 P1 采纳项）
+_BROWSER_PRINT_PRODUCER_MARKS = ("skia/pdf", "chrome", "microsoft edge", "pdfium", "mozillapdf", "webkit")
+
+# PDF 链接反查的最大页数与收集上限（性能保护：浏览器打印导出的手册链接量可能很大）
+_PDF_LINK_MAX_PAGES = 50
+_PDF_LINK_MAX_SAMPLES = 40
+
+# HAT（帮助创作工具）导出的 PDF 通常保留 HTML 源链接特征：/Content/、/Skins/、.htm topic 等
+_HAT_LINK_PATTERNS = [
+    re.compile(r"/content/", re.IGNORECASE),
+    re.compile(r"/skins/", re.IGNORECASE),
+    re.compile(r"\.htm(?:l)?(?:[#?]|$)", re.IGNORECASE),
+    re.compile(r"/topics?/", re.IGNORECASE),
+]
+
+
+def _collect_pdf_links(doc, max_pages: int = _PDF_LINK_MAX_PAGES,
+                       max_samples: int = _PDF_LINK_MAX_SAMPLES) -> List[str]:
+    """收集 PDF 内嵌链接 URL（前 max_pages 页，最多 max_samples 条）。异常静默跳过。"""
+    hrefs: List[str] = []
+    try:
+        for page in doc:
+            if len(hrefs) >= max_samples or page.number >= max_pages:
+                break
+            try:
+                for link in page.get_links():
+                    uri = str(link.get("uri") or "").strip()
+                    if uri and uri not in hrefs:
+                        hrefs.append(uri)
+                        if len(hrefs) >= max_samples:
+                            break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return hrefs
+
+
+def _hat_link_hints(hrefs: List[str]) -> List[str]:
+    """分析内嵌链接特征，返回"疑似 HAT 导出"的提示文本（命中才输出，不猜）。"""
+    if not hrefs:
+        return []
+    hits = {}
+    for href in hrefs:
+        for idx, pat in enumerate(_HAT_LINK_PATTERNS):
+            if pat.search(href):
+                hits.setdefault(idx, []).append(href[:120])
+    if not hits:
+        return []
+    hints = []
+    names = {0: "/Content/", 1: "/Skins/", 2: ".htm/.html topic", 3: "/topics/"}
+    for idx in sorted(hits):
+        samples = hits[idx][:3]
+        hints.append(
+            f"内嵌链接 {len(hits[idx])} 条含 {names[idx]} 特征"
+            f"（如 {samples[0]!r}），疑似由帮助创作工具（HAT，如 MadCap Flare）导出。"
+        )
+    return hints
+
+
 def analyze_tool_usage(filepath: str, full_text: str, pages_text: Optional[List[str]] = None) -> Dict:
     """识别文档的编辑/排版工具。
 
     优先级：PDF 元数据（高置信）> 嵌入字体（中置信）> 文本指纹（低置信，仅推测）。
+    浏���器打印导出的 PDF（Producer 为 Skia/Chrome 等）仅代表打印链路，会额外解析
+    内嵌链接反查疑似 HAT 源（外部评审 P1 采纳项）。
     返回结构化结果，供 JSON 存储与 Markdown 报告渲染。
     """
     meta = {}
@@ -209,6 +278,36 @@ def analyze_tool_usage(filepath: str, full_text: str, pages_text: Optional[List[
     elif font_signals:
         summary = f"主编辑工具：未命中元数据，可能为 {font_signals[0]['hint']}（中置信）"
 
+    # 浏览器打印导出（二手资料）识别与内嵌链接反查（外部评审 P1 采纳项）：
+    # producer 命中 Skia/Chrome 等打印链路时，工具识别只代表"打印导出"；若内嵌链接
+    # 含 HAT 特征则提示疑似原创工具，并注明可读性统计受分页/断行影响。
+    pdf_link_hints: List[str] = []
+    is_browser_print = str(producer).lower().startswith(_BROWSER_PRINT_PRODUCER_MARKS) or (
+        "chrome" in str(creator).lower() or "edge" in str(creator).lower()
+    )
+    # 仅浏览器打印 PDF 需要反查（打印链路掩盖了原创工具；正常 PDF 元数据即可识别，
+    # 免去二次 fitz.open 的开销——交叉审查 P2 修复）
+    if is_browser_print and str(filepath).lower().endswith(".pdf"):
+        try:
+            import fitz
+            _doc = fitz.open(filepath)
+            try:
+                hrefs = _collect_pdf_links(_doc)
+            finally:
+                _doc.close()
+            pdf_link_hints = _hat_link_hints(hrefs)
+        except Exception:
+            pdf_link_hints = []
+
+    export_notes: List[str] = []
+    if is_browser_print:
+        export_notes.append(
+            "该 PDF 由浏览器打印导出（Producer 为 Skia/Chrome 等打印链路），"
+            "工具识别仅代表打印链路，无法直接确认原创编辑工具；分页与断行为浏览器渲染结果，"
+            "句长/段落统计可能受其影响。"
+        )
+    export_notes.extend(pdf_link_hints)
+
     return {
         "summary": summary,
         "meta": {
@@ -222,53 +321,8 @@ def analyze_tool_usage(filepath: str, full_text: str, pages_text: Optional[List[
         "font_signals": font_signals[:6],
         "text_signals": text_signals,
         "raw_fonts": fonts[:20],
+        "export_notes": export_notes,
     }
-
-
-def enrich_tool_usage(tool_analysis: Dict, source_meta: Optional[Dict] = None) -> Dict:
-    """基于 HTML 结构线索补强工具识别。"""
-    source_meta = source_meta or {}
-    meta = dict(tool_analysis.get("meta") or {})
-    meta.update({k: v for k, v in source_meta.items() if v not in (None, "")})
-    tool_analysis["meta"] = meta
-
-    if str(meta.get("format", "")).upper() != "HTML":
-        return tool_analysis
-
-    hints = meta.get("html_hints") or {}
-    source_url = str(meta.get("source_url") or "")
-    flare_reasons = []
-    structural_reasons = []
-    if hints.get("content_path") or "/Content/" in source_url:
-        structural_reasons.append(f"URL 路径含 Flare 导出目录特征 /Content/（{source_url or 'HTML path'}）")
-    if hints.get("topic_htm") or re.search(r"/[^/]+\.htm(?:$|[?#])", source_url, re.IGNORECASE):
-        structural_reasons.append("Topic 页以 .htm 结尾且位于 /Content/ 目录（HAT 导出特征）")
-    if hints.get("madcap_runtime"):
-        flare_reasons.append("HTML 引用 MadCap 运行时脚本或标记")
-
-    all_reasons = flare_reasons + [r for r in structural_reasons if r not in flare_reasons]
-
-    if all_reasons:
-        tools = list(tool_analysis.get("tools") or [])
-        existing = next((t for t in tools if str(t.get("name")) == "MadCap Flare"), None)
-        confidence = "high" if flare_reasons else "medium"
-        source = "HTML 运行时与结构特征（脚本/URL/样式表）" if flare_reasons else "HTML 结构特征（URL/样式表）"
-        if existing is None:
-            tools.insert(0, {
-                "name": "MadCap Flare",
-                "category": "帮助文档创作工具（HAT）",
-                "confidence": confidence,
-                "source": source,
-                "evidence": all_reasons,
-            })
-        else:
-            existing["confidence"] = confidence
-            existing["source"] = source
-            existing["evidence"] = all_reasons
-        tool_analysis["tools"] = tools
-        tool_analysis["summary"] = f"主编辑工具：MadCap Flare（{confidence} 置信）"
-        tool_analysis["html_evidence"] = all_reasons
-    return tool_analysis
 
 
 # ------------------------------------------------------------ 可读性分析
@@ -286,6 +340,88 @@ _TERM_TAIL_ZH = re.compile(
 _EN_TERM_RE = re.compile(r"\b[A-Za-z]+(?:-[A-Za-z]+)*\b")
 _ALPHANUM_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\._]*")
 _CJK_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,8}")
+
+# ---------------------------------------------------------------- 术语库
+# 需求 §3.2/§5.3：术语 = 领域专业术语（内置测序/图像分析术语 + 平台词典），
+# 而非"长度 > 6 的英文单词"——旧启发式把 technical/information 等普通词全部
+# 误判为术语，导致术语密度虚高（实测 48.5%）。命中规则：精确 + 词干（英文）+ 大小写不敏感。
+_BUILTIN_EN_TERMS = {
+    # 测序领域（需求 §3.2）
+    "sequencing", "genomics", "metagenomics", "genome", "genomic", "transcriptome",
+    "nucleotide", "oligo", "oligonucleotide", "adapter", "adapters", "ligation",
+    "library", "libraries", "flowcell", "flowcells", "cluster", "clusters",
+    "basecall", "basecalls", "demultiplexing", "multiplexing", "barcode",
+    "barcodes", "indexing", "reads", "read", "run", "chemistry", "reagent",
+    "reagents", "kit", "kits", "specimen", "specimens", "assay", "assays",
+    "amplification", "denaturation", "hybridization", "polymerase", "primer",
+    "primers", "cDNA", "gDNA", "rna", "dna", "dnb", "pcr", "cbs", "wgs",
+    "rna-seq", "16s",
+    # 图像/信号分析领域（需求 §3.2）
+    "segmentation", "threshold", "thresholding", "roi", "rois", "marker",
+    "markers", "intensity", "focus", "imaging", "image", "images", "pixel",
+    "pixels", "calibration", "align", "alignment", "registration", "contrast",
+    "fluorescence", "emission", "excitation", "laser", "optics", "detector",
+    # 仪器/运行维护常用技术词
+    "instrument", "module", "firmware", "software", "throughput", "yield",
+    "q30", "error", "phi", "maintenance", "troubleshooting", "consumable",
+    "consumables", "cartridge", "tips", "plate", "tubes", "chamber", "valve",
+    "pump", "temperature", "incubation", "wash", "buffer", "buffers",
+}
+
+_DIC_DIR = None
+
+
+# 平台词典中属普通词的条目（拼写白名单用途可保留，术语密度统计需排除）
+_PLATFORM_TERM_EXCLUDES = {"table", "figure", "step", "sec", "min", "hr", "rxn", "sativa"}
+
+
+def _load_platform_terms() -> set:
+    """复用平台词典 app/dictionary/technical_terms.txt（测序领域术语）。"""
+    global _DIC_DIR
+    if _DIC_DIR is None:
+        import os
+        _DIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dictionary")
+    terms = set()
+    try:
+        path = os.path.join(_DIC_DIR, "technical_terms.txt")
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                term = line.strip().lower()
+                if term and not term.startswith("#") and term not in _PLATFORM_TERM_EXCLUDES:
+                    terms.add(term)
+    except OSError:
+        pass  # 词典缺失时降级为仅内置术语
+    return terms
+
+
+def _en_stem(token: str) -> str:
+    """轻量英文词干：仅处理规则复数（-s/-es），供词干匹配。"""
+    t = token.lower()
+    if len(t) > 3 and t.endswith("ies"):
+        return t[:-3] + "y"
+    if len(t) > 2 and t.endswith("es"):
+        return t[:-2]
+    if len(t) > 2 and t.endswith("s") and not t.endswith("ss"):
+        return t[:-1]
+    return t
+
+
+_ALL_EN_TERMS = _BUILTIN_EN_TERMS | _load_platform_terms()
+_ALL_EN_TERMS_STEMS = {_en_stem(t) for t in _ALL_EN_TERMS}
+
+
+def _is_en_term(raw_token: str) -> bool:
+    """英文术语判定：领域术语命中（精确/词干）或强术语特征（数字/连字符/全大写缩写）。"""
+    low = raw_token.lower()
+    if low in _ALL_EN_TERMS or _en_stem(low) in _ALL_EN_TERMS_STEMS:
+        return True
+    if re.search(r"\d", raw_token):          # 型号/编号（NextSeq 2000、Q30）
+        return True
+    if "-" in raw_token:                     # 复合术语（base-call、RNA-seq）
+        return True
+    if len(raw_token) >= 2 and raw_token.isupper():  # 缩写（DNA、PCR、MGI）
+        return True
+    return False
 _MODIFIER_STACK_ZH_RE = re.compile(r"([\u4e00-\u9fff]{1,6}的){3,}")
 _MODIFIER_STACK_EN_RE = re.compile(r"\b(?:high|low|fast|slow|new|old|large|small|big|automatic|manual|digital|optical|thermal|electrical|mechanical|advanced|standard|optional|integrated|portable|compact|powerful)\b(?:\s+(?:high|low|fast|slow|new|old|large|small|big|automatic|manual|digital|optical|thermal|electrical|mechanical|advanced|standard|optional|integrated|portable|compact|powerful)){2,}", re.IGNORECASE)
 
@@ -300,6 +436,22 @@ _WEIGHTS = {
 
 def _clamp_score(score: float) -> float:
     return max(0.0, min(100.0, round(score, 1)))
+
+
+def _band_score(avg: float, ideal_lo: float, ideal_hi: float,
+                k_short: float, k_long: float) -> float:
+    """区间制评分（外部评审 P0 采纳项：单向阈值制导致所有达标文档满分、无区分度）。
+
+    理想区间 [ideal_lo, ideal_hi] 内满分；区间外按线性梯度扣分——
+    过短/过低（avg < ideal_lo）与过长/过高（avg > ideal_hi）双向扣分，
+    避免"电报体句长、过浅术语密度"也拿满分。k_short/k_long 为两侧每单位扣分梯度。
+    只扣过高一侧时传 k_short=0.0（配合 avg>=0 语义即不触发短侧扣分）。
+    """
+    if avg < ideal_lo and k_short > 0:
+        return _clamp_score(100.0 - (ideal_lo - avg) * k_short)
+    if avg > ideal_hi and k_long > 0:
+        return _clamp_score(100.0 - (avg - ideal_hi) * k_long)
+    return 100.0
 
 
 def _find_page_of(snippet: str, pages_text: List[str]) -> int:
@@ -343,22 +495,45 @@ def _tokenize(full_text: str, language: str) -> Tuple[List[str], bool]:
         return tokens, False
 
 
+_CAPTION_LINE_RES = [
+    # 图表题注：Table N / Figure N / 图 N / 表 N（含行尾）
+    re.compile(r"^\s*(table|figure|fig\.?|图|表)\s*\d+", re.IGNORECASE),
+    # 章节标题：Chapter/Appendix + 编号，或多级编号标题
+    re.compile(r"^\s*(chapter|appendix|第[一二三四五六七八九十\d]+[章节部])\b", re.IGNORECASE),
+    # 纯规格/单位行：数字 + 单位/括号，无动词（如 "1500 VA LCD 100 V"、"111 cm (43.7 in)"）
+    re.compile(r"^\s*\d+[\s\u00a0.]*(?:[A-Za-z]|%|°|×|x|\d)", re.IGNORECASE),
+]
+
+
+def _looks_like_caption_line(line: str) -> bool:
+    """判定一行文本是否为标题/图表题注/规格数字行（不应作为"问题例句"展示）。"""
+    text = (line or "").strip()
+    if not text:
+        return True
+    if len(text) < 15:
+        return True
+    return any(pat.match(text) for pat in _CAPTION_LINE_RES)
+
+
 def _dim_sentence_length(sentences: List[str], language: str, pages_text: List[str]) -> Dict:
     if not sentences:
         return {"score": 100.0, "avg": 0.0, "samples": []}
     if language == "zh":
         lens = [len(s) for s in sentences]
         avg = sum(lens) / len(lens)
-        # 中文句长：<=40 字满分，每超 1 字扣 1.5 分
-        score = _clamp_score(100 - max(0.0, avg - 40) * 1.5)
-        label = f"平均句长 {avg:.1f} 字（建议 ≤ 40 字）"
+        # 中文句长：理想区间 15-40 字（区间制，外部评审 P0 采纳项）
+        score = _band_score(avg, 15.0, 40.0, k_short=1.0, k_long=1.5)
+        label = f"平均句长 {avg:.1f} 字（理想 15–40 字）"
     else:
         lens = [len(s.split()) for s in sentences]
         avg = sum(lens) / len(lens)
-        # 英文句长：<=20 词满分，每超 1 词扣 3 分
-        score = _clamp_score(100 - max(0.0, avg - 20) * 3.0)
-        label = f"平均句长 {avg:.1f} 词（建议 ≤ 20 词）"
-    long_sents = sorted(sentences, key=len, reverse=True)[:3]
+        # 英文句长：理想区间 8-20 词；过短（电报体）与过长均扣分
+        score = _band_score(avg, 8.0, 20.0, k_short=2.0, k_long=3.0)
+        label = f"平均句长 {avg:.1f} 词（理想 8–20 词）"
+    # 长句样本：按长度降序，但过滤标题/图表题注/规格数字行（避免把标题当"问题例句"）
+    long_sents = [s for s in sorted(sentences, key=len, reverse=True) if not _looks_like_caption_line(s)][:3]
+    if not long_sents:
+        long_sents = sorted(sentences, key=len, reverse=True)[:3]
     samples = [{"page": _find_page_of(s, pages_text), "text": s[:120]} for s in long_sents]
     return {"score": score, "avg": round(avg, 1), "label": label, "samples": samples}
 
@@ -380,20 +555,50 @@ def _dim_term_density(full_text: str, language: str, tokens: List[str]) -> Dict:
             if (len(t) >= 2 and _TERM_TAIL_ZH.search(t)) or (_ALPHANUM_TOKEN_RE.fullmatch(t) and re.search(r"[A-Za-z0-9]", t))
         ]
     else:
-        term_tokens = [
-            t for t in tokens
-            if (len(t) > 6 and not t.lower() in _STOP_EN) or re.search(r"\d", t) or "-" in t
-        ]
+        # 英文：按领域术语库命中（精确/词干/大小写不敏感）+ 强术语特征判定。
+        # 注意在原始大小写文本上取词，保留 DNA/PCR 等缩写与 Q30 等型号的大小写信息。
+        raw_tokens = _EN_TERM_RE.findall(full_text)
+        term_tokens = [t for t in raw_tokens if _is_en_term(t)]
+        tokens = raw_tokens
     density = len(term_tokens) / max(len(tokens), 1)
-    # 密度 <= 15% 满分；每 +5% 扣 8 分，封顶 100
-    score = _clamp_score(100 - max(0.0, density - 0.15) / 0.05 * 8.0)
-    samples = [{"page": 0, "text": t} for t in term_tokens[:8]]
+    # 术语密度：理想区间 5%-15%（区间制，外部评审 P0 采纳项）。
+    # 过低 = 技术深度不足，过高 = 术语堆砌，均扣分；短侧梯度更缓（轻度惩罚）。
+    score = _band_score(density, 0.05, 0.15, k_short=200.0, k_long=160.0)
+    # 密术语句子样本（外部评审 P1 采纳项）：按句内术语命中数取 top5，替代"术语词列表"
+    term_set = set(term_tokens[:200])
+    dense_sents = _dense_term_sentences(full_text, language, term_set, top_n=5)
+    samples = [{"page": 0, "text": s[:120]} for s in dense_sents]
     return {
         "score": score,
         "density": round(density * 100, 1),
-        "label": f"术语密度 {round(density * 100, 1)}%（建议 ≤ 15%）",
+        "label": f"术语密度 {round(density * 100, 1)}%（理想 5%–15%）",
         "samples": samples,
     }
+
+
+def _dense_term_sentences(full_text: str, language: str, term_set: set, top_n: int = 5) -> List[str]:
+    """找出术语密度最高的句子（术语命中数 >= 3 且占比高），作为"密术语句子"样本。
+
+    外部评审 P1 采纳项：术语维度的问题例句应为句子实例，而非孤立的术语词列表。
+    """
+    sents = _split_sentences(full_text, language)
+    scored = []
+    for s in sents:
+        text = s.strip()
+        if len(text) < 20 or _looks_like_caption_line(text):
+            continue
+        if language == "zh":
+            words = _CJK_TOKEN_RE.findall(text) or [text]
+        else:
+            words = _EN_TERM_RE.findall(text)
+        if not words:
+            continue
+        hits = sum(1 for w in words if w in term_set)
+        ratio = hits / max(len(words), 1)
+        if hits >= 3 and ratio >= 0.25:
+            scored.append((hits, len(text), text))
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+    return [t for _, _, t in scored[:top_n]]
 
 
 def _dim_passive_ratio(sentences: List[str], language: str, pages_text: List[str]) -> Dict:
@@ -404,13 +609,13 @@ def _dim_passive_ratio(sentences: List[str], language: str, pages_text: List[str
     else:
         passive_sents = [s for s in sentences if _PASSIVE_EN_RE.search(s)]
     ratio = len(passive_sents) / len(sentences)
-    # 被动占比 <=10% 满分；每 +5% 扣 10 分
-    score = _clamp_score(100 - max(0.0, ratio - 0.10) / 0.05 * 10.0)
+    # 被动占比：<=10% 满分（用户裁定：只扣过高，0% 不扣——操作手册以祈使句为主属正常）
+    score = _band_score(ratio, 0.0, 0.10, k_short=0.0, k_long=200.0)
     samples = [{"page": _find_page_of(s, pages_text), "text": s[:120]} for s in passive_sents[:3]]
     return {
         "score": score,
         "ratio": round(ratio * 100, 1),
-        "label": f"被动句占比 {round(ratio * 100, 1)}%（建议 ≤ 10%）",
+        "label": f"被动句占比 {round(ratio * 100, 1)}%（建议 ≤ 10%，过低不扣分）",
         "samples": samples,
     }
 
@@ -421,16 +626,18 @@ def _dim_paragraph_length(paragraphs: List[str], language: str) -> Dict:
     if language == "zh":
         lens = [len(p) for p in paragraphs]
         avg = sum(lens) / len(lens)
-        # 中文段长：<=150 字满分，每超 50 字扣 10 分
-        score = _clamp_score(100 - max(0.0, avg - 150) / 50.0 * 10.0)
-        label = f"平均段落长度 {avg:.0f} 字（建议 ≤ 150 字）"
+        # 中文段长：理想区间 30-150 字（区间制；过短 = 碎片化，过长 = 大段）
+        score = _band_score(avg, 30.0, 150.0, k_short=0.5, k_long=0.2)
+        label = f"平均段落长度 {avg:.0f} 字（理想 30–150 字）"
     else:
         lens = [len(p.split()) for p in paragraphs]
         avg = sum(lens) / len(lens)
-        # 英文段长：<=80 词满分，每超 20 词扣 10 分
-        score = _clamp_score(100 - max(0.0, avg - 80) / 20.0 * 10.0)
-        label = f"平均段落长度 {avg:.0f} 词（建议 ≤ 80 词）"
-    long_paras = sorted(paragraphs, key=len, reverse=True)[:3]
+        # 英文段长：理想区间 10-80 词
+        score = _band_score(avg, 10.0, 80.0, k_short=2.5, k_long=0.5)
+        label = f"平均段落长度 {avg:.0f} 词（理想 10–80 词）"
+    long_paras = [p for p in sorted(paragraphs, key=len, reverse=True) if len(p.split()) >= 8 and not _looks_like_caption_line(p)][:3]
+    if not long_paras:
+        long_paras = sorted(paragraphs, key=len, reverse=True)[:3]
     samples = [{"page": 0, "text": p[:120]} for p in long_paras]
     return {"score": score, "avg": round(avg, 1), "label": label, "samples": samples}
 
@@ -463,130 +670,14 @@ def _level_of(score: float) -> str:
     return "poor"
 
 
-_VERSION_RE = re.compile(
-    r"\b(?:version|ver\.?|revision|rev\.?|document\s+number|doc\s+id|part\s+number)\b|\b\d{4}-\d{2}-\d{2}\b",
-    re.IGNORECASE,
-)
-_TOC_RE = re.compile(r"\b(?:table of contents|contents)\b|\n\s*contents\s*\n", re.IGNORECASE)
-_INDEX_RE = re.compile(r"\b(?:index|glossary|terminology)\b", re.IGNORECASE)
-_TROUBLE_RE = re.compile(r"\b(?:troubleshooting|faq|error|warning|caution|recovery|resolve)\b", re.IGNORECASE)
-_STEP_RE = re.compile(r"(?m)^\s*(?:\d+\.|\d+\)|step\s+\d+|\u2022|-\s+(?:click|select|open|check|review|install|configure|run|restart))", re.IGNORECASE)
-_PRECOND_RE = re.compile(r"\b(?:before you begin|prerequisite|requirements|prepare|preparation)\b", re.IGNORECASE)
-_TASK_TITLE_RE = re.compile(r"\b(?:install|configure|set up|prepare|run|start|stop|restart|maintain|troubleshoot|review|replace|check|clean)\b", re.IGNORECASE)
-_LINK_RE = re.compile(r"https?://\S+|\b\S+\.(?:html?|pdf)\b", re.IGNORECASE)
-
-
-def _avg_applicable(scores: List[Optional[float]]) -> float:
-    vals = [float(s) for s in scores if s is not None]
-    if not vals:
-        return 0.0
-    return _clamp_score(sum(vals) / len(vals))
-
-
-def analyze_experience(filepath: str, full_text: str, tool_analysis: Dict, pages_text: Optional[List[str]] = None) -> Dict:
-    """启发式评估 Access / Findability / Usability。
-
-    目标是补齐竞品横向比较的结构化维度。
-    当前为规则近似值，适合趋势判断与同类样本比较。
-    """
-    pages_text = pages_text or []
-    ext = str(filepath).rsplit(".", 1)[-1].lower() if "." in str(filepath) else ""
-    meta = tool_analysis.get("meta") or {}
-    text = full_text or ""
-
-    has_version = bool(_VERSION_RE.search(text))
-    has_toc = bool(_TOC_RE.search(text))
-    has_index = bool(_INDEX_RE.search(text))
-    has_trouble = bool(_TROUBLE_RE.search(text))
-    step_hits = len(_STEP_RE.findall(text))
-    has_precond = bool(_PRECOND_RE.search(text))
-    link_hits = len(_LINK_RE.findall(text))
-
-    headings = []
-    for line in text.splitlines():
-        line = line.strip()
-        if 4 <= len(line) <= 80 and not line.endswith("."):
-            headings.append(line)
-    heading_sample = headings[:30]
-    task_title_hits = sum(1 for h in heading_sample if _TASK_TITLE_RE.search(h))
-    task_title_score = 30
-    if heading_sample:
-        task_title_score = _clamp_score(task_title_hits / len(heading_sample) * 100)
-
-    format_choice = 50 if ext in {"pdf", "html", "htm"} else 70
-    version_transparency = 100 if has_version else 40
-    offline_availability = 100 if ext in {"pdf", "html", "htm", "docx", "md", "markdown", "txt"} else 60
-    access_overall = _avg_applicable([format_choice, version_transparency, offline_availability])
-
-    toc_score = 60 if has_toc else (25 if len(pages_text) > 5 else 0)
-    index_score = 100 if has_index else 0
-    findability_overall = _avg_applicable([toc_score, index_score])
-
-    if step_hits >= 8 and has_precond:
-        step_completeness = 85
-    elif step_hits >= 3:
-        step_completeness = 65
-    else:
-        step_completeness = 35
-    error_recovery = 100 if has_trouble else 40
-    information_consistency = 100
-    link_effectiveness = 60 if ext in {"html", "htm"} and link_hits > 0 else 30
-    actionability = 85 if step_hits >= 8 else (60 if step_hits >= 3 else 30)
-    usability_overall = _avg_applicable(
-        [task_title_score, step_completeness, error_recovery, information_consistency, link_effectiveness, actionability]
-    )
-
-    return {
-        "access": {
-            "overall_score": access_overall,
-            "level": _level_of(access_overall),
-            "dimensions": {
-                "format_choice": {"score": format_choice, "label": "格式选择"},
-                "version_transparency": {"score": version_transparency, "label": "版本透明度"},
-                "offline_availability": {"score": offline_availability, "label": "离线可用性"},
-            },
-            "summary": "离线可用性和版本透明度较好，单一导出格式限制了格式弹性。"
-            if ext in {"pdf", "html", "htm"}
-            else "版本透明度和离线能力可用，格式弹性取决于源文档体系。",
-            "na_dimensions": ["获取门槛", "站内搜索", "移动端适配", "多语言支持"],
-        },
-        "findability": {
-            "overall_score": findability_overall,
-            "level": _level_of(findability_overall),
-            "dimensions": {
-                "toc": {"score": toc_score, "label": "目录（TOC）"},
-                "index_or_glossary": {"score": index_score, "label": "索引与术语表"},
-            },
-            "summary": "目录可作为弱导航信号，术语索引决定查找效率上限。",
-            "na_dimensions": ["站内搜索", "面包屑导航", "URL 语义化", "SEO 元数据", "关键内容直达"],
-        },
-        "usability": {
-            "overall_score": usability_overall,
-            "level": _level_of(usability_overall),
-            "dimensions": {
-                "task_oriented_titles": {"score": task_title_score, "label": "任务导向标题"},
-                "step_completeness": {"score": step_completeness, "label": "步骤完整性"},
-                "error_recovery": {"score": error_recovery, "label": "错误恢复信息"},
-                "information_consistency": {"score": information_consistency, "label": "信息一致性"},
-                "link_effectiveness": {"score": link_effectiveness, "label": "链接有效性"},
-                "actionability": {"score": actionability, "label": "可操作指令"},
-            },
-            "summary": "任务步骤、恢复信息和导航支持共同决定使用顺畅度。",
-            "stats": {
-                "step_hits": step_hits,
-                "task_title_hits": task_title_hits,
-                "heading_count_sampled": len(heading_sample),
-                "link_hits": link_hits,
-            },
-        },
-    }
-
-
 def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, language: str = None) -> Dict:
     """可读性量化分析。
 
     维度与权重：平均句长 25% / 术语密度 20% / 被动句比例 20% / 段落长度 15% / 修饰词堆叠 20%。
     每维度输出 0-100 分、样本例句；总分 = 加权和，映射评级。
+
+    样本量三档（外部评审 P0 采纳项）：句数 < 100 不评分（维度 N/A、综合评分 None、
+    评级 insufficient）；100-500 评分但显著标注"样本有限"；> 500 正常评分。
     """
     pages_text = pages_text or []
     language = language or detect_language(full_text)
@@ -605,18 +696,80 @@ def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, 
         "modifier_stack": _dim_modifier_stack(full_text, language, pages_text),
     }
 
+    n_sents = len(sentences)
+    if n_sents < 100:
+        sample_status = "insufficient"
+    elif n_sents <= 500:
+        sample_status = "limited"
+    else:
+        sample_status = "sufficient"
+
+    warnings = []
+    if sample_status == "insufficient":
+        warnings.append(
+            f"文本样本量不足（{n_sents} 句），无法可靠评分，本次不输出可读性分数；"
+            "网页输入请确认正文非 JS 动态加载，或改用本地 PDF/HTML 上传。"
+        )
+    elif sample_status == "limited":
+        warnings.append(
+            f"文本样本量有限（{n_sents} 句），评分仅供参考；建议补充更多正文内容后复核。"
+        )
+
+    if sample_status == "insufficient":
+        # 不评分：维度分数置 None，综合分/评级空缺，由报告渲染为 N/A
+        for k in dims:
+            dims[k] = {**dims[k], "score": None}
+        suggestions = ["样本不足，未生成改进建议。"]
+        return {
+            "language": language,
+            "overall_score": None,
+            "level": "insufficient",
+            "level_note": "样本不足，未评分",
+            "sample_status": sample_status,
+            "warnings": warnings,
+            "dimensions": dims,
+            "suggestions": suggestions,
+            "stats": {
+                "sentence_count": n_sents,
+                "avg_sentence_len": round(sum(len(s.split()) for s in sentences) / max(n_sents, 1), 1) if sentences else 0,
+                "avg_paragraph_len": round(sum(len(p.split()) for p in paragraphs) / max(len(paragraphs), 1), 1) if paragraphs else 0,
+                "term_density_pct": dims["term_density"].get("density"),
+                "passive_ratio_pct": dims["passive_ratio"].get("ratio"),
+            },
+        }
+
     overall = sum(dims[k]["score"] * _WEIGHTS[k] for k in _WEIGHTS)
     overall = _clamp_score(overall)
 
+    # 评级抑制：任一维度显著失分（<55 分）时，综合评级必须下调——
+    # 避免出现"术语密度 46 分但综合评级 excellent"的误导性结论。
+    level = _level_of(overall)
+    level_note = ""
+    _quality_rank = {"poor": 1, "fair": 2, "good": 3, "excellent": 4}
+    min_dim_score = min(d["score"] for d in dims.values())
+    weakest = min(dims, key=lambda k: dims[k]["score"])
+    if min_dim_score < 40:
+        capped = "poor"
+    elif min_dim_score < 55:
+        capped = "fair"
+    else:
+        capped = None
+    if capped and _quality_rank[level] > _quality_rank[capped]:
+        dim_names = {"sentence_length": "平均句长", "term_density": "术语密度",
+                     "passive_ratio": "被动句比例", "paragraph_length": "段落长度",
+                     "modifier_stack": "修饰词堆叠"}
+        level = capped
+        level_note = f"「{dim_names[weakest]}」维度仅 {min_dim_score} 分，综合评级已下调至 {level}"
+
     suggestions = []
     if dims["sentence_length"]["score"] < 75:
-        suggestions.append("存在较多超长句，建议拆分：单句不超过 40 字（中文）/ 20 词（英文）。")
+        suggestions.append("句长偏离理想区间（中文 15-40 字 / 英文 8-20 词）：过短检查碎片化，过长建议拆分。")
     if dims["passive_ratio"]["score"] < 75:
         suggestions.append("被动句比例偏高，建议改为主动语态，明确执行主体。")
     if dims["term_density"]["score"] < 75:
-        suggestions.append("术语密度较高，首次出现处建议给出解释或中英文对照。")
+        suggestions.append("术语密度偏离理想区间（5%-15%）：过高时首次出现处给出解释或中英文对照。")
     if dims["paragraph_length"]["score"] < 75:
-        suggestions.append("段落过长，建议按单一主题拆分，段首给出主题句。")
+        suggestions.append("段落长度偏离理想区间（中文 30-150 字 / 英文 10-80 词），建议按单一主题拆分或合并。")
     if dims["modifier_stack"]["score"] < 75:
         suggestions.append("存在修饰词堆叠，建议精简定语层级，拆为多句表述。")
     if not suggestions:
@@ -625,7 +778,10 @@ def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, 
     return {
         "language": language,
         "overall_score": overall,
-        "level": _level_of(overall),
+        "level": level,
+        "level_note": level_note,
+        "sample_status": sample_status,
+        "warnings": warnings,
         "dimensions": {
             "sentence_length": dims["sentence_length"],
             "term_density": dims["term_density"],
@@ -646,44 +802,190 @@ def analyze_readability(full_text: str, pages_text: Optional[List[str]] = None, 
     }
 
 
-def analyze_structure_stats(full_text: str, source_meta: Optional[Dict] = None, readability: Optional[Dict] = None) -> Dict:
-    """结构统计：章节、图表、安全警告与样本可信度提示。"""
-    source_meta = source_meta or {}
-    readability = readability or {}
-    hints = source_meta.get("html_hints") or {}
-    sentence_count = ((readability.get("stats") or {}).get("sentence_count")) or 0
-    pages = int(source_meta.get("pages") or 1)
-    chapter_count = len(_CHAPTER_LINE_RE.findall(full_text or ""))
-    image_count = int(hints.get("img_count") or 0)
-    table_count = int(hints.get("table_count") or 0)
-    warning_count = len(_WARNING_LINE_RE.findall(full_text or ""))
+# ------------------------------------------------------------ 结构统计（客观指标）
+# 评审意见采纳项：报告除评分外补充客观事实统计（页数/章节/图表/安全警告），
+# 评分可信度存疑时读者仍可获得可验证的结构信息。
 
-    cautions = []
+# 标题行特征（保守启发式：只统计独立短行；编号标题要求至少两级如 3.2，避开 "1. 操作步骤"）
+_HEADING_LINE_RES = [
+    re.compile(r"^\s*chapter\s+\d+", re.IGNORECASE),
+    re.compile(r"^\s*appendix\s+[a-z0-9]", re.IGNORECASE),
+    re.compile(r"^\s*\d+(\.\d+){1,3}[.、\s]\s*\S"),
+    re.compile(r"^\s*第[一二三四五六七八九十百\d]+[章节部]"),
+]
+_HEADING_LINE_MAX = 60
+_HEADING_LINE_END_EXCLUDE = ("。", ".", ";", "；", ",", "，", "!", "！", "?", "？")
+
+# 安全警告标签：要求位于行首（手册警告块的常规排式）。两侧都要求标签后为标点/空白/行尾：
+# 英文 "WARNING Hot surface" 计、"WARNING signs indicate..." 不计；
+# 中文「警告：xxx」计、「注意事项」「注意观察仪器状态」等普通词组不计（交叉审查 P0-1 修复）
+_WARNING_LINE_RES = [
+    re.compile(r'^(WARNING|CAUTION|DANGER|NOTICE)(?:\s*[!：:）)]|\s+(?=[A-Z0-9"(\u4e00-\u9fff])|$)'),
+    re.compile(r"^(警告|注意|危险|警示)(?=[\s!！:：,，。．]|$)"),
+    # 名词短语标题形态（Illumina 等厂商手册）："Laser Safety Warning" / "Hot Surface Safety Warning"，
+    # 独立标题行、以 Safety Warning 收尾。交叉审查实测驱动的三重守卫防误报：
+    #   ① 句首排除词（Figure/Table 图题、"See/Read/The/This" 等正文句首）直接排除；
+    #   ② 短语须为大写词序列（Title Case，1-4 个大写词 + Safety Warning），小写句中词无法通过；
+    #   ③ 不以句号收尾（正文句子 "Refer to the ... Safety Warning." 不命中）。
+    # 中文「激光安全警告」同理，且排除句首动词（请/参见/检查/以上等句子形态）。
+    re.compile(
+        r"^(?!(?:Figure|Table|See|Read|Refer|The|This|That|These|Please|Check|Note|A|An|Example)\b)"
+        r"(?:[A-Z][A-Za-z0-9-]*[\s,]+){0,3}[A-Z][A-Za-z0-9-]*\s+Safety\s+Warning\s*$"
+    ),
+    re.compile(
+        r"^(?!请|参见|参阅|见|查看|检查|参考|阅读|以上|注意|这是|上述|下列|如下|关于)"
+        r"[一-龥]{2,10}安全警告(?=[\s：:！!。]|$)"
+    ),
+]
+
+# 警告相关 unicode 符号（图标型警告的文本层残留，外部评审 P1 采纳项）
+# 注意：🛡🚧🚫 为增补平面字符，须写完整码点 \U0001F6E1 等；UTF-16 代理对写法
+# （\ud83d\udee1）在 Python3 str 中是孤立代理项，永远匹配不到（交叉审查 P2 修复）
+_WARNING_SYMBOL_RE = re.compile(r"[\u26a0\u2620\U0001F6E1\U0001F6A7\U0001F6AB\u26d4]")
+
+# 表格线框检测的页数上限与时间预算：超限跳过/提前结束，避免拖慢同步分析（交叉审查 P1-4）
+_TABLE_DETECT_MAX_PAGES = 300
+_TABLE_DETECT_TIME_BUDGET = 10.0  # 秒
+
+
+def _is_heading_line(line: str) -> bool:
+    s = line.strip()
+    if not s or len(s) > _HEADING_LINE_MAX:
+        return False
+    if s.endswith(_HEADING_LINE_END_EXCLUDE):
+        return False
+    return any(rx.match(s) for rx in _HEADING_LINE_RES)
+
+
+def _is_warning_line(line: str) -> bool:
+    s = line.strip()
+    if not s or len(s) > _HEADING_LINE_MAX * 2:
+        return False
+    return any(rx.match(s) for rx in _WARNING_LINE_RES)
+
+
+def _count_pdf_figures(doc) -> int:
+    """统计 PDF 嵌入图片：按 xref 去重（同一 logo 复用只计一次），xref=0 的内联图按出现次数计。"""
+    xrefs = set()
+    inline = 0
+    for page in doc:
+        try:
+            for img in page.get_images(full=True):
+                xref = img[0] if img else 0
+                if xref:
+                    xrefs.add(xref)
+                else:
+                    inline += 1
+        except Exception:
+            continue
+    return len(xrefs) + inline
+
+
+def _count_pdf_tables(doc) -> Tuple[Optional[int], str]:
+    """统计 PDF 表格数（PyMuPDF find_tables 线框策略）。返回 (数量, 说明)；不可用时数量为 None。
+
+    - 旧版 PyMuPDF 无 find_tables → None + 说明（不能静默当 0，交叉审查 P1-2）
+    - 超时间预算 → 返回已检页的部分计数 + 说明（计数可能偏低）
+    """
+    if doc.page_count > _TABLE_DETECT_MAX_PAGES:
+        return None, f"页数超过 {_TABLE_DETECT_MAX_PAGES}，跳过表格检测以控制耗时"
+    if doc.page_count and not hasattr(doc[0], "find_tables"):
+        return None, "当前 PyMuPDF 版本不支持 find_tables，表格数不可用"
+    import time
+    deadline = time.monotonic() + _TABLE_DETECT_TIME_BUDGET
+    total = 0
+    for page in doc:
+        if time.monotonic() > deadline:
+            return total, f"表格检测超出 {_TABLE_DETECT_TIME_BUDGET:.0f}s 时间预算，已提前结束（计数可能偏低）"
+        try:
+            total += len(page.find_tables().tables)
+        except Exception:
+            continue
+    return total, ""
+
+
+def analyze_structure(filepath: str, full_text: str, pages_text: Optional[List[str]] = None,
+                      html_extraction: Optional[Dict] = None) -> Dict:
+    """客观结构统计：页数 / 章节数（标题行）/ 图片数 / 表格数 / 安全警告数。
+
+    - 文本类指标（标题行/警告数）：全部格式可用，基于行首特征正则
+    - 图片/表格数：PDF 走 fitz（图片按 xref 去重、表格走线框检测），HTML 走标签计数，
+      其余格式（DOCX/MD/TXT）暂不支持，以 notes 说明
+    """
+    notes: List[str] = []
+    lines = (full_text or "").splitlines()
+    # 标题按文本去重：目录页（TOC）中的 "3.2 Installation …… 12" 不与正文标题重复计数
+    heading_texts = {ln.strip() for ln in lines if _is_heading_line(ln)}
+    heading_count = len(heading_texts)
+    warning_count = sum(1 for ln in lines if _is_warning_line(ln))
+    # 警告符号计数（图标型警告的文本层残留）：统一按 full_text 正则口径计数
+    # （full_text 即最终正文，PDF/HTML/DOCX 一致；HTML 不再用解析器计数覆盖——
+    # 解析器会把 title 等非正文文本计入，与正文口径不一致，交叉审查 P2 修复）
+    warning_symbol_count = len(_WARNING_SYMBOL_RE.findall(full_text or ""))
+    page_count = len(pages_text) if pages_text else (1 if full_text else 0)
+    figure_count: Optional[int] = None
+    table_count: Optional[int] = None
+
+    path_low = str(filepath or "").lower()
+    if path_low.endswith(".pdf"):
+        try:
+            import fitz
+            doc = fitz.open(filepath)
+            try:
+                page_count = doc.page_count
+                figure_count = _count_pdf_figures(doc)
+                table_count, note = _count_pdf_tables(doc)
+                if note:
+                    notes.append(note)
+            finally:
+                doc.close()
+        except Exception as exc:
+            notes.append(f"PDF 结构统计失败：{exc}")
+    elif html_extraction is not None:
+        # HTML：解析器统计的标签数（已剔除 nav/header/footer 骨架内的元素）
+        # v1.1 支持预计算累加统计（多 topic 汇总场景）
+        page_count = html_extraction.get("page_count", 1)
+        figure_count = html_extraction.get("img_count")
+        table_count = html_extraction.get("table_count")
+        tag_headings = html_extraction.get("heading_count")
+        if isinstance(tag_headings, int):
+            # 标签计数（h1-h3）比文本正则更可靠，优先采用
+            heading_count = tag_headings
+        # 多文本合并时，预计算警告数可能已传入
+        precomputed_warning = html_extraction.get("warning_count")
+        if isinstance(precomputed_warning, int):
+            warning_count = precomputed_warning
+        precomputed_symbol = html_extraction.get("warning_symbol_count")
+        if isinstance(precomputed_symbol, int):
+            warning_symbol_count = precomputed_symbol
+    else:
+        notes.append("图片/表格统计当前仅支持 PDF 与 HTML 输入")
+
+    # 安全警告 0 标注（外部评审 P1 采纳项）：0 警告 ≠ 真没有，图标/特殊排版可能漏检
     if warning_count == 0:
-        cautions.append("安全警告数为 0：检测依赖文本关键词匹配，图标或特殊排版呈现的安全提示可能未被统计，建议人工复核。")
-    if sentence_count and sentence_count < 200:
-        cautions.append(f"文本样本量有限（{sentence_count} 句），评分仅供参考；建议补充更多正文内容后复核。")
-
-    source_url = str(source_meta.get("source_url") or "")
-    if "/FrontPages/" in source_url:
-        cautions.append("当前页面路径疑似手册入口页/封面页，非正文内容；建议选择具体子页面分析，或上传完整 HTML 包后分析。")
+        notes.append(
+            "安全警告数为 0：检测依赖文本关键词匹配（行首 WARNING/CAUTION/警告 等），"
+            "图标或特殊排版呈现的安全提示可能未被统计，建议人工复核。"
+        )
+    if warning_symbol_count > 0:
+        notes.append(f"文本层检测到 {warning_symbol_count} 处警告类符号（⚠/☠ 等），可能对应图标型安全提示。")
 
     return {
-        "pages": pages,
-        "chapter_count": chapter_count,
-        "image_count": image_count,
+        "page_count": page_count,
+        "heading_count": heading_count,
+        "figure_count": figure_count,
         "table_count": table_count,
         "warning_count": warning_count,
-        "cautions": cautions,
+        "warning_symbol_count": warning_symbol_count,
+        "notes": notes,
     }
 
 
-def analyze_document(filepath: str, full_text: str, pages_text: Optional[List[str]] = None) -> Dict:
-    """文档总入口：返回结构化竞品分析结果。"""
-    tool_analysis = analyze_tool_usage(filepath, full_text, pages_text)
-    readability = analyze_readability(full_text, pages_text)
+def analyze_document(filepath: str, full_text: str, pages_text: Optional[List[str]] = None,
+                     html_extraction: Optional[Dict] = None) -> Dict:
+    """文档总入口：返回 {tool_analysis, readability, structure_stats} 供存储与报告渲染。"""
     return {
-        "tool_analysis": tool_analysis,
-        "readability": readability,
-        **analyze_experience(filepath, full_text, tool_analysis, pages_text),
+        "tool_analysis": analyze_tool_usage(filepath, full_text, pages_text),
+        "readability": analyze_readability(full_text, pages_text),
+        "structure_stats": analyze_structure(filepath, full_text, pages_text, html_extraction),
     }

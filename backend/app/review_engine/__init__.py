@@ -17,8 +17,6 @@ Compatibility
 -------------
 - Current ``review.py`` routes continue to call the original entry points.
 - New engine modules are additive and keep existing API behaviour stable.
-- Migration happens gradually: deterministic rules move from inline code
-  to ``rules/`` modules one group at a time.
 
 Modules
 -------
@@ -27,27 +25,31 @@ Modules
 - ``layers.py``          — Issue layer classification (deterministic/structural/AI)
 - ``validation.py``      — AI issue evidence + safety checks
 - ``pipeline.py``        — Issue ranking, de-duplication, shadow suppression
+ - ``false_positives.py`` — Rulebook v1 false-positive matchers for default filtering
 - ``orchestrator.py``    — Stage-based pipeline runner with diagnostics
 - ``ai_candidates.py``   — AI candidate engine (chunking, provider, caching)
 - ``reporting.py``       — Report aggregator (display groups, quality scoring)
 - ``evaluation.py``      — Evaluation runner (baseline matching, consistency)
 - ``annotation_baseline.py`` — Human review baseline parsing & evaluation
-- ``rules/``             — Deterministic rule implementations (incremental)
 """
 
 from app.review_engine.models import CandidateIssue, ReviewStageDiagnostics, ValidationResult  # noqa: F401
+from app.review_engine.false_positives import is_rulebook_false_positive, rulebook_false_positive_reason  # noqa: F401
+from app.review_engine.orchestrator import (  # noqa: F401
+    AICandidateEngine,
+    AIReviewResult,
+    ChunkMeta,
+    DeterministicRuleEngine,
+    DisplayIssue,
+    EvalResult,
+    EvalSuiteResult,
+    EvaluationRunner,
+    ReportAggregator,
+    ReviewOrchestrator,
+    ReviewReport,
+    ReviewRunResult,
+)
+from app.review_engine.pipeline import select_review_issues  # noqa: F401
 
-DocumentContext = None
-TextSpan = None
-ReviewOrchestrator = None
-ReviewRunResult = None
-AICandidateEngine = None
-AIReviewResult = None
-ChunkMeta = None
-ReportAggregator = None
-ReviewReport = None
-DisplayIssue = None
-EvaluationRunner = None
-EvalResult = None
-EvalSuiteResult = None
-DeterministicRuleEngine = None
+DocumentContext = dict
+TextSpan = tuple

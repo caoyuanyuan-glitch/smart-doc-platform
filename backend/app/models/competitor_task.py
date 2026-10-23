@@ -19,7 +19,8 @@ class CompetitorTask(Base):
     status = Column(String, default="pending")  # pending / processing / completed / failed
     tool_analysis = Column(Text)   # JSON: 编辑工具识别结果
     readability = Column(Text)     # JSON: 可读性分析结果
-    overall_score = Column(Float, default=0.0)
+    experience = Column(Text)      # JSON: 体验三维度（可获得性/易查找性/可用性）
+    overall_score = Column(Float, default=0.0)  # 综合评分
     report_md = Column(Text)       # Markdown 报告全文
     error = Column(Text)           # 失败原因
     user_id = Column(Integer)

@@ -1,0 +1,34 @@
+{
+  "_comment": "外部规范写法库。表项给出某术语的通行写法（canonical）与常见偏离写法（variants）。规则只报告'文档写法与通行写法不一致'这一客观事实，不做主观优劣判断。",
+  "version": "1.0",
+  "items": [
+    {
+      "id": "c1",
+      "canonical": "pair-end",
+      "category": "测序类型写法",
+      "note": "Illumina 体系中 pair-end 为通用写法，首字母小写；缩写表与正文应保持一致",
+      "variants": ["Pair-end", "Pair-End", "pair-End"]
+    },
+    {
+      "id": "c2",
+      "canonical": "single-end",
+      "category": "测序类型写法",
+      "note": "Illumina 体系中 single-end 为通用写法，首字母小写；缩写表与正文应保持一致",
+      "variants": ["Single-end", "Single-End", "single-End"]
+    },
+    {
+      "id": "c3",
+      "canonical": "paired-end",
+      "category": "测序类型写法",
+      "note": "Illumina 体系中 paired-end 为通用写法，首字母小写",
+      "variants": ["Paired-end", "Paired-End"]
+    },
+    {
+      "id": "c4",
+      "canonical": "double-stranded",
+      "category": "核酸结构写法",
+      "note": "double-stranded / single-stranded 为通用写法，首字母小写",
+      "variants": ["Double-stranded", "Single-stranded"]
+    }
+  ]
+}

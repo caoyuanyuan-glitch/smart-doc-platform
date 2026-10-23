@@ -3,12 +3,8 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 import os
 import re
-import json
-import time
 import uuid
 from datetime import datetime
-from html.parser import HTMLParser
-from urllib import parse, request
 
 from app.api.auth import get_current_active_user
 from app.schemas.user import UserOut
@@ -16,77 +12,24 @@ from app.database import get_db
 from app.schemas.competitor import CompetitorTask as CompetitorTaskOut
 from app.schemas.competitor import CompetitorTaskSummary, CompetitorReport
 from app.schemas.competitor import CompetitorUrlAnalyzeRequest
+from app.schemas.competitor import (
+    CompetitorComparison as CompetitorComparisonOut,
+    CompetitorComparisonSummary,
+    CompetitorComparisonCreate,
+)
 
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads/competitor"
 # 注：仅支持可解析格式；旧版 .doc（二进制）无平台解析器，不列入白名单，避免"通过校验但解析失败"
+# 本地 HTML 上传（需求 V1.2 §4.1 P1）：用于 JS 渲染/受限站点人工保存页面后上传分析
 ALLOWED_EXTS = {".pdf", ".docx", ".md", ".markdown", ".txt", ".html", ".htm"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
-MAX_REMOTE_HTML_BYTES = 5 * 1024 * 1024  # 5 MB
-
-_MEMORY_TASKS = {}
-_MEMORY_NEXT_ID = [1000]
 
 _SAFE_NAME_RE = re.compile(r"[^\w.\-\u4e00-\u9fff]+")
 
 
-class _HTMLTextExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self._chunks = []
-        self._title_chunks = []
-        self._skip_depth = 0
-        self._in_title = False
-
-    def handle_starttag(self, tag, attrs):
-        name = tag.lower()
-        if name in {"script", "style", "noscript"}:
-            self._skip_depth += 1
-            return
-        if name == "title":
-            self._in_title = True
-        if name in {"p", "div", "section", "article", "header", "footer", "nav", "main", "aside", "br", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}:
-            self._chunks.append("\n")
-
-    def handle_endtag(self, tag):
-        name = tag.lower()
-        if name in {"script", "style", "noscript"} and self._skip_depth > 0:
-            self._skip_depth -= 1
-            return
-        if name == "title":
-            self._in_title = False
-        if name in {"p", "div", "section", "article", "header", "footer", "nav", "main", "aside", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}:
-            self._chunks.append("\n")
-
-    def handle_data(self, data):
-        if self._skip_depth > 0:
-            return
-        text = re.sub(r"\s+", " ", data or "").strip()
-        if not text:
-            return
-        self._chunks.append(text)
-        self._chunks.append(" ")
-        if self._in_title:
-            self._title_chunks.append(text)
-
-    def get_text(self) -> str:
-        text = "".join(self._chunks)
-        text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
-    def get_title(self) -> str:
-        return re.sub(r"\s+", " ", " ".join(self._title_chunks)).strip()
-
-
 def _require_competitor_task_access(db: Session, task_id: int, current_user: UserOut):
-    memory_task = _MEMORY_TASKS.get(task_id)
-    if memory_task is not None:
-        if current_user.role != "admin" and memory_task.get("user_id") != current_user.id:
-            raise HTTPException(status_code=404, detail="Task not found")
-        return "memory", memory_task
-
     from app.crud.competitor import get_competitor_task
     try:
         task = get_competitor_task(db, task_id=task_id)
@@ -96,87 +39,7 @@ def _require_competitor_task_access(db: Session, task_id: int, current_user: Use
         raise HTTPException(status_code=404, detail="Task not found")
     if current_user.role != "admin" and getattr(task, "user_id", None) != current_user.id:
         raise HTTPException(status_code=404, detail="Task not found")
-    return "db", task
-
-
-def _memory_task_to_response(task: dict) -> dict:
-    return {
-        "id": task["id"],
-        "source_type": task.get("source_type", "file"),
-        "file_name": task.get("file_name", ""),
-        "file_size": task.get("file_size", 0),
-        "status": task.get("status", "pending"),
-        "tool_analysis": task.get("tool_analysis"),
-        "readability": task.get("readability"),
-        "overall_score": task.get("overall_score"),
-        "report_md": task.get("report_md"),
-        "error": task.get("error"),
-        "user_id": task.get("user_id"),
-        "created_at": task.get("created_at"),
-        "completed_at": task.get("completed_at"),
-    }
-
-
-def _task_value(task, key: str, default=None):
-    if isinstance(task, dict):
-        return task.get(key, default)
-    return getattr(task, key, default)
-
-
-def _create_memory_task(*, file_name: str, file_size: int, user_id: int, source_type: str) -> dict:
-    task_id = _MEMORY_NEXT_ID[0]
-    _MEMORY_NEXT_ID[0] += 1
-    task = {
-        "id": task_id,
-        "source_type": source_type,
-        "file_name": file_name,
-        "file_size": file_size,
-        "status": "processing",
-        "tool_analysis": None,
-        "readability": None,
-        "overall_score": None,
-        "report_md": None,
-        "error": None,
-        "user_id": user_id,
-        "created_at": datetime.utcnow(),
-        "completed_at": None,
-        "created_ts": int(time.time()),
-    }
-    _MEMORY_TASKS[task_id] = task
     return task
-
-
-def _store_task_result(db: Session, task_ref, *, status: str, tool_analysis=None, readability=None,
-                       overall_score=None, report_md=None, error=None, completed_at=None):
-    from app.crud.competitor import update_competitor_task
-
-    if isinstance(task_ref, dict):
-        task_ref["status"] = status
-        if tool_analysis is not None:
-            task_ref["tool_analysis"] = json.dumps(tool_analysis, ensure_ascii=False)
-        if readability is not None:
-            task_ref["readability"] = json.dumps(readability, ensure_ascii=False)
-        if overall_score is not None:
-            task_ref["overall_score"] = overall_score
-        if report_md is not None:
-            task_ref["report_md"] = report_md
-        if error is not None:
-            task_ref["error"] = error
-        if completed_at is not None:
-            task_ref["completed_at"] = completed_at
-        return task_ref
-
-    return update_competitor_task(
-        db,
-        task_ref.id,
-        status=status,
-        tool_analysis=tool_analysis,
-        readability=readability,
-        overall_score=overall_score,
-        report_md=report_md,
-        error=error,
-        completed_at=completed_at,
-    )
 
 
 def _ensure_upload_dir():
@@ -204,16 +67,16 @@ def _sanitize_filename(filename: str) -> str:
 
 
 def _normalize_url(input_url: str) -> str:
-    raw = (input_url or "").strip()
-    if not raw:
-        raise HTTPException(status_code=400, detail="网页链接不能为空")
-    parsed = parse.urlparse(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="仅支持 http/https 网页链接")
-    return raw
+    """URL 校验（含 SSRF 防护）由 utils.competitor_html.assert_public_http_url 承担。"""
+    from app.utils.competitor_html import UrlNotAllowedError, assert_public_http_url
+    try:
+        return assert_public_http_url(input_url)
+    except UrlNotAllowedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _build_remote_display_name(page_title: str, final_url: str) -> str:
+    from urllib import parse
     title = _sanitize_filename(page_title)
     if title:
         return title[:120]
@@ -225,85 +88,92 @@ def _build_remote_display_name(page_title: str, final_url: str) -> str:
     return _sanitize_filename(host)
 
 
-def _extract_html_document(html: str, *, payload_size: int, display_name_hint: str, final_url: str = "") -> dict:
-    parser = _HTMLTextExtractor()
-    parser.feed(html)
-    parser.close()
-
-    full_text = parser.get_text()
-    if not full_text:
-        raise HTTPException(status_code=422, detail="未能从 HTML 中提取到正文内容")
-
-    title = parser.get_title()
-    filename = f"{_build_remote_display_name(title, final_url or display_name_hint)}.html"
-    html_hints = {
-        "img_count": len(re.findall(r"<img\b", html, flags=re.IGNORECASE)),
-        "table_count": len(re.findall(r"<table\b", html, flags=re.IGNORECASE)),
-        "madcap_runtime": bool(re.search(r"MadCap(?:All|[:._/-]|\s)", html, flags=re.IGNORECASE)),
-        "content_path": "/Content/" in (final_url or display_name_hint),
-        "topic_htm": bool(re.search(r"/[^/]+\.htm(?:$|[?#])", final_url or display_name_hint, flags=re.IGNORECASE)),
-    }
-    source_meta = {
-        "format": "HTML",
-        "title": title,
-        "pages": 1,
-        "html_hints": html_hints,
-    }
-    if final_url:
-        source_meta["source_url"] = final_url
-        source_meta["producer"] = "Web page"
-        source_meta["creator"] = parse.urlparse(final_url).netloc
-    else:
-        source_meta["producer"] = "Local HTML file"
-        source_meta["creator"] = "Uploaded file"
-
-    return {
-        "filename": filename,
-        "file_size": payload_size,
-        "full_text": full_text,
-        "pages_text": [full_text],
-        "source_meta": source_meta,
-    }
-
-
 def _parse_web_document(source_url: str) -> dict:
-    normalized_url = _normalize_url(source_url)
-    req = request.Request(
-        normalized_url,
-        headers={
-            "User-Agent": "SmartDocPlatformCompetitorBot/1.0",
-            "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.5,*/*;q=0.1",
-        },
-    )
-    try:
-        with request.urlopen(req, timeout=20) as resp:
-            headers = resp.headers
-            content_type = (headers.get_content_type() or "").lower()
-            if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
-                raise HTTPException(status_code=400, detail=f"链接内容类型不支持: {content_type or 'unknown'}")
-            payload = resp.read(MAX_REMOTE_HTML_BYTES + 1)
-            if len(payload) > MAX_REMOTE_HTML_BYTES:
-                raise HTTPException(status_code=413, detail="网页内容过大，请换用更短的手册页面")
-            charset = headers.get_content_charset() or "utf-8"
-            html = payload.decode(charset, errors="replace")
-            final_url = resp.geturl() or normalized_url
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"网页抓取失败: {exc}")
+    """递归抓取网页站点（全站子页面/topic）并完成正文汇总与抽取。
 
-    return _extract_html_document(
-        html,
-        payload_size=len(payload),
-        display_name_hint=final_url,
-        final_url=final_url,
-    )
+    用户裁定（2026-08-24）：所有子页面、子 topic 都需要爬取，不只是入口页面。
+    返回 pages_html（各页完整 HTML，供体验三维度页级聚合），不落库。
+    """
+    from app.utils import competitor_crawl, competitor_html
+
+    _normalize_url(source_url)  # 预校验，给出明确的 400 文案
+    try:
+        crawl = competitor_crawl.crawl_site(source_url)
+    except competitor_html.UrlNotAllowedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if not crawl["combined_text"].strip():
+        # 全站均无可提取正文（纯 JS 渲染/空骨架）：与单页口径一致，明确报错
+        raise HTTPException(status_code=422, detail="未能从网页中提取到正文内容（可能为纯 JS 渲染页面）")
+
+    final_url = crawl["final_url"]
+    full_text = crawl["combined_text"]
+    pages_text = [p["full_text"] for p in crawl["pages"] if p["full_text"]]
+    # 入口页（pages[0]）重新抽取完整资产特征（脚本/样式/生成器），供工具识别证据链
+    entry_html = crawl["pages"][0]["html"]
+    entry_extraction = competitor_html.extract_main_text(entry_html)
+    title = entry_extraction.get("title", "") or crawl["pages"][0].get("title", "")
+    display_name = _build_remote_display_name(title, final_url)
+    from urllib import parse
+    # 入口页/封面页识别（外部评审 P1 采纳项）：命中时并入 warnings，报告显著提示
+    entry_hints = competitor_html.entry_page_hints(final_url, full_text)
+    warnings = list(entry_extraction.get("notes", [])) + entry_hints
+    # 结构统计用全站累加（替换单页计数）
+    struct = crawl["structure"]
+    html_context = {
+        "final_url": final_url,
+        "html": entry_html[:200000],  # 证据检测仅需要头部与资产引用，截断防止超量存储
+        "extraction": {
+            "script_srcs": entry_extraction.get("script_srcs"),
+            "css_hrefs": entry_extraction.get("css_hrefs"),
+            "attrs_sample": entry_extraction.get("attrs_sample"),
+            "generator": entry_extraction.get("generator"),
+            "low_content": entry_extraction.get("low_content"),
+            "notes": entry_extraction.get("notes"),
+            "page_count": crawl["ok"],
+            "img_count": struct["img_count"],
+            "table_count": struct["table_count"],
+            "heading_count": struct["heading_count"],
+            "warning_symbol_count": struct["warning_symbol_count"],
+            "warning_count": struct["warning_count"],
+        },
+        "crawl": {
+            "ok": crawl["ok"],
+            "failed": crawl["failed"],
+            "total": crawl["total"],
+            "skipped": crawl["skipped"],
+            "dedup": crawl["dedup"],
+            "max_depth": crawl["pages"][-1]["depth"] if crawl["pages"] else 1,
+        },
+    }
+    return {
+        "filename": f"{display_name}.html",
+        "file_size": sum(len(p["html"]) for p in crawl["pages"]),
+        "full_text": full_text,
+        "pages_text": pages_text,
+        "pages_html": [p["html"] for p in crawl["pages"]],  # 内存字段，不落库
+        "source_meta": {
+            "format": "HTML",
+            "title": title,
+            "source_url": final_url,
+            "producer": "Web page",
+            "creator": parse.urlparse(final_url).netloc,
+            "generator": entry_extraction.get("generator", ""),
+            "pages": crawl["ok"],
+        },
+        "html_context": html_context,
+        "warnings": warnings,
+    }
 
 
 def _parse_document(file_path: str, filename: str) -> dict:
-    """按扩展名分发解析，统一返回 {full_text, pages_text}。"""
+    """按扩展名分发解析，统一返回 {full_text, pages_text, html_context?}。"""
     from app.utils import doc_parser
     ext = os.path.splitext(filename)[1].lower()
+    html_context = None
+    warnings = []
     if ext == ".pdf":
         result = doc_parser.parse_pdf(file_path)
     elif ext == ".docx":
@@ -311,14 +181,30 @@ def _parse_document(file_path: str, filename: str) -> dict:
     elif ext in (".md", ".markdown", ".txt"):
         result = doc_parser.parse_markdown(file_path)
     elif ext in (".html", ".htm"):
-        with open(file_path, "rb") as f:
-            payload = f.read()
-        html = payload.decode("utf-8", errors="replace")
-        return _extract_html_document(
-            html,
-            payload_size=len(payload),
-            display_name_hint=filename,
-        )
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                html = f.read()
+        except OSError as exc:
+            raise HTTPException(status_code=422, detail=f"HTML 文件读取失败: {exc}")
+        from app.utils import competitor_html
+        extraction = competitor_html.extract_main_text(html)
+        result = {"full_text": extraction.get("full_text", ""), "pages_text": []}
+        if not result["full_text"]:
+            raise HTTPException(
+                status_code=422,
+                detail="未能从 HTML 中提取到正文内容（可能为纯 JS 渲染页面）",
+            )
+        html_context = {
+            "final_url": "",
+            "html": html[:200000],
+            "extraction": {
+                k: extraction.get(k)
+                for k in ("script_srcs", "css_hrefs", "attrs_sample", "generator", "low_content", "notes",
+                          "img_count", "table_count", "heading_count", "warning_symbol_count")
+            },
+        }
+        # 本地 HTML 也可能为入口页（无 URL 路径特征时按全文长度判定）
+        warnings = list(extraction.get("notes", [])) + competitor_html.entry_page_hints("", result["full_text"])
     else:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}")
     if not result or not result.get("full_text", "").strip():
@@ -327,55 +213,91 @@ def _parse_document(file_path: str, filename: str) -> dict:
         raise HTTPException(status_code=422, detail=detail)
     pages_text = result.get("pages_text") or []
     if not pages_text:
-        # DOCX/MD/TXT 无"页"概念：以全文作为单页兜底，保证报告页码定位可用
+        # DOCX/MD/TXT/HTML 无"页"概念：以全文作为单页兜底，保证报告页码定位可用
         pages_text = [result["full_text"]]
     return {
         "full_text": result.get("full_text", ""),
         "pages_text": pages_text,
-        "source_meta": result.get("source_meta"),
+        "html_context": html_context,
+        "warnings": warnings,
     }
 
 
-def _source_type_of_filename(filename: str) -> str:
-    ext = os.path.splitext(filename or "")[1].lower()
-    if ext in {".html", ".htm"}:
-        return "html"
-    return "file"
-
-
-def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: list, source_meta: Optional[dict] = None) -> dict:
-    """执行竞品分析：编辑工具识别 + 可读性分析 + 报告渲染。"""
-    from app.utils.competitor_analysis import (
-        analyze_experience,
-        analyze_readability,
-        analyze_structure_stats,
-        analyze_tool_usage,
-        enrich_tool_usage,
+def _merge_html_tool_analysis(tool_analysis: dict, html_context: Optional[dict]) -> None:
+    """将 HTML 工具识别证据链（MadCap Flare 等）并入 tool_analysis。"""
+    if not html_context:
+        return
+    from app.utils import competitor_html
+    detection = competitor_html.detect_html_tool(
+        html_context.get("final_url", ""),
+        html_context.get("extraction") or {},
+        html_context.get("html", ""),
     )
+    tools = detection.get("tools", [])
+    if tools:
+        tool_analysis["tools"] = tools
+        tool_analysis["summary"] = detection["summary"]
+    tool_analysis["html_evidence"] = detection.get("evidence", [])
+
+
+def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: list,
+                  source_meta: Optional[dict] = None,
+                  html_context: Optional[dict] = None,
+                  warnings: Optional[list] = None,
+                  pages_html: Optional[list] = None) -> dict:
+    """执行竞品分析：编辑工具识别 + 可读性分析 + 体验三维度 + 结构统计 + 报告渲染。
+
+    pages_html（全站递归爬取场景）：各页完整 HTML，供体验三维度页级聚合（不落库）。
+    """
+    from app.utils.competitor_analysis import analyze_tool_usage, analyze_readability, analyze_structure
+    from app.utils.competitor_experience import analyze_experience
     from app.utils.competitor_report import render_competitor_report
 
     tool_analysis = analyze_tool_usage(file_path, full_text, pages_text)
     if source_meta:
-        tool_analysis = enrich_tool_usage(tool_analysis, source_meta)
-    readability = analyze_readability(full_text, pages_text)
-    experience = analyze_experience(file_path, full_text, tool_analysis, pages_text)
-    structure_stats = analyze_structure_stats(full_text, source_meta=tool_analysis.get("meta"), readability=readability)
-    readability_payload = {
-        **readability,
-        "structure_stats": structure_stats,
-        "access": experience.get("access"),
-        "findability": experience.get("findability"),
-        "usability": experience.get("usability"),
-    }
+        merged_meta = dict(tool_analysis.get("meta") or {})
+        merged_meta.update({k: v for k, v in (source_meta or {}).items() if v not in (None, "")})
+        tool_analysis["meta"] = merged_meta
+    _merge_html_tool_analysis(tool_analysis, html_context)
+    # 结构统计（客观指标）：失败不影响主流程，降级为空统计并在 notes 说明
     try:
-        report_md = render_competitor_report(
-            filename,
-            tool_analysis,
-            readability_payload,
-            access=experience.get("access"),
-            findability=experience.get("findability"),
-            usability=experience.get("usability"),
+        tool_analysis["structure_stats"] = analyze_structure(
+            file_path, full_text, pages_text,
+            html_extraction=(html_context or {}).get("extraction"),
         )
+    except Exception as exc:
+        print(f"[competitor] 结构统计失败（降级为空）: {exc}")
+        tool_analysis["structure_stats"] = {"notes": [f"结构统计失败: {exc}"]}
+    readability = analyze_readability(full_text, pages_text)
+    # 体验三维度（需求说明书 V1.2 §3.3-3.5）：可获得性/易查找性/可用性（DQTI 理论）
+    # 失败不影响主流程：降级为空结果，报告缺三章节
+    try:
+        experience = analyze_experience(
+            file_path, full_text, pages_text,
+            html=(html_context or {}).get("html"),
+            final_url=(html_context or {}).get("final_url", ""),
+            pages_html=pages_html,
+        )
+    except Exception as exc:
+        print(f"[competitor] 体验维度分析失败（降级为空）: {exc}")
+        experience = {"error": f"体验维度分析失败: {exc}"}
+    # 合并抽取阶段警告（正文过少/JS 渲染受限）到可读性结果，统一由报告渲染输出
+    merged_warnings = list(readability.get("warnings") or [])
+    for w in warnings or []:
+        if w not in merged_warnings:
+            merged_warnings.append(w)
+    if merged_warnings:
+        readability["warnings"] = merged_warnings
+    # 洞察引擎（需求缺口1）：分数 → 对本司的可执行启示；规则层保底，AI 层可选降级
+    from app.utils.competitor_insight import generate_insights
+    try:
+        readability["insights"] = generate_insights(tool_analysis, readability, experience)
+    except Exception as exc:
+        # 洞察失败不能影响分析主流程：降级为空洞察，报告仅缺"启示"章节
+        print(f"[competitor] 洞察生成失败（降级为空）: {exc}")
+        readability["insights"] = {"insights": [], "ai_available": False}
+    try:
+        report_md = render_competitor_report(filename, tool_analysis, readability, experience)
     except Exception as exc:
         # 兜底降级：报告渲染自身异常时用最小模板，保证 status=completed 且报告可下载
         print(f"[competitor] 报告渲染失败，使用兜底模板: {exc}")
@@ -391,9 +313,8 @@ def _run_analysis(file_path: str, filename: str, full_text: str, pages_text: lis
         )
     return {
         "tool_analysis": tool_analysis,
-        "readability": readability_payload,
-        "structure_stats": structure_stats,
-        **experience,
+        "readability": readability,
+        "experience": experience,
         "report_md": report_md,
     }
 
@@ -424,50 +345,38 @@ async def create_competitor_task(
     safe_name = _sanitize_filename(filename)
     _ensure_upload_dir()
 
-    source_type = _source_type_of_filename(safe_name)
+    # 来源类型：本地 HTML 上传单独标记（区别于普通文档与网页链接）
+    source_type = "html" if ext in (".html", ".htm") else "file"
     from app.crud.competitor import create_competitor_task as db_create
-    try:
-        task = db_create(
-            db,
-            file_name=safe_name,
-            file_size=len(data),
-            user_id=current_user.id,
-            source_type=source_type,
-        )
-    except Exception:
-        task = _create_memory_task(
-            file_name=safe_name,
-            file_size=len(data),
-            user_id=current_user.id,
-            source_type=source_type,
-        )
+    task = db_create(db, file_name=safe_name, file_size=len(data), user_id=current_user.id,
+                     source_type=source_type)
 
-    task_id = task["id"] if isinstance(task, dict) else task.id
-    stored_name = f"{task_id}_{uuid.uuid4().hex[:8]}_{safe_name}"
+    stored_name = f"{task.id}_{uuid.uuid4().hex[:8]}_{safe_name}"
     stored_path = os.path.join(UPLOAD_DIR, stored_name)
     try:
         with open(stored_path, "wb") as f:
             f.write(data)
     except Exception as exc:
         _safe_remove(stored_path)  # 写盘可能留下部分文件，必须清理
-        _store_task_result(db, task, status="failed", error=f"文件保存失败: {exc}")
+        from app.crud.competitor import update_competitor_task
+        update_competitor_task(db, task.id, status="failed", error=f"文件保存失败: {exc}")
         raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
 
     try:
         parsed = _parse_document(stored_path, safe_name)
         result = _run_analysis(
-            stored_path,
-            safe_name,
-            parsed["full_text"],
-            parsed["pages_text"],
-            source_meta=parsed.get("source_meta"),
+            stored_path, safe_name,
+            parsed["full_text"], parsed["pages_text"],
+            html_context=parsed.get("html_context"),
+            warnings=parsed.get("warnings"),
         )
-        _store_task_result(
-            db,
-            task,
+        from app.crud.competitor import update_competitor_task
+        update_competitor_task(
+            db, task.id,
             status="completed",
             tool_analysis=result["tool_analysis"],
             readability=result["readability"],
+            experience=result["experience"],
             overall_score=result["readability"].get("overall_score"),
             report_md=result["report_md"],
             completed_at=datetime.utcnow(),
@@ -477,13 +386,12 @@ async def create_competitor_task(
         raise
     except Exception as exc:
         _safe_remove(stored_path)
-        _store_task_result(db, task, status="failed", error=str(exc))
+        from app.crud.competitor import update_competitor_task
+        update_competitor_task(db, task.id, status="failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"分析失败: {exc}")
 
     # 分析完成（成功路径）：结果已全量入库，原文件不再需要，及时清理避免磁盘膨胀
     _safe_remove(stored_path)
-    if isinstance(task, dict):
-        return _memory_task_to_response(task)
     from app.crud.competitor import get_competitor_task
     return get_competitor_task(db, task.id)
 
@@ -500,21 +408,13 @@ async def create_competitor_task_from_url(
     from app.crud.competitor import get_competitor_task
     from app.crud.competitor import update_competitor_task
 
-    try:
-        task = db_create(
-            db,
-            file_name=parsed["filename"],
-            file_size=parsed["file_size"],
-            user_id=current_user.id,
-            source_type="html",
-        )
-    except Exception:
-        task = _create_memory_task(
-            file_name=parsed["filename"],
-            file_size=parsed["file_size"],
-            user_id=current_user.id,
-            source_type="html",
-        )
+    task = db_create(
+        db,
+        file_name=parsed["filename"],
+        file_size=parsed["file_size"],
+        user_id=current_user.id,
+        source_type="url",
+    )
     try:
         result = _run_analysis(
             parsed["filename"],
@@ -522,27 +422,145 @@ async def create_competitor_task_from_url(
             parsed["full_text"],
             parsed["pages_text"],
             source_meta=parsed["source_meta"],
+            html_context=parsed.get("html_context"),
+            warnings=parsed.get("warnings"),
+            pages_html=parsed.get("pages_html"),
         )
-        _store_task_result(
+        update_competitor_task(
             db,
-            task,
+            task.id,
             status="completed",
             tool_analysis=result["tool_analysis"],
             readability=result["readability"],
+            experience=result["experience"],
             overall_score=result["readability"].get("overall_score"),
             report_md=result["report_md"],
             completed_at=datetime.utcnow(),
         )
     except HTTPException as exc:
-        _store_task_result(db, task, status="failed", error=exc.detail)
+        update_competitor_task(db, task.id, status="failed", error=exc.detail)
         raise
     except Exception as exc:
-        _store_task_result(db, task, status="failed", error=str(exc))
+        update_competitor_task(db, task.id, status="failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"分析失败: {exc}")
 
-    if isinstance(task, dict):
-        return _memory_task_to_response(task)
     return get_competitor_task(db, task.id)
+
+
+@router.post("/compare", response_model=CompetitorComparisonOut)
+async def create_competitor_comparison(
+    payload: CompetitorComparisonCreate,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """创建多文档对比（2-5 个已完成分析任务，可选其一为我方基线）。
+
+    路由声明在 GET /{task_id} 之前，避免路径参数吞掉 /compare。
+    """
+    task_ids = payload.task_ids or []
+    if len(task_ids) < 2 or len(task_ids) > 5:
+        raise HTTPException(status_code=400, detail="参与对比的任务数须为 2-5 个")
+    # 元素必须是整数 ID（Pydantic list 未约束元素类型，防止 dict 等不可哈希类型打穿 set()）
+    if any(not isinstance(t, int) or isinstance(t, bool) for t in task_ids):
+        raise HTTPException(status_code=400, detail="task_ids 必须为整数任务 ID 列表")
+    if len(set(task_ids)) != len(task_ids):
+        raise HTTPException(status_code=400, detail="参与对比的任务存在重复")
+
+    from app.crud.competitor import get_competitor_task
+    tasks = []
+    for tid in task_ids:
+        task = get_competitor_task(db, task_id=tid)
+        if not task or (current_user.role != "admin" and task.user_id != current_user.id):
+            raise HTTPException(status_code=404, detail=f"任务不存在: {tid}")
+        if task.status != "completed" or not task.readability:
+            raise HTTPException(status_code=400, detail=f"任务 {tid} 未完成分析，无法参与对比")
+        tasks.append(task)
+
+    from app.utils.competitor_comparison import (
+        load_task_payloads, build_comparison, render_comparison_report,
+    )
+    payloads = load_task_payloads(tasks)
+    # 先剔除损坏 JSON 再校验数量：若此时剩 <2 条，根因是"结果损坏"而非"任务数不足"，
+    # 用 422 + 明确文案，避免误导排障
+    if len(payloads) < 2:
+        broken = len(tasks) - len(payloads)
+        raise HTTPException(
+            status_code=422,
+            detail=f"{broken} 个任务的分析结果损坏（JSON 解析失败），无法对比",
+        )
+    try:
+        result, insights = build_comparison(payloads, payload.baseline_task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    warnings = []
+    for p in payloads:
+        for w in p.get("warnings") or []:
+            item = f"「{p['name']}」{w}"
+            if item not in warnings:
+                warnings.append(item)
+
+    title = ((payload.title or "").strip() or "竞品文档对比")[:120]
+    try:
+        report_md = render_comparison_report(title, result, insights, warnings)
+    except Exception as exc:
+        print(f"[competitor] 对比报告渲染失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"对比报告生成失败: {exc}")
+
+    from app.crud.competitor import create_competitor_comparison as db_create
+    return db_create(
+        db,
+        title=title[:120],
+        task_ids=task_ids,
+        baseline_task_id=payload.baseline_task_id,
+        result={**result, "insights": insights},
+        report_md=report_md,
+        user_id=current_user.id,
+    )
+
+
+def _require_comparison_access(db: Session, comparison_id: int, current_user: UserOut):
+    from app.crud.competitor import get_competitor_comparison
+    item = get_competitor_comparison(db, comparison_id)
+    if not item or (current_user.role != "admin" and item.user_id != current_user.id):
+        raise HTTPException(status_code=404, detail="Comparison not found")
+    return item
+
+
+@router.get("/compare", response_model=List[CompetitorComparisonSummary])
+async def read_competitor_comparisons(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """对比列表：管理员可见全部，普通用户仅可见自己的。"""
+    from app.crud.competitor import get_competitor_comparisons
+    user_id = None if current_user.role == "admin" else current_user.id
+    return get_competitor_comparisons(db, user_id=user_id, skip=skip, limit=limit)
+
+
+@router.get("/compare/{comparison_id}", response_model=CompetitorComparisonOut)
+async def read_competitor_comparison(
+    comparison_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """对比详情（含结构化结果与 Markdown 报告全文）。"""
+    return _require_comparison_access(db, comparison_id, current_user)
+
+
+@router.delete("/compare/{comparison_id}")
+async def delete_competitor_comparison(
+    comparison_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """删除对比记录（不影响参与任务本身）。"""
+    _require_comparison_access(db, comparison_id, current_user)
+    from app.crud.competitor import delete_competitor_comparison as db_delete
+    db_delete(db, comparison_id)
+    return {"message": "Comparison deleted successfully", "comparison_id": comparison_id}
 
 
 @router.get("/", response_model=List[CompetitorTaskSummary])
@@ -551,30 +569,11 @@ async def read_competitor_tasks(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
-): 
+):
     """任务列表：管理员可见全部，普通用户仅可见自己的。"""
     from app.crud.competitor import get_competitor_tasks
     user_id = None if current_user.role == "admin" else current_user.id
-
-    items = []
-    try:
-        db_tasks = get_competitor_tasks(db, user_id=user_id, skip=0, limit=1000) or []
-    except Exception:
-        db_tasks = []
-
-    for task in db_tasks:
-        items.append(task)
-
-    mem_list = sorted(_MEMORY_TASKS.values(), key=lambda x: x["id"], reverse=True)
-    for task in mem_list:
-        if current_user.role != "admin" and task.get("user_id") != current_user.id:
-            continue
-        if any(getattr(item, "id", None) == task["id"] for item in items):
-            continue
-        items.append(_memory_task_to_response(task))
-
-    items.sort(key=lambda x: x["id"] if isinstance(x, dict) else getattr(x, "id", 0), reverse=True)
-    return items[skip: skip + limit]
+    return get_competitor_tasks(db, user_id=user_id, skip=skip, limit=limit)
 
 
 @router.get("/{task_id}", response_model=CompetitorTaskOut)
@@ -582,12 +581,9 @@ async def read_competitor_task(
     task_id: int,
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
-): 
+):
     """任务详情（含工具识别 / 可读性 JSON 与 Markdown 报告全文）。"""
-    source, task = _require_competitor_task_access(db, task_id, current_user)
-    if source == "memory":
-        return _memory_task_to_response(task)
-    return task
+    return _require_competitor_task_access(db, task_id, current_user)
 
 
 @router.get("/{task_id}/report", response_model=CompetitorReport)
@@ -597,28 +593,44 @@ async def read_competitor_report(
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
-    """报告全文（JSON {content, format}，与 compare 报告接口对齐）。"""
-    source, task = _require_competitor_task_access(db, task_id, current_user)
-    if _task_value(task, "status") != "completed" or not _task_value(task, "report_md"):
-        detail = _task_value(task, "error") or "分析尚未完成"
+    """报告全文（JSON {content, format}，与 compare 报告接口对齐）。
+
+    format=json（需求说明书 V1.1 导出要求采纳项）：返回结构化结果（含
+    tool_analysis/readability/experience 已解析对象），便于二次处理与归档。
+    """
+    task = _require_competitor_task_access(db, task_id, current_user)
+    if task.status != "completed" or not task.report_md:
+        detail = task.error or "分析尚未完成"
         raise HTTPException(status_code=404, detail=detail)
     if format == "json":
+        import json as _json
+
+        def _maybe_json(value):
+            if isinstance(value, str):
+                try:
+                    return _json.loads(value)
+                except (ValueError, TypeError):
+                    return value
+            return value
+
         return {
             "content": {
-                "report_md": _task_value(task, "report_md"),
-                "tool_analysis": json.loads(_task_value(task, "tool_analysis") or "{}"),
-                "readability": json.loads(_task_value(task, "readability") or "{}"),
-                "overall_score": _task_value(task, "overall_score"),
-                "source_type": _task_value(task, "source_type", "file"),
-                "file_name": _task_value(task, "file_name", ""),
+                "id": task.id,
+                "source_type": task.source_type,
+                "file_name": task.file_name,
+                "overall_score": task.overall_score,
+                "tool_analysis": _maybe_json(task.tool_analysis),
+                "readability": _maybe_json(task.readability),
+                "experience": _maybe_json(task.experience),
+                "report_md": task.report_md,
             },
             "format": format,
         }
-    content = _task_value(task, "report_md", "")
+    content = task.report_md
     if format == "text":
         # text 参数需返回纯文本（去 Markdown 标记），避免"标着 text 返回 md"的误导
         from app.utils.competitor_report import markdown_to_text
-        content = markdown_to_text(_task_value(task, "report_md", ""))
+        content = markdown_to_text(task.report_md)
     return {"content": content, "format": format}
 
 
@@ -629,12 +641,9 @@ async def delete_competitor_task(
     current_user: UserOut = Depends(get_current_active_user),
 ):
     """删除任务记录与对应上传文件。"""
-    source, task = _require_competitor_task_access(db, task_id, current_user)
-    if source == "db":
-        from app.crud.competitor import delete_competitor_task as db_delete
-        db_delete(db, task_id)
-    else:
-        _MEMORY_TASKS.pop(task_id, None)
+    task = _require_competitor_task_access(db, task_id, current_user)
+    from app.crud.competitor import delete_competitor_task as db_delete
+    db_delete(db, task_id)
     # 清理上传文件（按任务前缀匹配，避免遍历整个上传目录）
     try:
         for name in os.listdir(UPLOAD_DIR):

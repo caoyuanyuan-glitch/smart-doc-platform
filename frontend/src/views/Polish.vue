@@ -659,7 +659,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onActivated, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -667,6 +667,8 @@ import axios from 'axios'
 import { polishAPI, knowledgeAPI, systemAPI, getAPIErrorMessage, getKnowledgeLoadErrorMessage } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
 import { usePolishStore } from '@/store/polish'
+
+defineOptions({ name: 'Polish' })
 
 const route = useRoute()
 const router = useRouter()
@@ -3934,6 +3936,14 @@ onMounted(async () => {
   restoreCatSessionSnapshot()
   loadDropdownOptions()
   await loadPolishEngineStatus()
+})
+
+onActivated(() => {
+  const pendingPolishText = sessionStorage.getItem('pendingPolishText')
+  if (pendingPolishText) {
+    originalText.value = pendingPolishText
+    sessionStorage.removeItem('pendingPolishText')
+  }
 })
 </script>
 

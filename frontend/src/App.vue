@@ -156,6 +156,7 @@
               </template>
               <el-menu-item index="/competitor">上传分析</el-menu-item>
               <el-menu-item index="/competitor/tasks">历史任务</el-menu-item>
+              <el-menu-item index="/competitor/compare">对比分析</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="polish-sub">
@@ -232,7 +233,7 @@
                 <el-menu-item index="/qa/history/general">知识库问答历史</el-menu-item>
                 <el-menu-item index="/qa/history/doc">说明书问答历史</el-menu-item>
               </el-sub-menu>
-              <el-menu-item v-if="userStore.isAdmin" index="/qa/dashboard">问答看板</el-menu-item>
+              <el-menu-item index="/qa/dashboard">问答看板</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="translate-sub">
@@ -243,6 +244,7 @@
               <el-menu-item index="/translate/stats">统计面板</el-menu-item>
               <el-menu-item index="/translate">文本翻译</el-menu-item>
               <el-menu-item index="/translate/docs">文档翻译</el-menu-item>
+              <el-menu-item index="/translate/history">已翻译文档</el-menu-item>
             </el-sub-menu>
 
             <el-menu-item index="/knowledge">
@@ -260,7 +262,7 @@
 
       <main class="main-content" :class="{ collapsed: isCollapsed }">
         <router-view v-slot="{ Component }">
-          <keep-alive :include="['Compare', 'CompareParams', 'QA', 'QAHistory', 'QADoc', 'PolishHistory', 'SpellCheckHistory']">
+          <keep-alive :include="['Compare', 'CompareParams', 'QA', 'QAHistory', 'QADoc', 'PolishHistory', 'SpellCheckHistory', 'Review', 'Polish']">
             <component :is="Component" />
           </keep-alive>
         </router-view>

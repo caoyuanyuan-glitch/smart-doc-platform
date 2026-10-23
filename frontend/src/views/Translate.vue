@@ -61,20 +61,34 @@
           <template #header>
             <span class="card-header-title">翻译内容</span>
           </template>
-          <div class="text-input-area">
+          <div class="text-input-area" @paste="handlePasteImage">
+            <div class="source-composer">
+              <div v-if="pastedImages.length" class="pasted-image-list">
+                <figure v-for="item in pastedImages" :key="item.id" class="pasted-image-item">
+                  <img :src="item.url" :alt="item.name" />
+                </figure>
+              </div>
+              <div v-if="ocrRecognizing" class="ocr-progress">正在识别图片文字...</div>
             <el-input
               v-model="inputText"
               type="textarea"
               :rows="14"
-              placeholder="请输入需要翻译的文本内容..."
+              placeholder="请输入需要翻译的文本，或直接粘贴图片识别原文..."
               resize="none"
             />
+            </div>
             <div class="input-actions">
-              <span class="char-count">{{ inputText.length }} 字符</span>
-              <el-button type="primary" :loading="translating" @click="translateText" :disabled="!inputText.trim()">
-                <el-icon><Switch /></el-icon>
-                开始翻译
-              </el-button>
+              <span class="char-count">{{ ocrRecognizing ? '正在识别图片文字...' : `${inputText.length} 字符` }}</span>
+              <div class="input-action-buttons">
+                <el-button type="primary" :loading="translating || ocrRecognizing" @click="translateText" :disabled="!inputText.trim() || ocrRecognizing">
+                  <el-icon><Switch /></el-icon>
+                  开始翻译
+                </el-button>
+                <el-button :disabled="translating || ocrRecognizing || !canClearTranslation" @click="clearTranslationSession">
+                  <el-icon><Delete /></el-icon>
+                  清空
+                </el-button>
+              </div>
             </div>
           </div>
         </el-card>
@@ -87,6 +101,7 @@
               <span class="card-header-title">翻译结果</span>
               <div v-if="result" class="result-meta">
                 <el-tag v-if="resultSourceTag" :type="resultSourceTag.type" size="small">{{ resultSourceTag.label }}</el-tag>
+                <el-tag v-if="fuzzyMatchSummary" type="warning" size="small">{{ fuzzyMatchSummary }}</el-tag>
                 <div class="result-usage-stats">
                   <span>总字数 {{ Number(result.source_word_count || 0).toLocaleString() }}</span>
                   <span>AI {{ Number(result.ai_word_count || 0).toLocaleString() }}</span>
@@ -121,7 +136,29 @@
               resize="none"
               class="translated-editor"
             />
-            <div v-else class="result-text translated-text">{{ currentTranslatedText }}</div>
+            <div
+              v-else
+              class="result-text translated-text"
+              :class="{ 'has-fuzzy-match': fuzzyMatches.length > 0 }"
+              v-html="highlightedTranslatedHtml"
+            />
+            <div v-if="!editingResult && fuzzyMatches.length" class="fuzzy-match-list">
+              <div v-for="(item, index) in fuzzyMatches" :key="index" class="fuzzy-match-card">
+                <div class="fuzzy-match-head">
+                  <el-tag type="warning" size="small">匹配率 {{ formatMatchRate(item.match_rate) }}</el-tag>
+                  <span class="fuzzy-match-reason">{{ matchReasonLabel(item.reason) }}</span>
+                </div>
+                <div class="fuzzy-match-row">
+                  <span class="fuzzy-match-label">当前原文</span>
+                  <p class="fuzzy-match-text" v-html="renderDiffHtml(item.source_spans)"></p>
+                </div>
+                <div class="fuzzy-match-row">
+                  <span class="fuzzy-match-label">记忆库原文</span>
+                  <p class="fuzzy-match-text" v-html="renderDiffHtml(item.candidate_spans)"></p>
+                </div>
+                <p class="fuzzy-match-hint">黄色/红色标记是与记忆库不一致的内容，请据此核对并修改译文。</p>
+              </div>
+            </div>
             <div class="memory-write-section">
               <span class="memory-write-label">写入目标记忆库</span>
               <el-select
@@ -172,10 +209,10 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort } from '@element-plus/icons-vue'
-import { knowledgeAPI, translationAPI, getKnowledgeLoadErrorMessage } from '@/api'
+import { Switch, Document, CopyDocument, Download, EditPen, Check, Close, Plus, Sort, Delete } from '@element-plus/icons-vue'
+import { knowledgeAPI, translationAPI, getAPIErrorMessage, getKnowledgeLoadErrorMessage } from '@/api'
 import { TRANSLATION_STATS_EVENT } from '@/constants/events'
 import { extractMemoryLibraryFiles } from '@/utils/memoryLibrary'
 import {
@@ -212,11 +249,15 @@ const memoryLibraryFiles = ref([])
 const memoryLibraryLoading = ref(false)
 const inputText = ref('')
 const translating = ref(false)
+const ocrRecognizing = ref(false)
 const result = ref(null)
 const editingResult = ref(false)
 const translatedDraft = ref('')
 const writingMemory = ref(false)
 const writableMemoryFileTypes = ['xlsx', 'xlsm', 'xltx', 'xltm']
+
+const pastedImages = ref([])
+const canClearTranslation = computed(() => Boolean(inputText.value.trim() || pastedImages.value.length || result.value || editingResult.value || translatedDraft.value))
 
 const writableMemoryLibraryFiles = computed(() => {
   return memoryLibraryFiles.value.filter(file => writableMemoryFileTypes.includes(String(file.fileType || '').toLowerCase()))
@@ -284,8 +325,102 @@ const resultSourceTag = computed(() => {
   return null
 })
 
+const fuzzyMatches = computed(() => {
+  const items = Array.isArray(result.value?.memory_matches) ? result.value.memory_matches : []
+  return items.filter((item) => {
+    const rate = Number(item?.match_rate)
+    if (Number.isFinite(rate) && rate < 100) {
+      return true
+    }
+    return String(item?.source_text || '').trim() !== String(item?.candidate_text || '').trim()
+  })
+})
+
+const fuzzyMatchSummary = computed(() => {
+  const items = fuzzyMatches.value
+  if (!items.length) {
+    return ''
+  }
+  if (items.length === 1) {
+    return `匹配率 ${formatMatchRate(items[0].match_rate)}`
+  }
+  const lowest = Math.min(...items.map((item) => Number(item.match_rate) || 0))
+  return `${items.length} 处非完全匹配，最低 ${formatMatchRate(lowest)}`
+})
+
+const highlightedTranslatedHtml = computed(() => highlightTranslatedText(currentTranslatedText.value, fuzzyMatches.value))
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function formatMatchRate(rate) {
+  const value = Number(rate)
+  if (!Number.isFinite(value)) {
+    return '—'
+  }
+  return `${Number.isInteger(value) ? value : value.toFixed(1)}%`
+}
+
+function matchReasonLabel(reason) {
+  const labels = {
+    similarity_ranked: '整句模糊匹配',
+    token_subsequence: '短语嵌入匹配'
+  }
+  return labels[reason] || '记忆库匹配'
+}
+
+function renderDiffHtml(spans) {
+  if (!Array.isArray(spans) || !spans.length) {
+    return ''
+  }
+  return spans.map((span) => {
+    const text = escapeHtml(span.text)
+    const tag = span.tag || 'equal'
+    if (tag === 'equal') {
+      return text
+    }
+    return `<mark class="diff-${tag}">${text}</mark>`
+  }).join('')
+}
+
+function highlightTranslatedText(text, matches) {
+  const source = String(text || '')
+  if (!source) {
+    return ''
+  }
+  const leftovers = []
+  for (const item of matches || []) {
+    for (const fragment of item.leftover_fragments || []) {
+      if (fragment) {
+        leftovers.push(fragment)
+      }
+    }
+  }
+  leftovers.sort((a, b) => b.length - a.length)
+  if (!leftovers.length) {
+    return escapeHtml(source)
+  }
+  const pattern = leftovers.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  const splitter = new RegExp(`(${pattern})`, 'g')
+  return source.split(splitter).map((part) => {
+    if (leftovers.includes(part)) {
+      return `<mark class="diff-leftover">${escapeHtml(part)}</mark>`
+    }
+    return escapeHtml(part)
+  }).join('')
+}
+
 onMounted(async () => {
   await Promise.all([loadMemoryBanks(), loadMemoryLibraryFiles(), loadProviders()])
+})
+
+onUnmounted(() => {
+  revokePastedImages()
 })
 
 function syncSelectedModel() {
@@ -341,7 +476,73 @@ function onEngineChange(val) {
   syncSelectedModel()
 }
 
+function revokePastedImages() {
+  pastedImages.value.forEach(item => {
+    if (item.url) {
+      URL.revokeObjectURL(item.url)
+    }
+  })
+  pastedImages.value = []
+}
+
+function clearTranslationSession() {
+  if (translating.value || ocrRecognizing.value) {
+    return
+  }
+  inputText.value = ''
+  revokePastedImages()
+  result.value = null
+  editingResult.value = false
+  translatedDraft.value = ''
+  ElMessage.success('已清空当前翻译内容')
+}
+
+function getPastedImageFile(event) {
+  const items = Array.from(event.clipboardData?.items || [])
+  const imageItem = items.find(item => item.type && item.type.startsWith('image/'))
+  return imageItem ? imageItem.getAsFile() : null
+}
+
+async function handlePasteImage(event) {
+  const file = getPastedImageFile(event)
+  if (!file) {
+    return
+  }
+  event.preventDefault()
+  if (ocrRecognizing.value || translating.value) {
+    ElMessage.info('正在处理中，请稍后再粘贴图片')
+    return
+  }
+  const filename = file.name && file.name.includes('.') ? file.name : 'pasted-image.png'
+  pastedImages.value.push({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    url: URL.createObjectURL(file),
+    name: filename
+  })
+  ocrRecognizing.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', file, filename)
+    const { data } = await translationAPI.ocrImage(formData)
+    const text = String(data?.text || '').trim()
+    if (!text) {
+      ElMessage.warning('图片中未识别到文字')
+      return
+    }
+    const current = inputText.value.trimEnd()
+    inputText.value = current ? `${current}\n\n${text}` : text
+    ElMessage.success('图片文字已识别并填入翻译内容')
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '图片文字识别失败'))
+  } finally {
+    ocrRecognizing.value = false
+  }
+}
+
 async function translateText() {
+  if (ocrRecognizing.value) {
+    return
+  }
   if (!inputText.value.trim()) {
     ElMessage.warning('请输入翻译内容')
     return
@@ -568,16 +769,58 @@ function downloadResult() {
   flex-direction: column;
 }
 
+.source-composer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #fff;
+  overflow: auto;
+}
+
+.pasted-image-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+
+.pasted-image-item {
+  margin: 0;
+}
+
+.pasted-image-item img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.ocr-progress {
+  margin: 8px 12px 0;
+  font-size: 13px;
+  color: #2563eb;
+}
+
 .text-input-area :deep(.el-textarea) {
   flex: 1;
 }
 
 .text-input-area :deep(.el-textarea__inner) {
-  border-radius: 8px;
+  border: none;
+  box-shadow: none;
+  border-radius: 0 0 8px 8px;
   font-size: 14px;
   line-height: 1.7;
-  height: 100% !important;
-  min-height: 320px;
+  height: auto !important;
+  min-height: 180px;
 }
 
 .input-actions {
@@ -585,6 +828,12 @@ function downloadResult() {
   justify-content: space-between;
   align-items: center;
   margin-top: 12px;
+}
+
+.input-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .char-count {
@@ -676,6 +925,87 @@ function downloadResult() {
   overflow-y: auto;
   color: #1f2937;
   flex: 1;
+}
+
+.translated-text.has-fuzzy-match {
+  border: 1px solid #fbbf24;
+  background: #fffbeb;
+}
+
+.translated-text :deep(mark),
+.fuzzy-match-text :deep(mark) {
+  padding: 0 2px;
+  border-radius: 3px;
+  color: inherit;
+}
+
+.diff-replace,
+.diff-delete {
+  background: #fecaca;
+  box-shadow: inset 0 -1px 0 #ef4444;
+}
+
+.diff-insert {
+  background: #bbf7d0;
+  box-shadow: inset 0 -1px 0 #22c55e;
+}
+
+.diff-leftover {
+  background: #fde68a;
+  box-shadow: inset 0 -1px 0 #d97706;
+}
+
+.fuzzy-match-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fuzzy-match-card {
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.fuzzy-match-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.fuzzy-match-reason {
+  font-size: 12px;
+  color: #92400e;
+}
+
+.fuzzy-match-row {
+  margin-top: 6px;
+}
+
+.fuzzy-match-label {
+  display: block;
+  font-size: 12px;
+  color: #78716c;
+  margin-bottom: 4px;
+}
+
+.fuzzy-match-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1f2937;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fuzzy-match-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #b45309;
+  line-height: 1.5;
 }
 
 .memory-write-section {

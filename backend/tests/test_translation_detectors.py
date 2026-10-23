@@ -17,32 +17,54 @@ from app.api.translation import (  # noqa: E402
     _apply_memory_glossary,
     _append_memory_entry_to_delimited_file,
     _append_memory_entry_to_excel,
+    _append_memory_match_trace,
     _build_batch_separator,
     _build_memory_candidate_bundle,
     _build_memory_seed_file_path,
+    _build_diff_spans,
+    _collect_fuzzy_memory_matches,
     _count_translatable_text_units,
     _collect_memory_candidates,
     _do_translate,
     _ensure_memory_bank_entry,
     _find_memory_glossary,
+    _filename_looks_non_translatable,
     _get_memory_file_candidates,
     _normalize_memory_file_ids,
     _get_memory_match_trace,
     _get_translate_task_status,
+    _get_translation_usage_stats,
     _group_image_ocr_data,
     _detect_confirmation_button_blocks,
     _merge_image_ocr_blocks,
+    _blocks_to_ocr_text,
+    _ocr_image_file_to_text,
+    _clean_ocr_document_text,
+    _restore_ocr_alnum_tokens,
+    _restore_ocr_latin_letters,
     _load_memory_file_entries,
     _looks_like_hallucination,
     _looks_like_invalid_translation,
     _match_memory_candidates,
     _mark_translation_canceled,
+    _memory_match_qualifies_for_stats,
+    _normalize_usage_counts,
     _split_batched_translation_output,
+    _reset_memory_match_trace,
+    _reset_translation_usage_stats,
+    _record_passthrough_usage,
+    _record_qualified_memory_usage,
     _thread_locals,
     _translate_tasks,
     _translate_tasks_lock,
     _sync_memory_file_to_seed,
+    persist_memory_library_seed_if_needed,
     _translate_image,
+    _sanitize_translated_filename,
+    _translate_filename,
+    _is_completed_translation_filename,
+    _build_translation_stats_payload,
+    translate_with_memory,
 )
 from app.utils.runtime_paths import runtime_memory_seed_dir  # noqa: E402
 
@@ -221,6 +243,77 @@ class ImageTranslationTest(unittest.TestCase):
             with Image.open(__import__("io").BytesIO(translated)) as image:
                 self.assertEqual(image.format, "PNG")
 
+    def test_blocks_to_ocr_text_keeps_reading_order(self):
+        text = _blocks_to_ocr_text([
+            {"text": "second", "top": 40, "left": 10},
+            {"text": "first", "top": 10, "left": 10},
+            {"text": "  ", "top": 80, "left": 10},
+        ])
+        self.assertEqual(text, "first\nsecond")
+
+    def test_ocr_image_file_to_text_uses_document_ocr(self):
+        with patch("app.api.translation._ocr_document_image_to_text", return_value="Hello\nWorld"):
+            self.assertEqual(_ocr_image_file_to_text("/tmp/x.png"), "Hello\nWorld")
+
+    def test_ocr_image_file_to_text_falls_back_to_blocks(self):
+        with patch("app.api.translation._ocr_document_image_to_text", return_value=""), \
+             patch("app.api.translation._extract_image_ocr_blocks", return_value=(None, [
+                 {"text": "Hello", "top": 0, "left": 0},
+                 {"text": "World", "top": 20, "left": 0},
+             ])):
+            self.assertEqual(_ocr_image_file_to_text("/tmp/x.png"), "Hello\nWorld")
+
+    def test_ocr_image_file_to_text_raises_when_empty(self):
+        with patch("app.api.translation._ocr_document_image_to_text", return_value=""), \
+             patch("app.api.translation._extract_image_ocr_blocks", return_value=(None, [])):
+            with self.assertRaises(ValueError):
+                _ocr_image_file_to_text("/tmp/x.png")
+
+    def test_clean_ocr_document_text_joins_wrapped_lines(self):
+        text = _clean_ocr_document_text(
+            "1.G99.测序仪支持多种规格芯片上机，定位芯\n: 。 片的位置。。\n\n2.此位置信息会受到影响。"
+        )
+        self.assertIn("定位芯片的位置。", text)
+        self.assertIn("2.此位置信息会受到影响。", text)
+
+    def test_restore_ocr_alnum_prefers_g99_over_699(self):
+        text = _restore_ocr_alnum_tokens(
+            "1.699.测序仪支持多种规格芯片上机",
+            ["1.G99-测序仪支持多种规格芯片上机", "B12 and 812"],
+        )
+        self.assertIn("G99", text)
+        self.assertNotIn("699", text)
+
+    def test_restore_ocr_alnum_keeps_unrelated_numbers(self):
+        text = _restore_ocr_alnum_tokens("订单号 1699 已发货", ["型号 G99"])
+        self.assertEqual(text, "订单号 1699 已发货")
+
+    def test_restore_ocr_latin_prefers_fov_over_fev(self):
+        text = _restore_ocr_latin_letters(
+            "投射在晶圆所有 Fev 排布",
+            [
+                ((237, 159, 186), "投射在晶圆所有 Fev 排布"),
+                ((259, 159, 186), "投射在晶圆所有 Fov 排布"),
+                ((195, 159, 188), "投射在品圆所有 Fov 排布"),
+            ],
+        )
+        self.assertIn("Fov", text)
+        self.assertNotIn("Fev", text)
+
+    def test_document_ocr_keeps_numbered_paragraphs(self):
+        fixture = Path(__file__).parent / "fixtures" / "ocr_numbered_paragraphs.png"
+        if not fixture.exists():
+            self.skipTest("OCR fixture missing")
+        text = _ocr_image_file_to_text(str(fixture))
+        self.assertIn("测序仪支持多种规格芯片上机", text)
+        self.assertIn("芯片晶圆切割", text)
+        self.assertIn("多芯片融合的拍照起点定位", text)
+        self.assertRegex(text, r"Fov")
+        self.assertIn("G99", text)
+        self.assertNotIn("699", text)
+        self.assertNotIn("Fev", text)
+        self.assertNotIn("TALIA", text)
+        self.assertNotIn("AML", text)
 
 class HybridMemoryFallbackTest(unittest.TestCase):
     def tearDown(self):
@@ -304,6 +397,35 @@ class MemorySeedSyncTest(unittest.TestCase):
     def test_runtime_memory_seed_dir_is_shared_location(self):
         shared_dir = runtime_memory_seed_dir()
         self.assertIn(".smart-doc-platform", str(shared_dir))
+
+    def test_persist_uploaded_csv_under_memory_library_to_seed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_path = tmp_path / "source.csv"
+            source_path.write_text("zh-CN,en-US\n基因,gene\n", encoding="utf-8")
+            root = SimpleNamespace(name="资源库", parent=None)
+            child = SimpleNamespace(name="记忆库", parent=root)
+            memory_file = SimpleNamespace(
+                file_path=str(source_path),
+                name="admin-upload.csv",
+                file_type="csv",
+                folder=child,
+            )
+            seed_file_path = persist_memory_library_seed_if_needed(memory_file, seed_root=tmp_path / "seed")
+            self.assertEqual(seed_file_path, tmp_path / "seed" / "资源库" / "记忆库" / "admin-upload.csv")
+            self.assertTrue(seed_file_path.exists())
+            self.assertIn("基因", seed_file_path.read_text(encoding="utf-8"))
+
+    def test_persist_skips_files_outside_memory_library(self):
+        root = SimpleNamespace(name="资源库", parent=None)
+        other = SimpleNamespace(name="文件资料", parent=root)
+        memory_file = SimpleNamespace(
+            file_path="/tmp/manual.pdf",
+            name="manual.pdf",
+            file_type="pdf",
+            folder=other,
+        )
+        self.assertIsNone(persist_memory_library_seed_if_needed(memory_file, seed_root=Path("/tmp/seed")))
 
 
 class MemoryNormalizationTest(unittest.TestCase):
@@ -408,6 +530,102 @@ class MemoryNormalizationTest(unittest.TestCase):
 
         self.assertEqual(matched, "Mammoth 冷却控制板 V3.0.0")
         self.assertEqual(_get_memory_match_trace()[-1]["reason"], "metadata_exact")
+
+
+    def test_fuzzy_sentence_match_accepts_eighty_percent_similarity(self):
+        bundle = _build_memory_candidate_bundle([
+            {
+                "source_text": "参数确认无误后，点击运行。",
+                "translated_text": "After confirming the parameters, click Run.",
+            }
+        ])
+
+        matched = _match_memory_candidates("确认参数无误后点击运行。", bundle, threshold=0.8)
+
+        self.assertEqual(matched, "After confirming the parameters, click Run.")
+        self.assertGreaterEqual(_get_memory_match_trace()[-1]["score"], 0.8)
+
+    def test_fuzzy_sentence_match_works_when_partial_preserve_is_disabled(self):
+        bundle = _build_memory_candidate_bundle([
+            {
+                "source_text": "请在样本制备卡准备界面点击下一步。",
+                "translated_text": "Click Next on the sample prep card screen.",
+            }
+        ])
+
+        matched = _match_memory_candidates(
+            "请在样品制备卡准备界面点击下一步。",
+            bundle,
+            threshold=0.8,
+            preserve_sentence_unmatched=False,
+        )
+
+        self.assertEqual(matched, "Click Next on the sample prep card screen.")
+
+    def test_fuzzy_sentence_match_ignores_terminal_punctuation_kind_mismatch(self):
+        bundle = _build_memory_candidate_bundle([
+            {
+                "source_text": "点击运行按钮开始实验",
+                "translated_text": "Click Run to start the experiment.",
+            }
+        ])
+
+        matched = _match_memory_candidates("点击运行按钮开始实验。", bundle, threshold=0.8)
+
+        self.assertEqual(matched, "Click Run to start the experiment.")
+
+    def test_collect_fuzzy_memory_matches_includes_score_and_diff_spans(self):
+        _reset_memory_match_trace()
+        bundle = _build_memory_candidate_bundle([
+            {
+                "source_text": "参数确认无误后，点击运行。",
+                "translated_text": "After confirming the parameters, click Run.",
+            }
+        ])
+
+        matched = _match_memory_candidates("确认参数无误后点击运行。", bundle, threshold=0.8)
+        details = _collect_fuzzy_memory_matches()
+
+        self.assertEqual(matched, "After confirming the parameters, click Run.")
+        self.assertEqual(len(details), 1)
+        self.assertGreater(details[0].match_rate, 0)
+        self.assertLess(details[0].match_rate, 100)
+        self.assertTrue(any(span.tag != "equal" for span in details[0].source_spans))
+
+    def test_collect_fuzzy_memory_matches_shows_contained_longer_memory_sentence(self):
+        _reset_memory_match_trace()
+        source = "结合不同的芯片拍照预设设置的起点位置（参考起始点）"
+        candidate = "多flow cell融合场景下成像起点位置按如下方式确定：结合不同的芯片拍照预设设置的起点位置（参考起始点）"
+        translated = (
+            "The imaging starting point in multi-flow cell fusion scenario is positioned "
+            "using the following manner: According to the pre-configured imaging starting positions."
+        )
+        _append_memory_match_trace(source, candidate, "similarity_ranked", score=1.0, translated_text=translated)
+
+        details = _collect_fuzzy_memory_matches()
+
+        self.assertEqual(len(details), 1)
+        self.assertLess(details[0].match_rate, 100)
+        self.assertGreater(details[0].match_rate, 0)
+        self.assertTrue(any(span.tag != "equal" for span in details[0].candidate_spans))
+
+    def test_collect_fuzzy_memory_matches_skips_true_100_percent_compact_match(self):
+        _reset_memory_match_trace()
+        _append_memory_match_trace(
+            "点击运行。",
+            "点击运行。",
+            "normalized_exact",
+            score=1.0,
+            translated_text="Click Run.",
+        )
+
+        self.assertEqual(_collect_fuzzy_memory_matches(), [])
+
+    def test_build_diff_spans_marks_replaced_tokens(self):
+        left_spans, right_spans = _build_diff_spans("请在样本制备卡准备界面点击下一步。", "请在样品制备卡准备界面点击下一步。")
+
+        self.assertTrue(any(span["tag"] in {"replace", "delete"} for span in left_spans))
+        self.assertTrue(any(span["tag"] in {"replace", "insert"} for span in right_spans))
 
 
 class TranslationStatisticsTest(unittest.TestCase):
@@ -530,6 +748,137 @@ class MemoryFileWriteTest(unittest.TestCase):
             self.assertEqual(worksheet.cell(row=2, column=1).value, "新增译文")
             self.assertEqual(worksheet.cell(row=2, column=2).value, "New Source")
             workbook.close()
+
+
+class FilenameTranslationTest(unittest.TestCase):
+    def test_sanitize_accepts_long_but_reasonable_titles(self):
+        original = "DNBSEQ-T7RS High-throughput Sequencing Set User Manual"
+        translated = "DNBSEQ-T7RS 高通量测序试剂套装用户手册"
+        self.assertEqual(_sanitize_translated_filename(translated, original), translated)
+
+    def test_sanitize_rejects_oversized_hallucination(self):
+        original = "Manual"
+        translated = "x" * 400
+        self.assertIsNone(_sanitize_translated_filename(translated, original))
+
+    def test_chinese_title_is_translatable(self):
+        self.assertFalse(
+            _filename_looks_non_translatable("DNBSEQ-T7基因测序仪系统使用说明书", "zh")
+        )
+
+    def test_memory_hit_is_used_before_ai(self):
+        db = SimpleNamespace()
+        with patch("app.api.translation.translate_with_memory", return_value=("基因测序仪说明书", True)), \
+             patch("app.api.translation.ai_client.chat") as chat:
+            result = _translate_filename(
+                "Gene Sequencer Manual",
+                "en",
+                "zh",
+                model="qwen",
+                engine="hybrid",
+                db=db,
+            )
+        self.assertEqual(result, "基因测序仪说明书")
+        chat.assert_not_called()
+
+    def test_memory_engine_keeps_original_when_no_hit(self):
+        db = SimpleNamespace()
+        with patch("app.api.translation.translate_with_memory", return_value=("Gene Sequencer Manual", False)):
+            result = _translate_filename(
+                "Gene Sequencer Manual",
+                "en",
+                "zh",
+                engine="memory",
+                db=db,
+            )
+        self.assertEqual(result, "Gene Sequencer Manual")
+
+
+class CompletedTranslationListTest(unittest.TestCase):
+    def test_completed_filename_detection(self):
+        self.assertTrue(_is_completed_translation_filename("说明书.docx"))
+        self.assertFalse(_is_completed_translation_filename(""))
+        self.assertFalse(_is_completed_translation_filename("ERROR:timeout"))
+        self.assertFalse(_is_completed_translation_filename("CANCELED:stopped"))
+
+
+class TranslationStatsAggregationTest(unittest.TestCase):
+    def test_normalize_usage_counts_keeps_uncategorized_remainder(self):
+        self.assertEqual(
+            _normalize_usage_counts(100, 40, 20),
+            {"source_count": 100, "ai_count": 40, "memory_count": 20},
+        )
+
+    def test_passthrough_usage_is_not_counted_as_memory(self):
+        _reset_translation_usage_stats()
+        _record_passthrough_usage("这是一段未匹配的原文内容")
+        stats = _get_translation_usage_stats()
+        self.assertEqual(stats["memory_word_count"], 0)
+        self.assertEqual(stats["ai_word_count"], 0)
+
+    def test_low_score_trace_does_not_qualify_for_memory_stats(self):
+        _reset_memory_match_trace()
+        _append_memory_match_trace("源句", "候选句", "token_subsequence", score=0.4, translated_text="candidate")
+        self.assertFalse(_memory_match_qualifies_for_stats("源句"))
+
+    def test_high_score_trace_qualifies_for_memory_stats(self):
+        _reset_memory_match_trace()
+        _append_memory_match_trace("源句", "候选句", "similarity_ranked", score=0.86, translated_text="candidate")
+        self.assertTrue(_memory_match_qualifies_for_stats("源句"))
+
+    def test_glossary_partial_hit_does_not_record_memory_stats(self):
+        bundle = _build_memory_candidate_bundle([
+            {
+                "source_text": "基因",
+                "translated_text": "gene",
+                "source_lang": "zh",
+                "target_lang": "en",
+                "priority": 1,
+            }
+        ])
+        _reset_translation_usage_stats()
+        _reset_memory_match_trace()
+        with patch("app.api.translation._get_memory_candidate_bundle", return_value=bundle):
+            result, hit = translate_with_memory("检测基因序列", "zh", "en", db=SimpleNamespace())
+        self.assertTrue(hit)
+        self.assertIn("gene", result)
+        _record_qualified_memory_usage("检测基因序列")
+        self.assertEqual(_get_translation_usage_stats()["memory_word_count"], 0)
+
+    def test_stats_payload_uses_all_records_for_total_word_count(self):
+        class FakeQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return None
+
+        class FakeDB:
+            def query(self, *args, **kwargs):
+                return FakeQuery()
+
+        def fake_summary(db, file_type=None, batch_id=None):
+            if file_type == "text":
+                return {"doc_count": 2, "doc_word_count": 30, "ai_word_count": 10, "memory_word_count": 8}
+            if file_type == "file":
+                return {"doc_count": 4, "doc_word_count": 70, "ai_word_count": 40, "memory_word_count": 20}
+            return {"doc_count": 6, "doc_word_count": 100, "ai_word_count": 50, "memory_word_count": 28}
+
+        with patch("app.api.translation._refresh_missing_translation_doc_word_counts"), \
+             patch("app.api.translation._query_translation_doc_summary", side_effect=fake_summary):
+            payload = _build_translation_stats_payload(FakeDB(), None)
+
+        self.assertEqual(payload["total_word_count"], 100)
+        self.assertEqual(payload["doc_count"], 4)
+        self.assertEqual(payload["ai_word_count"], 50)
+        self.assertEqual(payload["memory_word_count"], 28)
+        self.assertEqual(payload["text_word_count"], 30)
+        self.assertEqual(payload["text_ai_word_count"], 10)
+        self.assertEqual(payload["text_memory_word_count"], 8)
+
 
 if __name__ == "__main__":
     unittest.main()

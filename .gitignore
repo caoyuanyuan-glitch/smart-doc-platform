@@ -194,3 +194,11 @@ frontend/dist/
 # Local secrets (never commit API keys)
 backend/runtime.secrets/
 backend/runtime.env.local
+
+# 审核回归种子样例（体积大，按需从内网盘获取）
+/H-020-*.pdf
+/H-020-*.7z.[0-9][0-9][0-9]
+/H-020-*.fdf
+backend/tests/fixtures/seed/*
+!backend/tests/fixtures/seed/.gitkeep
+!backend/tests/fixtures/seed/README.md

@@ -1,6 +1,7 @@
 from app.api import spell_check as spell_check_api
 from app.utils import spell_checker as spell_checker_utils
 from app.utils import grammar_engine
+from app.utils.article_constants import expected_article, is_vowel_sound
 
 
 class _FakeWordFrequency:
@@ -25,10 +26,52 @@ def test_spell_check_process_text_passes_file_type_to_rule_engine(monkeypatch):
     monkeypatch.setattr(spell_check_api, "_collect_low_level_rule_issues", lambda text, document_language: [])
     monkeypatch.setattr(spell_check_api, "_collect_consistency_issues", lambda text, document_language: [])
 
-    result = spell_check_api.process_text("foo\n\nbar", file_type="pdf")
+    result = spell_check_api.process_text("foo.\n\nbar", file_type="pdf")
 
-    assert captured == {"content": "foo\n\nbar", "file_type": "pdf"}
+    assert captured == {"content": "foo.\n\nbar", "file_type": "pdf"}
     assert result["total_count"] == 0
+
+
+def test_merge_soft_wrapped_lines_joins_pdf_visual_line_breaks():
+    text = (
+        "4. If the selected recipe includes the barcode length, tap the Barcode list to\n\n"
+        "select a barcode file.\n\n"
+        "5. If the selected recipe includes the barcode length, you need to select whether\n\n"
+        "to split barcode. Yes is selected by default."
+    )
+
+    merged = spell_check_api._merge_soft_wrapped_lines(text)
+
+    assert merged == (
+        "4. If the selected recipe includes the barcode length, tap the Barcode list to select a barcode file.\n\n"
+        "5. If the selected recipe includes the barcode length, you need to select whether to split barcode. "
+        "Yes is selected by default."
+    )
+
+
+def test_merge_soft_wrapped_lines_keeps_paragraphs_lists_and_mid_word_fragments():
+    text = (
+        "Revision history\n\nDate\n\nVersion\n\n"
+        "a. Select Yes. The Exiting interface is displayed.\n\n"
+        "MGI has t\n\naken measures to ensure the correctness of this manual.\n\n"
+        "Use 200 uL wide-\n\ntip pipette tips."
+    )
+
+    merged = spell_check_api._merge_soft_wrapped_lines(text)
+
+    assert merged == (
+        "Revision history\n\nDate\n\nVersion\n\n"
+        "a. Select Yes. The Exiting interface is displayed.\n\n"
+        "MGI has taken measures to ensure the correctness of this manual.\n\n"
+        "Use 200 uL wide-tip pipette tips."
+    )
+
+
+def test_process_text_keeps_line_breaks_outside_pdf():
+    text = "foo\n\nbar"
+
+    assert spell_check_api.process_text(text)["text"] == "foo\n\nbar"
+    assert spell_check_api.process_text(text, file_type="pdf")["text"] == "foo bar"
 
 
 def test_guess_file_type_from_text_detects_markdown():
@@ -231,6 +274,140 @@ def test_check_grammar_patterns_keeps_a_unified_phrase_valid():
     assert issues == []
 
 
+def test_is_vowel_sound_judges_all_caps_wordlike_terms_by_whole_word_sound():
+    # all-caps 可读词按整词读音判定：HOME 读 /h/，不按字母名 H(/eɪtʃ/) 判为元音音。
+    assert spell_checker_utils._is_vowel_sound('HOME') is False
+    assert spell_checker_utils._is_vowel_sound('END') is True
+    assert spell_checker_utils._is_vowel_sound('OPEN') is True
+    # all-caps 缩写仍按字母名判定：MRI 读 /ɛm/、USB 读 /juː/。
+    assert spell_checker_utils._is_vowel_sound('MRI') is True
+    assert spell_checker_utils._is_vowel_sound('UPS') is False
+    assert spell_checker_utils._is_vowel_sound('USB') is False
+    # 小写词与混合大小写走首字母读音。
+    assert spell_checker_utils._is_vowel_sound('home') is False
+    assert spell_checker_utils._is_vowel_sound('Home') is False
+
+
+def test_check_grammar_patterns_article_for_home_and_ups():
+    # HOME 属 all-caps 可读词，冠词有两读（/h/ 与字母名 /eɪtʃ/），与 review.py 一致：a/an 均不报。
+    assert spell_checker_utils.check_grammar_patterns("used in a HOME HEALTHCARE ENVIRONMENT") == []
+    assert spell_checker_utils.check_grammar_patterns("used in an HOME HEALTHCARE ENVIRONMENT") == []
+
+    # UPS 不在可读词表内，仍按缩写字母名判定：正确搭配不报，错误搭配报出正确冠词。
+    assert spell_checker_utils.check_grammar_patterns("use a UPS for backup power") == []
+    ups_issues = spell_checker_utils.check_grammar_patterns("use an UPS for backup power")
+    assert [(i["original_text"], i["suggestion"]) for i in ups_issues] == [
+        ("an UPS", "建议改为: a UPS")
+    ]
+
+
+def test_check_grammar_patterns_handles_sentence_initial_articles():
+    # 句首大写冠词此前不进入匹配（An UPS 被整句跳过），大小写不敏感后应正常判定；
+    # 建议文本首字母随冠词还原，不输出 a UPS -> an UPS 这类大小写错乱。
+    lower_issues = spell_checker_utils.check_grammar_patterns("an UPS unit is supported")
+    upper_issues = spell_checker_utils.check_grammar_patterns("An UPS unit is supported")
+    assert [(i["original_text"], i["suggestion"]) for i in lower_issues] == [("an UPS", "建议改为: a UPS")]
+    assert [(i["original_text"], i["suggestion"]) for i in upper_issues] == [("An UPS", "建议改为: a UPS")]
+
+
+def test_check_grammar_patterns_skips_lone_uppercase_a_label():
+    # 单独的大写 A 是元件/端口/图注标签，不是冠词，不得按冠词判定产生 "an of" 类误报。
+    assert spell_checker_utils.check_grammar_patterns("Connects to the temperature control module A of module port A.") == []
+    assert spell_checker_utils.check_grammar_patterns("A\n\nAnti-shock label 24") == []
+
+
+def test_check_grammar_patterns_keeps_correct_sentence_initial_articles():
+    # 句首大写的正确用法进入匹配后仍不得误报。
+    cases = [
+        "An honest assessment of data quality is recommended.",
+        "Run the reaction for an hour, then perform an MRI scan.",
+        "An FDA-approved protocol should be followed strictly.",
+        "Wait an 8-hour stabilization period, then use a one-step calibration.",
+        "A user at the university requested the sample preparation protocol.",
+    ]
+    for text in cases:
+        assert spell_checker_utils.check_grammar_patterns(text) == [], text
+
+
+def test_is_vowel_sound_judges_hyphenated_abbreviation_by_head():
+    # 连字符复合词首段为全大写缩写时按缩写首字母判定，避免 An FDA-approved 被误报。
+    assert spell_checker_utils._is_vowel_sound("FDA-approved") is True
+    assert spell_checker_utils._is_vowel_sound("MRI-guided") is True
+    assert spell_checker_utils._is_vowel_sound("UPS-backed") is False
+
+
+def test_run_grammar_accepts_collective_noun_plural_subjects():
+    # 集合名词不带 -s 词尾，此前被判单数与 are 冲突；补入 IRREGULAR_PLURALS 后不再误报。
+    # 注意：这也意味着 "The staff is" 会被判为单数动词搭配复数主语，属该集合名词的已知取舍。
+    cases = [
+        "The staff are available on site.",
+        "All personnel are trained.",
+        "The crew are ready.",
+        "The cattle are grazing.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+
+def test_spatial_omics_is_not_reported_as_misspelling():
+    # omics 经 technical_terms.txt 与 TECH_TERMS_WHITELIST 双重收录，
+    # 且不再被 COMMON_MISSPELLINGS 映射为大写 Omics。
+    assert spell_checker_utils.is_whitelisted("omics") is True
+    assert "omics" not in spell_checker_utils.COMMON_MISSPELLINGS
+    assert spell_checker_utils.check_spelling(
+        "The spatial omics pipeline supports FASTQ input.", file_type=None
+    ) == []
+
+
+def test_article_judgment_is_shared_across_review_and_spell_checker():
+    from app.api import review as review_api
+    from app.utils.article_constants import abbrev_article
+
+    tokens = ["NOTE", "NAME", "HOME", "UPS", "NOTE1", "FDA-approved"]
+    judgments = {token: expected_article(token) for token in tokens}
+    assert judgments["HOME"] is None
+    assert judgments["UPS"] == "a"
+    assert judgments["NOTE"] == "an"
+    assert judgments["NAME"] == "an"
+    assert judgments["NOTE1"] == "a"
+    assert judgments["FDA-approved"] == "an"
+    for token in tokens:
+        assert spell_checker_utils._is_vowel_sound(token) is is_vowel_sound(token)
+        if token.isupper() and token.isalpha():
+            assert abbrev_article(token) == expected_article(token)
+
+    scan_tokens = ["NOTE", "NAME", "HOME", "UPS"]
+    for token in scan_tokens:
+        expected = expected_article(token)
+        for article in ("a", "an"):
+            text = f"Use {article} {token} before starting the run."
+            spell_hits = spell_checker_utils.check_grammar_patterns(text)
+            review_hits = [
+                issue for issue in review_api._run_manual_engineering_audit(text, file_type="md")
+                if issue.get("rule") == "DOC-GRAMMAR-002"
+            ]
+            if expected is None or article == expected:
+                assert spell_hits == [], (token, article, spell_hits)
+                assert review_hits == [], (token, article, review_hits)
+            else:
+                assert spell_hits, (token, article)
+                assert review_hits, (token, article)
+
+
+def test_check_spelling_skips_omics_family_terms():
+    issues = spell_checker_utils.check_spelling(
+        "The Spatial Omics workflow covers genomics, proteomics and metabolomics data."
+    )
+
+    assert all(issue["original_text"].lower() not in {
+        "omics", "genomics", "proteomics", "metabolomics",
+    } for issue in issues)
+
+
 def test_find_term_variant_issues_skips_when_correct_form_exists_in_document():
     issues = spell_checker_utils._find_term_variant_issues(
         "The High-throughput workflow is supported. Another note mentions highthroughput only in OCR text.",
@@ -252,3 +429,215 @@ def test_should_skip_spelling_issue_skips_mixedly_false_positive():
 
 def test_should_skip_spelling_issue_skips_nonfiltered_technical_term():
     assert spell_checker_utils._should_skip_spelling_issue("nonfiltered", "Use nonfiltered pipette tips for transfer.", file_type="pdf") is True
+
+
+def test_run_grammar_accepts_plural_subjects_in_proprietary_notice():
+    text = (
+        "This manual and the information contained herein are proprietary to Qingdao MGI Tech Co., Ltd., "
+        "and are intended solely for the contractual use of its customers. "
+        "Figures in this manual are for illustrative purpose only. "
+        "Trademarks, product, service, and company names mentioned in this manual are the property "
+        "of their respective companies."
+    )
+    errors = []
+
+    spell_check_api.run_grammar(text, errors)
+
+    assert errors == []
+
+
+def test_run_grammar_accepts_modifiers_between_subject_and_verb():
+    # 主语与动词之间夹入介词短语、并列成分、关系从句或结尾为 -ss 的单数名词时，不应报主谓不一致。
+    cases = [
+        "Once the pre-run wash and maintenance wash are completed, run another wash.",
+        "The chip and universal sequencing reaction kit are not used immediately.",
+        "A message that indicates the exceptions is displayed if the test fails.",
+        "This process is suitable for the extraction.",
+        "The data are analyzed automatically.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+
+def test_run_grammar_does_not_treat_line_break_fragments_as_pronouns():
+    errors = []
+
+    spell_check_api.run_grammar("Transfer the supernatant to a new tube.", errors)
+
+    assert errors == []
+
+
+def test_run_grammar_still_reports_provable_agreement_errors():
+    cases = {
+        "The tube are ready.": "are",
+        "The tubes is ready.": "is",
+        "It indicates that the icon are grayed out.": "are",
+        "There is many samples.": "is",
+    }
+    for text, expected in cases.items():
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert [text[e["start"]:e["end"]] for e in errors] == [expected], text
+
+
+def test_run_grammar_uses_noun_head_after_there_be():
+    cases = [
+        "If there are any special insert size requirements for the kit, contact us.",
+        "There is no sound of cracked ice during shaking.",
+        "There are many samples in the rack.",
+        "There is ice in the cartridge.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+
+def test_run_grammar_accepts_irregular_plural_subjects():
+    # 不规则复数不以 -s/-es 结尾，不得被当成单数而与 are/were 冲突。
+    cases = [
+        "The people are waiting outside.",
+        "The children are playing in the yard.",
+        "Several mice are in the cage.",
+        "The women are here.",
+        "The police are investigating.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+    # 确实用错单数动词时仍要报。
+    flagged = []
+    spell_check_api.run_grammar("The people is waiting outside.", flagged)
+    assert len(flagged) == 1
+
+
+def test_run_grammar_there_be_ignores_trailing_modifier_or_verb():
+    # there be 之后的名词短语常跟形容词或动词，中心语是短语内的名词而不是它们。
+    cases = [
+        "There are several options available.",
+        "If there are any temperature alarms, contact technical support.",
+        "If there are questions, contact us.",
+        "Verify that there are no bubbles remaining.",
+    ]
+    for text in cases:
+        errors = []
+
+        spell_check_api.run_grammar(text, errors)
+
+        assert errors == [], text
+
+
+def test_low_level_acronym_spacing_rule_ignores_math_and_ui_labels():
+    text = "Library input V(μL)= c(ng/μL)×106 N(bp)\n\nMetrics\nProgress(10/302)\n"
+
+    issues = spell_check_api._collect_low_level_rule_issues(text, "english")
+
+    assert all("缩写与括号" not in issue["description"] for issue in issues)
+
+
+def test_low_level_acronym_spacing_rule_still_flags_real_acronyms():
+    text = "Extract the DNA(1 μg) sample and run PCR(2 cycles)."
+
+    issues = spell_check_api._collect_low_level_rule_issues(text, "english")
+
+    flagged = [issue["original_text"] for issue in issues if "缩写与括号" in issue["description"]]
+    assert flagged == ["DNA(", "PCR("]
+
+
+def test_collect_punctuation_spacing_issues_flags_missing_space_after_period():
+    text = "Cool the lid to operating temperature.For these cyclers, wait."
+
+    issues = spell_check_api._collect_punctuation_spacing_issues(text)
+
+    assert [issue["original_text"] for issue in issues] == ["temperature.For"]
+    assert issues[0]["suggestion"] == "temperature. For"
+
+
+def test_collect_punctuation_spacing_issues_keeps_legal_abbreviations():
+    text = "Use e.g. this kit, the U.S. Army standard, and Fig.1 as shown in V3.0."
+
+    assert spell_check_api._collect_punctuation_spacing_issues(text) == []
+
+
+def test_collect_split_word_issues_uses_document_consistency():
+    text = "DNBSEQ-E25RS High-throughput Sequencing Set and DNBSEQ-E25RS High-throu ghput kit."
+
+    issues = spell_check_api._collect_split_word_issues(text)
+
+    assert [issue["original_text"] for issue in issues] == ["High-throu ghput"]
+    assert issues[0]["suggestion"] == "High-throughput"
+
+
+def test_collect_split_word_issues_keeps_normal_modifier_phrases():
+    text = "Displays real-time sequencing temperature and one-stop single-cell workflow."
+
+    assert spell_check_api._collect_split_word_issues(text) == []
+
+
+def test_collect_numeric_plural_issues_flags_prose_number_one():
+    text = "Rotate the cartridge upright and swing downward 1 times to bring the reagent up."
+
+    issues = spell_check_api._collect_numeric_plural_issues(text)
+
+    assert [issue["original_text"] for issue in issues] == ["1 times"]
+    assert issues[0]["suggestion"] == "1 time"
+
+
+def test_collect_numeric_plural_issues_keeps_tables_sizes_and_invariant_nouns():
+    text = (
+        "Reaction Buffer 100 uL/tube\u00d71 months Cat. No.: 940-0029; "
+        "size 4.1 inches; only 1 series is needed; repeat 1 time."
+    )
+
+    assert spell_check_api._collect_numeric_plural_issues(text) == []
+
+
+def test_run_grammar_flags_compound_subject_but_not_coordinated_list():
+    flagged = []
+    spell_check_api.run_grammar("If no report is generated, and Task exception are displayed.", flagged)
+
+    assert len(flagged) == 1
+
+    listed = []
+    spell_check_api.run_grammar(
+        "Flow cell ID, Throughput, and Expiration date are automatically filled in.", listed
+    )
+
+    assert listed == []
+
+
+def test_build_response_merges_same_start_duplicates():
+    text = "Disgestive\n\nBuffer 250 μL"
+    issues = [
+        {
+            "position": "0-18",
+            "category": "拼写/用词错误",
+            "source": "spellcheck",
+            "original_text": "Disgestive\n\nBuffer",
+            "description": "疑似错误词",
+        },
+        {
+            "position": "0-10",
+            "category": "拼写/用词错误",
+            "source": "spellcheck",
+            "original_text": "Disgestive",
+            "description": "疑似错误词",
+        },
+    ]
+
+    result = spell_check_api._build_response(text, issues)
+
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["word"] == "Disgestive"

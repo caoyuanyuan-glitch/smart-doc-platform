@@ -13,6 +13,7 @@ CHINESE_SPELLING_RULES = [
     {"original": "震荡混匀", "expected": "振荡混匀", "severity": "serious", "rule": "词语误用（振荡指往复运动）"},
     {"original": "试剂艙", "expected": "试剂仓", "severity": "serious", "rule": "错别字"},
     {"original": "以（表示已完成时）", "expected": "已", "severity": "serious", "rule": "词语误用"},
+    {"original": "交户", "expected": "交互", "severity": "serious", "rule": "错别字"},
     {"original": "手工冰箱", "expected": "冰箱", "severity": "serious", "rule": "不规范表述"},
     {"original": "拍摄模组", "expected": "识别模组", "severity": "general", "rule": "术语错误（拍摄模组不含扫码器）"},
 ]
@@ -37,7 +38,12 @@ CHINESE_GRAMMAR_RULES = [
 # ============================================
 # 4.4 中文术语规则
 # ============================================
-CHINESE_TERMINOLOGY_RULES = []
+CHINESE_TERMINOLOGY_RULES = [
+    {"pattern": r"手工冰箱", "original": "手工冰箱", "expected": "冰箱", "severity": "serious",
+     "rule": "不规范表述"},
+    {"pattern": r"拍摄模组", "original": "拍摄模组", "expected": "识别模组", "severity": "general",
+     "rule": "术语错误（拍摄模组不含扫码器）"},
+]
 
 # ============================================
 # 4.5 单位规则
@@ -98,8 +104,61 @@ ENGLISH_GRAMMAR_RULES = [
     {"pattern": r"\bfor\s+run\s+\w+", "expected": "for running", "severity": "suggestion", "rule": "for + 动词"},
     {"pattern": r"\bdesk\s+top\b", "expected": "desktop", "severity": "general", "rule": "单词拆分"},
     {"pattern": r"\bat\s+your\s+own\s+risk\b", "expected": "proceed with caution", "severity": "suggestion", "rule": "避免口语化表述"},
-    {"pattern": r"[a-zA-Z]、(?=[a-zA-Z])", "expected": ",", "severity": "serious", "rule": "中文顿号混入英文"},
 ]
+
+
+# ============================================
+# v2 对齐：P0 规则库 10 大分类视图
+# 中文 5 维：字词 / 句子 / 标点 / 段落 / 逻辑
+# 英文 5 维：拼写 / 句式 / 标点 / 语法 / 逻辑
+# ============================================
+
+# --- 中文·段落（v2 新增维度；初期可为空，由 T3 人工意见回流填充）---
+CHINESE_PARAGRAPH_RULES = []
+
+# --- 中文·逻辑（v2 新增维度；确定性部分已由 review.py _run_logic_integrity_audit 覆盖，此处不重复）---
+CHINESE_LOGIC_RULES = []
+
+# --- 英文·句式（v2 新增维度）---
+ENGLISH_SENTENCE_RULES = [
+    {"pattern": r"\bturn\s+on\s+it\b", "expected": "turn it on", "severity": "suggestion",
+     "rule": "短语动词词序（PDF 伪影优先走视觉复核）"},
+]
+
+# --- 英文·标点（v2 新增维度）---
+ENGLISH_PUNCTUATION_RULES = [
+    {"pattern": r"[a-zA-Z]、(?=[a-zA-Z])", "expected": ",", "severity": "serious",
+     "rule": "中文顿号混入英文"},
+]
+
+# --- 英文·逻辑（v2 新增维度；初期可为空）---
+ENGLISH_LOGIC_RULES = []
+
+# --- 10 大分类聚合视图（v2 第 2 节 P0 口径）---
+def _dedupe_rules(rules):
+    """同一维度内按 (原文, 期望) 去重，避免同一规则双跑重复上报。"""
+    seen, unique = set(), []
+    for rule in rules:
+        key = (rule.get("original") or rule.get("pattern"), rule.get("expected"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(rule)
+    return unique
+
+
+V2_RULE_CATEGORIES = {
+    "中文_字词": _dedupe_rules(list(CHINESE_TERMINOLOGY_RULES) + list(CHINESE_SPELLING_RULES)),
+    "中文_句子": list(CHINESE_GRAMMAR_RULES),
+    "中文_标点": list(CHINESE_PUNCTUATION_RULES),
+    "中文_段落": list(CHINESE_PARAGRAPH_RULES),
+    "中文_逻辑": list(CHINESE_LOGIC_RULES),
+    "英文_拼写": list(ENGLISH_CORRECT_SPELLINGS),
+    "英文_句式": list(ENGLISH_SENTENCE_RULES),
+    "英文_标点": list(ENGLISH_PUNCTUATION_RULES),
+    "英文_语法": list(ENGLISH_GRAMMAR_RULES),
+    "英文_逻辑": list(ENGLISH_LOGIC_RULES),
+}
 
 
 # ============================================
@@ -172,12 +231,42 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个专业的技术文档审核工程师，�
 九、中文顿号混入英文（严重）
 英文文档中不得出现中文顿号"，"。
 
+十、语义质量检查（中文文档重点，逐句执行）
+
+【冗余与多余】
+1. 删除无信息量的套话/引导语：如封面"关于本指南"、"以下将介绍"等可整体删除或压缩
+2. 删除句中冗余虚词：如"请点击"→"点击"、"将"字赘余（"将鼠标移至"→"鼠标移至"）
+3. 同一信息在前后章节重复描述时，后文应指出"与 xx 章重复"，不重复报告
+
+【表述准确性】
+4. 用词与界面/行为实际不符时报告，如"发出提示"应核实是否实为"播放提示音"
+5. 描述更像其他对象时报告，如把"进度条"描述成"状态显示"等近似但不准确的说法
+
+【信息完整性】
+6. 操作步骤缺后续动作时报告，如"点击关闭当前界面"应补充"并返回主界面"
+7. 步骤结果缺收尾动作时报告，如屏幕锁定类操作应补"并锁定屏幕"
+
+【一致性】
+8. 同一对象/动作在不同章节描述不一致时报告，指出两处写法，给出统一写法
+9. 同一术语/缩写的大小写全文必须一致，如 barcode/Barcode 混用、DNA/duallabel 混用
+10. 同类结构标点必须一致，如同一列表项有的用顿号有的用逗号
+
+【语气与方向】
+11. 操作步骤中不得添加"请"等敬语（除 UI 界面本身显示的提示外）；发现原句含"请"且非 UI 提示时报告
+12. 判断修改方向：AI 只建议删除/修正，不得把原文没有的错误反向添加
+
+【图表衔接】
+13. 表格/图与正文衔接处标点检查：表格后接正文时用句号，图题后接下文用句号
+
+【句子成分】
+14. 检查句子是否缺字/多字：如"系统设置界面吗"缺"点击关闭当前界面并返回主界面"；"重新修饰"缺"的"（"重新修饰的词"）
+
 【输出格式】
 请按以下JSON格式输出审核结果，不要输出其他内容：
 {{
   "issues": [
     {{
-      "type": "拼写|语法|标点|术语|单位|合规|格式",
+      "type": "拼写|语法|标点|术语|单位|合规|格式|冗余|表述不准确|信息不完整|一致性|语气|图表衔接|句子成分",
       "severity": "serious|general|suggestion",
       "location": "问题所在位置",
       "original": "原文内容",
@@ -203,13 +292,48 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个专业的技术文档审核工程师，�
 4. 海外英文手册仅提供 Email、未提供电话，默认视为可接受
 5. 英文句号位于闭引号外、弯引号与直引号混用，默认按 PDF 提取或风格差异处理
 6. 产品实际输出文件名中的占位符连写形式，例如 `ROINAMEquantification.csv`，默认视为可接受
-7. `following status`、`turn on it` 这类已被人工接受的 PDF 表达，优先走视觉复核，不直接上报"""
+7. `following status`、`turn on it` 这类已被人工接受的 PDF 表达，优先走视觉复核，不直接上报
+
+【语义类误报抑制规则】
+1. 语义类问题必须引用原文完整句子，不得仅凭单字/单词判断（"的"类缺字除外，须说明所在句子成分）
+2. "冗余/多余"类必须给出删后仍通顺的句子，否则不上报
+3. 方向相反类：仅当原文明显含该词时报告删除，不得建议添加原文没有的词
+4. 表格衔接类：仅当表格后紧跟正文且确实无句号时报告"""
+
+
+SEMANTIC_FEWSHOT_EXAMPLES = """
+【语义检查示例】（"原句 → 审核结论"形式）
+
+示例1（冗余）：
+原句：关于本指南，本手册介绍了 G99 系统的操作方法。
+结论：{"type":"冗余","severity":"suggestion","location":"封面","original":"关于本指南，","expected":"删除","rule":"无信息量引导语，可整体删除"}
+
+示例2（冗余虚词）：
+原句：请将样品放入离心机中。
+结论：{"type":"冗余","severity":"suggestion","original":"请","expected":"删除","rule":"操作步骤不加敬语'请'"}
+
+示例3（表述不准确）：
+原句：系统会发出提示声音。
+结论：{"type":"表述不准确","severity":"general","original":"发出提示声音","expected":"播放提示音","rule":"用词与实际不符，应为播放提示音"}
+
+示例4（信息不完整）：
+原句：点击关闭当前界面。
+结论：{"type":"信息不完整","severity":"general","original":"点击关闭当前界面","expected":"点击关闭当前界面并返回主界面","rule":"缺后续动作，应返回主界面"}
+
+示例5（一致性-大小写）：
+原句：barcode 扫描完成后，系统显示 Barcode 编号。
+结论：{"type":"一致性","severity":"general","original":"barcode...Barcode","expected":"统一为 Barcode","rule":"同一术语大小写不一致"}
+
+示例6（方向相反）：
+原句：请点击【开始】按钮。
+结论：{"type":"语气","severity":"suggestion","original":"请","expected":"删除","rule":"操作步骤中不加'请'（UI 提示除外）"}
+"""
 
 
 def build_system_prompt() -> str:
     """构建完整的System Prompt"""
     english_words = ", ".join(ENGLISH_CORRECT_SPELLINGS)
-    return SYSTEM_PROMPT_TEMPLATE.format(english_words=english_words)
+    return SYSTEM_PROMPT_TEMPLATE.format(english_words=english_words) + SEMANTIC_FEWSHOT_EXAMPLES
 
 
 def get_all_rules() -> dict:
@@ -224,4 +348,5 @@ def get_all_rules() -> dict:
         "english_spelling": ENGLISH_CORRECT_SPELLINGS,
         "english_grammar": ENGLISH_GRAMMAR_RULES,
         "british_american": BRITISH_AMERICAN_SPELLINGS,
+        "v2_categories": V2_RULE_CATEGORIES,
     }

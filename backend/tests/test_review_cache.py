@@ -8,6 +8,7 @@ from app.api import review_rules
 from app.crud import rule as crud_rule
 from app.crud import review as crud_review
 from app.review_engine import pipeline as review_pipeline
+from app.review_engine import false_positives
 from app.review_engine import validation as review_validation
 
 
@@ -97,7 +98,12 @@ def test_pdf_page_metadata_collects_suspicious_table_pages(monkeypatch):
         },
     )
 
-    metadata = review_api._extract_pdf_page_metadata(document, "fallback")
+    content = (
+        "版本  日期\n2.0  2026年7月15日\n1.0  2025年11月17日\n3"
+        "\n\f\n"
+        "正文内容\n图 1 系统组成\nDoc. No. H-020-001246-00"
+    )
+    metadata = review_api._extract_pdf_page_metadata(document, content)
     suspicious = review_api._collect_pdf_suspicious_pages(metadata)
 
     assert metadata["enabled"] is True
@@ -117,6 +123,27 @@ def test_run_filename_audit_skips_known_product_output_filename():
     )
 
     assert issues == []
+
+
+def test_run_filename_audit_skips_revision_and_absent_cover_product():
+    filename = "H-020-001368-00 MGIDL-G99RS 全自动样本加载仪快速操作指南_中文_RUO_WH-R02.pdf"
+    content = "触摸屏显示用户交互界面。长按【长按启动】按钮旁的指纹区域。"
+
+    issues = review_api._run_filename_audit(filename, content, "cn")
+
+    assert not any(issue["rule"] == "FILENAME-002" for issue in issues)
+
+
+def test_run_filename_audit_flags_conflicting_product_model():
+    issues = review_api._run_filename_audit(
+        "DNBSEQ-T7 操作指南.pdf",
+        "本指南适用于 DNBSEQ-T10 测序仪。",
+        "cn",
+    )
+
+    issue = next(item for item in issues if item["rule"] == "FILENAME-002")
+    assert issue["original_text"] == "DNBSEQ-T7"
+    assert "DNBSEQ-T10" in issue["description"]
 
 
 def test_resolve_compare_row_level_accepts_email_only_support_contact_for_english_manuals():
@@ -140,7 +167,7 @@ def test_review_cache_version_tracks_review_basis_files():
         assert path in review_api.REVIEW_CACHE_VERSION_FILES
 
     assert review_api.PROJECT_ROOT / "backend" / "app" / "crud" / "rule.py" in review_api.REVIEW_CACHE_VERSION_FILES
-    assert review_api.PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.json" in review_api.REVIEW_CACHE_VERSION_FILES
+    assert review_api.PROJECT_ROOT / "backend" / "seed" / "review_rule_library_seed.xlsx" in review_api.REVIEW_CACHE_VERSION_FILES
 
 
 def test_select_relevant_ai_review_basis_prefers_es_sections(monkeypatch):
@@ -265,18 +292,37 @@ def test_find_cached_completed_review_matches_cache_key(monkeypatch):
     assert summary["total"] == 3
 
 
-def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
-    payload = {
-        "source": "外部评审规则库",
-        "export_date": "2026-08-17",
-        "rules": [{
-            "rule_id": "R013",
-            "rule_content": "标点符号使用必须符合规范",
-            "category": "格式",
-            "severity": "一般",
-            "applicable_scenarios": ["PDF"],
-        }],
-    }
+def _write_seed_workbook(path, rules, source="外部评审规则库", export_date="2026-08-17"):
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = crud_rule.REVIEW_RULE_LIBRARY_SEED_SHEET
+    sheet.append([title for title in crud_rule.REVIEW_RULE_LIBRARY_SEED_COLUMNS.values()])
+    for rule in rules:
+        sheet.append([
+            rule["rule_id"],
+            rule.get("category", ""),
+            rule.get("severity", ""),
+            rule.get("rule_content", ""),
+            "、".join(rule.get("applicable_scenarios") or []),
+            "",
+        ])
+    meta = workbook.create_sheet(crud_rule.REVIEW_RULE_LIBRARY_SEED_META_SHEET)
+    meta.append(("来源", source))
+    meta.append(("导出日期", export_date))
+    workbook.save(path)
+    return path
+
+
+def test_seed_external_review_rules_updates_existing_rule(monkeypatch, tmp_path):
+    seed_path = _write_seed_workbook(tmp_path / "seed.xlsx", [{
+        "rule_id": "R013",
+        "rule_content": "标点符号使用必须符合规范",
+        "category": "格式",
+        "severity": "一般",
+        "applicable_scenarios": ["PDF"],
+    }])
     existing = SimpleNamespace(
         rule_no="EXT-R013",
         category="旧分类",
@@ -294,10 +340,7 @@ def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
     monkeypatch.setattr(
         crud_rule,
         "REVIEW_RULE_LIBRARY_SEED_PATH",
-        SimpleNamespace(
-            exists=lambda: True,
-            read_text=lambda encoding="utf-8": json.dumps(payload, ensure_ascii=False),
-        ),
+        seed_path,
     )
     monkeypatch.setattr(crud_rule, "get_rule_by_no", lambda db_obj, rule_no: existing if rule_no == "EXT-R013" else None)
 
@@ -307,8 +350,93 @@ def test_seed_external_review_rules_updates_existing_rule(monkeypatch):
     assert existing.description == "标点符号使用必须符合规范"
     assert existing.regex == "(?!)"
     assert existing.severity == "general"
-    assert existing.language == "both"
+    # 外部规则库是中文评审规则库，语义类规则不参与匹配且按中文规则处理
+    assert existing.language == "cn"
     assert commits == [True]
+
+
+def test_shipped_seed_workbook_loads_all_rules():
+    meta, rules = crud_rule._load_review_rule_library_seed()
+
+    assert len(rules) == 29
+    assert meta["来源"] == "飞书多维表格 - 技术文档评审规则库"
+    assert meta["导出日期"] == "2026-06-18"
+    assert rules[0]["rule_id"] == "R001"
+    assert rules[0]["applicable_scenarios"] == ["通用"]
+    assert all(rule["rule_id"] and rule["rule_content"] for rule in rules)
+
+
+def test_seed_external_review_rules_reads_provenance_from_meta_sheet(monkeypatch, tmp_path):
+    seed_path = _write_seed_workbook(
+        tmp_path / "seed.xlsx",
+        [{
+            "rule_id": "R900",
+            "rule_content": "标点符号使用必须符合规范",
+            "category": "格式",
+            "severity": "严重",
+            "applicable_scenarios": ["仪器说明书", "试剂说明书"],
+        }],
+        source="测试规则库",
+        export_date="2026-01-02",
+    )
+    added = []
+    db = SimpleNamespace(add=added.append, commit=lambda: None)
+
+    monkeypatch.setattr(crud_rule, "REVIEW_RULE_LIBRARY_SEED_PATH", seed_path)
+    monkeypatch.setattr(crud_rule, "get_rule_by_no", lambda db_obj, rule_no: None)
+
+    created = crud_rule.seed_external_review_rules(db)
+
+    assert created == 1
+    rule = added[0]
+    assert rule.rule_no == "EXT-R900"
+    assert rule.severity == "serious"
+    assert rule.example == "来源: 测试规则库 | 适用场景: 仪器说明书、试剂说明书"
+    assert rule.audit_basis == "测试规则库 | 导出日期: 2026-01-02"
+
+
+def test_convert_rule_content_to_regex_never_derives_pattern_from_prose():
+    # 规则描述本身不能变成扫描模式：这类“正则”只能匹配规则自身的措辞
+    prose_rules = [
+        "表格内容显示不全，提醒修改表格宽度",
+        "需包含产品中有害物质的名称及含有物质表",
+        "警告/提示/危险/注意图标文字底部需与右侧文字底部对齐",
+        "正确表述是 \"For details about xxx, refer to xxx.\" 而不是 \"Details about XXX refer to XXX.\"",
+    ]
+
+    for rule_content in prose_rules:
+        assert crud_rule._convert_rule_content_to_regex(rule_content) == "(?!)"
+
+
+def test_convert_rule_content_to_regex_disables_false_positive_suppression_rules():
+    assert crud_rule._convert_rule_content_to_regex("°C与℃视觉无区别，不列为错误") == "(?!)"
+    assert crud_rule._convert_rule_content_to_regex("PDF转Word导致的格式丢失属于转换 artifact，不列为错误") == "(?!)"
+
+
+def test_convert_rule_content_to_regex_keeps_detectable_rules():
+    assert crud_rule._convert_rule_content_to_regex(
+        "所有文档中涉及的公司官网地址必须使用统一规范的正确地址，不得使用旧版/错误地址"
+    ) == r"https?://[^\s]+mgi[^\s]*"
+    assert crud_rule._convert_rule_content_to_regex(
+        "避免\"不避免\"类语法错误。\"如操作不当或不避免\"不通顺"
+    ) == r"不避免"
+
+
+def test_convert_rule_content_to_regex_does_not_flag_correct_term():
+    # 规则是“限期”应改为“期限”，正则不能反过来命中正确的“期限”
+    regex = crud_rule._convert_rule_content_to_regex(
+        "\"限期\"建议改为\"期限\"或\"使用寿命\"，\"使用限期\"表述不够准确"
+    )
+
+    assert regex == "限期"
+    assert re.search(regex, "使用限期") is not None
+    assert re.search(regex, "服务期限为一年") is None
+
+
+def test_rule_language_for_pattern_marks_chinese_patterns_as_cn():
+    assert crud_rule._rule_language_for_pattern("(?!)") == "cn"
+    assert crud_rule._rule_language_for_pattern("限期") == "cn"
+    assert crud_rule._rule_language_for_pattern(r"https?://[^\s]+mgi[^\s]*") == "both"
 
 
 def test_convert_rule_content_to_regex_disables_ui_bracket_semantic_rule():
@@ -756,7 +884,11 @@ def test_finalize_review_issues_defaults_to_pipeline_only(monkeypatch):
         "_filter_ai_issues_without_document_evidence_with_reasons",
         lambda issues, content: (list(issues), {"missing_evidence": 1}),
     )
-    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_apply_false_positive_signature_penalty",
+        lambda issues, signatures, payloads=None: (list(issues), {"exact": 0, "fingerprint": 0}),
+    )
 
     def fake_false_positive(issues):
         calls.append("false_positive")
@@ -829,7 +961,11 @@ def test_finalize_review_issues_records_ai_evidence_drop_samples(monkeypatch):
 
     monkeypatch.setattr(review_api, "dedupe_issues_by_original", lambda issues: list(issues))
     monkeypatch.setattr(review_api, "_sanitize_issue_suggestions", lambda issues: list(issues))
-    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_apply_false_positive_signature_penalty",
+        lambda issues, signatures, payloads=None: (list(issues), {"exact": 0, "fingerprint": 0}),
+    )
     monkeypatch.setattr(review_api, "pipeline_select_review_issues", lambda issues: list(issues))
 
     issues, diagnostics = review_api._finalize_review_issues(
@@ -861,13 +997,18 @@ def test_false_positive_signature_filter_drops_matched_issues():
         {"rule": "SPELL", "category": "拼写", "original_text": "digestive", "source": "spellcheck"},
     ]
 
-    filtered = review_api._apply_false_positive_signature_penalty(
+    filtered, hit_stats = review_api._apply_false_positive_signature_penalty(
         issues,
         {"SPELL|拼写|consumbles"},
     )
 
-    assert len(filtered) == 1
-    assert filtered[0]["original_text"] == "digestive"
+    assert hit_stats["exact"] == 1
+    assert hit_stats["fingerprint"] == 0
+    assert len(filtered) == 2
+    marked = next(item for item in filtered if item["original_text"] == "consumbles")
+    kept = next(item for item in filtered if item["original_text"] == "digestive")
+    assert marked.get("possible_false_positive") is True
+    assert kept.get("possible_false_positive") is not True
 
 
 def test_sync_false_positive_memory_adds_and_removes_entries():
@@ -952,13 +1093,17 @@ def test_false_positive_penalty_keeps_same_text_on_different_rule():
         {"rule": "R013", "category": "术语", "original_text": "consumbles", "source": "ai"},
     ]
 
-    filtered = review_api._apply_false_positive_signature_penalty(
+    filtered, hit_stats = review_api._apply_false_positive_signature_penalty(
         issues,
         {"SPELL|拼写|consumbles"},
     )
 
-    assert len(filtered) == 1
-    assert filtered[0]["rule"] == "R013"
+    assert hit_stats["exact"] == 1
+    assert len(filtered) == 2
+    spell_issue = next(item for item in filtered if item["rule"] == "SPELL")
+    term_issue = next(item for item in filtered if item["rule"] == "R013")
+    assert spell_issue.get("possible_false_positive") is True
+    assert term_issue.get("possible_false_positive") is not True
 
 
 def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
@@ -967,10 +1112,11 @@ def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
         {
             "source": "ai",
             "severity": "general",
-            "category": "术语",
+            # P1-A: 只有视觉/版式类问题才进入视觉复核，文本类问题会被入口跳过
+            "category": "表格/版式",
             "original_text": "注册手册号",
             "context": "输入注册手册号后继续。",
-            "description": "疑似术语错误",
+            "description": "截图疑似版式异常",
             "suggestion": "改为注册手机号",
             "position": json.dumps({"page_number": 2}, ensure_ascii=False),
         },
@@ -994,7 +1140,7 @@ def test_apply_pdf_visual_verification_filters_rejected_ai_issue(monkeypatch):
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "reject",
             "reason": "重复文本层伪影",
             "confidence": 92,
@@ -1038,7 +1184,7 @@ def test_apply_pdf_visual_verification_adds_confirmed_page_candidate_issue(monke
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "confirm",
             "reason": "表格列宽分布不均，页面显示拥挤",
             "confidence": 88,
@@ -1082,7 +1228,7 @@ def test_apply_pdf_visual_verification_adds_manual_page_issue_on_visual_error(mo
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "error",
             "reason": "visual model unavailable",
             "confidence": 0,
@@ -1113,7 +1259,7 @@ def test_apply_pdf_visual_verification_filters_known_quote_mapping_artifact_afte
         {
             "source": "ai",
             "severity": "general",
-            "category": "格式规范",
+            "category": "表格/版式",
             "original_text": '“Run settings".',
             "context": 'The text layer shows “Run settings". in the UI message.',
             "description": '引号和句号位置疑似异常',
@@ -1130,7 +1276,7 @@ def test_apply_pdf_visual_verification_filters_known_quote_mapping_artifact_afte
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 61,
@@ -1154,7 +1300,7 @@ def test_apply_pdf_visual_verification_filters_known_following_status_artifact_a
         {
             "source": "ai",
             "severity": "general",
-            "category": "语言质量",
+            "category": "表格/版式",
             "original_text": 'following status',
             "context": 'Check the following status of the module.',
             "description": '短语表达疑似异常',
@@ -1171,7 +1317,7 @@ def test_apply_pdf_visual_verification_filters_known_following_status_artifact_a
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 58,
@@ -1195,7 +1341,7 @@ def test_apply_pdf_visual_verification_filters_known_turn_on_it_artifact_after_u
         {
             "source": "ai",
             "severity": "general",
-            "category": "语言质量",
+            "category": "表格/版式",
             "original_text": 'turn on it',
             "context": 'Press the switch and turn on it before use.',
             "description": '短语表达疑似异常',
@@ -1212,7 +1358,7 @@ def test_apply_pdf_visual_verification_filters_known_turn_on_it_artifact_after_u
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 57,
@@ -1253,7 +1399,7 @@ def test_apply_pdf_visual_verification_filters_missing_icon_text_layer_artifact_
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图中控件可见，但文本层无法确认",
             "confidence": 55,
@@ -1276,7 +1422,7 @@ def test_apply_pdf_visual_verification_filters_duplicated_text_layer_artifact_af
         {
             "source": "ai",
             "severity": "general",
-            "category": "重复内容",
+            "category": "表格/版式",
             "original_text": '一旦您开始使',
             "context": '一旦您开始使 一旦您开始使 用本软件',
             "description": '重复文本层伪影',
@@ -1293,7 +1439,7 @@ def test_apply_pdf_visual_verification_filters_duplicated_text_layer_artifact_af
     monkeypatch.setattr(
         review_api.ai_client,
         "verify_review_issue_from_image",
-        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify": {
+        lambda image_bytes, issue_payload, page_number=None, review_id=None, request_label="review.visual_verify", provider="kimi": {
             "decision": "uncertain",
             "reason": "截图证据不足",
             "confidence": 54,
@@ -1323,7 +1469,11 @@ def test_finalize_review_issues_can_enable_legacy_post_filters(monkeypatch):
         "_filter_ai_issues_without_document_evidence_with_reasons",
         lambda issues, content: (list(issues), {}),
     )
-    monkeypatch.setattr(review_api, "_apply_false_positive_signature_penalty", lambda issues, signatures: list(issues))
+    monkeypatch.setattr(
+        review_api,
+        "_apply_false_positive_signature_penalty",
+        lambda issues, signatures, payloads=None: (list(issues), {"exact": 0, "fingerprint": 0}),
+    )
 
     def fake_false_positive(issues):
         calls.append("false_positive")
@@ -2255,13 +2405,13 @@ def test_pipeline_filters_visual_layout_external_rule_issue():
     assert selected == []
 
 
-def test_run_english_heuristic_audit_detects_this_instructions_grammar_issue():
+def test_run_english_heuristic_audit_keeps_instructions_for_use_title():
     issues = review_api._run_english_heuristic_audit(
         "This instructions for use describes how to perform sequencing.",
         file_type="pdf",
     )
 
-    assert any(issue.get("rule") == "GRAMMAR-007" for issue in issues)
+    assert not any(issue.get("rule") == "GRAMMAR-007" for issue in issues)
 
 
 def test_run_english_heuristic_audit_keeps_official_global_site():
@@ -2310,6 +2460,38 @@ def test_run_manual_engineering_audit_detects_missing_space_before_parentheses()
     )
 
     assert any(issue["rule"] == "DOC-FMT-003" and issue["original_text"] == "Distribution(TB)" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_clean_as_noun_after_preposition():
+    issues = review_api._run_manual_engineering_audit(
+        "Ensure that the device is powered off before clean or disinfection.",
+        file_type="pdf",
+    )
+
+    assert any(
+        issue["rule"] == "DOC-GRAM-002"
+        and issue["original_text"] == "before clean"
+        and "before cleaning" in issue["suggestion"]
+        for issue in issues
+    )
+
+
+def test_run_manual_engineering_audit_detects_inconsistent_maintenance_terms():
+    content = (
+        "Weekly disinfection\n\n"
+        "Perform the following steps:\n\n"
+        "1. Wipe the device.\n\n"
+        "Monthly cleaning\n\n"
+        "Perform the following steps:\n\n"
+        "1. Wipe the device.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert any(
+        issue["rule"] == "DOC-TERM-002" and issue["original_text"] == "Monthly cleaning"
+        for issue in issues
+    )
 
 
 def test_run_manual_engineering_audit_detects_missing_space_before_units():
@@ -2361,7 +2543,44 @@ def test_run_manual_engineering_audit_detects_a_appropriate():
         file_type="pdf",
     )
 
-    assert any(issue["rule"] == "DOC-GRAM-002" for issue in issues)
+    assert any(issue["rule"] == "DOC-GRAM-009" for issue in issues)
+
+
+def test_run_manual_engineering_audit_suggests_singular_task_exception():
+    issues = review_api._run_manual_engineering_audit(
+        "If no report is generated, and Task exception are displayed.",
+        file_type="pdf",
+    )
+
+    assert any(
+        issue["rule"] == "DOC-GRAM-004"
+        and issue["suggestion"] == "Task exception is displayed"
+        for issue in issues
+    )
+
+
+def test_run_manual_engineering_audit_skips_article_rule_for_all_caps_wordlike_terms():
+    # HOME 属 all-caps 可读词，不进入首字母冠词分支，避免 an HOME → a HOME 误报。
+    for text in [
+        "used in a HOME HEALTHCARE ENVIRONMENT",
+        "used in an HOME HEALTHCARE ENVIRONMENT",
+        "Tap HOME to return.",
+        "Tap an HOME button.",
+    ]:
+        issues = review_api._run_manual_engineering_audit(text, file_type="pdf")
+        assert [
+            issue for issue in issues
+            if issue["rule"] == "DOC-GRAMMAR-002" and "HOME" in (issue["original_text"] or "").upper()
+        ] == [], text
+
+    # UPS 不在可读词表内，仍按缩写字母名判定：an UPS 应报为 a UPS。
+    ups_issues = review_api._run_manual_engineering_audit(
+        "Connect an UPS to the port.", file_type="pdf",
+    )
+    assert [
+        (issue["original_text"], issue["suggestion"])
+        for issue in ups_issues if issue["rule"] == "DOC-GRAMMAR-002"
+    ] == [("an UPS", "a UPS")]
 
 
 def test_run_manual_engineering_audit_detects_library_spelling():
@@ -2391,6 +2610,72 @@ def test_run_manual_engineering_audit_detects_by_use():
     assert any(issue["rule"] == "DOC-GRAM-003" for issue in issues)
 
 
+def test_run_manual_engineering_audit_detects_deleted_item_left_in_body():
+    content = (
+        "Revision history\n"
+        "Version Date Description\n"
+        "3.0 July 14, 2026\n"
+        "y Deleted MDA T-Reagent (App-C)\n"
+        "y Updated the MGI website\n"
+        "About the sequencing set\n"
+        "Cat. No. Name Model Version\n"
+        "940-002933-00 DNBSEQ-E25RS High-throughput Sequencing Set App-C FCL PE150 1.0\n"
+        "Chapter 4 Making DNBs\n"
+        "Component Specification\n"
+        "MDA T-Reagent 0.32 mL/tubex1\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    revision_issues = [issue for issue in issues if issue["rule"] == "DOC-REVISION-001"]
+    assert revision_issues
+    assert revision_issues[0]["original_text"] == "MDA T-Reagent"
+
+
+def test_run_manual_engineering_audit_detects_message_indicating_quote():
+    issues = review_api._run_manual_engineering_audit(
+        "Returning to the Choose scheme interface and selecting X, a message indicating that "
+        "Are you sure you want to quit? Loaded consumables shall be discarded once offloaded is displayed.",
+        file_type="pdf",
+    )
+
+    quote_issues = [issue for issue in issues if issue["rule"] == "DOC-QUOTE-001"]
+    assert quote_issues
+    assert quote_issues[0]["original_text"] == "a message indicating that Are you sure you want to quit?"
+
+
+def test_run_manual_engineering_audit_detects_check_whether_clause():
+    issues = review_api._run_manual_engineering_audit(
+        "2. Check the well whose rubber stopper falls off or tilts.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-GRAM-008" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_kit_cat_no_in_overview_check():
+    content = (
+        "About the sequencing set\n"
+        "Cat. No. Name Model Version\n"
+        "940-002930-00 DNBSEQ-E25RS High-throughput Sequencing Set FCL SE100 1.0\n"
+        "940-002931-00 DNBSEQ-E25RS High-throughput Sequencing Set FCL SE150 1.0\n"
+        "940-002932-00 DNBSEQ-E25RS High-throughput Sequencing Set App-C FCL SE100 1.0\n"
+        "940-002933-00 DNBSEQ-E25RS High-throughput Sequencing Set App-C FCL PE150 1.0\n"
+        "Chapter 4 Making DNBs\n"
+        + "The reagent kit components are listed below for reference only. " * 40 + "\n"
+        "Table 2 DNBSEQ-E25RS High-throughput Sequencing Kit (FCL SE100)\n"
+        "Cat. No.: 940-002926-00\n"
+        "Table 3 DNBSEQ-E25RS High-throughput Sequencing Set (FCL PE150)\n"
+        "Cat. No.: 940-002934-00\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    originals = {issue["original_text"] for issue in issues if issue["rule"] == "DOC-CATNO-003"}
+
+    assert "940-002926-00" not in originals
+    assert "940-002934-00" in originals
+
+
 def test_run_manual_engineering_audit_detects_missing_data_placeholder():
     content = (
         "About the sequencing set\n"
@@ -2406,6 +2691,243 @@ def test_run_manual_engineering_audit_detects_missing_data_placeholder():
     issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
 
     assert any(issue["rule"] == "DOC-DATA-001" and issue["original_text"] == "About" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_missing_space_after_sentence_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "Please check the installation.r before use. Tap [Run Wizard].On the interface. "
+        "Store at -20℃.Do not refreeze. Timeout is 30 min.Then stop.",
+        file_type="pdf",
+    )
+
+    space_issues = [issue for issue in issues if issue["rule"] == "DOC-SPACE-001"]
+    originals = {issue["original_text"] for issue in space_issues}
+
+    assert "installation.r" in originals
+    assert "].O" in originals
+    assert "℃.D" in originals
+    assert "n.T" in originals
+
+
+def test_run_manual_engineering_audit_detects_adjacent_fullwidth_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "下面显示以下测量结果：。请确认。",
+        file_type="pdf",
+    )
+
+    punct_issues = [issue for issue in issues if issue["rule"] == "DOC-PUNCT-002"]
+
+    assert len(punct_issues) == 1
+    assert punct_issues[0]["original_text"] == "：。"
+
+
+def test_run_manual_engineering_audit_keeps_punctuation_split_by_whitespace():
+    issues = review_api._run_manual_engineering_audit(
+        "下面显示以下测量结果：\n。请确认。",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-PUNCT-002" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_missing_space_after_clause_punctuation():
+    issues = review_api._run_manual_engineering_audit(
+        "Add 5 mL of buffer,then incubate. The device is powered on;Check the software. "
+        "Figure 1:Add the reagent. Prepare Fast Wash 2:Remove the cap.",
+        file_type="pdf",
+    )
+
+    space_issues = [issue for issue in issues if issue["rule"] == "DOC-SPACE-004"]
+    originals = {issue["original_text"] for issue in space_issues}
+
+    assert "buffer,t" in originals
+    assert "on;C" in originals
+    assert "1:A" in originals
+    assert "2:R" in originals
+
+
+def test_run_manual_engineering_audit_skips_label_value_and_time_colons():
+    issues = review_api._run_manual_engineering_audit(
+        "Contact support at: US:US-TechSupport@example.com or Canada:CA-TechSupport@example.com. "
+        "Fill in the date as xxxx/xx/xx xx:xx in the form. Ratio 1:2 was used. "
+        "Declare the root element xmlns:MadCap namespace and the <dc:Title> attribute. "
+        "Findings include 吸头;封闭液去除塞;DNB;PCR 管 and 更换;吸取;转移;标记. "
+        "Refer to manual H-020-001198-00;D4 for details.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-SPACE-004" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_figure_placeholder_time_masks():
+    issues = review_api._run_manual_engineering_audit(
+        "The interface shows XX/XX/XXXX XX:XX:XX in the header. "
+        "Prepare Fast Wash 2:Remove the cap.",
+        file_type="pdf",
+    )
+
+    originals = {issue["original_text"] for issue in issues if issue["rule"] == "DOC-SPACE-004"}
+
+    assert "2:R" in originals
+    assert not any("X:" in original or ":X" in original for original in originals)
+
+
+def test_run_manual_engineering_audit_skips_numeric_parenthesis_ui_labels():
+    issues = review_api._run_manual_engineering_audit(
+        "The interface shows Progress(10/302) after the first cycle.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-FMT-003" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_table_scramble_one_months():
+    scrambled = review_api._run_manual_engineering_audit(
+        "Stop DNB Reaction Buffer 100 µL/tube×1 months\n\nCat. No.: 940-002927-00",
+        file_type="pdf",
+    )
+    assert not any(issue["rule"] == "DOC-GRAMMAR-001" for issue in scrambled)
+
+    prose = review_api._run_manual_engineering_audit(
+        "Hold the reagent cartridge upright and swing downward 1 times gently.",
+        file_type="pdf",
+    )
+    assert any(issue["rule"] == "DOC-GRAMMAR-001" for issue in prose)
+
+
+def test_pipeline_drops_figure_placeholder_masks_but_keeps_explicit_markers():
+    placeholder_masks = [
+        "XXXXXXXXXXX",
+        "XX/XX/XXXX XX:XX:XX",
+        "Username XXXXXXXX",
+        "Flow cell ID AXXXXXXX",
+        "Read1 Read2 Barcode1 Barcode2 XX XX X X",
+        "SNR Image 1: XX Image 2: XX Q30 XX% FIT XX% BIC XX%",
+        "xxxx xxxx",
+    ]
+    issues = [
+        {
+            "rule": "Unreplaced release placeholder",
+            "category": "格式规范",
+            "source": "ai",
+            "severity": "serious",
+            "original_text": original,
+            "suggestion": "Replace placeholder with a representative example value",
+            "description": "Placeholder text should be replaced before release",
+            "confidence": 90,
+        }
+        for original in placeholder_masks
+    ]
+    issues.append({
+        "rule": "Unreplaced release placeholder",
+        "category": "格式规范",
+        "source": "ai",
+        "severity": "serious",
+        "original_text": "Status TBD before release",
+        "suggestion": "Replace placeholder with actual content",
+        "description": "Unreplaced release placeholder",
+        "confidence": 90,
+    })
+    issues.append({
+        "rule": "Placeholder text preceding figure caption",
+        "category": "格式规范",
+        "source": "ai",
+        "severity": "suggestion",
+        "original_text": "Release note pending 待补充",
+        "suggestion": "Remove placeholder text",
+        "description": "Placeholder text preceding figure caption",
+        "confidence": 60,
+    })
+    issues.append({
+        "rule": "CYY-CN-PLACEHOLDER-001",
+        "category": "占位符残留",
+        "source": "rule",
+        "severity": "serious",
+        "original_text": "XX/XX/XXXX",
+        "suggestion": "请替换为正式内容或删除该占位符",
+        "description": "文档中仍存在明显占位符残留，发布前需要替换为正式文本。",
+        "confidence": 97,
+    })
+    issues.append({
+        "rule": "CYY-CN-MATERIAL-001",
+        "category": "物料编码",
+        "source": "rule",
+        "severity": "serious",
+        "original_text": "00XXXX-00",
+        "suggestion": "请申请并替换为正式物料编码",
+        "description": "文档中仍存在 00XXXX 类物料编码占位符，发布前需要替换为正式编号。",
+        "confidence": 96,
+    })
+
+    for issue in issues[:-4]:
+        assert review_pipeline.is_noise(dict(issue)) is True
+    assert false_positives.rulebook_false_positive_reason(issues[-4]) is None
+    assert false_positives.rulebook_false_positive_reason(issues[-3]) is None
+    assert false_positives.rulebook_false_positive_reason(issues[-2]) == "figure_placeholder_mask"
+    assert false_positives.rulebook_false_positive_reason(issues[-1]) is None
+
+    selected = review_pipeline.select_review_issues([dict(issue) for issue in issues])
+    originals = {issue["original_text"] for issue in selected}
+
+    for original in placeholder_masks:
+        assert original not in originals
+    assert "XX/XX/XXXX" not in originals
+    assert "Status TBD before release" in originals
+    assert "00XXXX-00" in originals
+
+
+def test_pipeline_drops_substitution_rule_without_wrong_term_in_text():
+    # 知识库条目「试剂舱 → 试剂仓」被 AI 套用到正文的“试剂槽”上，属臆造错误。
+    hallucinated = {
+        "source": "ai",
+        "rule": "试剂舱 → 试剂仓",
+        "category": "术语一致性",
+        "severity": "general",
+        "original_text": "准备测序试剂槽",
+        "context": "第5 章 准备测序试剂槽 13",
+        "suggestion": "准备测序试剂仓",
+        "description": "",
+        "audit_basis": "审核规则一：试剂舱/试剂槽应为试剂仓",
+        "confidence": 75,
+    }
+    assert review_pipeline.hallucinated_substitution_term(hallucinated) == "试剂舱"
+    assert review_pipeline.is_noise(dict(hallucinated)) is True
+
+    # 原文确实出现该错词时，纠错建议必须保留。
+    genuine = {
+        "source": "ai",
+        "rule": "试剂舱 → 试剂仓",
+        "category": "术语一致性",
+        "severity": "serious",
+        "original_text": "试剂舱门自动打开",
+        "context": "此时试剂舱门自动打开",
+        "suggestion": "试剂仓门自动打开",
+        "description": "",
+        "audit_basis": "审核规则一：试剂舱 → 试剂仓",
+        "confidence": 90,
+    }
+    assert review_pipeline.hallucinated_substitution_term(genuine) is None
+    assert review_pipeline.is_noise(dict(genuine)) is False
+
+
+def test_run_manual_engineering_audit_skips_abbreviation_and_domain_periods():
+    issues = review_api._run_manual_engineering_audit(
+        "Use a tube (e.g.next tube). Open manual.pdf and visit www.mgi-tech.com. "
+        "Refer to the U.S.A office. Run node.js and read config.yaml or data.json. "
+        "See Fig.3 and Section 3.2. Inc.Ltd approved it. Edit runtime.env before start.",
+        file_type="pdf",
+    )
+
+    assert not any(issue["rule"] == "DOC-SPACE-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_split_microliter_symbol():
+    issues = review_api._run_manual_engineering_audit(
+        "Pipette 10 μ L of the sample into the tube.",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-SPACE-005" and issue["original_text"] == "μ L" for issue in issues)
 
 
 def test_run_chinese_human_baseline_rules_detects_temperature_range():
@@ -2609,6 +3131,104 @@ def test_run_chinese_human_baseline_rules_detects_cable_typo():
     assert any(issue["rule"] == "CYY-CN-SPELL-005" for issue in issues)
 
 
+def test_run_chinese_human_baseline_rules_detects_jiaohu_typo():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "触摸屏 显示用户交户界面。",
+    )
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-SPELL-007")
+    assert issue["original_text"] == "交户"
+    assert "交互" in issue["suggestion"]
+
+
+def test_run_chinese_human_baseline_rules_detects_similar_ui_labels():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "主界面显示【长按开启】。\n操作时请长按【长按启动】按钮旁的指纹区域。",
+    )
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-UI-002")
+    assert "长按开启" in issue["original_text"]
+    assert "长按启动" in issue["original_text"]
+
+
+def test_run_chinese_human_baseline_rules_ignores_similar_english_ui_codes():
+    issues = review_api._run_chinese_human_baseline_rules(
+        "载片类型包括：【FTN】、【FTS】、【FTL】。",
+    )
+
+    assert not any(issue["rule"] == "CYY-CN-UI-002" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_ignores_parallel_menu_labels():
+    # 共享前缀但差异 2 字的并列菜单项/参数字段属于不同功能命名，不是同一动作的用词不统一
+    issues = review_api._run_chinese_human_baseline_rules(
+        "1. 点击 >【设置】>【系统设置】>【系统时间】。\n\n"
+        "参数 说明\n\n【测序类型】 可选择测序类型。\n\n【测序方案】 输入测序方案名称。\n\n"
+        "【Barcode管理】 管理 Barcode。\n\n【Barcode位置】 根据测序类型自动填充。",
+    )
+
+    assert not any(issue["rule"] == "CYY-CN-UI-002" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_ignores_enumerated_ui_labels():
+    # 差异部分含拉丁字母/数字的并列枚举标签（识别结果（DNA）/（RNA）、短读长1链/2链）
+    # 属于带区分意义的正常命名，不是同一动作的用词不统一
+    issues = review_api._run_chinese_human_baseline_rules(
+        "结果包括【识别结果（DNA）】和【识别结果（RNA）】。\n"
+        "路径包括【短读长1链数据文件路径】和【短读长2链数据文件路径】。",
+    )
+
+    assert not any(issue["rule"] == "CYY-CN-UI-002" for issue in issues)
+
+
+def test_detect_page_number_sequence_issues_is_language_neutral():
+    content = "Chapter A\n01\fChapter B\n02\fChapter C\n01\f"
+
+    issues = review_api._detect_page_number_sequence_issues(content)
+
+    assert len(issues) == 1
+    assert issues[0]["rule"] == "CYY-CN-PAGE-001"
+    assert issues[0]["category"] == "页码异常"
+
+
+def test_run_chinese_human_baseline_rules_detects_wrong_step_page_reference():
+    content = (
+        "具体操作，参考第2页“加载DNB”步骤5。\n01\f"
+        "加载DNB\n1. 打开加载仪的翻盖。\n02\f"
+        "4. 轻轻按压翻盖。\n5. 上下滑动主界面，选择载片类型。\n03"
+    )
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-REF-005")
+    assert "步骤5" in issue["original_text"]
+    assert "第 3 页" in issue["suggestion"]
+
+
+def test_run_chinese_human_baseline_rules_keeps_matching_step_page_reference():
+    content = (
+        "具体操作，参考第2页“加载DNB”步骤1。\n01\f"
+        "加载DNB\n1. 打开加载仪的翻盖。\n02\f"
+        "4. 轻轻按压翻盖。\n5. 上下滑动主界面，选择载片类型。\n03"
+    )
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-REF-005" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_skips_ambiguous_section_reference():
+    # 同名标题在正文中出现两次（如目录 + 章节），无法确定唯一锚点，放弃页码判断避免误报
+    content = (
+        "具体操作，参考第9页“表格导入”步骤1。\n01\f"
+        "表格导入\n1. 打开导入面板。\n02\f"
+        "8. 其他无关步骤。\n03\f"
+        "表格导入\n1. 打开导入面板。\n04"
+    )
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-REF-005" for issue in issues)
+
+
+
 def test_run_chinese_human_baseline_rules_detects_figure_table_spacing():
     issues = review_api._run_chinese_human_baseline_rules(
         "入库登记\n在入库登记界面，可新建、查看待提交和已完成的入库登记单。\n图 1 入库登记界面\n项目 说明\n1 左侧导航栏",
@@ -2773,10 +3393,13 @@ def test_log_review_ai_usage_prints_summary(monkeypatch, capsys):
     assert "total_tokens=150" in output
 
 
-def test_review_ai_chunk_limit_defaults_to_ten(monkeypatch):
+def test_review_ai_chunk_limit_defaults_to_thirty_two(monkeypatch):
+    # 默认上限由 10 提到 32：MAX10 会把长文档合并成 10 个大块，超过 prompt 的
+    # content[:6500] 后尾部被静默丢弃（实测 12 万字符丢 47.33%），
+    # 提到 32 后 12 万字符以内文档丢尾归零。
     monkeypatch.delenv("REVIEW_AI_MAX_CHUNKS", raising=False)
 
-    assert review_api._review_ai_chunk_limit() == 10
+    assert review_api._review_ai_chunk_limit() == 32
 
 
 def test_review_ai_chunk_limit_uses_dynamic_value_under_budget(monkeypatch):
@@ -2784,7 +3407,8 @@ def test_review_ai_chunk_limit_uses_dynamic_value_under_budget(monkeypatch):
 
     assert review_api._review_ai_chunk_limit(6000) == 3
     assert review_api._review_ai_chunk_limit(12000) == 5
-    assert review_api._review_ai_chunk_limit(30000) == 10
+    # 30000 字符按公式需 11 块，旧默认 10 会在此处截尾，故不再被压到 10。
+    assert review_api._review_ai_chunk_limit(30000) == 11
 
 
 def test_review_ai_chunk_limit_caps_long_documents_by_env_budget(monkeypatch):
@@ -2814,7 +3438,7 @@ def test_run_ai_deep_review_stops_when_budget_reached(monkeypatch):
     monkeypatch.setattr(review_api, "set_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(review_api, "_select_relevant_ai_review_basis", lambda chunk, sections: "basis")
 
-    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None):
+    def fake_run_cached_ai_chunk_review(review_id, chunk, document_language, audit_basis, chunk_timeout, force_provider=None, excerpt_position=None):
         processed.append(chunk)
         usage_state["tokens"] += 120
         return ([{"rule": "AI", "chapter": ""}], False)
@@ -2960,7 +3584,7 @@ def test_chinese_human_baseline_rules_cover_consistency_logic_and_product_cases(
         "前文用 Catalog Number，后文用 Cat. No.。表格1使用 Cat.No。"
         "使用 PBMC 和外周血单个核细胞进行分析。RNA 完整性对实验结果至关重要，RNA 质量直接影响数据可靠性。"
         "表3列出了试剂盒的5个组分。步骤3要求使用试剂A进行反应。声称无 RNase 污染。"
-        "货号：H-020-000898-01。规格：16 RXN / 4 RXN。"
+        "货号：H-020-000898-01。规格：16 RXN / 4 RXN。请将规格单位 RXN 改为反应。"
     )
 
     issues = review_api._run_chinese_human_baseline_rules(content)
@@ -3223,6 +3847,208 @@ def test_run_chinese_human_baseline_rules_detects_missing_ml_spacing():
     assert any(issue['rule'] == 'CYY-CN-FMT-002' and issue['original_text'] == '0.2mL' for issue in issues)
 
 
+def test_run_chinese_human_baseline_rules_detects_operation_lead_in():
+    content = "自定义标签序列界面\n操作如下：\n1. 在标签序列列表中选择【其他】。"
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert any(issue["rule"] == "CYY-CN-STEP-004" and "操作如下" in issue["original_text"] for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_keeps_as_shown_operation_lead_in():
+    content = "手势操作如下图所示：\n1. 按下电源按钮。"
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-STEP-004" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_halfwidth_colon_lead_in():
+    content = (
+        "参数设置示例（PE100+10+10）\n"
+        "操作步骤如下:\n"
+        "1. 在以下假设基础上设置测序参数：\n"
+        "前提条件:\n"
+        "y SubmitImages = false\n"
+        "状态: 空闲\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    originals = {issue["original_text"] for issue in issues if issue["rule"] == "CYY-CN-PUNCT-008"}
+    assert "操作步骤如下:" in originals
+    assert "前提条件:" in originals
+    assert not any(text.startswith("状态") for text in originals)
+    punct_issue = next(item for item in issues if item["rule"] == "CYY-CN-PUNCT-008" and item["original_text"] == "操作步骤如下:")
+    assert review_api._should_drop_known_false_positive_issue(punct_issue) is False
+
+
+def test_run_chinese_human_baseline_rules_detects_menu_label_suffix_conflict():
+    content = (
+        "1. 点击 >【维护】，选择【实用工具】，进入实用工具界面。\n"
+        "3. 点击 > 【维护】 > 【工具】，然后点击【升降屏】。\n"
+        "点击 >【维护】>【文件上传】。\n"
+        "点击 >【设置】>【其他设置】。\n"
+        "点击 >【设置】>【语言设置】。\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-UI-003")
+    assert "【工具】" in issue["original_text"]
+    assert "实用工具" in issue["suggestion"]
+    assert not any(
+        item["rule"] == "CYY-CN-UI-003" and "设置" in item["description"]
+        for item in issues
+    )
+
+
+def test_run_chinese_human_baseline_rules_detects_rohs_structure_gaps():
+    content = (
+        "结构组成 9\n"
+        "产品中有害物质的名称及含有信息表 73\n"
+        "结构组成\n"
+        "仪器主要包括主体架构、操作系统主机、XYZ- 平台、试剂仓、气液系统和载片平台。\n"
+        "产品中有害物质的名称及含有信息表\n"
+        "部件名称 铅 汞\n"
+        "气液系统 × ○\n"
+        "载片平台 × ○\n"
+        "术语表\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-ROHS-001")
+    assert issue["original_text"] == "部件名称"
+    assert "主体架构" in issue["description"]
+    assert "操作系统主机" in issue["description"]
+    assert "XYZ-平台" in issue["description"]
+    assert "试剂仓" in issue["description"]
+
+
+def test_run_chinese_human_baseline_rules_keeps_matching_rohs_parts():
+    content = (
+        "结构组成 9\n"
+        "产品中有害物质的名称及含有信息表 73\n"
+        "结构组成\n"
+        "仪器主要包括主体架构、操作系统主机、XYZ-平台、试剂仓。\n"
+        "产品中有害物质的名称及含有信息表\n"
+        "部件名称 铅\n"
+        "主体架构 ×\n"
+        "操作系统主机 ×\n"
+        "XYZ-平台 ×\n"
+        "试剂仓 ×\n"
+        "术语表\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-ROHS-001" for issue in issues)
+
+
+def test_run_chinese_human_baseline_rules_detects_index_page_offset():
+    content = (
+        "术语阿尔法出现在这里。\n10\f"
+        "术语贝塔出现在这里。\n11\f"
+        "术语伽马出现在这里。\n12\f"
+        "术语德尔塔出现在这里。\n13\f"
+        "术语伊普西龙出现在这里。\n14\f"
+        "索引\n"
+        "术语阿尔法 1\n"
+        "术语贝塔 2\n"
+        "术语伽马 3\n"
+        "术语德尔塔 4\n"
+        "术语伊普西龙 5\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-INDEX-001")
+    assert "+9" in issue["suggestion"]
+
+
+def test_run_chinese_human_baseline_rules_detects_alphabetic_index_offset():
+    content = (
+        "Background 出现在这里。\n10\f"
+        "保险丝出现在这里。\n11\f"
+        "操作区出现在这里。\n12\f"
+        "ESR 出现在这里。\n13\f"
+        "Lag 出现在这里。\n14\f"
+        "清洗类型出现在这里。\n15\f"
+        "B\n"
+        "Background 1\n"
+        "保险丝 2\n"
+        "C\n"
+        "操作区 3\n"
+        "E\n"
+        "ESR 4\n"
+        "L\n"
+        "Lag 5\n"
+        "Q\n"
+        "清洗类型 6\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    issue = next(item for item in issues if item["rule"] == "CYY-CN-INDEX-001")
+    assert "+" in issue["suggestion"]
+
+
+def test_run_chinese_human_baseline_rules_keeps_matching_index_pages():
+    content = (
+        "术语阿尔法出现在这里。\n10\f"
+        "术语贝塔出现在这里。\n11\f"
+        "术语伽马出现在这里。\n12\f"
+        "术语德尔塔出现在这里。\n13\f"
+        "术语伊普西龙出现在这里。\n14\f"
+        "索引\n"
+        "术语阿尔法 10\n"
+        "术语贝塔 11\n"
+        "术语伽马 12\n"
+        "术语德尔塔 13\n"
+        "术语伊普西龙 14\n"
+    )
+
+    issues = review_api._run_chinese_human_baseline_rules(content)
+
+    assert not any(issue["rule"] == "CYY-CN-INDEX-001" for issue in issues)
+
+
+def test_english_unit_spacing_rule_survives_pipeline_selection():
+    # DOC-UNIT-001 是英文单位规则，分类同为“单位格式”，不应被中文单位规则的高压制逻辑连带丢弃
+    issue = {
+        'original_text': '24VDC',
+        'rule': 'DOC-UNIT-001',
+        'category': '单位格式',
+        'severity': 'general',
+        'confidence': 94,
+        'source': 'rule',
+        'suggestion': '24 VDC',
+        'description': '英文技术说明书中电源、功率与频率单位建议在数值与单位之间保留空格。',
+        'audit_basis': '说明书审核能力补强方案 - 英文单位格式',
+        'context': 'Main unit 24VDC, 5A',
+    }
+
+    assert review_api.pipeline_select_review_issues([issue]) == [issue]
+
+
+def test_chinese_unit_spacing_rules_stay_suppressed():
+    issue = {
+        'original_text': '24VDC',
+        'rule': 'CYY-CN-UNIT-005',
+        'category': '单位格式',
+        'severity': 'general',
+        'confidence': 94,
+        'source': 'rule',
+        'suggestion': '24 VDC',
+        'description': '电源与功率单位建议在数值与单位之间保留空格。',
+        'audit_basis': 'CYY人工审核经验基线 - 电源单位格式',
+        'context': '主机的供电规格为 24VDC',
+    }
+
+    assert review_api.pipeline_select_review_issues([issue]) == []
+
+
 def test_clean_issue_suggestion_for_display_strips_chinese_quotes():
     assert review_api._clean_issue_suggestion_for_display('建议统一为“2 ℃ ~ 8 ℃”') == '2 ℃ ~ 8 ℃'
 
@@ -3339,10 +4165,11 @@ def test_finalize_review_issues_filters_known_false_positives_by_default():
     filtered, diagnostics = review_api._finalize_review_issues(issues, '联系电话：XXXXXXXXXXX', set())
 
     originals = {issue['original_text'] for issue in filtered}
-    assert '空格' not in originals
+    space_issue = next(issue for issue in filtered if issue['original_text'] == '空格')
+    assert space_issue.get('possible_false_positive') is True
     assert '物质的名' not in originals
-    assert 'XXXXXXXXXXX' in originals
-    assert diagnostics['after_known_false_positive_ai'] == 0
+    assert 'XXXXXXXXXXX' not in originals
+    assert diagnostics['after_known_false_positive_ai'] == 1
 
 
 def test_should_skip_rule_match_skips_ext_r013_for_pdf():
@@ -3409,3 +4236,266 @@ def test_normalize_review_issue_display_falls_back_to_description_when_suggestio
     result = review_api._normalize_review_issue_display([issue])
 
     assert result[0].suggestion == '术语表缺少对应中文释义'
+
+
+def test_rulebook_false_positive_drops_nested_list_numbering():
+    issue = {
+        "source": "ai",
+        "rule": "AI-STYLE-001",
+        "category": "格式规范",
+        "severity": "general",
+        "original_text": "1)",
+        "context": "1. Prepare the sample\n  1) Mix the buffer\n  2) Incubate",
+        "suggestion": "外层与内层编号格式不统一，请统一为 1. 2. 3.",
+        "description": "嵌套有序列表编号差异",
+        "audit_basis": "格式规范",
+        "confidence": 88,
+    }
+
+    assert review_api.is_rulebook_false_positive(issue) is True
+    assert review_pipeline.select_review_issues([issue]) == []
+
+
+def test_rulebook_false_positive_drops_official_global_site():
+    issue = {
+        "source": "ai",
+        "rule": "DET-URL-001",
+        "category": "官网地址",
+        "severity": "serious",
+        "original_text": "https://global-mgitech.com/",
+        "context": "Visit https://global-mgitech.com/ for support.",
+        "suggestion": "官网地址错误，应改为 en.mgi-tech.com",
+        "description": "术语一致性：官网地址不正确",
+        "audit_basis": "官网规范",
+        "confidence": 90,
+    }
+
+    filtered, _diagnostics = review_api._finalize_review_issues([issue], "Visit https://global-mgitech.com/", set())
+    assert filtered == []
+
+
+def test_rulebook_false_positive_drops_english_email_only_contact():
+    issue = {
+        "source": "ai",
+        "rule": "AI-CHECK-001",
+        "category": "信息完整性",
+        "severity": "general",
+        "original_text": "MGI-service@mgi-tech.com",
+        "context": "Technical support: MGI-service@mgi-tech.com",
+        "suggestion": "The manufacturer contact is missing a telephone number.",
+        "description": "English manual lacks a phone number",
+        "audit_basis": "contact completeness",
+        "confidence": 86,
+    }
+
+    assert review_api.is_rulebook_false_positive(issue) is True
+
+
+def test_rulebook_false_positive_keeps_real_url_issue():
+    issue = {
+        "source": "rule",
+        "rule": "DET-URL-001",
+        "category": "官网地址",
+        "severity": "serious",
+        "original_text": "https://en.mgi-tech.com/",
+        "context": "Visit https://en.mgi-tech.com/ for support.",
+        "suggestion": "英文手册应使用 https://global-mgitech.com/",
+        "description": "官网地址错误",
+        "audit_basis": "官网规范",
+        "confidence": 95,
+    }
+
+    assert review_api.is_rulebook_false_positive(issue) is False
+
+
+def test_review_cache_version_tracks_false_positive_module():
+    assert review_api.PROJECT_ROOT / "backend" / "app" / "review_engine" / "false_positives.py" in review_api.REVIEW_CACHE_VERSION_FILES
+
+
+def test_should_reuse_cached_review_respects_force_and_provider():
+    cached = SimpleNamespace(id=9)
+    assert review_api._should_reuse_cached_review(cached) is True
+    assert review_api._should_reuse_cached_review(cached, force=True) is False
+    assert review_api._should_reuse_cached_review(cached, provider="qwen") is False
+    assert review_api._should_reuse_cached_review(None) is False
+
+
+def test_normalize_review_status_accepts_cancelled():
+    assert review_api._normalize_review_status("cancelled") == "cancelled"
+    assert review_api._normalize_review_status("running") == "running"
+
+
+def test_review_cancel_flag_blocks_progress_and_clears():
+    review_id = 99001
+    review_api._clear_review_runtime_flags(review_id)
+    review_api.request_review_cancel(review_id)
+    assert review_api._is_review_cancelled(review_id) is True
+    try:
+        review_api.set_progress(review_id, "running", "规则审核", 25, "进行中")
+        assert False, "cancelled review should reject progress updates"
+    except review_api.ReviewCancelled:
+        pass
+    review_api.set_progress(
+        review_id,
+        "cancelled",
+        "已停止",
+        0,
+        "用户已停止审核",
+        allow_when_cancelled=True,
+    )
+    assert review_api.get_progress(review_id)["status"] == "cancelled"
+    review_api._clear_review_runtime_flags(review_id)
+    assert review_api._is_review_cancelled(review_id) is False
+
+
+def test_run_cached_ai_chunk_review_bypasses_cache_on_force(monkeypatch):
+    review_id = 99002
+    cache_key = "force-chunk-key"
+    review_api._clear_review_runtime_flags(review_id)
+    review_api._review_force_rerun_ids.add(review_id)
+    review_api._ai_review_chunk_cache[cache_key] = [{"rule": "cached"}]
+    monkeypatch.setattr(review_api, "_build_ai_chunk_cache_key", lambda *args, **kwargs: cache_key)
+    calls = []
+
+    def fake_timeout(*args, **kwargs):
+        calls.append(1)
+        return {"issues": [{"rule": "fresh"}]}
+
+    monkeypatch.setattr(review_api, "_call_with_timeout", fake_timeout)
+    issues, cache_hit = review_api._run_cached_ai_chunk_review(
+        review_id, "chunk", "cn", "basis", 10
+    )
+    assert cache_hit is False
+    assert issues == [{"rule": "fresh"}]
+    assert calls == [1]
+    review_api._clear_review_runtime_flags(review_id)
+    review_api._ai_review_chunk_cache.pop(cache_key, None)
+
+
+def test_run_safety_compliance_audit_skips_hazard_covered_by_earlier_label():
+    # 真实手册中安全标题下的条目被 PDF 拆成多行，风险词距标题数百字符仍属同一标注
+    content = (
+        "General safety\n\n"
+        "DANGER\n\n"
+        "Wear protective equipment before operating the device. "
+        "Failure to do so might cause serious personal injury. "
+        "Keep the working area clean and dry at all times during operation. "
+        "Do not touch the power port while the device is running.\n\n"
+        "The device contains flammable liquid that must be handled with care.\n"
+    )
+
+    issues = review_api._run_safety_compliance_audit(content, "en")
+
+    assert not any(issue["rule"] == "SAFE-002" for issue in issues)
+
+
+def test_run_safety_compliance_audit_keeps_hazard_without_label():
+    content = "The device contains flammable liquid that must be handled with care.\n"
+
+    issues = review_api._run_safety_compliance_audit(content, "en")
+
+    assert any(
+        issue["rule"] == "SAFE-002" and issue["original_text"] == "flammable"
+        for issue in issues
+    )
+
+
+def test_run_safety_compliance_audit_keeps_hazard_after_new_heading():
+    # 标题与风险词之间出现新段落标题说明已跨章节，仍需提示缺少安全标注
+    content = (
+        "DANGER\n\n"
+        "Wear protective equipment before operating the device. "
+        "Failure to do so might cause serious personal injury. "
+        "Keep the working area clean and dry at all times during operation.\n\n"
+        "Power supply specifications\n\n"
+        "The device uses high voltage input.\n"
+    )
+
+    issues = review_api._run_safety_compliance_audit(content, "en")
+
+    assert any(
+        issue["rule"] == "SAFE-002" and issue["original_text"] == "high voltage"
+        for issue in issues
+    )
+
+
+def test_run_manual_engineering_audit_skips_symbol_legend_catalog_number():
+    content = (
+        "Symbol Title Description\n\n"
+        "Catalog number Indicates the manufacturer's catalog number so that the device can be identified.\n\n"
+        "CE marking of conformity Indicates that this device conforms with the specified Council Directive.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert not any(issue["rule"] == "DOC-CATNO-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_keeps_real_catalog_number_label():
+    issues = review_api._run_manual_engineering_audit(
+        "Order the reagent using Catalog number: 1000123 from the catalog.\n",
+        file_type="pdf",
+    )
+
+    assert any(issue["rule"] == "DOC-CATNO-001" for issue in issues)
+
+
+def test_run_manual_engineering_audit_skips_leadin_for_separate_procedures():
+    content = (
+        "Powering on the device\n\n"
+        "Perform the following steps:\n"
+        "1. Connect the power cord.\n"
+        "2. Press the power button.\n\n"
+        "Logging in to the control software\n\n"
+        "Perform the following steps:\n"
+        "1. Double-click the software icon.\n"
+        "2. Input the password.\n"
+    )
+
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+
+    assert not any(issue["rule"] == "DOC-PROC-002" for issue in issues)
+
+
+def test_run_manual_engineering_audit_detects_chinese_residual_in_english():
+    content = (
+        "This chapter describes the sequencing workflow and reagent storage conditions. "
+        "Store the kit at room temperature。Do not freeze the reagents.\n"
+        "Please refer to 请参见下表 for reagent details and handling steps.\n"
+    )
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    cn_issues = [item for item in issues if item["rule"] == "ENG-CN-001"]
+    originals = {item["original_text"] for item in cn_issues}
+    assert any("请参见下表" in text for text in originals)
+    assert any("。" in text and re.search(r"[A-Za-z]", text) for text in originals)
+
+
+def test_run_manual_engineering_audit_detects_skipped_table_number():
+    content = "\n".join([
+        "This chapter describes reagent setup and adapter layout for the instrument.",
+        "Table 1 Reagent components",
+        "Buffer A is listed with the required volume for each reaction.",
+        "Table 2 Consumable list",
+        "Filter tips are listed with the catalog identifiers.",
+        "Table 4 Adapter plate layout",
+        "Well A1 is reserved for the positive control sample.",
+    ])
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    assert any(
+        item["rule"] == "DOC-FIGTAB-001" and "Table 3" in item["suggestion"]
+        for item in issues
+    )
+
+
+def test_run_manual_engineering_audit_skips_continuous_table_numbers():
+    content = "\n".join([
+        "This chapter describes reagent setup and adapter layout for the instrument.",
+        "Table 1 Reagent components",
+        "Buffer A is listed with the required volume for each reaction.",
+        "Table 2 Consumable list",
+        "Filter tips are listed with the catalog identifiers.",
+        "Table 3 Adapter plate layout",
+        "Well A1 is reserved for the positive control sample.",
+    ])
+    issues = review_api._run_manual_engineering_audit(content, file_type="pdf")
+    assert not any(item["rule"] == "DOC-FIGTAB-001" for item in issues)

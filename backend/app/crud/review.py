@@ -101,7 +101,10 @@ def update_review_status(db: Session, review_id: int, status: str, total_issues:
         review.status = status
         review.total_issues = total_issues
         review.summary = summary
-        if status in {"completed", "failed"}:
+        if status == "running" and not getattr(review, "started_at", None):
+            review.started_at = datetime.utcnow()
+        review.heartbeat_at = datetime.utcnow()
+        if status in {"completed", "failed", "cancelled"}:
             review.completed_at = datetime.utcnow()
         db.commit()
         db.refresh(review)
@@ -170,6 +173,25 @@ def seed_preset_false_positive_memory(db: Session):
 def list_false_positive_memory_signatures(db: Session):
     rows = db.query(FalsePositiveMemory).filter(FalsePositiveMemory.enabled.is_(True)).all()
     return {str(row.signature or '').strip().lower() for row in rows if str(row.signature or '').strip()}
+
+
+def list_false_positive_memory_payloads(db: Session):
+    """返回可用于结构化指纹匹配的 (rule, original_text) 列表。
+
+    历史实现只回传 signature 字符串，只能做精确相等比对，
+    换一个措辞（`Add 5 min` vs `Add 5 mins`）就失效。
+    这里同时回传规则号与问题原文，让调用方可以按
+    「同规则族 + token 覆盖相似度」判定是否属于同一问题。
+    """
+    rows = db.query(FalsePositiveMemory).filter(FalsePositiveMemory.enabled.is_(True)).all()
+    payloads = []
+    for row in rows:
+        rule = str(getattr(row, 'rule', '') or '').strip()
+        text = str(getattr(row, 'original_text', '') or '').strip()
+        if not text:
+            continue
+        payloads.append((rule, text))
+    return payloads
 
 
 def delete_false_positive_memory_for_issue(db: Session, source_issue_id: int):
@@ -263,8 +285,48 @@ def delete_reviews_by_document(db: Session, document_id: int):
     if not reviews:
         return 0
 
+    document = db.query(Document).filter(Document.id == document_id).first()
+    filename = str(getattr(document, "filename", "") or "")
+    is_test = filename.startswith("文本片段_")
+    if not is_test:
+        return 0
+
     review_ids = [review.id for review in reviews]
     db.query(Issue).filter(Issue.review_id.in_(review_ids)).delete(synchronize_session=False)
     db.query(Review).filter(Review.id.in_(review_ids)).delete(synchronize_session=False)
     db.commit()
     return len(review_ids)
+
+
+def persist_review_progress(db: Session, review_id: int, status: str, step: str, progress: int, message: str = ""):
+    review = db.query(Review).filter(Review.id == review_id).first()
+    if not review:
+        return None
+    review.status = status or review.status
+    review.stage = step or getattr(review, "stage", "") or ""
+    review.progress = int(progress or 0)
+    review.message = message or ""
+    review.heartbeat_at = datetime.utcnow()
+    if status == "failed":
+        review.error_message = message
+    db.commit()
+    db.refresh(review)
+    return review
+
+
+def reclaim_stale_running_reviews(db: Session, timeout_seconds: int = 900) -> int:
+    cutoff = datetime.utcnow().timestamp() - max(30, int(timeout_seconds or 900))
+    running = db.query(Review).filter(Review.status == "running").all()
+    count = 0
+    for review in running:
+        heartbeat = getattr(review, "heartbeat_at", None) or getattr(review, "started_at", None) or review.created_at
+        stamp = heartbeat.timestamp() if heartbeat else 0
+        if stamp and stamp < cutoff:
+            review.status = "failed"
+            review.error_message = "审核任务心跳超时，已回收"
+            review.message = review.error_message
+            review.completed_at = datetime.utcnow()
+            count += 1
+    if count:
+        db.commit()
+    return count
