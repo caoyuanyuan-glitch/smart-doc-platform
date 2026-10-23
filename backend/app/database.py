@@ -226,6 +226,23 @@ def _ensure_legacy_sqlite_columns():
                     conn.execute(text(s))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_polish_feedback_polish_session_id ON polish_feedback (polish_session_id)"))
 
+    try:
+        diagnose_tables = set(inspector.get_table_names())
+    except Exception:
+        diagnose_tables = set()
+    if "cat_diagnose_record_lab" in diagnose_tables:
+        try:
+            diagnose_columns = {col["name"] for col in inspector.get_columns("cat_diagnose_record_lab")}
+        except Exception:
+            diagnose_columns = set()
+        with engine.begin() as conn:
+            if "source_name" not in diagnose_columns:
+                conn.execute(text("ALTER TABLE cat_diagnose_record_lab ADD COLUMN source_name VARCHAR(255)"))
+            conn.execute(text(
+                "UPDATE cat_diagnose_record_lab SET ruleable = 1 "
+                "WHERE COALESCE(ruleable, 0) = 0 "
+                "AND revised IS NOT NULL AND TRIM(revised) != ''"
+            ))
 
 def _sqlite_has_fk(inspector, table_name, column_name, referred_table):
     try:
@@ -400,6 +417,8 @@ def get_db():
         db.close()
 
 def create_tables():
+    from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, polished_document_lab, convert_task, convert_rule, polish_feedback, polish_feedback_lab, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_analysis_session_lab, cat_decision_record, cat_decision_record_lab, false_positive_memory
+    from app.models import cat_diagnose_record_lab
     from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, convert_task, convert_rule, polish_feedback, qa_feedback, qa_history, audit_trace, competitor_task, competitor_comparison, cat_analysis_session, cat_decision_record, false_positive_memory
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()

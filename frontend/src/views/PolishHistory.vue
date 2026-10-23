@@ -4,20 +4,6 @@
         <h2 class="page-title">已润色文档</h2>
         <div class="page-actions">
           <el-button type="danger" :disabled="selectedIds.length === 0" @click="batchDelete">批量删除 ({{ selectedIds.length }})</el-button>
-          <el-upload
-            ref="uploadRef"
-            action=""
-            :auto-upload="false"
-            :show-file-list="false"
-            :on-change="handleFileChange"
-            accept="*"
-            multiple
-          >
-            <el-button type="primary">
-              <el-icon><Upload /></el-icon>
-              上传文档
-            </el-button>
-          </el-upload>
         </div>
       </div>
 
@@ -36,7 +22,7 @@
             border
             style="width: 100%"
             v-loading="loading"
-            empty-text="暂无文档，请上传"
+            empty-text="暂无已润色文档"
             @selection-change="handleSelectionChange"
           >
             <el-table-column type="selection" width="50" />
@@ -96,8 +82,8 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Download, View, Delete, Document } from '@element-plus/icons-vue'
-import { polishAPI } from '@/api'
+import { Download, View, Delete } from '@element-plus/icons-vue'
+import { polishLabAPI as polishAPI } from '@/api'
 
 const router = useRouter()
 const documents = ref([])
@@ -147,16 +133,6 @@ async function loadDocuments() {
   }
 }
 
-async function handleFileChange(file) {
-  try {
-    await polishAPI.uploadPolishedFile(file.raw)
-    ElMessage.success('上传成功')
-    loadDocuments()
-  } catch (e) {
-    ElMessage.error('上传失败：' + (e.response?.data?.detail || e.message))
-  }
-}
-
 async function handlePreview(doc) {
   router.push({ name: 'PolishPreview', params: { id: doc.id } })
 }
@@ -176,7 +152,7 @@ async function handleDownloadReport(doc) {
     return
   }
   try {
-    await polishAPI.downloadPolishedReport(doc.id, `【润色报告】${doc.name.replace(/\.[^.]+$/, '.docx')}`)
+    await polishAPI.downloadPolishedReport(doc.id, doc.report_filename || `【润色报告】${String(doc.name || '润色文档').replace(/\.[^.]+$/, '.html')}`)
     ElMessage.success('润色报告下载已开始')
   } catch (e) {
     ElMessage.error('下载失败')

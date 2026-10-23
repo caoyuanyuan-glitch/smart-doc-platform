@@ -71,7 +71,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft, Download, Loading, WarningFilled, Document } from '@element-plus/icons-vue'
-import { polishAPI } from '@/api'
+import { polishLabAPI as polishAPI } from '@/api'
 
 const route = useRoute()
 const loading = ref(true)
@@ -107,14 +107,14 @@ async function loadPreview() {
 
 function handleDownload() {
   if (!docInfo.value) return
-  polishAPI.downloadPolishedFile(docInfo.value.id, docInfo.value.filename)
+  polishAPI.downloadPolishedFile(docInfo.value.id, docInfo.value.name || docInfo.value.filename)
   ElMessage.success('已开始下载')
 }
 
 async function handleDownloadReport() {
   if (!docInfo.value) return
   try {
-    const name = docInfo.value.name.replace('【修订标记版】', '【润色报告】').replace(/\.[^.]+$/, '.docx')
+    const name = docInfo.value.report_filename || `【润色报告】${String(docInfo.value.name || '润色文档').replace(/^【润色版】|^【修订标记版】/, '').replace(/\.[^.]+$/, '.html')}`
     await polishAPI.downloadPolishedReport(docInfo.value.id, name)
     ElMessage.success('润色报告下载已开始')
   } catch (e) {

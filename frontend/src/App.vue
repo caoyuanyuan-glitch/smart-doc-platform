@@ -168,6 +168,7 @@
               <el-menu-item index="/polish">文本润色</el-menu-item>
               <el-menu-item index="/polish/document">文档润色</el-menu-item>
               <el-menu-item index="/tools/polish-rules">润色规则</el-menu-item>
+              <el-menu-item index="/polish/candidates">AI 诊断候补</el-menu-item>
               <el-menu-item index="/polish/history">已润色文档</el-menu-item>
             </el-sub-menu>
 
