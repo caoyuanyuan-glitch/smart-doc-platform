@@ -202,6 +202,22 @@ export const compareAPI = {
   updateConfig: (config) => instance.put('/compare/config', config),
   getPreviewInfo: (id) => instance.get(`/compare/${id}/preview/info`),
   getPreviewFileUrl: (id, side) => `/api/compare/${id}/preview/file?side=${side}`,
+  getPreviewContent: (id, side, extra = {}) => instance.get(`/compare/${id}/preview/content`, {
+    params: {
+      side,
+      highlight: extra.highlight === false ? 0 : 1,
+    },
+  }),
+  getPreviewPage: (id, side, page, extra = {}) => instance.get(`/compare/${id}/preview/page`, {
+    params: {
+      side,
+      page,
+      highlight: extra.highlight === false ? 0 : 1,
+      peer_page: extra.peerPage || 0,
+    },
+    responseType: 'blob',
+  }),
+  getPreviewAlign: (id) => instance.get(`/compare/${id}/preview/align`),
 }
 
 export const competitorAPI = {

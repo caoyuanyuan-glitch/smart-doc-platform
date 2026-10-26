@@ -5,71 +5,55 @@
 
       <div class="panel">
         <div class="panel-header">
-          <span>上传两个文档进行对比</span>
+          <span>上传文档进行对比</span>
           <div class="panel-actions">
-            <el-tag size="small" type="info">支持 PDF / DOCX / MD / TXT / DITA / ZIP</el-tag>
+            <el-tag size="small" type="info">支持 PDF / Word / Excel / MD / TXT / DITA / ZIP</el-tag>
           </div>
         </div>
 
         <div class="upload-grid">
           <div class="upload-slot">
-            <div class="slot-label">参照文档</div>
-            <el-upload
-              action="#"
-              :auto-upload="false"
-              :show-file-list="false"
-              :before-upload="(f) => { files[0] = f; return false }"
-              :on-change="(f) => { files[0] = f.raw || f }"
-              accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
-            >
-              <div class="upload-box" :class="{ filled: files[0] }">
-                <el-icon style="font-size: 36px; color: #3b82f6; margin-bottom: 8px;"><Upload /></el-icon>
-                <div v-if="!files[0]" class="upload-hint">点击上传参照文档</div>
-                <div v-else class="upload-name">{{ files[0].name }}</div>
-              </div>
-            </el-upload>
+            <div class="slot-label">基准文档</div>
+            <label class="upload-box" :class="{ filled: files[0] }">
+              <input type="file" accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip,.xlsx,.xls" @change="pickFile(0, $event)" />
+              <el-icon style="font-size: 36px; color: #3b82f6; margin-bottom: 8px;"><Upload /></el-icon>
+              <div v-if="!files[0]" class="upload-hint">点击上传基准文档</div>
+              <div v-else class="upload-name">{{ files[0].name }}</div>
+            </label>
+            <div class="slot-hint">对照标准，如旧版</div>
           </div>
-
-          <template v-for="(file, idx) in files.slice(1)" :key="idx">
+          <div class="vs-col">
+            <div class="slot-label vs-spacer-label" aria-hidden="true">&nbsp;</div>
             <div class="vs-badge">VS</div>
-            <div class="upload-slot">
-              <div class="slot-label">
-                对比文档 {{ idx + 1 }}
-                <el-button v-if="files.length > 2" type="danger" size="small" circle @click="removeFile(idx + 1)" style="margin-left: 6px;">
-                  <el-icon><Close /></el-icon>
-                </el-button>
-              </div>
-              <el-upload
-                action="#"
-                :auto-upload="false"
-                :show-file-list="false"
-                :before-upload="(f) => { files[idx + 1] = f; return false }"
-                :on-change="(f) => { files[idx + 1] = f.raw || f }"
-                accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip"
-              >
-                <div class="upload-box" :class="{ filled: files[idx + 1] }">
-                  <el-icon style="font-size: 36px; color: #7c3aed; margin-bottom: 8px;"><Upload /></el-icon>
-                  <div v-if="!files[idx + 1]" class="upload-hint">点击上传对比文档</div>
-                  <div v-else class="upload-name">{{ files[idx + 1].name }}</div>
-                </div>
-              </el-upload>
-            </div>
-          </template>
+            <div class="slot-hint vs-spacer-hint" aria-hidden="true">&nbsp;</div>
+          </div>
+          <div class="upload-slot">
+            <div class="slot-label">待比文档</div>
+            <label class="upload-box" :class="{ filled: files[1] }">
+              <input type="file" accept=".pdf,.docx,.doc,.md,.txt,.dita,.xml,.zip,.xlsx,.xls" @change="pickFile(1, $event)" />
+              <el-icon style="font-size: 36px; color: #7c3aed; margin-bottom: 8px;"><Upload /></el-icon>
+              <div v-if="!files[1]" class="upload-hint">点击上传待比文档</div>
+              <div v-else class="upload-name">{{ files[1].name }}</div>
+            </label>
+            <div class="slot-hint">要检查的版本，如新版</div>
+          </div>
         </div>
 
         <div class="action-row">
           <el-button type="primary" size="large" :loading="loading" :disabled="!files[0] || !files[1]" @click="doCompare">
             <el-icon><Search /></el-icon> 开始对比
           </el-button>
-          <el-button size="large" type="success" @click="addFile" :disabled="files.length >= 8">
-            <el-icon><Plus /></el-icon> 添加文件
-          </el-button>
           <el-button size="large" @click="clearFiles">清空</el-button>
         </div>
 
         <div v-if="progress > 0 && progress < 100" class="progress-panel">
-          <el-progress :percentage="progress" :stroke-width="16" status="success" />
-          <div class="progress-text">{{ progressText }}</div>
+          <el-progress
+            :percentage="progress"
+            :stroke-width="8"
+            :show-text="false"
+            color="#3b82f6"
+          />
+          <div class="progress-text">{{ progressText }} {{ progress }}%</div>
         </div>
       </div>
 
@@ -101,7 +85,7 @@
             <div class="pair-actions">
               <el-button size="small" type="primary" @click="previewPairReport(r.task_id)">预览报告</el-button>
               <el-button size="small" @click="exportPairReport(r.task_id)">导出报告</el-button>
-              <el-button size="small" @click="openPairPdfPreview(r.task_id)">PDF预览</el-button>
+              <el-button size="small" @click="openPairPdfPreview(r.task_id)">文档预览</el-button>
             </div>
 
             <div v-if="showPreview && activePreviewTask === r.task_id" class="panel" style="background: #fafafa; margin-top: 12px;">
@@ -117,32 +101,62 @@
 
       <el-dialog
         v-model="showPdfPreviewDialog"
-        title="PDF页码预览"
-        width="95%"
-        top="3vh"
+        title="文档预览"
+        :width="previewFullscreen ? '100%' : '98%'"
+        :top="previewFullscreen ? '0' : '1vh'"
+        :fullscreen="previewFullscreen"
         :close-on-click-modal="false"
         class="pdf-preview-dialog"
+        header-class="pdf-preview-dialog-header"
+        body-class="pdf-preview-dialog-body"
+        modal-class="pdf-preview-overlay"
+        :class="{ 'is-preview-fullscreen': previewFullscreen }"
+        @closed="onPreviewDialogClosed"
       >
+        <template #header>
+          <div class="pdf-preview-header">
+            <span class="pdf-preview-title">文档预览</span>
+            <el-button type="primary" size="small" @click.stop="togglePreviewFullscreen">
+              <el-icon><FullScreen /></el-icon>
+              {{ previewFullscreen ? '退出全屏' : '全屏' }}
+            </el-button>
+          </div>
+        </template>
         <div class="pdf-preview-wrapper">
           <div class="pdf-preview-pane">
             <div class="pane-header pane-a">
-              <span>参照文档：{{ files[0]?.name || '参照文档' }}</span>
+              <span>基准文档：{{ previewNameA || files[0]?.name || '基准文档' }}</span>
             </div>
             <div class="pane-content">
-              <PdfPreview
-                v-if="pdfUrlA"
+              <PageImagePreview
+                v-if="previewKindA === 'pdf-pages' && previewTaskId"
                 ref="pdfPreviewARef"
-                :pdf-url="pdfUrlA"
-                :file-name="files[0]?.name || 'document_A.pdf'"
+                :task-id="previewTaskId"
+                side="a"
+                :file-name="previewNameA || files[0]?.name || 'document_A.pdf'"
+                :total-pages="previewPagesA"
+                :highlight="highlightDiff"
                 @page-change="onPageAChange"
                 @loaded="onPdfALoaded"
               />
-              <el-empty v-else description="暂无PDF预览" />
+              <PdfPreview
+                v-else-if="previewKindA === 'pdf' && pdfUrlA"
+                ref="pdfPreviewARef"
+                :pdf-url="pdfUrlA"
+                :file-name="previewNameA || files[0]?.name || 'document_A.pdf'"
+                @page-change="onPageAChange"
+                @loaded="onPdfALoaded"
+              />
+              <div v-else-if="previewKindA === 'html'" class="html-preview-scroll" v-html="htmlPreviewA" />
+              <el-empty v-else description="暂无文档预览" />
             </div>
           </div>
           <div class="pdf-preview-divider">
             <div class="divider-actions">
-              <el-tooltip content="开启后两边同步翻页" placement="top">
+              <el-button type="primary" size="small" class="fs-side-btn" @click="togglePreviewFullscreen">
+                {{ previewFullscreen ? '退出' : '全屏' }}
+              </el-button>
+              <el-tooltip v-if="isPdfPreviewKind(previewKindA) && isPdfPreviewKind(previewKindB)" content="按相同章节同步翻页" placement="top">
                 <el-switch
                   v-model="syncScroll"
                   size="small"
@@ -150,22 +164,51 @@
                   inactive-text="独立"
                 />
               </el-tooltip>
+              <el-tooltip v-if="canHighlightPreview" content="标出文本增删改、图片和格式差异" placement="top">
+                <el-switch
+                  v-model="highlightDiff"
+                  size="small"
+                  active-text="高亮"
+                  inactive-text="原文"
+                />
+              </el-tooltip>
+              <div v-if="alignLabel" class="align-label" :title="alignLabel">{{ alignLabel }}</div>
+              <div v-if="highlightDiff && canHighlightPreview" class="hl-legend">
+                <span class="hl-del">删</span>
+                <span class="hl-ins">增</span>
+                <span class="hl-chg">改</span>
+                <span v-if="isPdfPreviewKind(previewKindA) && isPdfPreviewKind(previewKindB)" class="hl-img">图</span>
+                <span v-if="isPdfPreviewKind(previewKindA) && isPdfPreviewKind(previewKindB)" class="hl-fmt">格式</span>
+              </div>
             </div>
           </div>
           <div class="pdf-preview-pane">
             <div class="pane-header pane-b">
-              <span>对比文档：{{ compareFiles[activePdfSide]?.name || '对比文档' }}</span>
+              <span>待比文档：{{ previewNameB || compareFiles[activePdfSide]?.name || '待比文档' }}</span>
             </div>
             <div class="pane-content">
-              <PdfPreview
-                v-if="pdfUrlB"
+              <PageImagePreview
+                v-if="previewKindB === 'pdf-pages' && previewTaskId"
                 ref="pdfPreviewBRef"
-                :pdf-url="pdfUrlB"
-                :file-name="compareFiles[activePdfSide]?.name || 'document_B.pdf'"
+                :task-id="previewTaskId"
+                side="b"
+                :file-name="previewNameB || compareFiles[activePdfSide]?.name || 'document_B.pdf'"
+                :total-pages="previewPagesB"
+                :highlight="highlightDiff"
+                :initial-page="mapPeerPage('a', 1) || 1"
                 @page-change="onPageBChange"
                 @loaded="onPdfBLoaded"
               />
-              <el-empty v-else description="暂无PDF预览" />
+              <PdfPreview
+                v-else-if="previewKindB === 'pdf' && pdfUrlB"
+                ref="pdfPreviewBRef"
+                :pdf-url="pdfUrlB"
+                :file-name="previewNameB || compareFiles[activePdfSide]?.name || 'document_B.pdf'"
+                @page-change="onPageBChange"
+                @loaded="onPdfBLoaded"
+              />
+              <div v-else-if="previewKindB === 'html'" class="html-preview-scroll" v-html="htmlPreviewB" />
+              <el-empty v-else description="暂无文档预览" />
             </div>
           </div>
         </div>
@@ -208,7 +251,7 @@
           <el-table-column label="操作" width="280">
             <template #default="scope">
               <el-button size="small" @click="viewTask(scope.row.id)">查看</el-button>
-              <el-button v-if="scope.row.task_type !== 'param'" size="small" @click="openTaskPdfPreview(scope.row.id)">PDF预览</el-button>
+              <el-button v-if="scope.row.task_type !== 'param'" size="small" @click="openTaskPdfPreview(scope.row.id)">文档预览</el-button>
               <el-button v-if="scope.row.task_type !== 'param'" size="small" @click="exportTaskReport(scope.row.id)">导出报告</el-button>
               <el-button size="small" type="danger" @click="deleteTask(scope.row.id)">删除</el-button>
             </template>
@@ -239,13 +282,18 @@
             <el-statistic title="总参数" :value="paramStats.total" />
             <el-statistic title="一致" :value="paramStats.match" />
             <el-statistic title="不一致" :value="paramStats.diff" />
-            <el-statistic title="仅A有" :value="paramStats.onlyA" />
-            <el-statistic title="仅B有" :value="paramStats.onlyB" />
+            <el-statistic title="仅基准有" :value="paramStats.onlyA" />
+            <el-statistic title="仅待比有" :value="paramStats.onlyB" />
           </div>
           <el-table :data="paramTaskResults" border stripe max-height="500" style="width:100%">
             <el-table-column prop="param" label="参数名" width="200" fixed />
-            <el-table-column prop="value_a" label="参照文档值" min-width="180" />
-            <el-table-column prop="value_b" label="对比文档值" min-width="180" />
+            <el-table-column label="所在章节" min-width="160">
+              <template #default="scope">
+                {{ chapterLabel(scope.row) }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="value_a" label="基准文档值" min-width="180" />
+            <el-table-column prop="value_b" label="待比文档值" min-width="180" />
             <el-table-column label="匹配" width="100">
               <template #default="scope">
                 <el-tag :type="scope.row.match === '一致' ? 'success' : (scope.row.match === '不一致' ? 'danger' : 'info')" size="small">
@@ -264,12 +312,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { compareAPI } from '@/api'
-import { Upload, Search, View, Plus, Close } from '@element-plus/icons-vue'
+import { Upload, Search, View, FullScreen } from '@element-plus/icons-vue'
 import PdfPreview from '@/components/PdfPreview.vue'
+import PageImagePreview from '@/components/PageImagePreview.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -286,11 +335,25 @@ const showPreview = ref(false)
 const activePreviewTask = ref(null)
 const reportContent = ref('')
 const showPdfPreviewDialog = ref(false)
+const previewFullscreen = ref(false)
 const pdfUrlA = ref('')
 const pdfUrlB = ref('')
 const pdfPreviewARef = ref(null)
 const pdfPreviewBRef = ref(null)
+const previewKindA = ref('')
+const previewKindB = ref('')
+const htmlPreviewA = ref('')
+const htmlPreviewB = ref('')
+const previewNameA = ref('')
+const previewNameB = ref('')
+const previewTaskId = ref(0)
+const previewPagesA = ref(0)
+const previewPagesB = ref(0)
 const syncScroll = ref(true)
+const highlightDiff = ref(true)
+const previewAlignPairs = ref([])
+const previewPageA = ref(1)
+const previewPageB = ref(1)
 const _pageChangingFrom = ref('')
 const activePdfSide = ref(1)
 const paramTaskResults = ref([])
@@ -301,11 +364,109 @@ const currentView = computed(() => {
   return 'upload'
 })
 
+function isPdfPreviewKind(kind) {
+  return kind === 'pdf' || kind === 'pdf-pages'
+}
+
+const canHighlightPreview = computed(() => {
+  const pdfPair = isPdfPreviewKind(previewKindA.value) && isPdfPreviewKind(previewKindB.value)
+  const htmlPair = previewKindA.value === 'html' && previewKindB.value === 'html'
+  return pdfPair || htmlPair
+})
+
+function togglePreviewFullscreen() {
+  previewFullscreen.value = !previewFullscreen.value
+  nextTick(() => {
+    const overlay = document.querySelector('.pdf-preview-overlay')
+    if (previewFullscreen.value) {
+      const target = overlay || document.querySelector('.pdf-preview-dialog')
+      if (target && target.requestFullscreen && !document.fullscreenElement) {
+        target.requestFullscreen().catch(() => {})
+      }
+    } else if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {})
+    }
+  })
+}
+
+function onPreviewDialogClosed() {
+  previewFullscreen.value = false
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {})
+  }
+}
+
+function onNativeFullscreenChange() {
+  if (!document.fullscreenElement) {
+    previewFullscreen.value = false
+  }
+}
+
+function mapPeerPage(fromSide, page) {
+  const pairs = previewAlignPairs.value || []
+  const sa = fromSide === 'b' ? 'b' : 'a'
+  const sb = fromSide === 'b' ? 'a' : 'b'
+  const containing = pairs.filter((item) => {
+    const start = item[`page_start_${sa}`] || 0
+    const end = item[`page_end_${sa}`] || 0
+    const peerStart = item[`page_start_${sb}`] || 0
+    return start && end && peerStart && page >= start && page <= end
+  })
+  if (!containing.length) {
+    const firstA = Math.min(...pairs.map((p) => p.page_start_a).filter(Boolean))
+    const firstB = Math.min(...pairs.map((p) => p.page_start_b).filter(Boolean))
+    if (!Number.isFinite(firstA) || !Number.isFinite(firstB)) return 0
+    if (fromSide !== 'b' && page < firstA && firstA > 1) {
+      const spanA = firstA - 1
+      const spanB = Math.max(1, firstB - 1)
+      return Math.min(spanB, Math.max(1, Math.round(((page - 1) * spanB) / spanA) + 1))
+    }
+    if (fromSide === 'b' && page < firstB && firstB > 1) {
+      const spanB = firstB - 1
+      const spanA = Math.max(1, firstA - 1)
+      return Math.min(spanA, Math.max(1, Math.round(((page - 1) * spanA) / spanB) + 1))
+    }
+    return 0
+  }
+  containing.sort((x, y) => {
+    const rx = (x[`page_end_${sa}`] || 0) - (x[`page_start_${sa}`] || 0)
+    const ry = (y[`page_end_${sa}`] || 0) - (y[`page_start_${sa}`] || 0)
+    return rx - ry || (y.level || 0) - (x.level || 0)
+  })
+  const item = containing[0]
+  const offset = page - (item[`page_start_${sa}`] || page)
+  const start = item[`page_start_${sb}`] || 0
+  const end = item[`page_end_${sb}`] || start
+  return Math.min(end, Math.max(start, start + offset))
+}
+
+const alignLabel = computed(() => {
+  const pairs = previewAlignPairs.value || []
+  const page = previewPageA.value
+  const containing = pairs.filter((item) => {
+    const start = item.page_start_a || 0
+    const end = item.page_end_a || 0
+    return start && end && page >= start && page <= end
+  })
+  if (!containing.length) return ''
+  containing.sort((x, y) => {
+    const rx = (x.page_end_a || 0) - (x.page_start_a || 0)
+    const ry = (y.page_end_a || 0) - (y.page_start_a || 0)
+    return rx - ry || (y.level || 0) - (x.level || 0)
+  })
+  return containing[0].heading_a || containing[0].heading_b || ''
+})
+
 onMounted(async () => {
   console.log('[Compare] Component mounted, currentView:', currentView.value, 'route:', route.path)
+  document.addEventListener('fullscreenchange', onNativeFullscreenChange)
   if (currentView.value === 'tasks') {
     await loadHistory()
   }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('fullscreenchange', onNativeFullscreenChange)
 })
 
 watch(() => route.path, async (newPath) => {
@@ -355,6 +516,12 @@ function getVerdictTagType(verdict) {
   return 'warning'
 }
 
+function pickFile(idx, ev) {
+  const f = ev.target.files && ev.target.files[0]
+  if (f) files.value[idx] = f
+  ev.target.value = ''
+}
+
 function clearFiles() {
   files.value = [null, null]
   allResults.value = []
@@ -364,26 +531,9 @@ function clearFiles() {
   activePreviewTask.value = null
 }
 
-function addFile() {
-  if (files.value.length < 8) {
-    files.value.push(null)
-  }
-}
-
-function removeFile(index) {
-  if (files.value.length > 2) {
-    files.value.splice(index, 1)
-  }
-}
-
 function updateProgress(pct, text) {
-  return new Promise(resolve => {
-    setTimeout(() => {
-      progress.value = pct
-      progressText.value = text
-      resolve()
-    }, 200)
-  })
+  progress.value = pct
+  progressText.value = text
 }
 
 async function doCompare() {
@@ -398,32 +548,24 @@ async function doCompare() {
   progressText.value = ''
 
   try {
-    await updateProgress(5, '正在初始化...')
-    await updateProgress(10, '正在上传文件...')
+    updateProgress(15, '正在上传文件')
 
     const respPromise = compareAPI.create(validFiles)
-
-    for (let p = 20; p < 80; p += 5) {
-      await updateProgress(p, `正在对比分析... ${p}%`)
-      await new Promise(r => setTimeout(r, 300))
-    }
-
-    await updateProgress(80, '正在对比分析...')
+    updateProgress(55, '正在对比分析')
 
     const resp = await respPromise
     const data = resp.data || {}
 
-    await updateProgress(90, '正在生成结果...')
+    updateProgress(90, '正在生成结果')
 
     allResults.value = (data.results || []).map(r => ({
       ...r,
       task_id: r.task_id || r.comparison_id || 0,
     }))
 
-    await updateProgress(95, '正在整理报告...')
-    await updateProgress(100, '对比完成')
+    updateProgress(100, '对比完成')
 
-    setTimeout(() => { progress.value = 0 }, 1500)
+    setTimeout(() => { progress.value = 0 }, 600)
     ElMessage.success(`对比完成，共 ${allResults.value.length} 组结果`)
   } catch (e) {
     progress.value = 0
@@ -464,6 +606,95 @@ async function exportPairReport(taskId) {
   }
 }
 
+function resetPreviewState() {
+  pdfUrlA.value = ''
+  pdfUrlB.value = ''
+  previewKindA.value = ''
+  previewKindB.value = ''
+  htmlPreviewA.value = ''
+  htmlPreviewB.value = ''
+  previewNameA.value = ''
+  previewNameB.value = ''
+  previewTaskId.value = 0
+  previewPagesA.value = 0
+  previewPagesB.value = 0
+  previewAlignPairs.value = []
+  previewPageA.value = 1
+  previewPageB.value = 1
+}
+
+async function loadSidePreview(taskId, side) {
+  try {
+    const resp = await compareAPI.getPreviewContent(taskId, side, { highlight: highlightDiff.value })
+    const data = resp.data || {}
+    const name = data.file_name || ''
+    let kind = ''
+    if (data.type === 'pdf-pages') kind = 'pdf-pages'
+    else if (data.type === 'pdf') kind = 'pdf'
+    else if (data.content) kind = 'html'
+    if (side === 'a') {
+      previewKindA.value = kind
+      previewNameA.value = name
+      previewPagesA.value = data.total_pages || 0
+      if (kind === 'pdf-pages') {
+        pdfUrlA.value = ''
+        htmlPreviewA.value = ''
+      } else if (kind === 'pdf') {
+        pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
+        htmlPreviewA.value = ''
+      } else {
+        pdfUrlA.value = ''
+        htmlPreviewA.value = data.content || ''
+      }
+    } else {
+      previewKindB.value = kind
+      previewNameB.value = name
+      previewPagesB.value = data.total_pages || 0
+      if (kind === 'pdf-pages') {
+        pdfUrlB.value = ''
+        htmlPreviewB.value = ''
+      } else if (kind === 'pdf') {
+        pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
+        htmlPreviewB.value = ''
+      } else {
+        pdfUrlB.value = ''
+        htmlPreviewB.value = data.content || ''
+      }
+    }
+  } catch (e) {
+    if (side === 'a') {
+      previewKindA.value = ''
+      pdfUrlA.value = ''
+      htmlPreviewA.value = ''
+    } else {
+      previewKindB.value = ''
+      pdfUrlB.value = ''
+      htmlPreviewB.value = ''
+    }
+  }
+}
+
+async function loadPairPreview(taskId) {
+  resetPreviewState()
+  previewTaskId.value = taskId
+  try {
+    const resp = await compareAPI.getPreviewAlign(taskId)
+    previewAlignPairs.value = resp.data?.pairs || []
+  } catch (e) {
+    previewAlignPairs.value = []
+  }
+  await Promise.all([loadSidePreview(taskId, 'a'), loadSidePreview(taskId, 'b')])
+}
+
+watch(highlightDiff, () => {
+  if (!showPdfPreviewDialog.value || !previewTaskId.value) return
+  if (previewKindA.value !== 'html' && previewKindB.value !== 'html') return
+  Promise.all([
+    loadSidePreview(previewTaskId.value, 'a'),
+    loadSidePreview(previewTaskId.value, 'b'),
+  ])
+})
+
 function openPairPdfPreview(taskId) {
   if (!taskId) {
     ElMessage.warning('无法获取任务ID')
@@ -471,9 +702,8 @@ function openPairPdfPreview(taskId) {
   }
   const idx = allResults.value.findIndex(r => r.task_id === taskId)
   activePdfSide.value = idx >= 0 ? (idx + 1) : 1
-  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
-  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
   showPdfPreviewDialog.value = true
+  loadPairPreview(taskId)
 }
 
 async function viewTask(taskId) {
@@ -584,33 +814,30 @@ function openTaskPdfPreview(taskId) {
     return
   }
   activePdfSide.value = 1
-  pdfUrlA.value = compareAPI.getPreviewFileUrl(taskId, 'a')
-  pdfUrlB.value = compareAPI.getPreviewFileUrl(taskId, 'b')
   showPdfPreviewDialog.value = true
+  loadPairPreview(taskId)
 }
 
 function onPageAChange(page) {
-  if (syncScroll.value && _pageChangingFrom.value !== 'b') {
-    _pageChangingFrom.value = 'a'
-    nextTick(() => {
-      if (pdfPreviewBRef.value?.goToPage) {
-        pdfPreviewBRef.value.goToPage(page)
-      }
-      _pageChangingFrom.value = ''
-    })
+  previewPageA.value = page
+  if (!syncScroll.value || _pageChangingFrom.value === 'b') return
+  _pageChangingFrom.value = 'a'
+  const peer = mapPeerPage('a', page)
+  if (peer && pdfPreviewBRef.value?.goToPage) {
+    pdfPreviewBRef.value.goToPage(peer, true)
   }
+  _pageChangingFrom.value = ''
 }
 
 function onPageBChange(page) {
-  if (syncScroll.value && _pageChangingFrom.value !== 'a') {
-    _pageChangingFrom.value = 'b'
-    nextTick(() => {
-      if (pdfPreviewARef.value?.goToPage) {
-        pdfPreviewARef.value.goToPage(page)
-      }
-      _pageChangingFrom.value = ''
-    })
+  previewPageB.value = page
+  if (!syncScroll.value || _pageChangingFrom.value === 'a') return
+  _pageChangingFrom.value = 'b'
+  const peer = mapPeerPage('b', page)
+  if (peer && pdfPreviewARef.value?.goToPage) {
+    pdfPreviewARef.value.goToPage(peer, true)
   }
+  _pageChangingFrom.value = ''
 }
 
 function onPdfALoaded(info) {
@@ -698,26 +925,69 @@ function onPdfBLoaded(info) {
 
 .upload-grid {
   display: flex;
-  align-items: flex-start;
-  gap: 24px;
   justify-content: center;
+  align-items: stretch;
+  gap: 16px;
 }
 
-.upload-slot { flex: 1; max-width: 400px; }
+.upload-slot,
+.vs-col {
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.vs-col {
+  width: 64px;
+}
 
 .slot-label {
   font-weight: 600;
-  margin-bottom: 12px;
   color: #374151;
+  text-align: center;
+  width: 240px;
+  line-height: 22px;
+  margin-bottom: 10px;
+}
+
+.slot-hint {
+  margin-top: 10px;
+  font-weight: 400;
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
+  width: 240px;
+  line-height: 18px;
+}
+
+.vs-spacer-label,
+.vs-spacer-hint {
+  visibility: hidden;
 }
 
 .upload-box {
+  position: relative;
   border: 2px dashed #d1d5db;
   border-radius: 8px;
-  padding: 30px;
+  padding: 30px 16px;
   text-align: center;
   cursor: pointer;
   transition: all 0.3s;
+  width: 240px;
+  min-height: 160px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.upload-box input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .upload-box:hover { border-color: #3b82f6; background: #eff6ff; }
@@ -726,13 +996,18 @@ function onPdfBLoaded(info) {
 
 .upload-hint { color: #6b7280; font-size: 14px; }
 
-.upload-name { color: #3b82f6; font-weight: 600; font-size: 14px; }
+.upload-name { color: #3b82f6; font-weight: 600; font-size: 14px; word-break: break-all; }
 
 .vs-badge {
+  flex: 1;
   font-size: 20px;
   font-weight: 700;
   color: #9ca3af;
-  padding: 8px 16px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
 }
 
 .action-row {
@@ -743,15 +1018,15 @@ function onPdfBLoaded(info) {
 }
 
 .progress-panel {
-  margin-top: 20px;
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
+  max-width: 320px;
+  margin: 16px auto 0;
+  padding: 0;
 }
 
 .progress-text {
   text-align: center;
-  margin-top: 8px;
+  margin-top: 6px;
+  font-size: 12px;
   color: #6b7280;
 }
 
@@ -916,13 +1191,32 @@ function onPdfBLoaded(info) {
 
 .pdf-preview-dialog :deep(.el-dialog__body) {
   padding: 0;
-  height: calc(94vh - 60px);
+  height: calc(98vh - 54px);
+  overflow: hidden;
+}
+
+.pdf-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: calc(100% - 36px);
+}
+
+.pdf-preview-title {
+  font-size: 16px;
+  font-weight: 600;
 }
 
 .pdf-preview-wrapper {
   display: flex;
   height: 100%;
-  min-height: 600px;
+  min-height: 0;
+}
+
+.fs-side-btn {
+  width: 42px;
+  padding: 8px 0;
 }
 
 .pdf-preview-pane {
@@ -958,6 +1252,45 @@ function onPdfBLoaded(info) {
   min-height: 0;
 }
 
+.html-preview-scroll {
+  height: 100%;
+  overflow: auto;
+  background: #fff;
+  padding: 16px 20px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #1f2937;
+}
+
+.html-preview-scroll pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  margin: 0;
+}
+
+.html-preview-scroll img {
+  max-width: 100%;
+}
+
+.html-preview-scroll table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0 16px;
+}
+
+.html-preview-scroll td,
+.html-preview-scroll th {
+  border: 1px solid #e5e7eb;
+  padding: 6px 8px;
+  vertical-align: top;
+}
+
+.html-preview-scroll ul {
+  padding-left: 20px;
+}
+
 .pdf-preview-divider {
   width: 50px;
   background: #f3f4f6;
@@ -976,7 +1309,111 @@ function onPdfBLoaded(info) {
   align-items: center;
 }
 
+.hl-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: #4b5563;
+}
+
+.align-label {
+  max-width: 72px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: #1d4ed8;
+  text-align: center;
+  word-break: break-all;
+}
+
+.hl-del,
+.hl-ins,
+.hl-chg {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.hl-del { background: rgba(255, 76, 76, 0.35); }
+.hl-ins { background: rgba(46, 184, 92, 0.35); }
+.hl-chg { background: rgba(255, 196, 0, 0.45); }
+
+.hl-img,
+.hl-fmt {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.hl-img { background: rgba(59, 130, 246, 0.35); }
+.hl-fmt { background: rgba(168, 85, 247, 0.35); }
+
 .sim-high { color: #10b981; font-weight: 600; }
 .sim-medium { color: #f59e0b; font-weight: 600; }
 .sim-low { color: #ef4444; font-weight: 600; }
+</style>
+
+<style>
+.pdf-preview-overlay {
+  overflow: hidden !important;
+}
+.pdf-preview-overlay:fullscreen,
+.pdf-preview-overlay:-webkit-full-screen {
+  background: #fff;
+}
+.pdf-preview-dialog.el-dialog {
+  display: flex !important;
+  flex-direction: column;
+  margin-bottom: 0;
+}
+.pdf-preview-dialog .pdf-preview-dialog-header,
+.pdf-preview-dialog .el-dialog__header {
+  flex: 0 0 auto !important;
+  padding: 10px 16px 8px !important;
+}
+.pdf-preview-dialog .pdf-preview-dialog-body,
+.pdf-preview-dialog .el-dialog__body {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  height: calc(98vh - 54px);
+}
+.pdf-preview-dialog.is-fullscreen,
+.pdf-preview-dialog.is-preview-fullscreen {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
+  margin: 0 !important;
+  top: 0 !important;
+  overflow: hidden !important;
+}
+.pdf-preview-dialog.is-fullscreen .pdf-preview-dialog-body,
+.pdf-preview-dialog.is-fullscreen .el-dialog__body,
+.pdf-preview-dialog.is-preview-fullscreen .pdf-preview-dialog-body,
+.pdf-preview-dialog.is-preview-fullscreen .el-dialog__body {
+  height: auto !important;
+}
+</style>
+
+<style>
+.html-preview-scroll .hl-del,
+.html-preview-scroll td.hl-del {
+  background: rgba(255, 76, 76, 0.28);
+}
+.html-preview-scroll .hl-ins,
+.html-preview-scroll td.hl-ins {
+  background: rgba(46, 184, 92, 0.28);
+}
+.html-preview-scroll .hl-chg,
+.html-preview-scroll td.hl-chg {
+  background: rgba(255, 196, 0, 0.35);
+}
+.html-preview-scroll .hl-block {
+  border-radius: 4px;
+  padding: 2px 4px;
+}
 </style>

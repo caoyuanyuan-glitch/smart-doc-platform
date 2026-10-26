@@ -258,7 +258,17 @@ document.addEventListener('DOMContentLoaded', function() {
         diffs_content = ""
         if status in ("仅在A中", "仅在B中"):
             content = r.get("content_a") or r.get("content_b") or ""
-            diffs_content = f"<div class='diff-empty'>✓ {status}，无对比内容</div>"
+            snippet = html.escape((content or "").strip()[:800])
+            if snippet:
+                side = "side-a" if status == "仅在A中" else "side-b"
+                diffs_content = (
+                    f"<div class='diff-row changed'>"
+                    f"<span class='tag-c'>{status}</span>"
+                    f"<div class='text'><div class='{side}'>{snippet}</div></div>"
+                    f"</div>"
+                )
+            else:
+                diffs_content = f"<div class='diff-empty'>{status}</div>"
         elif status == "完全一致":
             diffs_content = "<div class='diff-empty'>✓ 该章节内容完全一致，无差异</div>"
         else:
@@ -273,7 +283,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if not fuzzy_diffs and not only_a and not only_b:
                 diffs_content = "<div class='diff-empty'>✓ 该章节内容完全一致，无差异</div>"
             else:
-                display_diffs = fuzzy_diffs[:15]
+                display_diffs = fuzzy_diffs[:40]
                 for d in display_diffs:
                     d_html = compute_word_diff(d.get("a", ""), d.get("b", ""))
                     score = d.get("score", 0.0)
@@ -295,7 +305,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         f'</div></div>'
                     )
             # 显示仅在A或仅在B的句子
-            for s in only_a[:5]:
+            for s in only_a[:20]:
                 diffs.append(
                     f'<div class="diff-row changed">'
                     f'<span class="tag-c">🔵 A 独有</span>'
@@ -304,7 +314,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     f'<div class="side-b"></div>'
                     f'</div></div>'
                 )
-            for s in only_b[:5]:
+            for s in only_b[:20]:
                 diffs.append(
                     f'<div class="diff-row changed">'
                     f'<span class="tag-c">🔵 B 独有</span>'

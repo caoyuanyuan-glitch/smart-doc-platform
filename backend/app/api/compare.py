@@ -5,6 +5,10 @@ import os
 import json
 import time
 import xml.etree.ElementTree as ET
+import html
+import mimetypes
+import shutil
+import zipfile
 from app.api.auth import get_current_active_user
 from app.schemas.user import UserOut
 from app.database import get_db
@@ -18,6 +22,8 @@ _MEMORY_TASKS = {}
 _MEMORY_DIFFS = {}
 _MEMORY_NEXT_ID = [1000]
 _MEMORY_FILES = {}  # task_id -> {file_a_path, file_b_path, file_a_name, file_b_name}
+
+_ALIGN_CACHE = {}
 
 
 def _require_compare_task_access(db: Session, task_id: int, current_user: UserOut):
@@ -48,6 +54,592 @@ def _ensure_upload_dir():
 def _ensure_preview_dir():
     if not os.path.exists(PREVIEW_DIR):
         os.makedirs(PREVIEW_DIR, exist_ok=True)
+
+
+_TEXT_PREVIEW_EXTS = {".md", ".txt", ".dita", ".xml", ".ditamap"}
+_ZIP_TEXT_EXTS = {".dita", ".xml", ".ditamap", ".md", ".txt"}
+
+
+def _file_ext(name):
+    return os.path.splitext(name or "")[1].lower()
+
+
+def _preview_kind(file_name):
+    ext = _file_ext(file_name)
+    if ext == ".pdf":
+        return "pdf"
+    if ext in {".docx", ".zip"}:
+        return "html"
+    if ext in _TEXT_PREVIEW_EXTS or ext == ".doc":
+        return "html"
+    return "html"
+
+
+def _pdf_page_count(path):
+    import fitz
+    doc = fitz.open(path)
+    try:
+        return int(doc.page_count or 0)
+    finally:
+        doc.close()
+
+
+def _join_pdf_tokens(tokens):
+    import re
+    out = ""
+    for t in tokens:
+        t = (t or "").strip()
+        if not t:
+            continue
+        if not out:
+            out = t
+            continue
+        if re.search(r'[\u4e00-\u9fff]$', out) or re.search(r'^[\u4e00-\u9fff]', t):
+            out += t
+        else:
+            out += " " + t
+    return out
+
+
+def _norm_pdf_line(text):
+    import re
+    return re.sub(r"\s+", "", text or "").strip()
+
+
+def _inflate_bbox(bbox, pad=1.6):
+    x0, y0, x1, y1 = bbox
+    return (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+
+
+def _union_bbox(bboxes):
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    for b in bboxes:
+        if not b or len(b) < 4:
+            continue
+        xs0.append(b[0]); ys0.append(b[1]); xs1.append(b[2]); ys1.append(b[3])
+    if not xs0:
+        return None
+    return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+
+def _extract_page_lines(page):
+    lines = []
+    words = page.get_text("words") or []
+    if words:
+        current_key = None
+        current = None
+        for w in words:
+            x0, y0, x1, y1, text = w[:5]
+            block_no = w[5] if len(w) > 5 else 0
+            line_no = w[6] if len(w) > 6 else 0
+            key = (block_no, line_no)
+            item = {"text": text or "", "bbox": (x0, y0, x1, y1)}
+            if key != current_key:
+                if current:
+                    current["text"] = _join_pdf_tokens([x["text"] for x in current["words"]])
+                    current["bbox"] = _union_bbox([x["bbox"] for x in current["words"]])
+                    if current["text"]:
+                        lines.append(current)
+                current_key = key
+                current = {"text": "", "words": [item], "bbox": item["bbox"]}
+            else:
+                current["words"].append(item)
+        if current:
+            current["text"] = _join_pdf_tokens([x["text"] for x in current["words"]])
+            current["bbox"] = _union_bbox([x["bbox"] for x in current["words"]])
+            if current["text"]:
+                lines.append(current)
+        return lines
+
+    d = page.get_text("dict") or {}
+    for block in d.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            spans = line.get("spans") or []
+            word_list = []
+            for s in spans:
+                t = (s.get("text") or "").strip()
+                if not t:
+                    continue
+                word_list.append({"text": t, "bbox": tuple(s.get("bbox") or (0, 0, 0, 0))})
+            text = _join_pdf_tokens([x["text"] for x in word_list])
+            if not text:
+                continue
+            bbox = line.get("bbox") or _union_bbox([x["bbox"] for x in word_list])
+            lines.append({"text": text, "bbox": bbox, "words": word_list})
+    return lines
+
+
+def _word_diff_boxes(line_a, line_b):
+    from difflib import SequenceMatcher
+    wa = line_a.get("words") or []
+    wb = line_b.get("words") or []
+    na = [_norm_pdf_line(w.get("text", "")) for w in wa]
+    nb = [_norm_pdf_line(w.get("text", "")) for w in wb]
+    if not any(na) and not any(nb):
+        return [], []
+    sm = SequenceMatcher(None, na, nb, autojunk=False)
+    boxes_a, boxes_b = [], []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag in ("delete", "replace"):
+            boxes_a.extend(w["bbox"] for w in wa[i1:i2] if w.get("bbox"))
+        if tag in ("insert", "replace"):
+            boxes_b.extend(w["bbox"] for w in wb[j1:j2] if w.get("bbox"))
+    return boxes_a, boxes_b
+
+
+def _pack_words(words):
+    text = ""
+    spans = []
+    for w in words or []:
+        token = _norm_pdf_line(w.get("text", ""))
+        if not token:
+            continue
+        start = len(text)
+        text += token
+        spans.append((start, len(text), w.get("bbox")))
+    return text, spans
+
+
+def _spans_in_range(spans, start, end):
+    boxes = []
+    for s, e, bbox in spans:
+        if bbox and e > start and s < end:
+            boxes.append(bbox)
+    return boxes
+
+
+def _hunk_diff_boxes(lines_a, lines_b):
+    import re
+    from difflib import SequenceMatcher
+    wa, wb = [], []
+    for line in lines_a or []:
+        wa.extend(line.get("words") or [])
+    for line in lines_b or []:
+        wb.extend(line.get("words") or [])
+    sa, spa = _pack_words(wa)
+    sb, spb = _pack_words(wb)
+    if not sa and not sb:
+        return [], []
+    if re.fullmatch(r"\d{1,4}", sa or "") and re.fullmatch(r"\d{1,4}", sb or ""):
+        return [], []
+    ratio = SequenceMatcher(None, sa, sb).ratio() if (sa or sb) else 0.0
+    similar = ratio >= 0.45
+    sm = SequenceMatcher(None, sa, sb, autojunk=False)
+    boxes_a, boxes_b = [], []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            kind_a = "chg" if similar else "del"
+            kind_b = "chg" if similar else "ins"
+            boxes_a.extend((b, kind_a) for b in _spans_in_range(spa, i1, i2))
+            boxes_b.extend((b, kind_b) for b in _spans_in_range(spb, j1, j2))
+        elif tag == "delete":
+            boxes_a.extend((b, "del") for b in _spans_in_range(spa, i1, i2))
+        elif tag == "insert":
+            boxes_b.extend((b, "ins") for b in _spans_in_range(spb, j1, j2))
+    if similar:
+        if not boxes_a and not boxes_b:
+            return [], []
+    else:
+        if not boxes_a:
+            boxes_a = [(ln.get("bbox"), "del") for ln in (lines_a or []) if ln.get("bbox")]
+        if not boxes_b:
+            boxes_b = [(ln.get("bbox"), "ins") for ln in (lines_b or []) if ln.get("bbox")]
+    return boxes_a, boxes_b
+
+
+def _diff_page_boxes(page_a, page_b, for_side):
+    from difflib import SequenceMatcher
+    lines_a = _extract_page_lines(page_a)
+    lines_b = _extract_page_lines(page_b)
+    na = [_norm_pdf_line(x["text"]) for x in lines_a]
+    nb = [_norm_pdf_line(x["text"]) for x in lines_b]
+    sm = SequenceMatcher(None, na, nb, autojunk=False)
+    boxes = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "delete" and for_side == "a":
+            for line in lines_a[i1:i2]:
+                if line.get("bbox"):
+                    boxes.append((line["bbox"], "del"))
+        elif tag == "insert" and for_side == "b":
+            for line in lines_b[j1:j2]:
+                if line.get("bbox"):
+                    boxes.append((line["bbox"], "ins"))
+        elif tag == "replace":
+            ba, bb = _hunk_diff_boxes(lines_a[i1:i2], lines_b[j1:j2])
+            boxes.extend(ba if for_side == "a" else bb)
+    try:
+        from app.utils.compare_preview import extra_page_boxes
+        boxes.extend(extra_page_boxes(page_a, page_b, for_side))
+    except Exception:
+        pass
+    return boxes
+
+
+def _paint_highlights(png_bytes, width, height, boxes, zoom):
+    import io
+    from PIL import Image, ImageDraw
+    colors = {
+        "del": (255, 76, 76, 92),
+        "ins": (46, 184, 92, 92),
+        "chg": (255, 196, 0, 100),
+        "img": (59, 130, 246, 96),
+        "fmt": (168, 85, 247, 96),
+    }
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for bbox, kind in boxes:
+        color = colors.get(kind)
+        if not color or not bbox:
+            continue
+        x0, y0, x1, y1 = _inflate_bbox(bbox)
+        rect = [x0 * zoom, y0 * zoom, x1 * zoom, y1 * zoom]
+        if rect[2] <= rect[0] or rect[3] <= rect[1]:
+            continue
+        draw.rectangle(rect, fill=color)
+    out = Image.alpha_composite(img, overlay).convert("RGB")
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _render_pdf_page_png(path, page, zoom=1.5, peer_path="", peer_page=0, side="a", highlight=True):
+    import fitz
+    doc = fitz.open(path)
+    try:
+        total = int(doc.page_count or 0)
+        if total <= 0:
+            raise ValueError("PDF has no pages")
+        idx = max(1, min(int(page), total)) - 1
+        this_page = doc[idx]
+        boxes = []
+        if highlight and peer_path and os.path.exists(peer_path) and _file_ext(peer_path) == ".pdf":
+            peer = fitz.open(peer_path)
+            try:
+                ptotal = int(peer.page_count or 0)
+                if ptotal > 0:
+                    pidx = max(1, min(int(peer_page or page), ptotal)) - 1
+                    if side == "b":
+                        boxes = _diff_page_boxes(peer[pidx], this_page, "b")
+                    else:
+                        boxes = _diff_page_boxes(this_page, peer[pidx], "a")
+            finally:
+                peer.close()
+        pix = this_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        png = pix.tobytes("png")
+        if boxes:
+            png = _paint_highlights(png, pix.width, pix.height, boxes, zoom)
+        return png, total
+    finally:
+        doc.close()
+
+
+def _heading_key(text):
+    import re
+    s = (text or "").strip()
+    s = re.sub(r"^第\s*[一二三四五六七八九十百零\d]+\s*[章节篇]\s*", "", s)
+    s = re.sub(r"^[A-Za-z]?\d+(?:\.\d+)*\s*", "", s)
+    s = re.sub(r"\s+", "", s)
+    return s.lower()
+
+
+def _front_page_heading(page):
+    import re
+    text = page.get_text() or ""
+    if "此页有意留白" in text or "intentionally left blank" in text.lower():
+        return "空白页"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    skip = re.compile(r"^(?:[IVXivx]+|\d+|[—\-–]+)$")
+    for ln in lines[:12]:
+        if skip.match(ln):
+            continue
+        if ln in ("产品说明书", "使用说明书"):
+            return "封面"
+        if "关于说明书" in ln:
+            return "关于说明书"
+        if ln.startswith("版本记录") or ln == "版本记录":
+            return "版本记录"
+        if ln in ("目录", "CONTENTS", "Contents") or ln.startswith("目录"):
+            return "目录"
+        if len(ln) <= 24 and not ln.endswith("。"):
+            return ln
+    return "封面"
+
+
+def _front_matter_ranges(doc, last_page):
+    last_page = int(last_page or 0)
+    n = int(doc.page_count or 0)
+    last_page = min(last_page, n)
+    if last_page < 1:
+        return []
+    ranges = []
+    current = None
+    for i in range(last_page):
+        page_no = i + 1
+        heading = _front_page_heading(doc[i])
+        if current and current["heading"] == heading:
+            current["page_end"] = page_no
+            continue
+        if current:
+            ranges.append(current)
+        current = {
+            "heading": heading,
+            "level": 0,
+            "page_start": page_no,
+            "page_end": page_no,
+        }
+    if current:
+        ranges.append(current)
+    return ranges
+
+
+def _pdf_chapter_ranges(path):
+    import fitz
+    doc = fitz.open(path)
+    try:
+        toc = doc.get_toc() or []
+        n = int(doc.page_count or 0)
+        ranges = []
+        if toc and len(toc) >= 2:
+            for i, item in enumerate(toc):
+                level = int(item[0] or 1)
+                title = str(item[1] or "").strip()
+                page = int(item[2] or 1)
+                if not title or n <= 0:
+                    continue
+                page = max(1, min(page, n))
+                end = n
+                for j in range(i + 1, len(toc)):
+                    if int(toc[j][0] or 1) <= level:
+                        end = int(toc[j][2] or 1) - 1
+                        break
+                end = max(page, min(end, n))
+                ranges.append({
+                    "heading": title,
+                    "level": level,
+                    "page_start": page,
+                    "page_end": end,
+                })
+        elif n:
+            pages_text = [(doc[i].get_text() or "") for i in range(n)]
+            from app.utils.doc_parser import detect_headings_from_text, flatten_chapters
+            flat = flatten_chapters(detect_headings_from_text(pages_text))
+            for ch in flat:
+                heading = (ch.get("heading") or "").strip()
+                ps = int(ch.get("page_start") or 0)
+                pe = int(ch.get("page_end") or ps)
+                if not heading or ps <= 0:
+                    continue
+                ranges.append({
+                    "heading": heading,
+                    "level": 1,
+                    "page_start": ps,
+                    "page_end": max(ps, pe),
+                })
+        first_body = min((int(r.get("page_start") or 0) for r in ranges if int(r.get("page_start") or 0) > 0), default=0)
+        if first_body > 1:
+            ranges = _front_matter_ranges(doc, first_body - 1) + ranges
+        return ranges
+    finally:
+        doc.close()
+
+
+def _align_chapter_ranges(ranges_a, ranges_b):
+    from difflib import SequenceMatcher
+    used = set()
+    pairs = []
+    keys_b = {}
+    for j, rb in enumerate(ranges_b):
+        keys_b.setdefault(_heading_key(rb.get("heading", "")), []).append(j)
+
+    n_a = max(1, len(ranges_a) - 1)
+    n_b = max(1, len(ranges_b) - 1)
+    for i, ra in enumerate(ranges_a):
+        key = _heading_key(ra.get("heading", ""))
+        if not key:
+            continue
+        cand = [j for j in keys_b.get(key, []) if j not in used]
+        chosen = None
+        if len(cand) == 1:
+            chosen = cand[0]
+        elif cand:
+            pos = i / n_a
+            chosen = min(cand, key=lambda j: abs(j / n_b - pos))
+        else:
+            best_j, best = None, 0.0
+            for j, rb in enumerate(ranges_b):
+                if j in used:
+                    continue
+                kb = _heading_key(rb.get("heading", ""))
+                if not kb:
+                    continue
+                score = SequenceMatcher(None, key, kb).ratio()
+                if score > best:
+                    best, best_j = score, j
+            if best_j is not None and best >= 0.72:
+                chosen = best_j
+        if chosen is None:
+            continue
+        used.add(chosen)
+        rb = ranges_b[chosen]
+        pairs.append({
+            "heading_a": ra.get("heading", ""),
+            "heading_b": rb.get("heading", ""),
+            "level": max(int(ra.get("level") or 1), int(rb.get("level") or 1)),
+            "page_start_a": int(ra.get("page_start") or 0),
+            "page_end_a": int(ra.get("page_end") or 0),
+            "page_start_b": int(rb.get("page_start") or 0),
+            "page_end_b": int(rb.get("page_end") or 0),
+        })
+    return pairs
+
+
+def _lookup_peer_page(pairs, page, from_side):
+    sa, sb = ("b", "a") if from_side == "b" else ("a", "b")
+    containing = []
+    for item in pairs or []:
+        start = int(item.get(f"page_start_{sa}") or 0)
+        end = int(item.get(f"page_end_{sa}") or 0)
+        peer_start = int(item.get(f"page_start_{sb}") or 0)
+        if start and end and peer_start and start <= page <= end:
+            containing.append(item)
+    if not containing:
+        return 0, ""
+    containing.sort(key=lambda item: (
+        int(item.get(f"page_end_{sa}") or 0) - int(item.get(f"page_start_{sa}") or 0),
+        -int(item.get("level") or 0),
+    ))
+    item = containing[0]
+    offset = page - int(item.get(f"page_start_{sa}") or page)
+    peer_start = int(item.get(f"page_start_{sb}") or 0)
+    peer_end = int(item.get(f"page_end_{sb}") or peer_start)
+    peer = min(peer_end, max(peer_start, peer_start + offset))
+    heading = item.get(f"heading_{sa}") or item.get(f"heading_{sb}") or ""
+    return peer, heading
+
+
+def _align_cache_key(path_a, path_b):
+    try:
+        return (path_a, path_b, os.path.getmtime(path_a), os.path.getmtime(path_b))
+    except OSError:
+        return (path_a, path_b, 0, 0)
+
+
+def _get_preview_align(task_id):
+    path_a, _ = _resolve_preview_file(task_id, "a")
+    path_b, _ = _resolve_preview_file(task_id, "b")
+    if not path_a or not path_b:
+        return {"pairs": []}
+    if _file_ext(path_a) != ".pdf" or _file_ext(path_b) != ".pdf":
+        return {"pairs": []}
+    key = _align_cache_key(path_a, path_b)
+    cached = _ALIGN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    pairs = _align_chapter_ranges(_pdf_chapter_ranges(path_a), _pdf_chapter_ranges(path_b))
+    data = {"pairs": pairs}
+    _ALIGN_CACHE[key] = data
+    return data
+
+
+def _copy_preview_source(src_path, task_id, side, file_name):
+    if not src_path or not os.path.exists(src_path):
+        return ""
+    ext = _file_ext(file_name) or _file_ext(src_path) or ".bin"
+    dest = os.path.join(PREVIEW_DIR, f"task_{task_id}_{side}{ext}")
+    shutil.copy2(src_path, dest)
+    return dest
+
+
+def _resolve_preview_file(task_id, side):
+    side = "b" if side == "b" else "a"
+    if task_id in _MEMORY_FILES:
+        info = _MEMORY_FILES[task_id]
+        path = info.get(f"file_{side}_path", "")
+        name = info.get(f"file_{side}_name", "")
+        if path and os.path.exists(path):
+            return path, name
+    if os.path.isdir(PREVIEW_DIR):
+        prefix = f"task_{task_id}_{side}."
+        for fname in os.listdir(PREVIEW_DIR):
+            if fname.startswith(prefix):
+                path = os.path.join(PREVIEW_DIR, fname)
+                return path, fname
+    return "", ""
+
+
+def _read_text_preview(path, limit=200000):
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read(limit)
+
+
+def _wrap_pre(text):
+    return f'<pre class="doc-preview">{html.escape(text or "")}</pre>'
+
+
+def _build_zip_preview_html(path):
+    with zipfile.ZipFile(path) as zf:
+        names = [n for n in zf.namelist() if n and not n.endswith("/")][:200]
+        items = "".join(f"<li>{html.escape(n)}</li>" for n in names)
+        extra = ""
+        preview_member = next(
+            (n for n in names if _file_ext(n) in _ZIP_TEXT_EXTS),
+            None,
+        )
+        if preview_member:
+            raw = zf.read(preview_member)
+            text = raw.decode("utf-8", errors="replace")[:80000]
+            extra = (
+                f"<h4>{html.escape(preview_member)}</h4>"
+                f"{_wrap_pre(text)}"
+            )
+    return (
+        '<div class="doc-preview-html">'
+        f"<p>ZIP 内文件（最多 200）</p><ul>{items}</ul>{extra}"
+        "</div>"
+    )
+
+
+def _build_compare_preview_html(path, file_name, peer_path="", peer_name="", side="a", highlight=False):
+    ext = _file_ext(file_name) or _file_ext(path)
+    try:
+        if highlight and peer_path and os.path.exists(peer_path):
+            try:
+                from app.utils.compare_preview import build_highlighted_preview
+                highlighted = build_highlighted_preview(
+                    path, file_name, peer_path, peer_name, side
+                )
+                if highlighted:
+                    return highlighted
+            except Exception as e:
+                print(f"[Preview] highlight failed: {e}")
+        if ext == ".docx":
+            try:
+                from app.api.qa import _build_docx_preview_html
+                return _build_docx_preview_html(path)
+            except Exception:
+                import docx2txt
+                return _wrap_pre(docx2txt.process(path) or "")
+        if ext == ".zip":
+            return _build_zip_preview_html(path)
+        if ext == ".doc":
+            return _wrap_pre("当前预览支持 .docx / PDF / MD / TXT / DITA / ZIP / Excel，请将 .doc 另存为 .docx 后再预览。")
+        if ext in {".xlsx", ".xlsm", ".xls"}:
+            from app.api.qa import _build_xlsx_preview_html
+            return _build_xlsx_preview_html(path)
+        if ext in _TEXT_PREVIEW_EXTS:
+            return _wrap_pre(_read_text_preview(path))
+        return _wrap_pre(_read_text_preview(path))
+    except Exception as e:
+        return _wrap_pre(f"预览失败：{e}")
 
 
 def _read_upload_as_text(path: str) -> str:
@@ -536,6 +1128,14 @@ def _parse_file(file_path: str, filename: str):
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
             return {"text": "", "segments": [], "structure": [], "type": "unknown"}
+    elif ext in (".xlsx", ".xlsm", ".xls"):
+        try:
+            from app.utils.document_parser import parse_xlsx
+            text = parse_xlsx(file_path)
+            return {"text": text or "", "segments": [], "structure": [], "type": "xlsx"}
+        except Exception as e:
+            print(f"XLSX parse error: {e}")
+            return {"text": "", "segments": [], "structure": [], "type": "xlsx"}
     else:
         text = _read_upload_as_text(file_path)
         return {"text": text, "segments": [], "structure": [], "type": "text"}
@@ -764,16 +1364,8 @@ def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, user_
     preview_a_path = ""
     preview_b_path = ""
     try:
-        ext_a = os.path.splitext(file_a_name)[1].lower()
-        ext_b = os.path.splitext(file_b_name)[1].lower()
-        if ext_a == ".pdf":
-            preview_a_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_a{ext_a}")
-            import shutil
-            shutil.copy2(file_a_path, preview_a_path)
-        if ext_b == ".pdf":
-            preview_b_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_b{ext_b}")
-            import shutil
-            shutil.copy2(file_b_path, preview_b_path)
+        preview_a_path = _copy_preview_source(file_a_path, task_id, "a", file_a_name)
+        preview_b_path = _copy_preview_source(file_b_path, task_id, "b", file_b_name)
     except Exception as e:
         print(f"[Preview] Save preview files failed: {e}")
 
@@ -1352,53 +1944,122 @@ async def get_preview_file(
     current_user: UserOut = Depends(get_current_active_user),
 ):
     """
-    获取对比任务的PDF预览文件
+    获取对比任务的原始预览文件
     side: 'a' 或 'b'
     """
     from fastapi.responses import FileResponse
-    import os
-
     _require_compare_task_access(db, task_id, current_user)
-
-    file_path = None
-    file_name = None
-
-    # 先从内存查找
-    if task_id in _MEMORY_FILES:
-        info = _MEMORY_FILES[task_id]
-        if side == "a":
-            file_path = info.get("file_a_path", "")
-            file_name = info.get("file_a_name", "")
-        else:
-            file_path = info.get("file_b_path", "")
-            file_name = info.get("file_b_name", "")
-
-    # 再尝试从数据库查找（如果有）
-    if not file_path:
-        try:
-            from app.crud.compare import get_compare_task
-            task = get_compare_task(db, task_id=task_id)
-            if task:
-                # 尝试从预览目录查找
-                ext = ".pdf"
-                candidate = os.path.join(PREVIEW_DIR, f"task_{task_id}_{side}{ext}")
-                if os.path.exists(candidate):
-                    file_path = candidate
-                    if side == "a":
-                        file_name = getattr(task, "file_a_name", f"document_{side}.pdf")
-                    else:
-                        file_name = getattr(task, "file_b_name", f"document_{side}.pdf")
-        except Exception:
-            pass
-
+    file_path, file_name = _resolve_preview_file(task_id, side)
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Preview file not found")
-
+    media_type, _ = mimetypes.guess_type(file_name or file_path)
     return FileResponse(
         file_path,
-        media_type="application/pdf",
-        filename=file_name or f"document_{side}.pdf"
+        media_type=media_type or "application/octet-stream",
+        filename=file_name or f"document_{side}",
     )
+
+
+@router.get("/{task_id}/preview/content")
+async def get_preview_content(
+    task_id: int,
+    side: str = "a",
+    highlight: int = 1,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """Return PDF metadata or HTML preview for DOCX / MD / TXT / DITA / ZIP / Excel."""
+    _require_compare_task_access(db, task_id, current_user)
+    file_path, file_name = _resolve_preview_file(task_id, side)
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+    kind = _preview_kind(file_name or file_path)
+    if kind == "pdf":
+        try:
+            total_pages = _pdf_page_count(file_path)
+        except Exception:
+            total_pages = 0
+        return {
+            "type": "pdf-pages",
+            "file_name": file_name,
+            "total_pages": total_pages,
+            "content": "",
+        }
+    peer_side = "b" if side != "b" else "a"
+    peer_path, peer_name = ("", "")
+    if highlight:
+        peer_path, peer_name = _resolve_preview_file(task_id, peer_side)
+    return {
+        "type": "html",
+        "file_name": file_name,
+        "content": _build_compare_preview_html(
+            file_path,
+            file_name,
+            peer_path=peer_path,
+            peer_name=peer_name,
+            side="b" if side == "b" else "a",
+            highlight=bool(highlight),
+        ),
+    }
+
+
+@router.get("/{task_id}/preview/page")
+async def get_preview_page(
+    task_id: int,
+    side: str = "a",
+    page: int = 1,
+    highlight: int = 1,
+    peer_page: int = 0,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    from fastapi.responses import Response
+    _require_compare_task_access(db, task_id, current_user)
+    file_path, file_name = _resolve_preview_file(task_id, side)
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+    if _file_ext(file_name or file_path) != ".pdf":
+        raise HTTPException(status_code=400, detail="Not a PDF")
+    try:
+        peer_side = "b" if side != "b" else "a"
+        peer_path, _peer_name = _resolve_preview_file(task_id, peer_side)
+        mapped = 0
+        heading = ""
+        if peer_path and _file_ext(peer_path) == ".pdf":
+            mapped, heading = _lookup_peer_page(
+                _get_preview_align(task_id).get("pairs") or [],
+                page,
+                "b" if side == "b" else "a",
+            )
+        use_highlight = bool(highlight) and bool(mapped)
+        png, total = _render_pdf_page_png(
+            file_path,
+            page,
+            peer_path=peer_path,
+            peer_page=mapped,
+            side="b" if side == "b" else "a",
+            highlight=use_highlight,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Render failed: {e}")
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "X-Total-Pages": str(total),
+            "X-Peer-Page": str(mapped),
+        },
+    )
+
+
+@router.get("/{task_id}/preview/align")
+async def get_preview_align(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    _require_compare_task_access(db, task_id, current_user)
+    return _get_preview_align(task_id)
 
 
 @router.get("/{task_id}/preview/info")
@@ -1411,37 +2072,23 @@ async def get_preview_info(
     获取预览文件信息（是否有PDF预览、文件名等）
     """
     _require_compare_task_access(db, task_id, current_user)
-
     info = {
         "task_id": task_id,
         "has_preview_a": False,
         "has_preview_b": False,
         "file_a_name": "",
         "file_b_name": "",
+        "type_a": "",
+        "type_b": "",
     }
-
-    # 从内存查找
-    if task_id in _MEMORY_FILES:
-        f = _MEMORY_FILES[task_id]
-        info["file_a_name"] = f.get("file_a_name", "")
-        info["file_b_name"] = f.get("file_b_name", "")
-        info["has_preview_a"] = os.path.exists(f.get("file_a_path", "")) if f.get("file_a_path") else False
-        info["has_preview_b"] = os.path.exists(f.get("file_b_path", "")) if f.get("file_b_path") else False
-
-    # 检查数据库任务
-    if not info["has_preview_a"] and not info["has_preview_b"]:
-        try:
-            from app.crud.compare import get_compare_task
-            task = get_compare_task(db, task_id=task_id)
-            if task:
-                info["file_a_name"] = getattr(task, "file_a_name", "")
-                info["file_b_name"] = getattr(task, "file_b_name", "")
-                # 检查预览目录
-                a_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_a.pdf")
-                b_path = os.path.join(PREVIEW_DIR, f"task_{task_id}_b.pdf")
-                info["has_preview_a"] = os.path.exists(a_path)
-                info["has_preview_b"] = os.path.exists(b_path)
-        except Exception:
-            pass
-
+    path_a, name_a = _resolve_preview_file(task_id, "a")
+    path_b, name_b = _resolve_preview_file(task_id, "b")
+    if name_a:
+        info["file_a_name"] = name_a
+    if name_b:
+        info["file_b_name"] = name_b
+    info["has_preview_a"] = bool(path_a)
+    info["has_preview_b"] = bool(path_b)
+    info["type_a"] = _preview_kind(name_a or path_a) if path_a else ""
+    info["type_b"] = _preview_kind(name_b or path_b) if path_b else ""
     return info

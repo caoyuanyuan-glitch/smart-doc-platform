@@ -1,10 +1,10 @@
 <template>
   <div class="compare-container">
-    <h2 class="page-title">参数数值对比</h2>
+    <h2 class="page-title">多文件一致性检查</h2>
 
     <div class="panel">
       <div class="panel-header">
-        <span>上传参照文档和多个对比文档，对比相同参数的数值是否一致</span>
+        <span>上传基准文档和对比文档，填写要对比的参数名；不填则默认对比仪器尺寸、重量、环境温度/湿度/大气压、电源电压、额定功率、LCD尺寸、分辨率</span>
         <div class="panel-actions">
           <el-tag size="small" type="info">支持 Word / PDF / Excel</el-tag>
         </div>
@@ -12,62 +12,55 @@
 
       <div class="upload-grid">
         <div class="upload-slot">
-          <div class="slot-label">参照文档</div>
-          <el-upload
-            action="#"
-            :auto-upload="false"
-            :show-file-list="false"
-            :before-upload="(f) => { files[0] = f; return false }"
-            :on-change="(f) => { files[0] = f.raw || f }"
-            accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md"
-          >
-            <div class="upload-box" :class="{ filled: files[0] }">
-              <el-icon style="font-size:36px;color:#3b82f6;margin-bottom:8px;"><Upload /></el-icon>
-              <div v-if="!files[0]" class="upload-hint">点击上传参照文档</div>
-              <div v-else class="upload-name">{{ files[0].name }}</div>
-            </div>
-          </el-upload>
+          <div class="slot-label">基准文档</div>
+          <label class="upload-box" :class="{ filled: files[0] }">
+            <input type="file" accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md" @change="pickFile(0, $event)" />
+            <el-icon style="font-size:36px;color:#3b82f6;margin-bottom:8px;"><Upload /></el-icon>
+            <div v-if="!files[0]" class="upload-hint">点击上传基准文档</div>
+            <div v-else class="upload-name">{{ files[0].name }}</div>
+          </label>
+          <div class="slot-hint">对照标准，如旧版</div>
         </div>
-
-        <template v-for="(file, idx) in files.slice(1)" :key="idx">
+        <div class="vs-col">
+          <div class="slot-label vs-spacer-label" aria-hidden="true">&nbsp;</div>
           <div class="vs-badge">VS</div>
-          <div class="upload-slot">
-            <div class="slot-label">
-              对比文档 {{ idx + 1 }}
-              <el-button v-if="files.length > 2" type="danger" size="small" circle @click="removeFile(idx + 1)" style="margin-left:6px;">
-                <el-icon><Close /></el-icon>
-              </el-button>
-            </div>
-            <el-upload
-              action="#"
-              :auto-upload="false"
-              :show-file-list="false"
-              :before-upload="(f) => { files[idx + 1] = f; return false }"
-              :on-change="(f) => { files[idx + 1] = f.raw || f }"
-              accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md"
-            >
-              <div class="upload-box" :class="{ filled: files[idx + 1] }">
-                <el-icon style="font-size:36px;color:#7c3aed;margin-bottom:8px;"><Upload /></el-icon>
-                <div v-if="!files[idx + 1]" class="upload-hint">点击上传对比文档</div>
-                <div v-else class="upload-name">{{ files[idx + 1].name }}</div>
-              </div>
-            </el-upload>
-          </div>
-        </template>
+          <div class="slot-hint vs-spacer-hint" aria-hidden="true">&nbsp;</div>
+        </div>
+        <div class="upload-slot">
+          <div class="slot-label">对比文档</div>
+          <label class="upload-box" :class="{ filled: files[1] }">
+            <input type="file" accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md" @change="pickFile(1, $event)" />
+            <el-icon style="font-size:36px;color:#7c3aed;margin-bottom:8px;"><Upload /></el-icon>
+            <div v-if="!files[1]" class="upload-hint">点击上传对比文档</div>
+            <div v-else class="upload-name">{{ files[1].name }}</div>
+          </label>
+          <div class="slot-hint">要检查的版本，如新版</div>
+        </div>
+      </div>
+
+      <div class="param-names-row">
+        <div class="param-names-label">待对比参数</div>
+        <el-select
+          v-model="paramNames"
+          multiple
+          filterable
+          allow-create
+          placeholder="勾选或输入后按回车添加；留空则用默认规格项"
+        >
+          <el-option v-for="name in defaultParamNames" :key="name" :label="name" :value="name" />
+        </el-select>
+        <div class="param-names-hint">已选 {{ paramNames.length }} 项，开始对比时只检查这些参数</div>
       </div>
 
       <div class="action-row">
-        <el-button type="primary" size="large" :loading="loading" :disabled="!files[0] || !files[1]" @click="doCompare">
-          <el-icon><Search /></el-icon> 开始对比
-        </el-button>
-        <el-button size="large" type="success" @click="addFile" :disabled="files.length >= 8">
-          <el-icon><Plus /></el-icon> 添加文件
-        </el-button>
-        <el-button size="large" @click="clearFiles">清空</el-button>
+          <el-button type="primary" size="large" :loading="loading" :disabled="!files[0] || !files[1]" @click="doCompare">
+            <el-icon><Search /></el-icon> 开始对比
+          </el-button>
+          <el-button size="large" @click="clearFiles">清空</el-button>
       </div>
 
       <div v-if="loading" class="progress-panel">
-        <el-progress :percentage="progress" :stroke-width="16" status="success" />
+        <el-progress :percentage="progress" :stroke-width="6" :show-text="false" color="#3b82f6" />
         <div class="progress-text">{{ progressText }}</div>
       </div>
     </div>
@@ -89,119 +82,141 @@
           :name="ri"
         >
           <div class="pair-header">
-            <span class="pair-label">
-              {{ r.file_a }} <strong>VS</strong> {{ r.file_b }}
-            </span>
+            <div class="doc-info">
+              <div>基准文档：{{ r.file_a }}</div>
+              <div>对比文档：{{ r.file_b }}</div>
+              <div>检查项：{{ (r.param_names && r.param_names.length ? r.param_names : paramNames).join('、') }}</div>
+            </div>
             <div class="pair-tags">
               <el-tag type="success" size="small">一致: {{ r.match_count }}</el-tag>
               <el-tag type="danger" size="small">不一致: {{ r.diff_count }}</el-tag>
-              <el-tag type="warning" size="small">仅参照: {{ r.only_a_count }}</el-tag>
-              <el-tag size="small">仅对方: {{ r.only_b_count }}</el-tag>
+              <el-tag type="warning" size="small">建议优化: {{ suggestionCount(r) }}</el-tag>
             </div>
           </div>
 
           <div class="cards">
             <div class="card primary">
-              <div class="num">{{ r.total }}</div>
-              <div class="lbl">参数总数</div>
+              <div class="num">{{ issueTotal(r) }}</div>
+              <div class="lbl">合计</div>
             </div>
             <div class="card">
-              <div class="num" style="color:#22c55e">{{ r.match_count }}</div>
-              <div class="lbl">一致</div>
+              <div class="num" style="color:#ef4444">{{ severeCount(r) }}</div>
+              <div class="lbl">严重不一致</div>
             </div>
             <div class="card">
-              <div class="num" style="color:#ef4444">{{ r.diff_count }}</div>
-              <div class="lbl">不一致</div>
-            </div>
-            <div class="card">
-              <div class="num" style="color:#f59e0b">{{ r.only_a_count }}</div>
-              <div class="lbl">仅参照有</div>
-            </div>
-            <div class="card">
-              <div class="num" style="color:#8b5cf6">{{ r.only_b_count }}</div>
-              <div class="lbl">仅对方有</div>
+              <div class="num" style="color:#f59e0b">{{ suggestionCount(r) }}</div>
+              <div class="lbl">建议优化</div>
             </div>
           </div>
 
+          <h3 class="section-title">对比矩阵</h3>
           <div class="param-table-wrapper">
             <div class="custom-table-container">
               <table class="param-table">
                 <thead>
                   <tr>
-                    <th>参数名称</th>
-                    <th>{{ r.file_a || '参照文档' }}</th>
-                    <th>{{ r.file_b || '对比文档' }}</th>
-                    <th>一致性</th>
-                    <th>匹配方式</th>
-                    <th>数据来源</th>
+                    <th>检查项</th>
+                    <th>{{ docLabel(r.file_a) }}</th>
+                    <th>{{ docLabel(r.file_b) }}</th>
+                    <th>是否一致</th>
+                    <th>所在章节</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(row, idx) in paginateResults(r.results || [], ri)" :key="idx">
+                  <tr
+                    v-for="(row, idx) in paginateResults(foundRows(r), ri)"
+                    :key="idx"
+                  >
                     <td class="param-name-cell">{{ row.param }}</td>
-                    <td>{{ row.value_a || '—' }}</td>
-                    <td>{{ row.value_b || '—' }}</td>
+                    <td class="value-cell">
+                      <div v-if="isStructured(row.value_a) || isStructured(row.value_b)" class="struct-block">
+                        <div v-if="structureParts(row.value_a).intro" class="struct-intro">
+                          <template v-if="row.match === '不一致'">
+                            <span
+                              v-for="(seg, si) in valueDiff(structureParts(row.value_a).intro, structureParts(row.value_b).intro).left"
+                              :key="'ai-' + idx + '-' + si"
+                              :class="{ 'hl-diff': seg.diff }"
+                            >{{ seg.text }}</span>
+                          </template>
+                          <template v-else>{{ structureParts(row.value_a).intro }}</template>
+                        </div>
+                        <table class="mini-struct">
+                          <thead><tr><th>{{ structHeaders(row).name }}</th><th>{{ structHeaders(row).desc }}</th></tr></thead>
+                          <tbody>
+                            <tr v-for="(item, ii) in alignedStructRows(row)" :key="'ar-' + idx + '-' + ii">
+                              <th>{{ item.name }}</th>
+                              <td :class="{ 'cell-diff': item.diff && row.match === '不一致' }">{{ item.descA || '-' }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <template v-else-if="row.match === '不一致'">
+                        <span
+                          v-for="(seg, si) in valueDiff(row.value_a, row.value_b).left"
+                          :key="'a-' + idx + '-' + si"
+                          :class="{ 'hl-diff': seg.diff }"
+                        >{{ seg.text }}</span>
+                      </template>
+                      <template v-else>{{ displayValue(row.value_a) }}</template>
+                    </td>
+                    <td class="value-cell">
+                      <div v-if="isStructured(row.value_a) || isStructured(row.value_b)" class="struct-block">
+                        <div v-if="structureParts(row.value_b).intro" class="struct-intro">
+                          <template v-if="row.match === '不一致'">
+                            <span
+                              v-for="(seg, si) in valueDiff(structureParts(row.value_a).intro, structureParts(row.value_b).intro).right"
+                              :key="'bi-' + idx + '-' + si"
+                              :class="{ 'hl-diff': seg.diff }"
+                            >{{ seg.text }}</span>
+                          </template>
+                          <template v-else>{{ structureParts(row.value_b).intro }}</template>
+                        </div>
+                        <table class="mini-struct">
+                          <thead><tr><th>{{ structHeaders(row).name }}</th><th>{{ structHeaders(row).desc }}</th></tr></thead>
+                          <tbody>
+                            <tr v-for="(item, ii) in alignedStructRows(row)" :key="'br-' + idx + '-' + ii">
+                              <th>{{ item.name }}</th>
+                              <td :class="{ 'cell-diff': item.diff && row.match === '不一致' }">{{ item.descB || '-' }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <template v-else-if="row.match === '不一致'">
+                        <span
+                          v-for="(seg, si) in valueDiff(row.value_a, row.value_b).right"
+                          :key="'b-' + idx + '-' + si"
+                          :class="{ 'hl-diff': seg.diff }"
+                        >{{ seg.text }}</span>
+                      </template>
+                      <template v-else>{{ displayValue(row.value_b) }}</template>
+                    </td>
                     <td class="match-cell">
                       <el-tag
                         :type="row.match === '一致' ? 'success' : row.match === '不一致' ? 'danger' : row.match === '仅A有' ? 'warning' : 'info'"
                         size="small"
                       >
-                        {{ row.match }}
+                        {{ matchLabel(row.match) }}
                       </el-tag>
                     </td>
-                    <td class="fuzzy-cell">
-                      <template v-if="row.match === '仅A有' || row.match === '仅B有'">
-                        <span class="text-muted">—</span>
-                      </template>
-                      <template v-else-if="row.fuzzy">
-                        <el-tag size="small" type="info" effect="plain">
-                          模糊匹配({{ row.fuzzy_score }})
-                        </el-tag>
-                        <div class="matched-name">→{{ row.matched_param }}</div>
-                      </template>
-                      <template v-else>
-                        <el-tag size="small" type="success" effect="plain">精确匹配</el-tag>
-                      </template>
-                    </td>
-                    <td class="source-cell">
-                      <div>参照: {{ row.source_a || '—' }}</div>
-                      <div>对比: {{ row.source_b || '—' }}</div>
-                    </td>
+                    <td class="source-cell">{{ chapterLabel(row) }}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
 
-            <div class="pagination-row" v-if="(r.results || []).length > pageSize">
+            <div class="pagination-row" v-if="foundRows(r).length > pageSize">
               <el-pagination
                 v-model:current-page="pages[ri]"
                 :page-size="pageSize"
-                :total="(r.results || []).length"
+                :total="foundRows(r).length"
                 layout="prev, pager, next, total"
                 background
                 small
               />
             </div>
+            <div class="matrix-note">未找到的检查项未展示。</div>
           </div>
 
-          <el-collapse v-if="r.extracted_text_a || r.extracted_text_b" style="margin-top:16px">
-            <el-collapse-item title="查看提取的原始文本（调试）" name="debug">
-              <el-tabs>
-                <el-tab-pane label="参照文档 提取文本" v-if="r.extracted_text_a">
-                  <pre class="debug-text">{{ r.extracted_text_a }}</pre>
-                  <div style="margin-top:4px;color:#9ca3af;font-size:12px">
-                    从参照文档中提取到 {{ r.params_a_count }} 个参数
-                  </div>
-                </el-tab-pane>
-                <el-tab-pane label="对比文档 提取文本" v-if="r.extracted_text_b">
-                  <pre class="debug-text">{{ r.extracted_text_b }}</pre>
-                  <div style="margin-top:4px;color:#9ca3af;font-size:12px">
-                    从对比文档中提取到 {{ r.params_b_count }} 个参数
-                  </div>
-                </el-tab-pane>
-              </el-tabs>
-            </el-collapse-item>
-          </el-collapse>
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -211,7 +226,7 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Upload, Search, Plus, Close } from '@element-plus/icons-vue'
+import { Upload, Search } from '@element-plus/icons-vue'
 import { instance } from '@/api'
 
 const files = ref([null, null])
@@ -222,6 +237,23 @@ const allResults = ref([])
 const activeTab = ref(0)
 const pageSize = ref(20)
 const pages = reactive({})
+const defaultParamNames = [
+  '预期用途',
+  '适用范围',
+  '结构组成',
+  '符合标准清单',
+  '产品性能-技术指标',
+  '仪器尺寸',
+  '重量',
+  '操作/运行环境温度',
+  '湿度',
+  '大气压',
+  '电源电压',
+  '额定功率',
+  'LCD尺寸',
+  '分辨率',
+]
+const paramNames = ref([...defaultParamNames])
 
 function paginateResults(results, tabIdx) {
   if (!results) return []
@@ -230,16 +262,145 @@ function paginateResults(results, tabIdx) {
   return results.slice(start, start + pageSize.value)
 }
 
-function addFile() {
-  if (files.value.length < 8) {
-    files.value.push(null)
-  }
+function foundRows(r) {
+  return (r.results || []).filter(row => {
+    if (row.match === '缺失') return false
+    return Boolean(String(row.value_a || '').trim() || String(row.value_b || '').trim())
+  })
 }
 
-function removeFile(index) {
-  if (files.value.length > 2) {
-    files.value.splice(index, 1)
+function displayValue(val) {
+  const s = String(val || '').trim()
+  return s || '-'
+}
+
+function structureParts(val) {
+  const lines = String(val || '').split('\n').map(s => s.trim()).filter(Boolean)
+  const intro = []
+  const rows = []
+  for (const line of lines) {
+    if (line.includes(' | ')) {
+      const i = line.indexOf(' | ')
+      rows.push({ name: line.slice(0, i), desc: line.slice(i + 3) })
+    } else if (!/^各部件功能说明如下[:：]?$/.test(line)) {
+      intro.push(line)
+    }
   }
+  return { intro: intro.join('\n'), rows }
+}
+
+function isStructured(val) {
+  return structureParts(val).rows.length >= 2
+}
+
+function structHeaders(row) {
+  const name = String(row.param || '')
+  if (name.includes('标准')) return { name: '标准号', desc: '内容' }
+  return { name: '部件', desc: '功能' }
+}
+
+function alignedStructRows(row) {
+  const a = structureParts(row.value_a).rows
+  const b = structureParts(row.value_b).rows
+  const names = []
+  const seen = {}
+  for (const item of a.concat(b)) {
+    if (!seen[item.name]) {
+      seen[item.name] = true
+      names.push(item.name)
+    }
+  }
+  const mapA = {}
+  const mapB = {}
+  for (const item of a) mapA[item.name] = item.desc
+  for (const item of b) mapB[item.name] = item.desc
+  return names.map(name => ({
+    name,
+    descA: mapA[name] || '',
+    descB: mapB[name] || '',
+    diff: (mapA[name] || '') !== (mapB[name] || ''),
+  }))
+}
+
+function tokenizeValue(text) {
+  const s = String(text || '')
+  const tokens = []
+  const re = /[A-Za-z0-9]+(?:[./\-_][A-Za-z0-9]+)*|[\u4e00-\u9fff]|./g
+  let m
+  while ((m = re.exec(s))) tokens.push(m[0])
+  return tokens
+}
+
+function mergeDiffSegs(segs) {
+  const out = []
+  for (const seg of segs) {
+    const last = out[out.length - 1]
+    if (last && last.diff === seg.diff) last.text += seg.text
+    else out.push({ text: seg.text, diff: seg.diff })
+  }
+  return out
+}
+
+function valueDiff(aRaw, bRaw) {
+  const a = String(aRaw || '')
+  const b = String(bRaw || '')
+  if (!a && !b) {
+    return {
+      left: [{ text: '-', diff: false }],
+      right: [{ text: '-', diff: false }],
+    }
+  }
+  const ta = tokenizeValue(a)
+  const tb = tokenizeValue(b)
+  const n = ta.length
+  const m = tb.length
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = ta[i] === tb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
+    }
+  }
+  const left = []
+  const right = []
+  let i = 0
+  let j = 0
+  while (i < n && j < m) {
+    if (ta[i] === tb[j]) {
+      left.push({ text: ta[i], diff: false })
+      right.push({ text: tb[j], diff: false })
+      i += 1
+      j += 1
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      left.push({ text: ta[i], diff: true })
+      i += 1
+    } else {
+      right.push({ text: tb[j], diff: true })
+      j += 1
+    }
+  }
+  while (i < n) {
+    left.push({ text: ta[i], diff: true })
+    i += 1
+  }
+  while (j < m) {
+    right.push({ text: tb[j], diff: true })
+    j += 1
+  }
+  return { left: mergeDiffSegs(left), right: mergeDiffSegs(right) }
+}
+
+function segsToHtml(segs) {
+  if (!segs || !segs.length) return '-'
+  return segs.map(seg => {
+    const text = _esc(seg.text || '')
+    return seg.diff ? '<span class="hl-diff">' + text + '</span>' : text
+  }).join('')
+}
+
+function pickFile(idx, ev) {
+  const f = ev.target.files && ev.target.files[0]
+  if (f) files.value[idx] = f
+  ev.target.value = ''
 }
 
 function clearFiles() {
@@ -274,6 +435,7 @@ async function doCompare() {
 
     const formData = new FormData()
     validFiles.forEach(f => formData.append('files', f))
+    formData.append('param_names', (paramNames.value || []).join(','))
 
     await updateProgress(50, '正在对比参数数值...')
 
@@ -309,47 +471,48 @@ function exportReport() {
 
   const now = new Date().toLocaleString('zh-CN', { hour12: false })
   const rowsHtml = results.map((r, ri) => {
-    const items = r.results || []
+    const items = foundRows(r)
     const rows = items.map(row => {
       const matchClass = row.match === '一致' ? 'match-ok' : row.match === '不一致' ? 'match-diff' : 'match-only'
-      let fuzzyHtml = ''
-      if (row.match === '仅A有' || row.match === '仅B有') {
-        fuzzyHtml = '<span class="text-muted">—</span>'
-      } else if (row.fuzzy) {
-        fuzzyHtml = '<span class="tag tag-info">模糊匹配(' + row.fuzzy_score + ')</span><div class="matched-name">→' + _esc(row.matched_param || '') + '</div>'
-      } else {
-        fuzzyHtml = '<span class="tag tag-ok">精确匹配</span>'
-      }
+      const mismatched = row.match === '不一致'
+      const segs = mismatched ? valueDiff(row.value_a, row.value_b) : null
+      const htmlA = mismatched ? segsToHtml(segs.left) : _esc(displayValue(row.value_a))
+      const htmlB = mismatched ? segsToHtml(segs.right) : _esc(displayValue(row.value_b))
       return '<tr>' +
         '<td class="param-name">' + _esc(row.param) + '</td>' +
-        '<td>' + _esc(row.value_a || '—') + '</td>' +
-        '<td>' + _esc(row.value_b || '—') + '</td>' +
-        '<td><span class="tag ' + matchClass + '">' + _esc(row.match) + '</span></td>' +
-        '<td class="fuzzy-cell">' + fuzzyHtml + '</td>' +
-        '<td class="source-cell">参照: ' + _esc(row.source_a || '—') + '<br>对比: ' + _esc(row.source_b || '—') + '</td>' +
+        '<td>' + htmlA + '</td>' +
+        '<td>' + htmlB + '</td>' +
+        '<td><span class="tag ' + matchClass + '">' + _esc(matchLabel(row.match)) + '</span></td>' +
+        '<td class="source-cell">' + _esc(chapterLabel(row)) + '</td>' +
         '</tr>'
     }).join('')
 
+    const checkedNames = (r.param_names && r.param_names.length ? r.param_names : paramNames.value) || []
     return '<div class="pair-section">' +
-      '<h2>对比 ' + (ri + 1) + ': ' + _esc(r.file_a || '参照文档') + ' VS ' + _esc(r.file_b || '对比文档') + '</h2>' +
+      '<h2>1. 文档信息</h2>' +
+      '<p>基准文档：' + _esc(r.file_a || '') + '</p>' +
+      '<p>对比文档：' + _esc(r.file_b || '') + '</p>' +
+      '<p>检查项：' + _esc(checkedNames.join('、')) + '</p>' +
+      '<h2>2. 问题汇总</h2>' +
       '<div class="cards">' +
-      '<div class="card primary"><div class="num">' + (r.total || 0) + '</div><div class="lbl">参数总数</div></div>' +
-      '<div class="card"><div class="num" style="color:#22c55e">' + (r.match_count || 0) + '</div><div class="lbl">一致</div></div>' +
-      '<div class="card"><div class="num" style="color:#ef4444">' + (r.diff_count || 0) + '</div><div class="lbl">不一致</div></div>' +
-      '<div class="card"><div class="num" style="color:#f59e0b">' + (r.only_a_count || 0) + '</div><div class="lbl">仅参照有</div></div>' +
-      '<div class="card"><div class="num" style="color:#8b5cf6">' + (r.only_b_count || 0) + '</div><div class="lbl">仅对方有</div></div>' +
+      '<div class="card"><div class="num" style="color:#ef4444">' + severeCount(r) + '</div><div class="lbl">严重不一致</div></div>' +
+      '<div class="card"><div class="num" style="color:#f59e0b">' + suggestionCount(r) + '</div><div class="lbl">建议优化</div></div>' +
+      '<div class="card primary"><div class="num">' + issueTotal(r) + '</div><div class="lbl">合计</div></div>' +
       '</div>' +
+      '<h2>3. 对比矩阵</h2>' +
       '<table class="param-table">' +
       '<thead><tr>' +
-      '<th>参数名称</th>' +
-      '<th>' + _esc(r.file_a || '参照文档') + '</th>' +
-      '<th>' + _esc(r.file_b || '对比文档') + '</th>' +
-      '<th>一致性</th>' +
-      '<th>匹配方式</th>' +
-      '<th>数据来源</th>' +
+      '<th>检查项</th>' +
+      '<th>' + _esc(docLabel(r.file_a)) + '</th>' +
+      '<th>' + _esc(docLabel(r.file_b)) + '</th>' +
+      '<th>是否一致</th>' +
+      '<th>所在章节</th>' +
       '</tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
       '</table>' +
+      '<p class="matrix-note">未找到的检查项未展示。</p>' +
+      '<h2>4. 审核结论</h2>' +
+      '<p>结论：' + (issueTotal(r) ? '需修改后复审' : '通过') + '</p>' +
       '</div>'
   }).join('')
 
@@ -358,7 +521,7 @@ function exportReport() {
     '<head>\n' +
     '<meta charset="UTF-8">\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
-    '<title>参数数值对比报告</title>\n' +
+    '<title>多文件一致性审核报告</title>\n' +
     '<style>\n' +
     'body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;background:#f5f6f8;color:#1a1a1a}\n' +
     '.wrap{max-width:1180px;margin:0 auto;padding:32px 24px}\n' +
@@ -376,7 +539,7 @@ function exportReport() {
     '.param-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}\n' +
     '.param-table thead{position:sticky;top:0;z-index:10}\n' +
     '.param-table th{background:#f5f7fa;color:#303133;font-weight:600;font-size:13px;padding:12px 10px;text-align:left;border-bottom:2px solid #dcdfe6;white-space:nowrap}\n' +
-    '.param-table td{padding:10px;border-bottom:1px solid #ebeef5;color:#303133;vertical-align:top}\n' +
+    '.param-table td{padding:10px;border-bottom:1px solid #ebeef5;color:#303133;vertical-align:top;white-space:pre-wrap;word-break:break-word}\n' +
     '.param-table tbody tr:hover{background:#f5f7fa}\n' +
     '.param-name{font-weight:600;color:#1f2937;white-space:nowrap}\n' +
     '.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}\n' +
@@ -389,12 +552,14 @@ function exportReport() {
     '.source-cell{font-size:12px;color:#606266;white-space:nowrap}\n' +
     '.text-muted{color:#c0c4cc}\n' +
     '.matched-name{font-size:11px;color:#909399;margin-top:2px}\n' +
+    '.hl-diff{background:#fecaca;color:#991b1b;border-radius:2px}\n' +
+    '.matrix-note{margin:12px 0 0;font-size:12px;color:#6b7280}\n' +
     '@media print{.wrap{max-width:100%}}\n' +
     '</style>\n' +
     '</head>\n' +
     '<body>\n' +
     '<div class="wrap">\n' +
-    '<h1>参数数值对比报告</h1>\n' +
+    '<h1>多文件一致性审核报告</h1>\n' +
     '<div class="meta">生成时间: ' + now + ' | 对比组数: ' + results.length + '</div>\n' +
     rowsHtml +
     '\n</div>\n' +
@@ -405,7 +570,7 @@ function exportReport() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = '参数对比报告_' + new Date().toISOString().slice(0, 10) + '.html'
+  a.download = '多文件一致性审核报告_' + new Date().toISOString().slice(0, 10) + '.html'
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
@@ -416,6 +581,47 @@ function exportReport() {
 function _esc(str) {
   if (!str) return ''
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function docLabel(name) {
+  const s = String(name || '').trim()
+  if (!s) return '文档'
+  return s.replace(/\.(pdf|docx?|xlsx?|txt|md)$/i, '')
+}
+
+function isSuggestionItem(param) {
+  return /带宽|格式|单位/.test(param || '')
+}
+
+function diffRows(r) {
+  return (r.results || []).filter(row => row.match === '不一致')
+}
+
+function severeCount(r) {
+  return diffRows(r).filter(row => !isSuggestionItem(row.param)).length
+}
+
+function suggestionCount(r) {
+  return diffRows(r).filter(row => isSuggestionItem(row.param)).length
+}
+
+function issueTotal(r) {
+  return severeCount(r) + suggestionCount(r)
+}
+
+function chapterLabel(row) {
+  const a = (row.chapter_a || '').trim()
+  const b = (row.chapter_b || '').trim()
+  if (!a && !b) return '-'
+  if (a && b && a === b) return a
+  if (a && b) return a + ' / ' + b
+  return a || b
+}
+
+function matchLabel(match) {
+  if (match === '一致') return '是'
+  if (match === '不一致') return '否'
+  return '-'
 }
 </script>
 
@@ -460,29 +666,69 @@ function _esc(str) {
 
 .upload-grid {
   display: flex;
-  align-items: flex-start;
-  gap: 24px;
   justify-content: center;
-  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 16px;
 }
 
-.upload-slot { flex: 1; max-width: 400px; min-width: 200px; }
-
-.slot-label {
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: #374151;
+.upload-slot,
+.vs-col {
+  width: 240px;
   display: flex;
+  flex-direction: column;
   align-items: center;
 }
 
+.vs-col {
+  width: 64px;
+}
+
+.slot-label {
+  font-weight: 600;
+  color: #374151;
+  text-align: center;
+  width: 240px;
+  line-height: 22px;
+  margin-bottom: 10px;
+}
+
+.slot-hint {
+  margin-top: 10px;
+  font-weight: 400;
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
+  width: 240px;
+  line-height: 18px;
+}
+
+.vs-spacer-label,
+.vs-spacer-hint {
+  visibility: hidden;
+}
+
 .upload-box {
+  position: relative;
   border: 2px dashed #d1d5db;
   border-radius: 8px;
-  padding: 30px;
+  padding: 30px 16px;
   text-align: center;
   cursor: pointer;
   transition: all .3s;
+  width: 240px;
+  min-height: 160px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.upload-box input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .upload-box:hover { border-color: #3b82f6; background: #eff6ff; }
@@ -494,12 +740,51 @@ function _esc(str) {
 .upload-name { color: #3b82f6; font-weight: 600; font-size: 14px; }
 
 .vs-badge {
+  flex: 1;
   font-size: 20px;
   font-weight: 700;
   color: #9ca3af;
-  padding: 8px 16px;
+  padding: 0;
   display: flex;
   align-items: center;
+  justify-content: center;
+  margin: 0;
+}
+
+.vs-spacer {
+  width: 80px;
+}
+
+.param-names-row {
+  max-width: 720px;
+  margin: 20px auto 0;
+}
+
+.param-names-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+.param-names-row :deep(.el-select) {
+  width: 100%;
+}
+
+.param-names-row :deep(.el-select__wrapper) {
+  min-height: 42px;
+  height: auto;
+  align-items: flex-start;
+}
+
+.param-names-row :deep(.el-select__selection) {
+  flex-wrap: wrap;
+}
+
+.param-names-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .action-row {
@@ -510,16 +795,16 @@ function _esc(str) {
 }
 
 .progress-panel {
-  margin-top: 20px;
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
+  max-width: 240px;
+  margin: 16px auto 0;
+  padding: 0;
 }
 
 .progress-text {
   text-align: center;
-  margin-top: 8px;
+  margin-top: 6px;
   color: #6b7280;
+  font-size: 12px;
 }
 
 .result-tabs { margin-top: 16px; }
@@ -532,6 +817,49 @@ function _esc(str) {
   padding: 12px 16px;
   background: #f8fafc;
   border-radius: 6px;
+}
+
+.doc-info {
+  font-size: 14px;
+  color: #1f2937;
+  line-height: 1.7;
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 8px 0 12px;
+}
+
+.issue-list {
+  margin-bottom: 20px;
+}
+
+.issue-block {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.7;
+}
+
+.issue-title {
+  font-weight: 600;
+  color: #9a3412;
+  margin-bottom: 6px;
+}
+
+.issue-line {
+  margin-top: 4px;
+}
+
+.issue-indent {
+  padding-left: 1.5em;
+  color: #4b5563;
 }
 
 .pair-label {
@@ -617,6 +945,66 @@ function _esc(str) {
   font-size: 12px;
   color: #606266;
   white-space: nowrap;
+}
+
+.value-cell {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 420px;
+  line-height: 1.65;
+}
+
+.struct-block {
+  white-space: normal;
+}
+
+.struct-intro {
+  margin-bottom: 8px;
+}
+
+.mini-struct {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.mini-struct th,
+.mini-struct td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 8px;
+  vertical-align: top;
+  text-align: left;
+}
+
+.mini-struct thead th {
+  background: #f8fafc;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mini-struct tbody th {
+  width: 72px;
+  font-weight: 600;
+  color: #374151;
+  background: #fafafa;
+  white-space: nowrap;
+}
+
+.cell-diff {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.hl-diff {
+  background: #fecaca;
+  color: #991b1b;
+  border-radius: 2px;
+}
+
+.matrix-note {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .text-muted {
