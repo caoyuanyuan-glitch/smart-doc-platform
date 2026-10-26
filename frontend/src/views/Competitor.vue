@@ -45,7 +45,7 @@
                 clearable
                 @input="handleUrlInput"
               />
-              <div class="upload-sub">适合官网手册、帮助中心、HTML 说明页。当前抓取单页正文内容。</div>
+              <div class="upload-sub">适合官网手册、帮助中心、HTML 说明页。会抓取同站子页面，大型站点在时限内取已抓取部分继续分析。</div>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -55,6 +55,9 @@
             <el-icon><Search /></el-icon> 开始分析
           </el-button>
           <el-button size="large" @click="resetUpload">清空</el-button>
+        </div>
+        <div v-if="analyzing" class="upload-sub" style="margin-top: 8px;">
+          {{ inputMode === 'url' ? '正在抓取网页手册，大型站点大约需要几十秒，请稍候' : '正在分析文档，请稍候' }}
         </div>
       </div>
 
@@ -507,7 +510,11 @@ async function doAnalyze() {
     activeTab.value = 'result'
     ElMessage.success('分析完成')
   } catch (e) {
-    ElMessage.error(getAPIErrorMessage(e, '分析失败'))
+    if (e?.code === 'ECONNABORTED') {
+      ElMessage.error('分析超时，请换更短的手册入口页或稍后重试')
+    } else {
+      ElMessage.error(getAPIErrorMessage(e, '分析失败'))
+    }
   } finally {
     analyzing.value = false
   }

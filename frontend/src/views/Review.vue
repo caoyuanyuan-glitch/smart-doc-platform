@@ -1683,9 +1683,7 @@ async function openManualIssueDialogForTask(row) {
   currentTaskId.value = row.id
   currentReport.value = row
   // Load the full issue list first so the new entry is not the only one counted.
-  if (taskIssues[row.id] === undefined) {
-    await loadReviewIssues(row.id)
-  }
+  await loadReviewIssues(row.id)
   openManualIssueDialog()
 }
 
@@ -3078,7 +3076,7 @@ function canViewReviewIssues(row) {
 
 function reviewFailureHint(row) {
   if (row?.status !== 'failed') return ''
-  return row?.progress?.message || row?.error_message || ''
+  return reviewFailureMessage(row)
 }
 
 function compareLevelTagType(level) {
@@ -3106,6 +3104,27 @@ function parseMaybeJson(value) {
   } catch {
     return null
   }
+}
+
+function reviewFailureMessage(review) {
+  if (!review) return ''
+  const progressMessage = review?.progress?.message
+  const parsedProgress = parseMaybeJson(progressMessage)
+  if (parsedProgress && typeof parsedProgress === 'object') {
+    const text = String(parsedProgress.message || parsedProgress.step || '').trim()
+    if (text) return text
+  } else if (progressMessage) {
+    const text = String(progressMessage).trim()
+    if (text) return text
+  }
+  const errorMessage = String(review?.error_message || '').trim()
+  if (errorMessage) return errorMessage
+  const parsedSummary = parseMaybeJson(review?.summary)
+  if (parsedSummary && typeof parsedSummary === 'object') {
+    const text = String(parsedSummary.message || parsedSummary.step || '').trim()
+    if (text) return text
+  }
+  return String(review?.summary || '').trim()
 }
 
 function issuePositionMeta(issue) {
@@ -3176,11 +3195,7 @@ function reviewProgressText(progress) {
 }
 
 function reviewFailureText(review) {
-  const parsed = parseMaybeJson(review?.summary)
-  if (parsed && typeof parsed === 'object') {
-    return parsed.message || '审核失败'
-  }
-  return review?.summary || '审核失败'
+  return reviewFailureMessage(review) || '审核失败'
 }
 
 function reviewCompletionText(review) {
@@ -3235,9 +3250,7 @@ async function openIssueDialog(row) {
   terminologyData.value = null
   showTerminology.value = false
   issueDialogVisible.value = true
-  if (taskIssues[row.id] === undefined) {
-    await loadReviewIssues(row.id)
-  }
+  await loadReviewIssues(row.id)
   loadAuditTraces(row.id)
   loadCoverage(row.id)
   loadTerminology(row.id)
@@ -3267,9 +3280,7 @@ async function openIssueDialogByDoc(documentId) {
   terminologyData.value = null
   showTerminology.value = false
   issueDialogVisible.value = true
-  if (taskIssues[reviewId] === undefined) {
-    await loadReviewIssues(reviewId)
-  }
+  await loadReviewIssues(reviewId)
   loadAuditTraces(reviewId)
   loadCoverage(reviewId)
   loadTerminology(reviewId)
@@ -3537,9 +3548,7 @@ async function batchConfirmAll(taskId) {
     return
   }
 
-  if (taskIssues[taskId] === undefined) {
-    await loadReviewIssues(taskId)
-  }
+  await loadReviewIssues(taskId)
 
   const list = taskIssues[taskId] || []
   const pending = list.filter(i => !i.status || i.status === 'pending')

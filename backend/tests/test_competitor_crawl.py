@@ -5,6 +5,7 @@
 """
 import unittest
 from unittest import mock
+import time
 
 from app.utils import competitor_crawl, competitor_html
 
@@ -54,7 +55,7 @@ PAGES = {
 }
 
 
-def _mock_fetch(raw_url):
+def _mock_fetch(raw_url, timeout=None):
     """mock competitor_html.fetch_html：按规范化键返回假页面；未知页抛 RuntimeError。"""
     key = competitor_crawl._norm_key(raw_url)
     if key not in PAGES:
@@ -114,7 +115,9 @@ class TestCrawlSite(unittest.TestCase):
         # 让 install 页抓取失败：其余页正常，failed 计数
         with mock.patch.object(
             competitor_html, "fetch_html",
-            side_effect=lambda u: (_mock_fetch(u) if "install" not in u else (_ for _ in ()).throw(RuntimeError("timeout"))),
+            side_effect=lambda u, timeout=None: (
+                _mock_fetch(u) if "install" not in u else (_ for _ in ()).throw(RuntimeError("timeout"))
+            ),
         ):
             r = competitor_crawl.crawl_site("https://docs.example.com/")
         urls = [p["url"] for p in r["pages"]]
@@ -140,6 +143,28 @@ class TestCrawlSite(unittest.TestCase):
                                side_effect=competitor_html.UrlNotAllowedError("bad")):
             with self.assertRaises(competitor_html.UrlNotAllowedError):
                 competitor_crawl.crawl_site("http://127.0.0.1/x.htm")
+
+    def test_crawl_stops_when_budget_exceeded(self):
+        """总时限到达后停止扩展，至少保留入口页，budget_hit=True。"""
+        def slow_fetch(raw_url, timeout=None):
+            time.sleep(0.04)
+            return _mock_fetch(raw_url)
+
+        with mock.patch.object(competitor_html, "fetch_html", side_effect=slow_fetch):
+            result = competitor_crawl.crawl_site("https://docs.example.com/", budget_seconds=0.05)
+
+        self.assertTrue(result["budget_hit"])
+        self.assertGreaterEqual(len(result["pages"]), 1)
+        self.assertLess(len(result["pages"]), 5)
+
+    def test_crawl_keeps_entry_page_when_budget_is_zero(self):
+        """budget_seconds=0 时入口页已在 prefetched 中，应保留而非丢弃。"""
+        with mock.patch.object(competitor_html, "fetch_html", side_effect=_mock_fetch):
+            result = competitor_crawl.crawl_site("https://docs.example.com/", budget_seconds=0.0)
+
+        self.assertTrue(result["budget_hit"])
+        self.assertGreaterEqual(len(result["pages"]), 1)
+        self.assertEqual(result["pages"][0]["url"], "https://docs.example.com/")
 
 class TestUrlNormalize(unittest.TestCase):
     """URL 规范化与链接判定。"""

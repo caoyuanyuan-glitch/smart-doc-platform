@@ -12,7 +12,8 @@
 
 边界（防失控）：
 - max_pages=50（含入口），max_depth=4（入口=1，最多向下 3 层）；
-- 页间礼貌延迟 POLITE_DELAY，防对目标站点造成压力。
+- 页间礼貌延迟 POLITE_DELAY，防对目标站点造成压力；
+- CRAWL_BUDGET_SECONDS 总时限，超时后用已抓页面继续分析，避免大站点把请求卡死。
 """
 import time
 from collections import deque
@@ -24,6 +25,8 @@ from app.utils import competitor_html
 MAX_PAGES = 50       # 最多抓取页数（含入口）
 MAX_DEPTH = 4        # 入口页 depth=1，最多向下 3 层
 POLITE_DELAY = 0.2   # 页间礼貌延迟（秒）
+CRAWL_BUDGET_SECONDS = 45.0  # 全站抓取总时限，超时后用已抓页面继续分析
+PAGE_FETCH_TIMEOUT = 8       # 单页抓取超时（秒），避免大站点一页卡 20s
 
 # 明显的二进制/资源/脚本扩展名，不作为子页面入队
 _SKIP_EXT = {
@@ -87,13 +90,15 @@ def _count_text_warnings(pages: List[Dict]) -> int:
     return n
 
 
-def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_DEPTH) -> Dict:
+def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_DEPTH,
+               budget_seconds: float = CRAWL_BUDGET_SECONDS) -> Dict:
     """从入口 URL 递归爬取同域站点，返回汇总分析所需的页面集合。
 
     参数:
         entry_url: 用户输入的入口 URL（前首页 / Landing Page / 文档根）
         max_pages: 最多抓取页数（含入口），防止爬取失控
         max_depth: 最大链接深度（入口=1）
+        budget_seconds: 全站抓取总时限；超时后停止扩展，用已抓页面继续分析
 
     返回:
         entry_url: 用户输入入口
@@ -103,6 +108,7 @@ def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_
         ok / failed / total: 成功正文页 / 抓取失败页 / 访问总页数
         skipped: 被过滤的非文档链接数
         dedup: 已访问去重命中数
+        budget_hit: 是否因总时限提前停止
         combined_text: 非空正文合并（用于可读性/结构/可用性分析）
         structure: 全站累加结构统计（img/table/heading/warning 计数）
 
@@ -113,7 +119,8 @@ def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_
 
     # 入口预校验 + 抓取（复用 fetch_html 的 SSRF 防护与超时机制）
     competitor_html.assert_public_http_url(entry_url)
-    entry = competitor_html.fetch_html(entry_url)
+    deadline = time.monotonic() + max(0.0, float(budget_seconds))
+    entry = competitor_html.fetch_html(entry_url, timeout=PAGE_FETCH_TIMEOUT)
     base_url = entry["final_url"]
     base_host = (urlparse(base_url).hostname or "").lower()
 
@@ -121,14 +128,21 @@ def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_
     visited = {_norm_key(base_url)}
     queue: deque = deque([(base_url, 1)])
     ok = failed = skipped = dedup = 0
+    budget_hit = False
+    prefetched = {_norm_key(base_url): entry}
 
     while queue and len(pages) < max_pages:
         url, depth = queue.popleft()
-        try:
-            fetched = competitor_html.fetch_html(url)
-        except Exception:
-            failed += 1
-            continue
+        fetched = prefetched.pop(_norm_key(url), None)
+        if fetched is None:
+            if time.monotonic() >= deadline:
+                budget_hit = True
+                break
+            try:
+                fetched = competitor_html.fetch_html(url, timeout=PAGE_FETCH_TIMEOUT)
+            except Exception:
+                failed += 1
+                continue
         extraction = competitor_html.extract_main_text(fetched["html"])
         full_text = extraction.get("full_text", "") or ""
         if full_text and not extraction.get("low_content"):
@@ -159,7 +173,8 @@ def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_
                 continue
             visited.add(key)
             queue.append((child, depth + 1))
-        time.sleep(POLITE_DELAY)
+        if queue and len(pages) < max_pages and time.monotonic() < deadline:
+            time.sleep(POLITE_DELAY)
 
     total = ok + failed
     combined = "\n\n".join(p["full_text"] for p in pages if p["full_text"])
@@ -179,6 +194,7 @@ def crawl_site(entry_url: str, max_pages: int = MAX_PAGES, max_depth: int = MAX_
         "total": total,
         "skipped": skipped,
         "dedup": dedup,
+        "budget_hit": budget_hit,
         "combined_text": combined,
         "structure": structure,
     }
