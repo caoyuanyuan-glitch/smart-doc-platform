@@ -5,7 +5,7 @@
         <el-button
           size="small"
           :icon="ArrowLeft"
-          :disabled="currentPage <= 1 || loading"
+          :disabled="currentPage <= 1"
           @click="prevPage"
         />
         <span class="page-info">
@@ -14,7 +14,7 @@
             :min="1"
             :max="totalPages || 1"
             size="small"
-            :disabled="loading || !totalPages"
+            :disabled="!totalPages"
             @change="jumpToPage"
             controls-position="right"
             style="width: 100px"
@@ -24,7 +24,7 @@
         <el-button
           size="small"
           :icon="ArrowRight"
-          :disabled="currentPage >= totalPages || loading"
+          :disabled="currentPage >= totalPages"
           @click="nextPage"
         />
       </div>
@@ -72,19 +72,22 @@
 <script setup>
 import { ref, onMounted, watch, nextTick } from 'vue'
 import { ArrowLeft, ArrowRight, ZoomIn, ZoomOut, Loading, Warning } from '@element-plus/icons-vue'
+import { instance } from '@/api'
+import { ensurePromiseTry } from '@/utils/promiseTry'
 
 let pdfjsLib = null
 let workerConfigured = false
 
 async function ensurePdfjs() {
+  ensurePromiseTry()
   if (!pdfjsLib) {
     pdfjsLib = await import('pdfjs-dist')
   }
   if (!workerConfigured) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      'pdfjs-dist/build/pdf.worker.min.mjs',
-      import.meta.url
-    ).toString()
+    pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(
+      new URL('../pdf.worker.polyfill.js', import.meta.url),
+      { type: 'module' }
+    )
     workerConfigured = true
   }
   return pdfjsLib
@@ -117,6 +120,7 @@ const loading = ref(false)
 const error = ref('')
 let pdfDoc = null
 let currentRenderTask = null
+let renderSeq = 0
 
 async function loadPdf() {
   if (!props.pdfUrl) return
@@ -124,7 +128,14 @@ async function loadPdf() {
   error.value = ''
   try {
     const lib = await ensurePdfjs()
-    const loadingTask = lib.getDocument(props.pdfUrl)
+    if (pdfDoc) {
+      try {
+        await pdfDoc.destroy()
+      } catch (e) {}
+      pdfDoc = null
+    }
+    const data = await fetchPdfBytes(props.pdfUrl)
+    const loadingTask = lib.getDocument({ data })
     pdfDoc = await loadingTask.promise
     totalPages.value = pdfDoc.numPages
     emit('loaded', { totalPages: totalPages.value })
@@ -141,16 +152,41 @@ async function loadPdf() {
   }
 }
 
-async function renderPage(pageNum) {
+function toApiPath(pdfUrl) {
+  if (pdfUrl.startsWith('/api/')) return pdfUrl.slice(4)
+  return pdfUrl
+}
+
+async function fetchPdfBytes(pdfUrl) {
+  if (pdfUrl.startsWith('blob:') || pdfUrl.startsWith('data:')) {
+    const resp = await fetch(pdfUrl)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    return await resp.arrayBuffer()
+  }
+  const resp = await instance.get(toApiPath(pdfUrl), { responseType: 'arraybuffer' })
+  return resp.data
+}
+
+async function renderPage(pageNum, opts = {}) {
   if (!pdfDoc || !canvasRef.value) return
+  const total = totalPages.value || 1
+  const page = Math.max(1, Math.min(Number(pageNum) || 1, total))
+  const silent = !!opts.silent
+  const changed = page !== currentPage.value
+  currentPage.value = page
+  inputPage.value = page
+  if (changed && !silent) emit('page-change', page)
+  const seq = ++renderSeq
   if (currentRenderTask) {
     try {
-      await currentRenderTask.cancel()
+      currentRenderTask.cancel()
     } catch (e) {}
+    currentRenderTask = null
   }
   try {
-    const page = await pdfDoc.getPage(pageNum)
-    const viewport = page.getViewport({ scale: scale.value })
+    const pdfPage = await pdfDoc.getPage(page)
+    if (seq !== renderSeq) return
+    const viewport = pdfPage.getViewport({ scale: scale.value })
     const canvas = canvasRef.value
     const context = canvas.getContext('2d')
     const dpr = window.devicePixelRatio || 1
@@ -158,16 +194,13 @@ async function renderPage(pageNum) {
     canvas.height = viewport.height * dpr
     canvas.style.width = viewport.width + 'px'
     canvas.style.height = viewport.height + 'px'
-    context.scale(dpr, dpr)
+    context.setTransform(dpr, 0, 0, dpr, 0, 0)
     const renderContext = {
       canvasContext: context,
       viewport: viewport
     }
-    currentRenderTask = page.render(renderContext)
+    currentRenderTask = pdfPage.render(renderContext)
     await currentRenderTask.promise
-    currentPage.value = pageNum
-    inputPage.value = pageNum
-    emit('page-change', pageNum)
   } catch (e) {
     if (e.name !== 'RenderingCancelledException') {
       console.error('Page render error:', e)
@@ -218,9 +251,10 @@ async function fitWidth() {
   renderPage(currentPage.value)
 }
 
-function goToPage(pageNum) {
-  if (pageNum >= 1 && pageNum <= totalPages.value && pageNum !== currentPage.value) {
-    renderPage(pageNum)
+function goToPage(pageNum, silent = false) {
+  const page = parseInt(pageNum, 10)
+  if (page >= 1 && page <= totalPages.value && page !== currentPage.value) {
+    renderPage(page, { silent: !!silent })
   }
 }
 

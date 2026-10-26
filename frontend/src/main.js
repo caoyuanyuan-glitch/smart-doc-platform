@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
+import './utils/promiseTry'
 // Element Plus 按需引入：模板中的 el-* 组件由 unplugin-vue-components 自动导入并附带样式
 // ElMessage / ElMessageBox 属于 JS API 调用，无法被模板解析器覆盖，需手动补充样式
 import 'element-plus/es/components/message/style/css'
@@ -38,10 +39,16 @@ function isUsefulBootstrapError(error) {
   return Boolean(error.message || error.reason || error.filename || error.error)
 }
 
+let appMounted = false
+
 window.addEventListener('error', (event) => {
   const payload = event.error || event
   if (!isUsefulBootstrapError(payload)) {
     console.warn('Ignored non-fatal window error event', event)
+    return
+  }
+  if (appMounted) {
+    console.error(payload)
     return
   }
   renderBootstrapError(payload)
@@ -51,6 +58,10 @@ window.addEventListener('unhandledrejection', (event) => {
   const payload = event.reason || event
   if (!isUsefulBootstrapError(payload)) {
     console.warn('Ignored non-fatal unhandledrejection event', event)
+    return
+  }
+  if (appMounted) {
+    console.error(payload)
     return
   }
   renderBootstrapError(payload)
@@ -68,6 +79,7 @@ async function bootstrap() {
     app.use(pinia)
     app.use(router)
     app.mount('#app')
+    appMounted = true
   } catch (error) {
     console.error('Failed to bootstrap app', error)
     renderBootstrapError(error)

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile, Depends
+from fastapi import APIRouter, HTTPException, File, UploadFile, Form, Depends
 from typing import List
 import os
 import time
@@ -19,6 +19,7 @@ def _ensure_upload_dir():
 @router.post("/")
 async def compare_params(
     files: List[UploadFile] = File(...),
+    param_names: str = Form(""),
     current_user: UserOut = Depends(get_current_active_user),
 ):
     _ensure_upload_dir()
@@ -57,7 +58,7 @@ async def compare_params(
             cmp_path = saved_paths[i]
             cmp_name = saved_names[i]
 
-            pair_result = run_param_compare(ref_path, cmp_path)
+            pair_result = run_param_compare(ref_path, cmp_path, param_names=param_names)
             pair_result["file_a"] = ref_name
             pair_result["file_b"] = cmp_name
             pair_result["pair_index"] = i

@@ -180,12 +180,25 @@ def parse_pdf(filepath):
 
 
 def _build_chapters(full_text, pages_text, toc, filepath):
-    """将文本构建为章节结构（使用文本模式匹配）"""
-    chapters = []
+    """将文本构建为章节结构：优先 PDF 书签，其次文本标题。"""
+    def _count_nodes(nodes):
+        n = 0
+        stack = list(nodes or [])
+        while stack:
+            node = stack.pop()
+            n += 1
+            stack.extend(node.get("subsections") or [])
+        return n
+
+    toc_chapters = _extract_chapters_from_toc(toc, pages_text) if toc else []
     text_chapters = detect_headings_from_text(pages_text)
-    if text_chapters and len(text_chapters) >= 2:
+    toc_n = _count_nodes(toc_chapters)
+    text_n = _count_nodes(text_chapters)
+    if toc_n >= 3 or (toc_n >= 2 and toc_n >= text_n):
+        chapters = toc_chapters
+    elif text_n >= 2:
         chapters = text_chapters
-    if not chapters:
+    else:
         first_page_text = pages_text[0] if pages_text else ""
         first_line = ""
         for line in first_page_text.split('\n'):
@@ -1027,21 +1040,31 @@ def detect_headings_from_text(pages_text):
     # 收集所有行（带全局索引），同时去重
     seen_lines = set()  # 用于去重
     global_lines = []
+    line_pages = []
     for page_idx, page_text in enumerate(pages_text):
         for line in page_text.split('\n'):
             s = line.strip()
             if s and s not in seen_lines:
                 seen_lines.add(s)
                 global_lines.append(s)
+                line_pages.append(page_idx + 1)
 
     # 标题模式（支持中英文）
     # 顶级：Chapter X Title（英文）或 第X章 标题（中文）
     chapter_pattern = re_mod.compile(r'^Chapter\s+(\d+)\s+([A-Z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff\s\-]{2,80})$')
-    chapter_cn_pattern = re_mod.compile(r'^第([一二三四五六七八九十\d]+)[章节篇]\s+([A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff\s\-]{2,80})$')
-    # 二级：X.Y Title（支持中文标题，如 "1.2 电气安全"）
-    h1_pattern = re_mod.compile(r'^(\d+)\.(\d+)\s+([A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff\s\-，、：]{0,80})$')
+    chapter_cn_pattern = re_mod.compile(
+        r'^第\s*([一二三四五六七八九十百零\d]+)\s*[章节篇][\s、.．:：]*(.{0,80})$'
+    )
+    # 二级：X.Y Title，允许无空格（如 "1.2电气安全"）
+    h1_pattern = re_mod.compile(
+        r'^(\d+)\.(\d+)[\s、.．:：]*([A-Za-z\u4e00-\u9fff].{0,80})$'
+    )
     # 三级：X.Y.Z Subtitle
-    h2_pattern = re_mod.compile(r'^(\d+)\.(\d+)\.(\d+)\s+([A-Za-z\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff\s\-\(\)\uff08\uff09]{0,80})$')
+    h2_pattern = re_mod.compile(
+        r'^(\d+)\.(\d+)\.(\d+)[\s、.．:：]*([A-Za-z\u4e00-\u9fff].{0,80})$'
+    )
+    # 无点号的一级： "1 安全" / "2 产品概述"
+    h0_pattern = re_mod.compile(r'^(\d{1,2})[\s、]+([\u4e00-\u9fffA-Z].{1,40})$')
 
     # 表格项目：数字 + 空格 + 单位（ml, mL, μL, L, g, kg 等）
     is_table_item = re_mod.compile(r'^\d+(\.\d+)?\s*(ml|mL|μL|uL|L|g|kg|mg|cm|mm|m|nm|µm|V|W|Hz|A|kW|kV)\b', re_mod.IGNORECASE)
@@ -1089,12 +1112,16 @@ def detect_headings_from_text(pages_text):
     def flush_h1():
         """把当前 H1（X.Y）的所有内容提交到 Chapter 的 subsections"""
         nonlocal current_h1, current_section
-        if current_h1 and current_chapter is not None:
+        if current_h1:
             if current_section:
                 current_h1["subsections"].append(current_section)
                 current_section = None
-            current_chapter["subsections"].append(current_h1)
+            if current_chapter is not None:
+                current_chapter["subsections"].append(current_h1)
             current_h1 = None
+        elif current_section and current_chapter is not None:
+            current_chapter["subsections"].append(current_section)
+            current_section = None
 
     def flush_chapter():
         """把当前 Chapter 的所有内容提交到 chapters"""
@@ -1114,9 +1141,18 @@ def detect_headings_from_text(pages_text):
         m_chapter_cn = chapter_cn_pattern.match(s)
         m_h1 = h1_pattern.match(s)
         m_h2 = h2_pattern.match(s)
+        m_h0 = None
+        if not (m_chapter or m_chapter_cn or m_h1 or m_h2):
+            m_h0 = h0_pattern.match(s)
+            if m_h0 and (s.endswith('。') or s.endswith('.') or len(s) > 40):
+                m_h0 = None
+        if m_h1 and int(m_h1.group(1)) >= 1900:
+            m_h1 = None
+        if m_h2 and int(m_h2.group(1)) >= 1900:
+            m_h2 = None
 
         # 如果是标题，直接处理（不跳过）
-        if (m_chapter or m_chapter_cn or m_h1 or m_h2) and len(s) <= 80:
+        if (m_chapter or m_chapter_cn or m_h0 or m_h1 or m_h2) and len(s) <= 80:
             # 处理标题（见下方）
             pass
         else:
@@ -1160,21 +1196,27 @@ def detect_headings_from_text(pages_text):
                 current_chapter["content"] += s + " "
             continue
 
-        if m_chapter or m_chapter_cn:
+        page_no = line_pages[line_idx] if line_idx < len(line_pages) else 0
+        if m_chapter or m_chapter_cn or m_h0:
             # 顶级章节（英文 Chapter X 或中文 第X章）
             flush_chapter()
             if m_chapter:
                 chapter_num = int(m_chapter.group(1))
-            else:
+            elif m_chapter_cn:
                 # 中文数字转换
                 cn_num = m_chapter_cn.group(1)
                 cn_num_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
                 chapter_num = cn_num_map.get(cn_num, int(cn_num) if cn_num.isdigit() else 0)
+            else:
+                chapter_num = int(m_h0.group(1))
             current_chapter = {
                 "heading": s,
                 "content": "",
                 "subsections": [],
-                "_chapter_num": chapter_num
+                "_chapter_num": chapter_num,
+                "_real_chapter": True,
+                "page_start": page_no,
+                "page_end": page_no,
             }
             current_h1 = None
             current_section = None
@@ -1185,24 +1227,39 @@ def detect_headings_from_text(pages_text):
             elif current_section and current_chapter and not current_h1:
                 # 没有 X.Y 时，把 X.Y.Z 直接放到 Chapter 下
                 current_chapter["subsections"].append(current_section)
-            current_section = {"heading": s, "content": "", "subsections": []}
+            current_section = {
+                "heading": s,
+                "content": "",
+                "subsections": [],
+                "page_start": page_no,
+                "page_end": page_no,
+            }
         elif m_h1:
-            # 二级章节（X.Y）- 应该归到对应的 Chapter X 下
+            # 二级章节（X.Y）。没有真实章标题时，把 1.1 自身作为顶级，不用 Chapter N 占位。
             chapter_num = int(m_h1.group(1))
-            # 如果当前 chapter 不存在或者编号不匹配，创建一个 Chapter 占位
-            if not current_chapter or current_chapter.get("_chapter_num") != chapter_num:
-                flush_chapter()
-                current_chapter = {
-                    "heading": f"Chapter {chapter_num}",
+            if current_chapter and current_chapter.get("_real_chapter") and current_chapter.get("_chapter_num") == chapter_num:
+                flush_h1()
+                current_h1 = {
+                    "heading": s,
                     "content": "",
                     "subsections": [],
-                    "_chapter_num": chapter_num
+                    "page_start": page_no,
+                    "page_end": page_no,
                 }
+                current_section = None
             else:
-                # 同 chapter 下的下一个 H1，先 flush 当前的 H1
-                flush_h1()
-            current_h1 = {"heading": s, "content": "", "subsections": []}
-            current_section = None
+                flush_chapter()
+                current_chapter = {
+                    "heading": s,
+                    "content": "",
+                    "subsections": [],
+                    "_chapter_num": chapter_num,
+                    "_real_chapter": False,
+                    "page_start": page_no,
+                    "page_end": page_no,
+                }
+                current_h1 = None
+                current_section = None
         else:
             # 正文内容
             if current_section:
