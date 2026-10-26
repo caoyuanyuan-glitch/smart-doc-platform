@@ -3622,6 +3622,13 @@ def _backfill_issue_page_numbers(issues, content):
         if any(meta.get(key) for key in ("page_number", "page", "page_no")):
             continue
         start = meta.get("start")
+        # AI 通道 issue 的 position 无顶层 start，只有 position_object.char_start
+        # （全文绝对偏移，可直接用于反查页码）；其次兜底 char_start。
+        if start is None:
+            pos_obj = meta.get("position_object") or {}
+            start = pos_obj.get("char_start")
+        if start is None:
+            start = meta.get("char_start")
         try:
             start = int(start)
         except (TypeError, ValueError):
@@ -10834,6 +10841,21 @@ def _run_manual_engineering_audit(content, file_type=None):
         # detect_language 对混排返回 both，外层语言门控拦不住中英说明书里的中文温度写法。
         ctx = content[max(0, match.start() - 8):min(len(content), match.end() + 8)]
         if re.search(r'[\u4e00-\u9fff]', ctx):
+            continue
+        # 表格/标签语境排除：试剂盒组分表、存储/运输温度列、货号表等属标签排版约定，
+        # 规则注释声明的"试剂盒标签/仪器界面除外"在此落地，避免表格级全量误报。
+        tbl_ctx = content[max(0, match.start() - 40):min(len(content), match.end() + 40)]
+        if re.search(
+            r'Storage\s+temperature|Transportation|Cap\s*color|Spec\.?\s*[&/]\s*quantity'
+            r'|储存温度|运输条件|组分|Component|Cat\.?\s*No\.?|货号',
+            tbl_ctx, re.IGNORECASE,
+        ):
+            continue
+        # 独立单元格/区间碎片排除：匹配点前是换行/制表/括号/区间连字符、后是换行/逗号，
+        # 属表格碎片或范围书写（如 2-8 ℃、-20 ℃），非行内正文句子。
+        before = content[match.start() - 1] if match.start() > 0 else ''
+        after = content[match.end()] if match.end() < len(content) else ''
+        if before in '\n\r\t' or after in '\n\r\t,':
             continue
         raw = match.group(0)
         add_issue(

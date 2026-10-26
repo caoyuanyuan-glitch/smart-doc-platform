@@ -20,7 +20,7 @@ def main():
     os.chdir(str(BACKEND))
     os.environ["DATABASE_URL"] = "sqlite:///" + str(DB_PATH)
     os.environ["REVIEW_PDF_VISUAL_VERIFY"] = "1"
-    os.environ["REVIEW_VISUAL_PROVIDERS"] = "deepseek"
+    os.environ["REVIEW_VISUAL_PROVIDERS"] = os.environ.get("REVIEW_VISUAL_PROVIDERS", "qwen")
     os.environ.setdefault("REVIEW_PDF_VISUAL_VERIFY_LIMIT", "6")
     os.environ.setdefault("REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT", "6")
     os.environ.setdefault("REVIEW_PDF_VISUAL_PAGE_BUDGET", "0")
