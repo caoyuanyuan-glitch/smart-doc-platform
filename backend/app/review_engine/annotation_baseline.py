@@ -434,7 +434,13 @@ def _matches_annotation_strictly(
     # 页级 issue（整页判断，rule=PDF-VISUAL-001）不构成"同一处文本"的证据。
     # 它的 page_number 天然等于页号，若允许走页码通道，会与同页任意批注
     # 假命中（实测限额 24 时净增 4 条，3 条是错配）。
+    # —— 2026-10-26 修正：版式类 gold（STRUCT-LAYOUT-001 等）的批注本身就是
+    #    页级/区域级判断（太挤、粗线条、图片不居中），允许"页码锚点一致 + 类别一致"
+    #    计为严格命中；外层 injective 单射保证一条视觉 issue 最多命中一条批注，
+    #    不会出现同页多条批注被同一条页级 issue 批量刷中的情况。
     if str(issue.get("rule", "")).upper() == "PDF-VISUAL-001":
+        if item.category in ("表格/版式", "图片/图表") and _annotation_page_anchor_matches(item, issue):
+            return True
         return False
     # 页码冲突排除：issue 明确标了页码且与批注页不一致 ⇒ 一定不是同一处文本。
     # 注意这里是"只用来排除、不用来命中"——把页码当独立命中通道会让

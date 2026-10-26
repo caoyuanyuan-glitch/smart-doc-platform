@@ -656,17 +656,25 @@ class AIClient:
         if name == "qwen":
             return getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None)
         if name == "deepseek":
-            return getattr(self, "deepseek_client", None)
+            # DeepSeek 仅有 deepseek-chat/reasoner 纯文本模型，不支持图像输入，
+            # 让其返回 None 会让视觉复核链跳过 deepseek，避免每次白花 400。
+            return None
         return None
 
     def _visual_model_for(self, provider: str) -> str:
+        """视觉复核必须使用视觉模型，不能用文本模型传图。
+
+        - qwen  → qwen-vl-plus（DashScope 视觉模型，兼容 OpenAI 图片格式）
+        - kimi  → moonshot-v1-8k-vision-preview（Kimi Vision）
+        - deepseek → 不支持视觉，返回空
+        """
         name = str(provider or "").strip().lower()
         if name == "kimi":
-            return self.kimi_model
+            return os.getenv("KIMI_VL_MODEL", "moonshot-v1-8k-vision-preview")
         if name == "qwen":
-            return self.qwen_model
+            return os.getenv("QWEN_VL_MODEL", "qwen-vl-plus")
         if name == "deepseek":
-            return self.deepseek_model
+            return ""
         return ""
 
     # ------------------------------------------------------------------
@@ -1780,7 +1788,13 @@ class AIClient:
 2. `reject`：页面中看不到该问题，且更像 PDF 文本提取伪影、重复文本层、断行噪声、图标丢失或 OCR 误识别。
 3. `uncertain`：图片证据不足，无法稳定确认。
 
-版式问题只要截图里肉眼可见，必须 `confirm`：表格单元格过挤、表线明显偏粗、图片未居中、列宽不均、相邻单元格样式不一致。表格对齐整齐不能作为 reject 拥挤/粗线/未居中的理由。
+版式问题只要截图里肉眼可见，必须 `confirm`，判定标准（满足任一即为问题）：
+- 表格外框线/表头线明显比其他行线更粗（肉眼可见的粗细对比）；
+- 单元格内容贴近单元格边界、行高明显小于内容所需、单元格文字互相挤压；
+- 图片/图形明显偏离列中心或页面中心，且未与其他列对齐；
+- 相邻单元格或相邻行的列宽/行高明显不一致；
+- 同类元素（表头、图标、段落）样式不统一（粗细、字号、对齐不一致）。
+表格整体对齐整齐不能作为 reject 拥挤/粗线/未居中的理由；无法稳定判断时用 `uncertain`。
 对「表格/版式」：截图中只要有表格或图，且看不到提取伪影，不要因为“排版整齐”而 `reject`；证据不够强时用 `uncertain`。
 
 已知优先按伪影或可接受差异处理的场景：
