@@ -22,9 +22,11 @@ class PolishLabIsolationTest(unittest.TestCase):
 
     def test_feedback_files_are_isolated(self):
         self.assertIn('PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单.md"', self.polish_src)
-        self.assertIn('PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单-AI调试.md"', self.lab_src)
+        self.assertIn('PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单.md"', self.lab_src)
+        self.assertIn('PLATFORM_FEEDBACK_SENTENCE_FOLDER_NAMES = ("写作规范", "句式清单", "来自平台反馈")', self.lab_src)
+        self.assertIn('PLATFORM_FEEDBACK_TERMINOLOGY_FOLDER_NAMES = ("资源库", "术语库", "来自平台反馈")', self.lab_src)
+        self.assertIn("def _ensure_knowledge_file_in_folder(", self.lab_src)
         self.assertNotIn("平台反馈的句式清单-AI调试.md", self.polish_src)
-        self.assertIn('"polish-lab", "feedback"', self.lab_src)
 
     def test_database_tables_are_isolated(self):
         self.assertIn("from app.models.polished_document_lab import PolishedDocumentLab as PolishedDocument", self.lab_src)

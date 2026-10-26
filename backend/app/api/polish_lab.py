@@ -42,6 +42,7 @@ from app.utils.polish_rules_engine import apply_all_rules, apply_custom_rules
 from app.crud.polish_learning_rule import get_enabled_engine_keys, get_enabled_custom_rules, get_enabled_typo_rules, record_rule_triggers
 from app.crud.term import bulk_create_terms
 from app.utils.typo_dictionary import get_default_typo_dict
+from app.utils.runtime_paths import runtime_knowledge_dir
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -596,7 +597,8 @@ def _load_terminology_source(db: Session, terminology_id: int = None) -> Optiona
 # 句式清单所在知识库文件夹 ID（写作规范 / 句式清单）
 SENTENCE_GUIDE_FOLDER_IDS = [8]
 SENTENCE_FEEDBACK_FOLDER_IDS = [10]
-PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单-AI调试.md"
+PLATFORM_FEEDBACK_FILENAME = "平台反馈的句式清单.md"
+PLATFORM_FEEDBACK_SENTENCE_FOLDER_NAMES = ("写作规范", "句式清单", "来自平台反馈")
 DOCUMENT_PRODUCT_TYPES = (
     "建库试剂",
     "测序试剂",
@@ -607,10 +609,9 @@ DOCUMENT_PRODUCT_TYPES = (
     "超声",
 )
 TERMINOLOGY_FEEDBACK_FOLDER_IDS = [21]
-PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME = "平台反馈的术语对照表-AI调试.md"
+PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME = "平台反馈的术语对照表.md"
+PLATFORM_FEEDBACK_TERMINOLOGY_FOLDER_NAMES = ("资源库", "术语库", "来自平台反馈")
 TERMINOLOGY_FOLDER_IDS = [19]
-PLATFORM_FEEDBACK_SENTENCE_RELATIVE_PATH = os.path.join("..", "polish-lab", "feedback", PLATFORM_FEEDBACK_FILENAME)
-PLATFORM_FEEDBACK_TERMINOLOGY_RELATIVE_PATH = os.path.join("..", "polish-lab", "feedback", PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME)
 PRIMARY_SENTENCE_GUIDE_FILENAMES = {
     "DNBelab-D4RS_结构化句式库_操作步骤.md",
 }
@@ -656,6 +657,25 @@ def _read_knowledge_text_content(file_path: str) -> str:
             except Exception:
                 return ''
     return str(_read_file_safe(path) or '')
+
+
+def _source_file_extension(filename: str) -> str:
+    name = str(filename or "").strip()
+    if "." not in name:
+        return ""
+    return name.rsplit(".", 1)[-1].lower()
+
+
+def _ensure_word_source_filename(filename: str) -> str:
+    ext = _source_file_extension(filename)
+    if ext == "docx":
+        return ext
+    if ext == "doc":
+        raise HTTPException(
+            status_code=400,
+            detail="待润色文件仅支持 .docx 格式的 Word 文档，请将 .doc 另存为 .docx 后上传",
+        )
+    raise HTTPException(status_code=400, detail="待润色文件仅支持 Word 文档（.docx）")
 
 
 def _build_document_polish_guide(
@@ -3887,121 +3907,118 @@ def _load_sentence_guides(db: Session, style_guide_id: int = None, product_type:
     return result
 
 
-def _ensure_platform_feedback_sentence_file(db: Session, user_id: int) -> KnowledgeFile:
-    """确保平台反馈句式清单存在于知识库中。"""
-    folder_id = None
-    knowledge_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
-    if not os.path.exists(knowledge_dir):
-        os.makedirs(knowledge_dir)
+def _find_folder_by_names(db: Session, names: tuple[str, ...]) -> Optional[Folder]:
+    parent_id = None
+    current = None
+    for index, name in enumerate(names):
+        query = db.query(Folder).filter(Folder.name == name)
+        if index == 0:
+            query = query.filter(Folder.parent_id.is_(None))
+        else:
+            query = query.filter(Folder.parent_id == parent_id)
+        current = query.order_by(Folder.id.asc()).first()
+        if current is None:
+            return None
+        parent_id = current.id
+    return current
 
-    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_SENTENCE_RELATIVE_PATH)
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    initial_content = "# 平台反馈的句式清单\n\n## 用户反馈修正\n\n"
 
-    feedback_file = db.query(KnowledgeFile).filter(
-        KnowledgeFile.folder_id == folder_id,
-        KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME,
-        KnowledgeFile.file_path == file_path
-    ).first()
-
-    if not feedback_file:
+def _ensure_knowledge_file_in_folder(
+    db: Session,
+    user_id: int,
+    folder_names: tuple[str, ...],
+    file_name: str,
+    initial_content: str,
+) -> KnowledgeFile:
+    folder = _find_folder_by_names(db, folder_names)
+    folder_id = folder.id if folder else None
+    feedback_file = None
+    if folder_id is not None:
         feedback_file = db.query(KnowledgeFile).filter(
             KnowledgeFile.folder_id == folder_id,
-            KnowledgeFile.name == PLATFORM_FEEDBACK_FILENAME
+            KnowledgeFile.name == file_name,
         ).order_by(KnowledgeFile.id.asc()).first()
-        if feedback_file:
-            feedback_file.file_path = file_path
-            feedback_file.filename = PLATFORM_FEEDBACK_FILENAME
-            feedback_file.file_type = 'md'
-            feedback_file.file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-            db.commit()
-            db.refresh(feedback_file)
 
-    if feedback_file:
-        if not os.path.exists(feedback_file.file_path):
-            with open(feedback_file.file_path, 'w', encoding='utf-8') as f:
-                f.write(initial_content)
-            feedback_file.file_size = os.path.getsize(feedback_file.file_path)
-            db.commit()
-            db.refresh(feedback_file)
+    if feedback_file and feedback_file.file_path and os.path.exists(feedback_file.file_path):
         return feedback_file
 
-    if not os.path.exists(file_path):
+    knowledge_dir = str(runtime_knowledge_dir())
+    os.makedirs(knowledge_dir, exist_ok=True)
+    if feedback_file:
+        file_path = feedback_file.file_path or os.path.join(knowledge_dir, f"{uuid.uuid4()}.md")
+        os.makedirs(os.path.dirname(file_path) or knowledge_dir, exist_ok=True)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(initial_content)
+        feedback_file.file_path = file_path
+        feedback_file.file_size = os.path.getsize(file_path)
+        db.commit()
+        db.refresh(feedback_file)
+        return feedback_file
 
+    stored_name = f"{uuid.uuid4()}.md"
+    file_path = os.path.join(knowledge_dir, stored_name)
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(initial_content)
     feedback_file = KnowledgeFile(
         folder_id=folder_id,
-        name=PLATFORM_FEEDBACK_FILENAME,
-        filename=PLATFORM_FEEDBACK_FILENAME,
+        name=file_name,
+        filename=stored_name,
         file_path=file_path,
         file_size=os.path.getsize(file_path),
         file_type='md',
-        created_by=user_id
+        created_by=user_id,
     )
     db.add(feedback_file)
     db.commit()
     db.refresh(feedback_file)
     return feedback_file
+
+
+def _append_terminology_pairs(file_path: str, pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    existing = ""
+    if file_path and os.path.exists(file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            existing = f.read()
+    new_pairs = []
+    for old_term, new_term in pairs:
+        normalized_old = old_term.strip()
+        normalized_new = new_term.strip()
+        if not normalized_old or not normalized_new:
+            continue
+        marker = f'| {normalized_old} | {normalized_new} |'
+        compact = f'|{normalized_old}|{normalized_new}|'
+        if marker in existing or compact in existing.replace(' ', ''):
+            continue
+        new_pairs.append((normalized_old, normalized_new))
+    if not new_pairs:
+        return []
+    os.makedirs(os.path.dirname(file_path) or '.', exist_ok=True)
+    with open(file_path, 'a', encoding='utf-8') as f:
+        for old_term, new_term in new_pairs:
+            f.write(f'| {old_term} | {new_term} |\n')
+    return new_pairs
+
+
+def _ensure_platform_feedback_sentence_file(db: Session, user_id: int) -> KnowledgeFile:
+    """确保平台反馈句式清单存在于知识库中。"""
+    return _ensure_knowledge_file_in_folder(
+        db,
+        user_id,
+        PLATFORM_FEEDBACK_SENTENCE_FOLDER_NAMES,
+        PLATFORM_FEEDBACK_FILENAME,
+        "# 平台反馈的句式清单\n\n## 用户反馈修正\n\n",
+    )
 
 
 def _ensure_platform_feedback_terminology_file(db: Session, user_id: int) -> KnowledgeFile:
     """确保平台反馈术语对照表存在于知识库中。"""
-    folder_id = None
-
-    knowledge_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "knowledge")
-    if not os.path.exists(knowledge_dir):
-        os.makedirs(knowledge_dir)
-
-    file_path = os.path.join(knowledge_dir, PLATFORM_FEEDBACK_TERMINOLOGY_RELATIVE_PATH)
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    initial_content = "# 平台反馈的术语对照表\n\n| 非标准词 | 标准词 |\n| --- | --- |\n"
-
-    feedback_file = db.query(KnowledgeFile).filter(
-        KnowledgeFile.folder_id == folder_id,
-        KnowledgeFile.name == PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME,
-        KnowledgeFile.file_path == file_path
-    ).first()
-
-    if not feedback_file:
-        feedback_file = db.query(KnowledgeFile).filter(
-            KnowledgeFile.folder_id == folder_id,
-            KnowledgeFile.name == PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME
-        ).order_by(KnowledgeFile.id.asc()).first()
-        if feedback_file:
-            feedback_file.file_path = file_path
-            feedback_file.filename = PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME
-            feedback_file.file_type = 'md'
-            feedback_file.file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-            db.commit()
-            db.refresh(feedback_file)
-
-    if feedback_file:
-        if not os.path.exists(feedback_file.file_path):
-            with open(feedback_file.file_path, 'w', encoding='utf-8') as f:
-                f.write(initial_content)
-            feedback_file.file_size = os.path.getsize(feedback_file.file_path)
-            db.commit()
-            db.refresh(feedback_file)
-        return feedback_file
-
-    if not os.path.exists(file_path):
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(initial_content)
-
-    feedback_file = KnowledgeFile(
-        folder_id=folder_id,
-        name=PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME,
-        filename=PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME,
-        file_path=file_path,
-        file_size=os.path.getsize(file_path),
-        file_type='md',
-        created_by=user_id
+    return _ensure_knowledge_file_in_folder(
+        db,
+        user_id,
+        PLATFORM_FEEDBACK_TERMINOLOGY_FOLDER_NAMES,
+        PLATFORM_FEEDBACK_TERMINOLOGY_FILENAME,
+        "# 平台反馈的术语对照表\n\n| 非标准词 | 标准词 |\n| --- | --- |\n",
     )
-    db.add(feedback_file)
-    db.commit()
-    db.refresh(feedback_file)
-    return feedback_file
 
 
 def _get_platform_feedback_targets(db: Session, user_id: int) -> list[KnowledgeFile]:
@@ -7268,13 +7285,80 @@ def _apply_cat_terms(text: str, term_dict: Optional[dict]) -> str:
     value = str(text or '')
     if not value or not term_dict:
         return value
-    result = value
+    items = []
+    seen = set()
     for old_term, new_term in term_dict.items():
         old_text = str(old_term or '').strip()
         new_text = str(new_term or '').strip()
-        if old_text and new_text and old_text in result:
-            result = result.replace(old_text, new_text)
+        if not old_text or not new_text or old_text == new_text or old_text in seen:
+            continue
+        seen.add(old_text)
+        items.append((old_text, new_text))
+    items.sort(key=lambda item: len(item[0]), reverse=True)
+    result = value
+    for old_text, new_text in items:
+        if old_text not in result:
+            continue
+        pieces = []
+        cursor = 0
+        while True:
+            found = result.find(old_text, cursor)
+            if found < 0:
+                pieces.append(result[cursor:])
+                break
+            pieces.append(result[cursor:found])
+            if _term_occurrence_already_standard(result, found, old_text, new_text):
+                pieces.append(old_text)
+            else:
+                pieces.append(new_text)
+            cursor = found + len(old_text)
+        result = ''.join(pieces)
     return result
+
+
+def _term_occurrence_already_standard(text: str, index: int, old_text: str, new_text: str) -> bool:
+    """Skip a match that is already the standardized form, e.g. 仪器 inside 本仪器."""
+    if not old_text or old_text not in new_text:
+        return False
+    start = 0
+    while True:
+        pos = new_text.find(old_text, start)
+        if pos < 0:
+            return False
+        window_start = index - pos
+        if window_start >= 0 and text[window_start:window_start + len(new_text)] == new_text:
+            return True
+        start = pos + 1
+
+
+def _classify_cat_surface_kind(
+    original: str,
+    revised: str,
+    term_dict: Optional[dict] = None,
+    typo_dict: Optional[dict] = None,
+) -> str:
+    """term=术语表命中；typo=错别字表命中；其余再走词形分类。"""
+    from app.utils.cat_diagnose import classify_surface_edit, is_format_only_edit
+
+    original_text = str(original or '')
+    revised_text = str(revised or '')
+    if is_format_only_edit(original_text, revised_text):
+        return 'format'
+
+    after_typo = _apply_cat_terms(original_text, typo_dict) if typo_dict else original_text
+    after_term = _apply_cat_terms(original_text, term_dict) if term_dict else original_text
+    if after_typo != original_text and _cat_exact_duplicate(after_typo, revised_text):
+        return 'typo'
+    if after_term != original_text and _cat_exact_duplicate(after_term, revised_text):
+        return 'term'
+
+    after_both = _apply_cat_terms(after_term, typo_dict) if typo_dict else after_term
+    if after_both != original_text and _cat_exact_duplicate(after_both, revised_text):
+        if after_term != after_both:
+            return 'typo'
+        if after_term != original_text:
+            return 'term'
+    return classify_surface_edit(original_text, revised_text)
 
 
 def _apply_cat_surface_rules(text: str, term_dict: Optional[dict] = None, typo_dict: Optional[dict] = None, custom_rules: Optional[list] = None) -> str:
@@ -8033,6 +8117,7 @@ async def _collect_text_polish_cat_items(
     terminology = terminology_md or _load_scoped_terminology_source(db, None, None)
     resolved_terms = _resolve_terminology(db, terminology, original_text) if terminology else {}
     custom_rules = get_enabled_custom_rules(db) if db else []
+    typo_dict = _load_typo_dict(db) if db else get_default_typo_dict()
     original_paragraphs = original_text.split('\n')
     sentence_items = _split_cat_sentences(original_paragraphs, source_paragraphs=original_paragraphs)
     if not sentence_items:
@@ -8067,6 +8152,7 @@ async def _collect_text_polish_cat_items(
             min_threshold=min_match_threshold,
             fuzzy_lower=fuzzy_lower_bound,
             term_dict=resolved_terms,
+            typo_dict=typo_dict,
             source_sentence=source_line_stripped,
             custom_rules=custom_rules,
             debug_stats=simple_match_debug,
@@ -8078,6 +8164,7 @@ async def _collect_text_polish_cat_items(
                 min_threshold=min_match_threshold,
                 fuzzy_lower=fuzzy_lower_bound,
                 term_dict=resolved_terms,
+                typo_dict=typo_dict,
                 source_sentence=source_line_stripped,
                 custom_rules=custom_rules,
                 debug_stats=simple_match_debug,
@@ -8390,8 +8477,12 @@ def _simple_match(
             and not _is_truncated_dunhao_enumeration(display_source_text, surface_display_text)
             and not _cat_writeback_hazard_reason(display_source_text, surface_display_text)
         ):
-            from app.utils.cat_diagnose import classify_surface_edit
-            surface_kind = classify_surface_edit(display_source_text, surface_display_text)
+            surface_kind = _classify_cat_surface_kind(
+                display_source_text,
+                surface_display_text,
+                term_dict=term_dict,
+                typo_dict=typo_dict,
+            )
             surface_candidate = {
                 "template_text": surface_display_text,
                 "raw_template_text": display_source_text,
@@ -10188,7 +10279,7 @@ async def analyze_file_endpoint(
     original_temp_path = None
     try:
         filename = file.filename or "unnamed"
-        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else "txt"
+        ext = _ensure_word_source_filename(filename)
         
         _update_progress(5, "读取文件中...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
@@ -10206,9 +10297,7 @@ async def analyze_file_endpoint(
             output_filename = filename
 
         _update_progress(10, "解析文本内容...")
-        if ext in ['txt', 'md', 'markdown']:
-            content = _read_file_safe(temp_path)
-        elif ext == 'docx':
+        if ext == 'docx':
             from docx import Document
             doc = Document(temp_path)
             content = '\n'.join([p.text for p in _iter_docx_paragraphs_in_order(doc)])
@@ -10552,31 +10641,11 @@ def submit_polish_feedback(
             target_files = _get_platform_feedback_terminology_targets(db, current_user.id if current_user else 1)
             new_pairs = []
             for term_file in target_files:
-                existing = ""
-                if term_file.file_path and os.path.exists(term_file.file_path):
-                    with open(term_file.file_path, 'r', encoding='utf-8') as f:
-                        existing = f.read()
-
-                file_new_pairs = []
-                for old_term, new_term in corrections_pairs:
-                    normalized_old = old_term.strip()
-                    normalized_new = new_term.strip()
-                    if (
-                        f'| {normalized_old} | {normalized_new} |' in existing or
-                        f'|{normalized_old}|{normalized_new}|' in existing
-                    ):
-                        continue
-                    file_new_pairs.append((normalized_old, normalized_new))
-
-                if not file_new_pairs:
-                    term_file.file_size = os.path.getsize(term_file.file_path)
+                if not term_file.file_path:
                     continue
-
-                with open(term_file.file_path, 'a', encoding='utf-8') as f:
-                    for old_term, new_term in file_new_pairs:
-                        f.write(f'| {old_term} | {new_term} |\n')
-
-                term_file.file_size = os.path.getsize(term_file.file_path)
+                file_new_pairs = _append_terminology_pairs(term_file.file_path, corrections_pairs)
+                if os.path.exists(term_file.file_path):
+                    term_file.file_size = os.path.getsize(term_file.file_path)
                 if not new_pairs:
                     new_pairs = file_new_pairs
 
@@ -12837,7 +12906,7 @@ async def cat_analyze(
 
     try:
         filename = file.filename or "unnamed"
-        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else "txt"
+        ext = _ensure_word_source_filename(filename)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
             content_bytes = await file.read()
@@ -12845,17 +12914,11 @@ async def cat_analyze(
             temp_path = tmp.name
 
         original_lines = None
-        if ext in ['txt', 'md', 'markdown']:
-            content = _read_file_safe(temp_path)
-            original_lines = content.split('\n')
-        elif ext == 'docx':
+        if ext == 'docx':
             from docx import Document
             doc = Document(temp_path)
             original_lines = [p.text for p in _iter_docx_body_paragraphs(doc)]
             content = '\n'.join(original_lines)
-        else:
-            content = _read_file_safe(temp_path)
-            original_lines = content.split('\n')
 
         if not content or not content.strip():
             raise HTTPException(status_code=400, detail="无法提取文本内容")

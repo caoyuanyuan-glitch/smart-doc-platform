@@ -48,7 +48,7 @@
             <div class="form-item">
               <label class="form-label">待润色文件</label>
               <div class="input-with-button">
-                <el-input v-model="formData.sourceFile" readonly placeholder="选择本地文件" />
+                <el-input v-model="formData.sourceFile" readonly placeholder="仅支持 Word 文档（.docx）" />
                 <el-button type="primary" @click="openLocalFilePicker()">选择文件</el-button>
               </div>
             </div>
@@ -515,47 +515,39 @@
         <h2 class="page-title">文本润色</h2>
       </div>
 
-      <!-- 文件选择行 -->
-      <div class="panel">
-        <div class="panel-header">
-          <span>参考文件</span>
-        </div>
-        <div class="file-select-row">
-          <div class="file-select-col">
-            <label class="form-label">产品类型</label>
-            <div class="input-with-button">
-              <el-select v-model="textProductType" size="small" class="full-width" placeholder="选择产品类型" clearable @change="handleTextProductTypeChange">
+      <div class="text-page-grid">
+        <div class="text-left">
+          <div class="panel doc-input-panel">
+            <div class="panel-header">
+              <span>参考文件</span>
+            </div>
+            <div class="form-item">
+              <label class="form-label">产品类型</label>
+              <el-select v-model="textProductType" class="full-width" placeholder="选择产品类型" clearable @change="handleTextProductTypeChange">
                 <el-option v-for="item in documentProductTypeOptions" :key="`text-${item}`" :label="item" :value="item" />
               </el-select>
             </div>
-          </div>
-          <div class="file-select-col">
-            <label class="form-label">句式清单文件</label>
-            <div class="input-with-button">
-              <el-select v-model="textSentenceFileId" size="small" class="full-width" :placeholder="textSentenceFileSelectPlaceholder" :disabled="!textProductType" clearable @change="handleTextSentenceFileChange">
+            <div class="form-item">
+              <label class="form-label">句式清单文件</label>
+              <el-select v-model="textSentenceFileId" class="full-width" :placeholder="textSentenceFileSelectPlaceholder" :disabled="!textProductType" clearable @change="handleTextSentenceFileChange">
                 <el-option v-for="f in textSentenceFileOptions" :key="`text-sentence-${f.id}`" :label="f.label" :value="f.id" />
               </el-select>
+              <div class="form-helper-text">{{ textSentenceFileHelperText }}</div>
             </div>
-            <div class="form-helper-text">{{ textSentenceFileHelperText }}</div>
-          </div>
-          <div class="file-select-col">
-            <label class="form-label">术语对照表</label>
-            <div class="input-with-button">
-              <el-select v-model="textTerminologyFileId" size="small" class="full-width" :placeholder="textTerminologyFileSelectPlaceholder" :disabled="!textProductType" clearable @change="handleTextTerminologyChange">
+            <div class="form-item">
+              <label class="form-label">术语对照表</label>
+              <el-select v-model="textTerminologyFileId" class="full-width" :placeholder="textTerminologyFileSelectPlaceholder" :disabled="!textProductType" clearable @change="handleTextTerminologyChange">
                 <el-option v-for="f in textTermFileOptions" :key="`text-term-${f.id}`" :label="f.label" :value="f.id" />
               </el-select>
+              <div class="form-helper-text">{{ textTerminologyFileHelperText }}</div>
             </div>
-            <div class="form-helper-text">{{ textTerminologyFileHelperText }}</div>
           </div>
         </div>
-      </div>
 
-      <!-- 左右分栏：输入 + 结果 -->
-      <div class="content-row">
-        <div class="content-left">
-          <div class="panel">
+        <div class="text-right">
+          <div class="panel text-input-panel">
             <div class="panel-header">
-              <span>输入待润色文本</span>
+              <span>待润色文本</span>
               <div class="panel-actions">
                 <el-button type="primary" size="small" @click="doPolish">
                   <el-icon v-if="loading" class="is-loading button-loading-icon"><Loading /></el-icon>
@@ -568,70 +560,70 @@
               <el-input
                 v-model="originalText"
                 type="textarea"
+                :rows="8"
                 placeholder="输入待润色文本..."
               />
             </div>
           </div>
-        </div>
-        <div class="content-right">
-          <div v-if="result" class="panel result-panel">
-              <div class="panel-header">
-                <div class="result-header-inline">
-                  <span>润色结果</span>
-                  <el-tag size="small" type="success">{{ currentPolishEngineLabel }}</el-tag>
-                </div>
-                <div class="panel-actions">
-                  <el-button size="small" @click="copyResult">复制</el-button>
-                  <el-button size="small" @click="downloadResult">导出</el-button>
-                </div>
-              </div>
-              <div class="result-grid-vertical">
-                <div class="result-col-v">
-                  <div class="col-content col-content-compact issue-diff-content issue-diff-suggested" v-html="highlightedPolishedResultHtml"></div>
-                </div>
-              </div>
-              <div v-if="textCatPanelItems.length" class="text-cat-panel">
-                <div class="text-cat-header">
-                  <span>候选句子</span>
-                  <span class="text-cat-count">共 {{ textCatCandidateCount }} 条</span>
-                </div>
-                <div class="text-cat-list">
-                  <div v-for="item in textCatPanelItems" :key="item.rowKey" class="text-cat-item-row" :class="severityClass(selectedTextCatCandidate(item))">
-                    <div class="cat-item-body">
-                      <div class="cat-issue-tags" v-if="categoryLabel(selectedTextCatCandidate(item))">
-                        <span class="cat-category-tag">{{ categoryLabel(selectedTextCatCandidate(item)) }}</span>
-                      </div>
-                      <el-select v-if="item.candidates.length > 1 || !isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" v-model="item.selectedCandidateIndex" class="full-width" size="large" placeholder="选择候选句式" placement="bottom-start" :popper-options="{ placement: 'bottom-start', modifiers: [{ name: 'flip', enabled: false }] }" @change="applyTextCatCandidate(item)">
-                        <el-option
-                          v-for="(candidate, candidateIndex) in item.candidates"
-                          :key="`${item.rowKey}-${candidateIndex}`"
-                          :label="candidate.template_text || ''"
-                          :value="candidateIndex"
-                        />
-                      </el-select>
-                      <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
-                        <div class="cat-hint-title">提示</div>
-                        <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
-                      </div>
-                      <div v-else-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
-                        <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
-                      </div>
-                    </div>
+
+          <div v-if="result && !hasVisibleTextPolishResult" class="text-empty-result">未检测到可应用的润色结果</div>
+
+          <div v-if="hasVisibleTextPolishResult" class="panel result-panel text-result-panel">
+          <div class="panel-header">
+            <div class="result-header-inline">
+              <span>润色结果</span>
+              <el-tag size="small" type="success">{{ currentPolishEngineLabel }}</el-tag>
+            </div>
+            <div class="panel-actions">
+              <el-button size="small" @click="copyResult">复制</el-button>
+              <el-button size="small" @click="downloadResult">导出</el-button>
+            </div>
+          </div>
+          <div class="result-grid-vertical">
+            <div class="result-col-v">
+              <div class="col-content col-content-compact issue-diff-content issue-diff-suggested" v-html="highlightedPolishedResultHtml"></div>
+            </div>
+          </div>
+          <div v-if="textCatPanelItems.length" class="text-cat-panel">
+            <div class="text-cat-header">
+              <span>候选句子</span>
+              <span class="text-cat-count">共 {{ textCatCandidateCount }} 条</span>
+            </div>
+            <div class="text-cat-list">
+              <div v-for="item in textCatPanelItems" :key="item.rowKey" class="text-cat-item-row" :class="severityClass(selectedTextCatCandidate(item))">
+                <div class="cat-item-body">
+                  <div class="cat-issue-tags" v-if="categoryLabel(selectedTextCatCandidate(item))">
+                    <span class="cat-category-tag">{{ categoryLabel(selectedTextCatCandidate(item)) }}</span>
+                  </div>
+                  <el-select v-if="item.candidates.length > 1 || !isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" v-model="item.selectedCandidateIndex" class="full-width" size="large" placeholder="选择候选句式" placement="bottom-start" :popper-options="{ placement: 'bottom-start', modifiers: [{ name: 'flip', enabled: false }] }" @change="applyTextCatCandidate(item)">
+                    <el-option
+                      v-for="(candidate, candidateIndex) in item.candidates"
+                      :key="`${item.rowKey}-${candidateIndex}`"
+                      :label="candidate.template_text || ''"
+                      :value="candidateIndex"
+                    />
+                  </el-select>
+                  <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
+                    <div class="cat-hint-title">提示</div>
+                    <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                  </div>
+                  <div v-else-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
+                    <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
                   </div>
                 </div>
               </div>
-          </div>
-          <div v-else class="panel result-placeholder">
-            <div class="panel-header">
-              <span>润色结果</span>
             </div>
-            <div class="placeholder-text">点击"开始润色"查看结果</div>
           </div>
+        </div>
+          <div v-else-if="!result" class="panel result-placeholder text-result-panel">
+          <div class="panel-header">
+            <span>润色结果</span>
+          </div>
+          <div class="placeholder-text">点击"开始润色"查看结果</div>
         </div>
       </div>
 
-      <!-- 意见反馈行（独立） -->
-      <div v-if="result" class="panel feedback-panel">
+        <div v-if="result" class="panel feedback-panel">
         <div class="panel-header">
           <span>意见反馈</span>
         </div>
@@ -655,40 +647,53 @@
             </div>
           </div>
         </div>
-        <div class="feedback-type-row">
-          <div class="form-item">
-            <label class="form-label">反馈类型</label>
-            <el-radio-group v-model="feedbackType">
-              <el-radio value="term">术语修正</el-radio>
-              <el-radio value="sentence">句式修正</el-radio>
-            </el-radio-group>
-          </div>
-        </div>
-        <div class="feedback-body">
-          <template v-if="feedbackType === 'term'">
-            <div v-for="(item, index) in termItems" :key="`term-${index}`" class="term-row">
-              <el-input v-model="item.original" placeholder="原文用词" />
-              <span class="term-arrow">→</span>
-              <el-input v-model="item.standard" placeholder="标准用语" />
-              <el-button text @click="removeTermItem(index)">删除</el-button>
-            </div>
-            <el-button type="primary" plain size="small" @click="addTermItem">+ 添加术语修正</el-button>
-          </template>
-          <template v-else>
-            <el-input
-              v-model="sentenceCorrections"
-              type="textarea"
-              :rows="3"
-              placeholder="每行一条正确写法，例如：\n请勿在开机状态下断开电源。\n使用前请仔细阅读本说明书。"
+        <div v-if="selectedFeedbackStars" class="feedback-details">
+          <div class="feedback-correction-row">
+            <label class="form-label">是否修正结果</label>
+            <el-switch
+              v-model="feedbackWantCorrection"
+              inline-prompt
+              active-text="开"
+              inactive-text="关"
             />
+          </div>
+          <template v-if="feedbackWantCorrection">
+            <div class="feedback-type-row">
+              <div class="form-item">
+                <el-radio-group v-model="feedbackType">
+                  <el-radio value="term">术语修正</el-radio>
+                  <el-radio value="sentence">句式修正</el-radio>
+                </el-radio-group>
+              </div>
+            </div>
+            <div class="feedback-body">
+              <template v-if="feedbackType === 'term'">
+                <div v-for="(item, index) in termItems" :key="`term-${index}`" class="term-row">
+                  <el-input v-model="termItems[index].original" placeholder="原文用词" />
+                  <span class="term-arrow">→</span>
+                  <el-input v-model="termItems[index].standard" placeholder="标准用词" />
+                  <el-button text @click="removeTermItem(index)">删除</el-button>
+                </div>
+                <el-button type="primary" plain size="small" @click="addTermItem">+ 添加术语修正</el-button>
+              </template>
+              <template v-else>
+                <el-input
+                  v-model="sentenceCorrections"
+                  type="textarea"
+                  :rows="3"
+                  placeholder="每行一条正确写法，例如：\n请勿在开机状态下断开电源。\n使用前请仔细阅读本说明书。"
+                />
+              </template>
+              <div class="feedback-hint">{{ feedbackHint }}</div>
+            </div>
           </template>
-          <div class="feedback-hint">{{ feedbackHint }}</div>
-        </div>
-        <div class="feedback-bottom">
-          <div class="form-item">
-            <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
+          <div class="feedback-bottom">
+            <div class="form-item">
+              <el-button type="primary" :loading="feedbackLoading" @click="submitFeedback">提交反馈</el-button>
+            </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
 
@@ -732,7 +737,7 @@
       ref="localFileInputRef"
       type="file"
       style="display: none"
-      accept=".txt,.md,.docx"
+      accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       @change="onLocalFileSelected"
     />
 
@@ -1094,6 +1099,7 @@ const feedbackType = ref('term')
 const termItems = ref([{ original: '', standard: '' }])
 const sentenceCorrections = ref('')
 const feedbackLoading = ref(false)
+const feedbackWantCorrection = ref(false)
 const currentPolishEngine = ref('检测中')
 const feedbackScoreMap = {
   1: 20,
@@ -1125,7 +1131,7 @@ const feedbackTarget = computed(() => (
 const feedbackHint = computed(() => (
   feedbackType.value === 'sentence'
     ? '句式修正将写入平台反馈的句式清单，每行一条。'
-    : '术语修正将写入平台反馈的术语对照表，按“原文用词 → 标准用语”填写。'
+    : '术语修正将写入平台反馈的术语对照表，按“原文用词 → 标准用词”填写。'
 ))
 
 const feedbackTargetHint = computed(() => (
@@ -1161,11 +1167,51 @@ function buildTermCorrections() {
     .join('\n')
 }
 
+function getFeedbackCorrectionError() {
+  if (feedbackType.value === 'term') {
+    const rows = termItems.value.map(item => ({
+      original: String(item.original || '').trim(),
+      standard: String(item.standard || '').trim()
+    }))
+    if (rows.some(item => item.original && item.standard)) {
+      return ''
+    }
+    const hasOriginal = rows.some(item => item.original)
+    const hasStandard = rows.some(item => item.standard)
+    if (hasOriginal && !hasStandard) {
+      return '请填写术语修正的标准用词'
+    }
+    if (hasStandard && !hasOriginal) {
+      return '请填写术语修正的原文用词'
+    }
+    return '请填写术语修正的原文用词和标准用词'
+  }
+  if (!String(sentenceCorrections.value || '').trim()) {
+    return '请填写句式修正内容'
+  }
+  return ''
+}
+
+async function promptMessageBox(method, message, title, options = {}) {
+  try {
+    await ElMessageBox[method](message, title, {
+      closeOnClickModal: false,
+      closeOnPressEscape: false,
+      showClose: false,
+      ...options,
+    })
+    return 'confirm'
+  } catch (action) {
+    return action === 'cancel' ? 'cancel' : 'close'
+  }
+}
+
 function resetFeedbackForm() {
   feedbackAccuracy.value = null
   feedbackType.value = 'term'
   termItems.value = [{ original: '', standard: '' }]
   sentenceCorrections.value = ''
+  feedbackWantCorrection.value = false
 }
 
 function setFeedbackStars(star) {
@@ -1659,7 +1705,10 @@ function detectLongParagraphList(text) {
     if (orderedCount >= 1) {
       return { type: 'ol', items: sentenceItems }
     }
-    if (sentenceItems.every(item => item.text.length >= 8 && item.text.length <= 80)) {
+    if (
+      sentenceItems.length >= 3 &&
+      sentenceItems.every(item => item.text.length >= 8 && item.text.length <= 80)
+    ) {
       return { type: 'ul', items: sentenceItems }
     }
   }
@@ -1836,6 +1885,11 @@ const currentPolishEngineLabel = computed(() => {
   }
   const sourceLabel = formatCatCandidateSource(candidate)
   if (candidate && sourceLabel && sourceLabel !== '候选规则') {
+    const displayed = String(getDisplayedPolishedText(result.value, textCatItems.value) || '').trim()
+    const original = String(result.value?.original || '').trim()
+    if (displayed === original && String(candidate?.rule_source || '').trim() === 'surface_rules') {
+      return `当前引擎：${currentPolishEngine.value}`
+    }
     return `当前引擎：${sourceLabel}`
   }
   return `当前引擎：${currentPolishEngine.value}`
@@ -1843,6 +1897,17 @@ const currentPolishEngineLabel = computed(() => {
 const highlightedPolishedHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'polished'))
 const displayedPolishedText = computed(() => getDisplayedPolishedText(result.value, textCatItems.value))
 const highlightedPolishedResultHtml = computed(() => renderTextPolishedResultHtml(result.value, displayedPolishedText.value))
+const hasVisibleTextPolishResult = computed(() => {
+  if (!result.value) {
+    return false
+  }
+  if (textCatPanelItems.value.length) {
+    return true
+  }
+  const original = String(result.value.original || '').trim()
+  const displayed = String(displayedPolishedText.value || '').trim()
+  return Boolean(displayed) && displayed !== original
+})
 const highlightedDocOriginalHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'original'))
 const highlightedDocPolishedHtml = computed(() => renderDiffHtml(docResult.value?.original, docResult.value?.polished, 'polished'))
 const currentSentenceProductFolder = computed(() => sentenceProductFolderMap.value[String(formData.value.productType || '').trim()] || null)
@@ -3106,11 +3171,38 @@ function openLocalFilePicker() {
   localFileInputRef.value?.click()
 }
 
+function sourceFileExtension(filename) {
+  const name = String(filename || '').trim()
+  const idx = name.lastIndexOf('.')
+  if (idx < 0) {
+    return ''
+  }
+  return name.slice(idx + 1).toLowerCase()
+}
+
+function wordSourceFileError(filename) {
+  const ext = sourceFileExtension(filename)
+  if (ext === 'docx') {
+    return ''
+  }
+  if (ext === 'doc') {
+    return '待润色文件仅支持 .docx 格式的 Word 文档，请将 .doc 另存为 .docx 后上传'
+  }
+  return '待润色文件仅支持 Word 文档（.docx）'
+}
+
 function onLocalFileSelected(event) {
   const file = event.target.files?.[0]
   if (file) {
-    pendingLocalFile = file
-    formData.value.sourceFile = file.name
+    const error = wordSourceFileError(file.name)
+    if (error) {
+      pendingLocalFile = null
+      formData.value.sourceFile = ''
+      ElMessage.warning(error)
+    } else {
+      pendingLocalFile = file
+      formData.value.sourceFile = file.name
+    }
   }
   if (localFileInputRef.value) {
     localFileInputRef.value.value = ''
@@ -4017,7 +4109,11 @@ async function submitPolish() {
     ElMessage.warning('请选择待润色文件')
     return
   }
-  
+  const sourceFileError = wordSourceFileError(pendingLocalFile.name || formData.value.sourceFile)
+  if (sourceFileError) {
+    ElMessage.warning(sourceFileError)
+    return
+  }
   loading.value = true
   startDocumentProgress()
   
@@ -4263,27 +4359,20 @@ async function submitFeedback() {
     ElMessage.warning('请先选择准确度评分')
     return
   }
-  let corrections = feedbackType.value === 'term' ? buildTermCorrections() : String(sentenceCorrections.value || '').trim()
-  if (feedbackAccuracy.value < 100 && !corrections) {
-    try {
-      await ElMessageBox.confirm(
-        '需要提交修正信息，以便优化准确率吗？',
+  let corrections = ''
+  if (feedbackWantCorrection.value) {
+    corrections = feedbackType.value === 'term' ? buildTermCorrections() : String(sentenceCorrections.value || '').trim()
+    if (!corrections) {
+      await promptMessageBox(
+        'alert',
+        getFeedbackCorrectionError() || '请填写修正内容',
         '提示',
         {
-          confirmButtonText: '是',
-          cancelButtonText: '否',
-          distinguishCancelAndClose: true,
-          closeOnClickModal: false,
-          closeOnPressEscape: false,
+          confirmButtonText: '确定',
           type: 'warning',
         }
       )
       return
-    } catch (action) {
-      if (action !== 'cancel') {
-        return
-      }
-      corrections = ''
     }
   }
   feedbackLoading.value = true
@@ -4299,8 +4388,12 @@ async function submitFeedback() {
     )
     const data = resp.data || {}
     const targetName = feedbackTargetLabel()
-    if (data.processed_count > 0) {
+    if (data.errors) {
+      ElMessage.error(`反馈已记录，写入${targetName}失败`)
+    } else if (data.processed_count > 0) {
       ElMessage.success(`反馈已提交，已将 ${data.processed_count} 条修正写入${targetName}`)
+    } else if (corrections) {
+      ElMessage.success(`反馈已提交，${targetName}中已有相同修正`)
     } else {
       ElMessage.success('反馈已提交')
     }
@@ -5933,6 +6026,88 @@ watch(currentView, (view) => {
   min-height: 0;
 }
 
+.text-page-grid {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  grid-template-rows: auto auto;
+  gap: 18px;
+  align-items: stretch;
+}
+
+.text-left {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  min-width: 0;
+}
+
+.text-left .panel {
+  flex: 1;
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.text-right {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  min-height: 520px;
+}
+
+.text-empty-result {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  border: 1px dashed #d9e2ec;
+  border-radius: 8px;
+  color: #5b6b7c;
+  background: #f7fafc;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.text-input-panel,
+.text-result-panel {
+  flex: 1 1 0;
+  width: 100%;
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.text-result-panel {
+  overflow: auto;
+}
+
+.text-input-panel .text-input-shell {
+  flex: 1;
+  min-height: 160px;
+}
+
+.text-input-panel :deep(.el-textarea) {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+}
+
+.text-input-panel :deep(.el-textarea__inner) {
+  height: 100%;
+  min-height: 160px;
+  resize: none;
+}
+
+.text-result-panel .result-grid-vertical,
+.text-result-panel .result-col-v,
+.text-result-panel .col-content {
+  flex: 1;
+  min-height: 0;
+}
+
 .content-left .panel :deep(.el-textarea) {
   display: flex;
   flex: 1;
@@ -6190,12 +6365,31 @@ watch(currentView, (view) => {
 }
 
 .feedback-panel {
-  margin-top: 16px;
+  grid-column: 1;
+  grid-row: 2;
+  width: auto;
+  max-width: none;
+  margin-top: 0;
+}
+
+.feedback-details {
+  margin-top: 2px;
 }
 
 .feedback-rating-row,
 .feedback-type-row {
   margin-bottom: 14px;
+}
+
+.feedback-correction-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.feedback-correction-row .form-label {
+  margin-bottom: 0;
 }
 
 .feedback-rating-group {
@@ -6478,6 +6672,22 @@ watch(currentView, (view) => {
     flex-direction: column;
   }
 
+  .text-page-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+
+  .text-left,
+  .text-right,
+  .feedback-panel {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .text-right {
+    min-height: 0;
+  }
+
   .doc-result-preview {
     grid-template-columns: 1fr;
   }
@@ -6496,6 +6706,11 @@ watch(currentView, (view) => {
     align-items: flex-start;
     gap: 12px;
     flex-direction: column;
+  }
+
+  .feedback-panel {
+    width: 100%;
+    max-width: 100%;
   }
 
   .feedback-rating-btn {
