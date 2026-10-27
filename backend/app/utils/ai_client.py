@@ -1796,6 +1796,7 @@ class AIClient:
 - 同类元素（表头、图标、段落）样式不统一（粗细、字号、对齐不一致）。
 表格整体对齐整齐不能作为 reject 拥挤/粗线/未居中的理由；无法稳定判断时用 `uncertain`。
 对「表格/版式」：截图中只要有表格或图，且看不到提取伪影，不要因为“排版整齐”而 `reject`；证据不够强时用 `uncertain`。
+若该页除了上述主问题外，还肉眼可见其他独立的版式/图片问题（表格过挤、线条明显过粗、图片未居中、图片颜色异常、同类元素样式不统一、文字说明与图标内容不符等），请逐一填入 `extra_issues`，每项给出该问题在页面上的位置与现象；没有则填空数组。`extra_issues` 只列与主问题相互独立的问题，不要重复主问题本身。
 
 已知优先按伪影或可接受差异处理的场景：
 - 双层文本层重复，例如同一句或同一短语重复叠加。
@@ -1809,7 +1810,14 @@ class AIClient:
   "reason": "一句话说明依据",
   "visible_text": "从图片中能读到的关键文字，读不到则留空",
   "confidence": 0,
-  "is_extraction_artifact": false
+  "is_extraction_artifact": false,
+  "extra_issues": [
+    {{
+      "type": "crowded|thick_lines|image_off_center|color|style_mismatch|content_missing",
+      "reason": "一句话说明该问题在页面上的位置与现象",
+      "confidence": 0
+    }}
+  ]
 }}
 """.strip()
 
@@ -1863,12 +1871,28 @@ class AIClient:
         decision = str(data.get("decision") or "").strip().lower()
         if decision not in {"confirm", "reject", "uncertain"}:
             decision = "uncertain"
+        extra_issues = []
+        raw_extra = data.get("extra_issues")
+        if isinstance(raw_extra, list):
+            known_types = {"crowded", "thick_lines", "image_off_center", "color", "style_mismatch", "content_missing"}
+            for item in raw_extra[:6]:
+                if not isinstance(item, dict):
+                    continue
+                issue_type = str(item.get("type") or "").strip().lower()
+                if issue_type not in known_types:
+                    continue
+                extra_issues.append({
+                    "type": issue_type,
+                    "reason": self._clean_text(item.get("reason"), 160),
+                    "confidence": self._normalize_confidence(item.get("confidence"), 0),
+                })
         return {
             "decision": decision,
             "reason": self._clean_text(data.get("reason"), 220),
             "visible_text": self._clean_text(data.get("visible_text"), 220),
             "confidence": self._normalize_confidence(data.get("confidence"), 0),
             "is_extraction_artifact": bool(data.get("is_extraction_artifact")),
+            "extra_issues": extra_issues,
             "raw_text": self._clean_text(result, 500),
         }
 
@@ -2439,6 +2463,9 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 - Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
+- Subject-verb agreement and singular/plural form: report third-person singular mismatches such as "the system apply" -> "the system applies", "the kit run" -> "the kit runs", and noun number inconsistency for the same field (e.g. one place says "reagent" and another "reagents" for the same item). Use category "语法与表达" with severity serious for the verb mismatch, and category "术语一致性" for noun number inconsistency.
+- Step applicability: report when a step is only valid for a subset of the software/platforms/flow-cell types mentioned in the document (e.g. the sub-paths or file names differ across bioinformatics software) and should be removed, merged, or explicitly marked as conditional. Use category "信息不完整" or "冗余", severity suggestion.
+- Abbreviation casing consistency: report when the same abbreviation is written with inconsistent capitalization within the same context (e.g. lowercase "p" vs "P", "s" vs "S", "dna" vs "DNA"). Use category "术语一致性", severity suggestion. Do not report single-letter tokens in isolation unless the casing conflict is visible in the same excerpt.
 
 SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
 - Redundancy: report filler lead-ins with no information value (such as "About this guide" or "The following section will introduce"), redundant auxiliaries ("please click" -> "click"), and the same fact restated in a later section. Use category "冗余".

@@ -390,10 +390,35 @@ def _is_localized_meaningful_english_fix(original: Any, suggestion: Any) -> bool
     return True
 
 
+def _is_grammar_morphological_pair(left: str, right: str) -> bool:
+    """判断两个 token 是否为同一动词/名词的语法形态变化。
+
+    主谓一致（apply→applies）、名词单复数（reagent→reagents）等是真实语法错误，
+    不是低价值改写。若这里判 True，则 low_value/aggressive 过滤必须放行，
+    否则会误杀 AI 已检出的语法修正（实测 apply→applies 的 SequenceMatcher
+    ratio=0.667 低于 0.72 阈值，被 low_value_english_rewrite 误杀）。
+    """
+    if not left or not right or left == right:
+        return False
+    # y → ies（apply→applies, try→tries）
+    if left.endswith("y") and right.endswith("ies") and left[:-1] + "ies" == right:
+        return True
+    if right.endswith("y") and left.endswith("ies") and right[:-1] + "ies" == left:
+        return True
+    # 直接加 s / es（use→uses, reagent→reagents, box→boxes）
+    if right == left + "s" or left == right + "s":
+        return True
+    if right == left + "es" or left == right + "es":
+        return True
+    return False
+
+
 def _tokens_look_like_meaningful_fix_pair(left: str, right: str) -> bool:
     if not left or not right or left == right:
         return False
     if frozenset({left, right}) in _MEANINGFUL_LOCAL_REWRITE_PAIRS:
+        return True
+    if _is_grammar_morphological_pair(left, right):
         return True
     if left.rstrip("s") == right.rstrip("s") and abs(len(left) - len(right)) <= 2:
         return True
