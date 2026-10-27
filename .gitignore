@@ -154,6 +154,8 @@ web/build/
 
 # Compressed files
 *.zip
+!backend/scripts/review_comment_extractor.zip
+!backend/seed/knowledge/资源库/脚本/*.zip
 *.rar
 *.7z
 *.tar
