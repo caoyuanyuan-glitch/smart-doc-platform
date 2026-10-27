@@ -297,7 +297,7 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     if item.expected_rule == "STRUCT-IMAGE-001" and all(token in text for token in ["install", "finish", "打开本系统"]):
         return rule == "CYY-CN-LOGIC-007" or "内容逻辑" in category
     if item.expected_rule == "STRUCT-IMAGE-001":
-        return rule.startswith("CYY-CN-IMAGE-") or "图片" in category or "对象缺失" in category
+        return rule.startswith("CYY-CN-IMAGE-") or rule == "PDF-VISUAL-001" or "图片" in category or "对象缺失" in category
     if item.expected_rule == "STRUCT-STEP-001":
         return rule in {"CYY-CN-STRUCT-001", "CYY-CN-STEP-004"} or "步骤结构" in category
     if item.expected_rule == "STRUCT-COMPONENT-001":
@@ -393,6 +393,23 @@ def _matches_annotation_strictly(
     """
     expected = str(item.expected_rule or "").upper()
     rule = str(issue.get("rule", "") or "").upper()
+
+    # 页级视觉 issue 是"整页疑点"而非"某处文本"：其 original_text 是整页预览，
+    # 若走通用文本通道，会被任意页的批注（selected/comment 恰好出现在整页文本中）
+    # 在单射里抢占，导致真正的同页批注无 issue 可用（实测 159p 的视觉 issue 被
+    # 其他页批注的文本重叠抢占，页内"样式挤了"批注反而漏检）。
+    # 因此页级视觉 issue 直接走专用页码+类别通道，不做规则族/文本匹配——
+    # 视觉 issue 的 category（图表编号/页脚异常等）与批注 expected_rule 家族
+    # 本就分属两套维度，用规则族闸门会误伤（159p 视觉 issue cat=图表编号，
+    # 无法通过 STRUCT-LAYOUT-001 的规则族检查）。
+    if rule == "PDF-VISUAL-001":
+        # 批注为页级/区域级判断类（表格/版式、图片/图表、图片规范、字体/版式细节、
+        # 结构完整性）且页码锚点一致时计为严格命中；外层 injective 单射保证一条
+        # 视觉 issue 最多命中一条批注，不会出现同页多条批注被同一条页级 issue 批量刷中。
+        if item.category in ("表格/版式", "图片/图表", "图片规范", "字体/版式细节", "结构完整性") and _annotation_page_anchor_matches(item, issue):
+            return True
+        return False
+
     if expected and rule == expected:
         rule_ok = True
     elif allow_rule_family:
@@ -431,17 +448,6 @@ def _matches_annotation_strictly(
         original_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", str(issue.get("original_text", "")).lower())}
         if original_tokens and len(context_tokens & original_tokens) / len(original_tokens) >= 0.5:
             return True
-    # 页级 issue（整页判断，rule=PDF-VISUAL-001）不构成"同一处文本"的证据。
-    # 它的 page_number 天然等于页号，若允许走页码通道，会与同页任意批注
-    # 假命中（实测限额 24 时净增 4 条，3 条是错配）。
-    # —— 2026-10-26 修正：版式类 gold（STRUCT-LAYOUT-001 等）的批注本身就是
-    #    页级/区域级判断（太挤、粗线条、图片不居中），允许"页码锚点一致 + 类别一致"
-    #    计为严格命中；外层 injective 单射保证一条视觉 issue 最多命中一条批注，
-    #    不会出现同页多条批注被同一条页级 issue 批量刷中的情况。
-    if str(issue.get("rule", "")).upper() == "PDF-VISUAL-001":
-        if item.category in ("表格/版式", "图片/图表") and _annotation_page_anchor_matches(item, issue):
-            return True
-        return False
     # 页码冲突排除：issue 明确标了页码且与批注页不一致 ⇒ 一定不是同一处文本。
     # 注意这里是"只用来排除、不用来命中"——把页码当独立命中通道会让
     # 同页不同处的 issue 也算命中（V4 实测会引入 page=69 的跨页错配）。

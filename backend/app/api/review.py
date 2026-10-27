@@ -2612,6 +2612,28 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                     consensus_score=int(issue.get('consensus_score') or 0),
                     basis_labels=basis_labels,
                 )
+                # M6 页码回填修复：AI 通道 issue 没有字符定位（AI 返回的 position
+                # 只是文本描述），此前回填全部失败或落在第 1 页，导致 AI 检出的
+                # 问题在严格匹配里全部按页码错配漏检。
+                # 这里用 original_text 在"本块"内定位（块内首次出现），加上块
+                # 全文起始偏移得到全文 char_start，供 _backfill_issue_page_numbers
+                # 反查真实页码。
+                _position = _decode_issue_position(_issue_value(issue, 'position', ''))
+                if not _position.get('char_start'):
+                    _orig = str(_issue_value(issue, 'original_text', '') or '')
+                    _local = -1
+                    if _orig:
+                        _local = chunk.find(_orig)
+                        if _local < 0:
+                            _tokens = _orig.split()
+                            if len(_tokens) >= 3:
+                                _first = chunk.find(_tokens[0])
+                                if _first >= 0:
+                                    _local = _first
+                    if _local >= 0:
+                        _position['char_start'] = int(start) + _local
+                        _position['char_end'] = int(start) + _local + max(1, len(_orig))
+                        _set_issue_value(issue, 'position', json.dumps(_position, ensure_ascii=False))
                 all_issues.append(issue)
             chunk_trace["issue_count"] = len(chunk_issues)
             chunk_trace["cache_hit"] = bool(cache_hit)
@@ -3744,8 +3766,15 @@ def _visual_provider_available(provider: str) -> bool:
         return bool(getattr(ai_client, "kimi_client", None))
     if name == "qwen":
         return bool(getattr(ai_client, "qwen_client", None) or getattr(ai_client, "dashscope_client", None))
+    if name == "visual":
+        # 通用 OpenAI 兼容视觉插槽（VISUAL_API_KEY / VISUAL_BASE_URL / VISUAL_MODEL）
+        return bool(getattr(ai_client, "visual_client", None))
+    # deepseek 仅有纯文本模型（deepseek-chat/reasoner），不支持图像输入。
+    # 若此处按 client 存在判为可用，verify_review_issue_from_image 会返回
+    # error/deepseek_unavailable，map 成 failed 直接短路整条视觉回退链，
+    # qwen/kimi 永远拿不到接管机会 —— 视觉复核等于没有视觉模型在跑。
     if name == "deepseek":
-        return bool(getattr(ai_client, "deepseek_client", None))
+        return False
     return False
 
 
@@ -4026,6 +4055,12 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         if decision == 'confirm':
             diagnostics['confirmed_count'] += 1
             page_issues.append(_build_pdf_page_visual_issue(page_candidate, result))
+            # 多疑点拆分：视觉模型确认该页有问题后，若还看到与主问题
+            # 相互独立的版式/图片疑点（过挤/粗线/未居中/颜色/样式/内容缺失），
+            # 每条独立产一条 PDF-VISUAL-001 issue，供单射匹配覆盖同页多条批注。
+            for extra in (result.get("extra_issues") or []):
+                if isinstance(extra, dict) and str(extra.get("type") or "").strip():
+                    page_issues.append(_build_extra_pdf_page_visual_issue(page_candidate, extra))
             continue
         if decision == 'error' and _should_promote_page_candidate_without_visual(page_candidate):
             diagnostics['uncertain_count'] += 1
@@ -4040,6 +4075,12 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         diagnostics['uncertain_count'] += 1
         # C3: geometry/visual uncertainty may only emit 待人工复核, confidence < 85.
         page_issues.append(_build_pdf_page_manual_review_issue(page_candidate, 'visual_uncertain'))
+        # 视觉 uncertain 页同样解析 extra_issues：模型虽未对主问题 confirm，
+        # 但可能已列出该页其他肉眼可见的版式/图片疑点（过挤/粗线/未居中/颜色等），
+        # 每条独立产一条待人工复核 issue，缓解同页多条版式批注被单射挤掉的问题。
+        for extra in (result.get("extra_issues") or []):
+            if isinstance(extra, dict) and str(extra.get("type") or "").strip():
+                page_issues.append(_build_extra_pdf_page_visual_issue(page_candidate, extra))
 
     if page_issues:
         diagnostics['page_issue_count'] = len(page_issues)
@@ -4772,6 +4813,72 @@ def _should_promote_page_candidate_without_visual(page_candidate: dict) -> bool:
     ):
         return True
     return False
+
+
+def _extra_visual_issue_category(issue_type: str) -> str:
+    """视觉模型 extra_issues 的类型 → issue 分类。
+
+    版式类疑点归「表格/版式」，图片/内容类归「图片/图表」或「结构完整性」，
+    保证与 annotation_baseline 的 PDF-VISUAL-001 匹配白名单对齐。
+    """
+    return {
+        "crowded": "表格/版式",
+        "thick_lines": "表格/版式",
+        "style_mismatch": "表格/版式",
+        "image_off_center": "图片/图表",
+        "color": "图片/图表",
+        "content_missing": "结构完整性",
+    }.get(issue_type, "表格/版式")
+
+
+def _extra_visual_issue_description(issue_type: str, reason: str) -> str:
+    descriptions = {
+        "crowded": "单元格过挤/行高不足",
+        "thick_lines": "表格线条明显过粗",
+        "image_off_center": "图片未居中",
+        "color": "图片颜色异常",
+        "style_mismatch": "同类元素样式不统一",
+        "content_missing": "文字说明与图标/内容不符或缺失",
+    }
+    label = descriptions.get(issue_type, "版式疑点")
+    return f"PDF 页级渲染复核确认疑点（{label}）: {reason[:140]}"
+
+
+def _build_extra_pdf_page_visual_issue(page_candidate: dict, extra: dict) -> dict:
+    issue_type = str(extra.get("type") or "").strip().lower()
+    reason = str(extra.get("reason") or "")[:160]
+    page_number = int(page_candidate.get("page_number") or 0)
+    category = _extra_visual_issue_category(issue_type)
+    confidence = int(extra.get("confidence") or 0) or 82
+    return {
+        "severity": "general",
+        "category": category,
+        "rule": "PDF-VISUAL-001",
+        "chapter": f"第{page_number}页",
+        "original_text": page_candidate.get("text_preview") or "",
+        "context": page_candidate.get("text_preview") or "",
+        "suggestion": "请人工复核该页该项版式/图片问题",
+        "description": _extra_visual_issue_description(issue_type, reason),
+        "audit_basis": "PDF 页级渲染复核（多疑点拆分）",
+        "confidence": confidence,
+        "source": "ai",
+        "position": _encode_issue_position_with_meta(
+            int(page_candidate.get("char_start") or 0),
+            int(page_candidate.get("char_end") or 0),
+            page_number=page_number,
+            area=category,
+            visual_verification={
+                "decision": "confirm",
+                "reason": reason,
+                "confidence": confidence,
+                "page_candidate": True,
+                "extra_issue": True,
+            },
+            needs_human_review=True,
+        ),
+        "needs_human_review": True,
+        "page_number": page_number,
+    }
 
 
 def _build_pdf_page_visual_issue(page_candidate: dict, result: dict) -> dict:

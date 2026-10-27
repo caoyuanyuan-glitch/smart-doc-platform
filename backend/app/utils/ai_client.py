@@ -228,6 +228,17 @@ class AIClient:
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
+        # 通用视觉插槽（visual）：任何 OpenAI 兼容的视觉模型端点均可接入。
+        # 后续补充 key 时只需在 runtime.env 配置以下三个变量即可启用，无需改代码：
+        #   VISUAL_API_KEY=<key>
+        #   VISUAL_BASE_URL=https://<endpoint>/v1   （兼容 OpenAI 图片格式）
+        #   VISUAL_MODEL=<model>                    （如 gpt-4o / doubao-vision / qwen-vl 等）
+        # 并在 REVIEW_VISUAL_PROVIDERS 中加入 visual（如 REVIEW_VISUAL_PROVIDERS=visual）。
+        # 不配置时该插槽自动不可用，不影响现有 qwen/kimi 视觉链。
+        self.visual_api_key = os.getenv("VISUAL_API_KEY")
+        self.visual_base_url = os.getenv("VISUAL_BASE_URL")
+        self.visual_model = os.getenv("VISUAL_MODEL", "gpt-4o")
+
         timeout = _provider_http_timeout()
 
         self.qwen_client = OpenAI(
@@ -258,6 +269,16 @@ class AIClient:
         ) if _is_valid_key(self.kimi_api_key) else None
         if self.kimi_client:
             print(f"[AI] Kimi (Moonshot) 已连接, base_url={self.kimi_base_url}, model={self.kimi_model}")
+
+        # 通用视觉插槽客户端
+        self.visual_client = None
+        if _is_valid_key(self.visual_api_key) and self.visual_base_url:
+            self.visual_client = OpenAI(
+                api_key=self.visual_api_key,
+                base_url=self.visual_base_url,
+                timeout=timeout,
+            )
+            print(f"[AI] 通用视觉插槽已配置, base_url={self.visual_base_url}, model={self.visual_model}")
 
         # MCAI Proxy 客户端（纯文本响应格式）
         mcai_base_url = os.getenv("MCAI_LLM_BASE_URL")
@@ -655,6 +676,10 @@ class AIClient:
             return getattr(self, "kimi_client", None)
         if name == "qwen":
             return getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None)
+        if name == "visual":
+            # 通用 OpenAI 兼容视觉插槽：配置 VISUAL_API_KEY / VISUAL_BASE_URL /
+            # VISUAL_MODEL 后即可启用，兼容 gpt-4o、doubao-vision 等任意视觉端点。
+            return getattr(self, "visual_client", None)
         if name == "deepseek":
             # DeepSeek 仅有 deepseek-chat/reasoner 纯文本模型，不支持图像输入，
             # 让其返回 None 会让视觉复核链跳过 deepseek，避免每次白花 400。
@@ -664,8 +689,9 @@ class AIClient:
     def _visual_model_for(self, provider: str) -> str:
         """视觉复核必须使用视觉模型，不能用文本模型传图。
 
-        - qwen  → qwen-vl-plus（DashScope 视觉模型，兼容 OpenAI 图片格式）
         - kimi  → moonshot-v1-8k-vision-preview（Kimi Vision）
+        - qwen  → qwen-vl-plus（DashScope 视觉模型，兼容 OpenAI 图片格式）
+        - visual → VISUAL_MODEL（通用视觉插槽，默认 gpt-4o）
         - deepseek → 不支持视觉，返回空
         """
         name = str(provider or "").strip().lower()
@@ -673,6 +699,8 @@ class AIClient:
             return os.getenv("KIMI_VL_MODEL", "moonshot-v1-8k-vision-preview")
         if name == "qwen":
             return os.getenv("QWEN_VL_MODEL", "qwen-vl-plus")
+        if name == "visual":
+            return os.getenv("VISUAL_MODEL", "gpt-4o")
         if name == "deepseek":
             return ""
         return ""
@@ -1796,6 +1824,7 @@ class AIClient:
 - 同类元素（表头、图标、段落）样式不统一（粗细、字号、对齐不一致）。
 表格整体对齐整齐不能作为 reject 拥挤/粗线/未居中的理由；无法稳定判断时用 `uncertain`。
 对「表格/版式」：截图中只要有表格或图，且看不到提取伪影，不要因为“排版整齐”而 `reject`；证据不够强时用 `uncertain`。
+若该页除了上述主问题外，还肉眼可见其他独立的版式/图片问题（表格过挤、线条明显过粗、图片未居中、图片颜色异常、同类元素样式不统一、文字说明与图标内容不符等），请逐一填入 `extra_issues`，每项给出该问题在页面上的位置与现象；没有则填空数组。`extra_issues` 只列与主问题相互独立的问题，不要重复主问题本身。
 
 已知优先按伪影或可接受差异处理的场景：
 - 双层文本层重复，例如同一句或同一短语重复叠加。
@@ -1809,7 +1838,14 @@ class AIClient:
   "reason": "一句话说明依据",
   "visible_text": "从图片中能读到的关键文字，读不到则留空",
   "confidence": 0,
-  "is_extraction_artifact": false
+  "is_extraction_artifact": false,
+  "extra_issues": [
+    {{
+      "type": "crowded|thick_lines|image_off_center|color|style_mismatch|content_missing",
+      "reason": "一句话说明该问题在页面上的位置与现象",
+      "confidence": 0
+    }}
+  ]
 }}
 """.strip()
 
@@ -1863,12 +1899,28 @@ class AIClient:
         decision = str(data.get("decision") or "").strip().lower()
         if decision not in {"confirm", "reject", "uncertain"}:
             decision = "uncertain"
+        extra_issues = []
+        raw_extra = data.get("extra_issues")
+        if isinstance(raw_extra, list):
+            known_types = {"crowded", "thick_lines", "image_off_center", "color", "style_mismatch", "content_missing"}
+            for item in raw_extra[:6]:
+                if not isinstance(item, dict):
+                    continue
+                issue_type = str(item.get("type") or "").strip().lower()
+                if issue_type not in known_types:
+                    continue
+                extra_issues.append({
+                    "type": issue_type,
+                    "reason": self._clean_text(item.get("reason"), 160),
+                    "confidence": self._normalize_confidence(item.get("confidence"), 0),
+                })
         return {
             "decision": decision,
             "reason": self._clean_text(data.get("reason"), 220),
             "visible_text": self._clean_text(data.get("visible_text"), 220),
             "confidence": self._normalize_confidence(data.get("confidence"), 0),
             "is_extraction_artifact": bool(data.get("is_extraction_artifact")),
+            "extra_issues": extra_issues,
             "raw_text": self._clean_text(result, 500),
         }
 
@@ -2439,6 +2491,9 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 - Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
+- Subject-verb agreement and singular/plural form: report third-person singular mismatches such as "the system apply" -> "the system applies", "the kit run" -> "the kit runs", and noun number inconsistency for the same field (e.g. one place says "reagent" and another "reagents" for the same item). Use category "语法与表达" with severity serious for the verb mismatch, and category "术语一致性" for noun number inconsistency.
+- Step applicability: report when a step is only valid for a subset of the software/platforms/flow-cell types mentioned in the document (e.g. the sub-paths or file names differ across bioinformatics software) and should be removed, merged, or explicitly marked as conditional. Use category "信息不完整" or "冗余", severity suggestion.
+- Abbreviation casing consistency: report when the same abbreviation is written with inconsistent capitalization within the same context (e.g. lowercase "p" vs "P", "s" vs "S", "dna" vs "DNA"). Use category "术语一致性", severity suggestion. Do not report single-letter tokens in isolation unless the casing conflict is visible in the same excerpt.
 
 SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
 - Redundancy: report filler lead-ins with no information value (such as "About this guide" or "The following section will introduce"), redundant auxiliaries ("please click" -> "click"), and the same fact restated in a later section. Use category "冗余".

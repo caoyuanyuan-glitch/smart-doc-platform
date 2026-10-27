@@ -1,0 +1,11 @@
+﻿细类,平台类别,expected_rule,layer,条数,是否已有规则,说明
+A1 文本-空格,空格与排版,DET-SPACE-001,deterministic,40,已有,
+A2 文本-标点符号,标点符号,DET-PUNCT-001[NEW],ai,70,需新建,
+A3 文本-拼写语法,拼写错误,DET-TERM-SPELL-001,ai,94,已有,
+A4 文本-术语一致性,术语一致性,TERM-001,ai,128,已有,
+A5 文本-引用链接,交叉引用,DET-MATERIAL-001,deterministic,19,已有,
+B1 版式-图片,图片/图表,PDF-VISUAL-001,ai,15,已有,
+B2 版式-表格列宽/间距留白,表格/版式,PDF-VISUAL-001,ai,142,已有,
+B3 版式-字体字号,表格/版式,PDF-VISUAL-001,ai,17,已有,
+B4 版式-分页页眉位置,表格/版式,PDF-VISUAL-001,ai,14,已有,
+C 内容语义,内容评审,CONTENT-REVIEW-001[NEW],ai,311,需新建,
