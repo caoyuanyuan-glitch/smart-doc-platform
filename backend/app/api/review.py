@@ -3766,8 +3766,12 @@ def _visual_provider_available(provider: str) -> bool:
         return bool(getattr(ai_client, "kimi_client", None))
     if name == "qwen":
         return bool(getattr(ai_client, "qwen_client", None) or getattr(ai_client, "dashscope_client", None))
+    # deepseek 仅有纯文本模型（deepseek-chat/reasoner），不支持图像输入。
+    # 若此处按 client 存在判为可用，verify_review_issue_from_image 会返回
+    # error/deepseek_unavailable，map 成 failed 直接短路整条视觉回退链，
+    # qwen/kimi 永远拿不到接管机会 —— 视觉复核等于没有视觉模型在跑。
     if name == "deepseek":
-        return bool(getattr(ai_client, "deepseek_client", None))
+        return False
     return False
 
 
