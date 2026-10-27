@@ -15536,6 +15536,49 @@ async def search_reviews(
         return {"query": q, "results": [], "count": 0, "error": str(e)}
 
 
+@router.get("/supplements", response_model=list[dict])
+async def list_manual_supplements(
+    review_id: int = None,
+    category: str = None,
+    status: str = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """只读查询补录回流快照，供后续聚类成规则候选 / 评测回测消费。"""
+    try:
+        from app.models.supplement_feedback import SupplementFeedback
+        query = db.query(SupplementFeedback)
+        if review_id:
+            query = query.filter(SupplementFeedback.review_id == review_id)
+        if category:
+            query = query.filter(SupplementFeedback.category == category)
+        if status:
+            query = query.filter(SupplementFeedback.rule_candidate_status == status)
+        rows = query.order_by(SupplementFeedback.created_at.desc()).limit(min(limit, 1000)).all()
+        return [
+            {
+                "id": r.id,
+                "review_id": r.review_id,
+                "issue_id": r.issue_id,
+                "document_id": r.document_id,
+                "category": r.category,
+                "severity": r.severity,
+                "chapter": r.chapter,
+                "original_text": r.original_text,
+                "suggestion": r.suggestion,
+                "context": r.context,
+                "position": r.position,
+                "rule_candidate_status": r.rule_candidate_status,
+                "created_by": r.created_by,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 @router.get("/{review_id}", response_model=Review)
 async def read_review(
     review_id: int,
@@ -15575,23 +15618,93 @@ async def create_manual_review_issue(
     if severity not in {'fatal', 'serious', 'general', 'suggestion'}:
         severity = 'general'
 
+    category = str(payload.get('category') or '人工补充').strip() or '人工补充'
+    chapter = str(payload.get('chapter') or '').strip()
+    suggestion = str(payload.get('suggestion') or '').strip()
+
+    # ---- 位置解析（新增）：允许补录携带页码/字符区间，供后续聚类与规则生成 ----
+    position_payload = payload.get('position') or {}
+    if isinstance(position_payload, str):
+        try:
+            position_payload = json.loads(position_payload)
+        except Exception:
+            position_payload = {}
+    if not isinstance(position_payload, dict):
+        position_payload = {}
+
+    def _safe_int(value):
+        try:
+            return int(value) if value not in (None, '', 0) else None
+        except (TypeError, ValueError):
+            return None
+
+    page_number = _safe_int(position_payload.get('page_number') or position_payload.get('page') or payload.get('page'))
+    char_start = _safe_int(position_payload.get('char_start') or payload.get('char_start'))
+    char_end = _safe_int(position_payload.get('char_end') or payload.get('char_end'))
+    if char_start is not None and char_end is not None and char_start > char_end:
+        char_start, char_end = char_end, char_start
+    if (char_start is None) != (char_end is None):
+        raise HTTPException(status_code=400, detail="char_start 与 char_end 必须同时提供")
+
+    position = '{}'
+    if page_number is not None or char_start is not None:
+        position = json.dumps({
+            "page_number": page_number,
+            "chapter": chapter,
+            "char_start": char_start,
+            "char_end": char_end,
+            "position_object": {
+                "page": page_number,
+                "chapter": chapter,
+                "char_start": char_start,
+                "char_end": char_end,
+                "bbox": None,
+                "source": "manual",
+            },
+            "source": "manual",
+        }, ensure_ascii=False)
+
     issue = IssueCreate(
         review_id=review_id,
         severity=severity,
-        category=str(payload.get('category') or '人工补充').strip() or '人工补充',
+        category=category,
         rule='MANUAL-SUPPLEMENT',
-        chapter=str(payload.get('chapter') or '').strip(),
+        chapter=chapter,
         original_text=original_text,
         context=str(payload.get('context') or '').strip(),
-        suggestion=str(payload.get('suggestion') or '').strip(),
+        suggestion=suggestion,
         description=str(payload.get('description') or '审核人补充上报的平台漏检问题').strip(),
         audit_basis=str(payload.get('audit_basis') or '审核人补充上报').strip(),
         confidence=100,
         source='manual',
-        position='{}',
+        position=position,
         status='confirmed',
     )
     created = create_issue(db, issue)
+
+    # ---- 回流快照（新增）：补录即成为进化原料，失败不阻断主流程 ----
+    try:
+        from app.models.supplement_feedback import SupplementFeedback
+        feedback = SupplementFeedback(
+            review_id=review_id,
+            issue_id=created.id,
+            document_id=getattr(review, 'document_id', None),
+            category=category,
+            severity=severity,
+            chapter=chapter,
+            original_text=original_text,
+            suggestion=suggestion,
+            context=str(payload.get('context') or '').strip(),
+            position=position,
+            rule_candidate_status='open',
+            created_by=getattr(current_user, 'id', None),
+        )
+        db.add(feedback)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"[补充回流] 快照写入失败(非致命): {exc}", flush=True)
+
     total = db.query(IssueModel).filter(IssueModel.review_id == review_id).count()
     review.total_issues = total
     db.commit()
