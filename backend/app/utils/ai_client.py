@@ -228,6 +228,17 @@ class AIClient:
         self.fallback_base_url = self.proxy_base_url or os.getenv("ANTHROPIC_BASE_URL")
         self.fallback_model = self.proxy_model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
+        # 通用视觉插槽（visual）：任何 OpenAI 兼容的视觉模型端点均可接入。
+        # 后续补充 key 时只需在 runtime.env 配置以下三个变量即可启用，无需改代码：
+        #   VISUAL_API_KEY=<key>
+        #   VISUAL_BASE_URL=https://<endpoint>/v1   （兼容 OpenAI 图片格式）
+        #   VISUAL_MODEL=<model>                    （如 gpt-4o / doubao-vision / qwen-vl 等）
+        # 并在 REVIEW_VISUAL_PROVIDERS 中加入 visual（如 REVIEW_VISUAL_PROVIDERS=visual）。
+        # 不配置时该插槽自动不可用，不影响现有 qwen/kimi 视觉链。
+        self.visual_api_key = os.getenv("VISUAL_API_KEY")
+        self.visual_base_url = os.getenv("VISUAL_BASE_URL")
+        self.visual_model = os.getenv("VISUAL_MODEL", "gpt-4o")
+
         timeout = _provider_http_timeout()
 
         self.qwen_client = OpenAI(
@@ -258,6 +269,16 @@ class AIClient:
         ) if _is_valid_key(self.kimi_api_key) else None
         if self.kimi_client:
             print(f"[AI] Kimi (Moonshot) 已连接, base_url={self.kimi_base_url}, model={self.kimi_model}")
+
+        # 通用视觉插槽客户端
+        self.visual_client = None
+        if _is_valid_key(self.visual_api_key) and self.visual_base_url:
+            self.visual_client = OpenAI(
+                api_key=self.visual_api_key,
+                base_url=self.visual_base_url,
+                timeout=timeout,
+            )
+            print(f"[AI] 通用视觉插槽已配置, base_url={self.visual_base_url}, model={self.visual_model}")
 
         # MCAI Proxy 客户端（纯文本响应格式）
         mcai_base_url = os.getenv("MCAI_LLM_BASE_URL")
@@ -655,6 +676,10 @@ class AIClient:
             return getattr(self, "kimi_client", None)
         if name == "qwen":
             return getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None)
+        if name == "visual":
+            # 通用 OpenAI 兼容视觉插槽：配置 VISUAL_API_KEY / VISUAL_BASE_URL /
+            # VISUAL_MODEL 后即可启用，兼容 gpt-4o、doubao-vision 等任意视觉端点。
+            return getattr(self, "visual_client", None)
         if name == "deepseek":
             # DeepSeek 仅有 deepseek-chat/reasoner 纯文本模型，不支持图像输入，
             # 让其返回 None 会让视觉复核链跳过 deepseek，避免每次白花 400。
@@ -664,8 +689,9 @@ class AIClient:
     def _visual_model_for(self, provider: str) -> str:
         """视觉复核必须使用视觉模型，不能用文本模型传图。
 
-        - qwen  → qwen-vl-plus（DashScope 视觉模型，兼容 OpenAI 图片格式）
         - kimi  → moonshot-v1-8k-vision-preview（Kimi Vision）
+        - qwen  → qwen-vl-plus（DashScope 视觉模型，兼容 OpenAI 图片格式）
+        - visual → VISUAL_MODEL（通用视觉插槽，默认 gpt-4o）
         - deepseek → 不支持视觉，返回空
         """
         name = str(provider or "").strip().lower()
@@ -673,6 +699,8 @@ class AIClient:
             return os.getenv("KIMI_VL_MODEL", "moonshot-v1-8k-vision-preview")
         if name == "qwen":
             return os.getenv("QWEN_VL_MODEL", "qwen-vl-plus")
+        if name == "visual":
+            return os.getenv("VISUAL_MODEL", "gpt-4o")
         if name == "deepseek":
             return ""
         return ""

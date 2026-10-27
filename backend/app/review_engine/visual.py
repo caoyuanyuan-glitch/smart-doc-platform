@@ -31,7 +31,10 @@ _PROVIDER_FAULT_RE = re.compile(
 
 
 def visual_provider_chain() -> list[str]:
-    raw = str(os.getenv("REVIEW_VISUAL_PROVIDERS", "kimi,qwen") or "")
+    # 默认链顺序：kimi → qwen → visual（通用 OpenAI 兼容视觉插槽）。
+    # visual 插槽在未配置 VISUAL_API_KEY/VISUAL_BASE_URL 时会被
+    # _visual_provider_available 判为不可用而跳过，不影响其余 provider。
+    raw = str(os.getenv("REVIEW_VISUAL_PROVIDERS", "kimi,qwen,visual") or "")
     providers = []
     seen = set()
     for item in raw.split(","):
