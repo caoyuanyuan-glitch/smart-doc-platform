@@ -24,6 +24,13 @@ SUPPORTED_SEED_FILE_TYPES = {
     ".xlsx",
     ".xltm",
     ".xltx",
+    ".zip",
+    ".txt",
+    ".py",
+    ".pyw",
+    ".cmd",
+    ".vbs",
+    ".hta",
 }
 
 
