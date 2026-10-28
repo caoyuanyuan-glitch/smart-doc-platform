@@ -1,0 +1,17 @@
+{
+ "document": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD Version 2.0.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD Version 2.0.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "无序列表",
+   "selected_text": "修订 1. 修 2. “ 3. 删 “",
+   "context": "修订内容摘要 日 1. 修改试剂盒有效期为12 个月 2. 删除信号因子名称中的 “V2.0”字样 3. 删除MDA T- 试剂名称中的 “MGI”字样 首次发布 型号 版本",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
