@@ -1,0 +1,113 @@
+{
+ "document": "H-020-000958-00_R02 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "20",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "标注字改成蓝色",
+   "selected_text": "Touch screen/ interface Compartment door Figure 1 Single cell droplet generator (front view) Power switch Power port Label USB Network port",
+   "context": "Perform the following steps: 1. Take out the flow cell and DNBelab C-TaiM 4 Single Cell Droplet Generator. Touch screen/ interface Compartment door Figure 1 Single cell droplet generator (front view) Power switch Power port Label USB Network port Figure 2 Single cell droplet generator (back view) 2. Switch the power switch of the Single cell droplet generator to position. Tap Open, and the compartment door opens automatically.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "保持左对齐",
+   "selected_text": "/ /",
+   "context": "ent Cap color Specification / 4 EA/box × 1 asket / 2 pcs/bag × 1 rimer-1~8 / 4 μL/tube ×8 rimer-9~16 / 4 μL/tube ×8",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "11",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺空格",
+   "selected_text": "5m",
+   "context": "For Research Use Onl 15 mL centrifuge tube 50 mL centrifuge tube Qubit Assay Tubes 0.5mL transparent thin wall PCR tube",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加粗",
+   "selected_text": "-",
+   "context": "flow cell stage. Figure 3 Opening the latch",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "蓝色字",
+   "selected_text": "Sample well Collection well Oil well Beads well",
+   "context": "in place. 7. Add the reagents to the sample well, oil well and beads well in order according to the following figure and table. Sample well Collection well Oil well Beads well Figure 6 Flow cell wells Order Well Reagent to be added Volume 1 Sample well Sample phase suspension 100 μL",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "蓝色字",
+   "selected_text": "Cover Oil Droplets P100 Oil P100 Oil",
+   "context": "Cover Oil Droplets P100 Oil P100 Oil Figure 9 Liquid in the 8-strip tube Tips The liquid in the PCR 8-strip tube is divided into 3 levels: the upper level is the Cover Oil, the middle level is the droplets, and the bottom level is P100 Oil (little or none).",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "34",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "搞到下一页",
+   "selected_text": "Type Model No. Cat. No. Genetic sequencer DNBSEQ-T7RS /",
+   "context": "29 For Research Use Only. Not for use in diagnostic procedures. Sequencing Set User Manual before starting sequencing, and strictly perform all operations according to the operations in the user manual. Table 22 Preparation list Type Model No. Cat. No. Genetic sequencer DNBSEQ-T7RS /",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "36",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "搞到下一页",
+   "selected_text": "Precautions during use of the DNA Clean",
+   "context": "31 For Research Use Only. Not for use in diagnostic procedures. DNA fragments. The higher volume of the beads leads to the smaller lower limit length of the purified DNA fragments. Precautions during use of the DNA Clean",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000958-00_R02 peered by Tina.pdf ·",
+   "page": "40",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "Ltd后面缺个.",
+   "selected_text": "td nsha and td",
+   "context": "information dao MGI Tech Co., Ltd ng 4, No.2, Hengyunshan Road, Qingdao Area, Free Trade Zone, Shandong, China dao MGI Tech Co., Ltd service@mgi-tech.com",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}

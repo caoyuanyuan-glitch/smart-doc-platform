@@ -1,0 +1,161 @@
+{
+ "document": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "32",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "单位重复",
+   "selected_text": "00、300、50、",
+   "context": "兼容耗材清单 描述 1000、300、50、10 μL 吸头 1.3 mL 96 孔圆形孔U 型底深孔板 2.2 mL 96 孔方形孔V 形底深孔板 0.2 mL 96 孔全裙边PCR 板",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "48",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "删了",
+   "selected_text": "射到眼",
+   "context": "由本公司技术支持装配、保养和维护激光扫码器。 扫码器的激光有可能入射到眼睛，在进行保养和维护时请佩戴具有光阻隔 护和更换台面扫码器时，请确保电源已关闭，防止激光溢出。 的台面扫码器须联系本公司技术支持进行处理，防止造成危害。 按产品使用说明书及维修说明对台面扫码器进行装配、保养或维护，将受 台面扫码器时，如出现任何问题，联系技术支持对其进行检查和维",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "56",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "名称看起来不完整",
+   "selected_text": "激光产品的安全 第1 部分： YY/T 1173 聚合酶链反应分析仪 YY/T 1908 核酸提取仪",
+   "context": "自动移液工作站性能检测通则 GB/T 7247.1 激光产品的安全 第1 部分：设备分类和要求 YY/T 1173 聚合酶链反应分析仪 YY/T 1908 核酸提取仪 环境要求及试验 方法 GB/T 14710 医用电器环境要求及试验方法",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "17",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "顿号",
+   "selected_text": "灯，层",
+   "context": "所示： 说明 主机架 承载仪器内部部件，包含外壳，机柜，框架，台面 灯，层流罩等模块，其中台面又包含样本载架，台 器，吸头盒板位等模块。 机械臂 带动移液模块、开关盖模块实现精确定位，进行一 头的装卸、精准移液，试管的转移及开盖。 提取模块 磁棒法核酸提取。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "18",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "顿号",
+   "selected_text": "，包含外壳，机柜，框架，台面，紫外 。其中台面又包含单孔槽板位，吸头盒",
+   "context": "说明 承载仪器内部部件，包含外壳，机柜，框架，台面，紫外 灯，层流罩等模块。其中台面又包含单孔槽板位，吸头盒 板位等模块。 带动移液模块、转板抓手实现精确定位，进行一次性吸头 的装卸，耗材的转移和精准移液。 进行核酸提纯。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "18",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "顿号",
+   "selected_text": "灯，层",
+   "context": "说明 主机架 承载仪器内部部件，包含外壳，机柜，框架，台面， 灯，层流罩等模块。其中台面又包含单孔槽板位，吸 板位等模块。 机械臂 带动移液模块、转板抓手实现精确定位，进行一次性 的装卸，耗材的转移和精准移液。 磁力架模块 进行核酸提纯。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "19",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下来点",
+   "selected_text": "-",
+   "context": "3 4 5 6 7",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "居中",
+   "selected_text": "9",
+   "context": "8 9 材。 说明 放置样本管，适配采血管和离心管。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "上去点，与箭头中点齐平",
+   "selected_text": "-",
+   "context": "场地要求",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "31",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "空格",
+   "selected_text": "0V",
+   "context": "说明 200-240 V~，50/60 Hz 动范围 不超过标称电压的±10% 3000VA（输入1：1000VA；输入2：2000VA） T16AH250V 流 10 A/5 A",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "41",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "两根线",
+   "selected_text": "-",
+   "context": "-",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "52",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整列宽",
+   "selected_text": "温度 ℃、 温度 ℃、 升温 ℃） 降温 ℃）",
+   "context": "大气压力范围 80 kPa~106 kPa 块 温度范围 4 ℃~90 ℃ 温度准确性（6 ℃、37 ℃、42 ℃、55 ℃） 不超过±1 ℃ 温度均匀性（6 ℃、37 ℃、42 ℃、55 ℃） 不大于1.5 ℃ 升温速率（25 ℃至55 ℃） 小于300 秒 降温速率（25 ℃至4 ℃） 小于900 秒",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001148-00 GenSIRO-48 全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf ·",
+   "page": "60",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整列宽",
+   "selected_text": "售后服 家",
+   "context": "中国武汉市东湖新技 生产许可证编号 售后服务单位/技术支持厂 家 武汉华大智造科技有 技术支持电话 4000-688-114 技术支持邮箱 MGI-service@mg",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

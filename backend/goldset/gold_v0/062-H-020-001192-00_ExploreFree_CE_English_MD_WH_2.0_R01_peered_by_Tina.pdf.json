@@ -1,0 +1,41 @@
+{
+ "document": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R01 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R01 peered by Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "与后面声输出表保持一致",
+   "selected_text": "ude: B mode, M mode, Color Dopple c Imaging.",
+   "context": "odes ration modes include: B mode, M mode, Color Doppler, pler, and Harmonic Imaging. composition device consists of a main unit (with dual headed probes), C adapter, a wireless charging dock, and software (Name:",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R01 peered by Tina.pdf ·",
+   "page": "43",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "logging",
+   "selected_text": "m the fo r login ce conn",
+   "context": "Ensure that the device is paired up with the soft accessing the main interface of the software. Perform the following steps: 1. After login in, the software automatically navig device connection preparation interface. 2. Long press the power button for 3 s to po device. The LED indicator starts flashing.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R01 peered by Tina.pdf ·",
+   "page": "48",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是不是and? 一般是先冻结，再截图吧，你跟研发确认下",
+   "selected_text": "or",
+   "context": "�Measurement uncertainty and probe variability: 2 5. (Optional) Fine-tune imaging parameters v control during scanning. 6. Tap or to capture optimal images.",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

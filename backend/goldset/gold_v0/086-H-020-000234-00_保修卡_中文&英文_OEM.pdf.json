@@ -1,0 +1,17 @@
+{
+ "document": "H-020-000234-00 保修卡_中文&英文_OEM.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000234-00 保修卡_中文&英文_OEM.pdf ·",
+   "page": "1",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这是OEM通用的吗",
+   "selected_text": "您可通过如下方式提出服务请 电话：400-809-9973",
+   "context": "为了您 范围： 您可通过如下方式提出服务请求和投诉： 电话：400-809-9973 联系方式",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  }
+ ]
+}

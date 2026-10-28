@@ -1,0 +1,101 @@
+{
+ "document": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "42",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "第二列写的是QUAL",
+   "selected_text": "OU sc",
+   "context": "allele frequency threshold. FMT/GT='1' A O ) / ( I N F O / Indicates the filter variant call format (VCF) parameter. y OUAL represents the variant's quality score. y GT represents the genotype of the variant. y A O represents the number of alternate observations at the variant",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "63",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "用形容词，去掉s",
+   "selected_text": "cs",
+   "context": "Description The summary results for all samples in the same analys batch. The phylogenetics NWK file for all samples in the sam analysis batch. The summary file of all sheets for all samples in the sam analysis batch.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "69",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "确认下是这个状态吗，标题写的是分析失败",
+   "selected_text": "k In Progress laying tasks in",
+   "context": "analysis failure or which the first analysis fails or has eps: ory module, click In Progress in the ry Task page displaying tasks in the In mple ID, and click to search for the belongs. page is displayed.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "拼写错误，应该是：prediction",
+   "selected_text": "predication",
+   "context": "s in the target region and perform negative or tance predication and annotation d drug resistance predication and annotation f Mutations in Mycobacterium Tuberculosis n with Drug Resistance published by WHO in pe species classification.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "中英文不一致",
+   "selected_text": "d NTM classification,",
+   "context": "Association with Drug Resistance published by WHO in pe Spoligotype and NTM classification, and use SNPs to sification. s single-sample and multi-sample phylogenetic analysis.",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "41",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "拼写错误, 应该是Minimum",
+   "selected_text": "Mininum threshold for specie classificat Mininum abundanc",
+   "context": "Confidence score threshold for species classification 0.75 Mininum depth threshold for species classification 10 Mininum abundance of H37Rv 2",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "66",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "确认下是否为压缩文件",
+   "selected_text": "e BAM file mple.",
+   "context": "sus.fa The consensus sequence file for the sample. m The alignment BAM file for the sample. m.wig.gz The BAM file required for IGV for the sample. eCover.xlsx The MTB genome coverage for the sample. .xlsx The species and lineage result for the sample.",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000690-00 MTB-Explorer Software User Manual_English_RUO_SZ R02 Tina.pdf ·",
+   "page": "92",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "最后这句话与中文不一致",
+   "selected_text": "real data viewing,",
+   "context": "MGI ZTRON Laboratory Management System Lite (MGI ZLIMS Lite) can be used to monitor and manage the sequencing and bioinformatic analysis tasks, including device monitoring, intelligent early-warning, real data viewing, and so on. Nontuberculous Mycobacteria Mycobacterium tuberculosis complex Rifampicin Isoniazid",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}

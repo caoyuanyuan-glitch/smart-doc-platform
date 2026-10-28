@@ -1,0 +1,53 @@
+{
+ "document": "H-020-000781-00 DNBSEQ-G99RS&DNBSEQ-G99ARS System Guide (StandardMPS 2.0)_English_RUO_WH 7.1 新增FCN和FCS型号20260401张倩.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000781-00 DNBSEQ-G99RS&DNBSEQ-G99ARS System Guide (StandardMPS 2.0)_English_RUO_WH 7.1 新增FCN和FCS型号20260401张倩.pdf ·",
+   "page": "43",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "太粗，下同",
+   "selected_text": "Sequencing Reagent Set DNBSEQ-G99RS High-throughput",
+   "context": "940-001274-00 G99 App-D FCL PE150 DNBSEQ-G99RS High-throughput Sequencing Reagent Set V2.0 24.0 940-001716-00 G99 App-D FCL PE300 DNBSEQ-G99RS High-throughput Sequencing Reagent Set V1.0 48.0 940-002706-00 G99 App-D FCS SE100 DNBSEQ-G99RS High-throughput Sequencing Reagent Set V1.0 4.0 940-002649-00 G99 App-D FCS PE150 DNBSEQ-G99RS High-throughput Sequencing Reagent Set V1.0 12.0 DNBSEQ-G99RS High-throughput",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000781-00 DNBSEQ-G99RS&DNBSEQ-G99ARS System Guide (StandardMPS 2.0)_English_RUO_WH 7.1 新增FCN和FCS型号20260401张倩.pdf ·",
+   "page": "70",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "太粗",
+   "selected_text": "G99 App-D FCL PE300 4.5 21.0 0.5 G99 App-D FCS SE100 2.0 8.0 0.5",
+   "context": "61 For Research Use Only. Not for use in diagnostic procedures. G99 App-D FCL SE100 2.0 8.0 0.5 G99 App-D FCL PE150 3.0 14.0 0.5 G99 App-D FCL PE300 4.5 21.0 0.5 G99 App-D FCS SE100 2.0 8.0 0.5 G99 App-D FCS PE150 3.0 14.0 0.5 G99 FCL SE400 4.0 16.0 0.5",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000781-00 DNBSEQ-G99RS&DNBSEQ-G99ARS System Guide (StandardMPS 2.0)_English_RUO_WH 7.1 新增FCN和FCS型号20260401张倩.pdf ·",
+   "page": "71",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "有修改的表格都看下",
+   "selected_text": "G99 App-D FCU PE300 4.5 21.0 0.5 G99 App-D FCN SE100 2.0 8.0 0.5",
+   "context": "to 8 ℃ (h) temperature (h) G99 App-D FCU SE100 2.0 8.0 0.5 G99 App-D FCU PE150 3.0 14.0 0.5 G99 App-D FCU PE300 4.5 21.0 0.5 G99 App-D FCN SE100 2.0 8.0 0.5 G99 App-D FCN PE150 3.0 14.0 0.5 G99 App-D FCN PE300 4.5 21.0 0.5",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000781-00 DNBSEQ-G99RS&DNBSEQ-G99ARS System Guide (StandardMPS 2.0)_English_RUO_WH 7.1 新增FCN和FCS型号20260401张倩.pdf ·",
+   "page": "242",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "https://global-mgitech.com",
+   "selected_text": "www.mgi-tech.com :",
+   "context": "2nd Gaoxin Road, East Lake High-Tech Development Zone, 430075, Wuhan, P.R.China MGI-service@mgi-tech.com www.mgi-tech.com E-mail: Website:",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  }
+ ]
+}

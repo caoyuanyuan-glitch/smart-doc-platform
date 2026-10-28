@@ -1,0 +1,161 @@
+{
+ "document": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "9",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "保修卡不是已经纳入说明书中了？而且名称是：保修服务卡",
+   "selected_text": "、存品信 、保修卡",
+   "context": "现热量的转移，使存储空间内维持所需求的温度环境。 括相应软件及独立电源部分等电控系统）用于温度等参数的监控及供电 （包括冻存架、进出口系统、存取仓系统、记录存品信息和与上位机进 于存品的自动化存取、存品信息记录、存品管理。 小工具、产品说明书、保修卡等。 需要接触或使用本产品的医护人员、科研人员以及设备管理维护人员。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "80",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "请放心使用；未经厂家授权，请勿擅自开启仓门",
+   "selected_text": "，不必慌张；禁止未获得厂家许可直接打开大门。",
+   "context": "急取样 部机构出现故障，冻存盒无法取出/ 存入到指定位置时，应当立刻联系基点。由基点授 工程师到现场解决。 温度充分保证样本安全，不必慌张；禁止未获得厂家许可直接打开大门。 备因出现故障或断电而导致制冷系统停止工作时，设备自带UPS 可保证当前动作完结， 进入低温安全空间，并保证所有自动门体已封闭。随后，需执行如下操作： 认制冷系统停止是否因为断电导致，若是，则确认来电时间或启动场所备用电源（若有）。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "87",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "也不得饮酒 喝酒过于口语化",
+   "selected_text": "，也不可喝酒。",
+   "context": "y 脱下或松开可能会限制血液循环到冻结区域的衣物。使用温度为42 ℃ 部分快速升温。 y 在任何情况下均不得使用温度高于44℃的热水，也不得在恢复温度之 部分。 y 病人不得吸烟，也不可喝酒。 应急处理――泄漏处理 当在操作使用过程中发生泄漏，应进行如下处理： 尽可能切断泄漏源，不要直接接触泄漏物。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺上角标，以及商标正确性，例如华为公司名称，应该可以搞成中文",
+   "selected_text": "本说明书中的所有图片均为示意图，图片内容可能与实物有细微差异，请以购买的仪器为准。 HP 是HP Inc. 在美国和/ 或其他国家（地区）的商标。Lenovo 是Lenovo 在美国和/ 或 其他国家（地区）的商标。英特尔、志强是Intel 公司或其子公司在美国和/ 或其他国家（地区） 的商标。华为是Huawei Technologies Co., Ltd 在中国和/ 或其他国家（地区）的商标。 戴尔是戴尔公司或其子公司的商标。文中涉及的其它名称及商标属于各自所有者资产。 ©基点生物科技（上海）有限公司版权所有。",
+   "context": "基点对本说明书不做任何种类的保证，包括（但不限于）用于特定目的的商业性和合理性的 隐含保证。基点已经采取措施，确保本说明书的准确性。但是，基点对遗漏不承担责任，并 保留任何对本说明书和仪器进行改进以提高其可靠性、功能或设计的权利。 本说明书中的所有图片均为示意图，图片内容可能与实物有细微差异，请以购买的仪器为准。 HP 是HP Inc. 在美国和/ 或其他国家（地区）的商标。Lenovo 是Lenovo 在美国和/ 或 其他国家（地区）的商标。英特尔、志强是Intel 公司或其子公司在美国和/ 或其他国家（地区） 的商标。华为是Huawei Technologies Co., Ltd 在中国和/ 或其他国家（地区）的商标。 戴尔是戴尔公司或其子公司的商标。文中涉及的其它名称及商标属于各自所有者资产。 ©2026 基点生物科技（上海）有限公司 版权所有。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "封面用的斜杠",
+   "selected_text": "0 & 1",
+   "context": "用于MGICLab-FZ90 & 150K 超低温自动化样本存储系统。说明书 本V1。 其包含的信息为基点生物科技（上海）有限公司（以下简称基点）的专 书面许可，任何个人或组织不得全部或部分地对本说明书进行重印、 给他人。本说明书的读者为终端用户，说明书作为仪器的一部分，由 使用。严禁未授权的个人使用本说明书。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "换成中文标识",
+   "selected_text": "WARNING",
+   "context": "图 5 贴码位置 WARNING �条形码在低温环境下应不能松脱、开裂。 �如果冻存盒底面非漏空，无法通过扫码验证 �请勿存入未经基点在本存储系统上验证可 �冻存盒条码位置与默认位置不相符时，请与 冻存管 存储系统可支持以下冻存管，设备根据选",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "28",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这个上角标位置不对",
+   "selected_text": "00 ㎡。 使",
+   "context": "侧预留，用于维修维护及散热。 台设备运行散热量5460 BTU/h（1000L 系列）或8000 BTU/h（ 议空调留有充分冗余。 备净重1050 kg（1000L 系列）或1250 kg（1500L 及以上系列） 求：不低于650 kg/ ㎡。 议配备氧浓度传感器，在使用液氮后备系统时会用到。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "出框了，调整字号",
+   "selected_text": "绍及操作",
+   "context": "件介绍及操作",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "47",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "单位前面加空格",
+   "selected_text": "内高温报警值、箱内低温报警值、进仓口箱内温 储区箱内温度可设置范围为-80℃~-50℃；进 -25℃~-15℃。本参数仅对本台设备生效。 长、屏幕熄屏时长等。其中，屏幕熄屏时长若设",
+   "context": "下表所示： 置存储区箱内温度、箱内高温报警值、箱内低温报警值、进仓口箱内温 进仓口高温报警值。存储区箱内温度可设置范围为-80℃~-50℃；进 箱内温度可设置范围为-25℃~-15℃。本参数仅对本台设备生效。 置大门开门报警延时时长、屏幕熄屏时长等。其中，屏幕熄屏时长若设 0，则屏幕不自动熄屏。本参数仅对本台设备生效。 启/ 关闭待机灯光、订单提醒灯光、警告灯光，可设置报警灯光的颜色。 数仅对本台设备生效。 置设备自检时间、系统语言、时区及时间。本参数对集群内所有设备生效。",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "55",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这里加空格，让交叉引用到下一行，不然句号单独了",
+   "selected_text": "考第",
+   "context": "文件导入的方式，选择需要存样的冻存盒， 使用文件导入的方式，将待存管及需要存 会将所选冻存盒取出，在将冻存管放入冻 下： 盒订单创建弹窗，参考第45 页 “图 40” 方式： 参考第45 页 “图 41” 。该页面默认展 的冻存盒，并提供盒码、盒备注、设备号、 索条件为当前登录账户权限存储位上、在",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "57",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上意见",
+   "selected_text": "考第",
+   "context": "文件导入的方式，选择需要取出的冻存管。 将冻存管取出后，再将冻存盒存回设备内。 盒订单创建弹窗，参考第45 页 “图 40” 参考第45 页 “图 41” 。该页面默认展 的冻存管，并提供盒码、管码、备注、设备 认搜索条件为当前登录账户权限存储位上、",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "65",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重新插入下",
+   "selected_text": "作人、 考第",
+   "context": "图 44” 。 冻存盒添加至取盒订单中。 可选择订单操作的协作人、 ，切换内容显示，参考第 启取盒流程；若需要保存 订单。 执行订单】，查找本订单。",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00 MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312 peered by Tina.pdf ·",
+   "page": "80",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加一个交叉引用",
+   "selected_text": "达。 录。",
+   "context": "专业人员的远程指导下，拔掉箱体后背液氮接口的硅胶塞，将液氮 开液氮罐阀门，并在专业人员远程指导下，完成阀门大小的控制。 待来电或专业人员到达。 氮的安全使用，请见附录。",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  }
+ ]
+}

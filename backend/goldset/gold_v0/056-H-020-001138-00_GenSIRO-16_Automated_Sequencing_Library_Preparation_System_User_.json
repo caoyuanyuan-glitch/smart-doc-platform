@@ -1,0 +1,53 @@
+{
+ "document": "H-020-001138-00 GenSIRO-16 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001138-00 GenSIRO-16 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 Tina.pdf ·",
+   "page": "37",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "The bag size should be",
+   "selected_text": "with Size 150",
+   "context": "Below -70 ℃ (Below -94 ℉) laboratory r The bag should be printed with biological risk symbol. Size no less than 245 mm (W) × 150 mm (H) × 105 mm (D) (9.6 inches × 5.9 inches × 4.1 inches, extraction chamber)/ 275 mm (W) × 305 mm (H) × 145 mm (D) (10.8 inches ×12.0 inches × 5.7 inches, library",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001138-00 GenSIRO-16 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 Tina.pdf ·",
+   "page": "37",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺句号",
+   "selected_text": "-",
+   "context": "ches, extraction chamber)/ 5 mm (W) × 305 mm (H) × 5 mm (D) (10.8 inches ×12.0 ches × 5.7 inches, library eparation chamber)",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001138-00 GenSIRO-16 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 Tina.pdf ·",
+   "page": "54",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺空格",
+   "selected_text": "te 5℃ e",
+   "context": "the deivce is initializing, observe whether there is a tem pt. If an alarm occurs, please contact technical support. the device is running, observe whether the difference mperature of the temperature control module and the erature is within ±5℃. If you find that the temperature nce range, stop the device immediately, and contact th rt to troubleshoot the problem. g clean and disinfection",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001138-00 GenSIRO-16 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 Tina.pdf ·",
+   "page": "57",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "搞成超宽表",
+   "selected_text": "Table 6 Troubleshooting Module Problem Possible cause Recommended action Sampling module Communication error. The sampling module cannot communicate with the device. The power supply or UPS is not connected. The communication cable may be in poor contact. 1. Check whether the power supply is connected. 2. Check whether the voltage of the mains supply outlet is within the required range.",
+   "context": "and solve the problem. The following table lists some of the problems and possible solutions. If you need additional assistance, contact the technical support. Table 6 Troubleshooting Module Problem Possible cause Recommended action Sampling module Communication error. The sampling module cannot communicate with the device. The power supply or UPS is not connected. The communication cable may be in poor contact. 1. Check whether the power supply is connected. 2. Check whether the voltage of the mains supply outlet is within the required range.",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

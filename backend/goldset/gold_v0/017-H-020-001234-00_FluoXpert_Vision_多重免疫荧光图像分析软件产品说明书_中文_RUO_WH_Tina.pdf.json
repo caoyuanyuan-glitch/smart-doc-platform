@@ -1,0 +1,173 @@
+{
+ "document": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "9",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "应该为邻近 临近应该是时间上的吧",
+   "selected_text": "临近细",
+   "context": "生成报告 密度分析 共表达细胞类型 分析 临近细胞分析",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "11",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否已经穷举了",
+   "selected_text": "JPEG、PN F 等格式。 】",
+   "context": "关闭、导航图、 等。 】＞【Add new Marker Layer】＞【Add e】/【Add IHC Image】选择需添加的 图像文件，支持TIFF、JPEG、PNG、ZARR、 ，BMP，和 OME-TIFF 等格式。 】＞【Save Selected Layer】可保存下方 层，支持TIFF、JPEG、PNG、ZARR、ZARR. ，和OME-TIFF 等格式。 】＞【Load Result Layer】＞【Load er】/【Load Density Layer】可加载结果图层。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "19",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "IHC 图像",
+   "selected_text": "HC 图像请 点击【",
+   "context": "�【Postprocess Threshold】建议设置为【0.2】 域越大。 �Brightfield Model 分割 HC 图像请使用Brightfield 模型进行细胞分割。 a. 点击【Segmentation Model】下拉框选择【B b. 点击【Segmentation Type】下拉框，选择【 c. 点击【Select Nuclei layer】下拉框，选择细胞 d. 点击【Select the other(cell) layer】下拉框， e. 设置【】和【",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "20",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "文件命名为： {ROI 名称}xxxx",
+   "selected_text": "，生成单细胞数据表格（ 格式文件） ，命名为ROI 名称quantification.csv。 阳性细胞分析页签",
+   "context": "pply threshold】，生成单细胞数据表格（CSV 格式文件），CSV 表格文件位于 取的目录的根目录下，命名为ROI 名称quantification.csv。 阳性细胞分析页签",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "邻近",
+   "selected_text": "最临近分 操作步骤如",
+   "context": "可选）进行空间分析 空间分析模块分为【最临近分析模块(Nearest Ne (Density Map Analysis)】。 最临近分析模块 操作步骤如下： 1. 选择一个基准marker（marker 阳性或共表 PanCK，则基准marker 为CD3。 2. 选择最邻近的距离，并提供两种分析方式： �【Nearest】：分析最邻近的一个相应细胞及",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "与软件确认是否可以改为邻近",
+   "selected_text": "最临近 】",
+   "context": "空间分析 空间分析模块分为【最临近分析模块(Nearest Neighbor Analysis Density Map Analysis)】。 最临近分析模块 操作步骤如下： 选择一个基准marker（marker 阳性或共表达细胞），例如",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "邻近",
+   "selected_text": "临近分",
+   "context": "图 17 最临近分析模块可视化结果",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "37",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是不是p",
+   "selected_text": "ifl",
+   "context": "3. 点击【Start Tissue Array Grid】生成分割网格，支持 4. 点击【Confirm Grid】完成分割，结果自动列在下方列 5. 点击【Save TMA Grid】，将框选信息另存为CSV 文件 6. 打开【Multiflex FL】，执行以下操作： 1) 点击【Load ROI Coordinates】，导入上一步生成的 2) 点击【Exit ROI Drawing】退出勾画模式。 3) 随后可根据第14 页“进行阳性细胞分析”、第17 页 第19 页“（可选）进行空间分析”章节指引，进行后",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "两行调换个顺序",
+   "selected_text": "编制 年 月 日 修订 2026 年8 月14 日 2.0",
+   "context": "版本记录 日期 版本 编制 2026 年5 月29 日 1.0 修订 2026 年8 月14 日 2.0",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "19",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "不一致",
+   "selected_text": "设置【Cellprob �【Cellpro Thre 假阳性越高。",
+   "context": "e. 设置【Cellprob Threshold】和【Postprocess Thresho �【Cellpro Threshold】建议设置为【0.1】。通常来说，数值越 假阳性越高。 �【Postprocess Threshold】建议设置为【0.2】。通常来说 域越大。 �Brightfield Model 分割 HC 图像请使用Brightfield 模型进行细胞分割。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同英文意见，这里不一致",
+   "selected_text": "准marker（marke 准marker 为CD3。 距离，并提供两种分",
+   "context": "最临近分析模块 操作步骤如下： 1. 选择一个基准marker（marker 阳性或共表达细胞），例如分析CD PanCK，则基准marker 为CD3。 2. 选择最邻近的距离，并提供两种分析方式： �【Nearest】：分析最邻近的一个相应细胞及其距离 �【100/200/300 pixels】：分析固定距离内的所有的相应细胞 3. 选择目标marker（marker 阳性或共表达细胞），例如分析CD3 的最邻近 基准 为，可一次性勾选多个目标。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否不是中文逗号",
+   "selected_text": "K, 则",
+   "context": "19 胞 D3 的最邻近的PanCK, 则",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "有没有&",
+   "selected_text": "sE ge",
+   "context": "Window】＞【TransEval】启用图像变换和测量功能栏。【Tra nsform】和【ImageEvaluate】两个页签。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001234-00 FluoXpert Vision 多重免疫荧光图像分析软件产品说明书_中文_RUO_WH Tina.pdf ·",
+   "page": "38",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "统一下小写吧",
+   "selected_text": "(csv)",
+   "context": "通道直方图的横坐标，纵坐标分别代表什么？ 强度；纵坐标：像素点数量。 生成的单细胞数据表格(csv) 包含哪些内容？ 含：每个细胞的不同marker 的平均信号强度 (mean intensity)，最 sity)，最大强度(max intensity)，阳性率(postive rate)，位置坐标 积大小（Area，单位为像素）以及细胞形态参数等信息。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}

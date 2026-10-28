@@ -1,0 +1,65 @@
+{
+ "document": "H-020-001195-00 USCISEQ-G99RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001195-00 USCISEQ-G99RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf ·",
+   "page": "58",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "icon width样式 这里图标左右空隙有点小了",
+   "selected_text": "步骤如下 击 > 电源按钮",
+   "context": "（可选）关机 y 需关机超过7 天时，确保关机前已完成自动清 y 长时间不使用仪器时，请关闭仪器电源，并拔 操作步骤如下： 1. 点击 >【关机】，在弹出的对话框中选择【关机】 2. 将电源按钮拨至 位置。 3. 将电源线从插座或UPS 上拔出。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001195-00 USCISEQ-G99RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf ·",
+   "page": "61",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "实用工具",
+   "selected_text": "骤3。 【工具】",
+   "context": "图 40ﾠ错误信息 现报警信息，执行步骤3。 点击 > 【维护】 > 【工具】，然后点击【升降屏】，点击【上升】，取",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001195-00 USCISEQ-G99RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf ·",
+   "page": "67",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否样式问题，表没有居中",
+   "selected_text": "按照如下体积配制0.1 M NaOH，用于深度清洗。 表 7 准备清洗试剂：0.1 M NaOH 试剂 用量 终浓度 2 M NaOH 50 mL 0.1 M 实验室级用水 950 mL N/A 总体积 1000 mL",
+   "context": "操作步骤如下： 1. 准备清洗试剂。 按照如下体积配制0.1 M NaOH，用于深度清洗。 表 7 准备清洗试剂：0.1 M NaOH 试剂 用量 终浓度 2 M NaOH 50 mL 0.1 M 实验室级用水 950 mL N/A 总体积 1000 mL 保存条件 4 ℃ 保存1 个月 2. 准备清洗试剂槽。 深度清洗使用的配套清洗试剂盒可按需订购。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001195-00 USCISEQ-G99RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf ·",
+   "page": "74",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": ", 应该是逗号加空格",
+   "selected_text": "t.c uto",
+   "context": "求 第6 部分：实验室用材料加 2125.14-2023） ment for measurement.control ar requirements forautomatic pment for analysisand other 要求",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001195-00 USCISEQ-G99RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf ·",
+   "page": "80",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "与结构组成章节不一致，漏列主体架构、操作系统主机、XYZ-平台、试剂仓 4 个部件。",
+   "selected_text": "部件名称",
+   "context": "产品中有害物质的名 部件名称 有害物质 铅 （Pb） 汞 （Hg） 镉 （Cd） 六价铬 （Cr(VI)） 多溴 联苯 （PB 气液系统 × ○ ○ ○ 载片平台 × ○ ○ ○ 光学系统 ×",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}

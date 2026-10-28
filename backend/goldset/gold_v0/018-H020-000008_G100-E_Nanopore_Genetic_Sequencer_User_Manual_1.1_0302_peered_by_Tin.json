@@ -1,0 +1,173 @@
+{
+ "document": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "36",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "反了",
+   "selected_text": "o \"N",
+   "context": "1920 × 1080 pixels support that the workstation meets the tion sleep mode to \"Never\" to prevent",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "1",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "文件名中的H020, H后面欠缺-",
+   "selected_text": "-",
+   "context": "-",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "18",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "虚线不够明显，建议调整下描边粗细",
+   "selected_text": "-",
+   "context": "2",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "19",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这是铭牌位置么？",
+   "selected_text": "-",
+   "context": "4 5 Figure 2 Back view",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "19",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "四个都改为垂直竖线，底部",
+   "selected_text": "-",
+   "context": "2 3 4 5 Figure 2 Back view Item Description Ventilation hole Provides heat dissipation for the sequencer.",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "device",
+   "selected_text": "G100-E Nanopore",
+   "context": "dinates with the G100-E Nanopore g, detect chip signals, and convert of the control software, contact the",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "the initialization progress",
+   "selected_text": "s Initializing a",
+   "context": "Figure 7 Chip interface Description lization in ress Displays Initializing and real-time sequencing temperature. ization pleted Displays the chip ID, Available pores, Temperature, and the action buttons: QC and Start. y Available pores: Indicates the valid pores for sequencing Defaults to 0 before QC.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "Displays the following information: Chip ID Available pores Temperature You can click QC to xxx. Or, you can click Start to xxx. Display后面只写显示的东西，而 QC和start是需要执行的动作。",
+   "selected_text": "Displays the chip ID, Available pores, T the action buttons: QC and Start.",
+   "context": "Item Description Initialization in progress Displays Initializing and real-time sequencing temperature. Initialization completed Displays the chip ID, Available pores, Temperature, and the action buttons: QC and Start. y Available pores: Indicates the valid pores for sequencing. Defaults to 0 before QC. y QC: Click to perform chip QC. y Start: Click to perform sequencing after parameters are completed.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "两列均匀分布下",
+   "selected_text": "een lock, and manage da 2",
+   "context": "nterface ttings to configure software language, switch between dark and light set automatic screen lock, and manage data upload. 2",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "33",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "device 不用多次重复出现产品名称，防止后面有变动又没有改",
+   "selected_text": "e G100-E Nanopore Genetic Sequencer",
+   "context": "urces. that the laboratory is away from direct sunlight and is well ventilated. It is mended that you refer to the standard of a biosafety level (BSL) 2 laboratory. nstall or operate the G100-E Nanopore Genetic Sequencer in a BSL-3 or higher- oratory. The device cannot provide services in such environments. ommended that laboratory cleanliness meet the standard of ISO 14644-1 Class nditions do not meet operational requirements, engage qualified professionals ade or construct a compliant laboratory under the owner’s supervision. For ns regarding laboratory conditions, contact the technical support.",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "43",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "直接放到这里就不用折线了",
+   "selected_text": "oove",
+   "context": "nsure that the thermal pad fully contacts the White scale groove stening the buckle",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "44",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "replacement buffer, 通改",
+   "selected_text": "replace buffer",
+   "context": "�The Start button is disabled during QC. If QC is stopped, it must be restart completed before sequencing. njecting the replace buffer Perform the following steps: 1. Take out the replace buffer, mix it thoroughly, and centrifuge briefly. N Incomplete mixing may cause uneven osmotic pressure, leading to local hypert and affecting the number and quality of available pores.",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "46",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "device 通改。只在扉页出现产品名称和型号，以防后续有变化漏改",
+   "selected_text": "e G100-E Nanopore Genetic Sequencer. system thoroughly and centrifuge it bri",
+   "context": "orm the following steps: ake out the corresponding reagents to prepare the library sequencing ystem in accordance with the Universal Sequencing Reaction Kit User Manual ompatible with the G100-E Nanopore Genetic Sequencer. ix the sequencing system thoroughly and centrifuge it briefly. g the samples orm the following steps:",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H020-000008 G100-E Nanopore Genetic Sequencer User Manual 1.1_0302 peered by Tina.pdf ·",
+   "page": "72",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺-",
+   "selected_text": "H02",
+   "context": "Part No.: H020-000008",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}

@@ -1,0 +1,29 @@
+{
+ "document": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0127 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "39",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "边框显示不全",
+   "selected_text": "-",
+   "context": "For Research Use Only. Not for use in diagnostic procedures. Figure 9 Single stepping interface",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "64",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "https://global-mgitech.com/",
+   "selected_text": "www.mgi-tech.com",
+   "context": "2nd Gaoxin Road, East Lake High-Tech Development Zone, 430075, Wuhan, P.R.China MGI-service@mgi-tech.com www.mgi-tech.com E-mail: Website:",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  }
+ ]
+}

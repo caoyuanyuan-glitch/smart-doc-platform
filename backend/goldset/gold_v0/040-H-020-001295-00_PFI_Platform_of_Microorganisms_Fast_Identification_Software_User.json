@@ -1,0 +1,101 @@
+{
+ "document": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "内容重复",
+   "selected_text": ".S. and/or other countries. Ubuntu is a registered tr Ubuntu is a registered trademark of Canonical Ltd. ademark of its corresponding registered owners. Int",
+   "context": "DNBSEQTM, MGISEQTM, and MGI ZLIMS are trademarks of MGI Tech Co., Ltd. or its subsidiaries in China and/or other countries. Linux® is a trademark of Linus Torvalds in the U.S. and/or other countries. Ubuntu is a registered trademark of Canonical Ltd. Ubuntu is a registered trademark of Canonical Ltd. LibreOffice is a registered trademark of its corresponding registered owners. Intel® and Xeon® are trademarks of Intel Corporation or its subsidiaries in the U.S. and/or other countries. AMD® and EPYCTM are trademarks of Advanced Micro Devices, Inc. or its subsidiaries in the U.S. and/or other countries. ChromeTM is a trademark of Google LLC. Other names and trademarks mentioned in this manual may be the property of their respective companies and subsidiaries.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "13",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重复内容",
+   "selected_text": "Displays the storage information of the projects. Displays the storage information of the projects. Select Cumulative in the upper-right corner of the",
+   "context": "em Description ft navigation bar Displays submodules of the Project module, such as Project Management and Project Info . roject orage Own stribution(TB) Displays the storage information of the projects. Displays the storage information of the projects. Select Cumulative in the upper-right corner of the area to view the cumulative storage distribution of the projects. Select RealTime to view the real-time storage distribution of the projects.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "61",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重复引导语",
+   "selected_text": "perform the following steps:",
+   "context": "analyzing a sample after an analysis failure If you need to reanalyze the samples for which the first analysis fails or has been canceled, perform the following steps: For Research Use Only. Not for use in diagnostic procedures.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "85",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是不是GB",
+   "selected_text": "G o",
+   "context": "eld or information in rmation in the Read1 Files e is greater than 4.2 G or d to change parameters by sis on the top navigation bar n the left navigation bar. The",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "88",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否应该是：Read QC",
+   "selected_text": "data filtering, ene annotatio",
+   "context": "s Fast Identification (PFI) software is an based on the Linux operating system, sis modules such as data filtering, n, drug resistance gene annotation, and genome de novo assembly. ng (MPS) is a high-throughput sequencing ng of short reads. g (SMS) is a single molecular sequencing",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "88",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "确认下公式",
+   "selected_text": "10log10 P",
+   "context": "level equencing quality (Q) alue Phred Quality Score is used to measure the quality o read according to the following formula: Q = −10log10 P where P represents the probability of the base being incorrectly. If the probability is 0.001, Q should be 30, and in th quality system, the quality ASCII code is 30+33 = 63 corresponding to 63 is “?”, the quality value corresp",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "检查与Analysis module description章节中模块名称不一致",
+   "selected_text": "the Linux ope host source, and virulence",
+   "context": "rocessing workflow The PFI software is an automatic data processing the Linux operating system. It includes analysis m host source, microorganism identification, drug and virulence factor annotation. The processing workflow is shown below:",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001295-00 PFI Platform of Microorganisms Fast Identification Software User Manual_English_RUO_SZ Tina.pdf ·",
+   "page": "89",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "拼写错误，single",
+   "selected_text": "fragm sing-",
+   "context": "pooled samples. re generated by rolling circle replication using cle as a template. Rolling circle replication can be-sequenced DNA fragments, enhance their oid amplification of sing-base replication errors. g (PE) is a sequencing mode in which both ends sequenced. g (SE) is a sequencing mode in which only one t is sequenced. y Management System Lite (MGI ZLIMS Lite) can",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  }
+ ]
+}

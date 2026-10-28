@@ -1,0 +1,101 @@
+{
+ "document": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "请与机械确认，要同步改为EU REP 记得核对公告板",
+   "selected_text": "-",
+   "context": "Date of manufacture Indicates the manufactured Authorized representative in the European Community Indicates the au European Comm Catalog number Indicates the ma so that the devi CE marking of conformity Indicates that t specified Counc",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "40",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "前面写的slide，确认下应该用那个词",
+   "selected_text": "y resu chip",
+   "context": "subsequent experiments, ensure all heated lids in the reaction n. A closed lid may result in collision during Stereo‑seq Slide otentially resulting in chip breakage. terials plications, take out samples, reagents, and consumable rkflow and prepare the reagents. For details, refer to the",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "14",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "未显示完整",
+   "selected_text": "T10AH250V",
+   "context": "“ON\" (power) supply “OFF\" (power) Indicates mains supp T10AH250V Fuse specification Indicates t to Pipette number / 1 to 36 Lane number of the operation deck Indicates t",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整行高",
+   "selected_text": "-",
+   "context": "7 Reaction module port A Connects to the reaction module A of the device. 8 CAN communication port Connects the motor of reaction module for thermal lid decapper. 9 TILT port Reserved port. 10 Network port of external electrical box Connects to the network.",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整行高",
+   "selected_text": "module port A the device.",
+   "context": "2 Supporting feet Supports the device to ensure stability. 3 Temperature control module port A Connects to the temperature control module A of the device. 4 Temperature control module port B Connects to the temperature control module B of the device. 5 Reaction module port B Connects to the reaction module B of the device. 6 Reaction module port C Connects to the reaction module C of the device.",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "33",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否有多余空格",
+   "selected_text": "G G G G G",
+   "context": "Recommended brand Rem op centrifuge General laboratory supplier / General laboratory supplier cence microscope General laboratory supplier Aut perf and coll into or General laboratory supplier / mixer General laboratory supplier / vice T100 Thermal Cycler, Bio-Rad; ProFle3x32-well PCR System, ABI / tic rack for 1.5-2 mL Thermo Fisher / .0 fluorometer Thermo Fisher /",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "40",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "逗号",
+   "selected_text": "er. p",
+   "context": "zones. Before performing subsequent experiments, ensure all zones are fully open. A closed lid may result in collisio Cassette transfer. potentially resulting in chip breakage. paring the materials According to the applications, take out samples, reag required for one workflow and prepare the reagents.",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0106peered by Tina.pdf ·",
+   "page": "44",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "will 或者搞成被动 if the device will not be used for a long time.",
+   "selected_text": "do",
+   "context": "evice e power cord if you do not use the device for a r and click OK to exit the software. computer.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  }
+ ]
+}

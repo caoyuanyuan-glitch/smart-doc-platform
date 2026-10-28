@@ -1,0 +1,65 @@
+{
+ "document": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R02.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R02.pdf ·",
+   "page": "92",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这不是兽用吧",
+   "selected_text": "oise. e animal",
+   "context": "y Radiated or conducted electromagnetic signals distortion, degradation, or artifacts in the ultrasound suggest that you position device away from sources o RF noise. y If the animal physiological signal falls below the amplitude or value specified in the product spe operating the device may cause inaccurate results. y Portable and mobile RF communications equipmen device. See tables in the section. -",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R02.pdf ·",
+   "page": "104",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这章节确定没有声输出表吗？ 如果是的话建议换个名字，因为内容与标题不符",
+   "selected_text": "output data",
+   "context": "tic output data User manual coustic output data Description",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R02.pdf ·",
+   "page": "104",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "落单了，建议去掉，如果实在没有声输出",
+   "selected_text": "Description",
+   "context": "Acoustic output data Description The acoustic output MI and TI values are displayed at the top of the software interface. The preset values vary for different exam positions, and the MI and TI values will also differ accordingly.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R02.pdf ·",
+   "page": "1",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "封面没有出血位",
+   "selected_text": "-",
+   "context": "Version：2.0",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001192-00 ExploreFree CE_English_MD_WH_2.0_R02.pdf ·",
+   "page": "101",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "5的前面有的有空格，有的没有，统一下",
+   "selected_text": "≤5 ≤5 ≤ 5 ≤ 5 able 18 Convex array probe 3.2C12860A-139 3.5 MHz nominal, ±15% tolerance 3.5 MHz 5.0 MHz ≥ 160 ≥ 100 ≤ 5 ≤5 ≤ 5 ≤ 5",
+   "context": "g frequency 7.5 MHz nominal, ±15% tolerance uency 7.5 MHz 10.0 MHz penetration (mm) ≥ 50 ≥ 30 display error (%) ≤5 ≤5 play error (%) ≤ 5 ≤ 5 Table 18 Convex array probe pe 3.2C12860A-139 g frequency 3.5 MHz nominal, ±15% tolerance uency 3.5 MHz 5.0 MHz penetration (mm) ≥ 160 ≥ 100 display error (%) ≤ 5 ≤5 play error (%) ≤ 5 ≤ 5",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  }
+ ]
+}

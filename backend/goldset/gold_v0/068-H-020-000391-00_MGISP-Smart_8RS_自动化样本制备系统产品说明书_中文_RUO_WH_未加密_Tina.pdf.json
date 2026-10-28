@@ -1,0 +1,29 @@
+{
+ "document": "H-020-000391-00 MGISP-Smart 8RS 自动化样本制备系统产品说明书_中文_RUO_WH_未加密 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000391-00 MGISP-Smart 8RS 自动化样本制备系统产品说明书_中文_RUO_WH_未加密 Tina.pdf ·",
+   "page": "45",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "图片丢失，重新链接图片",
+   "selected_text": "2. 用两个大拇指按压PCR 模块上盖板卡扣下方，打开上盖板。 图 10 PCR模块上盖板卡扣位置 3. 将PCR 模块硅胶垫撕下，放至指定的、带有生物风险标志的专用垃圾桶。 图 11 取下PCR模块上盖板硅胶垫",
+   "context": "2. 用两个大拇指按压PCR 模块上盖板卡扣下方，打开上盖板。 图 10 PCR模块上盖板卡扣位置 3. 将PCR 模块硅胶垫撕下，放至指定的、带有生物风险标志的专用垃圾桶。 图 11 取下PCR模块上盖板硅胶垫",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  },
+  {
+   "file": "H-020-000391-00 MGISP-Smart 8RS 自动化样本制备系统产品说明书_中文_RUO_WH_未加密 Tina.pdf ·",
+   "page": "46",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上",
+   "selected_text": "4. 安装新的硅胶垫，确保表面平整无气泡。 图 12 安装新的硅胶垫 5. 盖上PCR 上盖板，并向里按压上盖板封条，待上盖板完全放下时用卡扣将上盖板卡紧。 图 13 关闭PCR上盖板 年保养",
+   "context": "年保养 说明书 4. 安装新的硅胶垫，确保表面平整无气泡。 图 12 安装新的硅胶垫 5. 盖上PCR 上盖板，并向里按压上盖板封条，待上盖板完全放下时用卡扣将上盖板卡紧。 图 13 关闭PCR上盖板 年保养 每年一次，联系技术支持更换紫外灯灯管及高效空气过滤模块( 选配) 的过滤网片，检查和 保养移液器。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}

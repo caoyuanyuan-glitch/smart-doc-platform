@@ -1,0 +1,41 @@
+{
+ "document": "H-020-001239-00 ExploreFree 系列 掌上无线彩色多普勒超声诊断仪产品说明书_中文_MD_WH (2) Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001239-00 ExploreFree 系列 掌上无线彩色多普勒超声诊断仪产品说明书_中文_MD_WH (2) Tina.pdf ·",
+   "page": "1",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "跟资质确认下是否可以改成三个地址",
+   "selected_text": "中国武汉市东湖新技术开发区高新二路388号 武汉光谷国际生物医药企业加速器3.1期24栋",
+   "context": "4000-688-114 MGI-service@mgi-tech.com 中国武汉市东湖新技术开发区高新二路388号 武汉光谷国际生物医药企业加速器3.1期24栋 www.mgi-tech.com",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001239-00 ExploreFree 系列 掌上无线彩色多普勒超声诊断仪产品说明书_中文_MD_WH (2) Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "版权年份2026",
+   "selected_text": "是 25 武",
+   "context": "异，请以购买的产品为准。 本说明书仅用于操作和维护设备。华大智造有权不 Wi-Fi 是国际Wi-Fi 联盟组织的商标。 ©2025 武汉华大智造科技有限公司 版权所有。 ●虽然使用超声系统进行检查期间所用的超声波频率、强 控制在可接受的安全风险范围内，但是我们仍然建议使 置，以降低安全风险。 华大智造对设备的不恰当使用不负责任。在满足下列全",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001239-00 ExploreFree 系列 掌上无线彩色多普勒超声诊断仪产品说明书_中文_MD_WH (2) Tina.pdf ·",
+   "page": "97",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "主页没有应用正确",
+   "selected_text": "-",
+   "context": "- - - 此页有意留白- - - 探头型号：7.5L12838A-139 工作模式：C 模式 探头编号：077392506018 探头额定频率：4.5 MHz 指数名称 TIS TIB",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  }
+ ]
+}

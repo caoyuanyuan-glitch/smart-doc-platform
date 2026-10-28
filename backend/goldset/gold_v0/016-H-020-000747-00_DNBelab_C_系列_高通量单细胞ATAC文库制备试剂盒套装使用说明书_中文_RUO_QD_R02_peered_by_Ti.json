@@ -1,0 +1,173 @@
+{
+ "document": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "口语化了 改为：重点清洁",
+   "selected_text": "，特别是金",
+   "context": "拭手套，然后用RNase-Zap 擦拭移液器、实验台 灯并进行下列操作： 和仪器进行全面擦拭，特别是金属、塑料制品表面。 照明灯。 min。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是不是多了",
+   "selected_text": "条件下反应",
+   "context": "温度 时间 105 ℃ （热盖） On 95 ℃ 3 min 4. 95 ℃条件下反应结束后，立即将PCR 管转移到冰上，静置 体系。 y 95 ℃反应结束后，应立即将PCR 管置于冰上，否则 y 单链环化反应体系可在静置的 5 min 内配制好。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "10",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "搞成乘号，直接复制上面表格",
+   "selected_text": "数量 盒* 袋*1",
+   "context": "红色 管 系列 高通量单细胞ATAC 载片模块（16 RXN） 分信息 规格及数量 备注 ATAC 载片 16 个/ 盒*1 搭配单细胞液滴生成仪使用 （货号：900-000637-00） 封垫 5 件/ 袋*1",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整列宽",
+   "selected_text": "细胞 个 提核",
+   "context": "人或哺乳动物的组织 细胞样本 推荐直径小于40 μm y 细胞核转座投入总量推荐：50000 ~ 100000 个 y 细胞核转座后上载片投入总量推荐：5000 ~ 200 个 y 提核前 �细胞活性大于80% �结团率小于5% �杂质率小于5% 提核后",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "冒号",
+   "selected_text": "前 胞活 团率 质率 后 胞活",
+   "context": "y 细胞核转座投入总量推荐：50000 ~ 100000 个 y 细胞核转座后上载片投入总量推荐：5000 ~ 20000 个 y 提核前 �细胞活性大于80% �结团率小于5% �杂质率小于5% y 提核后 �细胞活性小于5% �结团率小于5% �杂质率小于5% y 细胞活性小于5% 结团率小于",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "20",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "另外那个文件的这个图，也搞成蓝色字",
+   "selected_text": "网口 标签 USB",
+   "context": "开关 电源线接口 网口 标签 USB 图 2 单细胞液滴生成仪前视图（左）、后视图（右） 电源开关拨至，在触摸屏上点击【打开】。载片仓仓门自动弹开，取出载",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "字小了点",
+   "selected_text": "密封垫",
+   "context": "图 3 放置载片 根据装载载片数量自行裁剪所需密封垫的数量）。 密封垫",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "往下来一点，横线前面的距离加大",
+   "selected_text": "本相悬 加液",
+   "context": "样本相悬浮液 图 6 载片加液 门关闭。 选择载片对应的通道。 】、【B】、【C】、【D】与载片载板中的“A”、“B”、“C”、“D”",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重新截屏吧，这个图丑爆了",
+   "selected_text": "应开始。",
+   "context": "屏幕中的通道【A】、【B】、【C】、【D】与载片载板中的“A”、“B”、“C”、“D” 一一对应。 9. 点击【开始】，反应开始。 图 7 反应开始",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重新截图",
+   "selected_text": "图反应完成",
+   "context": "应完成后，点击【确认】。 图 8 反应完成 击【打开】，载片仓仓门弹出，取出载片载板。先将密封垫取出，再打开安全锁扣，取 载片，进行液滴回收。 液滴生成完成后，应立即进行液滴回收操作，以免因长时间放置在空气中，收集孔中的 液滴被蒸干，或者液滴挂在收集孔壁上造成样品损失。",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "单位前面加空格",
+   "selected_text": "在 2℃ ~ 8℃",
+   "context": "17 5 min 1 Hold / 结束后，可将回收的液滴在 2℃ ~ 8℃ 下放置 72 h。",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "27",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "乘号",
+   "selected_text": "管 * * * * * * * *",
+   "context": "本色 5.933 mL/ 瓶×1 蓝色 800 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1 红色 16 μL/ 管*1",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "28",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺句号",
+   "selected_text": "切记不 珠",
+   "context": "管瞬时离心并置于磁力架上，静置 2 ~ 5 min，至液体澄清。用移液器 到新的 1.5 mL 低吸附离心管中。 y 此步保留上清，切记不要丢弃上清。 y 注意不要吸到磁珠 μL DNA Clean Beads 加到上一步离心管的上清中，并用移液器轻 最后一次应确保将吸头中所有液体及磁珠都打入离心管中。 管置于室温孵育 5 min。 管瞬时离心并置于磁力架上，静置 2 ~ 5 min，至液体澄清，弃掉上",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000747-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "33",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缩短行高",
+   "selected_text": "SEQ-2000RS 高通量测序试剂 SEQ-2000RS 高通量测序试剂",
+   "context": "表准备清单 种类 型号 货号 测序仪 MGISEQ-2000RS / 测序试剂套装 MGISEQ-2000RS 高通量测序试剂套装（FCL PE100） 1000012554 MGISEQ-2000RS 高通量测序试剂套装（FCL PE150） 1000012555 9.1.2 DNB 制备 按下表制备：",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

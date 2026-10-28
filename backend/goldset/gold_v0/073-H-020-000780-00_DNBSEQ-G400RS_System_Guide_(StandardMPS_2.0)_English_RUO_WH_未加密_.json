@@ -1,0 +1,29 @@
+{
+ "document": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_未加密 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_未加密 Tina.pdf ·",
+   "page": "224",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "地址改为最新，封底也改",
+   "selected_text": "1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China",
+   "context": "cturer Wuhan MGI Tech Co., Ltd. s 1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China al support Wuhan MGI Tech Co., Ltd. al support E-mail MGI-service@mgi-tech.com",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  },
+  {
+   "file": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_未加密 Tina.pdf ·",
+   "page": "224",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "地址改为最新，封底也改",
+   "selected_text": "1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China",
+   "context": "cturer Wuhan MGI Tech Co., Ltd. s 1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China al support Wuhan MGI Tech Co., Ltd. al support E-mail MGI-service@mgi-tech.com",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  }
+ ]
+}

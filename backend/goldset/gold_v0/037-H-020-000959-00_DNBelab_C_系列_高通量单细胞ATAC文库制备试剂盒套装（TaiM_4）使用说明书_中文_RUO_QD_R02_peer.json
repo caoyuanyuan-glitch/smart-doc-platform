@@ -1,0 +1,101 @@
+{
+ "document": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "19",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "右边建议再加一个箭头",
+   "selected_text": "密",
+   "context": "载片收集孔上（根据装载载片数量自行裁剪所需密封垫的数量）。 密封垫",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "28",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "载， 通改",
+   "selected_text": "细胞 同芯片",
+   "context": "的（ 链固定序列 暗反 y Read 2=69 bp（2 链固定序列19 bp 暗反应） y Sample Barcode=10 bp y MGI 的单细胞scATAC 文库不能和MGI 的APP 系列转 文库进行同芯片或者同Lane pooling 测序，否则会导 失败。 ISEQ-2000RS 测序平台实验要求",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "虽然可以重新自动定向，但还是改下跟信息卡保持一致吧： https://www.mgi-tech.com/manual",
+   "selected_text": "版本的试剂盒使用。 : www.mgi-tech.com/download/files",
+   "context": "月 2.0 月13 日 1.0 最新版说明书，对照相应版本的试剂盒使用。 号或产品名，下载说明书: www.mgi-tech.com/download/files",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "13",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加冒号，下同",
+   "selected_text": "前 胞活",
+   "context": "y 提核前 �细胞活性大于80% �结团率小于5% �杂质率小于5% y 提核后 细胞活性小于",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "18",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这里距离太近了",
+   "selected_text": "标 U 网",
+   "context": "电源线 开关 标签 USB 网口 图 1 单细胞液滴生成仪前视图（左）、后视图（右） 源开关拨至，在触摸屏上点击【开门】，载片仓仓门自动弹开。 的卡扣。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "18",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "箭头建议加粗一点",
+   "selected_text": "-",
+   "context": "拨至，在触摸屏上点击【开门】，载片仓仓门自动弹开。 。 图 2 拨开卡扣",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "检查所有交叉引用，出处应该是特殊字体",
+   "selected_text": "（1�16）的",
+   "context": "并置于室温平衡至少，并在使用前进行涡旋混匀。 “关于Barcode Primer（1�16）的使用”。 物”的浓度，取3 ng（若不足3 ng，则全部投入）于 Water 补充体积至46 μL，将PCR 管置于冰盒上。 mer。 号。",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  },
+  {
+   "file": "H-020-000959-00 DNBelab C 系列 高通量单细胞ATAC文库制备试剂盒套装（TaiM 4）使用说明书_中文_RUO_QD_R02 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "商标，加到到扉页商标声明",
+   "selected_text": "53及以上版本 7_Ubuntu 及",
+   "context": "表 22 DNBSEQ-T7RS 测序软件版本及读长 ECR3.0 及以上版本 1.3.3.553及以上版本 1.4.2.47_Ubuntu 及以上版本 自定义 s No 115 cycles （1~6 bp，17~22 bp，33~65 bp 设置暗反应） 69 cycles （1~19 bp 设置暗反应）",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

@@ -1,0 +1,53 @@
+{
+ "document": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH 6.1 增加FCN FCS型号_张倩20260326.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH 6.1 增加FCN FCS型号_张倩20260326.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "2026",
+   "selected_text": "及商标属于 -2025 武",
+   "context": "Intel 和 Intel Core 是英特尔公司或其子公司在美国和 USB Type-C TM 是USB Implementers Forum 的商标。 公司或其子公司的商标。Qubit TM 是赛默飞世尔科技公司 它名称及商标属于各自所有者资产。 ©2024-2025 武汉华大智造科技有限公司 版权所有。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH 6.1 增加FCN FCS型号_张倩20260326.pdf ·",
+   "page": "59",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同下",
+   "selected_text": "G99 App-D FCS SE100 2.0 8.0 0.5",
+   "context": "G99 App-D FCL PE150 3.0 14.0 0.5 G99 App-D FCL PE300 4.5 21.0 0.5 G99 App-D FCS SE100 2.0 8.0 0.5 G99 App-D FCS PE150 3.0 14.0 0.5 G99 FCL SE400 4.0 16.0 0.5 G99 App-D FCU SE100 2.0 8.0 0.5",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH 6.1 增加FCN FCS型号_张倩20260326.pdf ·",
+   "page": "59",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这个线太粗了，你重新应用表格body样式",
+   "selected_text": "G99 App-D FCU PE300 4.5 21.0 0.5 G99 App-D FCN SE100 2.0 8.0 0.5",
+   "context": "G99 App-D FCU SE100 2.0 8.0 0.5 G99 App-D FCU PE150 3.0 14.0 0.5 G99 App-D FCU PE300 4.5 21.0 0.5 G99 App-D FCN SE100 2.0 8.0 0.5 G99 App-D FCN PE150 3.0 14.0 0.5 G99 App-D FCN PE300 4.5 21.0 0.5 准备载片",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH 6.1 增加FCN FCS型号_张倩20260326.pdf ·",
+   "page": "60",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "有内容更新的表格都查下有没有类似粗线",
+   "selected_text": "G99 App-D FCL PE300 400~600 G99 App-D FCS SE100 200~400 G99 App-D FCS PE150 300~500 G99 App-D FCU SE100 200~400 G99 App-D FCU PE150 300~500 G99 App-D FCU PE300 400~600 G99 App-D FCN SE100 200~400 G99 App-D FCN PE150 300~500",
+   "context": "51 G99 FCL SE400 400~600 G99 App-D FCL SE100 200~400 G99 App-D FCL PE150 300~500 G99 App-D FCL PE300 400~600 G99 App-D FCS SE100 200~400 G99 App-D FCS PE150 300~500 G99 App-D FCU SE100 200~400 G99 App-D FCU PE150 300~500 G99 App-D FCU PE300 400~600 G99 App-D FCN SE100 200~400 G99 App-D FCN PE150 300~500 G99 App-D FCN PE300 400~600",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

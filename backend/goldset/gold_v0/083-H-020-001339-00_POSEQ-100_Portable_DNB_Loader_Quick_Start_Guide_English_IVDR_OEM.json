@@ -1,0 +1,29 @@
+{
+ "document": "H-020-001339-00 POSEQ-100 Portable DNB Loader Quick Start Guide_English_IVDR_OEM_R02 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001339-00 POSEQ-100 Portable DNB Loader Quick Start Guide_English_IVDR_OEM_R02 Tina.pdf ·",
+   "page": "1",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "后面没有这个逗号",
+   "selected_text": "e, p",
+   "context": "Prepare the DNB loading mixture and mix gently by filtered, wide-bore, pipette tip. Component Volume (μL) DNB Load Buffer II 7.00 Make DNB Enzyme Mix II_LC 1.00 DNB 21.00 Total volume 29.00",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001339-00 POSEQ-100 Portable DNB Loader Quick Start Guide_English_IVDR_OEM_R02 Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "aspiration",
+   "selected_text": "e aspirate",
+   "context": "y Part No.: H-020-001339-00 y Version: 1.0 y Release da ©POMI All rig Guide ② Adjust the aspirate volume to 2 μL and load a new 20 filtered pipette tip. ③ Press and hold the plunger button, and gently insert t into outlet B. ④ Hold the new tip in outlet B with the other hand, gently hand from the plunger button, and remove the tip fro",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  }
+ ]
+}

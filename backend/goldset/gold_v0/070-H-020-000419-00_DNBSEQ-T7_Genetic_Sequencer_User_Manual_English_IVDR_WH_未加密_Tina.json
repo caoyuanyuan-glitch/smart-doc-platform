@@ -1,0 +1,29 @@
+{
+ "document": "H-020-000419-00 DNBSEQ-T7 Genetic Sequencer User Manual_English_IVDR_WH_未加密 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000419-00 DNBSEQ-T7 Genetic Sequencer User Manual_English_IVDR_WH_未加密 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多了竖线",
+   "selected_text": "V 6",
+   "context": "te Version y 9, 2026 6.0 y 15, 2025 5.0 vember 28, 2024 4.0 rch 6, 2024 3.0 tober 20, 2022 2.0",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000419-00 DNBSEQ-T7 Genetic Sequencer User Manual_English_IVDR_WH_未加密 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多了竖线",
+   "selected_text": "6.0",
+   "context": "ate Version May 9, 2026 6.0 May 15, 2025 5.0 ovember 28, 2024 4.0 March 6, 2024 3.0 ctober 20, 2022 2.0",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}

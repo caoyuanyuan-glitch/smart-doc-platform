@@ -1,0 +1,77 @@
+{
+ "document": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "17",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "应该是三个部分",
+   "selected_text": "器主要 件两部 和垃圾",
+   "context": "组成 本仪器主要由仪器主机、外置扫码器和时空自动化 制软件两部分组成。其中仪器主机由工作平台、机 模块和垃圾桶组成。 各模块详细描述如下： 部件 说明 工作平台 包含仪器工作台面、框架",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "35",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "【HeatCoverTempA/B/C】",
+   "selected_text": "控A/B/C，",
+   "context": "2. 依次选择热盖温控A/B/C，点击右侧【关门】，关闭各反应区热盖。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加个边框，0.75 pt, 85%灰",
+   "selected_text": "8 6 7 5 4",
+   "context": "主界面 8 6 7 5 4",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "34",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加边框，同上",
+   "selected_text": "初始化完成后，弹出应用选择窗口，选择目标应用。",
+   "context": "1. 关闭视窗。 2. 点击初始化界面的【仪器初始化】，仪器开始初始化。 3. 初始化完成后，弹出应用选择窗口，选择目标应用。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "35",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上",
+   "selected_text": "手按压热反应 控A/B/C，",
+   "context": "使用无尘布擦拭低温试剂区热反应模块底部的冷凝水（如有）。 4. 双手按压热反应模块两侧的卡扣，打开热盖。 5. 使用75% 酒精润湿的无尘布擦拭各反应区热盖。 6. 清洁完毕后，双手按压热反应模块两侧的卡扣，关闭热盖。 7. 依次选择热盖温控A/B/C，点击右侧【开门】，打开各反应区热盖。 开始后续实验前，须确保反应区热盖均处于打开状态。若热盖未打开，转移载 导致芯片碎裂。 物料",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0127 peered by Tina.pdf ·",
+   "page": "43",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整列宽，让这句一行显示",
+   "selected_text": "打开 误",
+   "context": "如故障仍然存在， 打开软件时，系统提示错 误 1. 检查是否按下仪器电 2. 检查视窗是否已关 3. 检查仪器侧面的网 4. 重启软件和仪器。 5. 如故障仍然存在， 运行时报错 保存错误截图并联系技",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

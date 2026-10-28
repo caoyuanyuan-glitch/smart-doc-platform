@@ -1,0 +1,113 @@
+{
+ "document": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "126",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这个步骤不建议放到清洁操作里面，去掉这个编号，单独起一行，改为: 当出现以下任意一种XXX",
+   "selected_text": "7. （可选）",
+   "context": "7. （可选）出现以下任意一种情况时，请更换新的 000718-00）： � 密封垫清洗20 次后。 �密封垫使用满3 个月。 �移液枪吸头加载样本时松动。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "132",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "步骤，这个需要改下样式，改到这里的时候叫我",
+   "selected_text": "仓门 页 “ 到测",
+   "context": "图 82 选择抬针 图 83 确认抬针 试剂槽：打开试剂仓门，取出试剂槽。将适量MDA聚合酶混 管中，按照 第60 页 “18”混匀。 ：将测序试剂槽加载到测序仪上，关闭试剂仓门。点击 ，并 ？】中的【是】。 34.2°C A C T G 61:42:15 A 61:42:15 状态：已暂停 剩余时间：",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这个图中的这个空隙，看起来大于2mm",
+   "selected_text": "1",
+   "context": "1",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "可以合并单元格，是同一个按钮",
+   "selected_text": "4 4",
+   "context": "关操作。 4 点击可查看功能菜单。该功能菜单可进行以 点击可查看日志。 点击可修改设置。 点击可进行维护。 点击可锁屏。 点击可关机或重启仪器。 4 点击可查看仪器信息。 5 点击登录系统。 6 状态栏 显示仪器主要部件的状态。 信息显示栏",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "32",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "出圈了，建议换行试试",
+   "selected_text": "介绍",
+   "context": "装介绍 息。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "42",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "均匀分布列",
+   "selected_text": "读长 SE50 SE100 PE100 PE150 12.0 20.0 36.0 50.0 13.0 21.0 37.0 51.0 0.2 0.3 0.7 0.9 0.3 0.6 1.2 2.0",
+   "context": "表 11 FCL 各读长理论测序时长（小时） 类型 读长 SE50 SE100 PE100 PE150 单载片 12.0 20.0 36.0 50.0 双载片 13.0 21.0 37.0 51.0 数据处理（单边） 0.2 0.3 0.7 0.9 数据处理（双边） 0.3 0.6 1.2 2.0 y 每张FCL 有四条流道，每条流道有6 亿DNB 结合位点。 y 测序时长（单载片/ 双载片）包括从Post loading 开始到测序完成的时间。数据处理 的时间包括测序完成后测序仪自动进行barcode 拆分（如有选择拆分barcode）和 FASTQ 文件输出的时间。 上表中测序时长为单 测序时长。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "56",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "矫正宽度",
+   "selected_text": "T r u S e q ,",
+   "context": "体系 体系 PCR MGI V=40 fmol/C V=20 fmol/ PCR-free V=75 fmol/C V=37.5 fmo App PCR T r u S e q , Nextera V=60 fmol/C V=30 fmol/ App PCR-free V=75 fmol/C V=37.5 fmo 制备DNB 如果建库试剂盒说明书有特殊要求，则以建库试剂盒说明书的片段要求为准",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "75",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "字体不对",
+   "selected_text": "按下载 ~-80 异常”",
+   "context": "孔对准载片平台上的定位柱并放下，同时向左上角°轻轻推动，保 柱贴合。 ，双手同时向下按压载片两边，使载片吸附在平台上。 弱，轻触定位柱即可。按下载片时如与定位柱过度摩擦，则可能使载片破碎。 常范围内（-99 kPa~-80 kPa）。 考第124 页“负压异常”。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000912-00 MGISEQ-2000RS 系统操作指南 (StandardMPS 2.0)_中文_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "105",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "空隙太大",
+   "selected_text": "r",
+   "context": "图编辑文件 表 31 参数设置说明 说明 】 Cycle= r[Read1读长]e1r[Read2读长]e1b[Dual bar 长]. e1 表示校正循环数。 例如： y PE100+10(101+101+10), Cycle=r100e1r100e1b10 y PE100+10(100+100+10),",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

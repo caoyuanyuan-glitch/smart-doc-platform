@@ -1,0 +1,65 @@
+{
+ "document": "H-020-001037-00 DNBSEQ-G400RS System Quick Start Guide (StandardMPS 2.0)_English_RUO_WH_V3.0 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001037-00 DNBSEQ-G400RS System Quick Start Guide (StandardMPS 2.0)_English_RUO_WH_V3.0 peered by Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "删了，前面已经打了R标识了，不用每次都打",
+   "selected_text": "A/d t® d",
+   "context": "l)  If the library concentration is unknown, it is reco ssDNA/dsDNA library quantitation (ng/μL) by usi Qubit® dsDNA Assay Kit and Qubit Fluorometer. convert the concentration of the ssDNA/dsDNA ssDNA: dsDNA: 2",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001037-00 DNBSEQ-G400RS System Quick Start Guide (StandardMPS 2.0)_English_RUO_WH_V3.0 peered by Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "跟图片中的字母大小写一致",
+   "selected_text": ". A i nd r",
+   "context": "entration eter as an example. A is a test room for placing test en for operation and result display. a b",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001037-00 DNBSEQ-G400RS System Quick Start Guide (StandardMPS 2.0)_English_RUO_WH_V3.0 peered by Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上",
+   "selected_text": "Qub . B",
+   "context": "Calculating DNB concentration Take Qubit 4 Fluorometer as an example. A i tubes. B is a touchscreen for operation and r",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001037-00 DNBSEQ-G400RS System Quick Start Guide (StandardMPS 2.0)_English_RUO_WH_V3.0 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否有多余空格",
+   "selected_text": "ell ID, p d . cal",
+   "context": "e D drive of the computer. d after the flow cell ID, mainly contains pictures ics) generated during the device operation. ed after the flow cell ID, primarily contains Q files, reports, and . cal files. y uct solely for research use only and el name which means that it should not be . Please refer to FDA Guidance, Distribution",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001037-00 DNBSEQ-G400RS System Quick Start Guide (StandardMPS 2.0)_English_RUO_WH_V3.0 peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加空格，通查交叉应用",
+   "selected_text": "u 1 b nz",
+   "context": "s been thawed (including dNTPs) but cannot be used tely, store it at 2 ℃ to 8 ℃ away from light. It is strong ended that you use it within 24 h. Mix the reagents in t by following instructions in Preparing Sequencing Reag e-Part 2 on page 11 before use. and Sequencing Enzyme Mix II have been added into th , i.e. the cartridge has been prepared but cannot be us tely, store it at 2 ℃ to 8 ℃ and use it within 24 h. Mix ents in the cartridge by following instructions in Prepari cing Reagent Cartridge-Part 2 on page 11 before use.",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  }
+ ]
+}

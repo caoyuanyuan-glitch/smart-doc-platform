@@ -1,0 +1,41 @@
+{
+ "document": "H-020-000999-00 DNBelab-D4RS Fast PCR-FREE FS Library Prep Set V2.0 Instructions for Use_English_RUO_QD_V3.0_20260205 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000999-00 DNBelab-D4RS Fast PCR-FREE FS Library Prep Set V2.0 Instructions for Use_English_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "5",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "红背景",
+   "selected_text": "This Library Prep used for clinical di",
+   "context": "y the whole genome capture, typing, and assembly of influenza A y human resequencing analysis WARNING This Library Prep Set is for scientific research use only, used for clinical diagnosis. Compatible sequencing platform The prepared library can be sequenced on the following platfor following sequencing types:",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000999-00 DNBelab-D4RS Fast PCR-FREE FS Library Prep Set V2.0 Instructions for Use_English_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "5",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "页脚缺RUO声明",
+   "selected_text": "-",
+   "context": "-",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000999-00 DNBelab-D4RS Fast PCR-FREE FS Library Prep Set V2.0 Instructions for Use_English_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "6",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "中文写半透明，这里就是透明了",
+   "selected_text": "Transparent",
+   "context": "aration cartridge A elab-D4RS Sealing B 1 tube/bag×4 el Transparent 1 pcs/bag×4 Separation Tube s / 4 pcs/bag×1",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

@@ -1,0 +1,29 @@
+{
+ "document": "H-020-000014-00 MGISEQ-2000RS 基因测序仪产品说明书_中文_RUO_WH_未加密 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000014-00 MGISEQ-2000RS 基因测序仪产品说明书_中文_RUO_WH_未加密 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重新应用表格样式",
+   "selected_text": "版本 版本 8.0",
+   "context": "版本 版本 5 月9 日 8.0 10 月21 日 7.0 7 月29 日 6.0 1 月15 日 5.0 6 月1 日 4.0",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000014-00 MGISEQ-2000RS 基因测序仪产品说明书_中文_RUO_WH_未加密 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重新应用表格样式",
+   "selected_text": "版本 版本 8.0",
+   "context": "版本 版本 5 月9 日 8.0 10 月21 日 7.0 7 月29 日 6.0 1 月15 日 5.0 6 月1 日 4.0",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

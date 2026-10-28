@@ -1,0 +1,17 @@
+{
+ "document": "H-020-001011-00 MGISP-NEXRS Automated Nucleic Acid Extractor User Manual_Russian_RUO_WH Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001011-00 MGISP-NEXRS Automated Nucleic Acid Extractor User Manual_Russian_RUO_WH Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "跟下面保持一样队形，г.",
+   "selected_text": "6 года",
+   "context": "Дата Версия 18 мая 2026 года 2.0 ыпуск 22 июля 2024 г. 1.0",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}

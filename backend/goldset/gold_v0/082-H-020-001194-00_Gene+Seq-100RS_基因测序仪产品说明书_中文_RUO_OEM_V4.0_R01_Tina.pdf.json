@@ -1,0 +1,29 @@
+{
+ "document": "H-020-001194-00 Gene+Seq-100RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001194-00 Gene+Seq-100RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf ·",
+   "page": "61",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "实用工具",
+   "selected_text": "骤3。 【工具】，",
+   "context": "图 40ﾠ错误信息 出现报警信息，执行步骤3。 点击 > 【维护】 > 【工具】，然后点击【升降屏】，点击【上升】，取",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001194-00 Gene+Seq-100RS 基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01 Tina.pdf ·",
+   "page": "74",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "逗号加空格",
+   "selected_text": "nt.co utom",
+   "context": "要求 第6 部分：实验室用材料加 2125.14-2023） ment for measurement.control lar requirements forautomatic pment for analysisand other 要求",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  }
+ ]
+}
