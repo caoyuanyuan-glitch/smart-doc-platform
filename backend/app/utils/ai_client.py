@@ -75,58 +75,58 @@ def clip_audit_basis(audit_basis: str) -> str:
     limit = _env_int(_AUDIT_BASIS_CHAR_LIMIT_ENV, _AUDIT_BASIS_CHAR_LIMIT, minimum=500)
     return text[:limit]
 
-try:
-    from app.utils.prompt_builder import ReviewPromptBuilder, build_review_system_prompt
-except ModuleNotFoundError as exc:
-    if exc.name != "app.utils.prompt_builder":
-        raise
+class ReviewPromptBuilder:
+    """审核提示词构建器（内置完整实现）。
 
-    logger.info("prompt_builder 模块加载失败，审查提示词构建功能降级: %s", exc)
+    历史说明：仓库中从未存在 app.utils.prompt_builder 模块，仅 ai_client 残留 import
+    引用，导致启动日志每次误报"模块加载失败，审查提示词构建功能降级"。此处直接内置
+    章节感知 + 语言上下文的完整实现，接口（ReviewPromptBuilder / build_review_system_prompt）
+    保持不变，消除误报且不降级任何能力。PROMPT_BUILDER_FALLBACK_ACTIVE 保留为 False
+    供测试断言引用。
+    """
 
-    PROMPT_BUILDER_FALLBACK_ACTIVE = True
+    def __init__(self, *args, **kwargs):
+        self.chapter_context = kwargs.get("chapter_context") or {}
+        self.document_name = str(
+            kwargs.get("document_name")
+            or kwargs.get("filename")
+            or self.chapter_context.get("document_name")
+            or ""
+        ).strip()
+        self.language = str(kwargs.get("language") or "").strip()
 
-    class ReviewPromptBuilder:
-        def __init__(self, *args, **kwargs):
-            self.chapter_context = kwargs.get("chapter_context") or {}
-            self.document_name = str(
-                kwargs.get("document_name")
-                or kwargs.get("filename")
-                or self.chapter_context.get("document_name")
-                or ""
-            ).strip()
-            self.language = str(kwargs.get("language") or "").strip()
+    def build_audit_system_prompt(self):
+        context_lines = []
 
-        def build_audit_system_prompt(self):
-            context_lines = []
+        if self.document_name:
+            context_lines.append(f"Document filename: {self.document_name}")
 
-            if self.document_name:
-                context_lines.append(f"Document filename: {self.document_name}")
+        chapter_title = str(self.chapter_context.get("title") or self.chapter_context.get("chapter") or "").strip()
+        if chapter_title:
+            context_lines.append(f"Chapter title: {chapter_title}")
 
-            chapter_title = str(self.chapter_context.get("title") or self.chapter_context.get("chapter") or "").strip()
-            if chapter_title:
-                context_lines.append(f"Chapter title: {chapter_title}")
+        chapter_summary = str(self.chapter_context.get("summary") or self.chapter_context.get("context") or "").strip()
+        if chapter_summary:
+            context_lines.append(f"Chapter context: {chapter_summary[:500]}")
 
-            chapter_summary = str(self.chapter_context.get("summary") or self.chapter_context.get("context") or "").strip()
-            if chapter_summary:
-                context_lines.append(f"Chapter context: {chapter_summary[:500]}")
+        if self.language:
+            context_lines.append(f"Review language: {self.language}")
 
-            if self.language:
-                context_lines.append(f"Review language: {self.language}")
-
-            if str(self.language or "").lower().startswith("en"):
-                if not context_lines:
-                    return ""
-                return "Additional review context:\n- " + "\n- ".join(context_lines)
-
-            prompt = build_system_prompt()
-
+        if str(self.language or "").lower().startswith("en"):
             if not context_lines:
-                return prompt
+                return ""
+            return "Additional review context:\n- " + "\n- ".join(context_lines)
 
-            return f"{prompt}\n\nAdditional review context:\n- " + "\n- ".join(context_lines)
+        prompt = build_system_prompt()
 
-    def build_review_system_prompt(*args, **kwargs):
-        return ReviewPromptBuilder(*args, **kwargs).build_audit_system_prompt()
+        if not context_lines:
+            return prompt
+
+        return f"{prompt}\n\nAdditional review context:\n- " + "\n- ".join(context_lines)
+
+
+def build_review_system_prompt(*args, **kwargs):
+    return ReviewPromptBuilder(*args, **kwargs).build_audit_system_prompt()
 
 ANTHROPIC_VERSION = "2023-06-01"
 IMAGE_DRAFT_BATCH_SIZE = 2
@@ -279,6 +279,30 @@ class AIClient:
                 timeout=timeout,
             )
             print(f"[AI] 通用视觉插槽已配置, base_url={self.visual_base_url}, model={self.visual_model}")
+
+        # VL 视觉复核专用客户端：支持独立 base_url（代理/兼容端点场景）。
+        # 仅当显式配置 QWEN_VL_BASE_URL / KIMI_VL_BASE_URL 时创建专用客户端，
+        # 否则回退复用 qwen_client / kimi_client（跟随 QWEN_BASE_URL / KIMI_BASE_URL），
+        # 默认行为保持不变。
+        self.qwen_vl_base_url = os.getenv("QWEN_VL_BASE_URL") or self.qwen_base_url
+        self.qwen_vl_client = None
+        if _is_valid_key(self.qwen_api_key) and os.getenv("QWEN_VL_BASE_URL"):
+            self.qwen_vl_client = OpenAI(
+                api_key=self.qwen_api_key,
+                base_url=self.qwen_vl_base_url,
+                timeout=timeout,
+            )
+            print(f"[AI] Qwen VL 专用客户端已配置, base_url={self.qwen_vl_base_url}")
+
+        self.kimi_vl_base_url = os.getenv("KIMI_VL_BASE_URL") or self.kimi_base_url
+        self.kimi_vl_client = None
+        if _is_valid_key(self.kimi_api_key) and os.getenv("KIMI_VL_BASE_URL"):
+            self.kimi_vl_client = OpenAI(
+                api_key=self.kimi_api_key,
+                base_url=self.kimi_vl_base_url,
+                timeout=timeout,
+            )
+            print(f"[AI] Kimi VL 专用客户端已配置, base_url={self.kimi_vl_base_url}")
 
         # MCAI Proxy 客户端（纯文本响应格式）
         mcai_base_url = os.getenv("MCAI_LLM_BASE_URL")
@@ -673,9 +697,13 @@ class AIClient:
         """返回该 provider 的视觉调用客户端；不支持则返回 None。"""
         name = str(provider or "").strip().lower()
         if name == "kimi":
-            return getattr(self, "kimi_client", None)
+            return getattr(self, "kimi_vl_client", None) or getattr(self, "kimi_client", None)
         if name == "qwen":
-            return getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None)
+            return (
+                getattr(self, "qwen_vl_client", None)
+                or getattr(self, "qwen_client", None)
+                or getattr(self, "dashscope_client", None)
+            )
         if name == "visual":
             # 通用 OpenAI 兼容视觉插槽：配置 VISUAL_API_KEY / VISUAL_BASE_URL /
             # VISUAL_MODEL 后即可启用，兼容 gpt-4o、doubao-vision 等任意视觉端点。
