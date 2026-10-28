@@ -2287,7 +2287,7 @@ def _ai_audit_timeout_seconds(content):
 
 def _review_ai_chunk_timeout_seconds(chunk):
     chunk_length = len(chunk or '')
-    base = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50')
+    base = _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '300')
     if chunk_length >= 2500:
         return max(base, 50.0)
     if chunk_length >= 1500:
@@ -2463,7 +2463,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 cache_kwargs["document_name"] = document_name
             all_issues, cache_hit = _run_cached_ai_chunk_review(
                 review_id, content, document_language, selected_basis,
-                _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
+                _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '300'),
                 **cache_kwargs,
             )
             for issue in all_issues:
@@ -2472,7 +2472,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
                 "enabled": True,
                 "selected_chunk_count": 1,
                 "total_chunk_count": 1,
-                "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
+                "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '300'),
                 "chunks": [{
                     "chunk_index": 1,
                     "start": 0,
@@ -2540,7 +2540,7 @@ def _run_ai_deep_review(review_id, content, document_language, ai_review_basis_s
         "enabled": True,
         "selected_chunk_count": len(chunks),
         "total_chunk_count": len(all_chunks),
-        "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '50'),
+        "chunk_timeout_seconds": _review_env_float('REVIEW_AI_CHUNK_TIMEOUT', '300'),
         "chunks": [],
         "chunk_meta": [],
         "chunker_mode": chunker_mode,
@@ -3792,6 +3792,10 @@ def _verify_review_issue_visually(png_bytes, issue_payload, page_number, review_
     }
     for provider in visual_provider_chain():
         if not _visual_provider_available(provider):
+            print(
+                f"[视觉] provider={provider} 不可用（未配置 key/客户端），跳过",
+                flush=True,
+            )
             attempts.append({"provider": provider, "visual_status": "provider_unavailable"})
             continue
         # 不再硬编码跳过非 kimi：原先的 `if provider != "kimi": continue`
@@ -10942,42 +10946,39 @@ def _run_manual_engineering_audit(content, file_type=None):
             92,
         )
 
-    # 英文文档中 ℃ 前的空格：人工批注常标「多余空格」；°C 的 SI 空格不在此列。
-    for match in re.finditer(r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)([ \t\u00a0\u202f]+)℃', content):
-        # 局部语境判定：前后 8 字符内有汉字视为中文排版，跳过。
-        # detect_language 对混排返回 both，外层语言门控拦不住中英说明书里的中文温度写法。
-        ctx = content[max(0, match.start() - 8):min(len(content), match.end() + 8)]
-        if re.search(r'[\u4e00-\u9fff]', ctx):
-            continue
-        # 表格/标签语境排除：试剂盒组分表、存储/运输温度列、货号表等属标签排版约定，
-        # 规则注释声明的"试剂盒标签/仪器界面除外"在此落地，避免表格级全量误报。
-        tbl_ctx = content[max(0, match.start() - 40):min(len(content), match.end() + 40)]
-        if re.search(
-            r'Storage\s+temperature|Transportation|Cap\s*color|Spec\.?\s*[&/]\s*quantity'
-            r'|储存温度|运输条件|组分|Component|Cat\.?\s*No\.?|货号',
-            tbl_ctx, re.IGNORECASE,
-        ):
-            continue
-        # 独立单元格/区间碎片排除：匹配点前是换行/制表/括号/区间连字符、后是换行/逗号，
-        # 属表格碎片或范围书写（如 2-8 ℃、-20 ℃），非行内正文句子。
-        before = content[match.start() - 1] if match.start() > 0 else ''
-        after = content[match.end()] if match.end() < len(content) else ''
-        if before in '\n\r\t' or after in '\n\r\t,':
-            continue
-        raw = match.group(0)
-        add_issue(
-            match.start(),
-            match.end(),
-            raw,
-            'DOC-SPACE-006',
-            '空格与排版',
-            f"{match.group(1)}℃",
-            '英文文档正文中，数值与 ℃ 之间通常不保留空格（试剂盒标签/仪器界面除外）；'
-            '若为标签排版约定可忽略本条。',
-            '说明书审核能力补强方案 - 温度单位空格',
-            'general',
-            92,
+    # 温度单位与数值之间空格写法的一致性检查（DOC-SPACE-006 重构）：
+    # 原先该规则把「英文数值 ℃ 前有空格」单点判错，但 SI/NIST 规范明确要求
+    # 数值与单位之间保留空格（30 ℃ 是规范写法），且与 AI 提示词
+    # "Keep one space between numbers and units ... never remove an existing
+    # number-unit space" 直接冲突，在 G99 评测中贡献了 76 条误报（35%）。
+    # 单点写法（紧贴 15℃ 或带空格 15 ℃）均不判错；仅在**同一文档内两种写法
+    # 并存**（写法不一致）时，按多数写法报一条全文一致性建议。
+    _tight_c_forms = len(re.findall(r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)℃', content))
+    _spaced_c_forms = len(re.findall(r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)[ \t\u00a0\u202f]+℃', content))
+    if _tight_c_forms and _spaced_c_forms:
+        _c_majority = "紧贴" if _tight_c_forms >= _spaced_c_forms else "带空格"
+        # 只报首处少数写法，避免逐条刷屏
+        _c_report_re = re.compile(
+            r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)([ \t\u00a0\u202f]+)℃'
+            if _c_majority == "紧贴" else
+            r'(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)℃'
         )
+        _c_match = _c_report_re.search(content)
+        if _c_match:
+            add_issue(
+                _c_match.start(),
+                _c_match.end(),
+                _c_match.group(0),
+                'DOC-SPACE-006',
+                '空格与排版',
+                f"建议统一为{_c_majority}写法",
+                f"全文温度写法不一致：紧贴（如 15℃）出现 {_tight_c_forms} 次、"
+                f"带空格（如 15 ℃）出现 {_spaced_c_forms} 次。两种写法单独看都合法"
+                f"（SI 规范允许数值与单位间保留空格），建议按多数写法（{_c_majority}）统一。",
+                '说明书审核能力补强方案 - 温度单位空格一致性',
+                'general',
+                88,
+            )
 
     # 缺失空格：分句标点（逗号、分号、冒号）后直接连写下一个单词（如 buffer,then、on;Check）
     # 要求标点后紧跟字母，天然排除时间 10:30、URL 协议等数字/符号相邻场景；
@@ -11357,6 +11358,21 @@ def _run_manual_engineering_audit(content, file_type=None):
             if second_start - first_start < 60:
                 continue
             first_chapter = extract_chapter(content, first_start).strip()
+            second_chapter = extract_chapter(content, second_start).strip()
+            # 章节隔离：技术手册中安全声明、操作说明、联系信息等会在多个章节正常重复。
+            # 判定编辑残留的关键是「近距离重复」：同一句在较短篇幅内再次完整出现，
+            # 极可能是复制粘贴残留；跨章节或远距离的正常重复不属于编辑残留。
+            if (second_start - first_start) >= 1500:
+                continue
+            # 安全/合规/联系信息/引导类句子的重复是正常写法，一律跳过。
+            allowed_duplicate_pattern = re.compile(
+                r'\b(?:safety|warning|caution|protective|contact|support|information|'
+                r'follow the|according to|comply|failure to|available for|'
+                r'authorized|qualified|regulatory|warranty|for more|for details)\b',
+                re.IGNORECASE,
+            )
+            if allowed_duplicate_pattern.search(first_original):
+                continue
             if first_chapter:
                 duplicate_suggestion = (
                     f'该句与「{first_chapter}」章节中的句子完全重复，'
@@ -11371,7 +11387,7 @@ def _run_manual_engineering_audit(content, file_type=None):
                 'DOC-DUP-001',
                 '重复内容',
                 duplicate_suggestion,
-                '同一完整句子在不同位置重复出现，发布前应确认是否为复制残留。',
+                '同一完整句子在同一章节内重复出现，发布前应确认是否为复制残留。',
                 '说明书审核能力补强方案 - 跨段重复句检查',
                 'serious',
                 91,
@@ -12968,6 +12984,10 @@ def _should_skip_rule_match(rule, match, content, document_language, file_type=N
 
     # Mixed Chinese-English spacing rule should keep common product names and protocol acronyms intact.
     if rule_no == "R025":
+        # 中文部件编号/型号编号豁免：如「架C」「组件A」「孔位U」——中文词+单个大写字母
+        # 是产品部件编号的常规写法（板类载架C、底板组件A），不是中英混排缺空格。
+        if re.fullmatch(r"[\u4e00-\u9fff]+[A-Z]", original_text) or re.fullmatch(r"[A-Z][\u4e00-\u9fff]+", original_text):
+            return True
         window = content[max(0, start - 1):min(len(content), end + 1)]
         if re.search(r"[A-Za-z]{2,}", window):
             return True
