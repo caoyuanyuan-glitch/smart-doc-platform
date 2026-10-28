@@ -1,0 +1,101 @@
+{
+ "document": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "文中并未找到",
+   "selected_text": "Micro Intel® TruSe",
+   "context": "本指南中的所有图片均为示意图，图片内容可能 DNBSEQTM 是华大智造或其子公司在中国和/ 或 Microsoft® 和Windows® 是微软公司在美国和 Intel® 是英特尔公司或其子公司在美国和/或其 TruSeq® 是因美纳公司或其子公司的商标。Qu 商标。文中涉及的其它名称及商标属于各自所有 ©2025-2026 武汉华大智造科技有限公司 版权",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "38",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "Vx并不是对应试剂类型。 建议证据和改为：显示内容说明如下： 或者：及版本",
+   "selected_text": "则【下一 装类型的",
+   "context": "面左侧显示试剂套装类型和版本、试剂槽ID 及插件ID。 各耗材ID 左侧显示对应类型及版本。如测序试剂槽、制备插 件、加载插件、引物插件、测序插件ID 与左侧显示的试剂槽 或版本类型不一致，则【下一步】按钮置灰。各耗材ID 左侧 显示的内容与试剂套装类型的对应关系说明如下： 显示内容 说明 【Std】 表示高通量测序试剂套装。 【STO】 表示时空可视化试剂套装。 【Vx】 表示试剂套装的版本。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "92",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "建议去掉",
+   "selected_text": ". 确保【应用类型 在装载耗材界面 型】区域会根据",
+   "context": "如用测序仪制备DNB，选择【dsDNA】。 如手工制备DNB，选择【DNB】。 3. 确保【应用类型】区域显示为【STO】。 在装载耗材界面装载完DNBSEQ-T7+RS 时空可视化试剂 型】区域会根据输入的的测序试剂槽ID 信息自动显示【S 【WGBS】。 4. 点击【测序方案】信息框的 ，选择【创建测序方案】， 方案，点击【保存】。 仅需在首次进行该读长（FCL PE75）测序时自定义测",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "92",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "或者：xxx与xxx不可选。",
+   "selected_text": "序试剂槽后，【应用类 ，且置灰【Default】和",
+   "context": "空可视化试剂盒中测序试剂槽后，【应用类 息自动显示【STO】，且置灰【Default】和 建测序方案】，按照下图信息创建自定义测序 ）测序时自定义测序方案。再次进行相同测序时， 从【自定义】列表中选择相同的测序方案。有关自",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "92",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这句话有点开发者视角了 建议改为： 当输入测序试剂槽ID后，系统会自动将【应用类型】识别为【STO】，并自动禁用【Default】和【WGBS】选项。",
+   "selected_text": "载耗材界面装载完DNBSEQ-T7+RS 时空可视化试剂盒中 区域会根据输入的的测序试剂槽ID 信息自动显示【STO GBS】。",
+   "context": "如手工制备DNB，选择【DNB】。 3. 确保【应用类型】区域显示为【STO】。 在装载耗材界面装载完DNBSEQ-T7+RS 时空可视化试剂盒中测序试剂槽后，【应用类 型】区域会根据输入的的测序试剂槽ID 信息自动显示【STO】，且置灰【Default】和 【WGBS】。 4. 点击【测序方案】信息框的 ，选择【创建测序方案】，按照下图信息创建自定义测序 方案，点击【保存】。 仅需在首次进行该读长（FCL PE75）测序时自定义测序方案。再次进行相同测序时， 可点击【测序方案】信息框的 ，从【自定义】列表中选择相同的测序方案。有关自",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "64",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "查下表格样式",
+   "selected_text": "-",
+   "context": "MGI ≥6 fm MGI PCR-free App PCR TruSeq、Nextera App PCR-free 时空文库浓度要求 如时空文库（dsDNA 文库）浓度未知，建议使用Qubit Assay K 量出文库实际浓度（ng/μL）。fmol 和ng 换算公式如下： c (fmol/μL) = 3030 × c (ng/μL)",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "70",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下面搞一个p看看能不能到下一页",
+   "selected_text": "测序仪制备DNB（时空文库）",
+   "context": "图 16 取出制备插件内管 测序仪制备DNB（时空文库）",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001145-00 DNBSEQ-T7+RS 基因测序仪系统操作指南_中文_RUO_WH V5.0 R01 peered by Tina.pdf ·",
+   "page": "182",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这根线咋回事",
+   "selected_text": "00 DNBSEQ-T7+RS 时空可视化试剂套装 T7+ STO FCL PE75",
+   "context": "MGI 940-002665-00 DNBSEQ-T7+RS 高通量测序试剂套装 T7+ App-D FCL PE100 940-002668-00 DNBSEQ-T7+RS 高通量测序试剂套装 T7+ App-D FCL PE150 940-002663-00 DNBSEQ-T7+RS 时空可视化试剂套装 T7+ STO FCL PE75",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
