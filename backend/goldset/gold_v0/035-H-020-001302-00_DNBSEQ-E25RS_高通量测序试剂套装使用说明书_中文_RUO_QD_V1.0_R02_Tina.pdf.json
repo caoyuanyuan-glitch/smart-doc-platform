@@ -1,0 +1,113 @@
+{
+ "document": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是这么近的吗 类似问题参考另外一份中文意见",
+   "selected_text": "装基本信息 货号 名",
+   "context": "1.0 2026 年6 月22 日 试剂套装基本信息 货号 名称 型 940-005020-00 DNBSEQ-E25RS 高通量测序试剂套装 E2 940-005021-00 DNBSEQ-E25RS 高通量测序试剂套装 E2 940-005022-00 DNBSEQ-E25RS 高通量测序试剂套装 E2",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "13",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重复",
+   "selected_text": "文库插入片段大小要求 本试剂盒适用于本试剂盒适用于 文库插入片段长度为200 bp~5",
+   "context": "第 章制备 4.1 文库插入片段大小要求 本试剂盒适用于本试剂盒适用于MGI接头文库和App文库（包括TruSeq 文库插入片段长度为200 bp~500 bp，同时主带集中在±100 bp 以内 y 如建库试剂盒说明书有特殊要求，则以建库试剂盒说明书的片段要求 y 产出数据量仅为参考，不同文库和不同应用产出数据量会有变化。 表 7 推荐插入片段大小 型号 推荐插入片段大小 产出数据量",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "14",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "前面试剂套装章节并没有提到这种测序",
+   "selected_text": "于 接头 于App-C 测 如",
+   "context": "为碱基平均分子量（）。 表示文库总片 c 表示浓度。 y 文库量要求 �对于MGI 接头文库，每个DNB 制备体系所需文库量为 �对于App-C 测序，每个DNB 制备体系所需文库量为8 y 如DNB 制备说明书有特殊要求，则以DNB 制备说 y 如建库试剂盒说明书有特殊要求，则以建库试剂盒 y 由于文库种类多样，建议根据实际情况调整投入量 15 ng/μL 左右。若首次使用该平台，可从建议投入 可结合既往经验进行调整。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "测序",
+   "selected_text": "测试方 定义",
+   "context": "点击【测序方案】下拉列表，选择测序方案，如【 示该测序方案的测序顺序、一链、二链、Barcode 及 如需自定义测序方案，参考DNBSEQ-E25RS&DNB 书。 4. 如所选测试方案包含Barcode 长度，点击【Barcode】 如需自定义Barcode 文件，参考DNBSEQ-E25RS 品说明书。 5. 如所选测序方案中包含Barcode 长度，则需选 Barcode。 确认方案无误后，点击 进入下一步。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "（可选）",
+   "selected_text": "书 4. 如 如 品 5. 如 B",
+   "context": "3. 点击【测序方案】下拉列表，选择测序方 示该测序方案的测序顺序、一链、二链、B 如需自定义测序方案，参考DNBSEQ-E2 书。 4. 如所选测试方案包含Barcode 长度，点击【 如需自定义Barcode 文件，参考DNBSE 品说明书。 5. 如所选测序方案中包含Barcode 长度 Barcode。 6. 确认方案无误后，点击 进入下一步。 如点击 ，界面出现提示信息：【请确 �如需退出测序，执行如下操作：",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "前面试剂套装章节根本没有这个载片类型",
+   "selected_text": "】或【】， 是FCL，",
+   "context": "信息。 。如载片序列号前两位为【A1】， 片序列号前两位为【A2】或【A3】， 致。如使用的载片类型是FCL，",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "36",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "其他",
+   "selected_text": "头镊子 其它胶",
+   "context": "试剂槽底部胶塞歪斜或脱落时，执行如下操作： 1. 将试剂槽保持在水平状态。 2. 确认胶塞歪斜或脱落的孔位。 3. 用尖头镊子夹住胶塞，对准相应孔位，拧紧胶塞。 4. 拧紧其它胶塞。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这个顺序也跟前面试剂套装章节不一致",
+   "selected_text": "说明书。 L App-D FCU S",
+   "context": "组分存放在包装盒中，直至使用完毕。 加载缓冲液Ⅰ为搭配DNBelab-D4RS 系列数字化样本制备系统建库时使用。具体 请参考相应的样本制备说明书。 序试剂套装（E25 FCL App-D FCU SE100）货号：940-005020-00 规格及数量 储存温度 运输温度 有效期 1 张 0 ℃~25 ℃ 0 ℃~25 ℃ 10 个月",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02 Tina.pdf ·",
+   "page": "11",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "货号错误，与前面试剂套装那里不一致",
+   "selected_text": "号：940-005203-00",
+   "context": "E25 FCS PE150）货号：940-005203-00 数量 储存温度 运输温度 有效期 0 ℃~25 ℃ 0 ℃~25 ℃ 10 个月",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}
