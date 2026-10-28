@@ -416,6 +416,37 @@ def get_db():
     finally:
         db.close()
 
+def _ensure_supplement_schema():
+    """review_supplement_feedback 表结构迁移。
+
+    PR #159 已建的老表：review_id/issue_id NOT NULL，无批量导入字段。
+    新结构：review_id/issue_id 可空（批量导入不绑定审核任务），新增
+    doc_name/page/annotation_type/author/comment/layer/expected_rule/source/batch_name。
+    对已存在的老表重建（保留数据），对不存在的表由 create_all 直接建新结构。
+    """
+    if not SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "review_supplement_feedback" not in tables:
+        return
+    cols = {col["name"] for col in inspector.get_columns("review_supplement_feedback")}
+    new_cols = {"doc_name", "page", "annotation_type", "author", "comment",
+                "layer", "expected_rule", "source", "batch_name"}
+    needs_rebuild = bool(new_cols - cols)
+    if not needs_rebuild:
+        for col in inspector.get_columns("review_supplement_feedback"):
+            if col["name"] in {"review_id", "issue_id"} and not col.get("nullable", True):
+                needs_rebuild = True
+                break
+    if not needs_rebuild:
+        return
+    from app.models.supplement_feedback import SupplementFeedback
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        _rebuild_sqlite_table_with_fk(conn, SupplementFeedback.__table__)
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+
 def create_tables():
     from app.models import user, document, review, issue, rule, audit_basis, term, compare_task, compare_diff, compare_config, memory, translation_doc, knowledge, polished_document, polished_document_lab, convert_task, convert_rule, polish_feedback, polish_feedback_lab, qa_feedback, qa_history, audit_trace, competitor_task, cat_analysis_session, cat_analysis_session_lab, cat_decision_record, cat_decision_record_lab, false_positive_memory, supplement_feedback
     from app.models import cat_diagnose_record_lab
@@ -423,3 +454,4 @@ def create_tables():
     Base.metadata.create_all(bind=engine)
     _ensure_legacy_sqlite_columns()
     _ensure_review_foreign_keys()
+    _ensure_supplement_schema()
