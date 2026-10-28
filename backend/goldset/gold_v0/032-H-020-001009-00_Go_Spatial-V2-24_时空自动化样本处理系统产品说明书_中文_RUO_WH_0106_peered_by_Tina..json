@@ -1,0 +1,113 @@
+{
+ "document": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "34",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下面写的是应用选择界面",
+   "selected_text": "始化】， 择窗口，",
+   "context": "下： 窗。 始化界面的【仪器初始化】，仪器开始初始化。 完成后，弹出应用选择窗口，选择目标应用。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "13",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "粗细不同，重新应用表格body样式，检查其他表是否有类似问题",
+   "selected_text": "产品有害物",
+   "context": "符号说明如下： 标题 说明 / 表示该仪器仅供科研使用，不能用于临床诊断 产品编号 标识制造商的产品目录编号，以便识别该仪器 制造商 表示该仪器制造商 生产日期 表示该仪器的生产日期 电子电气产品有害物 质限制使用标志 该电子电气产品含有某些有害物质，在环保使 期限内可以放心使用，超过环保使用期限之后 应该进入回收循环系统 序列编号 表示制造商的序列编号，以便识别特定的仪器",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加边框，85%灰",
+   "selected_text": "-",
+   "context": "主界面 8 1 2 3 6 7 5 4 图 6 主界面",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "28",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "在扉页补充这个trademark描述",
+   "selected_text": "：Intel Core",
+   "context": "参数 硬件配置 y 处理器：Intel Core i5 y 内存：8 GB y 机械硬盘：512 GB 环境 预装软件： y 控制软件 位操作系统",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "28",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "在扉页补充这个trademark描述",
+   "selected_text": "接口：连 DisplayPort（ 制软件的用户类",
+   "context": "不建议在计算机上安装杀毒软件。 y 网口：连接仪器和外部网络 y USB 接口：连接键盘、鼠标，或备用 y DisplayPort（DP）接口：连接显示器 控制软件的用户类型包括普通用户和管理员用户。具体的 访问权限信息，请联系技术支持。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多了空格",
+   "selected_text": "推 一 一",
+   "context": "推荐品牌 备注 一般实验室用品牌 / 一般实验室用品牌 / 一般实验室用品牌 可进行自 采集的图 图像的功 一般实验室用品牌",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "确认下是不是乘号",
+   "selected_text": "3x3",
+   "context": "一般实验室用品牌 / 一般实验室用品牌 / T100 Thermal Cycler, Bio-Rad; ProFle3x32-well PCR System, ABI / 力架 Thermo Fisher / 仪 Thermo Fisher / alyzer Agilent Technologies /",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "34",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加边框",
+   "selected_text": "-",
+   "context": "1. 关闭视窗。 2. 点击初始化界面的【仪器初始化】，仪器开始初始化。 3. 初始化完成后，弹出应用选择窗口，选择目标应用。 图 8 应用选择界面 进行前期清洁 操作步骤如下：",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001009-00 Go Spatial-V2-24 时空自动化样本处理系统产品说明书_中文_RUO_WH_0106 peered by Tina.pdf ·",
+   "page": "38",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加【】",
+   "selected_text": "> 清洁，",
+   "context": "期清洁 作步骤如下： 关闭视窗。 点击界面右上角 > 清洁，在弹窗中点击【开始】，仪器开始清洁。 �清洁时长默认为30 分钟，可手动修改。 �清洁时须确保操作区域内无人员停留，并避免直视紫外灯光。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}
