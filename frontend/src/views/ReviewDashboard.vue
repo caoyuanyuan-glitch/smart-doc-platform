@@ -5,7 +5,10 @@
         <h2>文档审核统计看板</h2>
         <p>{{ pageSubtitle }}</p>
       </div>
-      <el-button size="small" @click="loadDashboard" :loading="loading">刷新</el-button>
+      <div class="head-actions">
+        <el-button size="small" type="warning" plain @click="openImportDialog">导入人工审核意见</el-button>
+        <el-button size="small" @click="loadDashboard" :loading="loading">刷新</el-button>
+      </div>
     </div>
 
     <div class="filter-bar">
@@ -118,6 +121,91 @@
       </el-table>
     </div>
 
+    <div v-if="!isPersonalView" class="chart-card wide table-card">
+      <div class="section-title">
+        <span>人工审核意见样本池</span>
+        <small>已整理的人工意见入库后可在这里聚类，识别"人工到底在标什么"</small>
+        <el-button size="small" type="primary" plain @click="loadCluster" style="margin-left:auto">刷新聚类</el-button>
+      </div>
+      <template v-if="clusterLoaded">
+        <div class="cluster-summary">
+          <el-tag effect="plain">样本总数 {{ cluster.total }}</el-tag>
+          <el-tag type="warning" effect="plain">规则候选 {{ cluster.rule_candidate_count }}</el-tag>
+        </div>
+        <div class="cluster-grid">
+          <div class="cluster-block">
+            <div class="cluster-title">类别分布（人工标尺）</div>
+            <el-table :data="clusterCategoryRows" size="small" border max-height="320">
+              <el-table-column prop="category" label="类别" min-width="150" />
+              <el-table-column prop="count" label="条数" width="90" />
+              <el-table-column label="占比" width="120">
+                <template #default="scope">{{ clusterPercent(scope.row.count) }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <div class="cluster-block">
+            <div class="cluster-title">高频规则候选（同类意见 ≥3 条）</div>
+            <el-table :data="cluster.rule_candidates || []" size="small" border max-height="320">
+              <el-table-column prop="category" label="类别" width="130" show-overflow-tooltip />
+              <el-table-column prop="comment" label="人工意见" min-width="200" show-overflow-tooltip />
+              <el-table-column prop="count" label="次数" width="80" />
+              <el-table-column label="操作" width="110">
+                <template #default="scope">
+                  <el-button size="small" type="primary" link @click="convertCandidate(scope.row)">转规则候选</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </div>
+        <div class="cluster-empty" v-if="!cluster.total">暂无样本。点击右上角"导入人工审核意见"上传你整理好的 md / json / csv。</div>
+      </template>
+      <el-empty v-else description="点击刷新聚类查看人工意见样本分布" />
+    </div>
+
+    <el-dialog v-model="importDialogVisible" title="导入人工审核意见（平台进化入口）" width="640px" destroy-on-close>
+      <el-form label-width="90px">
+        <el-form-item label="意见文件">
+          <el-upload
+            drag
+            :auto-upload="false"
+            :limit="1"
+            accept=".md,.json,.csv,.markdown,.txt"
+            :on-change="onImportFileChange"
+            :on-remove="onImportFileRemove"
+          >
+            <div class="upload-tip">
+              <div>拖拽文件到此处，或点击选择</div>
+              <div class="upload-sub">支持：gold_v0 评测集 .json / 标注集 .csv / 意见汇总 .md</div>
+            </div>
+          </el-upload>
+        </el-form-item>
+        <el-form-item label="批次名称">
+          <el-input v-model="importBatchName" placeholder="留空则用文件名" />
+        </el-form-item>
+        <el-form-item v-if="importPreview.parsed > 0" label="解析预览">
+          <div class="preview-box">
+            <div class="preview-line">解析出 <b>{{ importPreview.parsed }}</b> 条人工意见</div>
+            <div class="preview-line">类别分布：</div>
+            <div class="preview-cats">
+              <el-tag v-for="(count, cat) in importPreview.category_distribution" :key="cat" size="small" effect="plain" style="margin:2px">
+                {{ cat }} ×{{ count }}
+              </el-tag>
+            </div>
+            <div class="preview-line" style="margin-top:6px">前 3 条样例：</div>
+            <div v-for="(row, idx) in importPreview.sample.slice(0, 3)" :key="idx" class="preview-sample">
+              <div class="sample-doc">{{ row.doc_name || '(无文档名)' }} · p{{ row.page || '-' }}</div>
+              <div class="sample-comment">{{ row.comment || '-' }}</div>
+            </div>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="importDialogVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!selectedImportFile" :loading="importing" @click="doImport">解析并预览</el-button>
+        <el-button v-if="importPreview.inserted > 0" type="success" :loading="importing" @click="confirmImport">确认入库（{{ importPreview.inserted }} 条）</el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -165,6 +253,111 @@ const pageSubtitle = computed(() => (
 ))
 
 let refreshTimer = null
+
+// === 人工审核意见导入与样本池 ===
+const importDialogVisible = ref(false)
+const selectedImportFile = ref(null)
+const importBatchName = ref('')
+const importing = ref(false)
+const importPreview = reactive({ parsed: 0, inserted: 0, skipped: 0, category_distribution: {}, sample: [], batch_name: '' })
+const cluster = reactive({ total: 0, category_distribution: {}, rule_candidates: [], rule_candidate_count: 0 })
+const clusterLoaded = ref(false)
+
+function openImportDialog() {
+  selectedImportFile.value = null
+  importBatchName.value = ''
+  Object.assign(importPreview, { parsed: 0, inserted: 0, skipped: 0, category_distribution: {}, sample: [], batch_name: '' })
+  importDialogVisible.value = true
+}
+
+function onImportFileChange(file) {
+  selectedImportFile.value = file.raw
+  importBatchName.value = ''
+  Object.assign(importPreview, { parsed: 0, inserted: 0, skipped: 0, category_distribution: {}, sample: [], batch_name: '' })
+}
+
+function onImportFileRemove() {
+  selectedImportFile.value = null
+}
+
+async function doImport() {
+  if (!selectedImportFile.value) return
+  importing.value = true
+  try {
+    const response = await reviewAPI.importSupplements(selectedImportFile.value, importBatchName.value)
+    const data = response.data || {}
+    Object.assign(importPreview, {
+      parsed: data.parsed || 0,
+      inserted: data.inserted || 0,
+      skipped: data.skipped || 0,
+      category_distribution: data.category_distribution || {},
+      sample: data.sample || [],
+      batch_name: data.batch_name || ''
+    })
+  } catch (error) {
+    ElMessage.error(`解析失败: ${getAPIErrorMessage(error)}`)
+  } finally {
+    importing.value = false
+  }
+}
+
+async function confirmImport() {
+  importing.value = true
+  try {
+    // 首次调用已入库（inserted>0 表示写入成功）；此处提示并刷新聚类
+    ElMessage.success(`已入库 ${importPreview.inserted} 条人工审核意见（批次: ${importPreview.batch_name}）`)
+    importDialogVisible.value = false
+    await loadCluster()
+  } catch (error) {
+    ElMessage.error(`入库失败: ${getAPIErrorMessage(error)}`)
+  } finally {
+    importing.value = false
+  }
+}
+
+const clusterCategoryRows = computed(() => {
+  return Object.entries(cluster.category_distribution || {})
+    .map(([category, count]) => ({ category, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 15)
+})
+
+function clusterPercent(count) {
+  if (!cluster.total) return '--'
+  return `${((count / cluster.total) * 100).toFixed(1)}%`
+}
+
+async function loadCluster() {
+  clusterLoaded.value = false
+  try {
+    const response = await reviewAPI.clusterSupplements({ min_count: 3 })
+    const data = response.data || {}
+    Object.assign(cluster, {
+      total: data.total || 0,
+      category_distribution: data.category_distribution || {},
+      rule_candidates: data.rule_candidates || [],
+      rule_candidate_count: data.rule_candidate_count || 0
+    })
+    clusterLoaded.value = true
+  } catch (error) {
+    ElMessage.error(`聚类加载失败: ${getAPIErrorMessage(error)}`)
+    clusterLoaded.value = false
+  }
+}
+
+async function convertCandidate(row) {
+  if (!row.ids || !row.ids.length) {
+    ElMessage.warning('该候选缺少样本 id')
+    return
+  }
+  try {
+    await reviewAPI.convertSupplement(row.ids[0])
+    ElMessage.success(`已将「${row.comment.slice(0, 20)}」标记为规则候选`)
+    await loadCluster()
+  } catch (error) {
+    ElMessage.error(`操作失败: ${getAPIErrorMessage(error)}`)
+  }
+}
 
 const issueRows = computed(() => {
   const rows = issueDistribution.value
@@ -326,6 +519,7 @@ onMounted(() => {
   loadDashboard()
   if (isAdmin.value) {
     loadUsers()
+    loadCluster()
   }
   refreshTimer = setInterval(loadDashboard, 5 * 60 * 1000)
 })
@@ -347,31 +541,20 @@ onUnmounted(() => {
 <style scoped>
 .review-dashboard { padding: 28px; color: #303133; background: #f8fafc; min-height: 100%; }
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-.page-head h2 { margin: 0 0 6px; font-size: 22px; }
-.page-head p { margin: 0; color: #8c8c8c; }
-.filter-bar { display: flex; align-items: center; gap: 12px; padding: 14px 18px; margin-bottom: 22px; background: #fff; border-radius: 10px; box-shadow: 0 1px 6px rgba(15,23,42,0.04); }
-.filter-bar :deep(.el-tabs__header) { margin: 0; }
-.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-bottom: 24px; }
-.summary-card { min-height: 158px; }
-.kpi-card { padding: 26px 22px; border-radius: 12px; color: #fff; box-shadow: 0 6px 18px rgba(24,144,255,0.10); }
-.kpi-card.blue { background: linear-gradient(135deg, #1890ff, #096dd9); }
-.kpi-card.soft-blue { background: linear-gradient(135deg, #38bdf8, #0f766e); }
-.kpi-label { font-size: 13px; opacity: .9; }
-.kpi-value { margin-top: 12px; font-size: 38px; line-height: 1; font-weight: 900; }
-.kpi-desc { margin-top: 14px; font-size: 12px; opacity: .78; }
-.quality-card { border-radius: 12px; padding: 24px 22px; box-shadow: 0 6px 18px rgba(15,23,42,0.05); border: 1px solid #dfe7f2; background: #fff; }
-.quality-card.detection-rate { background: linear-gradient(135deg, #ecfdf5, #fff); }
-.quality-card.false-positive-rate { background: linear-gradient(135deg, #fff7ed, #fff); }
-.quality-label { color: #64748b; font-size: 13px; font-weight: 700; }
-.quality-value { margin-top: 12px; font-size: 38px; font-weight: 900; color: #1f2937; }
-.quality-value.is-muted { font-size: 26px; color: #94a3b8; }
-.quality-desc { margin-top: 12px; color: #94a3b8; font-size: 12px; line-height: 1.5; }
-.quality-subdesc { margin-top: 8px; color: #64748b; font-size: 12px; }
-.chart-card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 1px 8px rgba(15,23,42,0.05); }
-.chart-card.wide { margin-bottom: 16px; }
-.table-card { overflow: auto; }
-.section-title { display: flex; align-items: baseline; gap: 10px; font-size: 16px; font-weight: 700; margin-bottom: 16px; }
-.section-title small { color: #94a3b8; font-size: 12px; font-weight: 500; }
-.chart { height: 360px; }
+.page-head .head-actions { display: flex; gap: 8px; }
+.cluster-summary { display: flex; gap: 8px; margin-bottom: 12px; }
+.cluster-grid { display: grid; grid-template-columns: 1fr 1.4fr; gap: 16px; }
+.cluster-block { min-width: 0; }
+.cluster-title { font-size: 13px; font-weight: 700; color: #475569; margin-bottom: 8px; }
+.cluster-empty { color: #94a3b8; font-size: 13px; padding: 18px 0; }
+.upload-tip { text-align: center; color: #475569; }
+.upload-sub { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+.preview-box { width: 100%; background: #f8fafc; border: 1px solid #e5eaf1; border-radius: 8px; padding: 10px 12px; font-size: 13px; color: #475569; max-height: 300px; overflow: auto; }
+.preview-line { margin: 4px 0; }
+.preview-cats { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.preview-sample { border-top: 1px dashed #e5eaf1; padding: 6px 0; }
+.sample-doc { font-size: 12px; color: #94a3b8; }
+.sample-comment { font-size: 13px; color: #1f2937; margin-top: 2px; }
+@media (max-width: 900px) { .cluster-grid { grid-template-columns: 1fr; } }
 @media (max-width: 768px) { .review-dashboard { padding: 16px; } .filter-bar { flex-wrap: wrap; } }
 </style>
