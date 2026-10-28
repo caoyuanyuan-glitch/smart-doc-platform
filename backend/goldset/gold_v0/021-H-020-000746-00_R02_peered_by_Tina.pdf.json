@@ -1,0 +1,149 @@
+{
+ "document": "H-020-000746-00_R02 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "前面已经有商标声明了，这里可以去掉",
+   "selected_text": "on th Q TM",
+   "context": "1.1 About the product Based on the proprietary DNBelab C series si DNBSEQ TM sequencing technologies, combin cell analysis software, the DNBelab C Series C portable, instant, and one-stop single-cell omic Based on droplet microfluidics, the DNBelab C cell ATAC library preparation set, to quickly pro nucleus suspension and prepare the dedicated",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "保留Touch screen就可以了吧",
+   "selected_text": "Touch scre interface",
+   "context": "Touch screen/ interface Compartment door Network port Label USB",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "42",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "区别是个啥",
+   "selected_text": "Software version Control software version",
+   "context": "9.2.4 Sequencing parameters Table 31 DNBSEQ-T7RS (HotMPS) sequencing software version Software version ECR 4.0 or later version Control software version 1.4.1.812 or later version Basecall version BCS_1.0.10.142 or later version Sequencing script Customize Custom primers No 115 cycles (1 to 6 bp, 17 to 22 bp, 3",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "https://global-mgitech.com 封底的网址也改下",
+   "selected_text": "number or product name from the web www.mgi-tech.com/download/files.",
+   "context": "Tips y Please download the latest instructions for use, and use it with the corresponding version of the preparation set. y Download the instructions for use through search according to the catalog number or product name from the website: www.mgi-tech.com/download/files.",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "19",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "间隙太大",
+   "selected_text": "37 ℃ ng for 15",
+   "context": "ution is prepared, adjust the pipette range to 20 μL, he reaction solution thoroughly. nd tap the tube, ensure that no bubbles exist in the tube. e in the mixer at 37 ℃ (99 ℉), and transpose at es. After transposing for 15 minutes, take out the tube e to mix it thoroughly, and then place the tube in the posing. is completed, place the 1.5 mL centrifuge tube on ice y pipette to mix it thoroughly. Count and records the",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多余空格",
+   "selected_text": "T",
+   "context": "Figure 8 Droplet fo 11. Tap Open to open the compartme Remove the sealing gasket, unlock th the droplets. Tips After the droplet formation is c to avoid droplets evaporation d due to attachment on the well.",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "27",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "can be stored",
+   "selected_text": "can store a",
+   "context": "1 / mpleted, the solution can store at 2 ℃ to ours. beads",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "都搞成双引号",
+   "selected_text": "a new 1.5 m e ‘Product’ a S Assay Kit. ‘Product’ can ths.",
+   "context": "entrifuge the tube briefly, place the tube on the magnetic sepa nd wait for 2 to 5 minutes until the liquid becomes clear. Transf he supernatant to a new 1.5 mL centrifuge tube and mark it as ‘Pro ake out 1 μL of the ‘Product’ and detect its concentration of produ he Qubit dsDNA HS Assay Kit. Stop point The ‘Product’ can be stored at -25 ℃ to -15 ℃ (-13 ℉ to months. ibrary preparation",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同下",
+   "selected_text": "ransfer 20 μ s ‘Product’.",
+   "context": "on the magnetic separation rack, becomes clear. Transfer 20 μL of ube and mark it as ‘Product’. concentration of product by using -25 ℃ to -15 ℃ (-13 ℉ to 5 ℉) for 6",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "31",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上",
+   "selected_text": "m the following steps: ording to the ‘Product’ ds selection on Page 20, ‘Product’ in a new 0.2 m",
+   "context": "Tips Please read through Appendix 2 Using scATAC Barcode Prime Page 38. Perform the following steps: 1. According to the ‘Product’ concentration detected in Demuls beads selection on Page 20, add 3 ng (if less than 3 ng, put th the ‘Product’ in a new 0.2 mL PCR tube, add NF Water as a com total volume of 46 μL, and place the PCR tube on ice. 2. Add 4 μL of the scATAC Barcode Primer in the PCR tube. Tips Record the number of scATAC Barcode Primer added in each s 3. Add 50 μL of the PCR Enzyme II, vortex to mix it thoroughly, a",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "48",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "For d",
+   "selected_text": "as De",
+   "context": "balancing barcode group, and so on. y 8 scATAC Barcode Primer (17 to 96) group. 17 to 24 are used as a base bal as a base balancing barcode group, an y Details about the sequence informatio Tips The purification method is HPLC. Table 32 Primer se Primer Sequence in （",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-000746-00_R02 peered by Tina.pdf ·",
+   "page": "48",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加逗号",
+   "selected_text": "n r",
+   "context": "Primer (17 to 96) are used as a base balancing barcod used as a base balancing barcode group, 25 to 32 are use barcode group, and so on. quence information refer to the following table. method is HPLC. able 32 Primer sequence information Sequence information (5' →3') （）",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}
