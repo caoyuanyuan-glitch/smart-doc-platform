@@ -1,0 +1,125 @@
+{
+ "document": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "176",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "改为顿号，其他地方用的是顿号",
+   "selected_text": "，） 释，毒",
+   "context": "ms Fast Identification，PFI）软件是基于Linux 操作系统开 生物识别、耐药基因注释，毒力因子注释和从头组装等多个 is Pipeline，MGAP）软件是基于Linux 操作系统开发的一 分析和进化溯源分析三个模块。 cing），泛指短读长高通量测序。 ），泛指、 平台的长读长单分子测序。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "14",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "拉大列宽一行显示，缩小最后一列的列宽",
+   "selected_text": "： 型号 Gene+PFI Pro",
+   "context": "件组成 软件组成如下表所示： 名称 型号 软件组成 微生物快速识别 与组装溯源平台 Gene+PFI Pro 微生物快速识别（Platform of microorganism Fast Identification）软件（以下简称PFI软件 微生物组装溯源（Microbial Genome Analys Pipeline）软件（以下简称MGAP软件） 置要求 置和软件环境要求如下表所示：",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "77",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "此处应该是句号",
+   "selected_text": "】； 作修改",
+   "context": "； 和【二链数据文件路径】； 建失败，可执行如下操作修改参数： 【分析任务】>【任务列表】，进入任务列表界面。 详情界面点击【暂停】暂停分析任务。 。 项目详情界面。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "81",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重复「和」字。",
+   "selected_text": "并行测 术和和基 点，通",
+   "context": "件概述 P 软件基于大规模并行测序（Massively Parallel Sequencing，M encing，SMS）技术和和基因组学知识，对未知微生物进行无参组 行重测序检测突变位点，通过多个模块实现基础数据质控、基因组学 软件适用于病毒、细菌、真菌全基因组样本的高通量测序数据及单分 装。 MGIEasy Fast 酶切文库制备试剂套装 酶切文库制备试剂套装",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "97",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "确认下是否半角括号，FQA用的全角括号",
+   "selected_text": "量(MPS)】 量百分比(MPS)】 基百分比(MPS)】 64 (MPS)】 深度(MPS)】",
+   "context": "90 【清理】 【true】 表示是否清理 y 【true】： y 【false】 【低质量(MPS)】 【20】 表示短读长数 【低质量百分比(MPS)】 【0.5】 表示短读长数 【N 碱基百分比(MPS)】 【0.05】 表示短读长数 【Phred64 (MPS)】 【false】 表示短读长数 有两个值： y 【true】： y 【false】 【最低深度(MPS)】 【10】 表示短读长数",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "161",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "漏字了，测",
+   "selected_text": "量序 。",
+   "context": "析可兼容不同质量体系的高通量测序数据，默认为Phred33 的测序数据 MPS）】的值修改为【true】。 否可以分析长读长高通量序数据？ 前已支持三代测序数据。 ，可以使用MGAP 软件只进行系统进化树构建吗？ S 平台上已开放对应从组装结果到构建系统进化树的应用模块“MGAP",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "170",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "- 小横线",
+   "selected_text": "~",
+   "context": "描述 200 V ~ 240 V~ 50/60 Hz 1450 VA 长）× 445 mm（宽）× 216 mm（高）",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "176",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "74 页写的 Single Molecule Sequencing 不一致",
+   "selected_text": "Molecular 序列数相对",
+   "context": "微生物组装溯源（Microbial Genome Analysis Pipeline，MGAP）软件是基于 款分析软件，集成了基因组组装、基因预测分析和进化溯源分析三个模块。 大规模并行测序（Massively Parallel Sequencing），泛指短读长高通量测序 单分子测序（Single Molecular Sequencing），泛指ONT、PacBio 平台的长 相应物种标准化RNA 序列数相对于标准化DNA 序列数的倍数，计算公式：（ 总RNA 校正序列数）/（某物种DNA 校正序列数/ 总DNA 校正序列数）。 比对到具体物种上的序列占所有序列的比例，计算方式为：单物种特异Reads 用Phred Quality Score 来衡量Read 中每个碱基的质量，公式如下：",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "176",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下面写的计算方式，统一下",
+   "selected_text": "平台的 ，计算公式： 序列数）。",
+   "context": "测分析和进化溯源分析三个模块。 quencing），泛指短读长高通量测序。 ng），泛指ONT、PacBio 平台的长读长单分子测序。 化DNA 序列数的倍数，计算公式：（某物种RNA 校正序列数/ 正序列数/ 总DNA 校正序列数）。 例，计算方式为：单物种特异Reads 数/ 总物种特异Reads 数。 每个碱基的质量，公式如下： 。如果该碱基测序出错的概率为，则 应该为；在",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001383-00 Gene+PFI PRO 微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM R01 Tina.pdf ·",
+   "page": "176",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "与上面描述统一",
+   "selected_text": "：单物种特异 ，公式如下：",
+   "context": "于标准化DNA 序列数的倍数，计算公式：（某物种RNA 校正序列数/ NA 校正序列数/ 总DNA 校正序列数）。 列的比例，计算方式为：单物种特异Reads 数/ 总物种特异Reads 数。 ad 中每个碱基的质量，公式如下： 的概率。如果该碱基测序出错的概率为0.001，则Q 应该为30；在 I 编码为30+33=63，63 对应的ASCII 码为“？”，则该碱基对应的 1%，或者正确率是99%。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}
