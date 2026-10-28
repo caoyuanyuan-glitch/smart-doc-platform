@@ -1,0 +1,125 @@
+{
+ "document": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "删了",
+   "selected_text": "修订 1. 修",
+   "context": "版本 发布日期 修订内容摘要 2026 年2 月 1. 修改封闭液去除管图片及描述 2. 修改说明书下载地址 3. 新增适用范围和适配的测序平台 4. 修改试剂套装名称 5. 修改推荐的阔口吸头品牌 订正样本制备卡套件运输温度",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是不是最多只支持4次冻融cycle",
+   "selected_text": "试剂反复冻 融4次稳定",
+   "context": "条件及有效期 运输温度 冻融次数 有效期 ℃ -80 ℃ ~ -15 ℃ 试剂反复冻 融4次稳定 见试剂盒 标签 2 ℃ ~ 8 ℃ / ~",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "14",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "适配",
+   "selected_text": "，测",
+   "context": "择界面，点击【适配测序平台】下拉箭头，并在弹出的列表中选择 MGISEQ-2000RS 时，测序平台应选【OTHER】。 适配测序平台 DNBSEQ-G99 xxxx/xx/xx xx:xx",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "14",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "删了",
+   "selected_text": "适配",
+   "context": "操作步骤如下： 1. 在测序平台选择界面，点击【适配测序平台】下拉箭头， 序平台。 适配MGISEQ-2000RS 时，测序平台应选【OTHE 适配测序平台 DNBSEQ",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "从左至右",
+   "selected_text": "L），搭配阔口吸 图从左往右数的",
+   "context": "置于平整桌面上待用。 器（量程调整为50 μL），搭配阔口吸头将产物孔 D1-D4 的DNB 吸出（吸 孔），分别转移到下图从左往右数的第1，3，5，7 个空管中。正常情况下， 约为10 μL。 闭液去除塞和八联排管组成。下图从左往右数的第2，4，6，8 个管中",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "管内白色部分为",
+   "selected_text": "白色材料为 闭液为红色，",
+   "context": "图 20 封闭液去除管（白色材料为封闭液去除塞） B 时会带出封闭液，封闭液为红色，DNB 为无色。 DNB，避免过度缓慢吸取。 证移液器垂直于样本制备卡，阔口吸头与D 孔贴紧，保证密封。 建议使用200 μL 阔口吸头（不带滤芯）（Axygen，货号：T-205-WB-C）。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "上面已经解释过了，这里直接写含有白色封闭液去除塞的管中",
+   "selected_text": "个含有白色",
+   "context": "下机产物为无色透明。 层油相后剩余封闭液的体积需不大 数的第2，4，6，8 个含有白色",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上意见，通改",
+   "selected_text": "从左往右数的",
+   "context": "上待用。 为50 μL），搭配阔口吸头将产物孔 D1-D4 的DNB 吸出（吸 移到下图从左往右数的第1，3，5，7 个空管中。正常情况下， 八联排管组成。下图从左往右数的第2，4，6，8 个管中",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加空格",
+   "selected_text": "5μ",
+   "context": "25 每份 可以投入测序载片上的 条 分别投入4 条lane。 μL。 加载缓冲液II 及0.25μL 的DNB 聚合",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001000-00 DNBelab-D4RS Fast PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_20260205 Tina.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "倾斜",
+   "selected_text": "、振荡及剧烈吹打。 DNBSEQ-G99RS 基因测序仪系统操作指南。 测序时，采用 便携式加",
+   "context": ") 在21 μL DNB 中加入7 μL DNB 加载缓冲液II 和1 μL DNB 聚合酶混合液Ⅱ（LC）。 ) 使用200 μL 移液枪和阔口吸头缓慢吹打混匀 5-8 次。 禁止离心、振荡及剧烈吹打DNB。 其他上机操作参考DNBSEQ-G99RS 基因测序仪系统操作指南。 搭配MGISEQ-2000RS 测序时，采用MGIDL-200H 便携式加样器可支持单样本/ ane 测序。D4 单张样本制备卡可得到4 份DNB，每份DNB 可以投入测序载片上的1 条 ane，即D4 单张样本制备卡得到的4 份DNB 可以分别投入4 条lane。 DNB 加载体系配制步骤如下： ) 在每份DNB 中，用DNB 加载缓冲液I 补足到25μL。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
