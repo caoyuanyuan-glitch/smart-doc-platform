@@ -1,0 +1,17 @@
+{
+ "document": "H-020-000113-00 DNBSEQ-T7RS Genetic Sequencer User Manual_English_RUO_WH_未加密 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000113-00 DNBSEQ-T7RS Genetic Sequencer User Manual_English_RUO_WH_未加密 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多了竖线",
+   "selected_text": "Ver 8.0",
+   "context": "Date Version May 9, 2026 8.0 May 15, 2025 7.0 November 28, 2024 6.0 uly 28, 2024 5.0 anuary 8, 2024 4.0",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}
