@@ -1,0 +1,454 @@
+{
+  "documents": [
+    {
+      "name": "H020-000008_G100-E_Nanopore_Genetic_Sequencer_User_Manual_1.1_0203_peered_by_lei",
+      "baseline": "goldset/gold_v0/001-H020-000008_G100-E_Nanopore_Genetic_Sequencer_User_Manual_1.1_0203_peered_by_lei.json",
+      "enforce": false
+    },
+    {
+      "name": "光学相干断层扫描仪产品说明书_中文_IVD_(6)_peered_by_Tina.pdf",
+      "baseline": "goldset/gold_v0/002-光学相干断层扫描仪产品说明书_中文_IVD_(6)_peered_by_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "JB-A09-193_MGIEasy_快速建库杂交捕获应用操作指南自动化操作说明书_RV1.0_SV1.0_reviewed_by_Yuanyuan.pdf",
+      "baseline": "goldset/gold_v0/003-JB-A09-193_MGIEasy_快速建库杂交捕获应用操作指南自动化操作说明书_RV1.0_SV1.0_reviewed_by_Yuanyuan.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "JB-A09-193MGIEasy_Fast_Library_Preparation_and_Capture_Application_Operation_Ins",
+      "baseline": "goldset/gold_v0/004-JB-A09-193MGIEasy_Fast_Library_Preparation_and_Capture_Application_Operation_Ins.json",
+      "enforce": false
+    },
+    {
+      "name": "H020-000008_G100-E_Nanopore_Genetic_Sequencer_User_Manual_1.1_reviewed_by_YY.doc",
+      "baseline": "goldset/gold_v0/005-H020-000008_G100-E_Nanopore_Genetic_Sequencer_User_Manual_1.1_reviewed_by_YY.doc.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001367-00_αLab_Studio_实验室智能管理平台-物料管理产品说明书_中文_RUO_SZ_Tina.pdf",
+      "baseline": "goldset/gold_v0/006-H-020-001367-00_αLab_Studio_实验室智能管理平台-物料管理产品说明书_中文_RUO_SZ_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "Sample_extraction_for_human_microbiome_metagenomics_sequencing_package_Instructi",
+      "baseline": "goldset/gold_v0/007-Sample_extraction_for_human_microbiome_metagenomics_sequencing_package_Instructi.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001371-00_DNBelab_C_Series_High-throughput_Single-cell_5'RNA&V(D)J_Library",
+      "baseline": "goldset/gold_v0/008-H-020-001371-00_DNBelab_C_Series_High-throughput_Single-cell_5'RNA&V(D)J_Library.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001235-00_FluoXpert_Vision_Analysis_Software_User_Manual_English_RUO_WH_Ti",
+      "baseline": "goldset/gold_v0/009-H-020-001235-00_FluoXpert_Vision_Analysis_Software_User_Manual_English_RUO_WH_Ti.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001303-00_DNBSEQ-E25RS_CE_RUO_kit_IFU_V1.0_R02_Tina.pdf",
+      "baseline": "goldset/gold_v0/010-H-020-001303-00_DNBSEQ-E25RS_CE_RUO_kit_IFU_V1.0_R02_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001152-00PrepALL-P8RS&PrepALL-P8GRSPrepALL液体工作站产品说明书_中文_RUO_WHV5.0_Tina.pd",
+      "baseline": "goldset/gold_v0/011-H-020-001152-00PrepALL-P8RS&PrepALL-P8GRSPrepALL液体工作站产品说明书_中文_RUO_WHV5.0_Tina.pd.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001249-00_DNBSEQ-E25RS_High-throughput_Sequencing_Set_Instructions_for_Use",
+      "baseline": "goldset/gold_v0/012-H-020-001249-00_DNBSEQ-E25RS_High-throughput_Sequencing_Set_Instructions_for_Use.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001368-00_MGIDL-G99RS_全自动样本加载仪快速操作指南_中文_RUO_WH-R02_Tina.pdf",
+      "baseline": "goldset/gold_v0/013-H-020-001368-00_MGIDL-G99RS_全自动样本加载仪快速操作指南_中文_RUO_WH-R02_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001294-00_PFI_微生物快速识别软件产品说明书_中文_RUO_SZ_Tina.pdf",
+      "baseline": "goldset/gold_v0/014-H-020-001294-00_PFI_微生物快速识别软件产品说明书_中文_RUO_SZ_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001385-00_DNBelab_C-Yellow-8_单细胞文库制备一体机产品说明书_中文_RUO_OEM_R02_1008_Tina.pdf",
+      "baseline": "goldset/gold_v0/015-H-020-001385-00_DNBelab_C-Yellow-8_单细胞文库制备一体机产品说明书_中文_RUO_OEM_R02_1008_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000747-00_DNBelab_C_系列_高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02_peered_by_Ti",
+      "baseline": "goldset/gold_v0/016-H-020-000747-00_DNBelab_C_系列_高通量单细胞ATAC文库制备试剂盒套装使用说明书_中文_RUO_QD_R02_peered_by_Ti.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001234-00_FluoXpert_Vision_多重免疫荧光图像分析软件产品说明书_中文_RUO_WH_Tina.pdf",
+      "baseline": "goldset/gold_v0/017-H-020-001234-00_FluoXpert_Vision_多重免疫荧光图像分析软件产品说明书_中文_RUO_WH_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H020-000008_G100-E_Nanopore_Genetic_Sequencer_User_Manual_1.1_0302_peered_by_Tin",
+      "baseline": "goldset/gold_v0/018-H020-000008_G100-E_Nanopore_Genetic_Sequencer_User_Manual_1.1_0302_peered_by_Tin.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001148-00_GenSIRO-48_全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf",
+      "baseline": "goldset/gold_v0/019-H-020-001148-00_GenSIRO-48_全自动测序文库制备系统产品说明书_中文_IVD_WH_R01.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001273-00_MGICLab-FZ90&150K_超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312_peered_by_",
+      "baseline": "goldset/gold_v0/020-H-020-001273-00_MGICLab-FZ90&150K_超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_0312_peered_by_.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000746-00_R02_peered_by_Tina.pdf",
+      "baseline": "goldset/gold_v0/021-H-020-000746-00_R02_peered_by_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001176-00_GenSIRO-48_Automated_Sequencing_Library_Preparation_System_User_",
+      "baseline": "goldset/gold_v0/022-H-020-001176-00_GenSIRO-48_Automated_Sequencing_Library_Preparation_System_User_.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001273-00MGICLab-FZ90&150K_超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_6.8评审_Tina.pdf",
+      "baseline": "goldset/gold_v0/023-H-020-001273-00MGICLab-FZ90&150K_超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA_6.8评审_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000691-00_MTB-Explorer_软件产品说明书_中文_RUO_SZ_R02_Tina.pdf",
+      "baseline": "goldset/gold_v0/024-H-020-000691-00_MTB-Explorer_软件产品说明书_中文_RUO_SZ_R02_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001000-00_DNBelab-D4RS_Fast_PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_202",
+      "baseline": "goldset/gold_v0/025-H-020-001000-00_DNBelab-D4RS_Fast_PCR-FREE酶切文库制备试剂套装V2.0使用说明书_中文_RUO_QD_V3.0_202.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001010-00_Go_Spatial-V2-24_Automated_Sample_Preparation_System_User_Manual",
+      "baseline": "goldset/gold_v0/026-H-020-001010-00_Go_Spatial-V2-24_Automated_Sample_Preparation_System_User_Manual.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001383-00_Gene+PFI_PRO_微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM_R01_Tina.pdf",
+      "baseline": "goldset/gold_v0/027-H-020-001383-00_Gene+PFI_PRO_微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEM_R01_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000618-00_DNBSEQ-E25RS_High-throughput_Sequencing_Set_Instructions_for_Use",
+      "baseline": "goldset/gold_v0/028-H-020-000618-00_DNBSEQ-E25RS_High-throughput_Sequencing_Set_Instructions_for_Use.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000876-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_系统操作指南_V8.0_R01_Tina.pdf",
+      "baseline": "goldset/gold_v0/029-H-020-000876-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_系统操作指南_V8.0_R01_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000912-00_MGISEQ-2000RS_系统操作指南_(StandardMPS_2.0)_中文_RUO_WH_0305_peered_by_",
+      "baseline": "goldset/gold_v0/030-H-020-000912-00_MGISEQ-2000RS_系统操作指南_(StandardMPS_2.0)_中文_RUO_WH_0305_peered_by_.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000958-00_R02_peered_by_Tina.pdf",
+      "baseline": "goldset/gold_v0/031-H-020-000958-00_R02_peered_by_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001009-00_Go_Spatial-V2-24_时空自动化样本处理系统产品说明书_中文_RUO_WH_0106_peered_by_Tina.",
+      "baseline": "goldset/gold_v0/032-H-020-001009-00_Go_Spatial-V2-24_时空自动化样本处理系统产品说明书_中文_RUO_WH_0106_peered_by_Tina..json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001210-00_USCISEQ-T1+RS_基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114_peered_by_Tina",
+      "baseline": "goldset/gold_v0/033-H-020-001210-00_USCISEQ-T1+RS_基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114_peered_by_Tina.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001248-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01_Tina.pdf",
+      "baseline": "goldset/gold_v0/034-H-020-001248-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001302-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02_Tina.pdf",
+      "baseline": "goldset/gold_v0/035-H-020-001302-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000690-00_MTB-Explorer_Software_User_Manual_English_RUO_SZ_R02_Tina.pdf",
+      "baseline": "goldset/gold_v0/036-H-020-000690-00_MTB-Explorer_Software_User_Manual_English_RUO_SZ_R02_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000959-00_DNBelab_C_系列_高通量单细胞ATAC文库制备试剂盒套装（TaiM_4）使用说明书_中文_RUO_QD_R02_peer",
+      "baseline": "goldset/gold_v0/037-H-020-000959-00_DNBelab_C_系列_高通量单细胞ATAC文库制备试剂盒套装（TaiM_4）使用说明书_中文_RUO_QD_R02_peer.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001010-00_Go_Spatial-V2-24_Automated_Sample_Preparation_System_User_Manual",
+      "baseline": "goldset/gold_v0/038-H-020-001010-00_Go_Spatial-V2-24_Automated_Sample_Preparation_System_User_Manual.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001145-00_DNBSEQ-T7+RS_基因测序仪系统操作指南_中文_RUO_WH_V5.0_R01_peered_by_Tina.pdf",
+      "baseline": "goldset/gold_v0/039-H-020-001145-00_DNBSEQ-T7+RS_基因测序仪系统操作指南_中文_RUO_WH_V5.0_R01_peered_by_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001295-00_PFI_Platform_of_Microorganisms_Fast_Identification_Software_User",
+      "baseline": "goldset/gold_v0/040-H-020-001295-00_PFI_Platform_of_Microorganisms_Fast_Identification_Software_User.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000617-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01_Tina.pdf",
+      "baseline": "goldset/gold_v0/041-H-020-000617-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000619-00_测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02_Tina.pdf",
+      "baseline": "goldset/gold_v0/042-H-020-000619-00_测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0_Tina.pdf",
+      "baseline": "goldset/gold_v0/043-H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "MGICLab-FZ90&150K_Pro_超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12_Tina.pdf",
+      "baseline": "goldset/gold_v0/044-MGICLab-FZ90&150K_Pro_超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "CSS-00065_DNBSEQ_Fast_PCR-FREE_FS_Library_Prep_Set_User_Manual_Rev_B_20260703_(3",
+      "baseline": "goldset/gold_v0/045-CSS-00065_DNBSEQ_Fast_PCR-FREE_FS_Library_Prep_Set_User_Manual_Rev_B_20260703_(3.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001009-00_Go_Spatial-V2-24_时空自动化样本处理系统产品说明书_中文_RUO_WH_0127_peered_by_Tina.",
+      "baseline": "goldset/gold_v0/046-H-020-001009-00_Go_Spatial-V2-24_时空自动化样本处理系统产品说明书_中文_RUO_WH_0127_peered_by_Tina..json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001150-00_GenSIRO-48RS_全自动测序文库制备系统产品说明书_中文_RUO_WH_R01_peered_by_Tina.pdf",
+      "baseline": "goldset/gold_v0/047-H-020-001150-00_GenSIRO-48RS_全自动测序文库制备系统产品说明书_中文_RUO_WH_R01_peered_by_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "Sample_extraction_for_human_microbiome_metagenomics_sequencing_package_package自动",
+      "baseline": "goldset/gold_v0/048-Sample_extraction_for_human_microbiome_metagenomics_sequencing_package_package自动.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001037-00_DNBSEQ-G400RS_System_Quick_Start_Guide_(StandardMPS_2.0)_English",
+      "baseline": "goldset/gold_v0/049-H-020-001037-00_DNBSEQ-G400RS_System_Quick_Start_Guide_(StandardMPS_2.0)_English.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001192-00_ExploreFree_CE_English_MD_WH_2.0_R02.pdf",
+      "baseline": "goldset/gold_v0/050-H-020-001192-00_ExploreFree_CE_English_MD_WH_2.0_R02.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001195-00_USCISEQ-G99RS_基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01_Tina.pdf",
+      "baseline": "goldset/gold_v0/051-H-020-001195-00_USCISEQ-G99RS_基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000649-00_MGIFLP-L_Automated_Sequencing_Library_Preparation_System_User_Ma",
+      "baseline": "goldset/gold_v0/052-H-020-000649-00_MGIFLP-L_Automated_Sequencing_Library_Preparation_System_User_Ma.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000781-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_System_Guide_(StandardMPS_2.0)_Englis",
+      "baseline": "goldset/gold_v0/053-H-020-000781-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_System_Guide_(StandardMPS_2.0)_Englis.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000876-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_系统操作指南（StandardMPS_2.0）_中文_RUO_WH_6.1",
+      "baseline": "goldset/gold_v0/054-H-020-000876-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_系统操作指南（StandardMPS_2.0）_中文_RUO_WH_6.1.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001110-00_MGIFLP-L_Automated_Sequencing_Library_Preparation_System_User_Ma",
+      "baseline": "goldset/gold_v0/055-H-020-001110-00_MGIFLP-L_Automated_Sequencing_Library_Preparation_System_User_Ma.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001138-00_GenSIRO-16_Automated_Sequencing_Library_Preparation_System_User_",
+      "baseline": "goldset/gold_v0/056-H-020-001138-00_GenSIRO-16_Automated_Sequencing_Library_Preparation_System_User_.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001316-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_RUO_OEMV1.0_Tina.pdf",
+      "baseline": "goldset/gold_v0/057-H-020-001316-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_RUO_OEMV1.0_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000780-00_DNBSEQ-G400RS_System_Guide_(StandardMPS_2.0)_English_RUO_WH_0305",
+      "baseline": "goldset/gold_v0/058-H-020-000780-00_DNBSEQ-G400RS_System_Guide_(StandardMPS_2.0)_English_RUO_WH_0305.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000948-00DNBSEQ-G99系列基因测序仪快速操作指南(StandardMPS2.0)_中文_RUO_WH_V4.0_R01_Tina.p",
+      "baseline": "goldset/gold_v0/059-H-020-000948-00DNBSEQ-G99系列基因测序仪快速操作指南(StandardMPS2.0)_中文_RUO_WH_V4.0_R01_Tina.p.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000999-00_DNBelab-D4RS_Fast_PCR-FREE_FS_Library_Prep_Set_V2.0_Instructions",
+      "baseline": "goldset/gold_v0/060-H-020-000999-00_DNBelab-D4RS_Fast_PCR-FREE_FS_Library_Prep_Set_V2.0_Instructions.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001053-00_DNBSEQ-T1+_Genetic_Sequencer_User_Manual_English_IVDR_SZ_V5.0_20",
+      "baseline": "goldset/gold_v0/061-H-020-001053-00_DNBSEQ-T1+_Genetic_Sequencer_User_Manual_English_IVDR_SZ_V5.0_20.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001192-00_ExploreFree_CE_English_MD_WH_2.0_R01_peered_by_Tina.pdf",
+      "baseline": "goldset/gold_v0/062-H-020-001192-00_ExploreFree_CE_English_MD_WH_2.0_R01_peered_by_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001193-00_ExploreFree_VET_User_Manual_English_VET_WH_R01_peered_by_Tina.pd",
+      "baseline": "goldset/gold_v0/063-H-020-001193-00_ExploreFree_VET_User_Manual_English_VET_WH_R01_peered_by_Tina.pd.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001239-00_ExploreFree_系列_掌上无线彩色多普勒超声诊断仪产品说明书_中文_MD_WH_(2)_Tina.pdf",
+      "baseline": "goldset/gold_v0/064-H-020-001239-00_ExploreFree_系列_掌上无线彩色多普勒超声诊断仪产品说明书_中文_MD_WH_(2)_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001272-00_G100-E_G100-E_Genetic_Sequencer_User_Manual_English_IVDR_Cyclone",
+      "baseline": "goldset/gold_v0/065-H-020-001272-00_G100-E_G100-E_Genetic_Sequencer_User_Manual_English_IVDR_Cyclone.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000014-00_MGISEQ-2000RS_基因测序仪产品说明书_中文_RUO_WH_未加密_Tina.pdf",
+      "baseline": "goldset/gold_v0/066-H-020-000014-00_MGISEQ-2000RS_基因测序仪产品说明书_中文_RUO_WH_未加密_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000362-00_保修卡_中文&英文_KS.pdf",
+      "baseline": "goldset/gold_v0/067-H-020-000362-00_保修卡_中文&英文_KS.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000391-00_MGISP-Smart_8RS_自动化样本制备系统产品说明书_中文_RUO_WH_未加密_Tina.pdf",
+      "baseline": "goldset/gold_v0/068-H-020-000391-00_MGISP-Smart_8RS_自动化样本制备系统产品说明书_中文_RUO_WH_未加密_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000418-00_DNBSEQ-G50_Genetic_Sequencer_User_Manual_English_IVDR_WH_Tina.pd",
+      "baseline": "goldset/gold_v0/069-H-020-000418-00_DNBSEQ-G50_Genetic_Sequencer_User_Manual_English_IVDR_WH_Tina.pd.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000419-00_DNBSEQ-T7_Genetic_Sequencer_User_Manual_English_IVDR_WH_未加密_Tina",
+      "baseline": "goldset/gold_v0/070-H-020-000419-00_DNBSEQ-T7_Genetic_Sequencer_User_Manual_English_IVDR_WH_未加密_Tina.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000420-00_MGISP-NE32_Automated_Nucleic_Acid_Extractor_User_Manual_English_",
+      "baseline": "goldset/gold_v0/071-H-020-000420-00_MGISP-NE32_Automated_Nucleic_Acid_Extractor_User_Manual_English_.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000649-00_Tina.pdf",
+      "baseline": "goldset/gold_v0/072-H-020-000649-00_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000780-00_DNBSEQ-G400RS_System_Guide_(StandardMPS_2.0)_English_RUO_WH_未加密_",
+      "baseline": "goldset/gold_v0/073-H-020-000780-00_DNBSEQ-G400RS_System_Guide_(StandardMPS_2.0)_English_RUO_WH_未加密_.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000795-00_HELICON_G50_Genetic_Sequencer_User_Manual_English_IVDR_WH_Tina.p",
+      "baseline": "goldset/gold_v0/074-H-020-000795-00_HELICON_G50_Genetic_Sequencer_User_Manual_English_IVDR_WH_Tina.p.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000876-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_系统操作指南（StandardMPS_2.0）_中文_RUO_WH_-_0",
+      "baseline": "goldset/gold_v0/075-H-020-000876-00_DNBSEQ-G99RS&DNBSEQ-G99ARS_系统操作指南（StandardMPS_2.0）_中文_RUO_WH_-_0.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000956-00_STP-B1000_Sample_Transfer_Processing_System_User_Manual_English_",
+      "baseline": "goldset/gold_v0/076-H-020-000956-00_STP-B1000_Sample_Transfer_Processing_System_User_Manual_English_.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000957-00_STP-B1000RS_Sample_Transfer_Processing_System_User_Manual_Englis",
+      "baseline": "goldset/gold_v0/077-H-020-000957-00_STP-B1000RS_Sample_Transfer_Processing_System_User_Manual_Englis.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001010-00_Go_Spatial-V2-24_Automated_Sample_Preparation_System_User_Manual",
+      "baseline": "goldset/gold_v0/078-H-020-001010-00_Go_Spatial-V2-24_Automated_Sample_Preparation_System_User_Manual.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001033-00_MGISP-Smart_8_Automated_Sample_Preparation_System_User_Manual_En",
+      "baseline": "goldset/gold_v0/079-H-020-001033-00_MGISP-Smart_8_Automated_Sample_Preparation_System_User_Manual_En.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001043-00_DNBSEQ-G400RS_FluoXpert_System_Guide_English_RUO_WH_未加密_Tina.pdf",
+      "baseline": "goldset/gold_v0/080-H-020-001043-00_DNBSEQ-G400RS_FluoXpert_System_Guide_English_RUO_WH_未加密_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001045-00_Urine_DNA_Storage_Reagent_Instructions_for_Use_English_RUO_WH_未加",
+      "baseline": "goldset/gold_v0/081-H-020-001045-00_Urine_DNA_Storage_Reagent_Instructions_for_Use_English_RUO_WH_未加.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001194-00_Gene+Seq-100RS_基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01_Tina.pdf",
+      "baseline": "goldset/gold_v0/082-H-020-001194-00_Gene+Seq-100RS_基因测序仪产品说明书_中文_RUO_OEM_V4.0_R01_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001339-00_POSEQ-100_Portable_DNB_Loader_Quick_Start_Guide_English_IVDR_OEM",
+      "baseline": "goldset/gold_v0/083-H-020-001339-00_POSEQ-100_Portable_DNB_Loader_Quick_Start_Guide_English_IVDR_OEM.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000084-00_MGISP-960RS&MGISP-960BRS&MGISP-960CRS_高通量自动化样本制备系统产品说明书_中文_RUO_W",
+      "baseline": "goldset/gold_v0/084-H-020-000084-00_MGISP-960RS&MGISP-960BRS&MGISP-960CRS_高通量自动化样本制备系统产品说明书_中文_RUO_W.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000113-00_DNBSEQ-T7RS_Genetic_Sequencer_User_Manual_English_RUO_WH_未加密_Tin",
+      "baseline": "goldset/gold_v0/085-H-020-000113-00_DNBSEQ-T7RS_Genetic_Sequencer_User_Manual_English_RUO_WH_未加密_Tin.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000234-00_保修卡_中文&英文_OEM.pdf",
+      "baseline": "goldset/gold_v0/086-H-020-000234-00_保修卡_中文&英文_OEM.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-000504-00_MGIDL-T20ARS_全自动样本加载仪产品说明书_中文_RUO_QD_V5.0_20260605_Tina.pdf",
+      "baseline": "goldset/gold_v0/087-H-020-000504-00_MGIDL-T20ARS_全自动样本加载仪产品说明书_中文_RUO_QD_V5.0_20260605_Tina.pdf.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001011-00_MGISP-NEXRS_Automated_Nucleic_Acid_Extractor_User_Manual_Russian",
+      "baseline": "goldset/gold_v0/088-H-020-001011-00_MGISP-NEXRS_Automated_Nucleic_Acid_Extractor_User_Manual_Russian.json",
+      "enforce": false
+    },
+    {
+      "name": "H-020-001248-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_Version_2.0.pdf",
+      "baseline": "goldset/gold_v0/089-H-020-001248-00_DNBSEQ-E25RS_高通量测序试剂套装使用说明书_中文_RUO_QD_Version_2.0.pdf.json",
+      "enforce": false
+    }
+  ],
+  "thresholds": {
+    "min_recall": 0.88,
+    "min_precision": 0.88,
+    "min_high_value_rate": 0.0
+  }
+}
