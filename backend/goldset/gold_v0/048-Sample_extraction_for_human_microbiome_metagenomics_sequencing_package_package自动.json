@@ -1,0 +1,77 @@
+{
+ "document": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf",
+ "annotations": [
+  {
+   "file": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "未更新",
+   "selected_text": "自动化版本 说明书版本 修订日期 修订内容摘要 1.0 1.0 2024 年9 月 首次发布",
+   "context": "版本记录 自动化版本 说明书版本 修订日期 修订内容摘要 1.0 1.0 2024 年9 月 首次发布",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf ·",
+   "page": "4",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重复",
+   "selected_text": "A纯 足两2",
+   "context": "到MGISP-960，DNA纯 GIISP-NE384，不足两2 .113及以上。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf ·",
+   "page": "12",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这里建议搞成公式形式，防止歧义",
+   "selected_text": ")x样",
+   "context": "次打开试剂盒包装，按照瓶上标签向结合液（Buffer PF）中加 制洗脱液：洗脱液中按每个反应0.5μL（洗脱液：RNA酶A=200 体积按（96x100(μL))x样本板数（N）/1000）x1.1+28）mL。 工或参考JB-A09-158 20-960μL Reagent Dispensing_Deepw 动化设备进行试剂分装。 中通量试剂分装准备",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf ·",
+   "page": "13",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否重复",
+   "selected_text": "PW2 2.2 mL 96 孔圆形孔 V 型底深孔板 580 μL 洗涤液2（PW2，已加入无水乙醇） PW2 2.2 mL 96 孔圆形孔 V 型底深孔板 580 μL 洗涤液2（PW2，已加入无水乙醇）",
+   "context": "异丙醇）磁珠与结合液接触后需在3 小时内使用 W1 2.2 mL 96 孔圆形孔 V 型底深孔板 480 μL 洗涤液1（Buffer W1，已加入无水乙醇） PW2 2.2 mL 96 孔圆形孔 V 型底深孔板 580 μL 洗涤液2（PW2，已加入无水乙醇） PW2 2.2 mL 96 孔圆形孔 V 型底深孔板 580 μL 洗涤液2（PW2，已加入无水乙醇） PB 2.2 mL 96 孔圆形孔 V 型底深孔板 80 μL 洗脱液PB（Buffer PB，包含RNA 酶A） 3.4 样本前处理 使用MGIEasy粪便采集套装（15mL规格：940-001644-00，30mL规格：940-001645-00）进行采样，",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf ·",
+   "page": "5",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "编号不连续，全文通查",
+   "selected_text": "表1-1 订 数量 1 1 2 1 表1-2 订",
+   "context": "ISP-960（订制化配置）可使用如下配置： 表1-1 订制化配置6-MGISP-960 平台 硬件 数量 位置 振荡器 1 POS20 磁力架 1 POS19 温控模块 2 POS21，POS22 垃圾桶 1 POS24 表1-2 订制化配置9-MGISP-960 平台 硬件 数量 位置 振荡器 1 POS20 磁力架 2 POS18，POS19 温控模块 1 POS21",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "Sample extraction for human microbiome metagenomics sequencing package package自动化操作说明书_SV1.0.pdf ·",
+   "page": "6",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加冒号 ：",
+   "selected_text": "） 号9",
+   "context": "MVM25 多管振荡器）或同等功能仪器震荡速度可达到2000rp 仪（ThermoFisher, 货号：AB-1443A）或同等功能仪器 ： 940-001646-00） （预装板 MGI 货号940-001914-00） 吸头（MGI 货号：1000000723） 901002） V 形底深孔板（MGI 货号：1000008088） 型底深孔板（MGI 货号：1000004644）",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}
