@@ -1,0 +1,41 @@
+{
+ "document": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_0305 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "58",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "均匀分布列",
+   "selected_text": "unt type User name Password account user Password123 nistrator account research Admin123",
+   "context": "1. Select in the main interface. 2. Log in to the control software with the account information provided below: Account type User name Password User account user Password123 Administrator account research Admin123 Performing pre-run checks Before each sequencing run, perform the following checks: y Check whether the remaining storage drive space is greater than 4.6 TB. If",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "143",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这个不是试剂名称",
+   "selected_text": "y insert the",
+   "context": "Once the pre-run wash and maintenance wash are com another wash for the DNB loading tubes, perform the follo Tips There is no need to replace the Cleaning cartridge duri 1. Slowly insert the Cleaning cartridge into the reage following the direction printed on the cartridge cover un 2. Place DNB loading needle washing tube 3 (2.0 mL st tube with 1.8 mL of Tween-20) into the DNB tube ra compartment door. 3. Place the washing flow cell on the stage. Ensure that th",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000780-00 DNBSEQ-G400RS System Guide (StandardMPS 2.0)_English_RUO_WH_0305 peered by Tina.pdf ·",
+   "page": "179",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "出框了，拉大宽度",
+   "selected_text": "e “TC”",
+   "context": "of Barcode in the added to maintain Seq barcodes and use “TC” odes. barcode in the ode in the Customize",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
