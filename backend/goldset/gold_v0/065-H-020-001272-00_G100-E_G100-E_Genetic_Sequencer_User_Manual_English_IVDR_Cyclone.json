@@ -1,0 +1,41 @@
+{
+ "document": "H-020-001272-00 G100-E G100-E Genetic Sequencer User Manual_English_IVDR_CycloneSEQ_0311 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001272-00 G100-E G100-E Genetic Sequencer User Manual_English_IVDR_CycloneSEQ_0311 peered by Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "根据下面这两个图应该是Front of XXX (with Rotary ON/OFF)",
+   "selected_text": "- OFF and ON",
+   "context": "4 Sequencing chip - OFF and ON",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001272-00 G100-E G100-E Genetic Sequencer User Manual_English_IVDR_CycloneSEQ_0311 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "我看上图还是用chip",
+   "selected_text": "g flow",
+   "context": "k it during use. ure conduction module enetic sequencer. ckaged sequencing flow gers. Enables sequencing n, and data transmission.",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001272-00 G100-E G100-E Genetic Sequencer User Manual_English_IVDR_CycloneSEQ_0311 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "Click a tab in the area to access the following functions:",
+   "selected_text": "Provides Chip, Sequencing, Data Board, Log, and Settings tabs.",
+   "context": "Item Description Software icon Click to view the software and hardware version information. Navigation area Provides Chip, Sequencing, Data Board, Log, and Settings tabs. y Chip tab: Click to perform chip QC and view chip- related information. y Sequencing tab: Click to configure sequencing parameters, perform sequencing, and view sequencing data.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  }
+ ]
+}
