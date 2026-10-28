@@ -149,7 +149,7 @@ Word 转 DITA 批量转换基线规则
   - 每次转换完成后必须再做一轮与原文核对：按 `word-to-dita-conversion-rules.md` 逐条检查，对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出；不得只交 zip
   - 用户口述的新转换规则（如 `警告`→`warning`、`注意`→`caution`）必须沉淀到该规则文件，并同步落实现与测试，不能只停留在对话里
   - 规则文件同时覆盖 Word/WPS 与 IDML 两种源格式，差异只写在“IDML 源解析规则”小节
-    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 178 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
+    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 192 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
   - IME 主题类型：封面 `sCoverTopic`，章级 `chapterTopic`，其余一律 `sDitaTopic` + `DTO`。IME 按编号前缀显示：`DTO` 为「主题 Topic」，`DTC` 为「主题 Concept」
   - `ul`/`ol` 条目、表格单元格、正文与 Note 句段都包 `<p>`：`<li><p>…</p></li>`、`<entry><p>…</p></entry>`；空单元格保持空 `<entry>`
   - 改写已导入的 IME zip 时，必须同步 `.dita` 文件名/`cms:number`、ditamap、`xref`、`jsonData.json`、`infotree.xml`（含 `out/` 副本）。只改 `.dita` 时 IME 仍显示旧类型

@@ -38,6 +38,10 @@ from app.api.convert import (  # noqa: E402
     _flatten_sections,
     _markdown_to_lossless_csv,
     _csv_to_markdown,
+    _extract_cover_fields,
+    _is_cover_topic_xml,
+    _patch_template_cover_fields,
+    _is_frontmatter_title,
 )
 
 TOOLS_ROOT = BACKEND_ROOT / "tools"
@@ -1292,6 +1296,73 @@ class TemplateSubsetTest(unittest.TestCase):
         self.assertIn("DTC041004.dita", used_files)
 
 
+class CoverFieldPatchTest(unittest.TestCase):
+    COVER_XML = '''<concept outputclass="cover" cms:imesofttype="sCoverTopic">
+  <title>Cover</title>
+  <conbody>
+    <table>
+      <tgroup cols="2">
+        <tbody>
+          <row>
+            <entry><p>Part No.</p></entry>
+            <entry><p id="p4c1ad437">H-020-000897-00</p></entry>
+          </row>
+          <row>
+            <entry><p>手册名称</p></entry>
+            <entry><p id="p82765932"> Instructions for Use</p></entry>
+          </row>
+          <row>
+            <entry><p>产品名称 可以为空，默认为 PLM 项目名称</p></entry>
+            <entry><p id="p0538a1a2">DNBelab C Series High-throughput Single-cell RNA Library Preparation Set V3.0</p></entry>
+          </row>
+        </tbody>
+      </tgroup>
+    </table>
+  </conbody>
+</concept>'''
+
+    def test_extracts_e25_fields_from_about_text(self):
+        fields = _extract_cover_fields(
+            "H-020-000618-00 DNBSEQ-E25RS CE RUO kit IFU.idml",
+            "This instructions for use is applicable to DNBSEQ-E25RS High-throughput Sequencing set. The version of the instructions for use is 8.0.",
+            "en-US",
+        )
+        self.assertEqual(fields["part_no"], "H-020-000618-00")
+        self.assertEqual(fields["manual_name"], "Instructions for Use")
+        self.assertEqual(fields["product_name"], "DNBSEQ-E25RS High-throughput Sequencing Set")
+
+    def test_extracts_part_no_from_resolved_idml_filename(self):
+        fields = _extract_cover_fields(
+            "static/uploads/idml_123_H-020-000618-00 DNBSEQ-E25RS CE RUO kit IFU.idml",
+            "This instructions for use is applicable to DNBSEQ-E25RS High-throughput Sequencing set.",
+            "en-US",
+        )
+        self.assertEqual(fields["part_no"], "H-020-000618-00")
+
+    def test_patches_template_cover_values_and_keeps_ids(self):
+        self.assertTrue(_is_cover_topic_xml(self.COVER_XML))
+        patched = _patch_template_cover_fields(self.COVER_XML, {
+            "part_no": "H-020-000618-00",
+            "manual_name": "Instructions for Use",
+            "product_name": "DNBSEQ-E25RS High-throughput Sequencing Set",
+        })
+        self.assertIn(">H-020-000618-00</p>", patched)
+        self.assertIn('id="p4c1ad437"', patched)
+        self.assertIn(">Instructions for Use</p>", patched)
+        self.assertIn(">DNBSEQ-E25RS High-throughput Sequencing Set</p>", patched)
+        self.assertNotIn("H-020-000897-00", patched)
+        self.assertNotIn("DNBelab C Series", patched)
+
+    def test_fills_empty_self_closing_cover_value(self):
+        xml = (
+            '<concept cms:imesofttype="sCoverTopic">'
+            "<row><entry><p>Part No.</p></entry><entry><p id=\"pempty\"/></entry></row>"
+            "</concept>"
+        )
+        patched = _patch_template_cover_fields(xml, {"part_no": "H-020-000618-00"})
+        self.assertIn('<p id="pempty">H-020-000618-00</p>', patched)
+
+
 class DocxTableMarkdownTest(unittest.TestCase):
     def test_repeated_merged_cell_values_are_collapsed(self):
         tc_objects = {}
@@ -1541,8 +1612,8 @@ class DocxTableMarkdownTest(unittest.TestCase):
         self.assertIn('namest="COLSPEC7" nameend="COLSPEC8"', xml)
         self.assertNotIn("COLSPEC10", xml)
         self.assertNotIn("COLSPEC11", xml)
-        self.assertIn(">1</entry>", xml)
-        self.assertIn(">4</entry>", xml)
+        self.assertIn("<p>1</p>", xml)
+        self.assertIn("<p>4</p>", xml)
 
     def test_sequencing_parameters_table_is_extra_wide(self):
         xml = _content_to_dita_xml(
@@ -2484,6 +2555,351 @@ class IdmlConversionTest(unittest.TestCase):
         )
         self.assertNotIn("第30 页", xml)
         self.assertNotIn("[[XREF:", xml)
+
+    def test_english_cross_reference_on_page_becomes_xref(self):
+        """English InDesign xrefs read '<title> on Page' plus ResultText."""
+        import tempfile
+
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Body">'
+            "<CharacterStyleRange><Content>Otherwise, refer to </Content></CharacterStyleRange>"
+            '<CrossReferenceSource Self="xref1" AppliedFormat="uda6">'
+            '<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/Cross reference-EN">'
+            "<Content>Quantifying DNBs on Page </Content></CharacterStyleRange>"
+            '<CharacterStyleRange PageNumberType="TextVariable">'
+            '<TextVariableInstance Name="TV XRefPageNumber" ResultText="15"/>'
+            "</CharacterStyleRange>"
+            "</CrossReferenceSource>"
+            '<CharacterStyleRange><Content>.</Content></CharacterStyleRange>'
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_xref_en.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("Otherwise, refer to [[XREF:Quantifying DNBs#15]].", md)
+        self.assertNotIn("on Page", md)
+
+        xml = _content_to_dita_xml(
+            "Make DNB", md, "task", "DTO041250", "en-US",
+            topic_kind="task", source_format="idml",
+            xref_map={"Quantifying DNBs": "DTO041015"},
+        )
+        self.assertIn(
+            '<xref href="DTO041015.dita" cms:title="Quantifying DNBs"/>',
+            xml,
+        )
+        self.assertNotIn("on Page", xml)
+        self.assertNotIn("[[XREF:", xml)
+
+    def test_reagent_name_character_style_becomes_term(self):
+        """Blue reagent names (Reagent name_EN) map to <term>."""
+        import tempfile
+
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Body">'
+            "<CharacterStyleRange><Content>Add </Content></CharacterStyleRange>"
+            '<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/Reagent name_EN">'
+            "<Content>Conversion Enzyme</Content></CharacterStyleRange>"
+            "<CharacterStyleRange><Content> to the mixture.</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_term.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("[[TERM]]Conversion Enzyme[[/TERM]]", md)
+        xml = _content_to_dita_xml(
+            "Make DNB", md, "task", "DTO041251", "en-US",
+            topic_kind="task", source_format="idml",
+        )
+        self.assertIn("<term>Conversion Enzyme</term>", xml)
+        self.assertNotIn("[[TERM]]", xml)
+
+    def test_table_title_wide_style_marks_180mm(self):
+        """Table-title-EN-Wide captions emit [[TWIDE:180mm]] for kit tables."""
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/For reagent kit only:Title-L1-with number-EN"'
+            ' Name="For reagent kit only:Title-L1-with number-EN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/For reagent kit only:Table-title-EN-Wide"'
+            ' Name="For reagent kit only:Table-title-EN-Wide"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/For reagent kit only:Title-L1-with number-EN">'
+            "<CharacterStyleRange><Content>Introduction</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/For reagent kit only:Table-title-EN-Wide">'
+            "<CharacterStyleRange><Content>DNBSEQ-E25RS High-throughput Sequencing Set "
+            "(FCL SE100) Cat. No.: 940-000573-00</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="2">'
+            '<Column Self="co0" Name="0" SingleColumnWidth="100"/>'
+            '<Column Self="co1" Name="1" SingleColumnWidth="100"/>'
+            '<Cell Self="c0" Name="0:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Kit name</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Component</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c2" Name="0:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>A</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c3" Name="1:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>B</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_wide.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("[[TWIDE:180mm]]", md)
+        self.assertIn("[[TABCAP]]DNBSEQ-E25RS High-throughput Sequencing Set", md)
+        xml = _content_to_dita_xml(
+            "Introduction", md, "concept", "CTO041252", "en-US",
+            topic_kind="chapter", source_format="idml",
+        )
+        self.assertIn('<table outputclass="180mm">', xml)
+
+    def test_idml_table_width_marks_user_supplied_180mm(self):
+        """IDML tables laid out at ~180 mm get outputclass=180mm without a Wide title style."""
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/For reagent kit only:Title-L1-with number-EN"'
+            ' Name="For reagent kit only:Title-L1-with number-EN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/For reagent kit only:Table-title-EN"'
+            ' Name="For reagent kit only:Table-title-EN"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/For reagent kit only:Title-L1-with number-EN">'
+            "<CharacterStyleRange><Content>Introduction</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/For reagent kit only:Table-title-EN">'
+            "<CharacterStyleRange><Content>User-supplied equipment, reagent and consumables</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="4">'
+            '<Column Self="co0" Name="0" SingleColumnWidth="85.17"/>'
+            '<Column Self="co1" Name="1" SingleColumnWidth="180.14"/>'
+            '<Column Self="co2" Name="2" SingleColumnWidth="143.80"/>'
+            '<Column Self="co3" Name="3" SingleColumnWidth="103.23"/>'
+            '<Cell Self="c0" Name="0:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Type</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Name</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c2" Name="2:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Specification</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c3" Name="3:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Qty</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c4" Name="0:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Equipment</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c5" Name="1:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Pipette</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c6" Name="2:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>1 mL</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c7" Name="3:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>1</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_user_supplied.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("[[TWIDE:180mm]]", md)
+        xml = _content_to_dita_xml(
+            "Introduction", md, "concept", "CTO041253", "en-US",
+            topic_kind="chapter", source_format="idml",
+        )
+        self.assertIn('<table outputclass="180mm">', xml)
+        self.assertIn("User-supplied equipment, reagent and consumables", xml)
+
+    def test_idml_xmp_thumbnail_fills_missing_inline_icon(self):
+        """A PDF icon without Links/ still inlines from its XMP JPEG preview."""
+        import base64
+        import tempfile
+
+        jpeg = base64.b64decode(
+            "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+        )
+        b64 = base64.b64encode(jpeg).decode("ascii")
+        xmp = (
+            "<?xpacket begin=\"\ufeff\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+            "<rdf:Description xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
+            "xmlns:xmpGImg=\"http://ns.adobe.com/xap/1.0/g/img/\">"
+            "<dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">icon_status sequencing</rdf:li></rdf:Alt></dc:title>"
+            f"<xmpGImg:image>{b64}</xmpGImg:image>"
+            "</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=\"r\"?>"
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/StepsList">'
+            "<CharacterStyleRange><Content>Tap</Content>"
+            '<Rectangle ContentType="GraphicType">'
+            "<PDF>"
+            "<MetadataPacketPreference><Properties>"
+            f"<Contents><![CDATA[{xmp}]]></Contents>"
+            "</Properties></MetadataPacketPreference>"
+            "</PDF></Rectangle>"
+            "<Content>. The self-check of the device starts.</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_xmp_icon.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("icon_status sequencing.jpg", md)
+        self.assertIn("Tap", md)
+        self.assertIn("self-check of the device starts", md)
+        xml = _content_to_dita_xml(
+            "Selecting a recipe", md, "task", "DTO041254", "en-US",
+            topic_kind="task", source_format="idml",
+        )
+        self.assertIn("icon_status sequencing.jpg", xml)
+        self.assertIn("<image href=", xml)
+        self.assertIn("Tap", xml)
+
+    def test_idml_xmp_thumbnail_fills_missing_figure(self):
+        """A missing .ai figure still emits the XMP JPEG preview as the image."""
+        import base64
+        import tempfile
+
+        jpeg = base64.b64decode(
+            "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+        )
+        b64 = base64.b64encode(jpeg).decode("ascii")
+        xmp = (
+            "<?xpacket begin=\"\ufeff\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+            "<rdf:Description xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
+            "xmlns:xmpGImg=\"http://ns.adobe.com/xap/1.0/g/img/\">"
+            "<dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">image_installliquidwastebox</rdf:li></rdf:Alt></dc:title>"
+            f"<xmpGImg:image>{b64}</xmpGImg:image>"
+            "</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=\"r\"?>"
+        )
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/For reagent kit only:Figure-title-EN"'
+            ' Name="For reagent kit only:Figure-title-EN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Body" Name="Body Text"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Body">'
+            "<CharacterStyleRange>"
+            '<Rectangle ContentType="GraphicType"><PDF>'
+            '<Link LinkResourceURI="file:C:/doc/Links/image_installliquidwastebox.ai"/>'
+            "<MetadataPacketPreference><Properties>"
+            f"<Contents><![CDATA[{xmp}]]></Contents>"
+            "</Properties></MetadataPacketPreference>"
+            "</PDF></Rectangle>"
+            "</CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/For reagent kit only:Figure-title-EN">'
+            "<CharacterStyleRange><Content>Placing the waste container</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_xmp_fig.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("image_installliquidwastebox.jpg", md)
+        self.assertIn("[[FIGCAP]]Placing the waste container", md)
+        xml = _content_to_dita_xml(
+            "Loading", md, "task", "DTO041255", "en-US",
+            topic_kind="task", source_format="idml",
+        )
+        self.assertIn("image_installliquidwastebox.jpg", xml)
+        self.assertIn("<fig>", xml)
+        self.assertIn("Placing the waste container", xml)
+
+    def test_nested_warning_table_in_cell_becomes_note(self):
+        """A warning callout nested in a table cell becomes <note type="warning">."""
+        import xml.etree.ElementTree as ET
+
+        nested = (
+            '<Table Self="warn" HeaderRowCount="0" FooterRowCount="0" '
+            'BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="w0" Name="0:0">'
+            "<ParagraphStyleRange>"
+            "<CharacterStyleRange>"
+            '<Rectangle><PDF><Link LinkResourceURI="file:C:/Links/label000082_Warning_EN.ai"/>'
+            "</PDF></Rectangle>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="w1" Name="1:0">'
+            "<ParagraphStyleRange>"
+            "<CharacterStyleRange>"
+            "<Content>Sequencing cannot be resumed after ending. Please operate with care.</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        table = (
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="c0" Name="0:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Item</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Description</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c2" Name="0:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>Stop</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c3" Name="1:1">'
+            "<ParagraphStyleRange><CharacterStyleRange>"
+            "<Content>Tap to end sequencing in advance.</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange>"
+            f"{nested}"
+            "</Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        joined = "\n".join(lines)
+        self.assertIn("[[NOTE:warning]]", joined)
+        self.assertIn("Sequencing cannot be resumed after ending", joined)
+        xml = _content_to_dita_xml(
+            "Sequencing", "\n".join(lines), "task", "DTO041253", "en-US",
+            topic_kind="task", source_format="idml",
+        )
+        self.assertIn('<note type="warning">', xml)
+        self.assertIn("Tap to end sequencing in advance.", xml)
+        self.assertIn("Sequencing cannot be resumed after ending. Please operate with care.", xml)
+
+    def test_about_the_sequencing_set_is_frontmatter(self):
+        self.assertTrue(_is_frontmatter_title("About the sequencing set"))
 
     def test_idml_table_column_widths_become_colspec(self):
         """IDML Column/@SingleColumnWidth maps to relative CALS colwidth."""

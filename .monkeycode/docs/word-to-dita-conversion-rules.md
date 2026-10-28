@@ -11,12 +11,13 @@
 ## 模板复用规则
 
 - `Cover` topic 直接复用参考 DITA zip 包中的原始 topic。
+- 复用模板封面时，从源文档写入封面三字段：Part No.（手册编号）、手册名称、产品名称。英文手册名称为 `Instructions for Use`，中文为 `使用说明书`。产品名称取「本说明书适用于…」或 `applicable to …` 句中的产品名。
 - 复用模板封面 topic 时，源 Word 的封面不再单独生成 topic，也不在 ditamap 中重复挂载。
 - 源 Word 的 `Version History` / `版本记录` 正文（含修订表）必须写进该 topic；复用模板封面时不得把这份内容带进 Cover 后丢掉。
 - 验收时源 Word 的封面标题与封面正文不计入标题结构和内容完整性比对范围。
 - `booklists/toc` 继续复用参考 DITA zip 包。
 - `Manufacturer information` 按源 Word 生成，不复用模板 appendix 内容。
-- `<frontmatter>` 内顺序为：封面（Cover）、`关于说明书`、`版本记录`；`关于说明书`、`版本记录` 与封面平级，排在封面之后，不嵌套在封面下。
+ - `<frontmatter>` 内顺序为：封面（Cover）、`关于说明书`、`版本记录`，以及源文档中的 `About the sequencing set`；这些 topic 与封面平级，排在封面之后，不嵌套在封面下。
 - `制造商信息` 不是固定前部 topic，按源文档框架放置：IDML 中 `Title-Appen. n` 样式输出为正文之后的 `<appendix>`；Word 中按源章节位置生成。
 
  - 参考包若是快速操作指南（frontmatter 只有封面 topic，没有关于说明书和 toc），输出包跟随参考包：封面 topic 复用参考包结构，不生成关于说明书，不挂 booklists/toc。源 MD 标题前的适用平台并入第一章正文；文档日期写入封面「修订日期」，不再并入第一章。用户已填的封面字段（手册名称、编号、修订日期、版本）按该封面输出。
@@ -83,9 +84,18 @@
 - 中文源用 `【】` 包裹屏上文本；输出为独立的 `<uicontrol>文本</uicontrol>`，只取括号内文本（`【】` 由 IME 自动渲染）。
 - 英文源的屏上控件用 `Silk screen` 字符样式标记（该样式自带加粗外观），等价于中文的 `【】`；同样输出 `<uicontrol>`。加粗的英文操作步骤文本也按屏上控件处理。
  - 英文 Word 源若用方括号包裹屏上文本（如 `[DNBelabC-YellowR16]`、`[Login]`），同样输出 `<uicontrol>`；纯数字方括号（`[1]`、`[12]`）不是控件名。
+- 英文方括号转 `uicontrol` 时，内部转换标记保持原样：`XREF:`、`NOTE:`、`TABCAP`、`FIGCAP`、`TWIDE:`、`COLW:`、`THEAD:`、`LVL:`、`SPAN:`。
 - `【N】`（数字起首）是 note 的条目序号，不是控件名，保持原样交由 note 条目合并逻辑处理。
  - 英文 Word 的 `[N]`（如 `[1]`、`[12]`）与中文 `【N】` 同类，是 note 条目序号，不是控件名。
 - `uicontrol` 去首尾空白；纯空格的对屏文本段保留为普通空格，不生成空控件。
+
+### 术语（`term`）
+
+- 源文件中的蓝色试剂名输出为 `<term>`。
+- IDML 用字符样式 `Reagent name` / `Reagent name_EN` 标记（该样式自带蓝色外观），等价于正文里的蓝色试剂名。
+- 解析阶段写成 `[[TERM]]试剂名[[/TERM]]`，DITA 阶段还原为 `<term>试剂名</term>`。
+- 试剂名保持原文，包括空格与大小写（如 `Conversion Enzyme`）。
+- 同一字符 run 已是屏上控件（Silk screen / `【】`）时输出 `<uicontrol>`，控件优先于术语。
 
 ## Note 规则
 
@@ -137,7 +147,8 @@
 - 表头行数由 `HeaderRowCount` 决定：解析阶段输出 `[[THEAD:n]]` 标记，DITA 阶段把前 n 行全部放入同一个 `<thead>`。两行表头必须保留两行，不能只取第一行或把第二行降到 `<tbody>`。
 - 表格单元格内的图标（如 `icon_emergencystop.ai` 状态图标）必须保留为该 `<entry>` 内的 `<image>`，不得因为单元格没有正文而丢弃；单元格文字与嵌套表格正文只输出一次。
 - 段落内可锚定提示框表格（`ParagraphStyleRange → CharacterStyleRange → Table`）：必须先输出段落自身文字，再输出锚定表格，不能因嵌套表格跳过段落正文。
- - 图片由外部链接引用（`Link` 元素），常见 `.ai`/`.png`；同名 `.svg` 视为其可用的替代资源。源 zip 含 `.idml` 与同级 `Links/`，`Links/` 放与链接主干同名的 `.svg`（`.ai` 按同名 `.svg` 替换）。无对应资源的链接不输出图片。
+ - 图片由外部链接引用（`Link` 元素），常见 `.ai`/`.png`；同名 `.svg` 视为其可用的替代资源。源 zip 含 `.idml` 与同级 `Links/`，`Links/` 放与链接主干同名的 `.svg`（`.ai` 按同名 `.svg` 替换）。无对应 `Links/` 文件时，回退使用 IDML 内嵌 XMP JPEG 预览（覆盖未打包的 `.ai` 以及无 `Link` 的内联 PDF 图标，如 `icon_status sequencing`、`icon_run_E25 kit`、`image_installliquidwastebox`）。
+- IDML 故事里的 `PDF` / `Image` / `EPS` 即使 `Link` 缺失或 `Links/` 中没有 IME 可用文件，也按图形处理。回退资源取自该图形 `MetadataPacketPreference` 内 XMP 的 `xmpGImg:image` JPEG（约 256 px 预览）。文件名优先用 `Link` 主干，否则用 XMP `dc:title`；主干末尾的 `_N` 在匹配时去掉；输出扩展名为 `.jpg`，保留空格与中文。
  - 无原生 InDesign `Links/` 时，可用 IME 导出包 `image/` 中的 SVG：去掉文件名 `G\d+_` 前缀，按主干（大小写不敏感）对齐 IDML `Link` 主干，写入源 zip 的 `Links/{主干}.svg`。note 图标（`icon_note`、`Warning` 等）仍不输出。
 - 链接 URI 必须先做百分号解码（`urllib.parse.unquote`）再匹配资源；InDesign 会把名称中的空格与中文编码成 `%20`/`%xx`，不解码会导致这些图片全部漏配。
 - 图题段落以 `Figure-title` 样式标识（如 `For reagent kit only:Figure-title-CN/-EN`），转换时打上 `[[FIGCAP]]` 标记，供 DITA 层包装为图。
@@ -150,7 +161,11 @@
 - 内联图标若排在提示框（note）之前，输出顺序须保持“图标 → note”，不能因为提示框先冲刷而把图标挤到 note 之后。
 - 内联按钮图标必须保持它在句中的原始位置，不能下沉到段落/列表项末尾：例如源为「点击[icon]，托盘将自动收回…」时，输出须为 `<li><p>点击<image href="…"/>，托盘将自动收回…</p></li>`，图标夹在 `点击` 与 `，` 之间。图标在解析阶段以占位符随文本一起传递，避免位置丢失。
 - 段落正文中的状态图标（文件名以 `icon` 开头，如 `icon_status sequencing_1_1.ai`）按内联图片输出，段落保持为正文而不是被拆成独立的块级图片。
-  - 交叉引用（`CrossReferenceSource`，源文形态为 `第<页码>页“目标标题”`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。DITA 阶段输出空标签 `<xref href="目标topic.dita" cms:title="目标标题"/>`，不把「第N 页标题」写进 xref 体内，页码由 IME 按目标 topic 生成。找不到对应 topic 时回退为纯文本 `第N 页“标题”`，不产出无效 `<xref>`。
+- 文件名以 `formula_` 开头的公式图同样按内联图标处理。
+- 内联图标解析失败、占位符被去掉时，仅当左右两侧都是字母或数字才插入空格；标点（含中文标点）紧贴图标时不补空格。
+  - 交叉引用（`CrossReferenceSource`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。中文源形态为 `第<页码>页“目标标题”`，英文源形态为 `<target title> on Page`。DITA 阶段输出空标签 `<xref href="目标topic.dita" cms:title="目标标题"/>`，不把页码写进 xref 体内，页码由 IME 按目标 topic 生成。找不到对应 topic 时中文回退为纯文本 `第N 页“标题”`，英文回退为标题文本，不产出无效 `<xref>`。
+  - 蓝色试剂名见「术语（`term`）」：字符样式 `Reagent name` / `Reagent name_EN` 输出 `<term>`。
+ - 单元格内嵌套的提示框表格输出为该 `<entry>` 内的 `<note>`，不得并成一句普通正文。
   - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`），也不含页码。数字/英文后紧跟汉字处的空格只用于未解析回退文本（`第12 页`、`测定DNB 浓度`）。
   - IDML 斜体字符样式转为 `<i>`：`Cross reference` / `Cross reference-in para.-CN` 等（公式变量 `N`/`c`/`V`、书名）以及 `Subtle Emphasis`、`FontStyle="Italic"`。相邻斜体 run 合并。屏上控件样式优先于斜体。
  - 页码变量解析失败时省略“第N页”，只输出标题；不得残留 `第页“目标标题”` 这类空页码形式。
@@ -188,7 +203,8 @@
 - 没有垂直合并的标签首行（如 `Workbench Position`）可作为 1 行 `<thead>`。
 - Word `w:vMerge` / `w:gridSpan` 在解析阶段输出 `[[SPAN:c,r]]` / `[[SPANC]]`，DITA 阶段还原为 `morerows` 与 `namest`/`nameend`。
 - 同一行里横向合并的 `[[SPANC]]` 只占位、不再推进列号；`namest`/`nameend` 必须落在已有 `colspec` 范围内。列号越界时 IME 打开该 topic 会报「加载文档内容失败:undefined」。
-- 超宽表输出 `<table outputclass="180mm">`：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` 等宽表章节，或列数 ≥ 7（覆盖 Barcode / Appendix C–E）。
+ - 超宽表输出 `<table outputclass="180mm">`：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` / `User-supplied equipment` 等宽表章节，列数 ≥ 7（覆盖 Barcode / Appendix C–E），IDML 表题样式含 `Wide`（如 `Table-title-EN-Wide` 的套装组分表），或 IDML 表格列宽合计 ≥ 480 pt（约 169 mm，覆盖 Table 6 `User-supplied equipment, reagent and consumables`）。
+- 列宽合计低于 480 pt 的表保持默认宽度，例如约 392 pt（约 138 mm）的两列表、约 143 mm 的 Sequencing cycle 表。
 - Word 表格跨页后重复出现的表头行，需要在转换后自动删除。
 - 若同一 Markdown 表中出现嵌入式 `Table N ...` 行，视为下一张表的标题并拆分为独立表格。
 - 被合并单元格拆碎的英文表题片段需自动拼回完整标题。
@@ -205,8 +221,8 @@
 - note 图标图片不计入图片丢失。
 - 表格标题、图片标题、列表、note 转换结果都应通过自动校验。
 - 内容完整性：源文档全部段落必须出现在输出 DITA 中（用“源段落 → 输出全文”归一化比对，缺失数应为 0）。
-- 结构合法性：输出的每个 `.dita` / `.ditamap` 必须可解析，ditamap 中所有 `href` 必须可达。
- - 每次转换完成后必须做一轮与原文核对：按本文件逐条检查模板复用、标题树、列表、note、uicontrol、图题/表题、图片和扉页；先跑单测与 `verify_word_to_dita_package.py`，再人工对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出后再交给用户。
+ - 结构合法性：输出的每个 `.dita` / `.ditamap` 必须可解析，ditamap 中所有 `href` 必须可达。
+  - 每次转换完成后必须做一轮与原文核对：按本文件逐条检查模板复用、标题树、列表、note、uicontrol、term、图题/表题、图片和扉页；先跑单测与 `verify_word_to_dita_package.py`，再人工对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出后再交给用户。
 
 ## Markdown 源解析规则
 
