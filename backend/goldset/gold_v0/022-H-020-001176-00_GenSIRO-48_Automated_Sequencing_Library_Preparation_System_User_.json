@@ -1,0 +1,137 @@
+{
+ "document": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "45",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "通查",
+   "selected_text": "48to al",
+   "context": "ction mechanism will be displayed. an error occurs, a bleshooting on page 48to contact the technical eriments separately, or This section takes the s an example. Specific",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "45",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "删了",
+   "selected_text": "when the running t",
+   "context": "area, click to start the integrated kflow is enabled, when the extraction utomatically starts running the library",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "72",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "换成新的",
+   "selected_text": ": www.mgi-tech.com",
+   "context": "Address: Building 24, Stage 3.1, BioLake Accelerator, No.388, 2nd Gaoxin Road, East Lake High-Tech Development Zone, 430075, Wuhan, P.R.China E-mail: MGI-service@mgi-tech.com Website: www.mgi-tech.com",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "2",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "后面加空格",
+   "selected_text": "s®a an",
+   "context": "es in this manual are for illustrative purpose only. The co y different from the product. For the most up-to-date d oduct purchased. soft® and Windows®are trademarks or registered tradem ration in the U.S. and/or other countries. Other names oned in this manual may be the property of their respec ubsidiaries. 5-2026 Wuhan MGI Tech Co., Ltd. All rights reserved.",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "The extraction module is on the left, and the library preparation module is on the right.",
+   "selected_text": "Structural frame (the left is extraction module, and the right is library preparation module)",
+   "context": "1 Structural frame (the left is extraction module, and the right is library preparation module) Door You can observe device through th You can perform the operation de the door. This door with sens door duri cause the 2 Door handle Holds to open or cl 3 Robotic arm of the Pipette module Picks up pipette tip liquid.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上意见",
+   "selected_text": "Structural frame (the left is extraction module, and the right is library preparation module)",
+   "context": "of the extraction module 6 Power button from the power sup 7 Cabinet 1 Press the cabinet d 8 Structural frame (the left is extraction module, and the right is library preparation module) Supporting feet Supports the main stability. Put down move the device. 9 Structural frame of the library preparation module Cabinet 2 Contains a built-in w for collecting waste Press the cabinet d 10 Transfer Grips plate consum silicone lids, and te",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上",
+   "selected_text": "Electrical module (the left is library preparation module and the right is extraction module) Electrical module of the library preparation module Electrical module (the left is library preparation module and the right is extraction module)",
+   "context": "No. Module Name Description 1 Electrical module (the left is library preparation module and the right is extraction module) Handle Used to pull out th maintenance. 2 Ventilation outlet Ventilates the devi 3 Electrical module of the library preparation module USB port Connect to the bui module. 4 Electrical module (the left is library preparation module and the right is extraction module) Fuse socket Fuses are installed 5 Power switch Connects to or dis power supply: Turn to the pos power supply. Turn to the from the power 6 Power port Connects to the m 7 Network port Connect the instru (the computer nee separately).",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这里缺了空格，还多了字母",
+   "selected_text": "opening the cabinet for ce orserver installation.r.",
+   "context": "tion Ventilates the device. or of inet Facilitates opening the cabinet for maintenance orserver installation.r.",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "37",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是不是有多余空格",
+   "selected_text": "μ L, 300 μ L, 50 μ L, 10 μ L ti",
+   "context": "ons. List of compatible consumables Description tip 1000 μ L, 300 μ L, 50 μ L, 10 μ L tips 1.3 mL U-bottom deep-well plate 2.2 mL 96-Well V-bottom Deepwell Plate 0.2 mL 96-Well Full-Skirt PCR Plate",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "52",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "单位前面加空格",
+   "selected_text": "t 5℃ te",
+   "context": "uring initialization, observe if there are any temperatur ny alarm occurs, contact the technical support. uring operation, observe whether the deviation betwee emperature and actual displayed temperature of the te module is within ± 5℃. If the temperature exceeds this evice and contact technical support for troubleshooting g the device re that the dust-free tissue is wet but leaves no droplets.",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001176-00 GenSIRO-48 Automated Sequencing Library Preparation System User Manual_English_IVDR_WH_R01 peered by Tina.pdf ·",
+   "page": "66",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "拉大列宽吧",
+   "selected_text": "rt rt E-",
+   "context": "Address Building 24, Stage 3.1, BioLake Acceler Gaoxin Road, East Lake High-Tech Deve 430075, Wuhan, P.R.China Technical support Wuhan MGI Tech Co., Ltd. Technical support E- mail MGI-service@mgi-tech.com",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
