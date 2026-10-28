@@ -1,0 +1,41 @@
+{
+ "document": "H-020-000948-00DNBSEQ-G99系列基因测序仪快速操作指南(StandardMPS2.0)_中文_RUO_WH_V4.0_R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000948-00DNBSEQ-G99系列基因测序仪快速操作指南(StandardMPS2.0)_中文_RUO_WH_V4.0_R01 Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重复斜杠",
+   "selected_text": "/G9 0//G",
+   "context": "此时G99 FCL PE50/G99 FCL PE150/G99 App-D FCL FCL PE300/G99 App-D FCS PE150/G99 App-D FCU FCU PE300//G99 App-D FCX PE150 测序试剂槽准备完 准备测序仪 1. 确保电源开关处于关闭状态。 2. 连接电源线。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000948-00DNBSEQ-G99系列基因测序仪快速操作指南(StandardMPS2.0)_中文_RUO_WH_V4.0_R01 Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "试剂套装表及全文其余 6 处均写作组合型号 G99 FCL SE100/PE50，与生化确认下",
+   "selected_text": "G99 FCL PE50/",
+   "context": "pp-D 槽准备 此时G99 FCL PE50/G99 FCL PE150/G99 App-D FCL PE150 FCL PE300/G99 App-D FCS PE150/G99 App-D FCU PE15 FCU PE300//G99 App-D FCX PE150 测序试剂槽准备完毕。 准备测序仪",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000948-00DNBSEQ-G99系列基因测序仪快速操作指南(StandardMPS2.0)_中文_RUO_WH_V4.0_R01 Tina.pdf ·",
+   "page": "20",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "实用工具",
+   "selected_text": "【工具】",
+   "context": "后界面提示错误信息“仪器存在报错”，点击【确认】。 “测序试剂槽在位”、“载片在位”等报警信息，执行步骤3。 击 >【维护】>【工具】，然后点击【升降屏】，点击【上 剂槽和测序载片。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}
