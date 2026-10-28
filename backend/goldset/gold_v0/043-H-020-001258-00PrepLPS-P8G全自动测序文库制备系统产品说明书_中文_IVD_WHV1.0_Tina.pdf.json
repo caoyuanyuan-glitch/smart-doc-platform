@@ -1,0 +1,89 @@
+{
+ "document": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf ·",
+   "page": "80",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这没有确定吗",
+   "selected_text": "±?%",
+   "context": "L)：CV ＜2%, 准确度 ＜±5% μL]：CV ＜1%, 准确度 ＜±2.5% ：CV<10%，准确度<±?% )：CV<4%，准确度<±6% L)：CV<3%，准确度<±4% μL)：CV<2%，准确度<±2.5% 0 μL]：CV<0.5%，准确度<±1%",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf ·",
+   "page": "17",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下面写的是PCR模块，看是否要统一",
+   "selected_text": "臂在台面与堆栈上实 、PCR 温度循环模块 定量、pooling 或均",
+   "context": "建、文库定量、pooling 或均一化、DNB 制 动作流程与参数；通过独立灵活8 通道的移 液体；通过抓手机械臂在台面与堆栈上实现 模块、磁力架适配器、PCR 温度循环模块及 增、磁珠纯化、文库定量、pooling 或均一 本制备。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "左移一点，目前看来没有跟线条居中",
+   "selected_text": "-",
+   "context": "主页",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf ·",
+   "page": "34",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "边框与其他图标粗细不一致",
+   "selected_text": "表",
+   "context": "台面显示区  表示热振荡模块。  表示定量模块。  表示PCR 模块。  表示垃圾桶。  表示高板位。  表示低板位。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf ·",
+   "page": "49",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "与左视图中的名称不一致，总开关",
+   "selected_text": "侧总电源开关按钮，",
+   "context": "2. 确保电源处于关闭状态。 3. 连接仪器电源线。 4. 将仪器电源开关拨至位置。 5. 按下仪器左侧总电源开关按钮，启动仪器和计算机。 软件 操作步骤如下：",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf ·",
+   "page": "65",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "与左视图中的名称不一致，总开关",
+   "selected_text": "侧总电源开关按钮",
+   "context": "长时间不使用仪器时，请关闭所有电源，并拔下电源线。 操作步骤如下： 1. 长按仪器左侧总电源开关按钮3 s，关闭仪器。 2. 将仪器电源开关拨至 位置，断开电源。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001258-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_IVD_WHV1.0 Tina.pdf ·",
+   "page": "84",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整列宽，一行展示完整",
+   "selected_text": "家",
+   "context": "生产地址 武汉市东湖新技术开 生产许可证编号 售后服务单位/技术支持厂 家 武汉华大智造科技有 技术支持电话 4000-688-114 技术支持邮箱 MGI-service@mgi-",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
