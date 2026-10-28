@@ -1,0 +1,77 @@
+{
+ "document": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf ·",
+   "page": "18",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "RS",
+   "selected_text": "8）",
+   "context": "电气模块 对建库仓视窗检测器、层流罩、照明灯、紫 行通讯和控制。 全自动测序文库 制备系统 （GenSIRO-48） 控制软件 专门用于控制本仪器的应用软件。为用户提 台，指导用户完成信息配置、模块调试、实 作。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf ·",
+   "page": "43",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "一定要写这个吗，后面又写了一遍",
+   "selected_text": "第36 页“更换层流罩的过滤网片”。更换部件信息如下： 部件名称 型号/尺寸 紫外灯灯管 TUV 16W FAM PHILIPS",
+   "context": "每年一次，联系技术支持执行以下保养项目： 更换紫外灯灯管及层流罩的过滤网片。具体操作，参考第37 页“更换紫外灯灯管”和 第36 页“更换层流罩的过滤网片”。更换部件信息如下： 部件名称 型号/尺寸 紫外灯灯管 TUV 16W FAM PHILIPS 层流罩过滤网片 488 mm × 657 mm × 46 mm 如不按时更换紫外灯灯管及层流罩的过滤网片，可能会造成交叉感染。 检查、保养和维护机械臂各轴电机。 检查、保养和校准移液器坐标位置。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf ·",
+   "page": "44",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "若只能由技术支持完成，那删除操作步骤，只写当出现XXX情况时，或多长周期联系技术支持进行更换。型号也不用列出，以防后续变化。",
+   "selected_text": "更换紫外灯灯管 本操作仅可由技术支持进行。 更换周期：检查出异常时。 紫外灯灯管型号：TUV 16W FAM PHILIPS 更换操作步骤如下： 1. 关闭仪器总电源。 2. 打开视窗。手握紫外灯灯管逆时针旋转1/2 圈，取出紫外灯灯管。 3. 装上新紫外灯灯管，顺时针旋转1/2 圈。关闭视窗。 4. 打开仪器电源，测试紫外灯功能是否正常。",
+   "context": "3. 装上新电机。关闭视窗。 4. 打开仪器电源，测试电机功能是否正常。 更换紫外灯灯管 本操作仅可由技术支持进行。 更换周期：检查出异常时。 紫外灯灯管型号：TUV 16W FAM PHILIPS 更换操作步骤如下： 1. 关闭仪器总电源。 2. 打开视窗。手握紫外灯灯管逆时针旋转1/2 圈，取出紫外灯灯管。 3. 装上新紫外灯灯管，顺时针旋转1/2 圈。关闭视窗。 4. 打开仪器电源，测试紫外灯功能是否正常。 清理磁盘历史数据 查看磁盘空间，及时将历史数据备份到外部存储设备。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf ·",
+   "page": "42",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "加空格",
+   "selected_text": "持。 5℃",
+   "context": "提示，请联系技术支持。 显示温度误差是否在±5℃之内。 技术支持排查异常。",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf ·",
+   "page": "43",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同下",
+   "selected_text": "更换层流罩的过滤网片 本操作仅可由技术支持进行。 更换周期：每年一次或检查出异常时。 过滤网片规格：488 mm × 657 mm × 46 mm 更换操作步骤如下： 1. 关闭仪器总电源。 2. 拆除仪器顶部盖板，拆除过滤网固定螺丝，取出过滤网片。 3. 装上新过滤网片并固定，装上仪器顶部盖板。 4. 打开仪器电源，测试层流罩功能是否正常。",
+   "context": "检查和保养定量模块中的光学组件。 检查、校准温控模块和PCR 模块开关。 更换层流罩的过滤网片 本操作仅可由技术支持进行。 更换周期：每年一次或检查出异常时。 过滤网片规格：488 mm × 657 mm × 46 mm 更换操作步骤如下： 1. 关闭仪器总电源。 2. 拆除仪器顶部盖板，拆除过滤网固定螺丝，取出过滤网片。 3. 装上新过滤网片并固定，装上仪器顶部盖板。 4. 打开仪器电源，测试层流罩功能是否正常。 36",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001150-00 GenSIRO-48RS 全自动测序文库制备系统产品说明书_中文_RUO_WH_R01 peered by Tina.pdf ·",
+   "page": "44",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同下意见",
+   "selected_text": "换建库移液Z8 轴丝杆电机 本操作仅可由技术支持进行。 更换周期：每五年一次或检查出异常时。 电机型号：17E2225S4-199SSAEK5D-130 更换操作步骤如下： 1. 关闭仪器总电源。 2. 打开视窗。拆下需更换的电机。 3. 装上新电机。关闭视窗。 4. 打开仪器电源，测试电机功能是否正常。",
+   "context": "更换建库移液Z8 轴丝杆电机 本操作仅可由技术支持进行。 更换周期：每五年一次或检查出异常时。 电机型号：17E2225S4-199SSAEK5D-130 更换操作步骤如下： 1. 关闭仪器总电源。 2. 打开视窗。拆下需更换的电机。 3. 装上新电机。关闭视窗。 4. 打开仪器电源，测试电机功能是否正常。 更换紫外灯灯管 本操作仅可由技术支持进行。 更换周期：检查出异常时。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}
