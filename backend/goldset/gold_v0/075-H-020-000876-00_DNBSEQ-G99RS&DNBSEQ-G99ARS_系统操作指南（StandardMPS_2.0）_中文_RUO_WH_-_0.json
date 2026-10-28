@@ -1,0 +1,29 @@
+{
+ "document": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH - 0824 Tina1.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH - 0824 Tina1.pdf ·",
+   "page": "206",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "表编号与实际不符，应该改为：下表",
+   "selected_text": "如表9 所",
+   "context": "准确率检测结果如表9 所示： 表 92 “基因测序仪准确率企业参考品”检测 检测项目 重复1 重复2 重复3 重复 大肠杆菌企参品 99.78% 99.77% 99.75% 99. UHRR 企参品 99.64% 99.65% 99.66% 99.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000876-00 DNBSEQ-G99RS&DNBSEQ-G99ARS 系统操作指南（StandardMPS 2.0）_中文_RUO_WH - 0824 Tina1.pdf ·",
+   "page": "63",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "交叉引用错误，逻辑问题，应该是：第49 页“文库浓度及所需量的要求”",
+   "selected_text": "算 文库所需量 据第75 页“标签序列选择” 所 每个 制备体系所需投入的",
+   "context": "4. 融化后，使用涡漩振荡器振荡混匀5 s后，短暂离心置于冰盒上备用。 计算ssDNA 文库所需量 根据第75 页“标签序列选择” 所测得的ssDNA 文库的浓度及所需的文 算每个DNB 制备体系所需投入的ssDNA 文库体积。 y C 表示文库浓度（fmol/μL）。 y 如果建库试剂盒说明书有特殊要求，则以建库试剂盒说明书的文库要求 y 计算出的文库体积V 填入第53 页“DNB 制备反应体系1”。 表 文库所需量",
+   "category": "交叉引用",
+   "layer": "deterministic",
+   "expected_rule": "DET-MATERIAL-001"
+  }
+ ]
+}
