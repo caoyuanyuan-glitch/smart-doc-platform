@@ -1,0 +1,17 @@
+{
+ "document": "H-020-000504-00 MGIDL-T20ARS 全自动样本加载仪产品说明书_中文_RUO_QD V5.0 20260605 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000504-00 MGIDL-T20ARS 全自动样本加载仪产品说明书_中文_RUO_QD V5.0 20260605 Tina.pdf ·",
+   "page": "70",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "前文都是载片",
+   "selected_text": "芯片平",
+   "context": "显示系统 × 电气组件 × ○ ○ ○ 电源系统 × ○ ○ ○ 芯片平台组件 × ○ ○ ○ 本表格依据SJ/T 11364 的规定编制。 ○：表示该有害物质在该部件所在均质材料中的含 ×：表示该有害物质至少在该部件的某一均质材料 对于标有× 的部件，目前业界没有成熟",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}
