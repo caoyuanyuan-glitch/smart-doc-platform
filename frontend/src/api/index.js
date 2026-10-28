@@ -185,6 +185,15 @@ export const reviewAPI = {
   getStageDiagnostics: (id) => instance.get(`/review/${id}/stage-diagnostics`),
   getProviderStatus: () => instance.get('/review/provider-status'),
   listFalsePositiveMemory: (params = {}) => instance.get('/review/false-positive-memory', { params }),
+  importSupplements: (file, batchName = '') => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (batchName) formData.append('batch_name', batchName)
+    return instance.post('/review/supplements/import', formData, { timeout: 300000, headers: { 'Content-Type': 'multipart/form-data' } })
+  },
+  clusterSupplements: (params = {}) => instance.get('/review/supplements/cluster', { params }),
+  convertSupplement: (id) => instance.post(/review/supplements//convert-rule),
+  dismissSupplement: (id) => instance.post(/review/supplements//dismiss),
   deleteFalsePositiveMemory: (id) => instance.delete(`/review/false-positive-memory/${id}`),
 }
 
