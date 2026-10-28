@@ -1,0 +1,41 @@
+{
+ "document": "H-020-001053-00 DNBSEQ-T1+ Genetic Sequencer User Manual_English_IVDR_SZ_V5.0_20260114 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001053-00 DNBSEQ-T1+ Genetic Sequencer User Manual_English_IVDR_SZ_V5.0_20260114 peered by Tina.pdf ·",
+   "page": "89",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下面没有对应解释",
+   "selected_text": "ee",
+   "context": "/O signal/ ontrolc ncluding unctional arth) Burstb IEC 61000-4-4 ± 0,5 kV (5 or 100 kHz) Surgee IEC 61000-4-5 ± 1 kV line-t ground Conducted RFb IEC 61000-4-6 3 V (150 kH to 80 mHz)",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001053-00 DNBSEQ-T1+ Genetic Sequencer User Manual_English_IVDR_SZ_V5.0_20260114 peered by Tina.pdf ·",
+   "page": "64",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否多余空格",
+   "selected_text": ".",
+   "context": "side of the box to split the box. Split setting list to select a barcode splitting scheme. n the sequencing recipe is single barcode sequencing, t Split or No split . n the sequencing recipe is dual barcode sequencing, se the following: o split : Indicates no barcode is split. plit : Indicates Barcode 1 and Barcode 2 are split. plit BC : For SE sequencing, it indicates only Barcode 1 i",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001053-00 DNBSEQ-T1+ Genetic Sequencer User Manual_English_IVDR_SZ_V5.0_20260114 peered by Tina.pdf ·",
+   "page": "80",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "另起一个p",
+   "selected_text": "4",
+   "context": "LCD 19 inches 1920×360 pixels m (H)× 750.3 mm (D) 45 inches (W)× es (D)",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
