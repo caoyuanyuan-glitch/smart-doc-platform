@@ -1,0 +1,53 @@
+{
+ "document": "H-020-001316-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_RUO_OEMV1.0 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001316-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_RUO_OEMV1.0 Tina.pdf ·",
+   "page": "78",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这2个区别是什么？",
+   "selected_text": "热循环主机： 不含胶垫：256 mm × 54 mm (长 含胶垫：256.5 mm × 64 mm (长 热循环模块： 156.5 mm × 255 m",
+   "context": "窗门打开、脚杯高度） 含层流罩把手：(870 mm × 770 mm × 1168 mm) ±5 mm（不 视窗门打开、脚杯高度） 4 kg 热循环主机： 不含胶垫：256.5 mm × 439.5 mm × 54 mm (长×宽×高） 含胶垫：256.5 mm × 439.5 mm × 64 mm (长×宽×高） 热循环模块： 156.5 mm × 255 mm × 125.8 mm (长×宽×高） 1000 VA 含把手：727.5 mm × 804 mm × 260 mm (长×宽×高）",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001316-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_RUO_OEMV1.0 Tina.pdf ·",
+   "page": "80",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "类似问题查看其他几个文件的注释同步修改，这里不再赘述",
+   "selected_text": "±?%",
+   "context": "： ＜准确度＜ μL]：CV ＜1%, 准确度 ＜±2.5% )：CV<10%，准确度<±?% )：CV<4%，准确度<±6% L)：CV<3%，准确度<±4% μL)：CV<2%，准确度<±2.5% 0 μL]：CV<0.5%，准确度<±1%",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001316-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_RUO_OEMV1.0 Tina.pdf ·",
+   "page": "49",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "我看基本部件里面写的是急停开关，通查",
+   "selected_text": "保急停按钮已",
+   "context": "为保证信息安全，建议设置复杂度较高的密码。 每隔三个月更换一次密码。 操作步骤如下： 1. 确保急停按钮已复位。 2. 确保电源处于关闭状态。 3. 连接仪器电源线。 4. 将仪器电源开关拨至位置。 5. 按下仪器左侧总电源开关按钮，启动仪器和计算机。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001316-00PrepLPS-P8G全自动测序文库制备系统产品说明书_中文_RUO_OEMV1.0 Tina.pdf ·",
+   "page": "81",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "改成中文的冒号",
+   "selected_text": "头:",
+   "context": "： ＜准确度＜ [50.0 μL-100.0 μL)：CV ＜1%, 准确度 ＜±1% [100.0 μL-1000.0 μL]：CV ＜0.5%, 准确度 ＜±1% 1000 μL(无滤芯)吸头: 1200.0 μL：CV<0.5%，准确度<±1% 详见装箱单",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}
