@@ -1,0 +1,125 @@
+{
+ "document": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "10",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "200、2000，E25服务器有没有？",
+   "selected_text": "生信分析加速器 �DNBSEQ-G99ARS 服务器 �DNBSEQ-T1+ARS 服务器 华大智造生信分析产品中已配置本",
+   "context": "�微生物快速识别平台 �微生物快速识别与组装溯源平台 �MegaBOLT 生信分析加速器 �DNBSEQ-G99ARS 服务器 �DNBSEQ-T1+ARS 服务器 华大智造生信分析产品中已配置本软件所需的Linux 操作系统环境。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "10",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下面都是套装",
+   "selected_text": "分析，适配以 试剂盒/ 试",
+   "context": "研使用，不能用于临床诊断。 于高通量测序数据的分析，适配以下试剂盒/ 试剂套装： 试剂盒/ 试剂套装 rer_ATOPlex ATOPlex MTB 建库试剂盒套装 rer_WGS MGIEasy Fast 酶切文库制备试剂套装V2.0",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "37",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "第二列写的是QUAL，确认下",
+   "selected_text": "变异 【OU 【",
+   "context": "y 【--min-coverage】表示最低覆盖度。 y 【-F】表示最低变异频率。 MT/GT='1' && /DP)>=0.0】 进行变异过滤时所采用的过滤参数。 y 【OUAL】表示变异质量值。 y 【GT】表示基因型。【AO】表示位点变异 深度。 y 【DP】表示位点总深度。 y 【AO/DP】表示变异频率。 单样本进化树菌株个数。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "60",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "确认下这个状态是否正确",
+   "selected_text": "可进行重分析 【进行中】 定位到目标样",
+   "context": "取消分析的样本，可进行重分析。操作步骤如下： 页的状态显示区，点击【进行中】，进入任务管理界面。 查询条件，点击 定位到目标样本所属的任务记录行。 进度界面。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "10",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "错别字，不是缀述，应该是赘述",
+   "selected_text": "为例进 再缀述",
+   "context": "析任务，等待本软件完成数 作简单、方便，实现从样本 S Lite 的使用场景为例进行 操作步骤相同，将不再缀述。 器）中：",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "中英文不一致",
+   "selected_text": "，并使用SNP 进行MTBC 分型。",
+   "context": "预测 并且根据WHO 于2023 年出版的《结核分枝杆菌耐药相关基因突变目录 南》对变异结果进行耐药注释和预测。 Spoligotype 分型，并使用SNP 进行MTBC 分型。 和多样本溯源分析。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "54",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这句话不应该加粗处理",
+   "selected_text": "操作步骤如下： 1. 点击右下角【确认生成任务】，弹出生成任务界面。 有关生成任务界面的详情，参考第 页“生成测序",
+   "context": "生成分析任务 分析样本信息录入完成后，自动回到新建分析界面。 操作步骤如下： 1. 点击右下角【确认生成任务】，弹出生成任务界面。 有关生成任务界面的详情，参考第27 页“生成测序+ 分析任务”。 2. 执行如下任一操作： �如无需修改分析参数，直接点击【确定】。 �如需修改分析参数，点击【如需修改分析参数，请展开设置】，并修改所需参数，完成 后点击【确定】。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "80",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "冗余字",
+   "selected_text": "【 这个两",
+   "context": "内参 占比】偏低。【外参测序片段】是指在体系中引入 设计引物进行扩增，可作为建库操作的一个质控指标。【外参占比(%)】 TB 测序片段相对比例(%)】等指标综合评估样本是否污染、建库操作 ，【外参占比(%)】与【MTB 测序片段相对比例(%)】成反比，可将 本进行梯度建库，基于这个两个指标值绘制标准曲线，用于定量。 取数据量？ 求可以根据前面的【数据量】进行相应数据量截取，【数据量】表示保 WGS 分析）或对数（ATOPlex 分析）。",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "82",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "中英文不一致",
+   "selected_text": "手动分析两种业务场景。可实现测序、生信分析这 有设备集成和监控、智能预警、工作看板等功能。 非结核分枝杆菌",
+   "context": "大规模并行测序，泛指短读长高通量测序。 ZLIMS Lite 华大智造标准实验室管理系统MGI ZLIMS Lite (ZTRON Laboratory Management System Lite)，适配DNB 样本测序后自动分析、选择测序文件 手动分析两种业务场景。可实现测序、生信分析这两个阶段生命周期管理，并具 有设备集成和监控、智能预警、工作看板等功能。 NTM 非结核分枝杆菌(Nontuberculous Mycobacteria) MTBC 结核分枝杆菌复合群(Mycobacterium tuberculosis complex) RIF 利福平(Rifampicin) INH 异烟肼(Isoniazid)",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000691-00 MTB-Explorer 软件产品说明书_中文_RUO_SZ R02 Tina.pdf ·",
+   "page": "86",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "特殊字符，不正常显示",
+   "selected_text": "r�A r�W r 软件",
+   "context": "进化溯源 M MTB-Explorer�ATOPlex 分析报告 56 MTB-Explorer�WGS 分析报告 64 MTB-Explorer 软件 2 N 耐药预测 15",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}
