@@ -12,6 +12,7 @@ import shutil
 import threading
 import urllib.parse
 import xml.etree.ElementTree as ET
+import base64
 from app.database import get_db
 from app.api.auth import get_current_active_user, require_admin
 from app.schemas.user import UserOut
@@ -136,6 +137,9 @@ CHAPTER_APPENDIX_PREFIX_RE = re.compile(
 # such as "3'RNA" or "1.13×" keep their leading digits.
 SECTION_NUMBER_PREFIX_RE = re.compile(r'^\d+(?:[.．]\d+)+\s*(?=[\u4e00-\u9fff]|[A-Z])')
 APPENDIX_ITEM_NUMBER_PREFIX_RE = re.compile(r'^[A-Za-z]\s*[-–—]\s*\d+\s*(?=[\u4e00-\u9fff]|[A-Z])')
+
+
+COVER_PART_NO_RE = re.compile(r'(H-\d{3}-\d{6}-\d{2})', re.I)
 
 
 def _get_step_names():
@@ -790,6 +794,7 @@ def _dita_table_should_be_extra_wide(cols, *texts):
         "flexible-throughput",
         "flexible throughput",
         "consumable usage",
+        "user-supplied equipment",
     )
     return any(marker in blob for marker in markers)
 
@@ -1392,6 +1397,7 @@ def _is_frontmatter_title(title):
     if key in {
         "about the user manual",
         "about the instructions for use",
+        "about the sequencing set",
         "revision history",
         "version history",
         "manufacturer information",
@@ -1729,6 +1735,8 @@ IDML_DEFERRED_IMAGE_REPLACEMENTS = {
     ".eps": ".svg",
 }
 
+IDML_EXTRA_WIDE_TABLE_PT = 480.0
+
 
 # Real-world IDML style vocabularies (e.g. MGI/DNBSEQ manuals) name headings
 # "<group>:Title-L<n>-<lang>" instead of Word's "Heading n". The "<group>"
@@ -1808,6 +1816,12 @@ IDML_ITALIC_STYLE_RE = re.compile(r'(?i)italic|subtle\s*emphasis|^cross\s*refere
 IDML_I_MARK_OPEN = "[[I]]"
 IDML_I_MARK_CLOSE = "[[/I]]"
 
+# Blue reagent names (character style "Reagent name_EN") map to DITA <term>.
+IDML_TERM_STYLE_RE = re.compile(r'(?i)reagent\s*name')
+IDML_TERM_MARK_OPEN = "[[TERM]]"
+IDML_TERM_MARK_CLOSE = "[[/TERM]]"
+IDML_NESTED_NOTE_RE = re.compile(r'\[\[NOTE:(\w+)\]\](.*?)\[\[/NOTE\]\]', re.S)
+
 # InDesign cross-references read 第<page>页“<target title>”. Carry title and
 # page as [[XREF:title#page]]; resolved DITA xrefs are empty elements with
 # cms:title, and the page is only used when the target cannot be resolved.
@@ -1827,11 +1841,18 @@ def _idml_style_is_italic(style_key, font_style=""):
     return bool(key and IDML_ITALIC_STYLE_RE.search(key))
 
 
-def _idml_wrap_run_text(text, ui=False, italic=False):
+def _idml_style_is_term(style_key):
+    key = (style_key or "").strip()
+    return bool(key and IDML_TERM_STYLE_RE.search(key))
+
+
+def _idml_wrap_run_text(text, ui=False, italic=False, term=False):
     if not text:
         return text
     if ui:
         return f"{IDML_UI_MARK_OPEN}{text}{IDML_UI_MARK_CLOSE}"
+    if term and text.strip():
+        return f"{IDML_TERM_MARK_OPEN}{text}{IDML_TERM_MARK_CLOSE}"
     if italic and text.strip():
         return f"{IDML_I_MARK_OPEN}{text}{IDML_I_MARK_CLOSE}"
     return text
@@ -1840,7 +1861,10 @@ def _idml_wrap_run_text(text, ui=False, italic=False):
 def _idml_merge_adjacent_i_marks(text):
     if not text:
         return text
-    return text.replace(f"{IDML_I_MARK_CLOSE}{IDML_I_MARK_OPEN}", "")
+    text = text.replace(f"{IDML_I_MARK_CLOSE}{IDML_I_MARK_OPEN}", "")
+    text = text.replace(f"{IDML_TERM_MARK_CLOSE}{IDML_TERM_MARK_OPEN}", "")
+    text = text.replace(f"{IDML_UI_MARK_CLOSE}{IDML_UI_MARK_OPEN}", "")
+    return text
 
 
 def _idml_table_column_widths(table_elem):
@@ -1853,6 +1877,13 @@ def _idml_table_column_widths(table_elem):
         except (TypeError, ValueError):
             continue
     return widths
+
+
+def _idml_table_is_extra_wide(table_elem):
+    widths = _idml_table_column_widths(table_elem)
+    if not widths:
+        return False
+    return sum(widths.values()) >= IDML_EXTRA_WIDE_TABLE_PT
 
 
 def _idml_relative_colwidths(widths, col_count):
@@ -1882,12 +1913,13 @@ def _idml_relative_colwidths(widths, col_count):
     return parts
 
 
-def _idml_collect_text(elem, ui_styles=None, ui=False, italic=False):
+def _idml_collect_text(elem, ui_styles=None, ui=False, italic=False, term=False):
     """Collect paragraph text from an element, skipping nested tables.
 
     When ``ui_styles`` is given, runs carrying an on-screen ("Silk screen")
     character style are wrapped in ``[[UI]]...[[/UI]]`` so the DITA layer can
     turn them into ``<uicontrol>``. Italic character styles become ``[[I]]``.
+    Reagent-name character styles become ``[[TERM]]``.
     """
     parts = []
     for child in list(elem):
@@ -1899,29 +1931,31 @@ def _idml_collect_text(elem, ui_styles=None, ui=False, italic=False):
         child_italic = italic or _idml_style_is_italic(
             child_style, child.get("FontStyle") or ""
         )
+        child_term = term or _idml_style_is_term(child_style)
         if tag == "CrossReferenceSource":
             marker = _idml_xref_marker(child)
             if marker:
                 parts.append(marker)
             else:
-                parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic))
+                parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic, child_term))
             continue
         if tag == "Content":
             if child.text:
-                parts.append(_idml_wrap_run_text(child.text, child_ui, child_italic))
+                parts.append(_idml_wrap_run_text(child.text, child_ui, child_italic, child_term))
         elif tag == "Br":
             parts.append(" ")
         else:
-            parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic))
+            parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic, child_term))
     return _idml_merge_adjacent_i_marks("".join(parts))
 
 
 def _idml_xref_marker(elem):
     """Return an ``[[XREF:title]]`` marker for a ``<CrossReferenceSource>``.
 
-    The source text reads 第<page>页“<target title>”. The page comes from the
-    InDesign ResultText variable. The page is kept on the marker so unresolved
-    targets can still show 第N页“标题”; resolved xrefs stay empty.
+    Chinese sources read 第<page>页“<target title>”; English sources read
+    ``<target title> on Page``. The page comes from the InDesign ResultText
+    variable. Resolved DITA xrefs stay empty; the page is only kept so
+    unresolved targets can still show a fallback.
     """
     contents = [
         sub.text
@@ -1930,9 +1964,11 @@ def _idml_xref_marker(elem):
     ]
     text = "".join(contents)
     match = re.search(r'[\u201c"]([^\u201d"]+)[\u201d"]', text)
-    if not match:
-        return None
-    title = match.group(1).strip()
+    title = match.group(1).strip() if match else ""
+    if not title:
+        en_match = re.search(r'(?i)^(.+?)\s+on\s+page\s*$', text.strip())
+        if en_match:
+            title = en_match.group(1).strip()
     if not title:
         return None
     title = _clean_xref_title(title) or title
@@ -2119,14 +2155,44 @@ def _idml_inline_images(text, uris, image_resolver):
     """Replace positional icon placeholders with inline image markdown."""
     def repl(match):
         index = int(match.group(1))
-        if index >= len(uris) or image_resolver is None:
-            return ""
-        path = image_resolver(uris[index])
-        if not path:
-            return ""
-        return f"![{os.path.basename(path)}]({path})"
+        replacement = ""
+        if index < len(uris) and image_resolver is not None:
+            path = image_resolver(uris[index])
+            if path:
+                replacement = f"![{os.path.basename(path)}]({path})"
+        if replacement:
+            return replacement
+        start, end = match.start(), match.end()
+        left = text[start - 1] if start else ""
+        right = text[end] if end < len(text) else ""
+        if left.isalnum() and right.isalnum():
+            return " "
+        return ""
 
     return re.sub(r"\x00IMG(\d+)\x00", repl, text)
+
+
+def _idml_nested_callout_cell_text(table_elem, ui_styles=None, image_resolver=None):
+    """Flatten a table nested in a cell; callouts become [[NOTE:type]] markers."""
+    lines = _idml_table_to_markdown(table_elem, ui_styles, image_resolver)
+    if not lines:
+        return ""
+    header = (lines[0] or "").strip()
+    match = re.search(r"\[\[NOTE:(\w+)\]\]", header)
+    if not match:
+        return _idml_collect_text(table_elem, ui_styles).strip()
+    bodies = []
+    for line in lines[1:]:
+        body = (line or "").strip()
+        if not body.startswith("|") or not body.endswith("|"):
+            continue
+        inner = body[1:-1].strip()
+        if not inner or re.match(r"^:?-+:?$", inner.replace(" ", "").replace("|", "")):
+            continue
+        bodies.append(inner)
+    if not bodies:
+        return ""
+    return f"[[NOTE:{match.group(1)}]]{' '.join(bodies)}[[/NOTE]]"
 
 
 def _idml_cell_text_items(cell, ui_styles=None, image_resolver=None):
@@ -2153,6 +2219,8 @@ def _idml_cell_text_items(cell, ui_styles=None, image_resolver=None):
             elif piece_kind == "image":
                 path = image_resolver(value) if image_resolver else None
                 text = f"![{os.path.basename(path)}]({path})" if path else ""
+            elif piece_kind == "table":
+                text = _idml_nested_callout_cell_text(value, ui_styles, image_resolver)
             else:
                 text = _idml_collect_text(value, ui_styles).strip()
             if text:
@@ -2165,8 +2233,8 @@ def _idml_cell_text_items(cell, ui_styles=None, image_resolver=None):
                 add_paragraph(child)
                 continue
             if tag == "Table":
-                # A nested callout inside a cell contributes its body text once.
-                text = _idml_collect_text(child, ui_styles).strip()
+                # A nested callout inside a cell becomes a note marker.
+                text = _idml_nested_callout_cell_text(child, ui_styles, image_resolver)
                 if text:
                     items.append((text, False))
                 continue
@@ -2279,6 +2347,8 @@ def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None):
     )
     if relative_widths:
         lines.append("[[COLW:" + ",".join(relative_widths) + "]]")
+    if _idml_table_is_extra_wide(table_elem):
+        lines.append("[[TWIDE:180mm]]")
     if header_row_count != 1:
         # GFM only has one header row; carry the real IDML header count so a
         # two-row header stays in <thead> instead of leaking into <tbody>.
@@ -2328,6 +2398,150 @@ def _idml_callout_note_type(cell):
     return "tip"
 
 
+def _idml_xmp_blob(elem):
+    parts = []
+    for node in elem.iter():
+        if _strip_xml_ns(node.tag) == "Contents" and node.text:
+            parts.append(node.text)
+    return "\n".join(parts)
+
+
+def _idml_xmp_title(elem):
+    blob = _idml_xmp_blob(elem)
+    match = re.search(r"<dc:title>[\s\S]*?<rdf:li[^>]*>([^<]+)</rdf:li>", blob, re.I)
+    return (match.group(1).strip() if match else "") or ""
+
+
+def _idml_xmp_jpeg_bytes(elem):
+    blob = _idml_xmp_blob(elem)
+    match = re.search(r"<xmpGImg:image>([\s\S]*?)</xmpGImg:image>", blob, re.I)
+    if not match:
+        return None
+    raw = (
+        match.group(1)
+        .replace("&#xA;", "")
+        .replace("&#xD;", "")
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace(" ", "")
+    )
+    try:
+        data = base64.b64decode(raw)
+    except Exception:
+        return None
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    return data
+
+
+def _idml_first_link_uri(elem):
+    for node in elem.iter():
+        if _strip_xml_ns(node.tag) != "Link":
+            continue
+        uri = node.get("LinkResourceURI") or node.get("URI") or ""
+        if uri:
+            return uri
+    return ""
+
+
+def _idml_graphic_ref(elem):
+    uri = _idml_first_link_uri(elem)
+    if uri:
+        return uri
+    title = _idml_xmp_title(elem)
+    if title:
+        return f"xmp:{title}"
+    self_id = (elem.get("Self") or "").strip()
+    return f"xmp:{self_id}" if self_id else ""
+
+
+def _idml_thumb_lookup_keys(link_uri):
+    raw = urllib.parse.unquote(link_uri or "").replace("\\", "/")
+    if raw.lower().startswith("file:"):
+        raw = raw[5:]
+    keys = []
+    if raw.lower().startswith("xmp:"):
+        title = raw[4:].strip()
+        stem = os.path.splitext(title)[0]
+        keys.extend([title.lower(), stem.lower(), f"xmp:{title.lower()}", f"xmp:{stem.lower()}"])
+        return [k for k in keys if k]
+    base = os.path.basename(raw).strip()
+    stem, _ext = os.path.splitext(base)
+    keys.extend([stem.lower(), base.lower(), f"xmp:{stem.lower()}"])
+    alt = re.sub(r"[ _]+\d+$", "", stem).strip()
+    if alt and alt.lower() != stem.lower():
+        keys.append(alt.lower())
+        keys.append(f"xmp:{alt.lower()}")
+    return [k for k in keys if k]
+
+
+def _idml_collect_xmp_thumbnails(zf, namelist):
+    """Map link stems / XMP titles to JPEG preview bytes embedded in IDML."""
+    thumbs = {}
+    for name in namelist:
+        if name.endswith("/") or not name.lower().endswith(".xml"):
+            continue
+        low = name.lower().replace("\\", "/")
+        if "/stories/" not in f"/{low}" and not low.startswith("stories/"):
+            continue
+        try:
+            root = ET.fromstring(zf.read(name))
+        except Exception:
+            continue
+        for node in root.iter():
+            tag = _strip_xml_ns(node.tag)
+            if tag not in ("PDF", "Image", "EPS"):
+                continue
+            jpeg = _idml_xmp_jpeg_bytes(node)
+            if not jpeg:
+                continue
+            keys = []
+            uri = _idml_first_link_uri(node)
+            if uri:
+                keys.extend(_idml_thumb_lookup_keys(uri))
+            title = _idml_xmp_title(node)
+            if title:
+                keys.extend(_idml_thumb_lookup_keys(f"xmp:{title}"))
+            self_id = (node.get("Self") or "").strip()
+            if self_id:
+                keys.append(f"xmp:{self_id.lower()}")
+            for key in keys:
+                thumbs.setdefault(key, jpeg)
+    return thumbs
+
+
+def _idml_resolve_xmp_thumb(link_uri, thumbs, media_dir, cache):
+    if link_uri in cache:
+        return cache[link_uri]
+    blob = None
+    for key in _idml_thumb_lookup_keys(link_uri):
+        blob = thumbs.get(key)
+        if blob:
+            break
+    if not blob:
+        cache[link_uri] = None
+        return None
+    raw = urllib.parse.unquote(link_uri or "")
+    if raw.lower().startswith("xmp:"):
+        stem = raw[4:]
+    else:
+        stem = os.path.splitext(os.path.basename(raw.replace("\\", "/")))[0]
+    safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", stem).strip() or "image"
+    out_path = os.path.join(media_dir, f"{safe_stem}.jpg")
+    counter = 1
+    while os.path.exists(out_path):
+        out_path = os.path.join(media_dir, f"{safe_stem}_{counter}.jpg")
+        counter += 1
+    try:
+        with open(out_path, "wb") as handle:
+            handle.write(blob)
+    except Exception:
+        cache[link_uri] = None
+        return None
+    cache[link_uri] = out_path
+    return out_path
+
+
 def _idml_image_links(elem):
     links = []
     for child in list(elem):
@@ -2335,6 +2549,11 @@ def _idml_image_links(elem):
         if tag == "Table":
             # Images anchored in a callout table belong to that table, not to
             # the surrounding paragraph.
+            continue
+        if tag in ("PDF", "Image", "EPS"):
+            uri = _idml_graphic_ref(child)
+            if uri:
+                links.append(uri)
             continue
         if tag == "Link":
             uri = child.get("LinkResourceURI") or child.get("URI") or ""
@@ -2398,7 +2617,7 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
         buffer.clear()
         images.clear()
 
-    def visit(node, ui=False, italic=False):
+    def visit(node, ui=False, italic=False, term=False):
         for sub in list(node):
             sub_tag = _strip_xml_ns(sub.tag)
             sub_style = _idml_style_key(sub.get("AppliedCharacterStyle", ""))
@@ -2406,9 +2625,10 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
             sub_italic = italic or _idml_style_is_italic(
                 sub_style, sub.get("FontStyle") or ""
             )
+            sub_term = term or _idml_style_is_term(sub_style)
             if sub_tag == "Content":
                 if sub.text:
-                    buffer.append(_idml_wrap_run_text(sub.text, sub_ui, sub_italic))
+                    buffer.append(_idml_wrap_run_text(sub.text, sub_ui, sub_italic, sub_term))
             elif sub_tag == "Br":
                 if split_on_br:
                     flush()
@@ -2417,6 +2637,12 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
             elif sub_tag == "Table":
                 flush()
                 pieces.append(("table", sub, None))
+            elif sub_tag in ("PDF", "Image", "EPS"):
+                uri = _idml_graphic_ref(sub)
+                if uri:
+                    placeholder = f"\x00IMG{len(images)}\x00"
+                    images.append(uri)
+                    buffer.append(placeholder)
             elif sub_tag == "Link":
                 uri = sub.get("LinkResourceURI") or sub.get("URI") or ""
                 if uri:
@@ -2433,9 +2659,9 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
                 if marker:
                     buffer.append(marker)
                 else:
-                    visit(sub, sub_ui, sub_italic)
+                    visit(sub, sub_ui, sub_italic, sub_term)
             else:
-                visit(sub, sub_ui, sub_italic)
+                visit(sub, sub_ui, sub_italic, sub_term)
 
     visit(para)
     flush()
@@ -2444,7 +2670,10 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
 
 def _idml_is_inline_icon(uri):
     base = urllib.parse.unquote(os.path.basename((uri or "").replace("\\", "/")))
-    return base.lower().startswith("icon")
+    low = base.lower()
+    if low.startswith("xmp:"):
+        low = low[4:]
+    return low.startswith("icon") or low.startswith("formula_")
 
 
 def _idml_paragraph_has_only_inline_icons(elem):
@@ -2471,7 +2700,10 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
         if tag == "ParagraphStyleRange":
             text = re.sub(r'[ \t\u00a0]+', ' ', _idml_collect_text(child)).strip()
             style_ref = child.get("AppliedParagraphStyle", "")
-            display = (_idml_style_key(style_ref) and style_map.get(_idml_style_key(style_ref), "")) or ""
+            style_key = _idml_style_key(style_ref)
+            display = urllib.parse.unquote(
+                (style_key and style_map.get(style_key, "")) or style_key or ""
+            )
             if text and not _idml_style_is_toc(display):
                 if text not in DOCX_TOC_TITLES:
                     level = _idml_heading_level(style_ref, style_map)
@@ -2535,6 +2767,14 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
                             else:
                                 emit_piece(piece_kind, value)
                         continue
+                    if marker == IDML_TABCAP_MARKER and re.search(r'(?i)wide', display):
+                        blocks.append({
+                            "kind": "para",
+                            "level": 0,
+                            "text": "[[TWIDE:180mm]]",
+                            "marker": None,
+                            "appendix": False,
+                        })
                     blocks.append({
                         "kind": "heading" if level else "para",
                         "level": level,
@@ -2723,6 +2963,11 @@ def _extract_idml_image(zf, namelist, link_uri, media_dir, cache):
         resolved_name = stem + replacement
     target = _idml_find_link_target(namelist, resolved_name)
     if target is None:
+        alt_stem = re.sub(r'[_\s]+\d+$', '', stem)
+        if alt_stem and alt_stem.lower() != stem.lower():
+            alt_ext = os.path.splitext(resolved_name)[1]
+            target = _idml_find_link_target(namelist, alt_stem + alt_ext)
+    if target is None:
         cache[link_uri] = None
         return None
     out_stem, out_ext = os.path.splitext(os.path.basename(resolved_name))
@@ -2763,9 +3008,15 @@ def _idml_to_markdown(idml_path):
         cover_images = []
         content_started = False
         image_cache = {}
+        xmp_thumbs = _idml_collect_xmp_thumbnails(zf, namelist)
 
         def resolve_image(link_uri):
-            return _extract_idml_image(zf, namelist, link_uri, media_dir, image_cache)
+            path = _extract_idml_image(zf, namelist, link_uri, media_dir, image_cache)
+            if path:
+                return path
+            if image_cache.get(link_uri) is None:
+                image_cache.pop(link_uri, None)
+            return _idml_resolve_xmp_thumb(link_uri, xmp_thumbs, media_dir, image_cache)
 
         def emit_image(link_uri):
             path = resolve_image(link_uri)
@@ -2983,6 +3234,87 @@ def _extract_template_parts(template_path):
     return result
 
 
+def _is_cover_topic_xml(xml):
+    text = xml or ""
+    return bool(
+        re.search(r'cms:imesofttype\s*=\s*["\']sCoverTopic["\']', text, re.I)
+        or re.search(r'outputclass\s*=\s*["\']cover["\']', text, re.I)
+    )
+
+
+def _product_name_from_filename(file_path):
+    stem = os.path.splitext(os.path.basename(file_path or ""))[0]
+    stem = COVER_PART_NO_RE.sub(" ", stem)
+    stem = re.sub(r'(?i)\b(?:ifu|instructions for use|ce|ruo|kit)\b', " ", stem)
+    stem = re.sub(r'[-_]+', " ", stem)
+    return re.sub(r'\s+', " ", stem).strip(" ._-") or None
+
+
+def _extract_cover_fields(file_path, source_content="", dita_lang="en-US"):
+    """Fill cover Part No. / manual name / product name from the source document."""
+    fields = {}
+    blob = "\n".join(
+        part for part in (os.path.basename(file_path or ""), source_content or "") if part
+    )
+    part_match = COVER_PART_NO_RE.search(blob)
+    if part_match:
+        fields["part_no"] = part_match.group(1)
+
+    lang = (dita_lang or "").lower()
+    if lang.startswith("zh"):
+        fields["manual_name"] = "使用说明书"
+        product_match = re.search(r'本说明书适用于\s*([^。\n]+)', source_content or "")
+    else:
+        fields["manual_name"] = "Instructions for Use"
+        product_match = re.search(
+            r'(?i)(?:this\s+)?instructions for use is applicable to\s+([^.]+)',
+            source_content or "",
+        )
+        if not product_match:
+            product_match = re.search(r'(?i)applicable to\s+([^.]+)', source_content or "")
+
+    if product_match:
+        product = re.sub(r'\s+', " ", product_match.group(1)).strip(" .")
+        product = re.sub(r'\s+set$', " Set", product, flags=re.I)
+        fields["product_name"] = product
+    else:
+        fallback = _product_name_from_filename(file_path)
+        if fallback:
+            fields["product_name"] = fallback
+    return fields
+
+
+def _replace_cover_value_after_label(xml, label_pattern, value):
+    if not xml or not value:
+        return xml
+    escaped = _escape_xml_attr(value)
+    pattern = re.compile(
+        rf'(<p\b[^>]*>\s*(?:{label_pattern})\s*</p>\s*</entry>\s*<entry\b[^>]*>\s*)'
+        r'(<p\b[^>]*/>|<p\b[^>]*>.*?</p>)',
+        re.DOTALL | re.I,
+    )
+
+    def _repl(match):
+        p_tag = match.group(2)
+        attr_match = re.match(r'<p(\b[^>]*?)(?:\s*/)?>', p_tag, re.I)
+        attr = attr_match.group(1) if attr_match else ""
+        attr = re.sub(r'\s*/\s*$', "", attr)
+        return f'{match.group(1)}<p{attr}>{escaped}</p>'
+
+    return pattern.sub(_repl, xml, count=1)
+
+
+def _patch_template_cover_fields(cover_xml, fields):
+    if not cover_xml or not fields:
+        return cover_xml
+    xml = cover_xml
+    xml = _replace_cover_value_after_label(xml, r'Part\s*No\.?', fields.get("part_no"))
+    xml = _replace_cover_value_after_label(xml, r'手册编号', fields.get("part_no"))
+    xml = _replace_cover_value_after_label(xml, r'手册名称', fields.get("manual_name"))
+    xml = _replace_cover_value_after_label(xml, r'产品名称[^<]*', fields.get("product_name"))
+    return xml
+
+
 def _extract_template_frontmatter_subset(frontmatter_xml):
     if not frontmatter_xml:
         return ""
@@ -3164,6 +3496,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         restored = re.sub(r'\[\[SUP\]\](.*?)\[\[/SUP\]\]', r'<sup>\1</sup>', restored)
         restored = re.sub(r'\[\[SUB\]\](.*?)\[\[/SUB\]\]', r'<sub>\1</sub>', restored)
         restored = re.sub(r'\[\[I\]\](.*?)\[\[/I\]\]', r'<i>\1</i>', restored)
+        restored = re.sub(r'\[\[TERM\]\](.*?)\[\[/TERM\]\]', r'<term>\1</term>', restored)
         def _code_repl(match):
             inner = match.group(1)
             if _looks_like_file_format(inner):
@@ -3193,6 +3526,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         restored = re.sub(r'\[\[/?I\]\]', '', restored)
         restored = re.sub(r'\[\[/?CODE\]\]', '', restored)
         restored = re.sub(r'\[\[/?UI\]\]', '', restored)
+        restored = re.sub(r'\[\[/?TERM\]\]', '', restored)
         restored = UI_CONTROL_RE.sub(r'<uicontrol>\1</uicontrol>', restored)
         if is_english:
             def _en_bracket_ui(match):
@@ -3200,7 +3534,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 if not inner or inner in {
                     "B", "/B", "SUP", "/SUP", "SUB", "/SUB", "UI", "/UI",
                     "I", "/I", "CODE", "/CODE", "LINK", "/LINK",
-                }:
+                    "TERM", "/TERM",
+                } or inner.startswith((
+                    "XREF:", "NOTE:", "TABCAP", "FIGCAP", "TWIDE:",
+                    "COLW:", "THEAD:", "LVL:", "SPAN:",
+                )):
                     return match.group(0)
                 return f'<uicontrol>{inner}</uicontrol>'
             restored = EN_BRACKET_UI_RE.sub(_en_bracket_ui, restored)
@@ -3689,6 +4027,32 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     f"<li><p>{_restore_inline_run_markup(i)}</p></li>" for i in items
                 )
                 return f"<entry{attrs}><{tag}>{lis}</{tag}></entry>"
+            if IDML_NESTED_NOTE_RE.search(stripped):
+                chunks = []
+                cursor = 0
+                for note_match in IDML_NESTED_NOTE_RE.finditer(stripped):
+                    before = stripped[cursor:note_match.start()].strip()
+                    if before:
+                        chunks.append(("p", before))
+                    chunks.append(("note", note_match.group(1), note_match.group(2).strip()))
+                    cursor = note_match.end()
+                tail = stripped[cursor:].strip()
+                if tail:
+                    chunks.append(("p", tail))
+                inner_xml = []
+                for chunk in chunks:
+                    if chunk[0] == "p":
+                        restored = _restore_inline_run_markup(chunk[1])
+                        if restored.strip():
+                            inner_xml.append(f"<p>{restored}</p>")
+                    else:
+                        restored = _restore_inline_run_markup(chunk[2])
+                        inner_xml.append(
+                            f'<note type="{chunk[1]}"><p>{restored}</p></note>'
+                        )
+                if not inner_xml:
+                    return f"<entry{attrs}></entry>"
+                return f"<entry{attrs}>{''.join(inner_xml)}</entry>"
             restored = _restore_inline_run_markup(cell_text or "")
             if not restored.strip():
                 return f"<entry{attrs}></entry>"
@@ -5358,7 +5722,14 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     if fname.lower().endswith((".dita", ".xml", ".ditamap")):
                         try:
                             text_content = content.decode("utf-8", errors="ignore")
-                            content = _rewrite_xml_language_attrs(text_content, dita_lang).encode("utf-8")
+                            text_content = _rewrite_xml_language_attrs(text_content, dita_lang)
+                            if _is_cover_topic_xml(text_content):
+                                cover_source = "\n".join(
+                                    part for part in (source_content or "", skipped_cover_content or "") if part
+                                )
+                                cover_fields = _extract_cover_fields(file_path, cover_source, dita_lang)
+                                text_content = _patch_template_cover_fields(text_content, cover_fields)
+                            content = text_content.encode("utf-8")
                         except Exception:
                             pass
                     tpl_fname = os.path.join(output_base, fname)
