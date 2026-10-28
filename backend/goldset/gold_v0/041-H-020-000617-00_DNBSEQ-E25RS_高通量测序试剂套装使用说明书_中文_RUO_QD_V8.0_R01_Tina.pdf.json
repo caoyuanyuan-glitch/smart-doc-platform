@@ -1,0 +1,89 @@
+{
+ "document": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "12",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "商标声明中增加这2个",
+   "selected_text": "括TruSeq 和Nextera 接 100 bp 以内。",
+   "context": "求 库和App 文库（包括TruSeq 和Nextera 接头）。文库插入 ，同时主带集中在±100 bp 以内。 书有特殊要求，则以建库试剂盒说明书的片段要求为准。 考，不同文库和不同应用产出数据量会有变化。 表 7 推荐插入片段大小 推荐插入片段大小 产出数据量 载片",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "下图所示",
+   "selected_text": "试剂槽底部胶 据下图图示方",
+   "context": "图 14 安装试剂槽 再次放置试剂槽，确保试剂槽底部胶塞未脱落或倾斜后再放置。 子处于打开状态，根据下图图示方向，将废液盒放在托盘上。确认废液盒",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "调整列宽，让最后一列有更多空间，尤其是确保摄氏度不与数字分开",
+   "selected_text": "-",
+   "context": "记录 版本 发布日期 修订内容摘要 8.0 2026 年10 月9 日 y 载片运输温度 ℃ y 仪器操作描述 7.0 2026 年4 月16 日 y 更新颠倒试剂 y 更新测序相关 6.0 2024 年12 月10 日 y 增加DNB 加 y 更新信号试剂 y 更新载片名称 y 更新试剂套装 5.0 2024 年8 月15 日 更新载片货号 4.0 2024 年5 月23 日 y 修改载片、 试剂盒的效期 y 更新转换酶的 3.0 2024 年1 月25 日 y 修改组分 修改制备",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "中英文不一致",
+   "selected_text": "仪器操作描述优化 更新颠倒试剂槽描述",
+   "context": "布日期 修订内容摘要 26 年10 月9 日 y 载片运输温度由10 ℃~25 ℃ 改为2 ℃~25 ℃ y 仪器操作描述优化 26 年4 月16 日 y 更新颠倒试剂槽描述 y 更新测序相关操作 年 月 日 y 增加DNB 加载缓冲液I 和LC 加载酶 y 更新信号试剂的装量",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "14",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "重复表述",
+   "selected_text": "钟以上，",
+   "context": "出制备缓冲液（）或制备缓冲 备缓冲液（OS-App-V4.0），置于常温约10 分钟可融化。 ）和DNB 终止缓冲液，置于4 ℃冰箱融化，如无条件 如常温放置超过30 分钟以上，不建议再使用。 V2.0-SB）适用于单barcode 文库。 V2.0-DB）适用于双barcode 文库。 App-V4.0) 仅适用于App-C 测序。 秒，短暂离心后置于冰上备用。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "平均分布列",
+   "selected_text": "交条件（Ap 时间 On",
+   "context": "3 分钟 Hold DNB 制备反应引物杂交条件（App 文库） 时间 On",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000617-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "24",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多余了一条线",
+   "selected_text": "撕 \\",
+   "context": "图 9 扫描 2. 撕开载片包装，检查载片完整性并确认载片 \\ 握住载片时，避免触碰载片上的小孔 XXXXXXXXXXX",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
