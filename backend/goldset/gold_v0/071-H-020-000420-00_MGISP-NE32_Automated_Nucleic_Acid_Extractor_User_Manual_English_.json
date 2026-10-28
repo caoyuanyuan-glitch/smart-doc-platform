@@ -1,0 +1,29 @@
+{
+ "document": "H-020-000420-00 MGISP-NE32 Automated Nucleic Acid Extractor User Manual_English_IVDR_WH Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000420-00 MGISP-NE32 Automated Nucleic Acid Extractor User Manual_English_IVDR_WH Tina.pdf ·",
+   "page": "1",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "地址不是最新",
+   "selected_text": "MGI-service@mgi-tech.com : 1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China :",
+   "context": "MGI-service@mgi-tech.com E-mail: 1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China https://global-mgitech.com Website: Address: W u h",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000420-00 MGISP-NE32 Automated Nucleic Acid Extractor User Manual_English_IVDR_WH Tina.pdf ·",
+   "page": "1",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "地址不是最新",
+   "selected_text": "MGI-service@mgi-tech.com : 1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China :",
+   "context": "MGI-service@mgi-tech.com E-mail: 1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Development Zone, Wuhan, Hubei 430075, P.R. China https://global-mgitech.com Website: Address: W u h",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  }
+ ]
+}
