@@ -3,7 +3,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, polish_lab, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor
+from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, polish_lab, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor, supplement_feedback
 from app.database import create_tables
 import threading
 import os
@@ -60,6 +60,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(documents.router, prefix="/api/documents", tags=["文档管理"])
 app.include_router(review.router, prefix="/api/review", tags=["文档审核"])
+app.include_router(supplement_feedback.router, prefix="/api", tags=["人工意见样本池"])
 app.include_router(compare.router, prefix="/api/compare", tags=["文档对比"])
 app.include_router(param_compare.router, prefix="/api/compare/params", tags=["参数对比"])
 app.include_router(competitor.router, prefix="/api/competitor", tags=["竞品分析"])
