@@ -1,0 +1,29 @@
+{
+ "document": "H-020-000649-00 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000649-00 Tina.pdf ·",
+   "page": "78",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "地址不是最新",
+   "selected_text": "1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Develop- ment Zone, Wuhan, Hubei 430075, P.R. China ress:",
+   "context": "1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Develop- ment Zone, Wuhan, Hubei 430075, P.R. China MGI-service@mgi-tech.com https://global-mgitech.com Address: E-mail: Website:",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000649-00 Tina.pdf ·",
+   "page": "78",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "地址不是最新",
+   "selected_text": "1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Develop- ment Zone, Wuhan, Hubei 430075, P.R. China ress:",
+   "context": "1st, 3rd, and 4th Floors, Intelligent Building, No.66, 7th Guanggu Road, East Lake High-Tech Develop- ment Zone, Wuhan, Hubei 430075, P.R. China MGI-service@mgi-tech.com https://global-mgitech.com Address: E-mail: Website:",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  }
+ ]
+}
