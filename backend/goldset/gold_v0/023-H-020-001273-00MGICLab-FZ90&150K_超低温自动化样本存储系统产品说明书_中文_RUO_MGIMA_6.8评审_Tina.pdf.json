@@ -1,0 +1,137 @@
+{
+ "document": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "84",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "不明白",
+   "selected_text": "能检查或",
+   "context": "大智造或代理机构才能检查或提供）如下表： 料号 MSCEI-040142 MSCEH-100042",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "89",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "为避免歧义，建议改为按下，下同",
+   "selected_text": "当样本不 拍下 随后佩",
+   "context": "进出仓紧急取样 当样本不慎掉入进出仓中无法取出时，执行以下操 1. 拍下< 急停> 按钮（< 急停> 按钮位置在屏幕后 2. 随后佩戴手套，手动打开进出仓左侧的紧急取样 3. 将手伸入摸索，拾取冻存管。 4. 完成后，锁闭紧急取样门。 5. 在屏幕上点击【恢复】。 执行此操作前必须拍下 急停 按钮，避免机构",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "仪器线条用85%灰，下同，具体要求你看下wiki 绘图规范：https://wiki.genomics.cn/pages/viewpage.action?pageId=318079637",
+   "selected_text": "-",
+   "context": "件 前视图 1 2 3 4 5 6 7 8 图 3 前视图",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "去掉括号，这不是界面字符串",
+   "selected_text": "位机，再留 【2×n+2】。 需远程监控，",
+   "context": "网络要求 每台设备需留2 个网口，位置在设备背面，此网口数量 上位机，再留最多2 个网口，位置在交换机处或者服务 为【2×n+2】。 如需远程监控，库区需要配备4G、GPRS 或外网信号， 设备组网说明： y 单台设备（同类型） 不需要单独配调度系统服务器，设备内集成部署HS 地址的客户端局域网接口（传输速度）",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多了这根线，改到这里我来教你怎么藏起来这根线",
+   "selected_text": "请把此端口号列入白名单，以确保客户可访问我们的自动化",
+   "context": "单台设备（同类型） 不需要单独配调度系统服务器，设备内集成部署HS 服务，设备后端须有一个带固定IP 地址的客户端局域网接口（传输速度1000 MBit/s），分配端口号为18090。 请把此端口号列入白名单，以确保客户可访问我们的自动化系统。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "去掉线，通查",
+   "selected_text": "-",
+   "context": "硬盘或512 SSD 自适应网卡，独立千兆管理端口 800 W",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "35",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "应用icon width字符样式",
+   "selected_text": "才可进行 角 进 管理】>",
+   "context": "图 14 登录界面 需登录后才可进行操作。 点击右上角 进入登录页面。可通过账号密码或面容识 在【账户管理】>【个人账户】界面录入面容信息。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "36",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "根据图片规范，调整标注线条长度",
+   "selected_text": "1 2 图 15 主页",
+   "context": "1 2 3 4 图 15 主页",
+   "category": "图片/图表",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "45",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "改为中文句号，看是否有多余空格",
+   "selected_text": "自动关 出. 需先验",
+   "context": "提供样本管理模式、虚拟键盘、自动登出时长、存取管关门计时、存 设置功能。存取管关门计时与存取盒关门计时，指在存取管或存取盒 备将冻存盒取出后，自动关闭外门所需的等待时间。 为0 时，账户不自动登出. 提供密码修改功能。需先验证当前密码，新密码不得与当前密码一致 账户将自动登出，需使用新密码重新登录。 供自定义耗材设置、自定义字段设置功能。",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "89",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "全文检查，改为【】这种括号",
+   "selected_text": "本不慎掉入进 下< 急停> 后佩戴手套，",
+   "context": "进出仓紧急取样 当样本不慎掉入进出仓中无法取出时，执行以下操作： 1. 拍下< 急停> 按钮（< 急停> 按钮位置在屏幕后方），确 2. 随后佩戴手套，手动打开进出仓左侧的紧急取样门。 3. 将手伸入摸索，拾取冻存管。 4. 完成后，锁闭紧急取样门。 5. 在屏幕上点击【恢复】。 执行此操作前必须拍下 急停 按钮，避免机构运动导致夹",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001273-00MGICLab-FZ90&150K 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA 6.8评审 Tina.pdf ·",
+   "page": "89",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "【】",
+   "selected_text": "。 下< 急停> 按 须确认紧急取",
+   "context": "手伸入摸索，拾取冻存管。 成后，锁闭紧急取样门。 屏幕上点击【恢复】。 执行此操作前必须拍下< 急停> 按钮，避免机构运动导致夹伤。 完成紧急取样后，必须确认紧急取样门已完整锁闭，避免进出仓漏冷。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  }
+ ]
+}
