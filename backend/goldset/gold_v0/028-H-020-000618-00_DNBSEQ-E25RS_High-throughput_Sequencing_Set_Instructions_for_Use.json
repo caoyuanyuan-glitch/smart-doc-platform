@@ -1,0 +1,113 @@
+{
+ "document": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "建议改为product",
+   "selected_text": "device ld not b",
+   "context": "s product is a universal reagent set for the sequencing o aries, and is used with the DNBSEQ-E25RS series gene complete high-throughput sequencing and obtain sam ormation. WARNING This device is intended only for scientific should not be used for clinical diagnosis. rking principle device adopts the advanced DNB and the core technology o",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "10",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "It is not recommended to mix reagents... 或者 Mixing reagents from... is not recommended.",
+   "selected_text": "ly. Keep mixed u",
+   "context": "not be reused. batched separately. Keep the components recommended to mixed use reagents from ts and user-",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "18",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "take out and",
+   "selected_text": "thaw ake DN",
+   "context": "11 cedures. (App-C FCL PE150) ents: TE Buffer. rary adapter type, thaw Make DNB Buffer (OS-V2.0- OS-V2.0-DB), or Make DNB Buffer (OS-App-V4.0) by mperature for about 10 minutes.",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "逗号前面多了一个空格",
+   "selected_text": "6 ,",
+   "context": "y Modified the d sequencing\" 7.0 April 16 , 2026 y Updated the des reagent cartridge y Updated the seque 6.0 December 10, 2024 y Added reagent t Buffer I and LC Loa y Updated the filling y Updated the name",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "双引号反向了",
+   "selected_text": "\"S",
+   "context": "nsportation temperature of m 10 ℃ to 25 ℃ to 2 ℃ to descriptions of \"Start scription of inverting the uencing operations",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "9",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "中英文不一致，中文是型号",
+   "selected_text": "Sequencing read length",
+   "context": "identifying a specific library. Table 1 Sequencing cycle a Sequencing read length Read 1 read length Read 2 read length Total r length SE100 100 / 100+20 100+10 100",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "9",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺FCL，根据前面表格",
+   "selected_text": "SE100 PE150",
+   "context": "Sequencing read length Read 1 read length Read 2 read length T le SE100 100 / 10 10 10 PE150 150 150 3 3 3 App-C FCL SE100 100 / 10 10 10",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "是否有多余空格",
+   "selected_text": "℃.",
+   "context": "temperature. enzyme inactivation ature reaches 4 ℃. . Add the following",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01 Tina.pdf ·",
+   "page": "27",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺定冠词the",
+   "selected_text": "r ns",
+   "context": "the following steps: . The self-check of the device starts. After the chec d, the Choose scheme interface is displayed. artridge rack in reagent compartment is being artment door opens automatically and the rack slides o ARNING Do not place your hand between the compartm device casing to avoid pinching.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  }
+ ]
+}
