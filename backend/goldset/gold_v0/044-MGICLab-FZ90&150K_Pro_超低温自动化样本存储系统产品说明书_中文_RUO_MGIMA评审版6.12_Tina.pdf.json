@@ -1,0 +1,89 @@
+{
+ "document": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf",
+ "annotations": [
+  {
+   "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf ·",
+   "page": "79",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "须为",
+   "selected_text": "，需选择 所示。",
+   "context": "需要整理的冻存盒，需选择样本 ，可被点击，如下图所示。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf ·",
+   "page": "79",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "亮起，可点击",
+   "selected_text": "，选择需要整理的 变亮，可被点击，",
+   "context": "，点击【开启多选】，选择需要整理的冻存盒，需选择样本 时【碎片整理】按钮变亮，可被点击，如下图所示。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf ·",
+   "page": "110",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "为什么还没申请",
+   "selected_text": "编号：待申请",
+   "context": "编号：待申请",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "小写，通查这个单位",
+   "selected_text": "Z",
+   "context": "，AC 220 V，50 HZ 16 A（三孔）。 现场应合理分配三孔电源插座位置。 低温保存箱侧面的机组铭牌。低温保存箱应使用专用的接地系统， 靠接地。检查低温保存箱铭牌上的额定电压，并对比插座上的电压。",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf ·",
+   "page": "31",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "线还没去掉，下同",
+   "selected_text": "电源：",
+   "context": "�UPS 电源：1000 VA/800 W",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf ·",
+   "page": "44",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "改为中文句号，通查",
+   "selected_text": "动关 出. 需先验",
+   "context": "面容信息可录入或更换。 提供样本管理模式、虚拟键盘、自动登出时长、存取管关门计时、存 设置功能。存取管关门计时与存取盒关门计时，指在存取管或存取盒 备将冻存盒取出后，自动关闭外门所需的等待时间。 为0 时，账户不自动登出. 提供密码修改功能。需先验证当前密码，新密码不得与当前密码一致 账户将自动登出，需使用新密码重新登录。 供自定义耗材设置、自定义字段设置功能。",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "MGICLab-FZ90&150K Pro 超低温自动化样本存储系统产品说明书_中文_RUO_MGIMA评审版6.12 Tina.pdf ·",
+   "page": "85",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "前面写的是：冻存盒 与研发确认统一描述",
+   "selected_text": "方式。操 于冷冻盒内 固定线不得",
+   "context": "法 度校准一般采用自校方式。操作步骤如下： 将温度记录仪固定于冷冻盒内。若冷冻管高度不足以固定温度记录仪时 固定在冷冻盒上，固定线不得影响正常存取操作。随后在温度记录仪周 遮挡。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}
