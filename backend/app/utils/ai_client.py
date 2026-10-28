@@ -1827,6 +1827,14 @@ class AIClient:
         if not image_bytes:
             return {"decision": "skipped", "reason": f"{provider}_unavailable", "confidence": 0}
 
+        model = self._visual_model_for(provider)
+        print(
+            f"[视觉] 调用复核模型: provider={provider} model={model or '(未配置)'} "
+            f"page={int(page_number or 0) or '?'} review_id={review_id} "
+            f"label={request_label} 图片={len(image_bytes)}B",
+            flush=True,
+        )
+
         issue_payload = issue_payload or {}
         prompt = f"""
 你是一名技术文档审核复核员，需要根据页面截图判断一个审核问题是否有图片证据支持。
@@ -1906,16 +1914,27 @@ class AIClient:
                         temperature=0.3,
                     )
                 )
+            elapsed_ms = round((time.time() - started_at) * 1000)
             self._record_usage_event(
                 provider,
                 model,
                 getattr(response, "usage", None),
                 request_label=request_label,
                 review_id=review_id,
-                elapsed_ms=round((time.time() - started_at) * 1000),
+                elapsed_ms=elapsed_ms,
             )
             result = response.choices[0].message.content or ""
+            print(
+                f"[视觉] 复核成功: provider={provider} model={model} page={int(page_number or 0) or '?'} "
+                f"耗时={elapsed_ms}ms review_id={review_id}",
+                flush=True,
+            )
         except Exception as exc:
+            print(
+                f"[视觉] 复核失败: provider={provider} model={model or '(未配置)'} "
+                f"page={int(page_number or 0) or '?'} review_id={review_id} 原因={self._clean_text(str(exc), 180)}",
+                flush=True,
+            )
             return {
                 "decision": "error",
                 "reason": self._clean_text(str(exc), 180),
@@ -1942,6 +1961,12 @@ class AIClient:
                     "reason": self._clean_text(item.get("reason"), 160),
                     "confidence": self._normalize_confidence(item.get("confidence"), 0),
                 })
+        print(
+            f"[视觉] 复核结论: provider={provider} decision={decision} "
+            f"page={int(page_number or 0) or '?'} review_id={review_id} "
+            f"extra_issues={len(extra_issues)} reason={self._clean_text(data.get('reason'), 120)}",
+            flush=True,
+        )
         return {
             "decision": decision,
             "reason": self._clean_text(data.get("reason"), 220),
@@ -2509,7 +2534,7 @@ class AIClient:
 REVIEW GOAL:
 - Behave like a human release reviewer, not a grammar checker.
 - Prioritize content issues that affect release approval, compliance, user operation, safety, information completeness, terminology consistency, table content integrity, figure references, revision history, default credentials, IP/URL exposure, and legally sensitive statements.
-- Style, readability, redundancy, punctuation habits, spacing, and similar quality issues SHOULD be reported with severity=suggestion. Keep fatal/serious/general for safety, compliance, operability, completeness, and consistency problems.
+- Style, readability, redundancy, punctuation habits, spacing, and similar quality issues SHOULD be reported only when they affect release approval, compliance, or user operation, and as severity=suggestion. Keep fatal/serious/general for safety, compliance, operability, completeness, and consistency problems. Do not pad the report with acceptable style variations.
 
 ADDITIONAL MANUAL REVIEW CHECKS:
 - Cross-reference semantics: report when a reference such as Section X.X, Figure X, or Table X points to missing content or clearly mismatched topic content. Use category "编号引用".
@@ -2519,7 +2544,7 @@ ADDITIONAL MANUAL REVIEW CHECKS:
 - Index page accuracy: report when a table of contents or index page number does not match the actual chapter page. Use category "编号引用".
 - Trademark and proper-name casing: report when brand names such as macOS, DNBSEQ, or GenSeq use inconsistent official casing within the same document. Use category "术语一致性".
 - Step reference logic: when the text references "see Step N", "as shown in step N", or "after completing step N", verify not only existence and numbering continuity but also whether the referenced step's actual content logically matches the citing context. Report as `suggestion` severity if mismatched, citing the referenced step's actual content and the expected content at the citing location. Do not report if the referenced step's content cannot be confirmed (confidence must be >= 70).
-- Subject-verb agreement and singular/plural form: report third-person singular mismatches such as "the system apply" -> "the system applies", "the kit run" -> "the kit runs", and noun number inconsistency for the same field (e.g. one place says "reagent" and another "reagents" for the same item). Use category "语法与表达" with severity serious for the verb mismatch, and category "术语一致性" for noun number inconsistency.
+- Subject-verb agreement and singular/plural form: report ONLY clear third-person singular mismatches within a complete sentence that break comprehension, such as "the system apply" -> "the system applies", "the kit run" -> "the kit runs". Do NOT report isolated word-level grammar preferences, acceptable technical-writing variants (e.g. "data is" vs "data are", "the" vs "a" article choices), or singular/plural variants where both forms are used for the same field (e.g. one place says "reagent" and another "reagents") unless the inconsistency confuses the meaning. Use category "语法与表达" with severity serious for the verb mismatch, and category "术语一致性" for noun number inconsistency.
 - Step applicability: report when a step is only valid for a subset of the software/platforms/flow-cell types mentioned in the document (e.g. the sub-paths or file names differ across bioinformatics software) and should be removed, merged, or explicitly marked as conditional. Use category "信息不完整" or "冗余", severity suggestion.
 - Abbreviation casing consistency: report when the same abbreviation is written with inconsistent capitalization within the same context (e.g. lowercase "p" vs "P", "s" vs "S", "dna" vs "DNA"). Use category "术语一致性", severity suggestion. Do not report single-letter tokens in isolation unless the casing conflict is visible in the same excerpt.
 
@@ -2533,13 +2558,20 @@ SEMANTIC QUALITY CHECKS (apply sentence by sentence, not only word by word):
 - Sentence constituents: report missing or extra characters that break the sentence, and name the affected constituent. Use category "句子成分".
 Each semantic issue must quote the complete sentence from the excerpt as evidence, and the same defect must not be reported twice.
 
+MANDATORY CONTENT CHECKS (report as serious/fatal when violated, with evidence):
+- Safety/grounding statements: report when a safety warning, protective-grounding instruction, or electrical-safety statement is truncated, contradicts another statement in the same excerpt, or misses a required protective-action clause (e.g. grounding requirements without wiring instructions). Category "安全合规".
+- Permission/access statements: report when a function is stated as restricted (e.g. "admin only", "available to administrator") but the excerpt provides no administrator configuration path, or the permission wording is ambiguous about who can perform the action. Category "法规合规" or "信息不完整".
+- UI status/transition descriptions: report when a UI state transition (pause/resume, start/stop, selection) omits the trigger action or the resulting state is unclear from the text alone. Category "操作步骤" or "信息不完整".
+- Troubleshooting/fault content: report when a fault-troubleshooting step ends without a resolution or references a missing table/figure/step that is required for the user to continue. Category "信息不完整" or "编号引用".
+
 🚫 FORBIDDEN issue types (reporting any of these is an error):
 - ❌ Unicode-equivalent character differences (e.g. µ U+00B5 vs μ U+03BC, full-width vs half-width digits, minus sign U+2212 vs hyphen U+002D) where both render identically
 - ❌ Issues where the original field is shorter than 2 meaningful characters
 - ❌ Pure formatting differences that are visually identical
 - ❌ Excerpt-boundary artifacts reported as completeness defects: missing sections, headings without body text, truncated sentences, table header cells whose rows fall outside the excerpt, table-of-contents lines, or "the document/excerpt is incomplete"
+- ❌ Low-value English rewrite issues that do not affect meaning, compliance, or user operation: article choices (a/the), gerund vs infinitive style, singular/plural variants, word-order or phrasing preferences, British/American spelling variants where both forms are standard, and subject-verb agreement variations where the sentence remains clearly understandable. Report these only when the variation changes the meaning, breaks a complete sentence, or affects release/compliance.
 
-Quality issues such as punctuation habit, spacing, articles, abbreviation expansion, gerund vs noun, and style preferences SHOULD be reported as severity=suggestion.
+Quality issues such as punctuation habit, spacing, abbreviation expansion, gerund vs noun, and style preferences SHOULD be reported ONLY when they affect formatting compliance or operability, and as severity=suggestion. Do not report acceptable, unambiguous variants for padding.
 
 IMPORTANT REMINDERS:
 - Report only issues with EXPLICIT textual evidence from the document.
@@ -2655,8 +2687,15 @@ Return all issues with confidence >= 50. Do not return an empty issues array onl
 - ❌ original 字段长度小于 2 个有意义字符的问题
 - ❌ 纯格式差异但视觉呈现完全一致
 - ❌ 把机械切分产生的边界现象当作完整性缺陷：缺少章节、标题下无正文、句子被截断、表格只有表头、目录行被当成无正文标题、"文档/节选不完整"
+- ❌ 不影响语义、合规或用户操作的低价值改写问题：只为了语言风格而调整的语序、句式、同义表达、语气助词增减（如"请""的/地/得"混用）、无歧义的标点习惯差异，以及原文表达可正常理解时的主谓/搭配微调。仅当改动会改变原意、破坏句子完整性或影响发布/合规时才可报告。
 
-标点习惯、空格、冠词、缩写展开、动名词形式和风格偏好等质量类问题应报告，severity=suggestion。
+必查内容类问题（违反时须按 serious/fatal 报告，并给出证据）：
+- 安全/接地声明：安全警告、保护接地要求、电气安全语句被截断，或与同一节选内其他语句互相矛盾，或缺少必要的保护动作说明（如只有接地要求而无布线操作）时报告，category=安全合规。
+- 权限/访问表述：功能被声明为受限（如"仅管理员""管理员账号可用"），但节选内没有给出管理员配置路径，或权限措辞无法明确谁可执行该操作时报告，category=法规合规或信息不完整。
+- UI 状态/切换描述：界面状态切换（暂停/继续、启动/停止、选中）缺少触发动作，或仅凭文本无法判断切换后的状态时报告，category=操作步骤或信息不完整。
+- 故障排查内容：故障排查步骤没有给出解决动作就结束，或引用了用户继续操作所必需的表格/图/步骤但该对象不存在时报告，category=信息不完整或编号引用。
+
+标点习惯、空格、缩写展开、动名词形式和风格偏好等质量类问题，仅当影响排版规范或可操作性时才报告，severity=suggestion；不得为凑数而报告无歧义的可接受变体。
 
 重要提醒：
 - 只报告有明确文本证据的问题。
