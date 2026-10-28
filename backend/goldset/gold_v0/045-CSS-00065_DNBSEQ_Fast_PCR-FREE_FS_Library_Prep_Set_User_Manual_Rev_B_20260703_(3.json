@@ -1,0 +1,77 @@
+{
+ "document": "CSS-00065 DNBSEQ Fast PCR-FREE FS Library Prep Set User Manual Rev B 20260703 (3) Tina.pdf",
+ "annotations": [
+  {
+   "file": "CSS-00065 DNBSEQ Fast PCR-FREE FS Library Prep Set User Manual Rev B 20260703 (3) Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "确认下是不是3.0",
+   "selected_text": "B",
+   "context": "B V2.0 Mar. 2026",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "CSS-00065 DNBSEQ Fast PCR-FREE FS Library Prep Set User Manual Rev B 20260703 (3) Tina.pdf ·",
+   "page": "43",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "多了，这个topic类型有问题，新建一个复制内容到新建topic",
+   "selected_text": "Acronyms and abbreviations",
+   "context": "Appendix 2 Acronyms and abbreviations Acronyms and abbreviations Table 47 Acronyms and abbreviations Acronym Definition Cat. No. Catalog Number",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "CSS-00065 DNBSEQ Fast PCR-FREE FS Library Prep Set User Manual Rev B 20260703 (3) Tina.pdf ·",
+   "page": "8",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "sentence style",
+   "selected_text": "p Colo",
+   "context": "315-00)” on page 3 and “Table 4 DNBSEQ Fast PCR-FREE Cat. No.: 940-001316-00)” on page 4. REE FS Library Prep Set (16 RXN) (Cat. No.: 940-001314-00) ents Cap Color Spec & Quantity uffer II Green 215 μL/tube × 1 nzyme II Green 105 μL/tube × 1 tion Buffer Red 450 μL/tube × 1",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "CSS-00065 DNBSEQ Fast PCR-FREE FS Library Prep Set User Manual Rev B 20260703 (3) Tina.pdf ·",
+   "page": "12",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "搞到下一页",
+   "selected_text": "Tubes 1.7 Precautions",
+   "context": "0.2 mL PCR tube or 96-well plate C), or Qubit Assay Tubes or 0.5 mL Thin Wall PCR Tubes Invitro (Cat.N 1.7 Precautions",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "CSS-00065 DNBSEQ Fast PCR-FREE FS Library Prep Set User Manual Rev B 20260703 (3) Tina.pdf ·",
+   "page": "36",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "搞到下一页",
+   "selected_text": "immediatel 4.2 Digestion",
+   "context": "Prepare the “Table 40 Digestion mixture” on pag 4. When the program is completed, place the PCR immediately proceed to the next step. 4.2 Digestion 30 For Re",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "CSS-00065 DNBSEQ Fast PCR-FREE FS Library Prep Set User Manual Rev B 20260703 (3) Tina.pdf ·",
+   "page": "40",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "Appendix 下面再建一个主题topic，目前页眉跨行了",
+   "selected_text": "Appendix 1 UDB PF Adapter Kit's barcode number and sequence information",
+   "context": "Appendix 1 UDB PF Adapter Kit's barcode number and sequence information For detailed sequence information of each barcode, please reach out to our Technical Support team at: US:US-TechSupport@CompleteGenomics.com. Canada:CA-TechSupport@CompleteGenomics.com.",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
