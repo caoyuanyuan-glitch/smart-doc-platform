@@ -1,0 +1,41 @@
+{
+ "document": "H-020-001193-00 ExploreFree VET User Manual_English_VET_WH_R01 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001193-00 ExploreFree VET User Manual_English_VET_WH_R01 peered by Tina.pdf ·",
+   "page": "22",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "后面几个都没有加mode",
+   "selected_text": "B mode, M mode, ging.",
+   "context": "es modes include: B mode, M mode, Color Doppler, nd Harmonic Imaging. mposition",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001193-00 ExploreFree VET User Manual_English_VET_WH_R01 peered by Tina.pdf ·",
+   "page": "41",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "logging",
+   "selected_text": "login",
+   "context": "Ensure that the device is paired up with the soft accessing the main interface of the software. Perform the following steps: 1. After login in, the software automatically navig device connection preparation interface. 2. Long press the power button for 3 s to po device. The LED indicator starts flashing.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001193-00 ExploreFree VET User Manual_English_VET_WH_R01 peered by Tina.pdf ·",
+   "page": "104",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "从别的地方粘贴一个摄氏度符号，这里间隙过大",
+   "selected_text": "3 ℃",
+   "context": "d with internal temperature sensors nisms that continuously monitor and e temperature, ensuring that the lens emains below 43 ℃ under normal chanisms operate autonomously to em performance. No specific action uired from the user to ensure their",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
