@@ -1,0 +1,113 @@
+{
+ "document": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "6",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "有点夸大了",
+   "selected_text": "NA 纳米 而大幅提 片，载片",
+   "context": "球（DNA Nanoball，DNB）以及联合探针锚定聚合 synthesis，cPAS）测序核心技术，使用一种经过特殊 饰位点仅固定一个DNA 纳米球，阵列载片修饰位点的间 号不会互相干扰，从而大幅提高信号处理的准确性。 序试剂泵入测序载片，载片上加载的DNB 可依次结合 会在试剂的作用下发出自发光信号。不同的标记物所发出 转换成数字信号，传输到计算模块进行处理，可以获取待",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "9",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "修订记录说要删除",
+   "selected_text": "信号因子缓冲液 MDA T- 试剂 测序酶混合液",
+   "context": "信号因子1 42 μL/ 支×1 信号因子2 25 μL/ 支×1 信号因子缓冲液 17 mL/ 支×1 MDA T- 试剂 0.32 mL/ 支×1 MDA 测序酶混合液 0.05 mL/ 支×1 测序试剂槽 1 个 废液盒 1 个 漏斗 1 个",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "11",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "删除还是不删",
+   "selected_text": "信号因子缓冲液 MDA T- 试剂 测序酶混合",
+   "context": "信号因子1 42 μL/ 支×1 信号因子2 25 μL/ 支×1 信号因子缓冲液 17 mL/ 支×1 MDA T- 试剂 0.32 mL/ 支×1 MDA 测序酶混合液 0.05 mL/ 支×1 测序试剂槽 1 个 废液盒 1 个 漏斗 1 个",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "25",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "所需",
+   "selected_text": "择测序方 一链、",
+   "context": "案】下拉列表，选择测序方案，如【PE150APPC_customized】。 序方案的测序顺序、一链、二链、Barcode 及暗反应等信息。 序方案，参考DNBSEQ-E25RS&DNBSEQ-E25ARS 基因测序仪产 案中包含Barcode长度，点击【Barcode】下拉列表，选择所需Barcod arcode 文件，参考DNBSEQ-E25RS&DNBSEQ-E25ARS 基因测",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "26",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "输入载片序列号时，请务必核对准确。进入参数回顾界面后，无法回退至上一步修改。",
+   "selected_text": "进入参数回顾界面后，载片序列号不可通过点击 回到输入信息界面修改。因此在 输入序列号时请确保序列号准确无误。",
+   "context": "进入参数回顾界面后，载片序列号不可通过点击 回到输入信息界面修改。因此在 输入序列号时请确保序列号准确无误。 XXXX/XX/XX XX:XX:XX A T C G 输入信息 方案选择 输入DNB编号 参数回顾",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "16",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这空隙不对",
+   "selected_text": ", 表",
+   "context": "取出 聚合酶混合液（）置于冰上，使用前短暂离心 y 请勿将DNB 聚合酶混合液II（OS）置于室温。 y 请勿长时间触碰管壁，避免高温导致酶失活。 PCR 仪达到4 ℃后, 取出PCR 管，用迷你离心机离心5 秒后， 表 10 DNB 制备反应混合液2（MGI 接头文库 组分 体积（μL） DNB 聚合酶混合液I（OS） 40 DNB 聚合酶混合液II（OS） 4",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "17",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "平均分布列",
+   "selected_text": "杂交条件（ 文 时间 On 5 分钟 3 分钟 3 分钟 Hold （）置于冰上，",
+   "context": "反应混合液1，用迷你离心机离心5 秒，置于PCR 仪中进行引物杂交， 13 DNB 制备反应引物杂交条件（App 文库） 时间 On 5 分钟 3 分钟 3 分钟 Hold DNB 聚合酶混合液II（LC）置于冰上，使用前短暂离心5 秒，再置 酶（App）、DNB 聚合酶混合液II（LC）置于室温。 触碰管壁，避免高温导致酶失活。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "粗了",
+   "selected_text": "50 A 17 10 7 颠倒",
+   "context": "用力甩1 次。剪开试剂槽外包装袋。 匀融化后的信号因子1 和信号因子2 约5 秒。短暂离心4~5 秒后备用。 积的信号因子1 和信号因子2 加入到信号因子缓冲液中，制备成信号 CL SE100 FCL PE150 App-C FCL SE100 App-C FCL PE150 7 μL 42 μL 17 μL 42 μL 0 μL 25 μL 10 μL 25 μL mL 17 mL 7 mL 17 mL 瓶的盖子，上下轻微颠倒10~15 次，混匀试剂。过程中勿剧烈振荡， ，将漏斗放在MSP 孔上，将混好的信号因子混合液全部加入孔中。再 面最高1 cm 处轻拍桌面5 次。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001248-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V3.0_R01 Tina.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "收回至仪器内",
+   "selected_text": "收回仪器。",
+   "context": "图 15 安装废液盒 时，定位夹刚好对准废液盒凹槽。 >【确定】，托盘自动收回仪器。仪器将自动进行装载和压紧动作。 。 闭仓门。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  }
+ ]
+}
