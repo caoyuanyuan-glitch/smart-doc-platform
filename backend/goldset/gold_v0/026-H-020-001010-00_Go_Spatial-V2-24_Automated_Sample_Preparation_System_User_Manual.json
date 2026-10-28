@@ -1,0 +1,125 @@
+{
+ "document": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "network port of the",
+   "selected_text": "e e",
+   "context": "Description Connects to the external electrical box Connects to the external electrical box Reserved port",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "具体接到哪个接口",
+   "selected_text": "e",
+   "context": "Description Connects to the external electrical box Connects to the external electrical box Reserved port Connects to the mains supply, turns on/off the power supply of the",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "3",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "平均分布列",
+   "selected_text": "Version 2.0 1.0",
+   "context": "Date Version February 3, 2026 2.0 February 25, 2025 1.0",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "15",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "同上意见",
+   "selected_text": "e c",
+   "context": "d Connects to the mains supply, turns on/off the power supply of the device. Connects to the computer n the label:",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "23",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "network port of the 建议跟项目组确认下，中文同步改",
+   "selected_text": "e c",
+   "context": "Description rt Connects to the CAN communication port of the external electrical box. Connects to the computer.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "27",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "标注线置于顶层，通查",
+   "selected_text": "-",
+   "context": "7 5 4 7 6",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "38",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺句号",
+   "selected_text": "g",
+   "context": "e to start initializing",
+   "category": "标点符号",
+   "layer": "ai",
+   "expected_rule": "DET-PUNCT-001[NEW]"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "39",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "The application name displayed in the application selection window is subject to the actual window.",
+   "selected_text": "The application names are as displayed in the actual window.",
+   "context": "3. After the initialization is complete, the application selection window pops up. Select the required application. Tips The application names are as displayed in the actual window.",
+   "category": "拼写错误",
+   "layer": "ai",
+   "expected_rule": "DET-TERM-SPELL-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "50",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "这里是不是缺空格",
+   "selected_text": "N p er",
+   "context": "After turning the power switch to the ON position, I still cannot power on the device. 1. Check whethe connected and fr 2. Check whether t ON position. 3. Check whether outlet is within th 4. If the problem support. 1. Check whether t",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-001010-00 Go Spatial-V2-24 Automated Sample Preparation System User Manual_English_RUO_WH_0203 peered by Tina.pdf ·",
+   "page": "52",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "放到第三行",
+   "selected_text": "×× (without supporting feet)",
+   "context": "wer 500 VA ification T10AH250V ns 1450 mm (W) × 812 mm (D) × 918 mm (H) (without supporting feet) (57 inches × 32 inches × 36 inches) ht Approximately 220 kg (485 lb) (only includes structural frame) ltage 200-240 V~, 50/60 Hz",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
