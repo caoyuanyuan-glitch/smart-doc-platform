@@ -1,0 +1,89 @@
+{
+ "document": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf ·",
+   "page": "29",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "正常不是应该拍照问技术支持吗？直接丢了岂不是无法索赔。 建议改为： 当出现XXX时，禁止使用该试剂槽，将其单独隔离留存备查、存放于指定垃圾桶，按实验室及当地法律法规要求进行处理。如有疑问，联系技术支持。",
+   "selected_text": "，并迅速转移至指定垃圾",
+   "context": "完成后，摇晃试剂槽，检查是否已无冰块。若有， 直至冰块完全融化，并用无尘纸擦干试剂槽表面的 现包装袋鼓起、试剂槽包装顶部破损或试剂泄漏（非冷凝 情况）时，切勿使用该试剂槽，并迅速转移至指定垃圾 。如有疑问，联系技术支持。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "轻柔上下颠倒",
+   "selected_text": "无尘纸擦干。 ，上下轻微颠倒1 拍击桌面5 次，再",
+   "context": " 如是试剂泄漏，液体呈现明显颜色，液体从试剂槽底 部，尤其是从底部盖板流出，或流出的液体会浸湿整个 试剂槽底部。  如是冷凝水，液体一般出现在试剂槽的侧面和四个底角 周围。此时，可用无尘纸擦干。 毕后，双手握住试剂槽两侧，上下轻微颠倒10 次，将试剂 拿起至距桌面最高1 cm 处拍击桌面5 次，再上下轻微颠倒 ，并再次将试剂槽拿起至距桌面最高1 cm 处拍击桌面5 。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf ·",
+   "page": "30",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "轻拍",
+   "selected_text": "上下轻 处拍击桌",
+   "context": "，液体一般出现在试剂槽的侧面和四个底角 ，可用无尘纸擦干。 槽两侧，上下轻微颠倒10 次，将试剂 cm 处拍击桌面5 次，再上下轻微颠倒 拿起至距桌面最高1 cm 处拍击桌面5",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf ·",
+   "page": "32",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "轻拍，下同",
+   "selected_text": "液全部加 处拍击桌",
+   "context": "9. 盖上信号因子混合液瓶的盖子，上下颠倒10~15 次，混匀试 剂。过程中勿剧烈振荡，避免气泡产生。 10.按照下图放置试剂槽，将漏斗放在MSP 孔上，将混好的信号 因子混合液全部加入MSP 孔中。再将试剂槽拿起至距桌面最 高1 cm 处拍击桌面5 次。 xxxx xxxx",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf ·",
+   "page": "21",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "上角标字号大了，要不直接PDF改字号",
+   "selected_text": "40 fm 06 计算： 80 fm 06",
+   "context": "及定量结果，计算文库投入体积： mol，根据以下公式进行计算： μL）= N(bp) × 330 × 2 × 40 fmol c(ng/μL) × 106 mol，根据以下公式进行计算： μL）= N(bp) × 330 × 2 × 80 fmol c(ng/μL) × 106 片段总长度（包括接头序列长度），c 为文库 平均分子量（330 g/mol）。 p-C 和App-D 测序，取出转换酶，置于冰 ，选择任一操作，制备DNB。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf ·",
+   "page": "27",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "缺空格，全文检查",
+   "selected_text": "4℃ 缓慢",
+   "context": "温度 时间 35℃热盖 On 30℃ 20 分钟 4℃ Hold i. PCR 仪温度达到4℃后，立即加入20 μL DNB 终止缓冲 液，用阔口吸头缓慢地吹打混匀5~8 次。 切勿离心、振荡及剧烈吹打。 取2 μL DNB，使用Qubit ssDNA Assay Kit 和Qubit 4 荧光 定量仪进行浓度检测。  对于MGI 文库，浓度的合格标准为4 ng/μL~40 ng/μL。 对于 文库，浓度的合格标准为。",
+   "category": "空格与排版",
+   "layer": "deterministic",
+   "expected_rule": "DET-SPACE-001"
+  },
+  {
+   "file": "H-020-000619-00 测序反应通用试剂盒（联合探针锚定聚合测序法）使用说明书_中文_IVD_QD_R02 Tina.pdf ·",
+   "page": "28",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "两个词隔开一点吧",
+   "selected_text": "MDA/消化MSP",
+   "context": "准备测序试剂槽 操作步骤如下： 1. 取出试剂槽，标签朝上，竖直向上放置在桌面上。孔位名称如 下图。 MDA/消化MSP",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
