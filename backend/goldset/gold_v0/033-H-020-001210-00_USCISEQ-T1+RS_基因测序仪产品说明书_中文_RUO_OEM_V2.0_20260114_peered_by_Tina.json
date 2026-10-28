@@ -1,0 +1,113 @@
+{
+ "document": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf",
+ "annotations": [
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "17",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "789没有逆时针",
+   "selected_text": "2 7 8 9",
+   "context": "6 2 2 7 8 9",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "33",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "红色高亮区域",
+   "selected_text": "当某一区域被填充红色时， 绿色时，表示该区域对应的",
+   "context": " 表示负压已关闭； 表示负压已开启。  表示升降屏已升起； 表示升降屏已降下。 当某一区域被填充红色时，表示出现错误，请根据提示进行处理；被填充 绿色时，表示该区域对应的部件的准备工作已完成。 【测序试剂仓】 【载片仓】 进入测序界面。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "33",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "绿色高亮区域",
+   "selected_text": "；被填充",
+   "context": "已开启。 屏已降下。 ，请根据提示进行处理；被填充 作已完成。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "44",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "防止因倾倒/碰撞",
+   "selected_text": "桶”。 ，以防废液桶被踢倒，",
+   "context": "废液桶前，预估废液桶空间是否充足。以PE150 为例，每个run 将产生2 L 左右 废液桶，以免废液溢出，造成污染。 第50 页“更换废液桶”。 ，并放置到合适位置，以防废液桶被踢倒，导致废液溢出。 的电源线连接电源，且电源线仅用于本仪器的供电。否则，可能导致电源线或仪器损坏。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "46",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "将试剂槽放置于实验台面，双手水平握试剂槽两端，轻轻敲击桌面5次 你再确认下",
+   "selected_text": "颠倒混匀试剂槽10 次 在桌面上敲击5 下，",
+   "context": "请勿剧烈摇晃测序试剂槽1，以防产生大量气泡影响测 2) 撕掉包装袋，使用无尘纸擦净表面冷凝水。 3) 颠倒混匀试剂槽10 次。 4) 在桌面上敲击5 下，使得孔壁上的试剂落入孔底，撕开测序试 撕开铝膜时需小心，以防孔内试剂溅出。 撕开铝膜后，需在30 分钟内完成上机操作。 4. 打开样本仓门，向下握住抽屉上的凹槽，拉出抽屉直到听到咔的 5. 用无尘布蘸少量75%酒精，按照下图箭头指示的两个方向，由里 无结晶或脏污，并等待自然风干。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "48",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "当该区域绿色高亮时",
+   "selected_text": "，该区域被填充绿色，",
+   "context": "打开仓门。 图”。 右侧 变为 ，该区域被填充绿色，则表示该步骤已完成。 划伤。",
+   "category": "内容评审",
+   "layer": "ai",
+   "expected_rule": "CONTENT-REVIEW-001[NEW]"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "13",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "颜色搞成黑",
+   "selected_text": "-",
+   "context": "提示操作者按照说明进行操作，如操作不 提示操作者按照说明进行操作，如操作不 提示操作者按照说明进行操作，强调操作 的内容 提示操作者按照说明进行操作，如操作不 【xx】 表示仪器丝印和界面文字",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "44",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "泄漏",
+   "selected_text": "溢出。",
+   "context": "充足。以PE150 为例，每个run 将产生2 L 左右 染。 桶被踢倒，导致废液溢出。 于本仪器的供电。否则，可能导致电源线或仪器损坏。",
+   "category": "术语一致性",
+   "layer": "ai",
+   "expected_rule": "TERM-001"
+  },
+  {
+   "file": "H-020-001210-00 USCISEQ-T1+RS 基因测序仪产品说明书_中文_RUO_OEM_V2.0_20260114 peered by Tina.pdf ·",
+   "page": "51",
+   "annotation_type": "Highlight",
+   "author": "caoyuanyuan",
+   "comment": "中文界面字符串样式，下同",
+   "selected_text": "STO_25+59+10：进 STO_25+59_noBC：",
+   "context": "试剂套装，按下表选择对应的测序方案： 型 测序方案 1.0 STO_25+59+10：进行Barcode 测序。 STO_25+59_noBC：不进行Barcode 测序。",
+   "category": "表格/版式",
+   "layer": "ai",
+   "expected_rule": "PDF-VISUAL-001"
+  }
+ ]
+}
