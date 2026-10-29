@@ -36,6 +36,17 @@
                   <span class="provider-meta">{{ provider.meta }}</span>
                 </div>
               </div>
+              <div v-if="!aiStatusError" class="ai-visual-section">
+                <div class="ai-visual-title">视觉模型（PDF 复核{{ aiStatus?.visual_verify_enabled === false ? ' 已关闭' : ` 开启·上限${aiStatus?.visual_verify_limit ?? 6}条` }}）</div>
+                <div v-if="visualRows.length" class="ai-provider-list">
+                  <div v-for="provider in visualRows" :key="'v-' + provider.name" class="ai-provider-row">
+                    <span class="provider-name">{{ provider.label }}</span>
+                    <span class="provider-state" :class="provider.stateClass">{{ provider.text }}</span>
+                    <span class="provider-meta">{{ provider.meta }}</span>
+                  </div>
+                </div>
+                <div v-else class="ai-visual-empty">未配置任何视觉 provider，PDF 视觉复核将跳过</div>
+              </div>
             </div>
           </el-popover>
           <el-popover
@@ -305,7 +316,8 @@ const providerLabels = {
   deepseek: 'DeepSeek',
   arkclaw: 'ArkClaw',
   proxy: 'Proxy',
-  mcai: 'MCAI Proxy'
+  mcai: 'MCAI Proxy',
+  visual: '视觉插槽'
 }
 
 const activeMenu = computed(() => {
@@ -354,7 +366,8 @@ const aiStatusSubtitle = computed(() => {
   if (!aiStatus.value) return '点击刷新检测 provider'
   const primary = aiStatus.value.primary || 'qwen'
   const primaryStatus = aiStatus.value.primary_status || 'unknown'
-  return `主 provider: ${providerLabels[primary] || primary} · ${primaryStatus}`
+  const visual = visualSummary.value
+  return `主 provider: ${providerLabels[primary] || primary} · ${primaryStatus}${visual ? ` | ${visual}` : ''}`
 })
 
 const providerRows = computed(() => {
@@ -372,6 +385,28 @@ const providerRows = computed(() => {
       meta: status === 'ok' ? [model, latency].filter(Boolean).join(' · ') : reason
     }
   })
+})
+
+const visualRows = computed(() => {
+  const vps = aiStatus.value?.visual_providers || {}
+  return Object.entries(vps).map(([name, item]) => ({
+    name,
+    label: providerLabels[name] || name,
+    text: item?.available ? '已配置' : '未配置',
+    stateClass: item?.available ? 'ok' : 'unavailable',
+    meta: item?.available
+      ? `模型: ${item?.model || '未指定'}`
+      : (name === 'visual' ? '缺 VISUAL_API_KEY/BASE_URL' : '缺 key')
+  }))
+})
+
+const visualSummary = computed(() => {
+  const chain = aiStatus.value?.visual_chain || []
+  const any = aiStatus.value?.visual_any_available
+  if (!chain.length) return ''
+  if (aiStatus.value?.visual_verify_enabled === false) return '视觉复核已关闭'
+  if (any) return `视觉已配置 (${chain.join('/')})`
+  return '视觉未配置'
 })
 
 const aiUsageTotals = computed(() => aiUsage.value?.totals || {
@@ -618,6 +653,27 @@ body {
 .ai-provider-list {
   display: grid;
   gap: 8px;
+}
+
+.ai-visual-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed #cbd5e1;
+}
+
+.ai-visual-title {
+  font-size: 12px;
+  font-weight: 800;
+  color: #475569;
+  margin-bottom: 8px;
+}
+
+.ai-visual-empty {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .ai-provider-row {
