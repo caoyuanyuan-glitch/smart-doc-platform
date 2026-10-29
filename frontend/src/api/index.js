@@ -192,8 +192,8 @@ export const reviewAPI = {
     return instance.post('/review/supplements/import', formData, { timeout: 300000, headers: { 'Content-Type': 'multipart/form-data' } })
   },
   clusterSupplements: (params = {}) => instance.get('/review/supplements/cluster', { params }),
-  convertSupplement: (id) => instance.post(/review/supplements//convert-rule),
-  dismissSupplement: (id) => instance.post(/review/supplements//dismiss),
+  convertSupplement: (id) => instance.post(`/review/supplements/${id}/convert-rule`),
+  dismissSupplement: (id) => instance.post(`/review/supplements/${id}/dismiss`),
   deleteFalsePositiveMemory: (id) => instance.delete(`/review/false-positive-memory/${id}`),
 }
 
@@ -227,6 +227,7 @@ export const compareAPI = {
     responseType: 'blob',
   }),
   getPreviewAlign: (id) => instance.get(`/compare/${id}/preview/align`),
+  getPreviewTextDiff: (id) => instance.get(`/compare/${id}/preview/textdiff`),
 }
 
 export const competitorAPI = {

@@ -26,6 +26,33 @@ def test_md_preview_marks_insert_and_change():
         assert "New para" in html_b
 
 
+def test_md_preview_keeps_fenced_code_as_one_block():
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "a.md")
+        b = os.path.join(tmp, "b.md")
+        _write(a, "# Demo\n\n```python\nfoo\n\nbar\n```\n")
+        _write(b, "# Demo\n\n```python\nfoo\n\nbaz\n```\n")
+        html_a = build_highlighted_preview(a, "a.md", b, "b.md", "a")
+        html_b = build_highlighted_preview(b, "b.md", a, "a.md", "b")
+        assert html_a.count("md-code") == 1
+        assert html_b.count("md-code") == 1
+        assert "hl-chg" in html_a
+        assert "hl-chg" in html_b
+        assert "bar" in html_a
+        assert "baz" in html_b
+
+
+def test_md_preview_marks_list_insert_and_table_change():
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "a.markdown")
+        b = os.path.join(tmp, "b.markdown")
+        _write(a, "- Alpha\n- Beta\n")
+        _write(b, "- Alpha\n- Beta\n- Gamma\n")
+        html_b = build_highlighted_preview(b, "b.markdown", a, "a.markdown", "b")
+        assert "Gamma" in html_b
+        assert "hl-ins" in html_b
+
+
 def test_xlsx_preview_marks_changed_cell():
     from openpyxl import Workbook
 
