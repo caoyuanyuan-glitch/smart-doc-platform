@@ -3840,7 +3840,14 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         'items': [],
     }
     from app.review_engine.visual import apply_visual_verification, build_visual_verification, map_visual_status, visual_provider_chain
-    if not _review_pdf_visual_verify_enabled():
+    enabled = _review_pdf_visual_verify_enabled()
+    print(
+        f"[视觉] 阶段入口: enabled={enabled} providers={','.join(visual_provider_chain()) or '(空)'} "
+        f"file_type={getattr(document, 'file_type', '') or ''} issues={len(issues)} "
+        f"limit={_review_pdf_visual_verify_limit()}",
+        flush=True,
+    )
+    if not enabled:
         diagnostics['reason'] = 'disabled'
         for issue in issues:
             apply_visual_verification(issue, build_visual_verification(status='skipped', error_code='disabled'))
@@ -3901,6 +3908,10 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
     diagnostics['page_candidate_count'] = len(page_candidates)
     if not candidates and not page_candidates:
         diagnostics['reason'] = 'no_candidates'
+        print(
+            f"[视觉] 无候选 issue/page（limit={limit} page_budget={page_budget}），跳过视觉复核",
+            flush=True,
+        )
         return issues, diagnostics
 
     fallback_page_issues = [
@@ -3914,6 +3925,11 @@ def _apply_pdf_visual_verification(review_id: int, document, content: str, issue
         diagnostics['visual_status'] = 'provider_unavailable'
         diagnostics['provider_chain'] = visual_chain
         diagnostics['skipped_count'] = len(candidates) + len(page_candidates)
+        print(
+            f"[视觉] 全部 provider 不可用: chain={','.join(visual_chain) or '(空)'} "
+            f"候选={len(candidates)}+{len(page_candidates)}，标记 blocked 并跳过视觉复核",
+            flush=True,
+        )
         for issue, page_number in candidates:
             visual = build_visual_verification(status='provider_unavailable', evidence_page=page_number)
             issue['visual_verification'] = visual
