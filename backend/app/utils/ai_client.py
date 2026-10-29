@@ -496,6 +496,41 @@ class AIClient:
 
         ok_count = sum(1 for r in results.values() if r.get("status") == "ok")
         primary = self._select_primary_provider(results)
+
+        # 视觉链配置探测（不实际调用 API）：kimi/qwen/visual 是否可用作视觉复核
+        visual_chain = []
+        for name in str(os.getenv("REVIEW_VISUAL_PROVIDERS", "kimi,qwen,visual") or "").split(","):
+            n = str(name or "").strip().lower()
+            if n and n not in visual_chain:
+                visual_chain.append(n)
+        if not visual_chain:
+            visual_chain = ["kimi"]
+        visual_models = {
+            "kimi": self.kimi_model,
+            "qwen": self.qwen_model,
+            "visual": self.visual_model,
+        }
+        visual_providers = {}
+        for name in visual_chain:
+            if name == "kimi":
+                available = bool(getattr(self, "kimi_client", None))
+            elif name == "qwen":
+                available = bool(getattr(self, "qwen_client", None) or getattr(self, "dashscope_client", None))
+            elif name == "visual":
+                available = bool(getattr(self, "visual_client", None))
+            else:
+                available = False
+            visual_providers[name] = {
+                "available": available,
+                "model": visual_models.get(name, ""),
+            }
+        visual_any_available = any(p.get("available") for p in visual_providers.values())
+        visual_verify_enabled = os.getenv("REVIEW_PDF_VISUAL_VERIFY", "true").strip().lower() not in {"0", "false", "no", "off"}
+        try:
+            visual_verify_limit = max(0, int(os.getenv("REVIEW_PDF_VISUAL_VERIFY_LIMIT", "6") or 0))
+        except Exception:
+            visual_verify_limit = 6
+
         return {
             "total_providers": len(results),
             "ok_providers": ok_count,
@@ -504,6 +539,11 @@ class AIClient:
             "primary": primary,
             "primary_status": results.get(primary, {}).get("status", "unknown"),
             "providers": results,
+            "visual_chain": visual_chain,
+            "visual_providers": visual_providers,
+            "visual_any_available": visual_any_available,
+            "visual_verify_enabled": visual_verify_enabled,
+            "visual_verify_limit": visual_verify_limit,
         }
 
     def warmup(self):
