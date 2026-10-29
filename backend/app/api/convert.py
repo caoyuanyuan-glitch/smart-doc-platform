@@ -1437,6 +1437,10 @@ def _split_leading_docx_subheading(content):
             (IDML_TABCAP_MARKER, IDML_FIGCAP_MARKER, IDML_APPENDIX_MARKER, "[[NOTE:")
         )
         or re.match(r'^\d+[.)、]\s*', normalized_line)
+        # IDML list items carry [[LVL:n]] before the markdown marker. After
+        # _clean_navtitle the dash remains; neither form is a subheading.
+        or first_line.startswith(("[[LVL:", "[[KEEP]]"))
+        or re.match(r'^[-*+]\s+', normalized_line)
         or TABLE_CAPTION_PREFIX_RE.match(normalized_line)
         or FIGURE_CAPTION_PREFIX_RE.match(normalized_line)
         # Table group labels such as "测序仪：MGISEQ-2000RS" are body text.
@@ -1822,6 +1826,19 @@ IDML_TERM_MARK_OPEN = "[[TERM]]"
 IDML_TERM_MARK_CLOSE = "[[/TERM]]"
 IDML_NESTED_NOTE_RE = re.compile(r'\[\[NOTE:(\w+)\]\](.*?)\[\[/NOTE\]\]', re.S)
 
+# Superscript character styles (and Position="Superscript") map to DITA <sup>.
+IDML_SUP_STYLE_RE = re.compile(r'(?i)superscript')
+
+# Introductory-sentence paragraph styles keep their source line breaks in IME.
+IDML_KEEP_STYLE_RE = re.compile(r'(?i)introductory\s+sentence')
+IDML_KEEP_MARKER = "[[KEEP]]"
+
+# Cell fill travels as [[BG:#RRGGBB]] so the DITA layer can emit vf:bgcolor.
+IDML_BG_MARK_RE = re.compile(r'\[\[BG:(#[0-9A-Fa-f]{6})\]\]')
+IDML_CMYK_COLOR_RE = re.compile(
+    r'(?i)C\s*=\s*([\d.]+)\s*M\s*=\s*([\d.]+)\s*Y\s*=\s*([\d.]+)\s*K\s*=\s*([\d.]+)'
+)
+
 # InDesign cross-references read 第<page>页“<target title>”. Carry title and
 # page as [[XREF:title#page]]; resolved DITA xrefs are empty elements with
 # cms:title, and the page is only used when the target cannot be resolved.
@@ -1846,7 +1863,14 @@ def _idml_style_is_term(style_key):
     return bool(key and IDML_TERM_STYLE_RE.search(key))
 
 
-def _idml_wrap_run_text(text, ui=False, italic=False, term=False):
+def _idml_style_is_sup(style_key, position=""):
+    if re.search(r"(?i)superscript", position or ""):
+        return True
+    key = (style_key or "").strip()
+    return bool(key and IDML_SUP_STYLE_RE.search(key))
+
+
+def _idml_wrap_run_text(text, ui=False, italic=False, term=False, sup=False):
     if not text:
         return text
     if ui:
@@ -1855,6 +1879,8 @@ def _idml_wrap_run_text(text, ui=False, italic=False, term=False):
         return f"{IDML_TERM_MARK_OPEN}{text}{IDML_TERM_MARK_CLOSE}"
     if italic and text.strip():
         return f"{IDML_I_MARK_OPEN}{text}{IDML_I_MARK_CLOSE}"
+    if sup and text.strip():
+        return f"[[SUP]]{text}[[/SUP]]"
     return text
 
 
@@ -1864,6 +1890,7 @@ def _idml_merge_adjacent_i_marks(text):
     text = text.replace(f"{IDML_I_MARK_CLOSE}{IDML_I_MARK_OPEN}", "")
     text = text.replace(f"{IDML_TERM_MARK_CLOSE}{IDML_TERM_MARK_OPEN}", "")
     text = text.replace(f"{IDML_UI_MARK_CLOSE}{IDML_UI_MARK_OPEN}", "")
+    text = text.replace("[[/SUP]][[SUP]]", "")
     return text
 
 
@@ -1913,7 +1940,7 @@ def _idml_relative_colwidths(widths, col_count):
     return parts
 
 
-def _idml_collect_text(elem, ui_styles=None, ui=False, italic=False, term=False):
+def _idml_collect_text(elem, ui_styles=None, ui=False, italic=False, term=False, sup=False):
     """Collect paragraph text from an element, skipping nested tables.
 
     When ``ui_styles`` is given, runs carrying an on-screen ("Silk screen")
@@ -1932,20 +1959,29 @@ def _idml_collect_text(elem, ui_styles=None, ui=False, italic=False, term=False)
             child_style, child.get("FontStyle") or ""
         )
         child_term = term or _idml_style_is_term(child_style)
+        child_sup = sup or _idml_style_is_sup(
+            child_style, child.get("Position") or ""
+        )
         if tag == "CrossReferenceSource":
             marker = _idml_xref_marker(child)
             if marker:
                 parts.append(marker)
             else:
-                parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic, child_term))
+                parts.append(_idml_collect_text(
+                    child, ui_styles, child_ui, child_italic, child_term, child_sup
+                ))
             continue
         if tag == "Content":
             if child.text:
-                parts.append(_idml_wrap_run_text(child.text, child_ui, child_italic, child_term))
+                parts.append(_idml_wrap_run_text(
+                    child.text, child_ui, child_italic, child_term, child_sup
+                ))
         elif tag == "Br":
             parts.append(" ")
         else:
-            parts.append(_idml_collect_text(child, ui_styles, child_ui, child_italic, child_term))
+            parts.append(_idml_collect_text(
+                child, ui_styles, child_ui, child_italic, child_term, child_sup
+            ))
     return _idml_merge_adjacent_i_marks("".join(parts))
 
 
@@ -1998,6 +2034,8 @@ def _load_idml_styles(zf):
     # "Silk screen" character style (which renders bold), so both map to
     # <uicontrol> downstream.
     ui_styles = set()
+    cell_fills = {}
+    table_styles = {}
     for name in zf.namelist():
         low = name.lower()
         if not low.endswith("styles.xml"):
@@ -2014,6 +2052,21 @@ def _load_idml_styles(zf):
                     key = _idml_style_key(elem.get("Self") or "")
                     if key:
                         ui_styles.add(key)
+                continue
+            if tag == "CellStyle":
+                key = _idml_style_key(elem.get("Self") or "")
+                fill = elem.get("FillColor") or ""
+                if key and fill:
+                    cell_fills[key] = fill
+                continue
+            if tag == "TableStyle":
+                key = _idml_style_key(elem.get("Self") or "")
+                if key:
+                    table_styles[key] = {
+                        "left": _idml_style_key(elem.get("LeftColumnRegionCellStyle") or ""),
+                        "right": _idml_style_key(elem.get("RightColumnRegionCellStyle") or ""),
+                        "body": _idml_style_key(elem.get("BodyRegionCellStyle") or ""),
+                    }
                 continue
             if tag != "ParagraphStyle":
                 continue
@@ -2033,7 +2086,7 @@ def _load_idml_styles(zf):
                     list_type = list_type or "BulletList"
             if list_type:
                 list_styles[key] = list_type
-    return style_map, list_styles, ui_styles
+    return style_map, list_styles, ui_styles, cell_fills, table_styles
 
 
 def _idml_heading_level(style_ref, style_map):
@@ -2247,8 +2300,7 @@ def _idml_cell_text_items(cell, ui_styles=None, image_resolver=None):
             items.append((text, False))
     return items
 
-
-def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None):
+def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None, cell_fills=None, table_styles=None):
     # IDML stores cells as direct children of <Table>, positioned by a
     # "<col>:<row>" Name attribute (columns are the first index, rows the
     # second; the table's ColumnCount/RowCount confirm this order).
@@ -2267,6 +2319,9 @@ def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None):
         text = _idml_cell_markdown(
             _idml_cell_text_items(child, ui_styles, image_resolver)
         )
+        bg = _idml_cell_bgcolor(child, cell_fills, table_elem, table_styles, col)
+        if bg:
+            text = f"[[BG:{bg}]]{text}"
         try:
             rowspan = max(1, int(child.get("RowSpan") or "1"))
             colspan = max(1, int(child.get("ColumnSpan") or "1"))
@@ -2295,7 +2350,7 @@ def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None):
     # leading column holds real content, is a normal table.
     if row_indexes and header_row_count == 0 and 1 <= width <= 2:
         lead_texts = [
-            strip_images(strip_spans(grid.get((r, 0), ""))).strip()
+            strip_images(IDML_BG_MARK_RE.sub("", strip_spans(grid.get((r, 0), "")))).strip()
             for r in row_indexes
         ]
         lead_cells = [cell_elems.get((r, 0)) for r in row_indexes]
@@ -2323,7 +2378,13 @@ def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None):
     if width == 1 and row_indexes:
         header_cell = cell_elems.get((row_indexes[0], 0))
         header_text = strip_spans(grid.get((row_indexes[0], 0), "").strip())
-        if (not header_text or _idml_cell_is_callout(header_cell)):
+        header_text = IDML_BG_MARK_RE.sub("", header_text).strip()
+        # A filled 1-column cell (RUO red bar, gray heading row) is a table,
+        # not a tip/warning callout.
+        if (
+            (not header_text or _idml_cell_is_callout(header_cell))
+            and not _idml_cell_bgcolor(header_cell, cell_fills, table_elem, table_styles, 0)
+        ):
             callout_type = _idml_callout_note_type(header_cell)
             lines = [f"| [[NOTE:{callout_type}]] |", "| :--- |"]
             body_rows = []
@@ -2375,6 +2436,62 @@ def _idml_cell_is_callout(cell):
     if cell is None:
         return False
     return bool(IDML_CALLOUT_STYLE_RE.search(" ".join(_idml_cell_paragraph_styles(cell))))
+
+
+def _idml_fill_to_hex(fill_ref, style_name=""):
+    """Map IDML CMYK / warning-RUO / heading-frame fills to IME hex colors."""
+    hay = f"{fill_ref or ''} {style_name or ''}"
+    if re.search(r"(?i)research\s*use", hay):
+        return "#FF0000"
+    if re.search(r"(?i)ruo", hay) and re.search(r"(?i)warning|single\s+sentence", hay):
+        return "#FF0000"
+    if re.search(r"(?i)heading.*frames|frames.*heading", hay):
+        return "#C0C0C0"
+    match = IDML_CMYK_COLOR_RE.search(fill_ref or "")
+    if not match:
+        return ""
+    cyan, magenta, yellow, black = (float(part) for part in match.groups())
+    if magenta >= 80 and yellow >= 80 and cyan <= 20 and black <= 20:
+        return "#FF0000"
+    if cyan <= 10 and magenta <= 10 and yellow <= 10 and black >= 40:
+        return "#C0C0C0"
+    return ""
+
+
+def _idml_inherited_cell_style_key(table_elem, col, table_styles):
+    """Region cell style when the cell itself is $ID/[None]."""
+    if table_elem is None:
+        return ""
+    info = (table_styles or {}).get(
+        _idml_style_key(table_elem.get("AppliedTableStyle") or "")
+    ) or {}
+    try:
+        width = int(table_elem.get("ColumnCount") or "0") or 0
+    except ValueError:
+        width = 0
+    if col == 0 and info.get("left"):
+        return info["left"]
+    if width and col == width - 1 and info.get("right"):
+        return info["right"]
+    return info.get("body") or ""
+
+
+def _idml_cell_bgcolor(cell, cell_fills=None, table_elem=None, table_styles=None, col=0):
+    if cell is None:
+        return ""
+    fill = cell.get("FillColor") or ""
+    style_ref = cell.get("AppliedCellStyle") or ""
+    style_key = _idml_style_key(style_ref)
+    if (not style_key) or style_key.endswith("[None]") or style_key in ("None", "[None]"):
+        style_key = _idml_inherited_cell_style_key(table_elem, col, table_styles)
+    style_fill = (cell_fills or {}).get(style_key) or ""
+    para_styles = " ".join(_idml_cell_paragraph_styles(cell))
+    return (
+        _idml_fill_to_hex(fill, style_ref)
+        or _idml_fill_to_hex(style_fill, style_key)
+        or _idml_fill_to_hex("", para_styles)
+        or _idml_fill_to_hex("", _idml_style_key((table_elem.get("AppliedTableStyle") if table_elem is not None else "") or ""))
+    )
 
 
 def _idml_callout_note_type(cell):
@@ -2617,7 +2734,7 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
         buffer.clear()
         images.clear()
 
-    def visit(node, ui=False, italic=False, term=False):
+    def visit(node, ui=False, italic=False, term=False, sup=False):
         for sub in list(node):
             sub_tag = _strip_xml_ns(sub.tag)
             sub_style = _idml_style_key(sub.get("AppliedCharacterStyle", ""))
@@ -2626,9 +2743,14 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
                 sub_style, sub.get("FontStyle") or ""
             )
             sub_term = term or _idml_style_is_term(sub_style)
+            sub_sup = sup or _idml_style_is_sup(
+                sub_style, sub.get("Position") or ""
+            )
             if sub_tag == "Content":
                 if sub.text:
-                    buffer.append(_idml_wrap_run_text(sub.text, sub_ui, sub_italic, sub_term))
+                    buffer.append(_idml_wrap_run_text(
+                        sub.text, sub_ui, sub_italic, sub_term, sub_sup
+                    ))
             elif sub_tag == "Br":
                 if split_on_br:
                     flush()
@@ -2659,9 +2781,9 @@ def _idml_paragraph_pieces(para, split_on_br, ui_styles=None):
                 if marker:
                     buffer.append(marker)
                 else:
-                    visit(sub, sub_ui, sub_italic, sub_term)
+                    visit(sub, sub_ui, sub_italic, sub_term, sub_sup)
             else:
-                visit(sub, sub_ui, sub_italic, sub_term)
+                visit(sub, sub_ui, sub_italic, sub_term, sub_sup)
 
     visit(para)
     flush()
@@ -2681,10 +2803,12 @@ def _idml_paragraph_has_only_inline_icons(elem):
     return bool(uris) and all(_idml_is_inline_icon(uri) for uri in uris)
 
 
-def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_styles=None):
+def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_styles=None, cell_fills=None, table_styles=None):
     def emit_piece(piece_kind, value):
         if piece_kind == "table":
-            table_lines = _idml_table_to_markdown(value, ui_styles, image_resolver)
+            table_lines = _idml_table_to_markdown(
+                value, ui_styles, image_resolver, cell_fills, table_styles
+            )
             if table_lines:
                 blocks.append({"kind": "table", "lines": table_lines})
         elif piece_kind == "image":
@@ -2693,7 +2817,9 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
     for child in list(elem):
         tag = _strip_xml_ns(child.tag)
         if tag == "Table":
-            table_lines = _idml_table_to_markdown(child, ui_styles, image_resolver)
+            table_lines = _idml_table_to_markdown(
+                child, ui_styles, image_resolver, cell_fills, table_styles
+            )
             if table_lines:
                 blocks.append({"kind": "table", "lines": table_lines})
             continue
@@ -2704,6 +2830,7 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
             display = urllib.parse.unquote(
                 (style_key and style_map.get(style_key, "")) or style_key or ""
             )
+            keep_prefix = IDML_KEEP_MARKER if IDML_KEEP_STYLE_RE.search(display) else ""
             if text and not _idml_style_is_toc(display):
                 if text not in DOCX_TOC_TITLES:
                     level = _idml_heading_level(style_ref, style_map)
@@ -2757,10 +2884,11 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
                             child, split_on_br=True, ui_styles=ui_styles
                         ):
                             if piece_kind == "text":
+                                body_text = _idml_inline_images(value, extra, image_resolver) if extra else value
                                 blocks.append({
                                     "kind": "para",
                                     "level": 0,
-                                    "text": _idml_inline_images(value, extra, image_resolver) if extra else value,
+                                    "text": f"{keep_prefix}{body_text}" if keep_prefix else body_text,
                                     "marker": None,
                                     "appendix": False,
                                 })
@@ -2778,10 +2906,12 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
                     blocks.append({
                         "kind": "heading" if level else "para",
                         "level": level,
-                        "text": text if level else re.sub(
-                            r'[ \t\u00a0]+', ' ',
-                            _idml_collect_text(child, ui_styles),
-                        ).strip(),
+                        "text": text if level else (
+                            keep_prefix + re.sub(
+                                r'[ \t\u00a0]+', ' ',
+                                _idml_collect_text(child, ui_styles),
+                            ).strip()
+                        ),
                         "marker": marker,
                         "appendix": bool(level) and bool(IDML_APPENDIX_STYLE_RE.search(display)),
                     })
@@ -2790,9 +2920,9 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
             # A callout table can be anchored inside a paragraph; recurse so the
             # nested table is emitted after the paragraph's own text.
             if any(_strip_xml_ns(d.tag) == "Table" for d in child.iter()):
-                _idml_walk(child, style_map, list_styles, blocks, image_resolver, ui_styles)
+                _idml_walk(child, style_map, list_styles, blocks, image_resolver, ui_styles, cell_fills, table_styles)
             continue
-        _idml_walk(child, style_map, list_styles, blocks, image_resolver, ui_styles)
+        _idml_walk(child, style_map, list_styles, blocks, image_resolver, ui_styles, cell_fills, table_styles)
 
 
 def _idml_item_position(elem):
@@ -2994,7 +3124,7 @@ def _idml_to_markdown(idml_path):
     _ensure_dir(media_dir)
     with zipfile.ZipFile(idml_path, "r") as zf:
         namelist = zf.namelist()
-        style_map, list_styles, ui_styles = _load_idml_styles(zf)
+        style_map, list_styles, ui_styles, cell_fills, table_styles = _load_idml_styles(zf)
         order = _idml_reading_order(zf)
         if order is None:
             order = [
@@ -3045,7 +3175,7 @@ def _idml_to_markdown(idml_path):
             if _idml_story_is_junk(story_root, style_map):
                 continue
             blocks = []
-            _idml_walk(story_root, style_map, list_styles, blocks, resolve_image, ui_styles)
+            _idml_walk(story_root, style_map, list_styles, blocks, resolve_image, ui_styles, cell_fills, table_styles)
             for block in blocks:
                 if block["kind"] != "image":
                     content_started = True
@@ -3538,6 +3668,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 } or inner.startswith((
                     "XREF:", "NOTE:", "TABCAP", "FIGCAP", "TWIDE:",
                     "COLW:", "THEAD:", "LVL:", "SPAN:",
+                    "BG:", "KEEP",
                 )):
                     return match.group(0)
                 return f'<uicontrol>{inner}</uicontrol>'
@@ -3578,7 +3709,25 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             )
             restored = re.sub(r'(\d+(?:\.\d+)*)\s*节', _md_section_xref, restored)
             restored = restored.replace('</xref>第', '</xref> 第')
+        # IME draws 【】 around uicontrol, so source spaces around the run
+        # become a double gap. Drop the adjacent spaces.
+        restored = re.sub(
+            r'[ \t]*((?:<uicontrol>.*?</uicontrol>)+)[ \t]*',
+            r'\1',
+            restored,
+        )
         return restored
+
+    def _split_keep_marker(text):
+        raw = text or ""
+        if raw.startswith(IDML_KEEP_MARKER):
+            return True, raw[len(IDML_KEEP_MARKER):].lstrip()
+        return False, raw
+
+    def _paragraph_xml(text, indent="        "):
+        keep, raw = _split_keep_marker(text)
+        attr = ' outputclass="keep"' if keep else ""
+        return f"{indent}<p{attr}>{_restore_inline_run_markup(raw)}</p>"
 
     safe_content = section_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("<br>", "")
 
@@ -4016,6 +4165,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
         def _dita_table_entry_xml(cell_text, attrs=""):
             stripped = (cell_text or "").strip()
+            bg_match = IDML_BG_MARK_RE.search(stripped)
+            if bg_match:
+                attrs += f' vf:bgcolor="{bg_match.group(1)}"'
+                stripped = IDML_BG_MARK_RE.sub("", stripped).strip()
+                cell_text = IDML_BG_MARK_RE.sub("", cell_text or "")
             ul = stripped.startswith(IDML_CELL_UL_OPEN) and stripped.endswith(IDML_CELL_UL_CLOSE)
             ol = stripped.startswith(IDML_CELL_OL_OPEN) and stripped.endswith(IDML_CELL_OL_CLOSE)
             if ul or ol:
@@ -4752,7 +4906,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 hang_on_item = (not is_native_md) or bool(re.match(r'^[ \t]+', line))
                 if hang_on_item:
                     _append_list_continuation(
-                        f"        <p>{_restore_inline_run_markup(clean)}</p>"
+                        _paragraph_xml(clean)
                     )
                     continue
             if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', clean):
@@ -4760,7 +4914,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             result = _flush_list()
             if result:
                 _append_body(result)
-            _append_body(f"        <p>{_restore_inline_run_markup(clean)}</p>")
+            _append_body(_paragraph_xml(clean))
 
     _flush_codeblock()
     if pending_note_type and pending_note_blocks:
@@ -4826,7 +4980,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 {doctype}
-<{root_tag} xmlns:cms="http://www.w3.org/ime/cms" xmlns:m="http://www.w3.org/1998/Math/MathML" xml:lang="{dita_lang}" id="{xml_id}"{outputclass} cms:keys="{topic_id}" cms:title="{safe_title_attr}" cms:number="{topic_id}" cms:imesofttype="{ime_topic_type}">
+<{root_tag} xmlns:cms="http://www.w3.org/ime/cms" xmlns:m="http://www.w3.org/1998/Math/MathML" xmlns:vf="http://www.megalinkware.com" xml:lang="{dita_lang}" id="{xml_id}"{outputclass} cms:keys="{topic_id}" cms:title="{safe_title_attr}" cms:number="{topic_id}" cms:imesofttype="{ime_topic_type}">
   <title id="title_{topic_id}">{safe_title}</title>
   <{body_tag} id="body_{topic_id}" outputclass="pretext">
 {body_content}

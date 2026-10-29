@@ -50,6 +50,7 @@
   - 英文同类表格分组标签同样保留为正文，例如 `Cell phase (1.13×)`、`Magnetic bead phase (1.13×)`。
   - 产品套装型号行，例如 `MGISEQ-2000RS 高通量测序试剂套装(FCL PE100) (Cat. No. 1000012554)`。
 - 带 Word 编号的短段落，例如 `cDNA产物扩增循环数参考`；它属于编号列表项，不是章节标题。
+ - IDML 嵌套列表的父项（`[[LVL:n]]` 加 `- ` / `1. `）即使短、无标点，也保持为列表项，不得升成独立章节。例如 `Required concentration` 作为 `Bulleted list:Level 2` 父项时，输出 `<li><p>Required concentration</p>` 下挂子列表，不生成独立 topic。
 
 ## IME 主题类型
 
@@ -88,6 +89,7 @@
 - `【N】`（数字起首）是 note 的条目序号，不是控件名，保持原样交由 note 条目合并逻辑处理。
  - 英文 Word 的 `[N]`（如 `[1]`、`[12]`）与中文 `【N】` 同类，是 note 条目序号，不是控件名。
 - `uicontrol` 去首尾空白；纯空格的对屏文本段保留为普通空格，不生成空控件。
+ - `uicontrol` 标签两侧的源空格去掉：IME 会给控件加上 【】，源里的左右空格会变成双倍间隙。输出写成 `click<uicontrol>Start</uicontrol>button`。
 
 ### 术语（`term`）
 
@@ -127,6 +129,7 @@
 
 - IDML 中警告、注意、提示以“提示框”形式出现。真实版式常见为 **两列表格**：第 0 列只放符号图标（`ParagraphStyle` 常为 `Text:Symbols-*`，格内无正文），第 1 列放正文（`ParagraphStyle` 常为 `Table:Warning sentence-*`、`Table:Single sentence-*`）。也有退化为单列或 1×1 的形态。判定口径：表格 `HeaderRowCount=0` 且列数 ≤2、首列单元格在各行都没有正文文本（只含图标/符号样式）时，视为提示框。
 - 这类表格必须输出为 `<note>`，不能输出为无标题表格。
+ - 单元格带红/灰填色的单列表（如 `Single sentence-EN-RUO` 红底声明）保持为表格并写 `vf:bgcolor`，不转成 note。
 - note 类型由符号图标文件名判定：
   - 图标名含 `Warning`、`Danger`、`warn` → `type="warning"`。
   - 图标名含 `Caution` → `type="caution"`。
@@ -168,6 +171,9 @@
  - 单元格内嵌套的提示框表格输出为该 `<entry>` 内的 `<note>`，不得并成一句普通正文。
   - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`），也不含页码。数字/英文后紧跟汉字处的空格只用于未解析回退文本（`第12 页`、`测定DNB 浓度`）。
   - IDML 斜体字符样式转为 `<i>`：`Cross reference` / `Cross reference-in para.-CN` 等（公式变量 `N`/`c`/`V`、书名）以及 `Subtle Emphasis`、`FontStyle="Italic"`。相邻斜体 run 合并。屏上控件样式优先于斜体。
+  - IDML 上标转为 `<sup>`：字符样式 `Superscript`，或 `CharacterStyleRange` 的 `Position="Superscript"`（如商标 `TM`）。
+  - `Text:Introductory sentence*` 段落输出 `<p outputclass="keep">`，IME 按源行距排版。
+  - 单元格填色写入 `vf:bgcolor`（命名空间 `http://www.megalinkware.com`）：红 `C=0 M=100 Y=100 K=0` / `Warning *-RUO` / `TableStyle/Research use only` / `Single sentence-*-RUO` → `#FF0000`；灰 `Table heading-with frames-vertical` / `K≥40` 的黑灰 → `#C0C0C0`。浅灰斑马纹（`K=20`）不着色。格子 `AppliedCellStyle` 为 `$ID/[None]` 时，从表格样式的左右列区域单元格样式继承填色。带填色的单列 `Single sentence-EN-RUO` 红条保持为表格，不转成 note。
  - 页码变量解析失败时省略“第N页”，只输出标题；不得残留 `第页“目标标题”` 这类空页码形式。
  - 非列表正文段落里的 `<Br/>` 是段落分隔（如 `关于说明书` 的 `Text in first page` 用一个段落样式写下多段声明）：每一截输出独立 `<p>`，不能拼成一个 `<p>`。
  - 表格单元格若使用 `Table:Bulleted list` / `Table:Numbered list` / `sentence list` 样式，单元格内由 `<Br/>` 分开的各项输出为该 `<entry>` 内的 `<ul>`/`<ol>`（版本记录的修订摘要即此结构）；`Table:Single sentence` 仍为纯文本。
