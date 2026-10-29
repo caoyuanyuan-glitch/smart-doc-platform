@@ -56,8 +56,8 @@ def _ensure_preview_dir():
         os.makedirs(PREVIEW_DIR, exist_ok=True)
 
 
-_TEXT_PREVIEW_EXTS = {".md", ".txt", ".dita", ".xml", ".ditamap"}
-_ZIP_TEXT_EXTS = {".dita", ".xml", ".ditamap", ".md", ".txt"}
+_TEXT_PREVIEW_EXTS = {".md", ".markdown", ".txt", ".dita", ".xml", ".ditamap"}
+_ZIP_TEXT_EXTS = {".dita", ".xml", ".ditamap", ".md", ".markdown", ".txt"}
 
 
 def _file_ext(name):
@@ -70,6 +70,8 @@ def _preview_kind(file_name):
         return "pdf"
     if ext in {".docx", ".zip"}:
         return "html"
+    if ext in {".md", ".markdown", ".txt"}:
+        return "textdiff"
     if ext in _TEXT_PREVIEW_EXTS or ext == ".doc":
         return "html"
     return "html"
@@ -1985,6 +1987,23 @@ async def get_preview_content(
             "total_pages": total_pages,
             "content": "",
         }
+    if kind == "textdiff":
+        peer_side = "b" if side != "b" else "a"
+        peer_path, peer_name = ("", "")
+        if highlight:
+            peer_path, peer_name = _resolve_preview_file(task_id, peer_side)
+        return {
+            "type": "textdiff",
+            "file_name": file_name,
+            "content": _build_compare_preview_html(
+                file_path,
+                file_name,
+                peer_path=peer_path,
+                peer_name=peer_name,
+                side="b" if side == "b" else "a",
+                highlight=bool(highlight),
+            ),
+        }
     peer_side = "b" if side != "b" else "a"
     peer_path, peer_name = ("", "")
     if highlight:
@@ -2092,3 +2111,24 @@ async def get_preview_info(
     info["type_a"] = _preview_kind(name_a or path_a) if path_a else ""
     info["type_b"] = _preview_kind(name_b or path_b) if path_b else ""
     return info
+
+
+@router.get("/{task_id}/preview/textdiff")
+async def get_preview_textdiff(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """Line-aligned text diff for Markdown / TXT, Beyond Compare layout."""
+    _require_compare_task_access(db, task_id, current_user)
+    path_a, name_a = _resolve_preview_file(task_id, "a")
+    path_b, name_b = _resolve_preview_file(task_id, "b")
+    if not path_a or not os.path.exists(path_a) or not path_b or not os.path.exists(path_b):
+        raise HTTPException(status_code=404, detail="Preview file not found")
+    from app.utils.md_compare import build_aligned_text_diff
+    text_a = _read_text_preview(path_a, limit=800000)
+    text_b = _read_text_preview(path_b, limit=800000)
+    data = build_aligned_text_diff(text_a, text_b)
+    data["file_a_name"] = name_a
+    data["file_b_name"] = name_b
+    return data

@@ -149,6 +149,9 @@ def _char_highlight(text_a, text_b, side):
     return "".join(parts)
 
 
+_ATOMIC_TAGS = {"table", "pre", "blockquote"}
+
+
 def highlight_block_html(blocks_a, blocks_b, side):
     na = [x.get("key", "") for x in blocks_a]
     nb = [x.get("key", "") for x in blocks_b]
@@ -174,7 +177,7 @@ def highlight_block_html(blocks_a, blocks_b, side):
         if (i2 - i1) == 1 and (j2 - j1) == 1:
             a = blocks_a[i1]
             b = blocks_b[j1]
-            if a.get("tag") == "table" or b.get("tag") == "table":
+            if a.get("tag") in _ATOMIC_TAGS or b.get("tag") in _ATOMIC_TAGS:
                 src = a if side == "a" else b
                 out.append(f'<div class="hl-block hl-chg">{src.get("html") or ""}</div>')
                 continue
@@ -199,26 +202,8 @@ def _wrap_blocks(html_body, kind):
 def _md_blocks(path):
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
-    chunks = re.split(r"\n\s*\n", text)
-    blocks = []
-    for chunk in chunks:
-        raw = chunk.strip("\n")
-        if not raw.strip():
-            continue
-        stripped = raw.strip()
-        tag = "p"
-        body = stripped
-        if stripped.startswith("#"):
-            hashes = len(stripped) - len(stripped.lstrip("#"))
-            tag = f"h{min(max(hashes, 1), 3)}"
-            body = stripped[hashes:].strip()
-        blocks.append({
-            "key": _norm_text(body),
-            "text": body,
-            "tag": tag,
-            "html": f"<{tag}>{html.escape(body)}</{tag}>",
-        })
-    return blocks
+    from app.utils.md_compare import parse_markdown_blocks
+    return parse_markdown_blocks(text)
 
 
 def _docx_blocks(path):

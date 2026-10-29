@@ -322,6 +322,7 @@ def parse_markdown(filepath):
     tables_text = []
     in_table = False
     table_buffer = []
+    preamble_parts = []
 
     def _add_text_to_current(text):
         if not text.strip():
@@ -329,6 +330,8 @@ def parse_markdown(filepath):
         if stack:
             node = stack[-1]
             node["content"] += text + " "
+        else:
+            preamble_parts.append(text)
 
     for line in lines:
         stripped = line.strip()
@@ -380,6 +383,13 @@ def parse_markdown(filepath):
     # 处理最后一个表格
     if in_table and table_buffer:
         tables_text.append("\n".join(table_buffer))
+
+    preamble = " ".join(preamble_parts).strip()
+    if not chapters:
+        body = preamble or content
+        chapters = [{"heading": "全文", "content": body, "subsections": []}]
+    elif preamble:
+        chapters[0]["content"] = (preamble + " " + (chapters[0].get("content") or "")).strip()
 
     # 如果顶级章节太少，扁平化
     chapters = _flatten_chapters_if_needed(chapters)
