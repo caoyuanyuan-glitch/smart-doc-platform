@@ -2287,6 +2287,28 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertEqual(lines[0], "| [[NOTE:warning]] |")
         self.assertIn("请勿将手置于仓门之间。", "\n".join(lines))
 
+    def test_two_column_filled_icon_callout_still_becomes_note(self):
+        """A 2-column warning box stays a note even when both cells are filled red."""
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="c0" Name="0:0" FillColor="Color/C=0 M=100 Y=100 K=0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text:Symbols-CN">'
+            '<CharacterStyleRange><Link LinkResourceURI="file:C:/doc/Links/label000081_Warning.ai"/>'
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0" FillColor="Color/C=0 M=100 Y=100 K=0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Warning sentence-CN">'
+            "<CharacterStyleRange><Content>"
+            "This product is intended only for scientific research."
+            "</Content></CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        self.assertEqual(lines[0], "| [[NOTE:warning]] |")
+        self.assertNotIn("[[BG:", "\n".join(lines))
+        self.assertIn("scientific research", "\n".join(lines))
+
     def test_numbered_list_br_runs_become_separate_steps(self):
         """<Br/> inside one InDesign numbered-list paragraph separates steps."""
         import tempfile
@@ -3488,6 +3510,196 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertNotIn('<note type="warning">', nested_li)
         self.assertLess(parent.index("</ul>"), parent.index("如下界面显示后"))
         self.assertLess(parent.index("如下界面显示后"), parent.index('<note type="warning">'))
+
+    def test_idml_superscript_character_style_becomes_sup(self):
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/Body" Name="Body Text"/>\n'
+            '    <CharacterStyle Self="CharacterStyle/Superscript" Name="Superscript"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Body">'
+            '<CharacterStyleRange><Content>Qubit </Content></CharacterStyleRange>'
+            '<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/Superscript">'
+            "<Content>TM</Content></CharacterStyleRange>"
+            '<CharacterStyleRange><Content> kit.</Content></CharacterStyleRange>'
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_sup.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("[[SUP]]TM[[/SUP]]", md)
+        xml = _content_to_dita_xml("Kit", md, "concept", "DTO041401", "en-US", topic_kind="concept")
+        self.assertIn("Qubit <sup>TM</sup> kit.", xml)
+
+    def test_idml_list_parent_is_not_promoted_to_heading(self):
+        markdown = (
+            "# Required concentration and volume of library\n\n"
+            "[[LVL:2]]- Required concentration\n\n"
+            "[[LVL:3]]- For the library with MGI adapter, keep 2 fmol/μL.\n\n"
+            "[[LVL:2]]- Required volume of library\n"
+        )
+        sections = _postprocess_section_tree(
+            _reshape_docx_sections(_parse_md_sections(markdown))
+        )
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0]["title"], "Required concentration and volume of library")
+        self.assertEqual(sections[0]["sections"], [])
+        xml = _content_to_dita_xml(
+            sections[0]["title"], sections[0]["content"], "concept", "DTO041402",
+            "en-US", topic_kind="concept", source_format="idml",
+        )
+        self.assertIn("<li><p>Required concentration</p>", xml)
+        self.assertIn("<li><p>Required volume of library</p>", xml)
+        self.assertNotIn("<title id=\"title_DTO041402\">- Required concentration</title>", xml)
+
+    def test_idml_cell_fill_colors_become_bgcolor(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="c0" Name="0:0" '
+            'AppliedCellStyle="CellStyle/Table heading-with frames-vertical">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>Component</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0" '
+            'AppliedCellStyle="CellStyle/Table heading-with frames-vertical">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>Volume</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c2" Name="0:1" '
+            'AppliedCellStyle="CellStyle/Table heading-with frames-vertical">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>Total volume</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c3" Name="1:1" FillColor="Color/C=0 M=100 Y=100 K=0">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>100 μL</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        joined = "\n".join(lines)
+        self.assertIn("[[BG:#C0C0C0]]Total volume", joined)
+        self.assertIn("[[BG:#FF0000]]100 μL", joined)
+        xml = _content_to_dita_xml(
+            "Mix", "\n".join(lines), "concept", "DTO041403", "en-US",
+            topic_kind="concept", source_format="idml",
+        )
+        self.assertIn('vf:bgcolor="#C0C0C0"', xml)
+        self.assertIn('vf:bgcolor="#FF0000"', xml)
+        self.assertIn("Total volume", xml)
+
+    def test_idml_filled_single_sentence_stays_table(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="1" ColumnCount="1">'
+            '<Cell Self="c0" Name="0:0" FillColor="Color/C=0 M=100 Y=100 K=0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Single sentence-EN-RUO">'
+            "<CharacterStyleRange><Content>"
+            "MGI intends to provide this product solely for research use."
+            "</Content></CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        joined = "\n".join(lines)
+        self.assertNotIn("[[NOTE:", joined)
+        self.assertIn("[[BG:#FF0000]]", joined)
+        xml = _content_to_dita_xml(
+            "About", "\n".join(lines), "concept", "DTO041404", "en-US",
+            topic_kind="concept", source_format="idml",
+        )
+        self.assertNotIn("<note", xml)
+        self.assertIn('vf:bgcolor="#FF0000"', xml)
+        self.assertIn("solely for research use", xml)
+
+    def test_idml_ruo_bar_without_cell_fillcolor_stays_table(self):
+        """618 RUO bar: cell style is None; red fill lives on the table style."""
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="1" ColumnCount="1" '
+            'AppliedTableStyle="TableStyle/Research use only">'
+            '<Cell Self="c0" Name="0:0" AppliedCellStyle="CellStyle/$ID/[None]">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Single sentence-EN-RUO">'
+            "<CharacterStyleRange><Content>"
+            "MGI intends to provide this product solely for research use."
+            "</Content></CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        cell_fills = {
+            "Warning icon-RUO": "Color/C=0 M=100 Y=100 K=0",
+            "Warning text-RUO": "Color/C=0 M=100 Y=100 K=0",
+        }
+        table_styles = {
+            "Research use only": {
+                "left": "Warning icon-RUO",
+                "right": "Warning text-RUO",
+                "body": "",
+            }
+        }
+        lines = _idml_table_to_markdown(
+            ET.fromstring(table), cell_fills=cell_fills, table_styles=table_styles
+        )
+        joined = "\n".join(lines)
+        self.assertNotIn("[[NOTE:", joined)
+        self.assertIn("[[BG:#FF0000]]", joined)
+        xml = _content_to_dita_xml(
+            "About", "\n".join(lines), "concept", "DTO041406", "en-US",
+            topic_kind="concept", source_format="idml",
+        )
+        self.assertNotIn("<note", xml)
+        self.assertIn('vf:bgcolor="#FF0000"', xml)
+        self.assertIn("solely for research use", xml)
+
+    def test_uicontrol_adjacent_spaces_are_stripped(self):
+        xml = _content_to_dita_xml(
+            "Run",
+            "Tap [[UI]]Login[[/UI]] to continue.",
+            "task",
+            "DTO041405",
+            "en-US",
+            topic_kind="task",
+            source_format="idml",
+        )
+        self.assertIn("Tap<uicontrol>Login</uicontrol>to continue.", xml)
+
+    def test_idml_introductory_sentence_gets_keep_outputclass(self):
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/Intro" '
+            'Name="Text:Introductory sentence in chap. 1st-EN"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Intro">'
+            "<CharacterStyleRange><Content>"
+            "This chapter describes library loading."
+            "</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_keep.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("[[KEEP]]This chapter describes library loading.", md)
+        xml = _content_to_dita_xml(
+            "Loading", md, "concept", "DTO041406", "en-US", topic_kind="concept"
+        )
+        self.assertIn(
+            '<p outputclass="keep">This chapter describes library loading.</p>',
+            xml,
+        )
 
 
 class NativeMarkdownToDitaTest(unittest.TestCase):

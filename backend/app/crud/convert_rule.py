@@ -76,6 +76,11 @@ def seed_default_rules(db: Session):
         ("R006", "列表-有序", "Markdown有序列表（1./1)开头）须转换为DITA ol/li标签"),
         ("R007", "结构", "所有标题层级（H1-H6）均拆分为独立topic，各topic通过bookmap组织"),
         ("R008", "模板", "提供参考模板时复用frontmatter整段（含Cover等子章节）及Manufacturer附录"),
+        ("R009", "上标", "IDML Superscript 字符样式或 Position=Superscript 输出为 DITA sup，例如商标 TM"),
+        ("R010", "列表", "嵌套列表父项保持为列表项，不升成独立章节"),
+        ("R011", "单元格填色", "红/灰单元格填色写入 vf:bgcolor；单列 RUO 红条保持为表格"),
+        ("R012", "控件", "uicontrol 标签两侧的源空格去掉，IME 会自行加上【】"),
+        ("R013", "段前引言", "Introductory sentence 段落输出 p outputclass=keep"),
     ]
     count = 0
     for rn, cat, desc in defaults:
