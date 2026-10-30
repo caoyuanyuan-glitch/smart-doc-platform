@@ -147,3 +147,73 @@ def test_aligned_text_diff_delete_leaves_gap():
     assert deleted
     assert deleted[0]["b_no"] is None
     assert "gone" in deleted[0]["a_text"]
+
+
+def test_aligned_text_diff_pairs_headings_ignoring_section_numbers():
+    a = (
+        "## 6. Software Activation (Official Version)\n"
+        "\n"
+        "The software is a trial version with the following limitations:\n"
+        "\n"
+        "## 7. FAQ and Support\n"
+        "Contact us.\n"
+    )
+    b = (
+        "## 7. Software Activation (Official Version)\n"
+        "\n"
+        "The software is a trial version, with the following limitations:\n"
+        "\n"
+        "## 8. FAQ and Support\n"
+        "Contact us.\n"
+    )
+    data = build_aligned_text_diff(a, b)
+    activation = next(row for row in data["rows"] if "Software Activation" in row["a_text"])
+    assert "Software Activation" in activation["b_text"]
+    assert activation["op"] == "replace"
+    faq = next(row for row in data["rows"] if "FAQ" in row["a_text"])
+    assert "FAQ" in faq["b_text"]
+    assert "Software Activation" not in faq["b_text"]
+
+
+def test_aligned_text_diff_extra_section_does_not_shift_later_headings():
+    a = "## 1. Alpha\n\nA body.\n\n## 2. Gamma\n\nG body.\n"
+    b = "## 1. Alpha\n\nA body.\n\n## 2. Beta\n\nB body.\n\n## 3. Gamma\n\nG body.\n"
+    data = build_aligned_text_diff(a, b)
+    gamma = next(row for row in data["rows"] if "Gamma" in row["a_text"])
+    assert "Gamma" in gamma["b_text"]
+    assert any(row["op"] == "insert" and "Beta" in row["b_text"] for row in data["rows"])
+
+
+def test_aligned_text_diff_pairs_rewritten_lines_on_same_row():
+    a = (
+        "If you have purchased an official license, activate it as follows:\n"
+        "- Validity period: **90 days**\n"
+    )
+    b = (
+        "If you have purchased an official license, please follow these steps to activate:\n"
+        "- Validity period: **30 days**\n"
+    )
+    data = build_aligned_text_diff(a, b)
+    activate = next(row for row in data["rows"] if "purchased an official license" in row["a_text"])
+    assert "please follow these steps" in activate["b_text"]
+    assert activate["op"] == "replace"
+    assert activate["b_no"] is not None
+    period = next(row for row in data["rows"] if "90 days" in row["a_text"])
+    assert "30 days" in period["b_text"]
+    assert period["op"] == "replace"
+
+
+def test_aligned_text_diff_marks_case_only_as_unimportant():
+    data = build_aligned_text_diff(
+        "1. **Request a license file**\n",
+        "1. **Request a License File**\n",
+    )
+    row = next(row for row in data["rows"] if "Request" in row["a_text"])
+    assert row["op"] == "replace"
+    assert row.get("unimportant") is True
+
+
+def test_aligned_text_diff_keeps_gap_for_extra_line():
+    data = build_aligned_text_diff("alpha\nbeta\n", "alpha\nINSERT\nbeta\n")
+    assert any(row["op"] == "insert" and "INSERT" in row["b_text"] for row in data["rows"])
+    assert any(row["op"] == "equal" and row["a_text"] == "beta" for row in data["rows"])
