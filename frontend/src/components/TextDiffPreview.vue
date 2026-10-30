@@ -25,49 +25,36 @@
           :style="overviewStyle(sec)"
         />
       </div>
-      <div ref="paneARef" class="bc-pane" @scroll="onScrollA">
-        <template v-for="item in visibleItems" :key="'a-' + item.key">
+      <div ref="scrollRef" class="bc-body">
+        <template v-for="item in visibleItems" :key="item.key">
           <div v-if="item.type === 'skip'" class="bc-skip" @click="expandAll(item.rowIndex)">{{ item.count }} 行相同</div>
-          <div
-            v-else
-            class="bc-line"
-            :class="lineClass(item, 'a')"
-            :data-row="item.rowIndex"
-          >
-            <div class="bc-mark" :class="markClass(item.rowIndex)">
-              <span v-if="isSectionStart(item.rowIndex)" class="bc-arrow" />
+          <div v-else class="bc-row" :data-row="item.rowIndex">
+            <div class="bc-line" :class="lineClass(item, 'a')">
+              <div class="bc-mark" :class="markClass(item.rowIndex)">
+                <span v-if="isSectionStart(item.rowIndex)" class="bc-arrow" />
+              </div>
+              <div class="bc-no">{{ item.row.a_no || '' }}</div>
+              <div class="bc-txt">
+                <span
+                  v-for="(sp, si) in (item.row.a_spans || [])"
+                  :key="'as' + si"
+                  :class="'sp-' + sp.k"
+                >{{ sp.t }}</span>
+              </div>
             </div>
-            <div class="bc-no">{{ item.row.a_no || '' }}</div>
-            <div class="bc-txt">
-              <span
-                v-for="(sp, si) in (item.row.a_spans || [])"
-                :key="'as' + si"
-                :class="'sp-' + sp.k"
-              >{{ sp.t }}</span>
-            </div>
-          </div>
-        </template>
-      </div>
-      <div class="bc-split" />
-      <div ref="paneBRef" class="bc-pane" @scroll="onScrollB">
-        <template v-for="item in visibleItems" :key="'b-' + item.key">
-          <div v-if="item.type === 'skip'" class="bc-skip" @click="expandAll(item.rowIndex)">{{ item.count }} 行相同</div>
-          <div
-            v-else
-            class="bc-line"
-            :class="lineClass(item, 'b')"
-            :data-row="item.rowIndex"
-          >
-            <div class="bc-mark" :class="markClass(item.rowIndex)">
-              <span v-if="isSectionStart(item.rowIndex)" class="bc-arrow" />
-            </div>
-            <div class="bc-no">{{ item.row.b_no || '' }}</div>
-            <div class="bc-txt">
-              <span
-                v-for="(sp, si) in (item.row.b_spans || [])"
-                :key="'bs' + si"
-                :class="'sp-' + sp.k"
-              >{{ sp.t }}</span>
+            <div class="bc-split" />
+            <div class="bc-line" :class="lineClass(item, 'b')">
+              <div class="bc-mark" :class="markClass(item.rowIndex)">
+                <span v-if="isSectionStart(item.rowIndex)" class="bc-arrow" />
+              </div>
+              <div class="bc-no">{{ item.row.b_no || '' }}</div>
+              <div class="bc-txt">
+                <span
+                  v-for="(sp, si) in (item.row.b_spans || [])"
+                  :key="'bs' + si"
+                  :class="'sp-' + sp.k"
+                >{{ sp.t }}</span>
+              </div>
             </div>
           </div>
         </template>
@@ -90,9 +77,7 @@ const props = defineProps({
 
 const viewMode = ref('all')
 const currentSection = ref(0)
-const paneARef = ref(null)
-const paneBRef = ref(null)
-let syncing = false
+const scrollRef = ref(null)
 
 const toolbarText = computed(() => {
   if (!props.diffCount) return '文件相同'
@@ -153,6 +138,7 @@ function lineClass(item, side) {
     ['op-' + op]: true,
     gap,
     current: isCurrent(item.rowIndex),
+    unimportant: !!item.row.unimportant && !gap,
   }
 }
 
@@ -165,13 +151,10 @@ function overviewStyle(sec) {
 
 function scrollToRow(rowIndex) {
   nextTick(() => {
-    const el = paneARef.value?.querySelector(`[data-row="${rowIndex}"]`)
-    if (!el || !paneARef.value) return
-    const top = el.offsetTop - paneARef.value.clientHeight / 3
-    syncing = true
-    paneARef.value.scrollTop = top
-    if (paneBRef.value) paneBRef.value.scrollTop = top
-    syncing = false
+    const el = scrollRef.value?.querySelector(`[data-row="${rowIndex}"]`)
+    if (!el || !scrollRef.value) return
+    const top = el.offsetTop - scrollRef.value.clientHeight / 3
+    scrollRef.value.scrollTop = top
   })
 }
 
@@ -195,20 +178,6 @@ function goPrev() {
 function expandAll(rowIndex) {
   viewMode.value = 'all'
   scrollToRow(rowIndex)
-}
-
-function onScrollA(e) {
-  if (syncing) return
-  syncing = true
-  if (paneBRef.value) paneBRef.value.scrollTop = e.target.scrollTop
-  syncing = false
-}
-
-function onScrollB(e) {
-  if (syncing) return
-  syncing = true
-  if (paneARef.value) paneARef.value.scrollTop = e.target.scrollTop
-  syncing = false
 }
 
 function onOverviewClick(e) {
@@ -318,11 +287,16 @@ watch(
 .bc-ov-mark.current {
   background: #cc4444;
 }
-.bc-pane {
+.bc-body {
   flex: 1 1 auto;
   min-width: 0;
   overflow: auto;
   background: #fff;
+}
+.bc-row {
+  display: flex;
+  align-items: stretch;
+  min-height: 18px;
 }
 .bc-split {
   width: 6px;
@@ -333,12 +307,10 @@ watch(
 }
 .bc-line {
   display: flex;
-  height: 18px;
-  flex-shrink: 0;
+  flex: 1 1 0;
+  min-width: 0;
   line-height: 18px;
   font-size: 12px;
-  width: max-content;
-  min-width: 100%;
 }
 .bc-mark {
   width: 16px;
@@ -387,8 +359,11 @@ watch(
 }
 .bc-txt {
   padding: 0 8px;
-  white-space: pre;
-  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .bc-line.gap .bc-txt {
   background-image: repeating-linear-gradient(
@@ -404,14 +379,25 @@ watch(
 .bc-line.op-insert:not(.gap) .bc-txt {
   background: #ffd6d6;
 }
-.bc-line.current:not(.gap) .bc-txt {
+.bc-line.op-replace.unimportant:not(.gap) .bc-txt {
+  background: #d9e2f6;
+}
+.bc-line.current:not(.gap):not(.unimportant) .bc-txt {
   background: #ffc9c9;
+}
+.bc-line.current.unimportant:not(.gap) .bc-txt {
+  background: #c5d3f2;
 }
 .sp-del,
 .sp-ins,
 .sp-chg {
   color: #9f1239;
   font-weight: 700;
+}
+.bc-line.unimportant .sp-del,
+.bc-line.unimportant .sp-ins,
+.bc-line.unimportant .sp-chg {
+  color: #254edb;
 }
 .bc-skip {
   height: 22px;

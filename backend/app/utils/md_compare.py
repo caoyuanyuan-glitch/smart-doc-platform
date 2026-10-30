@@ -266,6 +266,69 @@ def _split_lines(text):
     return (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
+def _align_key(line):
+    s = (line or "").strip()
+    if not s:
+        return ""
+    if re.match(r"^(-{3,}|\*{3,}|_{3,})$", s):
+        return "\x00hr"
+    heading = re.match(r"^(#{1,6})\s+(.*)$", s)
+    if heading:
+        title = re.sub(r"^\d+(\.\d+)*\.?\s+", "", heading.group(2)).strip()
+        return "h:" + re.sub(r"\s+", " ", title).lower()
+    ordered = re.match(r"^(\d+)\.\s+(.*)$", s)
+    if ordered:
+        return "ol:" + re.sub(r"\s+", " ", ordered.group(2)).lower()
+    return re.sub(r"\s+", " ", s).lower()
+
+
+def _similar_ratio(a, b):
+    ka = _align_key(a)
+    kb = _align_key(b)
+    if ka == "\x00hr" or kb == "\x00hr":
+        return 1.0 if ka == kb else 0.0
+    if not ka and not kb:
+        return 1.0
+    if not ka or not kb:
+        return 0.0
+    if ka == kb:
+        return 1.0
+    return SequenceMatcher(None, ka, kb, autojunk=False).ratio()
+
+
+def _is_unimportant(a, b):
+    return (a or "").lower() == (b or "").lower() and a != b
+
+
+def _similar_pairs(a_lines, b_lines, thresh=0.58):
+    na, nb = len(a_lines), len(b_lines)
+    if na == 0 or nb == 0 or na * nb > 400000:
+        return []
+    dp = [[0] * (nb + 1) for _ in range(na + 1)]
+    sim = [[0.0] * nb for _ in range(na)]
+    for i, la in enumerate(a_lines):
+        for j, lb in enumerate(b_lines):
+            r = _similar_ratio(la, lb)
+            sim[i][j] = r
+            if r >= thresh:
+                dp[i + 1][j + 1] = dp[i][j] + 1
+            else:
+                dp[i + 1][j + 1] = dp[i][j + 1] if dp[i][j + 1] >= dp[i + 1][j] else dp[i + 1][j]
+    i, j = na, nb
+    matched = []
+    while i > 0 and j > 0:
+        if sim[i - 1][j - 1] >= thresh and dp[i][j] == dp[i - 1][j - 1] + 1:
+            matched.append((i - 1, j - 1))
+            i -= 1
+            j -= 1
+        elif dp[i][j] == dp[i - 1][j]:
+            i -= 1
+        else:
+            j -= 1
+    matched.reverse()
+    return matched
+
+
 def _diff_sections(rows):
     sections = []
     start = None
@@ -286,83 +349,108 @@ def build_aligned_text_diff(text_a, text_b):
     """Line-aligned text diff in Beyond Compare layout: equal / replace / insert / delete."""
     lines_a = _split_lines(text_a)
     lines_b = _split_lines(text_b)
-    sm = SequenceMatcher(None, lines_a, lines_b, autojunk=False)
+    keys_a = [_align_key(x) for x in lines_a]
+    keys_b = [_align_key(x) for x in lines_b]
+    sm = SequenceMatcher(lambda k: k in ("", "\x00hr"), keys_a, keys_b, autojunk=False)
     rows = []
+
+    def emit_equal(i, j):
+        line = lines_a[i]
+        other = lines_b[j]
+        if line == other:
+            rows.append({
+                "op": "equal",
+                "a_no": i + 1,
+                "b_no": j + 1,
+                "a_text": line,
+                "b_text": other,
+                "a_spans": [{"t": line, "k": "eq"}],
+                "b_spans": [{"t": other, "k": "eq"}],
+            })
+            return
+        rows.append({
+            "op": "replace",
+            "a_no": i + 1,
+            "b_no": j + 1,
+            "a_text": line,
+            "b_text": other,
+            "a_spans": _char_spans(line, other, "a"),
+            "b_spans": _char_spans(line, other, "b"),
+            "unimportant": _is_unimportant(line, other),
+        })
+
+    def emit_delete(i):
+        line = lines_a[i]
+        rows.append({
+            "op": "delete",
+            "a_no": i + 1,
+            "b_no": None,
+            "a_text": line,
+            "b_text": "",
+            "a_spans": [{"t": line, "k": "del"}],
+            "b_spans": [],
+        })
+
+    def emit_insert(j):
+        line = lines_b[j]
+        rows.append({
+            "op": "insert",
+            "a_no": None,
+            "b_no": j + 1,
+            "a_text": "",
+            "b_text": line,
+            "a_spans": [],
+            "b_spans": [{"t": line, "k": "ins"}],
+        })
+
+    def emit_replace_range(i1, i2, j1, j2):
+        a_chunk = lines_a[i1:i2]
+        b_chunk = lines_b[j1:j2]
+        pairs = _similar_pairs(a_chunk, b_chunk)
+        if not pairs:
+            n_pair = min(len(a_chunk), len(b_chunk))
+            pairs = [(k, k) for k in range(n_pair)]
+        ai = 0
+        bj = 0
+        for pa, pb in pairs:
+            while ai < pa and bj < pb:
+                emit_equal(i1 + ai, j1 + bj)
+                ai += 1
+                bj += 1
+            while ai < pa:
+                emit_delete(i1 + ai)
+                ai += 1
+            while bj < pb:
+                emit_insert(j1 + bj)
+                bj += 1
+            emit_equal(i1 + pa, j1 + pb)
+            ai = pa + 1
+            bj = pb + 1
+        while ai < len(a_chunk) and bj < len(b_chunk):
+            emit_equal(i1 + ai, j1 + bj)
+            ai += 1
+            bj += 1
+        while ai < len(a_chunk):
+            emit_delete(i1 + ai)
+            ai += 1
+        while bj < len(b_chunk):
+            emit_insert(j1 + bj)
+            bj += 1
+
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             for k in range(i2 - i1):
-                line = lines_a[i1 + k]
-                rows.append({
-                    "op": "equal",
-                    "a_no": i1 + k + 1,
-                    "b_no": j1 + k + 1,
-                    "a_text": line,
-                    "b_text": lines_b[j1 + k],
-                    "a_spans": [{"t": line, "k": "eq"}],
-                    "b_spans": [{"t": lines_b[j1 + k], "k": "eq"}],
-                })
+                emit_equal(i1 + k, j1 + k)
             continue
         if tag == "delete":
             for k in range(i2 - i1):
-                line = lines_a[i1 + k]
-                rows.append({
-                    "op": "delete",
-                    "a_no": i1 + k + 1,
-                    "b_no": None,
-                    "a_text": line,
-                    "b_text": "",
-                    "a_spans": [{"t": line, "k": "del"}],
-                    "b_spans": [],
-                })
+                emit_delete(i1 + k)
             continue
         if tag == "insert":
             for k in range(j2 - j1):
-                line = lines_b[j1 + k]
-                rows.append({
-                    "op": "insert",
-                    "a_no": None,
-                    "b_no": j1 + k + 1,
-                    "a_text": "",
-                    "b_text": line,
-                    "a_spans": [],
-                    "b_spans": [{"t": line, "k": "ins"}],
-                })
+                emit_insert(j1 + k)
             continue
-        n_pair = min(i2 - i1, j2 - j1)
-        for k in range(n_pair):
-            ta = lines_a[i1 + k]
-            tb = lines_b[j1 + k]
-            rows.append({
-                "op": "replace",
-                "a_no": i1 + k + 1,
-                "b_no": j1 + k + 1,
-                "a_text": ta,
-                "b_text": tb,
-                "a_spans": _char_spans(ta, tb, "a"),
-                "b_spans": _char_spans(ta, tb, "b"),
-            })
-        for k in range(n_pair, i2 - i1):
-            line = lines_a[i1 + k]
-            rows.append({
-                "op": "delete",
-                "a_no": i1 + k + 1,
-                "b_no": None,
-                "a_text": line,
-                "b_text": "",
-                "a_spans": [{"t": line, "k": "del"}],
-                "b_spans": [],
-            })
-        for k in range(n_pair, j2 - j1):
-            line = lines_b[j1 + k]
-            rows.append({
-                "op": "insert",
-                "a_no": None,
-                "b_no": j1 + k + 1,
-                "a_text": "",
-                "b_text": line,
-                "a_spans": [],
-                "b_spans": [{"t": line, "k": "ins"}],
-            })
+        emit_replace_range(i1, i2, j1, j2)
     sections = _diff_sections(rows)
     return {
         "rows": rows,
