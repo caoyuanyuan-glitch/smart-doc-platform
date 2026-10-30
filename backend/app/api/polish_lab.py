@@ -1415,6 +1415,8 @@ def _template_replace_guard(sentence: str, template: str, match_level: str, scor
         return False
     sentence_norm = _normalize_sentence_for_match(sentence)
     template_norm = _normalize_sentence_for_match(template)
+    if _is_segmented_sentence_rewrite(sentence, template):
+        return False
     if sentence_norm and len(sentence_norm) <= 8 and not re.search(r'[，。；！？,;!?]', sentence) and len(template_norm) >= len(sentence_norm) * 2:
         return False
     if match_level == 'L1':
@@ -4787,9 +4789,12 @@ def _apply_skill_polish(
                 whole_template, whole_score, whole_level = (None, 0.0, 'NONE')
                 if not pooling_sentence_mode:
                     whole_template, whole_score, whole_level = _best_guarded_match(template_match_line, preferred_entries)
+                rewritten_line = new_line
                 if whole_template and whole_score >= _POLISH_MATCH_CONFIG["l3_auto_confidence"]:
+                    rewritten_line = _rewrite_with_whole_template(new_line, whole_template)
+                if rewritten_line != new_line:
                     original_before = new_line
-                    new_line = replace_with_context(new_line, whole_template)
+                    new_line = rewritten_line
                     display_after = _reapply_sentence_prefix(original, new_line)
                     changes.append(PolishRuleMatch(
                         rule_name="句式模板匹配",
@@ -4819,13 +4824,13 @@ def _apply_skill_polish(
                             if not tmpl:
                                 continue
                             replaced_window = replace_with_context(window, tmpl)
-                            if replaced_window == window:
+                            if replaced_window == window or _is_segmented_sentence_rewrite(window, replaced_window):
                                 continue
                             updated_line = updated_line.replace(window, replaced_window, 1)
                             clause_matched_templates.append(tmpl)
                             matched_preferred_sentence = True
                         new_line = _normalize_internal_sentence_punctuation(updated_line)
-                    else:
+                    elif _looks_like_step_list(new_line):
                         clause_parts = re.split(r'([，。；！？,;!?]+)', new_line)
                         rebuilt_parts = []
                         for index, part in enumerate(clause_parts):
@@ -4905,9 +4910,12 @@ def _apply_skill_polish(
                             has_changes = True
             else:
                 whole_template, whole_score, whole_level = _best_guarded_match(template_match_line, preferred_entries)
+                rewritten_line = new_line
                 if whole_template and whole_score >= _POLISH_MATCH_CONFIG["l3_auto_confidence"]:
+                    rewritten_line = _rewrite_with_whole_template(new_line, whole_template)
+                if rewritten_line != new_line:
                     original_before = new_line
-                    new_line = replace_with_context(new_line, whole_template)
+                    new_line = rewritten_line
                     display_after = _reapply_sentence_prefix(original, new_line)
                     changes.append(PolishRuleMatch(
                         rule_name="句式模板匹配",
@@ -6831,12 +6839,76 @@ def _dedupe_repeated_figure_refs(text: str) -> str:
     return value
 
 
+_LIST_ITEM_LEAD_RE = re.compile(
+    r'(?m)^\s*(?:[*\-•·]+|\d+\s*[)）、.]|[（(]\s*\d+\s*[)）])\s*\S'
+)
+_STEP_SEQUENCE_RE = re.compile(
+    r'(?:首先|其次|再次|然后|接着|最后|'
+    r'一是|二是|三是|四是|五是|'
+    r'其[一二三四五]|'
+    r'第[一二三四五六七八九十百]+[步项点]|'
+    r'[（(]\s*\d+\s*[)）]|'
+    r'(?:^|[\n；;。！？!?])\s*\d+\s*[)）、.])'
+)
+
+
+def _terminal_sentence_units(text: str) -> list[str]:
+    value = str(text or '').strip()
+    if not value:
+        return []
+    parts = [part.strip() for part in re.split(r'(?<=[。！？!?])\s*', value) if part.strip()]
+    return parts or [value]
+
+
+def _looks_like_step_list(text: str) -> bool:
+    """True when the text is already a procedure that may be shown as a list."""
+    value = str(text or '').strip()
+    if not value:
+        return False
+    if len(_LIST_ITEM_LEAD_RE.findall(value)) >= 2:
+        return True
+    if len(_STEP_SEQUENCE_RE.findall(value)) >= 2:
+        return True
+    numbered = 0
+    for unit in _terminal_sentence_units(value):
+        if re.match(r'^\s*(?:\d+\s*[)）、.]|[（(]\s*\d+\s*[)）]|第[一二三四五六七八九十百]+[步项点])', unit):
+            numbered += 1
+    return numbered >= 2
+
+
+def _is_segmented_sentence_rewrite(source: str, candidate: str) -> bool:
+    """True when a non-step sentence is rewritten as multiple sentences or a list."""
+    source_text = str(source or '').strip()
+    candidate_text = str(candidate or '').strip()
+    if not source_text or not candidate_text:
+        return False
+    if _looks_like_step_list(source_text):
+        return False
+    if len(_terminal_sentence_units(source_text)) > 1:
+        return False
+    if _looks_like_step_list(candidate_text):
+        return True
+    return len(_terminal_sentence_units(candidate_text)) >= 2
+
+
+def _rewrite_with_whole_template(source: str, template: str) -> str:
+    template_text = str(template or '').strip()
+    if not template_text:
+        return source
+    rewritten = replace_with_context(source, template_text)
+    if rewritten == source or _is_segmented_sentence_rewrite(source, rewritten):
+        return source
+    return rewritten
+
+
 def _cat_writeback_hazard_reason(source_text: str, candidate_text: str) -> str:
     """Drop candidates that would corrupt the document if written back."""
     source = str(source_text or '').strip()
     candidate = str(candidate_text or '').strip()
     if not source or not candidate:
         return ''
+    if _is_segmented_sentence_rewrite(source, candidate):
+        return 'segmented_sentence'
 
     source_prefix, source_body = _split_notice_prefix(source)
     candidate_prefix, candidate_body = _split_notice_prefix(candidate)
