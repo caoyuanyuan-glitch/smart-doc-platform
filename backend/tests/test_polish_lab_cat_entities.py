@@ -28,9 +28,12 @@ from app.api.polish_lab import (  # noqa: E402
     _has_missing_icon_button_name,
     _is_dropped_cat_artifact_revision,
     _is_trivial_cat_artifact_edit,
+    _is_segmented_sentence_rewrite,
+    _looks_like_step_list,
     _polished_file_download_name,
     _polished_report_download_name,
     _reapply_sentence_prefix,
+    _rewrite_with_whole_template,
     _simple_match,
     _split_cat_sentences,
     _split_step_prefix,
@@ -1087,6 +1090,36 @@ class PolishLabCatCategoryG1Test(unittest.TestCase):
             custom_rules=[rule],
         )
         self.assertTrue(any("流道槽" in str(item.get("template_text") or "") for item in hits))
+
+    def test_long_sentence_is_not_split_into_list(self):
+        source = '实验前请熟悉和掌握需使用的各种仪器的操作方法和注意事项。'
+        split_candidate = '熟悉和掌握各种仪器的操作方法。熟悉和掌握各种仪器的注意事项。'
+        numbered_candidate = '1）熟悉和掌握各种仪器的操作方法。2）熟悉和掌握各种仪器的注意事项。'
+
+        self.assertFalse(_looks_like_step_list(source))
+        self.assertTrue(_is_segmented_sentence_rewrite(source, split_candidate))
+        self.assertTrue(_is_segmented_sentence_rewrite(source, numbered_candidate))
+        self.assertEqual(_cat_writeback_hazard_reason(source, split_candidate), 'segmented_sentence')
+        self.assertEqual(_rewrite_with_whole_template(source, split_candidate), source)
+
+        hits = _simple_match(
+            source,
+            [{'text': split_candidate, 'id': 't1'}, {'text': numbered_candidate, 'id': 't2'}],
+            source_sentence=source,
+        )
+        self.assertFalse(any(
+            split_candidate in str(item.get('template_text') or '')
+            or numbered_candidate in str(item.get('template_text') or '')
+            for item in hits
+        ))
+
+    def test_step_sequence_may_be_rewritten_as_list(self):
+        source = '首先打开仪器电源，然后点击运行按钮。'
+        candidate = '1）打开仪器电源。2）点击运行按钮。'
+
+        self.assertTrue(_looks_like_step_list(source))
+        self.assertFalse(_is_segmented_sentence_rewrite(source, candidate))
+        self.assertNotEqual(_cat_writeback_hazard_reason(source, candidate), 'segmented_sentence')
 
 
 if __name__ == '__main__':

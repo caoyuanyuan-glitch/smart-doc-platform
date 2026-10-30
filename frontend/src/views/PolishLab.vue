@@ -565,10 +565,11 @@
               />
             </div>
           </div>
+        </div>
 
-          <div v-if="result && !hasVisibleTextPolishResult" class="text-empty-result">未检测到可应用的润色结果</div>
+        <div v-if="result && !loading && !hasVisibleTextPolishResult" class="text-empty-result">未检测到可应用的润色结果</div>
 
-          <div v-if="hasVisibleTextPolishResult" class="panel result-panel text-result-panel">
+        <div v-if="!loading && hasVisibleTextPolishResult" class="panel result-panel text-result-panel">
           <div class="panel-header">
             <div class="result-header-inline">
               <span>润色结果</span>
@@ -580,8 +581,15 @@
             </div>
           </div>
           <div class="result-grid-vertical">
-            <div class="result-col-v">
-              <div class="col-content col-content-compact issue-diff-content issue-diff-suggested" v-html="highlightedPolishedResultHtml"></div>
+            <div class="issue-diff-card text-result-diff-card">
+              <div v-if="showTextResultOriginal" class="issue-diff-row">
+                <span class="issue-diff-label">原文</span>
+                <div class="issue-diff-content issue-diff-original" v-html="highlightedOriginalResultHtml"></div>
+              </div>
+              <div class="issue-diff-row">
+                <span class="issue-diff-label">结果</span>
+                <div class="issue-diff-content issue-diff-suggested" v-html="highlightedPolishedResultHtml"></div>
+              </div>
             </div>
           </div>
           <div v-if="textCatPanelItems.length" class="text-cat-panel">
@@ -595,35 +603,47 @@
                   <div class="cat-issue-tags" v-if="categoryLabel(selectedTextCatCandidate(item))">
                     <span class="cat-category-tag">{{ categoryLabel(selectedTextCatCandidate(item)) }}</span>
                   </div>
-                  <el-select v-if="item.candidates.length > 1 || !isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" v-model="item.selectedCandidateIndex" class="full-width" size="large" placeholder="选择候选句式" placement="bottom-start" :popper-options="{ placement: 'bottom-start', modifiers: [{ name: 'flip', enabled: false }] }" @change="applyTextCatCandidate(item)">
-                    <el-option
-                      v-for="(candidate, candidateIndex) in item.candidates"
-                      :key="`${item.rowKey}-${candidateIndex}`"
-                      :label="candidate.template_text || ''"
-                      :value="candidateIndex"
-                    />
-                  </el-select>
-                  <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
-                    <div class="cat-hint-title">提示</div>
-                    <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                  <div class="issue-diff-card cat-issue-diff-card">
+                    <div class="issue-diff-row">
+                      <span class="issue-diff-label">原文</span>
+                      <div class="issue-diff-content issue-diff-original" v-html="renderCatOriginalDiffHtml(item.originalText, getTextCatDisplayText(item))"></div>
+                    </div>
+                    <div v-if="isHintOnlyDiagnose(selectedTextCatCandidate(item), item.originalText)" class="cat-hint-card">
+                      <div class="cat-hint-title">提示</div>
+                      <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                    </div>
+                    <div v-else class="issue-diff-row">
+                      <span class="issue-diff-label">候选</span>
+                      <div class="issue-diff-content issue-diff-suggested">
+                        <div v-html="renderCatSuggestedDiffHtml(item.originalText, getTextCatDisplayText(item))"></div>
+                        <div v-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
+                          <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div v-else-if="isDiagnoseCandidate(selectedTextCatCandidate(item))" class="cat-diagnose-meta">
-                    <div v-if="diagnoseProblemText(selectedTextCatCandidate(item))" class="cat-diagnose-problem">{{ diagnoseProblemText(selectedTextCatCandidate(item)) }}</div>
+                  <div v-if="item.candidates.length > 1" class="cat-candidate-select-shell">
+                    <div class="cat-candidate-select-overlay">{{ selectedTextCatCandidate(item)?.template_text || '' }}</div>
+                    <el-select v-model="item.selectedCandidateIndex" class="full-width cat-candidate-select" size="large" popper-class="cat-candidate-select-popper" placeholder="选择候选句式" @change="applyTextCatCandidate(item)">
+                      <el-option
+                        v-for="(candidate, candidateIndex) in item.candidates"
+                        :key="`${item.rowKey}-${candidateIndex}`"
+                        :label="candidate.template_text || ''"
+                        :value="candidateIndex"
+                      >
+                        <div class="cat-candidate-option">
+                          <div class="cat-candidate-text">{{ candidate.template_text }}</div>
+                        </div>
+                      </el-option>
+                    </el-select>
                   </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
-          <div v-else-if="!result" class="panel result-placeholder text-result-panel">
-          <div class="panel-header">
-            <span>润色结果</span>
-          </div>
-          <div class="placeholder-text">点击"开始润色"查看结果</div>
-        </div>
-      </div>
 
-        <div v-if="result" class="panel feedback-panel">
+        <div v-if="result && !loading" class="panel feedback-panel">
         <div class="panel-header">
           <span>意见反馈</span>
         </div>
@@ -1690,37 +1710,12 @@ function detectLongParagraphList(text) {
     }
   }
 
-  const semicolonItems = collectRangeItems(raw, /[^；;]+[；;]?\s*/g)
-  if (
-    semicolonItems.length >= 2 &&
-    semicolonItems.length <= 8 &&
-    semicolonItems.every(item => item.text.length >= 6 && item.text.length <= 120)
-  ) {
-    return { type: 'ul', items: semicolonItems }
-  }
-
   const sentenceItems = collectRangeItems(raw, /[^。！？!?]+[。！？!?]?\s*/g)
   if (sentenceItems.length >= 2 && sentenceItems.length <= 6) {
     const orderedCount = sentenceItems.filter(item => orderedListLeadPattern.test(item.text)).length
-    if (orderedCount >= 1) {
+    if (orderedCount >= 2) {
       return { type: 'ol', items: sentenceItems }
     }
-    if (
-      sentenceItems.length >= 3 &&
-      sentenceItems.every(item => item.text.length >= 8 && item.text.length <= 80)
-    ) {
-      return { type: 'ul', items: sentenceItems }
-    }
-  }
-
-  const commaItems = collectRangeItems(raw, /[^，,]+[，,]?\s*/g)
-  if (
-    compact.length >= 40 &&
-    commaItems.length >= 3 &&
-    commaItems.length <= 6 &&
-    commaItems.every(item => item.text.length >= 6 && item.text.length <= 40)
-  ) {
-    return { type: 'ul', items: commaItems }
   }
 
   return null
@@ -1897,6 +1892,12 @@ const currentPolishEngineLabel = computed(() => {
 const highlightedPolishedHtml = computed(() => renderDiffHtml(result.value?.original, result.value?.polished, 'polished'))
 const displayedPolishedText = computed(() => getDisplayedPolishedText(result.value, textCatItems.value))
 const highlightedPolishedResultHtml = computed(() => renderTextPolishedResultHtml(result.value, displayedPolishedText.value))
+const highlightedOriginalResultHtml = computed(() => renderDiffHtml(result.value?.original, displayedPolishedText.value, 'original'))
+const showTextResultOriginal = computed(() => {
+  const original = String(result.value?.original || '').trim()
+  const displayed = String(displayedPolishedText.value || '').trim()
+  return Boolean(original && displayed && original !== displayed)
+})
 const hasVisibleTextPolishResult = computed(() => {
   if (!result.value) {
     return false
@@ -6054,7 +6055,13 @@ watch(currentView, (view) => {
   flex-direction: column;
   gap: 16px;
   min-width: 0;
-  min-height: 520px;
+  min-height: 240px;
+}
+
+.text-empty-result,
+.text-result-panel {
+  grid-column: 2;
+  grid-row: 2;
 }
 
 .text-empty-result {
@@ -6066,21 +6073,24 @@ watch(currentView, (view) => {
   background: #f7fafc;
   font-size: 13px;
   line-height: 1.5;
+  min-height: 88px;
+  overflow: visible;
 }
 
 .text-input-panel,
 .text-result-panel {
-  flex: 1 1 0;
+  flex: 1 1 auto;
   width: 100%;
   margin-bottom: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .text-result-panel {
-  overflow: auto;
+  overflow: visible;
+  min-height: 240px;
 }
 
 .text-input-panel .text-input-shell {
@@ -6103,9 +6113,60 @@ watch(currentView, (view) => {
 
 .text-result-panel .result-grid-vertical,
 .text-result-panel .result-col-v,
-.text-result-panel .col-content {
-  flex: 1;
-  min-height: 0;
+.text-result-panel .col-content,
+.text-result-panel .text-result-diff-card {
+  flex: 0 1 auto;
+  min-height: auto;
+  height: auto;
+  overflow: visible;
+}
+
+.text-result-diff-card {
+  min-height: 88px;
+}
+
+.text-result-diff-card .issue-diff-content {
+  white-space: break-spaces;
+  word-break: break-word;
+  overflow: visible;
+}
+
+.text-cat-panel {
+  overflow: visible;
+}
+
+.text-cat-item-row {
+  overflow: visible;
+}
+
+.text-cat-item-row .issue-diff-content {
+  white-space: break-spaces;
+  word-break: break-word;
+}
+
+.text-cat-item-row .cat-candidate-select-shell {
+  margin-top: 10px;
+}
+
+.text-cat-item-row .cat-candidate-select-overlay {
+  max-height: none;
+  overflow: visible;
+}
+
+.text-cat-item-row :deep(.el-select__wrapper) {
+  min-height: 64px;
+  height: auto;
+  align-items: flex-start;
+}
+
+.text-cat-item-row :deep(.el-select__selected-item) {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  line-height: 1.5;
+  word-break: break-word;
+  opacity: 0;
 }
 
 .content-left .panel :deep(.el-textarea) {
@@ -6679,6 +6740,8 @@ watch(currentView, (view) => {
 
   .text-left,
   .text-right,
+  .text-empty-result,
+  .text-result-panel,
   .feedback-panel {
     grid-column: 1;
     grid-row: auto;
