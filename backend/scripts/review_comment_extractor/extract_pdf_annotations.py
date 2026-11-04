@@ -41,7 +41,16 @@ def main():
         output.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         output.write_text(core.to_markdown(rows), encoding="utf-8")
+        html_path = output.with_suffix(".html")
+        root = Path(args.input)
+        if root.is_file():
+            root = root.parent
+        search_dirs = [html_path.parent, root]
+        search_dirs.extend(core.collect_shot_dirs(root))
+        html_path.write_text(core.to_html(rows, search_dirs), encoding="utf-8")
     print(f"提取完成: {len(rows)} 条批注 -> {output}")
+    if not (args.json or output.suffix.lower() == ".json"):
+        print(f"请用浏览器打开: {output.with_suffix('.html')}")
     for err in errors:
         print(f"跳过: {err}")
 
