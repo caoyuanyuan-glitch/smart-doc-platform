@@ -6,7 +6,8 @@
    - 每条以 `## N. <文档名> · 第 <X> 页` 起头
    - 字段行：`- 批注类型: ...` / `- 批注人: ...` / `- 人工意见: ...` / `- 选中文本: ...` / `- 附近正文: ...`
    - 新版（extractor v2）为 `### 批注覆盖文本` / `### 原文` / `### 人工意见` 小节
-2. JSON（gold_v0 评测集格式）
+    - 现行版为 `### 框选还原` / `### 定位原文` / `### 人工意见`，并带 `- 文档号` / `- 建议分类`
+ 2. JSON（gold_v0 评测集格式）
    - list of {file, page, annotation_type, author, comment, selected_text, context, category, layer, expected_rule}
 3. CSV（标注集 v0 格式）
    - batch, doc, page, comment, selected, context, auto_category, rule_detectable, loc_quality, flag, note
@@ -92,8 +93,10 @@ def parse_csv_content(raw: str | bytes) -> list[dict]:
 
 
 _SECTION_HEAD_RE = re.compile(r"^##\s*\d*\.?\s*(.*?)\s*·\s*第\s*([0-9]+)\s*页")
-_ATTR_LINE_RE = re.compile(r"^-\s*(批注类型|批注人|人工意见|选中文本|附近正文|类别|修改建议|触发条件|例外条件|批注矩形|批注截图)\s*:\s*(.*)$")
-_SUBSECTION_RE = re.compile(r"^###\s*(批注覆盖文本|原文|人工意见|人工意见\d*)\s*$")
+_ATTR_LINE_RE = re.compile(
+    r"^-\s*(批注类型|批注人|人工意见|选中文本|附近正文|类别|修改建议|触发条件|例外条件|批注矩形|批注截图|文档号|建议分类)\s*:\s*(.*)$"
+)
+_SUBSECTION_RE = re.compile(r"^###\s*(批注覆盖文本|框选还原|原文|定位原文|人工意见|人工意见\d*)\s*$")
 
 
 def _parse_md_blocks(lines: list[str]) -> Iterable[tuple[dict, list[str]]]:
@@ -105,7 +108,11 @@ def _parse_md_blocks(lines: list[str]) -> Iterable[tuple[dict, list[str]]]:
             if current is not None:
                 yield current, block
             m = _SECTION_HEAD_RE.match(line)
-            current = {"doc_name": m.group(1).strip() if m else "", "page": m.group(2).strip() if m else ""}
+            if not m:
+                current = None
+                block = []
+                continue
+            current = {"doc_name": m.group(1).strip(), "page": m.group(2).strip()}
             block = []
         else:
             block.append(line)
@@ -167,11 +174,17 @@ def _parse_md_block(header: dict, lines: list[str]) -> dict:
             row["category"] = _clean(value)
         elif key == "修改建议":
             row["suggestion"] = _clean(value)
+        elif key == "建议分类":
+            row["category"] = _clean(value)
 
     if "批注覆盖文本" in sub_sections:
         row["original_text"] = row["original_text"] or _clean(" ".join(sub_sections["批注覆盖文本"]))
+    if "框选还原" in sub_sections:
+        row["original_text"] = row["original_text"] or _clean(" ".join(sub_sections["框选还原"]))
     if "原文" in sub_sections:
         row["context"] = row["context"] or _clean(" ".join(sub_sections["原文"]))
+    if "定位原文" in sub_sections:
+        row["context"] = row["context"] or _clean(" ".join(sub_sections["定位原文"]))
     if "人工意见" in sub_sections:
         row["comment"] = row["comment"] or _clean(" ".join(sub_sections["人工意见"]))
     return row
