@@ -200,14 +200,25 @@ def test_disabled_live_family_uses_platform_rules_only(monkeypatch):
     trademark = _ann("DET-TRADEMARK-001")
     dead = _issue(rule="EXT-R006")
     assert _matches_expected_rule_data(trademark, dead, _issue_blob(dead)) is False
+    word = _ann("AI-WORD-001")
+    dead_word = _issue(rule="EXT-R024")
+    live_word = _issue(rule="EXT-R022")
+    assert _matches_expected_rule_data(word, dead_word, _issue_blob(dead_word)) is False
+    assert _matches_expected_rule_data(word, live_word, _issue_blob(live_word)) is True
     monkeypatch.setenv("WORKBUDDY_RULE_PLATFORM_CH", "off")
     assert _matches_expected_rule_data(item, hit, _issue_blob(hit)) is False
 
 
 def test_term_family_matches_term_rules():
     reset_families_cache()
+    families = _load_families()
+    term = families["TERM-CHECK-001"]
+    struct = families["STRUCT-TERM-001"]
+    assert "TERM-" not in (term.get("rule_prefixes") or [])
+    assert "TERM-FORBIDDEN" not in (term.get("exact_rules") or [])
+    assert "TERM-FORBIDDEN" not in (struct.get("exact_rules") or [])
     item = _ann("TERM-CHECK-001")
     issue = _issue(rule="TERM-INCONSIST", category="术语规范")
     assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is True
-    struct = _ann("STRUCT-TERM-001")
-    assert _matches_expected_rule_data(struct, issue, _issue_blob(issue)) is True
+    struct_item = _ann("STRUCT-TERM-001")
+    assert _matches_expected_rule_data(struct_item, issue, _issue_blob(issue)) is True

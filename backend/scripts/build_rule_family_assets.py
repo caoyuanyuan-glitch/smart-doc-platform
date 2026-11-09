@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
 
-PACK = Path("/tmp/opencode/rule-pack/人工审核意见整理_规则学习包_20261106")
-ASSETS = Path("/workspace/backend/app/review_engine/assets")
-FIXTURES = Path("/workspace/backend/tests/fixtures")
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+PACK = _BACKEND_DIR / "tests" / "fixtures" / "rule_pack_20261106"
+ASSETS = _BACKEND_DIR / "app" / "review_engine" / "assets"
+FIXTURES = _BACKEND_DIR / "tests" / "fixtures"
 
 # 24 个 legacy 分支的数据驱动编码，须与 annotation_baseline._matches_expected_rule_legacy 逐例等价。
 LEGACY_MATCH = {
@@ -141,10 +143,11 @@ LEGACY_MATCH = {
     },
     "STRUCT-TERM-001": {
         "selected_in_blob_min_len": 4,
-        "rule_prefixes": ["DOC-TERM", "CYY-CN-CONSIST-"],
+        "rule_prefixes": ["DOC-TERM", "CYY-CN-CONSIST-", "TERM-"],
         "exact_rules": [
             "CYY-CN-NAV-001", "STRUCT-TERM-001",
             "DET-TERM-BASELINE-001", "DET-TERM-CASE-001", "DET-TERM-CANON-001",
+            "TERM-INCONSIST", "TERM-PAIR",
         ],
         "category_keywords": ["术语一致性"],
     },
@@ -293,11 +296,41 @@ def build_families() -> dict:
             "disabled": False,
         }
 
+    entries["TERM-CHECK-001"] = {
+        "label_code": "E1",
+        "label_name": "术语库动态校验",
+        "platform_dim": "术语一致性",
+        "layer": "deterministic",
+        "samples": 0,
+        "in_legacy_code": False,
+        "in_regression_set": False,
+        "rule_prefixes": [],
+        "exact_rules": ["TERM-INCONSIST", "TERM-PAIR"],
+        "category_keywords": [],
+        "text_all": [],
+        "blob_all": [],
+        "selected_in_blob_min_len": 0,
+        "overrides": [],
+        "platform_rules": [],
+        "legacy_only": False,
+        "disabled": False,
+        "notes": (
+            "TERM-CHECK-001 与 STRUCT-TERM-001 的规则号重叠是刻意设计："
+            "前者按检出层组织（术语库动态校验），后者按问题类型组织（篇内不一致）。"
+            "允许一条 issue 被两族认领，统计时按族去重。"
+            "TERM-FORBIDDEN 通道未启用。"
+        ),
+    }
+
     stats = {
         "total": len(entries),
         "in_legacy_code": sum(1 for e in entries.values() if e["in_legacy_code"]),
         "legacy_only": sum(1 for e in entries.values() if e["legacy_only"]),
-        "new_rules": sum(1 for e in entries.values() if not e["in_legacy_code"]),
+        # TERM-CHECK-001 is a post-pack overlay, not one of the 44 new pack rules.
+        "new_rules": sum(
+            1 for rid, e in entries.items()
+            if not e["in_legacy_code"] and rid != "TERM-CHECK-001"
+        ),
         "disabled": sum(1 for e in entries.values() if e["disabled"]),
         "in_regression_set": sum(1 for e in entries.values() if e["in_regression_set"]),
     }
@@ -308,7 +341,13 @@ def build_families() -> dict:
             "overrides", "selected_in_blob", "exact_rules", "rule_prefixes",
             "category_keywords", "blob_all", "text_all",
         ],
-        "notes": "44 条新增规则默认 disabled；platform_rules 仅在 WORKBUDDY_RULE_PLATFORM_CH=on 时并入。",
+        "notes": (
+            "44 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。"
+            "DET-TRADEMARK-001/EXT-R006/EXT-R024 挂起。"
+            "TERM-CHECK-001 与 STRUCT-TERM-001 共享 TERM-INCONSIST/TERM-PAIR；前者是术语库动态校验视角，后者是篇内不一致视角。"
+            "回归样本全部挂在 STRUCT-TERM-001（40 条），TERM-CHECK-001 样本为 0。"
+            "TERM-FORBIDDEN 通道未启用。"
+        ),
         "stats": stats,
         "entries": entries,
     }
@@ -388,10 +427,15 @@ def build_candidates_xlsx() -> int:
 
 
 def main() -> None:
+    asset_path = ASSETS / "expected_rule_families.json"
+    if asset_path.exists() and not os.getenv("FORCE_REBUILD_ASSETS"):
+        raise SystemExit(
+            f"{asset_path} 已存在。要重建请先删除它，或设置 FORCE_REBUILD_ASSETS=1。"
+        )
     ASSETS.mkdir(parents=True, exist_ok=True)
     FIXTURES.mkdir(parents=True, exist_ok=True)
     families = build_families()
-    (ASSETS / "expected_rule_families.json").write_text(
+    asset_path.write_text(
         json.dumps(families, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

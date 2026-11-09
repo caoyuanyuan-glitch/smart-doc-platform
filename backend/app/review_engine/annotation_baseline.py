@@ -48,7 +48,7 @@ def _load_families() -> dict:
 
 
 HUNG_FAMILIES = frozenset({"DET-TRADEMARK-001"})
-HUNG_PLATFORM_RULES = frozenset({"EXT-R006"})
+HUNG_PLATFORM_RULES = frozenset({"EXT-R006", "EXT-R024"})
 
 
 def _platform_channel_on() -> bool:

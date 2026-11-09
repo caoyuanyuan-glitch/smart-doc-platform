@@ -46,6 +46,8 @@ def bootstrap_runtime_env():
     _load_env_file_with_protected_keys(_BACKEND_DIR / "runtime.env", protected_keys)
     _load_env_file_with_protected_keys(Path("/root/.codingmatrix/smart-doc-runtime.env"), protected_keys)
     _load_env_file_with_protected_keys(Path.home() / ".smart-doc-platform" / "runtime.env", protected_keys)
+    # Local overlay (gitignored). Non-secret switches only; never put API keys here.
+    _load_env_file_with_protected_keys(_BACKEND_DIR / "runtime.env.local", protected_keys)
 
     custom_env_file = os.getenv("SMART_DOC_ENV_FILE") or os.getenv("ENV_FILE")
     if _non_empty(custom_env_file):

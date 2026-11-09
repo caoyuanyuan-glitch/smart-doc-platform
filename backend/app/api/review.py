@@ -16038,7 +16038,7 @@ async def get_review_coverage(
     # 8. 规则覆盖度
     from app.crud.rule import get_rules as db_get_rules
     try:
-        all_rules = db_get_rules(db, skip=0, limit=500)
+        all_rules = db_get_rules(db, skip=0, limit=10000)
         total_available_rules = len(all_rules)
     except Exception:
         total_available_rules = 0

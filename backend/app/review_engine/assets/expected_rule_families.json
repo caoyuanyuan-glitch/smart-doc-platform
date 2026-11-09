@@ -10,7 +10,7 @@
     "blob_all",
     "text_all"
   ],
-  "notes": "44 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。DET-TRADEMARK-001/EXT-R006 挂起。TERM-CHECK-001 承接 TERM-*。",
+  "notes": "44 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。DET-TRADEMARK-001/EXT-R006/EXT-R024 挂起。TERM-CHECK-001 与 STRUCT-TERM-001 共享 TERM-INCONSIST/TERM-PAIR；前者是术语库动态校验视角，后者是篇内不一致视角。回归样本全部挂在 STRUCT-TERM-001（40 条），TERM-CHECK-001 样本为 0。TERM-FORBIDDEN 通道未启用。",
   "stats": {
     "total": 69,
     "in_legacy_code": 24,
@@ -61,8 +61,7 @@
         "DET-TERM-CASE-001",
         "DET-TERM-CANON-001",
         "TERM-INCONSIST",
-        "TERM-PAIR",
-        "TERM-FORBIDDEN"
+        "TERM-PAIR"
       ],
       "category_keywords": [
         "术语一致性"
@@ -83,13 +82,10 @@
       "samples": 0,
       "in_legacy_code": false,
       "in_regression_set": false,
-      "rule_prefixes": [
-        "TERM-"
-      ],
+      "rule_prefixes": [],
       "exact_rules": [
         "TERM-INCONSIST",
-        "TERM-PAIR",
-        "TERM-FORBIDDEN"
+        "TERM-PAIR"
       ],
       "category_keywords": [],
       "text_all": [],
@@ -98,7 +94,8 @@
       "overrides": [],
       "platform_rules": [],
       "legacy_only": false,
-      "disabled": false
+      "disabled": false,
+      "notes": "TERM-CHECK-001 与 STRUCT-TERM-001 的规则号重叠是刻意设计：前者按检出层组织（术语库动态校验），后者按问题类型组织（篇内不一致）。允许一条 issue 被两族认领，统计时按族去重。TERM-FORBIDDEN 通道未启用。"
     },
     "DET-TYPO-CN-001": {
       "label_code": "A5",
