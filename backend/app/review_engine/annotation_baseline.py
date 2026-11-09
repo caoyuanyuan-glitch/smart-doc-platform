@@ -3,6 +3,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+import os
 
 
 @dataclass
@@ -21,6 +22,47 @@ class HumanAnnotation:
 
 def _clean(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+# 规则族数据驱动加载（2026-11-06）
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_FAMILIES_FILE = _ASSETS_DIR / "expected_rule_families.json"
+_FAMILIES_CACHE: dict | None = None
+
+
+def reset_families_cache() -> None:
+    global _FAMILIES_CACHE
+    _FAMILIES_CACHE = None
+
+
+def _load_families() -> dict:
+    """加载规则族定义。失败时返回空 dict，调用方须回退硬编码。"""
+    global _FAMILIES_CACHE
+    if _FAMILIES_CACHE is not None:
+        return _FAMILIES_CACHE
+    try:
+        _FAMILIES_CACHE = json.loads(_FAMILIES_FILE.read_text(encoding="utf-8"))["entries"]
+    except Exception:
+        _FAMILIES_CACHE = {}
+    return _FAMILIES_CACHE
+
+
+def _all_in(tokens, haystack) -> bool:
+    tokens = [str(t) for t in (tokens or []) if str(t)]
+    if not tokens:
+        return False
+    return all(t.lower() in haystack for t in tokens)
+
+
+def _cond(when: dict, text: str, blob: str) -> bool:
+    keys = [k for k in (when or {}) if (when.get(k) or [])]
+    if not keys:
+        return False
+    for k in keys:
+        haystack = text if k == "text_all" else blob
+        if not _all_in(when.get(k), haystack):
+            return False
+    return True
 
 
 def _parse_bullet(block: str, label: str) -> str:
@@ -277,7 +319,7 @@ def _has_substantive_text_overlap(item: HumanAnnotation, issue: dict[str, Any]) 
 # 不能靠放宽规则族口径制造虚高。
 
 
-def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+def _matches_expected_rule_legacy(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
     rule = str(issue.get("rule", "") or "").upper()
     category = str(issue.get("category", "") or "")
     text = " ".join([item.comment, item.selected_text, item.context]).lower()
@@ -376,6 +418,125 @@ def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: s
     return False
 
 
+def _matches_expected_rule_data(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+    families = _load_families()
+    entry = families.get(item.expected_rule)
+    if not entry or entry.get("disabled"):
+        return False
+
+    rule = str(issue.get("rule", "") or "").upper()
+    category = str(issue.get("category", "") or "")
+    text = " ".join([item.comment, item.selected_text, item.context]).lower()
+    selected = _norm_for_match(item.selected_text)
+    exact = {str(r).upper() for r in entry.get("exact_rules") or []}
+    include_platform = (os.environ.get("WORKBUDDY_RULE_PLATFORM_CH") or "off").lower() == "on"
+    if include_platform:
+        exact |= {str(r).upper() for r in entry.get("platform_rules") or []}
+
+    for ov in entry.get("overrides") or []:
+        when, then = ov.get("when") or {}, ov.get("then") or {}
+        if not _cond(when, text, blob):
+            continue
+        if then.get("always"):
+            return True
+        if rule in {str(r).upper() for r in then.get("exact_rules") or []}:
+            return True
+        if any(k and k in category for k in then.get("category_keywords") or []):
+            return True
+        return False
+
+    min_len = int(entry.get("selected_in_blob_min_len") or 0)
+    if min_len and selected and len(selected) >= min_len and selected in blob:
+        return True
+    if rule in exact:
+        return True
+    for prefix in entry.get("rule_prefixes") or []:
+        if rule.startswith(str(prefix).upper()):
+            return True
+    for kw in entry.get("category_keywords") or []:
+        if kw and kw in category:
+            return True
+    if _all_in(entry.get("blob_all"), blob):
+        return True
+    if _all_in(entry.get("text_all"), text):
+        return True
+    return False
+
+
+def _rule_family_strong_hit(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+    """强通道命中：overrides / selected_in_blob / exact_rules / rule_prefixes / blob_all / text_all。"""
+    families = _load_families()
+    entry = families.get(item.expected_rule)
+    if not entry or entry.get("disabled"):
+        return False
+    rule = str(issue.get("rule", "") or "").upper()
+    category = str(issue.get("category", "") or "")
+    text = " ".join([item.comment, item.selected_text, item.context]).lower()
+    selected = _norm_for_match(item.selected_text)
+    exact = {str(r).upper() for r in entry.get("exact_rules") or []}
+    include_platform = (os.environ.get("WORKBUDDY_RULE_PLATFORM_CH") or "off").lower() == "on"
+    if include_platform:
+        exact |= {str(r).upper() for r in entry.get("platform_rules") or []}
+
+    for ov in entry.get("overrides") or []:
+        when, then = ov.get("when") or {}, ov.get("then") or {}
+        if not _cond(when, text, blob):
+            continue
+        if then.get("always"):
+            return True
+        if rule in {str(r).upper() for r in then.get("exact_rules") or []}:
+            return True
+        if any(k and k in category for k in then.get("category_keywords") or []):
+            return True
+        return False
+
+    min_len = int(entry.get("selected_in_blob_min_len") or 0)
+    if min_len and selected and len(selected) >= min_len and selected in blob:
+        return True
+    if rule in exact:
+        return True
+    for prefix in entry.get("rule_prefixes") or []:
+        if rule.startswith(str(prefix).upper()):
+            return True
+    if _all_in(entry.get("blob_all"), blob):
+        return True
+    if _all_in(entry.get("text_all"), text):
+        return True
+    return False
+
+
+def _rule_family_has_text_evidence(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+    selected = _norm_for_match(item.selected_text)
+    if selected and len(selected) >= 4 and selected in blob:
+        return True
+    context = _norm_for_match(item.context)
+    if context and len(context) >= 16 and context[:40] in blob:
+        return True
+    comment = _norm_for_match(item.comment)
+    description = _norm_for_match(issue.get("description", ""))
+    if comment and len(comment) >= 8 and (comment in blob or comment in description):
+        return True
+    original = _norm_for_match(issue.get("original_text", ""))
+    if original and len(original) >= 4 and selected and original in selected:
+        return True
+    return _rule_family_strong_hit(item, issue, blob)
+
+
+def _matches_expected_rule(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
+    mode = (os.environ.get("WORKBUDDY_RULE_FAMILIES") or "auto").strip().lower()
+    if mode == "legacy":
+        return _matches_expected_rule_legacy(item, issue, blob)
+    families = _load_families()
+    if mode == "data":
+        if not families:
+            raise RuntimeError("expected_rule_families.json 加载失败，无法启用数据驱动模式")
+        return _matches_expected_rule_data(item, issue, blob)
+    return (
+        _matches_expected_rule_data(item, issue, blob)
+        if families else _matches_expected_rule_legacy(item, issue, blob)
+    )
+
+
 def _matches_annotation_strictly(
     item: HumanAnnotation,
     issue: dict[str, Any],
@@ -414,6 +575,11 @@ def _matches_annotation_strictly(
         rule_ok = True
     elif allow_rule_family:
         rule_ok = _matches_expected_rule(item, issue, blob)
+        if rule_ok and not _rule_family_has_text_evidence(item, issue, blob):
+            # 纯 category_keywords 弱通道不能单独支撑 strict；
+            # 页码锚点一致时留给后面的页码通道做二次确认。
+            if not _annotation_page_anchor_matches(item, issue):
+                rule_ok = False
     else:
         rule_ok = False
     if not rule_ok:

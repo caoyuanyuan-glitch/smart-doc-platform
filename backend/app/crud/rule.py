@@ -37,7 +37,7 @@ RULE_PATTERN_MAP = (
     (r"图标文字底部|图片和图注|图片中标注文字|图片中文字体", DISABLED_RULE_REGEX),
     (r"产品中有害物质的名称及含有物质表", DISABLED_RULE_REGEX),
     (r"仅可交互UI元素", DISABLED_RULE_REGEX),
-    (r"统一使用双引号.*单引号", DISABLED_RULE_REGEX),
+    (r"统一使用双引号.*单引号", r"‘[^’]{1,40}’"),
     (r"标点符号", DISABLED_RULE_REGEX),
     (r"公司官网地址", r"https?://[^\s]+mgi[^\s]*"),
     (r"多余的?空格|空行", r"[ \t]{2,}|\n{3,}"),
@@ -49,6 +49,7 @@ RULE_PATTERN_MAP = (
     (r"成语", r"周而复始|恰如其分|千丝万缕|不言而喻|一目了然|举足轻重"),
     (r"文言化", r"未尽事宜|鉴于|据此|兹"),
     (r"Cat\.?\s*No", r"Cat\.?\s*No\.?"),
+    (r"For details about xxx", r"(?<!For\s)(?<!See\s)Details\s+about\s+[^.]{3,60}?\s*refer\s+to"),
 )
 
 

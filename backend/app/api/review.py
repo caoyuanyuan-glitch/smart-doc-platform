@@ -48,6 +48,7 @@ from app.models.issue import Issue as IssueModel
 from app.models.document import Document as DocumentModel
 from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
+from app.services.terminology import load_terminology, resolve_terminology_path, run_term_check_v2
 from app.rules.term_consistency_rule import TermConsistencyRule
 from app.review_engine.unit_spacing import check_units_and_spacing
 from app.review_engine.term_baseline import check_term_baseline
@@ -13612,7 +13613,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             _end_stage("document_loading", output_count=len(content))
 
             set_progress(review_id, 'running', '规则审核', 15, '正在加载审核规则...')
-            rules = get_rules(db)
+            rules = get_rules(db, skip=0, limit=10000)
             print(f"[审核] 加载规则数量: {len(rules)}")
 
             _begin_stage("rule_based_audit")
@@ -13626,9 +13627,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
 
             set_progress(review_id, 'running', '术语检查', 35, '正在执行术语检查...')
-            terms = get_terms(db)
-            print(f"[审核] 加载术语数量: {len(terms)}")
-            term_issues = [] if document.file_type == 'xlsx' else run_term_check(content, terms)
+            pack = load_terminology(resolve_terminology_path(db, document))
+            if document.file_type == 'xlsx':
+                term_issues = []
+            elif pack:
+                print(f"[审核] 术语库动态解析 pairs={len(pack.get('pairs') or [])}")
+                term_issues = run_term_check_v2(content, pack, lang=detect_language(content))
+            else:
+                terms = get_terms(db)
+                print(f"[审核] 加载术语数量: {len(terms)}")
+                term_issues = run_term_check(content, terms)
             print(f"[审核] 术语匹配到问题: {len(term_issues)}个")
 
             if snippet_review and document.file_type != 'xlsx' and document_language == "cn":
