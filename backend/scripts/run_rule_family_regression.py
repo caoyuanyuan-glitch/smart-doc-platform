@@ -128,6 +128,7 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
             expected_rule=sample.get("expected_rule") or "",
         )
         sample_no = sample.get("doc") or _doc_no(item.file)
+        parsed_no = _doc_no(str(sample.get("doc") or "")) or _doc_no(item.file)
         entry = families.get(item.expected_rule) or {}
         if entry and not entry.get("disabled"):
             stats["enabled_family"] += 1
@@ -147,10 +148,10 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
 
         if not matched_issues:
             align = "不可判定"
-            if entry.get("disabled") or not entry:
-                reason = "规则族未接通"
+            if not parsed_no:
+                reason = "缺文档号"
             else:
-                reason = "样本版本不可判定"
+                reason = "库里无 issue"
             tier, loose, strict, channel = "NONE", False, False, ""
             countable = False
         else:
@@ -169,7 +170,7 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
                     best = candidate
             if best is None:
                 align = "不可判定"
-                reason = "样本版本不可判定"
+                reason = "缺文档号" if not parsed_no else "库里无 issue"
                 tier, loose, strict, channel = "NONE", False, False, ""
                 countable = False
             else:
@@ -195,6 +196,10 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
                 stats["must_detect"] += 1
         else:
             stats["uncountable"] += 1
+            if reason == "缺文档号":
+                stats["uncountable_missing_docno"] += 1
+            else:
+                stats["uncountable_no_issue"] += 1
 
         per_rule[item.expected_rule][tier] += 1
         db.add(ReviewBacktestRun(
@@ -231,10 +236,12 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
         "true_hit_recall": (stats["true_hit"] / stats["countable"]) if stats["countable"] else None,
         "strict_recall": (stats["strict"] / stats["countable"]) if stats["countable"] else None,
         "must_detect_miss_rate": (stats["must_detect_miss"] / stats["must_detect"]) if stats["must_detect"] else None,
-        "note": "不得把 0.6667 当作 recall 基线；只认 TRUE_HIT。",
+        "note": "reachable_family_samples 是族可达样本，不是 countable，不可称作准确率。不得把 0.6667 当作 recall 基线；只认 TRUE_HIT。",
         "enabled_family_samples": stats["enabled_family"],
         "reachable_family_samples": stats["reachable_family"],
         "family_coverage_pct": round(stats["reachable_family"] / len(samples) * 100, 1) if samples else 0.0,
+        "uncountable_missing_docno": stats["uncountable_missing_docno"],
+        "uncountable_no_issue": stats["uncountable_no_issue"],
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return summary
