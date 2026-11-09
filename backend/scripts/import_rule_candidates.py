@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -16,15 +17,19 @@ from app.schemas.rule import RuleCreate
 from app.crud.rule import bulk_create_rules, get_rules
 
 CANDIDATE_XLSX = Path(__file__).resolve().parents[1] / "app" / "review_engine" / "assets" / "rule_candidates_20261106.xlsx"
-BACKUP_TABLE = "rules_bak_20261106"
 BUILTIN_HR = {f"HR{i:03d}" for i in range(1, 15)}
 SEVERITY_MAP = {"致命": "fatal", "严重": "serious", "一般": "general", "建议": "suggestion"}
 LANGUAGE_MAP = {"中文": "cn", "英文": "en", "中英通用": "both", "cn": "cn", "en": "en", "both": "both"}
 
 
 def _backup_rules(db: Session) -> None:
-    db.execute(text(f"DROP TABLE IF EXISTS {BACKUP_TABLE}"))
-    db.execute(text(f"CREATE TABLE {BACKUP_TABLE} AS SELECT * FROM rules"))
+    name = f"rules_bak_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        db.execute(text(f'CREATE TABLE "{name}" (LIKE rules INCLUDING ALL)'))
+        db.execute(text(f'INSERT INTO "{name}" SELECT * FROM rules'))
+    else:
+        db.execute(text(f"CREATE TABLE {name} AS SELECT * FROM rules"))
     db.commit()
 
 

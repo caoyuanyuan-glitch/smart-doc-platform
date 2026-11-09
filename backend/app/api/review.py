@@ -38,6 +38,7 @@ from app.crud.document import create_document, get_document, get_documents_by_id
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue, list_false_positive_memory_signatures, delete_false_positive_memory_for_issue, upsert_false_positive_memory_for_issue, list_false_positive_memory, delete_false_positive_memory_entry
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
+from app.review_engine.issue_rule import canonicalize_issue_rule
 from app.models.term import Term
 from app.crud.audit_basis import get_audit_basis
 from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files, get_file
@@ -7483,7 +7484,7 @@ def _run_db_term_consistency_audit(db: Session, content):
             issues.append({
                 'severity': 'general',
                 'category': '术语一致性',
-                'rule': 'TERM-CONSISTENCY-DB',
+                'rule': 'TERM-INCONSIST',
                 'original_text': match.group(0),
                 'suggestion': standard,
                 'description': f'术语不一致: "{match.group(0)}" 建议统一为 "{standard}"。',
@@ -13130,7 +13131,7 @@ def run_term_check(content, terms):
                 issues.append({
                     "severity": "suggestion",
                     "category": "术语规范",
-                    "rule": "TERM",
+                    "rule": "TERM-INCONSIST",
                     "chapter": chapter,
                     "original_text": term.non_standard,
                     "context": context,
@@ -14013,12 +14014,15 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         _ensure_review_not_cancelled(review_id)
         for issue in issues:
+            issue = canonicalize_issue_rule(issue)
             persisted_position = _decode_issue_position(issue.get("position", ""))
             persisted_position.update({
                 key: issue.get(key)
                 for key in ("evidence", "position_object", "visual_verification", "source_format", "target_status", "rejected_reason")
                 if issue.get(key) not in (None, "", {}, [])
             })
+            if issue.get("check_type"):
+                persisted_position["check_type"] = issue["check_type"]
             create_issue(db=db, issue=IssueCreate(
                 review_id=review_id,
                 severity=issue["severity"],
@@ -15252,7 +15256,7 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             review_id=review_id,
             severity=severity_map.get(level, "general"),
             category='核心参数对比' if row.get('kind') == 'parameter' else '主干流程比对',
-            rule='COMPARE-PARAM' if row.get('kind') == 'parameter' else 'COMPARE-FLOW',
+            rule='',
             chapter=str(row.get('dimension') or '对比审核'),
             original_text=str(row.get('parameter_name') or ''),
             context="\n".join([f"主文档：{row.get('main_value') or '-'}", *reference_lines]),
@@ -15260,7 +15264,7 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             description=str(row.get('conclusion') or '对比审核发现差异'),
             audit_basis='对比审核 - 核心参数差异明细表',
             confidence=95,
-            source='rule',
+            source='compare_param' if row.get('kind') == 'parameter' else 'compare_flow',
             position=_encode_issue_position_with_meta(0, 0, compare_type=row.get('kind'), compare_level=level, parameter_name=row.get('parameter_name')),
             status='pending',
         ))
@@ -15712,7 +15716,7 @@ async def create_manual_review_issue(
         review_id=review_id,
         severity=severity,
         category=category,
-        rule='MANUAL-SUPPLEMENT',
+        rule='',
         chapter=chapter,
         original_text=original_text,
         context=str(payload.get('context') or '').strip(),

@@ -53,7 +53,7 @@ def test_asset_files_exist():
     assert (ASSETS / "rule_candidates_20261106.xlsx").is_file()
     assert FIXTURE.is_file()
     families = json.loads((ASSETS / "expected_rule_families.json").read_text(encoding="utf-8"))
-    assert families["stats"]["total"] == 68
+    assert families["stats"]["total"] == 69
     assert families["stats"]["in_legacy_code"] == 24
     assert families["stats"]["legacy_only"] == 9
     assert families["stats"]["new_rules"] == 44
@@ -187,3 +187,27 @@ def test_data_mode_raises_when_assets_missing(monkeypatch, tmp_path):
     finally:
         monkeypatch.setenv("WORKBUDDY_RULE_FAMILIES", "auto")
         reset_families_cache()
+
+
+def test_disabled_live_family_uses_platform_rules_only(monkeypatch):
+    reset_families_cache()
+    monkeypatch.setenv("WORKBUDDY_RULE_PLATFORM_CH", "on")
+    item = _ann("DET-URL-001")
+    hit = _issue(rule="EXT-R005", category="无关分类")
+    miss = _issue(rule="X", category="合规文案")
+    assert _matches_expected_rule_data(item, hit, _issue_blob(hit)) is True
+    assert _matches_expected_rule_data(item, miss, _issue_blob(miss)) is False
+    trademark = _ann("DET-TRADEMARK-001")
+    dead = _issue(rule="EXT-R006")
+    assert _matches_expected_rule_data(trademark, dead, _issue_blob(dead)) is False
+    monkeypatch.setenv("WORKBUDDY_RULE_PLATFORM_CH", "off")
+    assert _matches_expected_rule_data(item, hit, _issue_blob(hit)) is False
+
+
+def test_term_family_matches_term_rules():
+    reset_families_cache()
+    item = _ann("TERM-CHECK-001")
+    issue = _issue(rule="TERM-INCONSIST", category="术语规范")
+    assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is True
+    struct = _ann("STRUCT-TERM-001")
+    assert _matches_expected_rule_data(struct, issue, _issue_blob(issue)) is True

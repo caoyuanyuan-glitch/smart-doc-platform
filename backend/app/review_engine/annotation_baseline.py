@@ -47,6 +47,45 @@ def _load_families() -> dict:
     return _FAMILIES_CACHE
 
 
+HUNG_FAMILIES = frozenset({"DET-TRADEMARK-001"})
+HUNG_PLATFORM_RULES = frozenset({"EXT-R006"})
+
+
+def _platform_channel_on() -> bool:
+    return (os.environ.get("WORKBUDDY_RULE_PLATFORM_CH") or "off").lower() == "on"
+
+
+def _platform_exact(entry: dict) -> set[str]:
+    return {
+        str(r).upper()
+        for r in (entry.get("platform_rules") or [])
+        if str(r).upper() not in HUNG_PLATFORM_RULES
+    }
+
+
+def family_is_reachable(rule_id: str, entry: dict | None) -> bool:
+    """Enabled families, plus disabled families whose live platform_rules are switched on."""
+    if not entry:
+        return False
+    if not entry.get("disabled"):
+        return True
+    if not _platform_channel_on():
+        return False
+    if rule_id in HUNG_FAMILIES:
+        return False
+    return bool(_platform_exact(entry))
+
+
+def _disabled_platform_only_hit(item: HumanAnnotation, entry: dict, issue: dict[str, Any]) -> bool | None:
+    """None = enabled family (continue normal match). True/False = disabled-family result."""
+    if not entry.get("disabled"):
+        return None
+    if not _platform_channel_on() or item.expected_rule in HUNG_FAMILIES:
+        return False
+    rule = str(issue.get("rule", "") or "").upper()
+    return rule in _platform_exact(entry)
+
+
 def _all_in(tokens, haystack) -> bool:
     tokens = [str(t) for t in (tokens or []) if str(t)]
     if not tokens:
@@ -406,7 +445,7 @@ def _matches_expected_rule_legacy(item: HumanAnnotation, issue: dict[str, Any], 
             return True
         # DET-TERM-BASELINE-001 / DET-TERM-CASE-001：文档内术语基线比对（P1 新增）
         # DET-TERM-CANON-001：外部规范写法库（P1 新增）
-        return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule == "CYY-CN-NAV-001" or rule in {"STRUCT-TERM-001", "DET-TERM-BASELINE-001", "DET-TERM-CASE-001", "DET-TERM-CANON-001"} or "术语一致性" in category
+        return rule.startswith("DOC-TERM") or rule.startswith("CYY-CN-CONSIST-") or rule.startswith("TERM-") or rule == "CYY-CN-NAV-001" or rule in {"STRUCT-TERM-001", "DET-TERM-BASELINE-001", "DET-TERM-CASE-001", "DET-TERM-CANON-001", "TERM-INCONSIST", "TERM-PAIR", "TERM-FORBIDDEN"} or "术语一致性" in category
     if item.expected_rule == "AI-STYLE-001":
         return rule in {
             "DOC-MICRO-001", "DOC-PROC-001", "GRAMMAR-003", "GRAMMAR-004", "GRAMMAR-005",
@@ -421,17 +460,20 @@ def _matches_expected_rule_legacy(item: HumanAnnotation, issue: dict[str, Any], 
 def _matches_expected_rule_data(item: HumanAnnotation, issue: dict[str, Any], blob: str) -> bool:
     families = _load_families()
     entry = families.get(item.expected_rule)
-    if not entry or entry.get("disabled"):
+    if not entry:
         return False
+    disabled_hit = _disabled_platform_only_hit(item, entry, issue)
+    if disabled_hit is not None:
+        return disabled_hit
 
     rule = str(issue.get("rule", "") or "").upper()
     category = str(issue.get("category", "") or "")
     text = " ".join([item.comment, item.selected_text, item.context]).lower()
     selected = _norm_for_match(item.selected_text)
     exact = {str(r).upper() for r in entry.get("exact_rules") or []}
-    include_platform = (os.environ.get("WORKBUDDY_RULE_PLATFORM_CH") or "off").lower() == "on"
+    include_platform = _platform_channel_on()
     if include_platform:
-        exact |= {str(r).upper() for r in entry.get("platform_rules") or []}
+        exact |= _platform_exact(entry)
 
     for ov in entry.get("overrides") or []:
         when, then = ov.get("when") or {}, ov.get("then") or {}
@@ -467,16 +509,19 @@ def _rule_family_strong_hit(item: HumanAnnotation, issue: dict[str, Any], blob: 
     """强通道命中：overrides / selected_in_blob / exact_rules / rule_prefixes / blob_all / text_all。"""
     families = _load_families()
     entry = families.get(item.expected_rule)
-    if not entry or entry.get("disabled"):
+    if not entry:
         return False
+    disabled_hit = _disabled_platform_only_hit(item, entry, issue)
+    if disabled_hit is not None:
+        return disabled_hit
     rule = str(issue.get("rule", "") or "").upper()
     category = str(issue.get("category", "") or "")
     text = " ".join([item.comment, item.selected_text, item.context]).lower()
     selected = _norm_for_match(item.selected_text)
     exact = {str(r).upper() for r in entry.get("exact_rules") or []}
-    include_platform = (os.environ.get("WORKBUDDY_RULE_PLATFORM_CH") or "off").lower() == "on"
+    include_platform = _platform_channel_on()
     if include_platform:
-        exact |= {str(r).upper() for r in entry.get("platform_rules") or []}
+        exact |= _platform_exact(entry)
 
     for ov in entry.get("overrides") or []:
         when, then = ov.get("when") or {}, ov.get("then") or {}

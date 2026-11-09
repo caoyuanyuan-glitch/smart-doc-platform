@@ -84,9 +84,24 @@ def test_run_term_check_v2_reports_inconsistency_and_forbidden(tmp_path):
     content = "请执行清洗，同时【清洗】完成。IT产品与服务 paired with WashX nearby."
     issues = run_term_check_v2(content, pack, lang="zh")
     rules = {item["rule"] for item in issues}
-    assert "TERM-INCONSIST" in rules or "TERM-PAIR" in rules or "TERM-FORBIDDEN" in rules
+    assert "TERM-PAIR" not in rules
+    assert "TERM-INCONSIST" in rules or "TERM-FORBIDDEN" in rules
     trimmed = trim_terms_for_ai_v2(pack, "%1:机械臂归零", max_items=2)
     assert any(item["zh"] == "%1:机械臂归零" for item in trimmed)
+
+
+def test_run_term_check_v2_pair_channel_opt_in(tmp_path, monkeypatch):
+    reset_terminology_cache()
+    path = tmp_path / "术语.xlsx"
+    _write_pack(path)
+    pack = load_terminology(str(path))
+    content = "请执行清洗 WashX 完成。"
+    monkeypatch.delenv("WORKBUDDY_TERM_PAIR", raising=False)
+    off_rules = {item["rule"] for item in run_term_check_v2(content, pack, lang="zh")}
+    assert "TERM-PAIR" not in off_rules
+    monkeypatch.setenv("WORKBUDDY_TERM_PAIR", "on")
+    on_rules = {item["rule"] for item in run_term_check_v2(content, pack, lang="zh")}
+    assert "TERM-PAIR" in on_rules
 
 
 def test_real_v30_pack_parses_5506_pairs():

@@ -10,9 +10,9 @@
     "blob_all",
     "text_all"
   ],
-  "notes": "44 条新增规则默认 disabled；platform_rules 仅在 WORKBUDDY_RULE_PLATFORM_CH=on 时并入。",
+  "notes": "44 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。DET-TRADEMARK-001/EXT-R006 挂起。TERM-CHECK-001 承接 TERM-*。",
   "stats": {
-    "total": 68,
+    "total": 69,
     "in_legacy_code": 24,
     "legacy_only": 9,
     "new_rules": 44,
@@ -51,14 +51,18 @@
       "in_regression_set": true,
       "rule_prefixes": [
         "DOC-TERM",
-        "CYY-CN-CONSIST-"
+        "CYY-CN-CONSIST-",
+        "TERM-"
       ],
       "exact_rules": [
         "CYY-CN-NAV-001",
         "STRUCT-TERM-001",
         "DET-TERM-BASELINE-001",
         "DET-TERM-CASE-001",
-        "DET-TERM-CANON-001"
+        "DET-TERM-CANON-001",
+        "TERM-INCONSIST",
+        "TERM-PAIR",
+        "TERM-FORBIDDEN"
       ],
       "category_keywords": [
         "术语一致性"
@@ -66,6 +70,31 @@
       "text_all": [],
       "blob_all": [],
       "selected_in_blob_min_len": 4,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "TERM-CHECK-001": {
+      "label_code": "E1",
+      "label_name": "术语库动态校验",
+      "platform_dim": "术语一致性",
+      "layer": "deterministic",
+      "samples": 0,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [
+        "TERM-"
+      ],
+      "exact_rules": [
+        "TERM-INCONSIST",
+        "TERM-PAIR",
+        "TERM-FORBIDDEN"
+      ],
+      "category_keywords": [],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
       "overrides": [],
       "platform_rules": [],
       "legacy_only": false,

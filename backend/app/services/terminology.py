@@ -277,27 +277,29 @@ def run_term_check_v2(content: str, pack, lang: str = "zh") -> list[dict]:
             })
 
     # ② 中英配对错误：中文术语附近出现库内英文，但不在该中文允许译法中
-    present_en = [en for en in pack.get("en_set", ()) if en and len(en) >= 4 and en in content]
-    for zh, en_list in pack.get("zh_index", {}).items():
-        if not zh or len(zh) < 2 or zh not in content:
-            continue
-        allowed = set(en_list or [])
-        for window in _windows(content, zh, 80):
-            wrong = [en for en in present_en if en in window and en not in allowed]
-            if not wrong:
+    pair_on = (os.environ.get("WORKBUDDY_TERM_PAIR") or "off").lower() == "on"
+    if pair_on:
+        present_en = [en for en in pack.get("en_set", ()) if en and len(en) >= 4 and en in content]
+        for zh, en_list in pack.get("zh_index", {}).items():
+            if not zh or len(zh) < 2 or zh not in content:
                 continue
-            add({
-                "severity": "suggestion",
-                "category": "术语规范",
-                "rule": "TERM-PAIR",
-                "original_text": f"{zh} / {wrong[0]}",
-                "suggestion": f"「{zh}」对应英文应为 {' / '.join(en_list[:3])}",
-                "description": "中文术语附近配了库外的英文",
-                "audit_basis": "术语&固定表达 V3.0",
-                "confidence": 75,
-                "source": "term_v2",
-            })
-            break
+            allowed = set(en_list or [])
+            for window in _windows(content, zh, 80):
+                wrong = [en for en in present_en if en in window and en not in allowed]
+                if not wrong:
+                    continue
+                add({
+                    "severity": "suggestion",
+                    "category": "术语规范",
+                    "rule": "TERM-PAIR",
+                    "original_text": f"{zh} / {wrong[0]}",
+                    "suggestion": f"「{zh}」对应英文应为 {' / '.join(en_list[:3])}",
+                    "description": "中文术语附近配了库外的英文",
+                    "audit_basis": "术语&固定表达 V3.0",
+                    "confidence": 75,
+                    "source": "term_v2",
+                })
+                break
 
     # ③ 术语表明确禁止的写法
     for zh, en, src, note in pack.get("pairs") or []:

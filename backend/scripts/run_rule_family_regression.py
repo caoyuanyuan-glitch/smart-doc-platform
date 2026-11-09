@@ -23,11 +23,12 @@ from app.review_engine.annotation_baseline import (
     _matches_annotation_strictly,
     _matches_expected_rule,
     _rule_family_has_text_evidence,
+    family_is_reachable,
 )
+from app.review_engine.issue_rule import looks_like_rule_no
 
 FIXTURE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "regression_701_rules.jsonl"
 DOC_NO_RE = re.compile(r"H-020-\d{6}")
-RULE_NO_RE = re.compile(r"^[A-Z][A-Z0-9_-]*\d+$|^[A-Z]+(?:-[A-Z0-9]+)+$")
 
 
 def _doc_no(text: str) -> str:
@@ -49,8 +50,7 @@ def _version_align(sample_file: str, issue_file: str) -> str:
 
 
 def _looks_like_rule_no(value: str) -> bool:
-    text = str(value or "").strip()
-    return bool(text) and bool(RULE_NO_RE.match(text))
+    return looks_like_rule_no(value)
 
 
 def _issue_dict(row: Issue, filename: str) -> dict:
@@ -129,6 +129,10 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
         )
         sample_no = sample.get("doc") or _doc_no(item.file)
         entry = families.get(item.expected_rule) or {}
+        if entry and not entry.get("disabled"):
+            stats["enabled_family"] += 1
+        if family_is_reachable(item.expected_rule, entry):
+            stats["reachable_family"] += 1
         matched_issues = []
         for review_id, rows in issues_by_doc.items():
             filename = filename_by_review.get(review_id, "")
@@ -228,6 +232,9 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
         "strict_recall": (stats["strict"] / stats["countable"]) if stats["countable"] else None,
         "must_detect_miss_rate": (stats["must_detect_miss"] / stats["must_detect"]) if stats["must_detect"] else None,
         "note": "不得把 0.6667 当作 recall 基线；只认 TRUE_HIT。",
+        "enabled_family_samples": stats["enabled_family"],
+        "reachable_family_samples": stats["reachable_family"],
+        "family_coverage_pct": round(stats["reachable_family"] / len(samples) * 100, 1) if samples else 0.0,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return summary
