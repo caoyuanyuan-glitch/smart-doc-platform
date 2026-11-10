@@ -1045,6 +1045,58 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         self.assertEqual(_clean_title("细胞相（1.13×）"), "细胞相（1.13×）")
         self.assertEqual(_clean_title("2.0 mL"), "2.0 mL")
 
+    def test_clean_title_drops_broken_double_dot_numbering(self):
+        self.assertEqual(_clean_title("9..4 测序参数"), "测序参数")
+
+    def test_numbering_only_line_before_table_is_not_heading(self):
+        class StubTable:
+            rows = [["试剂", "体积"]]
+
+        class StubRun:
+            def __init__(self, text, bold=None):
+                self.text = text
+                self.bold = bold
+
+        class StubParagraph:
+            def __init__(self, text):
+                self.runs = [StubRun(text)]
+
+        paragraph = StubParagraph("9.2.2")
+        self.assertEqual(_infer_docx_heading_level(paragraph, "9.2.2", StubTable(), "Normal"), 0)
+        self.assertEqual(_infer_docx_heading_level(paragraph, "9..2", StubTable(), "Normal"), 0)
+        self.assertFalse(_looks_like_docx_heading_text("9.2.2"))
+
+    def test_broken_numbering_sequencing_params_is_child_heading(self):
+        class StubTable:
+            rows = [["文库类型", "cDNA"]]
+
+        class StubRun:
+            def __init__(self, text, bold):
+                self.text = text
+                self.bold = bold
+
+        class StubParagraph:
+            def __init__(self, runs):
+                self.runs = runs
+
+        bold_params = StubParagraph([StubRun("9..4 测序参数", True)])
+        self.assertEqual(
+            _infer_docx_heading_level(bold_params, "9..4 测序参数", StubTable(), "Normal"),
+            3,
+        )
+        self.assertEqual(_infer_docx_heading_level(object(), "测序参数", None, "Normal"), 3)
+
+    def test_beads_precautions_are_appendix_child_headings(self):
+        self.assertEqual(
+            _infer_docx_heading_level(object(), "DNA Clean Beads使用前注意事项", None, "Normal"),
+            3,
+        )
+        self.assertEqual(
+            _infer_docx_heading_level(object(), "DNA Clean Beads操作注意事项", None, "Normal"),
+            3,
+        )
+        self.assertTrue(_looks_like_docx_heading_text("DNA Clean Beads使用前注意事项"))
+
     def test_reshape_keeps_numbered_docx_heading_as_separate_topic(self):
         markdown = "# Barcode 引物使⽤注意\n\n1. 规则 A\n\n### 6.2.3 Sample Barcode 使⽤规则 (96 RXN)\n\n1. 规则 B\n"
         sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
@@ -1081,6 +1133,37 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
         root = sections[0]
         self.assertEqual(root.get("sections") or [], [])
+        self.assertIn("基于碱基平衡的设计原则", root["content"])
+
+    def test_beads_precautions_headings_become_appendix_children(self):
+        markdown = (
+            "# 附录A 关于DNA Clean Beads及纯化\n\n"
+            "### DNA Clean Beads使用前注意事项\n\n"
+            "磁珠需平衡至室温。\n\n"
+            "### DNA Clean Beads操作注意事项\n\n"
+            "请于溶液彻底澄清后再吸取上清。\n"
+        )
+        sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
+        root = sections[0]
+        self.assertEqual(_clean_title(root["title"]), "关于DNA Clean Beads及纯化")
+        child_titles = [_clean_title(child["title"]) for child in root.get("sections", [])]
+        self.assertEqual(
+            child_titles,
+            ["DNA Clean Beads使用前注意事项", "DNA Clean Beads操作注意事项"],
+        )
+
+    def test_usage_rules_merge_into_appendix_body(self):
+        markdown = (
+            "# 附录B 关于 Barcode Primer（1 ~ 16）使用\n\n"
+            "本试剂套装。\n\n"
+            "### B-1 使用规则\n\n"
+            "基于碱基平衡的设计原则，需将成组使用或单个使用。\n"
+        )
+        sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
+        root = sections[0]
+        self.assertEqual(_clean_title(root["title"]), "关于 Barcode Primer（1 ~ 16）使用")
+        self.assertEqual(root.get("sections") or [], [])
+        self.assertIn("本试剂套装。", root["content"])
         self.assertIn("基于碱基平衡的设计原则", root["content"])
 
     def test_parenthesized_docx_heading_becomes_separate_section(self):
@@ -1642,6 +1725,20 @@ class CoverFieldPatchTest(unittest.TestCase):
             patched,
         )
         self.assertNotIn("V3.0", patched)
+
+    def test_patches_about_manual_cms_title_from_visible_title(self):
+        xml = (
+            '<concept cms:title="新的sDitaConcept">'
+            '<title>关于说明书</title>'
+            '<p>本说明书适用于DNBelab C系列高通量单细胞RNA文库制备试剂盒套装V3.0。说明书版本3.0。</p>'
+            '</concept>'
+        )
+        patched = _patch_template_about_product(xml, {
+            "product_name": "DNBelab C系列单细胞C6 RNA文库制备试剂盒套装",
+            "version": "1.0",
+        })
+        self.assertIn('cms:title="关于说明书"', patched)
+        self.assertNotIn("新的sDitaConcept", patched)
 
 
 class DocxTableMarkdownTest(unittest.TestCase):

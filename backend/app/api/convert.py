@@ -308,6 +308,15 @@ CHAPTER_APPENDIX_PREFIX_RE = re.compile(
 # such as "3'RNA" or "1.13×" keep their leading digits.
 SECTION_NUMBER_PREFIX_RE = re.compile(r'^\d+(?:[.．]\d+)+\s*(?=[\u4e00-\u9fff]|[A-Z])')
 APPENDIX_ITEM_NUMBER_PREFIX_RE = re.compile(r'^[A-Za-z]\s*[-–—]\s*\d+\s*(?=[\u4e00-\u9fff]|[A-Z])')
+BROKEN_SECTION_NUMBER_PREFIX_RE = re.compile(r'^\d+(?:[.．]{2,}\d+)+\s*')
+NUMBERING_ONLY_LINE_RE = re.compile(r'^\d+(?:[.．]{1,2}\d+)+$')
+BEADS_PRECAUTIONS_HEADING_RE = re.compile(
+    r'^(?:DNA\s*Clean\s*Beads\s*)?(使用前注意事项|操作注意事项)$'
+)
+SEQUENCING_PARAMS_HEADING_RE = re.compile(
+    r'^(?:\d+(?:[.．]{1,2}\d+)+\s*)?测序参数$'
+)
+USAGE_RULE_SECTION_KEYS = {"使用规则", "usage rules"}
 
 
 COVER_PART_NO_RE = re.compile(r'(H-\d{3}-\d{6}-\d{2})', re.I)
@@ -357,6 +366,7 @@ def _clean_title(title):
     t = CHAPTER_APPENDIX_PREFIX_RE.sub('', t)
     t = SECTION_NUMBER_PREFIX_RE.sub('', t)
     t = APPENDIX_ITEM_NUMBER_PREFIX_RE.sub('', t)
+    t = BROKEN_SECTION_NUMBER_PREFIX_RE.sub('', t)
     # "6.2 cDNA扩增" / "5.模板转换" / "8. rRNA去除": Latin+CJK after a
     # number is still a title. Keep content numbers such as "2.0 mL".
     numbered = re.match(r'^(\d+(?:[.．]\d+)+)\s*(.*)$', t)
@@ -2173,6 +2183,40 @@ def _docx_numbered_heading_level(text):
     return 0
 
 
+def _docx_compact_heading_text(text):
+    return _normalize_docx_text(_clean_navtitle(_strip_md_bold(text or "")))
+
+
+def _is_numbering_only_line(text):
+    compact = _docx_compact_heading_text(text)
+    return bool(compact and NUMBERING_ONLY_LINE_RE.match(compact))
+
+
+def _docx_forced_heading_level(text):
+    """Headings the source marks as body but IME still needs as child topics."""
+    compact = _docx_compact_heading_text(text)
+    if not compact:
+        return 0
+    if BEADS_PRECAUTIONS_HEADING_RE.match(compact):
+        return 3
+    if SEQUENCING_PARAMS_HEADING_RE.match(compact):
+        numbered_level = _docx_numbered_heading_level(compact)
+        if numbered_level:
+            return numbered_level
+        return 3
+    return 0
+
+
+def _is_usage_rules_section_title(title):
+    return _normalize_section_key(title) in USAGE_RULE_SECTION_KEYS
+
+
+def _is_appendix_section_title(title):
+    compact = _docx_compact_heading_text(title)
+    lowered = compact.lower()
+    return compact.startswith("附录") or lowered.startswith("appendix")
+
+
 def _looks_like_docx_heading_text(text):
     # Bold run placeholders ([[B]]...[[/B]]) must be removed before matching,
     # otherwise fully bold numbered headings such as "3.2.1 软件登陆" never look
@@ -2206,6 +2250,8 @@ def _looks_like_docx_heading_text(text):
         if not (is_numbered and len(compact) <= 60):
             return False
     if is_numbered:
+        return True
+    if _docx_forced_heading_level(compact):
         return True
     # A single trailing parenthetical can be part of a heading (for example
     # "DNBSEQ-G99ARS (SE50/PE50/PE150)"); product lines that stack several
@@ -2263,6 +2309,10 @@ def _infer_docx_heading_level(paragraph, text, next_block, style_name):
     if is_table_title:
         return 0
 
+    forced_level = _docx_forced_heading_level(normalized_text)
+    if forced_level:
+        return forced_level
+
     # A fully bold line sitting immediately above a table is a group label
     # (Cell phase, 常温试剂), not a topic title.
     if (
@@ -2303,6 +2353,7 @@ def _infer_docx_heading_level(paragraph, text, next_block, style_name):
         and not _docx_paragraph_is_fully_bold(paragraph)
         and not re.search(r'[，。；]', compact)
         and not compact.endswith(("：", ":"))
+        and not _is_numbering_only_line(compact)
     )
     if inferred_heading:
         return 2
@@ -2819,6 +2870,23 @@ def _postprocess_section_tree(sections):
                     continue
                 grouped_children.append(child)
             current["sections"] = grouped_children
+
+        if current["sections"] and (
+            current.get("is_appendix") or _is_appendix_section_title(current["title"])
+        ):
+            kept_children = []
+            for child in current["sections"]:
+                if _is_usage_rules_section_title(child.get("title", "")):
+                    current["content"] = _append_text_block(
+                        current.get("content", ""), child.get("content", "")
+                    )
+                    for grandchild in child.get("sections") or []:
+                        current["content"] = _append_text_block(
+                            current.get("content", ""), grandchild.get("content", "")
+                        )
+                    continue
+                kept_children.append(child)
+            current["sections"] = kept_children
 
         if title_key == "cleanup of adapter ligated product" and current["content"] and current["sections"]:
             target_child = None
@@ -5414,9 +5482,28 @@ def _patch_template_cover_fields(cover_xml, fields):
     return xml
 
 
+def _sync_topic_cms_title_with_visible_title(xml):
+    """IME tree shows cms:title; keep it aligned with the visible <title>."""
+    title_match = re.search(r"<title\b[^>]*>\s*([^<]+?)\s*</title>", xml or "")
+    if not title_match:
+        return xml
+    visible = title_match.group(1).strip()
+    if not visible:
+        return xml
+    return re.sub(
+        r'(\s)cms:title="[^"]*"',
+        rf'\1cms:title="{_escape_xml_attr(visible)}"',
+        xml,
+        count=1,
+    )
+
+
 def _patch_template_about_product(xml, fields):
     """Rewrite the reused 关于说明书 product sentence to the source product."""
-    if not xml or not fields:
+    if not xml:
+        return xml
+    xml = _sync_topic_cms_title_with_visible_title(xml)
+    if not fields:
         return xml
     product = (fields.get("product_name") or "").strip()
     if not product:

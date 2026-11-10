@@ -156,12 +156,12 @@ def _parse_dita_package(zip_path):
 
             def _walk(elem):
                 tag = _local(elem.tag)
-                if tag in {"chapter", "topicref", "topichead"}:
+                if tag in {"chapter", "appendix", "topicref", "topichead"}:
                     title = html.unescape(elem.attrib.get("navtitle") or "")
                     href = elem.attrib.get("href") or ""
                     children = [
                         child for child in list(elem)
-                        if _local(child.tag) in {"chapter", "topicref", "topichead"}
+                        if _local(child.tag) in {"chapter", "appendix", "topicref", "topichead"}
                     ]
                     first_child_title = html.unescape(
                         children[0].attrib.get("navtitle") or ""
@@ -170,7 +170,7 @@ def _parse_dita_package(zip_path):
                     # Empty chapter containers that immediately wrap a same-named
                     # chapterTopic are the IME chapter chrome, not a second title.
                     skip_self = (
-                        tag == "chapter"
+                        tag in {"chapter", "appendix"}
                         and not href.endswith(".dita")
                         and first_child_title == title
                         and first_child_href.endswith(".dita")
