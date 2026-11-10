@@ -28,12 +28,17 @@ from app.api.convert import (  # noqa: E402
     _generated_topic_code,
     _copy_docx_media_to_output,
     _download_images_for_output,
+    _extract_images_md,
+    _prune_unreferenced_output_images,
+    _rewrite_dita_image_hrefs,
     _topic_placeholder,
     _rewrite_template_frontmatter,
     _topic_kind_for_section,
     _idml_to_markdown,
     _idml_table_to_markdown,
     _idml_walk,
+    _idml_normalize_image_stem,
+    _idml_find_link_target,
     _resolve_idml_source,
     _flatten_sections,
     _markdown_to_lossless_csv,
@@ -42,7 +47,26 @@ from app.api.convert import (  # noqa: E402
     _is_cover_topic_xml,
     _patch_template_cover_fields,
     _is_frontmatter_title,
-)
+    _transpose_version_column_table,
+    _apply_dita_image_page_widths,
+    _apply_dita_placed_image_sizes,
+    _apply_dita_overflow_image_widths,
+    _idml_frame_size_mm,
+    _idml_callout_note_type,
+    _idml_insert_precautions_heading,
+    _idml_flatten_svg_embedded_raster,
+    _split_about_manual_paragraphs,
+    _wrap_standalone_dita_images_in_fig,
+    _wrap_noteish_top_level_lists,
+    _apply_dita_inline_icon_widths,
+    _pair_adjacent_dita_figures,
+    _idml_index_marker,
+    _build_xref_map,
+    _postprocess_dita_topics,
+    _idml_xref_marker,
+    _idml_collect_paragraph_destination_titles,
+    _idml_collect_hyperlink_source_destinations,
+    )
 
 TOOLS_ROOT = BACKEND_ROOT / "tools"
 if str(TOOLS_ROOT) not in sys.path:
@@ -623,6 +647,7 @@ class ContentGenerationTest(unittest.TestCase):
             topic_kind="concept",
         )
         self.assertIn('<image href="image/docx_image_003.png"></image>', xml)
+        self.assertIn('<fig><image href="image/docx_image_003.png"></image></fig>', xml)
         self.assertNotIn('<alt>', xml)
         self.assertNotIn('placement="break"', xml)
 
@@ -919,6 +944,15 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         child_titles = [child.get('title') for child in root.get('sections', [])]
         self.assertIn('6.2.3 Sample Barcode 使⽤规则 (96 RXN)', child_titles)
 
+    def test_reshape_keeps_index_letter_as_body(self):
+        markdown = "# 索引\n\nB\n\nBackground 101, 110\n\nC\n\n操作区 16\n"
+        sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
+        root = sections[0]
+        self.assertEqual(root["title"], "索引")
+        self.assertEqual(root.get("sections") or [], [])
+        self.assertTrue(root["content"].lstrip().startswith("B"))
+        self.assertIn("Background 101, 110", root["content"])
+
     def test_parenthesized_docx_heading_becomes_separate_section(self):
         markdown = "# MGISEQ-2000RS DNB 加载\n\n### DNB 加载 (StandardMPS)\n\n#### 准备\n\n试剂说明\n"
         sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
@@ -973,6 +1007,32 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         )
         self.assertIn("Automated Version", version_history["content"])
         self.assertIn("First release", version_history["content"])
+
+    def test_table_intro_sentence_stays_body_not_heading(self):
+        import tempfile
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "table_intro.docx")
+            doc = Document()
+            doc.add_heading("准备建库试剂", level=4)
+            intro = doc.add_paragraph("将Box1&Box2中的试剂按照如下表格加入到对应标记管中：")
+            intro.style = doc.styles["Normal"]
+            table = doc.add_table(rows=2, cols=2)
+            table.cell(0, 0).text = "试剂名称"
+            table.cell(0, 1).text = "加样体积"
+            table.cell(1, 0).text = "A57-WGS-BE"
+            table.cell(1, 1).text = "68 μL"
+            doc.add_heading("准备测序试剂", level=4)
+            doc.save(path)
+            markdown = _docx_to_markdown(path)
+
+        self.assertNotIn("## 将Box1&Box2中的试剂按照如下表格加入到对应标记管中", markdown)
+        self.assertIn("将Box1&Box2中的试剂按照如下表格加入到对应标记管中：", markdown)
+        self.assertLess(
+            markdown.index("将Box1&Box2中的试剂按照如下表格加入到对应标记管中："),
+            markdown.index("A57-WGS-BE"),
+        )
 
     def test_real_docx_markdown_contains_expected_split_headings(self):
         markdown = _docx_to_markdown('/workspace/.monkeycode-tmp-files/8a916735-H-940-001530-00 MGIEasy 全基因组甲基化建库试剂盒使用说明书 3.0 -250317-1.docx')
@@ -1295,6 +1355,26 @@ class TemplateSubsetTest(unittest.TestCase):
         self.assertIn("cover.dita", used_files)
         self.assertIn("DTC041004.dita", used_files)
 
+    def test_rewrite_frontmatter_retargets_about_manual_to_source_guide(self):
+        xml = (
+            '<frontmatter>'
+            '<topicref navtitle="封面CN" href="cover.dita" keys="OLDCOVER"/>'
+            '<topicref navtitle="关于说明书" href="about.dita" keys="OLDABOUT" cms:title="关于说明书" cms:placeHolder="DTC041001"/>'
+            '<booklists><toc/></booklists>'
+            '</frontmatter>'
+        )
+        topics = [
+            {"title": "关于指南", "filename": "CTO041001.dita", "id": "CTO041001", "topic_kind": "chapter", "level": 1},
+            {"title": "版本记录", "filename": "DTO041002.dita", "id": "DTO041002", "topic_kind": "concept", "level": 2},
+        ]
+        rewritten, used_files = _rewrite_template_frontmatter(xml, topics)
+        self.assertIn('navtitle="关于指南"', rewritten)
+        self.assertIn('href="CTO041001.dita"', rewritten)
+        self.assertNotIn('navtitle="关于说明书"', rewritten)
+        self.assertNotIn("about.dita", rewritten)
+        self.assertIn("CTO041001.dita", used_files)
+        self.assertTrue(_is_frontmatter_title("关于指南"))
+
 
 class CoverFieldPatchTest(unittest.TestCase):
     COVER_XML = '''<concept outputclass="cover" cms:imesofttype="sCoverTopic">
@@ -1339,6 +1419,19 @@ class CoverFieldPatchTest(unittest.TestCase):
         )
         self.assertEqual(fields["part_no"], "H-020-000618-00")
 
+    def test_extracts_chinese_guide_product_name(self):
+        fields = _extract_cover_fields(
+            "H-020-000876-00 G99RS.idml",
+            "本指南适用于基因测序仪（DNBSEQ-G99RS与DNBSEQ-G99ARS）和DNBSEQ-G99RS高通量测序试剂套装。",
+            "zh-CN",
+        )
+        self.assertEqual(fields["part_no"], "H-020-000876-00")
+        self.assertEqual(fields["manual_name"], "使用说明书")
+        self.assertEqual(
+            fields["product_name"],
+            "基因测序仪（DNBSEQ-G99RS与DNBSEQ-G99ARS）和DNBSEQ-G99RS高通量测序试剂套装",
+        )
+
     def test_patches_template_cover_values_and_keeps_ids(self):
         self.assertTrue(_is_cover_topic_xml(self.COVER_XML))
         patched = _patch_template_cover_fields(self.COVER_XML, {
@@ -1361,6 +1454,16 @@ class CoverFieldPatchTest(unittest.TestCase):
         )
         patched = _patch_template_cover_fields(xml, {"part_no": "H-020-000618-00"})
         self.assertIn('<p id="pempty">H-020-000618-00</p>', patched)
+
+    def test_patches_chinese_cover_number_label(self):
+        xml = (
+            '<concept cms:imesofttype="sCoverTopic">'
+            "<row><entry><p>编号</p></entry><entry><p id=\"pnum\">H-020-000898-00</p></entry></row>"
+            "</concept>"
+        )
+        patched = _patch_template_cover_fields(xml, {"part_no": "H-020-000876-00"})
+        self.assertIn('<p id="pnum">H-020-000876-00</p>', patched)
+        self.assertNotIn("H-020-000898-00", patched)
 
 
 class DocxTableMarkdownTest(unittest.TestCase):
@@ -1568,7 +1671,7 @@ class DocxTableMarkdownTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<table outputclass="180mm">', xml)
+        self.assertIn('<table outputclass="180 mm">', xml)
         self.assertIn('namest="COLSPEC1" nameend="COLSPEC4"', xml)
 
     def test_horizontal_span_placeholders_do_not_shift_later_columns(self):
@@ -1624,7 +1727,7 @@ class DocxTableMarkdownTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<table outputclass="180mm">', xml)
+        self.assertIn('<table outputclass="180 mm">', xml)
 
     def test_pcr_module_vmerge_keeps_single_description(self):
         table = self._real_table(
@@ -1713,6 +1816,89 @@ class ImageDownloadReuseTest(unittest.TestCase):
 
             self.assertEqual(mapping[str(src)], "image/flow sequencing flow.svg")
             self.assertTrue((output_base / "image" / "flow sequencing flow.svg").exists())
+
+    def test_extract_images_keeps_parentheses_and_ampersand(self):
+        tube = "/tmp/media/Micro Tube 0.5 mL (Empty)(本色）.svg"
+        barcode = "/tmp/media/image_barcode App&CG-SB-PE-B1 i7.svg"
+        content = (
+            f"![Micro Tube 0.5 mL (Empty)(本色）.svg](<{tube}>)\n\n"
+            f"![image_barcode App&CG-SB-PE-B1 i7.svg](<{barcode}>)\n"
+        )
+        images = _extract_images_md(content)
+        self.assertEqual([img["path"] for img in images], [tube, barcode])
+
+    def test_dita_href_keeps_parentheses_and_single_amp_escape(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tube_name = "Micro Tube 0.5 mL (Empty)(本色）.svg"
+            barcode_name = "image_barcode App&CG-SB-PE-B1 i7.svg"
+            tube = Path(tmpdir) / tube_name
+            barcode = Path(tmpdir) / barcode_name
+            tube.write_text("<svg/>", encoding="utf-8")
+            barcode.write_text("<svg/>", encoding="utf-8")
+            xml = _content_to_dita_xml(
+                "测序试剂套装组分清单",
+                f"![{tube_name}](<{tube}>)\n\n![{barcode_name}](<{barcode}>)\n",
+                "concept",
+                "DTO041046",
+                "zh-CN",
+                topic_kind="concept",
+                source_format="idml",
+            )
+            self.assertIn(f'href="{tube}"', xml)
+            self.assertIn('href="' + str(barcode).replace("&", "&amp;") + '"', xml)
+            self.assertNotIn("&amp;amp;", xml)
+            mapped = _rewrite_dita_image_hrefs(xml, {
+                str(tube): f"image/{tube_name}",
+                str(barcode): f"image/{barcode_name}",
+            })
+            self.assertIn(f'href="image/{tube_name}"', mapped)
+            self.assertIn('href="image/image_barcode App&amp;CG-SB-PE-B1 i7.svg"', mapped)
+            self.assertNotIn("&amp;amp;", mapped)
+            self.assertNotIn("static/uploads", mapped)
+
+    def test_preserve_names_copies_ampersand_and_parenthesis_files(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_dir = Path(tmpdir)
+            tube = src_dir / "Micro Tube 0.5 mL (Empty)(本色）.svg"
+            barcode = src_dir / "image_barcode App&CG-DB-PE.svg"
+            tube.write_bytes(b"<svg/>")
+            barcode.write_bytes(b"<svg/>")
+            output_base = src_dir / "out"
+            mapping = _download_images_for_output(
+                [{"alt": "t", "path": str(tube)}, {"alt": "b", "path": str(barcode)}],
+                str(output_base),
+                preserve_names=True,
+            )
+            self.assertEqual(mapping[str(tube)], "image/Micro Tube 0.5 mL (Empty)(本色）.svg")
+            self.assertEqual(mapping[str(barcode)], "image/image_barcode App&CG-DB-PE.svg")
+            self.assertTrue((output_base / "image" / tube.name).exists())
+            self.assertTrue((output_base / "image" / barcode.name).exists())
+
+    def test_prune_keeps_ampersand_image_referenced_in_dita(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir)
+            image_dir = output / "image"
+            image_dir.mkdir()
+            keep = image_dir / "image_barcode App&CG-DB-PE.svg"
+            drop = image_dir / "unused.svg"
+            keep.write_bytes(b"<svg/>")
+            drop.write_bytes(b"<svg/>")
+            (output / "DTO041158.dita").write_text(
+                '<image href="image/image_barcode App&amp;CG-DB-PE.svg"></image>\n',
+                encoding="utf-8",
+            )
+            _prune_unreferenced_output_images(str(output))
+            self.assertTrue(keep.exists())
+            self.assertFalse(drop.exists())
 
 
 class DitaPackageTitleFilterTest(unittest.TestCase):
@@ -2127,6 +2313,20 @@ class IdmlConversionTest(unittest.TestCase):
             self.assertNotIn(".ai", md)
             self.assertNotIn("logo", md)
 
+    def test_ai_reference_falls_back_to_jpg(self):
+        import tempfile
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container = self._idml_referencing_ai(
+                tmpdir, {"Links/logo.jpg": b"\xff\xd8\xff fake-jpeg"}
+            )
+            resolved = _resolve_idml_source(container)
+            names = zipfile.ZipFile(resolved).namelist()
+            self.assertTrue(any(n.endswith("logo.jpg") for n in names))
+            md = _idml_to_markdown(resolved)
+            self.assertIn("logo.jpg", md)
+
     def test_leading_image_forms_cover(self):
         import tempfile
         import zipfile
@@ -2192,6 +2392,110 @@ class IdmlConversionTest(unittest.TestCase):
             self.assertNotIn("1. 介绍", md)
             self.assertNotIn("1. 预期用途", md)
 
+    def test_colon_title_styles_map_to_headings_captions_and_appendix(self):
+        """Operation-guide IDML uses Title:L<n>-CN / Figure:Title / Table:Title."""
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/Title:L1-CN" Name="Title:L1-CN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Title:L2-CN" Name="Title:L2-CN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Title:Appen.-L1-CN" Name="Title:Appen.-L1-CN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Figure:Title-CN" Name="Figure:Title-CN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Table:Title-CN" Name="Table:Title-CN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Text:L2-CN" Name="Text:L2-CN"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Title:L1-CN">'
+            "<CharacterStyleRange><Content>安全</Content></CharacterStyleRange></ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Title:L2-CN">'
+            "<CharacterStyleRange><Content>图形符号说明</Content></CharacterStyleRange></ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text:L2-CN">'
+            "<CharacterStyleRange><Content>正文内容。</Content></CharacterStyleRange></ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Figure:Title-CN">'
+            "<CharacterStyleRange><Content>仪器前视图</Content></CharacterStyleRange></ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Title-CN">'
+            "<CharacterStyleRange><Content>图形符号</Content></CharacterStyleRange></ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Title:Appen.-L1-CN">'
+            "<CharacterStyleRange><Content>制造商信息</Content></CharacterStyleRange></ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+            self.assertIn("# 安全", md)
+            self.assertIn("## 图形符号说明", md)
+            self.assertIn("正文内容。", md)
+            self.assertIn("[[FIGCAP]]仪器前视图", md)
+            self.assertIn("[[TABCAP]]图形符号", md)
+            self.assertIn("# [[APPENDIX]] 制造商信息", md)
+            self.assertNotIn("1. 安全", md)
+
+    def test_idml_title_br_splits_into_sibling_headings(self):
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/Title:L4-CN" Name="Title:L4-CN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Title:L5-CN" Name="Title:L5-CN"/>\n'
+            '    <ParagraphStyle Self="ParagraphStyle/Text:L2-CN" Name="Text:L2-CN"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Title:L4-CN">'
+            "<CharacterStyleRange><Content>制备G99 FCL SE400读长DNB</Content><Br/></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Title:L5-CN">'
+            "<CharacterStyleRange><Content>STR扩增子文库DNB</Content><Br/>"
+            "<Content>准备DNB制备试剂</Content><Br/></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text:L2-CN">'
+            "<CharacterStyleRange><Content>操作步骤如下：</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+            self.assertIn("#### 制备G99 FCL SE400读长DNB", md)
+            self.assertIn("##### STR扩增子文库DNB", md)
+            self.assertIn("##### 准备DNB制备试剂", md)
+            self.assertNotIn("STR扩增子文库DNB 准备DNB制备试剂", md)
+            self.assertIn("操作步骤如下：", md)
+
+    def test_idml_title_br_sentence_stays_body(self):
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/Title:L4-CN" Name="Title:L4-CN"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Title:L4-CN">'
+            "<CharacterStyleRange><Content>制备G99 App-D FCL SE100读长的DNB</Content><Br/>"
+            "<Content>App DNB制备缓冲液可同时用于MGI和App文库的DNB制备。</Content><Br/>"
+            "</CharacterStyleRange></ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+            self.assertIn("#### 制备G99 App-D FCL SE100读长的DNB", md)
+            self.assertIn("App DNB制备缓冲液可同时用于MGI和App文库的DNB制备。", md)
+            self.assertNotIn("#### App DNB制备缓冲液可同时用于MGI和App文库的DNB制备。", md)
+            self.assertNotIn("制备G99 App-D FCL SE100读长的DNB App DNB", md)
+
     def test_table_of_contents_styles_are_dropped(self):
         import tempfile
 
@@ -2239,10 +2543,11 @@ class IdmlConversionTest(unittest.TestCase):
     def test_callout_icon_selects_note_type(self):
         cases = {
             "label000081_Warning.ai": "warning",
-            "label000018_Danger.ai": "warning",
+            "label000018_Danger.ai": "danger",
             "label000008_Caution.ai": "caution",
             "label000073_Tips.ai": "tip",
             "icon_noteEN.ai": "tip",
+            "icon_biological risk.svg": "biological_risk",
         }
         for icon_name, expected in cases.items():
             with self.subTest(icon=icon_name):
@@ -2550,14 +2855,27 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertNotIn("[[XREF:", xml)
 
     def test_unresolved_cross_reference_falls_back_to_title_text(self):
-        """A cross-reference to an unknown target keeps its visible title."""
+        """Unresolved xrefs stay empty; IME fills page text from cms:title."""
         md = "参考[[XREF:不存在的章节]]。\n"
         xml = _content_to_dita_xml(
             "正文", md, "concept", "DTC041231", "zh-CN",
             topic_kind="concept", source_format="idml", xref_map={},
         )
-        self.assertIn("参考不存在的章节。", xml)
-        self.assertNotIn("<xref", xml)
+        self.assertIn('<xref cms:title="不存在的章节"/>', xml)
+        self.assertNotIn("“不存在的章节”", xml)
+        self.assertNotIn("[[XREF:", xml)
+
+    def test_unresolved_table_xref_keeps_idml_page_form(self):
+        md = "计算出的文库体积V填入[[XREF:表 25#53]]。\n"
+        xml = _content_to_dita_xml(
+            "计算ssDNA文库所需量", md, "concept", "DTO041064", "zh-CN",
+            topic_kind="task", source_format="idml", xref_map={},
+        )
+        self.assertIn(
+            '<xref cms:title="表 25"/>',
+            xml,
+        )
+        self.assertNotIn("第53 页", xml)
         self.assertNotIn("[[XREF:", xml)
 
     def test_xref_inside_table_cell_keeps_page_number(self):
@@ -2696,10 +3014,10 @@ class IdmlConversionTest(unittest.TestCase):
             "Introduction", md, "concept", "CTO041252", "en-US",
             topic_kind="chapter", source_format="idml",
         )
-        self.assertIn('<table outputclass="180mm">', xml)
+        self.assertIn('<table outputclass="180 mm">', xml)
 
     def test_idml_table_width_marks_user_supplied_180mm(self):
-        """IDML tables laid out at ~180 mm get outputclass=180mm without a Wide title style."""
+        """IDML tables laid out at ~180 mm get width=180mm without a Wide title style."""
         import tempfile
 
         styles = (
@@ -2760,7 +3078,7 @@ class IdmlConversionTest(unittest.TestCase):
             "Introduction", md, "concept", "CTO041253", "en-US",
             topic_kind="chapter", source_format="idml",
         )
-        self.assertIn('<table outputclass="180mm">', xml)
+        self.assertIn('<table outputclass="180 mm">', xml)
         self.assertIn("User-supplied equipment, reagent and consumables", xml)
 
     def test_idml_xmp_thumbnail_fills_missing_inline_icon(self):
@@ -2919,6 +3237,104 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertIn('<note type="warning">', xml)
         self.assertIn("Tap to end sequencing in advance.", xml)
         self.assertIn("Sequencing cannot be resumed after ending. Please operate with care.", xml)
+
+    def test_nested_sentence_list_in_cell_becomes_note_ul(self):
+        """A nested tip callout with sentence-list items becomes note/ul in the cell."""
+        import xml.etree.ElementTree as ET
+
+        nested = (
+            '<Table Self="tip" HeaderRowCount="0" FooterRowCount="0" '
+            'BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="t0" Name="0:0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text:Symbols-CN">'
+            '<CharacterStyleRange>'
+            '<Rectangle><PDF><Link LinkResourceURI="file:C:/Links/label000073_Tips.ai"/>'
+            "</PDF></Rectangle>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="t1" Name="1:0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Warning sentence list-CN">'
+            "<CharacterStyleRange>"
+            "<Content>仅DNBSEQ-G99ARS配置生信服务器及相关功能。</Content><Br/>"
+            "<Content>不同型号的生信服务器外观和部署的位置将有差异。</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        table = (
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="c0" Name="0:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>名称</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>说明</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c2" Name="0:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>生信服务器</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c3" Name="1:1">'
+            "<ParagraphStyleRange><CharacterStyleRange>"
+            "<Content>进行数据分析。</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange>"
+            f"{nested}"
+            "</Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        joined = "\n".join(lines)
+        self.assertIn("[[NOTE:tip]]", joined)
+        self.assertIn("[[UL]]", joined)
+        xml = _content_to_dita_xml(
+            "前视图", joined, "task", "DTO041020", "zh-CN",
+            topic_kind="task", source_format="idml",
+        )
+        self.assertIn("进行数据分析。", xml)
+        note = xml.split('<note type="tip">', 1)[1].split("</note>", 1)[0]
+        self.assertIn("<ul>", note)
+        self.assertEqual(note.count("<li>"), 2)
+        self.assertIn("仅DNBSEQ-G99ARS配置生信服务器及相关功能。", note)
+        self.assertIn("不同型号的生信服务器外观和部署的位置将有差异。", note)
+
+    def test_mixed_prose_and_bulleted_list_in_cell_becomes_p_then_ul(self):
+        """Single-sentence intro plus Table:Bulleted list in one cell becomes p then ul."""
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="c0" Name="0:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>名称</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>说明</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c2" Name="0:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>电源开关</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c3" Name="1:1">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Single sentence-CN">'
+            "<CharacterStyleRange><Content>接通或断开仪器电源：</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Bulleted list-L1-CN">'
+            "<CharacterStyleRange>"
+            "<Content>拨至 I 位置时接通电源。</Content><Br/>"
+            "<Content>拨至 O 位置时断开电源。</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange>"
+            "</Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        joined = "\n".join(lines)
+        self.assertIn("接通或断开仪器电源：", joined)
+        self.assertIn("[[UL]]", joined)
+        xml = _content_to_dita_xml(
+            "右视图", joined, "task", "DTO041023", "zh-CN",
+            topic_kind="task", source_format="idml",
+        )
+        self.assertIn("<p>接通或断开仪器电源：</p>", xml)
+        self.assertIn("<ul>", xml)
+        self.assertEqual(xml.count("<li>"), 2)
+        self.assertIn("拨至 I 位置时接通电源。", xml)
+        self.assertIn("拨至 O 位置时断开电源。", xml)
+        after_intro = xml.split("<p>接通或断开仪器电源：</p>", 1)[1]
+        self.assertIn("<ul>", after_intro)
 
     def test_about_the_sequencing_set_is_frontmatter(self):
         self.assertTrue(_is_frontmatter_title("About the sequencing set"))
@@ -3279,7 +3695,7 @@ class IdmlConversionTest(unittest.TestCase):
         resolver = lambda uri: "image/icon_emergencystop.svg"
         lines = _idml_table_to_markdown(ET.fromstring(table), None, resolver)
         self.assertIn(
-            "![icon_emergencystop.svg](image/icon_emergencystop.svg)",
+            "![icon_emergencystop.svg](<image/icon_emergencystop.svg>)",
             "\n".join(lines),
         )
         xml = _content_to_dita_xml(
@@ -3373,7 +3789,7 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["kind"], "para")
         self.assertIn(
-            "点击![icon_status_sequencing_1_1.svg](image/icon_status_sequencing_1_1.svg)重试。",
+            "点击![icon_status_sequencing_1_1.svg](<image/icon_status_sequencing_1_1.svg>)重试。",
             blocks[0]["text"],
         )
 
@@ -3427,7 +3843,7 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertNotIn("第30 页", xml)
 
     def test_xref_link_text_spaces_alnum_before_cjk(self):
-        """cms:title keeps the compact title; unresolved fallback spaces alnum/CJK."""
+        """cms:title keeps the compact title; unresolved xrefs stay empty."""
         xml = _content_to_dita_xml(
             "DNB浓度不合格",
             "当DNB浓度不符合[[XREF:测定DNB浓度#12]]的要求时。\n",
@@ -3454,8 +3870,11 @@ class IdmlConversionTest(unittest.TestCase):
             source_format="idml",
             xref_map={},
         )
-        self.assertIn("第12 页“测定DNB 浓度”", unresolved)
-        self.assertNotIn("<xref", unresolved)
+        self.assertIn(
+            '<xref cms:title="测定DNB浓度"/>',
+            unresolved,
+        )
+        self.assertNotIn("第12 页", unresolved)
 
     def test_list_body_paragraph_stays_before_note_and_figure(self):
         """A step continuation paragraph stays ahead of the following note/fig."""
@@ -3510,6 +3929,31 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertNotIn('<note type="warning">', nested_li)
         self.assertLess(parent.index("</ul>"), parent.index("如下界面显示后"))
         self.assertLess(parent.index("如下界面显示后"), parent.index('<note type="warning">'))
+
+    def test_idml_body_level_paragraph_hangs_on_nearest_item(self):
+        """Text:L4 intro and the following figure stay on the nested L3 item."""
+        md = (
+            "[[LVL:2]]1. 填写DNB样本信息。\n\n"
+            "可通过以下方式录入样本信息：\n\n"
+            "[[LVL:3]]- 自动生成样本编号\n\n"
+            "[[LVL:4]][[KEEP]]执行如下操作：\n\n"
+            "[[LVL:4]]1. 选择自动生成样本编号，点击新建弹出对话框。\n\n"
+            "![screen.svg](image/screen.svg)\n\n"
+            "[[FIGCAP]]选择自动生成样本编号\n\n"
+            "[[LVL:3]]- 表格导入样本编号\n"
+        )
+        xml = _content_to_dita_xml(
+            "录入样本信息", md, "task", "DTO041088", "zh-CN",
+            topic_kind="task", source_format="idml",
+        )
+        auto = xml.split("自动生成样本编号", 1)[1].split("表格导入样本编号", 1)[0]
+        self.assertIn("执行如下操作", auto)
+        self.assertLess(auto.index("执行如下操作"), auto.index("<ol>"))
+        first_step = auto.split("<ol>", 1)[1].split("</li>", 1)[0]
+        self.assertIn("screen.svg", first_step)
+        self.assertIn("选择自动生成样本编号", first_step)
+        after_nested = xml.split("表格导入样本编号", 1)[1]
+        self.assertNotIn("执行如下操作", after_nested)
 
     def test_idml_superscript_character_style_becomes_sup(self):
         import tempfile
@@ -3586,6 +4030,8 @@ class IdmlConversionTest(unittest.TestCase):
         joined = "\n".join(lines)
         self.assertIn("[[BG:#C0C0C0]]Total volume", joined)
         self.assertIn("[[BG:#FF0000]]100 μL", joined)
+        self.assertNotIn("[[BG:#C0C0C0]]Component", joined)
+        self.assertNotIn("[[BG:#C0C0C0]]Volume", joined)
         xml = _content_to_dita_xml(
             "Mix", "\n".join(lines), "concept", "DTO041403", "en-US",
             topic_kind="concept", source_format="idml",
@@ -3593,6 +4039,8 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertIn('vf:bgcolor="#C0C0C0"', xml)
         self.assertIn('vf:bgcolor="#FF0000"', xml)
         self.assertIn("Total volume", xml)
+        thead = xml.split("<thead>")[1].split("</thead>")[0]
+        self.assertNotIn("vf:bgcolor", thead)
 
     def test_idml_filled_single_sentence_stays_table(self):
         import xml.etree.ElementTree as ET
@@ -3943,6 +4391,873 @@ class NativeMarkdownToDitaTest(unittest.TestCase):
             xml,
         )
         self.assertIn("step 5", xml)
+
+
+class VersionHistoryAndWideTableTest(unittest.TestCase):
+    def test_kit_component_section_table_is_180mm(self):
+        xml = _content_to_dita_xml(
+            "试剂套装组分清单",
+            "| 试剂盒信息 | 组分 | 规格及数量 | 储存温度 | 运输温度 | 有效期 |\n"
+            "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
+            "| 载片 | 测序载片 | 1 张 | 10 ℃ | 2 ℃ | 10 个月 |",
+            "concept",
+            "DTO041002",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn('<table outputclass="180 mm">', xml)
+
+    def test_version_history_column_table_is_transposed(self):
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<concept cms:title="版本记录" xmlns:cms="http://www.w3.org/ime/cms">'
+            "<title>版本记录</title><conbody><table><tgroup cols=\"3\">"
+            "<thead><row><entry>版本</entry><entry>8.0</entry><entry>1.0</entry></row></thead>"
+            "<tbody><row><entry>发布日期</entry><entry>2026年10月9日</entry>"
+            "<entry>2023年3月22日</entry></row>"
+            "<row><entry>修订内容摘要</entry><entry>优化</entry><entry>首次发布</entry></row>"
+            "</tbody></tgroup></table></conbody></concept>"
+        )
+        out = _transpose_version_column_table(xml)
+        self.assertIn("<tgroup cols=\"3\">", out)
+        self.assertIn("<entry><p>版本</p></entry>", out)
+        self.assertIn("<entry><p>发布日期</p></entry>", out)
+        self.assertIn("<entry><p>修订内容摘要</p></entry>", out)
+        self.assertIn("<entry><p>8.0</p></entry>", out)
+        self.assertIn("<entry><p>2026年10月9日</p></entry>", out)
+        self.assertIn("<entry><p>首次发布</p></entry>", out)
+        self.assertNotIn("<entry>8.0</entry>", out)
+
+    def test_large_screenshot_gets_page_width(self):
+        import tempfile
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_dir = Path(tmpdir) / "image"
+            image_dir.mkdir()
+            Image.new("RGB", (800, 600), "white").save(image_dir / "screen.png")
+            Image.new("RGB", (80, 80), "white").save(image_dir / "icon.png")
+            topic = Path(tmpdir) / "DTO041025.dita"
+            topic.write_text(
+                '<topic><body>'
+                '<image href="image/screen.png"></image>'
+                '<image href="image/icon.png"></image>'
+                "</body></topic>",
+                encoding="utf-8",
+            )
+            updated = _apply_dita_image_page_widths(tmpdir)
+            self.assertEqual(updated, 1)
+            text = topic.read_text(encoding="utf-8")
+            self.assertIn('href="image/screen.png" width="150mm"', text)
+            self.assertIn('href="image/icon.png"', text)
+            self.assertNotIn('href="image/icon.png" width=', text)
+
+    def test_note_icons_in_first_bullet_wrap_list_as_tip(self):
+        import tempfile
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            icon = Path(tmpdir) / "tip.png"
+            Image.new("RGB", (48, 48), "yellow").save(icon)
+            xml = _content_to_dita_xml(
+                "试剂套装组分清单",
+                f"- ![tip]({icon})不同批次之间的试剂组分严禁混用。\n"
+                "- 组分和包装盒的批次是不同的。\n"
+                "- 请将组分存放在包装盒中，直至使用完毕。\n",
+                "concept",
+                "DTO041002",
+                "zh-CN",
+                topic_kind="task",
+            )
+        self.assertIn('<note type="tip">', xml)
+        self.assertIn("<ul>", xml)
+        self.assertIn("不同批次之间的试剂组分严禁混用。", xml)
+        self.assertNotIn("tip.png", xml)
+
+    def test_noteish_leading_list_postprocess_wraps_tip(self):
+        xml = (
+            '<topic cms:title="试剂套装组分清单"><title>试剂套装组分清单</title>'
+            "<body><ul>"
+            "<li><p>不同批次之间的试剂组分严禁混用。</p></li>"
+            "<li><p>请将组分存放在包装盒中，直至使用完毕。</p></li>"
+            "</ul><table><tgroup cols=\"1\"></tgroup></table></body></topic>"
+        )
+        out = _wrap_noteish_top_level_lists(xml)
+        self.assertIn('<note type="tip">', out)
+        self.assertIn("<ul>", out)
+
+    def test_collapsed_about_manual_splits_into_paragraphs(self):
+        xml = (
+            '<?xml version="1.0"?>\n'
+            '<concept cms:title="关于说明书" xmlns:cms="http://www.w3.org/ime/cms">'
+            "<title>关于说明书</title><conbody>"
+            "<p>本说明书适用于DNBSEQ-E25RS高通量测序试剂套装。说明书版本8.0，试剂套装版本2.0，主机软件版本V1。 "
+            "本说明书及其包含的信息为青岛华大智造科技有限责任公司（以下简称华大智造）的专有保密信息，未经华大智造的书面许可，任何个人或组织不得全部或部分地对本说明书进行重印、复制、修改、传播或公布给他人。"
+            "本说明书的读者为终端用户。说明书作为产品的一部分，由华大智造授权终端用户予以使用。严禁未授权的个人使用本说明书。 "
+            "华大智造对本说明书不做任何种类的保证，包括（但不限于）用于特定目的的商业性和合理性的隐含保证。"
+            "华大智造已经采取措施，确保本说明书的准确性。但是，华大智造对遗漏不承担责任，并保留任何对本说明书和产品进行改进以提高其可靠性、功能或设计的权利。 "
+            "本说明书中的所有图片均为示意图，图片内容可能与实物有细微差异，请以购买的产品为准。 "
+            "DNBSEQTM是华大智造或其子公司在中国和/或其他国家（地区）的商标或注册商标。QubitTM是赛默飞世尔科技公司或其子公司的商标。文中涉及的其它名称及商标属于各自所有者资产。 "
+            "©2023-2026青岛华大智造科技有限责任公司 版权所有。</p>"
+            "</conbody></concept>"
+        )
+        out = _split_about_manual_paragraphs(xml)
+        self.assertGreaterEqual(out.count("<p>"), 6)
+        self.assertIn(
+            "<p>本说明书适用于DNBSEQ-E25RS高通量测序试剂套装。说明书版本8.0，试剂套装版本2.0，主机软件版本V1。</p>",
+            out,
+        )
+        self.assertIn("<p>本说明书及其包含的信息", out)
+        self.assertIn("<p>本说明书的读者为终端用户。", out)
+        self.assertIn("<p>DNBSEQTM是华大智造或其子公司在中国和/或其他国家（地区）的商标或注册商标。", out)
+        self.assertNotIn("<p>D</p>", out)
+        self.assertIn("<p>©2023-2026青岛华大智造科技有限责任公司 版权所有。</p>", out)
+
+    def test_untitled_block_image_wraps_in_fig(self):
+        xml = _content_to_dita_xml(
+            "新建测序+分析任务",
+            "1. 点击选择文件。\n![image_016.png](image/image_016.png)\n",
+            "task",
+            "DTO041025",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn('<fig><image href="image/image_016.png"></image></fig>', xml)
+
+    def test_inline_icon_stays_inside_paragraph(self):
+        xml = _content_to_dita_xml(
+            "运行控制软件",
+            "双击桌面图标 ![image_007.png](image/image_007.png) ，打开仪器软件。",
+            "task",
+            "DTO041014",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn(
+            '<p>双击桌面图标 <image href="image/image_007.png"></image> ，打开仪器软件。</p>',
+            xml,
+        )
+        self.assertNotIn("<fig>", xml)
+
+    def test_standalone_image_line_postprocess_wraps_fig(self):
+        xml = (
+            "<topic><body>\n"
+            '        <image href="image/image_016.png" width="150mm"></image>\n'
+            '        <p>双击桌面图标 <image href="image/image_007.png"></image> 。</p>\n'
+            "</body></topic>"
+        )
+        out = _wrap_standalone_dita_images_in_fig(xml)
+        self.assertIn(
+            '<fig><image href="image/image_016.png" width="150mm"></image></fig>',
+            out,
+        )
+        self.assertIn(
+            '<p>双击桌面图标 <image href="image/image_007.png"></image> 。</p>',
+            out,
+        )
+
+
+class ImeFeedbackFixesTest(unittest.TestCase):
+    def test_sequencing_kit_section_table_is_180mm(self):
+        xml = _content_to_dita_xml(
+            "测序试剂套装",
+            "| 名称 | 规格 | 数量 | 储存 |\n"
+            "| :--- | :--- | :--- | :--- |\n"
+            "| 试剂盒 | 1 | 1 | -25 ℃ |",
+            "concept",
+            "DTO041045",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn('<table outputclass="180 mm">', xml)
+
+    def test_version_history_white_corner_is_cleared(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="3">'
+            '<Cell Self="c00" Name="0:0" AppliedCellStyle="CellStyle/white cell">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>版本</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c10" Name="1:0" AppliedCellStyle="CellStyle/Table heading-with frames">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>日期</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c20" Name="2:0" AppliedCellStyle="CellStyle/Table heading-with frames">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>版本</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c01" Name="0:1">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>1.0</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c11" Name="1:1">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>2026年1月1日</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c21" Name="2:1">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>首次发布</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        header = lines[0] if lines[0].startswith("|") else lines[-3]
+        for line in lines:
+            if line.startswith("|") and "日期" in line:
+                header = line
+                break
+        cells = [cell.strip() for cell in header.strip("|").split("|")]
+        self.assertEqual(cells[0], "")
+        self.assertIn("日期", cells)
+        self.assertIn("版本", cells)
+
+    def test_biological_icon_is_omitted_from_note(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="c0" Name="0:0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text:Symbols-CN">'
+            '<CharacterStyleRange><Link LinkResourceURI="file:Links/icon_biological risk.svg"/>'
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Self="c1" Name="1:0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Warning sentence-CN">'
+            "<CharacterStyleRange><Content>涉及生物安全的操作请遵守实验室规范。</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+
+        def resolve(uri):
+            return "/tmp/icon_biological risk.svg"
+
+        lines = _idml_table_to_markdown(ET.fromstring(table), image_resolver=resolve)
+        joined = "\n".join(lines)
+        self.assertIn("[[NOTE:", joined)
+        self.assertNotIn("icon_biological risk.svg", joined)
+        xml = _content_to_dita_xml(
+            "生物安全", joined, "concept", "DTO041013", "zh-CN",
+            topic_kind="concept", source_format="idml",
+        )
+        self.assertIn('<note type="biological_risk">', xml)
+        self.assertNotIn("icon_biological risk.svg", xml)
+
+    def test_placed_image_size_is_applied(self):
+        import tempfile
+        import xml.etree.ElementTree as ET
+
+        rect = ET.fromstring(
+            '<Rectangle ItemTransform="1 0 0 1 0 0">'
+            '<PathPointType Anchor="0 0"/>'
+            '<PathPointType Anchor="96.377 0"/>'
+            '<PathPointType Anchor="96.377 48.189"/>'
+            '<PathPointType Anchor="0 48.189"/>'
+            "</Rectangle>"
+        )
+        width_mm, height_mm = _idml_frame_size_mm(rect)
+        self.assertAlmostEqual(width_mm, 34.0, places=0)
+        self.assertAlmostEqual(height_mm, 17.0, places=0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            topic = Path(tmpdir) / "DTO041006.dita"
+            topic.write_text(
+                '<topic><body><image href="image/icon_laser.svg"></image></body></topic>',
+                encoding="utf-8",
+            )
+            updated = _apply_dita_placed_image_sizes(
+                tmpdir, {"icon_laser": [34.0, 17.0]}
+            )
+            self.assertEqual(updated, 1)
+            text = topic.read_text(encoding="utf-8")
+            self.assertIn('width="34mm"', text)
+            self.assertIn('height="17mm"', text)
+
+    def test_idml_image_stem_strips_pack_variants(self):
+        self.assertEqual(
+            _idml_normalize_image_stem("icon_status bar_negative pressure_normal_g99_32"),
+            "icon_status bar_negative pressure_normal",
+        )
+        self.assertEqual(
+            _idml_normalize_image_stem("button_pause_click-table20-01"),
+            "button_pause_click-table20",
+        )
+        self.assertEqual(
+            _idml_normalize_image_stem("icon_status sequencing_1_1"),
+            "icon_status sequencing_1_1",
+        )
+        namelist = [
+            "Links/icon_status bar_negative pressure_normal.svg",
+            "Links/button_pause_click-table20-01.svg",
+            "Links/323-CLIENT-INI_new-01.svg",
+        ]
+        self.assertEqual(
+            _idml_find_link_target(
+                namelist, "icon_status bar_negative pressure_normal_g99_32.svg"
+            ),
+            "Links/icon_status bar_negative pressure_normal.svg",
+        )
+        self.assertEqual(
+            _idml_find_link_target(namelist, "button_pause_click-table20.svg"),
+            "Links/button_pause_click-table20-01.svg",
+        )
+        self.assertEqual(
+            _idml_find_link_target(namelist, "323-CLIENT-INI_new.svg"),
+            "Links/323-CLIENT-INI_new-01.svg",
+        )
+
+    def test_idml_line_separator_folds_into_same_sentence(self):
+        import xml.etree.ElementTree as ET
+
+        body = (
+            '<Story><ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text:L3-CN">'
+            "<CharacterStyleRange><Content>如超过24 h，\u2028不建议使用。</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Story>"
+        )
+        blocks = []
+        _idml_walk(ET.fromstring(body), {}, {}, blocks)
+        self.assertEqual(len(blocks), 1)
+        self.assertNotIn("\u2028", blocks[0]["text"])
+        self.assertIn("不建议使用", blocks[0]["text"])
+        self.assertIn("如超过24 h", blocks[0]["text"])
+
+
+    def test_nested_cell_note_inside_ul_becomes_dita_note(self):
+        xml = _content_to_dita_xml(
+            "测序仪维护",
+            "| 类型 | 适用场景 |\n"
+            "| :--- | :--- |\n"
+            "| 深度清洗 | [[UL]]闲置超过7天[[LI]]每月一次[[LI]][[NOTE:tip]]正常使用指测序间隔不超过7天。[[/NOTE]][[/UL]] |",
+            "concept",
+            "DTO041122",
+            "zh-CN",
+            topic_kind="task",
+            source_format="idml",
+        )
+        self.assertNotIn("[[NOTE:tip]]", xml)
+        self.assertIn('<note type="tip">', xml)
+        self.assertIn("正常使用指测序间隔不超过7天。", xml)
+
+    def test_danger_icon_maps_to_danger_note(self):
+        import xml.etree.ElementTree as ET
+
+        cell = ET.fromstring(
+            '<Cell Self="c0" Name="0:0">'
+            '<Rectangle><Image>'
+            '<Link LinkResourceURI="file:/Links/label000018_Danger.ai"/>'
+            "</Image></Rectangle></Cell>"
+        )
+        self.assertEqual(_idml_callout_note_type(cell), "danger")
+
+    def test_chapter_opening_warnings_get_precautions_heading(self):
+        md = (
+            "# 仪器维护与保养\n\n"
+            "本章介绍仪器及各部件维护和保养的方法。\n\n"
+            "| [[NOTE:danger]] |\n"
+            "| :--- |\n"
+            "| - 清洁前，确保电源已关闭。 |\n\n"
+            "| [[NOTE:warning]] |\n"
+            "| :--- |\n"
+            "| - 建议不要使用本指南未提及的清洗液。 |\n\n"
+            "## 服务计划\n"
+        )
+        out = _idml_insert_precautions_heading(md)
+        self.assertIn("## 注意事项", out)
+        self.assertLess(out.index("## 注意事项"), out.index("[[NOTE:danger]]"))
+        self.assertLess(out.index("[[NOTE:danger]]"), out.index("## 服务计划"))
+
+    def test_overflow_screenshot_width_is_clamped_to_143mm(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            topic = Path(tmpdir) / "DTO041116.dita"
+            topic.write_text(
+                '<topic><image href="image/image_writeFQ14.svg" '
+                'width="180.2mm" height="139.8mm"></image></topic>',
+                encoding="utf-8",
+            )
+            updated = _apply_dita_overflow_image_widths(tmpdir)
+            self.assertEqual(updated, 1)
+            text = topic.read_text(encoding="utf-8")
+            self.assertIn('width="143 mm"', text)
+            self.assertIn('height="110.9mm"', text)
+
+    def test_cell_images_collapse_to_headerless_single_row(self):
+        import xml.etree.ElementTree as ET
+
+        def resolve(uri):
+            name = uri.rsplit("/", 1)[-1]
+            return f"/tmp/{name}"
+
+        table = ET.fromstring(
+            '<Table Self="t1" HeaderRowCount="1" BodyRowCount="1" ColumnCount="2">'
+            '<Cell Self="c00" Name="0:0">'
+            '<Rectangle><Image>'
+            '<Link LinkResourceURI="file:/Links/33.Stop sequencing.svg"/>'
+            "</Image></Rectangle></Cell>"
+            '<Cell Self="c10" Name="1:0">'
+            '<Rectangle><Image>'
+            '<Link LinkResourceURI="file:/Links/34.Confirm to stop sequencing.svg"/>'
+            "</Image></Rectangle></Cell>"
+            '<Cell Self="c01" Name="0:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>点击停止测序</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            '<Cell Self="c11" Name="1:1"><ParagraphStyleRange>'
+            "<CharacterStyleRange><Content>确认停止测序</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(table, image_resolver=resolve)
+        joined = "\n".join(lines)
+        self.assertIn("[[THEAD:0]]", joined)
+        self.assertIn("33.Stop sequencing.svg", joined)
+        self.assertIn("34.Confirm to stop sequencing.svg", joined)
+        self.assertIn("[[FIGCAP]]点击停止测序", joined)
+        self.assertIn("[[FIGCAP]]确认停止测序", joined)
+        self.assertEqual(sum(1 for line in lines if line.startswith("| ") and "---" not in line), 1)
+        xml = _content_to_dita_xml(
+            "PE测序时漏加MDA混合液", joined, "task", "DTO041141", "zh-CN",
+            topic_kind="task", source_format="idml",
+        )
+        self.assertIn("<title>点击停止测序</title>", xml)
+        self.assertIn("<title>确认停止测序</title>", xml)
+        self.assertIn("<fig>", xml)
+        self.assertNotIn("<thead>", xml)
+        self.assertIn('valign="bottom"', xml)
+
+    def test_svg_screenshot_wrapper_flattens_to_png(self):
+        import base64
+        import tempfile
+
+        jpeg = base64.b64decode(
+            "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+        )
+        b64 = base64.b64encode(jpeg).decode("ascii")
+        svg = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+            'width="100mm" height="64mm">'
+            f'<image width="405" height="259" xlink:href="data:image/jpeg;base64,{b64}"/>'
+            "</svg>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svg_path = Path(tmpdir) / "323-CLIENT-INI_new-01.svg"
+            svg_path.write_text(svg, encoding="utf-8")
+            out = _idml_flatten_svg_embedded_raster(str(svg_path))
+            self.assertTrue(out)
+            self.assertTrue(out.endswith(".jpg"))
+            self.assertTrue(Path(out).is_file())
+
+
+    def test_ordering_section_table_is_180mm(self):
+        xml = _content_to_dita_xml(
+            "订购信息",
+            "| 货号 | 型号 | 名称 | 品牌 |\n"
+            "| :--- | :--- | :--- | :--- |\n"
+            "| 900-000608-00 | G99 | 基因测序仪 | MGI |",
+            "concept",
+            "CTO041188",
+            "zh-CN",
+            topic_kind="chapter",
+        )
+        self.assertIn('<table outputclass="180 mm">', xml)
+
+    def test_tips_icon_wins_over_warning_style(self):
+        import xml.etree.ElementTree as ET
+
+        cell = ET.fromstring(
+            '<Cell Self="c0" Name="0:0">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Warning sentence list-CN">'
+            '<CharacterStyleRange><Link LinkResourceURI="file:/Links/label000073_Tips.ai"/>'
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+        )
+        self.assertEqual(_idml_callout_note_type(cell), "tip")
+
+    def test_page_reference_becomes_nested_indexterm(self):
+        import xml.etree.ElementTree as ET
+
+        marker = _idml_index_marker(ET.fromstring(
+            '<PageReference ReferencedTopic="u1fdeTopicn计算机Topicn控制软件"/>'
+        ))
+        self.assertEqual(marker, "[[INDEX:计算机/控制软件]]")
+        xml = _content_to_dita_xml(
+            "生物安全",
+            "请遵守[[INDEX:生物安全]]实验室规范。\n",
+            "concept",
+            "DTO041013",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("<indexterm>生物安全</indexterm>", xml)
+        nested = _content_to_dita_xml(
+            "控制软件",
+            "打开[[INDEX:计算机/控制软件]]。\n",
+            "concept",
+            "DTO041080",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn(
+            "<indexterm>计算机<indexterm>控制软件</indexterm></indexterm>",
+            nested,
+        )
+
+    def test_inline_icon_width_is_forced_to_6mm(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            topic = Path(tmpdir) / "DTO041146.dita"
+            topic.write_text(
+                '<topic><p>负压图标<image href="image/icon_status bar_negative pressure_abnormal.svg" '
+                'width="8.5mm" height="8.5mm"></image></p></topic>',
+                encoding="utf-8",
+            )
+            updated = _apply_dita_inline_icon_widths(tmpdir)
+            self.assertEqual(updated, 1)
+            text = topic.read_text(encoding="utf-8")
+            self.assertIn('width="6mm"', text)
+            self.assertIn('height="6mm"', text)
+
+    def test_graphical_symbol_topic_keeps_idml_icon_size(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            topic = Path(tmpdir) / "DTO041005.dita"
+            topic.write_text(
+                '<topic cms:title="外箱"><title>外箱</title>'
+                "<p>外箱丝印及标签上的图形符号说明如下：</p>"
+                '<p><image href="image/icon_upwards.svg" width="12mm" height="12mm"></image></p>'
+                "</topic>",
+                encoding="utf-8",
+            )
+            updated = _apply_dita_inline_icon_widths(tmpdir)
+            self.assertEqual(updated, 0)
+            text = topic.read_text(encoding="utf-8")
+            self.assertIn('width="12mm"', text)
+            self.assertNotIn('width="6mm"', text)
+
+    def test_adjacent_screenshot_figs_pair_into_headerless_table(self):
+        xml = (
+            "<topic><body>\n"
+            '<fig><image href="image/22.Main interface.svg" '
+            'width="110.3mm" height="64.3mm"></image></fig>\n'
+            '<fig><image href="image/39.Main interface with resuming sequencing.svg" '
+            'width="110.3mm" height="64.3mm"></image></fig>\n'
+            "</body></topic>"
+        )
+        out = _pair_adjacent_dita_figures(xml)
+        self.assertIn("<table>", out)
+        self.assertNotIn("<thead>", out)
+        self.assertIn("22.Main interface.svg", out)
+        self.assertIn("39.Main interface with resuming sequencing.svg", out)
+        self.assertEqual(out.count("<fig>"), 0)
+        self.assertIn('valign="bottom"', out)
+
+    def test_titled_adjacent_figs_are_not_paired(self):
+        xml = (
+            "<topic><body>\n"
+            '<fig><title>放置载片</title><image href="image/15.Loading flow cell.svg" '
+            'width="90.3mm" height="93.1mm"></image></fig>\n'
+            '<fig><title>扫描载片ID</title><image href="image/16.Scanning flow cell ID.svg" '
+            'width="90.3mm" height="93.2mm"></image></fig>\n'
+            "</body></topic>"
+        )
+        out = _pair_adjacent_dita_figures(xml)
+        self.assertNotIn("<table>", out)
+        self.assertEqual(out.count("<fig>"), 2)
+        self.assertIn("<title>放置载片</title>", out)
+        self.assertIn("<title>扫描载片ID</title>", out)
+
+    def test_figure_pairing_does_not_swallow_intervening_list_items(self):
+        """A later adjacent pair must not eat earlier figs or nested list tags."""
+        import xml.etree.ElementTree as ET
+
+        xml = (
+            "<topic><body>\n"
+            "        <ol>\n"
+            "          <li><p>准备清洗试剂槽。</p>\n"
+            '        <fig><title>NaOH与MDA孔位</title><image href="image/Figure 63_1.svg" '
+            'width="90.2mm" height="50.7mm"></image></fig>\n'
+            "          </li>\n"
+            "          <li><p>在NaOH孔位加入7.5 mL 0.1 M NaOH。</p></li>\n"
+            "          <li><p>点击是开始清洗。</p>\n"
+            '        <fig><title>清洗前自检完成界面</title>'
+            '<image href="image/29.Selfcheck finished before washing using washing cartridge.svg" '
+            'width="80.1mm" height="81mm"></image></fig>\n'
+            '        <fig><title>是否清洗界面</title>'
+            '<image href="image/30.Wash or not.svg" '
+            'width="68.4mm" height="39.6mm"></image></fig>\n'
+            "          </li>\n"
+            "        </ol>\n"
+            "</body></topic>"
+        )
+        out = _pair_adjacent_dita_figures(xml)
+        ET.fromstring(out)
+        self.assertIn("在NaOH孔位加入7.5 mL 0.1 M NaOH。", out)
+        self.assertIn("Figure 63_1.svg", out)
+        self.assertEqual(out.count("<fig>"), 3)
+        self.assertNotIn("<table>", out)
+        self.assertIn("29.Selfcheck finished before washing using washing cartridge.svg", out)
+        self.assertIn("30.Wash or not.svg", out)
+        self.assertEqual(out.count("<li>"), 3)
+
+    def test_indexterm_moves_out_of_uicontrol(self):
+        xml = _content_to_dita_xml(
+            "报告参数说明",
+            "【[[INDEX:ChipProductivity(%)]]ChipProductivity(%)】\n",
+            "concept",
+            "DTO041107",
+            "zh-CN",
+            topic_kind="task",
+            source_format="idml",
+        )
+        self.assertIn("<indexterm>ChipProductivity(%)</indexterm>", xml)
+        self.assertIn("<uicontrol>ChipProductivity(%)</uicontrol>", xml)
+        self.assertNotIn(
+            "<uicontrol><indexterm>ChipProductivity(%)</indexterm>ChipProductivity(%)</uicontrol>",
+            xml,
+        )
+        self.assertIn("<keywords><indexterm>ChipProductivity(%)</indexterm></keywords>", xml)
+        body = xml.split("<body", 1)[-1]
+        self.assertNotIn("<indexterm>", body)
+
+    def test_container_title_maps_to_first_child_topic(self):
+        prepared = [
+            (
+                {"title": "制备G99 FCL SE100 DNB", "content": "", "has_children": True},
+                "制备G99 FCL SE100 DNB",
+                "task",
+                "",
+                "",
+                "task",
+            ),
+            (
+                {"title": "计算ssDNA文库所需量", "content": "body", "has_children": False},
+                "计算ssDNA文库所需量",
+                "task",
+                "DTO041064",
+                "DTO041064.dita",
+                "task",
+            ),
+        ]
+        xref_map = _build_xref_map(prepared)
+        self.assertEqual(xref_map.get("制备G99 FCL SE100 DNB"), "DTO041064")
+        self.assertEqual(xref_map.get("制备G99FCLSE100DNB"), "DTO041064")
+        xml = _content_to_dita_xml(
+            "试剂盒暂存",
+            "参考[[XREF:制备G99 FCL SE100 DNB#52]]。\n",
+            "concept",
+            "DTO041061",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="idml",
+            xref_map=xref_map,
+        )
+        self.assertIn(
+            '<xref href="DTO041064.dita" cms:title="制备G99 FCL SE100 DNB"/>',
+            xml,
+        )
+        self.assertNotIn("第52 页", xml)
+
+    def test_table_and_figure_xrefs_bind_to_caption_titles(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "book.ditamap").write_text(
+                '<bookmap><topicref href="DTO041064.dita"/>'
+                '<topicref href="DTO041157.dita"/></bookmap>',
+                encoding="utf-8",
+            )
+            Path(tmpdir, "DTO041064.dita").write_text(
+                '<?xml version="1.0"?>\n'
+                '<topic id="topic-DTO041064">'
+                '<title id="title_DTO041064">计算ssDNA文库所需量</title>'
+                '<body>\n<p>体积V填入<xref cms:title="表 25">第53 页“表 25”</xref>。</p>\n'
+                "<table><title>ssDNA文库所需量</title><tgroup cols=\"1\"/></table>\n"
+                "</body></topic>\n",
+                encoding="utf-8",
+            )
+            Path(tmpdir, "DTO041157.dita").write_text(
+                '<?xml version="1.0"?>\n'
+                '<topic id="topic-DTO041157">'
+                '<title id="title_DTO041157">准备Barcode</title>'
+                '<body>\n<p>参考<xref cms:title="图 121">第154 页“图 121”</xref>。</p>\n'
+                "<fig><title>PE测序的MGI Barcode文件</title>"
+                '<image href="image/x.svg"></image></fig>\n'
+                "</body></topic>\n",
+                encoding="utf-8",
+            )
+            _postprocess_dita_topics(tmpdir)
+            t64 = Path(tmpdir, "DTO041064.dita").read_text(encoding="utf-8")
+            t157 = Path(tmpdir, "DTO041157.dita").read_text(encoding="utf-8")
+            self.assertIn(
+                'cms:title="ssDNA文库所需量"',
+                t64,
+            )
+            self.assertRegex(
+                t64,
+                r'<xref href="DTO041064\.dita#topic-DTO041064/tit[a-f0-9]{8}" cms:title="ssDNA文库所需量" id="xre[a-f0-9]{8}"/>',
+            )
+            self.assertNotIn("第53 页", t64)
+            self.assertNotIn("表 25", t64)
+            self.assertNotIn("keyref=", t64)
+            self.assertIn(
+                'cms:title="PE测序的MGI Barcode文件"',
+                t157,
+            )
+            self.assertRegex(
+                t157,
+                r'<xref href="DTO041157\.dita#topic-DTO041157/tit[a-f0-9]{8}" cms:title="PE测序的MGI Barcode文件" id="xre[a-f0-9]{8}"/>',
+            )
+            self.assertNotIn("图 121", t157)
+            self.assertNotIn("keyref=", t157)
+            self.assertRegex(t64, r'<table id="tab[a-f0-9]{8}">')
+            self.assertRegex(t64, r'<title id="tit[a-f0-9]{8}">ssDNA文库所需量</title>')
+            self.assertRegex(t157, r'<fig id="fig[a-f0-9]{8}">')
+            self.assertRegex(t157, r'<title id="tit[a-f0-9]{8}">PE测序的MGI Barcode文件</title>')
+            self.assertRegex(t157, r'<image [^>]*id="ima[a-f0-9]{8}"')
+
+    def test_chapter_xrefs_use_ime_topic_path_without_keyref(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "book.ditamap").write_text(
+                '<bookmap><topicref href="DTO041061.dita"/>'
+                '<topicref href="DTO041064.dita"/></bookmap>',
+                encoding="utf-8",
+            )
+            Path(tmpdir, "DTO041061.dita").write_text(
+                '<?xml version="1.0"?>\n'
+                '<topic id="topic-DTO041061">'
+                '<title id="title_DTO041061">试剂盒暂存</title>'
+                '<body>\n<p>参考<xref href="DTO041064.dita" cms:title="制备G99 FCL SE100 DNB"/>。</p>\n'
+                "</body></topic>\n",
+                encoding="utf-8",
+            )
+            Path(tmpdir, "DTO041064.dita").write_text(
+                '<?xml version="1.0"?>\n'
+                '<topic id="topic-DTO041064">'
+                '<title id="title_DTO041064">制备G99 FCL SE100 DNB</title>'
+                '<body>\n<p>正文</p>\n'
+                "</body></topic>\n",
+                encoding="utf-8",
+            )
+            _postprocess_dita_topics(tmpdir)
+            t61 = Path(tmpdir, "DTO041061.dita").read_text(encoding="utf-8")
+            self.assertRegex(
+                t61,
+                r'<xref href="DTO041064\.dita#topic-DTO041064/title_DTO041064" cms:title="制备G99 FCL SE100 DNB" id="xre[a-f0-9]{8}"/>',
+            )
+            self.assertNotIn("keyref=", t61)
+
+    def test_idml_xref_uses_paragraph_destination_caption(self):
+        import xml.etree.ElementTree as ET
+        import app.api.convert as conv
+
+        story = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Figure:Title-CN">'
+            "<CharacterStyleRange>"
+            '<ParagraphDestination Self="ParagraphDestination/锚点 52" Name="锚点 52"/>'
+            "<Content>PE测序的MGI Barcode文件</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange>"
+        )
+        titles = _idml_collect_paragraph_destination_titles(story)
+        self.assertEqual(
+            titles.get("ParagraphDestination/锚点 52"),
+            "PE测序的MGI Barcode文件",
+        )
+        designmap = (
+            '<Hyperlink Self="u52d7" Name="交叉引用 11" Source="u4a8d">'
+            "<Properties>"
+            '<Destination type="object">ParagraphDestination/锚点 52</Destination>'
+            "</Properties></Hyperlink>"
+        )
+        mapping = _idml_collect_hyperlink_source_destinations(designmap)
+        self.assertEqual(mapping.get("u4a8d"), "ParagraphDestination/锚点 52")
+        saved = conv._IDML_XREF_DEST_TITLES
+        conv._IDML_XREF_DEST_TITLES = {"u4a8d": "PE测序的MGI Barcode文件"}
+        try:
+            elem = ET.fromstring(
+                '<CrossReferenceSource Self="u4a8d" AppliedFormat="u1fdd">'
+                "<CharacterStyleRange><Content>第</Content></CharacterStyleRange>"
+                '<CharacterStyleRange><TextVariableInstance ResultText="154"/></CharacterStyleRange>'
+                '<CharacterStyleRange><Content>页 “图 121”</Content></CharacterStyleRange>'
+                "</CrossReferenceSource>"
+            )
+            self.assertEqual(
+                _idml_xref_marker(elem),
+                "[[XREF:PE测序的MGI Barcode文件#154]]",
+            )
+        finally:
+            conv._IDML_XREF_DEST_TITLES = saved
+        xml = _content_to_dita_xml(
+            "准备Barcode文件",
+            "参考[[XREF:PE测序的MGI Barcode文件#154]]。\n",
+            "concept",
+            "DTO041156",
+            "zh-CN",
+            topic_kind="task",
+            source_format="idml",
+            xref_map={"Barcode文件": "DTO041157"},
+        )
+        self.assertIn('<xref cms:title="PE测序的MGI Barcode文件"/>', xml)
+        self.assertNotIn("DTO041157.dita", xml)
+        self.assertNotIn("图 121", xml)
+
+    def test_two_col_fig_table_entries_align_bottom(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "DTO041170.dita").write_text(
+                '<topic><body><table><tgroup cols="2"><tbody><row>'
+                '<entry><fig><title>选择自定义</title>'
+                '<image href="a.svg"></image></fig></entry>'
+                '<entry><fig><title>创建自定义方案</title>'
+                '<image href="b.svg"></image></fig></entry>'
+                "</row></tbody></tgroup></table></body></topic>",
+                encoding="utf-8",
+            )
+            _postprocess_dita_topics(tmpdir)
+            text = Path(tmpdir, "DTO041170.dita").read_text(encoding="utf-8")
+            self.assertEqual(text.count('valign="bottom"'), 2)
+
+    def test_table_fig_titles_get_ids_for_ime_xref_picker(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "DTO041065.dita").write_text(
+                '<?xml version="1.0"?>\n'
+                '<topic cms:number="DTO041065">'
+                '<title id="title_DTO041065">制备DNB</title>'
+                '<body id="body_DTO041065"><ol><li><p>准备反应体系：</p>\n'
+                '<table><title>DNB制备反应体系1</title><tgroup cols="1"/></table>\n'
+                "</li></ol>\n"
+                "<fig><title>PE测序的MGI Barcode文件</title>"
+                '<image href="image/x.svg"></image></fig>\n'
+                "</body></topic>\n",
+                encoding="utf-8",
+            )
+            _postprocess_dita_topics(tmpdir)
+            text = Path(tmpdir, "DTO041065.dita").read_text(encoding="utf-8")
+            self.assertRegex(text, r'<table id="tab[a-f0-9]{8}">')
+            self.assertRegex(text, r'<title id="tit[a-f0-9]{8}">DNB制备反应体系1</title>')
+            self.assertRegex(text, r'<fig id="fig[a-f0-9]{8}">')
+            self.assertRegex(text, r'<title id="tit[a-f0-9]{8}">PE测序的MGI Barcode文件</title>')
+            self.assertRegex(text, r'<image [^>]*id="ima[a-f0-9]{8}"')
+            self.assertIn('id="title_DTO041065"', text)
+            self.assertIn('id="body_DTO041065"', text)
+
+    def test_index_chapter_emits_backmatter_indexlist(self):
+        lines = []
+        topic_roots = [
+            {"topic": {"title": "产品概述", "filename": "CTO041001.dita", "id": "CTO041001", "topic_kind": "chapter"}, "children": []},
+            {"topic": {"title": "索引", "filename": "CTO041189.dita", "id": "CTO041189", "topic_kind": "chapter", "is_appendix": True}, "children": []},
+        ]
+        _append_bookmap_topics(lines, topic_roots, "20261110_120000", "zh-CN")
+        output = "\n".join(lines)
+        self.assertIn("<backmatter ", output)
+        self.assertIn('cms:type="backmatter"', output)
+        self.assertIn("<indexlist ", output)
+        self.assertIn('cms:type="indexlist"', output)
+        self.assertIn("</booklists>", output)
+        self.assertNotIn('navtitle="索引"', output)
+        self.assertNotIn("CTO041189.dita", output)
 
 
 if __name__ == "__main__":
