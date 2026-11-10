@@ -3140,6 +3140,21 @@ INDEXTERM_CHUNK_RE = re.compile(
 )
 
 
+def _merge_brackets_split_by_bold(text):
+    """Rejoin 【】 that Word split across adjacent bold runs.
+
+    Source like ``[[B]]【[[/B]][[B]]1[[/B]][[B]]】…[[/B]]`` must become
+    ``[[B]]【1】…[[/B]]`` before tags are emitted, otherwise UI_CONTROL_RE
+    matches across ``<b>`` and produces malformed XML.
+    """
+
+    def _inner(match):
+        inner = re.sub(r'\[\[/?B\]\]', '', match.group(1))
+        return f'【{inner}】'
+
+    return re.sub(r'【(.*?)】', _inner, text or "", flags=re.S)
+
+
 def _lift_indexterms_out_of_uicontrol(xml_text):
     """IME repeats indexterm text inside uicontrol; move the marker outside."""
 
@@ -5266,7 +5281,12 @@ def _is_cover_topic_xml(xml):
 def _product_name_from_filename(file_path):
     stem = os.path.splitext(os.path.basename(file_path or ""))[0]
     stem = COVER_PART_NO_RE.sub(" ", stem)
+    stem = re.sub(r'(?i)\bsrc[_\s-]?\d+\b', " ", stem)
+    stem = re.sub(r'\s+', " ", stem).strip()
+    stem = re.sub(r'(?i)^[0-9a-f]{8}-', "", stem)
     stem = re.sub(r'(?i)\b(?:ifu|instructions for use|ce|ruo|kit)\b', " ", stem)
+    stem = re.sub(r'使用说明书|操作指南', " ", stem)
+    stem = re.sub(r'[-_\s]\d{8}(?:[-_\s]\d+)?$', "", stem)
     stem = re.sub(r'[-_]+', " ", stem)
     return re.sub(r'\s+', " ", stem).strip(" ._-") or None
 
@@ -5280,6 +5300,8 @@ def _extract_cover_fields(file_path, source_content="", dita_lang="en-US"):
     part_match = COVER_PART_NO_RE.search(blob)
     if part_match:
         fields["part_no"] = part_match.group(1)
+    else:
+        fields["part_no"] = ""
 
     lang = (dita_lang or "").lower()
     if lang.startswith("zh"):
@@ -5299,14 +5321,30 @@ def _extract_cover_fields(file_path, source_content="", dita_lang="en-US"):
         product = re.sub(r'\s+set$', " Set", product, flags=re.I)
         fields["product_name"] = product
     else:
-        fallback = _product_name_from_filename(file_path)
-        if fallback:
-            fields["product_name"] = fallback
+        table_match = re.search(
+            r'表\s*1-1\s+(.+?)(?:（货号|[\(（]Cat\.?\s*No)',
+            source_content or "",
+        )
+        if table_match:
+            fields["product_name"] = re.sub(r'\s+', " ", table_match.group(1)).strip(" .")
+        else:
+            fallback = _product_name_from_filename(file_path)
+            if fallback:
+                fields["product_name"] = fallback
+
+    hist = re.search(
+        r'(?:版本历史|版本记录|Version History)[\s\S]{0,900}?'
+        r'\|[ \t]*(\d+\.\d+)[ \t]*\|',
+        source_content or "",
+        re.I,
+    )
+    if hist:
+        fields["version"] = hist.group(1)
     return fields
 
 
 def _replace_cover_value_after_label(xml, label_pattern, value):
-    if not xml or not value:
+    if not xml or value is None:
         return xml
     escaped = _escape_xml_attr(value)
     pattern = re.compile(
@@ -5320,7 +5358,9 @@ def _replace_cover_value_after_label(xml, label_pattern, value):
         attr_match = re.match(r'<p(\b[^>]*?)(?:\s*/)?>', p_tag, re.I)
         attr = attr_match.group(1) if attr_match else ""
         attr = re.sub(r'\s*/\s*$', "", attr)
-        return f'{match.group(1)}<p{attr}>{escaped}</p>'
+        if escaped:
+            return f'{match.group(1)}<p{attr}>{escaped}</p>'
+        return f'{match.group(1)}<p{attr}/>'
 
     return pattern.sub(_repl, xml, count=1)
 
@@ -5334,7 +5374,44 @@ def _patch_template_cover_fields(cover_xml, fields):
     xml = _replace_cover_value_after_label(xml, r'编号', fields.get("part_no"))
     xml = _replace_cover_value_after_label(xml, r'手册名称', fields.get("manual_name"))
     xml = _replace_cover_value_after_label(xml, r'产品名称[^<]*', fields.get("product_name"))
+    version = fields.get("version")
+    if version:
+        if "<cms:rev" in xml:
+            xml = re.sub(
+                r'(<cms:rev\b[^>]*>)[^<]*(</cms:rev>)',
+                lambda m: f'{m.group(1)}{_escape_xml_attr(version)}{m.group(2)}',
+                xml,
+                count=1,
+            )
+        else:
+            xml = _replace_cover_value_after_label(xml, r'版本', version)
     return xml
+
+
+def _patch_template_about_product(xml, fields):
+    """Rewrite the reused 关于说明书 product sentence to the source product."""
+    if not xml or not fields:
+        return xml
+    product = (fields.get("product_name") or "").strip()
+    if not product:
+        return xml
+    version = (fields.get("version") or "").strip()
+    product_xml = (
+        product.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+
+    def _repl_cn(match):
+        kind = match.group(1)
+        orig_ver = match.group(2) or ""
+        tail = f"说明书版本{version}。" if version else orig_ver
+        return f"本{kind}适用于{product_xml}。{tail}"
+
+    return re.sub(
+        r"本(说明书|指南)适用于[^。<]+。(说明书版本[^。<]+。)?",
+        _repl_cn,
+        xml,
+        count=1,
+    )
 
 
 def _extract_template_frontmatter_subset(frontmatter_xml):
@@ -5527,6 +5604,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             last = match.end()
         parts.append(restored[last:])
         restored = "".join(parts)
+        restored = _merge_brackets_split_by_bold(restored)
         if in_step and is_english and not is_native_md:
             # In English operation steps a bold run names a UI control.
             restored = re.sub(r'\[\[B\]\](.*?)\[\[/B\]\]', r'<uicontrol>\1</uicontrol>', restored)
@@ -8040,6 +8118,10 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                 docx_media_files = _copy_docx_media_to_output(file_path, output_base)
 
             if template_parts:
+                cover_source = "\n".join(
+                    part for part in (source_content or "", skipped_cover_content or "") if part
+                )
+                cover_fields = _extract_cover_fields(file_path, cover_source, dita_lang)
                 for fname, content in template_parts["files"].items():
                     if template_referenced_files and fname not in template_referenced_files:
                         continue
@@ -8048,11 +8130,9 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                             text_content = content.decode("utf-8", errors="ignore")
                             text_content = _rewrite_xml_language_attrs(text_content, dita_lang)
                             if _is_cover_topic_xml(text_content):
-                                cover_source = "\n".join(
-                                    part for part in (source_content or "", skipped_cover_content or "") if part
-                                )
-                                cover_fields = _extract_cover_fields(file_path, cover_source, dita_lang)
                                 text_content = _patch_template_cover_fields(text_content, cover_fields)
+                            if _is_about_manual_topic(text_content):
+                                text_content = _patch_template_about_product(text_content, cover_fields)
                             if _is_version_history_topic(text_content):
                                 text_content = _transpose_version_column_table(text_content)
                             content = text_content.encode("utf-8")

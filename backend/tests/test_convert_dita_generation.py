@@ -47,6 +47,7 @@ from app.api.convert import (  # noqa: E402
     _extract_cover_fields,
     _is_cover_topic_xml,
     _patch_template_cover_fields,
+    _patch_template_about_product,
     _is_frontmatter_title,
     _transpose_version_column_table,
     _apply_dita_image_page_widths,
@@ -1522,6 +1523,54 @@ class CoverFieldPatchTest(unittest.TestCase):
         self.assertIn('<p id="pnum">H-020-000876-00</p>', patched)
         self.assertNotIn("H-020-000898-00", patched)
 
+    def test_c6_filename_strips_upload_noise_and_reads_version(self):
+        fields = _extract_cover_fields(
+            "src_1794300896542_e8e9d70a-DNBelab C系列单细胞C6 RNA文库制备试剂盒套装 V1使用说明书-20261030-1.docx",
+            "## 版本历史\n\n"
+            "| 说明书 版本 | 试剂盒 版本 | 修订 日期 | 修订内容摘要 |\n"
+            "| :--- | :--- | :--- | :--- |\n"
+            "| 1.0 | V1.0 | 2026年9月 | 初版发布 |\n\n"
+            "表1-1 DNBelab C系列单细胞C6 RNA文库制备试剂盒套装 （货号： ）\n",
+            "zh-CN",
+        )
+        self.assertEqual(fields["part_no"], "")
+        self.assertEqual(fields["manual_name"], "使用说明书")
+        self.assertEqual(fields["product_name"], "DNBelab C系列单细胞C6 RNA文库制备试剂盒套装")
+        self.assertEqual(fields["version"], "1.0")
+
+    def test_clears_template_part_no_and_rewrites_version(self):
+        xml = (
+            '<concept cms:imesofttype="sCoverTopic">'
+            '<row><entry><p>编号</p></entry><entry><p id="pnum">H-020-000898-00</p></entry></row>'
+            '<row><entry><p>版本</p></entry>'
+            '<entry><p><cms:rev type="1" id="rev1">3.0</cms:rev></p></entry></row>'
+            '</concept>'
+        )
+        patched = _patch_template_cover_fields(xml, {
+            "part_no": "",
+            "version": "1.0",
+            "product_name": "DNBelab C系列单细胞C6 RNA文库制备试剂盒套装",
+        })
+        self.assertNotIn("H-020-000898-00", patched)
+        self.assertIn(">1.0</cms:rev>", patched)
+        self.assertNotIn(">3.0</cms:rev>", patched)
+
+    def test_patches_about_manual_product_sentence(self):
+        xml = (
+            '<concept><title>关于说明书</title>'
+            '<p>本说明书适用于DNBelab C系列高通量单细胞RNA文库制备试剂盒套装V3.0。说明书版本3.0。</p>'
+            '</concept>'
+        )
+        patched = _patch_template_about_product(xml, {
+            "product_name": "DNBelab C系列单细胞C6 RNA文库制备试剂盒套装 V1.0",
+            "version": "1.0",
+        })
+        self.assertIn(
+            "本说明书适用于DNBelab C系列单细胞C6 RNA文库制备试剂盒套装 V1.0。说明书版本1.0。",
+            patched,
+        )
+        self.assertNotIn("V3.0", patched)
+
 
 class DocxTableMarkdownTest(unittest.TestCase):
     def test_repeated_merged_cell_values_are_collapsed(self):
@@ -2735,6 +2784,20 @@ class IdmlConversionTest(unittest.TestCase):
         xml = _content_to_dita_xml("试剂准备", md, "concept", "DTC041217", "zh-CN", topic_kind="concept")
         self.assertIn("<li><p>提前取出DNA Clean Beads。</p></li>", xml)
         self.assertNotIn("<uicontrol>1</uicontrol>", xml)
+
+    def test_bold_split_numeric_brackets_stay_well_formed(self):
+        """Word often bolds 【, the number, and 】 in separate runs."""
+        md = (
+            "[[B]]【[[/B]][[B]]1[[/B]][[B]]】本章涉及到的实验步骤需使用低吸附管。[[/B]]\n"
+        )
+        xml = _content_to_dita_xml(
+            "试剂及耗材准备", md, "topic", "DTO041021", "zh-CN", topic_kind="topic",
+        )
+        self.assertNotIn("<uicontrol>", xml)
+        self.assertIn("【1】", xml)
+        import re
+        from xml.etree import ElementTree as ET
+        ET.fromstring(re.sub(r"<!DOCTYPE[^>]*>", "", xml))
 
     def test_english_step_bold_becomes_uicontrol(self):
         """Bold in an English operation step names a UI control."""
