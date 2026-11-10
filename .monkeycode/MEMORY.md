@@ -86,8 +86,8 @@ Git 与自检工作流
 - Context: Agent 在执行审核模块 AI 调用排障时发现；2026-09-22 补充提示词分层与输出截断排查
 - Category: 环境配置
 - Instructions:
-  - runtime.env 已提交到 Git 仓库，不再依赖外部备份文件恢复
-  - 添加新的 API Key 后直接编辑 backend/runtime.env 并 commit 即可
+  - 跟踪的 backend/runtime.env 只放 provider / base URL / model 与部署开关，不放 API Key
+  - 密钥由 IT 补到平台环境变量或本机 backend/runtime.env.local；2026-11-10 用户明确：本轮不吊销、不重签，后面 IT 补充
   - 审核模块 LLM provider 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
   - 排查 AI 审核结果异常时，先确认后端启动日志中的 provider 预热状态和审核日志中的 `AI客户端可用`、`providers=`、规范文件长度
   - 提示词分层：`app/utils/prompt_builder.py` 不在本仓库中，`ai_client` 恒走其 fallback 分支；但中文审核仍会经 fallback 的 `ReviewPromptBuilder.build_audit_system_prompt()` 调用 `review_rules.build_system_prompt()`（含 P3 语义规则），英文则使用内置英文 system prompt。看到 `prompt_builder 模块缺失` 告警不等于 P3 语义提示词未生效
