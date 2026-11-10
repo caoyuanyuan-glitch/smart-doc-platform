@@ -253,6 +253,78 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertIn("<li><p>装载完成后盖上盖板。</p></li>", xml)
         self.assertEqual(xml.count("<note "), 1)
 
+    def test_bold_wrapped_enumerated_note_items_group_into_list(self):
+        xml = _content_to_dita_xml(
+            "试剂及耗材准备",
+            "[[B]]注意：[[/B]]\n\n[[B]]【1】提前将P100 Oil取出，室温平衡至少30 min。[[/B]]\n\n"
+            "[[B]]【2】本章涉及到的实验步骤需使用低吸附管。[[/B]]\n\n4.1.1 涡旋混匀。",
+            "concept",
+            "DTO041021",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertEqual(xml.count("<note "), 1)
+        self.assertIn('<note type="caution">', xml)
+        self.assertIn("<li><p>提前将P100 Oil取出，室温平衡至少30 min。</p></li>", xml)
+        self.assertIn("<li><p>本章涉及到的实验步骤需使用低吸附管。</p></li>", xml)
+        self.assertIn("<p>4.1.1 涡旋混匀。</p>", xml)
+        self.assertLess(xml.index("</note>"), xml.index("4.1.1 涡旋混匀。"))
+        self.assertNotIn("<p><b></b></p>", xml)
+
+    def test_empty_bold_note_label_does_not_emit_empty_caution(self):
+        xml = _content_to_dita_xml(
+            "试剂及耗材准备",
+            "[[B]]注意：[[/B]][[B]][[/B]]\n\n[[B]]【1】提前将P100 Oil取出。[[/B]]\n\n[[B]]【2】使用低吸附管。[[/B]]",
+            "concept",
+            "DTO041026",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertEqual(xml.count("<note "), 1)
+        self.assertNotIn('<note type="caution"><p><b></b></p></note>', xml)
+        self.assertIn("<li><p>提前将P100 Oil取出。</p></li>", xml)
+        self.assertIn("<li><p>使用低吸附管。</p></li>", xml)
+
+    def test_standalone_enumerated_items_become_one_caution_list(self):
+        xml = _content_to_dita_xml(
+            "cDNA产物纯化",
+            "[[B]]【1】提前将DNA Clean Beads取出。[[/B]]\n\n[[B]]【2】操作前请仔细阅读附录A。[[/B]]\n\n5.1 将产物离心。",
+            "concept",
+            "DTO041034",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertEqual(xml.count("<note "), 1)
+        self.assertIn("<ul>", xml)
+        self.assertIn("<li><p>提前将DNA Clean Beads取出。</p></li>", xml)
+        self.assertIn("<li><p>操作前请仔细阅读附录A。</p></li>", xml)
+        self.assertIn("<p>5.1 将产物离心。</p>", xml)
+        self.assertLess(xml.index("</note>"), xml.index("5.1 将产物离心。"))
+
+    def test_chinese_stop_point_list_item_becomes_tip_note(self):
+        xml = _content_to_dita_xml(
+            "解交联",
+            "- [[B]]停止点：此步可放置50℃过夜反应。[[/B]]",
+            "concept",
+            "DTO041031",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<note type="tip"><p><b>此步可放置50℃过夜反应。</b></p></note>', xml)
+        self.assertNotIn("<li>", xml)
+
+    def test_preparation_list_table_is_extra_wide(self):
+        xml = _content_to_dita_xml(
+            "试剂及耗材准备",
+            "表 4-1 准备清单\n| 试剂 | 规格 | 数量 | 备注 |\n| :--- | :--- | :--- |\n| P100 Oil | 1.5 mL | 1 | / |",
+            "concept",
+            "DTO041021",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn('<table outputclass="180 mm">', xml)
+        self.assertIn("<title>准备清单</title>", xml)
+
     def test_english_label_only_note_groups_bracket_items(self):
         xml = _content_to_dita_xml(
             "Cell counting",
@@ -2794,7 +2866,7 @@ class IdmlConversionTest(unittest.TestCase):
             "试剂及耗材准备", md, "topic", "DTO041021", "zh-CN", topic_kind="topic",
         )
         self.assertNotIn("<uicontrol>", xml)
-        self.assertIn("【1】", xml)
+        self.assertIn("<li><p>本章涉及到的实验步骤需使用低吸附管。</p></li>", xml)
         import re
         from xml.etree import ElementTree as ET
         ET.fromstring(re.sub(r"<!DOCTYPE[^>]*>", "", xml))

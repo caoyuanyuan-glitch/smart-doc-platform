@@ -109,6 +109,7 @@
 - 警告类内容输出 `type="warning"`：文本标签 `警告`、`小心`、`请勿`、`切勿`，以及英文 `Warning`、`Danger`。
 - 注意类内容输出 `type="caution"`：文本标签 `注意`，以及 `Caution`。
 - 提示类内容输出 `type="tip"`：文本标签 `提示`、`Tips`，英文 Word 的 `Note:`，以及无法判定为警告或注意的内容。
+ - 中文 `停止点` 与英文 `StopPoint` / `Stop point` 同类，输出 `type="tip"`。
 - 未指定类型的普通 note 默认 `type="tip"`。
 - 上面三条对「文本标签类」note 生效；IDML 提示框则以图标判定类型（见下），不按正文文字改类型。
  - 生物风险类提示框输出 `type="biological_risk"`：图标文件名含 `biological` / `biohazard` / `bio-risk`（如生物安全、测序工作流程中的生物风险图标）。该类型优先于通用 `warning`。
@@ -116,6 +117,7 @@
 ### 文本标签
 
 - 中文 note 识别标签词：`注意事项`、`其他注意事项`、`注意`、`提示`、`警告`、`小心`。
+ - 中文另识别 `停止点`，按提示类输出。
 - 英文 note 识别标签词：`Warning`、`Caution`、`Tips`、`Danger`、`StopPoint`、`Stop point`。
  - 英文 Word 另识别 `Note:`，按提示类输出 `type="tip"`。
 - 英文普通 `Do not ...` 句子保持正文段落。
@@ -126,6 +128,8 @@
 - 整行加粗时保留正文加粗（如 `[[B]]注意：请先进行样本加载[[/B]]` 输出 `<note><p><b>请先进行样本加载</b></p></note>`）。
 - 只有标签的 note（如单独一行 `注意：`）吸收其后连续的 `【N】` 条目，合并为同一个 note。
 - note 内的 `【N】` 条目合并为同一个 `ul`，每项转为 `li`。
+  - `【N】` 整行加粗（`[[B]]【1】…[[/B]]`）时同样并入 note 内列表；标签后的空加粗 run 不输出空 `<note>`。
+  - 连续 `【N】` 段即使没有前置 `注意：`，也合并为一个 `caution` note 内的 `ul`。
  - 英文 `Note:` 同样吸收其后连续的 `[N]` 条目（含 `Note: [1] ...` 写在同一行、`[2]` 另起一行的写法），合并为同一个 note 内的 `ul`/`li`。
 - note 内每个句段各自一个 `<p>`；note 内 `ul` / `ol` 的每个条目同样写成 `<li><p>…</p></li>`。
 - IDML 提示框正文若采用 `Warning sentence list` 等“句子列表”样式，段落内由 `<Br/>` 分隔的每句话各成一个列表项，整体输出为 note 内的 `<ul><li><p>…</p></li></ul>`；普通提示框正文仍按 `<p>` 输出。
@@ -238,6 +242,7 @@
 - 同一行里横向合并的 `[[SPANC]]` 只占位、不再推进列号；`namest`/`nameend` 必须落在已有 `colspec` 范围内。列号越界时 IME 打开该 topic 会报「加载文档内容失败:undefined」。
   - 超宽表输出 `<table outputclass="180 mm">`（数字与 `mm` 之间必须有空格，）：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` / `User-supplied equipment` 等宽表章节，列数 ≥ 7（覆盖 Barcode / Appendix C–E），IDML 表题样式含 `Wide`（如 `Table-title-EN-Wide` 的套装组分表），或 IDML 表格列宽合计 ≥ 480 pt（约 169 mm，覆盖组分清单、Table 6 `User-supplied equipment, reagent and consumables`）。
   - 中文 `试剂套装组分清单` / `组分清单` 及同类组分表（含「试剂套装组分」）即使只有 6 列，也输出 `outputclass="180 mm"`。
+  - 中文表题含 `清单`、`试剂盒套装`、`本章需要用到的试剂` 的表格同样输出 `outputclass="180 mm"`。
   - 中文 `测序试剂套装` 章节下的表格同样输出 `outputclass="180 mm"`。
   - 中文 `订购信息`、`有害物质` 章节下的表格同样输出 `outputclass="180 mm"`。
   - IDML 表头行（`HeaderRowCount`）单元格不写 `vf:bgcolor`，避免 IME 把带填色的 thead 当成无表头。

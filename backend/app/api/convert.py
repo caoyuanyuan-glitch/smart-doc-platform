@@ -107,7 +107,7 @@ NOTE_LABEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CHINESE_NOTE_LABEL_PATTERN = re.compile(
-    r'^(?:\[\[/?(?:B|SUP|SUB)\]\])*(注意事项|其他注意事项|注意|提示|警告|小心)'
+    r'^(?:\[\[/?(?:B|SUP|SUB)\]\])*(注意事项|其他注意事项|注意|提示|警告|小心|停止点)'
     r'(?:\[\[/?(?:B|SUP|SUB)\]\])*[:：](?:\[\[/?(?:B|SUP|SUB)\]\])*\s*(.*)$'
 )
 CHINESE_WARNING_ACTION_PATTERN = re.compile(r'^(请勿|切勿)\s*(.*)$')
@@ -115,6 +115,29 @@ CHINESE_WARNING_ACTION_PATTERN = re.compile(r'^(请勿|切勿)\s*(.*)$')
 # label-only 注意：/Note: and are grouped into one <ul> inside the note.
 NOTE_ENUM_MARKER_RE = re.compile(r'^(?:【\d+】|\[\d+\])')
 NOTE_ENUM_P_RE = re.compile(r'^\s*<p>(?:【\d+】|\[\d+\])(.*)</p>\s*$', re.S)
+
+
+def _note_visible_text(text):
+    """Plain text of a note line or XML block, ignoring bold/run markers."""
+    value = re.sub(r'\[\[/?(?:B|SUP|SUB|I)\]\]', '', text or '')
+    value = re.sub(r'<[^>]+>', '', value)
+    value = _strip_md_bold(value)
+    return (
+        value.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .strip()
+    )
+
+
+def _note_enum_item_text(text):
+    visible = _note_visible_text(text)
+    match = NOTE_ENUM_MARKER_RE.match(visible)
+    if not match:
+        return None
+    rest = visible[match.end():].strip()
+    return rest or None
+
 # Table/figure caption numbering can be multi-level (表2-3, 表B-1) or plain
 # (Table 13, 图 6). Keep the pattern in one place so title cleanup and heading
 # splitting agree on what a caption prefix looks like.
@@ -1017,6 +1040,9 @@ def _dita_table_should_be_extra_wide(cols, *texts):
         "有害物质",
         "ordering information",
         "hazardous substance",
+        "清单",
+        "本章需要用到的试剂",
+        "试剂盒套装",
     )
     return any(marker in blob for marker in markers)
 
@@ -5977,7 +6003,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         stripped_text = re.sub(r'\[\[/?(?:B|SUP|SUB)\]\]', '', stripped_text)
         if stripped_text in {"注意事项", "其他注意事项"}:
             return False
-        if re.match(r'^(注意事项|其他注意事项|注意|提示|警告|小心|请勿|切勿)[:：]?\s*(.*)$', stripped_text):
+        if re.match(r'^(注意事项|其他注意事项|注意|提示|警告|小心|请勿|切勿|停止点)[:：]?\s*(.*)$', stripped_text):
             return True
         return bool(NOTE_LABEL_PATTERN.match(stripped_text))
 
@@ -6039,11 +6065,17 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if pending_note_type is None:
             return None
         body = (text or "").strip().lstrip('.:：;； ').strip()
-        if body:
+        if body and _note_visible_text(body):
             pending_note_blocks.append(f'          <p>{_restore_inline_run_markup(body)}</p>')
+        pending_note_blocks = [
+            block for block in pending_note_blocks if _note_visible_text(block)
+        ]
         if not pending_note_blocks:
-            fallback = pending_note_label or ""
-            pending_note_blocks.append(f'          <p>{_restore_inline_run_markup(fallback)}</p>')
+            pending_note_type = None
+            pending_note_label = None
+            pending_note_blocks = []
+            note_icon_detected = False
+            return None
         inner = "\n".join(_group_note_enumerated_blocks(pending_note_blocks))
         note_xml = f'        <note type="{pending_note_type}">\n{inner}\n        </note>'
         pending_note_type = None
@@ -6065,9 +6097,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             pending_items.clear()
 
         for block in blocks:
-            match = NOTE_ENUM_P_RE.match(block)
-            if match and match.group(1).strip():
-                pending_items.append(match.group(1).strip())
+            item = _note_enum_item_text(block)
+            if item:
+                pending_items.append(item)
                 continue
             flush_items()
             rendered.append(block)
@@ -6536,7 +6568,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 detail = f'[[B]]{detail[:-len("[[/B]]")]}[[/B]]'
             elif detail.startswith("[[/B]]"):
                 detail = detail[len("[[/B]]"):].strip()
-            if detail and not re.sub(r'[.:：;；,，!！?？\-\s\[\]/]+', '', detail):
+            if detail and not _note_visible_text(detail):
+                detail = ''
+            if detail and not re.sub(r'[.:：;；,，!！?？\-\s\[\]/]+', '', _note_visible_text(detail)):
                 detail = ''
             label_key = label.lower()
             if label in {"警告", "小心", "请勿", "切勿"} or label_key in {"warning", "caution", "danger"}:
@@ -6550,7 +6584,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 and not re.match(r'^\s*[-*+]\s+', next_nonempty)
                 # "注意：【1】..." continues with 【2】【3】 on later lines, so
                 # keep the note open to collect them into one bullet list.
-                and not NOTE_ENUM_MARKER_RE.match(detail)
+                and not NOTE_ENUM_MARKER_RE.match(_note_visible_text(detail))
             ):
                 return f'        <note type="{note_type}"><p>{_restore_inline_run_markup(detail)}</p></note>'
             return {"pending_type": note_type, "label": label, "detail": detail}
@@ -6983,14 +7017,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             body_parts.append(f"        <section><title>{h_text}</title></section>")
         else:
             clean = _clean_output_text(stripped)
+            visible_clean = _note_visible_text(clean)
             if pending_note_type:
-                if NOTE_ENUM_MARKER_RE.match(clean):
+                if NOTE_ENUM_MARKER_RE.match(visible_clean):
                     # Enumerated items after a label-only note belong to that note.
                     pending_note_blocks.append(
                         f'          <p>{_restore_inline_run_markup(clean)}</p>'
                     )
                     continue
-                if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', clean):
+                if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', visible_clean):
                     # A standalone number inside an open note is page furniture,
                     # not note content, so drop the line and abandon the empty note.
                     pending_note_type = None
@@ -6999,8 +7034,24 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     pending_note_body = None
                     note_icon_detected = False
                     continue
-                note_xml = _flush_pending_note(clean)
-                _append_block(note_xml)
+                collected_enums = bool(pending_note_blocks) and all(
+                    _note_enum_item_text(block) for block in pending_note_blocks
+                )
+                if collected_enums:
+                    note_xml = _flush_pending_note()
+                    if note_xml:
+                        _append_block(note_xml)
+                else:
+                    note_xml = _flush_pending_note(clean)
+                    if note_xml:
+                        _append_block(note_xml)
+                    continue
+            elif NOTE_ENUM_MARKER_RE.match(visible_clean):
+                pending_note_type = "caution"
+                pending_note_label = None
+                pending_note_blocks = [
+                    f'          <p>{_restore_inline_run_markup(clean)}</p>'
+                ]
                 continue
             next_line = safe_lines[idx + 1].strip() if idx + 1 < len(safe_lines) else ""
             next_image_match = _match_md_image_line(next_line)
