@@ -18,6 +18,7 @@ from app.api.convert import (  # noqa: E402
     _docx_numbered_run_continues,
     _docx_table_to_markdown,
     _looks_like_docx_heading_text,
+    _docx_numbered_heading_level,
     _parse_md_sections,
     _parse_content,
     _normalize_native_markdown,
@@ -564,7 +565,7 @@ class ContentGenerationTest(unittest.TestCase):
         )
         self.assertNotIn("<p>PCR module top cover plate latch position</p>", xml)
 
-    def test_unmatched_figure_caption_stays_paragraph(self):
+    def test_unmatched_figure_caption_becomes_fig_title(self):
         xml = _content_to_dita_xml(
             "无图示例",
             "图1 孤立图题\n\n正文段落",
@@ -573,7 +574,8 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<p>图1 孤立图题</p>', xml)
+        self.assertIn('<fig><title>孤立图题</title></fig>', xml)
+        self.assertNotIn('图1', xml)
 
     def test_inline_sup_markup_becomes_sup_tag(self):
         xml = _content_to_dita_xml(
@@ -843,6 +845,36 @@ class DocxHeadingDetectionTest(unittest.TestCase):
     def test_numbered_short_title_is_recognized_as_heading(self):
         self.assertTrue(_looks_like_docx_heading_text('6.2.3 Sample Barcode 使⽤规则 (96 RXN)'))
 
+    def test_chinese_chapter_title_is_recognized_as_heading(self):
+        self.assertTrue(_looks_like_docx_heading_text('第三章 细胞固定与预标记'))
+        self.assertEqual(_docx_numbered_heading_level('第三章 细胞固定与预标记'), 1)
+        self.assertEqual(_docx_numbered_heading_level('第八章 cDNA文库构建操作流程'), 1)
+        self.assertEqual(
+            _infer_docx_heading_level(object(), '第三章 细胞固定与预标记', None, 'Normal'),
+            1,
+        )
+
+    def test_latin_cjk_numbered_title_is_recognized_as_heading(self):
+        self.assertTrue(_looks_like_docx_heading_text('6.2 cDNA扩增操作流程'))
+        self.assertEqual(_docx_numbered_heading_level('6.2 cDNA扩增操作流程'), 2)
+        self.assertEqual(_docx_numbered_heading_level('6.3 cDNA产物纯化'), 2)
+        self.assertEqual(_docx_numbered_heading_level('5. 连接产物回收'), 2)
+        self.assertEqual(_docx_numbered_heading_level('5.模板转换'), 2)
+        self.assertEqual(_docx_numbered_heading_level('2.0 mL'), 0)
+
+    def test_numbered_procedure_sentence_is_not_a_heading(self):
+        self.assertFalse(
+            _looks_like_docx_heading_text(
+                '7.2.1 取新的0.2 mL PCR管，取3 μL Oligo产物进行文库构建。体系如下：'
+            )
+        )
+        self.assertEqual(
+            _docx_numbered_heading_level(
+                '7.2.1 取新的0.2 mL PCR管，取3 μL Oligo产物进行文库构建。体系如下：'
+            ),
+            0,
+        )
+
     def test_parenthesized_short_title_is_recognized_as_heading(self):
         self.assertTrue(_looks_like_docx_heading_text('DNB 加载 (StandardMPS 2.0)'))
 
@@ -886,7 +918,7 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         numbered_headline = StubParagraph([StubRun("3.8.1将试剂转移到制备卡的特定孔位。", None)])
         self.assertEqual(
             _infer_docx_heading_level(numbered_headline, "3.8.1将试剂转移到制备卡的特定孔位。", StubTable(), "3级正文"),
-            2,
+            0,
         )
 
     def test_numbered_short_list_item_is_not_inferred_as_heading(self):
@@ -931,6 +963,9 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         self.assertEqual(_clean_title("附录A DNA Clean Beads使用前注意事项"), "DNA Clean Beads使用前注意事项")
         self.assertEqual(_clean_title("附录"), "附录")
         self.assertEqual(_clean_title("4.1.1 仪器、试剂和耗材准备："), "仪器、试剂和耗材准备")
+        self.assertEqual(_clean_title("6.2 cDNA扩增操作流程"), "cDNA扩增操作流程")
+        self.assertEqual(_clean_title("5.模板转换"), "模板转换")
+        self.assertEqual(_clean_title("8. rRNA去除试剂准备"), "rRNA去除试剂准备")
 
     def test_clean_title_keeps_numbers_that_are_content(self):
         self.assertEqual(_clean_title("3'RNA自动化标准流程"), "3'RNA自动化标准流程")
@@ -952,6 +987,28 @@ class DocxHeadingDetectionTest(unittest.TestCase):
         self.assertEqual(root.get("sections") or [], [])
         self.assertTrue(root["content"].lstrip().startswith("B"))
         self.assertIn("Background 101, 110", root["content"])
+
+    def test_reshape_keeps_caution_label_and_wrapped_sentence_as_body(self):
+        markdown = (
+            "# 附录A 关于DNA Clean Beads及纯化\n\n"
+            "DNA Clean Beads使用前注意事项\n\n"
+            "磁珠需平衡至室温。\n"
+        )
+        sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
+        root = sections[0]
+        self.assertEqual(_clean_title(root["title"]), "关于DNA Clean Beads及纯化")
+        self.assertEqual(root.get("sections") or [], [])
+        self.assertIn("DNA Clean Beads使用前注意事项", root["content"])
+
+        markdown = (
+            "# B-1 使用规则\n\n"
+            "基于碱基平衡的设计原则，需将成组使用或单个使用，其中\n\n"
+            "第一组：-1 ~ 4为1组碱基平衡Barcode;\n"
+        )
+        sections = _postprocess_section_tree(_reshape_docx_sections(_parse_md_sections(markdown)))
+        root = sections[0]
+        self.assertEqual(root.get("sections") or [], [])
+        self.assertIn("基于碱基平衡的设计原则", root["content"])
 
     def test_parenthesized_docx_heading_becomes_separate_section(self):
         markdown = "# MGISEQ-2000RS DNB 加载\n\n### DNB 加载 (StandardMPS)\n\n#### 准备\n\n试剂说明\n"

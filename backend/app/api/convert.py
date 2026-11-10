@@ -334,8 +334,15 @@ def _clean_title(title):
     t = CHAPTER_APPENDIX_PREFIX_RE.sub('', t)
     t = SECTION_NUMBER_PREFIX_RE.sub('', t)
     t = APPENDIX_ITEM_NUMBER_PREFIX_RE.sub('', t)
-    # Single-level "1. Title" chapter numbers; keep "2.0 mL" / "3'RNA".
-    t = re.sub(r'^\d+\.\s+(?=[\u4e00-\u9fff]|[A-Z])', '', t)
+    # "6.2 cDNA扩增" / "5.模板转换" / "8. rRNA去除": Latin+CJK after a
+    # number is still a title. Keep content numbers such as "2.0 mL".
+    numbered = re.match(r'^(\d+(?:[.．]\d+)+)\s*(.*)$', t)
+    if numbered and _docx_heading_rest_ok(numbered.group(2)):
+        t = numbered.group(2).strip()
+    else:
+        numbered = re.match(r'^(\d+)\.\s*(.*)$', t)
+        if numbered and _docx_heading_rest_ok(numbered.group(2)):
+            t = numbered.group(2).strip()
 
     # 4. Trim and clean up
     t = re.sub(r'\s+', ' ', t).strip()
@@ -2092,23 +2099,52 @@ def _should_emit_docx_list_marker(paragraph, text, next_block, prev_block=None):
     return True
 
 
-def _docx_numbered_heading_level(text):
-    """Return the heading level for a "3.2.1 标题" paragraph, or 0.
+def _docx_heading_rest_ok(rest):
+    """True when text after a numbering prefix can be a heading title."""
+    rest = (rest or "").strip()
+    if not rest:
+        return False
+    if re.search(r'[，。；]', rest):
+        return False
+    if re.match(r'^[\u4e00-\u9fff]', rest):
+        return True
+    # "6.2 cDNA扩增操作流程": Latin token then CJK. Units like "2.0 mL" stay out.
+    if re.match(r'^[A-Za-z]', rest) and re.search(r'[\u4e00-\u9fff]', rest):
+        return True
+    if re.match(r'^[A-Z][A-Za-z]', rest):
+        return True
+    return False
 
-    The text after the numbering must start with a CJK character or a
-    capitalized English word, so unit-like content such as "2.0 mL" or
-    "1.13× 损耗" is not mistaken for a heading.
+
+def _docx_numbered_heading_level(text):
+    """Return the heading level for an outline title, or 0.
+
+    Handles "第N章 标题", "附录A 标题", "3.2.1 标题", "5. 连接产物回收", and "5.模板转换".
+    The text after the numbering must look like a title (CJK, Latin+CJK, or
+    capitalized English), so unit-like content such as "2.0 mL" stays body.
     """
     compact = _normalize_docx_text(_clean_navtitle(_strip_md_bold(text or "")))
+    if not compact or re.search(r'[，。；]', compact):
+        return 0
+    if CHAPTER_APPENDIX_PREFIX_RE.match(compact):
+        rest = CHAPTER_APPENDIX_PREFIX_RE.sub('', compact).strip()
+        if rest and re.search(r'[，。；]', rest):
+            return 0
+        if re.match(r'^(?:附录|Appendix)\b', compact, re.IGNORECASE):
+            if not rest:
+                return 1
+            return 2
+        return 1
     match = re.match(r'^(\d+(?:\.\d+){1,5})\s*(.*)$', compact)
-    if not match:
+    if match:
+        rest = match.group(2).strip()
+        if _docx_heading_rest_ok(rest):
+            return min(match.group(1).count('.') + 1, 6)
         return 0
-    rest = match.group(2).strip()
-    if not rest:
-        return 0
-    if not (re.match(r'^[\u4e00-\u9fff]', rest) or re.match(r'^[A-Z][A-Za-z]', rest)):
-        return 0
-    return min(match.group(1).count('.') + 1, 6)
+    match = re.match(r'^(\d+)\.\s*(.+)$', compact)
+    if match and _docx_heading_rest_ok(match.group(2)):
+        return 2
+    return 0
 
 
 def _looks_like_docx_heading_text(text):
@@ -2133,7 +2169,11 @@ def _looks_like_docx_heading_text(text):
     if re.match(r'^(试剂|样本|步骤|操作|注意|提示|警告|小心|请勿|切勿)[:：]', compact):
         return False
     is_numbered = bool(_docx_numbered_heading_level(compact))
-    if re.search(r'[.!?;，。；]$', compact):
+    # Procedure sentences stay body even when Chinese punct is mid-line
+    # ("7.2.1 取新的0.2 mL PCR管，…体系如下："). Dots in "3.1" are numbering.
+    if re.search(r'[，。；]', compact):
+        return False
+    if re.search(r'[.!?;]$', compact):
         return False
     if compact.endswith(("：", ":")):
         # A numbered heading may carry a trailing colon ("4.1.1 仪器、试剂和耗材准备：").
@@ -2230,11 +2270,13 @@ def _infer_docx_heading_level(paragraph, text, next_block, style_name):
         return 4
 
     inferred_heading = (
-        len(compact) <= 80
+        len(compact) <= 40
         and next_block is not None
         and hasattr(next_block, "rows")
         # A fully bold line above a table is a table group label, not a heading.
         and not _docx_paragraph_is_fully_bold(paragraph)
+        and not re.search(r'[，。；]', compact)
+        and not compact.endswith(("：", ":"))
     )
     if inferred_heading:
         return 2
@@ -2635,6 +2677,8 @@ def _split_leading_docx_subheading(content):
         or re.search(r'[:：]', normalized_line)
         or re.match(r'^(试剂|样本|步骤|操作|注意|提示|警告|小心|请勿|切勿)[:：]', normalized_line)
         or re.search(r'[.!?;:：，。)]$', normalized_line)
+        or re.search(r'[，。；]', normalized_line)
+        or (re.search(r'注意事项', normalized_line) and not re.match(r'^\d+', normalized_line))
         # Index letter headings ("B", "C") are body grouping labels.
         or re.fullmatch(r'[A-Za-z]', normalized_line)
     ):
@@ -6015,6 +6059,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         pending_figure_caption = None
         if hrefs:
             return _figure_xml(title, hrefs)
+        if FIGURE_CAPTION_PREFIX_RE.match(_strip_md_bold(_unescape_md(title or ""))):
+            return _figure_xml(title, [])
         return f"        <p>{_restore_inline_run_markup(title)}</p>"
 
     def _normalize_table_title(text):
@@ -6708,7 +6754,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 # Caption written before its image; bind once the image arrives.
                 pending_figure_caption = figure_title
             else:
-                _append_block(f"        <p>{_restore_inline_run_markup(figure_title)}</p>")
+                if FIGURE_CAPTION_PREFIX_RE.match(_strip_md_bold(_unescape_md(stripped))):
+                    _append_block(_figure_xml(figure_title, []))
+                else:
+                    _append_block(f"        <p>{_restore_inline_run_markup(figure_title)}</p>")
             continue
 
         if re.match(r'^\s*[-*+]\s+', line):
