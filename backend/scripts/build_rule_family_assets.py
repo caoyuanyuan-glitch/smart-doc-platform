@@ -143,7 +143,7 @@ LEGACY_MATCH = {
     },
     "STRUCT-TERM-001": {
         "selected_in_blob_min_len": 4,
-        "rule_prefixes": ["DOC-TERM", "CYY-CN-CONSIST-", "TERM-"],
+        "rule_prefixes": ["DOC-TERM", "CYY-CN-CONSIST-"],
         "exact_rules": [
             "CYY-CN-NAV-001", "STRUCT-TERM-001",
             "DET-TERM-BASELINE-001", "DET-TERM-CASE-001", "DET-TERM-CANON-001",

@@ -14,6 +14,7 @@ NON_RULE_CODES = {
     "COMPARE-FLOW": "compare_flow",
     "MANUAL-SUPPLEMENT": "manual_supplement",
 }
+AI_RULE_CODES = frozenset({"AI"})
 
 
 def looks_like_rule_no(value: str) -> bool:
@@ -34,6 +35,9 @@ def canonicalize_issue_rule(issue: dict) -> dict:
         issue["check_type"] = check_type
         if not issue.get("source") or issue.get("source") == "rule":
             issue["source"] = check_type
+        return issue
+    if upper in AI_RULE_CODES:
+        issue["check_type"] = issue.get("check_type") or "ai"
         return issue
     if rule and not looks_like_rule_no(rule):
         issue["check_type"] = "unmapped_rule_text"

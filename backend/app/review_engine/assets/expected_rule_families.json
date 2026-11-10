@@ -51,8 +51,7 @@
       "in_regression_set": true,
       "rule_prefixes": [
         "DOC-TERM",
-        "CYY-CN-CONSIST-",
-        "TERM-"
+        "CYY-CN-CONSIST-"
       ],
       "exact_rules": [
         "CYY-CN-NAV-001",

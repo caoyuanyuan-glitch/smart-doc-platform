@@ -222,3 +222,17 @@ def test_term_family_matches_term_rules():
     assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is True
     struct_item = _ann("STRUCT-TERM-001")
     assert _matches_expected_rule_data(struct_item, issue, _issue_blob(issue)) is True
+
+
+def test_open_term_prefix_does_not_reclaim_family(monkeypatch):
+    """TERM- 开放前缀已移除，新增 TERM-* 规则不得被 STRUCT-TERM-001 认领。"""
+    reset_families_cache()
+    monkeypatch.delenv("WORKBUDDY_RULE_PLATFORM_CH", raising=False)
+    families = _load_families()
+    struct = families["STRUCT-TERM-001"]
+    assert "TERM-" not in (struct.get("rule_prefixes") or [])
+    item = _ann("STRUCT-TERM-001")
+    for rule in ("TERM-FORBIDDEN", "TERM-NEWFAMILY", "TERM-ANYTHING-NEW"):
+        issue = _issue(rule=rule, category="无关分类")
+        assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is False
+

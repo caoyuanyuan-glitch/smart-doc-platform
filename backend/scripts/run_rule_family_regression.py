@@ -127,8 +127,7 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
             layer=sample.get("layer") or "",
             expected_rule=sample.get("expected_rule") or "",
         )
-        sample_no = sample.get("doc") or _doc_no(item.file)
-        parsed_no = _doc_no(str(sample.get("doc") or "")) or _doc_no(item.file)
+        sample_no = _doc_no(str(sample.get("doc") or "")) or _doc_no(item.file)
         entry = families.get(item.expected_rule) or {}
         if entry and not entry.get("disabled"):
             stats["enabled_family"] += 1
@@ -137,6 +136,8 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
         matched_issues = []
         for review_id, rows in issues_by_doc.items():
             filename = filename_by_review.get(review_id, "")
+            if not sample_no:
+                continue
             if _doc_no(filename) != sample_no:
                 continue
             for row in rows:
@@ -148,7 +149,7 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
 
         if not matched_issues:
             align = "不可判定"
-            if not parsed_no:
+            if not sample_no:
                 reason = "缺文档号"
             else:
                 reason = "库里无 issue"
@@ -170,7 +171,7 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
                     best = candidate
             if best is None:
                 align = "不可判定"
-                reason = "缺文档号" if not parsed_no else "库里无 issue"
+                reason = "缺文档号" if not sample_no else "库里无 issue"
                 tier, loose, strict, channel = "NONE", False, False, ""
                 countable = False
             else:
