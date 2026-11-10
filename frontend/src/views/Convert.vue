@@ -40,6 +40,42 @@
             <span>转换完成，但存在验证警告</span>
           </div>
 
+          <div v-if="report && report.checks && report.checks.length" class="verify-report">
+            <h4>验证报告</h4>
+            <div v-if="report.active_rules && report.active_rules.length" class="active-rules">
+              <p>本次生效规则 {{ report.active_rules.length }} 条</p>
+              <ul>
+                <li v-for="rule in report.active_rules" :key="rule.rule_number">
+                  <span class="rule-num">{{ rule.rule_number }}</span>
+                  <span class="rule-cat">{{ rule.category }}</span>
+                  {{ rule.description }}
+                </li>
+              </ul>
+            </div>
+            <div
+              v-for="(item, idx) in report.checks"
+              :key="idx"
+              class="check-item"
+              :class="{
+                'check-pass': item.status === 'passed',
+                'check-warn': item.status === 'warning',
+                'check-fail': item.status === 'failed'
+              }"
+            >
+              <span>{{ checkStatusLabel(item.status) }} {{ item.name }}</span>
+              <span v-if="item.detail" class="check-detail">{{ item.detail }}</span>
+            </div>
+          </div>
+
+          <div v-if="conversionDetail.length" class="topic-list">
+            <h4>生成条目（{{ conversionDetail.length }}）</h4>
+            <el-table :data="conversionDetail" size="small" border max-height="280">
+              <el-table-column prop="source_section" label="源章节" min-width="160" />
+              <el-table-column prop="target_type" label="类型" width="120" />
+              <el-table-column prop="topic_file" label="输出文件" min-width="160" />
+            </el-table>
+          </div>
+
           <div class="result-actions">
             <div v-if="taskResult.overall === 'passed' || packageReady" class="download-row">
               <span class="download-label">文件名：</span>
@@ -189,6 +225,11 @@
           <el-table-column prop="status" label="状态" width="100">
             <template #default="scope">
               <el-tag :type="statusTagType(scope.row.status)" size="small">{{ statusText(scope.row.status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="topic_count" label="条目" width="80">
+            <template #default="scope">
+              {{ scope.row.topic_count || '—' }}
             </template>
           </el-table-column>
           <el-table-column label="文件大小" width="110">
@@ -374,6 +415,7 @@ const tableHeaderStyle = {
 
 const progressColor = computed(() => {
   if (taskResult.value && taskResult.value.overall === 'warning') return '#e6a23c'
+  if (taskResult.value && taskResult.value.overall === 'failed') return '#dc2626'
   return '#67c23a'
 })
 
@@ -481,7 +523,7 @@ function startPolling() {
       if (data.status === 'completed') {
         stopPolling()
         converting.value = false
-        taskResult.value = { overall: 'passed' }
+        if (!taskResult.value) taskResult.value = { overall: 'passed' }
         packageReady.value = true
         await loadTaskResult()
         ElMessage.success('转换完成')
@@ -512,13 +554,25 @@ function cancelPolling() {
 
 async function loadTaskResult() {
   try {
-    const detailResp = await convertAPI.getDetail(taskId.value).catch(() => ({ data: null }))
+    const [detailResp, reportResp] = await Promise.all([
+      convertAPI.getDetail(taskId.value).catch(() => ({ data: null })),
+      convertAPI.getReport(taskId.value).catch(() => ({ data: null })),
+    ])
     if (detailResp.data && detailResp.data.detail) {
       conversionDetail.value = detailResp.data.detail
+    }
+    if (reportResp.data) {
+      report.value = reportResp.data
+      taskResult.value = { overall: reportResp.data.overall || 'passed' }
+    } else if (!taskResult.value) {
+      taskResult.value = { overall: 'passed' }
     }
     loadHistory()
   } catch (e) {
     console.error('加载任务结果失败', e)
+    if (!taskResult.value) {
+      taskResult.value = { overall: 'passed' }
+    }
   }
 }
 
@@ -578,6 +632,12 @@ function changeSource() {
   converting.value = false
   taskResult.value = null
   taskProgress.value = 0
+  sourceFile.value = null
+  convertFeedback.value = ''
+  convertScreenshot.value = null
+  report.value = null
+  conversionDetail.value = []
+  packageReady.value = false
 }
 
 function triggerScreenshotUpload() { screenshotInput.value?.click() }
@@ -682,6 +742,12 @@ function statusText(status) {
   if (status === 'completed') return '成功'
   if (status === 'failed') return '失败'
   return '处理中'
+}
+
+function checkStatusLabel(status) {
+  if (status === 'passed') return '通过'
+  if (status === 'failed') return '失败'
+  return '警告'
 }
 
 function getFilenameFromHeaders(headers) {
@@ -844,6 +910,17 @@ onBeforeUnmount(() => stopPolling())
 .check-pass { color: #16a34a; }
 .check-warn { color: #e6a23c; }
 
+.check-fail { color: #dc2626; }
+
+.topic-list {
+  margin: 16px 0;
+}
+
+.topic-list h4 {
+  margin-bottom: 12px;
+  color: #374151;
+}
+
 .active-rules {
   margin-bottom: 12px;
   padding: 10px;
@@ -928,5 +1005,24 @@ onBeforeUnmount(() => stopPolling())
 }
 .feedback-panel:focus {
   outline: none;
+}
+.result-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.result-banner.success {
+  background: #ecfdf5;
+  color: #166534;
+}
+
+.result-banner.warning {
+  background: #fef3c7;
+  color: #92400e;
 }
 </style>

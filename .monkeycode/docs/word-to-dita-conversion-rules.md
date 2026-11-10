@@ -35,7 +35,8 @@
 ## 标题与结构规则
 
 - DITA 层级按源 Word 标题层级建树，章节结构需要与 Word 层级 100% 一致。
-- 无正文的真实父 topic 仍输出 `conbody`/`body`，并至少放一个空 `<p>`，避免 IME 打开时报「加载文档内容失败:undefined」。
+- 标题下没有正文、只带子 topic 的父标题输出为 ditamap 中的 topicref 结构节点：不生成 `.dita`，topicref 不写 `href` / `keys` / `cms:template`。IME 类型为 topicref，正文写在子 topic 中。例如「进行前期准备」下只有「准备耗材」等内容 topic 时，「进行前期准备」本身用 topicref。
+- 无正文的叶子 topic 仍生成真实 topic，`conbody`/`body` 至少放一个空 `<p>`，避免 IME 打开时报「加载文档内容失败:undefined」。
 - 源 Word 里仅作分组、没有正文的 `Appendix` / `附录` 父标题不生成 topic，也不进入 ditamap。
 - 其下每个附录提升为独立 `<appendix>`：容器 `navtitle` 为附录名，先挂同名 `chapterTopic`，再挂该附录的子 topic；叶子附录的正文写在该 `chapterTopic` 中。
 - `Revision history` 视为真实章节。
@@ -108,6 +109,7 @@
 - 提示类内容输出 `type="tip"`：文本标签 `提示`、`Tips`，英文 Word 的 `Note:`，以及无法判定为警告或注意的内容。
 - 未指定类型的普通 note 默认 `type="tip"`。
 - 上面三条对「文本标签类」note 生效；IDML 提示框则以图标判定类型（见下），不按正文文字改类型。
+ - 生物风险类提示框输出 `type="biological_risk"`：图标文件名含 `biological` / `biohazard` / `bio-risk`（如生物安全、测序工作流程中的生物风险图标）。该类型优先于通用 `warning`。
 
 ### 文本标签
 
@@ -116,6 +118,7 @@
  - 英文 Word 另识别 `Note:`，按提示类输出 `type="tip"`。
 - 英文普通 `Do not ...` 句子保持正文段落。
 - note 图标图片不输出到最终 DITA。
+ - Word 提示框常把灯泡/注意图标放在首条列表项里。去掉这些 note 图标后，整组无序列表输出为 `<note type="tip">` 包住 `<ul>`（如试剂套装组分清单表前的三条提示）。
 - 标签词被加粗包裹（如 `[[B]]注意：[[/B]]正文`）时仍按 note 处理，标签词丢弃。
 - 标签词前若有多余的加粗空格（如 `[[B]] [[/B]][[B]]注意：[[/B]]正文`，Word 排版残留），仍按 note 处理；markdown 生成阶段也不再为纯空白加粗 run 添加 `[[B]]`/`[[/B]]`。
 - 整行加粗时保留正文加粗（如 `[[B]]注意：请先进行样本加载[[/B]]` 输出 `<note><p><b>请先进行样本加载</b></p></note>`）。
@@ -131,9 +134,12 @@
 - 这类表格必须输出为 `<note>`，不能输出为无标题表格。
  - 单元格带红/灰填色的单列表（如 `Single sentence-EN-RUO` 红底声明）保持为表格并写 `vf:bgcolor`，不转成 note。
 - note 类型由符号图标文件名判定：
-  - 图标名含 `Warning`、`Danger`、`warn` → `type="warning"`。
+  - 图标名含 `Danger` → `type="danger"`（优先于 warning）。
+  - 图标名含 `Warning`、`warn` → `type="warning"`。
   - 图标名含 `Caution` → `type="caution"`。
   - 图标名含 `Tips`、`icon_note`，或无图标 → `type="tip"`。
+  - 图标名含 `biological`、`biohazard`、`bio-risk` → `type="biological_risk"`（优先于 warning）。
+  - 图标文件名含 `Tips` 时，即使段落样式名含 `Warning`（如 `Warning sentence list`），仍输出 `type="tip"`。
 - 提示框内多段正文合并为同一个 note，每段一个 `<p>`；图标列不输出。
 - 相邻的两个提示框必须各自成独立 `<note>`，不能合并为一张多行表格；表格之间的空行即结束当前表格。
 - 提示框类型只看图标/样式，正文文字不改类型；即图标为 `Tips` 时，即使正文含 `切勿`，仍为 `type="tip"`（与参考包保持一致）。
@@ -142,6 +148,9 @@
 ## IDML 源解析规则
 
 - IDML 段落样式映射到标题层级：`Title-L<n>`（可带 `For reagent kit only:`、`Operation guide:` 等前缀）为第 n 级标题；`Title in first page`、`Title-Appen` 视为一级标题。
+  - 章标题（`Title-L1`）后、下一节标题前若出现 danger/warning 提示框，插入子标题 `注意事项`（英文手册为 `Precautions`），把这些提示放到该子 topic，不留在 chapter 正文。
+- 同一 `Title:L<n>` / `Title-L<n>` 段落内用 `<Br/>` 分隔的多个短标题，输出为多个同级标题；`<Br/>` 后以句号等收尾、不像标题的句子落为正文。
+- 索引中单独成行的拉丁字母（如 `B`、`C`）保持正文，不升级为独立 topic。
 - 目录样式（`Contents :*`、`TOC*`）丢弃，目录由 IME 重新生成。
 - 页眉页脚、空白页标记、`$ID/NormalParagraphStyle` 等无正文内容的 story 整体丢弃。
 - 表格使用 `<Table>` 直接子节点 `<Cell Name="col:row">` 定位（**第一段是列、第二段是行**，与 `ColumnCount`/`RowCount` 及真实文档一致），不用嵌套的 Row→Cell 结构。曾误按 `row:col` 解析，会把整张表转置，必须避免。
@@ -150,7 +159,7 @@
 - 表头行数由 `HeaderRowCount` 决定：解析阶段输出 `[[THEAD:n]]` 标记，DITA 阶段把前 n 行全部放入同一个 `<thead>`。两行表头必须保留两行，不能只取第一行或把第二行降到 `<tbody>`。
 - 表格单元格内的图标（如 `icon_emergencystop.ai` 状态图标）必须保留为该 `<entry>` 内的 `<image>`，不得因为单元格没有正文而丢弃；单元格文字与嵌套表格正文只输出一次。
 - 段落内可锚定提示框表格（`ParagraphStyleRange → CharacterStyleRange → Table`）：必须先输出段落自身文字，再输出锚定表格，不能因嵌套表格跳过段落正文。
- - 图片由外部链接引用（`Link` 元素），常见 `.ai`/`.png`；同名 `.svg` 视为其可用的替代资源。源 zip 含 `.idml` 与同级 `Links/`，`Links/` 放与链接主干同名的 `.svg`（`.ai` 按同名 `.svg` 替换）。无对应 `Links/` 文件时，回退使用 IDML 内嵌 XMP JPEG 预览（覆盖未打包的 `.ai` 以及无 `Link` 的内联 PDF 图标，如 `icon_status sequencing`、`icon_run_E25 kit`、`image_installliquidwastebox`）。
+ - 图片由外部链接引用（`Link` 元素），常见 `.ai`/`.png`；同名 `.svg` 视为其可用的替代资源。源 zip 含 `.idml` 与同级 `Links/`，`Links/` 放与链接主干同名的 `.svg`（`.ai` 按同名 `.svg` 替换）。匹配时去掉导出后缀 `_g99_32`、`-01` 等变体（如 IDML `icon_status bar_negative pressure_normal_g99_32.svg` 对齐包内 `icon_status bar_negative pressure_normal.svg`，`button_pause_click-table20.ai` 对齐 `button_pause_click-table20-01.svg`）。无对应 `Links/` 文件时，回退使用 IDML 内嵌 XMP JPEG 预览（覆盖未打包的 `.ai` 以及无 `Link` 的内联 PDF 图标，如 `icon_status sequencing`、`icon_run_E25 kit`、`image_installliquidwastebox`）。
 - IDML 故事里的 `PDF` / `Image` / `EPS` 即使 `Link` 缺失或 `Links/` 中没有 IME 可用文件，也按图形处理。回退资源取自该图形 `MetadataPacketPreference` 内 XMP 的 `xmpGImg:image` JPEG（约 256 px 预览）。文件名优先用 `Link` 主干，否则用 XMP `dc:title`；主干末尾的 `_N` 在匹配时去掉；输出扩展名为 `.jpg`，保留空格与中文。
  - 无原生 InDesign `Links/` 时，可用 IME 导出包 `image/` 中的 SVG：去掉文件名 `G\d+_` 前缀，按主干（大小写不敏感）对齐 IDML `Link` 主干，写入源 zip 的 `Links/{主干}.svg`。note 图标（`icon_note`、`Warning` 等）仍不输出。
 - 链接 URI 必须先做百分号解码（`urllib.parse.unquote`）再匹配资源；InDesign 会把名称中的空格与中文编码成 `%20`/`%xx`，不解码会导致这些图片全部漏配。
@@ -159,6 +168,8 @@
 - 步骤列表内穿插的提示框表格、图片按其在段落中的顺序输出到所属步骤项，保证 `ol` 编号连续（`准备DNB制备混合液`、`回顾参数`、`DNB浓度不合格` 等步骤数须与源一致）。
 - 源文档的列表层级（`Level n` 样式）必须保留：解析阶段在列表项行首输出 `[[LVL:n]]` 标记，DITA 阶段按层级构建嵌套 `<ul>`/`<ol>`。例如步骤下的 `Level 3` 项目符号成为该 `<li>` 内的 `<ul>`，其下 `Level 4` 编号项成为嵌套的 `<ol>`；不得把子列表压平到父级。
  - 列表项之后的说明段落、公式图必须挂在所属 `<li>` 内，并保持源文档顺序：出现在嵌套子列表之前的 `<p>`/note/图紧跟步骤正文；出现在嵌套子列表之后的说明挂在子列表后面。这些内容不能冲出整个 `<ul>` 变成兄弟节点。
+ - 正文段落样式带 `Text:L<n>` / `Introductory sentence-L<n>` 时，解析阶段同样输出 `[[LVL:n]]`（即使不是列表项）。DITA 阶段把该段挂到最近一条 `level <= n` 的列表项：出现在该项子列表之前则跟在该项正文后，不得上提到最外层步骤。例如「自动生成样本编号」下的「执行如下操作：」和图「选择自动生成样本编号」留在该条 `<li>` 内。
+ - InDesign 的 Unicode 行分隔符（U+2028）视为同一句内空格，不得把「如超过24 h，不建议使用。」拆成两行。
 - 列表层级标记不得影响章节类型判定：行首带 `[[LVL:n]]` 的编号步骤仍须识别为任务（DTO）。
 - 步骤内联按钮图标必须留在它所属的步骤项内：出现在列表项文本之后的 `<Link>` 图标挂到该 `<li>`；出现在最后一个步骤之后的图标，也要在 `</ol>` 关闭前挂进最后一个 `<li>`，不能落到列表之外。
 - 内联图标若排在提示框（note）之前，输出顺序须保持“图标 → note”，不能因为提示框先冲刷而把图标挤到 note 之后。
@@ -166,16 +177,19 @@
 - 段落正文中的状态图标（文件名以 `icon` 开头，如 `icon_status sequencing_1_1.ai`）按内联图片输出，段落保持为正文而不是被拆成独立的块级图片。
 - 文件名以 `formula_` 开头的公式图同样按内联图标处理。
 - 内联图标解析失败、占位符被去掉时，仅当左右两侧都是字母或数字才插入空格；标点（含中文标点）紧贴图标时不补空格。
-  - 交叉引用（`CrossReferenceSource`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。中文源形态为 `第<页码>页“目标标题”`，英文源形态为 `<target title> on Page`。DITA 阶段输出空标签 `<xref href="目标topic.dita" cms:title="目标标题"/>`，不把页码写进 xref 体内，页码由 IME 按目标 topic 生成。找不到对应 topic 时中文回退为纯文本 `第N 页“标题”`，英文回退为标题文本，不产出无效 `<xref>`。
+  - 交叉引用（`CrossReferenceSource`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。中文源形态为 `第<页码>页“目标标题”`，英文源形态为 `<target title> on Page`。交叉引用一律空标签 `<xref href cms:title/>`，页码由 IME 生成，不得把 `第N 页“…"` 或最外层引号写进正文。标题查找折叠空白（`读长DNB` 与 `读长 DNB`）。只有标题、没有正文的容器节点映射到其后第一个真实 `.dita` 子 topic，以便可点。`图 N` / `表 N` 按 ditamap 顺序绑定到随后的 `<fig><title>` / `<table><title>`，`cms:title` 写实际图题或表题（如 `ssDNA文库所需量`、`PE测序的MGI Barcode文件`），不得保留「表 25」「图 121」。
+  - 图/表交叉引用的真实题注从 IDML `Hyperlink Source` → `ParagraphDestination` 所在段落读取（如锚点「锚点 52」对应「PE测序的MGI Barcode文件」），不能只用 CrossReference 的「图 121 / 表 25」显示文本。
+  - IDML 索引标识（`PageReference` / `ReferencedTopic`）转成 `<indexterm>`；层级用 `Topicn` 切分后嵌套。`<indexterm>` 不得放在 `<uicontrol>` 内，也不得留在 body 里当正文显示，应抽到 topic `<prolog><metadata><keywords>`，正文只留 `uicontrol`。InDesign 生成式索引（`Title:Index` 字母头和页码列表）不进正文。「索引」章不生成空 topic，ditamap 输出 `<backmatter>` > `<booklists>` > `<indexlist/>`，由 IME 根据 indexterm 自动生成索引页。
   - 蓝色试剂名见「术语（`term`）」：字符样式 `Reagent name` / `Reagent name_EN` 输出 `<term>`。
  - 单元格内嵌套的提示框表格输出为该 `<entry>` 内的 `<note>`，不得并成一句普通正文。
-  - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`），也不含页码。数字/英文后紧跟汉字处的空格只用于未解析回退文本（`第12 页`、`测定DNB 浓度`）。
+  - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`），也不含页码。
   - IDML 斜体字符样式转为 `<i>`：`Cross reference` / `Cross reference-in para.-CN` 等（公式变量 `N`/`c`/`V`、书名）以及 `Subtle Emphasis`、`FontStyle="Italic"`。相邻斜体 run 合并。屏上控件样式优先于斜体。
   - IDML 上标转为 `<sup>`：字符样式 `Superscript`，或 `CharacterStyleRange` 的 `Position="Superscript"`（如商标 `TM`）。
   - `Text:Introductory sentence*` 段落输出 `<p outputclass="keep">`，IME 按源行距排版。
   - 单元格填色写入 `vf:bgcolor`（命名空间 `http://www.megalinkware.com`）：红 `C=0 M=100 Y=100 K=0` / `Warning *-RUO` / `TableStyle/Research use only` / `Single sentence-*-RUO` → `#FF0000`；灰 `Table heading-with frames-vertical` / `K≥40` 的黑灰 → `#C0C0C0`。浅灰斑马纹（`K=20`）不着色。格子 `AppliedCellStyle` 为 `$ID/[None]` 时，从表格样式的左右列区域单元格样式继承填色。带填色的单列 `Single sentence-EN-RUO` 红条保持为表格，不转成 note。
  - 页码变量解析失败时省略“第N页”，只输出标题；不得残留 `第页“目标标题”` 这类空页码形式。
  - 非列表正文段落里的 `<Br/>` 是段落分隔（如 `关于说明书` 的 `Text in first page` 用一个段落样式写下多段声明）：每一截输出独立 `<p>`，不能拼成一个 `<p>`。
+  - `关于说明书` 若被拼成一个长 `<p>`，按声明 / 读者 / 免责 / 准确性 / 示意图 / 商标 / 版权切开，恢复多个 `<p>`。
  - 表格单元格若使用 `Table:Bulleted list` / `Table:Numbered list` / `sentence list` 样式，单元格内由 `<Br/>` 分开的各项输出为该 `<entry>` 内的 `<ul>`/`<ol>`（版本记录的修订摘要即此结构）；`Table:Single sentence` 仍为纯文本。
 
 ## 图片规则
@@ -184,11 +198,18 @@
 - 图片不输出 `alt` 标签。
 - 紧邻 note 文本的小图标图片视为 note 图标，跳过输出。
 - 紧邻 note 的真实图片必须保留，只有尺寸很小（或无法读取）的图片才视为 note 图标。
+  - 生物安全等标识图标（文件名含 `biological` / `biohazard` / `bio-risk`）只用于判定 `type="biological_risk"`，callout 转 `<note>` 后不输出 note 内图标。
 - 出现在正文句子中的小按钮图标（如“点击界面右上角的 [按钮] 按键”）必须保留，并以内联 `<image>` 输出在句内。
  - 内联保留的判定范围：小图（尺寸不超过 220×120）所在段落同时含正文文本时内联输出；紧跟在上一句正文之后的孤立小图标也并入该句，不得拆成独立块图。
  - note 段落内的小图视为装饰，丢弃。
  - 句中图标若无法读取尺寸，只要该段同时含正文且不是 note/图题，仍按内联图标保留，不得拆成独立块图。
 - 图像与图题包装为 `<fig><title>图题</title><image href="image/…"></image></fig>`；块级图只保留 `href`，与 IME 官方包一致。编号由 IME 自动生成，`<title>` 内不放 `图 N`/`Figure N`。
+  - 无图题的块级截图同样包成 `<fig><image href="image/…"></image></fig>`（如「新建测序+分析任务」「生成测序+分析任务」步骤下的界面图）；句中按钮图标仍是内联 `<image>`，不包 `fig`。
+ - 像素宽度 ≥ 400 的块级截图/配图输出 `width="150mm"`，避免 IME 按原图像素超出版心；小按钮图标和 note 图标不加宽度。图片仍挂在所属步骤或图题下，溢出属于显示尺寸，不是位置错误。
+ - IDML 图框尺寸写入 `<image width="…" height="…">`（毫米，来自 Rectangle PathPointArray / ItemTransform）。源为 `.ai` 时按同主干依次回退 `.svg` / `.jpg` / `.jpeg` / `.png`。
+  - 写入图框尺寸后，宽度 ≥ 170 mm 的截图（如 writeFQ 参数设置界面）将宽度压到 `143 mm`，高度按比例缩放。
+  - 文件名以 `icon` / `button_` 开头的内联状态/按钮图标统一 `width="6mm"` `height="6mm"`（如负压异常图标），覆盖图框原始毫米尺寸。「图形符号说明」下的外箱/仪器/标签/指南图标保持 IDML 原始尺寸，不得强制 6 mm。
+  - SVG 若只是包了一张 data-URI 位图截图、几乎没有矢量路径，抽出 PNG/JPEG 作为 DITA `href`，避免 IME 丢图（如 Client.ini 文件位置）。
 - 同一图题段落内的多张实质图并入同一个 `<fig>`，不要拆成图题后的裸 `<image>`。
  - 图题后连续多图仍并入当前 `<fig>`；若下一张图后面紧跟另一条图题，则该图是下一图的配图，不得并入当前图。
 - Word 装饰残图不输出：1 像素细条、扁长横幅，以及图题/说明句之后空段落里的小图。
@@ -196,6 +217,10 @@
 - 块图后面紧跟的短说明（无 `图 N`/`Figure N` 前缀）包装为 `<fig><title>…</title>`，不要留成图下的普通 `<p>`。
 - 图题后面没有紧跟图片时，回退为普通段落并保留原文编号，避免正文内容丢失。
 - 输出包中的图片文件名保持源图片包（`Links/`）的原始名称，包含空格与中文；不做 `image_NNN` 重命名。参考包亦保留原始名（如 `G002708_image_loading flow cell.svg`）。
+- 源文件名含括号或 `&` 时（如 `Micro Tube 0.5 mL (Empty)(本色）.svg`、`image_barcode App&CG-DB-PE.svg`）必须完整保留，并复制进输出包 `image/`。DITA `href` 只对 `&` 做一次 XML 转义（`&amp;`），不得截断括号，不得留下 `./static/uploads/..._idml_media/` 临时路径。
+- 缺图时只按 Link 主干精确匹配（去 `_g99_32`、`-01`、`G\d+_` 变体后仍须同一主干）。近名文件不得顶替，例如不得用 `39.Main interface with resuming sequencing.svg` 顶 `39.Main interface with resuming sequencing-select flow cell.ai`，也不得用 `16.Scanning flow cell ID.svg` 顶 `16.Verifying the stage flatness.ai`。
+- 图包没有原图、也没有 XMP JPEG 预览时，图题回落为普通 `<p>`（如「平面度自检界面」「选择需续测的载片」），转换完成后必须列出缺失源文件名、图题和所在 topic，交给用户补图后再转。
+- 标识图（外箱/仪器/标签/指南，如 `label000042_ManufacturerDate`）必须用原图片包；图包没有原图时如实报缺失，不得自制替代 SVG 充当正式标识。
 - 同名图片冲突时才追加 `_N` 后缀；图片管线不做压缩，保真优先。
 
 ## 表格规则
@@ -209,12 +234,22 @@
 - 没有垂直合并的标签首行（如 `Workbench Position`）可作为 1 行 `<thead>`。
 - Word `w:vMerge` / `w:gridSpan` 在解析阶段输出 `[[SPAN:c,r]]` / `[[SPANC]]`，DITA 阶段还原为 `morerows` 与 `namest`/`nameend`。
 - 同一行里横向合并的 `[[SPANC]]` 只占位、不再推进列号；`namest`/`nameend` 必须落在已有 `colspec` 范围内。列号越界时 IME 打开该 topic 会报「加载文档内容失败:undefined」。
- - 超宽表输出 `<table outputclass="180mm">`：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` / `User-supplied equipment` 等宽表章节，列数 ≥ 7（覆盖 Barcode / Appendix C–E），IDML 表题样式含 `Wide`（如 `Table-title-EN-Wide` 的套装组分表），或 IDML 表格列宽合计 ≥ 480 pt（约 169 mm，覆盖 Table 6 `User-supplied equipment, reagent and consumables`）。
-- 列宽合计低于 480 pt 的表保持默认宽度，例如约 392 pt（约 138 mm）的两列表、约 143 mm 的 Sequencing cycle 表。
+  - 超宽表输出 `<table outputclass="180 mm">`（数字与 `mm` 之间必须有空格，）：`Sequencing Parameters` 整章、`Flexible-throughput` / `Consumable Usage` / `User-supplied equipment` 等宽表章节，列数 ≥ 7（覆盖 Barcode / Appendix C–E），IDML 表题样式含 `Wide`（如 `Table-title-EN-Wide` 的套装组分表），或 IDML 表格列宽合计 ≥ 480 pt（约 169 mm，覆盖组分清单、Table 6 `User-supplied equipment, reagent and consumables`）。
+  - 中文 `试剂套装组分清单` / `组分清单` 及同类组分表（含「试剂套装组分」）即使只有 6 列，也输出 `outputclass="180 mm"`。
+  - 中文 `测序试剂套装` 章节下的表格同样输出 `outputclass="180 mm"`。
+  - 中文 `订购信息`、`有害物质` 章节下的表格同样输出 `outputclass="180 mm"`。
+  - IDML 表头行（`HeaderRowCount`）单元格不写 `vf:bgcolor`，避免 IME 把带填色的 thead 当成无表头。
+  - `版本记录` 表头左上角 `white cell` 残留字（如单独一个「版本」）清空，只保留右侧「日期 / 版本 / 修订描述」。
+ - `版本记录` / `Version History` 表以版本为行，列为 `版本` / `发布日期` / `修订内容摘要`。模板或源表若把版本号排成列，转换时转置。
+ - 列宽合计低于 480 pt 的表保持默认宽度，例如约 392 pt（约 138 mm）的两列表、约 143 mm 的 Sequencing cycle 表。
 - Word 表格跨页后重复出现的表头行，需要在转换后自动删除。
 - 若同一 Markdown 表中出现嵌入式 `Table N ...` 行，视为下一张表的标题并拆分为独立表格。
 - 被合并单元格拆碎的英文表题片段需自动拼回完整标题。
 
+  - 单元格内嵌套的提示框（`[[NOTE:type]]…[[/NOTE]]`）必须转成 `<note>`，包括列表项里的提示；不得把 `[[NOTE:tip]]` 原文留在 `<li><p>` 中。
+  - 两列“界面截图 + 说明文字”对照表（首行仅图片、次行仅说明）输出为无表头的单行两列表，单元格为带 caption 的 `<fig>`。
+  - 步骤里并排的两张界面截图，以 IDML 原表为准：两列截图表输出为无表头、无填充色的单行两列表。每格须带 `<fig><title>`（如「点击停止测序」「确认停止测序」），caption 行并入格内，不得丢图题。例如「PE测序时漏加MDA混合液」步骤 1、2、6。带 `<title>` 的相邻独立 `<fig>` 不得事后收进两列表（放置载片、清洗、FAQ、自定义测序方案示例）。无图题的相邻块级截图仍可收成两列表。
+  - 并排两列且单元格含 `<fig>` 的表，`<entry>` 写 `valign="bottom"`，两张图底部对齐。
 - 表格单元格内每个句段包在 `<p>`：`<entry><p>…</p></entry>`。空单元格保持 `<entry></entry>`。
 - 单元格内列表同样每个 `<li>` 包 `<p>`。
 - 正文每个句段各自一个 `<p>`，含 note 内文字。
@@ -262,3 +297,16 @@
 原生 Markdown（`.md` / `.markdown`）转 DITA 共用同一套 Note、列表、表格、图片与验收规则；Markdown 特有语法写在“Markdown 源解析规则”小节。
  - 本文件是 Word/WPS、IDML 与 Markdown 转 DITA 转换规则的唯一基线，新增或调整转换规则时先更新本文件，再落实现与测试。
  - 原生 Markdown 的 `**加粗**` 即使出现在英文步骤列表中也转为 `<b>`，不按 Word 英文屏上控件处理。
+ - `<frontmatter>` 内顺序为：封面（Cover）、`关于说明书` 或源文档中的 `关于指南`、`版本记录`，以及源文档中的 `About the sequencing set`；这些 topic 与封面平级，排在封面之后，不嵌套在封面下。源文档有 `关于指南` 时，用它替换参考包中的 `关于说明书`，不保留参考包里另一本产品的关于说明书正文。
+
+## IME 导入经验（H-020-000876）
+
+- IDML 端到端必须用合并包：独立 `.idml` 不含 `Links/`，需与同级 `Links/`（或 SVG 图包按主干写入的 `Links/{idml主干}.svg`）打成一个 zip/idml 再转。流水线会删除它处理的 `.idml` 副本，源文件用拷贝，勿把 seed 路径直接交给 pipeline。
+- 改完 `backend/app/api/convert.py` 后必须重启后端（uvicorn 无 `--reload`），再用 API 重转。
+- IME 交叉引用金标准（参考包 `PM021493_T7+ UM_English_RUO_V1.0_en-US`）：空元素 `<xref id="xre…" href="文件.dita#topic根id/标题id" cms:title="…"/>`。例：`DTO020709.dita#topic-DTO001483/tit2aadd89e`。文件名可以是 `cms:number`，与 topic 的 `id` / `cms:keys` 不同。
+- 章/节 xref 指向目标 topic 的 title：`DTO041064.dita#topic-DTO041064/title_DTO041064`。图/表 xref 指向题注 title id：`DTO041157.dita#topic-DTO041157/tit3d5c85fb`。不得只指向含多图的 topic 文件。
+- 转换时写完整绑定，导入后即可点选。不得写 `keyref`：IME 发布 PDF 会报 `keyRef链接失效`，错误数据是当时写入的 topic 编号。
+- `<table>` / `<fig>` / 题注 `<title>` / fig 内 `<image>` / `<xref>` 必须带 IME 原生 id：三字母前缀 + 8 位十六进制（`tab` / `fig` / `tit` / `ima` / `xre`）。封面已有 id 保持原值。IME 按 topic 编号搜索后再展开 table/title、fig/title；没有 id 时搜索树只剩 topic/title/body，父级「制备DNB」看不到叶子里的表。
+- 图/表 xref 的 `cms:title` 用 ParagraphDestination 段落的真实题注（如 `PE测序的MGI Barcode文件`），不得把「表 25」「图 121」或 `第N 页“…"` 写进正文。
+- 验收：包内全部 `<xref>` 的 href 含 `#` 且 fragment 含 `/`，目标文件与 `id` 必须能对上；`keyref=` 计数为 0。导入 IME 后发布一次 PDF，确认无 `keyRef链接失效`。
+- 缺图清单按「源文件名 + 图题 + topic」交给用户补图后再转。
