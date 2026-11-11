@@ -1941,7 +1941,7 @@ def _postprocess_dita_topics(output_base):
         new_text = _wrap_standalone_dita_images_in_fig(new_text)
         new_text = _pair_adjacent_dita_figures(new_text)
         new_text = _align_side_by_side_figure_entries(new_text)
-        new_text = _move_indexterms_to_prolog(new_text)
+        new_text = _place_indexterms_in_body(new_text)
         new_text = _assign_dita_caption_ids(new_text, os.path.splitext(fname)[0])
         if new_text != text:
             with open(path, "w", encoding="utf-8") as handle:
@@ -3096,76 +3096,51 @@ INDEXTERM_CHUNK_RE = re.compile(
 )
 
 
-def _lift_indexterms_out_of_uicontrol(xml_text):
-    """IME repeats indexterm text inside uicontrol; move the marker outside."""
-
-    def _repl(match):
-        inner = match.group(1)
-        terms = INDEXTERM_CHUNK_RE.findall(inner)
-        if not terms:
-            return match.group(0)
-        body = INDEXTERM_CHUNK_RE.sub("", inner).strip()
-        prefix = "".join(terms)
-        if not body:
-            return prefix
-        return f"{prefix}<uicontrol>{body}</uicontrol>"
-
-    return re.sub(r"<uicontrol>(.*?)</uicontrol>", _repl, xml_text or "")
+def _indexterm_visible_text(term_xml):
+    return re.sub(r"</?indexterm>", "", term_xml or "")
 
 
-def _move_indexterms_to_prolog(xml_text):
-    """IME renders body <indexterm> as visible text; keep terms in prolog."""
+def _place_indexterms_in_body(xml_text):
+    """Wrap the first body occurrence with <indexterm>; do not emit prolog keywords."""
     body_match = re.search(
         r"(<(?:body|conbody)\b[^>]*>)([\s\S]*?)(</(?:body|conbody)>)",
         xml_text or "",
     )
     if not body_match or "<indexterm>" not in body_match.group(2):
         return xml_text
-    terms = []
-
-    def _take(match):
-        terms.append(match.group(0))
-        return ""
-
-    new_body = INDEXTERM_CHUNK_RE.sub(_take, body_match.group(2))
-    if not terms:
-        return xml_text
-    unique = []
     seen = set()
-    for term in terms:
-        if term not in seen:
-            seen.add(term)
-            unique.append(term)
-    keywords = "".join(unique)
-    xml_text = (
+
+    def _keep_first(match):
+        chunk = match.group(0)
+        key = _indexterm_visible_text(chunk)
+        if not key or key in seen:
+            return ""
+        seen.add(key)
+        return chunk
+
+    new_body = INDEXTERM_CHUNK_RE.sub(_keep_first, body_match.group(2))
+
+    def _dedupe_following(match):
+        chunk = match.group(1)
+        following = match.group(2) or ""
+        full = _indexterm_visible_text(chunk)
+        leaves = re.findall(r"<indexterm>([^<]+)", chunk)
+        leaf = leaves[-1] if leaves else full
+        for dup in (full, leaf):
+            if dup and following.startswith(dup):
+                return chunk + following[len(dup):]
+        return chunk + following
+
+    new_body = re.sub(
+        r"(" + INDEXTERM_CHUNK_RE.pattern + r")([^<]*)",
+        _dedupe_following,
+        new_body,
+    )
+    return (
         xml_text[: body_match.start(2)]
         + new_body
         + xml_text[body_match.end(2) :]
     )
-    if "<keywords>" in xml_text:
-        return xml_text.replace("<keywords>", "<keywords>" + keywords, 1)
-    if "<metadata>" in xml_text:
-        return xml_text.replace(
-            "<metadata>",
-            "<metadata>\n      <keywords>" + keywords + "</keywords>",
-            1,
-        )
-    if "<prolog>" in xml_text:
-        return xml_text.replace(
-            "<prolog>",
-            "<prolog>\n    <metadata>\n      <keywords>"
-            + keywords
-            + "</keywords>\n    </metadata>",
-            1,
-        )
-    prolog = (
-        "  <prolog>\n"
-        "    <metadata>\n"
-        f"      <keywords>{keywords}</keywords>\n"
-        "    </metadata>\n"
-        "  </prolog>\n"
-    )
-    return re.sub(r"(</title>\s*)", r"\1" + prolog, xml_text, count=1)
 
 
 def _strip_xml_ns(tag):
@@ -5563,7 +5538,6 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 + "</indexterm>" * len(terms)
             )
         restored = INDEX_RE.sub(_index_repl, restored)
-        restored = _lift_indexterms_out_of_uicontrol(restored)
         if is_native_md and xref_map:
             def _md_section_xref(match):
                 num = match.group(1)
@@ -7001,7 +6975,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 {body_content}
   </{body_tag}>
 </{root_tag}>"""
-    return _move_indexterms_to_prolog(xml)
+    return _place_indexterms_in_body(xml)
 
 
 def _strip_tag(xml):

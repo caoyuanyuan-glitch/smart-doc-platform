@@ -135,8 +135,8 @@ DITA 父子节点兼容规则
   - 无正文的父 topic 至少输出一个空 `<p>`，不要只留空白 `conbody`
 
 Word 转 DITA 批量转换基线规则
-- Date: 2026-10-22
-- Context: Agent 在收敛英文 Word 转 DITA 转换规则并准备后续批量处理时发现；2026-10-22 补 IDML 空 xref / 斜体 / 列宽，以及用 IME 包图顶替 Links
+- Date: 2026-11-11
+- Context: Agent 在收敛英文 Word 转 DITA 转换规则并准备后续批量处理时发现；2026-11-11 补 IME zip 中文文件名重打包约束
 - Category: 工作流协作
 - Instructions:
   - 后续批量 Word/WPS 转 DITA 时，统一以 `当前工作区/.monkeycode/docs/word-to-dita-conversion-rules.md` 作为转换与验收基线
@@ -153,6 +153,7 @@ Word 转 DITA 批量转换基线规则
   - IME 主题类型：封面 `sCoverTopic`，章级 `chapterTopic`，其余一律 `sDitaTopic` + `DTO`。IME 按编号前缀显示：`DTO` 为「主题 Topic」，`DTC` 为「主题 Concept」
   - `ul`/`ol` 条目、表格单元格、正文与 Note 句段都包 `<p>`：`<li><p>…</p></li>`、`<entry><p>…</p></entry>`；空单元格保持空 `<entry>`
   - 改写已导入的 IME zip 时，必须同步 `.dita` 文件名/`cms:number`、ditamap、`xref`、`jsonData.json`、`infotree.xml`（含 `out/` 副本）。只改 `.dita` 时 IME 仍显示旧类型
+  - 重打包必须从原 zip 拷贝未改条目（文件名、UTF-8 flag、压缩方式、字节原样），只替换改过的文件；整包解压再 zip 会把 `image/` 中文名打成乱码，IME 报「解析xml文件失败！」
   - 把已有节点的 `DTC` 前缀改成 `DTO` 后，IME 更新匹配不到原编号，导入选新增
   - 全量单测中这 6 个失败属环境性预置、非回归，排查时不要浪费时间：4 个 `DocxHeadingDetectionTest`（缺 `.monkeycode-tmp-files/` 下的 `.docx` 样例）、`test_polish_match_score`（润色模块数据）、`test_document_ocr_keeps_numbered_paragraphs`（缺 `tesseract`）
   - 改完 `backend/app/api/convert.py` 必须重启后端（uvicorn 无 `--reload`），再用 API 端到端跑 617：`POST /api/auth/login`（表单 `admin/admin123`）取 token → `POST /api/convert/`（multipart：`source_file`、`target_format=dita`、`output_language=zh-CN`、`template_file`）→ 轮询 `GET /api/convert/{id}/progress` 到 `completed` → `GET /api/convert/{id}/download`

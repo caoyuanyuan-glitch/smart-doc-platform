@@ -65,6 +65,13 @@
  - 封面与章级保持 `sCoverTopic` / `chapterTopic`，不改成 Topic。
  - 编号前缀从 `DTC` 改为 `DTO` 后，IME 按原编号匹配不到节点，导入时选新增。
 
+## IME 包改写注意事项
+
+- 改已导入的 IME zip 时，只替换真正改过的文件；其余条目从原 zip 原样拷贝，保留文件名、UTF-8 flag、压缩方式和字节。
+- 整包解压再重新 zip 会把 `image/` 下中文文件名打成乱码（如 `G027438_绿色.svg`）。IME 随后报「解析xml文件失败！」，因为 `href` 找不到原图。
+- 改完后核对：文件名列表与原包一致；未改文件的字节与原包一致；不要额外写入 `image/` 这类空目录项。
+- 改主题类型时仍须同步 `.dita` 文件名/`cms:number`、ditamap、`xref`、`jsonData.json`、`infotree.xml`（含 `out/` 副本）。
+
 ## 列表规则
 
 - 有序步骤列表转换为 `ol` 时保持连续。
@@ -99,6 +106,16 @@
 - 解析阶段写成 `[[TERM]]试剂名[[/TERM]]`，DITA 阶段还原为 `<term>试剂名</term>`。
 - 试剂名保持原文，包括空格与大小写（如 `Conversion Enzyme`）。
 - 同一字符 run 已是屏上控件（Silk screen / `【】`）时输出 `<uicontrol>`，控件优先于术语。
+
+### 索引（`indexterm`）
+
+- IDML 索引标识（`PageReference` / `ReferencedTopic`）转为 `<indexterm>`；层级用 `Topicn` 切分后嵌套，如 `计算机/控制软件` 输出 `<indexterm>计算机<indexterm>控制软件</indexterm></indexterm>`。
+- `<indexterm>` 直接包裹正文中的索引条目内容，放在 `body` / `conbody` 里该词出现的位置。例如 `如保险丝损坏` 输出 `如<indexterm>保险丝</indexterm>损坏`。
+- 不得抽到 topic 标题下的 `<prolog><metadata><keywords>`；topic 不为此生成空 `prolog`。
+- `<indexterm>` 的文本就是可见正文，不要在标签旁再重复写一遍索引词。
+- 索引词本身是屏上控件时，在 `<uicontrol>` 内包裹：`<uicontrol><indexterm>ChipProductivity(%)</indexterm></uicontrol>`。
+- 只包裹该 topic 正文里的首次出现；不要写进 `href` 等属性。
+- InDesign 生成式索引（`Title:Index` 字母头和页码列表）不进正文。「索引」章不生成空 topic，ditamap 输出 `<backmatter>` > `<booklists>` > `<indexlist/>`，由 IME 根据 indexterm 自动生成索引页。
 
 ## Note 规则
 
@@ -179,7 +196,7 @@
 - 内联图标解析失败、占位符被去掉时，仅当左右两侧都是字母或数字才插入空格；标点（含中文标点）紧贴图标时不补空格。
   - 交叉引用（`CrossReferenceSource`）在解析阶段转成 `[[XREF:目标标题#页码]]` 标记（分隔符不用竖线，避免拆坏 markdown 表格）；页码取自 `TextVariableInstance/@ResultText`。中文源形态为 `第<页码>页“目标标题”`，英文源形态为 `<target title> on Page`。交叉引用一律空标签 `<xref href cms:title/>`，页码由 IME 生成，不得把 `第N 页“…"` 或最外层引号写进正文。标题查找折叠空白（`读长DNB` 与 `读长 DNB`）。只有标题、没有正文的容器节点映射到其后第一个真实 `.dita` 子 topic，以便可点。`图 N` / `表 N` 按 ditamap 顺序绑定到随后的 `<fig><title>` / `<table><title>`，`cms:title` 写实际图题或表题（如 `ssDNA文库所需量`、`PE测序的MGI Barcode文件`），不得保留「表 25」「图 121」。
   - 图/表交叉引用的真实题注从 IDML `Hyperlink Source` → `ParagraphDestination` 所在段落读取（如锚点「锚点 52」对应「PE测序的MGI Barcode文件」），不能只用 CrossReference 的「图 121 / 表 25」显示文本。
-  - IDML 索引标识（`PageReference` / `ReferencedTopic`）转成 `<indexterm>`；层级用 `Topicn` 切分后嵌套。`<indexterm>` 不得放在 `<uicontrol>` 内，也不得留在 body 里当正文显示，应抽到 topic `<prolog><metadata><keywords>`，正文只留 `uicontrol`。InDesign 生成式索引（`Title:Index` 字母头和页码列表）不进正文。「索引」章不生成空 topic，ditamap 输出 `<backmatter>` > `<booklists>` > `<indexlist/>`，由 IME 根据 indexterm 自动生成索引页。
+  - 索引标识见「索引（`indexterm`）」：`PageReference` / `ReferencedTopic` 转成正文包裹的 `<indexterm>`，不进 `prolog`。
   - 蓝色试剂名见「术语（`term`）」：字符样式 `Reagent name` / `Reagent name_EN` 输出 `<term>`。
  - 单元格内嵌套的提示框表格输出为该 `<entry>` 内的 `<note>`，不得并成一句普通正文。
   - 交叉引用的 `cms:title` 不带源文档或 IME 的章节编号（如 `9.1`），也不含页码。
@@ -263,7 +280,7 @@
 - 表格标题、图片标题、列表、note 转换结果都应通过自动校验。
 - 内容完整性：源文档全部段落必须出现在输出 DITA 中（用“源段落 → 输出全文”归一化比对，缺失数应为 0）。
  - 结构合法性：输出的每个 `.dita` / `.ditamap` 必须可解析，ditamap 中所有 `href` 必须可达。
-  - 每次转换完成后必须做一轮与原文核对：按本文件逐条检查模板复用、标题树、列表、note、uicontrol、term、图题/表题、图片和扉页；先跑单测与 `verify_word_to_dita_package.py`，再人工对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出后再交给用户。
+  - 每次转换完成后必须做一轮与原文核对：按本文件逐条检查模板复用、标题树、列表、note、uicontrol、term、indexterm、图题/表题、图片和扉页；先跑单测与 `verify_word_to_dita_package.py`，再人工对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出后再交给用户。
 
 ## Markdown 源解析规则
 
@@ -302,6 +319,7 @@
 ## IME 导入经验（H-020-000876）
 
 - IDML 端到端必须用合并包：独立 `.idml` 不含 `Links/`，需与同级 `Links/`（或 SVG 图包按主干写入的 `Links/{idml主干}.svg`）打成一个 zip/idml 再转。流水线会删除它处理的 `.idml` 副本，源文件用拷贝，勿把 seed 路径直接交给 pipeline。
+ - 手工改 IME 导出包后重打包，见「IME 包改写注意事项」：从原 zip 拷贝未改条目，只替换改过的 `.dita`，避免中文图片文件名乱码导致「解析xml文件失败！」。
 - 改完 `backend/app/api/convert.py` 后必须重启后端（uvicorn 无 `--reload`），再用 API 重转。
 - IME 交叉引用金标准（参考包 `PM021493_T7+ UM_English_RUO_V1.0_en-US`）：空元素 `<xref id="xre…" href="文件.dita#topic根id/标题id" cms:title="…"/>`。例：`DTO020709.dita#topic-DTO001483/tit2aadd89e`。文件名可以是 `cms:number`，与 topic 的 `id` / `cms:keys` 不同。
 - 章/节 xref 指向目标 topic 的 title：`DTO041064.dita#topic-DTO041064/title_DTO041064`。图/表 xref 指向题注 title id：`DTO041157.dita#topic-DTO041157/tit3d5c85fb`。不得只指向含多图的 topic 文件。

@@ -4884,6 +4884,9 @@ class ImeFeedbackFixesTest(unittest.TestCase):
             source_format="idml",
         )
         self.assertIn("<indexterm>生物安全</indexterm>", xml)
+        self.assertIn("请遵守<indexterm>生物安全</indexterm>实验室规范", xml)
+        self.assertNotIn("<prolog>", xml)
+        self.assertNotIn("<keywords>", xml)
         nested = _content_to_dita_xml(
             "控制软件",
             "打开[[INDEX:计算机/控制软件]]。\n",
@@ -4897,6 +4900,11 @@ class ImeFeedbackFixesTest(unittest.TestCase):
             "<indexterm>计算机<indexterm>控制软件</indexterm></indexterm>",
             nested,
         )
+        self.assertIn(
+            "打开<indexterm>计算机<indexterm>控制软件</indexterm></indexterm>。",
+            nested,
+        )
+        self.assertNotIn("<prolog>", nested)
 
     def test_inline_icon_width_is_forced_to_6mm(self):
         import tempfile
@@ -4997,7 +5005,7 @@ class ImeFeedbackFixesTest(unittest.TestCase):
         self.assertIn("30.Wash or not.svg", out)
         self.assertEqual(out.count("<li>"), 3)
 
-    def test_indexterm_moves_out_of_uicontrol(self):
+    def test_indexterm_stays_in_uicontrol(self):
         xml = _content_to_dita_xml(
             "报告参数说明",
             "【[[INDEX:ChipProductivity(%)]]ChipProductivity(%)】\n",
@@ -5008,14 +5016,32 @@ class ImeFeedbackFixesTest(unittest.TestCase):
             source_format="idml",
         )
         self.assertIn("<indexterm>ChipProductivity(%)</indexterm>", xml)
-        self.assertIn("<uicontrol>ChipProductivity(%)</uicontrol>", xml)
+        self.assertIn(
+            "<uicontrol><indexterm>ChipProductivity(%)</indexterm></uicontrol>",
+            xml,
+        )
         self.assertNotIn(
             "<uicontrol><indexterm>ChipProductivity(%)</indexterm>ChipProductivity(%)</uicontrol>",
             xml,
         )
-        self.assertIn("<keywords><indexterm>ChipProductivity(%)</indexterm></keywords>", xml)
-        body = xml.split("<body", 1)[-1]
-        self.assertNotIn("<indexterm>", body)
+        self.assertNotIn("<keywords>", xml)
+        self.assertNotIn("<prolog>", xml)
+        self.assertEqual(xml.count("ChipProductivity(%)"), 1)
+
+    def test_indexterm_wraps_first_occurrence_only(self):
+        xml = _content_to_dita_xml(
+            "保险丝",
+            "如[[INDEX:保险丝]]保险丝损坏。另一处[[INDEX:保险丝]]保险丝也要检查。\n",
+            "concept",
+            "DTO053889",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("如<indexterm>保险丝</indexterm>损坏", xml)
+        self.assertIn("另一处保险丝也要检查", xml)
+        self.assertEqual(xml.count("<indexterm>"), 1)
+        self.assertNotIn("<prolog>", xml)
 
     def test_container_title_maps_to_first_child_topic(self):
         prepared = [
