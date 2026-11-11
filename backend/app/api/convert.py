@@ -110,7 +110,8 @@ CHINESE_NOTE_LABEL_PATTERN = re.compile(
     r'^(?:\[\[/?(?:B|SUP|SUB)\]\])*(注意事项|其他注意事项|注意|提示|警告|小心|停止点)'
     r'(?:\[\[/?(?:B|SUP|SUB)\]\])*[:：](?:\[\[/?(?:B|SUP|SUB)\]\])*\s*(.*)$'
 )
-CHINESE_WARNING_ACTION_PATTERN = re.compile(r'^(请勿|切勿)\s*(.*)$')
+CHINESE_WARNING_ACTION_PATTERN = re.compile(r'^(请勿|切勿)[:：]\s*(.*)$')
+NOTE_EXAMPLE_LABEL_RE = re.compile(r'^(例|例如)[:：]?\s*$')
 # Note enumeration markers: Chinese 【1】 and English Word [1]. These continue a
 # label-only 注意：/Note: and are grouped into one <ul> inside the note.
 NOTE_ENUM_MARKER_RE = re.compile(r'^(?:【\d+】|\[\d+\])')
@@ -134,6 +135,8 @@ def _note_enum_item_text(text):
     visible = _note_visible_text(text)
     match = NOTE_ENUM_MARKER_RE.match(visible)
     if not match:
+        if NOTE_EXAMPLE_LABEL_RE.match(visible) or re.match(r'^(例|例如)[:：]', visible):
+            return visible
         return None
     rest = visible[match.end():].strip()
     return rest or None
@@ -939,6 +942,97 @@ def _is_docx_toc_number(text):
     return bool(re.fullmatch(r'\d+(?:\.\d+)*', text or ''))
 
 
+def _docx_table_cell_visible_text(text):
+    value = re.sub(r'\[\[SPAN:\d+,\d+\]\]', '', text or '')
+    value = value.replace('[[SPANC]]', '')
+    return value.strip()
+
+
+def _docx_table_row_has_text(row):
+    return any(_docx_table_cell_visible_text(cell) for cell in (row or []))
+
+
+def _drop_empty_docx_grid_rows(grid):
+    """Drop all-empty Word table rows and shrink rowspans that covered them."""
+    if not grid:
+        return []
+    keep = [_docx_table_row_has_text(row) for row in grid]
+    if all(keep):
+        return grid
+    if not any(keep):
+        return []
+    new_grid = []
+    for index, row in enumerate(grid):
+        if not keep[index]:
+            continue
+        new_row = []
+        for cell in row:
+            raw = cell or ''
+            match = re.search(r'\[\[SPAN:(\d+),(\d+)\]\]', raw)
+            if not match:
+                new_row.append(cell)
+                continue
+            colspan = max(1, int(match.group(1)))
+            rowspan = max(1, int(match.group(2)))
+            kept_span = sum(
+                1 for later in range(index, min(index + rowspan, len(grid)))
+                if keep[later]
+            )
+            raw = re.sub(r'\s*\[\[SPAN:\d+,\d+\]\]', '', raw).rstrip()
+            if colspan > 1 or kept_span > 1:
+                raw = (raw + ' ' if raw else '') + f'[[SPAN:{colspan},{kept_span}]]'
+            new_row.append(raw)
+        new_grid.append(new_row)
+    return new_grid
+
+
+def _docx_md_table_data_rows(table_lines):
+    rows = []
+    for line in table_lines or []:
+        stripped = (line or '').strip()
+        if stripped.startswith('[[') or re.match(r'^\|\s*:?---', stripped):
+            continue
+        if stripped.startswith('|'):
+            rows.append(stripped)
+    return rows
+
+
+def _docx_md_table_col_count(row_line):
+    cells = [part for part in (row_line or '').strip().strip('|').split('|')]
+    return len(cells)
+
+
+def _docx_md_row_looks_like_header(row_line):
+    blob = re.sub(r'\[\[SPAN:\d+,\d+\]\]', '', row_line or '')
+    blob = blob.replace('[[SPANC]]', '')
+    blob = re.sub(r'[|\s]', '', blob)
+    return bool(re.search(r'试剂盒种类|组分信息|管盖颜色|规格及数量', blob))
+
+
+def _merge_adjacent_docx_markdown_tables(lines, table_lines):
+    """Join a page-split Word table onto the previous markdown table."""
+    new_rows = _docx_md_table_data_rows(table_lines)
+    if not new_rows or not lines:
+        return False
+    idx = len(lines) - 1
+    while idx >= 0 and not (lines[idx] or '').strip():
+        idx -= 1
+    if idx < 0:
+        return False
+    prev = (lines[idx] or '').strip()
+    if not prev.startswith('|') or re.match(r'^\|\s*:?---', prev):
+        return False
+    if _docx_md_table_col_count(prev) != _docx_md_table_col_count(new_rows[0]):
+        return False
+    start = 1 if _docx_md_row_looks_like_header(new_rows[0]) else 0
+    extra = new_rows[start:]
+    if not extra:
+        return True
+    for offset, row in enumerate(extra):
+        lines.insert(idx + 1 + offset, row)
+    return True
+
+
 def _docx_table_to_markdown(table, heading=""):
     """Render a Word table, preserving merges and the real header-row count."""
     from docx.oxml.ns import qn
@@ -1041,11 +1135,19 @@ def _docx_table_to_markdown(table, heading=""):
         if not header_flag:
             break
         header_rows += 1
+    keep_mask = [_docx_table_row_has_text(row) for row in grid]
+    kept_header_rows = sum(1 for index in range(header_rows) if index < len(keep_mask) and keep_mask[index])
+    grid = _drop_empty_docx_grid_rows(grid)
+    if not grid:
+        return []
+    header_rows = kept_header_rows
     if header_rows == 0 and len(grid) > 1:
-        first_has_continuing_merge = any(
-            merge == "restart" and rowspan_for(0, start) > 1
-            for start, _span, merge, _text in parsed_rows[0][1]
-        )
+        first_has_continuing_merge = False
+        for cell in grid[0]:
+            span_match = re.search(r'\[\[SPAN:\d+,(\d+)\]\]', cell or '')
+            if span_match and int(span_match.group(1)) > 1:
+                first_has_continuing_merge = True
+                break
         if not first_has_continuing_merge:
             header_rows = 1
     if header_rows >= len(grid) and len(grid) > 1:
@@ -1056,8 +1158,9 @@ def _docx_table_to_markdown(table, heading=""):
     md_lines = []
     md_lines.append(f"[[THEAD:{header_rows}]]")
     if header_rows == 0:
-        first_col_span = rowspan_for(0, 0) if parsed_rows else 1
-        if first_col_span > 1:
+        first_cell = grid[0][0] if grid and grid[0] else ""
+        first_span = re.search(r'\[\[SPAN:\d+,(\d+)\]\]', first_cell or "")
+        if first_span and int(first_span.group(1)) > 1:
             md_lines.append("[[ROWHEADER:firstcol]]")
     colwidths = _docx_table_relative_colwidths(table, max_col)
     if colwidths:
@@ -1651,6 +1754,34 @@ def _wrap_noteish_top_level_lists(xml_text):
     return xml_text[: body_match.start(2)] + new_body + xml_text[body_match.end(2) :]
 
 
+def _wrap_operation_precaution_paragraphs(xml_text):
+    """Turn consecutive body paragraphs in an 操作注意事项 topic into a list."""
+    if not xml_text:
+        return xml_text
+    titles = re.findall(r'cms:title="([^"]+)"', xml_text)
+    titles.extend(re.findall(r"<title\b[^>]*>([^<]*)</title>", xml_text))
+    if not any("操作注意事项" in (title or "") for title in titles):
+        return xml_text
+    body_match = re.search(
+        r"(<(?:body|conbody)\b[^>]*>)([\s\S]*?)(</(?:body|conbody)>)",
+        xml_text,
+    )
+    if not body_match:
+        return xml_text
+    body = body_match.group(2)
+    if "<ul>" in body or "<ol>" in body or "<table" in body or "<note" in body:
+        return xml_text
+    paragraphs = re.findall(r"<p>[\s\S]*?</p>", body)
+    if len(paragraphs) < 2:
+        return xml_text
+    leftover = re.sub(r"<p>[\s\S]*?</p>", "", body).strip()
+    if leftover:
+        return xml_text
+    items = "\n".join(f"          <li>{paragraph}</li>" for paragraph in paragraphs)
+    new_body = f"\n        <ul>\n{items}\n        </ul>\n"
+    return xml_text[: body_match.start(2)] + new_body + xml_text[body_match.end(2) :]
+
+
 def _dita_files_in_map_order(output_base):
     ordered = []
     seen = set()
@@ -2052,6 +2183,7 @@ def _postprocess_dita_topics(output_base):
         text = open(path, encoding="utf-8").read()
         new_text = _split_about_manual_paragraphs(text)
         new_text = _wrap_noteish_top_level_lists(new_text)
+        new_text = _wrap_operation_precaution_paragraphs(new_text)
         new_text = _wrap_standalone_dita_images_in_fig(new_text)
         new_text = _pair_adjacent_dita_figures(new_text)
         new_text = _align_side_by_side_figure_entries(new_text)
@@ -2749,8 +2881,12 @@ def _docx_to_markdown(file_path):
             ensure_cover_heading()
             table_lines = _docx_table_to_markdown(block, heading=current_heading)
             if table_lines:
-                lines.extend(table_lines)
-                lines.append("")
+                if _merge_adjacent_docx_markdown_tables(lines, table_lines):
+                    if lines and lines[-1] != "":
+                        lines.append("")
+                else:
+                    lines.extend(table_lines)
+                    lines.append("")
 
     lines = _merge_docx_wrapped_paragraphs(lines)
     lines = _nest_docx_label_bullet_lists(lines)
@@ -6239,7 +6375,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         stripped_text = re.sub(r'\[\[/?(?:B|SUP|SUB)\]\]', '', stripped_text)
         if stripped_text in {"注意事项", "其他注意事项"}:
             return False
-        if re.match(r'^(注意事项|其他注意事项|注意|提示|警告|小心|请勿|切勿|停止点)[:：]?\s*(.*)$', stripped_text):
+        if re.match(r'^(注意事项|其他注意事项|注意|提示|警告|小心|停止点)[:：]?\s*(.*)$', stripped_text):
+            return True
+        if re.match(r'^(请勿|切勿)[:：]', stripped_text) or stripped_text in {"请勿", "切勿"}:
             return True
         return bool(NOTE_LABEL_PATTERN.match(stripped_text))
 
@@ -6290,6 +6428,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     def _infer_note_type_from_text(text):
         normalized = _strip_md_bold(_unescape_md(_strip_list_prefix((text or '').strip()))).lower()
+        if re.match(r'^(停止点|stop\s*point|stoppoint)\b', normalized):
+            return "stoppoint"
         if any(keyword in normalized for keyword in ["warning", "caution", "danger", "请勿", "切勿", "警告", "小心", "do not"]):
             return "warning"
         if normalized.startswith("注意"):
@@ -6464,6 +6604,19 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             if idx > 0 and _is_repeated_table_header_row(row, header_row):
                 continue
             filtered_rows.append(row)
+        table_has_text = any(
+            re.sub(r'\[\[SPAN:\d+,\d+\]\]', '', (cell or '').replace('[[SPANC]]', '')).strip()
+            for row in filtered_rows
+            for cell in row
+        )
+        if not filtered_rows or not table_has_text:
+            table_rows = []
+            pending_table_title = None
+            pending_table_caption_only = None
+            pending_table_wide = None
+            pending_table_colwidths = None
+            pending_table_rowheader = None
+            return None
         header_rows = pending_table_header_rows
         pending_table_header_rows = None
         if header_rows is None:
@@ -6795,8 +6948,6 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             return None
         has_prefixed_note = bool(NOTE_LABEL_PATTERN.match(normalized_text) or CHINESE_NOTE_LABEL_PATTERN.match(normalized_text))
         if original_text.startswith(("- ", "* ", "+ ")) and not has_prefixed_note:
-            if any(keyword in normalized_text for keyword in ["请勿", "切勿", "小心", "警告"]):
-                return f'        <note type="warning"><p>{normalized_text}</p></note>'
             return None
         note_match = CHINESE_NOTE_LABEL_PATTERN.match(normalized_text) or NOTE_LABEL_PATTERN.match(normalized_text)
         if note_match:
@@ -6816,6 +6967,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             label_key = label.lower()
             if label in {"警告", "小心", "请勿", "切勿"} or label_key in {"warning", "caution", "danger"}:
                 note_type = "warning"
+            elif label == "停止点" or label_key.replace(" ", "") == "stoppoint":
+                note_type = "stoppoint"
             elif label == "注意":
                 note_type = "caution"
             else:
@@ -6826,6 +6979,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 # "注意：【1】..." continues with 【2】【3】 on later lines, so
                 # keep the note open to collect them into one bullet list.
                 and not NOTE_ENUM_MARKER_RE.match(_note_visible_text(detail))
+                and not (
+                    NOTE_EXAMPLE_LABEL_RE.match(_note_visible_text(_strip_list_prefix(next_nonempty)))
+                    or re.match(r'^(例|例如)[:：]', _note_visible_text(_strip_list_prefix(next_nonempty)))
+                )
             ):
                 return f'        <note type="{note_type}"><p>{_restore_inline_run_markup(detail)}</p></note>'
             return {"pending_type": note_type, "label": label, "detail": detail}
@@ -7265,11 +7422,27 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             clean = _clean_output_text(stripped)
             visible_clean = _note_visible_text(clean)
             if pending_note_type:
-                if NOTE_ENUM_MARKER_RE.match(visible_clean):
+                if (
+                    NOTE_ENUM_MARKER_RE.match(visible_clean)
+                    or NOTE_EXAMPLE_LABEL_RE.match(visible_clean)
+                    or re.match(r'^(例|例如)[:：]', visible_clean)
+                ):
                     # Enumerated items after a label-only note belong to that note.
                     pending_note_blocks.append(
                         f'          <p>{_restore_inline_run_markup(clean)}</p>'
                     )
+                    continue
+                next_vis = _note_visible_text(_strip_list_prefix(_next_nonempty_line(safe_lines, idx)))
+                if (
+                    NOTE_ENUM_MARKER_RE.match(next_vis)
+                    or NOTE_EXAMPLE_LABEL_RE.match(next_vis)
+                    or re.match(r'^(例|例如)[:：]', next_vis)
+                ):
+                    # Body sentence between 注意： and 例：/【N】 stays inside the note.
+                    if _note_visible_text(clean):
+                        pending_note_blocks.append(
+                            f'          <p>{_restore_inline_run_markup(clean)}</p>'
+                        )
                     continue
                 if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', visible_clean):
                     # A standalone number inside an open note is page furniture,

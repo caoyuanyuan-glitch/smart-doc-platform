@@ -60,6 +60,7 @@ from app.api.convert import (  # noqa: E402
     _split_about_manual_paragraphs,
     _wrap_standalone_dita_images_in_fig,
     _wrap_noteish_top_level_lists,
+    _wrap_operation_precaution_paragraphs,
     _apply_dita_inline_icon_widths,
     _pair_adjacent_dita_figures,
     _idml_index_marker,
@@ -192,7 +193,8 @@ class ContentGenerationTest(unittest.TestCase):
             topic_kind="concept",
         )
         self.assertIn('<note type="warning"><p>吸取上清并丢弃。</p></note>', xml)
-        self.assertIn('<note type="warning"><p>触碰磁珠。</p></note>', xml)
+        self.assertIn('<p>请勿触碰磁珠。</p>', xml)
+        self.assertEqual(xml.count("<note "), 1)
 
     def test_bold_attention_label_becomes_caution_note(self):
         xml = _content_to_dita_xml(
@@ -310,7 +312,7 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<note type="tip"><p><b>此步可放置50℃过夜反应。</b></p></note>', xml)
+        self.assertIn('<note type="stoppoint"><p><b>此步可放置50℃过夜反应。</b></p></note>', xml)
         self.assertNotIn("<li>", xml)
 
     def test_preparation_list_table_is_extra_wide(self):
@@ -735,8 +737,8 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<note type="warning">', xml)
-        self.assertNotIn('image/docx_image_002.png', xml)
+        self.assertIn('<li><p>添加试剂、转移上清时请勿触碰、吸取磁珠。</p>', xml)
+        self.assertNotIn("<note", xml)
 
     def test_english_warning_paragraph_becomes_note(self):
         xml = _content_to_dita_xml(
@@ -798,7 +800,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<note type="tip"><p>Store at -20C for up to 24 h.</p></note>', xml)
+        self.assertIn('<note type="stoppoint"><p>Store at -20C for up to 24 h.</p></note>', xml)
 
     def test_multiline_english_note_uses_icon_line_and_following_text(self):
         xml = _content_to_dita_xml(
@@ -809,7 +811,7 @@ class ContentGenerationTest(unittest.TestCase):
             "en-US",
             topic_kind="concept",
         )
-        self.assertIn('<note type="tip">', xml)
+        self.assertIn('<note type="stoppoint">', xml)
         self.assertIn('<p>Product(s) can be stored at -20 C.</p>', xml)
         self.assertNotIn('docx_image_016.png', xml)
 
@@ -5701,6 +5703,126 @@ class ImeFeedbackFixesTest(unittest.TestCase):
         self.assertIn('colwidth="0.09*"', xml)
         self.assertIn('colwidth="0.91*"', xml)
         self.assertIn('rowheader="firstcol"', xml)
+
+    def test_empty_docx_table_is_dropped(self):
+        table = DocxTableMarkdownTest()._real_table(
+            2, 4,
+            {(0, 0): "", (0, 1): "", (0, 2): "", (0, 3): ""},
+            header_rows=1,
+        )
+        self.assertEqual(_docx_table_to_markdown(table), [])
+
+    def test_empty_header_rows_are_dropped_before_real_header(self):
+        table = DocxTableMarkdownTest()._real_table(
+            3, 4,
+            {
+                (1, 0): "试剂盒种类",
+                (1, 1): "组分信息",
+                (1, 2): "管盖颜色",
+                (1, 3): "规格及数量",
+                (2, 0): "盒1",
+                (2, 1): "PCR Mix",
+                (2, 2): "透明",
+                (2, 3): "1",
+            },
+            header_rows=1,
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[0], "[[THEAD:1]]")
+        joined = "\n".join(lines)
+        self.assertIn("试剂盒种类", joined)
+        self.assertNotIn("|  |  |  |  |", joined)
+        xml = _content_to_dita_xml(
+            "试剂准备", "\n".join(lines), "concept", "DTO041050", "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn("<thead>", xml)
+        self.assertIn("试剂盒种类", xml)
+        self.assertNotIn("<row>\n              </row>", xml)
+
+    def test_page_split_reagent_tables_are_merged(self):
+        import tempfile
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "kits.docx")
+            doc = Document()
+            first = doc.add_table(rows=2, cols=4)
+            first.cell(0, 0).text = "试剂盒种类"
+            first.cell(0, 1).text = "组分信息"
+            first.cell(0, 2).text = "管盖颜色"
+            first.cell(0, 3).text = "规格及数量"
+            first.cell(1, 0).text = "盒1 试剂盒套装"
+            first.cell(1, 1).text = "PCR Mix"
+            first.cell(1, 2).text = "透明"
+            first.cell(1, 3).text = "1"
+            second = doc.add_table(rows=2, cols=4)
+            second.cell(1, 0).text = "盒5 试剂盒套装"
+            second.cell(1, 1).text = "primer"
+            second.cell(1, 2).text = "蓝"
+            second.cell(1, 3).text = "1"
+            doc.save(path)
+            markdown = _docx_to_markdown(path)
+        self.assertEqual(markdown.count("[[THEAD:"), 1)
+        self.assertIn("盒1 试剂盒套装", markdown)
+        self.assertIn("盒5 试剂盒套装", markdown)
+        xml = _content_to_dita_xml(
+            "试剂准备", markdown, "concept", "DTO041051", "zh-CN", topic_kind="task",
+        )
+        self.assertEqual(xml.count("<table"), 1)
+        self.assertIn("盒5 试剂盒套装", xml)
+
+    def test_qie_wu_inside_list_item_stays_a_list_item(self):
+        xml = _content_to_dita_xml(
+            "注意事项",
+            "- 所有样本及试剂应避免直接接触皮肤和眼睛，切勿吞咽。\n"
+            "- 所有样本和各种废弃物均应按相关法规规定进行污染物处理。",
+            "concept", "DTO041052", "zh-CN", topic_kind="concept",
+        )
+        self.assertEqual(xml.count("<li>"), 2)
+        self.assertNotIn("<note", xml)
+        self.assertIn("切勿吞咽", xml)
+
+    def test_qing_wu_sentence_without_colon_stays_paragraph(self):
+        xml = _content_to_dita_xml(
+            "储存",
+            "请勿将其置于室温以上的环境中。",
+            "concept", "DTO041053", "zh-CN", topic_kind="concept",
+        )
+        self.assertIn("<p>请勿将其置于室温以上的环境中。</p>", xml)
+        self.assertNotIn("<note", xml)
+
+    def test_attention_example_and_enum_items_share_one_note_list(self):
+        xml = _content_to_dita_xml(
+            "cDNA扩增",
+            "- [[B]]注意：[[/B]]\n\n"
+            "[[B]]针对不同样本和不同的细胞投入量，PCR循环数可适当调整。[[/B]]\n\n"
+            "[[B]]例[[/B]][[B]]：[[/B]]\n\n"
+            "[[B]]【1】第一项。[[/B]]\n\n"
+            "[[B]]【2】第二项。[[/B]]\n\n"
+            "[[B]]【3】第三项。[[/B]]",
+            "concept", "DTO041054", "zh-CN", topic_kind="task",
+        )
+        self.assertEqual(xml.count("<note "), 1)
+        self.assertIn('<note type="caution">', xml)
+        self.assertIn("<ul>", xml)
+        self.assertIn("针对不同样本和不同的细胞投入量", xml)
+        self.assertIn("<li><p>例：</p></li>", xml)
+        self.assertIn("<li><p>第一项。</p></li>", xml)
+        self.assertIn("<li><p>第三项。</p></li>", xml)
+        self.assertLess(xml.index("针对不同样本"), xml.index("<ul>"))
+        self.assertGreater(xml.index("</note>"), xml.index("第三项"))
+
+    def test_operation_precaution_paragraphs_become_ul(self):
+        xml = _content_to_dita_xml(
+            "DNA Clean Beads操作注意事项",
+            "使用前请充分混匀。\n\n请勿剧烈震荡。",
+            "concept", "DTO041055", "zh-CN", topic_kind="concept",
+        )
+        wrapped = _wrap_operation_precaution_paragraphs(xml)
+        self.assertIn("<ul>", wrapped)
+        self.assertIn("<li><p>使用前请充分混匀。</p></li>", wrapped)
+        self.assertIn("<li><p>请勿剧烈震荡。</p></li>", wrapped)
 
 
 if __name__ == "__main__":
