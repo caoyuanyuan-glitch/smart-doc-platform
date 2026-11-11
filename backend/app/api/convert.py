@@ -783,6 +783,40 @@ def _iter_docx_blocks(doc):
             yield Table(child, doc)
 
 
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _oxml_unwrap_element(element):
+    parent = element.getparent()
+    if parent is None:
+        return
+    index = parent.index(element)
+    for child in list(element):
+        element.remove(child)
+        parent.insert(index, child)
+        index += 1
+    parent.remove(element)
+
+
+def _accept_docx_tracked_changes(doc):
+    """Accept insert/delete/move revisions so python-docx sees the final text.
+
+    python-docx only walks direct ``w:r`` children, so inserted runs inside
+    ``w:ins`` never appear in ``paragraph.runs`` until the wrapper is unwrapped.
+    """
+    root = getattr(doc, "element", None)
+    if root is None:
+        return
+    for tag in (f"{{{W_NS}}}del", f"{{{W_NS}}}moveFrom"):
+        for element in list(root.iter(tag)):
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+    for tag in (f"{{{W_NS}}}ins", f"{{{W_NS}}}moveTo"):
+        for element in list(root.iter(tag)):
+            _oxml_unwrap_element(element)
+
+
 def _normalize_docx_text(text):
     return re.sub(r'\s+', ' ', str(text or '')).strip()
 
@@ -1021,6 +1055,13 @@ def _docx_table_to_markdown(table, heading=""):
     wide = _dita_table_should_be_extra_wide(max_col, heading)
     md_lines = []
     md_lines.append(f"[[THEAD:{header_rows}]]")
+    if header_rows == 0:
+        first_col_span = rowspan_for(0, 0) if parsed_rows else 1
+        if first_col_span > 1:
+            md_lines.append("[[ROWHEADER:firstcol]]")
+    colwidths = _docx_table_relative_colwidths(table, max_col)
+    if colwidths:
+        md_lines.append("[[COLW:" + ",".join(colwidths) + "]]")
     if wide:
         md_lines.append("[[TWIDE:180mm]]")
     md_lines.append("| " + " | ".join(grid[0]) + " |")
@@ -1028,6 +1069,32 @@ def _docx_table_to_markdown(table, heading=""):
     for row in grid[1:]:
         md_lines.append("| " + " | ".join(row) + " |")
     return md_lines
+
+
+def _docx_table_relative_colwidths(table, col_count):
+    """Read Word tblGrid widths and turn them into CALS relative colwidth values."""
+    from docx.oxml.ns import qn
+
+    tbl = getattr(table, "_tbl", None)
+    if tbl is None or col_count <= 0:
+        return None
+    widths = []
+    grid = tbl.find(qn("w:tblGrid"))
+    if grid is not None:
+        for grid_col in grid.findall(qn("w:gridCol")):
+            try:
+                widths.append(max(0, int(grid_col.get(qn("w:w")) or 0)))
+            except (TypeError, ValueError):
+                widths.append(0)
+    if len(widths) < col_count:
+        return None
+    widths = widths[:col_count]
+    if not any(width > 0 for width in widths):
+        return None
+    return _idml_relative_colwidths(
+        {index: float(width) for index, width in enumerate(widths)},
+        col_count,
+    )
 
 
 def _dita_table_should_be_extra_wide(cols, *texts):
@@ -1556,6 +1623,10 @@ def _align_side_by_side_figure_entries(xml_text):
 def _wrap_noteish_top_level_lists(xml_text):
     """Wrap a leading body <ul> that is actually a Word 提示/注意 box."""
     if not xml_text:
+        return xml_text
+    titles = re.findall(r'cms:title="([^"]+)"', xml_text)
+    titles.extend(re.findall(r"<title\b[^>]*>([^<]*)</title>", xml_text))
+    if any(re.search(r"注意事项|precautions", title or "", re.I) for title in titles):
         return xml_text
     body_match = re.search(
         r"(<(?:body|conbody)\b[^>]*>)([\s\S]*?)(</(?:body|conbody)>)",
@@ -2106,12 +2177,41 @@ def _get_docx_numbering_format(paragraph):
 def _docx_list_marker(paragraph):
     num_fmt, ilvl = _get_docx_numbering_format(paragraph)
     if not num_fmt:
+        if _docx_style_looks_like_list(paragraph):
+            return "- "
         return None
 
     indent = "  " * max(0, ilvl)
     if num_fmt in {"bullet", "none"}:
         return f"{indent}- "
     return f"{indent}1. "
+
+
+def _docx_style_looks_like_list(paragraph):
+    style = getattr(paragraph, "style", None)
+    name = (getattr(style, "name", None) or "").strip().lower()
+    return name in {"list paragraph", "list bullet", "list number", "列表段落"}
+
+
+_DOCX_OUTLINE_STEP_RE = re.compile(r"^(\d+(?:\.\d+){1,3})\.?\s+(\S.*)$")
+
+
+def _docx_procedure_step_body(text):
+    """Return the body of a typed outline step such as ``3.2.1 取细胞…``."""
+    compact = _normalize_docx_text(_strip_md_bold(text or ""))
+    match = _DOCX_OUTLINE_STEP_RE.match(compact)
+    if not match:
+        return None
+    rest = match.group(2).strip()
+    if not rest:
+        return None
+    if _looks_like_docx_heading_text(compact):
+        return None
+    if _is_caption_like_docx_text(compact) or _is_note_like_docx_text(compact):
+        return None
+    if re.search(r"[，。；]", rest) or (len(rest) >= 12 and re.search(r"[：:]", rest)):
+        return rest
+    return None
 
 
 def _should_emit_docx_list_marker(paragraph, text, next_block, prev_block=None):
@@ -2126,12 +2226,9 @@ def _should_emit_docx_list_marker(paragraph, text, next_block, prev_block=None):
     # real list item even when it is short and unpunctuated.
     if _docx_numbered_run_continues(paragraph, prev_block, next_block):
         return True
-    if len(compact) <= 20 and not re.search(r'[，。；：:,.()]', compact):
-        return False
-    if len(compact.split()) <= 6 and not re.search(r'[，。；：:,.()]', compact):
-        return False
     if next_block is not None and hasattr(next_block, "rows") and len(compact) <= 40:
-        return False
+        if not re.search(r'[，。；：:,.()]', compact):
+            return False
     return True
 
 
@@ -2453,11 +2550,54 @@ def _is_note_like_docx_text(text):
     return bool(CHINESE_NOTE_LABEL_PATTERN.match(stripped) or NOTE_LABEL_PATTERN.match(stripped))
 
 
+def _nest_docx_label_bullet_lists(lines):
+    """Turn ``Label：`` plus following bullets into a nested unordered list."""
+    result = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        stripped = (lines[index] or "").strip()
+        is_label = (
+            bool(stripped)
+            and not stripped.startswith(("#", "|", "!", "[["))
+            and not re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)", stripped)
+            and stripped.endswith(("：", ":"))
+            and len(stripped) <= 40
+            and not _is_note_like_docx_text(stripped)
+        )
+        if not is_label:
+            result.append(lines[index])
+            index += 1
+            continue
+        cursor = index + 1
+        bullets = []
+        while cursor < total:
+            raw = lines[cursor]
+            if not (raw or "").strip():
+                cursor += 1
+                continue
+            if re.match(r"^[-*+]\s+\S", raw.strip()) and not raw.startswith("  "):
+                bullets.append(re.sub(r"^[-*+]\s+", "", raw.strip()))
+                cursor += 1
+                continue
+            break
+        if not bullets:
+            result.append(lines[index])
+            index += 1
+            continue
+        result.append(f"- {stripped}")
+        for item in bullets:
+            result.append(f"  - {item}")
+        index = cursor
+    return result
+
+
 def _docx_to_markdown(file_path):
     from docx import Document as DocxDocument
     from docx.table import Table
 
     doc = DocxDocument(file_path)
+    _accept_docx_tracked_changes(doc)
     media_dir = os.path.splitext(file_path)[0] + "_media"
     _ensure_dir(media_dir)
 
@@ -2583,12 +2723,18 @@ def _docx_to_markdown(file_path):
                 if inline_text:
                     ensure_cover_heading()
                     prev_block = blocks[idx - 1] if idx else None
+                    step_body = _docx_procedure_step_body(inline_text)
                     list_marker = (
                         _docx_list_marker(block)
                         if _should_emit_docx_list_marker(block, text, next_block, prev_block)
                         else None
                     )
-                    lines.append(f"{list_marker}{inline_text}" if list_marker else inline_text)
+                    if step_body:
+                        lines.append(f"1. {step_body}")
+                    elif list_marker:
+                        lines.append(f"{list_marker}{inline_text}")
+                    else:
+                        lines.append(inline_text)
                 for image_path in block_images:
                     ensure_cover_heading()
                     lines.append(_md_image_markup(image_path))
@@ -2607,6 +2753,7 @@ def _docx_to_markdown(file_path):
                 lines.append("")
 
     lines = _merge_docx_wrapped_paragraphs(lines)
+    lines = _nest_docx_label_bullet_lists(lines)
     markdown_text = "\n".join(lines)
     markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text).strip()
     markdown_text = _idml_insert_precautions_heading(markdown_text)
@@ -5769,6 +5916,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     "XREF:", "NOTE:", "TABCAP", "FIGCAP", "TWIDE:",
                     "INDEX:",
                     "COLW:", "THEAD:", "LVL:", "SPAN:",
+                    "ROWHEADER:",
                     "BG:", "KEEP",
                 )):
                     return match.group(0)
@@ -5868,6 +6016,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     pending_table_header_rows = None
     pending_table_wide = None
     pending_table_colwidths = None
+    pending_table_rowheader = None
     in_codeblock = False
     codeblock_lang = ""
     codeblock_lines = []
@@ -6293,6 +6442,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     def _flush_pending_table():
         nonlocal in_table, table_rows, pending_table_title, pending_table_caption_only
         nonlocal pending_table_header_rows, pending_table_wide, pending_table_colwidths
+        nonlocal pending_table_rowheader
         if not in_table or not table_rows:
             in_table = False
             table_rows = []
@@ -6553,6 +6703,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         )
         pending_table_wide = None
         table_attr = f' outputclass="{_dita_format_mm_width(wide)}"' if wide else ""
+        rowheader = pending_table_rowheader
+        pending_table_rowheader = None
+        if rowheader:
+            table_attr = f'{table_attr} rowheader="{rowheader}"'
         if has_title:
             table_xml = [f'        <table{table_attr}>', f'          <title>{title_text}</title>']
         else:
@@ -6745,6 +6899,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             wide_match = re.match(r'^\[\[TWIDE:([^\]]+)\]\]$', stripped)
             if wide_match:
                 pending_table_wide = wide_match.group(1).strip()
+                continue
+        if stripped.startswith("[[ROWHEADER:"):
+            rowheader_match = re.match(r'^\[\[ROWHEADER:([^\]]+)\]\]$', stripped)
+            if rowheader_match:
+                pending_table_rowheader = rowheader_match.group(1).strip()
                 continue
         if not stripped:
             if pending_note_type and note_icon_detected:

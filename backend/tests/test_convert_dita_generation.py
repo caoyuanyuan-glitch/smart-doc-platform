@@ -1851,7 +1851,8 @@ class DocxTableMarkdownTest(unittest.TestCase):
         )
         lines = _docx_table_to_markdown(table)
         self.assertEqual(lines[0], "[[THEAD:0]]")
-        self.assertIn("[[SPAN:1,3]]", lines[1])
+        self.assertIn("[[ROWHEADER:firstcol]]", lines)
+        self.assertIn("[[SPAN:1,3]]", "\n".join(lines))
         xml = _content_to_dita_xml(
             "Applicable Reagent Kits",
             "\n".join(lines),
@@ -1863,6 +1864,7 @@ class DocxTableMarkdownTest(unittest.TestCase):
         self.assertNotIn("<thead>", xml)
         self.assertIn('morerows="2"', xml)
         self.assertEqual(xml.count("Kit type"), 1)
+        self.assertIn('rowheader="firstcol"', xml)
 
     def test_label_first_row_without_merge_becomes_thead(self):
         table = self._real_table(
@@ -5547,6 +5549,158 @@ class ImeFeedbackFixesTest(unittest.TestCase):
         self.assertIn("</booklists>", output)
         self.assertNotIn('navtitle="索引"', output)
         self.assertNotIn("CTO041189.dita", output)
+
+
+    def test_precautions_topic_list_is_not_wrapped_as_note(self):
+        xml = (
+            '<topic cms:title="注意事项"><title>注意事项</title>'
+            "<body><ul>"
+            "<li><p>本产品仅用于科研用途，不用于临床诊断，使用前请仔细阅读本说明书。</p></li>"
+            "<li><p>实验前请熟悉和掌握需使用的各种仪器的操作方法和注意事项。</p></li>"
+            "</ul></body></topic>"
+        )
+        out = _wrap_noteish_top_level_lists(xml)
+        self.assertNotIn('<note type="tip">', out)
+        self.assertIn("<ul>", out)
+
+    def test_nested_platform_label_list_becomes_nested_ul(self):
+        xml = _content_to_dita_xml(
+            "适配测序平台",
+            "- 文库适配测序平台：\n"
+            "  - DNBSEQ-T1+RS\n"
+            "  - DNBSEQ-T7+RS\n"
+            "  - DNBSEQ-T7RS\n"
+            "- cDNA文库测序类型：\n"
+            "  - 100（1链）+100（2链）+10\n",
+            "concept",
+            "DTO041005",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn("<li><p>文库适配测序平台：</p>", xml)
+        self.assertIn("<li><p>DNBSEQ-T1+RS</p></li>", xml)
+        platform_li = xml.split("<li><p>文库适配测序平台：</p>", 1)[1]
+        nested = platform_li.split("</li>", 1)[0]
+        self.assertIn("<ul>", nested)
+        self.assertIn("DNBSEQ-T7RS", xml)
+        self.assertLess(xml.index("<li><p>文库适配测序平台：</p>"), xml.index("<li><p>DNBSEQ-T1+RS</p></li>"))
+
+    def test_outline_procedure_steps_become_ol(self):
+        xml = _content_to_dita_xml(
+            "细胞固定",
+            "1. 细胞悬液转移至15mL低吸附离心管，4℃离心5 min，弃上清。\n"
+            "注意：若细胞已重悬在200μL PBS中，可省略此步。\n"
+            "1. 向200 μL细胞悬液中加入800 μL Fixation Buffer，阔口枪头轻柔吸打混匀。\n",
+            "task",
+            "DTO041022",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn("<ol>", xml)
+        self.assertIn("<li><p>细胞悬液转移至15mL低吸附离心管，4℃离心5 min，弃上清。</p>", xml)
+        self.assertIn('<note type="caution">', xml)
+        self.assertEqual(xml.count("<li>"), 2)
+
+    def test_docx_accepts_revisions_and_emits_procedure_ol(self):
+        import tempfile
+        from docx import Document
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        def make_run(text):
+            run = OxmlElement("w:r")
+            node = OxmlElement("w:t")
+            if text[:1].isspace() or text[-1:].isspace():
+                node.set(qn("xml:space"), "preserve")
+            node.text = text
+            run.append(node)
+            return run
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "steps.docx")
+            doc = Document()
+            doc.add_paragraph("3.2 细胞固定", style="Heading 2")
+            paragraph = doc.add_paragraph()
+            paragraph._p.append(make_run("3."))
+            deleted = OxmlElement("w:del")
+            deleted.set(qn("w:id"), "1")
+            deleted.set(qn("w:author"), "tester")
+            del_run = OxmlElement("w:r")
+            del_text = OxmlElement("w:delText")
+            del_text.text = "x"
+            del_run.append(del_text)
+            deleted.append(del_run)
+            paragraph._p.append(deleted)
+            inserted = OxmlElement("w:ins")
+            inserted.set(qn("w:id"), "2")
+            inserted.set(qn("w:author"), "tester")
+            inserted.append(make_run("2.1 细胞悬液转移至15mL低吸附离心管，弃上清。"))
+            paragraph._p.append(inserted)
+            doc.add_paragraph("3.2.2 向细胞悬液中加入Fixation Buffer，轻柔吸打混匀。")
+            doc.save(path)
+            markdown = _docx_to_markdown(path)
+        self.assertIn("1. 细胞悬液转移至15mL低吸附离心管，弃上清。", markdown)
+        self.assertIn("1. 向细胞悬液中加入Fixation Buffer，轻柔吸打混匀。", markdown)
+        self.assertNotIn("3.2.1", markdown)
+        self.assertNotIn("3.x", markdown)
+
+    def test_docx_label_and_list_paragraphs_nest_as_ul(self):
+        import tempfile
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "platforms.docx")
+            doc = Document()
+            doc.add_paragraph("1.3 适配测序平台", style="Heading 2")
+            doc.add_paragraph("文库适配测序平台：")
+            doc.add_paragraph("DNBSEQ-T1+RS", style="List Paragraph")
+            doc.add_paragraph("DNBSEQ-T7+RS", style="List Paragraph")
+            doc.add_paragraph("DNBSEQ-T7RS", style="List Paragraph")
+            doc.save(path)
+            markdown = _docx_to_markdown(path)
+        self.assertIn("- 文库适配测序平台：", markdown)
+        self.assertIn("  - DNBSEQ-T1+RS", markdown)
+        self.assertIn("  - DNBSEQ-T7RS", markdown)
+        xml = _content_to_dita_xml(
+            "适配测序平台", markdown.split("适配测序平台", 1)[-1],
+            "concept", "DTO041005", "zh-CN", topic_kind="task",
+        )
+        self.assertIn("<li><p>文库适配测序平台：</p>", xml)
+        self.assertIn("<li><p>DNBSEQ-T1+RS</p></li>", xml)
+
+    def test_docx_table_emits_word_colwidths(self):
+        from docx.oxml.ns import qn
+
+        table = DocxTableMarkdownTest()._real_table(
+            2,
+            2,
+            {
+                (0, 0): "仪器",
+                (0, 1): "单细胞液滴生成仪",
+                (1, 0): "仪器",
+                (1, 1): "超净工作台",
+            },
+            merges=[((0, 0), (1, 0))],
+            heading="客户自备物料清单",
+        )
+        grid = table._tbl.find(qn("w:tblGrid"))
+        cols = grid.findall(qn("w:gridCol"))
+        cols[0].set(qn("w:w"), "851")
+        cols[1].set(qn("w:w"), "8706")
+        lines = _docx_table_to_markdown(table, heading="客户自备物料清单")
+        self.assertIn("[[COLW:0.09*,0.91*]]", lines)
+        self.assertIn("[[ROWHEADER:firstcol]]", lines)
+        xml = _content_to_dita_xml(
+            "客户自备物料清单",
+            "表1-3 客户自备物料清单\n" + "\n".join(lines),
+            "concept",
+            "DTO041008",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn('colwidth="0.09*"', xml)
+        self.assertIn('colwidth="0.91*"', xml)
+        self.assertIn('rowheader="firstcol"', xml)
 
 
 if __name__ == "__main__":
