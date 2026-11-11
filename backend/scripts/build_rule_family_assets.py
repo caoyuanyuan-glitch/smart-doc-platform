@@ -104,6 +104,7 @@ LEGACY_MATCH = {
             "R010", "HR004", "UNIT-002", "UNIT-003", "UNIT-004", "HR006",
             "DOC-FMT-003", "DOC-SPACE-001", "DOC-SPACE-002", "DOC-SPACE-003",
             "DOC-SPACE-004", "DOC-SPACE-005", "DOC-SPACE-006", "DOC-UNIT-001",
+            "DET-SPACE-GAP", "DET-SPACE-UNIT",
         ],
         "category_keywords": ["格式规范", "空格"],
     },
@@ -116,7 +117,10 @@ LEGACY_MATCH = {
         "category_keywords": ["货号"],
     },
     "DET-MATERIAL-001": {
-        "exact_rules": ["CYY-CN-REF-003"],
+        "exact_rules": [
+            "CYY-CN-REF-003",
+            "REF-001", "REF-002", "REF-003", "REF-INDEX-001", "REF-STYLE",
+        ],
         "category_keywords": ["物料编码", "交叉引用"],
     },
     "DET-TYPO-001": {
@@ -147,7 +151,7 @@ LEGACY_MATCH = {
         "exact_rules": [
             "CYY-CN-NAV-001", "STRUCT-TERM-001",
             "DET-TERM-BASELINE-001", "DET-TERM-CASE-001", "DET-TERM-CANON-001",
-            "TERM-INCONSIST", "TERM-PAIR",
+            "TERM-INCONSIST", "TERM-PAIR", "TERM-CONSISTENCY-001", "TERM-FORBIDDEN",
         ],
         "category_keywords": ["术语一致性"],
     },
@@ -273,6 +277,23 @@ def build_families() -> dict:
             "disabled": disabled,
         }
 
+    # 准确率方案 2026-11-10：开 A5/B9，并把线上真实规则号登记进 exact_rules。
+    if "DET-TYPO-CN-001" in entries:
+        entries["DET-TYPO-CN-001"]["disabled"] = False
+        extra = ["DET-TYPO-CN-001", "CN-TYPO-001"]
+        cur = list(entries["DET-TYPO-CN-001"].get("exact_rules") or [])
+        extra = extra + list(entries["DET-TYPO-CN-001"].get("platform_rules") or [])
+        entries["DET-TYPO-CN-001"]["exact_rules"] = cur + [c for c in extra if c not in cur]
+    if "LEARN-PATCH-001" in entries:
+        entries["LEARN-PATCH-001"]["disabled"] = False
+        extra = ["LEARN-PATCH-001"]
+        cur = list(entries["LEARN-PATCH-001"].get("exact_rules") or [])
+        entries["LEARN-PATCH-001"]["exact_rules"] = cur + [c for c in extra if c not in cur]
+    if "DET-REF-001" in entries:
+        extra = ["REF-001", "REF-002", "REF-003", "REF-INDEX-001", "REF-STYLE"]
+        cur = list(entries["DET-REF-001"].get("exact_rules") or [])
+        entries["DET-REF-001"]["exact_rules"] = cur + [c for c in extra if c not in cur]
+
     for rule_id, match in LEGACY_MATCH.items():
         if rule_id in listed:
             continue
@@ -305,7 +326,7 @@ def build_families() -> dict:
         "in_legacy_code": False,
         "in_regression_set": False,
         "rule_prefixes": [],
-        "exact_rules": ["TERM-INCONSIST", "TERM-PAIR"],
+        "exact_rules": ["TERM-INCONSIST", "TERM-PAIR", "TERM-CONSISTENCY-001", "TERM-FORBIDDEN"],
         "category_keywords": [],
         "text_all": [],
         "blob_all": [],
@@ -318,7 +339,7 @@ def build_families() -> dict:
             "TERM-CHECK-001 与 STRUCT-TERM-001 的规则号重叠是刻意设计："
             "前者按检出层组织（术语库动态校验），后者按问题类型组织（篇内不一致）。"
             "允许一条 issue 被两族认领，统计时按族去重。"
-            "TERM-FORBIDDEN 通道未启用。"
+            "TERM-FORBIDDEN 已登记 exact_rules，术语库禁止标记仍缺数据时通道产出为 0。"
         ),
     }
 
@@ -342,11 +363,12 @@ def build_families() -> dict:
             "category_keywords", "blob_all", "text_all",
         ],
         "notes": (
-            "44 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。"
+            "新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。"
             "DET-TRADEMARK-001/EXT-R006/EXT-R024 挂起。"
+            "已开 DET-TYPO-CN-001 与 LEARN-PATCH-001。"
             "TERM-CHECK-001 与 STRUCT-TERM-001 共享 TERM-INCONSIST/TERM-PAIR；前者是术语库动态校验视角，后者是篇内不一致视角。"
             "回归样本全部挂在 STRUCT-TERM-001（40 条），TERM-CHECK-001 样本为 0。"
-            "TERM-FORBIDDEN 通道未启用。"
+            "TERM-FORBIDDEN 已登记 exact_rules。"
         ),
         "stats": stats,
         "entries": entries,

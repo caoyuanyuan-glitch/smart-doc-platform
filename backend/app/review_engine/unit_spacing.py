@@ -167,8 +167,43 @@ def check_number_unit_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     return issues
 
 
+# 人工主流报「单位前缺空格」的安全单位：紧贴即可报，不含 % / M / μ。
+_SAFE_TIGHT_UNIT_RE = re.compile(
+    r"(?<=\d)(?:℃|°\s*C|mL|rpm)(?![A-Za-z])"
+)
+
+
+def check_safe_tight_unit_gap(text: str, *, parsed: bool = True) -> list[dict]:
+    """对 ℃ / mL / rpm 上报数值紧贴单位的孤立写法（DET-SPACE-GAP）。"""
+    source = str(text or "")
+    if not parsed or not source.strip():
+        return []
+    issues = []
+    for match in _SAFE_TIGHT_UNIT_RE.finditer(source):
+        start = match.start()
+        prefix = source[max(0, start - 1):start]
+        if prefix in {"\n", "\f", " "}:
+            continue
+        original = source[max(0, start - 1):match.end()]
+        issues.append(_issue(
+            "DET-SPACE-GAP", source, start, match.end(), original,
+            "数值与单位之间缺少空格。℃ / mL / rpm 在本规范里要求与数字分开写。",
+            "建议在数值与单位之间补一个空格。",
+        ))
+        if len(issues) >= 5:
+            break
+    return issues
+
+
 def check_units_and_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     """数值-单位写法与间距检查入口。"""
     issues = check_unit_consistency(text, parsed=parsed)
     issues.extend(check_number_unit_spacing(text, parsed=parsed))
+    seen = {(item.get("rule"), item.get("original_text"), item.get("position")) for item in issues}
+    for item in check_safe_tight_unit_gap(text, parsed=parsed):
+        key = (item.get("rule"), item.get("original_text"), item.get("position"))
+        if key in seen:
+            continue
+        issues.append(item)
+        seen.add(key)
     return issues

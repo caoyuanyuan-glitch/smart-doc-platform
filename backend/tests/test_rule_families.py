@@ -57,7 +57,7 @@ def test_asset_files_exist():
     assert families["stats"]["in_legacy_code"] == 24
     assert families["stats"]["legacy_only"] == 9
     assert families["stats"]["new_rules"] == 44
-    assert families["stats"]["disabled"] == 44
+    assert families["stats"]["disabled"] == 42
     assert families["stats"]["in_regression_set"] == 52
     assert sum(1 for _ in FIXTURE.open(encoding="utf-8")) == 1061
 
@@ -215,8 +215,9 @@ def test_term_family_matches_term_rules():
     term = families["TERM-CHECK-001"]
     struct = families["STRUCT-TERM-001"]
     assert "TERM-" not in (term.get("rule_prefixes") or [])
-    assert "TERM-FORBIDDEN" not in (term.get("exact_rules") or [])
-    assert "TERM-FORBIDDEN" not in (struct.get("exact_rules") or [])
+    assert "TERM-FORBIDDEN" in (term.get("exact_rules") or [])
+    assert "TERM-FORBIDDEN" in (struct.get("exact_rules") or [])
+    assert "TERM-CONSISTENCY-001" in (term.get("exact_rules") or [])
     item = _ann("TERM-CHECK-001")
     issue = _issue(rule="TERM-INCONSIST", category="术语规范")
     assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is True
@@ -232,7 +233,23 @@ def test_open_term_prefix_does_not_reclaim_family(monkeypatch):
     struct = families["STRUCT-TERM-001"]
     assert "TERM-" not in (struct.get("rule_prefixes") or [])
     item = _ann("STRUCT-TERM-001")
-    for rule in ("TERM-FORBIDDEN", "TERM-NEWFAMILY", "TERM-ANYTHING-NEW"):
+    for rule in ("TERM-NEWFAMILY", "TERM-ANYTHING-NEW"):
         issue = _issue(rule=rule, category="无关分类")
         assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is False
 
+
+def test_accuracy_lift_families_are_enabled():
+    reset_families_cache()
+    families = _load_families()
+    assert families["DET-TYPO-CN-001"]["disabled"] is False
+    assert "DET-TYPO-CN-001" in families["DET-TYPO-CN-001"]["exact_rules"]
+    assert families["LEARN-PATCH-001"]["disabled"] is False
+    assert "LEARN-PATCH-001" in families["LEARN-PATCH-001"]["exact_rules"]
+    assert "DET-SPACE-GAP" in families["DET-SPACE-001"]["exact_rules"]
+    assert "DET-SPACE-UNIT" in families["DET-SPACE-001"]["exact_rules"]
+    item = _ann("DET-TYPO-CN-001")
+    issue = _issue(rule="DET-TYPO-CN-001", category="中文错别字")
+    assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is True
+    patch_item = _ann("LEARN-PATCH-001")
+    patch_issue = _issue(rule="LEARN-PATCH-001", category="术语一致性")
+    assert _matches_expected_rule_data(patch_item, patch_issue, _issue_blob(patch_issue)) is True

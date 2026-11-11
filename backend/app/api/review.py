@@ -54,6 +54,8 @@ from app.rules.term_consistency_rule import TermConsistencyRule
 from app.review_engine.unit_spacing import check_units_and_spacing
 from app.review_engine.term_baseline import check_term_baseline
 from app.review_engine.canonical_writing import check_canonical_writing
+from app.review_engine.cn_typo import check_cn_typos
+from app.review_engine.learned_patch import check_learned_patches
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -13281,6 +13283,16 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         issues.extend(check_canonical_writing(content))
     except Exception as e:
         print(f"[审核] 外部规范写法库规则执行失败: {e}")
+
+    try:
+        issues.extend(check_cn_typos(content))
+    except Exception as e:
+        print(f"[审核] 中文错别字规则执行失败: {e}")
+
+    try:
+        issues.extend(check_learned_patches(content))
+    except Exception as e:
+        print(f"[审核] 学到的替换对一致性规则执行失败: {e}")
 
     return issues
 

@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-06",
+  "version": "2026-11-10",
   "source": "人工审核意见整理_规则学习包_20261106",
   "match_order": [
     "overrides",
@@ -10,13 +10,13 @@
     "blob_all",
     "text_all"
   ],
-  "notes": "44 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。DET-TRADEMARK-001/EXT-R006/EXT-R024 挂起。TERM-CHECK-001 与 STRUCT-TERM-001 共享 TERM-INCONSIST/TERM-PAIR；前者是术语库动态校验视角，后者是篇内不一致视角。回归样本全部挂在 STRUCT-TERM-001（40 条），TERM-CHECK-001 样本为 0。TERM-FORBIDDEN 通道未启用。",
+  "notes": "42 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。DET-TRADEMARK-001/EXT-R006/EXT-R024 挂起。TERM-CHECK-001 与 STRUCT-TERM-001 共享 TERM-INCONSIST/TERM-PAIR；前者是术语库动态校验视角，后者是篇内不一致视角。回归样本全部挂在 STRUCT-TERM-001（40 条），TERM-CHECK-001 样本为 0。已开 DET-TYPO-CN-001 与 LEARN-PATCH-001；TERM-FORBIDDEN 已登记 exact_rules。",
   "stats": {
     "total": 69,
     "in_legacy_code": 24,
     "legacy_only": 9,
     "new_rules": 44,
-    "disabled": 44,
+    "disabled": 42,
     "in_regression_set": 52
   },
   "entries": {
@@ -29,7 +29,9 @@
       "in_legacy_code": false,
       "in_regression_set": true,
       "rule_prefixes": [],
-      "exact_rules": [],
+      "exact_rules": [
+        "LEARN-PATCH-001"
+      ],
       "category_keywords": [
         "给出替换文本（未说明缘由）"
       ],
@@ -39,7 +41,7 @@
       "overrides": [],
       "platform_rules": [],
       "legacy_only": false,
-      "disabled": true
+      "disabled": false
     },
     "STRUCT-TERM-001": {
       "label_code": "E1",
@@ -60,7 +62,9 @@
         "DET-TERM-CASE-001",
         "DET-TERM-CANON-001",
         "TERM-INCONSIST",
-        "TERM-PAIR"
+        "TERM-PAIR",
+        "TERM-CONSISTENCY-001",
+        "TERM-FORBIDDEN"
       ],
       "category_keywords": [
         "术语一致性"
@@ -84,7 +88,9 @@
       "rule_prefixes": [],
       "exact_rules": [
         "TERM-INCONSIST",
-        "TERM-PAIR"
+        "TERM-PAIR",
+        "TERM-CONSISTENCY-001",
+        "TERM-FORBIDDEN"
       ],
       "category_keywords": [],
       "text_all": [],
@@ -94,7 +100,7 @@
       "platform_rules": [],
       "legacy_only": false,
       "disabled": false,
-      "notes": "TERM-CHECK-001 与 STRUCT-TERM-001 的规则号重叠是刻意设计：前者按检出层组织（术语库动态校验），后者按问题类型组织（篇内不一致）。允许一条 issue 被两族认领，统计时按族去重。TERM-FORBIDDEN 通道未启用。"
+      "notes": "TERM-CHECK-001 与 STRUCT-TERM-001 的规则号重叠是刻意设计：前者按检出层组织（术语库动态校验），后者按问题类型组织（篇内不一致）。允许一条 issue 被两族认领，统计时按族去重。TERM-FORBIDDEN 已登记 exact_rules，术语库禁止标记仍缺数据时通道产出为 0。"
     },
     "DET-TYPO-CN-001": {
       "label_code": "A5",
@@ -105,7 +111,14 @@
       "in_legacy_code": false,
       "in_regression_set": true,
       "rule_prefixes": [],
-      "exact_rules": [],
+      "exact_rules": [
+        "DET-TYPO-CN-001",
+        "CN-TYPO-001",
+        "CYY-CN-SPELL-001",
+        "CYY-CN-SPELL-002",
+        "CYY-CN-SPELL-003",
+        "EXT-R020"
+      ],
       "category_keywords": [
         "中文错别字",
         "用字错误"
@@ -121,7 +134,7 @@
         "EXT-R020"
       ],
       "legacy_only": false,
-      "disabled": true
+      "disabled": false
     },
     "DET-EN-FUNC-001": {
       "label_code": "A1",
@@ -376,7 +389,9 @@
         "DOC-SPACE-004",
         "DOC-SPACE-005",
         "DOC-SPACE-006",
-        "DOC-UNIT-001"
+        "DOC-UNIT-001",
+        "DET-SPACE-GAP",
+        "DET-SPACE-UNIT"
       ],
       "category_keywords": [
         "格式规范",
@@ -833,7 +848,13 @@
       "in_legacy_code": false,
       "in_regression_set": true,
       "rule_prefixes": [],
-      "exact_rules": [],
+      "exact_rules": [
+        "REF-001",
+        "REF-002",
+        "REF-003",
+        "REF-INDEX-001",
+        "REF-STYLE"
+      ],
       "category_keywords": [
         "交叉引用粒度不足"
       ],
@@ -1650,7 +1671,12 @@
       "in_regression_set": false,
       "rule_prefixes": [],
       "exact_rules": [
-        "CYY-CN-REF-003"
+        "CYY-CN-REF-003",
+        "REF-001",
+        "REF-002",
+        "REF-003",
+        "REF-INDEX-001",
+        "REF-STYLE"
       ],
       "category_keywords": [
         "物料编码",
