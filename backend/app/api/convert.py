@@ -957,14 +957,116 @@ def _is_docx_toc_number(text):
     return bool(re.fullmatch(r'\d+(?:\.\d+)*', text or ''))
 
 
-def _docx_table_cell_visible_text(text):
+def _strip_span_markers(text):
+    """Drop table merge placeholders so they never leak into visible text."""
     value = re.sub(r'\[\[SPAN:\d+,\d+\]\]', '', text or '')
     value = value.replace('[[SPANC]]', '')
+    value = re.sub(r'\s{2,}', ' ', value)
     return value.strip()
+
+
+def _docx_table_cell_visible_text(text):
+    return _strip_span_markers(text)
 
 
 def _docx_table_row_has_text(row):
     return any(_docx_table_cell_visible_text(cell) for cell in (row or []))
+
+
+WORD_SEE_CAPTION_XREF_RE = re.compile(
+    r'(见|如)(表|图|Table|Figure)\s*(\d+(?:[-–—.]\d+)*[A-Za-z]*)'
+    r'(?:及(\d+(?:[-–—.]\d+)*[A-Za-z]*))?',
+    re.IGNORECASE,
+)
+WORD_SEE_CHAPTER_XREF_RE = re.compile(r'详见\s*[“"《]([^”"》]+)[”"》]')
+
+
+def _docx_caption_kind_token(kind):
+    raw = (kind or "").strip()
+    lower = raw.lower()
+    if lower == "table":
+        return "Table"
+    if lower == "figure":
+        return "Figure"
+    return raw
+
+
+def _docx_caption_num_key(num):
+    return re.sub(r'[–—．]', '-', (num or "").strip())
+
+
+def _docx_caption_map_key(kind, num):
+    return f"{_docx_caption_kind_token(kind)}{_docx_caption_num_key(num)}"
+
+
+def _docx_caption_key_title(text):
+    """Return (表1-1, title) when the line is a figure/table caption."""
+    raw = _strip_span_markers(_strip_md_bold(text or ""))
+    raw = re.sub(r'\s+', ' ', raw).strip()
+    match = re.match(
+        r'^(表|图|Table|Figure)\s*(\d+(?:[-–—.]\d+)*[A-Za-z]*)\s*(.*)$',
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    rest = (match.group(3) or "").lstrip(":：.．、- ").strip()
+    if not rest or re.match(r'^[（(]续', rest) or re.match(r'(?i)^\(cont', rest):
+        return None
+    return _docx_caption_map_key(match.group(1), match.group(2)), rest
+
+
+def _collect_docx_caption_map(doc):
+    """Map 表1-1 / 图6-1 to the caption body used as cms:title."""
+    from docx.oxml.ns import qn
+
+    mapping = {}
+    body = getattr(getattr(doc, "element", None), "body", None)
+    if body is None:
+        return mapping
+    for paragraph in body.iter(qn("w:p")):
+        text = _normalize_docx_text(
+            "".join((node.text or "") for node in paragraph.iter(qn("w:t")))
+        )
+        parsed = _docx_caption_key_title(text)
+        if parsed:
+            mapping.setdefault(parsed[0], parsed[1])
+    return mapping
+
+
+def _markup_docx_cross_refs(text, caption_map=None):
+    """Turn Word 见表/如图/详见“第N章 …” into [[XREF:title]] markers."""
+    if not text:
+        return text
+    caption_map = caption_map or {}
+
+    def _caption_repl(match):
+        lead, kind, num, also = match.group(1), match.group(2), match.group(3), match.group(4)
+        title = caption_map.get(_docx_caption_map_key(kind, num)) or f"{kind}{num}"
+        rendered = f"{lead}[[XREF:{title}]]"
+        if also:
+            other = caption_map.get(_docx_caption_map_key(kind, also)) or f"{kind}{also}"
+            rendered += f"及[[XREF:{other}]]"
+        return rendered
+
+    def _chapter_repl(match):
+        target = _clean_xref_title(match.group(1)) or match.group(1).strip()
+        return f"详见[[XREF:{target}]]"
+
+    def _apply(source):
+        marked = WORD_SEE_CAPTION_XREF_RE.sub(_caption_repl, source)
+        return WORD_SEE_CHAPTER_XREF_RE.sub(_chapter_repl, marked)
+
+    marked = _apply(text)
+    if marked != text:
+        return marked
+    # Word often splits 如图6-1 across adjacent bold runs.
+    stripped = re.sub(r'\[\[/?B\]\]', '', text)
+    if stripped != text:
+        marked_stripped = _apply(stripped)
+        if marked_stripped != stripped:
+            return marked_stripped
+    return text
 
 
 def _drop_empty_docx_grid_rows(grid):
@@ -1018,8 +1120,7 @@ def _docx_md_table_col_count(row_line):
 
 
 def _docx_md_row_looks_like_header(row_line):
-    blob = re.sub(r'\[\[SPAN:\d+,\d+\]\]', '', row_line or '')
-    blob = blob.replace('[[SPANC]]', '')
+    blob = _strip_span_markers(row_line or '')
     blob = re.sub(r'[|\s]', '', blob)
     return bool(re.search(r'试剂盒种类|组分信息|管盖颜色|规格及数量', blob))
 
@@ -1048,7 +1149,7 @@ def _merge_adjacent_docx_markdown_tables(lines, table_lines):
     return True
 
 
-def _docx_table_to_markdown(table, heading=""):
+def _docx_table_to_markdown(table, heading="", caption_map=None):
     """Render a Word table, preserving merges and the real header-row count."""
     from docx.oxml.ns import qn
     from docx.table import _Cell
@@ -1094,7 +1195,11 @@ def _docx_table_to_markdown(table, heading=""):
         cells = []
         for tc in tr.findall(qn("w:tc")):
             span = grid_span(tc)
-            cells.append((col, span, vmerge(tc), _normalize_docx_text(_Cell(tc, table).text)))
+            cell_text = _markup_docx_cross_refs(
+                _normalize_docx_text(_Cell(tc, table).text),
+                caption_map,
+            )
+            cells.append((col, span, vmerge(tc), cell_text))
             col += span
         max_col = max(max_col, col)
         parsed_rows.append((is_header_row(tr), cells))
@@ -2854,6 +2959,7 @@ def _docx_to_markdown(file_path):
     cover_started = False
     in_toc_block = False
     current_heading = ""
+    caption_map = _collect_docx_caption_map(doc)
     def ensure_cover_heading():
         nonlocal cover_started
         if cover_started or current_heading:
@@ -2931,6 +3037,7 @@ def _docx_to_markdown(file_path):
                         continue
                 block_images.append(value)
             inline_text = _normalize_docx_text(''.join(inline_parts))
+            inline_text = _markup_docx_cross_refs(inline_text, caption_map)
             style_name = block.style.name if block.style else ""
             heading_level = _infer_docx_heading_level(block, text, next_block, style_name)
 
@@ -2995,7 +3102,9 @@ def _docx_to_markdown(file_path):
             if in_toc_block:
                 continue
             ensure_cover_heading()
-            table_lines = _docx_table_to_markdown(block, heading=current_heading)
+            table_lines = _docx_table_to_markdown(
+                block, heading=current_heading, caption_map=caption_map
+            )
             if table_lines:
                 if _merge_adjacent_docx_markdown_tables(lines, table_lines):
                     if lines and lines[-1] != "":
@@ -6667,7 +6776,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         return f"        <p>{_restore_inline_run_markup(title)}</p>"
 
     def _normalize_table_title(text):
-        normalized = _strip_md_bold(_unescape_md((text or '').strip()))
+        normalized = _strip_span_markers(_strip_md_bold(_unescape_md((text or '').strip())))
         return TABLE_CAPTION_PREFIX_RE.sub('', normalized).lstrip(":：.．、- ").strip()
 
     def _strip_page_reference(text):
@@ -6690,10 +6799,14 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     def _extract_embedded_table_caption(cells):
         if not cells:
             return None
-        first = _strip_md_bold(_unescape_md((cells[0] or '').strip()))
+        cleaned = [
+            _strip_span_markers(_strip_md_bold(_unescape_md((cell or '').strip())))
+            for cell in cells
+        ]
+        first = cleaned[0] if cleaned else ''
         if not TABLE_CAPTION_PREFIX_RE.match(first):
             return None
-        parts = [first] + [(_strip_md_bold(_unescape_md((cell or '').strip()))) for cell in cells[1:] if (cell or '').strip()]
+        parts = [part for part in cleaned if part]
         return _join_caption_fragments(parts)
 
     def _flush_pending_table():

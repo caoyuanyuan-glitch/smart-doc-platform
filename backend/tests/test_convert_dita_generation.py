@@ -69,6 +69,7 @@ from app.api.convert import (  # noqa: E402
     _idml_xref_marker,
     _idml_collect_paragraph_destination_titles,
     _idml_collect_hyperlink_source_destinations,
+    _markup_docx_cross_refs,
     )
 
 TOOLS_ROOT = BACKEND_ROOT / "tools"
@@ -518,6 +519,70 @@ class ContentGenerationTest(unittest.TestCase):
         self.assertEqual(xml.count('<table>'), 2)
         self.assertIn('<title>Perfect balanced 8 barcode Pooling strategy (8 barcode from one entire column)</title>', xml)
         self.assertIn('<title>Unbalanced 9 barcode Pooling strategy (barcode from different columns)</title>', xml)
+
+    def test_embedded_span_caption_row_strips_merge_markers(self):
+        xml = _content_to_dita_xml(
+            "试剂准备",
+            "| 表2-2  10% BSA配制方法 [[SPAN:2,1]] | [[SPANC]] |\n"
+            "| :--- | :--- |\n"
+            "| 试剂名称 | 用量 |\n"
+            "| BSA粉末 | 1 g |",
+            "concept",
+            "DTO041017",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn("<title>10% BSA配制方法</title>", xml)
+        self.assertNotIn("[[SPAN", xml)
+        self.assertNotIn("SPANC", xml)
+
+    def test_word_see_table_and_chapter_refs_become_empty_xrefs(self):
+        marked = _markup_docx_cross_refs(
+            "客户自配，配制方法见表2-3。详见“第九章 测序”。",
+            {"表2-3": "3X SSC Buffer配制方法"},
+        )
+        self.assertIn("见[[XREF:3X SSC Buffer配制方法]]", marked)
+        self.assertIn("详见[[XREF:测序]]", marked)
+        xml = _content_to_dita_xml(
+            "试剂准备",
+            marked,
+            "concept",
+            "DTO041017",
+            "zh-CN",
+            topic_kind="concept",
+            xref_map={"测序": "DTO041064", "DTO041064": "测序"},
+        )
+        self.assertIn(
+            '<xref href="DTO041064.dita" cms:title="测序"/>',
+            xml,
+        )
+        self.assertIn('<xref cms:title="3X SSC Buffer配制方法"/>', xml)
+        self.assertNotIn("见表2-3", xml)
+        self.assertNotIn("第九章", xml)
+
+    def test_word_see_figure_pair_becomes_xrefs(self):
+        marked = _markup_docx_cross_refs(
+            "文库结构如图9-1及9-2所示。",
+            {
+                "图9-1": "cDNA文库结构",
+                "图9-2": "Oligo文库结构",
+            },
+        )
+        self.assertEqual(
+            marked,
+            "文库结构如[[XREF:cDNA文库结构]]及[[XREF:Oligo文库结构]]所示。",
+        )
+
+    def test_word_see_figure_ref_survives_split_bold_runs(self):
+        marked = _markup_docx_cross_refs(
+            "参考值：cDNA产物浓度大于10 ng/ μL（[[B]]如图[[/B]][[B]]6[[/B]][[B]]-1）。[[/B]]",
+            {"图6-1": "cDNA产物片段分布图（使用2100片段分析仪检测参考图）"},
+        )
+        self.assertIn(
+            "如[[XREF:cDNA产物片段分布图（使用2100片段分析仪检测参考图）]]",
+            marked,
+        )
+        self.assertNotIn("如图6-1", marked)
 
     def test_markdown_lists_map_to_ol_and_ul(self):
         xml = _content_to_dita_xml(
@@ -1967,6 +2032,32 @@ class DocxTableMarkdownTest(unittest.TestCase):
         )
         self.assertIn('<table outputclass="180 mm">', xml)
         self.assertIn('namest="COLSPEC1" nameend="COLSPEC4"', xml)
+
+    def test_merged_caption_row_title_drops_span_markers(self):
+        table = self._real_table(
+            3,
+            2,
+            {
+                (0, 0): "表2-2  10% BSA配制方法",
+                (1, 0): "试剂名称",
+                (1, 1): "用量",
+                (2, 0): "BSA粉末",
+                (2, 1): "1 g",
+            },
+            merges=[((0, 0), (0, 1))],
+        )
+        xml = _content_to_dita_xml(
+            "试剂准备",
+            "\n".join(_docx_table_to_markdown(table)),
+            "concept",
+            "DTO041017",
+            "zh-CN",
+            topic_kind="concept",
+        )
+        self.assertIn("<title>10% BSA配制方法</title>", xml)
+        self.assertNotIn("[[SPAN", xml)
+        self.assertNotIn("SPANC", xml)
+        self.assertIn("BSA粉末", xml)
 
     def test_horizontal_span_placeholders_do_not_shift_later_columns(self):
         table = self._real_table(
