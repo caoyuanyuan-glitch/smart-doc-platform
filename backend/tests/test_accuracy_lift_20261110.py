@@ -41,7 +41,8 @@ def test_true_layout_rules_remain_noise():
 
 
 def test_cn_typo_reports_login_and_neighbor():
-    text = "请先登陆系统，仪器应放置于临近热源的涡漩位置。"
+    # 「登陆密码」是人工明确要求改「登录」的真实错别字，必须报。
+    text = "用户账户和登陆密码信息，仪器应放置于临近热源的涡漩位置。"
     issues = check_cn_typos(text)
     rules = {item["original_text"]: item["expected"] for item in issues}
     assert rules["登陆"] == "登录"
@@ -49,8 +50,8 @@ def test_cn_typo_reports_login_and_neighbor():
     assert rules["涡漩"] == "涡旋"
 
 
-def test_cn_typo_silent_when_correct():
-    assert check_cn_typos("请先登录系统，仪器应放置于邻近热源的涡旋位置。") == []
+def test_cn_typo_silent_on_correct_text():
+    assert check_cn_typos("用户账户和登录密码信息，仪器放置于邻近热源的涡旋位置。") == []
 
 
 def test_learned_patch_reports_when_both_forms_present():
@@ -60,6 +61,8 @@ def test_learned_patch_reports_when_both_forms_present():
     assert issues[0]["rule"] == "LEARN-PATCH-001"
     blob = issues[0]["original_text"] + issues[0]["suggestion"]
     assert "Power off" in blob
+    for issue in issues:
+        assert issue["original_text"] in text
 
 
 def test_learned_patch_silent_when_only_one_form():
@@ -71,6 +74,15 @@ def test_learned_patch_skips_generic_device_product():
     assert looks_like_variant("device", "product") is False
     assert looks_like_variant("Color", "sentence style") is False
     assert looks_like_variant("can store", "can be stored") is True
+
+
+def test_learned_patch_original_text_uses_source_case():
+    text = "Please Close the lid. Then close the lid. Cover the sample. Cover the sample again."
+    issues = check_learned_patches(text)
+    assert issues
+    for issue in issues:
+        assert issue["original_text"] in text
+        assert issue["original_text"] != "close" or "close" in text
 
 
 def test_safe_tight_unit_gap_reports_celsius_and_ml():
@@ -85,3 +97,21 @@ def test_safe_tight_unit_gap_reports_celsius_and_ml():
 
 def test_safe_tight_unit_gap_skips_percent():
     assert check_safe_tight_unit_gap("浓度约为5%即可。") == []
+
+
+def test_safe_tight_unit_gap_covers_extended_unit_table():
+    """扩充后的单位表必须覆盖电源/功率/质量/长度类单位。"""
+    text = "输入 24VDC，功率 300VA，频率50Hz，净重 6g。"
+    issues = check_safe_tight_unit_gap(text)
+    originals = " ".join(item["original_text"] for item in issues)
+    assert "VDC" in originals
+    assert "VA" in originals
+    assert "Hz" in originals
+    assert "g" in originals
+
+
+def test_safe_tight_unit_regex_does_not_match_empty():
+    """回归：单位表分支末尾留空 | 会让正则匹配空串，产出量级爆炸。"""
+    from app.review_engine.unit_spacing import _SAFE_TIGHT_UNIT_RE as rx
+    assert not rx.search("5")
+    assert rx.search("5mL/min")

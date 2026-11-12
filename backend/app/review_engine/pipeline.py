@@ -506,7 +506,15 @@ _TRUE_LAYOUT_RULES = frozenset({
     "EXT-R017",
     "EXT-R018",
 })
-_NEW_FAMILY_PREFIXES = ("DET-", "AI-", "STRUCT-")
+# 显式白名单：只有确认与「版式」无关的规则才走规则号放行，
+# 不按前缀兜底（否则 AI-STYLE-001 / STRUCT-DUP-001 等真实问题会被当成版式噪声）。
+_NON_LAYOUT_RULE_ALLOWLIST = frozenset({
+    "DET-SPACE-GAP",
+    "DET-SPACE-UNIT",
+    "DET-TYPO-CN-001",
+    "LEARN-PATCH-001",
+    "DET-TERM-CANON-001",
+})
 
 
 def is_whitelisted_layout_issue(issue: Any) -> bool:
@@ -523,7 +531,7 @@ def is_whitelisted_layout_issue(issue: Any) -> bool:
     if rule in _TRUE_LAYOUT_RULES:
         return False
     # 新体系规则号被版式正则误杀时按规则号放行，不按类别放行。
-    return any(rule.startswith(prefix) for prefix in _NEW_FAMILY_PREFIXES)
+    return rule in _NON_LAYOUT_RULE_ALLOWLIST
 
 
 def is_high_value(issue: Any) -> bool:

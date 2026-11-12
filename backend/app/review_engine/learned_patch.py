@@ -124,7 +124,10 @@ def check_learned_patches(text: str, *, parsed: bool = True) -> list[dict]:
             "category": "术语一致性",
             "rule": "LEARN-PATCH-001",
             "chapter": "",
-            "original_text": minority_form,
+            # 以源码实际切片作为原文：_find_all() 对英文做忽略大小写匹配，
+            # 但资产保留原拼写（close/Close），直接用 minority_form 会让报告里的
+            # 原文在被检查文档中根本不存在（phantom）。
+            "original_text": source[start:end],
             "context": _context(source, start, end),
             "suggestion": f"建议全文统一为「{majority_form}」。",
             "description": (
