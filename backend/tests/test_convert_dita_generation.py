@@ -220,8 +220,9 @@ class ContentGenerationTest(unittest.TestCase):
             topic_kind="concept",
         )
         self.assertIn(
-            '<note type="caution"><p><b>请先进行样本加载，再进行试剂加载</b></p></note>', xml
+            '<note type="caution"><p>请先进行样本加载，再进行试剂加载</p></note>', xml
         )
+        self.assertNotIn("<b>", xml)
 
     def test_label_only_note_groups_following_enumerated_items(self):
         xml = _content_to_dita_xml(
@@ -312,8 +313,9 @@ class ContentGenerationTest(unittest.TestCase):
             "zh-CN",
             topic_kind="concept",
         )
-        self.assertIn('<note type="stoppoint"><p><b>此步可放置50℃过夜反应。</b></p></note>', xml)
+        self.assertIn('<note type="stoppoint"><p>此步可放置50℃过夜反应。</p></note>', xml)
         self.assertNotIn("<li>", xml)
+        self.assertNotIn("<b>", xml)
 
     def test_preparation_list_table_is_extra_wide(self):
         xml = _content_to_dita_xml(
@@ -1741,6 +1743,19 @@ class CoverFieldPatchTest(unittest.TestCase):
         })
         self.assertIn('cms:title="关于说明书"', patched)
         self.assertNotIn("新的sDitaConcept", patched)
+
+    def test_patches_about_manual_copyright_year(self):
+        xml = (
+            '<concept cms:title="关于说明书">'
+            '<title>关于说明书</title>'
+            "<p>©2024-2026青岛华大智造科技有限责任公司 版权所有。</p>"
+            "</concept>"
+        )
+        patched = _patch_template_about_product(xml, {
+            "product_name": "DNBelab C系列单细胞C6 RNA文库制备试剂盒套装",
+        })
+        self.assertIn("©2026青岛华大智造科技有限责任公司 版权所有。", patched)
+        self.assertNotIn("©2024-2026", patched)
 
 
 class DocxTableMarkdownTest(unittest.TestCase):
@@ -5823,6 +5838,81 @@ class ImeFeedbackFixesTest(unittest.TestCase):
         self.assertIn("<ul>", wrapped)
         self.assertIn("<li><p>使用前请充分混匀。</p></li>", wrapped)
         self.assertIn("<li><p>请勿剧烈震荡。</p></li>", wrapped)
+
+    def test_sequencer_and_read_before_lines_are_paragraphs(self):
+        xml = _content_to_dita_xml(
+            "测序试剂准备",
+            "- 测序仪：DNBSEQ-G400RS、DNBSEQ-T7RS\n"
+            "- DNBSEQ-G400RS高通量测序试剂套装\n"
+            "- DNBSEQ-T7RS高通量测序试剂套装\n"
+            "- 测序前请仔细阅读基因测序仪用户手册。",
+            "concept",
+            "DTO041055",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn("<p>测序仪：DNBSEQ-G400RS、DNBSEQ-T7RS</p>", xml)
+        self.assertIn("<p>测序前请仔细阅读基因测序仪用户手册。</p>", xml)
+        self.assertIn("<li><p>DNBSEQ-G400RS高通量测序试剂套装</p></li>", xml)
+        self.assertIn("<li><p>DNBSEQ-T7RS高通量测序试剂套装</p></li>", xml)
+        self.assertLess(xml.index("测序仪："), xml.index("<ul>"))
+        self.assertGreater(xml.index("测序前请仔细阅读"), xml.index("</ul>"))
+
+    def test_sequencer_paragraph_after_kit_list_stays_outside_ul(self):
+        xml = _content_to_dita_xml(
+            "仪器、试剂和耗材准备",
+            "测序仪：DNBSEQ-T7RS\n"
+            "- DNBSEQ-T7RS 高通量测序试剂套装(FCL PE100) V2.0\n"
+            "- DNBSEQ-T7RS 高通量测序试剂套装(FCL PE150) V2.0\n"
+            "测序前请仔细阅读对应的说明书《DNBSEQ T7RS 高通量测序试剂套装使用说明书》，并严格按照说明书的内容进行操作。",
+            "concept",
+            "DTO041058",
+            "zh-CN",
+            topic_kind="task",
+        )
+        self.assertIn("<p>测序仪：DNBSEQ-T7RS</p>", xml)
+        self.assertIn("<p>测序前请仔细阅读对应的说明书《DNBSEQ T7RS 高通量测序试剂套装使用说明书》，并严格按照说明书的内容进行操作。</p>", xml)
+        self.assertLess(xml.index("</ul>"), xml.index("测序前请仔细阅读"))
+        last_li = xml[xml.rfind("<li>"):xml.rfind("</li>") + 5]
+        self.assertNotIn("测序前请仔细阅读", last_li)
+
+    def test_empty_para_image_before_caption_overwrites_leftover_scrap(self):
+        import tempfile
+        from PIL import Image
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = str(Path(tmpdir) / "oligo.docx")
+            leftover_dir = str(Path(tmpdir) / "oligo_media")
+            Path(leftover_dir).mkdir()
+            Image.new("RGB", (130, 130), "red").save(
+                str(Path(leftover_dir) / "docx_image_001.png")
+            )
+            large_path = str(Path(tmpdir) / "large.png")
+            Image.new("RGB", (1146, 430), "blue").save(large_path)
+            doc = Document()
+            doc.add_paragraph().add_run().add_picture(large_path)
+            doc.add_paragraph()
+            doc.add_paragraph("图7-1 Oligo文库片段分布图（使用2100片段分析仪检测参考图）")
+            doc.save(docx_path)
+            markdown = _docx_to_markdown(docx_path)
+            with Image.open(str(Path(leftover_dir) / "docx_image_001.png")) as img:
+                self.assertGreater(img.size[0], 400)
+            self.assertIn("docx_image_001.png", markdown)
+            self.assertIn("Oligo文库片段分布图", markdown)
+            xml = _content_to_dita_xml(
+                "文库质控",
+                "\n".join(
+                    line for line in markdown.splitlines() if not line.startswith("# ")
+                ),
+                "concept",
+                "DTO041044",
+                "zh-CN",
+                topic_kind="task",
+            )
+            self.assertIn("<image href=", xml)
+            self.assertIn("Oligo文库片段分布图", xml)
+            self.assertIn("<fig>", xml)
 
 
 if __name__ == "__main__":

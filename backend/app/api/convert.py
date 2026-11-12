@@ -131,6 +131,18 @@ def _note_visible_text(text):
     )
 
 
+def _strip_note_inner_bold(xml_text):
+    """Drop run-level bold inside notes; IME notes stay unemphasized."""
+    if not xml_text or "<note" not in xml_text:
+        return xml_text
+
+    def _repl(match):
+        inner = re.sub(r"</?b>", "", match.group(2))
+        return f"<note{match.group(1)}>{inner}</note>"
+
+    return re.sub(r"<note(\b[^>]*)>(.*?)</note>", _repl, xml_text, flags=re.DOTALL)
+
+
 def _note_enum_item_text(text):
     visible = _note_visible_text(text)
     match = NOTE_ENUM_MARKER_RE.match(visible)
@@ -297,6 +309,9 @@ ABOUT_MANUAL_SPLIT_RE = re.compile(
     r'|©'
     r')'
 )
+# IME 关于说明书版权年只保留当前年。
+ABOUT_MANUAL_COPYRIGHT_YEAR = 2026
+
 # IME applies its own numbering to chapters and sections, so manual prefixes
 # such as "第一章", "附录A", "2.1" or "3.1.1" are dropped from titles.
 CHAPTER_APPENDIX_PREFIX_RE = re.compile(
@@ -1581,6 +1596,14 @@ def _is_about_manual_topic(xml_text):
     return bool(re.search(r"<title[^>]*>\s*关于说明书\s*</title>", xml_text or ""))
 
 
+def _rewrite_about_manual_copyright_year(xml_text, year=None):
+    """Keep only the current year on the 关于说明书 copyright line."""
+    if not xml_text or not _is_about_manual_topic(xml_text):
+        return xml_text
+    year = ABOUT_MANUAL_COPYRIGHT_YEAR if year is None else year
+    return re.sub(r"©\s*\d{4}(?:\s*[-–—]\s*\d{4})?", f"©{year}", xml_text)
+
+
 def _split_about_manual_paragraphs(xml_text):
     """Restore 关于说明书 logical paragraphs that were collapsed into one <p>."""
     if not xml_text or not _is_about_manual_topic(xml_text):
@@ -1780,6 +1803,67 @@ def _wrap_operation_precaution_paragraphs(xml_text):
     items = "\n".join(f"          <li>{paragraph}</li>" for paragraph in paragraphs)
     new_body = f"\n        <ul>\n{items}\n        </ul>\n"
     return xml_text[: body_match.start(2)] + new_body + xml_text[body_match.end(2) :]
+
+
+def _peel_sequencing_prep_list_edges(xml_text):
+    """Lift 测序仪： and 测序前请仔细阅读 out of a kit-name bullet list."""
+    if not xml_text or "<ul>" not in xml_text:
+        return xml_text
+
+    def _item_plain(item_xml):
+        return _normalize_docx_text(re.sub(r"<[^>]+>", "", item_xml or ""))
+
+    def _item_as_p(item_xml):
+        inner = (item_xml or "").strip()
+        if inner.startswith("<p>") and inner.endswith("</p>"):
+            return f"        {inner}"
+        return f"        <p>{inner}</p>"
+
+    def _split_read_before(item_xml):
+        paras = re.findall(r"<p>[\s\S]*?</p>", item_xml or "")
+        if len(paras) < 2:
+            return item_xml, []
+        keep = []
+        peeled = []
+        for para in paras:
+            if _item_plain(para).startswith("测序前请仔细阅读"):
+                peeled.append(para)
+            else:
+                keep.append(para)
+        if not peeled:
+            return item_xml, []
+        return "".join(keep), peeled
+
+    def _repl(match):
+        items = re.findall(r"<li>(.*?)</li>", match.group(0), flags=re.DOTALL)
+        if not items:
+            return match.group(0)
+        body = list(items)
+        prefix = []
+        suffix = []
+        while body and re.match(r"^测序仪[:：]", _item_plain(body[0])):
+            prefix.append(body.pop(0))
+        while body and _item_plain(body[-1]).startswith("测序前请仔细阅读"):
+            suffix.insert(0, body.pop())
+        split_body = []
+        extra_suffix = []
+        for item in body:
+            kept, peeled = _split_read_before(item)
+            if kept and kept.strip():
+                split_body.append(kept)
+            extra_suffix.extend(peeled)
+        body = split_body
+        suffix = extra_suffix + suffix
+        if not prefix and not suffix:
+            return match.group(0)
+        parts = [_item_as_p(item) for item in prefix]
+        if body:
+            lis = "\n".join(f"          <li>{item}</li>" for item in body)
+            parts.append(f"        <ul>\n{lis}\n        </ul>")
+        parts.extend(_item_as_p(item) for item in suffix)
+        return "\n".join(parts)
+
+    return re.sub(r"<ul>\s*(?:<li>[\s\S]*?</li>\s*)+</ul>", _repl, xml_text)
 
 
 def _dita_files_in_map_order(output_base):
@@ -2184,6 +2268,9 @@ def _postprocess_dita_topics(output_base):
         new_text = _split_about_manual_paragraphs(text)
         new_text = _wrap_noteish_top_level_lists(new_text)
         new_text = _wrap_operation_precaution_paragraphs(new_text)
+        new_text = _peel_sequencing_prep_list_edges(new_text)
+        new_text = _strip_note_inner_bold(new_text)
+        new_text = _rewrite_about_manual_copyright_year(new_text)
         new_text = _wrap_standalone_dita_images_in_fig(new_text)
         new_text = _pair_adjacent_dita_figures(new_text)
         new_text = _align_side_by_side_figure_entries(new_text)
@@ -2346,9 +2433,22 @@ def _docx_procedure_step_body(text):
     return None
 
 
+def _docx_force_plain_paragraph(text):
+    """Sequencer intro/read-before lines stay body paragraphs, not list items."""
+    compact = _normalize_docx_text(_strip_md_bold(text or ""))
+    compact = re.sub(r"\[\[/?(?:B|SUP|SUB|I)\]\]", "", compact).strip()
+    if re.match(r"^测序仪[:：]", compact):
+        return True
+    if compact.startswith("测序前请仔细阅读"):
+        return True
+    return False
+
+
 def _should_emit_docx_list_marker(paragraph, text, next_block, prev_block=None):
     marker = _docx_list_marker(paragraph)
     if not marker or not text:
+        return False
+    if _docx_force_plain_paragraph(text):
         return False
 
     compact = _normalize_docx_text(text)
@@ -2597,9 +2697,8 @@ def _materialize_docx_image(paragraph, rel_id, media_dir, image_index):
     ext = os.path.splitext(str(getattr(image_part, "partname", "")))[1] or ".png"
     file_name = f"docx_image_{image_index:03d}{ext.lower()}"
     file_path = os.path.join(media_dir, file_name)
-    if not os.path.exists(file_path):
-        with open(file_path, "wb") as f:
-            f.write(image_part.blob)
+    with open(file_path, "wb") as f:
+        f.write(image_part.blob)
     return file_path, image_index + 1
 
 
@@ -2672,6 +2771,22 @@ def _append_orphan_icon_to_previous(lines, image_path):
 def _is_caption_like_docx_text(text):
     normalized = re.sub(r'\[\[/?(?:B|SUP|SUB)\]\]', '', _normalize_docx_text(text or ""))
     return bool(TABLE_CAPTION_PREFIX_RE.match(normalized) or FIGURE_CAPTION_PREFIX_RE.match(normalized))
+
+
+def _following_caption_like_docx_block(blocks, idx, lookahead=5):
+    """True when the next nonempty Word block is a figure/table caption."""
+    from docx.table import Table
+
+    end = min(len(blocks), idx + 1 + lookahead)
+    for look_idx in range(idx + 1, end):
+        block = blocks[look_idx]
+        if isinstance(block, Table):
+            return False
+        text = _extract_docx_paragraph_text(block)
+        if not text:
+            continue
+        return _is_caption_like_docx_text(text)
+    return False
 
 
 def _is_note_like_docx_text(text):
@@ -2794,6 +2909,7 @@ def _docx_to_markdown(file_path):
                     and not is_caption_text
                     and not is_small_image
                     and _is_leftover_docx_scrap_image(value)
+                    and not _following_caption_like_docx_block(blocks, idx)
                 ):
                     continue
                 if is_small_image:
@@ -5790,7 +5906,7 @@ def _patch_template_about_product(xml, fields):
         return xml
     product = (fields.get("product_name") or "").strip()
     if not product:
-        return xml
+        return _rewrite_about_manual_copyright_year(xml)
     version = (fields.get("version") or "").strip()
     product_xml = (
         product.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -5802,12 +5918,13 @@ def _patch_template_about_product(xml, fields):
         tail = f"说明书版本{version}。" if version else orig_ver
         return f"本{kind}适用于{product_xml}。{tail}"
 
-    return re.sub(
+    xml = re.sub(
         r"本(说明书|指南)适用于[^。<]+。(说明书版本[^。<]+。)?",
         _repl_cn,
         xml,
         count=1,
     )
+    return _rewrite_about_manual_copyright_year(xml)
 
 
 def _extract_template_frontmatter_subset(frontmatter_xml):
@@ -7514,6 +7631,12 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             if in_list and list_items:
                 if re.match(r'^\d+[A-Za-z]?(?:[-–—]\d+)?$', clean):
                     continue
+                if _docx_force_plain_paragraph(clean):
+                    result = _flush_list()
+                    if result:
+                        _append_body(result)
+                    _append_body(_paragraph_xml(clean))
+                    continue
                 hang_on_item = (not is_native_md) or bool(re.match(r'^[ \t]+', line))
                 if hang_on_item:
                     _append_list_continuation(
@@ -7598,7 +7721,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 {body_content}
   </{body_tag}>
 </{root_tag}>"""
-    return _move_indexterms_to_prolog(xml)
+    xml = _move_indexterms_to_prolog(xml)
+    xml = _strip_note_inner_bold(xml)
+    xml = _peel_sequencing_prep_list_edges(xml)
+    return xml
 
 
 def _strip_tag(xml):
