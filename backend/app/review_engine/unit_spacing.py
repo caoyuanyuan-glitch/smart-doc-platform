@@ -167,8 +167,57 @@ def check_number_unit_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     return issues
 
 
+# 人工主流报「单位前缺空格」的安全单位：紧贴即可报，不含 % / M / μ。
+# 顺序要求：复合单位必须排在单单位前面，否则 "5mL/min" 会被 mL 抢先匹配掉。
+# 注意：分支末尾不能留空 "|"，(?:a|b|) 会匹配空串，导致每个数字后都产出一条 issue。
+_SAFE_TIGHT_UNIT_RE = re.compile(
+    r"(?<=\d)(?:"
+    r"mL/min|mL/h|L/min|L/h|"
+    r"℃|°\s*C|"
+    r"mL|µL|uL|"
+    r"rpm|"
+    r"VDC|VAC|VA|kW|mW|"
+    r"mA|µA|uA|mV|kV|"
+    r"Hz|kHz|MHz|"
+    r"kg|mg|µg|ug|"
+    r"kPa|MPa|bar|"
+    r"mm|cm|nm|"
+    r"L|V|A|W|g|N|Pa"
+    r")(?![A-Za-z])"
+)
+
+
+def check_safe_tight_unit_gap(text: str, *, parsed: bool = True) -> list[dict]:
+    """对安全单位表上报数值紧贴单位的孤立写法（DET-SPACE-GAP）。"""
+    source = str(text or "")
+    if not parsed or not source.strip():
+        return []
+    issues = []
+    for match in _SAFE_TIGHT_UNIT_RE.finditer(source):
+        start = match.start()
+        prefix = source[max(0, start - 1):start]
+        if prefix in {"\n", "\f", " "}:
+            continue
+        original = source[max(0, start - 1):match.end()]
+        issues.append(_issue(
+            "DET-SPACE-GAP", source, start, match.end(), original,
+            "数值与单位之间缺少空格。本规范要求数值与单位分开写。",
+            "建议在数值与单位之间补一个空格。",
+        ))
+        if len(issues) >= 5:
+            break
+    return issues
+
+
 def check_units_and_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     """数值-单位写法与间距检查入口。"""
     issues = check_unit_consistency(text, parsed=parsed)
     issues.extend(check_number_unit_spacing(text, parsed=parsed))
+    seen = {(item.get("rule"), item.get("original_text"), item.get("position")) for item in issues}
+    for item in check_safe_tight_unit_gap(text, parsed=parsed):
+        key = (item.get("rule"), item.get("original_text"), item.get("position"))
+        if key in seen:
+            continue
+        issues.append(item)
+        seen.add(key)
     return issues

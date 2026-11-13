@@ -1,4 +1,4 @@
-"""F6 / F6b：页码锚点只用于排除或文本缺失时的二次确认，页级 issue 不走该通道。"""
+"""F6 / F6b：页码锚点用于排除或文本缺失时的二次确认；页级视觉 issue 走专用页码+类别通道。"""
 
 import json
 
@@ -86,7 +86,8 @@ def test_page_mismatch_without_text_is_not_a_hit():
     assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is False
 
 
-def test_page_issue_never_page_anchored():
+def test_page_level_visual_layout_issue_matches_same_page():
+    # 页级视觉 issue 对表格/版式等区域判断类批注，按同页+类别计严格命中。
     annotation = _annotation(
         page="69",
         comment="检查下样式，太挤了",
@@ -103,4 +104,4 @@ def test_page_issue_never_page_anchored():
         context="unrelated visual preview without selected tokens",
         position=json.dumps({"page_number": 69}),
     )
-    assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is False
+    assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is True

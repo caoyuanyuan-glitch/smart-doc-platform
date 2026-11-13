@@ -57,6 +57,7 @@ Git 与自检工作流
   - 白天可以随时 commit，17:50 统一检查并逐分支执行 `git push origin <branch>`
   - 未收到用户明确推送指令前，不主动执行 `git push`
   - 每次完成代码修改后先做本地自检，再通知用户进行平台侧验证
+  - 按附件改代码时，方案有分歧先向用户确认再改
   - `git push` 报 500 的两种成因：`credential helper: server returned status 500` 表示 `/app/agent/bin/agent git-credential-helper` 不可用，改用 `gh auth login --hostname github.com --git-protocol https --web` 授权后 `gh auth setup-git` 再 push；`send-pack: unexpected disconnect` 表示 push 参数不被支持，GitHub 不认 GitLab 的 `-o merge_request.*` 语法，去掉 `-o` 重推
   - `gh` 默认未登录，可从 git 凭据助手取 bot token：`TOKEN=$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p')`，再用 `GH_TOKEN="$TOKEN" gh pr create ...`。token 只经环境变量传递，不落盘、不输出
   - PR 相关查询：`gh pr list --state open --json number,title,url,headRefName` 取链接；`gh pr view <n> --json state,mergedAt,mergeCommit` 看是否合并；`git merge-base --is-ancestor <commit> origin/main` 核验提交是否真进了主干
@@ -85,8 +86,8 @@ Git 与自检工作流
 - Context: Agent 在执行审核模块 AI 调用排障时发现；2026-09-22 补充提示词分层与输出截断排查
 - Category: 环境配置
 - Instructions:
-  - runtime.env 已提交到 Git 仓库，不再依赖外部备份文件恢复
-  - 添加新的 API Key 后直接编辑 backend/runtime.env 并 commit 即可
+  - 跟踪的 backend/runtime.env 只放 provider / base URL / model 与部署开关，不放 API Key
+  - 密钥由 IT 补到平台环境变量或本机 backend/runtime.env.local；2026-11-10 用户明确：本轮不吊销、不重签，后面 IT 补充
   - 审核模块 LLM provider 优先级: Qwen > Kimi > DeepSeek > ArkClaw > MCAI Proxy > Proxy
   - 排查 AI 审核结果异常时，先确认后端启动日志中的 provider 预热状态和审核日志中的 `AI客户端可用`、`providers=`、规范文件长度
   - 提示词分层：`app/utils/prompt_builder.py` 不在本仓库中，`ai_client` 恒走其 fallback 分支；但中文审核仍会经 fallback 的 `ReviewPromptBuilder.build_audit_system_prompt()` 调用 `review_rules.build_system_prompt()`（含 P3 语义规则），英文则使用内置英文 system prompt。看到 `prompt_builder 模块缺失` 告警不等于 P3 语义提示词未生效

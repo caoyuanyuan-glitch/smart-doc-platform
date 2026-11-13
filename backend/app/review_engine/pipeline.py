@@ -77,9 +77,11 @@ LOW_VALUE_PATTERN = re.compile(
 )
 
 VISUAL_LAYOUT_PATTERN = re.compile(
-    r"列宽|拉大列宽|调整列宽|溢出单元格|版式|字体/版式|字体|字号|图标大小|icon大小|"
+    r"列宽|拉大列宽|调整列宽|溢出单元格|字体/版式|字体大小|字体颜色|字体不一致|"
+    r"字号|图标大小|icon大小|"
     r"图片尺寸|图片大小|矢量图|挪到右边|竖线|折线|太密集|太杂乱|样式没有设置|"
-    r"table/layout|layout|column\s+width|cell\s+overflow|font\s+size|icon\s+size|image\s+size|visual",
+    r"table/layout|column\s+width|cell\s+overflow|font\s+size|icon\s+size|image\s+size|"
+    r"visual\s+layout|调整版式|版式问题|版式细节",
     re.IGNORECASE,
 )
 
@@ -495,6 +497,26 @@ def issue_topic(issue: Any) -> str:
     return ""
 
 
+# 真版式规则：描述里即使带「字体/版式」也应继续当噪声压掉。
+_TRUE_LAYOUT_RULES = frozenset({
+    "STRUCT-LAYOUT-001",
+    "STRUCT-IMAGE-001",
+    "DET-TYPO-001",
+    "EXT-R015",
+    "EXT-R017",
+    "EXT-R018",
+})
+# 显式白名单：只有确认与「版式」无关的规则才走规则号放行，
+# 不按前缀兜底（否则 AI-STYLE-001 / STRUCT-DUP-001 等真实问题会被当成版式噪声）。
+_NON_LAYOUT_RULE_ALLOWLIST = frozenset({
+    "DET-SPACE-GAP",
+    "DET-SPACE-UNIT",
+    "DET-TYPO-CN-001",
+    "LEARN-PATCH-001",
+    "DET-TERM-CANON-001",
+})
+
+
 def is_whitelisted_layout_issue(issue: Any) -> bool:
     data = issue_to_mapping(issue)
     rule = str(data["rule"] or "").upper()
@@ -504,7 +526,12 @@ def is_whitelisted_layout_issue(issue: Any) -> bool:
         # 放行的同时必须限制注入量（REVIEW_PDF_VISUAL_VERIFY_LAYOUT_LIMIT），
         # 否则会把整页判断混进"具体文字位置"的评测分母。
         return True
-    return rule.startswith("CYY-CN-LAYOUT-") and confidence >= 86
+    if rule.startswith("CYY-CN-LAYOUT-") and confidence >= 86:
+        return True
+    if rule in _TRUE_LAYOUT_RULES:
+        return False
+    # 新体系规则号被版式正则误杀时按规则号放行，不按类别放行。
+    return rule in _NON_LAYOUT_RULE_ALLOWLIST
 
 
 def is_high_value(issue: Any) -> bool:
