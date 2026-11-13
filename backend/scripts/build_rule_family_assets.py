@@ -10,11 +10,38 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
+from datetime import datetime
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 PACK = _BACKEND_DIR / "tests" / "fixtures" / "rule_pack_20261106"
 ASSETS = _BACKEND_DIR / "app" / "review_engine" / "assets"
 FIXTURES = _BACKEND_DIR / "tests" / "fixtures"
+
+
+def _asset_version() -> str:
+    """返回资产版本号。
+
+    原实现把版本硬编码为 "2026-11-06"，每次重新生成资产都写入过期版本号，
+    导致「资产已更新」与「资产版本号」两个信号互相矛盾，无法判断产物新旧。
+
+    取值顺序：
+      1) 环境变量 WORKBUDDY_ASSET_VERSION（CI 可显式指定，保证可复现）；
+      2) 规则学习包源文件的修改日期；
+      3) 今天的日期。
+    """
+    env = os.environ.get("WORKBUDDY_ASSET_VERSION", "").strip()
+    if env:
+        return env
+    # PACK 即规则学习包目录；附件示例里的 _ROOT 在本脚本不存在。
+    for src in (PACK,):
+        if src.exists():
+            stamp = max(
+                (p.stat().st_mtime for p in src.rglob("*") if p.is_file()),
+                default=0,
+            )
+            if stamp:
+                return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m-%d")
 
 # 24 个 legacy 分支的数据驱动编码，须与 annotation_baseline._matches_expected_rule_legacy 逐例等价。
 LEGACY_MATCH = {
@@ -356,7 +383,7 @@ def build_families() -> dict:
         "in_regression_set": sum(1 for e in entries.values() if e["in_regression_set"]),
     }
     return {
-        "version": "2026-11-06",
+        "version": _asset_version(),
         "source": "人工审核意见整理_规则学习包_20261106",
         "match_order": [
             "overrides", "selected_in_blob", "exact_rules", "rule_prefixes",

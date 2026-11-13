@@ -41,10 +41,16 @@ def _tracked_env_files() -> list[str]:
     proc = subprocess.run(
         ["git", "ls-files"],
         cwd=_ROOT,
-        check=True,
         capture_output=True,
         text=True,
     )
+    if proc.returncode != 0:
+        # git 配置不可读 / 不在仓库内 / 无权限 —— 都归到这里。
+        # 注意：不能静默返回空列表，否则「扫不到文件」会被误读成「没有密钥」。
+        raise SystemExit(
+            "check_tracked_secrets: git ls-files 执行失败"
+            f"（cwd={_ROOT}, rc={proc.returncode}）：{proc.stderr.strip()}"
+        )
     return [line.strip() for line in proc.stdout.splitlines() if line.strip() and _is_env_file(line.strip())]
 
 
