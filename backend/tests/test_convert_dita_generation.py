@@ -37,6 +37,7 @@ from app.api.convert import (  # noqa: E402
     _idml_to_markdown,
     _idml_table_to_markdown,
     _idml_walk,
+    _idml_cell_markdown,
     _idml_normalize_image_stem,
     _idml_find_link_target,
     _resolve_idml_source,
@@ -55,6 +56,10 @@ from app.api.convert import (  # noqa: E402
     _idml_callout_note_type,
     _idml_insert_precautions_heading,
     _idml_flatten_svg_embedded_raster,
+    _idml_cell_text_items,
+    _idml_export_native_cell_svg,
+    _idml_crop_tall_flow_svg,
+    _apply_dita_flow_and_symbol_sizes,
     _split_about_manual_paragraphs,
     _wrap_standalone_dita_images_in_fig,
     _wrap_noteish_top_level_lists,
@@ -64,8 +69,13 @@ from app.api.convert import (  # noqa: E402
     _build_xref_map,
     _postprocess_dita_topics,
     _idml_xref_marker,
+    _idml_svg_path_d,
     _idml_collect_paragraph_destination_titles,
     _idml_collect_hyperlink_source_destinations,
+    _is_system_guide_source,
+    _should_limit_dita_image_widths,
+    _unwrap_italic_punct_after_xref,
+    _idml_paint_hex,
     )
 
 TOOLS_ROOT = BACKEND_ROOT / "tools"
@@ -1410,6 +1420,8 @@ class CoverFieldPatchTest(unittest.TestCase):
         self.assertEqual(fields["part_no"], "H-020-000618-00")
         self.assertEqual(fields["manual_name"], "Instructions for Use")
         self.assertEqual(fields["product_name"], "DNBSEQ-E25RS High-throughput Sequencing Set")
+        self.assertEqual(fields["version"], "8.0")
+        self.assertEqual(fields["product_model"], "E25RS")
 
     def test_extracts_part_no_from_resolved_idml_filename(self):
         fields = _extract_cover_fields(
@@ -1464,6 +1476,41 @@ class CoverFieldPatchTest(unittest.TestCase):
         patched = _patch_template_cover_fields(xml, {"part_no": "H-020-000876-00"})
         self.assertIn('<p id="pnum">H-020-000876-00</p>', patched)
         self.assertNotIn("H-020-000898-00", patched)
+
+    def test_extracts_user_manual_version_and_model(self):
+        fields = _extract_cover_fields(
+            "H-020-000094-00 DNBSEQ-G400RS Genetic Sequencer User Manual_English_RUO_WH.idml",
+            "This user manual is applicable to DNBSEQ-G400RS Genetic Sequencer. The manual version is 9.0 and the software version is V1 and above.",
+            "en-US",
+        )
+        self.assertEqual(fields["part_no"], "H-020-000094-00")
+        self.assertEqual(fields["manual_name"], "User Manual")
+        self.assertEqual(fields["product_name"], "DNBSEQ-G400RS Genetic Sequencer")
+        self.assertEqual(fields["version"], "9.0")
+        self.assertEqual(fields["product_model"], "G400RS")
+
+    def test_patches_serial_item_version_and_model(self):
+        xml = (
+            '<concept cms:imesofttype="sCoverTopic">'
+            '<row><entry><p>Serial number</p></entry><entry><p id="psn">H-020-001143-00</p></entry></row>'
+            '<row><entry><p>Item</p></entry><entry><p id="pitem">System Guide</p></entry></row>'
+            '<row><entry><p>Version</p></entry><entry><p id="pver">1.0</p></entry></row>'
+            '<row><entry><p>Product model</p></entry><entry><p id="pmodel">DNBSEQ-T7+RS</p></entry></row>'
+            "</concept>"
+        )
+        patched = _patch_template_cover_fields(xml, {
+            "part_no": "H-020-000094-00",
+            "manual_name": "User Manual",
+            "version": "9.0",
+            "product_model": "G400RS",
+        })
+        self.assertIn('<p id="psn">H-020-000094-00</p>', patched)
+        self.assertIn('<p id="pitem">User Manual</p>', patched)
+        self.assertIn('<p id="pver">9.0</p>', patched)
+        self.assertIn('<p id="pmodel">G400RS</p>', patched)
+        self.assertNotIn("H-020-001143-00", patched)
+        self.assertNotIn("System Guide", patched)
+        self.assertNotIn("DNBSEQ-T7+RS", patched)
 
 
 class DocxTableMarkdownTest(unittest.TestCase):
@@ -1602,6 +1649,80 @@ class DocxTableMarkdownTest(unittest.TestCase):
                 (1, 1): "PCR Instrument Module",
                 (1, 2): "/",
                 (1, 3): "/",
+            },
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[0], "[[THEAD:1]]")
+
+    def test_two_column_key_value_table_has_no_thead(self):
+        table = self._real_table(
+            4,
+            2,
+            {
+                (0, 0): "Manufacturer",
+                (0, 1): "Wuhan MGI Tech Co., Ltd.",
+                (1, 0): "Address",
+                (1, 1): "23rd Floor, Intelligent Building",
+                (2, 0): "Technical support",
+                (2, 1): "Wuhan MGI Tech Co., Ltd.",
+                (3, 0): "Technical support E-mail",
+                (3, 1): "MGI-service@mgi-tech.com",
+            },
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[0], "[[THEAD:0]]")
+        xml = _content_to_dita_xml(
+            "Manufacturer information",
+            "\n".join(lines),
+            "concept",
+            "DTC041015",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertNotIn("<thead>", xml)
+        self.assertIn("Manufacturer", xml)
+
+    def test_stub_column_with_header_labels_becomes_thead(self):
+        table = self._real_table(
+            3,
+            4,
+            {
+                (0, 0): "Performance requirement",
+                (0, 1): "Experiment",
+                (0, 2): "Accuracy rate",
+                (0, 3): "Precision rate",
+                (1, 1): "Accuracy: Based on the default operation",
+                (1, 2): "99.77%",
+                (1, 3): "0.06%",
+                (2, 1): "Repetition: In at least 3 times experiments",
+            },
+            merges=[((0, 0), (2, 0))],
+        )
+        lines = _docx_table_to_markdown(table)
+        self.assertEqual(lines[0], "[[THEAD:0]]")
+        xml = _content_to_dita_xml(
+            "Performance specifications",
+            "\n".join(lines),
+            "concept",
+            "DTC041016",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertNotIn("<thead>", xml)
+        self.assertIn("Experiment", xml)
+        self.assertIn("Accuracy rate", xml)
+        self.assertIn('morerows="2"', xml)
+        self.assertIn('vf:bgcolor="#C0C0C0"', xml)
+
+    def test_two_column_label_header_row_becomes_thead(self):
+        table = self._real_table(
+            2,
+            2,
+            {
+                (0, 0): "试剂名称",
+                (0, 1): "加样体积",
+                (1, 0): "A57-WGS-BE",
+                (1, 1): "68 μL",
             },
         )
         lines = _docx_table_to_markdown(table)
@@ -2705,6 +2826,42 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertIn("<uicontrol>123456</uicontrol>", xml)
         self.assertNotIn("<uicontrol>1</uicontrol>", xml)
 
+    def test_list_close_marker_is_not_a_uicontrol(self):
+        xml = _content_to_dita_xml(
+            "Specifications",
+            "Relative humidity:[[UL]]20% to 80%[[LI]]non-condensing[[/UL]]",
+            "concept",
+            "DTO041233",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertNotIn("<uicontrol>UL</uicontrol>", xml)
+        self.assertNotIn("<uicontrol>/UL</uicontrol>", xml)
+        self.assertNotIn("<uicontrol>LI</uicontrol>", xml)
+
+    def test_chapter_warning_icon_and_list_become_note(self):
+        md = (
+            "![icon_warning.svg](image/icon_warning.svg)\n\n"
+            "- Do not place the instrument on an uneven surface.\n\n"
+            "- Do not use the instrument in a wet location.\n\n"
+            "![icon_caution.svg](image/icon_caution.svg)\n\n"
+            "- Disconnect the power cord before cleaning.\n"
+        )
+        xml = _content_to_dita_xml(
+            "Safety", md, "concept", "DTO041234", "en-US",
+            topic_kind="concept", source_format="idml",
+        )
+        self.assertIn('<note type="warning">', xml)
+        self.assertIn('<note type="caution">', xml)
+        warning = xml.split('<note type="warning">', 1)[1].split("</note>", 1)[0]
+        self.assertIn("<ul>", warning)
+        self.assertIn("uneven surface", warning)
+        self.assertIn("wet location", warning)
+        self.assertNotIn("icon_warning", xml)
+        self.assertNotIn("icon_caution", xml)
+        self.assertNotIn("<fig>", xml)
+
     def test_idml_bullet_with_warning_keyword_stays_a_list_item(self):
         """IDML warnings are callout tables; a bulleted item must not be
         promoted to a note and folded into the previous item."""
@@ -2753,6 +2910,42 @@ class IdmlConversionTest(unittest.TestCase):
         xml = _content_to_dita_xml("Run", md, "task", "DTO041221", "en-US", topic_kind="task")
         self.assertIn("<uicontrol>Login</uicontrol>", xml)
         self.assertNotIn("[[UI]]", xml)
+
+    def test_idml_hyphenated_silk_screen_run_becomes_uicontrol(self):
+        """G400 uses Silk-screen-in para.-EN, not only 'Silk screen-EN'."""
+        import tempfile
+
+        styles = (
+            '    <ParagraphStyle Self="ParagraphStyle/StepsList" Name="Numbered list:Level 2-EN">\n'
+            "      <Properties><BulletsAndNumberingListType>NumberedList</BulletsAndNumberingListType></Properties>\n"
+            "    </ParagraphStyle>\n"
+            '    <CharacterStyle Self="CharacterStyle/Silk-screen-in para.-EN" Name="Silk-screen-in para.-EN"/>\n'
+        )
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/StepsList">'
+            '<CharacterStyleRange><Content>Tap </Content></CharacterStyleRange>'
+            '<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/Silk-screen-in para.-EN">'
+            "<Content>Log</Content></CharacterStyleRange>"
+            '<CharacterStyleRange><Content>, select </Content></CharacterStyleRange>'
+            '<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/Silk-screen-in para.-EN">'
+            "<Content>Maintenance &gt; Self-test</Content></CharacterStyleRange>"
+            '<CharacterStyleRange><Content>.</Content></CharacterStyleRange>'
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_en_hyphen.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+                styles_body=styles,
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("[[UI]]Log[[/UI]]", md)
+        self.assertIn("[[UI]]Maintenance > Self-test[[/UI]]", md)
+        xml = _content_to_dita_xml("Run", md, "task", "DTO041222", "en-US", topic_kind="task")
+        self.assertIn("<uicontrol>Log</uicontrol>", xml)
+        self.assertIn("<uicontrol>Maintenance &gt; Self-test</uicontrol>", xml)
 
     def test_idml_italic_character_style_becomes_i(self):
         """Cross reference character styles (N/c/V, book titles) become <i>."""
@@ -3186,6 +3379,38 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertIn("image_installliquidwastebox.jpg", xml)
         self.assertIn("<fig>", xml)
         self.assertIn("Placing the waste container", xml)
+
+    def test_embedded_pdf_without_xmp_is_rasterized(self):
+        """Device-symbol PDFs have Contents=%PDF and no Link/XMP thumbnail."""
+        import base64
+        import tempfile
+
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page(width=40, height=40)
+        page.draw_rect(page.rect, color=(1, 0, 0), fill=(1, 0, 0))
+        pdf_b64 = base64.b64encode(doc.tobytes()).decode("ascii")
+        doc.close()
+        body = (
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Body">'
+            "<CharacterStyleRange>"
+            '<Rectangle Self="rect1" ContentType="GraphicType">'
+            f'<PDF Self="pdf_symbol"><Properties><Contents>{pdf_b64}</Contents></Properties></PDF>'
+            "</Rectangle>"
+            "</CharacterStyleRange>"
+            "</ParagraphStyleRange>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idml_path = Path(tmpdir) / "manual_pdf_symbol.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies='    <TextFrame Self="tf1" ParentStory="s" ItemTransform="1 0 0 1 20 60"/>',
+            )
+            md = _idml_to_markdown(str(idml_path))
+        self.assertIn("pdf_symbol.jpg", md)
+        self.assertRegex(md, r"!\[[^\]]*\]\(<[^>]*pdf_symbol\.jpg>\)|!\[[^\]]*\]\([^)]*pdf_symbol\.jpg\)")
 
     def test_nested_warning_table_in_cell_becomes_note(self):
         """A warning callout nested in a table cell becomes <note type="warning">."""
@@ -3674,6 +3899,93 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertIn("2 ℃~8 ℃冰箱", thead)
         self.assertNotIn("2 ℃~8 ℃冰箱", tbody)
 
+    def _idml_table_cell(self, name, text, rowspan=1, colspan=1):
+        return (
+            f'<Cell Name="{name}" RowSpan="{rowspan}" ColumnSpan="{colspan}">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table body">'
+            f"<CharacterStyleRange><Content>{text}</Content></CharacterStyleRange>"
+            "</ParagraphStyleRange></Cell>"
+        )
+
+    def test_idml_key_value_table_without_headerrowcount_has_no_thead(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="2" ColumnCount="2">'
+            + self._idml_table_cell("0:0", "Name")
+            + self._idml_table_cell("1:0", "Latvia MGI Tech, SIA")
+            + self._idml_table_cell("0:1", "Address")
+            + self._idml_table_cell("1:1", "Lidostas parks, Marupes nov., LV-2167")
+            + "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        self.assertIn("[[THEAD:0]]", "\n".join(lines))
+        xml = _content_to_dita_xml(
+            "European representative information",
+            "\n".join(lines),
+            "concept",
+            "DTC041017",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertNotIn("<thead>", xml)
+
+    def test_idml_unmarked_column_header_row_becomes_thead(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="3" ColumnCount="4">'
+            + self._idml_table_cell("0:0", "Performance requirement", rowspan=3)
+            + self._idml_table_cell("1:0", "Experiment")
+            + self._idml_table_cell("2:0", "Accuracy rate")
+            + self._idml_table_cell("3:0", "Precision rate")
+            + self._idml_table_cell("1:1", "Accuracy: Based on the default operation")
+            + self._idml_table_cell("2:1", "99.77%")
+            + self._idml_table_cell("3:1", "0.06%")
+            + self._idml_table_cell("1:2", "Repetition: In at least 3 times experiments")
+            + "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        self.assertIn("[[THEAD:0]]", "\n".join(lines))
+        xml = _content_to_dita_xml(
+            "Performance specifications",
+            "\n".join(lines),
+            "concept",
+            "DTC041018",
+            "en-US",
+            topic_kind="concept",
+        )
+        self.assertNotIn("<thead>", xml)
+        self.assertIn("Experiment", xml)
+        self.assertIn("Accuracy rate", xml)
+        self.assertIn('morerows="2"', xml)
+        self.assertIn('vf:bgcolor="#C0C0C0"', xml)
+
+    def test_idml_two_column_label_header_without_headerrowcount_becomes_thead(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="2" ColumnCount="2">'
+            + self._idml_table_cell("0:0", "Item")
+            + self._idml_table_cell("1:0", "Description")
+            + self._idml_table_cell("0:1", "Buffer")
+            + self._idml_table_cell("1:1", "10 uL")
+            + "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        self.assertNotIn("[[THEAD:0]]", "\n".join(lines))
+        xml = _content_to_dita_xml(
+            "Reagents",
+            "\n".join(lines),
+            "concept",
+            "DTC041019",
+            "en-US",
+            topic_kind="concept",
+        )
+        thead = xml.split("<thead>")[1].split("</thead>")[0]
+        self.assertIn("Item", thead)
+        self.assertIn("Description", thead)
+
     def test_table_cell_icon_keeps_inline_position(self):
         """An icon inside a table cell must not disappear during conversion."""
         import xml.etree.ElementTree as ET
@@ -3955,6 +4267,23 @@ class IdmlConversionTest(unittest.TestCase):
         after_nested = xml.split("表格导入样本编号", 1)[1]
         self.assertNotIn("执行如下操作", after_nested)
 
+    def test_levelled_body_after_nested_list_hangs_on_parent(self):
+        """Text:L3 after Level 3 bullets belongs after the nested ul."""
+        md = (
+            "[[LVL:2]]1. Perform one of the following operations:\n\n"
+            "[[LVL:3]]- Tap Log, select Maintenance > Self-test.\n\n"
+            "[[LVL:3]]- Tap Log, select Shut down > Restart.\n\n"
+            "[[LVL:3]]If the problems still persist, contact the technical support for help.\n"
+        )
+        xml = _content_to_dita_xml(
+            "Self-test", md, "task", "DTO041235", "en-US",
+            topic_kind="task", source_format="idml",
+        )
+        parent = xml.split("Perform one of the following", 1)[1]
+        nested_last = parent.split("Shut down", 1)[1].split("</li>", 1)[0]
+        self.assertNotIn("If the problems still persist", nested_last)
+        self.assertLess(parent.index("</ul>"), parent.index("If the problems still persist"))
+
     def test_idml_superscript_character_style_becomes_sup(self):
         import tempfile
 
@@ -4041,6 +4370,56 @@ class IdmlConversionTest(unittest.TestCase):
         self.assertIn("Total volume", xml)
         thead = xml.split("<thead>")[1].split("</thead>")[0]
         self.assertNotIn("vf:bgcolor", thead)
+
+    def test_inferred_header_row_drops_bgcolor(self):
+        import xml.etree.ElementTree as ET
+
+        table = (
+            '<Table Self="t1" HeaderRowCount="0" BodyRowCount="2" ColumnCount="3">'
+            '<Cell Name="0:0" AppliedCellStyle="CellStyle/Table heading-with frames-vertical">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>Experiment</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Name="1:0" AppliedCellStyle="CellStyle/Table heading-with frames-vertical">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>Accuracy rate</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Name="2:0" AppliedCellStyle="CellStyle/Table heading-with frames-vertical">'
+            "<ParagraphStyleRange><CharacterStyleRange><Content>Precision rate</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Name="0:1"><ParagraphStyleRange><CharacterStyleRange>'
+            "<Content>Accuracy: Based on the default operation</Content>"
+            "</CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Name="1:1"><ParagraphStyleRange><CharacterStyleRange>'
+            "<Content>99.77%</Content></CharacterStyleRange></ParagraphStyleRange></Cell>"
+            '<Cell Name="2:1"><ParagraphStyleRange><CharacterStyleRange>'
+            "<Content>0.06%</Content></CharacterStyleRange></ParagraphStyleRange></Cell>"
+            "</Table>"
+        )
+        lines = _idml_table_to_markdown(ET.fromstring(table))
+        joined = "\n".join(lines)
+        self.assertNotIn("[[BG:#C0C0C0]]Experiment", joined)
+        xml = _content_to_dita_xml(
+            "Performance specifications",
+            "\n".join(lines),
+            "concept",
+            "DTO041236",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        thead = xml.split("<thead>")[1].split("</thead>")[0]
+        self.assertIn("Experiment", thead)
+        self.assertNotIn("vf:bgcolor", thead)
+
+    def test_cell_list_continuation_joins_previous_item(self):
+        md = _idml_cell_markdown([
+            ("20% to 80%", "ul"),
+            ("(no condensation)", None),
+            ("Non-condensing", "ul"),
+        ])
+        self.assertTrue(md.startswith("[[UL]]"))
+        self.assertTrue(md.endswith("[[/UL]]"))
+        self.assertIn("20% to 80% (no condensation)", md)
+        self.assertIn("[[LI]]Non-condensing", md)
 
     def test_idml_filled_single_sentence_stays_table(self):
         import xml.etree.ElementTree as ET
@@ -4842,6 +5221,254 @@ class ImeFeedbackFixesTest(unittest.TestCase):
             self.assertTrue(out.endswith(".jpg"))
             self.assertTrue(Path(out).is_file())
 
+    def test_svg_with_text_labels_is_not_flattened(self):
+        import base64
+        import tempfile
+
+        jpeg = base64.b64decode(
+            "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+        )
+        b64 = base64.b64encode(jpeg).decode("ascii")
+        svg = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+            'width="100mm" height="64mm">'
+            f'<image width="405" height="259" xlink:href="data:image/jpeg;base64,{b64}"/>'
+            '<text x="10" y="20">DNB</text>'
+            "</svg>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svg_path = Path(tmpdir) / "image_copyflowcell_EN.svg"
+            svg_path.write_text(svg, encoding="utf-8")
+            self.assertIsNone(_idml_flatten_svg_embedded_raster(str(svg_path)))
+
+    def test_cell_br_splits_into_paragraphs(self):
+        md = _idml_cell_markdown([
+            ("[[UI]]Device[[/UI]]", None),
+            ("[[UI]]maintenance[[/UI]]", None),
+        ])
+        self.assertEqual(md, "[[UI]]Device[[/UI]][[P]][[UI]]maintenance[[/UI]]")
+        xml = _content_to_dita_xml(
+            "Maintenance",
+            "| Control | Function |\n| :--- | :--- |\n| " + md + " | Open the page |",
+            "concept",
+            "DTO041034",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("<uicontrol>Device</uicontrol></p><p><uicontrol>maintenance</uicontrol>", xml)
+
+    def test_regulation_number_and_name_split(self):
+        md = _idml_cell_markdown([
+            ("IEC 61326-1:2020 Electrical equipment for measurement, control and laboratory use", "ul"),
+        ])
+        self.assertIn("[[P]]", md)
+        xml = _content_to_dita_xml(
+            "Compliance",
+            "- IEC 61326-1:2020 Electrical equipment for measurement, control and laboratory use\n",
+            "concept",
+            "CTO041093",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("<p>IEC 61326-1:2020</p><p>Electrical equipment for measurement, control and laboratory use</p>", xml)
+
+    def test_wash_section_table_is_180mm(self):
+        xml = _content_to_dita_xml(
+            "Performing a wash",
+            "| Solution | Frequency |\n| :--- | :--- |\n| Wash buffer | Daily |",
+            "task",
+            "DTO041075",
+            "en-US",
+            topic_kind="task",
+            source_format="idml",
+        )
+        self.assertIn('<table outputclass="180 mm">', xml)
+
+    def test_performance_table_has_firstcol_rowheader(self):
+        xml = _content_to_dita_xml(
+            "Performance specifications",
+            "[[TABCAP]]Test results of genetic sequencer\n"
+            "| Experiment | Accuracy rate | Precision rate |\n"
+            "| :--- | :--- | :--- |\n"
+            "| Run 1 | 99.9% | 99.8% |",
+            "concept",
+            "CTO041094",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn('rowheader="firstcol"', xml)
+
+    def test_mixed_title_adjacent_figs_pair_into_white_table(self):
+        xml = (
+            "<topic><body>\n"
+            '<fig id="fig1"><image href="image/image_200H_frontview_EN.svg" '
+            'width="44.1mm" height="41.2mm"></image></fig>\n'
+            '<fig id="fig2"><title id="tit1">Basic components</title>'
+            '<image href="image/image_200H_backview_EN.svg" '
+            'width="28.9mm" height="35.1mm"></image></fig>\n'
+            "</body></topic>"
+        )
+        out = _pair_adjacent_dita_figures(xml)
+        self.assertIn("<title>Basic components</title>", out)
+        self.assertIn('vf:bgcolor="#FFFFFF"', out)
+        self.assertIn("image_200H_frontview_EN.svg", out)
+        self.assertIn("image_200H_backview_EN.svg", out)
+        self.assertEqual(out.count("<fig"), 0)
+
+    def test_native_cell_vector_exports_svg(self):
+        import tempfile
+        import xml.etree.ElementTree as ET
+
+        cell = ET.fromstring(
+            '<Cell Self="c0" Name="1:0">'
+            '<Rectangle Self="uRect1" FillColor="Color/C=100 M=0 Y=0 K=0" StrokeWeight="0" '
+            'ItemTransform="1 0 0 1 0 0">'
+            "<Properties><PathGeometry><GeometryPathType PathOpen=\"false\">"
+            "<PathPointArray>"
+            '<PathPointType Anchor="0 0" LeftDirection="0 0" RightDirection="0 0"/>'
+            '<PathPointType Anchor="20 0" LeftDirection="20 0" RightDirection="20 0"/>'
+            '<PathPointType Anchor="20 10" LeftDirection="20 10" RightDirection="20 10"/>'
+            '<PathPointType Anchor="0 10" LeftDirection="0 10" RightDirection="0 10"/>'
+            "</PathPointArray></GeometryPathType></PathGeometry></Properties>"
+            "</Rectangle></Cell>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def resolve(_uri):
+                return None
+            resolve.media_dir = tmpdir
+            resolve.native_cache = {}
+            items = _idml_cell_text_items(cell, image_resolver=resolve)
+            self.assertTrue(items)
+            markup = items[0][0]
+            self.assertIn(".svg", markup)
+            exported = list(Path(tmpdir).glob("*.svg"))
+            self.assertEqual(len(exported), 1)
+            svg = exported[0].read_text(encoding="utf-8")
+            self.assertIn("<path", svg)
+            self.assertIn("#00FFFF", svg)
+
+    def test_native_vector_inside_paragraph_exports_svg(self):
+        import tempfile
+        import xml.etree.ElementTree as ET
+
+        cell = ET.fromstring(
+            '<Cell Self="c0" Name="0:3">'
+            '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Table:Symbols-EN">'
+            '<CharacterStyleRange>'
+            '<Group Self="u1f4e" FillColor="Color/c61m0y45k0 2" StrokeWeight="0" '
+            'ItemTransform="1 0 0 1 0 0">'
+            '<Polygon Self="u1f51" FillColor="Color/c61m0y45k0 2" StrokeColor="Color/C=0 M=0 Y=0 K=85" '
+            'StrokeWeight="0.5" ItemTransform="1 0 0 1 0 0">'
+            "<Properties><PathGeometry><GeometryPathType PathOpen=\"false\">"
+            "<PathPointArray>"
+            '<PathPointType Anchor="0 0" LeftDirection="0 0" RightDirection="0 0"/>'
+            '<PathPointType Anchor="12 0" LeftDirection="12 0" RightDirection="12 0"/>'
+            '<PathPointType Anchor="12 12" LeftDirection="12 12" RightDirection="12 12"/>'
+            '<PathPointType Anchor="0 12" LeftDirection="0 12" RightDirection="0 12"/>'
+            "</PathPointArray></GeometryPathType></PathGeometry></Properties>"
+            "</Polygon></Group></CharacterStyleRange></ParagraphStyleRange></Cell>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def resolve(_uri):
+                return None
+            resolve.media_dir = tmpdir
+            resolve.native_cache = {}
+            resolve.color_map = {"Color/c61m0y45k0 2": ("RGB", "24 210 159")}
+            items = _idml_cell_text_items(cell, image_resolver=resolve)
+            self.assertTrue(items)
+            self.assertIn(".svg", items[0][0])
+            exported = list(Path(tmpdir).glob("*.svg"))
+            self.assertEqual(len(exported), 1)
+            svg = exported[0].read_text(encoding="utf-8")
+            self.assertIn("<path", svg)
+            self.assertIn("#18D29F", svg)
+            self.assertNotIn("#63FF8C", svg)
+
+    def test_paint_hex_uses_swatch_rgb_not_compact_name(self):
+        color_map = {
+            "Color/c61m0y45k0副本": ("RGB", "245 88 73"),
+            "Color/c61m0y45k0 2": ("RGB", "24 210 159"),
+        }
+        self.assertEqual(_idml_paint_hex("Color/c61m0y45k0副本", color_map), "#F55849")
+        self.assertEqual(_idml_paint_hex("Color/c61m0y45k0 2", color_map), "#18D29F")
+        self.assertIsNone(_idml_paint_hex("Color/c61m0y45k0副本"))
+        self.assertIsNone(_idml_paint_hex("Color/c61m0y45k0 2"))
+        self.assertEqual(_idml_paint_hex("Color/c61m0y45k0"), "#63FF8C")
+        self.assertEqual(_idml_paint_hex("Color/C=0 M=0 Y=0 K=85"), "#262626")
+
+    def test_epstext_bbox_exports_filled_rect(self):
+        import tempfile
+        import xml.etree.ElementTree as ET
+
+        group = ET.fromstring(
+            '<Group Self="u1f67" ItemTransform="1 0 0 1 0 0">'
+            '<Polygon Self="u1f6a" FillColor="Color/C=0 M=0 Y=0 K=85" StrokeWeight="0" '
+            'ItemTransform="1 0 0 1 0 0">'
+            "<Properties><PathGeometry><GeometryPathType PathOpen=\"false\">"
+            "<PathPointArray>"
+            '<PathPointType Anchor="0 0" LeftDirection="0 0" RightDirection="0 0"/>'
+            '<PathPointType Anchor="20 0" LeftDirection="20 0" RightDirection="20 0"/>'
+            '<PathPointType Anchor="20 20" LeftDirection="20 20" RightDirection="20 20"/>'
+            '<PathPointType Anchor="0 20" LeftDirection="0 20" RightDirection="0 20"/>'
+            "</PathPointArray></GeometryPathType></PathGeometry></Properties>"
+            "</Polygon>"
+            '<EPSText Self="u1f6e" FillColor="Color/c61m0y45k0 4" StrokeWeight="0" '
+            'ItemTransform="0.87 0 0 0.87 120 19">'
+            '<Properties><PathBoundingBox Left="6" Top="6" Right="10" Bottom="10" /></Properties>'
+            "</EPSText></Group>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def resolve(_uri):
+                return None
+            resolve.media_dir = tmpdir
+            resolve.native_cache = {}
+            resolve.color_map = {"Color/c61m0y45k0 4": ("RGB", "0 160 233")}
+            path = _idml_export_native_cell_svg(group, resolve)
+            self.assertTrue(path)
+            svg = Path(path).read_text(encoding="utf-8")
+            self.assertIn("#00A0E9", svg)
+            self.assertGreaterEqual(svg.count("<path"), 2)
+
+    def test_packaging_symbol_is_enlarged_to_15mm(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            topic = Path(tmpdir) / "DTO041013.dita"
+            topic.write_text(
+                '<topic cms:title="Packaging"><title>Packaging</title>'
+                "<p>The following table describes symbols on the packaging or on the label of the packaging:</p>"
+                '<p><image href="image/icon_donotroll.svg" width="9.9mm" height="11.2mm"></image></p>'
+                "</topic>",
+                encoding="utf-8",
+            )
+            updated = _apply_dita_flow_and_symbol_sizes(tmpdir)
+            self.assertEqual(updated, 1)
+            text = topic.read_text(encoding="utf-8")
+            self.assertIn('width="13.3mm"', text)
+            self.assertIn('height="15mm"', text)
+
+    def test_flow_svg_canvas_is_cropped(self):
+        import tempfile
+
+        svg = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1190 1222" '
+            'width="1190" height="1222">'
+            '<image y="0" height="300" width="1190" href="data:image/png;base64,aaa"/>'
+            '<text x="10" y="330" font-size="11">Load</text>'
+            "</svg>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svg_path = Path(tmpdir) / "flow_sequencingflow_New_EN.svg"
+            svg_path.write_text(svg, encoding="utf-8")
+            _idml_crop_tall_flow_svg(str(svg_path))
+            text = svg_path.read_text(encoding="utf-8")
+            self.assertIn('viewBox="0 0 1190 349"', text)
+
 
     def test_ordering_section_table_is_180mm(self):
         xml = _content_to_dita_xml(
@@ -4884,6 +5511,9 @@ class ImeFeedbackFixesTest(unittest.TestCase):
             source_format="idml",
         )
         self.assertIn("<indexterm>生物安全</indexterm>", xml)
+        self.assertIn("请遵守<indexterm>生物安全</indexterm>实验室规范", xml)
+        self.assertNotIn("<prolog>", xml)
+        self.assertNotIn("<keywords>", xml)
         nested = _content_to_dita_xml(
             "控制软件",
             "打开[[INDEX:计算机/控制软件]]。\n",
@@ -4897,6 +5527,11 @@ class ImeFeedbackFixesTest(unittest.TestCase):
             "<indexterm>计算机<indexterm>控制软件</indexterm></indexterm>",
             nested,
         )
+        self.assertIn(
+            "打开<indexterm>计算机<indexterm>控制软件</indexterm></indexterm>。",
+            nested,
+        )
+        self.assertNotIn("<prolog>", nested)
 
     def test_inline_icon_width_is_forced_to_6mm(self):
         import tempfile
@@ -4997,7 +5632,7 @@ class ImeFeedbackFixesTest(unittest.TestCase):
         self.assertIn("30.Wash or not.svg", out)
         self.assertEqual(out.count("<li>"), 3)
 
-    def test_indexterm_moves_out_of_uicontrol(self):
+    def test_indexterm_stays_in_uicontrol(self):
         xml = _content_to_dita_xml(
             "报告参数说明",
             "【[[INDEX:ChipProductivity(%)]]ChipProductivity(%)】\n",
@@ -5008,14 +5643,32 @@ class ImeFeedbackFixesTest(unittest.TestCase):
             source_format="idml",
         )
         self.assertIn("<indexterm>ChipProductivity(%)</indexterm>", xml)
-        self.assertIn("<uicontrol>ChipProductivity(%)</uicontrol>", xml)
+        self.assertIn(
+            "<uicontrol><indexterm>ChipProductivity(%)</indexterm></uicontrol>",
+            xml,
+        )
         self.assertNotIn(
             "<uicontrol><indexterm>ChipProductivity(%)</indexterm>ChipProductivity(%)</uicontrol>",
             xml,
         )
-        self.assertIn("<keywords><indexterm>ChipProductivity(%)</indexterm></keywords>", xml)
-        body = xml.split("<body", 1)[-1]
-        self.assertNotIn("<indexterm>", body)
+        self.assertNotIn("<keywords>", xml)
+        self.assertNotIn("<prolog>", xml)
+        self.assertEqual(xml.count("ChipProductivity(%)"), 1)
+
+    def test_indexterm_wraps_first_occurrence_only(self):
+        xml = _content_to_dita_xml(
+            "保险丝",
+            "如[[INDEX:保险丝]]保险丝损坏。另一处[[INDEX:保险丝]]保险丝也要检查。\n",
+            "concept",
+            "DTO053889",
+            "zh-CN",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("如<indexterm>保险丝</indexterm>损坏", xml)
+        self.assertIn("另一处保险丝也要检查", xml)
+        self.assertEqual(xml.count("<indexterm>"), 1)
+        self.assertNotIn("<prolog>", xml)
 
     def test_container_title_maps_to_first_child_topic(self):
         prepared = [
@@ -5258,6 +5911,306 @@ class ImeFeedbackFixesTest(unittest.TestCase):
         self.assertIn("</booklists>", output)
         self.assertNotIn('navtitle="索引"', output)
         self.assertNotIn("CTO041189.dita", output)
+
+    def test_system_guide_detection_and_image_width_policy(self):
+        self.assertTrue(_is_system_guide_source(
+            "H-020-000876-00 DNBSEQ-G99RS 系统操作指南.idml",
+        ))
+        self.assertTrue(_is_system_guide_source(
+            "DNBSEQ-G99RS System Guide.idml",
+        ))
+        self.assertFalse(_is_system_guide_source(
+            "DNBSEQ-T1+RS 基因测序仪快速操作指南.idml",
+        ))
+        self.assertFalse(_is_system_guide_source(
+            "MGIEasy 全基因组甲基化建库试剂盒使用说明书.docx",
+        ))
+        self.assertFalse(_should_limit_dita_image_widths(True))
+        self.assertFalse(_should_limit_dita_image_widths(False))
+
+    def test_system_guide_empty_parent_maps_xref_to_itself(self):
+        prepared = [
+            (
+                {"title": "进行前期准备", "content": "", "has_children": True},
+                "进行前期准备",
+                "task",
+                "DTO041010",
+                "DTO041010.dita",
+                "task",
+            ),
+            (
+                {"title": "准备耗材", "content": "body", "has_children": False},
+                "准备耗材",
+                "task",
+                "DTO041011",
+                "DTO041011.dita",
+                "task",
+            ),
+        ]
+        xref_map = _build_xref_map(prepared, is_system_guide=True)
+        self.assertEqual(xref_map.get("进行前期准备"), "DTO041010")
+        default_map = _build_xref_map(prepared)
+        self.assertEqual(default_map.get("进行前期准备"), "DTO041011")
+
+    def test_system_guide_xref_period_stays_in_paragraph(self):
+        xml = _content_to_dita_xml(
+            "步骤",
+            "参考[[XREF:准备耗材]][[I]]。[[/I]]\n",
+            "task",
+            "DTO041012",
+            "zh-CN",
+            topic_kind="task",
+            source_format="idml",
+            xref_map={"准备耗材": "DTO041011"},
+            is_system_guide=True,
+        )
+        self.assertIn(
+            '<xref href="DTO041011.dita" cms:title="准备耗材"/>。',
+            xml,
+        )
+        self.assertNotIn("<i>。</i>", xml)
+        self.assertIn("<p>", xml)
+        kept = _content_to_dita_xml(
+            "步骤",
+            "参考[[XREF:准备耗材]][[I]]。[[/I]]\n",
+            "task",
+            "DTO041012",
+            "zh-CN",
+            topic_kind="task",
+            source_format="idml",
+            xref_map={"准备耗材": "DTO041011"},
+        )
+        self.assertIn(
+            '<xref href="DTO041011.dita" cms:title="准备耗材"/>。',
+            kept,
+        )
+        self.assertNotIn("<i>。</i>", kept)
+        self.assertEqual(
+            _unwrap_italic_punct_after_xref(
+                '<p>参考<xref href="DTO041011.dita" cms:title="准备耗材"/><i>。</i></p>'
+            ),
+            '<p>参考<xref href="DTO041011.dita" cms:title="准备耗材"/>。</p>',
+        )
+
+    def test_cell_paragraph_marker_is_not_uicontrol(self):
+        xml = _content_to_dita_xml(
+            "Ensure",
+            "Ensure[[P]]that the reagent is loaded.\n",
+            "concept",
+            "DTO041005",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertNotIn("<uicontrol>P</uicontrol>", xml)
+        self.assertIn("<p>Ensure</p>", xml)
+        self.assertIn("<p>that the reagent is loaded.</p>", xml)
+
+    def test_nested_cell_note_splits_paragraph_marker(self):
+        xml = _content_to_dita_xml(
+            "Run",
+            "| Status | Detail |\n"
+            "| :--- | :--- |\n"
+            "| Ready | sequencing.[[P]][[NOTE:tip]]Keep the flow cell.[[/NOTE]] |\n",
+            "concept",
+            "DTO041071",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertNotIn("<uicontrol>P</uicontrol>", xml)
+        self.assertIn("<p>sequencing.</p>", xml)
+        self.assertIn('<note type="tip">', xml)
+        self.assertIn("Keep the flow cell.", xml)
+
+    def test_indexterm_folds_into_matching_uicontrol(self):
+        xml = _content_to_dita_xml(
+            "Software",
+            "Click [[INDEX:Upload]][[UI]]Upload[[/UI]] to start.\n",
+            "concept",
+            "DTO041033",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("<uicontrol><indexterm>Upload</indexterm></uicontrol>", xml)
+        self.assertNotIn("</indexterm><uicontrol>Upload</uicontrol>", xml)
+
+    def test_xref_page_zero_is_omitted(self):
+        import xml.etree.ElementTree as ET
+
+        zero = ET.fromstring(
+            "<CrossReferenceSource>"
+            "<Content>Rear view on Page</Content>"
+            '<TextVariableInstance ResultText="0"/>'
+            "</CrossReferenceSource>"
+        )
+        self.assertEqual(_idml_xref_marker(zero), "[[XREF:Rear view]]")
+        numbered = ET.fromstring(
+            "<CrossReferenceSource>"
+            "<Content>Rear view on Page</Content>"
+            '<TextVariableInstance ResultText="12"/>'
+            "</CrossReferenceSource>"
+        )
+        self.assertEqual(_idml_xref_marker(numbered), "[[XREF:Rear view#12]]")
+
+    def test_regulation_year_stays_with_identifier(self):
+        md = _idml_cell_markdown(
+            [
+                ("IEC 61010-2-010", None),
+                ("2019", None),
+                ("Safety requirements for electrical equipment", None),
+            ]
+        )
+        self.assertIn("IEC 61010-2-010 2019", md)
+        self.assertNotIn("IEC 61010-2-010[[P]]2019", md)
+        xml = _content_to_dita_xml(
+            "Standards",
+            f"| {md} |\n| :--- |\n",
+            "concept",
+            "CTO041093",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("<p>IEC 61010-2-010 2019</p>", xml)
+        self.assertIn("<p>Safety requirements for electrical equipment</p>", xml)
+
+    def test_full_rowspan_header_stays_in_tbody_with_gray(self):
+        xml = _content_to_dita_xml(
+            "Performance specifications",
+            "[[THEAD:0]]\n"
+            "| Performance requirement[[SPAN:1,3]] | Experiment | Accuracy rate | Precision rate |\n"
+            "| :--- | :--- | :--- | :--- |\n"
+            "| [[SPANC]] | 1 | 99.7% | 0.06% |\n"
+            "| [[SPANC]] | 2 | 99.6% | 0.06% |\n",
+            "concept",
+            "CTO041094",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertNotIn("<thead>", xml)
+        self.assertIn('morerows="2"', xml)
+        self.assertIn('vf:bgcolor="#C0C0C0"', xml)
+        self.assertIn("Performance requirement", xml)
+
+    def test_native_svg_uses_cubic_when_handles_differ(self):
+        curved = _idml_svg_path_d(
+            [((0.0, 0.0), (0.0, 0.0), (10.0, 0.0)), ((20.0, 0.0), (10.0, 0.0), (20.0, 0.0))],
+            False,
+            0.0,
+            0.0,
+        )
+        self.assertIn("C", curved)
+        straight = _idml_svg_path_d(
+            [((0.0, 0.0), (0.0, 0.0), (0.0, 0.0)), ((10.0, 0.0), (10.0, 0.0), (10.0, 0.0))],
+            True,
+            0.0,
+            0.0,
+        )
+        self.assertIn("L", straight)
+        self.assertNotIn("C", straight)
+
+    def test_untitled_parts_table_is_absorbed_into_figure(self):
+        xml = _content_to_dita_xml(
+            "DNB loader overview",
+            "[[FIGCAP]]Rear view\n\n"
+            "![rear](image/rear.svg)\n\n"
+            "| No. | Name | Description |\n"
+            "| :--- | :--- | :--- |\n"
+            "| 1 | Wheel | Used for moving the device. |\n",
+            "concept",
+            "DTO041038",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        fig_start = xml.find("<fig")
+        fig_end = xml.find("</fig>")
+        table_pos = xml.find("<table")
+        self.assertGreaterEqual(fig_start, 0)
+        self.assertGreater(table_pos, fig_start)
+        self.assertLess(table_pos, fig_end)
+        self.assertEqual(xml.find("<table", fig_end), -1)
+        self.assertIn("Wheel", xml[fig_start:fig_end])
+
+    def test_parts_legend_absorbs_preceding_image_table(self):
+        xml = _content_to_dita_xml(
+            "DNB loader overview",
+            "[[TABCAP]]Basic components\n"
+            "| ![front](image/front.svg) | ![back](image/back.svg) |\n"
+            "| :--- | :--- |\n\n"
+            "| No. | Name | Description |\n"
+            "| :--- | :--- | :--- |\n"
+            "| 1 | Upper cover | Fastens the flow cell. |\n",
+            "concept",
+            "DTO041038",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        fig_start = xml.find("<fig")
+        fig_end = xml.find("</fig>")
+        self.assertGreaterEqual(fig_start, 0)
+        fragment = xml[fig_start:fig_end]
+        self.assertIn("Basic components", fragment)
+        self.assertIn("Upper cover", fragment)
+        self.assertIn("<table", fragment)
+        self.assertEqual(xml.find("<table", fig_end), -1)
+
+    def test_regulation_spaced_year_is_not_split_from_id(self):
+        md = _idml_cell_markdown(
+            [
+                ("IEC 61010-2-010 2019", "ul"),
+                (
+                    "Safety requirements for electrical equipment for the heating of materials",
+                    None,
+                ),
+            ]
+        )
+        self.assertIn("IEC 61010-2-010 2019", md)
+        self.assertNotIn("IEC 61010-2-010[[P]]2019", md)
+        xml = _content_to_dita_xml(
+            "Standards",
+            f"| {md} |\n| :--- |\n",
+            "concept",
+            "CTO041093",
+            "en-US",
+            topic_kind="concept",
+            source_format="idml",
+        )
+        self.assertIn("<p>IEC 61010-2-010 2019</p>", xml)
+
+    def test_pair_mixed_figs_keeps_inner_legend_table(self):
+        xml = (
+            "<topic><body>\n"
+            '<fig id="fig1"><image href="image/image_200H_frontview_EN.svg" '
+            'width="44.1mm" height="41.2mm"></image></fig>\n'
+            '<fig id="fig2"><title id="tit1">Basic components</title>'
+            '<image href="image/image_200H_backview_EN.svg" '
+            'width="28.9mm" height="35.1mm"></image>'
+            "<table id=\"tab1\"><tgroup cols=\"3\"><tbody>"
+            "<row><entry><p>No.</p></entry>"
+            "<entry><p>Name</p></entry>"
+            "<entry><p>Description</p></entry></row>"
+            "<row><entry><p>1</p></entry>"
+            "<entry><p>Upper cover</p></entry>"
+            "<entry><p>Fastens the flow cell.</p></entry></row>"
+            "</tbody></tgroup></table></fig>\n"
+            "</body></topic>"
+        )
+        out = _pair_adjacent_dita_figures(xml)
+        fig_start = out.find("<fig")
+        fig_end = out.find("</fig>")
+        self.assertGreaterEqual(fig_start, 0)
+        fragment = out[fig_start:fig_end]
+        self.assertIn("Basic components", fragment)
+        self.assertIn("image_200H_frontview_EN.svg", fragment)
+        self.assertIn("image_200H_backview_EN.svg", fragment)
+        self.assertIn("Upper cover", fragment)
+        self.assertIn("<table", fragment)
+        self.assertEqual(out.find("<table", fig_end), -1)
 
 
 if __name__ == "__main__":
