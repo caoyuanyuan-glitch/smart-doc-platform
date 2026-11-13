@@ -2,6 +2,10 @@ import json
 import os
 import re
 import xml.etree.ElementTree as ET
+import base64
+import mimetypes
+import shutil
+import zipfile
 
 
 EDITABLE_SUFFIXES = (".dita", ".ditamap", ".xml")
@@ -194,7 +198,33 @@ def _normalize_patch_list(payload):
     return patches
 
 
-def request_ai_patches(files, feedback, chat_fn):
+def _screenshot_data_url(path, max_bytes=4 * 1024 * 1024):
+    if not path or not os.path.isfile(path):
+        return None
+    if os.path.getsize(path) > max_bytes:
+        return None
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _clone_zipinfo(zinfo):
+    cloned = zipfile.ZipInfo(filename=zinfo.filename, date_time=zinfo.date_time)
+    cloned.compress_type = zinfo.compress_type
+    cloned.comment = zinfo.comment
+    cloned.extra = zinfo.extra
+    cloned.create_system = zinfo.create_system
+    cloned.create_version = zinfo.create_version
+    cloned.extract_version = zinfo.extract_version
+    cloned.flag_bits = zinfo.flag_bits
+    cloned.volume = zinfo.volume
+    cloned.internal_attr = zinfo.internal_attr
+    cloned.external_attr = zinfo.external_attr
+    return cloned
+
+
+def request_ai_patches(files, feedback, chat_fn, screenshot_path=None):
     if not chat_fn:
         return []
     selected = _select_files_for_prompt(files, feedback)
@@ -207,27 +237,48 @@ def request_ai_patches(files, feedback, chat_fn):
     )
     for rel, content in selected.items():
         user_content += f"\n----- FILE {rel} -----\n{content}\n"
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "你在修订一份给 IME 导入的 DITA 转换包。"
-                "只根据用户反馈做最小修改。"
-                "封面用 sCoverTopic，章级用 chapterTopic，其余用 sDitaTopic。"
-                "不要编造新的 cms:number / 文件名。"
-                "只输出 JSON，格式："
-                '{"patches":[{"file":"相对路径","find":"原文中唯一片段","replace":"替换后的片段"}]}。'
-                "find 必须是目标文件中恰好出现一次的原文。"
-                "没有需要改的地方就输出 {\"patches\":[]}。"
-            ),
-        },
-        {"role": "user", "content": user_content},
-    ]
-    raw = chat_fn(messages, max_tokens=4000, temperature=0, request_label="convert.feedback")
-    return _normalize_patch_list(_extract_json_object(raw))
+    data_url = _screenshot_data_url(screenshot_path)
+    if screenshot_path and not data_url:
+        user_content += "\n用户附了报错截图，但未能发给模型，请主要依据文字反馈修改。\n"
+    elif data_url:
+        user_content += "\n用户附了 IME 报错截图，请结合截图中的文件名、属性和报错信息做最小修改。\n"
+    system_message = {
+        "role": "system",
+        "content": (
+            "你在修订一份给 IME 导入的 DITA 转换包。"
+            "只根据用户反馈做最小修改。"
+            "封面用 sCoverTopic，章级用 chapterTopic，其余用 sDitaTopic。"
+            "不要编造新的 cms:number / 文件名。"
+            "只输出 JSON，格式："
+            '{"patches":[{"file":"相对路径","find":"原文中唯一片段","replace":"替换后的片段"}]}。'
+            "find 必须是目标文件中恰好出现一次的原文。"
+            "没有需要改的地方就输出 {\"patches\":[]}。"
+        ),
+    }
+
+    def _call(messages):
+        raw = chat_fn(messages, max_tokens=4000, temperature=0, request_label="convert.feedback")
+        return _normalize_patch_list(_extract_json_object(raw))
+
+    if data_url:
+        vision_messages = [
+            system_message,
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_content},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ]
+        try:
+            return _call(vision_messages)
+        except Exception:
+            pass
+    return _call([system_message, {"role": "user", "content": user_content}])
 
 
-def apply_convert_feedback(output_dir, feedback, chat_fn=None):
+def apply_convert_feedback(output_dir, feedback, chat_fn=None, screenshot_path=None):
     """Apply user feedback onto an unzipped DITA conversion package.
 
     Returns a summary dict: files_touched, hygiene_files, ai_patches, notes.
@@ -255,7 +306,7 @@ def apply_convert_feedback(output_dir, feedback, chat_fn=None):
             hygiene_files.append(rel)
         updated[rel] = cleaned
 
-    ai_patches = request_ai_patches(updated, feedback, chat_fn)
+    ai_patches = request_ai_patches(updated, feedback, chat_fn, screenshot_path=screenshot_path)
     patches_by_file = {}
     for patch in ai_patches:
         patches_by_file.setdefault(patch["file"], []).append(patch)
@@ -300,3 +351,51 @@ def apply_convert_feedback(output_dir, feedback, chat_fn=None):
         "ai_patches": applied_patches,
         "notes": notes,
     }
+
+
+def rewrite_zip_replacing_files(src_zip, dest_zip, replacements):
+    """Copy src_zip entries as-is and replace named files. Preserves UTF-8 flags."""
+    replacements = {
+        str(name).replace("\\", "/"): data
+        for name, data in (replacements or {}).items()
+    }
+    tmp_zip = dest_zip + ".tmp"
+    written = set()
+    with zipfile.ZipFile(src_zip, "r") as zin, zipfile.ZipFile(tmp_zip, "w") as zout:
+        for info in zin.infolist():
+            name = info.filename.replace("\\", "/")
+            if name in replacements:
+                data = replacements[name]
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                zout.writestr(_clone_zipinfo(info), data)
+                written.add(name)
+            else:
+                zout.writestr(info, zin.read(info.filename))
+        for name, data in replacements.items():
+            if name in written:
+                continue
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            zout.writestr(name, data)
+    os.replace(tmp_zip, dest_zip)
+
+
+def apply_convert_feedback_to_zip(zip_path, feedback, chat_fn=None, screenshot_path=None):
+    work_dir = zip_path + "_feedback"
+    os.makedirs(work_dir, exist_ok=True)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(work_dir)
+        summary = apply_convert_feedback(
+            work_dir, feedback, chat_fn=chat_fn, screenshot_path=screenshot_path
+        )
+        replacements = {}
+        for rel in summary.get("files_touched") or []:
+            abs_path = os.path.join(work_dir, rel)
+            with open(abs_path, "rb") as handle:
+                replacements[rel.replace("\\", "/")] = handle.read()
+        rewrite_zip_replacing_files(zip_path, zip_path, replacements)
+        return summary
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)

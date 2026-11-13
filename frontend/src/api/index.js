@@ -429,9 +429,10 @@ export const convertAPI = {
     if (retryScreenshot) formData.append('retry_screenshot', retryScreenshot)
     return instance.post('/convert/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
-  revise: (taskId, feedback, screenshot) => {
+  revise: (taskId, feedback, screenshot, mode = 'patch') => {
     const formData = new FormData()
     formData.append('feedback', feedback)
+    if (mode) formData.append('mode', mode)
     if (screenshot) formData.append('screenshot', screenshot)
     return instance.post(`/convert/${taskId}/revise`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },

@@ -95,9 +95,9 @@
 
           <div v-if="showConvertFeedback" class="feedback-panel" tabindex="0" @paste="onScreenshotPaste">
             <div class="panel-header">
-              <span>按反馈修改转换包</span>
+              <span>按 IME 反馈调整</span>
             </div>
-            <div class="form-tip">针对当前这份 DITA 包填写 IME 导入报错或要改的结构。系统会直接改包并更新下载，不会重跑源文件。</div>
+            <div class="form-tip">填写 IME 导入报错或要改的结构。可只改当前这份 DITA 包，或从已保存的源文件按反馈重新转换后再套用反馈。</div>
             <el-input
               v-model="convertFeedback"
               type="textarea"
@@ -119,9 +119,14 @@
                 <el-button size="small" type="danger" link @click.stop="convertScreenshot = null">移除</el-button>
               </div>
             </div>
-            <el-button type="primary" class="feedback-submit" :disabled="!convertFeedback.trim()" @click="reviseConvert">
-              应用反馈
-            </el-button>
+            <div class="feedback-actions">
+              <el-button class="feedback-submit" :disabled="!convertFeedback.trim()" @click="reviseConvert('patch')">
+                只改当前包
+              </el-button>
+              <el-button type="primary" class="feedback-submit" :disabled="!convertFeedback.trim()" @click="reviseConvert('reconvert')">
+                按反馈重新转换
+              </el-button>
+            </div>
           </div>
         </div>
       </div>
@@ -665,7 +670,7 @@ function onScreenshotPaste(e) {
   }
 }
 
-async function reviseConvert() {
+async function reviseConvert(mode = 'patch') {
   if (!taskId.value) {
     ElMessage.info('请先完成一次转换')
     return
@@ -682,8 +687,8 @@ async function reviseConvert() {
   taskProgress.value = 0
   pipelineSteps.value = pipelineSteps.value.map(s => ({ ...s, status: 'pending' }))
   try {
-    await convertAPI.revise(taskId.value, feedback, convertScreenshot.value)
-    ElMessage.success('正在按反馈修改转换包')
+    await convertAPI.revise(taskId.value, feedback, convertScreenshot.value, mode)
+    ElMessage.success(mode === 'reconvert' ? '正在按反馈重新转换' : '正在按反馈修改转换包')
     startPolling()
   } catch (e) {
     converting.value = false
@@ -1002,6 +1007,11 @@ onBeforeUnmount(() => stopPolling())
 }
 .feedback-submit {
   align-self: flex-start;
+}
+.feedback-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .feedback-panel:focus {
   outline: none;

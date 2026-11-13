@@ -25,4 +25,7 @@ class ConvertTask(Base):
     retry_feedback = Column(Text, nullable=True)
     retry_screenshot_path = Column(String, nullable=True)
     user_id = Column(Integer, index=True, nullable=True)
+    source_path = Column(String, nullable=True)
+    template_path = Column(String, nullable=True)
+    output_language = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

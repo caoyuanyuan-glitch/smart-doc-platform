@@ -5930,6 +5930,51 @@ def _resolve_idml_source(upload_path):
     return out_path
 
 
+def _prepare_pipeline_source(source_format, kept_source_path):
+    """Return a working source path. kept_source_path itself is never deleted here."""
+    if source_format != "idml":
+        return kept_source_path
+    try:
+        resolved = _resolve_idml_source(kept_source_path)
+    except Exception:
+        resolved = None
+    if not resolved:
+        return None
+    if os.path.abspath(resolved) == os.path.abspath(kept_source_path):
+        work_path = os.path.join(
+            UPLOAD_DIR, f"idml_{int(time.time() * 1000)}_{os.path.basename(kept_source_path)}"
+        )
+        shutil.copy2(kept_source_path, work_path)
+        return work_path
+    return resolved
+
+
+def _requirements_with_feedback(requirements, feedback):
+    base = re.sub(r"(?m)^\s*\[IME反馈\].*$", "", requirements or "")
+    base = re.sub(r"\n{3,}", "\n\n", base).strip()
+    feedback = (feedback or "").strip()
+    if not feedback:
+        return base
+    if base:
+        return f"{base}\n[IME反馈] {feedback}"
+    return f"[IME反馈] {feedback}"
+
+
+def _convert_chat_fn():
+    try:
+        from app.utils.ai_client import ai_client
+        return ai_client.chat
+    except Exception:
+        return None
+
+
+def _apply_feedback_to_output_zip(zip_path, feedback, screenshot_path=None):
+    from app.utils.convert_feedback import apply_convert_feedback_to_zip
+    return apply_convert_feedback_to_zip(
+        zip_path, feedback, chat_fn=_convert_chat_fn(), screenshot_path=screenshot_path
+    )
+
+
 def _parse_template_zip(template_path):
     tree = {}
     try:
@@ -8702,7 +8747,8 @@ def _build_xref_map(prepared, is_system_guide=False):
 
 
 def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_content,
-                   target_format, template_path, requirements_text, output_language=None):
+                   target_format, template_path, requirements_text, output_language=None,
+                   post_feedback=None, post_screenshot_path=None):
     """格式转换流水线。
 
     固定行为（不可变）：
@@ -9164,6 +9210,14 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             output_public_path = f"/static/uploads/outputs/{zip_filename}"
             output_size = os.path.getsize(zip_path)
 
+        if post_feedback and target_format == "dita" and not is_lossless_md_csv:
+            _set_progress(90, "按反馈修改")
+            try:
+                _apply_feedback_to_output_zip(zip_path, post_feedback, post_screenshot_path)
+            except Exception:
+                pass
+            output_size = os.path.getsize(zip_path)
+
         verification_report = {
             "overall": overall,
             "checks": checks,
@@ -9211,10 +9265,9 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
             pass
     finally:
         if source_format == "idml" and file_path:
-            # Reconstructed package and extracted media are one-shot; the final
-            # output is already zipped, so drop them to avoid disk buildup.
             try:
-                if str(file_path).lower().endswith(".idml"):
+                basename = os.path.basename(file_path)
+                if basename.startswith("idml_") and str(file_path).lower().endswith(".idml"):
                     os.remove(file_path)
                 shutil.rmtree(os.path.splitext(file_path)[0] + "_idml_media", ignore_errors=True)
             except Exception:
@@ -9283,34 +9336,17 @@ async def start_conversion(
         with open(retry_screenshot_path, "wb") as f:
             f.write(await retry_screenshot.read())
 
-    combined_requirements = requirements or ""
-    if retry_feedback:
-        if combined_requirements:
-            combined_requirements += "\n[IME反馈] " + retry_feedback
-        else:
-            combined_requirements = "[IME反馈] " + retry_feedback
+    combined_requirements = _requirements_with_feedback(requirements, retry_feedback)
 
     pipeline_file_path = source_path
     if source_format == "idml":
-        # The container may hold both .indd and .idml; the IDML is the reliable
-        # source and the .indd (proprietary binary) is ignored.
-        try:
-            pipeline_file_path = _resolve_idml_source(source_path)
-        except Exception:
-            pipeline_file_path = None
+        pipeline_file_path = _prepare_pipeline_source(source_format, source_path)
         if not pipeline_file_path:
             try:
                 os.remove(source_path)
             except Exception:
                 pass
             raise HTTPException(status_code=400, detail="压缩包中未找到 .idml 文件；.indd 无法直接解析，请导出 IDML 后重试")
-        if pipeline_file_path != source_path:
-            # The outer container has served its purpose; the reconstructed
-            # package (deleted when the pipeline finishes) is now the source.
-            try:
-                os.remove(source_path)
-            except Exception:
-                pass
 
     source_content = ""
 
@@ -9322,6 +9358,9 @@ async def start_conversion(
         requirements=combined_requirements,
         retry_feedback=retry_feedback,
         retry_screenshot_path=retry_screenshot_path,
+        source_path=source_path,
+        template_path=template_path,
+        output_language=normalized_output_language,
     ), user_id=current_user.id)
 
     with _tasks_lock:
@@ -9349,10 +9388,9 @@ def _convert_output_disk_path(task):
 
 def _run_revise_pipeline(task_id, feedback, screenshot_path=None):
     from app.database import SessionLocal
-    from app.utils.convert_feedback import apply_convert_feedback
+    from app.utils.convert_feedback import apply_convert_feedback_to_zip
 
     db = SessionLocal()
-    work_dir = None
     try:
         def _set_progress(pct, step):
             with _tasks_lock:
@@ -9373,30 +9411,14 @@ def _run_revise_pipeline(task_id, feedback, screenshot_path=None):
             raise RuntimeError("找不到已生成的转换包")
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        work_dir = os.path.join(OUTPUT_DIR, f"revise_{timestamp}_{task_id}")
-        _ensure_dir(work_dir)
-        with zipfile.ZipFile(src_zip, "r") as zf:
-            zf.extractall(work_dir)
-
         _set_progress(45, "按反馈修改")
-        chat_fn = None
-        try:
-            from app.utils.ai_client import ai_client
-            chat_fn = ai_client.chat
-        except Exception:
-            chat_fn = None
-
-        apply_convert_feedback(work_dir, feedback, chat_fn=chat_fn)
-
         _set_progress(80, "打包")
         zip_filename = f"output_revised_{timestamp}_{task_id}.zip"
         zip_path = os.path.join(OUTPUT_DIR, zip_filename)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(work_dir):
-                for fname in files:
-                    abs_path = os.path.join(root, fname)
-                    arcname = os.path.relpath(abs_path, work_dir)
-                    zf.write(abs_path, arcname)
+        shutil.copy2(src_zip, zip_path)
+        apply_convert_feedback_to_zip(
+            zip_path, feedback, chat_fn=_convert_chat_fn(), screenshot_path=screenshot_path
+        )
 
         output_public_path = f"/static/uploads/outputs/{zip_filename}"
         update_convert_task_revised(
@@ -9421,15 +9443,66 @@ def _run_revise_pipeline(task_id, feedback, screenshot_path=None):
                 "progress": 0, "current_step": "按反馈修改", "status": "failed"
             }
     finally:
-        if work_dir:
-            shutil.rmtree(work_dir, ignore_errors=True)
         db.close()
+
+
+def _run_reconvert_pipeline(task_id, feedback, screenshot_path=None):
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        task = get_convert_task(db, task_id)
+        if not task:
+            raise RuntimeError("任务不存在")
+        kept_source = getattr(task, "source_path", None)
+        if not kept_source or not os.path.exists(kept_source):
+            raise RuntimeError("源文件已过期，请重新上传后再转；当前只能改已生成的包")
+        template_path = getattr(task, "template_path", None)
+        if template_path and not os.path.exists(template_path):
+            template_path = None
+        output_language = getattr(task, "output_language", None)
+        combined = _requirements_with_feedback(task.requirements, feedback)
+        pipeline_path = _prepare_pipeline_source(task.source_format, kept_source)
+        if task.source_format == "idml" and not pipeline_path:
+            raise RuntimeError("压缩包中未找到 .idml 文件；.indd 无法直接解析，请导出 IDML 后重试")
+        source_format = task.source_format
+        target_format = task.target_format
+        db.close()
+        db = None
+        _run_pipeline(
+            task_id, None, source_format, pipeline_path, "",
+            target_format, template_path, combined, output_language,
+            post_feedback=feedback, post_screenshot_path=screenshot_path,
+        )
+        db = SessionLocal()
+        task = get_convert_task(db, task_id)
+        if task and task.status == "completed":
+            task.requirements = combined
+            task.retry_feedback = feedback
+            if screenshot_path:
+                task.retry_screenshot_path = screenshot_path
+            db.commit()
+    except Exception as e:
+        try:
+            if db is None:
+                db = SessionLocal()
+            update_convert_task_failed(db, task_id, str(e))
+        except Exception:
+            pass
+        with _tasks_lock:
+            _task_store[task_id] = {
+                "progress": 0, "current_step": "解析", "status": "failed"
+            }
+    finally:
+        if db is not None:
+            db.close()
 
 
 @router.post("/{task_id}/revise", response_model=dict)
 async def revise_conversion(
     task_id: str,
     feedback: str = Form(...),
+    mode: str = Form("patch"),
     screenshot: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
@@ -9449,14 +9522,23 @@ async def revise_conversion(
         with open(screenshot_path, "wb") as handle:
             handle.write(await screenshot.read())
 
-    update_convert_task_status(db, task_id, "processing", progress=5, current_step="按反馈修改")
+    mode = (mode or "patch").strip().lower()
+    if mode not in ("patch", "reconvert"):
+        raise HTTPException(status_code=400, detail="mode 仅支持 patch 或 reconvert")
+    if mode == "reconvert":
+        source_path = getattr(task, "source_path", None)
+        if not source_path or not os.path.exists(source_path):
+            raise HTTPException(status_code=400, detail="源文件已过期，请重新上传后再转；当前只能改已生成的包")
+
+    current_step = "解析" if mode == "reconvert" else "按反馈修改"
+    update_convert_task_status(db, task_id, "processing", progress=5, current_step=current_step)
     with _tasks_lock:
         _task_store[task_id] = {
-            "progress": 5, "current_step": "按反馈修改", "status": "processing"
+            "progress": 5, "current_step": current_step, "status": "processing"
         }
 
     thread = threading.Thread(
-        target=_run_revise_pipeline,
+        target=_run_reconvert_pipeline if mode == "reconvert" else _run_revise_pipeline,
         args=(task_id, feedback.strip(), screenshot_path),
         daemon=True,
     )
