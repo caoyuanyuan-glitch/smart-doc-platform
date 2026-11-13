@@ -149,13 +149,13 @@ Word 转 DITA 批量转换基线规则
   - 每次转换完成后必须再做一轮与原文核对：按 `word-to-dita-conversion-rules.md` 逐条检查，对照源 Word/IDML 与输出 DITA，把违规项按严重程度列出；不得只交 zip
   - 用户口述的新转换规则（如 `警告`→`warning`、`注意`→`caution`）必须沉淀到该规则文件，并同步落实现与测试，不能只停留在对话里
   - 规则文件同时覆盖 Word/WPS 与 IDML 两种源格式，差异只写在“IDML 源解析规则”小节
-    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线为 200 passed，另有 4 个 DocxHeadingDetectionTest 因缺样例失败）
+    - 转换相关回归命令：`cd /workspace/backend && PYTHONPATH=/workspace/backend python3 -m pytest -q tests/test_convert_dita_generation.py`（当前基线约 270 passed；`DocxHeadingDetectionTest` 中 4 个因缺 `.docx` 样例报错，1 个标题识别断言失败）
   - IME 主题类型：封面 `sCoverTopic`，章级 `chapterTopic`，其余一律 `sDitaTopic` + `DTO`。IME 按编号前缀显示：`DTO` 为「主题 Topic」，`DTC` 为「主题 Concept」
   - `ul`/`ol` 条目、表格单元格、正文与 Note 句段都包 `<p>`：`<li><p>…</p></li>`、`<entry><p>…</p></entry>`；空单元格保持空 `<entry>`
   - 改写已导入的 IME zip 时，必须同步 `.dita` 文件名/`cms:number`、ditamap、`xref`、`jsonData.json`、`infotree.xml`（含 `out/` 副本）。只改 `.dita` 时 IME 仍显示旧类型
   - 重打包必须从原 zip 拷贝未改条目（文件名、UTF-8 flag、压缩方式、字节原样），只替换改过的文件；整包解压再 zip 会把 `image/` 中文名打成乱码，IME 报「解析xml文件失败！」
   - 把已有节点的 `DTC` 前缀改成 `DTO` 后，IME 更新匹配不到原编号，导入选新增
-  - 全量单测中这 6 个失败属环境性预置、非回归，排查时不要浪费时间：4 个 `DocxHeadingDetectionTest`（缺 `.monkeycode-tmp-files/` 下的 `.docx` 样例）、`test_polish_match_score`（润色模块数据）、`test_document_ocr_keeps_numbered_paragraphs`（缺 `tesseract`）
+  - 全量单测中这类失败属环境性预置、非回归，排查时不要浪费时间：`DocxHeadingDetectionTest`（缺 `.monkeycode-tmp-files/` 下的 `.docx` 样例及标题识别）、`test_polish_match_score`（润色模块数据）、`test_document_ocr_keeps_numbered_paragraphs`（缺 `tesseract`）
   - 改完 `backend/app/api/convert.py` 必须重启后端（uvicorn 无 `--reload`），再用 API 端到端跑 617：`POST /api/auth/login`（表单 `admin/admin123`）取 token → `POST /api/convert/`（multipart：`source_file`、`target_format=dita`、`output_language=zh-CN`、`template_file`）→ 轮询 `GET /api/convert/{id}/progress` 到 `completed` → `GET /api/convert/{id}/download`
   - IDML 端到端要用合并包（`.idml` 与同级 `Links/` 打成一个 zip），因为独立 `.idml` 内不含 `Links/`，直接调 `_idml_to_markdown` 会得到 0 张图
   - 无原生 InDesign `Links/` 时，用 IME 导出包 `image/` 下的 SVG：去掉文件名 `G\d+_` 前缀，按主干（大小写不敏感）对齐 IDML `Link` 的 `.ai`/`.png` 主干，写入合并 zip 的 `Links/{idml主干}.svg`；`.ai` 由转换器按同名 `.svg` 替换

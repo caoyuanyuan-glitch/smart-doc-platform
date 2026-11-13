@@ -968,11 +968,7 @@ def _docx_table_to_markdown(table, heading=""):
             break
         header_rows += 1
     if header_rows == 0 and len(grid) > 1:
-        first_has_continuing_merge = any(
-            merge == "restart" and rowspan_for(0, start) > 1
-            for start, _span, merge, _text in parsed_rows[0][1]
-        )
-        if not first_has_continuing_merge:
+        if not _table_grid_is_vertical_header(grid):
             header_rows = 1
     if header_rows >= len(grid) and len(grid) > 1:
         header_rows = 1
@@ -1010,6 +1006,9 @@ def _dita_table_should_be_extra_wide(cols, *texts):
         "有害物质",
         "ordering information",
         "hazardous substance",
+        "performing a wash",
+        "wash solutions",
+        "wash protocol",
     )
     return any(marker in blob for marker in markers)
 
@@ -1304,9 +1303,18 @@ def _apply_dita_inline_icon_widths(output_base, size_mm=6.0):
 def _is_graphical_symbol_topic(xml_text):
     """Symbol-legend topics keep IDML icon sizes instead of the 6 mm inline force."""
     text = xml_text or ""
-    if "图形符号说明" in text:
+    if "图形符号" in text:
         return True
-    return bool(re.search(r"(?i)graphical symbols? (?:are )?as follows", text))
+    if re.search(r"(?i)graphical symbols?", text):
+        return True
+    if re.search(r"(?i)symbols on the packaging", text):
+        return True
+    return bool(
+        re.search(
+            r'(?i)cms:title="(?:Packaging|包装)"|<title[^>]*>\s*(?:Packaging|包装)\s*<',
+            text,
+        )
+    )
 
 
 def _parse_dita_mm_attr(value):
@@ -1317,6 +1325,87 @@ def _parse_dita_mm_attr(value):
         return float(match.group(1))
     except ValueError:
         return None
+
+
+def _svg_viewbox_aspect(path):
+    try:
+        text = open(path, encoding="utf-8", errors="ignore").read(20000)
+    except Exception:
+        return None
+    match = re.search(r'viewBox="[\d.+-]+\s+[\d.+-]+\s+([\d.]+)\s+([\d.]+)"', text)
+    if not match:
+        return None
+    width = float(match.group(1))
+    height = float(match.group(2))
+    if width <= 0 or height <= 0:
+        return None
+    return height / width
+
+
+def _rewrite_image_mm(tag, width, height):
+    width_attr = _fmt_mm(width)
+    height_attr = _fmt_mm(height)
+    if re.search(r"\bwidth=", tag):
+        tag = re.sub(r'\bwidth="[^"]*"', f'width="{width_attr}"', tag, count=1)
+    elif tag.endswith("/>"):
+        tag = tag[:-2] + f' width="{width_attr}"/>'
+    elif tag.endswith(">"):
+        tag = tag[:-1] + f' width="{width_attr}">'
+    if re.search(r"\bheight=", tag):
+        tag = re.sub(r'\bheight="[^"]*"', f'height="{height_attr}"', tag, count=1)
+    elif tag.endswith("/>"):
+        tag = tag[:-2] + f' height="{height_attr}"/>'
+    elif tag.endswith(">"):
+        tag = tag[:-1] + f' height="{height_attr}">'
+    return tag
+
+
+def _apply_dita_flow_and_symbol_sizes(output_base, min_symbol_mm=15.0, min_flow_mm=100.0):
+    """Enlarge packaging symbols and un-squash cropped flow diagrams."""
+    if not output_base or not os.path.isdir(output_base):
+        return 0
+    image_dir = os.path.join(output_base, "image")
+    updated = 0
+    for fname in os.listdir(output_base):
+        if not fname.endswith(".dita"):
+            continue
+        path = os.path.join(output_base, fname)
+        text = open(path, encoding="utf-8").read()
+        is_symbol_topic = _is_graphical_symbol_topic(text)
+
+        def _tune(match):
+            tag = match.group(0)
+            name = _dita_image_basename(tag)
+            width_match = re.search(r'\bwidth="([^"]+)"', tag)
+            height_match = re.search(r'\bheight="([^"]+)"', tag)
+            width = _parse_dita_mm_attr(width_match.group(1) if width_match else "")
+            height = _parse_dita_mm_attr(height_match.group(1) if height_match else "")
+            if name.startswith("flow_"):
+                aspect = None
+                href_match = re.search(r'href="([^"]+)"', tag)
+                if href_match:
+                    svg_name = os.path.basename(href_match.group(1).replace("\\", "/"))
+                    svg_path = os.path.join(image_dir, svg_name)
+                    if svg_path.lower().endswith(".svg") and os.path.isfile(svg_path):
+                        aspect = _svg_viewbox_aspect(svg_path)
+                if aspect is None and width and height and width > 0:
+                    aspect = height / width
+                new_w = max(width or 0.0, min_flow_mm)
+                new_h = new_w * aspect if aspect else (height or new_w * 0.3)
+                return _rewrite_image_mm(tag, new_w, new_h)
+            if is_symbol_topic and width and height:
+                long_side = max(width, height)
+                if 0 < long_side < min_symbol_mm:
+                    scale = min_symbol_mm / long_side
+                    return _rewrite_image_mm(tag, width * scale, height * scale)
+            return tag
+
+        new_text = re.sub(r"<image\b[^>]*>", _tune, text)
+        if new_text != text:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(new_text)
+            updated += 1
+    return updated
 
 
 def _apply_dita_overflow_image_widths(output_base, max_width_mm=143.0, min_width_mm=170.0):
@@ -1421,6 +1510,15 @@ def _dita_fig_image_xml(fig_xml):
     return match.group(1) if match else ""
 
 
+def _dita_fig_title_xml(fig_xml):
+    match = re.search(r"<title\b[^>]*>(.*?)</title>", fig_xml or "", re.S)
+    return (match.group(1) or "").strip() if match else ""
+
+
+def _dita_fig_inner_tables(fig_xml):
+    return re.findall(r"<table\b[\s\S]*?</table>", fig_xml or "")
+
+
 def _pair_adjacent_dita_figures(xml_text):
     """Wrap two consecutive untitled screenshot <fig>s in a headerless 1-row 2-col table.
 
@@ -1433,7 +1531,7 @@ def _pair_adjacent_dita_figures(xml_text):
     # Each fig must stop at its own </fig>. A non-greedy <fig>.*?</fig> still
     # backtracks across later figures until the next fig is whitespace-adjacent,
     # which swallows list items and unbalances tags.
-    single_fig = r"<fig>(?:(?!</fig>)[\s\S])*</fig>"
+    single_fig = r"<fig\b[^>]*>(?:(?!</fig>)[\s\S])*</fig>"
     fig_pair_re = re.compile(rf"({single_fig})(\s*)({single_fig})")
 
     def _inside_table_or_entry(prefix):
@@ -1451,33 +1549,61 @@ def _pair_adjacent_dita_figures(xml_text):
         fig1, fig2 = match.group(1), match.group(3)
         img1 = _dita_fig_image_xml(fig1)
         img2 = _dita_fig_image_xml(fig2)
+        title1 = _dita_fig_title_xml(fig1)
+        title2 = _dita_fig_title_xml(fig2)
+        titled_count = int(bool(title1)) + int(bool(title2))
+        mixed_title = titled_count == 1
         if (
             _inside_table_or_entry(prefix)
-            or not (_dita_fig_is_screenshot(fig1) and _dita_fig_is_screenshot(fig2))
             or not img1
             or not img2
-            or "<title" in fig1
-            or "<title" in fig2
+            or titled_count == 2
+            or (
+                not mixed_title
+                and not (
+                    _dita_fig_is_screenshot(fig1) and _dita_fig_is_screenshot(fig2)
+                )
+            )
         ):
             pos = match.start() + len(fig1)
             continue
         indent = "        "
+        table_title = title1 or title2
+        title_xml = f"{indent}  <title>{table_title}</title>\n" if table_title else ""
+        cell_bg = ' vf:bgcolor="#FFFFFF"' if table_title else ""
+        inner_tables = _dita_fig_inner_tables(fig1) + _dita_fig_inner_tables(fig2)
         table = (
             f"{indent}<table>\n"
+            f"{title_xml}"
             f"{indent}  <tgroup cols=\"2\">\n"
             f"{indent}    <colspec colname=\"COLSPEC0\" colwidth=\"0.50*\"/>\n"
             f"{indent}    <colspec colname=\"COLSPEC1\" colwidth=\"0.50*\"/>\n"
             f"{indent}    <tbody>\n"
             f"{indent}      <row>\n"
-            f"{indent}        <entry valign=\"bottom\"><p>{img1}</p></entry>\n"
-            f"{indent}        <entry valign=\"bottom\"><p>{img2}</p></entry>\n"
+            f"{indent}        <entry valign=\"bottom\"{cell_bg}><p>{img1}</p></entry>\n"
+            f"{indent}        <entry valign=\"bottom\"{cell_bg}><p>{img2}</p></entry>\n"
             f"{indent}      </row>\n"
             f"{indent}    </tbody>\n"
             f"{indent}  </tgroup>\n"
             f"{indent}</table>"
         )
-        xml_text = xml_text[: match.start()] + table + xml_text[match.end():]
-        pos = match.start() + len(table)
+        if inner_tables:
+            fig_title = f"{indent}  <title>{table_title}</title>\n" if table_title else ""
+            tables_xml = "".join(
+                tbl if tbl.endswith("\n") else tbl + "\n" for tbl in inner_tables
+            )
+            replacement = (
+                f"{indent}<fig>\n"
+                f"{fig_title}"
+                f"{indent}  {img1}\n"
+                f"{indent}  {img2}\n"
+                f"{tables_xml}"
+                f"{indent}</fig>"
+            )
+        else:
+            replacement = table
+        xml_text = xml_text[: match.start()] + replacement + xml_text[match.end():]
+        pos = match.start() + len(replacement)
     return xml_text
 
 
@@ -3033,6 +3159,18 @@ IDML_CELL_OL_OPEN = "[[OL]]"
 IDML_CELL_LIST_SEP = "[[LI]]"
 IDML_CELL_UL_CLOSE = "[[/UL]]"
 IDML_CELL_OL_CLOSE = "[[/OL]]"
+IDML_CELL_P_SEP = "[[P]]"
+IDML_INLINE_MARK_STRIP_RE = re.compile(
+    r"\[\[(?:/?UI|/?B|/?I|/?TERM|/?SUP|/?SUB|INDEX:[^\]]+)\]\]"
+)
+_IDML_REGULATION_ID_RE = re.compile(
+    r"^(IEC|ISO|EN|GB(?:/T)?|YY|WS|ASTM|UL|CSA|JIS)\s*[\dA-Z]"
+)
+_IDML_REGULATION_SPLIT_RE = re.compile(
+    r"^((?:IEC|ISO|EN|GB(?:/T)?|YY|WS|ASTM|UL|CSA|JIS)\s*[\dA-Z][\w.\-:]*(?:\s+\d{4})?)\s+(.+)$"
+)
+
+_IDML_REGULATION_YEAR_RE = re.compile(r"^\d{4}$")
 
 # IDML tables may merge cells horizontally (ColumnSpan) and vertically
 # (RowSpan). The intermediate markdown carries the spans as markers so the
@@ -3054,7 +3192,7 @@ EN_BRACKET_UI_RE = re.compile(r'\[(?!\d{1,2}\])([^\[\]]+)\]')
 # English on-screen UI text is styled with a "Silk screen" character style
 # (which is what makes it look bold); it maps to <uicontrol> like the Chinese
 # 【】 convention.
-IDML_UI_STYLE_RE = re.compile(r'(?i)silk\s*screen')
+IDML_UI_STYLE_RE = re.compile(r'(?i)silk[\s-]*screen')
 IDML_UI_MARK_OPEN = "[[UI]]"
 IDML_UI_MARK_CLOSE = "[[/UI]]"
 
@@ -3082,6 +3220,9 @@ IDML_BG_MARK_RE = re.compile(r'\[\[BG:(#[0-9A-Fa-f]{6})\]\]')
 IDML_CMYK_COLOR_RE = re.compile(
     r'(?i)C\s*=\s*([\d.]+)\s*M\s*=\s*([\d.]+)\s*Y\s*=\s*([\d.]+)\s*K\s*=\s*([\d.]+)'
 )
+IDML_COMPACT_CMYK_RE = re.compile(
+    r'(?i)c(\d+(?:\.\d+)?)m(\d+(?:\.\d+)?)y(\d+(?:\.\d+)?)k(\d+(?:\.\d+)?)'
+)
 
 # InDesign cross-references read 第<page>页“<target title>”. Carry title and
 # page as [[XREF:title#page]]; resolved DITA xrefs are empty elements with
@@ -3094,6 +3235,16 @@ IDML_GENERATED_INDEX_RE = re.compile(r'(?i)Title:Index|Title[-:]Index\b')
 INDEXTERM_CHUNK_RE = re.compile(
     r"<indexterm>(?:[^<]|<indexterm>[^<]*</indexterm>)*</indexterm>"
 )
+
+XREF_ITALIC_PERIOD_RE = re.compile(
+    r"(<xref\b[^>]*(?:/>|>.*?</xref>))\s*<i>\s*([。．.]+)\s*</i>",
+    re.S,
+)
+
+
+def _unwrap_italic_punct_after_xref(text):
+    """Keep the period after xref in the parent <p>, not inside <i>."""
+    return XREF_ITALIC_PERIOD_RE.sub(r"\1\2", text or "")
 
 
 def _indexterm_visible_text(term_xml):
@@ -3134,6 +3285,11 @@ def _place_indexterms_in_body(xml_text):
     new_body = re.sub(
         r"(" + INDEXTERM_CHUNK_RE.pattern + r")([^<]*)",
         _dedupe_following,
+        new_body,
+    )
+    new_body = re.sub(
+        r"<indexterm>([^<]+)</indexterm><uicontrol>\1</uicontrol>",
+        r"<uicontrol><indexterm>\1</indexterm></uicontrol>",
         new_body,
     )
     return (
@@ -3378,7 +3534,7 @@ def _idml_xref_marker(elem):
             if result:
                 page = result
                 break
-    if page:
+    if page and page not in {"0", "00"}:
         return f"[[XREF:{title}#{page}]]"
     return f"[[XREF:{title}]]"
 
@@ -3471,6 +3627,31 @@ def _load_idml_styles(zf):
             if list_type:
                 list_styles[key] = list_type
     return style_map, list_styles, ui_styles, cell_fills, table_styles
+
+
+def _load_idml_colors(zf):
+    """Map Color Self ids in Graphic.xml to (Space, ColorValue)."""
+    colors = {}
+    for name in zf.namelist():
+        if not name.replace("\\", "/").lower().endswith("graphic.xml"):
+            continue
+        try:
+            root = ET.fromstring(zf.read(name))
+        except Exception:
+            continue
+        for elem in root.iter():
+            if _strip_xml_ns(elem.tag) != "Color":
+                continue
+            self_id = (elem.get("Self") or "").strip()
+            values = (elem.get("ColorValue") or "").strip()
+            if not self_id or not values:
+                continue
+            space = (elem.get("Space") or "CMYK").strip() or "CMYK"
+            colors[self_id] = (space, values)
+            decoded = urllib.parse.unquote(self_id)
+            if decoded != self_id:
+                colors[decoded] = (space, values)
+    return colors
 
 
 def _idml_heading_level(style_ref, style_map):
@@ -3574,6 +3755,61 @@ def _idml_cell_text(cell, ui_styles=None, image_resolver=None):
     )
 
 
+def _idml_cell_plain_for_join(text):
+    return IDML_INLINE_MARK_STRIP_RE.sub("", text or "").strip()
+
+
+def _idml_text_is_regulation_id(text):
+    return bool(_IDML_REGULATION_ID_RE.match(_idml_cell_plain_for_join(text)))
+
+
+def _idml_text_is_regulation_year(text):
+    return bool(_IDML_REGULATION_YEAR_RE.match(_idml_cell_plain_for_join(text)))
+
+
+def _idml_text_is_short_parenthetical(text):
+    plain = _idml_cell_plain_for_join(text)
+    return plain.startswith("(") and len(plain) <= 40
+
+
+def _idml_split_regulation_text(text):
+    """Split 'IEC 61326-1:2020 Full name' into number and title."""
+    raw = (text or "").strip()
+    if not raw:
+        return [raw]
+    match = _IDML_REGULATION_SPLIT_RE.match(_idml_cell_plain_for_join(raw))
+    if not match or _idml_text_is_regulation_year(match.group(2)):
+        return [raw]
+    marked = _IDML_REGULATION_SPLIT_RE.match(raw)
+    if marked and not _idml_text_is_regulation_year(marked.group(2)):
+        return [marked.group(1).strip(), marked.group(2).strip()]
+    return [match.group(1).strip(), match.group(2).strip()]
+
+
+def _idml_maybe_regulation_psep(text):
+    parts = _idml_split_regulation_text(text)
+    if len(parts) == 2:
+        return parts[0] + IDML_CELL_P_SEP + parts[1]
+    return text
+
+
+def _split_idml_p_parts(text):
+    return [part.strip() for part in (text or "").split(IDML_CELL_P_SEP) if part.strip()]
+
+
+def _idml_split_merged_uicontrol(text, rowspan=1):
+    """Split a rowspan silk-screen label so IME can wrap it in a narrow column."""
+    if rowspan <= 1:
+        return text
+    stripped = (text or "").strip()
+    match = re.fullmatch(r"\[\[UI\]\](.+?)\[\[/UI\]\]", stripped)
+    if not match:
+        return text
+    words = match.group(1).split()
+    if len(words) < 2:
+        return text
+    return IDML_CELL_P_SEP.join(f"[[UI]]{word}[[/UI]]" for word in words)
+
 def _idml_cell_list_kind(style):
     """ul/ol for table-cell paragraph styles that are real lists."""
     display = urllib.parse.unquote(style or "")
@@ -3590,7 +3826,7 @@ def _idml_cell_markdown(items):
     for text, kind in items or []:
         text = re.sub(r"\s+", " ", text or "").strip().replace("|", "\\|")
         if text:
-            cleaned.append((text, kind))
+            cleaned.append((_idml_maybe_regulation_psep(text), kind))
     if not cleaned:
         return ""
     kinds = {kind for _, kind in cleaned}
@@ -3598,7 +3834,20 @@ def _idml_cell_markdown(items):
         kind = next(iter(kinds))
         open_m = IDML_CELL_UL_OPEN if kind == "ul" else IDML_CELL_OL_OPEN
         close_m = IDML_CELL_UL_CLOSE if kind == "ul" else IDML_CELL_OL_CLOSE
-        return open_m + IDML_CELL_LIST_SEP.join(text for text, _ in cleaned) + close_m
+        merged = []
+        for text, _kind in cleaned:
+            if merged and _idml_text_is_regulation_id(merged[-1].split(IDML_CELL_P_SEP)[0]):
+                id_part, *rest = merged[-1].split(IDML_CELL_P_SEP)
+                if _idml_text_is_regulation_year(text):
+                    merged[-1] = (id_part + " " + text).strip()
+                    if rest:
+                        merged[-1] += IDML_CELL_P_SEP + IDML_CELL_P_SEP.join(rest)
+                    continue
+                if IDML_CELL_P_SEP not in merged[-1]:
+                    merged[-1] = merged[-1] + IDML_CELL_P_SEP + text
+                    continue
+            merged.append(text)
+        return open_m + IDML_CELL_LIST_SEP.join(merged) + close_m
     parts = []
     list_buf = []
     list_kind = None
@@ -3620,10 +3869,31 @@ def _idml_cell_markdown(items):
             list_kind = kind
             list_buf.append(text)
             continue
+        if list_buf:
+            if _idml_text_is_short_parenthetical(text):
+                list_buf[-1] = f"{list_buf[-1]} {text}".strip()
+            elif (
+                _idml_text_is_regulation_id(list_buf[-1].split(IDML_CELL_P_SEP)[0])
+                and _idml_text_is_regulation_year(text)
+            ):
+                id_part, *rest = list_buf[-1].split(IDML_CELL_P_SEP)
+                list_buf[-1] = (id_part + " " + text).strip()
+                if rest:
+                    list_buf[-1] += IDML_CELL_P_SEP + IDML_CELL_P_SEP.join(rest)
+            else:
+                list_buf[-1] = f"{list_buf[-1]}{IDML_CELL_P_SEP}{text}"
+            continue
         flush_list()
+        if parts and _idml_text_is_regulation_id(parts[-1].split(IDML_CELL_P_SEP)[0]):
+            id_part, *rest = parts[-1].split(IDML_CELL_P_SEP)
+            if _idml_text_is_regulation_year(text):
+                parts[-1] = (id_part + " " + text).strip()
+                if rest:
+                    parts[-1] += IDML_CELL_P_SEP + IDML_CELL_P_SEP.join(rest)
+                continue
         parts.append(text)
     flush_list()
-    return " ".join(parts)
+    return IDML_CELL_P_SEP.join(parts)
 
 
 def _idml_inline_images(text, uris, image_resolver):
@@ -3712,7 +3982,7 @@ def _idml_cell_text_items(cell, ui_styles=None, image_resolver=None):
         style = urllib.parse.unquote(para.get("AppliedParagraphStyle", ""))
         list_kind = _idml_cell_list_kind(style)
         pieces = _idml_paragraph_pieces(
-            para, split_on_br=bool(list_kind), ui_styles=ui_styles
+            para, split_on_br=True, ui_styles=ui_styles
         )
         for piece_kind, value, extra in pieces:
             if piece_kind == "text":
@@ -3726,6 +3996,13 @@ def _idml_cell_text_items(cell, ui_styles=None, image_resolver=None):
                 text = _idml_collect_text(value, ui_styles).strip()
             if text:
                 items.append((text, list_kind))
+        has_linked_image = any(
+            piece_kind == "image" or (piece_kind == "text" and extra)
+            for piece_kind, _value, extra in pieces
+        )
+        if image_resolver and not has_linked_image:
+            for path in _idml_export_nested_native_svgs(para, image_resolver):
+                items.append((_md_image_markup(path), False))
 
     def visit(node):
         for child in list(node):
@@ -3760,6 +4037,11 @@ def _idml_cell_text_items(cell, ui_styles=None, image_resolver=None):
                     if path:
                         items.append((_md_image_markup(path), False))
                         continue
+            if tag in ("Group", "Rectangle", "Oval", "Polygon"):
+                path = _idml_export_native_cell_svg(child, image_resolver)
+                if path:
+                    items.append((_md_image_markup(path), False))
+                    continue
             visit(child)
 
     visit(cell)
@@ -3790,6 +4072,102 @@ def _idml_clear_white_header_corner(grid, cell_elems, header_row_count):
 
 def _idml_cell_plain_markdown(text):
     return IDML_SPAN_MARK_RE.sub("", IDML_BG_MARK_RE.sub("", text or "")).strip()
+
+
+TABLE_INLINE_MARK_RE = re.compile(
+    r"\[\[(?:/?B|/?I|/?UI|/?TERM|FIGCAP|KEEP)\]\]"
+)
+
+
+def _table_cell_visible_text(text):
+    if not text or text == IDML_SPAN_COVERED:
+        return ""
+    visible = _idml_cell_plain_markdown(text)
+    visible = _strip_md_image_tokens(visible)
+    visible = TABLE_INLINE_MARK_RE.sub("", visible)
+    return " ".join(visible.split()).strip()
+
+
+def _table_cell_rowspan(text):
+    if not text or text == IDML_SPAN_COVERED:
+        return 1
+    match = IDML_SPAN_MARK_RE.search(text)
+    if match is None:
+        return 1
+    try:
+        return max(1, int(match.group(2)))
+    except ValueError:
+        return 1
+
+
+_PARTS_LEGEND_HEADERS = {
+    ("no", "name", "description"),
+    ("序号", "名称", "说明"),
+}
+
+
+def _is_untitled_parts_legend_table(rows, has_title=False):
+    """Untitled 3-col No./Name/Description tables are figure legends."""
+    if has_title or not rows or len(rows[0]) != 3:
+        return False
+    headers = tuple(
+        re.sub(r"[.．。]", "", _table_cell_visible_text(cell)).strip().lower()
+        for cell in rows[0]
+    )
+    return headers in _PARTS_LEGEND_HEADERS
+
+
+def _table_cell_looks_like_value(text):
+    visible = _table_cell_visible_text(text)
+    if not visible:
+        return False
+    if len(visible) > 32:
+        return True
+    if "@" in visible or re.search(r"https?://", visible, re.I):
+        return True
+    if re.search(r"\d", visible) and not re.match(r"(?i)^(no\.?|n/?a|n\.a\.?)$", visible):
+        return True
+    if re.search(
+        r"(?i)(有限公司|公司|大学|研究所|\bltd\.?|\bllc\b|\binc\.?|\bgmbh\b|\bsia\b|\bcorp\.?)",
+        visible,
+    ):
+        return True
+    return False
+
+
+def _table_grid_is_vertical_header(grid):
+    """True when the first column is the header, so row 0 stays in tbody."""
+    if not grid or len(grid) < 2:
+        return False
+    width = len(grid[0])
+    if width < 2:
+        return False
+    first = grid[0]
+    non_stub = []
+    has_stub = False
+    for cell in first:
+        if (cell or "") == IDML_SPAN_COVERED:
+            continue
+        if _table_cell_rowspan(cell) > 1:
+            has_stub = True
+            continue
+        non_stub.append(cell)
+    if has_stub:
+        stub_span = max(
+            (_table_cell_rowspan(cell) for cell in first if (cell or "") != IDML_SPAN_COVERED),
+            default=1,
+        )
+        if stub_span >= len(grid):
+            return True
+        if not non_stub:
+            return True
+        return any(_table_cell_looks_like_value(cell) for cell in non_stub)
+    if width != 2:
+        return False
+    labels = [_table_cell_visible_text(row[0]) if row else "" for row in grid]
+    if not all(labels) or any(len(label) > 40 for label in labels):
+        return False
+    return _table_cell_looks_like_value(first[1] if len(first) > 1 else "")
 
 
 def _idml_cell_is_image_only(text):
@@ -3868,6 +4246,7 @@ def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None, cel
             colspan = max(1, int(child.get("ColumnSpan") or "1"))
         except ValueError:
             rowspan, colspan = 1, 1
+        text = _idml_split_merged_uicontrol(text, rowspan)
         if colspan > 1 or rowspan > 1:
             text = (text + " " if text else "") + f"[[SPAN:{colspan},{rowspan}]]"
         grid[(row, col)] = text
@@ -3951,6 +4330,14 @@ def _idml_table_to_markdown(table_elem, ui_styles=None, image_resolver=None, cel
                 lines.append("| " + body + " |")
             return lines
     render = lambda r: [grid.get((r, c), "") for c in range(width)]
+    if header_row_count == 0 and len(row_indexes) > 1:
+        if not _table_grid_is_vertical_header([render(r) for r in row_indexes]):
+            header_row_count = 1
+    if header_row_count > 0:
+        header_rows = set(row_indexes[:header_row_count])
+        for key, value in list(grid.items()):
+            if key[0] in header_rows:
+                grid[key] = IDML_BG_MARK_RE.sub("", value or "")
     lines = []
     relative_widths = _idml_relative_colwidths(
         _idml_table_column_widths(table_elem), width
@@ -4073,6 +4460,23 @@ def _idml_callout_note_type(cell):
     return "tip"
 
 
+def _note_type_from_icon_href(href):
+    """Note type encoded in a warning/caution/tips icon filename."""
+    name = os.path.basename(urllib.parse.unquote(href or "")).replace("\\", "/").lower()
+    name = os.path.basename(name)
+    if re.search(r"biological|biohazard|bio[-_]?risk", name):
+        return "biological_risk"
+    if re.search(r"danger", name):
+        return "danger"
+    if re.search(r"caution", name):
+        return "caution"
+    if re.search(r"warning|icon_warn", name):
+        return "warning"
+    if re.search(r"icon_note|tips", name):
+        return "tip"
+    return None
+
+
 def _idml_xmp_blob(elem):
     parts = []
     for node in elem.iter():
@@ -4109,6 +4513,44 @@ def _idml_xmp_jpeg_bytes(elem):
     return data
 
 
+def _idml_embedded_pdf_bytes(elem):
+    """Decode a PDF element's Contents when it stores an embedded PDF."""
+    for node in elem.iter():
+        if _strip_xml_ns(node.tag) != "Contents" or not (node.text or "").strip():
+            continue
+        raw = re.sub(r"\s+", "", node.text)
+        if not raw.startswith("JVBERi"):
+            continue
+        try:
+            data = base64.b64decode(raw)
+        except Exception:
+            continue
+        if data.startswith(b"%PDF"):
+            return data
+    return None
+
+
+def _idml_rasterize_pdf_jpeg(pdf_bytes):
+    """Rasterize the first page of an embedded PDF to JPEG bytes."""
+    if not pdf_bytes:
+        return None
+    try:
+        import fitz
+    except ImportError:
+        return None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            if doc.page_count < 1:
+                return None
+            pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+            return pix.tobytes("jpeg")
+        finally:
+            doc.close()
+    except Exception:
+        return None
+
+
 def _idml_first_link_uri(elem):
     for node in elem.iter():
         if _strip_xml_ns(node.tag) != "Link":
@@ -4126,6 +4568,12 @@ def _idml_graphic_ref(elem):
     title = _idml_xmp_title(elem)
     if title:
         return f"xmp:{title}"
+    for node in elem.iter():
+        tag = _strip_xml_ns(node.tag)
+        if tag in ("PDF", "Image", "EPS") and node is not elem:
+            nested_id = (node.get("Self") or "").strip()
+            if nested_id:
+                return f"xmp:{nested_id}"
     self_id = (elem.get("Self") or "").strip()
     return f"xmp:{self_id}" if self_id else ""
 
@@ -4168,6 +4616,10 @@ def _idml_collect_xmp_thumbnails(zf, namelist):
             if tag not in ("PDF", "Image", "EPS"):
                 continue
             jpeg = _idml_xmp_jpeg_bytes(node)
+            if not jpeg:
+                pdf_bytes = _idml_embedded_pdf_bytes(node)
+                if pdf_bytes:
+                    jpeg = _idml_rasterize_pdf_jpeg(pdf_bytes)
             if not jpeg:
                 continue
             keys = []
@@ -4412,7 +4864,9 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
                                 blocks.append({
                                     "kind": "para",
                                     "level": 0,
-                                    "text": _idml_inline_images(value, extra, image_resolver) if extra else value,
+                                    "text": _idml_maybe_regulation_psep(
+                                        _idml_inline_images(value, extra, image_resolver) if extra else value
+                                    ),
                                     "marker": marker,
                                     "list_level": list_level,
                                     "appendix": False,
@@ -4452,7 +4906,7 @@ def _idml_walk(elem, style_map, list_styles, blocks, image_resolver=None, ui_sty
                                 blocks.append({
                                     "kind": "para",
                                     "level": 0,
-                                    "text": f"{keep_prefix}{body_text}" if keep_prefix else body_text,
+                                    "text": f"{keep_prefix}{_idml_maybe_regulation_psep(body_text)}" if keep_prefix else _idml_maybe_regulation_psep(body_text),
                                     "marker": None,
                                     "list_level": body_level,
                                     "appendix": False,
@@ -4791,6 +5245,8 @@ def _idml_flatten_svg_embedded_raster(svg_path):
     ))
     if len(matches) != 1:
         return None
+    if re.search(r"<(?:text|tspan)\b", text, re.I):
+        return None
     if len(re.findall(r"<(?:path|polygon|polyline|circle|ellipse)\b", text, re.I)) > 2:
         return None
     kind = matches[0].group(1).lower()
@@ -4810,6 +5266,367 @@ def _idml_flatten_svg_embedded_raster(svg_path):
     except Exception:
         return None
     return out_path
+
+
+def _idml_item_matrix(elem):
+    transform = (elem.get("ItemTransform") if elem is not None else "") or ""
+    try:
+        values = [float(part) for part in transform.split()]
+    except (TypeError, ValueError):
+        values = []
+    if len(values) == 6:
+        return tuple(values)
+    return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def _idml_mul_matrix(left, right):
+    a1, b1, c1, d1, tx1, ty1 = left
+    a2, b2, c2, d2, tx2, ty2 = right
+    return (
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * tx2 + c1 * ty2 + tx1,
+        b1 * tx2 + d1 * ty2 + ty1,
+    )
+
+
+def _idml_apply_matrix(matrix, x_val, y_val):
+    a, b, c, d, tx, ty = matrix
+    return a * x_val + c * y_val + tx, b * x_val + d * y_val + ty
+
+
+def _idml_color_value_to_hex(space, values):
+    try:
+        parts = [float(part) for part in (values or "").split()]
+    except ValueError:
+        return None
+    space_u = (space or "").upper()
+    if space_u == "RGB" and len(parts) >= 3:
+        if max(parts[:3]) <= 1.0:
+            parts = [part * 255.0 for part in parts[:3]]
+        red, green, blue = (max(0, min(255, int(round(part)))) for part in parts[:3])
+        return f"#{red:02X}{green:02X}{blue:02X}"
+    if space_u == "CMYK" and len(parts) >= 4:
+        cyan, magenta, yellow, black = (part / 100.0 for part in parts[:4])
+        red = round(255 * (1.0 - cyan) * (1.0 - black))
+        green = round(255 * (1.0 - magenta) * (1.0 - black))
+        blue = round(255 * (1.0 - yellow) * (1.0 - black))
+        return f"#{red:02X}{green:02X}{blue:02X}"
+    return None
+
+
+def _idml_paint_hex(fill_ref, color_map=None):
+    hay = (fill_ref or "").strip()
+    low = hay.lower()
+    if "nocolor" in low or low.endswith("/none") or "[none]" in low:
+        return None
+    if color_map:
+        for key in (hay, urllib.parse.unquote(hay)):
+            packed = color_map.get(key)
+            if packed:
+                hex_val = _idml_color_value_to_hex(*packed)
+                if hex_val:
+                    return hex_val
+    if re.search(r"(?i)paper|white", hay):
+        return "#FFFFFF"
+    if re.search(r"(?i)black", hay):
+        return "#000000"
+    match = IDML_CMYK_COLOR_RE.search(hay)
+    if not match:
+        swatch = hay.rsplit("/", 1)[-1].strip()
+        match = re.fullmatch(
+            r"(?i)c(\d+(?:\.\d+)?)m(\d+(?:\.\d+)?)y(\d+(?:\.\d+)?)k(\d+(?:\.\d+)?)",
+            swatch,
+        )
+    if not match:
+        return None
+    cyan, magenta, yellow, black = (float(part) / 100.0 for part in match.groups())
+    red = round(255 * (1.0 - cyan) * (1.0 - black))
+    green = round(255 * (1.0 - magenta) * (1.0 - black))
+    blue = round(255 * (1.0 - yellow) * (1.0 - black))
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def _idml_shape_has_placed_graphic(elem):
+    for node in elem.iter():
+        tag = _strip_xml_ns(node.tag)
+        if tag == "Link" and (node.get("LinkResourceURI") or node.get("URI")):
+            return True
+        if tag in ("Image", "PDF", "EPS"):
+            return True
+    return False
+
+
+def _idml_shape_is_native_vector(elem):
+    if elem is None or _idml_shape_has_placed_graphic(elem):
+        return False
+    for node in elem.iter():
+        tag = _strip_xml_ns(node.tag)
+        if tag in ("PathPointType", "EPSText"):
+            return True
+    return False
+
+
+def _idml_parse_xy(value):
+    try:
+        x_val, y_val = [float(part) for part in (value or "").split()]
+    except ValueError:
+        return None
+    return x_val, y_val
+
+
+def _idml_collect_native_paths(
+    elem, parent_matrix=(1.0, 0.0, 0.0, 1.0, 0.0, 0.0), color_map=None
+):
+    paths = []
+    tag = _strip_xml_ns(elem.tag)
+    matrix = _idml_mul_matrix(parent_matrix, _idml_item_matrix(elem))
+    if tag in ("Rectangle", "Oval", "Polygon"):
+        fill = _idml_paint_hex(elem.get("FillColor") or "", color_map)
+        stroke = _idml_paint_hex(elem.get("StrokeColor") or "", color_map)
+        try:
+            weight = float(elem.get("StrokeWeight") or "0")
+        except (TypeError, ValueError):
+            weight = 0.0
+        for geo in elem.iter():
+            if _strip_xml_ns(geo.tag) != "GeometryPathType":
+                continue
+            path_open = (geo.get("PathOpen") or "").lower() == "true"
+            points = []
+            for node in geo.iter():
+                if _strip_xml_ns(node.tag) != "PathPointType":
+                    continue
+                anchor = _idml_parse_xy(node.get("Anchor"))
+                if not anchor:
+                    continue
+                left = _idml_parse_xy(node.get("LeftDirection")) or anchor
+                right = _idml_parse_xy(node.get("RightDirection")) or anchor
+                points.append((
+                    _idml_apply_matrix(matrix, *anchor),
+                    _idml_apply_matrix(matrix, *left),
+                    _idml_apply_matrix(matrix, *right),
+                ))
+            if len(points) >= 2:
+                paths.append((points, fill, stroke, weight, path_open))
+        if not paths:
+            points = []
+            for node in elem.iter():
+                if _strip_xml_ns(node.tag) != "PathPointType":
+                    continue
+                anchor = _idml_parse_xy(node.get("Anchor"))
+                if not anchor:
+                    continue
+                left = _idml_parse_xy(node.get("LeftDirection")) or anchor
+                right = _idml_parse_xy(node.get("RightDirection")) or anchor
+                points.append((
+                    _idml_apply_matrix(matrix, *anchor),
+                    _idml_apply_matrix(matrix, *left),
+                    _idml_apply_matrix(matrix, *right),
+                ))
+            if len(points) >= 2:
+                paths.append((points, fill, stroke, weight, False))
+        return paths
+    if tag == "EPSText":
+        fill = _idml_paint_hex(elem.get("FillColor") or "", color_map)
+        stroke = _idml_paint_hex(elem.get("StrokeColor") or "", color_map)
+        try:
+            weight = float(elem.get("StrokeWeight") or "0")
+        except (TypeError, ValueError):
+            weight = 0.0
+        for node in elem.iter():
+            if _strip_xml_ns(node.tag) != "PathBoundingBox":
+                continue
+            try:
+                left = float(node.get("Left"))
+                top = float(node.get("Top"))
+                right = float(node.get("Right"))
+                bottom = float(node.get("Bottom"))
+            except (TypeError, ValueError):
+                break
+            # PathBoundingBox is already in the same page space as PathPoint
+            # anchors; skip this element's ItemTransform.
+            points = []
+            for x_val, y_val in (
+                (left, top),
+                (right, top),
+                (right, bottom),
+                (left, bottom),
+            ):
+                anchor = _idml_apply_matrix(parent_matrix, x_val, y_val)
+                points.append((anchor, anchor, anchor))
+            if len(points) >= 2:
+                paths.append((points, fill, stroke, weight, False))
+            break
+        return paths
+    for child in list(elem):
+        child_tag = _strip_xml_ns(child.tag)
+        if child_tag in ("Group", "Rectangle", "Oval", "Polygon", "EPSText"):
+            paths.extend(_idml_collect_native_paths(child, matrix, color_map))
+    return paths
+
+
+def _idml_svg_path_d(points, path_open, min_x, min_y):
+    def fmt(pt):
+        return f"{pt[0] - min_x:.3f} {pt[1] - min_y:.3f}"
+
+    if len(points) < 2:
+        return ""
+    d_parts = [f"M{fmt(points[0][0])}"]
+    count = len(points) if not path_open else len(points) - 1
+    for index in range(count):
+        curr = points[index]
+        nxt = points[(index + 1) % len(points)]
+        anchor0, _left0, right0 = curr
+        anchor1, left1, _right1 = nxt
+        if right0 == anchor0 and left1 == anchor1:
+            d_parts.append(f"L{fmt(anchor1)}")
+        else:
+            d_parts.append(f"C{fmt(right0)} {fmt(left1)} {fmt(anchor1)}")
+    if not path_open:
+        d_parts.append("Z")
+    return " ".join(d_parts)
+
+
+def _idml_export_native_cell_svg(elem, image_resolver):
+    """Write an InDesign-native shape group to SVG and return the media path."""
+    if not _idml_shape_is_native_vector(elem):
+        return None
+    media_dir = getattr(image_resolver, "media_dir", None) if image_resolver else None
+    if not media_dir:
+        return None
+    cache = getattr(image_resolver, "native_cache", None)
+    self_id = (elem.get("Self") or "").strip()
+    if cache is not None and self_id in cache:
+        return cache[self_id]
+    color_map = getattr(image_resolver, "color_map", None) if image_resolver else None
+    paths = _idml_collect_native_paths(elem, color_map=color_map)
+    if not paths:
+        return None
+    xs = [
+        coord[0]
+        for points, _fill, _stroke, _weight, _open in paths
+        for point in points
+        for coord in point
+    ]
+    ys = [
+        coord[1]
+        for points, _fill, _stroke, _weight, _open in paths
+        for point in points
+        for coord in point
+    ]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    width = max(max_x - min_x, 0.5)
+    height = max(max_y - min_y, 0.5)
+    pad = max(width, height) * 0.04
+    min_x -= pad
+    min_y -= pad
+    width += pad * 2
+    height += pad * 2
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.3f} {height:.3f}" '
+            f'width="{_idml_pt_to_mm(width):.2f}mm" height="{_idml_pt_to_mm(height):.2f}mm">'
+        ),
+    ]
+    for points, fill, stroke, weight, path_open in paths:
+        d_attr = _idml_svg_path_d(points, path_open, min_x, min_y)
+        if not d_attr:
+            continue
+        fill_attr = f'fill="{fill}"' if fill else 'fill="none"'
+        stroke_attr = ""
+        if stroke:
+            stroke_attr = f' stroke="{stroke}" stroke-width="{max(weight, 0.25):.3f}"'
+        parts.append(f'<path d="{d_attr}" {fill_attr}{stroke_attr}/>')
+    parts.append("</svg>")
+    _ensure_dir(media_dir)
+    safe_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", self_id or "native_icon").strip() or "native_icon"
+    out_path = os.path.join(media_dir, f"{safe_stem}.svg")
+    counter = 1
+    while os.path.exists(out_path):
+        out_path = os.path.join(media_dir, f"{safe_stem}_{counter}.svg")
+        counter += 1
+    try:
+        with open(out_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(parts))
+    except Exception:
+        return None
+    if cache is not None and self_id:
+        cache[self_id] = out_path
+    return out_path
+
+
+def _idml_export_nested_native_svgs(elem, image_resolver):
+    """Export outermost native shape groups under *elem* (e.g. cell paragraphs)."""
+    exported = []
+
+    def walk(node):
+        for child in list(node):
+            tag = _strip_xml_ns(child.tag)
+            if tag in ("Group", "Rectangle", "Oval", "Polygon"):
+                path = _idml_export_native_cell_svg(child, image_resolver)
+                if path:
+                    exported.append(path)
+                    continue
+            walk(child)
+
+    walk(elem)
+    return exported
+
+
+def _idml_crop_tall_flow_svg(svg_path):
+    """Crop a flow_* SVG whose viewBox is much taller than the drawn content."""
+    name = os.path.basename(svg_path or "").lower()
+    if not name.startswith("flow_") or not name.endswith(".svg"):
+        return svg_path
+    if not os.path.isfile(svg_path):
+        return svg_path
+    try:
+        text = open(svg_path, encoding="utf-8", errors="replace").read()
+    except Exception:
+        return svg_path
+    vb = re.search(r'viewBox="([\d.+-]+)\s+([\d.+-]+)\s+([\d.]+)\s+([\d.]+)"', text)
+    if not vb:
+        return svg_path
+    vx, vy, vw, vh = (float(part) for part in vb.groups())
+    if vw <= 0 or vh <= 0:
+        return svg_path
+    max_y = vy
+    for tag in re.finditer(r"<(?:image|rect|text|tspan|use)\b[^>]*>", text, re.I):
+        chunk = tag.group(0)
+        y_match = re.search(r'\by="([\d.+-]+)"', chunk)
+        h_match = re.search(r'\bheight="([\d.]+)"', chunk)
+        y_val = float(y_match.group(1)) if y_match else 0.0
+        h_val = float(h_match.group(1)) if h_match else 0.0
+        if h_val <= 0 and re.search(r"<text\b", chunk, re.I):
+            fs_match = re.search(r'font-size="([\d.]+)"', chunk)
+            h_val = float(fs_match.group(1)) if fs_match else 16.0
+        max_y = max(max_y, y_val + h_val)
+    if max_y <= vy + 1 or max_y >= vy + vh * 0.85:
+        return svg_path
+    new_h = max_y - vy + 8.0
+    text = re.sub(
+        r'viewBox="[^"]+"',
+        f'viewBox="{vx:g} {vy:g} {vw:g} {new_h:g}"',
+        text,
+        count=1,
+    )
+    text = re.sub(
+        r'(<svg\b[^>]*\bheight=")[^"]+',
+        lambda match: match.group(1) + f"{new_h:g}",
+        text,
+        count=1,
+        flags=re.I,
+    )
+    try:
+        with open(svg_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except Exception:
+        return svg_path
+    return svg_path
 
 
 def _extract_idml_image(zf, namelist, link_uri, media_dir, cache):
@@ -4851,6 +5668,8 @@ def _extract_idml_image(zf, namelist, link_uri, media_dir, cache):
     raster = _idml_flatten_svg_embedded_raster(out_path)
     if raster:
         out_path = raster
+    else:
+        _idml_crop_tall_flow_svg(out_path)
     cache[link_uri] = out_path
     return out_path
 
@@ -4954,6 +5773,10 @@ def _idml_to_markdown(idml_path):
             if image_cache.get(link_uri) is None:
                 image_cache.pop(link_uri, None)
             return _idml_resolve_xmp_thumb(link_uri, xmp_thumbs, media_dir, image_cache)
+
+        resolve_image.media_dir = media_dir
+        resolve_image.native_cache = {}
+        resolve_image.color_map = _load_idml_colors(zf)
 
         def emit_image(link_uri):
             path = resolve_image(link_uri)
@@ -5202,8 +6025,18 @@ def _product_name_from_filename(file_path):
     return re.sub(r'\s+', " ", stem).strip(" ._-") or None
 
 
+def _cover_manual_name(blob, dita_lang="en-US"):
+    text = blob or ""
+    lang_zh = str(dita_lang or "").lower().startswith("zh")
+    if _is_system_guide_source(source_content=text):
+        return "系统操作指南" if lang_zh else "System Guide"
+    if re.search(r"(?i)user\s+manual|用户手册", text):
+        return "用户手册" if lang_zh else "User Manual"
+    return "使用说明书" if lang_zh else "Instructions for Use"
+
+
 def _extract_cover_fields(file_path, source_content="", dita_lang="en-US"):
-    """Fill cover Part No. / manual name / product name from the source document."""
+    """Fill cover Part No., manual name, version, model, and product name."""
     fields = {}
     blob = "\n".join(
         part for part in (os.path.basename(file_path or ""), source_content or "") if part
@@ -5213,13 +6046,12 @@ def _extract_cover_fields(file_path, source_content="", dita_lang="en-US"):
         fields["part_no"] = part_match.group(1)
 
     lang = (dita_lang or "").lower()
+    fields["manual_name"] = _cover_manual_name(blob, dita_lang)
     if lang.startswith("zh"):
-        fields["manual_name"] = "使用说明书"
         product_match = re.search(r'本(?:说明书|指南)适用于\s*([^。\n]+)', source_content or "")
     else:
-        fields["manual_name"] = "Instructions for Use"
         product_match = re.search(
-            r'(?i)(?:this\s+)?(?:instructions for use|guide) is applicable to\s+([^.]+)',
+            r'(?i)(?:this\s+)?(?:instructions for use|user manual|guide) is applicable to\s+([^.]+)',
             source_content or "",
         )
         if not product_match:
@@ -5233,6 +6065,23 @@ def _extract_cover_fields(file_path, source_content="", dita_lang="en-US"):
         fallback = _product_name_from_filename(file_path)
         if fallback:
             fields["product_name"] = fallback
+
+    version_match = re.search(
+        r'(?i)(?:manual version|version of the (?:instructions for use|user manual|guide))\s*(?:is|:)\s*(v?\d+(?:\.\d+)*)',
+        source_content or "",
+    )
+    if not version_match:
+        version_match = re.search(
+            r'(?:手册)?版本(?:为|是|:|：)\s*(v?\d+(?:\.\d+)*)',
+            source_content or "",
+            re.I,
+        )
+    if version_match:
+        fields["version"] = version_match.group(1)
+
+    model_match = re.search(r'(?i)DNBSEQ-([A-Za-z0-9+]+)', blob)
+    if model_match:
+        fields["product_model"] = model_match.group(1)
     return fields
 
 
@@ -5263,8 +6112,15 @@ def _patch_template_cover_fields(cover_xml, fields):
     xml = _replace_cover_value_after_label(xml, r'Part\s*No\.?', fields.get("part_no"))
     xml = _replace_cover_value_after_label(xml, r'手册编号', fields.get("part_no"))
     xml = _replace_cover_value_after_label(xml, r'编号', fields.get("part_no"))
+    xml = _replace_cover_value_after_label(xml, r'Serial\s+number', fields.get("part_no"))
     xml = _replace_cover_value_after_label(xml, r'手册名称', fields.get("manual_name"))
+    xml = _replace_cover_value_after_label(xml, r'Item', fields.get("manual_name"))
     xml = _replace_cover_value_after_label(xml, r'产品名称[^<]*', fields.get("product_name"))
+    xml = _replace_cover_value_after_label(xml, r'Version', fields.get("version"))
+    xml = _replace_cover_value_after_label(xml, r'版本', fields.get("version"))
+    xml = _replace_cover_value_after_label(xml, r'Product\s+model', fields.get("product_model"))
+    xml = _replace_cover_value_after_label(xml, r'产品型号', fields.get("product_model"))
+    xml = _replace_cover_value_after_label(xml, r'型号', fields.get("product_model"))
     return xml
 
 
@@ -5395,7 +6251,7 @@ def _parse_special_requirements(requirements_text):
     return parsed
 
 
-def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, dita_lang, level=2, topic_kind="concept", source_format="docx", xref_map=None):
+def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, dita_lang, level=2, topic_kind="concept", source_format="docx", xref_map=None, is_system_guide=False):
     title_text = section_title or ""
     # English manuals mark UI control names with bold rather than 【】, so a bold
     # run inside an operation step becomes <uicontrol> in English output.
@@ -5505,6 +6361,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     "B", "/B", "SUP", "/SUP", "SUB", "/SUB", "UI", "/UI",
                     "I", "/I", "CODE", "/CODE", "LINK", "/LINK",
                     "TERM", "/TERM",
+                    "UL", "/UL", "OL", "/OL", "LI", "/LI",
+                    "P",
                 } or inner.startswith((
                     "XREF:", "NOTE:", "TABCAP", "FIGCAP", "TWIDE:",
                     "INDEX:",
@@ -5563,6 +6421,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             r'\1',
             restored,
         )
+        restored = _unwrap_italic_punct_after_xref(restored)
         return restored
 
     def _split_keep_marker(text):
@@ -5574,7 +6433,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     def _paragraph_xml(text, indent="        "):
         keep, raw = _split_keep_marker(text)
         attr = ' outputclass="keep"' if keep else ""
-        return f"{indent}<p{attr}>{_restore_inline_run_markup(raw)}</p>"
+        parts = _split_idml_p_parts(raw)
+        if not parts:
+            return f"{indent}<p{attr}></p>"
+        if len(parts) == 1:
+            return f"{indent}<p{attr}>{_restore_inline_run_markup(parts[0])}</p>"
+        return "\n".join(
+            f"{indent}<p{attr if index == 0 else ''}>{_restore_inline_run_markup(part)}</p>"
+            for index, part in enumerate(parts)
+        )
 
     section_content, image_stash = _stash_md_images(section_content)
 
@@ -5666,7 +6533,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 )
                 trailing = "\n".join(item.get("trailing") or [])
                 if child_blocks or children or trailing:
-                    rendered.append(f"{indent}  <li><p>{item['text']}</p>")
+                    if item.get("prewrapped"):
+                        rendered.append(f"{indent}  <li>{item['text']}")
+                    else:
+                        rendered.append(f"{indent}  <li><p>{item['text']}</p>")
                     if child_blocks:
                         rendered.append(child_blocks)
                     if children:
@@ -5675,7 +6545,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                         rendered.append(trailing)
                     rendered.append(f"{indent}  </li>")
                 else:
-                    rendered.append(f"{indent}  <li><p>{item['text']}</p></li>")
+                    if item.get("prewrapped"):
+                        rendered.append(f"{indent}  <li>{item['text']}</li>")
+                    else:
+                        rendered.append(f"{indent}  <li><p>{item['text']}</p></li>")
             rendered.append(f"{indent}</{tag}>")
             return "\n".join(rendered)
 
@@ -5704,6 +6577,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     pending_note_blocks = []
     pending_note_body = None
     note_icon_detected = False
+    pending_note_from_icon = False
+    pending_note_is_list = False
 
     def _append_block(xml, default_indent="        "):
         if pending_note_type is not None:
@@ -5716,15 +6591,31 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
     def _append_body(xml):
         body_parts.append(xml)
 
-    def _append_list_item(text, level=None, item_type=None):
+    def _append_list_item(text, level=None, item_type=None, prewrapped=False):
         list_items.append({
             "text": text,
+            "prewrapped": prewrapped,
             "blocks": [],
             "children": [],
             "trailing": [],
             "level": level if level is not None else list_base_level,
             "type": item_type or list_type or "ul",
         })
+
+    def _append_restored_list_item(raw_item, level, item_type):
+        parts = _split_idml_p_parts(_idml_maybe_regulation_psep(raw_item))
+        if len(parts) > 1:
+            inner = "".join(
+                f"<p>{_restore_inline_run_markup(_clean_output_text(part), in_step=True)}</p>"
+                for part in parts
+            )
+            _append_list_item(inner, level, item_type, prewrapped=True)
+            return
+        _append_list_item(
+            _restore_inline_run_markup(_clean_output_text(raw_item), in_step=True),
+            level,
+            item_type,
+        )
 
     def _append_list_continuation(xml, hang_level=None):
         """Hang a following paragraph/image on the current parent list item.
@@ -5764,6 +6655,22 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         last = list_items[-1]
         if hang_level is not None:
             target = _nearest_list_item(hang_level)
+            last_level = last.get("level")
+            if (
+                continuation
+                and last_level is not None
+                and last_level == hang_level
+                and last_level > (list_base_level or 0)
+            ):
+                outer = None
+                for item in reversed(list_items[:-1]):
+                    item_level = item.get("level")
+                    if item_level is None or item_level < hang_level:
+                        outer = item
+                        break
+                if outer is not None:
+                    outer.setdefault("trailing", []).append(xml)
+                    return
             if target is last:
                 target["blocks"].append(xml)
             else:
@@ -5835,6 +6742,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     def _is_note_icon_image(href):
         path = (href or "").strip()
+        if _note_type_from_icon_href(path):
+            return True
         if not path or path.startswith(("http://", "https://")) or not os.path.exists(path):
             return False
         try:
@@ -5888,6 +6797,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
     def _flush_pending_note(text=None):
         nonlocal pending_note_type, pending_note_label, pending_note_blocks, note_icon_detected
+        nonlocal pending_note_from_icon, pending_note_is_list
         if pending_note_type is None:
             return None
         body = (text or "").strip().lstrip('.:：;； ').strip()
@@ -5896,12 +6806,28 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         if not pending_note_blocks:
             fallback = pending_note_label or ""
             pending_note_blocks.append(f'          <p>{_restore_inline_run_markup(fallback)}</p>')
-        inner = "\n".join(_group_note_enumerated_blocks(pending_note_blocks))
+        if pending_note_is_list:
+            lis = []
+            extras = []
+            for block in pending_note_blocks:
+                if "<li>" in block:
+                    lis.append(block)
+                else:
+                    extras.append(block)
+            inner_parts = []
+            if lis:
+                inner_parts.append("          <ul>\n" + "\n".join(lis) + "\n          </ul>")
+            inner_parts.extend(extras)
+            inner = "\n".join(inner_parts)
+        else:
+            inner = "\n".join(_group_note_enumerated_blocks(pending_note_blocks))
         note_xml = f'        <note type="{pending_note_type}">\n{inner}\n        </note>'
         pending_note_type = None
         pending_note_label = None
         pending_note_blocks = []
         note_icon_detected = False
+        pending_note_from_icon = False
+        pending_note_is_list = False
         return note_xml
 
     def _group_note_enumerated_blocks(blocks):
@@ -6021,6 +6947,40 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         parts = [first] + [(_strip_md_bold(_unescape_md((cell or '').strip()))) for cell in cells[1:] if (cell or '').strip()]
         return _join_caption_fragments(parts)
 
+    def _absorb_legend_table(table_xml):
+        """Move an untitled parts table into the preceding fig or image table."""
+        idx = len(body_parts) - 1
+        while idx >= 0:
+            part = (body_parts[idx] or "").strip()
+            if (not part) or part.startswith("<note"):
+                idx -= 1
+                continue
+            break
+        if idx < 0:
+            return False
+        stripped = body_parts[idx].rstrip()
+        if stripped.endswith("</fig>"):
+            body_parts[idx] = stripped[:-6].rstrip() + "\n" + table_xml + "\n        </fig>"
+            return True
+        if "<table" not in stripped or not stripped.endswith("</table>"):
+            return False
+        entries = re.findall(r"<entry\b[^>]*>(.*?)</entry>", stripped, re.S)
+        if not entries:
+            return False
+        if not all(("<image" in entry) or (not re.sub(r"<[^>]+>", "", entry).strip()) for entry in entries):
+            return False
+        images = re.findall(r"<image\b[^>]*(?:/>|>.*?</image>)", stripped)
+        if not images:
+            return False
+        title_match = re.search(r"<title[^>]*>.*?</title>", stripped, re.S)
+        title_xml = title_match.group(0) if title_match else ""
+        fig = "        <fig>"
+        if title_xml:
+            fig += title_xml
+        fig += "".join(images) + "\n" + table_xml + "\n        </fig>"
+        body_parts[idx] = fig
+        return True
+
     def _flush_pending_table():
         nonlocal in_table, table_rows, pending_table_title, pending_table_caption_only
         nonlocal pending_table_header_rows, pending_table_wide, pending_table_colwidths
@@ -6081,6 +7041,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 raw = IDML_SPAN_MARK_RE.sub("", raw)
             return raw.strip(), colspan, rowspan, False
 
+        def _dita_p_xml(text, in_step=False):
+            parts = _split_idml_p_parts(text)
+            if not parts:
+                return "<p></p>"
+            return "".join(
+                f"<p>{_restore_inline_run_markup(part, in_step=in_step)}</p>"
+                for part in parts
+            )
+
         def _dita_li_xml(item):
             item = (item or "").strip()
             if not item:
@@ -6091,16 +7060,16 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 for note_match in IDML_NESTED_NOTE_RE.finditer(item):
                     before = item[cursor:note_match.start()].strip()
                     if before:
-                        parts.append(f"<p>{_restore_inline_run_markup(before)}</p>")
+                        parts.append(_dita_p_xml(before))
                     parts.append(
                         f'<note type="{note_match.group(1)}">{_dita_note_inner_xml(note_match.group(2).strip())}</note>'
                     )
                     cursor = note_match.end()
                 tail = item[cursor:].strip()
                 if tail:
-                    parts.append(f"<p>{_restore_inline_run_markup(tail)}</p>")
+                    parts.append(_dita_p_xml(tail))
                 return f"<li>{''.join(parts) or '<p></p>'}</li>"
-            return f"<li><p>{_restore_inline_run_markup(item)}</p></li>"
+            return f"<li>{_dita_p_xml(item)}</li>"
 
         def _dita_note_inner_xml(body):
             """Rebuild note inner XML from [[UL]] markers or a plain paragraph."""
@@ -6120,7 +7089,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             for match in list_re.finditer(text):
                 before = text[pos:match.start()].strip()
                 if before:
-                    chunks.append(f"<p>{_restore_inline_run_markup(before)}</p>")
+                    chunks.append(_dita_p_xml(before))
                 tag = "ul" if match.group(0).startswith(IDML_CELL_UL_OPEN) else "ol"
                 inner = match.group(1) if tag == "ul" else match.group(2)
                 items = [item for item in (inner or "").split(IDML_CELL_LIST_SEP) if item.strip()]
@@ -6132,7 +7101,7 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 pos = match.end()
             tail = text[pos:].strip()
             if tail:
-                chunks.append(f"<p>{_restore_inline_run_markup(tail)}</p>")
+                chunks.append(_dita_p_xml(tail))
             if not chunks:
                 return "<p></p>"
             return "".join(chunks)
@@ -6180,9 +7149,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 inner_xml = []
                 for chunk in chunks:
                     if chunk[0] == "p":
-                        restored = _restore_inline_run_markup(chunk[1])
-                        if restored.strip():
-                            inner_xml.append(f"<p>{restored}</p>")
+                        para_xml = _dita_p_xml(chunk[1])
+                        if para_xml and para_xml != "<p></p>":
+                            inner_xml.append(para_xml)
                     else:
                         inner_xml.append(
                             f'<note type="{chunk[1]}">{_dita_note_inner_xml(chunk[2])}</note>'
@@ -6195,6 +7164,8 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             restored = _restore_inline_run_markup(cell_text or "")
             if not restored.strip():
                 return f"<entry{attrs}></entry>"
+            if IDML_CELL_P_SEP in stripped:
+                return f"<entry{attrs}>{_dita_p_xml(stripped)}</entry>"
             return f"<entry{attrs}><p>{restored}</p></entry>"
 
         def _emit_span_row_entries(row, indent):
@@ -6276,6 +7247,12 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                         f'{paragraphs}\n'
                         f'        </note>'
                     )
+        if header_rows == 0 and filtered_rows and filtered_rows[0]:
+            first = filtered_rows[0][0]
+            span = _table_cell_rowspan(first)
+            if span > 1 and span >= len(filtered_rows) and "[[BG:" not in (first or ""):
+                filtered_rows = [list(row) for row in filtered_rows]
+                filtered_rows[0][0] = f"[[BG:#C0C0C0]]{first}"
         title_text = ""
         if has_title:
             title_text = _restore_inline_run_markup(_normalize_table_title(pending_table_title or _strip_tag(prev)))
@@ -6289,7 +7266,11 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         else:
             table_xml = [f'        <table{table_attr}>']
 
-        table_xml.append(f'          <tgroup cols="{cols}">')
+        rowheader = ""
+        hay = f"{section_title or ''} {title_text or ''}".lower()
+        if "test results of genetic sequencer" in hay:
+            rowheader = ' rowheader="firstcol"'
+        table_xml.append(f'          <tgroup cols="{cols}"{rowheader}>')
         # IME needs one <colspec> per column to render and resize column
         # widths; a <tgroup> without them yields a table with fixed columns.
         colwidths = pending_table_colwidths
@@ -6344,7 +7325,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
         table_rows = []
         pending_table_title = None
         pending_table_caption_only = None
-        return "\n".join(table_xml)
+        xml = "\n".join(table_xml)
+        if _is_untitled_parts_legend_table(filtered_rows, has_title) and _absorb_legend_table(xml):
+            return None
+        return xml
 
     def _looks_like_table_title_continuation(text):
         normalized = _strip_md_bold(_unescape_md((text or '').strip()))
@@ -6629,6 +7613,29 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     if figure_xml:
                         _append_block(figure_xml)
                 continue
+            note_type = _note_type_from_icon_href(href)
+            next_nonempty = _next_nonempty_line(safe_lines, idx)
+            next_is_list = bool(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", next_nonempty))
+            next_is_note_body = bool(
+                next_nonempty
+                and not _match_md_image_line(next_nonempty)
+                and not next_nonempty.startswith("|")
+                and not next_nonempty.startswith("#")
+                and not next_nonempty.startswith("[[FIGCAP]]")
+                and not next_nonempty.startswith("[[TABCAP]]")
+                and not _is_figure_caption(next_nonempty)
+            )
+            if note_type and (next_is_list or next_is_note_body):
+                _flush_pending_note_to_body()
+                image_xml = _flush_pending_image()
+                if image_xml:
+                    _append_block(image_xml)
+                pending_note_type = note_type
+                pending_note_from_icon = True
+                pending_note_is_list = next_is_list
+                pending_image = None
+                skip_next_note_icon_image = False
+                continue
             prev_line = safe_lines[idx - 1].strip() if idx > 0 else ""
             next_line = safe_lines[idx + 1].strip() if idx + 1 < len(safe_lines) else ""
             adjacent_note = _is_note_like_text(prev_line) or _is_note_like_text(next_line)
@@ -6687,6 +7694,13 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
 
         if re.match(r'^\s*[-*+]\s+', line):
             next_nonempty = _next_nonempty_line(safe_lines, idx)
+            if pending_note_type and pending_note_from_icon:
+                item = re.sub(r'^\s*[-*+]\s+', '', line)
+                pending_note_is_list = True
+                pending_note_blocks.append(
+                    f'          <li><p>{_restore_inline_run_markup(_clean_output_text(item), in_step=True)}</p></li>'
+                )
+                continue
             # IDML warnings surface as callout tables, so a bulleted or
             # numbered item is a plain list entry and must not be promoted
             # to a note by keyword (that would fold it into the previous item).
@@ -6746,13 +7760,16 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
             item, had_note_icon = _strip_leading_note_icons(item)
             if had_note_icon:
                 list_note_type = list_note_type or "tip"
-            _append_list_item(
-                _restore_inline_run_markup(_clean_output_text(item), in_step=True),
-                line_level,
-                "ul",
-            )
+            _append_restored_list_item(item, line_level, "ul")
         elif re.match(r'^\s*\d+[.)]\s+', line):
             next_nonempty = _next_nonempty_line(safe_lines, idx)
+            if pending_note_type and pending_note_from_icon:
+                item = re.sub(r'^\s*\d+[.)]\s+', '', line)
+                pending_note_is_list = True
+                pending_note_blocks.append(
+                    f'          <li><p>{_restore_inline_run_markup(_clean_output_text(item), in_step=True)}</p></li>'
+                )
+                continue
             # IDML warnings surface as callout tables, so a bulleted or
             # numbered item is a plain list entry and must not be promoted
             # to a note by keyword (that would fold it into the previous item).
@@ -6813,12 +7830,9 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     else:
                         _append_list_continuation(image_xml)
             item = re.sub(r'^\s*\d+[.)]\s+', '', line)
-            _append_list_item(
-                _restore_inline_run_markup(_clean_output_text(item), in_step=True),
-                line_level,
-                "ol",
-            )
+            _append_restored_list_item(item, line_level, "ol")
         elif re.match(r'^#{1,6}\s+', line):
+            _flush_pending_note_to_body()
             result = _flush_list()
             if result:
                 body_parts.append(result)
@@ -6845,10 +7859,15 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                     pending_note_blocks = []
                     pending_note_body = None
                     note_icon_detected = False
+                    pending_note_from_icon = False
+                    pending_note_is_list = False
                     continue
-                note_xml = _flush_pending_note(clean)
-                _append_block(note_xml)
-                continue
+                if pending_note_from_icon and pending_note_is_list:
+                    _flush_pending_note_to_body()
+                else:
+                    note_xml = _flush_pending_note(clean)
+                    _append_block(note_xml)
+                    continue
             next_line = safe_lines[idx + 1].strip() if idx + 1 < len(safe_lines) else ""
             next_image_match = _match_md_image_line(next_line)
             next_image_href = next_image_match.group(2) if next_image_match else ""
@@ -6864,7 +7883,10 @@ def _content_to_dita_xml(section_title, section_content, dita_type, topic_id, di
                 _append_block(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
                 continue
             if pending_image and _is_note_icon_image(pending_image.get("href")):
-                note_type = _infer_note_type_from_text(clean)
+                note_type = (
+                    _note_type_from_icon_href(pending_image.get("href"))
+                    or _infer_note_type_from_text(clean)
+                )
                 pending_image = None
                 _append_block(f'        <note type="{note_type}"><p>{_restore_inline_run_markup(clean)}</p></note>')
                 continue
@@ -7570,6 +8592,28 @@ def _derive_map_title(source_format, file_path, sections):
     return "Generated Document"
 
 
+def _is_system_guide_source(file_path="", source_content="", title=""):
+    """True for 系统操作指南 / System Guide; False for 快速操作指南 and IFU."""
+    haystack = " ".join(
+        part for part in (
+            os.path.basename(file_path or ""),
+            title or "",
+            (source_content or "")[:4000],
+        )
+        if part
+    )
+    if re.search(r"系统操作指南", haystack):
+        return True
+    if re.search(r"(?i)quick\s*(start|operation)?\s*guide|快速操作指南", haystack):
+        return False
+    return bool(re.search(r"(?i)\bsystem\s+(operation\s+)?guide\b", haystack))
+
+
+def _should_limit_dita_image_widths(is_system_guide):
+    # Source images already carry frame/SVG size; do not clamp to 150/143/6 mm.
+    return False
+
+
 # List levels arrive as a [[LVL:n]] marker prefixed to the line, so the marker
 # is allowed before the number when deciding whether a section is procedural.
 _ORDERED_LIST_LINE_RE = re.compile(r'(?m)^[ \t]*(?:\[\[LVL:\d+\]\])?\d+[.)]\s')
@@ -7616,7 +8660,9 @@ def _flatten_sections(sections, parent_h1="", level=1):
     return result
 
 
-def _should_emit_container_only(section):
+def _should_emit_container_only(section, is_system_guide=False):
+    if is_system_guide:
+        return False
     if not section.get("has_children"):
         return False
 
@@ -7626,18 +8672,18 @@ def _should_emit_container_only(section):
     return True
 
 
-def _build_xref_map(prepared):
+def _build_xref_map(prepared, is_system_guide=False):
     """Map heading titles to topic ids, including container -> first child."""
     xref_map = {}
     for index, (section, title, _dtype, tid, _fname, _kind) in enumerate(prepared or []):
         if _is_index_title(title):
             continue
-        if _should_emit_container_only(section):
+        if _should_emit_container_only(section, is_system_guide=is_system_guide):
             child_id = None
             for later_section, later_title, _, later_id, _, _ in prepared[index + 1:]:
                 if _is_index_title(later_title):
                     continue
-                if _should_emit_container_only(later_section):
+                if _should_emit_container_only(later_section, is_system_guide=is_system_guide):
                     continue
                 child_id = later_id
                 break
@@ -7685,6 +8731,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
         _set_progress(5, "解析")
 
         source_content = _load_source_content(source_format, file_path, source_content)
+        is_system_guide = _is_system_guide_source(file_path, source_content)
 
         is_lossless_md_csv = (
             (source_format == "md" and target_format == "csv")
@@ -7833,7 +8880,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                             section["content"] = skipped_cover_content
                         break
 
-            xref_map = _build_xref_map(prepared)
+            xref_map = _build_xref_map(prepared, is_system_guide=is_system_guide)
 
             for section, title, dita_type, topic_id, topic_filename, topic_kind in prepared:
                 if _is_index_title(title):
@@ -7857,7 +8904,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                         "status": "ok",
                     })
                     continue
-                if _should_emit_container_only(section):
+                if _should_emit_container_only(section, is_system_guide=is_system_guide):
                     topics_output.append({
                         "type": dita_type,
                         "filename": "",
@@ -7886,6 +8933,7 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     topic_kind=topic_kind,
                     source_format=source_format,
                     xref_map=xref_map,
+                    is_system_guide=is_system_guide,
                 )
                 if _is_version_history_topic(dita_content) or (title or "").strip().lower() in _VERSION_HISTORY_TITLES:
                     dita_content = _transpose_version_column_table(dita_content)
@@ -8045,9 +9093,11 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                     except Exception:
                         size_map = {}
                 _apply_dita_placed_image_sizes(output_base, size_map)
-            _apply_dita_inline_icon_widths(output_base)
-            _apply_dita_image_page_widths(output_base)
-            _apply_dita_overflow_image_widths(output_base)
+                _apply_dita_flow_and_symbol_sizes(output_base)
+            if _should_limit_dita_image_widths(is_system_guide):
+                _apply_dita_inline_icon_widths(output_base)
+                _apply_dita_image_page_widths(output_base)
+                _apply_dita_overflow_image_widths(output_base)
             _postprocess_dita_topics(output_base)
 
         metadata_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -8590,4 +9640,3 @@ async def bulk_delete_convert_rules_api(
     ids = [int(x) for x in rule_ids.split(",") if x.strip()]
     cnt = bulk_delete_convert_rules(db, ids)
     return {"deleted": cnt}
-IDML_APPENDIX_STYLE_RE = re.compile(r'(?i)Title[-:]Appen')
