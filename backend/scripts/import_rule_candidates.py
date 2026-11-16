@@ -82,7 +82,10 @@ def load_candidates(path: Path) -> tuple[list[RuleCreate], list[str]]:
         i = idx.get(name)
         if i is None or i >= len(row):
             return ""
-        return str(row[i] or "").strip()
+        # 只剥 ASCII 空白：str.strip() 会连全角空格 U+3000 一起剥掉，
+        # 而 U+3000 本身是候选正则（如 HR-DET-CHAR-001）的首字符，
+        # 剥掉后正则变成可匹配空串，在 9.7 万字文档上命中 9.7 万次。
+        return str(row[i] or "").strip(" \t\r\n")
 
     out = []
     skipped: list[str] = []
@@ -98,8 +101,12 @@ def load_candidates(path: Path) -> tuple[list[RuleCreate], list[str]]:
         if regex in {"(?!)", "(?!x?x?)"}:
             continue
         try:
-            re.compile(regex)
+            compiled = re.compile(regex)
         except re.error:
+            continue
+        # 能匹配空串的正则必然误报（每个位置一次），源表写错也不该入库。
+        if compiled.match("") is not None:
+            skipped.append(f"{rule_no}: 正则可匹配空串 {regex!r}")
             continue
         if not _bare_token_allowed(regex):
             skipped.append(f"{rule_no}: 纯英文单词命中停用词 {regex}")

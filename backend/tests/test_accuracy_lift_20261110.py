@@ -89,10 +89,12 @@ def test_safe_tight_unit_gap_reports_celsius_and_ml():
     text = "设置温度为37℃后开始运行，加入20mL缓冲液，转速设为3000rpm。"
     issues = check_safe_tight_unit_gap(text)
     originals = " ".join(item["original_text"] for item in issues)
-    assert "℃" in originals
-    assert "mL" in originals
-    assert "rpm" in originals
+    assert "37℃" in originals
+    assert "20mL" in originals
+    assert "3000rpm" in originals
     assert all(item["rule"] == "DET-SPACE-GAP" for item in issues)
+    for issue in issues:
+        assert issue["original_text"] in text
 
 
 def test_safe_tight_unit_gap_skips_percent():
@@ -115,3 +117,16 @@ def test_safe_tight_unit_regex_does_not_match_empty():
     from app.review_engine.unit_spacing import _SAFE_TIGHT_UNIT_RE as rx
     assert not rx.search("5")
     assert rx.search("5mL/min")
+
+
+def test_safe_tight_unit_gap_skips_catalog_part_numbers():
+    """货号里的 1L/4L 不是「数值+单位」，补空格会改坏货号。"""
+    text = "阿拉丁，货号：S128511-1L；Honeywell，货号：71474-1L；Sigma-Aldrich，货号：S5150-4L。"
+    assert check_safe_tight_unit_gap(text) == []
+
+
+def test_safe_tight_unit_gap_keeps_range_not_part_number():
+    text = "加入20-30mL缓冲液。"
+    issues = check_safe_tight_unit_gap(text)
+    originals = " ".join(item["original_text"] for item in issues)
+    assert "30mL" in originals

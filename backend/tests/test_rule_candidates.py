@@ -12,6 +12,7 @@ def test_rule_candidates_compile_and_skip_suppress():
     for item in candidates:
         re.compile(item.regex)
         assert item.regex not in {"(?!)", "(?!x?x?)"}
+        assert re.compile(item.regex).match("") is None
     assert "HR-STRUCT-DITA-001" in nos
     assert "HR-DOC-PAGE-001" in nos
 

@@ -248,6 +248,7 @@ def run_term_check_v2(content: str, pack, lang: str = "zh") -> list[dict]:
 
     # ① 同一英文概念多种中文译法：仅当术语库对该英文只有唯一译法时才判。
     # 实际可检的是：唯一官方译法出现的同时，文档里还出现了带括号/全角变体。
+    zh_index = pack.get("zh_index") or {}
     for en, zh_list in pack.get("en_index", {}).items():
         if len(zh_list) != 1:
             continue
@@ -259,18 +260,25 @@ def run_term_check_v2(content: str, pack, lang: str = "zh") -> list[dict]:
         for zh in pack.get("zh_set", ()):
             if zh == official or zh not in content:
                 continue
+            # 该写法若已是**另一个英文概念**的官方译法，就不是本篇概念的「变体」。
+            # 否则 Shutdown→【关机】 与 Power off→关机 会互相举报，
+            # 同一处文本收到两条方向相反的建议。
+            owners = zh_index.get(zh) or []
+            if owners and en not in owners:
+                continue
             stripped = zh.replace("【", "").replace("】", "").replace("[", "").replace("]", "")
             if stripped and stripped == stripped_official:
                 variants.append(zh)
         if variants:
             present = [official, *variants]
+            # original_text 必须是文中真实存在的片段，否则定位失败（phantom）。
             add({
                 "severity": "suggestion",
                 "category": "术语规范",
                 "rule": "TERM-INCONSIST",
-                "original_text": " / ".join(present),
-                "suggestion": f"术语库对 {en} 的唯一译法为「{official}」，本篇并存 {len(present)} 种写法",
-                "description": "同一英文概念在本篇出现多种中文译法",
+                "original_text": variants[0],
+                "suggestion": f"术语库对 {en} 的唯一译法为「{official}」，本篇并存 {len(present)} 种写法：{' / '.join(present)}",
+                "description": f"同一英文概念（{en}）在本篇出现多种中文译法：{' / '.join(present)}",
                 "audit_basis": "术语&固定表达 V3.0",
                 "confidence": 80,
                 "source": "term_v2",

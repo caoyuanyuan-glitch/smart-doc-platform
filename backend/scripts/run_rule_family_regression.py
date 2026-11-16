@@ -28,12 +28,15 @@ from app.review_engine.annotation_baseline import (
 from app.review_engine.issue_rule import looks_like_rule_no
 
 FIXTURE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "regression_701_rules.jsonl"
-DOC_NO_RE = re.compile(r"H-020-\d{6}")
+# 文档号在样本里有两种写法：`H-020-000876-00` 与 `H020-000008`。
+# 只认前一种会漏掉 95 条（G100-E 手册整份），全部落进「缺文档号 → 不可判定」。
+DOC_NO_RE = re.compile(r"H-?\s?020-?\s?(\d{6})")
 
 
 def _doc_no(text: str) -> str:
+    """归一化为 `H-020-XXXXXX`（不带版本后缀），两种写法归一到同一键。"""
     m = DOC_NO_RE.search(text or "")
-    return m.group(0) if m else ""
+    return f"H-020-{m.group(1)}" if m else ""
 
 
 def _version_align(sample_file: str, issue_file: str) -> str:
@@ -54,6 +57,15 @@ def _looks_like_rule_no(value: str) -> bool:
 
 
 def _issue_dict(row: Issue, filename: str) -> dict:
+    position = getattr(row, "position", None) or ""
+    page = getattr(row, "page", None)
+    if page is None and position:
+        # issues 表没有 page 列，页码只存在于 position JSON 里。
+        # 不解析它，页码通道 100% 失效，strict 判定恒不成立。
+        try:
+            page = json.loads(position).get("page")
+        except (TypeError, ValueError):
+            page = None
     return {
         "id": row.id,
         "rule": row.rule or "",
@@ -63,9 +75,26 @@ def _issue_dict(row: Issue, filename: str) -> dict:
         "description": row.description or "",
         "context": row.context or "",
         "audit_basis": row.audit_basis or "",
-        "page": getattr(row, "page", None),
+        "page": page,
+        "position": position,
         "doc_file": filename,
     }
+
+
+def _load_issue_dump(path: Path) -> dict[str, list[dict]]:
+    """读取预计算的 issue 导出（每条含 rule/original_text/doc_file[/position]）。
+
+    回归集本身不含文档正文，引擎无法在 CI 里现跑，只能吃这一步的产物。
+    """
+    by_doc: dict[str, list[dict]] = defaultdict(list)
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            by_doc[str(row.get("doc_file") or "")].append(row)
+    return by_doc
 
 
 def _hit_tier(item: HumanAnnotation, issue: dict, blob: str) -> tuple[str, bool, bool]:
@@ -94,14 +123,14 @@ def load_samples(path: Path) -> list[dict]:
     return rows
 
 
-def run_regression(db, fixture: Path = FIXTURE) -> dict:
+def run_regression(db, fixture: Path = FIXTURE, issues_dump: Path | None = None) -> dict:
     create_tables()
     samples = load_samples(fixture)
     families = _load_families()
     documents = {row.id: row for row in db.query(Document).all()}
-    issues_by_doc = defaultdict(list)
+    issues_by_review = defaultdict(list)
     for issue in db.query(Issue).all():
-        issues_by_doc[issue.review_id].append(issue)
+        issues_by_review[issue.review_id].append(issue)
 
     from app.models.review import Review
     reviews = {row.id: row for row in db.query(Review).all()}
@@ -109,6 +138,40 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
     for rid, review in reviews.items():
         doc = documents.get(review.document_id)
         filename_by_review[rid] = (doc.filename if doc else "") or ""
+
+    # 按文档号归集 issue：库里已审过的 + 预计算导出。
+    issues_by_docno: dict[str, list[dict]] = defaultdict(list)
+    for review_id, rows in issues_by_review.items():
+        filename = filename_by_review.get(review_id, "")
+        doc_no = _doc_no(filename)
+        if not doc_no:
+            continue
+        for row in rows:
+            payload = _issue_dict(row, filename)
+            if not _looks_like_rule_no(payload["rule"]):
+                # 前置条件②：rule 不是规则号时，规则族闸门不可用
+                payload["_rule_polluted"] = True
+            issues_by_docno[doc_no].append(payload)
+
+    if issues_dump:
+        for doc_file, rows in _load_issue_dump(issues_dump).items():
+            doc_no = _doc_no(doc_file)
+            if not doc_no:
+                continue
+            for row in rows:
+                payload = dict(row)
+                payload.setdefault("doc_file", doc_file)
+                if not _looks_like_rule_no(payload.get("rule") or ""):
+                    payload["_rule_polluted"] = True
+                issues_by_docno[doc_no].append(payload)
+
+    if not issues_by_docno:
+        # 以前这里静默产出「全 uncountable」的 0% 报告，看起来像跑通了。
+        raise RuntimeError(
+            "回归集无法计算：库里没有任何 issue，且未通过 --issues-dump 提供预计算产物。"
+            "请先对样本文档跑一次审核并导出 issue（含 rule/original_text/doc_file/position），"
+            "否则 1061 条样本全部不可判定，任何准确率数字都无意义。"
+        )
 
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
     stats = defaultdict(int)
@@ -133,19 +196,7 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
             stats["enabled_family"] += 1
         if family_is_reachable(item.expected_rule, entry):
             stats["reachable_family"] += 1
-        matched_issues = []
-        for review_id, rows in issues_by_doc.items():
-            filename = filename_by_review.get(review_id, "")
-            if not sample_no:
-                continue
-            if _doc_no(filename) != sample_no:
-                continue
-            for row in rows:
-                payload = _issue_dict(row, filename)
-                if not _looks_like_rule_no(payload["rule"]):
-                    # 前置条件②：rule 不是规则号时，规则族闸门不可用
-                    payload["_rule_polluted"] = True
-                matched_issues.append(payload)
+        matched_issues = list(issues_by_docno.get(sample_no, [])) if sample_no else []
 
         if not matched_issues:
             align = "不可判定"
@@ -251,10 +302,16 @@ def run_regression(db, fixture: Path = FIXTURE) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture", default=str(FIXTURE))
+    parser.add_argument(
+        "--issues-dump",
+        default=None,
+        help="预计算 issue 导出（JSONL，每行含 rule/original_text/doc_file[/position]）；"
+        "回归集不含正文，CI 里必须靠它提供引擎产物。",
+    )
     args = parser.parse_args()
     db = SessionLocal()
     try:
-        run_regression(db, Path(args.fixture))
+        run_regression(db, Path(args.fixture), Path(args.issues_dump) if args.issues_dump else None)
     finally:
         db.close()
 
