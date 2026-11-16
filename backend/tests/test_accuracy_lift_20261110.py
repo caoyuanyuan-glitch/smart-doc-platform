@@ -130,3 +130,12 @@ def test_safe_tight_unit_gap_keeps_range_not_part_number():
     issues = check_safe_tight_unit_gap(text)
     originals = " ".join(item["original_text"] for item in issues)
     assert "30mL" in originals
+
+
+def test_safe_tight_unit_gap_reports_seconds():
+    """goldset 真实批注「离心5s」：s 必须进安全单位表。"""
+    text = "离心5s，然后取上清。"
+    issues = check_safe_tight_unit_gap(text)
+    originals = [item["original_text"] for item in issues]
+    assert "5s" in originals
+    assert check_safe_tight_unit_gap("the 1st cycle") == []

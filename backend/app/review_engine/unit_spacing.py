@@ -218,7 +218,7 @@ _SAFE_TIGHT_UNIT_RE = re.compile(
     r"kg|mg|µg|ug|"
     r"kPa|MPa|bar|"
     r"mm|cm|nm|"
-    r"L|V|A|W|g|N|Pa"
+    r"L|V|A|W|g|N|Pa|s"
     r")(?![A-Za-z])"
 )
 

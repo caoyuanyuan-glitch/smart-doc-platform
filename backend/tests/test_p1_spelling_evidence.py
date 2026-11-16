@@ -366,3 +366,29 @@ def test_canonical_writing_caps_reports_per_pattern():
     text = " ".join(["Pair-end sequencing"] * 40)
     issues = check_canonical_writing(text)
     assert 0 < len(issues) <= 6
+
+
+def test_canonical_writing_skips_abbrev_table_and_product_codes():
+    """缩写表官方写法和 PE100 货号不得被改成小写。"""
+    from app.review_engine.canonical_writing import check_canonical_writing
+
+    table = (
+        "PE  Paired-end sequencing，双末端测序。\n"
+        "SE  Single-end Sequencing，单端测序。"
+    )
+    table_issues = check_canonical_writing(table)
+    assert table_issues == []
+
+    split_table = (
+        "Paired-end sequencing，双末端测序。\n\n"
+        "PE\n\n"
+        "Single-end Sequencing，单端测序。"
+    )
+    assert check_canonical_writing(split_table) == []
+
+    product = "Flow cell FCL PE100 / PE150 is supported."
+    assert check_canonical_writing(product) == []
+
+    body = "PE means Pair-end sequencing in the running text."
+    body_issues = check_canonical_writing(body)
+    assert any(item["original_text"] == "Pair-end" for item in body_issues)
