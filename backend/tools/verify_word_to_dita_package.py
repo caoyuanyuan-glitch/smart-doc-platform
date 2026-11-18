@@ -145,11 +145,48 @@ def _parse_dita_package(zip_path):
         ditamap_name = next(name for name in zf.namelist() if name.endswith(".ditamap"))
         ditamap_text = zf.read(ditamap_name).decode("utf-8", errors="ignore")
         navtitles = []
-        for title, href in re.findall(r'navtitle="([^"]+)"[^>]*href="([^"]+\.dita)"', ditamap_text):
-            title = html.unescape(title)
-            if title in {"Cover", "封面CN", "关于说明书", "版本记录", "编号：H-940-001530-00"}:
-                continue
-            navtitles.append(title)
+        skip_titles = {"Cover", "封面CN", "关于说明书", "版本记录", "编号：H-940-001530-00"}
+        try:
+            map_root = ET.fromstring(ditamap_text)
+        except ET.ParseError:
+            map_root = None
+        if map_root is not None:
+            def _local(tag):
+                return tag.split("}", 1)[-1]
+
+            def _walk(elem):
+                tag = _local(elem.tag)
+                if tag in {"chapter", "appendix", "topicref", "topichead"}:
+                    title = html.unescape(elem.attrib.get("navtitle") or "")
+                    href = elem.attrib.get("href") or ""
+                    children = [
+                        child for child in list(elem)
+                        if _local(child.tag) in {"chapter", "appendix", "topicref", "topichead"}
+                    ]
+                    first_child_title = html.unescape(
+                        children[0].attrib.get("navtitle") or ""
+                    ) if children else ""
+                    first_child_href = (children[0].attrib.get("href") or "") if children else ""
+                    # Empty chapter containers that immediately wrap a same-named
+                    # chapterTopic are the IME chapter chrome, not a second title.
+                    skip_self = (
+                        tag in {"chapter", "appendix"}
+                        and not href.endswith(".dita")
+                        and first_child_title == title
+                        and first_child_href.endswith(".dita")
+                    )
+                    if title and title not in skip_titles and not skip_self:
+                        navtitles.append(title)
+                for child in list(elem):
+                    _walk(child)
+
+            _walk(map_root)
+        else:
+            for title, href in re.findall(r'navtitle="([^"]+)"[^>]*href="([^"]+\.dita)"', ditamap_text):
+                title = html.unescape(title)
+                if title in skip_titles:
+                    continue
+                navtitles.append(title)
         dita_files = [name for name in zf.namelist() if name.endswith(".dita")]
         image_files = [name for name in zf.namelist() if name.startswith("image/") and not name.endswith("/")]
 
@@ -186,6 +223,23 @@ def _parse_dita_package(zip_path):
             try:
                 root = ET.fromstring(text)
             except ET.ParseError:
+                # Malformed uicontrol/b nesting still has real notes/figs.
+                note_count = len(re.findall(r'<note\b', text))
+                figure_title_count = len(re.findall(r'<fig\b[^>]*>\s*<title\b', text, re.S | re.I))
+                table_title_count = len(re.findall(r'<table\b[^>]*>\s*<title\b', text, re.S | re.I))
+                ol_count = len(re.findall(r'<ol\b', text))
+                ul_count = len(re.findall(r'<ul\b', text))
+                metrics["note_count"] += note_count
+                metrics["figure_title_count"] += figure_title_count
+                metrics["table_title_count"] += table_title_count
+                metrics["ol_count"] += ol_count
+                metrics["ul_count"] += ul_count
+                if note_count:
+                    metrics["note_files"].append(dita_name)
+                if figure_title_count:
+                    metrics["figure_title_files"].append(dita_name)
+                if table_title_count:
+                    metrics["table_title_files"].append(dita_name)
                 continue
 
             note_count = 0
