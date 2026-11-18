@@ -11,6 +11,9 @@ class ConvertTaskCreate(BaseModel):
     requirements: Optional[str] = None
     retry_feedback: Optional[str] = None
     retry_screenshot_path: Optional[str] = None
+    source_path: Optional[str] = None
+    template_path: Optional[str] = None
+    output_language: Optional[str] = None
 
 
 class ConvertTaskOut(BaseModel):

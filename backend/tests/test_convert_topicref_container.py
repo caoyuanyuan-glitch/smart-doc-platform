@@ -37,6 +37,14 @@ class TitleOnlyTopicrefTest(unittest.TestCase):
             "level": 3,
         }))
 
+    def test_system_guide_empty_parent_stays_real_topic(self):
+        self.assertFalse(_should_emit_container_only({
+            "title": "进行前期准备",
+            "content": "",
+            "has_children": True,
+            "level": 2,
+        }, is_system_guide=True))
+
     def test_title_only_parent_emits_topicref_without_href(self):
         lines = []
         node = {

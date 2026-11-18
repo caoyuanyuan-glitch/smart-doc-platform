@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,8 @@ from app.utils.convert_feedback import (
     apply_exact_patches,
     apply_hygiene,
     ensure_imesofttype,
+    request_ai_patches,
+    rewrite_zip_replacing_files,
     wrap_bare_li_and_entry,
 )
 
@@ -97,6 +100,72 @@ class ApplyFeedbackTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 apply_convert_feedback(tmp, "  ", chat_fn=lambda *args, **kwargs: "{}")
+
+
+class RequestAiPatchesTest(unittest.TestCase):
+    def test_includes_screenshot_in_messages(self):
+        calls = []
+
+        def fake_chat(messages, **kwargs):
+            calls.append(messages)
+            return '{"patches":[]}'
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+            path = handle.name
+        try:
+            request_ai_patches({"DTO41001.dita": SAMPLE_TOPIC}, "缺 imesofttype", fake_chat, screenshot_path=path)
+        finally:
+            os.remove(path)
+        self.assertEqual(len(calls), 1)
+        content = calls[0][1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_falls_back_to_text_when_vision_fails(self):
+        calls = []
+
+        def fake_chat(messages, **kwargs):
+            calls.append(messages)
+            content = messages[1]["content"]
+            if isinstance(content, list):
+                raise RuntimeError("vision unavailable")
+            return '{"patches":[]}'
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+            path = handle.name
+        try:
+            patches = request_ai_patches(
+                {"DTO41001.dita": SAMPLE_TOPIC}, "缺 imesofttype", fake_chat, screenshot_path=path
+            )
+        finally:
+            os.remove(path)
+        self.assertEqual(patches, [])
+        self.assertEqual(len(calls), 2)
+        self.assertIsInstance(calls[1][1]["content"], str)
+
+
+class RewriteZipTest(unittest.TestCase):
+    def test_keeps_unmodified_entry_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "src.zip")
+            dest = os.path.join(tmp, "dest.zip")
+            image_name = "image/中文图.svg"
+            image_bytes = b"<svg id='keep'>ok</svg>"
+            with zipfile.ZipFile(src, "w") as zf:
+                info = zipfile.ZipInfo(image_name)
+                info.flag_bits |= 0x800
+                zf.writestr(info, image_bytes)
+                zf.writestr("DTO41001.dita", SAMPLE_TOPIC.encode("utf-8"))
+            rewrite_zip_replacing_files(src, dest, {"DTO41001.dita": SAMPLE_TOPIC.replace("安装", "安装步骤")})
+            with zipfile.ZipFile(dest, "r") as zf:
+                self.assertEqual(zf.read(image_name), image_bytes)
+                self.assertIn("安装步骤", zf.read("DTO41001.dita").decode("utf-8"))
+                kept = next(item for item in zf.infolist() if item.filename == image_name)
+                self.assertTrue(kept.flag_bits & 0x800)
 
 
 if __name__ == "__main__":
