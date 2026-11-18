@@ -138,7 +138,8 @@ def _parse_terminology(terminology_input: str) -> dict:
         return {}
     # 如果是 .xlsx 文件路径
     if terminology_input.lower().endswith('.xlsx'):
-        return _parse_terminology_xlsx(terminology_input)
+        from app.services.terminology import load_terminology, pack_to_term_dict
+        return pack_to_term_dict(load_terminology(terminology_input))
     # 否则作为 Markdown 文本解析
     return _parse_terminology_md(terminology_input)
 
@@ -248,7 +249,7 @@ def _parse_terminology_md(md_content: str) -> dict:
 
 
 def _parse_terminology_xlsx(file_path: str) -> dict:
-    """解析 Excel (.xlsx) 术语文件，返回 {非标准: 标准} 映射。
+    """deprecated: 旧解析器会把 source 列当成标准写法。请改用 load_terminology。
     
     支持两种格式：
     - 替换表：| 非标准 | 标准 |   → 直接作为 old→new 映射

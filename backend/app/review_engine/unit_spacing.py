@@ -129,6 +129,36 @@ def check_unit_consistency(text: str, *, parsed: bool = True) -> list[dict]:
     return issues
 
 
+_PART_NO_TAIL_RE = re.compile(r"[A-Za-z0-9\-_.]*$")
+
+
+def _is_inside_part_number(source: str, start: int) -> bool:
+    """判断匹配点是否落在货号/型号内部（如 `71474-1L`、`S128511-1L` 的 `1L`）。
+
+    判据：左侧同一词片段含连字符且存在 ≥3 位连续数字组。
+    不要求含字母——本仓真实货号是纯数字型 `71474-1L`；
+    也刻意排除 `20-30` 这类量程（两个 2 位数），避免把正常写法漏报。
+    """
+    left = source[max(0, start - 32):start]
+    match = _PART_NO_TAIL_RE.search(left)
+    if not match:
+        return False
+    token = match.group(0)
+    return "-" in token and bool(re.search(r"\d{3,}", token))
+
+
+def _number_start(source: str, unit_start: int) -> int:
+    """从单位字符向左回退，取到完整数值的起点。
+
+    正则用零宽后顾 `(?<=\\d)` 匹配单位，`match.start()` 落在单位字符上，
+    只回退 1 位只能拿到 `0℃`；必须回退整个数字串才得到 `40℃`。
+    """
+    i = unit_start
+    while i > 0 and (source[i - 1].isdigit() or source[i - 1] in ".,"):
+        i -= 1
+    return i
+
+
 def check_number_unit_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     """数值与单位之间缺少空格的孤立写法（DET-SPACE-GAP）。
 
@@ -151,12 +181,18 @@ def check_number_unit_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     reported = 0
     for match in _NUM_UNIT_NOSPACE_RE.finditer(source):
         start = match.start()
-        # 跳过已被上一行拆开的情形（换行不是"缺空格"，是折行）。
-        prefix = source[max(0, start - 1):start]
-        if prefix in {"\n", "\f", " "}:
+        span_start = _number_start(source, start)
+        if span_start >= start:
+            # 单位前没有数字，不是「数值+单位」，不报。
+            continue
+        # 只跳过换行/换页造成的折行；行内空格是正常上下文，不能跳
+        # （`then 5mL` 正是要报的少数派写法）。
+        if source[max(0, span_start - 1):span_start] in {"\n", "\f"}:
+            continue
+        if _is_inside_part_number(source, span_start):
             continue
         issues.append(_issue(
-            "DET-SPACE-GAP", source, start, match.end(), source[start - 1:match.end()],
+            "DET-SPACE-GAP", source, span_start, match.end(), source[span_start:match.end()],
             f"数值与单位之间缺少空格。全文同类写法中，带空格 {spaced} 处、"
             f"紧贴 {tight} 处，本处属于少数写法。",
             "建议按全文多数写法，在数值与单位之间补一个空格。",
@@ -167,8 +203,61 @@ def check_number_unit_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     return issues
 
 
+# 人工主流报「单位前缺空格」的安全单位：紧贴即可报，不含 % / M / μ。
+# 顺序要求：复合单位必须排在单单位前面，否则 "5mL/min" 会被 mL 抢先匹配掉。
+# 注意：分支末尾不能留空 "|"，(?:a|b|) 会匹配空串，导致每个数字后都产出一条 issue。
+_SAFE_TIGHT_UNIT_RE = re.compile(
+    r"(?<=\d)(?:"
+    r"mL/min|mL/h|L/min|L/h|"
+    r"℃|°\s*C|"
+    r"mL|µL|uL|"
+    r"rpm|"
+    r"VDC|VAC|VA|kW|mW|"
+    r"mA|µA|uA|mV|kV|"
+    r"Hz|kHz|MHz|"
+    r"kg|mg|µg|ug|"
+    r"kPa|MPa|bar|"
+    r"mm|cm|nm|"
+    r"L|V|A|W|g|N|Pa|s"
+    r")(?![A-Za-z])"
+)
+
+
+def check_safe_tight_unit_gap(text: str, *, parsed: bool = True) -> list[dict]:
+    """对安全单位表上报数值紧贴单位的孤立写法（DET-SPACE-GAP）。"""
+    source = str(text or "")
+    if not parsed or not source.strip():
+        return []
+    issues = []
+    for match in _SAFE_TIGHT_UNIT_RE.finditer(source):
+        start = match.start()
+        span_start = _number_start(source, start)
+        if span_start >= start:
+            continue
+        if source[max(0, span_start - 1):span_start] in {"\n", "\f"}:
+            continue
+        # 货号 `71474-1L` 的 `1L` 不是「数值+单位」，补空格会把货号改坏。
+        if _is_inside_part_number(source, span_start):
+            continue
+        issues.append(_issue(
+            "DET-SPACE-GAP", source, span_start, match.end(), source[span_start:match.end()],
+            "数值与单位之间缺少空格。本规范要求数值与单位分开写。",
+            "建议在数值与单位之间补一个空格。",
+        ))
+        if len(issues) >= 5:
+            break
+    return issues
+
+
 def check_units_and_spacing(text: str, *, parsed: bool = True) -> list[dict]:
     """数值-单位写法与间距检查入口。"""
     issues = check_unit_consistency(text, parsed=parsed)
     issues.extend(check_number_unit_spacing(text, parsed=parsed))
+    seen = {(item.get("rule"), item.get("original_text"), item.get("position")) for item in issues}
+    for item in check_safe_tight_unit_gap(text, parsed=parsed):
+        key = (item.get("rule"), item.get("original_text"), item.get("position"))
+        if key in seen:
+            continue
+        issues.append(item)
+        seen.add(key)
     return issues

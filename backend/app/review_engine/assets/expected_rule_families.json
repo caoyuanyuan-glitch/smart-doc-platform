@@ -1,0 +1,1717 @@
+{
+  "version": "2026-11-10",
+  "source": "人工审核意见整理_规则学习包_20261106",
+  "match_order": [
+    "overrides",
+    "selected_in_blob",
+    "exact_rules",
+    "rule_prefixes",
+    "category_keywords",
+    "blob_all",
+    "text_all"
+  ],
+  "notes": "42 条新增规则默认 disabled；WORKBUDDY_RULE_PLATFORM_CH=on 时 disabled 族只走 live platform_rules。DET-TRADEMARK-001/EXT-R006/EXT-R024 挂起。TERM-CHECK-001 与 STRUCT-TERM-001 共享 TERM-INCONSIST/TERM-PAIR；前者是术语库动态校验视角，后者是篇内不一致视角。回归样本全部挂在 STRUCT-TERM-001（40 条），TERM-CHECK-001 样本为 0。已开 DET-TYPO-CN-001 与 LEARN-PATCH-001；TERM-FORBIDDEN 已登记 exact_rules。",
+  "stats": {
+    "total": 69,
+    "in_legacy_code": 24,
+    "legacy_only": 9,
+    "new_rules": 44,
+    "disabled": 42,
+    "in_regression_set": 52
+  },
+  "entries": {
+    "LEARN-PATCH-001": {
+      "label_code": "B9",
+      "label_name": "给出替换文本（未说明缘由）",
+      "platform_dim": "语言质量",
+      "layer": "ai_assisted",
+      "samples": 561,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "LEARN-PATCH-001"
+      ],
+      "category_keywords": [
+        "给出替换文本（未说明缘由）"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "STRUCT-TERM-001": {
+      "label_code": "E1",
+      "label_name": "篇内术语/写法不一致",
+      "platform_dim": "术语一致性",
+      "layer": "structural_consistency",
+      "samples": 301,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "DOC-TERM",
+        "CYY-CN-CONSIST-"
+      ],
+      "exact_rules": [
+        "CYY-CN-NAV-001",
+        "STRUCT-TERM-001",
+        "DET-TERM-BASELINE-001",
+        "DET-TERM-CASE-001",
+        "DET-TERM-CANON-001",
+        "TERM-INCONSIST",
+        "TERM-PAIR",
+        "TERM-CONSISTENCY-001",
+        "TERM-FORBIDDEN"
+      ],
+      "category_keywords": [
+        "术语一致性"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 4,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "TERM-CHECK-001": {
+      "label_code": "E1",
+      "label_name": "术语库动态校验",
+      "platform_dim": "术语一致性",
+      "layer": "deterministic",
+      "samples": 0,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "TERM-INCONSIST",
+        "TERM-PAIR",
+        "TERM-CONSISTENCY-001",
+        "TERM-FORBIDDEN"
+      ],
+      "category_keywords": [],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false,
+      "notes": "TERM-CHECK-001 与 STRUCT-TERM-001 的规则号重叠是刻意设计：前者按检出层组织（术语库动态校验），后者按问题类型组织（篇内不一致）。允许一条 issue 被两族认领，统计时按族去重。TERM-FORBIDDEN 已登记 exact_rules，术语库禁止标记仍缺数据时通道产出为 0。"
+    },
+    "DET-TYPO-CN-001": {
+      "label_code": "A5",
+      "label_name": "中文错别字/用字错误",
+      "platform_dim": "语言质量",
+      "layer": "deterministic",
+      "samples": 301,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "DET-TYPO-CN-001",
+        "CN-TYPO-001",
+        "CYY-CN-SPELL-001",
+        "CYY-CN-SPELL-002",
+        "CYY-CN-SPELL-003",
+        "EXT-R020"
+      ],
+      "category_keywords": [
+        "中文错别字",
+        "用字错误"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "CYY-CN-SPELL-001",
+        "CYY-CN-SPELL-002",
+        "CYY-CN-SPELL-003",
+        "EXT-R020"
+      ],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "DET-EN-FUNC-001": {
+      "label_code": "A1",
+      "label_name": "英文功能词补全/删减",
+      "platform_dim": "格式规范",
+      "layer": "deterministic",
+      "samples": 167,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "英文功能词补全"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-AMBIG-001": {
+      "label_code": "B5",
+      "label_name": "指代不明/歧义",
+      "platform_dim": "语言质量",
+      "layer": "ai_assisted",
+      "samples": 164,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "指代不明"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-CHECK-001": {
+      "label_code": "H1",
+      "label_name": "事实与配置需确认",
+      "platform_dim": "格式规范",
+      "layer": "human_confirm",
+      "samples": 160,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [
+        "CYY-CN-CHECK-",
+        "CYY-CN-ADDR-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "人工确认"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 2,
+      "overrides": [
+        {
+          "when": {
+            "text_all": [
+              "pos"
+            ]
+          },
+          "then": {
+            "exact_rules": [
+              "DOC-POS-001"
+            ],
+            "category_keywords": [
+              "台面位置"
+            ]
+          }
+        },
+        {
+          "when": {
+            "text_all": [
+              "install",
+              "finish",
+              "打开本系统"
+            ]
+          },
+          "then": {
+            "exact_rules": [
+              "CYY-CN-LOGIC-007"
+            ],
+            "category_keywords": [
+              "内容逻辑"
+            ]
+          }
+        }
+      ],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "DET-PUNCT-001": {
+      "label_code": "A7",
+      "label_name": "标点符号增删改",
+      "platform_dim": "格式规范",
+      "layer": "deterministic",
+      "samples": 142,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "DOC-PUNCT",
+        "DOC-QUOTE",
+        "CYY-CN-PUNCT"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "标点"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "DOC-PUNCT-002",
+        "DOC-PUNCT-003"
+      ],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "STRUCT-DUP-001": {
+      "label_code": "B4",
+      "label_name": "语句冗余应删除",
+      "platform_dim": "语言质量",
+      "layer": "structural_consistency",
+      "samples": 136,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "DOC-DUP"
+      ],
+      "exact_rules": [
+        "CYY-CN-DUP-002"
+      ],
+      "category_keywords": [
+        "重复"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "STRUCT-LAYOUT-001": {
+      "label_code": "C8",
+      "label_name": "表格/版式样式应用错误",
+      "platform_dim": "格式规范",
+      "layer": "structural_consistency",
+      "samples": 127,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "CYY-CN-LAYOUT-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "表格/版式"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [
+        {
+          "when": {
+            "text_all": [
+              "列宽"
+            ],
+            "blob_all": [
+              "储存环境"
+            ]
+          },
+          "then": {
+            "always": true
+          }
+        }
+      ],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "AI-STYLE-001": {
+      "label_code": "B10",
+      "label_name": "句式改写建议（整句替换）",
+      "platform_dim": "语言质量",
+      "layer": "ai_assisted",
+      "samples": 121,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "DOC-MICRO-001",
+        "DOC-PROC-001",
+        "GRAMMAR-003",
+        "GRAMMAR-004",
+        "GRAMMAR-005",
+        "DOC-GRAM-004",
+        "DOC-GRAM-005",
+        "DOC-GRAM-006",
+        "DOC-GRAM-007",
+        "DOC-GRAM-008",
+        "DOC-GRAMMAR-001",
+        "DOC-GRAMMAR-002",
+        "CYY-CN-STYLE-003",
+        "CYY-CN-GRAMMAR-009",
+        "CYY-CN-GRAMMAR-010",
+        "CYY-CN-GRAMMAR-011"
+      ],
+      "category_keywords": [
+        "表达与句式"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "EXT-R025",
+        "EXT-R026"
+      ],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "DET-SPACE-001": {
+      "label_code": "A9",
+      "label_name": "单位与数值间距格式",
+      "platform_dim": "格式规范",
+      "layer": "deterministic",
+      "samples": 113,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "R010",
+        "HR004",
+        "UNIT-002",
+        "UNIT-003",
+        "UNIT-004",
+        "HR006",
+        "DOC-FMT-003",
+        "DOC-SPACE-001",
+        "DOC-SPACE-002",
+        "DOC-SPACE-003",
+        "DOC-SPACE-004",
+        "DOC-SPACE-005",
+        "DOC-SPACE-006",
+        "DOC-UNIT-001",
+        "DET-SPACE-GAP",
+        "DET-SPACE-UNIT"
+      ],
+      "category_keywords": [
+        "格式规范",
+        "空格"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 2,
+      "overrides": [],
+      "platform_rules": [
+        "DOC-PUNCT-SPACE-001",
+        "EXT-R016"
+      ],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "AI-UISTR-001": {
+      "label_code": "D7",
+      "label_name": "界面标识与字符串样式",
+      "platform_dim": "交叉引用",
+      "layer": "ai_assisted",
+      "samples": 88,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "界面标识与字符串样式"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-GAP-001": {
+      "label_code": "F1",
+      "label_name": "内容缺失需补充",
+      "platform_dim": "逻辑完整性",
+      "layer": "ai_assisted",
+      "samples": 69,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "内容缺失需补充"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-TERM-SPELL-001": {
+      "label_code": "A4",
+      "label_name": "术语拼写正确性",
+      "platform_dim": "术语一致性",
+      "layer": "deterministic",
+      "samples": 65,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "CYY-CN-SPELL-"
+      ],
+      "exact_rules": [
+        "CYY-CN-TERM-006",
+        "CYY-CN-CONSIST-032",
+        "SPELL",
+        "SPELL-PHRASE",
+        "SPELL-PROP",
+        "SPELL-TRANS",
+        "SPELL-INS",
+        "SPELL-SPLIT"
+      ],
+      "category_keywords": [
+        "术语拼写",
+        "拼写错误",
+        "术语一致性"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 2,
+      "overrides": [],
+      "platform_rules": [
+        "CYY-CN-SPELL-001",
+        "CYY-CN-SPELL-002",
+        "CYY-CN-SPELL-003"
+      ],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "STRUCT-FMT-BOLD-001": {
+      "label_code": "A11",
+      "label_name": "加粗样式误用",
+      "platform_dim": "格式规范",
+      "layer": "structural_consistency",
+      "samples": 64,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "加粗样式误用"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-PAGE-001": {
+      "label_code": "C10",
+      "label_name": "溢出/跨页断版",
+      "platform_dim": "格式规范",
+      "layer": "structural_consistency",
+      "samples": 57,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "跨页断版"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-FMT-SIZE-001": {
+      "label_code": "A14",
+      "label_name": "字号不一致",
+      "platform_dim": "术语一致性",
+      "layer": "structural_consistency",
+      "samples": 57,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "字号不一致"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-FMT-ITALIC-001": {
+      "label_code": "A10",
+      "label_name": "变量斜体规范",
+      "platform_dim": "格式规范",
+      "layer": "deterministic",
+      "samples": 53,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "变量斜体规范"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-EN-NUM-001": {
+      "label_code": "A2",
+      "label_name": "英文单复数与词形",
+      "platform_dim": "格式规范",
+      "layer": "deterministic",
+      "samples": 45,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "英文单复数与词形"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-FMT-COLOR-001": {
+      "label_code": "A13",
+      "label_name": "字体颜色不符设计规范",
+      "platform_dim": "格式规范",
+      "layer": "structural_consistency",
+      "samples": 44,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "字体颜色不符设计规范"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "RESOLVE-SAME-001": {
+      "label_code": "Z1",
+      "label_name": "指代上一/下一条批注",
+      "platform_dim": "语言质量",
+      "layer": "invalid",
+      "samples": 39,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "指代上一",
+        "下一条批注"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-VISUAL-STYLE-001": {
+      "label_code": "A15",
+      "label_name": "线宽描边不符图形规范",
+      "platform_dim": "格式规范",
+      "layer": "ai_assisted",
+      "samples": 37,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "线宽描边不符图形规范"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-TITLE-CASE-001": {
+      "label_code": "A3",
+      "label_name": "英文大小写规范",
+      "platform_dim": "格式规范",
+      "layer": "deterministic",
+      "samples": 34,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "DOC-TITLE-001"
+      ],
+      "category_keywords": [
+        "标题大小写"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "DET-URL-001": {
+      "label_code": "E4",
+      "label_name": "公司主体与官网地址",
+      "platform_dim": "逻辑完整性",
+      "layer": "deterministic",
+      "samples": 33,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "公司主体与官网地址"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "EXT-R005"
+      ],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-WORD-001": {
+      "label_code": "B3",
+      "label_name": "用词/动词选择",
+      "platform_dim": "语言质量",
+      "layer": "ai_assisted",
+      "samples": 28,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "动词选择"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "EXT-R022",
+        "EXT-R024"
+      ],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-ZH-EN-001": {
+      "label_code": "G1",
+      "label_name": "译文与原文不一致",
+      "platform_dim": "术语一致性",
+      "layer": "ai_assisted",
+      "samples": 25,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "译文与原文不一致"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-TRADEMARK-001": {
+      "label_code": "E5",
+      "label_name": "商标/声明/合规文案",
+      "platform_dim": "安全合规",
+      "layer": "deterministic",
+      "samples": 20,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "合规文案"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "EXT-R006"
+      ],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-REVISION-001": {
+      "label_code": "E7",
+      "label_name": "版本/日期记录",
+      "platform_dim": "逻辑完整性",
+      "layer": "deterministic",
+      "samples": 19,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "DOC-REV",
+        "CYY-CN-REVISION-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "版本记录",
+        "修订一致性"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "AI-WARN-001": {
+      "label_code": "F5",
+      "label_name": "警示级别恰当性",
+      "platform_dim": "安全合规",
+      "layer": "ai_assisted",
+      "samples": 19,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "警示级别恰当性"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-VISUAL-IMAGE-001": {
+      "label_code": "C3",
+      "label_name": "图片模糊/分辨率不足",
+      "platform_dim": "格式规范",
+      "layer": "ai_assisted",
+      "samples": 19,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "图片模糊",
+        "分辨率不足"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-REF-001": {
+      "label_code": "D2",
+      "label_name": "交叉引用粒度不足",
+      "platform_dim": "交叉引用",
+      "layer": "deterministic",
+      "samples": 17,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "REF-001",
+        "REF-002",
+        "REF-003",
+        "REF-INDEX-001",
+        "REF-STYLE"
+      ],
+      "category_keywords": [
+        "交叉引用粒度不足"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-XREF-FILE-001": {
+      "label_code": "E3",
+      "label_name": "跨文件需同步修改",
+      "platform_dim": "逻辑完整性",
+      "layer": "ai_assisted",
+      "samples": 16,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "跨文件需同步修改"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-PLACE-001": {
+      "label_code": "F3",
+      "label_name": "内容位置归属不当",
+      "platform_dim": "逻辑完整性",
+      "layer": "ai_assisted",
+      "samples": 16,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "内容位置归属不当"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-PARA-001": {
+      "label_code": "D6",
+      "label_name": "段落与换行组织",
+      "platform_dim": "交叉引用",
+      "layer": "structural_consistency",
+      "samples": 14,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "段落与换行组织"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-IMAGE-001": {
+      "label_code": "C1",
+      "label_name": "图片缺失/丢失/需重制",
+      "platform_dim": "逻辑完整性",
+      "layer": "structural_consistency",
+      "samples": 13,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "CYY-CN-IMAGE-"
+      ],
+      "exact_rules": [
+        "PDF-VISUAL-001"
+      ],
+      "category_keywords": [
+        "图片",
+        "对象缺失"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [
+        {
+          "when": {
+            "text_all": [
+              "install",
+              "finish",
+              "打开本系统"
+            ]
+          },
+          "then": {
+            "exact_rules": [
+              "CYY-CN-LOGIC-007"
+            ],
+            "category_keywords": [
+              "内容逻辑"
+            ]
+          }
+        }
+      ],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "AI-VISUAL-ANNO-001": {
+      "label_code": "C6",
+      "label_name": "颜色与高亮标注",
+      "platform_dim": "格式规范",
+      "layer": "ai_assisted",
+      "samples": 12,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "颜色与高亮标注"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-STEP-001": {
+      "label_code": "D5",
+      "label_name": "列表类型与序号",
+      "platform_dim": "交叉引用",
+      "layer": "structural_consistency",
+      "samples": 12,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "CYY-CN-STRUCT-001",
+        "CYY-CN-STEP-004"
+      ],
+      "category_keywords": [
+        "步骤结构"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "DOC-PAGE-001": {
+      "label_code": "D1",
+      "label_name": "目录/页码异常",
+      "platform_dim": "交叉引用",
+      "layer": "deterministic",
+      "samples": 11,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "页码异常"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-CATNO-001": {
+      "label_code": "E6",
+      "label_name": "货号与物料编码",
+      "platform_dim": "逻辑完整性",
+      "layer": "deterministic",
+      "samples": 11,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "DOC-CATNO",
+        "CYY-CN-PRODUCT-002"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "货号"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "DET-CHAR-001": {
+      "label_code": "A8",
+      "label_name": "不可见字符与残留符号",
+      "platform_dim": "格式规范",
+      "layer": "deterministic",
+      "samples": 10,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "不可见字符与残留符号"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "EXT-R009"
+      ],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-SYMBOL-001": {
+      "label_code": "E8",
+      "label_name": "符号写法规范",
+      "platform_dim": "逻辑完整性",
+      "layer": "deterministic",
+      "samples": 9,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "符号写法规范"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "EXT-R023"
+      ],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-PROC-001": {
+      "label_code": "B6",
+      "label_name": "操作步骤语气与祈使句",
+      "platform_dim": "语言质量",
+      "layer": "ai_assisted",
+      "samples": 9,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "DOC-PROC-001"
+      ],
+      "category_keywords": [
+        "操作步骤语气"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "AI-GRAMMAR-001": {
+      "label_code": "B2",
+      "label_name": "语法与句法问题",
+      "platform_dim": "语言质量",
+      "layer": "ai_assisted",
+      "samples": 8,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "语法与句法问题"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-GAP-002": {
+      "label_code": "F2",
+      "label_name": "需解释含义/作用",
+      "platform_dim": "逻辑完整性",
+      "layer": "ai_assisted",
+      "samples": 7,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "需解释含义"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-CN-INTEGRITY-001": {
+      "label_code": "A6",
+      "label_name": "中文漏字/多字",
+      "platform_dim": "格式规范",
+      "layer": "structural_consistency",
+      "samples": 6,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "中文漏字"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "REVIEW-AMBIG-001": {
+      "label_code": "Z4",
+      "label_name": "非中文/未识别形态意见",
+      "platform_dim": "格式规范",
+      "layer": "ai_assisted",
+      "samples": 6,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "非中文",
+        "未识别形态意见"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-DITA-001": {
+      "label_code": "D3",
+      "label_name": "DITA 标签/属性缺失",
+      "platform_dim": "交叉引用",
+      "layer": "structural_consistency",
+      "samples": 5,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "DITA 标签",
+        "属性缺失"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-TOPIC-001": {
+      "label_code": "D4",
+      "label_name": "主题/章节结构问题",
+      "platform_dim": "交叉引用",
+      "layer": "structural_consistency",
+      "samples": 5,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "章节结构问题"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-VISUAL-CONSIST-001": {
+      "label_code": "C11",
+      "label_name": "图文不符",
+      "platform_dim": "格式规范",
+      "layer": "ai_assisted",
+      "samples": 5,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "图文不符"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-RISK-001": {
+      "label_code": "F6",
+      "label_name": "风险后果表述完整性",
+      "platform_dim": "逻辑完整性",
+      "layer": "ai_assisted",
+      "samples": 4,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "风险后果表述完整性"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-CHECK-003": {
+      "label_code": "H3",
+      "label_name": "是否遵循规范需确认",
+      "platform_dim": "格式规范",
+      "layer": "human_confirm",
+      "samples": 4,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "是否遵循规范需确认"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-TYPO-001": {
+      "label_code": "A12",
+      "label_name": "上下角标缺失或错位",
+      "platform_dim": "逻辑完整性",
+      "layer": "structural_consistency",
+      "samples": 3,
+      "in_legacy_code": true,
+      "in_regression_set": true,
+      "rule_prefixes": [
+        "CYY-CN-LAYOUT-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "字体/版式",
+        "表格/版式"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": false
+    },
+    "ANCHOR-FAIL-001": {
+      "label_code": "Z2",
+      "label_name": "定位失效待核查",
+      "platform_dim": "格式规范",
+      "layer": "invalid",
+      "samples": 2,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "定位失效待核查"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-RANGE-001": {
+      "label_code": "E9",
+      "label_name": "范围与数值格式",
+      "platform_dim": "逻辑完整性",
+      "layer": "deterministic",
+      "samples": 2,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "范围与数值格式"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [
+        "EXT-R027"
+      ],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-NUM-STYLE-001": {
+      "label_code": "A16",
+      "label_name": "数字/序号写法不统一",
+      "platform_dim": "术语一致性",
+      "layer": "structural_consistency",
+      "samples": 2,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "序号写法不统一"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-VISUAL-VALUE-001": {
+      "label_code": "C7",
+      "label_name": "图形必要性与设计",
+      "platform_dim": "格式规范",
+      "layer": "ai_assisted",
+      "samples": 2,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "图形必要性与设计"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-TITLE-001": {
+      "label_code": "B8",
+      "label_name": "标题与内容不符",
+      "platform_dim": "语言质量",
+      "layer": "ai_assisted",
+      "samples": 2,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "标题与内容不符"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "STRUCT-CONSIST-002": {
+      "label_code": "E2",
+      "label_name": "前后内容冲突",
+      "platform_dim": "逻辑完整性",
+      "layer": "structural_consistency",
+      "samples": 1,
+      "in_legacy_code": false,
+      "in_regression_set": true,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "前后内容冲突"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "AI-CHECK-002": {
+      "label_code": "H2",
+      "label_name": "数值公式正确性需确认",
+      "platform_dim": "格式规范",
+      "layer": "human_confirm",
+      "samples": 1,
+      "in_legacy_code": false,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [],
+      "category_keywords": [
+        "数值公式正确性需确认"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": false,
+      "disabled": true
+    },
+    "DET-CN-001": {
+      "label_code": "",
+      "label_name": "DET-CN-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "ENG-CN-001"
+      ],
+      "category_keywords": [
+        "中文混入"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "STRUCT-SCOPE-001": {
+      "label_code": "",
+      "label_name": "STRUCT-SCOPE-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "DOC-SCOPE-001",
+        "DOC-MODEL-002",
+        "CYY-CN-SCOPE-002",
+        "CYY-CN-SCOPE-003"
+      ],
+      "category_keywords": [],
+      "text_all": [],
+      "blob_all": [
+        "ne384",
+        "硬件配置"
+      ],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "STRUCT-FIGTAB-001": {
+      "label_code": "",
+      "label_name": "STRUCT-FIGTAB-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [
+        "DOC-FIGTAB"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "表图编号"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "STRUCT-COMPONENT-001": {
+      "label_code": "",
+      "label_name": "STRUCT-COMPONENT-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [
+        "CYY-CN-ROHS-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "结构完整"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "STRUCT-INDEX-001": {
+      "label_code": "",
+      "label_name": "STRUCT-INDEX-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [
+        "CYY-CN-INDEX-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "索引"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "AI-ADDR-001": {
+      "label_code": "",
+      "label_name": "AI-ADDR-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [
+        "CYY-CN-ADDR-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "地址"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "STRUCT-PAGE-NUM-001": {
+      "label_code": "",
+      "label_name": "STRUCT-PAGE-NUM-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [
+        "CYY-CN-PAGE-"
+      ],
+      "exact_rules": [],
+      "category_keywords": [
+        "页码"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "DET-MATERIAL-001": {
+      "label_code": "",
+      "label_name": "DET-MATERIAL-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "CYY-CN-REF-003",
+        "REF-001",
+        "REF-002",
+        "REF-003",
+        "REF-INDEX-001",
+        "REF-STYLE"
+      ],
+      "category_keywords": [
+        "物料编码",
+        "交叉引用"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    },
+    "DOC-DATA-001": {
+      "label_code": "",
+      "label_name": "DOC-DATA-001",
+      "platform_dim": "",
+      "layer": "",
+      "samples": 0,
+      "in_legacy_code": true,
+      "in_regression_set": false,
+      "rule_prefixes": [],
+      "exact_rules": [
+        "DOC-DATA-001"
+      ],
+      "category_keywords": [
+        "信息完整性"
+      ],
+      "text_all": [],
+      "blob_all": [],
+      "selected_in_blob_min_len": 0,
+      "overrides": [],
+      "platform_rules": [],
+      "legacy_only": true,
+      "disabled": false
+    }
+  }
+}

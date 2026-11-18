@@ -60,6 +60,8 @@ _MAX_REPORTS_PER_PATTERN = 6
 
 # 只在英文文档语境下启用（本库全是英文规范写法）。
 _ASCII_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+_ABBREV_TABLE_LINE_RE = re.compile(r"^[A-Z]{2,4}[ \t]{2,}")
+_ABBREV_DIGIT_TOKEN_RE = re.compile(r"^[A-Z]{2,4}\d+$")
 
 
 @lru_cache(maxsize=1)
@@ -133,6 +135,42 @@ def _find_variant_occurrences(text: str, variant: str) -> list[tuple[int, int]]:
     return [(m.start(), m.end()) for m in pattern.finditer(text)]
 
 
+def _line_at(text: str, offset: int) -> str:
+    start = offset
+    while start > 0 and text[start - 1] not in "\n\f":
+        start -= 1
+    end = offset
+    while end < len(text) and text[end] not in "\n\f":
+        end += 1
+    return text[start:end]
+
+
+def _in_abbrev_table_line(text: str, offset: int) -> bool:
+    """缩写表行：行首是 2–4 个大写字母，后面至少两个空格，再跟定义。
+
+    这类行里的 `Paired-end` / `Single-end` 是表内官方写法，不得改成小写。
+    """
+    line = _line_at(text, offset)
+    if _ABBREV_TABLE_LINE_RE.match(line):
+        return True
+    # PDF 文本层常把缩写和定义拆成两行，定义行形如
+    # `Paired-end sequencing，双末端测序。`
+    stripped = line.strip()
+    if "，" in stripped and len(stripped) <= 120:
+        return bool(re.match(r"[A-Za-z][-A-Za-z0-9 ]{0,60}，", stripped))
+    return False
+
+
+def _is_abbrev_digit_token(text: str, start: int, end: int) -> bool:
+    """货号/型号里的大写缩写+数字（`PE100` / `PE150`）不是术语大小写问题。"""
+    i, j = start, end
+    while i > 0 and text[i - 1].isalnum():
+        i -= 1
+    while j < len(text) and text[j].isalnum():
+        j += 1
+    return bool(_ABBREV_DIGIT_TOKEN_RE.match(text[i:j]))
+
+
 def find_canonical_writing_issues(text: str) -> list[dict]:
     """扫描文本，报告与外部规范写法不一致的位置。"""
     if not text:
@@ -162,7 +200,13 @@ def find_canonical_writing_issues(text: str) -> list[dict]:
                 )
             if item["note"]:
                 detail += f"（{item['note']}）"
-            for start, end in occurrences[:_MAX_REPORTS_PER_PATTERN]:
+            kept = [
+                (start, end)
+                for start, end in occurrences
+                if not _in_abbrev_table_line(text, start)
+                and not _is_abbrev_digit_token(text, start, end)
+            ]
+            for start, end in kept[:_MAX_REPORTS_PER_PATTERN]:
                 issues.append(_issue(
                     "DET-TERM-CANON-001",
                     text, start, end, variant,

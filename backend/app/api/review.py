@@ -38,6 +38,7 @@ from app.crud.document import create_document, get_document, get_documents_by_id
 from app.crud.review import create_review, get_review, get_reviews, update_review_status, create_issue, get_issues, update_issue, list_false_positive_memory_signatures, delete_false_positive_memory_for_issue, upsert_false_positive_memory_for_issue, list_false_positive_memory, delete_false_positive_memory_entry
 from app.crud.rule import get_rules
 from app.crud.term import get_terms
+from app.review_engine.issue_rule import canonicalize_issue_rule
 from app.models.term import Term
 from app.crud.audit_basis import get_audit_basis
 from app.crud.knowledge import get_folder_tree, get_folder, get_folder_files, get_file
@@ -48,10 +49,13 @@ from app.models.issue import Issue as IssueModel
 from app.models.document import Document as DocumentModel
 from app.models.user import User as UserModel
 from app.rules.reference_integrity_rule import ReferenceIntegrityRule
+from app.services.terminology import load_terminology, resolve_terminology_path, run_term_check_v2
 from app.rules.term_consistency_rule import TermConsistencyRule
 from app.review_engine.unit_spacing import check_units_and_spacing
 from app.review_engine.term_baseline import check_term_baseline
 from app.review_engine.canonical_writing import check_canonical_writing
+from app.review_engine.cn_typo import check_cn_typos
+from app.review_engine.learned_patch import check_learned_patches
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -7482,7 +7486,7 @@ def _run_db_term_consistency_audit(db: Session, content):
             issues.append({
                 'severity': 'general',
                 'category': '术语一致性',
-                'rule': 'TERM-CONSISTENCY-DB',
+                'rule': 'TERM-INCONSIST',
                 'original_text': match.group(0),
                 'suggestion': standard,
                 'description': f'术语不一致: "{match.group(0)}" 建议统一为 "{standard}"。',
@@ -13129,7 +13133,7 @@ def run_term_check(content, terms):
                 issues.append({
                     "severity": "suggestion",
                     "category": "术语规范",
-                    "rule": "TERM",
+                    "rule": "TERM-INCONSIST",
                     "chapter": chapter,
                     "original_text": term.non_standard,
                     "context": context,
@@ -13279,6 +13283,16 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         issues.extend(check_canonical_writing(content))
     except Exception as e:
         print(f"[审核] 外部规范写法库规则执行失败: {e}")
+
+    try:
+        issues.extend(check_cn_typos(content))
+    except Exception as e:
+        print(f"[审核] 中文错别字规则执行失败: {e}")
+
+    try:
+        issues.extend(check_learned_patches(content))
+    except Exception as e:
+        print(f"[审核] 学到的替换对一致性规则执行失败: {e}")
 
     return issues
 
@@ -13612,7 +13626,7 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             _end_stage("document_loading", output_count=len(content))
 
             set_progress(review_id, 'running', '规则审核', 15, '正在加载审核规则...')
-            rules = get_rules(db)
+            rules = get_rules(db, skip=0, limit=10000)
             print(f"[审核] 加载规则数量: {len(rules)}")
 
             _begin_stage("rule_based_audit")
@@ -13626,9 +13640,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             print(f"[审核] 规则匹配到问题: {len(rule_issues)}个")
 
             set_progress(review_id, 'running', '术语检查', 35, '正在执行术语检查...')
-            terms = get_terms(db)
-            print(f"[审核] 加载术语数量: {len(terms)}")
-            term_issues = [] if document.file_type == 'xlsx' else run_term_check(content, terms)
+            pack = load_terminology(resolve_terminology_path(db, document))
+            if document.file_type == 'xlsx':
+                term_issues = []
+            elif pack:
+                print(f"[审核] 术语库动态解析 pairs={len(pack.get('pairs') or [])}")
+                term_issues = run_term_check_v2(content, pack, lang=detect_language(content))
+            else:
+                terms = get_terms(db)
+                print(f"[审核] 加载术语数量: {len(terms)}")
+                term_issues = run_term_check(content, terms)
             print(f"[审核] 术语匹配到问题: {len(term_issues)}个")
 
             if snippet_review and document.file_type != 'xlsx' and document_language == "cn":
@@ -14005,12 +14026,15 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         _ensure_review_not_cancelled(review_id)
         for issue in issues:
+            issue = canonicalize_issue_rule(issue)
             persisted_position = _decode_issue_position(issue.get("position", ""))
             persisted_position.update({
                 key: issue.get(key)
                 for key in ("evidence", "position_object", "visual_verification", "source_format", "target_status", "rejected_reason")
                 if issue.get(key) not in (None, "", {}, [])
             })
+            if issue.get("check_type"):
+                persisted_position["check_type"] = issue["check_type"]
             create_issue(db=db, issue=IssueCreate(
                 review_id=review_id,
                 severity=issue["severity"],
@@ -15244,7 +15268,7 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             review_id=review_id,
             severity=severity_map.get(level, "general"),
             category='核心参数对比' if row.get('kind') == 'parameter' else '主干流程比对',
-            rule='COMPARE-PARAM' if row.get('kind') == 'parameter' else 'COMPARE-FLOW',
+            rule='',
             chapter=str(row.get('dimension') or '对比审核'),
             original_text=str(row.get('parameter_name') or ''),
             context="\n".join([f"主文档：{row.get('main_value') or '-'}", *reference_lines]),
@@ -15252,7 +15276,7 @@ def _build_compare_issue_payloads(review_id, compare_payload):
             description=str(row.get('conclusion') or '对比审核发现差异'),
             audit_basis='对比审核 - 核心参数差异明细表',
             confidence=95,
-            source='rule',
+            source='compare_param' if row.get('kind') == 'parameter' else 'compare_flow',
             position=_encode_issue_position_with_meta(0, 0, compare_type=row.get('kind'), compare_level=level, parameter_name=row.get('parameter_name')),
             status='pending',
         ))
@@ -15704,7 +15728,7 @@ async def create_manual_review_issue(
         review_id=review_id,
         severity=severity,
         category=category,
-        rule='MANUAL-SUPPLEMENT',
+        rule='',
         chapter=chapter,
         original_text=original_text,
         context=str(payload.get('context') or '').strip(),
@@ -16026,7 +16050,7 @@ async def get_review_coverage(
     # 8. 规则覆盖度
     from app.crud.rule import get_rules as db_get_rules
     try:
-        all_rules = db_get_rules(db, skip=0, limit=500)
+        all_rules = db_get_rules(db, skip=0, limit=10000)
         total_available_rules = len(all_rules)
     except Exception:
         total_available_rules = 0

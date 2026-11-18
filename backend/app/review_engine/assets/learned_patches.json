@@ -1,0 +1,985 @@
+{
+  "version": "2026-11-10",
+  "source": "rule_pack_20261106 B9 锚点+替换文本",
+  "notes": "仅收录短替换对。引擎只在同一文档同时出现锚点与替换文本时上报，避免把单点改写当成全局规则。",
+  "items": [
+    {
+      "id": "cyy-006",
+      "doc": "CSS-00065",
+      "anchor": "Color",
+      "replacement": "sentence style"
+    },
+    {
+      "id": "cyy-039",
+      "doc": "H-020-000445-00",
+      "anchor": "Power off the power.",
+      "replacement": "Power off the device."
+    },
+    {
+      "id": "cyy-054",
+      "doc": "H-020-000618-00",
+      "anchor": "device",
+      "replacement": "product"
+    },
+    {
+      "id": "cyy-093",
+      "doc": "H-020-000746-00",
+      "anchor": "can store",
+      "replacement": "can be stored"
+    },
+    {
+      "id": "cyy-141",
+      "doc": "H-020-000948-00",
+      "anchor": "此时G99 FCL PE50/G99",
+      "replacement": "组合型号 G99 FCL SE100/PE50，与生化确认下"
+    },
+    {
+      "id": "cyy-208",
+      "doc": "H-020-001010-00",
+      "anchor": "Connects",
+      "replacement": "network port of the"
+    },
+    {
+      "id": "cyy-231",
+      "doc": "H-020-001145-00",
+      "anchor": "则【下一 装类型的",
+      "replacement": "显示内容说明如下： 或者：及版本"
+    },
+    {
+      "id": "cyy-290",
+      "doc": "H-020-001192-00",
+      "anchor": "login",
+      "replacement": "logging"
+    },
+    {
+      "id": "cyy-354",
+      "doc": "H-020-001235-00",
+      "anchor": "TMA’s dimensions",
+      "replacement": "dimensions of the TMA"
+    },
+    {
+      "id": "cyy-393",
+      "doc": "H-020-001249-00",
+      "anchor": "back to",
+      "replacement": "to go back to"
+    },
+    {
+      "id": "cyy-394",
+      "doc": "H-020-001249-00",
+      "anchor": "please ensure",
+      "replacement": "ensure that"
+    },
+    {
+      "id": "cyy-433",
+      "doc": "H-020-001273-00",
+      "anchor": "拍下",
+      "replacement": "按下，下同"
+    },
+    {
+      "id": "cyy-470",
+      "doc": "H-020-001303-00",
+      "anchor": "Disgestive",
+      "replacement": "Disgestion 要不问下研发看"
+    },
+    {
+      "id": "cyy-495",
+      "doc": "H-020-001339-00",
+      "anchor": "aspirate",
+      "replacement": "aspiration"
+    },
+    {
+      "id": "cyy-614",
+      "doc": "H020-000008",
+      "anchor": "Bottom",
+      "replacement": "Back"
+    },
+    {
+      "id": "cyy-616",
+      "doc": "H020-000008",
+      "anchor": "port",
+      "replacement": "Outlet"
+    },
+    {
+      "id": "cyy-626",
+      "doc": "H020-000008",
+      "anchor": "Buttons",
+      "replacement": "All functions"
+    },
+    {
+      "id": "cyy-643",
+      "doc": "H020-000008",
+      "anchor": "BGI CycloneSEQ",
+      "replacement": "The device"
+    },
+    {
+      "id": "cyy-648",
+      "doc": "H020-000008",
+      "anchor": "(Resolution)",
+      "replacement": "pixels"
+    },
+    {
+      "id": "cyy-669",
+      "doc": "H020-000008",
+      "anchor": "form bubbles,",
+      "replacement": "bubbles exist"
+    },
+    {
+      "id": "cyy-672",
+      "doc": "H020-000008",
+      "anchor": "any liquid",
+      "replacement": "the reagent"
+    },
+    {
+      "id": "cyy-710",
+      "doc": "H020-000008",
+      "anchor": "G100-E Nanopore",
+      "replacement": "device"
+    },
+    {
+      "id": "cyy-712",
+      "doc": "H020-000008",
+      "anchor": "Displays Initializing",
+      "replacement": "the initialization progress"
+    },
+    {
+      "id": "cyy-782",
+      "doc": "OTHER",
+      "anchor": "OTC",
+      "replacement": "OCT"
+    },
+    {
+      "id": "ivy-172",
+      "doc": "H-020-000620-00",
+      "anchor": "to thaw them.",
+      "replacement": "for thawing"
+    },
+    {
+      "id": "ivy-243",
+      "doc": "H-020-000876-00",
+      "anchor": "行断点续测部分阶段",
+      "replacement": "不是所有阶段终止测序都可以进行断点续测"
+    },
+    {
+      "id": "ivy-280",
+      "doc": "H-020-001006-00",
+      "anchor": "reagent",
+      "replacement": "kit"
+    },
+    {
+      "id": "ivy-292",
+      "doc": "H-020-001006-00",
+      "anchor": "library.",
+      "replacement": "ies"
+    },
+    {
+      "id": "ivy-296",
+      "doc": "H-020-001006-00",
+      "anchor": "ensure",
+      "replacement": "prepare"
+    },
+    {
+      "id": "ivy-312",
+      "doc": "H-020-001098-00",
+      "anchor": "pate",
+      "replacement": "plate"
+    },
+    {
+      "id": "ivy-317",
+      "doc": "H-020-001098-00",
+      "anchor": "will proceed to the",
+      "replacement": "will be processed"
+    },
+    {
+      "id": "ivy-318",
+      "doc": "H-020-001098-00",
+      "anchor": "will not proceed to the process.",
+      "replacement": "will not be processed"
+    },
+    {
+      "id": "ivy-320",
+      "doc": "H-020-001098-00",
+      "anchor": "to run",
+      "replacement": "running"
+    },
+    {
+      "id": "ivy-355",
+      "doc": "H-020-001130-00",
+      "anchor": "dsDNA dsDNA",
+      "replacement": "ssDNA"
+    },
+    {
+      "id": "ivy-359",
+      "doc": "H-020-001143-00",
+      "anchor": "operation",
+      "replacement": "this side"
+    },
+    {
+      "id": "ivy-373",
+      "doc": "H-020-001143-00",
+      "anchor": "local",
+      "replacement": "locally"
+    },
+    {
+      "id": "ivy-444",
+      "doc": "H-020-001187-00",
+      "anchor": "Flashing yellow:",
+      "replacement": "Yellow"
+    },
+    {
+      "id": "ivy-448",
+      "doc": "H-020-001187-00",
+      "anchor": "to troubleshoot",
+      "replacement": "for troubleshooting"
+    },
+    {
+      "id": "ivy-449",
+      "doc": "H-020-001187-00",
+      "anchor": "switch",
+      "replacement": "button"
+    },
+    {
+      "id": "ivy-451",
+      "doc": "H-020-001187-00",
+      "anchor": "Includes",
+      "replacement": "Moves along"
+    },
+    {
+      "id": "ivy-496",
+      "doc": "H-020-001232-00",
+      "anchor": "applicable to",
+      "replacement": "compatible with"
+    },
+    {
+      "id": "ivy-497",
+      "doc": "H-020-001232-00",
+      "anchor": "Applicable",
+      "replacement": "Compatible"
+    },
+    {
+      "id": "ivy-499",
+      "doc": "H-020-001232-00",
+      "anchor": "scans",
+      "replacement": "acquires"
+    },
+    {
+      "id": "ivy-502",
+      "doc": "H-020-001232-00",
+      "anchor": "scanning",
+      "replacement": "acquisition"
+    },
+    {
+      "id": "ivy-503",
+      "doc": "H-020-001232-00",
+      "anchor": "the next step",
+      "replacement": "the Parameter review interface"
+    },
+    {
+      "id": "ivy-534",
+      "doc": "H-020-001235-00",
+      "anchor": "delineation",
+      "replacement": "drawing"
+    },
+    {
+      "id": "ivy-540",
+      "doc": "H-020-001235-00",
+      "anchor": "Move camera",
+      "replacement": "Adjust the image angle"
+    },
+    {
+      "id": "ivy-541",
+      "doc": "H-020-001235-00",
+      "anchor": "shapes",
+      "replacement": "region"
+    },
+    {
+      "id": "ivy-604",
+      "doc": "H-020-001249-00",
+      "anchor": "reagent set",
+      "replacement": "product"
+    },
+    {
+      "id": "ivy-606",
+      "doc": "H-020-001249-00",
+      "anchor": "index",
+      "replacement": "barcode"
+    },
+    {
+      "id": "ivy-612",
+      "doc": "H-020-001249-00",
+      "anchor": "place it",
+      "replacement": "them"
+    },
+    {
+      "id": "ivy-627",
+      "doc": "H-020-001249-00",
+      "anchor": "off",
+      "replacement": "out"
+    },
+    {
+      "id": "ivy-628",
+      "doc": "H-020-001249-00",
+      "anchor": "to wash",
+      "replacement": "washing"
+    },
+    {
+      "id": "ivy-677",
+      "doc": "H-020-001267-00",
+      "anchor": "processes.",
+      "replacement": "nodes"
+    },
+    {
+      "id": "ivy-680",
+      "doc": "H-020-001267-00",
+      "anchor": "prepared per",
+      "replacement": "processed"
+    },
+    {
+      "id": "ivy-685",
+      "doc": "H-020-001267-00",
+      "anchor": "more boxes of tips.",
+      "replacement": "tip boxes"
+    },
+    {
+      "id": "ivy-686",
+      "doc": "H-020-001267-00",
+      "anchor": "boxes of tips",
+      "replacement": "tip boxes"
+    },
+    {
+      "id": "ivy-689",
+      "doc": "H-020-001267-00",
+      "anchor": "close",
+      "replacement": "cover"
+    },
+    {
+      "id": "ivy-753",
+      "doc": "H-020-001272-00",
+      "anchor": "No less than",
+      "replacement": "At least"
+    },
+    {
+      "id": "ivy-756",
+      "doc": "H-020-001272-00",
+      "anchor": "log in,",
+      "replacement": "login"
+    },
+    {
+      "id": "ivy-766",
+      "doc": "H-020-001272-00",
+      "anchor": "buckle",
+      "replacement": "sequencing chip"
+    },
+    {
+      "id": "ivy-770",
+      "doc": "H-020-001272-00",
+      "anchor": "be hazardous to",
+      "replacement": "cause injury"
+    },
+    {
+      "id": "ivy-842",
+      "doc": "H-020-001369-00",
+      "anchor": "The flow cell",
+      "replacement": "Predefined"
+    },
+    {
+      "id": "ivy-859",
+      "doc": "H-020-001369-00",
+      "anchor": "The loader starts DNB loading,",
+      "replacement": "DNB loading starts"
+    },
+    {
+      "id": "ivy-861",
+      "doc": "H-020-001369-00",
+      "anchor": "will display",
+      "replacement": "displays"
+    },
+    {
+      "id": "ivy-890",
+      "doc": "H-T-158",
+      "anchor": "Don't",
+      "replacement": "Do not"
+    },
+    {
+      "id": "ivy-898",
+      "doc": "H-T-158",
+      "anchor": "Don't centrifuge",
+      "replacement": "Do not"
+    },
+    {
+      "id": "ivy-986",
+      "doc": "H020-000008",
+      "anchor": "test",
+      "replacement": "experiment"
+    },
+    {
+      "id": "ivy-995",
+      "doc": "H020-000008",
+      "anchor": "well",
+      "replacement": "inlet"
+    },
+    {
+      "id": "ivy-997",
+      "doc": "H020-000008",
+      "anchor": "It is used for",
+      "replacement": "Enables"
+    },
+    {
+      "id": "ivy-1032",
+      "doc": "H020-000008",
+      "anchor": "You can create",
+      "replacement": "Input"
+    },
+    {
+      "id": "ivy-1038",
+      "doc": "H020-000008",
+      "anchor": "release",
+      "replacement": "remove"
+    },
+    {
+      "id": "ivy-1055",
+      "doc": "H020-000008",
+      "anchor": "might",
+      "replacement": "may"
+    },
+    {
+      "id": "ivy-1057",
+      "doc": "H020-000008",
+      "anchor": "(conjugated",
+      "replacement": "ligated"
+    },
+    {
+      "id": "ivy-1058",
+      "doc": "H020-000008",
+      "anchor": "chip,",
+      "replacement": "flow cell"
+    },
+    {
+      "id": "ivy-1061",
+      "doc": "H020-000008",
+      "anchor": "physically via",
+      "replacement": "through"
+    },
+    {
+      "id": "ivy-1093",
+      "doc": "OTHER",
+      "anchor": "RPM-2000",
+      "replacement": "rpm"
+    },
+    {
+      "id": "joe2026-037",
+      "doc": "H-020-000620-00",
+      "anchor": "vortexing,",
+      "replacement": "using a vortex mixer"
+    },
+    {
+      "id": "joe2026-049",
+      "doc": "H-020-000620-00",
+      "anchor": "tube",
+      "replacement": "DNBs"
+    },
+    {
+      "id": "joe2026-061",
+      "doc": "H-020-000620-00",
+      "anchor": "is still outside",
+      "replacement": "still falls beyond"
+    },
+    {
+      "id": "joe2026-070",
+      "doc": "H-020-000620-00",
+      "anchor": "well.",
+      "replacement": "thoroughly"
+    },
+    {
+      "id": "joe2026-077",
+      "doc": "H-020-000620-00",
+      "anchor": "Prepare",
+      "replacement": "ing"
+    },
+    {
+      "id": "joe2026-082",
+      "doc": "H-020-000620-00",
+      "anchor": "not more than",
+      "replacement": "less than or equal to"
+    },
+    {
+      "id": "joe2026-106",
+      "doc": "H-020-000781-00",
+      "anchor": "model applies",
+      "replacement": "model apply"
+    },
+    {
+      "id": "joe2026-120",
+      "doc": "H-020-000781-00",
+      "anchor": "Table 39 on Page 71.",
+      "replacement": "the table below:"
+    },
+    {
+      "id": "joe2026-225",
+      "doc": "H-020-000876-00",
+      "anchor": "中推，在",
+      "replacement": "句号"
+    },
+    {
+      "id": "joe2026-287",
+      "doc": "H-020-000898-00",
+      "anchor": "单个反应体积(μL",
+      "replacement": "中文状态的"
+    },
+    {
+      "id": "joe2026-306",
+      "doc": "H-020-001010-00",
+      "anchor": "solutions",
+      "replacement": "the wash"
+    },
+    {
+      "id": "joe2026-308",
+      "doc": "H-020-001010-00",
+      "anchor": "the device",
+      "replacement": "them"
+    },
+    {
+      "id": "joe2026-312",
+      "doc": "H-020-001016-00",
+      "anchor": "preparation kit",
+      "replacement": "DNB Make Reagent Kit"
+    },
+    {
+      "id": "joe2026-320",
+      "doc": "H-020-001026-00",
+      "anchor": "times are",
+      "replacement": "time listed above is"
+    },
+    {
+      "id": "joe2026-327",
+      "doc": "H-020-001026-00",
+      "anchor": "kits.",
+      "replacement": "sets"
+    },
+    {
+      "id": "joe2026-330",
+      "doc": "H-020-001026-00",
+      "anchor": "is not",
+      "replacement": "be no"
+    },
+    {
+      "id": "joe2026-332",
+      "doc": "H-020-001026-00",
+      "anchor": "for each position in the barcode",
+      "replacement": "in each cycle"
+    },
+    {
+      "id": "joe2026-334",
+      "doc": "H-020-001026-00",
+      "anchor": "should not be",
+      "replacement": "is no"
+    },
+    {
+      "id": "joe2026-341",
+      "doc": "H-020-001026-00",
+      "anchor": "Final volume",
+      "replacement": "Total"
+    },
+    {
+      "id": "joe2026-361",
+      "doc": "H-020-001026-00",
+      "anchor": "Ultrapure water Ultrapure water",
+      "replacement": "Laboratory-grade water"
+    },
+    {
+      "id": "joe2026-362",
+      "doc": "H-020-001026-00",
+      "anchor": "sequencer,",
+      "replacement": "loader"
+    },
+    {
+      "id": "joe2026-385",
+      "doc": "H-020-001053-00",
+      "anchor": "get",
+      "replacement": "getting"
+    },
+    {
+      "id": "joe2026-401",
+      "doc": "H-020-001078-00",
+      "anchor": "and ensu",
+      "replacement": "getting"
+    },
+    {
+      "id": "joe2026-406",
+      "doc": "H-020-001104-00",
+      "anchor": "restricted",
+      "replacement": "available"
+    },
+    {
+      "id": "joe2026-409",
+      "doc": "H-020-001104-00",
+      "anchor": "authorization",
+      "replacement": "permissions"
+    },
+    {
+      "id": "joe2026-428",
+      "doc": "H-020-001104-00",
+      "anchor": "temperatures",
+      "replacement": "a temperature"
+    },
+    {
+      "id": "joe2026-437",
+      "doc": "H-020-001104-00",
+      "anchor": "compliance",
+      "replacement": "that the library complies"
+    },
+    {
+      "id": "joe2026-442",
+      "doc": "H-020-001104-00",
+      "anchor": "and rec dsDNA library",
+      "replacement": "different dsDNA libraries"
+    },
+    {
+      "id": "joe2026-443",
+      "doc": "H-020-001104-00",
+      "anchor": "using the",
+      "replacement": "according to"
+    },
+    {
+      "id": "joe2026-458",
+      "doc": "H-020-001104-00",
+      "anchor": "it",
+      "replacement": "them"
+    },
+    {
+      "id": "joe2026-467",
+      "doc": "H-020-001104-00",
+      "anchor": "amount of input",
+      "replacement": "input amount of"
+    },
+    {
+      "id": "joe2026-469",
+      "doc": "H-020-001104-00",
+      "anchor": "varying",
+      "replacement": "different"
+    },
+    {
+      "id": "joe2026-481",
+      "doc": "H-020-001104-00",
+      "anchor": "Circularization",
+      "replacement": "of the c"
+    },
+    {
+      "id": "joe2026-488",
+      "doc": "H-020-001104-00",
+      "anchor": "Digestion",
+      "replacement": "of the d"
+    },
+    {
+      "id": "joe2026-490",
+      "doc": "H-020-001104-00",
+      "anchor": "every time before use.",
+      "replacement": "before each use"
+    },
+    {
+      "id": "joe2026-494",
+      "doc": "H-020-001104-00",
+      "anchor": "till liquid",
+      "replacement": "until the"
+    },
+    {
+      "id": "joe2026-496",
+      "doc": "H-020-001104-00",
+      "anchor": "contacting,",
+      "replacement": "aspirating the beads"
+    },
+    {
+      "id": "joe2026-497",
+      "doc": "H-020-001104-00",
+      "anchor": "Please pay attention",
+      "replacement": "Pay attention"
+    },
+    {
+      "id": "joe2026-498",
+      "doc": "H-020-001104-00",
+      "anchor": "lids",
+      "replacement": "cap"
+    },
+    {
+      "id": "joe2026-504",
+      "doc": "H-020-001104-00",
+      "anchor": "lid",
+      "replacement": "cap"
+    },
+    {
+      "id": "joe2026-509",
+      "doc": "H-020-001104-00",
+      "anchor": "Transfer",
+      "replacement": "and t"
+    },
+    {
+      "id": "joe2026-510",
+      "doc": "H-020-001104-00",
+      "anchor": "Purified",
+      "replacement": "The p"
+    },
+    {
+      "id": "joe2026-522",
+      "doc": "H-020-001104-00",
+      "anchor": "each",
+      "replacement": "a single"
+    },
+    {
+      "id": "joe2026-545",
+      "doc": "H-020-001104-00",
+      "anchor": "e ula",
+      "replacement": "ing"
+    },
+    {
+      "id": "joe2026-569",
+      "doc": "H-020-001104-00",
+      "anchor": "write FASTQ.",
+      "replacement": "FASTQ writing"
+    },
+    {
+      "id": "joe2026-616",
+      "doc": "H-020-001148-00",
+      "anchor": "(版本号:V1)",
+      "replacement": "中文状态的"
+    },
+    {
+      "id": "joe2026-643",
+      "doc": "H-020-001180-00",
+      "anchor": "USE2",
+      "replacement": "USB"
+    },
+    {
+      "id": "joe2026-698",
+      "doc": "H-020-001182-00",
+      "anchor": "slide",
+      "replacement": "flow cell，需通改"
+    },
+    {
+      "id": "joe2026-701",
+      "doc": "H-020-001182-00",
+      "anchor": "staining scan",
+      "replacement": "staining and scanning"
+    },
+    {
+      "id": "joe2026-708",
+      "doc": "H-020-001182-00",
+      "anchor": "Displays",
+      "replacement": "Indicates"
+    },
+    {
+      "id": "joe2026-718",
+      "doc": "H-020-001182-00",
+      "anchor": "a microtome",
+      "replacement": "the m"
+    },
+    {
+      "id": "joe2026-722",
+      "doc": "H-020-001182-00",
+      "anchor": "precisely",
+      "replacement": "properly"
+    },
+    {
+      "id": "joe2026-723",
+      "doc": "H-020-001182-00",
+      "anchor": "allow the section to dry",
+      "replacement": "dry the sections"
+    },
+    {
+      "id": "joe2026-734",
+      "doc": "H-020-001182-00",
+      "anchor": "short-term",
+      "replacement": "temporary"
+    },
+    {
+      "id": "joe2026-737",
+      "doc": "H-020-001182-00",
+      "anchor": "attempting to section.",
+      "replacement": "sectioning"
+    },
+    {
+      "id": "joe2026-741",
+      "doc": "H-020-001182-00",
+      "anchor": "pick",
+      "replacement": "mount"
+    },
+    {
+      "id": "joe2026-753",
+      "doc": "H-020-001182-00",
+      "anchor": "mounted",
+      "replacement": "prepared"
+    },
+    {
+      "id": "joe2026-757",
+      "doc": "H-020-001182-00",
+      "anchor": "appropriate slide",
+      "replacement": "corresponding"
+    },
+    {
+      "id": "joe2026-763",
+      "doc": "H-020-001182-00",
+      "anchor": "slot",
+      "replacement": "well"
+    },
+    {
+      "id": "joe2026-771",
+      "doc": "H-020-001182-00",
+      "anchor": "errors,",
+      "replacement": "any parameter error"
+    },
+    {
+      "id": "joe2026-780",
+      "doc": "H-020-001182-00",
+      "anchor": "appropriate",
+      "replacement": "corresponding"
+    },
+    {
+      "id": "joe2026-788",
+      "doc": "H-020-001182-00",
+      "anchor": "an appropriate",
+      "replacement": "the designated"
+    },
+    {
+      "id": "joe2026-792",
+      "doc": "H-020-001182-00",
+      "anchor": "main power supply socket",
+      "replacement": "mains supply"
+    },
+    {
+      "id": "joe2026-802",
+      "doc": "H-020-001182-00",
+      "anchor": "Performing a wash",
+      "replacement": "Daily maintenance"
+    },
+    {
+      "id": "joe2026-814",
+      "doc": "H-020-001182-00",
+      "anchor": "Tap",
+      "replacement": "Select"
+    },
+    {
+      "id": "joe2026-829",
+      "doc": "H-020-001182-00",
+      "anchor": "power supply.",
+      "replacement": "mains supply"
+    },
+    {
+      "id": "joe2026-830",
+      "doc": "H-020-001182-00",
+      "anchor": "power",
+      "replacement": "mains"
+    },
+    {
+      "id": "joe2026-834",
+      "doc": "H-020-001182-00",
+      "anchor": "backside silicon wafer",
+      "replacement": "the back surfaces"
+    },
+    {
+      "id": "joe2026-835",
+      "doc": "H-020-001182-00",
+      "anchor": "aluminum chuck",
+      "replacement": "flow cell stage"
+    },
+    {
+      "id": "joe2026-842",
+      "doc": "H-020-001182-00",
+      "anchor": "step 4 to",
+      "replacement": "steps 4 and"
+    },
+    {
+      "id": "joe2026-847",
+      "doc": "H-020-001182-00",
+      "anchor": "Shutdown",
+      "replacement": "Power off"
+    },
+    {
+      "id": "joe2026-852",
+      "doc": "H-020-001182-00",
+      "anchor": "V2 lifting lever",
+      "replacement": "V2-barbell"
+    },
+    {
+      "id": "joe2026-938",
+      "doc": "H-020-001215-00",
+      "anchor": "mice and keyboards.",
+      "replacement": "a mouse and keyboard"
+    },
+    {
+      "id": "joe2026-947",
+      "doc": "H-020-001215-00",
+      "anchor": "processes",
+      "replacement": "pipelines"
+    },
+    {
+      "id": "joe2026-955",
+      "doc": "H-020-001215-00",
+      "anchor": "Protoco area",
+      "replacement": "Task status display area"
+    },
+    {
+      "id": "joe2026-970",
+      "doc": "H-020-001215-00",
+      "anchor": "species.",
+      "replacement": "standard sample"
+    },
+    {
+      "id": "joe2026-972",
+      "doc": "H-020-001215-00",
+      "anchor": "species,",
+      "replacement": "standard sample"
+    },
+    {
+      "id": "joe2026-983",
+      "doc": "H-020-001215-00",
+      "anchor": "at the top of the interface,",
+      "replacement": "on the top navigation bar"
+    },
+    {
+      "id": "joe2026-1002",
+      "doc": "H-020-001215-00",
+      "anchor": "the Storage for",
+      "replacement": "all storage devices from"
+    },
+    {
+      "id": "joe2026-1028",
+      "doc": "H-020-001215-00",
+      "anchor": "Node management",
+      "replacement": "Managing nodes"
+    },
+    {
+      "id": "joe2026-1029",
+      "doc": "H-020-001215-00",
+      "anchor": "Resource monitoring",
+      "replacement": "Monitoring resources"
+    },
+    {
+      "id": "joe2026-1034",
+      "doc": "H-020-001215-00",
+      "anchor": "Modifing",
+      "replacement": "Modifying"
+    },
+    {
+      "id": "joe2026-1045",
+      "doc": "H-020-001249-00",
+      "anchor": "place",
+      "replacement": "thaw"
+    },
+    {
+      "id": "joe2026-1176",
+      "doc": "H-020-001367-00",
+      "anchor": "在计算机桌面双击打开本系统。",
+      "replacement": "安装完成后，桌面将显示本系统的快捷方式"
+    },
+    {
+      "id": "joe2026-1312",
+      "doc": "OTHER",
+      "anchor": "plain FASTQ:",
+      "replacement": "a plain FASTQ file"
+    },
+    {
+      "id": "joe2026-1313",
+      "doc": "OTHER",
+      "anchor": "GZIP‑compressed FASTQ:",
+      "replacement": "a GZIP-compressed FASTQ file"
+    }
+  ]
+}

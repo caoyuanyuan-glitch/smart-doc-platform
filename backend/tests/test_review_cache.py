@@ -401,7 +401,6 @@ def test_convert_rule_content_to_regex_never_derives_pattern_from_prose():
         "表格内容显示不全，提醒修改表格宽度",
         "需包含产品中有害物质的名称及含有物质表",
         "警告/提示/危险/注意图标文字底部需与右侧文字底部对齐",
-        "正确表述是 \"For details about xxx, refer to xxx.\" 而不是 \"Details about XXX refer to XXX.\"",
     ]
 
     for rule_content in prose_rules:
@@ -452,7 +451,24 @@ def test_convert_rule_content_to_regex_disables_quote_semantic_rule():
         "文档中所有需要使用引号的场景统一使用双引号，不得混用单引号"
     )
 
-    assert regex == "(?!)"
+    assert regex == r"‘[^’]{1,40}’"
+    compiled = re.compile(regex)
+    assert compiled.search("点击‘开始’按钮")
+    assert compiled.search("TMA’s dimensions") is None
+    assert compiled.search("slide’s") is None
+    assert compiled.search("PCR（5 ’未磷酸化）") is None
+
+
+def test_convert_rule_content_to_regex_enables_details_about_refer_to():
+    regex = crud_rule._convert_rule_content_to_regex(
+        '正确表述是 "For details about xxx, refer to xxx." 而不是 "Details about XXX refer to XXX."'
+    )
+    compiled = re.compile(regex)
+    assert compiled.search("Details about the instrument operation, refer to Chapter 3.")
+    assert compiled.search("For details about the instrument operation, refer to Chapter 3.") is None
+    assert compiled.search("For details about safety warnings, refer to Section 2.") is None
+    assert compiled.search("See details about the instrument in Chapter 3.") is None
+    assert compiled.search("For detailed operations of this process, refer to page 65.") is None
 
 
 def test_review_rules_do_not_hardcode_single_quote_or_screen_name_as_errors():

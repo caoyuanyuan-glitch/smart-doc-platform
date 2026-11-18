@@ -1,0 +1,255 @@
+import json
+import os
+from pathlib import Path
+
+from app.review_engine.annotation_baseline import (
+    HumanAnnotation,
+    _issue_blob,
+    _load_families,
+    _matches_expected_rule,
+    _matches_expected_rule_data,
+    _matches_expected_rule_legacy,
+    reset_families_cache,
+)
+
+ASSETS = Path(__file__).resolve().parents[1] / "app" / "review_engine" / "assets"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "regression_701_rules.jsonl"
+
+
+def _ann(rule, **kwargs):
+    payload = {
+        "file": "doc.pdf",
+        "page": "1",
+        "annotation_type": "Highlight",
+        "author": "r",
+        "comment": kwargs.pop("comment", "comment"),
+        "selected_text": kwargs.pop("selected_text", "selected"),
+        "context": kwargs.pop("context", "context"),
+        "category": "cat",
+        "layer": "deterministic",
+        "expected_rule": rule,
+    }
+    payload.update(kwargs)
+    return HumanAnnotation(**payload)
+
+
+def _issue(**kwargs):
+    payload = {
+        "rule": "X",
+        "category": "其他",
+        "original_text": "orig",
+        "suggestion": "",
+        "description": "",
+        "context": "",
+        "audit_basis": "",
+    }
+    payload.update(kwargs)
+    return payload
+
+
+def test_asset_files_exist():
+    assert (ASSETS / "expected_rule_families.json").is_file()
+    assert (ASSETS / "rule_corpus_fewshot.jsonl").is_file()
+    assert (ASSETS / "rule_candidates_20261106.xlsx").is_file()
+    assert FIXTURE.is_file()
+    families = json.loads((ASSETS / "expected_rule_families.json").read_text(encoding="utf-8"))
+    assert families["stats"]["total"] == 69
+    assert families["stats"]["in_legacy_code"] == 24
+    assert families["stats"]["legacy_only"] == 9
+    assert families["stats"]["new_rules"] == 44
+    assert families["stats"]["disabled"] == 42
+    assert families["stats"]["in_regression_set"] == 52
+    assert sum(1 for _ in FIXTURE.open(encoding="utf-8")) == 1061
+
+
+def test_new_rules_are_disabled_and_do_not_match():
+    reset_families_cache()
+    item = _ann("STRUCT-NUM-STYLE-001", comment="MGI的写不写")
+    issue = _issue(rule="CYY-CN-FMT-001", category="数字 单位空格")
+    blob = _issue_blob(issue)
+    assert _matches_expected_rule_data(item, issue, blob) is False
+
+
+def test_platform_rules_default_off(monkeypatch):
+    reset_families_cache()
+    monkeypatch.delenv("WORKBUDDY_RULE_PLATFORM_CH", raising=False)
+    families = _load_families()
+    entry = families["AI-STYLE-001"]
+    assert entry.get("platform_rules")
+    item = _ann("AI-STYLE-001")
+    issue = _issue(rule=entry["platform_rules"][0], category="无关分类")
+    blob = _issue_blob(issue)
+    assert _matches_expected_rule_data(item, issue, blob) is False
+    monkeypatch.setenv("WORKBUDDY_RULE_PLATFORM_CH", "on")
+    assert _matches_expected_rule_data(item, issue, blob) is True
+    monkeypatch.setenv("WORKBUDDY_RULE_PLATFORM_CH", "off")
+
+
+def test_auto_mode_uses_data_when_assets_exist(monkeypatch):
+    reset_families_cache()
+    monkeypatch.setenv("WORKBUDDY_RULE_FAMILIES", "auto")
+    item = _ann("DET-CN-001")
+    issue = _issue(rule="ENG-CN-001", category="x")
+    blob = _issue_blob(issue)
+    assert _matches_expected_rule(item, issue, blob) is True
+
+
+def test_legacy_and_data_probes_are_equivalent():
+    reset_families_cache()
+    probes = [
+        ("DET-REVISION-001", _issue(rule="DOC-REV-1"), {}),
+        ("DET-REVISION-001", _issue(rule="CYY-CN-REVISION-9"), {}),
+        ("DET-REVISION-001", _issue(rule="X", category="版本记录"), {}),
+        ("DET-REVISION-001", _issue(rule="X", category="修订一致性"), {}),
+        ("DET-CN-001", _issue(rule="ENG-CN-001"), {}),
+        ("DET-CN-001", _issue(rule="X", category="中文混入"), {}),
+        ("STRUCT-SCOPE-001", _issue(rule="DOC-SCOPE-001"), {}),
+        ("STRUCT-SCOPE-001", _issue(rule="X", original_text="ne384 硬件配置"), {}),
+        ("STRUCT-FIGTAB-001", _issue(rule="DOC-FIGTAB-01"), {}),
+        ("STRUCT-FIGTAB-001", _issue(rule="X", category="表图编号"), {}),
+        ("STRUCT-LAYOUT-001", _issue(rule="CYY-CN-LAYOUT-1"), {}),
+        ("STRUCT-LAYOUT-001", _issue(rule="X", category="表格/版式"), {}),
+        ("STRUCT-LAYOUT-001", _issue(rule="X", original_text="储存环境"), {"comment": "列宽不对"}),
+        ("STRUCT-IMAGE-001", _issue(rule="CYY-CN-IMAGE-1"), {}),
+        ("STRUCT-IMAGE-001", _issue(rule="PDF-VISUAL-001"), {}),
+        ("STRUCT-IMAGE-001", _issue(rule="X", category="图片丢失"), {}),
+        ("STRUCT-IMAGE-001", _issue(rule="CYY-CN-LOGIC-007"), {"comment": "install finish 打开本系统"}),
+        ("STRUCT-IMAGE-001", _issue(rule="X", category="内容逻辑"), {"comment": "install finish 打开本系统"}),
+        ("STRUCT-STEP-001", _issue(rule="CYY-CN-STRUCT-001"), {}),
+        ("STRUCT-STEP-001", _issue(rule="X", category="步骤结构"), {}),
+        ("STRUCT-COMPONENT-001", _issue(rule="CYY-CN-ROHS-1"), {}),
+        ("STRUCT-COMPONENT-001", _issue(rule="X", category="结构完整"), {}),
+        ("STRUCT-INDEX-001", _issue(rule="CYY-CN-INDEX-1"), {}),
+        ("STRUCT-INDEX-001", _issue(rule="X", category="索引"), {}),
+        ("AI-PROC-001", _issue(rule="DOC-PROC-001"), {}),
+        ("AI-PROC-001", _issue(rule="X", category="操作步骤语气"), {}),
+        ("DET-TITLE-CASE-001", _issue(rule="DOC-TITLE-001"), {}),
+        ("DET-TITLE-CASE-001", _issue(rule="X", category="标题大小写"), {}),
+        ("AI-CHECK-001", _issue(rule="DOC-POS-001"), {"comment": "pos"}),
+        ("AI-CHECK-001", _issue(rule="CYY-CN-CHECK-1"), {}),
+        ("AI-CHECK-001", _issue(rule="X", category="人工确认"), {}),
+        ("AI-ADDR-001", _issue(rule="CYY-CN-ADDR-1"), {}),
+        ("AI-ADDR-001", _issue(rule="X", category="地址"), {}),
+        ("STRUCT-PAGE-NUM-001", _issue(rule="CYY-CN-PAGE-1"), {}),
+        ("STRUCT-PAGE-NUM-001", _issue(rule="X", category="页码"), {}),
+        ("DET-SPACE-001", _issue(rule="DOC-SPACE-006"), {}),
+        ("DET-SPACE-001", _issue(rule="X", category="空格"), {}),
+        ("DET-PUNCT-001", _issue(rule="DOC-PUNCT-002"), {}),
+        ("DET-PUNCT-001", _issue(rule="X", category="标点"), {}),
+        ("DET-CATNO-001", _issue(rule="DOC-CATNO-1"), {}),
+        ("DET-CATNO-001", _issue(rule="X", category="货号"), {}),
+        ("DET-MATERIAL-001", _issue(rule="CYY-CN-REF-003"), {}),
+        ("DET-MATERIAL-001", _issue(rule="X", category="交叉引用"), {}),
+        ("DET-TYPO-001", _issue(rule="CYY-CN-LAYOUT-2"), {}),
+        ("DET-TYPO-001", _issue(rule="X", category="字体/版式"), {}),
+        ("DOC-DATA-001", _issue(rule="DOC-DATA-001"), {}),
+        ("DOC-DATA-001", _issue(rule="X", category="信息完整性"), {}),
+        ("DET-TERM-SPELL-001", _issue(rule="SPELL-TRANS"), {}),
+        ("DET-TERM-SPELL-001", _issue(rule="X", category="拼写错误"), {}),
+        ("STRUCT-DUP-001", _issue(rule="DOC-DUP-1"), {}),
+        ("STRUCT-DUP-001", _issue(rule="X", category="重复"), {}),
+        ("STRUCT-TERM-001", _issue(rule="DOC-TERM-1"), {}),
+        ("STRUCT-TERM-001", _issue(rule="X", category="术语一致性"), {}),
+        ("AI-STYLE-001", _issue(rule="DOC-MICRO-001"), {}),
+        ("AI-STYLE-001", _issue(rule="X", category="表达与句式"), {}),
+        ("DET-CN-001", _issue(rule="NOPE", category="其他"), {}),
+    ]
+    covered = set()
+    mismatch = []
+    for expected, issue, extra in probes:
+        item = _ann(expected, **extra)
+        blob = _issue_blob(issue)
+        old = _matches_expected_rule_legacy(item, issue, blob)
+        new = _matches_expected_rule_data(item, issue, blob)
+        if old:
+            covered.add(expected)
+        if old != new:
+            mismatch.append((expected, issue.get("rule"), issue.get("category"), old, new))
+    assert mismatch == []
+    assert len(covered) == 24
+
+
+def test_data_mode_raises_when_assets_missing(monkeypatch, tmp_path):
+    import app.review_engine.annotation_baseline as baseline
+
+    monkeypatch.setattr(baseline, "_FAMILIES_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(baseline, "_FAMILIES_CACHE", None)
+    monkeypatch.setenv("WORKBUDDY_RULE_FAMILIES", "data")
+    item = _ann("DET-CN-001")
+    issue = _issue(rule="ENG-CN-001")
+    try:
+        raised = False
+        try:
+            _matches_expected_rule(item, issue, _issue_blob(issue))
+        except RuntimeError:
+            raised = True
+        assert raised
+    finally:
+        monkeypatch.setenv("WORKBUDDY_RULE_FAMILIES", "auto")
+        reset_families_cache()
+
+
+def test_disabled_live_family_uses_platform_rules_only(monkeypatch):
+    reset_families_cache()
+    monkeypatch.setenv("WORKBUDDY_RULE_PLATFORM_CH", "on")
+    item = _ann("DET-URL-001")
+    hit = _issue(rule="EXT-R005", category="无关分类")
+    miss = _issue(rule="X", category="合规文案")
+    assert _matches_expected_rule_data(item, hit, _issue_blob(hit)) is True
+    assert _matches_expected_rule_data(item, miss, _issue_blob(miss)) is False
+    trademark = _ann("DET-TRADEMARK-001")
+    dead = _issue(rule="EXT-R006")
+    assert _matches_expected_rule_data(trademark, dead, _issue_blob(dead)) is False
+    word = _ann("AI-WORD-001")
+    dead_word = _issue(rule="EXT-R024")
+    live_word = _issue(rule="EXT-R022")
+    assert _matches_expected_rule_data(word, dead_word, _issue_blob(dead_word)) is False
+    assert _matches_expected_rule_data(word, live_word, _issue_blob(live_word)) is True
+    monkeypatch.setenv("WORKBUDDY_RULE_PLATFORM_CH", "off")
+    assert _matches_expected_rule_data(item, hit, _issue_blob(hit)) is False
+
+
+def test_term_family_matches_term_rules():
+    reset_families_cache()
+    families = _load_families()
+    term = families["TERM-CHECK-001"]
+    struct = families["STRUCT-TERM-001"]
+    assert "TERM-" not in (term.get("rule_prefixes") or [])
+    assert "TERM-FORBIDDEN" in (term.get("exact_rules") or [])
+    assert "TERM-FORBIDDEN" in (struct.get("exact_rules") or [])
+    assert "TERM-CONSISTENCY-001" in (term.get("exact_rules") or [])
+    item = _ann("TERM-CHECK-001")
+    issue = _issue(rule="TERM-INCONSIST", category="术语规范")
+    assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is True
+    struct_item = _ann("STRUCT-TERM-001")
+    assert _matches_expected_rule_data(struct_item, issue, _issue_blob(issue)) is True
+
+
+def test_open_term_prefix_does_not_reclaim_family(monkeypatch):
+    """TERM- 开放前缀已移除，新增 TERM-* 规则不得被 STRUCT-TERM-001 认领。"""
+    reset_families_cache()
+    monkeypatch.delenv("WORKBUDDY_RULE_PLATFORM_CH", raising=False)
+    families = _load_families()
+    struct = families["STRUCT-TERM-001"]
+    assert "TERM-" not in (struct.get("rule_prefixes") or [])
+    item = _ann("STRUCT-TERM-001")
+    for rule in ("TERM-NEWFAMILY", "TERM-ANYTHING-NEW"):
+        issue = _issue(rule=rule, category="无关分类")
+        assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is False
+
+
+def test_accuracy_lift_families_are_enabled():
+    reset_families_cache()
+    families = _load_families()
+    assert families["DET-TYPO-CN-001"]["disabled"] is False
+    assert "DET-TYPO-CN-001" in families["DET-TYPO-CN-001"]["exact_rules"]
+    assert families["LEARN-PATCH-001"]["disabled"] is False
+    assert "LEARN-PATCH-001" in families["LEARN-PATCH-001"]["exact_rules"]
+    assert "DET-SPACE-GAP" in families["DET-SPACE-001"]["exact_rules"]
+    assert "DET-SPACE-UNIT" in families["DET-SPACE-001"]["exact_rules"]
+    item = _ann("DET-TYPO-CN-001")
+    issue = _issue(rule="DET-TYPO-CN-001", category="中文错别字")
+    assert _matches_expected_rule_data(item, issue, _issue_blob(issue)) is True
+    patch_item = _ann("LEARN-PATCH-001")
+    patch_issue = _issue(rule="LEARN-PATCH-001", category="术语一致性")
+    assert _matches_expected_rule_data(patch_item, patch_issue, _issue_blob(patch_issue)) is True

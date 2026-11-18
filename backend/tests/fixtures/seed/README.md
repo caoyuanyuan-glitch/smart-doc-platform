@@ -15,6 +15,7 @@
 | `..._RUO_OEMR01.7z.004` | 3,479,026 B | 第 4 卷 |
 | `H-020-001383-00Gene+PFIPRO微生物快速识别与组装溯源平台产品说明书_中文_RUO_OEMR01Tina.fdf` | 9,107 B | 对应 Tina 批注的 FDF 注释文件 |
 | `H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf.7z` | 6,648,182 B | G99（Lijuan 人工批注）原始压缩档，已知问题文档，用于解析与审核基线复跑 |
+| `H-020-00xxxx-00 DNBSEQ-T7+RS 基因测序仪系统操作指南（适配V2.0版本试剂套装）_中文_RUO_WH Tina.pdf` | 7,535,266 B | T7+ 中文系统操作指南 Tina 批注版，用于规则包接入后的端到端审核对照 |
 
 ## 获取方式
 
