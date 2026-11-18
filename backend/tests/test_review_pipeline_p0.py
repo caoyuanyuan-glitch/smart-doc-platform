@@ -196,10 +196,11 @@ def test_t9_same_page_layout_issue_strict_hits_p69():
         position=json.dumps({"page_number": 69}),
     )
 
-    # F6b: 页级 issue 禁止走页码通道，同页不能当成文本命中
-    assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is False
+    # 页级视觉 issue 对表格/版式批注按同页+类别计严格命中，
+    # 与 test_page_level_visual_layout_issue_matches_same_page 对齐。
+    assert _matches_annotation_strictly(annotation, issue, _issue_blob(issue)) is True
     result = evaluate_against_annotations([issue], [annotation])
-    assert result["strict_matched"] == 0
+    assert result["strict_matched"] == 1
 
 
 def test_t10_page_anchor_is_or_not_and():
@@ -262,8 +263,9 @@ def test_t12_injective_matching_still_pairs_one_issue_to_one_annotation():
     )
 
     result = evaluate_against_annotations([issue], annotations)
-    assert result["strict_matched"] == 0
-    assert result["strict_matched_issue_count"] == 0
+    # 一条页级视觉 issue 最多命中一条同页版式批注，不会把同页两条批注都刷中。
+    assert result["strict_matched"] == 1
+    assert result["strict_matched_issue_count"] == 1
 
 
 def test_t13_provider_unavailable_emits_manual_review_issue(monkeypatch):
@@ -336,15 +338,22 @@ def test_t16_english_celsius_extra_space_rule():
         "Store the cartridge at 4 ℃ overnight. Keep it at 35 ℃.",
         "pdf",
     )
-    space_issues = [item for item in issues if item.get("rule") == "DOC-SPACE-006"]
-    originals = {item.get("original_text") for item in space_issues}
-    assert "4 ℃" in originals
-    assert "35 ℃" in originals
+    # 统一带空格是 SI 合法写法，不再单点报「℃ 前多余空格」。
+    assert [item for item in issues if item.get("rule") == "DOC-SPACE-006"] == []
+
+    mixed_issues = review_api._run_manual_engineering_audit(
+        "Store at 4℃ overnight. Keep it at 35 ℃.",
+        "pdf",
+    )
+    space_issues = [item for item in mixed_issues if item.get("rule") == "DOC-SPACE-006"]
+    assert space_issues
+    originals = " ".join(str(item.get("original_text") or "") for item in space_issues)
+    assert "℃" in originals
     annotation = _annotation(
         page="82",
-        comment="多余空格了吗？全文关注",
-        selected_text="℃",
-        context="Remove the lid. Store at 4 ℃ overnight.",
+        comment="全文温度写法不一致",
+        selected_text="4℃",
+        context="Remove the lid. Store at 4℃ overnight.",
         category="单位/空格",
         expected_rule="DET-SPACE-001",
     )
@@ -357,9 +366,8 @@ def test_t16_english_celsius_extra_space_rule():
 def test_r3_celsius_skips_chinese_local_context():
     mixed = "保存温度 95 ℃，Store the cartridge at 4 ℃ overnight."
     mixed_issues = review_api._run_manual_engineering_audit(mixed, "pdf")
-    mixed_space = {item.get("original_text") for item in mixed_issues if item.get("rule") == "DOC-SPACE-006"}
-    assert "95 ℃" not in mixed_space
-    assert "4 ℃" in mixed_space
+    mixed_space = [item for item in mixed_issues if item.get("rule") == "DOC-SPACE-006"]
+    assert mixed_space == []
 
     chinese = "试剂应在 95 ℃ 水浴中加热 5 分钟，随后置于 25 ℃。"
     chinese_issues = review_api._run_manual_engineering_audit(chinese, "pdf")
@@ -368,8 +376,12 @@ def test_r3_celsius_skips_chinese_local_context():
 
     english = "Incubate at 95 ℃ for 5 min, then keep at 25 ℃ and 4 ℃."
     english_issues = review_api._run_manual_engineering_audit(english, "pdf")
-    english_space = {item.get("original_text") for item in english_issues if item.get("rule") == "DOC-SPACE-006"}
-    assert {"95 ℃", "25 ℃", "4 ℃"} <= english_space
+    english_space = [item for item in english_issues if item.get("rule") == "DOC-SPACE-006"]
+    assert english_space == []
+
+    mixed_style = "保存温度 95℃，Store the cartridge at 4 ℃ overnight."
+    style_issues = review_api._run_manual_engineering_audit(mixed_style, "pdf")
+    assert [item for item in style_issues if item.get("rule") == "DOC-SPACE-006"]
 
 
 def test_t17_visual_selection_fills_high_layout_score_pages():
@@ -444,17 +456,18 @@ def test_t20_caption_block_marks_figure_numbering():
 
 
 def test_t21_page_backfill_enables_space_anchor():
-    content = "\f".join(["page one text", "Store at 4 ℃ overnight and keep 35 ℃."])
+    # 用缺空格（DOC-SPACE-003）验证页码回填，不再依赖已废弃的「℃ 前多余空格」。
+    content = "\f".join(["page one text", "Store at 4℃ overnight and keep 35℃."])
     issues = review_api._run_manual_engineering_audit(content, "pdf")
-    space_issues = [item for item in issues if item.get("rule") == "DOC-SPACE-006"]
+    space_issues = [item for item in issues if item.get("rule") == "DOC-SPACE-003"]
     assert space_issues
     filled = review_api._backfill_issue_page_numbers(space_issues, content)
     assert filled >= 1
     annotation = _annotation(
         page="2",
-        comment="多余空格了吗？全文关注",
-        selected_text="℃",
-        context="Store at 4 ℃ overnight.",
+        comment="数值与单位之间应加空格",
+        selected_text="4℃",
+        context="Store at 4℃ overnight.",
         category="单位/空格",
         expected_rule="DET-SPACE-001",
     )
