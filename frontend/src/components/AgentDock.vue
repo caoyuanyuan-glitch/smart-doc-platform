@@ -36,6 +36,7 @@
 
           <div v-for="(msg, idx) in messages" :key="idx" class="agent-msg" :class="msg.role">
             <div class="agent-bubble">{{ msg.content }}</div>
+
             <div
               v-if="msg.role === 'assistant' && msg.sources && msg.sources.length"
               class="agent-sources"
@@ -48,8 +49,47 @@
                 :title="src.snippet || ''"
               >{{ src.title }}</span>
             </div>
+
+            <div v-if="msg.role === 'assistant' && msg.upload" class="agent-upload">
+              <input
+                :ref="el => setUploadInput(el, idx)"
+                type="file"
+                :multiple="msg.upload.multiple"
+                :accept="msg.upload.accept || ''"
+                class="agent-file-input"
+                @change="onFileSelected($event, idx, msg)"
+              />
+              <button class="agent-upload-btn" :disabled="sending || msg.task?.running" @click="triggerUpload(idx)">
+                <span class="agent-upload-icon">＋</span>
+                {{ msg.upload.multiple ? '选择两个文件对比' : '选择待审核文件' }}
+              </button>
+              <span class="agent-upload-hint">{{ msg.upload.multiple ? '请一次选中两个文件（Ctrl/Shift 多选）' : '支持 PDF / Word / Excel / Markdown' }}</span>
+            </div>
+
+            <div v-if="msg.role === 'assistant' && msg.task" class="agent-task">
+              <div class="agent-task-head">
+                <span class="agent-task-status" :class="msg.task.status">{{ taskStatusText(msg.task) }}</span>
+                <span v-if="msg.task.running" class="agent-task-pct">{{ msg.task.progress || 0 }}%</span>
+              </div>
+              <div v-if="msg.task.running" class="agent-task-bar">
+                <div class="agent-task-bar-fill" :style="{ width: (msg.task.progress || 0) + '%' }"></div>
+              </div>
+              <div v-if="msg.task.step" class="agent-task-step">{{ msg.task.step }}</div>
+              <div v-if="msg.task.summary" class="agent-task-summary">{{ msg.task.summary }}</div>
+              <button
+                v-if="msg.task.status === 'completed' && msg.task.resultPath"
+                class="agent-jump"
+                @click="goTo({ path: msg.task.resultPath, params: msg.task.resultParams || {} })"
+              >查看完整报告 <span aria-hidden="true">→</span></button>
+              <button
+                v-if="msg.task.status === 'failed'"
+                class="agent-jump"
+                @click="retryTask(idx, msg)"
+              >重试</button>
+            </div>
+
             <button
-              v-if="msg.role === 'assistant' && msg.action && msg.action.type === 'navigate' && msg.action.path"
+              v-if="msg.role === 'assistant' && msg.action && msg.action.type === 'navigate' && msg.action.path && !msg.upload && !msg.task"
               class="agent-jump"
               @click="goTo(msg.action)"
             >
@@ -94,9 +134,10 @@
 </template>
 
 <script setup>
-import { ref, nextTick, computed } from 'vue'
+import { ref, nextTick, computed, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { agentAPI } from '@/api'
+import { agentAPI, documentAPI, reviewAPI, compareAPI, getAPIErrorMessage } from '@/api'
+import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, Delete } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -107,6 +148,30 @@ const messages = ref([])
 const bodyRef = ref(null)
 const quickPrompts = ['帮我润色一段文本', '生成一篇使用说明书', '审核这份文档', '对比两个版本']
 const isAuthenticated = computed(() => !!localStorage.getItem('token'))
+
+const uploadInputs = ref({})
+const pollTimers = ref({})
+
+function setUploadInput(el, idx) {
+  if (el) uploadInputs.value[idx] = el
+}
+function triggerUpload(idx) {
+  const el = uploadInputs.value[idx]
+  if (el) el.click()
+}
+function taskStatusText(task) {
+  const map = { pending: '准备中', uploading: '上传文件中', running: '审核中', completed: '已完成', failed: '失败', cancelled: '已停止' }
+  return map[task.status] || task.status || '处理中'
+}
+function stopPolling(idx) {
+  if (pollTimers.value[idx]) {
+    clearInterval(pollTimers.value[idx])
+    delete pollTimers.value[idx]
+  }
+}
+onBeforeUnmount(() => {
+  Object.values(pollTimers.value).forEach(t => clearInterval(t))
+})
 
 function scrollToBottom() {
   nextTick(() => {
@@ -132,15 +197,26 @@ async function sendText(text) {
   try {
     const res = await agentAPI.chat(message, historyPayload())
     const data = res.data || {}
-    messages.value.push({
+    const assistantMsg = {
       role: 'assistant',
       content: data.reply || '抱歉，我暂时无法处理，请稍后重试。',
       action: data.action || null,
       moduleName: data.module_name || null,
       intent: data.intent || null,
       sources: data.sources || [],
-      answerSource: data.answer_source || null
-    })
+      answerSource: data.answer_source || null,
+      upload: null,
+      task: null
+    }
+    // 审核/对比：在对话内提供上传入口，不跳转落地页
+    if (data.intent === 'review') {
+      assistantMsg.upload = { multiple: false, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
+      assistantMsg.action = null
+    } else if (data.intent === 'compare') {
+      assistantMsg.upload = { multiple: true, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
+      assistantMsg.action = null
+    }
+    messages.value.push(assistantMsg)
   } catch (e) {
     messages.value.push({
       role: 'assistant',
@@ -162,6 +238,139 @@ function goTo(action) {
   const query = { ...(action.params || {}) }
   router.push({ path: action.path, query })
   open.value = false
+}
+
+// 文件选择 → 按意图执行审核或对比
+async function onFileSelected(event, idx, msg) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  if (!files.length) return
+  if (msg.intent === 'compare' && files.length < 2) {
+    ElMessage.warning('对比需要至少两个文件，请一次选择两个')
+    return
+  }
+  if (msg.intent === 'review') {
+    await startReview(files[0], idx, msg)
+  } else if (msg.intent === 'compare') {
+    await startCompare(files.slice(0, 2), idx, msg)
+  }
+}
+
+function initTask(msg, type) {
+  msg.task = { type, status: 'uploading', progress: 0, step: '上传文件中', running: true, summary: '', resultPath: '' }
+  msg.upload = null
+  scrollToBottom()
+}
+
+// 审核：上传 → 触发 → 轮询进度 → 结果摘要
+async function startReview(file, idx, msg) {
+  initTask(msg, 'review')
+  try {
+    const up = await documentAPI.upload(file)
+    const documentId = up.data?.id
+    if (!documentId) throw new Error('上传未返回文档 id')
+    msg.task.step = '已上传，正在启动审核'
+    msg.task.progress = 5
+
+    const created = await reviewAPI.create(documentId, 'hybrid')
+    const reviewId = created.data?.review_id
+    if (!reviewId) throw new Error('启动审核未返回 review id')
+    msg.task.reviewId = reviewId
+    msg.task.status = 'running'
+    msg.task.step = '审核进行中'
+    scrollToBottom()
+
+    let failCount = 0
+    pollTimers.value[idx] = setInterval(async () => {
+      try {
+        const p = await reviewAPI.getProgress(reviewId)
+        const d = p.data || {}
+        msg.task.progress = typeof d.progress === 'number' ? Math.round(d.progress) : (msg.task.progress || 0)
+        msg.task.step = d.step || d.message || '审核进行中'
+        const st = String(d.status || '').toLowerCase()
+        failCount = 0
+        if (['completed', 'failed', 'cancelled', 'error', 'timeout'].includes(st)) {
+          stopPolling(idx)
+          await finishReview(st, reviewId, msg)
+        }
+      } catch (e) {
+        failCount += 1
+        if (failCount >= 5) {
+          stopPolling(idx)
+          msg.task.status = 'failed'
+          msg.task.running = false
+          msg.task.step = '进度查询失败，请重试'
+          scrollToBottom()
+        }
+      }
+    }, 1500)
+  } catch (e) {
+    msg.task.status = 'failed'
+    msg.task.running = false
+    msg.task.step = '审核启动失败：' + (getAPIErrorMessage(e) || '未知错误')
+    scrollToBottom()
+  }
+}
+
+async function finishReview(status, reviewId, msg) {
+  msg.task.running = false
+  if (status !== 'completed') {
+    msg.task.status = status === 'failed' || status === 'error' ? 'failed' : 'cancelled'
+    msg.task.step = '审核未成功完成'
+    scrollToBottom()
+    return
+  }
+  msg.task.status = 'completed'
+  msg.task.progress = 100
+  msg.task.step = '审核完成'
+  try {
+    const issuesResp = await reviewAPI.getIssues(reviewId)
+    const issues = issuesResp.data || []
+    const serious = issues.filter(i => ['serious', 'critical', '严重', '错误'].includes(String(i.severity || '').toLowerCase())).length
+    msg.task.summary = issues.length
+      ? `共发现 ${issues.length} 个问题，其中严重 ${serious} 个。`
+      : '审核完成，未发现问题。'
+  } catch (e) {
+    msg.task.summary = '审核已完成，问题详情请查看完整报告。'
+  }
+  msg.task.resultPath = '/review'
+  msg.task.resultParams = { reviewId }
+  scrollToBottom()
+}
+
+// 对比：同步接口，直接等结果
+async function startCompare(files, idx, msg) {
+  initTask(msg, 'compare')
+  msg.task.step = '正在对比两个文件'
+  try {
+    const resp = await compareAPI.create(files)
+    const d = resp.data || {}
+    const results = d.results || []
+    msg.task.running = false
+    msg.task.status = 'completed'
+    msg.task.progress = 100
+    const totalDiffs = results.reduce((s, r) => s + (Number(r.total_diffs) || 0), 0)
+    const verdict = results[0]?.verdict || ''
+    msg.task.step = '对比完成'
+    msg.task.summary = `已对比 ${d.file_count || files.length} 个文件，共 ${totalDiffs} 处差异${verdict ? `，判定：${verdict}` : ''}。`
+    msg.task.resultPath = '/compare'
+    msg.task.resultParams = d.group_id ? { groupId: d.group_id } : {}
+    scrollToBottom()
+  } catch (e) {
+    msg.task.running = false
+    msg.task.status = 'failed'
+    msg.task.step = '对比失败：' + (e?.message || '未知错误')
+    scrollToBottom()
+  }
+}
+
+function retryTask(idx, msg) {
+  const type = msg.task?.type
+  msg.task = null
+  msg.upload = type === 'compare'
+    ? { multiple: true, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
+    : { multiple: false, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
+  nextTick(() => triggerUpload(idx))
 }
 </script>
 
@@ -222,6 +431,30 @@ function goTo(action) {
   font-size: 11px; color: #409eff; background: #ecf5ff; border: 1px solid #d9ecff;
   border-radius: 10px; padding: 2px 8px; cursor: help;
 }
+.agent-upload { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
+.agent-file-input { display: none; }
+.agent-upload-btn {
+  align-self: flex-start; border: 1px dashed #409eff; background: #f5faff; color: #409eff;
+  border-radius: 8px; padding: 8px 14px; font-size: 12px; cursor: pointer; transition: all .2s;
+}
+.agent-upload-btn:hover:not(:disabled) { background: #ecf5ff; }
+.agent-upload-btn:disabled { opacity: .5; cursor: not-allowed; }
+.agent-upload-icon { font-size: 14px; margin-right: 3px; }
+.agent-upload-hint { font-size: 11px; color: #a8abb2; }
+.agent-task {
+  margin-top: 8px; width: 100%; border: 1px solid #e4e7ed; border-radius: 8px;
+  padding: 10px 12px; background: #fff; display: flex; flex-direction: column; gap: 6px;
+}
+.agent-task-head { display: flex; align-items: center; justify-content: space-between; }
+.agent-task-status { font-size: 12px; font-weight: 500; color: #606266; }
+.agent-task-status.running { color: #409eff; }
+.agent-task-status.completed { color: #67c23a; }
+.agent-task-status.failed, .agent-task-status.cancelled { color: #f56c6c; }
+.agent-task-pct { font-size: 12px; color: #909399; }
+.agent-task-bar { height: 6px; border-radius: 3px; background: #e4e7ed; overflow: hidden; }
+.agent-task-bar-fill { height: 100%; background: #409eff; transition: width .3s; }
+.agent-task-step { font-size: 11px; color: #909399; }
+.agent-task-summary { font-size: 12px; color: #303133; line-height: 1.5; }
 .agent-thinking { color: #909399; }
 .agent-dots { letter-spacing: 2px; }
 .agent-footer { flex: 0 0 auto; padding: 10px 12px 12px; border-top: 1px solid #e4e7ed; background: #fff; }
