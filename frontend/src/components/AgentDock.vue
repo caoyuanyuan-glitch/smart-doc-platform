@@ -36,6 +36,18 @@
 
           <div v-for="(msg, idx) in messages" :key="idx" class="agent-msg" :class="msg.role">
             <div class="agent-bubble">{{ msg.content }}</div>
+            <div
+              v-if="msg.role === 'assistant' && msg.sources && msg.sources.length"
+              class="agent-sources"
+            >
+              <span class="agent-sources-label">参考来源</span>
+              <span
+                v-for="(src, sidx) in msg.sources"
+                :key="sidx"
+                class="agent-source-tag"
+                :title="src.snippet || ''"
+              >{{ src.title }}</span>
+            </div>
             <button
               v-if="msg.role === 'assistant' && msg.action && msg.action.type === 'navigate' && msg.action.path"
               class="agent-jump"
@@ -125,7 +137,9 @@ async function sendText(text) {
       content: data.reply || '抱歉，我暂时无法处理，请稍后重试。',
       action: data.action || null,
       moduleName: data.module_name || null,
-      intent: data.intent || null
+      intent: data.intent || null,
+      sources: data.sources || [],
+      answerSource: data.answer_source || null
     })
   } catch (e) {
     messages.value.push({
@@ -201,6 +215,13 @@ function goTo(action) {
   cursor: pointer; padding: 2px 0;
 }
 .agent-jump:hover { text-decoration: underline; }
+.agent-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; max-width: 86%; }
+.agent-sources-label { font-size: 11px; color: #909399; }
+.agent-source-tag {
+  display: inline-block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: #409eff; background: #ecf5ff; border: 1px solid #d9ecff;
+  border-radius: 10px; padding: 2px 8px; cursor: help;
+}
 .agent-thinking { color: #909399; }
 .agent-dots { letter-spacing: 2px; }
 .agent-footer { flex: 0 0 auto; padding: 10px 12px 12px; border-top: 1px solid #e4e7ed; background: #fff; }

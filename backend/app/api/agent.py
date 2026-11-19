@@ -17,12 +17,18 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_active_user
+from app.database import get_db
 from app.schemas.user import UserOut
 from app.utils.ai_client import ai_client
 
 router = APIRouter()
+
+# 知识库问答能力是否启用（可通过环境变量 REVIEW_AGENT_KB_QA=0 关闭，回退到纯通用问答）
+import os as _os
+_KB_QA_ENABLED = str(_os.environ.get("REVIEW_AGENT_KB_QA", "1")).strip().lower() not in {"0", "false", "no"}
 
 # 平台模块清单：name/path 与前端 router 保持一致，供分类提示与能力查询复用
 AGENT_MODULES: List[Dict[str, Any]] = [
@@ -208,13 +214,53 @@ def _answer_general(question: str) -> str:
         return "模型服务暂时不可用，你可以直接点击左侧菜单使用对应模块。"
 
 
+def _answer_from_knowledge(question: str, db: Optional[Session]) -> Optional[Dict[str, Any]]:
+    """基于平台知识库检索作答（RAG），复用 qa.py 的检索与组装逻辑。
+
+    返回 None 表示"没有有效命中/未启用"，调用方应回退到通用知识回答。
+    命中时返回 {"answer": str, "sources": [...], "hit": True}，供前端展示来源。
+    """
+    if not db or not _KB_QA_ENABLED or not question:
+        return None
+    try:
+        # 复用问答页完全相同的检索链路，保证两处口径一致
+        from app.api.qa import (
+            _load_qa_documents,
+            _rank_document_chunks,
+            _needs_clarification,
+            _build_context_from_sources,
+            _call_ai_qa,
+        )
+        documents = _load_qa_documents(db, [])
+        if not documents:
+            return None
+        ranked = _rank_document_chunks(question, documents, limit=8)
+        if not ranked or _needs_clarification(question, ranked):
+            return None
+        context, sources = _build_context_from_sources(ranked)
+        if not context:
+            return None
+        result = _call_ai_qa(question, context, [s.get("title") for s in sources])
+        answer = (result or {}).get("answer") or ""
+        if not answer or answer == "文档中未找到相关信息":
+            return None
+        return {
+            "answer": answer,
+            "sources": sources,
+            "hit": True,
+        }
+    except Exception:
+        # 检索引擎或模型异常时静默回退，不中断 Agent 主流程
+        return None
+
+
 def _suggestions(intent: str) -> List[str]:
     if intent == "chat" or intent not in MODULE_BY_KEY:
         return ["帮我润色一段文本", "生成一篇文档", "审核这份文档"]
     return ["继续", "返回能力说明", "换个模块"]
 
 
-def _dispatch(intent: str, params: Dict[str, Any]) -> Dict[str, Any]:
+def _dispatch(intent: str, params: Dict[str, Any], db: Optional[Session] = None) -> Dict[str, Any]:
     """根据意图分发：返回 reply + 可选 action。"""
     module = MODULE_BY_KEY.get(intent)
 
@@ -281,14 +327,37 @@ def _dispatch(intent: str, params: Dict[str, Any]) -> Dict[str, Any]:
             "suggestions": _suggestions(intent),
         }
 
-    # 问答：直接通用作答 + 引导到知识库问答页
+    # 问答：优先检索平台知识库作答（RAG），未命中则回退通用知识
     if intent == "qa":
         question = (params.get("question") or "").strip()
-        answer = _answer_general(question) if question else _CAPABILITY_INTRO
+        if not question:
+            return {
+                "intent": intent,
+                "module_name": "智能问答",
+                "reply": _CAPABILITY_INTRO,
+                "action": {"type": "navigate", "path": MODULE_BY_KEY["qa"]["path"], "params": {}},
+                "suggestions": _suggestions(intent),
+            }
+        kb = _answer_from_knowledge(question, db)
+        if kb:
+            reply = f"{kb['answer']}\n\n（以上回答来自平台知识库，共参考 {len(kb['sources'])} 份资料）"
+            return {
+                "intent": intent,
+                "module_name": "智能问答",
+                "reply": reply,
+                "sources": kb["sources"],
+                "answer_source": "knowledge",
+                "action": {"type": "navigate", "path": MODULE_BY_KEY["qa"]["path"], "params": {"question": question}},
+                "suggestions": _suggestions(intent),
+            }
+        # 回退：知识库无有效命中 → 通用知识作答，并引导到问答页做精确检索
+        answer = _answer_general(question)
         return {
             "intent": intent,
             "module_name": "智能问答",
-            "reply": f"{answer}\n\n（以上为通用回答；如需基于知识库的精确问答，请前往「智能问答」页面）",
+            "reply": f"{answer}\n\n（以上为通用回答；知识库中未检索到高度相关内容，可前往「智能问答」页面查看更多资料）",
+            "sources": [],
+            "answer_source": "general",
             "action": {"type": "navigate", "path": MODULE_BY_KEY["qa"]["path"], "params": {"question": question}},
             "suggestions": _suggestions(intent),
         }
@@ -317,7 +386,11 @@ async def agent_capabilities(_: UserOut = Depends(get_current_active_user)):
 
 
 @router.post("/chat")
-async def agent_chat(body: AgentChatInput, _: UserOut = Depends(get_current_active_user)):
+async def agent_chat(
+    body: AgentChatInput,
+    db: Session = Depends(get_db),
+    _: UserOut = Depends(get_current_active_user),
+):
     message = (body.message or "").strip()
     if not message:
         return {
@@ -329,4 +402,4 @@ async def agent_chat(body: AgentChatInput, _: UserOut = Depends(get_current_acti
         }
     classified = _classify(message, body.history)
     intent = classified["intent"]
-    return _dispatch(intent, classified)
+    return _dispatch(intent, classified, db=db)
