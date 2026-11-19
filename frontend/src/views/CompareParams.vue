@@ -40,16 +40,39 @@
 
       <div class="param-names-row">
         <div class="param-names-label">待对比参数</div>
-        <el-select
-          v-model="paramNames"
-          multiple
-          filterable
-          allow-create
-          placeholder="勾选或输入后按回车添加；留空则用默认规格项"
-        >
-          <el-option v-for="name in defaultParamNames" :key="name" :label="name" :value="name" />
-        </el-select>
-        <div class="param-names-hint">已选 {{ paramNames.length }} 项，开始对比时只检查这些参数</div>
+        <div class="param-editor">
+          <div class="param-tags">
+            <span v-for="(name, idx) in paramNames" :key="idx" class="param-tag">
+              <input
+                v-if="editingIndex === idx"
+                ref="editInput"
+                v-model="editingValue"
+                class="param-tag-input"
+                @keydown.enter.prevent="commitEdit"
+                @keydown.esc.prevent="cancelEdit"
+                @blur="commitEdit"
+              />
+              <span v-else class="param-tag-text" @click="startEdit(idx)">{{ name }}</span>
+              <button type="button" class="param-tag-remove" @click="removeParam(idx)" aria-label="移除">x</button>
+            </span>
+            <input
+              v-model="newParam"
+              class="param-add-input"
+              placeholder="输入参数名后回车添加"
+              @keydown.enter.prevent="addParam"
+            />
+          </div>
+        </div>
+        <div v-if="unusedCatalog.length" class="param-catalog">
+          <button
+            v-for="name in unusedCatalog"
+            :key="name"
+            type="button"
+            class="param-catalog-chip"
+            @click="addCatalogParam(name)"
+          >{{ name }}</button>
+        </div>
+        <div class="param-names-hint">点击已选项可改名；输入后回车添加。已选 {{ paramNames.length }} 项，开始对比时只检查这些参数</div>
       </div>
 
       <div class="action-row">
@@ -224,7 +247,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, computed, nextTick, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Upload, Search } from '@element-plus/icons-vue'
 import { instance } from '@/api'
@@ -254,6 +277,67 @@ const defaultParamNames = [
   '分辨率',
 ]
 const paramNames = ref([...defaultParamNames])
+const paramCatalog = ref([...defaultParamNames])
+const newParam = ref('')
+const editingIndex = ref(-1)
+const editingValue = ref('')
+const editInput = ref(null)
+const unusedCatalog = computed(() => paramCatalog.value.filter(name => !paramNames.value.includes(name)))
+
+function startEdit(idx) {
+  editingIndex.value = idx
+  editingValue.value = paramNames.value[idx]
+  nextTick(() => {
+    const el = Array.isArray(editInput.value) ? editInput.value[0] : editInput.value
+    el?.focus()
+    el?.select()
+  })
+}
+
+function cancelEdit() {
+  editingIndex.value = -1
+  editingValue.value = ''
+}
+
+function commitEdit() {
+  if (editingIndex.value < 0) return
+  const idx = editingIndex.value
+  const prev = paramNames.value[idx]
+  const next = (editingValue.value || '').trim()
+  editingIndex.value = -1
+  editingValue.value = ''
+  if (!next || next === prev) return
+  if (paramNames.value.some((name, i) => i !== idx && name === next)) {
+    ElMessage.warning('该参数已存在')
+    return
+  }
+  paramNames.value[idx] = next
+  const catalogIdx = paramCatalog.value.indexOf(prev)
+  if (catalogIdx >= 0) paramCatalog.value[catalogIdx] = next
+  else if (!paramCatalog.value.includes(next)) paramCatalog.value.push(next)
+}
+
+function removeParam(idx) {
+  if (editingIndex.value === idx) cancelEdit()
+  paramNames.value.splice(idx, 1)
+}
+
+function addParam() {
+  const next = (newParam.value || '').trim()
+  newParam.value = ''
+  if (!next) return
+  if (paramNames.value.includes(next)) {
+    ElMessage.warning('该参数已存在')
+    return
+  }
+  paramNames.value.push(next)
+  if (!paramCatalog.value.includes(next)) paramCatalog.value.push(next)
+}
+
+function addCatalogParam(name) {
+  if (!name || paramNames.value.includes(name)) return
+  paramNames.value.push(name)
+}
 
 function paginateResults(results, tabIdx) {
   if (!results) return []
@@ -767,18 +851,83 @@ function matchLabel(match) {
   margin-bottom: 8px;
 }
 
-.param-names-row :deep(.el-select) {
-  width: 100%;
-}
-
-.param-names-row :deep(.el-select__wrapper) {
+.param-editor {
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  padding: 8px 10px;
   min-height: 42px;
-  height: auto;
-  align-items: flex-start;
+  background: #fff;
 }
 
-.param-names-row :deep(.el-select__selection) {
+.param-tags {
+  display: flex;
   flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.param-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.param-tag-text {
+  cursor: text;
+  max-width: 240px;
+}
+
+.param-tag-input {
+  width: 140px;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: #1d4ed8;
+  background: transparent;
+}
+
+.param-tag-remove {
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.param-add-input {
+  flex: 1;
+  min-width: 180px;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  height: 28px;
+  color: #111827;
+}
+
+.param-catalog {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.param-catalog-chip {
+  border: 1px dashed #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .param-names-hint {

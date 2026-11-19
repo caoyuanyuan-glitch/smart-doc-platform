@@ -420,7 +420,7 @@ export const generateAPI = {
 }
 
 export const convertAPI = {
-  convert: (sourceFile, targetFormat, templateFile, requirements, outputLanguage, retryFeedback, retryScreenshot) => {
+  convert: (sourceFile, targetFormat, templateFile, requirements, outputLanguage, retryFeedback, retryScreenshot, extraFiles) => {
     const formData = new FormData()
     formData.append('source_file', sourceFile)
     formData.append('target_format', targetFormat)
@@ -429,6 +429,7 @@ export const convertAPI = {
     if (outputLanguage) formData.append('output_language', outputLanguage)
     if (retryFeedback) formData.append('retry_feedback', retryFeedback)
     if (retryScreenshot) formData.append('retry_screenshot', retryScreenshot)
+    ;(extraFiles || []).forEach((file) => formData.append('asset_files', file))
     return instance.post('/convert/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   revise: (taskId, feedback, screenshot, mode = 'patch') => {

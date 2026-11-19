@@ -42,6 +42,7 @@ from app.api.convert import (  # noqa: E402
     _idml_normalize_image_stem,
     _idml_find_link_target,
     _resolve_idml_source,
+    _merge_external_assets_into_idml,
     _flatten_sections,
     _markdown_to_lossless_csv,
     _csv_to_markdown,
@@ -2649,6 +2650,35 @@ class IdmlConversionTest(unittest.TestCase):
             resolved = _resolve_idml_source(container)
             md = _idml_to_markdown(resolved)
             self.assertIn("image1.png", md)
+
+    def test_separate_svg_zip_merges_into_idml(self):
+        import tempfile
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            body = (
+                '<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Heading1">'
+                '<CharacterStyleRange><Content>封面标题</Content></CharacterStyleRange>'
+                "</ParagraphStyleRange>"
+            )
+            idml_path = Path(tmpdir) / "manual.idml"
+            _write_idml_package(
+                idml_path,
+                story_files={"Story_u1.xml": _idml_story(body)},
+                spread_bodies=(
+                    '<Rectangle Self="r1"><Image Self="i1">'
+                    '<Link Self="l1" LinkResourceURI="file:Links/image1.svg"/></Image></Rectangle>'
+                    '<TextFrame Self="tf1" ParentStory="s"/>'
+                ),
+            )
+            svg_zip = Path(tmpdir) / "svgs.zip"
+            with zipfile.ZipFile(svg_zip, "w") as zf:
+                zf.writestr("image1.svg", b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+            merged = _merge_external_assets_into_idml(str(idml_path), [str(svg_zip)])
+            names = zipfile.ZipFile(merged).namelist()
+            self.assertTrue(any(n.endswith("image1.svg") for n in names))
+            md = _idml_to_markdown(merged)
+            self.assertIn("image1.svg", md)
 
     def test_container_skips_unreferenced_resources(self):
         import tempfile

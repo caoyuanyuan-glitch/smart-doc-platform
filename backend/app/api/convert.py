@@ -1,3 +1,4 @@
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -6611,7 +6612,93 @@ def _resolve_idml_source(upload_path):
     return out_path
 
 
-def _prepare_pipeline_source(source_format, kept_source_path):
+def _as_upload_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if item is not None and getattr(item, "filename", None)]
+    if getattr(value, "filename", None):
+        return [value]
+    return []
+
+
+def _collect_asset_entries(path):
+    """Collect image files from a zip or a standalone image into Links/<basename>."""
+    entries = []
+    if not path or not os.path.exists(path):
+        return entries
+
+    def _keep_name(name):
+        low = name.lower().replace("\\", "/")
+        if name.endswith("/") or low.startswith("__macosx/"):
+            return False
+        base = os.path.basename(name)
+        if not base or base.startswith("._"):
+            return False
+        if low.endswith(".idml") or low.endswith(".indd"):
+            return False
+        return os.path.splitext(name)[1].lower() in IDML_IME_IMAGE_EXTS
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            for name in zf.namelist():
+                if not _keep_name(name):
+                    continue
+                try:
+                    data = zf.read(name)
+                except Exception:
+                    continue
+                entries.append((f"Links/{os.path.basename(name)}", data))
+        return entries
+    except zipfile.BadZipFile:
+        pass
+    if _keep_name(os.path.basename(path)):
+        try:
+            with open(path, "rb") as handle:
+                entries.append((f"Links/{os.path.basename(path)}", handle.read()))
+        except Exception:
+            pass
+    return entries
+
+
+def _merge_external_assets_into_idml(idml_path, extra_paths):
+    extra_resources = []
+    for extra_path in extra_paths or []:
+        extra_resources.extend(_collect_asset_entries(extra_path))
+    if not extra_resources:
+        return idml_path
+    try:
+        with zipfile.ZipFile(idml_path, "r") as inner_zf:
+            inner_names = set(inner_zf.namelist())
+            referenced = _idml_referenced_basenames(inner_zf)
+            inner_entries = [
+                (name, inner_zf.read(name))
+                for name in inner_zf.namelist() if not name.endswith("/")
+            ]
+    except zipfile.BadZipFile:
+        return idml_path
+    parent = os.path.dirname(os.path.abspath(idml_path)) or UPLOAD_DIR
+    out_path = os.path.join(
+        parent, f"idml_{int(time.time() * 1000)}_{os.path.basename(idml_path)}"
+    )
+    inner_basenames = {os.path.basename(name).lower() for name in inner_names}
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as out_zf:
+        for name, data in inner_entries:
+            out_zf.writestr(name, data)
+        for name, data in extra_resources:
+            if name in inner_names:
+                continue
+            base = os.path.basename(name).lower()
+            if base in inner_basenames:
+                continue
+            if referenced and base not in referenced:
+                continue
+            out_zf.writestr(name, data)
+            inner_basenames.add(base)
+    return out_path
+
+
+def _prepare_pipeline_source(source_format, kept_source_path, extra_asset_paths=None):
     """Return a working source path. kept_source_path itself is never deleted here."""
     if source_format != "idml":
         return kept_source_path
@@ -6626,7 +6713,12 @@ def _prepare_pipeline_source(source_format, kept_source_path):
             UPLOAD_DIR, f"idml_{int(time.time() * 1000)}_{os.path.basename(kept_source_path)}"
         )
         shutil.copy2(kept_source_path, work_path)
-        return work_path
+        resolved = work_path
+    if extra_asset_paths:
+        try:
+            resolved = _merge_external_assets_into_idml(resolved, extra_asset_paths)
+        except Exception:
+            pass
     return resolved
 
 
@@ -10139,6 +10231,7 @@ async def start_conversion(
     output_language: str = Form(None),
     retry_feedback: str = Form(None),
     retry_screenshot: UploadFile = File(None),
+    asset_files: Optional[List[UploadFile]] = File(None),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
@@ -10177,6 +10270,18 @@ async def start_conversion(
     with open(source_path, "wb") as f:
         f.write(await source_file.read())
 
+    extra_paths = []
+    allowed_asset_exts = {".zip"} | IDML_IME_IMAGE_EXTS
+    for asset in _as_upload_list(asset_files):
+        filename = asset.filename or ""
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in allowed_asset_exts:
+            continue
+        extra_path = os.path.join(UPLOAD_DIR, f"asset_{int(time.time() * 1000)}_{filename}")
+        with open(extra_path, "wb") as f:
+            f.write(await asset.read())
+        extra_paths.append(extra_path)
+
     template_path = None
     template_filename = None
     if template_file:
@@ -10195,13 +10300,15 @@ async def start_conversion(
 
     pipeline_file_path = source_path
     if source_format == "idml":
-        pipeline_file_path = _prepare_pipeline_source(source_format, source_path)
+        pipeline_file_path = _prepare_pipeline_source(source_format, source_path, extra_paths)
         if not pipeline_file_path:
             try:
                 os.remove(source_path)
             except Exception:
                 pass
             raise HTTPException(status_code=400, detail="压缩包中未找到 .idml 文件；.indd 无法直接解析，请导出 IDML 后重试")
+        if extra_paths:
+            source_path = pipeline_file_path
 
     source_content = ""
 
