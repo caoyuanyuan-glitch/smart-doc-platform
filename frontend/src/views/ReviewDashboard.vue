@@ -149,9 +149,11 @@
               <el-table-column prop="category" label="类别" width="130" show-overflow-tooltip />
               <el-table-column prop="comment" label="人工意见" min-width="200" show-overflow-tooltip />
               <el-table-column prop="count" label="次数" width="80" />
-              <el-table-column label="操作" width="110">
+              <el-table-column label="操作" width="240">
                 <template #default="scope">
-                  <el-button size="small" type="primary" link @click="convertCandidate(scope.row)">转规则候选</el-button>
+                  <el-button size="small" type="primary" link @click="convertCandidate(scope.row)">转候选</el-button>
+                  <el-button size="small" type="success" link @click="toggleCandidateRule(scope.row, true)">启用</el-button>
+                  <el-button size="small" type="warning" link @click="toggleCandidateRule(scope.row, false)">停用</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -352,7 +354,26 @@ async function convertCandidate(row) {
   }
   try {
     await reviewAPI.convertSupplement(row.ids[0])
-    ElMessage.success(`已将「${row.comment.slice(0, 20)}」标记为规则候选`)
+    ElMessage.success(`已生成规则草案（默认禁用，需点「启用」才生效）`)
+    await loadCluster()
+  } catch (error) {
+    ElMessage.error(`操作失败: ${getAPIErrorMessage(error)}`)
+  }
+}
+
+async function toggleCandidateRule(row, enable) {
+  if (!row.ids || !row.ids.length) {
+    ElMessage.warning('该候选缺少样本 id')
+    return
+  }
+  try {
+    if (enable) {
+      await reviewAPI.enableSupplementRule(row.ids[0])
+      ElMessage.success('已启用：后续审核会把该抽象检测要点作为审核依据（不会照搬原文）')
+    } else {
+      await reviewAPI.disableSupplementRule(row.ids[0])
+      ElMessage.success('已停用，回到草案状态')
+    }
     await loadCluster()
   } catch (error) {
     ElMessage.error(`操作失败: ${getAPIErrorMessage(error)}`)

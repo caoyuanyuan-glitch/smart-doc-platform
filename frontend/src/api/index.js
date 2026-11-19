@@ -193,6 +193,8 @@ export const reviewAPI = {
   },
   clusterSupplements: (params = {}) => instance.get('/review/supplements/cluster', { params }),
   convertSupplement: (id) => instance.post(`/review/supplements/${id}/convert-rule`),
+  enableSupplementRule: (id) => instance.post(`/review/supplements/${id}/enable-rule`),
+  disableSupplementRule: (id) => instance.post(`/review/supplements/${id}/disable-rule`),
   dismissSupplement: (id) => instance.post(`/review/supplements/${id}/dismiss`),
   deleteFalsePositiveMemory: (id) => instance.delete(`/review/false-positive-memory/${id}`),
 }

@@ -181,16 +181,95 @@ def convert_rule(
     item_id: int,
     db: Session = Depends(get_db),
 ):
-    """把一条人工意见标记为规则候选（open -> rule_draft），后续人工确认转正式规则。"""
+    """把一条人工意见转成"学习规则草案"（open -> rule_draft）。
+
+    安全设计：草案 regex 恒为 `(?!)`（永不匹配），不产生任何检出；
+    抽象检测要点写入 rules 表，待人工确认启用后作为审核依据注入 prompt。
+    不做"意见原文→正则"（会照搬臆造，属用户已裁定误报类型）。
+    """
+    from app.models.rule import Rule
+    from app.review_engine.learned_rules import (
+        DISABLED_REGEX, abstract_hint, make_rule_no,
+    )
+
     row = db.query(SupplementFeedback).filter(SupplementFeedback.id == item_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="意见不存在")
     if row.rule_candidate_status == "converted":
         raise HTTPException(status_code=400, detail="该意见已转为正式规则")
+
+    language = "en" if str(row.layer or "").startswith("en") else "cn"
+    rule_no = make_rule_no(language, row.comment or "", row.original_text or "")
+    existing = db.query(Rule).filter(Rule.rule_no == rule_no).first()
+    if not existing:
+        hint = abstract_hint(row.category or row.expected_rule)
+        db.add(Rule(
+            rule_no=rule_no,
+            category=row.category or "人工学习规则",
+            description=hint,
+            regex=DISABLED_REGEX,
+            example=(row.original_text or "")[:500],
+            suggestion=(row.suggestion or "")[:500],
+            audit_basis=f"人工审核意见样本池（来源样本 #{row.id}）",
+            severity=row.severity or "general",
+            language=language,
+        ))
     row.rule_candidate_status = "rule_draft"
     db.commit()
     db.refresh(row)
-    return {"ok": True, "item": _fmt_row(row)}
+    return {"ok": True, "item": _fmt_row(row), "rule_no": rule_no, "enabled": False}
+
+
+@router.post("/{item_id}/enable-rule")
+def enable_rule(
+    item_id: int,
+    db: Session = Depends(get_db),
+):
+    """人工确认启用一条学习规则草案（rule_draft -> converted）。
+
+    启用只意味着"作为审核依据注入 prompt"，不会变成正则匹配；
+    regex 保持 `(?!)`，因此零误报风险。可再次调用 disable 回退。
+    """
+    from app.models.rule import Rule
+    from app.review_engine.learned_rules import ENABLED_PREFIX, make_rule_no
+
+    row = db.query(SupplementFeedback).filter(SupplementFeedback.id == item_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="意见不存在")
+    language = "en" if str(row.layer or "").startswith("en") else "cn"
+    rule_no = make_rule_no(language, row.comment or "", row.original_text or "")
+    rule = db.query(Rule).filter(Rule.rule_no == rule_no).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="学习规则草案不存在，请先转规则候选")
+    if not str(rule.description or "").startswith(ENABLED_PREFIX):
+        rule.description = ENABLED_PREFIX + str(rule.description or "")
+    row.rule_candidate_status = "converted"
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "item": _fmt_row(row), "rule_no": rule_no, "enabled": True}
+
+
+@router.post("/{item_id}/disable-rule")
+def disable_rule(
+    item_id: int,
+    db: Session = Depends(get_db),
+):
+    """停用一条已启用学习规则（回到草案态，不删除规则）。"""
+    from app.models.rule import Rule
+    from app.review_engine.learned_rules import ENABLED_PREFIX, make_rule_no
+
+    row = db.query(SupplementFeedback).filter(SupplementFeedback.id == item_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="意见不存在")
+    language = "en" if str(row.layer or "").startswith("en") else "cn"
+    rule_no = make_rule_no(language, row.comment or "", row.original_text or "")
+    rule = db.query(Rule).filter(Rule.rule_no == rule_no).first()
+    if rule and str(rule.description or "").startswith(ENABLED_PREFIX):
+        rule.description = str(rule.description)[len(ENABLED_PREFIX):].strip()
+    row.rule_candidate_status = "rule_draft"
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "item": _fmt_row(row), "rule_no": rule_no, "enabled": False}
 
 
 @router.post("/{item_id}/dismiss")

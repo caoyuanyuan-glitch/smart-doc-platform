@@ -13871,6 +13871,15 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             pre_ai_count = len(issues)
             _stage_input_counts["ai_deep_review"] = pre_ai_count
             ai_review_basis_sections = _build_ai_review_basis_sections(spec_texts, document_language)
+            # 自主进化：注入人工确认启用的学习规则（抽象要点，非原文正则）
+            try:
+                from app.review_engine.learned_rules import load_enabled_sections
+                learned_sections = load_enabled_sections(db)
+                if learned_sections:
+                    ai_review_basis_sections.extend(learned_sections)
+                    print(f"[审核] 注入已启用学习规则 {len(learned_sections)} 条")
+            except Exception as e:
+                print(f"[审核] 学习规则加载失败(非致命): {e}")
             if snippet_review:
                 ai_review_basis_sections = [
                     section for section in ai_review_basis_sections
