@@ -51,6 +51,14 @@
             </div>
 
             <div v-if="msg.role === 'assistant' && msg.upload" class="agent-upload">
+              <div v-if="msg.upload.intent === 'convert'" class="agent-convert-format">
+                <span class="agent-upload-hint">转成</span>
+                <select v-model="msg.upload.targetFormat" class="agent-format-select">
+                  <option value="markdown">Markdown</option>
+                  <option value="dita">DITA</option>
+                  <option value="csv">CSV</option>
+                </select>
+              </div>
               <input
                 :ref="el => setUploadInput(el, idx)"
                 type="file"
@@ -61,9 +69,9 @@
               />
               <button class="agent-upload-btn" :disabled="sending || msg.task?.running" @click="triggerUpload(idx)">
                 <span class="agent-upload-icon">＋</span>
-                {{ msg.upload.multiple ? '选择两个文件对比' : '选择待审核文件' }}
+                {{ uploadButtonText(msg.upload) }}
               </button>
-              <span class="agent-upload-hint">{{ msg.upload.multiple ? '请一次选中两个文件（Ctrl/Shift 多选）' : '支持 PDF / Word / Excel / Markdown' }}</span>
+              <span class="agent-upload-hint">{{ msg.upload.hint }}</span>
             </div>
 
             <div v-if="msg.role === 'assistant' && msg.task" class="agent-task">
@@ -136,7 +144,7 @@
 <script setup>
 import { ref, nextTick, computed, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { agentAPI, documentAPI, reviewAPI, compareAPI, getAPIErrorMessage } from '@/api'
+import { agentAPI, documentAPI, reviewAPI, compareAPI, convertAPI, getAPIErrorMessage } from '@/api'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, Delete } from '@element-plus/icons-vue'
 
@@ -160,8 +168,17 @@ function triggerUpload(idx) {
   if (el) el.click()
 }
 function taskStatusText(task) {
-  const map = { pending: '准备中', uploading: '上传文件中', running: '审核中', completed: '已完成', failed: '失败', cancelled: '已停止' }
+  const map = {
+    pending: '准备中', uploading: '上传文件中',
+    running: task.type === 'convert' ? '转换中' : '审核中',
+    processing: '转换中', completed: '已完成', failed: '失败', cancelled: '已停止'
+  }
   return map[task.status] || task.status || '处理中'
+}
+function uploadButtonText(upload) {
+  if (upload.intent === 'compare') return '选择两个文件对比'
+  if (upload.intent === 'convert') return '选择待转换文件'
+  return '选择待审核文件'
 }
 function stopPolling(idx) {
   if (pollTimers.value[idx]) {
@@ -208,12 +225,16 @@ async function sendText(text) {
       upload: null,
       task: null
     }
-    // 审核/对比：在对话内提供上传入口，不跳转落地页
+    // 审核/对比/转换：在对话内提供上传入口，不跳转落地页
+    const docAccept = '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls'
     if (data.intent === 'review') {
-      assistantMsg.upload = { multiple: false, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
+      assistantMsg.upload = { intent: 'review', multiple: false, accept: docAccept, hint: '支持 PDF / Word / Excel / Markdown' }
       assistantMsg.action = null
     } else if (data.intent === 'compare') {
-      assistantMsg.upload = { multiple: true, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
+      assistantMsg.upload = { intent: 'compare', multiple: true, accept: docAccept, hint: '请一次选中两个文件（Ctrl/Shift 多选）' }
+      assistantMsg.action = null
+    } else if (data.intent === 'convert') {
+      assistantMsg.upload = { intent: 'convert', multiple: false, accept: '.md,.markdown,.docx,.doc,.csv,.zip,.idml', hint: '支持 Markdown / Word / CSV / IDML', targetFormat: 'markdown' }
       assistantMsg.action = null
     }
     messages.value.push(assistantMsg)
@@ -253,6 +274,8 @@ async function onFileSelected(event, idx, msg) {
     await startReview(files[0], idx, msg)
   } else if (msg.intent === 'compare') {
     await startCompare(files.slice(0, 2), idx, msg)
+  } else if (msg.intent === 'convert') {
+    await startConvert(files[0], msg.upload.targetFormat || 'markdown', idx, msg)
   }
 }
 
@@ -328,12 +351,12 @@ async function finishReview(status, reviewId, msg) {
     const issues = issuesResp.data || []
     const serious = issues.filter(i => ['serious', 'critical', '严重', '错误'].includes(String(i.severity || '').toLowerCase())).length
     msg.task.summary = issues.length
-      ? `共发现 ${issues.length} 个问题，其中严重 ${serious} 个。`
-      : '审核完成，未发现问题。'
+      ? `共发现 ${issues.length} 个问题，其中严重 ${serious} 个；任务已保存到「审核任务」历史。`
+      : '审核完成，未发现问题；任务已保存到「审核任务」历史。'
   } catch (e) {
-    msg.task.summary = '审核已完成，问题详情请查看完整报告。'
+    msg.task.summary = '审核已完成，任务已保存到「审核任务」历史。'
   }
-  msg.task.resultPath = '/review'
+  msg.task.resultPath = '/review/tasks'
   msg.task.resultParams = { reviewId }
   scrollToBottom()
 }
@@ -352,8 +375,8 @@ async function startCompare(files, idx, msg) {
     const totalDiffs = results.reduce((s, r) => s + (Number(r.total_diffs) || 0), 0)
     const verdict = results[0]?.verdict || ''
     msg.task.step = '对比完成'
-    msg.task.summary = `已对比 ${d.file_count || files.length} 个文件，共 ${totalDiffs} 处差异${verdict ? `，判定：${verdict}` : ''}。`
-    msg.task.resultPath = '/compare'
+    msg.task.summary = `已对比 ${d.file_count || files.length} 个文件，共 ${totalDiffs} 处差异${verdict ? `，判定：${verdict}` : ''}；任务已保存到「对比任务」历史。`
+    msg.task.resultPath = '/compare/tasks'
     msg.task.resultParams = d.group_id ? { groupId: d.group_id } : {}
     scrollToBottom()
   } catch (e) {
@@ -364,12 +387,76 @@ async function startCompare(files, idx, msg) {
   }
 }
 
+// 转换：上传 → 触发 → 轮询进度 → 完成提示（任务已落库到转换历史）
+async function startConvert(file, targetFormat, idx, msg) {
+  initTask(msg, 'convert')
+  msg.task.step = '正在上传并启动转换'
+  try {
+    const resp = await convertAPI.convert(file, targetFormat)
+    const d = resp.data || {}
+    const taskId = d.task_id
+    if (!taskId) throw new Error('转换未返回 task_id')
+    msg.task.taskId = taskId
+    msg.task.status = 'processing'
+    msg.task.step = '转换进行中'
+    scrollToBottom()
+
+    let failCount = 0
+    pollTimers.value[idx] = setInterval(async () => {
+      try {
+        const p = await convertAPI.getProgress(taskId)
+        const pd = p.data || {}
+        msg.task.progress = typeof pd.progress === 'number' ? pd.progress : (msg.task.progress || 0)
+        msg.task.step = pd.current_step || '转换进行中'
+        msg.task.progressMsg = pd.error_message || ''
+        failCount = 0
+        const st = String(pd.status || '').toLowerCase()
+        if (['completed', 'failed', 'cancelled', 'error'].includes(st)) {
+          stopPolling(idx)
+          msg.task.running = false
+          if (st === 'completed') {
+            msg.task.status = 'completed'
+            msg.task.progress = 100
+            msg.task.step = '转换完成'
+            msg.task.summary = `已转换为 ${targetFormat.toUpperCase()}，任务已保存到「转换历史」。`
+            msg.task.resultPath = '/convert/history'
+            msg.task.resultParams = {}
+          } else {
+            msg.task.status = 'failed'
+            msg.task.step = '转换失败' + (pd.error_message ? '：' + pd.error_message : '')
+          }
+          scrollToBottom()
+        }
+      } catch (e) {
+        failCount += 1
+        if (failCount >= 5) {
+          stopPolling(idx)
+          msg.task.status = 'failed'
+          msg.task.running = false
+          msg.task.step = '进度查询失败，可到转换历史查看'
+          scrollToBottom()
+        }
+      }
+    }, 1500)
+  } catch (e) {
+    msg.task.status = 'failed'
+    msg.task.running = false
+    msg.task.step = '转换启动失败：' + (getAPIErrorMessage(e) || '未知错误')
+    scrollToBottom()
+  }
+}
+
 function retryTask(idx, msg) {
   const type = msg.task?.type
   msg.task = null
-  msg.upload = type === 'compare'
-    ? { multiple: true, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
-    : { multiple: false, accept: '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls' }
+  const docAccept = '.pdf,.doc,.docx,.txt,.md,.xlsx,.xls'
+  if (type === 'compare') {
+    msg.upload = { intent: 'compare', multiple: true, accept: docAccept, hint: '请一次选中两个文件（Ctrl/Shift 多选）' }
+  } else if (type === 'convert') {
+    msg.upload = { intent: 'convert', multiple: false, accept: '.md,.markdown,.docx,.doc,.csv,.zip,.idml', hint: '支持 Markdown / Word / CSV / IDML', targetFormat: 'markdown' }
+  } else {
+    msg.upload = { intent: 'review', multiple: false, accept: docAccept, hint: '支持 PDF / Word / Excel / Markdown' }
+  }
   nextTick(() => triggerUpload(idx))
 }
 </script>
@@ -441,6 +528,11 @@ function retryTask(idx, msg) {
 .agent-upload-btn:disabled { opacity: .5; cursor: not-allowed; }
 .agent-upload-icon { font-size: 14px; margin-right: 3px; }
 .agent-upload-hint { font-size: 11px; color: #a8abb2; }
+.agent-convert-format { display: flex; align-items: center; gap: 8px; }
+.agent-format-select {
+  border: 1px solid #dcdfe6; border-radius: 6px; padding: 4px 8px;
+  font-size: 12px; color: #606266; background: #fff; cursor: pointer;
+}
 .agent-task {
   margin-top: 8px; width: 100%; border: 1px solid #e4e7ed; border-radius: 8px;
   padding: 10px 12px; background: #fff; display: flex; flex-direction: column; gap: 6px;
