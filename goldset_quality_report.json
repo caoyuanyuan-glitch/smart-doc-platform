@@ -1,0 +1,1470 @@
+{
+  "report": {
+    "config": "config\\review-evaluation-suite.accuracy.json",
+    "documents": [
+      {
+        "name": "gospatial_v2_24_en",
+        "enforce": true,
+        "baseline": "goldset/human_baseline_gospatial_v2_24.md",
+        "resolved_path": "goldset\\human_baseline_gospatial_v2_24.md",
+        "annotation_count": 10,
+        "doc_check": {
+          "has_fn_section": true,
+          "fn_placeholder": true
+        },
+        "annotations": [
+          {
+            "index": 1,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "商标使用需法务确认，正文商标标注与声明页不一致",
+            "selected_text": "商标相关表述",
+            "context": "",
+            "expected_rule": "AI-TM-001",
+            "category": "商标法务",
+            "layer": "ai_assisted",
+            "issues": [
+              "missing_page",
+              "placeholder_author",
+              "vague_selected_text",
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 2,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "同一句话跨页重复出现，需删减一处",
+            "selected_text": "跨页重复句",
+            "context": "",
+            "expected_rule": "DOC-DUP-001",
+            "category": "重复内容",
+            "layer": "structural_consistency",
+            "issues": [
+              "missing_page",
+              "placeholder_author",
+              "vague_selected_text",
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 3,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "Cassetter 拼写错误，应为 Cassette",
+            "selected_text": "Cassetter",
+            "context": "Select the Cassetter module and load the samples.",
+            "expected_rule": "DET-TERM-SPELL-001",
+            "category": "术语拼写",
+            "layer": "deterministic",
+            "issues": [
+              "missing_page",
+              "placeholder_author"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 4,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "冠词 the 重复",
+            "selected_text": "the the",
+            "context": "",
+            "expected_rule": "DOC-DUP-007",
+            "category": "重复内容",
+            "layer": "deterministic",
+            "issues": [
+              "missing_page",
+              "placeholder_author",
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 5,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "Catalog number 应统一写为 Cat. No.",
+            "selected_text": "Catalog number",
+            "context": "",
+            "expected_rule": "DOC-CATNO-001",
+            "category": "术语一致性",
+            "layer": "structural_consistency",
+            "issues": [
+              "missing_page",
+              "placeholder_author",
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 6,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "操作步骤引导语重复",
+            "selected_text": "步骤引导语",
+            "context": "",
+            "expected_rule": "DOC-PROC-002",
+            "category": "操作步骤",
+            "layer": "structural_consistency",
+            "issues": [
+              "missing_page",
+              "placeholder_author",
+              "vague_selected_text",
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 7,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "文件名与正文引用不一致",
+            "selected_text": "文件名",
+            "context": "",
+            "expected_rule": "DOC-FILE-001",
+            "category": "信息完整",
+            "layer": "structural_consistency",
+            "issues": [
+              "missing_page",
+              "placeholder_author",
+              "vague_selected_text",
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 8,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "before clean 应改为 before cleaning",
+            "selected_text": "before clean",
+            "context": "Before clean the instrument, power it down completely.",
+            "expected_rule": "DOC-GRAM-002",
+            "category": "语法与表达",
+            "layer": "deterministic",
+            "issues": [
+              "missing_page",
+              "placeholder_author"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 9,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "during clean 应改为 during cleaning",
+            "selected_text": "during clean",
+            "context": "during clean the surface",
+            "expected_rule": "DOC-GRAM-002",
+            "category": "语法与表达",
+            "layer": "deterministic",
+            "issues": [
+              "missing_page",
+              "placeholder_author"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 10,
+            "file": "H-020-001010-00GoSpatial-V2-24AutomatedSamplePreparationSystemUserManual_English_RUO_WH.pdf",
+            "page": "",
+            "author": "待补",
+            "comment": "维护周期中 cleaning 与 disinfection 术语混用，需统一",
+            "selected_text": "Monthly cleaning",
+            "context": "Monthly cleaning and disinfection schedule",
+            "expected_rule": "DOC-TERM-002",
+            "category": "术语一致性",
+            "layer": "structural_consistency",
+            "issues": [
+              "missing_page",
+              "placeholder_author"
+            ],
+            "quality": "needs_fix"
+          }
+        ]
+      },
+      {
+        "name": "e25rs_cn",
+        "enforce": true,
+        "baseline": "goldset/human_baseline_e25rs_cn.json",
+        "resolved_path": "goldset\\human_baseline_e25rs_cn.json",
+        "annotation_count": 9,
+        "doc_check": {
+          "has_fn_section": false,
+          "fn_placeholder": false,
+          "no_fn_section": true
+        },
+        "annotations": [
+          {
+            "index": 1,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "3",
+            "author": "Tina",
+            "comment": "是这么近的吗\r类似问题参考另外一份中文意见",
+            "selected_text": "装基本信息\n货号\n名",
+            "context": "",
+            "expected_rule": "CYY-CN-LAYOUT-006",
+            "category": "表格/版式",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 2,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "8",
+            "author": "Tina",
+            "comment": "这个顺序也跟前面试剂套装章节不一致",
+            "selected_text": "CL App-D FCU S",
+            "context": "",
+            "expected_rule": "CYY-CN-CONSIST-031",
+            "category": "术语一致性",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 3,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "11",
+            "author": "Tina",
+            "comment": "货号错误，与前面试剂套装那里不一致",
+            "selected_text": "号：940-005203-00",
+            "context": "",
+            "expected_rule": "CYY-CN-PRODUCT-004",
+            "category": "货号一致性",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 4,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "13",
+            "author": "Tina",
+            "comment": "重复",
+            "selected_text": "本试剂盒适用于本试剂盒适用于M\n文库插入片段长度为200 bp~50",
+            "context": "",
+            "expected_rule": "CYY-CN-DUP-001",
+            "category": "重复内容",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 5,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "14",
+            "author": "Tina",
+            "comment": "前面试剂套装章节并没有提到这种测序",
+            "selected_text": "于MGI 接头\n于App-C 测",
+            "context": "",
+            "expected_rule": "CYY-CN-SCOPE-002",
+            "category": "适用范围/硬件配置",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 6,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "24",
+            "author": "Tina",
+            "comment": "测序",
+            "selected_text": "选测试方",
+            "context": "",
+            "expected_rule": "CYY-CN-TERM-006",
+            "category": "术语拼写",
+            "layer": "deterministic",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 7,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "24",
+            "author": "Tina",
+            "comment": "（可选）",
+            "selected_text": "书\n4. 如\n如\n品\n5. 如\nB",
+            "context": "",
+            "expected_rule": "CYY-CN-GRAMMAR-012",
+            "category": "表达与句式",
+            "layer": "deterministic",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 8,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "26",
+            "author": "Tina",
+            "comment": "前面试剂套装章节根本没有这个载片类型",
+            "selected_text": "型是FCL，",
+            "context": "",
+            "expected_rule": "CYY-CN-SCOPE-003",
+            "category": "适用范围/硬件配置",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 9,
+            "file": "H-020-001302-00 DNBSEQ-E25RS 高通量测序试剂套装使用说明书_中文_RUO_QD_V1.0_R02.pdf",
+            "page": "36",
+            "author": "Tina",
+            "comment": "其他",
+            "selected_text": "头镊子\n其它胶",
+            "context": "",
+            "expected_rule": "CYY-CN-CONSIST-032",
+            "category": "术语一致性",
+            "layer": "deterministic",
+            "issues": [
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          }
+        ]
+      },
+      {
+        "name": "e25rs_en",
+        "enforce": true,
+        "baseline": "goldset/human_baseline_e25rs_en.json",
+        "resolved_path": "goldset\\human_baseline_e25rs_en.json",
+        "annotation_count": 17,
+        "doc_check": {
+          "has_fn_section": false,
+          "fn_placeholder": false,
+          "no_fn_section": true
+        },
+        "annotations": [
+          {
+            "index": 1,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "3",
+            "author": "Tina",
+            "comment": "多了空格",
+            "selected_text": "-throu ghput",
+            "context": "Set\nApp-C\n5RS High-throu ghput \n Set\nApp-C",
+            "expected_rule": "DOC-SPACE-002",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 2,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "6",
+            "author": "Tina",
+            "comment": "这是正常距离吗，怎么有点挤",
+            "selected_text": "NING T\ns",
+            "context": "formation.\nWARNING This pro\nshould n\nki\ni\ni",
+            "expected_rule": "DET-TYPO-001",
+            "category": "字体/版式细节",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 3,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "10",
+            "author": "Tina",
+            "comment": "修订历史说删掉这个来着",
+            "selected_text": "MDA \nT-Reagent",
+            "context": "Buffer\n17 m\nMDA \nT-Reagent\n0.3\ntub",
+            "expected_rule": "DOC-REVISION-001",
+            "category": "修订一致性",
+            "layer": "structural_consistency",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 4,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "13",
+            "author": "Tina",
+            "comment": "同上",
+            "selected_text": "MDA \nT-Reagent",
+            "context": "Buffer\n17 mL/\nMDA \nT-Reagent \n0.32 m\ntube×1\nMDA Enzyme\n0 05 m",
+            "expected_rule": "DOC-REVISION-001",
+            "category": "修订一致性",
+            "layer": "structural_consistency",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 5,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "14",
+            "author": "Tina",
+            "comment": "拼写错误",
+            "selected_text": "consumbles",
+            "context": "2.2 U s e r - s u p p l i\nconsumbles\nTable 6 User supplie",
+            "expected_rule": "SPELL",
+            "category": "术语拼写",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 6,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "17",
+            "author": "Tina",
+            "comment": "空隙有点大",
+            "selected_text": "0 \n℃\ny var",
+            "context": "p\nyp\n-DB), or Make DNB \nf the -20 \n℃ ice; th\ntime may vary with a",
+            "expected_rule": "DET-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 7,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "19",
+            "author": "Tina",
+            "comment": "缺少空格",
+            "selected_text": "er\ne.F\nre",
+            "context": "ol is running, some\nm temperature wh\nmperature.For these\nd lid is required to\nure during the DNB",
+            "expected_rule": "DOC-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 8,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "21",
+            "author": "Tina",
+            "comment": "缺少空格",
+            "selected_text": "p\nre.Fo",
+            "context": "g,\noom temperature whil\nmperature.For these \nted lid is required to \nd\ni\nh\nDNB",
+            "expected_rule": "DOC-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 9,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "25",
+            "author": "Tina",
+            "comment": "删了",
+            "selected_text": "es t",
+            "context": "at surface\nrd 1 times to bring \nr respective wells.",
+            "expected_rule": "DOC-GRAMMAR-001",
+            "category": "语法与表达",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 10,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "27",
+            "author": "Tina",
+            "comment": "拼写错误",
+            "selected_text": "Regent f",
+            "context": "be selected based on the\ne MDA T-Regent from diffe\nidge with the MDA mixtu",
+            "expected_rule": "SPELL-PHRASE",
+            "category": "术语拼写",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 11,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "30",
+            "author": "Tina",
+            "comment": "去掉，建议直接用双引号括起来，直接引用的方式",
+            "selected_text": "that",
+            "context": "lected, and tap\nmpting that Are yo\ne discarded once of",
+            "expected_rule": "DOC-QUOTE-001",
+            "category": "标点符号",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 12,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "31",
+            "author": "Tina",
+            "comment": "to go back to",
+            "selected_text": "back to",
+            "context": "rameter review interface, th\nping\nback to the Ente\nsure the flow cell ID is enter",
+            "expected_rule": "DOC-GRAM-005",
+            "category": "表达与句式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 13,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "31",
+            "author": "Tina",
+            "comment": "ensure that",
+            "selected_text": "please ensure",
+            "context": "e modified by tapping\nbac\nherefore, please ensure the flow",
+            "expected_rule": "DOC-GRAM-006",
+            "category": "表达与句式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 14,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "34",
+            "author": "Tina",
+            "comment": "拼写错误",
+            "selected_text": "waster",
+            "context": "the reagent cartridge do n\nof the waster contain\nccording to the directio",
+            "expected_rule": "SPELL-PHRASE",
+            "category": "术语拼写",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 15,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "37",
+            "author": "Tina",
+            "comment": "去掉，双引号搞成直接引语",
+            "selected_text": "g\ng that A",
+            "context": "Returning to the Choo\nndicating that Are you \nhall be discarded onc",
+            "expected_rule": "DOC-QUOTE-001",
+            "category": "标点符号",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 16,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "40",
+            "author": "Tina",
+            "comment": "单数",
+            "selected_text": "are d",
+            "context": "ception are displayed\nace. Check the possi",
+            "expected_rule": "DOC-GRAM-004",
+            "category": "语法错误",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 17,
+            "file": "H-020-001249-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V3.0.pdf",
+            "page": "43",
+            "author": "Tina",
+            "comment": "whether",
+            "selected_text": "th\nt",
+            "context": ".  Keep the reage\n.  Check the well \n.  Use a pair of po",
+            "expected_rule": "DOC-GRAM-008",
+            "category": "表达与句式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          }
+        ]
+      },
+      {
+        "name": "e25rs_v8_cn_observed",
+        "enforce": false,
+        "baseline": "goldset/human_baseline_高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.json",
+        "resolved_path": "goldset\\human_baseline_高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.json",
+        "annotation_count": 9,
+        "doc_check": {
+          "has_fn_section": false,
+          "fn_placeholder": false,
+          "no_fn_section": true
+        },
+        "annotations": [
+          {
+            "index": 1,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "3",
+            "author": "Tina",
+            "comment": "调整列宽，让最后一列有更多空间，尤其是确保摄氏度不与数字分开",
+            "selected_text": "",
+            "context": "",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_selected_text",
+              "empty_context"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 2,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "12",
+            "author": "Tina",
+            "comment": "商标声明中增加这2个",
+            "selected_text": "和Nextera",
+            "context": "本试剂盒适用于MGI 接头文库和App 文库（包括TruSeq 和Nextera 接头）。文库插入 片段长度为200 bp~500 bp，同时主带集中在±100 bp 以内。",
+            "expected_rule": "DET-TRADEMARK-001",
+            "category": "商标声明",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 3,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "14",
+            "author": "Tina",
+            "comment": "重复表述",
+            "selected_text": "",
+            "context": "y 以上提及的所有试剂，如常温放置超过30 分钟以上，不建议再使用。 y DNB 制备缓冲液（OS-V2.0-SB）适用于单barcode 文库。",
+            "expected_rule": "STRUCT-DUP-001",
+            "category": "重复内容",
+            "layer": "structural_consistency",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 4,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "15",
+            "author": "Tina",
+            "comment": "平均分布列",
+            "selected_text": "时间 On",
+            "context": "表 11 DNB 制备反应引物杂交条件（App 文库） 时间 On",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "structural_consistency",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 5,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "22",
+            "author": "Tina",
+            "comment": "如",
+            "selected_text": "",
+            "context": "试剂仓中的托盘进行初始化，即仓门自动打开，托盘推出。 重试。多次自检失败，请联系技术支持。 y 请勿将手置于仓门和仪器外壳之间，以防夹手。",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 6,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "24",
+            "author": "Tina",
+            "comment": "多余了一条线",
+            "selected_text": "\\",
+            "context": "2. 撕开载片包装，检查载片完整性并确认载片二维码信息与标签上的序列号是否一致。 \\",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "structural_consistency",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 7,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "26",
+            "author": "Tina",
+            "comment": "下图所示",
+            "selected_text": "确保废液盒塞子处于打开状态，根据下图图示方向，将废液盒放在托盘上。确认废液盒卡",
+            "context": "如需再次放置试剂槽，确保试剂槽底部胶塞未脱落或倾斜后再放置。 7. 确保废液盒塞子处于打开状态，根据下图图示方向，将废液盒放在托盘上。确认废液盒卡",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 8,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "35",
+            "author": "Tina",
+            "comment": "当",
+            "selected_text": "",
+            "context": "9.1 DNB 浓度不合格 DNB 浓度不符合第12 页“测定DNB 浓度”的要求时，执行如下操作： 1. 检查所用试剂盒是否过期。",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 9,
+            "file": "H-020-000617-00 DNBSEQ-E25RS高通量测序试剂套装使用说明书_中文_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "35",
+            "author": "Tina",
+            "comment": "当",
+            "selected_text": "",
+            "context": "9.3 试剂槽底部胶塞歪斜或脱落 试剂槽底部胶塞歪斜或脱落时，执行如下操作： 1. 将试剂槽保持在水平状态。",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          }
+        ]
+      },
+      {
+        "name": "e25rs_v8_en_observed",
+        "enforce": false,
+        "baseline": "goldset/human_baseline_High-throughputSequencingSetInstructionsforUse_English_RUO_QD_V8.0_R01Tina.json",
+        "resolved_path": "goldset\\human_baseline_High-throughputSequencingSetInstructionsforUse_English_RUO_QD_V8.0_R01Tina.json",
+        "annotation_count": 10,
+        "doc_check": {
+          "has_fn_section": false,
+          "fn_placeholder": false,
+          "no_fn_section": true
+        },
+        "annotations": [
+          {
+            "index": 1,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "3",
+            "author": "Tina",
+            "comment": "逗号前面多了一个空格",
+            "selected_text": "",
+            "context": "April 16 , 2026",
+            "expected_rule": "DET-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 2,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "3",
+            "author": "Tina",
+            "comment": "双引号反向了",
+            "selected_text": "",
+            "context": "Modified the descriptions of  \"Start",
+            "expected_rule": "DET-PUNCT-001",
+            "category": "标点符号",
+            "layer": "deterministic",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 3,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "8",
+            "author": "Tina",
+            "comment": "建议改为product",
+            "selected_text": "device",
+            "context": "This device is intended only for scientific research and  should not be used for clinical diagnosis.",
+            "expected_rule": "STRUCT-TERM-001",
+            "category": "术语一致性",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 4,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "9",
+            "author": "Tina",
+            "comment": "中英文不一致，中文是型号",
+            "selected_text": "Sequencing read length",
+            "context": "Sequencing  read length",
+            "expected_rule": "STRUCT-TERM-001",
+            "category": "术语一致性",
+            "layer": "structural_consistency",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 5,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "9",
+            "author": "Tina",
+            "comment": "缺FCL，根据前面表格",
+            "selected_text": "SE100 PE150",
+            "context": "SE100 PE150",
+            "expected_rule": "STRUCT-COMPONENT-001",
+            "category": "信息完整性",
+            "layer": "structural_consistency",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 6,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "10",
+            "author": "Tina",
+            "comment": "It is not recommended to mix reagents...\n或者\nMixing reagents from... is not recommended.",
+            "selected_text": "mixed",
+            "context": "y The components and packages are batched separately. Keep the components  in the packages until use. It is not recommended to mixed use reagents from",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 7,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "18",
+            "author": "Tina",
+            "comment": "take out and",
+            "selected_text": "thaw",
+            "context": "2)  Based on the specific library adapter type, thaw Make DNB Buffer (OS-V2.0- SB), Make DNB Buffer (OS-V2.0-DB), or Make DNB Buffer (OS-App-V4.0) by",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 8,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "21",
+            "author": "Tina",
+            "comment": "是否有多余空格",
+            "selected_text": "",
+            "context": "5.  Take the tube out of the thermal cycler when the temperature reaches 4 ℃.",
+            "expected_rule": "DET-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 9,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "27",
+            "author": "Tina",
+            "comment": "缺定冠词the",
+            "selected_text": "",
+            "context": "The cartridge rack in reagent compartment is being initialized. The  compartment door opens automatically and the rack slides out.",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 10,
+            "file": "H-020-000618-00 DNBSEQ-E25RS High-throughput Sequencing Set Instructions for Use_English_RUO_QD_V8.0_R01Tina.pdf",
+            "page": "30",
+            "author": "Tina",
+            "comment": "the",
+            "selected_text": "",
+            "context": "WARNING The flow cell ID will be locked once flow cell loading is completed",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          }
+        ]
+      },
+      {
+        "name": "g99_v9_observed",
+        "enforce": false,
+        "baseline": "goldset/human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json",
+        "resolved_path": "goldset\\human_baseline_DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0)_V9.0_R01Lijuan.json",
+        "annotation_count": 33,
+        "doc_check": {
+          "has_fn_section": false,
+          "fn_placeholder": false,
+          "no_fn_section": true
+        },
+        "annotations": [
+          {
+            "index": 1,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "31",
+            "author": "caoyuanyuan",
+            "comment": "拼写错误，应该是Idle",
+            "selected_text": "Ilde",
+            "context": "B\nStatus: Ilde",
+            "expected_rule": "DET-TERM-SPELL-001",
+            "category": "拼写错误",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 2,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "32",
+            "author": "shaolijuan",
+            "comment": "建议删，下面只有icon",
+            "selected_text": "and buttons",
+            "context": "r details, refer to Device mainte\nof icons and buttons in the a\ndently without being connected\nn.",
+            "expected_rule": "STRUCT-COMPONENT-001",
+            "category": "结构完整性",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 3,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "43",
+            "author": "shaolijuan",
+            "comment": "model apply",
+            "selected_text": "model applies",
+            "context": "9 FCL/FCS/FCU/FCX PE150 seque\nquencing.\nhird-party library preparation kit\ntechnical support for conversion\ne App-D model applies to MGI\naries). MGI stLFR and STOmics lib\nmeans Pair-end sequencing; SE m",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 4,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "43",
+            "author": "shaolijuan",
+            "comment": "reagent",
+            "selected_text": "s",
+            "context": "vary with different\ntridges can be stack\nnumber of stacked l\nquencing set can pe\n0 sequencing set ca\nE150 sequencing se",
+            "expected_rule": "STRUCT-TERM-001",
+            "category": "术语一致性",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 5,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "43",
+            "author": "shaolijuan",
+            "comment": "reagent",
+            "selected_text": "s",
+            "context": "g set can perform\nncing set can perfo\nquencing set can pe\nkits are used for A\nsion options.\nMGI and App librarie",
+            "expected_rule": "STRUCT-TERM-001",
+            "category": "术语一致性",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 6,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "43",
+            "author": "shaolijuan",
+            "comment": "reagent",
+            "selected_text": "s",
+            "context": "es can be stacked fo\nber of stacked layer\nncing set can perfor\nquencing set can p\nsequencing set can\ntion kits are used fo",
+            "expected_rule": "STRUCT-TERM-001",
+            "category": "术语一致性",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 7,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "43",
+            "author": "shaolijuan",
+            "comment": "小写",
+            "selected_text": "P",
+            "context": "third-party library\nhe technical suppor\nhe App-D model a\nbraries). MGI stLFR\nE means Pair-end s",
+            "expected_rule": "DET-TERM-SPELL-001",
+            "category": "拼写错误",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 8,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "43",
+            "author": "shaolijuan",
+            "comment": "小写",
+            "selected_text": "S",
+            "context": "kits are used for Ap\non options.\nGI and App libraries\ns libraries are not inc\nE means Single-end",
+            "expected_rule": "DET-TERM-SPELL-001",
+            "category": "拼写错误",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 9,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "62",
+            "author": "caoyuanyuan",
+            "comment": "公司名称错误，应该是Integra",
+            "selected_text": "Intergra",
+            "context": "Eppendorf or equ\nEppendorf or equ\nEppendorf or equ\nIntergra or equiva\nGeneral lab suppl\nThermo Fisher\nBio-Rad or equiva",
+            "expected_rule": "DET-TERM-SPELL-001",
+            "category": "拼写错误",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 10,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "69",
+            "author": "shaolijuan",
+            "comment": "检查下样式，太挤了",
+            "selected_text": "s\nT",
+            "context": "Tips\nThe manu\nactual du\ny\nReagents\nor mucos\nprotective",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 11,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "69",
+            "author": "shaolijuan",
+            "comment": "粗线条",
+            "selected_text": "",
+            "context": "SE100 2.0 8.0 0.5\nPE150 3.0 14.0 0.5\nPE300 4.5 21.0 0.5\nSE100 2.0 8.0 0.5\nPE150 3.0 14.0 0.5\n4.0 16.0 0.5",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 12,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "69",
+            "author": "shaolijuan",
+            "comment": "thawed\r另外，建议将此句另作一步，放在表格后面",
+            "selected_text": "e c",
+            "context": "Remove the Seque\nTips\nDo not ope\nhaw the cartridge\nefrigerator. The a\ntore the cartridge\nTable 2\nW",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 13,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "70",
+            "author": "shaolijuan",
+            "comment": "粗线条",
+            "selected_text": "",
+            "context": "SE100 2.0 8.0 0.5\nPE150 3.0 14.0 0.5\nPE300 4.5 21.0 0.5\nSE100 2.0 8.0 0.5\nPE150 3.0 14.0 0.5",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 14,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "72",
+            "author": "shaolijuan",
+            "comment": "快速指南上还有Non-STR和STR amplicon libraries",
+            "selected_text": "p y µ",
+            "context": "fmol/µL\n≥3.75\nPCR-free libraries\nfmol/µL\n≥3\nThird-party PCR libraries\nfmol/µL\n≥3.75\nThird-party PCR-free libraries\nTips\nThird-party libraries refer to TruSeq or Nextera adapter libraries.\nMaking DNBs",
+            "expected_rule": "STRUCT-COMPONENT-001",
+            "category": "信息完整性",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 15,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "74",
+            "author": "shaolijuan",
+            "comment": "取消交叉引用，改成the table below",
+            "selected_text": "Make DNB reaction mixture 1 on Page 66:",
+            "context": "Making DNBs\nPerform the following steps:\n1.  Take out 0.2 mL PCR tubes. Prepare Make DNB re\nMake DNB reaction mixture 1 on Page 66:\nTable 27  Make DNB reaction m\nComponent Cap colo\nLow TE Buffer",
+            "expected_rule": "DET-MATERIAL-001",
+            "category": "交叉引用",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 16,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "76",
+            "author": "shaolijuan",
+            "comment": "样式有问题，太挤了",
+            "selected_text": "A",
+            "context": "PE150, G99 A\nApp-D FCU S\nSE100 and G\nTips\nApp Make\nlibraries.\nPreparing reag\nPerform the follo",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 17,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "77",
+            "author": "shaolijuan",
+            "comment": "需引用到Table级别",
+            "selected_text": "Make DNB reaction mixture 1 on Page 69.",
+            "context": "V=30 fmol/C\narty PCR libraries\nV=37.5 fmol/C\narty PCR-free libraries\ne the required volume of ssDNA library for each Make D\nt as V in Make DNB reaction mixture 1 on Page 69.\nDNBs\nhe following steps:\nt 0 2 mL PCR tubes Prepare Make DNB reaction mixture 1",
+            "expected_rule": "DET-MATERIAL-001",
+            "category": "交叉引用",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 18,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "78",
+            "author": "shaolijuan",
+            "comment": "取消交叉引用，改成the table below:",
+            "selected_text": "Table 39 on Page 71.",
+            "context": "all of Make DNB reaction mixture 2 in\nreaction mixture thoroughly by using a\ne the tubes into the thermal cycler fo\nshown in Table 39 on Page 71.",
+            "expected_rule": "DET-MATERIAL-001",
+            "category": "交叉引用",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 19,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "79",
+            "author": "shaolijuan",
+            "comment": "样式",
+            "selected_text": "A",
+            "context": "Making DNB\nFCU PE300\nTips\nApp Make\nlibraries.\nPreparing reag\nPerform the follo",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 20,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "80",
+            "author": "shaolijuan",
+            "comment": "需引用到Table级别",
+            "selected_text": "Make DNB reaction mixture 1 on Page 73",
+            "context": "V=30 fmol/C\nparty PCR libraries\nV=37.5 fmol/C\nparty PCR-free libraries\nte the required volume of ssDNA library for each Make\nt as V in Make DNB reaction mixture 1 on Page 73.",
+            "expected_rule": "DET-MATERIAL-001",
+            "category": "交叉引用",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 21,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "82",
+            "author": "shaolijuan",
+            "comment": "多余空格了吗？全文关注",
+            "selected_text": "℃",
+            "context": "5.  Remove the\n4 ℃.\n6.  Centrifuge b\nreaction mixt",
+            "expected_rule": "DET-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 22,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "82",
+            "author": "shaolijuan",
+            "comment": "多余空格？",
+            "selected_text": "℃",
+            "context": "ing temperature. F\nated lid is required\nure during the DNB\nou set the temper\ne to 35 ℃.\nB Reaction Buffer\ng 8 times using a\nDNBs gentl b",
+            "expected_rule": "DET-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 23,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "84",
+            "author": "shaolijuan",
+            "comment": "引用到Table级别",
+            "selected_text": "Make DNB reaction mixture 1 on Page 76 as V",
+            "context": "handled in accordance with relevant national and local regul\ny\nn represents the amount of libraries (ng). C represents the\nof libraries (ng/µL).\nlculate the required volume of ssDNA library for each Make\nd fill it in Make DNB reaction mixture 1 on Page 76 as V.\nng DNBs\nrm the following steps:\nke out 0 2 mL PCR tubes Prepare Make DNB reaction mixture 1",
+            "expected_rule": "DET-MATERIAL-001",
+            "category": "交叉引用",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 24,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "87",
+            "author": "shaolijuan",
+            "comment": "引用到Table级别",
+            "selected_text": "Make DNB reaction mixture 1 on Page 79 as V",
+            "context": "y\nAll samples should be considered potentially infectious a\nhandled in accordance with relevant national and local regul\ny\nC represents the concentration of libraries (fmol/µL).\nculate the required volume of ssDNA library for each Make\nd fill it in Make DNB reaction mixture 1 on Page 79 as V.\nng DNBs\nrm the following steps:\ne out 0 2 mL PCR tubes Prepare Make DNB reaction mixture 1",
+            "expected_rule": "DET-MATERIAL-001",
+            "category": "交叉引用",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 25,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "88",
+            "author": "shaolijuan",
+            "comment": "",
+            "selected_text": "℃",
+            "context": "rating temperature\nheated lid is requir\nrature during the D\nyou set the tempe\ne to 35 ℃.\n6  RCA conditions\nTime\nOn",
+            "expected_rule": "DET-SPACE-001",
+            "category": "单位/空格",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 26,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "90",
+            "author": "shaolijuan",
+            "comment": "样式，太挤",
+            "selected_text": "",
+            "context": "Tips\nIf the con\nabove, re\n160.\nIf the concentrati\nwith\nLow TE Buff",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          },
+          {
+            "index": 27,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "95",
+            "author": "caoyuanyuan",
+            "comment": "拼写错误，Idle",
+            "selected_text": "s: Ilde",
+            "context": "trol software to open\nB\nStatus: Ilde",
+            "expected_rule": "DET-TERM-SPELL-001",
+            "category": "拼写错误",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 28,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "114",
+            "author": "shaolijuan",
+            "comment": "图的颜色不是MGI蓝",
+            "selected_text": "B\nA",
+            "context": "B\nA",
+            "expected_rule": "STRUCT-IMAGE-001",
+            "category": "图片规范",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 29,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "121",
+            "author": "shaolijuan",
+            "comment": "建议删除此步，因为生信软件不同，这个路径下的子路径、文件名称都有所不同。写到上面的第5步，已经能看到报告了",
+            "selected_text": "6.  (Optional) Select in the Result File column to access the analysis result\ndirectory:\n Select Report, and then select the *.html file to view the analysis report.\n\nSelect the *.tar.gz file to download the result compression package to the\ndefault directory.\n\nSelect logs to view the analysis logs.",
+            "context": "6.  (Optional) Select in the Result File column to access the analysis result\ndirectory:\n Select Report, and then select the *.html file to view the analysis report.\n\nSelect the *.tar.gz file to download the result compression package to the\ndefault directory.\n\nSelect logs to view the analysis logs.\nPerforming the post-sequencing operations\nIf Auto Wash is selected when you set sequence parameters, the sequencer",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 30,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "158",
+            "author": "shaolijuan",
+            "comment": "这里不用Reagent样式吧？",
+            "selected_text": "0.1 M NaOH",
+            "context": "g to the table below:\nreagent:\n0.1 M NaOH\nL) Final concent\n0.1 M\nN/A",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 31,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "159",
+            "author": "shaolijuan",
+            "comment": "样式，挤了",
+            "selected_text": "T",
+            "context": "Confirm that Na\nplace the Washi\nselect the cartrid\nTips\nThe RFID\nthe selec\nscanner f",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "表格/版式",
+            "layer": "deterministic",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 32,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "175",
+            "author": "shaolijuan",
+            "comment": "这个建议移到上一页，上一页有点空",
+            "selected_text": "A\nSequencing\nStatus\n1. Check 2. Set 3. Load cartridge 4. Load flow cell 5. Review 6. Sequence\nFinish\nSequencing failed Washing failed\nAuto-sliding screen is moved up\nPlease perform a wash for the sequencer within 12 h.\nxxx, can restart sequencing.\nPlease perform a wash for the sequencer within 12 h.\nCycQ30\nCycQ30 F\n100 Remove cartridge\n90\nCompletion at：\n80 Remove flow cell\nXX/XX/XXXX\n70\nXX:XX:XX XX\n60 Close waste compartment door\n50\nFlow cell ID\nWaste container in place\n40\nXXXXXX\n30\nWaste level check passed\n20\nCartridge ID\n10\nXXXXXX\n0\n0 21 42 63 84 105 126 147 168 189 210 231 252 273 294 315 336\nReturn home\nFigure 103  Selecting Finish Figure 104  Removing Sequencing\nReagent Cartridge and flow cell",
+            "context": "A\nSequencing\nStatus\n1. Check 2. Set 3. Load cartridge 4. Load flow cell 5. Review 6. Sequence\nFinish\nSequencing failed Washing failed\nAuto-sliding screen is moved up\nPlease perform a wash for the sequencer within 12 h.\nxxx, can restart sequencing.\nPlease perform a wash for the sequencer within 12 h.\nCycQ30\nCycQ30 F\n100 Remove cartridge\n90\nCompletion at：\n80 Remove flow cell\nXX/XX/XXXX\n70\nXX:XX:XX XX\n60 Close waste compartment door\n50\nFlow cell ID\nWaste container in place\n40\nXXXXXX\n30\nWaste level check passed\n20\nCartridge ID\n10\nXXXXXX\n0\n0 21 42 63 84 105 126 147 168 189 210 231 252 273 294 315 336\nReturn home\nFigure 103  Selecting Finish Figure 104  Removing Sequencing\nReagent Cartridge and flow cell",
+            "expected_rule": "AI-STYLE-001",
+            "category": "表达与句式",
+            "layer": "ai_assisted",
+            "issues": [],
+            "quality": "ok"
+          },
+          {
+            "index": 33,
+            "file": "H-020-000781-00DNBSEQ-G99RS&DNBSEQ-G99ARSSystemGuide(StandardMPS2.0）_V9.0_R01Lijuan.pdf",
+            "page": "213",
+            "author": "shaolijuan",
+            "comment": "图片不居中",
+            "selected_text": "",
+            "context": ". Select next to\nA",
+            "expected_rule": "STRUCT-LAYOUT-001",
+            "category": "图片规范",
+            "layer": "deterministic",
+            "issues": [
+              "empty_selected_text"
+            ],
+            "quality": "needs_fix"
+          }
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "total_annotations": 88,
+    "total_needs_fix": 33,
+    "issue_counts": {
+      "empty_context": 16,
+      "empty_selected_text": 14,
+      "missing_page": 10,
+      "placeholder_author": 10,
+      "vague_selected_text": 4
+    },
+    "per_document": [
+      {
+        "name": "gospatial_v2_24_en",
+        "enforce": true,
+        "total": 10,
+        "needs_fix": 10,
+        "fn_placeholder": true,
+        "no_fn_section": false
+      },
+      {
+        "name": "e25rs_cn",
+        "enforce": true,
+        "total": 9,
+        "needs_fix": 9,
+        "fn_placeholder": false,
+        "no_fn_section": true
+      },
+      {
+        "name": "e25rs_en",
+        "enforce": true,
+        "total": 17,
+        "needs_fix": 0,
+        "fn_placeholder": false,
+        "no_fn_section": true
+      },
+      {
+        "name": "e25rs_v8_cn_observed",
+        "enforce": false,
+        "total": 9,
+        "needs_fix": 5,
+        "fn_placeholder": false,
+        "no_fn_section": true
+      },
+      {
+        "name": "e25rs_v8_en_observed",
+        "enforce": false,
+        "total": 10,
+        "needs_fix": 5,
+        "fn_placeholder": false,
+        "no_fn_section": true
+      },
+      {
+        "name": "g99_v9_observed",
+        "enforce": false,
+        "total": 33,
+        "needs_fix": 4,
+        "fn_placeholder": false,
+        "no_fn_section": true
+      }
+    ]
+  }
+}
