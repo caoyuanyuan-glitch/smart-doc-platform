@@ -532,3 +532,8 @@ export const polishStatsAPI = {
   getDocumentSessions: (params = {}) => instance.get('/polish-lab/stats/document/sessions', { params }),
   getDocumentDetail: (analyzeId) => instance.get(`/polish-lab/stats/document/${analyzeId}`)
 }
+
+export const agentAPI = {
+  chat: (message, history = null) => instance.post('/agent/chat', { message, history }),
+  capabilities: () => instance.get('/agent/capabilities')
+}

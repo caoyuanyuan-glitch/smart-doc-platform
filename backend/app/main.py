@@ -3,7 +3,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, polish_lab, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor, supplement_feedback
+from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, polish_lab, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor, supplement_feedback, agent
 from app.database import create_tables
 import threading
 import os
@@ -79,6 +79,7 @@ app.include_router(spell_check.router, prefix="/api/spell-check", tags=["拼写�
 app.include_router(whitelist.router, prefix="/api/whitelist", tags=["白名单管理"])
 app.include_router(polish_rules.router, tags=["润色规则管理"])
 app.include_router(system.router, prefix="/api/system", tags=["系统状态"])
+app.include_router(agent.router, prefix="/api/agent", tags=["悬浮Agent"])
 
 @app.on_event("startup")
 async def startup_event():
