@@ -13880,6 +13880,23 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     print(f"[审核] 注入已启用学习规则 {len(learned_sections)} 条")
             except Exception as e:
                 print(f"[审核] 学习规则加载失败(非致命): {e}")
+            # 能力2（opt-in）：全文术语写法索引注入，给分块 AI 补上跨块一致性上下文。
+            # 不额外调用模型；只是候选索引，是否报由主审核链裁定。
+            try:
+                from app.review_engine.accuracy_upgrades import build_fulltext_consistency_basis
+                consistency_basis = build_fulltext_consistency_basis(content)
+                if consistency_basis:
+                    ai_review_basis_sections.append({
+                        "label": "全文术语一致性索引",
+                        "text": consistency_basis,
+                        "priority": 5,
+                        "language": "both",
+                        "basis_type": "fulltext_consistency",
+                        "tags": ["consistency", "term", "cross_chunk"],
+                    })
+                    print(f"[审核] 注入全文术语一致性索引（开关 REVIEW_FULLTEXT_CONSISTENCY_PASS）")
+            except Exception as e:
+                print(f"[审核] 全文一致性索引生成失败(非致命): {e}")
             if snippet_review:
                 ai_review_basis_sections = [
                     section for section in ai_review_basis_sections
@@ -14034,6 +14051,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             for issue in issues:
                 if not issue.get('visual_verification'):
                     issue['visual_verification'] = build_visual_verification(status='not_required')
+            # 能力1（opt-in）：全页几何疑点提示，覆盖 6+6 页视觉复核之外的页。
+            # C3 合规：只产 needs_human_review / confidence<85，不烧视觉模型 key。
+            from app.review_engine.accuracy_upgrades import geometry_hint_issues
+            covered_pages = {int(issue.get('page_number') or 0) for issue in issues}
+            hints = geometry_hint_issues(visual_pages, existing_pages=covered_pages)
+            if hints:
+                print(f"[审核] 全页几何提示: 新增 {len(hints)} 条待人工复核（开关 REVIEW_FULLPAGE_GEOMETRY_HINTS）")
+                issues.extend(hints)
+                pdf_visual_verification = dict(pdf_visual_verification or {})
+                pdf_visual_verification['geometry_hint_count'] = len(hints)
         visual_dropped = _stage_input_counts.get("pdf_visual_verification", len(issues)) - len(issues)
         _end_stage("pdf_visual_verification", output_count=len(issues), dropped_count=visual_dropped)
 
