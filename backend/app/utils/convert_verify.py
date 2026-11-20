@@ -78,7 +78,7 @@ def verify_output_dir(output_base, target_format="dita"):
     if target_format == "markdown":
         md_files = [path for path in existing if path.lower().endswith(".md")]
         status = "passed" if md_files else "failed"
-        overall = "passed" if md_files else "warning"
+        overall = "passed" if md_files else "failed"
         return overall, [
             {
                 "name": "结构完整性",
@@ -162,8 +162,15 @@ def verify_output_dir(output_base, target_format="dita"):
         {"name": "空正文", "status": body_status, "detail": body_detail},
     ]
 
+    # 分级规则：结构损坏（XML 无法解析 / 无产物 / 结构检查 failed）→ failed（阻断性）；
+    # href 断链 / 图片缺失 / 空 body → warning（产物可打开，人工复核）。
+    # 修复点：此前所有 failed/warning 一律 overall=warning，XML 解析失败也被放行。
     overall = "passed"
-    if any(item["status"] == "failed" for item in checks) or any(item["status"] == "warning" for item in checks):
+    if checks[0]["status"] == "failed" or any(
+        item["status"] == "failed" for item in checks if item["name"] == "结构完整性"
+    ):
+        overall = "failed"
+    elif any(item["status"] != "passed" for item in checks):
         overall = "warning"
     if dita_count == 0 and map_count == 0:
         overall = "failed"

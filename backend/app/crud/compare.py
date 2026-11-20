@@ -3,6 +3,7 @@ from app.models.compare_task import CompareTask
 from app.models.compare_diff import CompareDiff
 from app.schemas.compare import CompareTaskCreate
 import json
+from datetime import datetime
 
 def create_compare_task(db: Session, file_a_name: str, file_b_name: str, user_id: int, group_id: int = None, file_names: str = None):
     db_task = CompareTask(
@@ -81,3 +82,39 @@ def get_compare_diffs(db: Session, task_id: int):
 
 def get_compare_tasks_by_group(db: Session, group_id: int):
     return db.query(CompareTask).filter(CompareTask.group_id == group_id).order_by(CompareTask.id).all()
+
+
+def get_compare_config(db: Session):
+    """获取全局对比配置（单行）。无记录时创建默认行。"""
+    from app.models.compare_config import CompareConfig
+    config = db.query(CompareConfig).first()
+    if not config:
+        config = CompareConfig()
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+    return config
+
+
+def update_compare_config(db: Session, threshold=None, alpha=None, beta=None, tolerance=None, whitelist=None):
+    """更新对比配置，仅覆盖显式传入的字段。"""
+    from app.models.compare_config import CompareConfig
+    import json as _json
+    config = db.query(CompareConfig).first()
+    if not config:
+        config = CompareConfig()
+        db.add(config)
+    if threshold is not None:
+        config.threshold = float(threshold)
+    if alpha is not None:
+        config.alpha = float(alpha)
+    if beta is not None:
+        config.beta = float(beta)
+    if tolerance is not None:
+        config.tolerance = float(tolerance)
+    if whitelist is not None:
+        config.whitelist = _json.dumps(whitelist, ensure_ascii=False) if not isinstance(whitelist, str) else whitelist
+    config.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(config)
+    return config

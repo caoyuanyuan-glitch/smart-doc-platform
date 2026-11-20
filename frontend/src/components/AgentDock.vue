@@ -117,7 +117,7 @@
             :rows="2"
             resize="none"
             placeholder="例如：帮我润色这段话 / 审核文档"
-            @keydown.enter.exact.prevent="send"
+            @keydown.enter.exact.prevent="onEnterKey"
             :disabled="sending"
           />
           <div class="agent-footer-bar">
@@ -147,15 +147,18 @@ import { useRouter } from 'vue-router'
 import { agentAPI, documentAPI, reviewAPI, compareAPI, convertAPI, getAPIErrorMessage } from '@/api'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, Delete } from '@element-plus/icons-vue'
+import { useUserStore } from '@/store/user'
 
 const router = useRouter()
+const userStore = useUserStore()
 const open = ref(false)
 const input = ref('')
 const sending = ref(false)
 const messages = ref([])
 const bodyRef = ref(null)
 const quickPrompts = ['帮我润色一段文本', '生成一篇使用说明书', '审核这份文档', '对比两个版本']
-const isAuthenticated = computed(() => !!localStorage.getItem('token'))
+// 用响应式登录态（登录/退出即时生效），不再读非响应式 localStorage
+const isAuthenticated = computed(() => userStore.isLoggedIn)
 
 const uploadInputs = ref({})
 const pollTimers = ref({})
@@ -199,6 +202,8 @@ function scrollToBottom() {
 }
 
 function clearMessages() {
+  // 先停掉所有在途轮询，避免清空后定时器仍持续请求并写入已脱离渲染的消息
+  Object.keys(pollTimers.value).forEach(stopPolling)
   messages.value = []
 }
 
@@ -255,6 +260,12 @@ async function sendText(text) {
 
 function send() {
   sendText(input.value)
+}
+
+function onEnterKey(e) {
+  // 中文/日文输入法选词回车（isComposing）不应触发发送
+  if (e && (e.isComposing || e.keyCode === 229)) return
+  send()
 }
 
 function goTo(action) {
@@ -505,7 +516,8 @@ function retryTask(idx, msg) {
 </script>
 
 <style scoped>
-.agent-dock { position: fixed; right: 24px; bottom: 24px; z-index: 3000; }
+/* z-index 低于 Element Plus 弹层（~2000+），避免盖住对话框；小屏自适应宽度 */
+.agent-dock { position: fixed; right: 24px; bottom: 24px; z-index: 1500; max-width: calc(100vw - 32px); }
 .agent-fab {
   width: 56px; height: 56px; border-radius: 50%; border: none; cursor: pointer;
   background: #409eff; color: #fff; display: flex; align-items: center; justify-content: center;
@@ -514,7 +526,7 @@ function retryTask(idx, msg) {
 .agent-fab:hover { transform: translateY(-2px); background: #337ecc; }
 .agent-fab.active { background: #5a5a5a; box-shadow: 0 4px 14px rgba(0, 0, 0, .2); }
 .agent-panel {
-  width: 360px; height: 540px; max-height: calc(100vh - 120px); margin-bottom: 12px; margin-left: auto;
+  width: 360px; height: 540px; max-width: 100%; max-height: calc(100vh - 120px); margin-bottom: 12px; margin-left: auto;
   background: #fff; border: 1px solid #e4e7ed; border-radius: 14px; overflow: hidden;
   box-shadow: 0 10px 40px rgba(0, 0, 0, .16); display: flex; flex-direction: column;
 }

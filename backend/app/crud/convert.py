@@ -81,7 +81,8 @@ def update_convert_task_failed(db: Session, task_id: str, error_message: str):
 
 
 def update_convert_task_revised(db: Session, task_id: str, output_zip_path: str, output_size: int,
-                                 retry_feedback: str, retry_screenshot_path: str = None):
+                                 retry_feedback: str, retry_screenshot_path: str = None,
+                                 verification_report: str = None):
     task = get_convert_task(db, task_id)
     if task:
         task.status = "completed"
@@ -92,6 +93,8 @@ def update_convert_task_revised(db: Session, task_id: str, output_zip_path: str,
         task.retry_feedback = retry_feedback
         if retry_screenshot_path:
             task.retry_screenshot_path = retry_screenshot_path
+        if verification_report is not None:
+            task.verification_report = verification_report
         task.error_message = None
         db.commit()
         db.refresh(task)
