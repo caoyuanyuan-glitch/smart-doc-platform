@@ -1967,6 +1967,24 @@ def _should_drop_known_false_positive_issue(issue):
         return True
     if _is_noop_ai_suggestion_issue(issue):
         return True
+    # 已裁定误报（多次实测复现，人工逐项裁定不算问题）：
+    # 警示模板句 / UI 图标提取伪影 / 表头拼接 / 单位+中文连接 / UI 图注语法。
+    # 只删这类精确匹配项，不碰真实问题；AI 黏连伪影需 content，走证据过滤。
+    try:
+        from app.review_engine.ruled_false_positives import (
+            is_ruled_icon_artifact,
+            is_ruled_learned_patch_overfit,
+            is_ruled_table_header_concat,
+            is_ruled_ui_label_grammar,
+            is_ruled_unit_zh_connect,
+            is_ruled_warning_template,
+        )
+        if (is_ruled_warning_template(issue) or is_ruled_icon_artifact(issue)
+                or is_ruled_table_header_concat(issue) or is_ruled_unit_zh_connect(issue)
+                or is_ruled_ui_label_grammar(issue) or is_ruled_learned_patch_overfit(issue)):
+            return True
+    except ImportError:
+        pass
     return False
 
 
@@ -3051,6 +3069,15 @@ def _filter_ai_evidence_keep_diagnostic(issues, content):
         if str(_issue_value(issue, "source", "") or "").lower() != "ai":
             filtered.append(issue)
             continue
+        # AI 黏连词伪影（如 nonTips = non- + Tips，文档中从未出现）：
+        # 这类字符串是模型输出时把相邻词截断黏连产生，不能当原文报。
+        try:
+            from app.review_engine.ruled_false_positives import is_ruled_ai_glued_word
+            if is_ruled_ai_glued_word(issue, content):
+                dropped_by_reason["ai_glued_word_artifact"] = dropped_by_reason.get("ai_glued_word_artifact", 0) + 1
+                continue
+        except ImportError:
+            pass
         result = engine_validate_ai_issue_candidate(issue, content)
         if result.accepted:
             filtered.append(issue)
@@ -13268,7 +13295,7 @@ def dedupe_issues_by_original(issues):
     return list(seen)
 
 
-def _run_reference_and_term_consistency_audit(db: Session, content):
+def _run_reference_and_term_consistency_audit(db: Session, content, doc_id: str = ""):
     issues = []
 
     try:
@@ -13319,7 +13346,9 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         print(f"[审核] 中文错别字规则执行失败: {e}")
 
     try:
-        issues.extend(check_learned_patches(content))
+        # 传入 doc_id：学到的替换对绑定来源文档，跨文档套用会把一篇的
+        # 用词习惯当另一篇的错误（power supply→mains supply、Close→cover）。
+        issues.extend(check_learned_patches(content, doc_id=doc_id))
     except Exception as e:
         print(f"[审核] 学到的替换对一致性规则执行失败: {e}")
 
@@ -13733,7 +13762,9 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                             print(f"[审核] PDF结构规则执行失败: {e}")
 
                     try:
-                        supplemental_issues = _run_reference_and_term_consistency_audit(db, content)
+                        supplemental_issues = _run_reference_and_term_consistency_audit(
+                            db, content, doc_id=str(getattr(document, "filename", "") or "")
+                        )
                         print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
                         rule_issues.extend(supplemental_issues)
                     except Exception as e:
@@ -14101,6 +14132,20 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         _ensure_review_not_cancelled(review_id)
         for issue in issues:
+            # 已裁定误报在持久化前最后一道关口统一丢弃：覆盖所有来源
+            # （规则/学习补丁/页码/AI），避免各生成路径绕过展示层过滤。
+            # 注意：这里只调 ruled_false_positives 的 6 类精确判定，
+            # 不可复用 _should_drop_known_false_positive_issue 整体——
+            # 那个函数是展示层宽过滤器（含"AI 缺 audit_basis 即丢"等宽规则），
+            # 放到持久化关口会误删 pipeline 特意保留的问题（实测 25→5）。
+            try:
+                from app.review_engine.ruled_false_positives import should_drop_ruled_fp
+                if should_drop_ruled_fp(issue, content):
+                    print(f"[审核] 已裁定误报丢弃: {issue.get('rule') or issue.get('category', '')} | "
+                          f"{str(issue.get('original_text') or '')[:40]!r}")
+                    continue
+            except ImportError:
+                pass
             issue = canonicalize_issue_rule(issue)
             persisted_position = _decode_issue_position(issue.get("position", ""))
             persisted_position.update({
