@@ -24,18 +24,15 @@ _GENERIC_ONE = {
 }
 
 
-def _encode_position(start: int, end: int, **meta) -> str:
-    payload = {"start": start, "end": end, "area": meta.pop("area", "正文")}
-    payload.update({key: value for key, value in meta.items() if value not in (None, "", [], {})})
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _page_at(text: str, offset: int) -> int:
-    return text[: max(0, offset)].count("\f") + 1
+from app.review_engine.issue_position_utils import (
+    encode_position as _encode_position,
+    page_at as _page_at,
+    build_context as _build_context,
+)
 
 
 def _context(text: str, start: int, end: int, radius: int = 70) -> str:
-    return re.sub(r"\s+", " ", text[max(0, start - radius):min(len(text), end + radius)]).strip()
+    return _build_context(text, start, end, radius)
 
 
 def looks_like_variant(anchor: str, replacement: str) -> bool:
@@ -99,13 +96,24 @@ def load_learned_patches() -> tuple[dict, ...]:
     return tuple(items)
 
 
-def check_learned_patches(text: str, *, parsed: bool = True) -> list[dict]:
+def check_learned_patches(text: str, *, parsed: bool = True, doc_id: str = "") -> list[dict]:
     source = str(text or "")
     if not parsed or not source.strip():
         return []
 
+    patches = load_learned_patches()
+    # 学到的替换对绑定来源文档（item["doc"]）；跨文档套用会把一篇的用词习惯
+    # 当另一篇的错误（如 power supply→mains supply、Close→cover），属过拟合误报。
+    # 传入 doc_id 且确实能对上至少一个来源文档时，只应用同源补丁；
+    # 若 doc_id 与任何来源文档都对不上（文件名里没有文档号），不能因此把
+    # 学习补丁整体静默掉，退回原行为（全部应用），避免过滤变成功能消失。
+    if doc_id:
+        same_source = [item for item in patches if str(item.get("doc") or "") and str(item["doc"]) in doc_id]
+        if same_source:
+            patches = tuple(same_source)
+
     issues = []
-    for item in load_learned_patches():
+    for item in patches:
         if len(issues) >= _MAX_REPORTS:
             break
         anchor = item["anchor"]

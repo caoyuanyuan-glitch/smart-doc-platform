@@ -39,18 +39,15 @@ _NUM_UNIT_NOSPACE_RE = re.compile(
 )
 
 
-def _encode_position(start: int, end: int, **meta) -> str:
-    payload = {"start": start, "end": end, "area": meta.pop("area", "正文")}
-    payload.update({key: value for key, value in meta.items() if value not in (None, "", [], {})})
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _page_at(text: str, offset: int) -> int:
-    return text[: max(0, offset)].count("\f") + 1
+from app.review_engine.issue_position_utils import (
+    encode_position as _encode_position,
+    page_at as _page_at,
+    build_context as _build_context,
+)
 
 
 def _context(text: str, start: int, end: int, radius: int = 60) -> str:
-    return re.sub(r"\s+", " ", text[max(0, start - radius):min(len(text), end + radius)]).strip()
+    return _build_context(text, start, end, radius)
 
 
 def _issue(rule, text, start, end, original, description, suggestion, *, chapter=""):

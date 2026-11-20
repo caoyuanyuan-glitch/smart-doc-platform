@@ -1967,6 +1967,24 @@ def _should_drop_known_false_positive_issue(issue):
         return True
     if _is_noop_ai_suggestion_issue(issue):
         return True
+    # 已裁定误报（多次实测复现，人工逐项裁定不算问题）：
+    # 警示模板句 / UI 图标提取伪影 / 表头拼接 / 单位+中文连接 / UI 图注语法。
+    # 只删这类精确匹配项，不碰真实问题；AI 黏连伪影需 content，走证据过滤。
+    try:
+        from app.review_engine.ruled_false_positives import (
+            is_ruled_icon_artifact,
+            is_ruled_learned_patch_overfit,
+            is_ruled_table_header_concat,
+            is_ruled_ui_label_grammar,
+            is_ruled_unit_zh_connect,
+            is_ruled_warning_template,
+        )
+        if (is_ruled_warning_template(issue) or is_ruled_icon_artifact(issue)
+                or is_ruled_table_header_concat(issue) or is_ruled_unit_zh_connect(issue)
+                or is_ruled_ui_label_grammar(issue) or is_ruled_learned_patch_overfit(issue)):
+            return True
+    except ImportError:
+        pass
     return False
 
 
@@ -3051,6 +3069,15 @@ def _filter_ai_evidence_keep_diagnostic(issues, content):
         if str(_issue_value(issue, "source", "") or "").lower() != "ai":
             filtered.append(issue)
             continue
+        # AI 黏连词伪影（如 nonTips = non- + Tips，文档中从未出现）：
+        # 这类字符串是模型输出时把相邻词截断黏连产生，不能当原文报。
+        try:
+            from app.review_engine.ruled_false_positives import is_ruled_ai_glued_word
+            if is_ruled_ai_glued_word(issue, content):
+                dropped_by_reason["ai_glued_word_artifact"] = dropped_by_reason.get("ai_glued_word_artifact", 0) + 1
+                continue
+        except ImportError:
+            pass
         result = engine_validate_ai_issue_candidate(issue, content)
         if result.accepted:
             filtered.append(issue)
@@ -13268,7 +13295,7 @@ def dedupe_issues_by_original(issues):
     return list(seen)
 
 
-def _run_reference_and_term_consistency_audit(db: Session, content):
+def _run_reference_and_term_consistency_audit(db: Session, content, doc_id: str = ""):
     issues = []
 
     try:
@@ -13319,7 +13346,9 @@ def _run_reference_and_term_consistency_audit(db: Session, content):
         print(f"[审核] 中文错别字规则执行失败: {e}")
 
     try:
-        issues.extend(check_learned_patches(content))
+        # 传入 doc_id：学到的替换对绑定来源文档，跨文档套用会把一篇的
+        # 用词习惯当另一篇的错误（power supply→mains supply、Close→cover）。
+        issues.extend(check_learned_patches(content, doc_id=doc_id))
     except Exception as e:
         print(f"[审核] 学到的替换对一致性规则执行失败: {e}")
 
@@ -13733,7 +13762,9 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                             print(f"[审核] PDF结构规则执行失败: {e}")
 
                     try:
-                        supplemental_issues = _run_reference_and_term_consistency_audit(db, content)
+                        supplemental_issues = _run_reference_and_term_consistency_audit(
+                            db, content, doc_id=str(getattr(document, "filename", "") or "")
+                        )
                         print(f"[审核] 引用/术语规则发现问题: {len(supplemental_issues)}个")
                         rule_issues.extend(supplemental_issues)
                     except Exception as e:
@@ -13880,6 +13911,23 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     print(f"[审核] 注入已启用学习规则 {len(learned_sections)} 条")
             except Exception as e:
                 print(f"[审核] 学习规则加载失败(非致命): {e}")
+            # 能力2（opt-in）：全文术语写法索引注入，给分块 AI 补上跨块一致性上下文。
+            # 不额外调用模型；只是候选索引，是否报由主审核链裁定。
+            try:
+                from app.review_engine.accuracy_upgrades import build_fulltext_consistency_basis
+                consistency_basis = build_fulltext_consistency_basis(content)
+                if consistency_basis:
+                    ai_review_basis_sections.append({
+                        "label": "全文术语一致性索引",
+                        "text": consistency_basis,
+                        "priority": 5,
+                        "language": "both",
+                        "basis_type": "fulltext_consistency",
+                        "tags": ["consistency", "term", "cross_chunk"],
+                    })
+                    print(f"[审核] 注入全文术语一致性索引（开关 REVIEW_FULLTEXT_CONSISTENCY_PASS）")
+            except Exception as e:
+                print(f"[审核] 全文一致性索引生成失败(非致命): {e}")
             if snippet_review:
                 ai_review_basis_sections = [
                     section for section in ai_review_basis_sections
@@ -14034,6 +14082,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             for issue in issues:
                 if not issue.get('visual_verification'):
                     issue['visual_verification'] = build_visual_verification(status='not_required')
+            # 能力1（opt-in）：全页几何疑点提示，覆盖 6+6 页视觉复核之外的页。
+            # C3 合规：只产 needs_human_review / confidence<85，不烧视觉模型 key。
+            from app.review_engine.accuracy_upgrades import geometry_hint_issues
+            covered_pages = {int(issue.get('page_number') or 0) for issue in issues}
+            hints = geometry_hint_issues(visual_pages, existing_pages=covered_pages)
+            if hints:
+                print(f"[审核] 全页几何提示: 新增 {len(hints)} 条待人工复核（开关 REVIEW_FULLPAGE_GEOMETRY_HINTS）")
+                issues.extend(hints)
+                pdf_visual_verification = dict(pdf_visual_verification or {})
+                pdf_visual_verification['geometry_hint_count'] = len(hints)
         visual_dropped = _stage_input_counts.get("pdf_visual_verification", len(issues)) - len(issues)
         _end_stage("pdf_visual_verification", output_count=len(issues), dropped_count=visual_dropped)
 
@@ -14074,6 +14132,20 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
 
         _ensure_review_not_cancelled(review_id)
         for issue in issues:
+            # 已裁定误报在持久化前最后一道关口统一丢弃：覆盖所有来源
+            # （规则/学习补丁/页码/AI），避免各生成路径绕过展示层过滤。
+            # 注意：这里只调 ruled_false_positives 的 6 类精确判定，
+            # 不可复用 _should_drop_known_false_positive_issue 整体——
+            # 那个函数是展示层宽过滤器（含"AI 缺 audit_basis 即丢"等宽规则），
+            # 放到持久化关口会误删 pipeline 特意保留的问题（实测 25→5）。
+            try:
+                from app.review_engine.ruled_false_positives import should_drop_ruled_fp
+                if should_drop_ruled_fp(issue, content):
+                    print(f"[审核] 已裁定误报丢弃: {issue.get('rule') or issue.get('category', '')} | "
+                          f"{str(issue.get('original_text') or '')[:40]!r}")
+                    continue
+            except ImportError:
+                pass
             issue = canonicalize_issue_rule(issue)
             persisted_position = _decode_issue_position(issue.get("position", ""))
             persisted_position.update({
