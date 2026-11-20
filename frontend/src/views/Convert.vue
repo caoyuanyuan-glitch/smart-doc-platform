@@ -88,7 +88,7 @@
             </div>
             <el-button @click="resetConvert">
               <el-icon><Refresh /></el-icon>
-              {{ sourceFile ? '用当前文件再转一次' : '重新转换' }}
+              {{ sourceFiles.length ? '用当前文件再转一次' : '重新转换' }}
             </el-button>
             <el-button @click="changeSource">更换文件</el-button>
           </div>
@@ -138,18 +138,21 @@
         <el-form label-width="130px" style="max-width: 800px;">
           <el-form-item label="源文件">
             <div class="upload-area" @click="triggerSourceUpload" @dragover.prevent @drop.prevent="onSourceDrop">
-              <input ref="sourceInput" type="file" accept=".md,.markdown,.csv,.docx,.doc,.zip,.idml" style="display:none"
+              <input ref="sourceInput" type="file" multiple accept=".md,.markdown,.csv,.docx,.doc,.zip,.idml,.svg,.png,.jpg,.jpeg,.gif,.bmp,.webp" style="display:none"
                 @change="onSourceChange" />
-              <el-icon class="upload-icon"><Upload /></el-icon>
-              <p v-if="!sourceFile">拖拽或点击上传 (.md / .csv / .docx / .doc / .idml / 含 IDML 与 Links 的 .zip, &le; 50MB)</p>
-              <div v-else class="file-info">
-                <el-icon><Document /></el-icon>
-                <span>{{ sourceFile.name }}</span>
-                <span class="file-size">({{ formatSize(sourceFile.size) }})</span>
-                <el-button size="small" type="danger" link @click.stop="clearTaskState(); sourceFile = null">移除</el-button>
+              <el-icon v-if="!sourceFiles.length" class="upload-icon"><Upload /></el-icon>
+              <p v-if="!sourceFiles.length">拖拽或点击上传，可多选。IDML 转 DITA 可同时选 .idml 和 SVG/Links 的 .zip（每个 &le; 50MB）</p>
+              <div v-else class="source-file-list" @click.stop>
+                <div v-for="file in sourceFiles" :key="file.name + file.size" class="file-info">
+                  <el-icon><Document /></el-icon>
+                  <span>{{ file.name }}</span>
+                  <span class="file-size">({{ formatSize(file.size) }})</span>
+                  <el-button size="small" type="danger" link @click.stop="removeSourceFile(file)">移除</el-button>
+                </div>
+                <el-button size="small" type="primary" link @click.stop="triggerSourceUpload">继续添加</el-button>
               </div>
             </div>
-            <div v-if="isIdmlSource" class="form-tip">带图请将 .idml 与 Links 打成同一个 zip 上传；独立 .idml 不含图。</div>
+            <div v-if="isIdmlSource" class="form-tip">IDML 带图可同时上传 .idml 和 SVG zip，也可继续上传含 Links 的同一个 zip。</div>
           </el-form-item>
 
           <el-form-item label="目标格式">
@@ -273,12 +276,36 @@ const route = useRoute()
 const currentView = computed(() => (route.path === '/convert/history' ? 'history' : 'convert'))
 
 const sourceInput = ref(null)
-const sourceFile = ref(null)
+const sourceFiles = ref([])
 const templateInput = ref(null)
 const templateFile = ref(null)
 const targetFormat = ref('dita')
 const outputLanguage = ref('')
 const convertError = ref('')
+
+function fileExtOf(file) {
+  const name = file?.name || ''
+  const match = name.toLowerCase().match(/(\.[^.]+)$/)
+  return match ? match[1] : ''
+}
+
+function pickPrimarySource(files) {
+  if (!files.length) return null
+  const byExt = (exts) => files.find(f => exts.includes(fileExtOf(f)))
+  return byExt(['.idml'])
+    || byExt(['.md', '.markdown', '.docx', '.doc', '.csv'])
+    || byExt(['.zip'])
+    || files[0]
+}
+
+const sourceFile = computed(() => pickPrimarySource(sourceFiles.value))
+const extraSourceFiles = computed(() => {
+  const primary = sourceFile.value
+  if (!primary) return []
+  const ext = fileExtOf(primary)
+  if (ext !== '.idml' && ext !== '.zip') return []
+  return sourceFiles.value.filter(f => f !== primary)
+})
 
 const outputLanguageOptions = [
   { value: 'en-US', label: 'English (en-US)' },
@@ -322,7 +349,7 @@ const convertRuleItems = computed(() => {
       '封面 sCoverTopic，章级 chapterTopic，其余 sDitaTopic + DTO。',
       '参考包只复用 Cover 和 booklists/toc。',
       '列表项、单元格、正文和 Note 句段包 p。',
-      'Word、IDML、Markdown 均可转 DITA；IDML 带图请上传含 Links 的 zip。',
+      'Word、IDML、Markdown 均可转 DITA；IDML 带图可同时上传 .idml 和 SVG zip。',
     ]
   }
   if (isMarkdownSource.value) {
@@ -341,7 +368,7 @@ const convertRuleItems = computed(() => {
       '交叉引用输出空 xref，页码由 IME 生成；斜体样式转 i。',
       '表格列宽按 IDML 占比输出；提示框表格转 note。',
       '列表项、单元格、正文和 Note 句段包 p。',
-      '带图请上传含 .idml 与 Links 的 zip。',
+      '带图可同时上传 .idml 和 SVG/Links zip。',
     ]
   }
   return [
@@ -450,24 +477,35 @@ function clearTaskState() {
   packageReady.value = false
 }
 
-function setSourceFile(file) {
-  if (!file) return
-  if (file.size > 50 * 1024 * 1024) {
-    ElMessage.warning('文件大小不能超过 50MB')
-    return
-  }
+function addSourceFiles(fileList) {
+  const incoming = Array.from(fileList || [])
+  if (!incoming.length) return
+  let added = 0
+  incoming.forEach((file) => {
+    if (file.size > 50 * 1024 * 1024) {
+      ElMessage.warning(`${file.name} 超过 50MB，已跳过`)
+      return
+    }
+    const idx = sourceFiles.value.findIndex(existing => existing.name === file.name)
+    if (idx >= 0) sourceFiles.value.splice(idx, 1, file)
+    else sourceFiles.value.push(file)
+    added += 1
+  })
+  if (added) clearTaskState()
+}
+
+function removeSourceFile(file) {
+  sourceFiles.value = sourceFiles.value.filter(item => item !== file)
   clearTaskState()
-  sourceFile.value = file
 }
 
 function onSourceChange(e) {
-  const f = e.target.files[0]
-  setSourceFile(f)
+  addSourceFiles(e.target.files)
+  e.target.value = ''
 }
 
 function onSourceDrop(e) {
-  const f = e.dataTransfer.files[0]
-  setSourceFile(f)
+  addSourceFiles(e.dataTransfer.files)
 }
 
 function onTemplateChange(e) {
@@ -503,7 +541,10 @@ async function startConvert() {
       targetFormat.value,
       getTemplatePayload(),
       null,
-      getOutputLanguagePayload()
+      getOutputLanguagePayload(),
+      null,
+      null,
+      extraSourceFiles.value
     )
     taskId.value = resp.data.task_id
     ElMessage.success('转换任务已提交')
@@ -637,7 +678,7 @@ function changeSource() {
   converting.value = false
   taskResult.value = null
   taskProgress.value = 0
-  sourceFile.value = null
+  sourceFiles.value = []
   convertFeedback.value = ''
   convertScreenshot.value = null
   report.value = null
@@ -854,6 +895,14 @@ onBeforeUnmount(() => stopPolling())
   border-radius: 4px;
   background: #eef2ff;
   color: #3730a3;
+}
+
+.source-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  text-align: left;
 }
 
 .file-info {

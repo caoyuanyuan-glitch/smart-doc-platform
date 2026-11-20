@@ -14472,6 +14472,10 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
             day = review.created_at.date()
             completed_ids_by_date.setdefault(day, []).append(review.id)
             issues_by_date[day] += issues_by_review.get(review.id, 0)
+    issues_by_submit_date = Counter()
+    for review in reviews:
+        if review.created_at:
+            issues_by_submit_date[review.created_at.date()] += issues_by_review.get(review.id, 0)
 
     issue_distribution = []
     rule_lookup = {rule.rule_no: rule.description for rule in get_rules(db, limit=10000) if rule.rule_no and rule.description}
@@ -14479,6 +14483,54 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
     for category, count in category_counts.most_common():
         issue_distribution.append({
             'type': category,
+            'count': count,
+            'percentage': _dashboard_pct(count, len(issues)),
+        })
+
+    source_labels = {
+        'rule': '规则',
+        'ai': 'AI',
+        'spellcheck': '拼写',
+        'term': '术语',
+        'grammar': '语法',
+        'manual': '人工',
+        'excel': 'Excel',
+        'visual': '视觉',
+    }
+    source_counts = Counter((str(getattr(issue, 'source', '') or '').strip().lower() or 'unset') for issue in issues)
+    source_distribution = []
+    for key, count in source_counts.most_common():
+        source_distribution.append({
+            'type': source_labels.get(key, '未标注' if key == 'unset' else key),
+            'key': key,
+            'count': count,
+            'percentage': _dashboard_pct(count, len(issues)),
+        })
+
+    severity_labels = {
+        'fatal': '致命',
+        'serious': '严重',
+        'general': '一般',
+        'suggestion': '建议',
+    }
+    severity_counts = Counter((str(getattr(issue, 'severity', '') or '').strip().lower() or 'unset') for issue in issues)
+    severity_distribution = []
+    for key in ('fatal', 'serious', 'general', 'suggestion'):
+        count = severity_counts.get(key, 0)
+        if not count:
+            continue
+        severity_distribution.append({
+            'type': severity_labels[key],
+            'key': key,
+            'count': count,
+            'percentage': _dashboard_pct(count, len(issues)),
+        })
+    for key, count in severity_counts.most_common():
+        if key in severity_labels:
+            continue
+        severity_distribution.append({
+            'type': '未分级' if key == 'unset' else key,
+            'key': key,
             'count': count,
             'percentage': _dashboard_pct(count, len(issues)),
         })
@@ -14531,8 +14583,11 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
             'submitted': [submitted_by_date.get(day, 0) for day in dates],
             'completed': [completed_by_date.get(day, 0) for day in dates],
             'avg_issues': [round(issues_by_date.get(day, 0) / len(completed_ids_by_date.get(day, [])), 2) if completed_ids_by_date.get(day) else 0 for day in dates],
+            'issues': [issues_by_submit_date.get(day, 0) for day in dates],
         },
         'issue_distribution': issue_distribution,
+        'source_distribution': source_distribution,
+        'severity_distribution': severity_distribution,
         'doc_type_distribution': list(doc_type_stats.values()),
         'user_stats': sorted(user_stats_map.values(), key=lambda item: item['tasks'], reverse=True),
         'task_list': [
