@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, BackgroundTasks, Query
 from typing import List, Optional
 from sqlalchemy.orm import Session
 import os
@@ -24,6 +24,21 @@ _MEMORY_NEXT_ID = [1000]
 _MEMORY_FILES = {}  # task_id -> {file_a_path, file_b_path, file_a_name, file_b_name}
 
 _ALIGN_CACHE = {}
+
+# 异步对比进度：group_id -> {status, step, progress, message, user_id, results}
+# 与审核 set_progress 同构；仅内存，进程重启后任务已落库，历史页仍可见。
+_COMPARE_PROGRESS = {}
+
+
+def _set_compare_progress(group_id, status, step, progress, message="", **extra):
+    entry = _COMPARE_PROGRESS.setdefault(group_id, {
+        "status": "pending", "step": "", "progress": 0, "message": "",
+        "user_id": None, "results": [],
+    })
+    entry.update(status=status, step=step, progress=int(progress), message=message)
+    if extra:
+        entry.update(extra)
+    return entry
 
 
 def _require_compare_task_access(db: Session, task_id: int, current_user: UserOut):
@@ -1399,9 +1414,50 @@ def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, user_
     }
 
 
+def _run_compare_background(group_id, saved_paths, saved_names, user_id):
+    """后台执行批量对比（与 _run_review_background 同构：自建 db session）。
+
+    进度写入 _COMPARE_PROGRESS；每个 pair 的结果仍由 _do_single_compare 落库，
+    因此历史页按 user_id 天然可见，与手动触发一致。
+    """
+    from app.database import SessionLocal
+    db = SessionLocal()
+    all_results = []
+    try:
+        _set_compare_progress(group_id, 'running', '解析文件', 5, '正在加载并解析待对比文件')
+        ref_path, ref_name = saved_paths[0], saved_names[0]
+        total = len(saved_paths) - 1
+        for i in range(1, len(saved_paths)):
+            _set_compare_progress(
+                group_id, 'running', '逐组对比',
+                5 + int(90 * i / max(total, 1)),
+                f'正在对比第 {i}/{total} 组文件',
+            )
+            pair = _do_single_compare(
+                ref_path, saved_paths[i], ref_name, saved_names[i],
+                user_id=user_id,
+                group_id=group_id, file_names=json.dumps(saved_names, ensure_ascii=False),
+                db=db,
+            )
+            all_results.append(pair)
+        _set_compare_progress(
+            group_id, 'completed', '完成', 100, '对比完成',
+            results=all_results, file_count=len(saved_names), file_names=saved_names,
+        )
+    except Exception as exc:
+        _set_compare_progress(group_id, 'failed', '失败', 0, str(exc))
+    finally:
+        db.close()
+        for p in saved_paths:
+            try: os.remove(p)
+            except Exception: pass
+
+
 @router.post("/")
 async def create_compare(
     files: List[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = None,
+    async_mode: bool = Query(False, description="为 true 时后台执行并立即返回 group_id，供聊天内轮询进度"),
     db: Session = Depends(get_db),
     current_user: UserOut = Depends(get_current_active_user),
 ):
@@ -1426,6 +1482,24 @@ async def create_compare(
                 try: os.remove(p)
                 except Exception: pass
             raise HTTPException(status_code=500, detail="File upload failed")
+
+    # 异步模式：文件上传后即返回，对比在后台任务执行（避免聊天内长时间同步阻塞）。
+    # 默认 async_mode=false 保持原同步行为，对比页手动触发不受影响。
+    if async_mode and background_tasks is not None:
+        _set_compare_progress(
+            group_id, 'running', '已上传', 0, '对比任务已创建，正在后台执行',
+            user_id=current_user.id, results=[],
+        )
+        background_tasks.add_task(
+            _run_compare_background, group_id, saved_paths, saved_names, current_user.id,
+        )
+        return {
+            "group_id": group_id,
+            "file_count": len(files),
+            "file_names": saved_names,
+            "status": "running",
+            "message": "对比任务已创建，请稍候",
+        }
 
     ref_path = saved_paths[0]
     ref_name = saved_names[0]
@@ -1452,6 +1526,43 @@ async def create_compare(
         "file_names": saved_names,
         "results": all_results,
     }
+
+
+@router.get("/progress/{group_id}")
+async def get_compare_progress(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    """查询异步对比进度。已完成时 results 内含逐组结果摘要。"""
+    entry = _COMPARE_PROGRESS.get(group_id)
+    if not entry:
+        # 进程重启后进度内存丢失，但任务已落库：按 group 查已完成/处理中状态兜底。
+        try:
+            from app.crud.compare import get_compare_tasks_by_group
+            tasks = get_compare_tasks_by_group(db, group_id) or []
+        except Exception:
+            tasks = []
+        if not tasks:
+            return {"status": "unknown", "step": "", "progress": 0, "message": "任务不存在或进度已过期"}
+        if current_user.role != "admin" and any(getattr(t, "user_id", None) != current_user.id for t in tasks):
+            raise HTTPException(status_code=404, detail="Task not found")
+        statuses = [getattr(t, "status", "") for t in tasks]
+        done = all(s in ("completed", "failed") for s in statuses)
+        return {
+            "status": "completed" if done else "running",
+            "step": "完成" if done else "处理中",
+            "progress": 100 if done else 50,
+            "message": "对比已完成（进度缓存已失效，结果见对比历史）" if done else "对比进行中",
+            "group_id": group_id,
+            "results": [{
+                "task_id": t.id, "similarity": getattr(t, "similarity", 0.0),
+                "verdict": getattr(t, "verdict", ""), "total_diffs": getattr(t, "total_diffs", 0),
+            } for t in tasks],
+        }
+    if current_user.role != "admin" and entry.get("user_id") != current_user.id:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return dict(entry, group_id=group_id)
 
 
 @router.get("/")
