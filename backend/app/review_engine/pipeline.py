@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 from collections import Counter
 from typing import Any
 
@@ -898,19 +899,24 @@ def suppress_shadowed_ai(issues: list[Any]) -> list[Any]:
 
 
 _PIPELINE_DROP_COUNTER: Counter = Counter()
+# 并发安全：FastAPI 多协程/线程会并发审核多个文档，全局 Counter 的 += 与
+# 取出清空必须原子化，否则归因计数会串到别的 review（工程债治理，不改判噪逻辑）。
+_PIPELINE_DROP_LOCK = threading.Lock()
 
 
 def drain_pipeline_drop_reasons() -> dict[str, int]:
     """取出并清空内存中的丢弃归因计数，供审核 summary 汇总（不依赖 REVIEW_DROP_LOG 文件）。"""
     global _PIPELINE_DROP_COUNTER
-    reasons = dict(_PIPELINE_DROP_COUNTER)
-    _PIPELINE_DROP_COUNTER = Counter()
+    with _PIPELINE_DROP_LOCK:
+        reasons = dict(_PIPELINE_DROP_COUNTER)
+        _PIPELINE_DROP_COUNTER = Counter()
     return reasons
 
 
 def _log_pipeline_drop(reason: str, issue: Any, score: int | None = None, threshold: int | None = None) -> None:
     """丢弃归因日志：环境变量 REVIEW_DROP_LOG 指向 JSONL 文件时记录每条被丢弃的问题及原因。"""
-    _PIPELINE_DROP_COUNTER[reason] += 1
+    with _PIPELINE_DROP_LOCK:
+        _PIPELINE_DROP_COUNTER[reason] += 1
     path = os.getenv("REVIEW_DROP_LOG", "")
     if not path:
         return

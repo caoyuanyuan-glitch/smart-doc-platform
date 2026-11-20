@@ -1,4 +1,13 @@
-"""Minimal adapters so review_engine exports real callables."""
+"""兼容适配层（非真实编排器）。
+
+这些类是历史导出的 shim，供 `app.review_engine.__init__` 的公开 API 与旧测试兼容；
+生产审核主流程 `_run_review_background`（app/api/review.py）**不经过这里**，
+真实编排逻辑在 review.py 按阶段直连各引擎模块。
+
+工程债记录：不要删除本文件（`__init__.py` 导出 + test_review_optimization 依赖），
+也不要误以为修改这里会影响审核行为。若要真正落地 stage-based 编排，需单独立项
+把 `_run_review_background` 的阶段逻辑迁移进来并同步改测试。
+"""
 
 from __future__ import annotations
 
