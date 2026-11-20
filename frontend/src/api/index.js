@@ -200,11 +200,14 @@ export const reviewAPI = {
 }
 
 export const compareAPI = {
-  create: (files) => {
+  create: (files, asyncMode = false) => {
     const formData = new FormData()
     files.forEach((f, i) => formData.append('files', f))
-    return instance.post('/compare/', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+    const config = { headers: { 'Content-Type': 'multipart/form-data' } }
+    if (asyncMode) config.params = { async_mode: true }
+    return instance.post('/compare/', formData, config)
   },
+  getProgress: (groupId) => instance.get(`/compare/progress/${groupId}`),
   get: (id) => instance.get(`/compare/${id}`),
   list: () => instance.get('/compare/'),
   delete: (id) => instance.delete(`/compare/${id}`),

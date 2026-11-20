@@ -168,10 +168,12 @@ function triggerUpload(idx) {
   if (el) el.click()
 }
 function taskStatusText(task) {
+  const runningLabel = task.type === 'convert' ? '转换中' : task.type === 'compare' ? '对比中' : '审核中'
   const map = {
     pending: '准备中', uploading: '上传文件中',
-    running: task.type === 'convert' ? '转换中' : '审核中',
-    processing: '转换中', completed: '已完成', failed: '失败', cancelled: '已停止'
+    running: runningLabel,
+    processing: task.type === 'compare' ? '对比中' : '转换中',
+    completed: '已完成', failed: '失败', cancelled: '已停止'
   }
   return map[task.status] || task.status || '处理中'
 }
@@ -361,30 +363,71 @@ async function finishReview(status, reviewId, msg) {
   scrollToBottom()
 }
 
-// 对比：同步接口，直接等结果
+// 对比：上传 → 后台异步对比 → 轮询进度 → 结果摘要（不再同步阻塞聊天）
 async function startCompare(files, idx, msg) {
   initTask(msg, 'compare')
-  msg.task.step = '正在对比两个文件'
+  msg.task.step = '正在上传并启动对比'
   try {
-    const resp = await compareAPI.create(files)
+    const resp = await compareAPI.create(files, true) // async_mode=true
     const d = resp.data || {}
-    const results = d.results || []
-    msg.task.running = false
-    msg.task.status = 'completed'
-    msg.task.progress = 100
-    const totalDiffs = results.reduce((s, r) => s + (Number(r.total_diffs) || 0), 0)
-    const verdict = results[0]?.verdict || ''
-    msg.task.step = '对比完成'
-    msg.task.summary = `已对比 ${d.file_count || files.length} 个文件，共 ${totalDiffs} 处差异${verdict ? `，判定：${verdict}` : ''}；任务已保存到「对比任务」历史。`
-    msg.task.resultPath = '/compare/tasks'
-    msg.task.resultParams = d.group_id ? { groupId: d.group_id } : {}
+    const groupId = d.group_id
+    if (!groupId) throw new Error('启动对比未返回 group_id')
+    msg.task.groupId = groupId
+    msg.task.status = 'running'
+    msg.task.step = '对比进行中（后台执行）'
+    msg.task.progress = 5
     scrollToBottom()
+
+    let failCount = 0
+    pollTimers.value[idx] = setInterval(async () => {
+      try {
+        const p = await compareAPI.getProgress(groupId)
+        const pd = p.data || {}
+        msg.task.progress = typeof pd.progress === 'number' ? Math.round(pd.progress) : (msg.task.progress || 0)
+        msg.task.step = pd.step || pd.message || '对比进行中'
+        const st = String(pd.status || '').toLowerCase()
+        failCount = 0
+        if (['completed', 'failed', 'cancelled', 'error', 'timeout'].includes(st)) {
+          stopPolling(idx)
+          await finishCompare(st, groupId, files.length, msg, pd)
+        }
+      } catch (e) {
+        failCount += 1
+        if (failCount >= 5) {
+          stopPolling(idx)
+          msg.task.status = 'failed'
+          msg.task.running = false
+          msg.task.step = '进度查询失败，请到「对比任务」历史查看结果'
+          scrollToBottom()
+        }
+      }
+    }, 1500)
   } catch (e) {
     msg.task.running = false
     msg.task.status = 'failed'
-    msg.task.step = '对比失败：' + (e?.message || '未知错误')
+    msg.task.step = '对比启动失败：' + (getAPIErrorMessage(e) || '未知错误')
     scrollToBottom()
   }
+}
+
+async function finishCompare(status, groupId, fileCount, msg, progressData) {
+  msg.task.running = false
+  if (status !== 'completed') {
+    msg.task.status = status === 'failed' || status === 'error' ? 'failed' : 'cancelled'
+    msg.task.step = '对比未成功完成'
+    scrollToBottom()
+    return
+  }
+  msg.task.status = 'completed'
+  msg.task.progress = 100
+  msg.task.step = '对比完成'
+  const results = (progressData && progressData.results) || []
+  const totalDiffs = results.reduce((s, r) => s + (Number(r.total_diffs) || 0), 0)
+  const verdict = results[0]?.verdict || ''
+  msg.task.summary = `已对比 ${fileCount} 个文件，共 ${totalDiffs} 处差异${verdict ? `，判定：${verdict}` : ''}；任务已保存到「对比任务」历史。`
+  msg.task.resultPath = '/compare/tasks'
+  msg.task.resultParams = { groupId }
+  scrollToBottom()
 }
 
 // 转换：上传 → 触发 → 轮询进度 → 完成提示（任务已落库到转换历史）
