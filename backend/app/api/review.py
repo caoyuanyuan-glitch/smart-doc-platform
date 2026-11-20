@@ -14437,27 +14437,39 @@ def _dashboard_visible_issues(raw_issues):
     ]
 
 
+# 引擎输出的 category 别名 → 展示名。键是 issue.category 的实际取值。
+_DASHBOARD_CATEGORY_ALIASES = {
+    "结构完整": "结构完整性",
+    "语法": "语法与表达",
+    "语法表达": "语法与表达",
+    "中英文混用": "术语一致性",
+    "格式排版": "格式与写法",
+    "数字与单位格式": "格式与写法",
+}
+
+
 def _dashboard_issue_group(issue):
-    category = str(getattr(issue, 'category', '') or '')
-    rule = str(getattr(issue, 'rule', '') or '')
-    description = str(getattr(issue, 'description', '') or '')
-    blob = f"{category} {description}".lower()
-    rule_blob = f"{rule} {category}".upper()
-    groups = (
-        ("术语", ("术语", "拼写", "错别字", "大小写", "测序类型"), ("TERM", "SPELL", "TYPO", "CANON")),
-        ("格式与写法", ("标点", "空格", "单位", "格式规范", "货号", "物料", "数值与单位"), ("PUNCT", "QUOTE", "SPACE", "UNIT", "CATNO", "FMT", "DOC-SPACE", "DOC-UNIT", "DOC-FMT")),
-        ("语法与表达", ("语法", "语气", "句式", "敬语", "表达", "英文微编辑", "英文规范", "grammar"), ("PROC", "GRAMMAR")),
-        ("结构完整性", ("结构", "步骤", "组成", "索引", "修订", "范围"), ("STRUCT", "STEP", "REVISION", "SCOPE", "INDEX", "COMPONENT")),
-        ("图表与版式", ("表格", "版式", "图片", "图表", "对象缺失", "字体"), ("FIGTAB", "LAYOUT", "IMAGE", "VISUAL")),
-        ("页码与导航", ("页码", "导航"), ("PAGE", "NAV-")),
-        ("信息完整性", ("信息完整", "地址"), ("DATA", "ADDR")),
-    )
-    for label, text_keys, rule_keys in groups:
-        if any(key in blob for key in text_keys):
-            return label
-        if any(key in rule_blob for key in rule_keys):
-            return label
-    return "其他"
+    """按审核引擎给出的 category 归类，不再用 description 关键词二次猜测。
+
+    实测依据：191 条真实 issue 中 category 覆盖率 100%，
+    关键词猜测会把「中文规范」18 条塞进「格式与写法」、「编号引用」12 条
+    拆到「页码与导航/图表与版式」，错分约 25%。category 原值才是引擎语义。
+    """
+    category = str(getattr(issue, 'category', '') or '').strip()
+    if not category:
+        rule = str(getattr(issue, 'rule', '') or '').upper()
+        for prefix, label in (
+            ("TERM", "术语一致性"), ("SPELL", "术语一致性"), ("TYPO", "术语一致性"),
+            ("PUNCT", "格式与写法"), ("SPACE", "格式与写法"), ("UNIT", "格式与写法"),
+            ("FMT", "格式与写法"), ("PROC", "语法与表达"), ("GRAMMAR", "语法与表达"),
+            ("STRUCT", "结构完整性"), ("STEP", "结构完整性"),
+            ("FIGTAB", "图表与版式"), ("LAYOUT", "图表与版式"), ("IMAGE", "图表与版式"),
+            ("VISUAL", "图表与版式"), ("PAGE", "页码与导航"), ("NAV", "页码与导航"),
+        ):
+            if rule.startswith(prefix) or f"-{prefix}-" in rule:
+                return label
+        return "其他"
+    return _DASHBOARD_CATEGORY_ALIASES.get(category, category)
 
 
 def _dashboard_normalize_text(text):
@@ -14478,7 +14490,7 @@ _DASHBOARD_RULE_SUMMARIES = {
 }
 
 _DASHBOARD_SUMMARY_PATTERNS = (
-    ("术语不统一", ("同一术语", "同一概念", "术语全文统一", "概念全文统一", "术语不统一", "术语规则", "术语一致性", "术语不准确")),
+    ("同一术语混用", ("同一术语", "同一概念", "术语全文统一", "概念全文统一", "术语不统一", "术语规则", "术语不准确")),
     ("操作步骤勿用敬语", ("敬语", "不得添加请", "避免使用敬语")),
     ("避免「不避免」类语法", ("不避免",)),
     ("交叉引用不一致", ("交叉引用",)),
@@ -14514,17 +14526,14 @@ def _dashboard_shorten_summary(text):
 
 def _dashboard_issue_distribution_label(issue, rule_lookup=None):
     rule = str(getattr(issue, 'rule', '') or '').strip()
-    category = str(getattr(issue, 'category', '') or '').strip()
     description = str(getattr(issue, 'description', '') or '').strip()
     rule_description = str((rule_lookup or {}).get(rule) or "").strip() if rule else ""
     if rule in _DASHBOARD_RULE_SUMMARIES:
         return _DASHBOARD_RULE_SUMMARIES[rule]
-    blob = _dashboard_normalize_text(f"{category} {description} {rule_description}")
+    blob = _dashboard_normalize_text(f"{description} {rule_description}")
     for label, keys in _DASHBOARD_SUMMARY_PATTERNS:
         if any(_dashboard_normalize_text(key) in blob for key in keys):
             return label
-    if category and category not in {"其他", "未分类"} and len(category) <= 16:
-        return category
     source = description or rule_description
     shortened = _dashboard_shorten_summary(source)
     if shortened:

@@ -46,11 +46,23 @@ def test_dashboard_issue_group_uses_real_categories():
     from types import SimpleNamespace
     from app.api import review as review_api
 
-    assert review_api._dashboard_issue_group(SimpleNamespace(category="术语一致性", rule="TERM-001", description="")) == "术语"
-    assert review_api._dashboard_issue_group(SimpleNamespace(category="标点符号", rule="DOC-PUNCT-001", description="")) == "格式与写法"
-    assert review_api._dashboard_issue_group(SimpleNamespace(category="操作步骤语气", rule="DOC-PROC-001", description="不得添加请")) == "语法与表达"
-    assert review_api._dashboard_issue_group(SimpleNamespace(category="图片/对象缺失", rule="PDF-VISUAL-001", description="")) == "图表与版式"
-    assert review_api._dashboard_issue_group(SimpleNamespace(category="", rule="", description="")) == "其他"
+    def issue(cat, rule="", desc=""):
+        return SimpleNamespace(category=cat, rule=rule, description=desc)
+
+    assert review_api._dashboard_issue_group(issue("中文规范")) == "中文规范"
+    assert review_api._dashboard_issue_group(issue("编号引用")) == "编号引用"
+    assert review_api._dashboard_issue_group(issue("信息完整性")) == "信息完整性"
+    assert review_api._dashboard_issue_group(issue("可读性")) == "可读性"
+    assert review_api._dashboard_issue_group(issue("法规合规")) == "法规合规"
+    assert review_api._dashboard_issue_group(issue("结构完整")) == "结构完整性"
+    assert review_api._dashboard_issue_group(issue("语法表达")) == "语法与表达"
+    assert review_api._dashboard_issue_group(issue("中英文混用")) == "术语一致性"
+    assert review_api._dashboard_issue_group(
+        issue("中文规范", desc="单位空格与页码错误")
+    ) == "中文规范"
+    assert review_api._dashboard_issue_group(issue("", rule="PDF-VISUAL-001")) == "图表与版式"
+    assert review_api._dashboard_issue_group(issue("", rule="TERM-001")) == "术语一致性"
+    assert review_api._dashboard_issue_group(issue("", rule="", desc="")) == "其他"
 
 
 def test_dashboard_issue_summary_merges_similar_wording():
@@ -59,7 +71,17 @@ def test_dashboard_issue_summary_merges_similar_wording():
 
     term_a = review_api._dashboard_issue_distribution_label(SimpleNamespace(category="", rule="", description="同一术语全文统一"))
     term_b = review_api._dashboard_issue_distribution_label(SimpleNamespace(category="", rule="", description="同一概念全文统一，不混用"))
-    assert term_a == term_b == "术语不统一"
+    assert term_a == term_b == "同一术语混用"
+    assert review_api._dashboard_issue_distribution_label(SimpleNamespace(
+        category="术语一致性",
+        rule="",
+        description="同一术语全文统一",
+    )) == "同一术语混用"
+    assert review_api._dashboard_issue_distribution_label(SimpleNamespace(
+        category="术语一致性",
+        rule="",
+        description="",
+    )) == "未分类"
 
     grammar_a = review_api._dashboard_issue_distribution_label(SimpleNamespace(category="", rule="", description="避免'不避免'类语法错误"))
     grammar_b = review_api._dashboard_issue_distribution_label(SimpleNamespace(category="", rule="", description="避免“不避免”类语法错误"))

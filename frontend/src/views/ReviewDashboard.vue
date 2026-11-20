@@ -74,16 +74,25 @@
         <h3>问题构成</h3>
         <p>有效检出、人工补录漏检与误报的数量对比</p>
       </div>
-      <div v-if="qualityMix.total" class="mix-bar">
-        <div
-          v-for="item in qualityMix.items"
-          v-show="item.count"
-          :key="item.key"
-          class="mix-seg"
-          :class="item.key"
-          :style="{ flexGrow: item.count }"
-        >
-          <span>{{ item.label }} {{ item.count }}</span>
+      <div v-if="qualityMix.total" class="mix-wrap">
+        <div class="mix-bar">
+          <div
+            v-for="item in qualityMix.items"
+            v-show="item.count"
+            :key="item.key"
+            class="mix-seg"
+            :class="item.key"
+            :style="{ flexGrow: item.count }"
+          />
+        </div>
+        <div class="mix-legend">
+          <span
+            v-for="item in qualityMix.items"
+            :key="item.key"
+            class="mix-leg"
+            :class="item.key"
+            v-show="item.count"
+          >{{ item.label }} {{ item.count }}</span>
         </div>
       </div>
       <div v-else class="mix-empty">当前筛选范围内还没有有效检出、漏检或误报样本。</div>
@@ -94,7 +103,7 @@
         <div class="panel-hd">
           <div>
             <h3>{{ isPersonalView ? '我的问题类别' : '问题类别' }}</h3>
-            <p>按术语、格式、语法、结构等归类</p>
+            <p>按审核引擎给出的分类</p>
           </div>
         </div>
         <v-chart v-if="categoryRows.length" class="chart chart-tall" :option="categoryPieOption" autoresize />
@@ -104,7 +113,7 @@
         <div class="panel-hd">
           <div>
             <h3>{{ isPersonalView ? '我的问题明细' : '问题明细' }}</h3>
-            <p>相近问题归并成短摘要，按条数取前 12 项</p>
+            <p>具体问题摘要，相近描述归并后取前 12 项</p>
           </div>
         </div>
         <v-chart v-if="issueRows.length" class="chart chart-tall" :option="issueBarOption" autoresize />
@@ -371,14 +380,20 @@ const categoryRows = computed(() => {
 })
 
 const CATEGORY_COLORS = {
-  术语: '#2563eb',
-  格式与写法: '#3b82f6',
-  语法与表达: '#60a5fa',
-  结构完整性: '#38bdf8',
-  图表与版式: '#0ea5e9',
-  页码与导航: '#0284c7',
-  信息完整性: '#1d4ed8',
-  其他: '#94a3b8'
+  术语一致性: '#5b7c99',
+  术语: '#5b7c99',
+  结构完整性: '#6b8f71',
+  中文规范: '#8c7b6b',
+  编号引用: '#6a8a8a',
+  语法与表达: '#7a7390',
+  格式与写法: '#9a8a6a',
+  信息完整性: '#6d8b7e',
+  操作步骤: '#8a6d6d',
+  可读性: '#6d7c8a',
+  图表与版式: '#7d8a6d',
+  页码与导航: '#8a7d6d',
+  法规合规: '#7a6d8a',
+  其他: '#c5cbd3'
 }
 
 const qualityMix = computed(() => {
@@ -394,9 +409,8 @@ const qualityMix = computed(() => {
 })
 
 function barColor(percent) {
-  if (percent >= 30) return '#ef4444'
-  if (percent >= 20) return '#f59e0b'
-  return '#3b82f6'
+  if (percent >= 30) return '#64748b'
+  return '#94a3b8'
 }
 
 function shortenLabel(text) {
@@ -559,31 +573,31 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 20px;
   align-items: flex-end;
-  padding: 22px 24px;
+  padding: 16px 18px;
   margin-bottom: 16px;
-  border-radius: 12px;
-  color: #fff;
-  background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 50%, #3b82f6 100%);
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.18);
+  border-radius: 10px;
+  color: #1e293b;
+  background: #fff;
+  border: 1px solid #e2e8f0;
   flex-wrap: wrap;
 }
 .eyebrow {
   margin: 0 0 6px;
   font-size: 11px;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.78);
+  color: #94a3b8;
 }
 .hero h2 {
   margin: 0;
-  font-size: 28px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 .hero-caption {
   margin: 8px 0 0;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.78);
+  color: #94a3b8;
 }
 .hero-tools {
   display: flex;
@@ -595,12 +609,12 @@ onUnmounted(() => {
   display: inline-flex;
   padding: 3px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
+  background: #f1f5f9;
 }
 .view-switch button {
   border: 0;
   background: transparent;
-  color: rgba(255, 255, 255, 0.86);
+  color: #64748b;
   padding: 6px 14px;
   border-radius: 999px;
   cursor: pointer;
@@ -608,8 +622,9 @@ onUnmounted(() => {
 }
 .view-switch button.active {
   background: #fff;
-  color: #2563eb;
-  font-weight: 650;
+  color: #334155;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 .filter-pills {
   display: flex;
@@ -628,23 +643,11 @@ onUnmounted(() => {
   position: relative;
   overflow: hidden;
   background: #fff;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   padding: 16px 18px 14px;
-  box-shadow: 0 1px 3px rgba(59, 130, 246, 0.06);
+  box-shadow: none;
 }
-.kpi::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-}
-.kpi.ink::before { background: #3b82f6; }
-.kpi.amber::before { background: #60a5fa; }
-.kpi.rose::before { background: #2563eb; }
-.kpi.teal::before { background: #38bdf8; }
 .kpi-kicker {
   font-size: 12px;
   color: #64748b;
@@ -652,8 +655,8 @@ onUnmounted(() => {
 }
 .kpi-value {
   margin-top: 10px;
-  font-size: 30px;
-  font-weight: 700;
+  font-size: 26px;
+  font-weight: 600;
   line-height: 1;
   font-variant-numeric: tabular-nums;
   color: #1e293b;
@@ -677,8 +680,8 @@ onUnmounted(() => {
 .mix-card,
 .panel {
   background: #fff;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   padding: 16px 18px 14px;
   min-width: 0;
 }
@@ -695,28 +698,46 @@ onUnmounted(() => {
   font-size: 12px;
   color: #94a3b8;
 }
+.mix-wrap {
+  margin-top: 12px;
+}
 .mix-bar {
   display: flex;
   overflow: hidden;
-  margin-top: 12px;
-  height: 42px;
+  height: 8px;
   border-radius: 999px;
-  background: #eff6ff;
+  background: #f1f5f9;
 }
 .mix-seg {
   display: flex;
   align-items: center;
   justify-content: center;
   min-width: 0;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
+  min-height: 8px;
 }
-.mix-seg.detected { background: #3b82f6; }
-.mix-seg.miss { background: #f59e0b; }
-.mix-seg.fp { background: #ef4444; }
+.mix-seg.detected { background: #64748b; }
+.mix-seg.miss { background: #c4a574; }
+.mix-seg.fp { background: #c17b7b; }
+.mix-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #64748b;
+}
+.mix-leg::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.mix-leg.detected::before { background: #64748b; }
+.mix-leg.miss::before { background: #c4a574; }
+.mix-leg.fp::before { background: #c17b7b; }
 .mix-empty {
   margin-top: 10px;
   color: #94a3b8;
@@ -743,10 +764,10 @@ onUnmounted(() => {
 .chart { height: 248px; width: 100%; }
 .chart-tall { height: 360px; }
 .desk-table {
-  --el-table-header-bg-color: #eff6ff;
+  --el-table-header-bg-color: #f8fafc;
   --el-table-bg-color: transparent;
   --el-table-tr-bg-color: transparent;
-  --el-table-row-hover-bg-color: #dbeafe;
+  --el-table-row-hover-bg-color: #f1f5f9;
 }
 .status-pill {
   display: inline-flex;
@@ -775,7 +796,7 @@ onUnmounted(() => {
 .preview-box {
   width: 100%;
   background: #f8fafc;
-  border: 1px solid #dbeafe;
+  border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 10px 12px;
   font-size: 13px;
@@ -785,7 +806,7 @@ onUnmounted(() => {
 }
 .preview-line { margin: 4px 0; }
 .preview-cats { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
-.preview-sample { border-top: 1px dashed #dbeafe; padding: 6px 0; }
+.preview-sample { border-top: 1px dashed #e2e8f0; padding: 6px 0; }
 .sample-doc { font-size: 12px; color: #94a3b8; }
 .sample-comment { font-size: 13px; color: #1e293b; margin-top: 2px; }
 @media (max-width: 1100px) {
