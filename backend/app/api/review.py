@@ -14437,17 +14437,108 @@ def _dashboard_visible_issues(raw_issues):
     ]
 
 
+# 引擎输出的 category 别名 → 展示名。键是 issue.category 的实际取值。
+_DASHBOARD_CATEGORY_ALIASES = {
+    "结构完整": "结构完整性",
+    "语法": "语法与表达",
+    "语法表达": "语法与表达",
+    "中英文混用": "术语一致性",
+    "格式排版": "格式与写法",
+    "数字与单位格式": "格式与写法",
+}
+
+
+def _dashboard_issue_group(issue):
+    """按审核引擎给出的 category 归类，不再用 description 关键词二次猜测。
+
+    实测依据：191 条真实 issue 中 category 覆盖率 100%，
+    关键词猜测会把「中文规范」18 条塞进「格式与写法」、「编号引用」12 条
+    拆到「页码与导航/图表与版式」，错分约 25%。category 原值才是引擎语义。
+    """
+    category = str(getattr(issue, 'category', '') or '').strip()
+    if not category:
+        rule = str(getattr(issue, 'rule', '') or '').upper()
+        for prefix, label in (
+            ("TERM", "术语一致性"), ("SPELL", "术语一致性"), ("TYPO", "术语一致性"),
+            ("PUNCT", "格式与写法"), ("SPACE", "格式与写法"), ("UNIT", "格式与写法"),
+            ("FMT", "格式与写法"), ("PROC", "语法与表达"), ("GRAMMAR", "语法与表达"),
+            ("STRUCT", "结构完整性"), ("STEP", "结构完整性"),
+            ("FIGTAB", "图表与版式"), ("LAYOUT", "图表与版式"), ("IMAGE", "图表与版式"),
+            ("VISUAL", "图表与版式"), ("PAGE", "页码与导航"), ("NAV", "页码与导航"),
+        ):
+            if rule.startswith(prefix) or f"-{prefix}-" in rule:
+                return label
+        return "其他"
+    return _DASHBOARD_CATEGORY_ALIASES.get(category, category)
+
+
+def _dashboard_normalize_text(text):
+    value = str(text or "")
+    for ch in "\"'“”‘’「」『』":
+        value = value.replace(ch, "")
+    return value.replace(" ", "").replace("\u3000", "").lower()
+
+
+_DASHBOARD_RULE_SUMMARIES = {
+    "CYY-CN-FMT-001": "温度范围单位空格",
+    "CYY-CN-FMT-002": "体积单位空格",
+    "CYY-CN-FMT-003": "电源规格单位空格",
+    "CYY-CN-MIXED-008": "中英文术语混用",
+    "CYY-CN-ROHS-001": "有害物质表缺部件",
+    "CYY-CN-CONSIST-014": "存储/储存不统一",
+    "EXT-R020": "错别字",
+}
+
+_DASHBOARD_SUMMARY_PATTERNS = (
+    ("同一术语混用", ("同一术语", "同一概念", "术语全文统一", "概念全文统一", "术语不统一", "术语规则", "术语不准确")),
+    ("操作步骤勿用敬语", ("敬语", "不得添加请", "避免使用敬语")),
+    ("避免「不避免」类语法", ("不避免",)),
+    ("交叉引用不一致", ("交叉引用",)),
+    ("操作对象缺失", ("缺少按钮", "无法定位", "对象缺失", "无法确定点击", "缺少可点击")),
+    ("操作步骤不完整", ("缺后续", "缺收尾")),
+    ("表格内容缺失", ("表格列内容缺失", "表格内容应完整", "表头列")),
+    ("图表与正文不一致", ("图与正文",)),
+    ("中英文术语混用", ("中英文",)),
+    ("数字与单位格式", ("单位格式", "单位空格")),
+    ("有害物质表缺部件", ("有害物质",)),
+    ("错别字", ("错别字", "切勿意为", "切记")),
+    ("冗余虚词", ("冗余虚词", "赘余")),
+    ("模糊表述", ("操作不当", "模糊表述")),
+    ("账号密码暴露", ("默认账号", "密码暴露")),
+    ("技术规格表留空", ("技术规格表", "留空")),
+    ("英文拼写错误", ("英文拼写",)),
+)
+
+
+def _dashboard_shorten_summary(text):
+    value = str(text or "").strip()
+    for sep in ("：", ":", "。", "；", ";", "，", ","):
+        if sep in value:
+            value = value.split(sep, 1)[0].strip()
+            break
+    for opener, closer in (("（", "）"), ("(", ")")):
+        if opener in value:
+            value = value.split(opener, 1)[0].strip()
+    if len(value) > 16:
+        return value[:15] + "…"
+    return value
+
+
 def _dashboard_issue_distribution_label(issue, rule_lookup=None):
     rule = str(getattr(issue, 'rule', '') or '').strip()
-    if rule:
-        rule_description = (rule_lookup or {}).get(rule)
-        if rule_description:
-            return f"{rule} {rule_description[:18]}"
-        return rule
     description = str(getattr(issue, 'description', '') or '').strip()
-    if description:
-        return description[:24]
-    return str(getattr(issue, 'category', '') or '').strip() or '未分类'
+    rule_description = str((rule_lookup or {}).get(rule) or "").strip() if rule else ""
+    if rule in _DASHBOARD_RULE_SUMMARIES:
+        return _DASHBOARD_RULE_SUMMARIES[rule]
+    blob = _dashboard_normalize_text(f"{description} {rule_description}")
+    for label, keys in _DASHBOARD_SUMMARY_PATTERNS:
+        if any(_dashboard_normalize_text(key) in blob for key in keys):
+            return label
+    source = description or rule_description
+    shortened = _dashboard_shorten_summary(source)
+    if shortened:
+        return shortened
+    return "未分类"
 
 
 def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_date=None, doc_type='all', user_id='all'):
@@ -14483,6 +14574,15 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
     for category, count in category_counts.most_common():
         issue_distribution.append({
             'type': category,
+            'count': count,
+            'percentage': _dashboard_pct(count, len(issues)),
+        })
+
+    group_counts = Counter(_dashboard_issue_group(issue) for issue in issues)
+    category_distribution = []
+    for group, count in group_counts.most_common():
+        category_distribution.append({
+            'type': group,
             'count': count,
             'percentage': _dashboard_pct(count, len(issues)),
         })
@@ -14586,6 +14686,7 @@ def _build_review_dashboard_payload(db, time_range='7d', start_date=None, end_da
             'issues': [issues_by_submit_date.get(day, 0) for day in dates],
         },
         'issue_distribution': issue_distribution,
+        'category_distribution': category_distribution,
         'source_distribution': source_distribution,
         'severity_distribution': severity_distribution,
         'doc_type_distribution': list(doc_type_stats.values()),

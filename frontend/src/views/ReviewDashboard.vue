@@ -74,73 +74,50 @@
         <h3>问题构成</h3>
         <p>有效检出、人工补录漏检与误报的数量对比</p>
       </div>
-      <div v-if="qualityMix.total" class="mix-bar">
-        <div
-          v-for="item in qualityMix.items"
-          v-show="item.count"
-          :key="item.key"
-          class="mix-seg"
-          :class="item.key"
-          :style="{ flexGrow: item.count }"
-        >
-          <span>{{ item.label }} {{ item.count }}</span>
+      <div v-if="qualityMix.total" class="mix-wrap">
+        <div class="mix-bar">
+          <div
+            v-for="item in qualityMix.items"
+            v-show="item.count"
+            :key="item.key"
+            class="mix-seg"
+            :class="item.key"
+            :style="{ flexGrow: item.count }"
+          />
+        </div>
+        <div class="mix-legend">
+          <span
+            v-for="item in qualityMix.items"
+            :key="item.key"
+            class="mix-leg"
+            :class="item.key"
+            v-show="item.count"
+          >{{ item.label }} {{ item.count }}</span>
         </div>
       </div>
       <div v-else class="mix-empty">当前筛选范围内还没有有效检出、漏检或误报样本。</div>
     </section>
 
-    <div class="charts-row single">
+    <div class="charts-row">
       <section class="panel">
         <div class="panel-hd">
           <div>
-            <h3>{{ isPersonalView ? '我的高占比问题' : '高占比问题' }}</h3>
-            <p>按问题条数占比取 Top5</p>
+            <h3>{{ isPersonalView ? '我的问题类别' : '问题类别' }}</h3>
+            <p>按审核引擎给出的分类</p>
           </div>
         </div>
-        <v-chart v-if="issueRows.length" class="chart" :option="issueBarOption" autoresize />
-        <el-empty v-else description="暂无问题分布" :image-size="64" />
+        <v-chart v-if="categoryRows.length" class="chart chart-tall" :option="categoryPieOption" autoresize />
+        <el-empty v-else description="暂无问题类别" :image-size="64" />
       </section>
-    </div>
-
-    <div class="tables-row" :class="{ single: isPersonalView }">
-      <section v-if="!isPersonalView" class="panel">
+      <section class="panel">
         <div class="panel-hd">
           <div>
-            <h3>人员负荷</h3>
-            <p>任务量、完成量与问题数</p>
+            <h3>{{ isPersonalView ? '我的问题明细' : '问题明细' }}</h3>
+            <p>具体问题摘要，相近描述归并后取前 12 项</p>
           </div>
         </div>
-        <el-table :data="userStats" size="small" empty-text="暂无数据" class="desk-table">
-          <el-table-column prop="username" label="人员" min-width="120" show-overflow-tooltip />
-          <el-table-column prop="tasks" label="任务" width="72" />
-          <el-table-column prop="completed" label="完成" width="72" />
-          <el-table-column prop="issues" label="问题" width="72" />
-        </el-table>
-      </section>
-      <section class="panel panel-wide">
-        <div class="panel-hd">
-          <div>
-            <h3>{{ isPersonalView ? '我的最近任务' : '最近审核任务' }}</h3>
-            <p>按提交时间倒序</p>
-          </div>
-        </div>
-        <el-table :data="taskList" size="small" empty-text="暂无数据" class="desk-table">
-          <el-table-column prop="review_id" label="ID" width="70" />
-          <el-table-column v-if="!isPersonalView" prop="submitted_by" label="提交人" width="100" show-overflow-tooltip />
-          <el-table-column prop="document_name" label="文档" min-width="180" show-overflow-tooltip />
-          <el-table-column label="类型" width="88">
-            <template #default="scope">{{ docTypeLabel(scope.row.document_type) }}</template>
-          </el-table-column>
-          <el-table-column prop="status" label="状态" width="96">
-            <template #default="scope">
-              <span class="status-pill" :class="scope.row.status">{{ statusText(scope.row.status) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="issue_count" label="问题" width="72" />
-          <el-table-column prop="submitted_at" label="提交时间" width="160">
-            <template #default="scope">{{ formatTime(scope.row.submitted_at) }}</template>
-          </el-table-column>
-        </el-table>
+        <v-chart v-if="issueRows.length" class="chart chart-tall" :option="issueBarOption" autoresize />
+        <el-empty v-else description="暂无问题明细" :image-size="64" />
       </section>
     </div>
 
@@ -230,13 +207,13 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
-import { BarChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent } from 'echarts/components'
+import { BarChart, PieChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { reviewAPI, userAPI, getAPIErrorMessage } from '@/api'
 import { useUserStore } from '@/store/user'
 
-use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
+use([BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const loading = ref(false)
 const userStore = useUserStore()
@@ -256,14 +233,13 @@ const quality = reactive({
   detection_rate_available: false
 })
 const issueDistribution = ref([])
-const userStats = ref([])
-const taskList = ref([])
+const categoryDistribution = ref([])
 const userOptions = ref([])
 const isPersonalView = computed(() => viewMode.value === 'personal' || !isAdmin.value)
 const viewCaption = computed(() => (
   isPersonalView.value
     ? '看我提交的任务、检出率和问题结构'
-    : '看全员任务量、检出质量、问题结构和人员负荷'
+    : '看全员任务量、检出质量和问题结构'
 ))
 
 let refreshTimer = null
@@ -391,16 +367,34 @@ async function toggleCandidateRule(row, enable) {
 }
 
 const issueRows = computed(() => {
-  const rows = issueDistribution.value
+  return issueDistribution.value
     .map(item => ({ ...item, percent: Math.round((Number(item.percentage || 0) * 100) * 10) / 10 }))
     .sort((left, right) => right.percent - left.percent)
-  const topRows = rows.slice(0, 5)
-  const restRows = rows.slice(5)
-  if (!restRows.length) return topRows
-  const restCount = restRows.reduce((sum, item) => sum + Number(item.count || 0), 0)
-  const restPercent = Math.round(restRows.reduce((sum, item) => sum + item.percent, 0) * 10) / 10
-  return [...topRows, { type: '其他', count: restCount, percent: restPercent }]
+    .slice(0, 12)
 })
+
+const categoryRows = computed(() => {
+  return categoryDistribution.value
+    .map(item => ({ ...item, percent: Math.round((Number(item.percentage || 0) * 100) * 10) / 10 }))
+    .filter(item => Number(item.count || 0) > 0)
+})
+
+const CATEGORY_COLORS = {
+  术语一致性: '#5b7c99',
+  术语: '#5b7c99',
+  结构完整性: '#6b8f71',
+  中文规范: '#8c7b6b',
+  编号引用: '#6a8a8a',
+  语法与表达: '#7a7390',
+  格式与写法: '#9a8a6a',
+  信息完整性: '#6d8b7e',
+  操作步骤: '#8a6d6d',
+  可读性: '#6d7c8a',
+  图表与版式: '#7d8a6d',
+  页码与导航: '#8a7d6d',
+  法规合规: '#7a6d8a',
+  其他: '#c5cbd3'
+}
 
 const qualityMix = computed(() => {
   const items = [
@@ -415,14 +409,13 @@ const qualityMix = computed(() => {
 })
 
 function barColor(percent) {
-  if (percent >= 30) return '#ef4444'
-  if (percent >= 20) return '#f59e0b'
-  return '#3b82f6'
+  if (percent >= 30) return '#64748b'
+  return '#94a3b8'
 }
 
 function shortenLabel(text) {
   const value = String(text || '')
-  return value.length > 16 ? `${value.slice(0, 15)}…` : value
+  return value.length > 22 ? `${value.slice(0, 21)}…` : value
 }
 
 const issueBarOption = computed(() => ({
@@ -435,7 +428,7 @@ const issueBarOption = computed(() => ({
       return row ? `${row.type}<br/>占比 ${row.percent}% · ${row.count} 条` : ''
     }
   },
-  grid: { left: 92, right: 44, top: 8, bottom: 8 },
+  grid: { left: 168, right: 48, top: 8, bottom: 8 },
   xAxis: {
     type: 'value',
     axisLabel: { formatter: '{value}%', color: '#94a3b8' },
@@ -461,6 +454,31 @@ const issueBarOption = computed(() => ({
   ]
 }))
 
+const categoryPieOption = computed(() => ({
+  tooltip: {
+    trigger: 'item',
+    formatter: params => `${params.name}<br/>${params.value} 条 · ${params.percent}%`
+  },
+  legend: {
+    bottom: 0,
+    type: 'scroll',
+    textStyle: { color: '#475569', fontSize: 12 }
+  },
+  series: [
+    {
+      type: 'pie',
+      radius: ['42%', '68%'],
+      center: ['50%', '44%'],
+      label: { formatter: '{b}\n{d}%', color: '#334155', fontSize: 11 },
+      data: categoryRows.value.map(item => ({
+        name: item.type,
+        value: item.count,
+        itemStyle: { color: CATEGORY_COLORS[item.type] || '#64748b' }
+      }))
+    }
+  ]
+}))
+
 function percentText(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return '--'
@@ -476,20 +494,6 @@ function formatMinutes(value) {
   const number = Number(value)
   if (!Number.isFinite(number) || number <= 0) return '--'
   return `${number} 分钟`
-}
-
-function formatTime(value) {
-  if (!value) return '--'
-  return String(value).replace('T', ' ').slice(0, 19)
-}
-
-function statusText(status) {
-  const map = { completed: '已完成', running: '进行中', pending: '待处理', failed: '失败' }
-  return map[status] || status || '--'
-}
-
-function docTypeLabel(type) {
-  return { excel: 'Excel', pdf: 'PDF', docx: 'Word', dita: 'DITA' }[type] || type || '其他'
 }
 
 function switchView(mode) {
@@ -524,8 +528,7 @@ async function loadDashboard() {
       detection_rate_available: false
     }, data.quality || {})
     issueDistribution.value = data.issue_distribution || []
-    userStats.value = data.user_stats || []
-    taskList.value = data.task_list || []
+    categoryDistribution.value = data.category_distribution || []
   } catch (error) {
     ElMessage.error(`加载审核看板失败: ${getAPIErrorMessage(error)}`)
   } finally {
@@ -570,31 +573,31 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 20px;
   align-items: flex-end;
-  padding: 22px 24px;
+  padding: 16px 18px;
   margin-bottom: 16px;
-  border-radius: 12px;
-  color: #fff;
-  background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 50%, #3b82f6 100%);
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.18);
+  border-radius: 10px;
+  color: #1e293b;
+  background: #fff;
+  border: 1px solid #e2e8f0;
   flex-wrap: wrap;
 }
 .eyebrow {
   margin: 0 0 6px;
   font-size: 11px;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.78);
+  color: #94a3b8;
 }
 .hero h2 {
   margin: 0;
-  font-size: 28px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 .hero-caption {
   margin: 8px 0 0;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.78);
+  color: #94a3b8;
 }
 .hero-tools {
   display: flex;
@@ -606,12 +609,12 @@ onUnmounted(() => {
   display: inline-flex;
   padding: 3px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
+  background: #f1f5f9;
 }
 .view-switch button {
   border: 0;
   background: transparent;
-  color: rgba(255, 255, 255, 0.86);
+  color: #64748b;
   padding: 6px 14px;
   border-radius: 999px;
   cursor: pointer;
@@ -619,8 +622,9 @@ onUnmounted(() => {
 }
 .view-switch button.active {
   background: #fff;
-  color: #2563eb;
-  font-weight: 650;
+  color: #334155;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 .filter-pills {
   display: flex;
@@ -639,23 +643,11 @@ onUnmounted(() => {
   position: relative;
   overflow: hidden;
   background: #fff;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   padding: 16px 18px 14px;
-  box-shadow: 0 1px 3px rgba(59, 130, 246, 0.06);
+  box-shadow: none;
 }
-.kpi::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-}
-.kpi.ink::before { background: #3b82f6; }
-.kpi.amber::before { background: #60a5fa; }
-.kpi.rose::before { background: #2563eb; }
-.kpi.teal::before { background: #38bdf8; }
 .kpi-kicker {
   font-size: 12px;
   color: #64748b;
@@ -663,8 +655,8 @@ onUnmounted(() => {
 }
 .kpi-value {
   margin-top: 10px;
-  font-size: 30px;
-  font-weight: 700;
+  font-size: 26px;
+  font-weight: 600;
   line-height: 1;
   font-variant-numeric: tabular-nums;
   color: #1e293b;
@@ -688,8 +680,8 @@ onUnmounted(() => {
 .mix-card,
 .panel {
   background: #fff;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   padding: 16px 18px 14px;
   min-width: 0;
 }
@@ -706,28 +698,46 @@ onUnmounted(() => {
   font-size: 12px;
   color: #94a3b8;
 }
+.mix-wrap {
+  margin-top: 12px;
+}
 .mix-bar {
   display: flex;
   overflow: hidden;
-  margin-top: 12px;
-  height: 42px;
+  height: 8px;
   border-radius: 999px;
-  background: #eff6ff;
+  background: #f1f5f9;
 }
 .mix-seg {
   display: flex;
   align-items: center;
   justify-content: center;
   min-width: 0;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
+  min-height: 8px;
 }
-.mix-seg.detected { background: #3b82f6; }
-.mix-seg.miss { background: #f59e0b; }
-.mix-seg.fp { background: #ef4444; }
+.mix-seg.detected { background: #64748b; }
+.mix-seg.miss { background: #c4a574; }
+.mix-seg.fp { background: #c17b7b; }
+.mix-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #64748b;
+}
+.mix-leg::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.mix-leg.detected::before { background: #64748b; }
+.mix-leg.miss::before { background: #c4a574; }
+.mix-leg.fp::before { background: #c17b7b; }
 .mix-empty {
   margin-top: 10px;
   color: #94a3b8;
@@ -752,11 +762,12 @@ onUnmounted(() => {
 }
 .panel-actions { display: flex; align-items: center; gap: 8px; }
 .chart { height: 248px; width: 100%; }
+.chart-tall { height: 360px; }
 .desk-table {
-  --el-table-header-bg-color: #eff6ff;
+  --el-table-header-bg-color: #f8fafc;
   --el-table-bg-color: transparent;
   --el-table-tr-bg-color: transparent;
-  --el-table-row-hover-bg-color: #dbeafe;
+  --el-table-row-hover-bg-color: #f1f5f9;
 }
 .status-pill {
   display: inline-flex;
@@ -785,7 +796,7 @@ onUnmounted(() => {
 .preview-box {
   width: 100%;
   background: #f8fafc;
-  border: 1px solid #dbeafe;
+  border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 10px 12px;
   font-size: 13px;
@@ -795,7 +806,7 @@ onUnmounted(() => {
 }
 .preview-line { margin: 4px 0; }
 .preview-cats { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
-.preview-sample { border-top: 1px dashed #dbeafe; padding: 6px 0; }
+.preview-sample { border-top: 1px dashed #e2e8f0; padding: 6px 0; }
 .sample-doc { font-size: 12px; color: #94a3b8; }
 .sample-comment { font-size: 13px; color: #1e293b; margin-top: 2px; }
 @media (max-width: 1100px) {

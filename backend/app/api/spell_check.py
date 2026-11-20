@@ -1323,6 +1323,7 @@ def process_text(text, file_type=None):
     normalized_text = pre_clean_lines(text)
     if file_type == 'pdf':
         normalized_text = _merge_soft_wrapped_lines(normalized_text)
+        normalized_text = _heal_spaced_midword_splits(normalized_text)
     document_language = _detect_document_language(normalized_text)
     issues = run_spelling_and_grammar_check(normalized_text, file_type=file_type)
     _append_legacy_grammar_issues(normalized_text, issues)
@@ -1554,6 +1555,21 @@ _TERMINAL_PUNCTUATION = (".", ":", ";", "?", "!")
 _LIST_ITEM_PREFIX = re.compile(r"^(?:[0-9]+[.)]|[a-z][.)]|[-*\u2022\u00b7])\s", re.IGNORECASE)
 _TRAILING_LETTERS = re.compile(r"([A-Za-z]+)\s*$")
 _LEADING_LETTERS = re.compile(r"^([A-Za-z]+)")
+_SPACED_MIDWORD = re.compile(r"\b([A-Za-z]{1,12})\s+([a-z]{1,3})\b")
+_SHORT_COMPLETE_WORDS = {
+    "a", "i", "am", "an", "as", "at", "be", "by", "do", "go", "he", "if", "in",
+    "is", "it", "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to",
+    "up", "us", "we",
+}
+
+
+def _is_complete_english_word(word):
+    token = (word or "").lower()
+    if not token:
+        return False
+    if len(token) <= 2:
+        return token in _SHORT_COMPLETE_WORDS
+    return token in spell_checker_utils.spell
 
 
 def _joins_mid_word(previous, following):
@@ -1562,9 +1578,29 @@ def _joins_mid_word(previous, following):
     if not tail or not head:
         return False
     left, right = tail.group(1).lower(), head.group(1).lower()
-    if left in spell_checker_utils.spell and right in spell_checker_utils.spell:
+    if _is_complete_english_word(left) and _is_complete_english_word(right):
         return False
     return f"{left}{right}" in spell_checker_utils.spell
+
+
+def _heal_spaced_midword_splits(text):
+    current = text or ""
+    pos = 0
+    while True:
+        match = _SPACED_MIDWORD.search(current, pos)
+        if not match:
+            return current
+        left, right = match.group(1), match.group(2)
+        joined = f"{left}{right}"
+        can_join = (
+            not (_is_complete_english_word(left) and _is_complete_english_word(right))
+            and joined.lower() in spell_checker_utils.spell
+        )
+        if can_join:
+            current = f"{current[:match.start()]}{joined}{current[match.end():]}"
+            pos = match.start()
+            continue
+        pos = match.start() + len(left)
 
 
 def _continues_previous_line(previous, following):

@@ -67,6 +67,19 @@ def test_merge_soft_wrapped_lines_keeps_paragraphs_lists_and_mid_word_fragments(
     )
 
 
+def test_heal_spaced_midword_splits_joins_broken_the():
+    assert spell_check_api._heal_spaced_midword_splits("from th e plunger") == "from the plunger"
+
+
+def test_heal_spaced_midword_splits_keeps_real_word_pairs():
+    assert spell_check_api._heal_spaced_midword_splits("go to the lab") == "go to the lab"
+    assert spell_check_api._heal_spaced_midword_splits("use a new kit") == "use a new kit"
+
+
+def test_merge_soft_wrapped_lines_joins_short_midword_fragments():
+    assert spell_check_api._merge_soft_wrapped_lines("from th\n\ne plunger") == "from the plunger"
+
+
 def test_process_text_keeps_line_breaks_outside_pdf():
     text = "foo\n\nbar"
 
@@ -361,6 +374,36 @@ def test_spatial_omics_is_not_reported_as_misspelling():
     assert spell_checker_utils.check_spelling(
         "The spatial omics pipeline supports FASTQ input.", file_type=None
     ) == []
+
+
+def test_axonometric_is_not_reported_as_misspelling():
+    assert spell_checker_utils.is_whitelisted("axonometric") is True
+    assert spell_checker_utils.check_spelling(
+        "Figure 3 Axonometric view of the instrument.", file_type=None
+    ) == []
+
+
+def test_preconfigured_is_not_reported_as_misspelling():
+    assert spell_checker_utils.is_whitelisted("preconfigured") is True
+    assert spell_checker_utils.check_spelling(
+        "Use the Preconfigured recipe on the home screen.", file_type=None
+    ) == []
+
+
+def test_english_extra_wordlist_covers_scowl_vocabulary():
+    extra = spell_checker_utils._read_english_extra_words()
+    assert len(extra) > 100000
+    assert "axonometric" in extra
+    assert "axonometric" in spell_checker_utils.spell
+
+
+def test_english_extra_wordlist_still_reports_real_typos():
+    issues = spell_checker_utils.check_spelling(
+        "Please accomodate the recieve step.", file_type=None
+    )
+    originals = {str(item.get("original_text") or "").lower() for item in issues}
+    assert "accomodate" in originals
+    assert "recieve" in originals
 
 
 def test_article_judgment_is_shared_across_review_and_spell_checker():

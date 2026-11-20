@@ -46,3 +46,7 @@ sativa
 barcodes
 RXN
 PF
+axonometric
+preconfigure
+preconfigured
+preconfiguring

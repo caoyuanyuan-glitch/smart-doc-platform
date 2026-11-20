@@ -5,6 +5,7 @@
 import re
 import threading
 from pathlib import Path
+import gzip
 from spellchecker import SpellChecker
 from app.paths import WHITELIST_FILE
 from app.utils.article_constants import (
@@ -131,6 +132,8 @@ TECH_TERMS_WHITELIST = {
     'basecall', 'basecalling', 'basecaller', 'cycler', 'cyclers', 'functionalized',
     'Nextera', 'TruSeq', 'nanoball', 'nanoballs', 'MDA', 'MSP', 'ATCG', 'Qty',
     'Bio-Rad', 'usersupplied', 'nonfiltered', 'non-filtered', 'de-bore', 'wide-bore',
+    'axonometric',
+    'preconfigure', 'preconfigured', 'preconfiguring',
 }
 
 SPELLCHECK_WHITELIST = {
@@ -168,6 +171,60 @@ def _load_dictionary_file(name):
         if term and not term.startswith('#'):
             terms.add(term)
     return terms
+
+
+def _iter_wordlist_lines(path):
+    if path.suffix == '.gz':
+        with gzip.open(path, 'rt', encoding='utf-8') as handle:
+            yield from handle
+        return
+    with path.open(encoding='utf-8') as handle:
+        yield from handle
+
+
+_ENGLISH_EXTRA_CACHE = None
+
+
+def _read_english_extra_words():
+    global _ENGLISH_EXTRA_CACHE
+    if _ENGLISH_EXTRA_CACHE is not None:
+        return _ENGLISH_EXTRA_CACHE
+    words = []
+    for name in ('english_extra.txt.gz', 'english_extra.txt'):
+        path = _DICTIONARY_DIR / name
+        if not path.exists():
+            continue
+        for raw in _iter_wordlist_lines(path):
+            term = raw.strip().lower()
+            if not term or term.startswith('#') or not term.isalpha() or len(term) < 3:
+                continue
+            words.append(term)
+        break
+    _ENGLISH_EXTRA_CACHE = words
+    return words
+
+
+def _load_english_extra_into_dictionary(checker):
+    extra = _read_english_extra_words()
+    if extra:
+        checker.word_frequency.load_words(extra)
+
+
+def _purge_known_typos_from_dictionary(checker):
+    common = globals().get('COMMON_MISSPELLINGS')
+    forced = globals().get('FORCED_MISSPELLINGS')
+    typos = set()
+    if isinstance(common, dict):
+        for wrong, correct in common.items():
+            wrong_key = str(wrong).lower()
+            correct_key = str(correct or '').lower()
+            if wrong_key and wrong_key != correct_key:
+                typos.add(wrong_key)
+    if isinstance(forced, (set, frozenset, list, tuple)):
+        typos.update(str(word).lower() for word in forced)
+    present = [word for word in typos if word in checker]
+    if present:
+        checker.word_frequency.remove_words(present)
 
 
 EXTERNAL_TECH_TERMS = _load_dictionary_file('technical_terms.txt')
@@ -218,9 +275,11 @@ def _load_whitelist_into_dictionary(terms=None, *, reset=False):
     global spell
     if reset:
         spell = SpellChecker(language='en')
+        _load_english_extra_into_dictionary(spell)
     words = _collect_dictionary_words(terms if terms is not None else _TECH_TERMS_EXACT)
     if words:
         spell.word_frequency.load_words(sorted(words))
+    _purge_known_typos_from_dictionary(spell)
 
 
 _load_whitelist_into_dictionary(_TECH_TERMS_EXACT, reset=True)
@@ -3026,6 +3085,9 @@ FORCED_MISSPELLINGS = {
     'sensitivty',
     'consumbles',
 }
+
+
+_purge_known_typos_from_dictionary(spell)
 
 TERM_VARIANT_CORRECTIONS = {
     't-regent': 'T-Reagent',

@@ -172,6 +172,7 @@ web/build/
 *.lz
 *.lzma
 *.iso
+!backend/app/dictionary/english_extra.txt.gz
 
 # Project-specific: Uploads
 backend/app/static/manual_uploads/
