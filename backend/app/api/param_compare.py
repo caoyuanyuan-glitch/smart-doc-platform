@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Form, Depends
 from typing import List
+import asyncio
 import os
+import re
 import time
 import json
 from app.api.auth import get_current_active_user
@@ -9,6 +11,16 @@ from app.schemas.user import UserOut
 router = APIRouter()
 
 UPLOAD_DIR = "./static/uploads"
+
+_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+")
+
+
+def _safe_filename(filename, fallback: str = "upload") -> str:
+    """清洗客户端文件名，防路径穿越（仅 basename + 白名单字符）。"""
+    name = (filename or "").replace("\\", "/")
+    name = name.rsplit("/", 1)[-1]
+    name = _FILENAME_SAFE_RE.sub("_", name).strip("._")[:180]
+    return name or fallback
 
 
 def _ensure_upload_dir():
@@ -32,7 +44,7 @@ async def compare_params(
     ts = int(time.time() * 1000)
 
     for i, f in enumerate(files):
-        path = os.path.join(UPLOAD_DIR, f"{ts}_{i}_{f.filename}")
+        path = os.path.join(UPLOAD_DIR, f"{ts}_{i}_{_safe_filename(f.filename)}")
         try:
             with open(path, "wb") as buffer:
                 buffer.write(await f.read())
@@ -58,13 +70,16 @@ async def compare_params(
             cmp_path = saved_paths[i]
             cmp_name = saved_names[i]
 
-            pair_result = run_param_compare(ref_path, cmp_path, param_names=param_names)
+            # PDF 解析/OCR 为同步重计算，放线程池执行，避免阻塞事件循环
+            pair_result = await asyncio.to_thread(
+                run_param_compare, ref_path, cmp_path, param_names
+            )
             pair_result["file_a"] = ref_name
             pair_result["file_b"] = cmp_name
             pair_result["pair_index"] = i
 
-            raw_ref = _extract_raw_text(ref_path)
-            raw_cmp = _extract_raw_text(cmp_path)
+            raw_ref = await asyncio.to_thread(_extract_raw_text, ref_path)
+            raw_cmp = await asyncio.to_thread(_extract_raw_text, cmp_path)
             pair_result["extracted_text_a"] = raw_ref[:3000] if raw_ref else ""
             pair_result["extracted_text_b"] = raw_cmp[:3000] if raw_cmp else ""
 

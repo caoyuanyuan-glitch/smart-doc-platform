@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, BackgroundTasks, Query
 from typing import List, Optional
+import asyncio
 from sqlalchemy.orm import Session
 import os
 import json
@@ -17,6 +18,20 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads"
 PREVIEW_DIR = "./static/preview"
+
+_FILENAME_SAFE_RE = __import__("re").compile(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+")
+
+
+def _safe_filename(filename: Optional[str], fallback: str = "upload") -> str:
+    """清洗客户端文件名，防路径穿越/非法字符。
+
+    - 仅取 basename，剥掉任何目录部分（含 Windows 反斜杠）
+    - 去掉路径分隔符、控制字符与空串文件名
+    """
+    name = (filename or "").replace("\\", "/")
+    name = name.rsplit("/", 1)[-1]
+    name = _FILENAME_SAFE_RE.sub("_", name).strip("._")[:180]
+    return name or fallback
 
 _MEMORY_TASKS = {}
 _MEMORY_DIFFS = {}
@@ -1134,6 +1149,11 @@ def _parse_file(file_path: str, filename: str):
         os.makedirs(temp_dir, exist_ok=True)
         try:
             with zipfile.ZipFile(file_path, 'r') as zf:
+                # Zip slip 防护：拒绝绝对路径与逃逸 temp_dir 的成员后再解压
+                for member in zf.namelist():
+                    member_path = os.path.realpath(os.path.join(temp_dir, member))
+                    if not member_path.startswith(os.path.realpath(temp_dir) + os.sep):
+                        raise ValueError(f"Unsafe zip member: {member}")
                 zf.extractall(temp_dir)
             result = _extract_dita_dir(temp_dir)
             if isinstance(result, str):
@@ -1313,28 +1333,9 @@ def _do_single_compare(file_a_path, file_b_path, file_a_name, file_b_name, user_
             result.get("only_b", []),
             dita_full_json=dita_full_json,
         )
+        # 注意：DITA 分支的 result["diffs"] 已在上方由 dita_full.topics 构建，
+        # 这里不得再从 dita_full 追加一次，否则每条 diff 重复入库 2 倍。
         diffs_to_save = result["diffs"][:200]
-        if dita_full:
-            for tr in dita_full.get("topics", []):
-                for d in tr.get("diffs", []):
-                    if len(diffs_to_save) >= 200:
-                        break
-                    diffs_to_save.append({
-                        "diff_type": d.get("type", "modify"),
-                        "severity": (
-                            "high" if d.get("type") in ("only_a", "only_b")
-                            else "medium" if d.get("similarity", 0) < 0.7
-                            else "low"
-                        ),
-                        "similarity": float(d.get("similarity", 0.0)),
-                        "text_a": d.get("text_a", ""),
-                        "text_b": d.get("text_b", ""),
-                        "position_a": {},
-                        "position_b": {},
-                        "chapter": tr.get("chapter_a", "") or tr.get("chapter_b", ""),
-                    })
-                if len(diffs_to_save) >= 200:
-                    break
 
         for diff in diffs_to_save[:200]:
             try:
@@ -1471,7 +1472,7 @@ async def create_compare(
     group_id = int(time.time() * 1000)
 
     for f in files:
-        path = os.path.join(UPLOAD_DIR, f"{group_id}_{len(saved_paths)}_{f.filename}")
+        path = os.path.join(UPLOAD_DIR, f"{group_id}_{len(saved_paths)}_{_safe_filename(f.filename)}")
         try:
             with open(path, "wb") as buffer:
                 buffer.write(await f.read())
@@ -1508,11 +1509,14 @@ async def create_compare(
     for i in range(1, len(saved_paths)):
         cmp_path = saved_paths[i]
         cmp_name = saved_names[i]
-        pair_result = _do_single_compare(
+        # 解析/对比为 CPU+IO 密集同步计算，放线程池执行，避免阻塞事件循环。
+        # SQLite 引擎已设 check_same_thread=False，session 在单个挂起请求内跨线程串行使用安全。
+        pair_result = await asyncio.to_thread(
+            _do_single_compare,
             ref_path, cmp_path, ref_name, cmp_name,
-            user_id=current_user.id,
-            group_id=group_id, file_names=json.dumps(saved_names, ensure_ascii=False),
-            db=db,
+            current_user.id,
+            group_id, json.dumps(saved_names, ensure_ascii=False),
+            db,
         )
         all_results.append(pair_result)
 
@@ -1621,6 +1625,51 @@ async def read_compare_tasks(
     items.sort(key=lambda x: x["id"] if isinstance(x["id"], int) else 0, reverse=True)
     
     return items[skip: skip + limit]
+
+
+@router.get("/config")
+async def get_config(
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    try:
+        from app.crud.compare import get_compare_config
+        config = get_compare_config(db)
+        whitelist = []
+        try:
+            if getattr(config, "whitelist", None):
+                whitelist = json.loads(config.whitelist)
+        except Exception:
+            whitelist = []
+        return {
+            "threshold": getattr(config, "threshold", 0.8),
+            "alpha": getattr(config, "alpha", 0.6),
+            "beta": getattr(config, "beta", 0.4),
+            "tolerance": getattr(config, "tolerance", 0.01),
+            "whitelist": whitelist,
+        }
+    except Exception:
+        return {"threshold": 0.8, "alpha": 0.6, "beta": 0.4, "tolerance": 0.01, "whitelist": []}
+
+
+@router.put("/config")
+async def update_config(
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    current_user: UserOut = Depends(get_current_active_user),
+):
+    payload = payload or {}
+    threshold = payload.get("threshold")
+    alpha = payload.get("alpha")
+    beta = payload.get("beta")
+    tolerance = payload.get("tolerance")
+    whitelist = payload.get("whitelist")
+    try:
+        from app.crud.compare import update_compare_config
+        update_compare_config(db, threshold, alpha, beta, tolerance, whitelist)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Config update failed: {e}")
+    return {"message": "Config updated successfully"}
 
 
 @router.get("/{task_id}")
@@ -1947,8 +1996,8 @@ body {{ font-family: Arial, sans-serif; margin: 20px; }}
 <p><strong>类型:</strong> {dtype}</p>
 <p><strong>严重程度:</strong> {severity}</p>
 <p><strong>相似度:</strong> {d.get('similarity', 0.0)*100:.1f}%</p>
-<p><strong>原文:</strong> {d.get('text_a', '')}</p>
-<p><strong>修改后:</strong> {d.get('text_b', '')}</p>
+<p><strong>原文:</strong> {html.escape(str(d.get('text_a', '') or ''))}</p>
+<p><strong>修改后:</strong> {html.escape(str(d.get('text_b', '') or ''))}</p>
 </div>"""
         html_content += "</body></html>"
         return {"content": html_content, "format": "html"}
@@ -2011,42 +2060,6 @@ body {{ font-family: Arial, sans-serif; margin: 20px; }}
                 "",
             ]
         return {"content": "\n".join(md_lines), "format": "md"}
-
-
-@router.get("/config")
-async def get_config(db: Session = Depends(get_db)):
-    try:
-        from app.crud.compare import get_compare_config
-        config = get_compare_config(db)
-        whitelist = []
-        try:
-            if getattr(config, "whitelist", None):
-                whitelist = json.loads(config.whitelist)
-        except Exception:
-            whitelist = []
-        return {
-            "threshold": getattr(config, "threshold", 0.8),
-            "alpha": getattr(config, "alpha", 0.6),
-            "beta": getattr(config, "beta", 0.4),
-            "tolerance": getattr(config, "tolerance", 0.01),
-            "whitelist": whitelist,
-        }
-    except Exception:
-        return {"threshold": 0.8, "alpha": 0.6, "beta": 0.4, "tolerance": 0.01, "whitelist": []}
-
-
-@router.put("/config")
-async def update_config(
-    threshold: float = None, alpha: float = None, beta: float = None,
-    tolerance: float = None, whitelist: list = None,
-    db: Session = Depends(get_db),
-):
-    try:
-        from app.crud.compare import update_compare_config
-        update_compare_config(db, threshold, alpha, beta, tolerance, whitelist)
-    except Exception:
-        pass
-    return {"message": "Config updated successfully"}
 
 
 @router.get("/{task_id}/preview/file")

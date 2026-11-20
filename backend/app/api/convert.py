@@ -10,6 +10,7 @@ import os
 import re
 import json
 import time
+import tempfile
 import zipfile
 import shutil
 import threading
@@ -34,6 +35,36 @@ router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 UPLOAD_DIR = "./static/uploads"
 OUTPUT_DIR = "./static/uploads/outputs"
+
+_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+")
+
+
+def _safe_filename(filename, fallback: str = "upload") -> str:
+    """清洗客户端文件名：仅保留 basename 与白名单字符，防上传路径穿越。"""
+    name = (filename or "").replace("\\", "/")
+    name = name.rsplit("/", 1)[-1]
+    name = _FILENAME_SAFE_RE.sub("_", name).strip("._")[:180]
+    return name or fallback
+
+
+def _safe_output_join(output_base: str, rel_path: str) -> str:
+    """将相对路径限制在 output_base 内，防模板 zip/href 的 zip-slip 写逃逸。
+
+    返回None表示路径非法（绝对路径或含 .. 逃逸），调用方应跳过该条目。
+    """
+    rel = (rel_path or "").replace("\\", "/")
+    if not rel or rel.startswith("/") or (len(rel) > 1 and rel[1] == ":"):
+        return None
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    joined = os.path.join(*parts)
+    candidate = os.path.join(output_base, joined)
+    real_base = os.path.realpath(output_base)
+    real_candidate = os.path.realpath(candidate)
+    if real_candidate != real_base and not real_candidate.startswith(real_base + os.sep):
+        return None
+    return candidate
 
 _tasks_lock = threading.Lock()
 _task_store = {}
@@ -3589,6 +3620,55 @@ def _extract_images_md(content):
     return images
 
 
+def _is_allowed_image_source_path(path: str, output_base: str) -> bool:
+    """本地图片仅允许来自平台受控目录（uploads / 系统临时目录 / 输出目录）。
+
+    防止恶意 markdown 引用 /etc/passwd 等任意服务器文件被打进可下载的输出包。
+    """
+    import tempfile as _tempfile
+    try:
+        real = os.path.realpath(path)
+        allowed_roots = [
+            os.path.realpath(UPLOAD_DIR),
+            os.path.realpath(_tempfile.gettempdir()),
+            os.path.realpath(output_base),
+        ]
+        return any(real == root or real.startswith(root + os.sep) for root in allowed_roots)
+    except Exception:
+        return False
+
+
+def _is_safe_remote_image_url(url: str) -> bool:
+    """远程图片 URL 基础 SSRF 防护：仅 http(s)，拒绝环回/内网/链路本地地址。"""
+    from urllib.parse import urlparse
+    import ipaddress
+    import socket
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").strip()
+        if not host:
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            return bool(ip.is_global)
+        except ValueError:
+            pass
+        if host.lower() in ("localhost",):
+            return False
+        try:
+            for info in socket.getaddrinfo(host, None):
+                ip = ipaddress.ip_address(info[4][0])
+                if not ip.is_global:
+                    return False
+        except OSError:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _download_images_for_output(images, output_base, timeout=30, preserve_names=False):
     """Download external images and save to output_dir/image/.
     Returns dict mapping original URL to local filename.
@@ -3628,10 +3708,16 @@ def _download_images_for_output(images, output_base, timeout=30, preserve_names=
                 ext = ".png"
             raw_data = None
             if os.path.exists(url):
+                # 本地路径仅允许平台受控目录，防任意服务器文件读
+                if not _is_allowed_image_source_path(url, output_base):
+                    continue
                 with open(url, "rb") as f:
                     raw_data = f.read()
             else:
                 if not url.startswith(("http://", "https://")):
+                    continue
+                # 基础 SSRF 防护：拒绝环回/内网/链路本地目标
+                if not _is_safe_remote_image_url(url):
                     continue
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -10024,11 +10110,16 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
                             content = text_content.encode("utf-8")
                         except Exception:
                             pass
-                    tpl_fname = os.path.join(output_base, fname)
+                    tpl_fname = _safe_output_join(output_base, fname)
+                    if not tpl_fname:
+                        # 模板 href 逃逸 output_base，跳过防 zip-slip
+                        continue
                     with open(tpl_fname, "wb") as f:
                         f.write(content)
                 for img_path, img_content in template_parts["image_files"].items():
-                    tpl_img = os.path.join(output_base, img_path)
+                    tpl_img = _safe_output_join(output_base, img_path)
+                    if not tpl_img:
+                        continue
                     os.makedirs(os.path.dirname(tpl_img), exist_ok=True)
                     with open(tpl_img, "wb") as f:
                         f.write(img_content)
@@ -10159,10 +10250,20 @@ def _run_pipeline(task_id, db_session_factory, source_format, file_path, source_
 
         if post_feedback and target_format == "dita" and not is_lossless_md_csv:
             _set_progress(90, "按反馈修改")
+            feedback_error = None
             try:
                 _apply_feedback_to_output_zip(zip_path, post_feedback, post_screenshot_path)
-            except Exception:
-                pass
+            except Exception as e:
+                feedback_error = str(e)
+            if feedback_error:
+                # 反馈应用失败必须如实上报，不得静默吞掉让用户拿到未修改的包
+                checks.append({
+                    "name": "反馈应用",
+                    "status": "warning",
+                    "detail": f"按反馈修改失败，输出为未应用反馈的版本：{feedback_error[:200]}",
+                })
+                if overall == "passed":
+                    overall = "warning"
             output_size = os.path.getsize(zip_path)
 
         verification_report = {
@@ -10266,7 +10367,7 @@ async def start_conversion(
         raise HTTPException(status_code=400, detail="输出语言仅支持 en-US 或 zh-CN")
 
     _ensure_dir(UPLOAD_DIR)
-    source_path = os.path.join(UPLOAD_DIR, f"src_{int(time.time() * 1000)}_{source_file.filename}")
+    source_path = os.path.join(UPLOAD_DIR, f"src_{int(time.time() * 1000)}_{_safe_filename(source_file.filename, 'source')}")
     with open(source_path, "wb") as f:
         f.write(await source_file.read())
 
@@ -10277,7 +10378,7 @@ async def start_conversion(
         ext = os.path.splitext(filename)[1].lower()
         if ext not in allowed_asset_exts:
             continue
-        extra_path = os.path.join(UPLOAD_DIR, f"asset_{int(time.time() * 1000)}_{filename}")
+        extra_path = os.path.join(UPLOAD_DIR, f"asset_{int(time.time() * 1000)}_{_safe_filename(filename, 'asset')}")
         with open(extra_path, "wb") as f:
             f.write(await asset.read())
         extra_paths.append(extra_path)
@@ -10286,13 +10387,13 @@ async def start_conversion(
     template_filename = None
     if template_file:
         template_filename = template_file.filename
-        template_path = os.path.join(UPLOAD_DIR, f"tpl_{int(time.time() * 1000)}_{template_file.filename}")
+        template_path = os.path.join(UPLOAD_DIR, f"tpl_{int(time.time() * 1000)}_{_safe_filename(template_file.filename, 'template')}")
         with open(template_path, "wb") as f:
             f.write(await template_file.read())
 
     retry_screenshot_path = None
     if retry_screenshot and retry_screenshot.filename:
-        retry_screenshot_path = os.path.join(UPLOAD_DIR, f"ss_{int(time.time() * 1000)}_{retry_screenshot.filename}")
+        retry_screenshot_path = os.path.join(UPLOAD_DIR, f"ss_{int(time.time() * 1000)}_{_safe_filename(retry_screenshot.filename, 'screenshot')}")
         with open(retry_screenshot_path, "wb") as f:
             f.write(await retry_screenshot.read())
 
@@ -10383,12 +10484,38 @@ def _run_revise_pipeline(task_id, feedback, screenshot_path=None):
         )
 
         output_public_path = f"/static/uploads/outputs/{zip_filename}"
+        # revise 后重跑结构验证并更新报告，避免报告停留在转换时的旧结果
+        revised_report = None
+        try:
+            with tempfile.TemporaryDirectory() as verify_dir:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    for member in zf.namelist():
+                        member_path = os.path.realpath(os.path.join(verify_dir, member))
+                        if not member_path.startswith(os.path.realpath(verify_dir) + os.sep):
+                            raise ValueError(f"Unsafe zip member: {member}")
+                    zf.extractall(verify_dir)
+                overall, checks = verify_output_dir(verify_dir, "dita")
+                revised_report = json.dumps(
+                    {"overall": overall, "checks": list(checks or []), "unmapped_sections": []},
+                    ensure_ascii=False,
+                )
+        except Exception as verify_exc:
+            revised_report = json.dumps(
+                {
+                    "overall": "warning",
+                    "checks": [{"name": "结构完整性", "status": "warning",
+                                "detail": f"revise 后验证失败：{str(verify_exc)[:200]}"}],
+                    "unmapped_sections": [],
+                },
+                ensure_ascii=False,
+            )
         update_convert_task_revised(
             db, task_id,
             output_zip_path=output_public_path,
             output_size=os.path.getsize(zip_path),
             retry_feedback=feedback,
             retry_screenshot_path=screenshot_path,
+            verification_report=revised_report,
         )
         _set_progress(100, "打包")
         with _tasks_lock:
@@ -10480,7 +10607,7 @@ async def revise_conversion(
     screenshot_path = None
     if screenshot and screenshot.filename:
         _ensure_dir(UPLOAD_DIR)
-        screenshot_path = os.path.join(UPLOAD_DIR, f"ss_{int(time.time() * 1000)}_{screenshot.filename}")
+        screenshot_path = os.path.join(UPLOAD_DIR, f"ss_{int(time.time() * 1000)}_{_safe_filename(screenshot.filename, 'screenshot')}")
         with open(screenshot_path, "wb") as handle:
             handle.write(await screenshot.read())
 

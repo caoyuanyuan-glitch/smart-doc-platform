@@ -25,7 +25,12 @@ def _load_env_file(path: Path, override: bool):
 
 
 def _load_env_file_with_protected_keys(path: Path, protected_keys: set[str]):
-    if not path.exists() or not path.is_file():
+    try:
+        exists = path.exists() and path.is_file()
+    except OSError:
+        # 无权限访问的路径（如非 root 用户 stat /root）直接跳过，不能让启动崩溃
+        return
+    if not exists:
         return
     values = dotenv_values(path)
     for key, value in values.items():
