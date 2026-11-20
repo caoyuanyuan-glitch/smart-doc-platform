@@ -59,8 +59,8 @@
           <div class="issue-panel-header">
             <div class="issue-header-meta">
               <span class="panel-title">当前问题</span>
-              <span class="issue-kind">{{ activeIssue ? getErrorTypeLabel(activeIssue.type) : (checkResult?.total_count === 0 && checkResult ? '处理完成' : '未选中问题') }}</span>
-            </div>
+              <span class="issue-kind">{{ activeIssue ? getErrorTypeLabel(activeIssue.type) : (checkResult?.total_count === 0 && checkResult ? '未发现问题' : '未选中问题') }}</span>
+              </div>
             <span class="nav-meta">{{ filteredErrors.length > 0 ? `${currentIssueIndex + 1} / ${filteredErrors.length}` : '0 / 0' }}</span>
           </div>
 
@@ -75,7 +75,7 @@
                 <el-button size="small" @click="replaceWord(activeIssue, suggestion)">应用</el-button>
               </div>
             </template>
-            <div v-else class="suggestion-empty">当前问题没有可靠的自动修订方案。可点击下方“编辑”手动写入修订内容。</div>
+            <div v-else class="suggestion-empty">{{ suggestionEmptyText }}</div>
           </div>
 
         </div>
@@ -95,7 +95,8 @@
           <div class="editor-header-meta">
             <span class="editor-title">{{ activeTab === 'file' ? '文档内容' : '原文内容' }}</span>
             <span class="editor-tip">
-              {{ activeTab === 'file' ? '点击高亮位置可在左侧处理当前问题' : '在这里粘贴或编辑文本，检查后可用左侧面板逐条处理问题' }}
+              <template v-if="checkResult">已读取 {{ checkResult.text.length }} 字 · {{ activeTab === 'file' ? '点击高亮位置可在左侧处理当前问题' : '可用左侧面板逐条处理问题' }}</template>
+              <template v-else>{{ activeTab === 'file' ? '点击高亮位置可在左侧处理当前问题' : '在这里粘贴或编辑文本，检查后可用左侧面板逐条处理问题' }}</template>
             </span>
           </div>
           <div v-if="checkResult" class="editor-header-actions">
@@ -181,6 +182,12 @@ const filteredErrors = computed(() => {
 })
 
 const activeIssue = computed(() => filteredErrors.value[currentIssueIndex.value] || null)
+const suggestionEmptyText = computed(() => {
+  if (checkResult.value && checkResult.value.total_count === 0) {
+    return '可滚动右侧正文确认提取内容。'
+  }
+  return '当前问题没有可靠的自动修订方案。可点击下方“编辑”手动写入修订内容。'
+})
 watch(filteredErrors, () => {
   if (currentIssueIndex.value >= filteredErrors.value.length) {
     currentIssueIndex.value = filteredErrors.value.length > 0 ? filteredErrors.value.length - 1 : 0
@@ -230,7 +237,7 @@ const highlightedText = computed(() => {
 function escapeHtml(text) {
   const div = document.createElement('div')
   div.textContent = text
-  return div.innerHTML.replace(/\n/g, '<br/>').replace(/\s/g, '&nbsp;')
+  return div.innerHTML.replace(/\n/g, '<br/>')
 }
 
 function escapeHtmlAttribute(text) {
@@ -413,7 +420,7 @@ function getIssueDetailText(issue) {
   }
 
   if (checkResult.value?.total_count === 0 && checkResult.value) {
-    return '所有当前命中问题都已处理完毕。点击下方“导出结果”保存当前正文。'
+    return '已完整读取文档，未发现拼写或规则问题。可滚动右侧正文确认提取内容。'
   }
 
   return '在这里处理当前问题：右侧高亮位置会同步当前项，左侧可继续浏览、忽略或手动修改。'
@@ -425,7 +432,7 @@ function getIssueToken(issue) {
   }
 
   if (checkResult.value?.total_count === 0 && checkResult.value) {
-    return '当前没有剩余问题'
+    return '未发现问题'
   }
 
   return '先点击文档中的高亮问题，或使用“下一处”开始浏览。'
@@ -449,7 +456,13 @@ async function startCheck() {
       }
       const file = fileList.value[0]
       const formData = new FormData()
-      formData.append('file', file.raw)
+      const raw = file.raw || file
+      if (!raw) {
+        progress.value.visible = false
+        ElMessage.warning('无法读取所选文件，请重新选择')
+        return
+      }
+      formData.append('file', raw)
 
       progress.value = { visible: true, percent: 10, message: '正在上传文件...', detail: file.name, status: '' }
       await new Promise(r => setTimeout(r, 100))
@@ -1110,7 +1123,8 @@ onMounted(() => {
   line-height: 1.9;
   color: #334155;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 :deep(.highlight-chip) {
