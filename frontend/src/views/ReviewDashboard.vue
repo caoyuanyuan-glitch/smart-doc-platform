@@ -89,58 +89,26 @@
       <div v-else class="mix-empty">当前筛选范围内还没有有效检出、漏检或误报样本。</div>
     </section>
 
-    <div class="charts-row single">
+    <div class="charts-row">
       <section class="panel">
         <div class="panel-hd">
           <div>
-            <h3>{{ isPersonalView ? '我的高占比问题' : '高占比问题' }}</h3>
-            <p>按问题条数占比取 Top5</p>
+            <h3>{{ isPersonalView ? '我的问题类别' : '问题类别' }}</h3>
+            <p>按术语、格式、语法、结构等归类</p>
           </div>
         </div>
-        <v-chart v-if="issueRows.length" class="chart" :option="issueBarOption" autoresize />
-        <el-empty v-else description="暂无问题分布" :image-size="64" />
+        <v-chart v-if="categoryRows.length" class="chart chart-tall" :option="categoryPieOption" autoresize />
+        <el-empty v-else description="暂无问题类别" :image-size="64" />
       </section>
-    </div>
-
-    <div class="tables-row" :class="{ single: isPersonalView }">
-      <section v-if="!isPersonalView" class="panel">
+      <section class="panel">
         <div class="panel-hd">
           <div>
-            <h3>人员负荷</h3>
-            <p>任务量、完成量与问题数</p>
+            <h3>{{ isPersonalView ? '我的问题明细' : '问题明细' }}</h3>
+            <p>相近问题归并成短摘要，按条数取前 12 项</p>
           </div>
         </div>
-        <el-table :data="userStats" size="small" empty-text="暂无数据" class="desk-table">
-          <el-table-column prop="username" label="人员" min-width="120" show-overflow-tooltip />
-          <el-table-column prop="tasks" label="任务" width="72" />
-          <el-table-column prop="completed" label="完成" width="72" />
-          <el-table-column prop="issues" label="问题" width="72" />
-        </el-table>
-      </section>
-      <section class="panel panel-wide">
-        <div class="panel-hd">
-          <div>
-            <h3>{{ isPersonalView ? '我的最近任务' : '最近审核任务' }}</h3>
-            <p>按提交时间倒序</p>
-          </div>
-        </div>
-        <el-table :data="taskList" size="small" empty-text="暂无数据" class="desk-table">
-          <el-table-column prop="review_id" label="ID" width="70" />
-          <el-table-column v-if="!isPersonalView" prop="submitted_by" label="提交人" width="100" show-overflow-tooltip />
-          <el-table-column prop="document_name" label="文档" min-width="180" show-overflow-tooltip />
-          <el-table-column label="类型" width="88">
-            <template #default="scope">{{ docTypeLabel(scope.row.document_type) }}</template>
-          </el-table-column>
-          <el-table-column prop="status" label="状态" width="96">
-            <template #default="scope">
-              <span class="status-pill" :class="scope.row.status">{{ statusText(scope.row.status) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="issue_count" label="问题" width="72" />
-          <el-table-column prop="submitted_at" label="提交时间" width="160">
-            <template #default="scope">{{ formatTime(scope.row.submitted_at) }}</template>
-          </el-table-column>
-        </el-table>
+        <v-chart v-if="issueRows.length" class="chart chart-tall" :option="issueBarOption" autoresize />
+        <el-empty v-else description="暂无问题明细" :image-size="64" />
       </section>
     </div>
 
@@ -230,13 +198,13 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
-import { BarChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent } from 'echarts/components'
+import { BarChart, PieChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { reviewAPI, userAPI, getAPIErrorMessage } from '@/api'
 import { useUserStore } from '@/store/user'
 
-use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
+use([BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const loading = ref(false)
 const userStore = useUserStore()
@@ -256,14 +224,13 @@ const quality = reactive({
   detection_rate_available: false
 })
 const issueDistribution = ref([])
-const userStats = ref([])
-const taskList = ref([])
+const categoryDistribution = ref([])
 const userOptions = ref([])
 const isPersonalView = computed(() => viewMode.value === 'personal' || !isAdmin.value)
 const viewCaption = computed(() => (
   isPersonalView.value
     ? '看我提交的任务、检出率和问题结构'
-    : '看全员任务量、检出质量、问题结构和人员负荷'
+    : '看全员任务量、检出质量和问题结构'
 ))
 
 let refreshTimer = null
@@ -391,16 +358,28 @@ async function toggleCandidateRule(row, enable) {
 }
 
 const issueRows = computed(() => {
-  const rows = issueDistribution.value
+  return issueDistribution.value
     .map(item => ({ ...item, percent: Math.round((Number(item.percentage || 0) * 100) * 10) / 10 }))
     .sort((left, right) => right.percent - left.percent)
-  const topRows = rows.slice(0, 5)
-  const restRows = rows.slice(5)
-  if (!restRows.length) return topRows
-  const restCount = restRows.reduce((sum, item) => sum + Number(item.count || 0), 0)
-  const restPercent = Math.round(restRows.reduce((sum, item) => sum + item.percent, 0) * 10) / 10
-  return [...topRows, { type: '其他', count: restCount, percent: restPercent }]
+    .slice(0, 12)
 })
+
+const categoryRows = computed(() => {
+  return categoryDistribution.value
+    .map(item => ({ ...item, percent: Math.round((Number(item.percentage || 0) * 100) * 10) / 10 }))
+    .filter(item => Number(item.count || 0) > 0)
+})
+
+const CATEGORY_COLORS = {
+  术语: '#2563eb',
+  格式与写法: '#3b82f6',
+  语法与表达: '#60a5fa',
+  结构完整性: '#38bdf8',
+  图表与版式: '#0ea5e9',
+  页码与导航: '#0284c7',
+  信息完整性: '#1d4ed8',
+  其他: '#94a3b8'
+}
 
 const qualityMix = computed(() => {
   const items = [
@@ -422,7 +401,7 @@ function barColor(percent) {
 
 function shortenLabel(text) {
   const value = String(text || '')
-  return value.length > 16 ? `${value.slice(0, 15)}…` : value
+  return value.length > 22 ? `${value.slice(0, 21)}…` : value
 }
 
 const issueBarOption = computed(() => ({
@@ -435,7 +414,7 @@ const issueBarOption = computed(() => ({
       return row ? `${row.type}<br/>占比 ${row.percent}% · ${row.count} 条` : ''
     }
   },
-  grid: { left: 92, right: 44, top: 8, bottom: 8 },
+  grid: { left: 168, right: 48, top: 8, bottom: 8 },
   xAxis: {
     type: 'value',
     axisLabel: { formatter: '{value}%', color: '#94a3b8' },
@@ -461,6 +440,31 @@ const issueBarOption = computed(() => ({
   ]
 }))
 
+const categoryPieOption = computed(() => ({
+  tooltip: {
+    trigger: 'item',
+    formatter: params => `${params.name}<br/>${params.value} 条 · ${params.percent}%`
+  },
+  legend: {
+    bottom: 0,
+    type: 'scroll',
+    textStyle: { color: '#475569', fontSize: 12 }
+  },
+  series: [
+    {
+      type: 'pie',
+      radius: ['42%', '68%'],
+      center: ['50%', '44%'],
+      label: { formatter: '{b}\n{d}%', color: '#334155', fontSize: 11 },
+      data: categoryRows.value.map(item => ({
+        name: item.type,
+        value: item.count,
+        itemStyle: { color: CATEGORY_COLORS[item.type] || '#64748b' }
+      }))
+    }
+  ]
+}))
+
 function percentText(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return '--'
@@ -476,20 +480,6 @@ function formatMinutes(value) {
   const number = Number(value)
   if (!Number.isFinite(number) || number <= 0) return '--'
   return `${number} 分钟`
-}
-
-function formatTime(value) {
-  if (!value) return '--'
-  return String(value).replace('T', ' ').slice(0, 19)
-}
-
-function statusText(status) {
-  const map = { completed: '已完成', running: '进行中', pending: '待处理', failed: '失败' }
-  return map[status] || status || '--'
-}
-
-function docTypeLabel(type) {
-  return { excel: 'Excel', pdf: 'PDF', docx: 'Word', dita: 'DITA' }[type] || type || '其他'
 }
 
 function switchView(mode) {
@@ -524,8 +514,7 @@ async function loadDashboard() {
       detection_rate_available: false
     }, data.quality || {})
     issueDistribution.value = data.issue_distribution || []
-    userStats.value = data.user_stats || []
-    taskList.value = data.task_list || []
+    categoryDistribution.value = data.category_distribution || []
   } catch (error) {
     ElMessage.error(`加载审核看板失败: ${getAPIErrorMessage(error)}`)
   } finally {
@@ -752,6 +741,7 @@ onUnmounted(() => {
 }
 .panel-actions { display: flex; align-items: center; gap: 8px; }
 .chart { height: 248px; width: 100%; }
+.chart-tall { height: 360px; }
 .desk-table {
   --el-table-header-bg-color: #eff6ff;
   --el-table-bg-color: transparent;
