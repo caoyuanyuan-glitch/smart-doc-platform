@@ -233,6 +233,18 @@ PRESET_PATTERNS: dict[str, PresetPattern] = {
         "forbid_blob": r"句子结构混乱|导致断句错误",
         "language": "en",
     },
+    # FP-HUMAN-ICON-001 AI 深度审核报的"图标/按钮缺失"
+    # 这类 issue 由模型产出、rule 为空，rule_family("") 返回空串，
+    # 原预置模式（只认规则族）对其全部失效（实测 T7 9 条图标类 issue 命中 0 条）。
+    # 图标是 PDF 文本层未提取的内嵌对象，属工具伪影而非文档缺陷（用户已裁定）。
+    # 只匹配"缺少可点击对象/图标"这一精确特征，且必须无规则号（AI 来源），避免误伤规则类真问题。
+    "FP-HUMAN-ICON-001": {
+        "families": set(),
+        "allow_empty_family": True,
+        "require_blob": r"缺少可点击对象|缺少.*图标|未显示图标|插入图标|\bmissing\s+icon\b",
+        "forbid_blob": r"正文明确说明无此图标|文档注明",
+        "language": None,
+    },
     # FP-V1-007 文本层单复数/短语动词词序
     "FP-V1-007": {
         "families": {"pdf_text_layer_artifact", "unit_plural"},
@@ -307,7 +319,13 @@ def match_preset_pattern(issue: Any, *, language: str | None = None) -> str | No
 
     for entry_id, pattern in PRESET_PATTERNS.items():
         families = pattern.get("families") or set()
+        allow_empty_family = bool(pattern.get("allow_empty_family"))
         if families and family not in families:
+            # 允许显式声明匹配无规则号（AI 产出）的条目；其余保持原有严格语义
+            if not (allow_empty_family and not family):
+                continue
+        elif allow_empty_family and family:
+            # 声明了"仅匹配无规则号"的条目，不算有规则号的 issue
             continue
         if pattern.get("language") and language and pattern["language"] != language:
             continue

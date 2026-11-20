@@ -278,6 +278,8 @@
           </keep-alive>
         </router-view>
       </main>
+
+      <AgentDock />
     </template>
     </div>
   </el-config-provider>
@@ -289,6 +291,7 @@ import { useRouter } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { useUserStore } from '@/store/user'
 import { qaAPI, systemAPI } from '@/api'
+import AgentDock from '@/components/AgentDock.vue'
 import {
   House, DocumentChecked, MagicStick, ChatDotRound, DocumentAdd,
   Files, DataAnalysis, Refresh, CollectionTag, Fold, Expand, Switch, User, FolderOpened,

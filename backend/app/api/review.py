@@ -6438,6 +6438,12 @@ def _build_ai_review_basis_sections(spec_texts, document_language):
             "is_checklist": True,
         })
     parts.extend(_load_cyy_human_review_basis_sections())
+    # 人工审核意见的安全激活：抽象问题模式清单（不含具体文档错误原文，避免照搬臆造）
+    try:
+        from app.review_engine.human_review_patterns import load_pattern_sections
+        parts.extend(load_pattern_sections())
+    except Exception:
+        pass
     return parts
 
 
@@ -6624,7 +6630,17 @@ def _select_relevant_ai_review_basis(content, basis_sections, document_language=
     if not basis_sections:
         return ""
 
+    # 抽象问题模式清单不含具体文档错误原文，作为全局审核偏好单独提取，
+    # 两条返回路径（ES 命中 / 本地兜底）都会纳入。
+    human_pattern_sections = [s for s in basis_sections if s.get("basis_type") == "human_pattern"]
+    human_pattern_text = "\n\n".join(
+        f"## {s.get('label')}\n{s.get('text')}" for s in human_pattern_sections
+        if str(s.get("text") or "").strip()
+    )
+
     es_sections = _fetch_es_relevant_basis_sections(content, basis_sections, document_language, limit=max_sections + 1)
+    # ES 不应重复召回本地构造的抽象模式 section
+    es_sections = [s for s in es_sections if s.get("basis_type") != "human_pattern"]
     if es_sections:
         selected = []
         total_length = 0
@@ -6675,12 +6691,14 @@ def _select_relevant_ai_review_basis(content, basis_sections, document_language=
             for section, text in selected:
                 label = str(section.get("label") or "审核依据")
                 lines.append(f"## {label}\n{text}")
-            return "\n\n".join(lines)
+            result = "\n\n".join(lines)
+            return f"{result}\n\n{human_pattern_text}" if human_pattern_text else result
 
     content_tokens = set(_extract_basis_tokens(content, max_tokens=120))
     min_relevance = 0.08
     summary_entry = None
     checklist_entry = None
+    human_pattern_entry = None
     other_ranked = []
     for index, section in enumerate(basis_sections):
         label = str(section.get("label") or "")
@@ -6697,6 +6715,12 @@ def _select_relevant_ai_review_basis(content, basis_sections, document_language=
         is_summary = _is_summary_basis_section(label)
         is_checklist = _is_checklist_basis_section(label)
         is_cyy_example = label.startswith("CYY人工审核经验基线-")
+        # 人工审核意见的抽象模式清单是全局审核偏好（不含具体文档错误原文），
+        # 独立于 CYY 样例 budget，也不受 relevance 阈值限制，始终纳入一次。
+        if section.get("basis_type") == "human_pattern":
+            if human_pattern_entry is None:
+                human_pattern_entry = (section, text)
+            continue
         if is_summary:
             if summary_entry is None or priority > summary_entry[2]:
                 summary_entry = (section, text, priority)
@@ -6724,6 +6748,8 @@ def _select_relevant_ai_review_basis(content, basis_sections, document_language=
         selected.append((section, clipped))
         total_length += len(clipped)
         return True
+
+    # 抽象问题模式清单在结尾统一拼接（不占 CYY budget、不受 relevance 阈值限制）
 
     if checklist_entry:
         relevance, overlap, _priority, _index, section, text = checklist_entry
@@ -6760,13 +6786,16 @@ def _select_relevant_ai_review_basis(content, basis_sections, document_language=
     if not selected and summary_entry and summary_entry[1].strip():
         _append_selected(summary_entry[0], summary_entry[1])
 
-    if not selected:
+    if not selected and not human_pattern_text:
         return ""
     lines = []
     for section, text in selected:
         label = str(section.get("label") or "审核依据")
         lines.append(f"## {label}\n{text}")
-    return "\n\n".join(lines)
+    result = "\n\n".join(lines)
+    if human_pattern_text:
+        result = f"{result}\n\n{human_pattern_text}" if result else human_pattern_text
+    return result
 
 
 def _unicode_equivalent(text):
@@ -13791,8 +13820,18 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                 set_progress(review_id, 'running', 'AI二次验证', 55, f'正在AI验证 {len(candidate_rule_issues)} 个候选问题...')
                 print(f"[审核] 开始AI二次验证，候选问题数={len(candidate_rule_issues)}")
                 try:
-                    deterministic_issues = [issue for issue in candidate_rule_issues if _is_deterministic_review_rule(issue)]
-                    ai_check_issues = [issue for issue in candidate_rule_issues if not _is_deterministic_review_rule(issue)]
+                    # 确定性规则默认豁免 AI 验证（避免重复花钱）。
+                    # 若规则库噪声大，可设 REVIEW_AI_VERIFY_DETERMINISTIC=1 让 AI 也验一遍。
+                    verify_deterministic = os.getenv("REVIEW_AI_VERIFY_DETERMINISTIC", "0").strip().lower() in {"1", "true", "yes", "on"}
+                    if verify_deterministic:
+                        deterministic_issues = []
+                        ai_check_issues = list(candidate_rule_issues)
+                    else:
+                        deterministic_issues = [issue for issue in candidate_rule_issues if _is_deterministic_review_rule(issue)]
+                        ai_check_issues = [issue for issue in candidate_rule_issues if not _is_deterministic_review_rule(issue)]
+                    if not ai_check_issues and candidate_rule_issues:
+                        print(f"[审核] AI二次验证跳过: {len(deterministic_issues)} 条候选全为确定性规则（source=rule/term/spellcheck），未调用模型。"
+                              f"如需 AI 验证这些候选，设 REVIEW_AI_VERIFY_DETERMINISTIC=1")
                     filtered = _call_with_timeout(
                         ai_client.filter_rule_false_positives,
                         90.0,
@@ -13832,6 +13871,15 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
             pre_ai_count = len(issues)
             _stage_input_counts["ai_deep_review"] = pre_ai_count
             ai_review_basis_sections = _build_ai_review_basis_sections(spec_texts, document_language)
+            # 自主进化：注入人工确认启用的学习规则（抽象要点，非原文正则）
+            try:
+                from app.review_engine.learned_rules import load_enabled_sections
+                learned_sections = load_enabled_sections(db)
+                if learned_sections:
+                    ai_review_basis_sections.extend(learned_sections)
+                    print(f"[审核] 注入已启用学习规则 {len(learned_sections)} 条")
+            except Exception as e:
+                print(f"[审核] 学习规则加载失败(非致命): {e}")
             if snippet_review:
                 ai_review_basis_sections = [
                     section for section in ai_review_basis_sections

@@ -193,6 +193,8 @@ export const reviewAPI = {
   },
   clusterSupplements: (params = {}) => instance.get('/review/supplements/cluster', { params }),
   convertSupplement: (id) => instance.post(`/review/supplements/${id}/convert-rule`),
+  enableSupplementRule: (id) => instance.post(`/review/supplements/${id}/enable-rule`),
+  disableSupplementRule: (id) => instance.post(`/review/supplements/${id}/disable-rule`),
   dismissSupplement: (id) => instance.post(`/review/supplements/${id}/dismiss`),
   deleteFalsePositiveMemory: (id) => instance.delete(`/review/false-positive-memory/${id}`),
 }
@@ -531,4 +533,9 @@ export const polishStatsAPI = {
   getTextSessions: (params = {}) => instance.get('/polish-lab/stats/text/sessions', { params }),
   getDocumentSessions: (params = {}) => instance.get('/polish-lab/stats/document/sessions', { params }),
   getDocumentDetail: (analyzeId) => instance.get(`/polish-lab/stats/document/${analyzeId}`)
+}
+
+export const agentAPI = {
+  chat: (message, history = null) => instance.post('/agent/chat', { message, history }),
+  capabilities: () => instance.get('/agent/capabilities')
 }
