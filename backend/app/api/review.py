@@ -13861,6 +13861,16 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                     except Exception as e:
                         print(f"[审核] 中文确定性格式规则执行失败: {e}")
 
+                    if document.file_type == 'pdf' and not snippet_review:
+                        try:
+                            from app.review_engine.pdf_table_continuity import check_pdf_table_continuity
+                            table_cont_issues = check_pdf_table_continuity(_get_document_upload_path(document))
+                            if table_cont_issues:
+                                print(f"[审核] PDF 表格连续性几何规则发现问题: {len(table_cont_issues)}个")
+                            rule_issues.extend(table_cont_issues)
+                        except Exception as e:
+                            print(f"[审核] PDF 表格连续性几何规则执行失败: {e}")
+
                 if not snippet_review:
                     try:
                         release_checklist_issues = _run_release_checklist_audit(content, document, spec_texts, document_language)
