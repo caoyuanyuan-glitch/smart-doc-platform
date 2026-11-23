@@ -244,7 +244,7 @@
                 <el-menu-item index="/qa/history/general">知识库问答历史</el-menu-item>
                 <el-menu-item index="/qa/history/doc">说明书问答历史</el-menu-item>
               </el-sub-menu>
-              <el-menu-item index="/qa/dashboard">问答看板</el-menu-item>
+              <el-menu-item index="/qa/dashboard">统计面板</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="translate-sub">

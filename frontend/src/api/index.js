@@ -378,6 +378,7 @@ export const qaAPI = {
   deleteSession: (sessionId) => instance.delete(`/qa/history/sessions/${sessionId}`),
   getDashboard: (params = {}) => instance.get('/qa/dashboard', { params }),
   getInitialSuggestions: (kbIds = [], limit = 4) => instance.get('/qa/suggestions/initial', { params: { kb_ids: kbIds.join(','), limit } }),
+  getSceneSources: () => instance.get('/qa/scenes/sources'),
 }
 
 export const manualAPI = {

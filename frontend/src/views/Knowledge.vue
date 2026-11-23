@@ -796,6 +796,7 @@ async function loadFolderContent(id) {
   } finally {
     fileLoading.value = false
   }
+  await openPreviewFromQuery()
 }
 
 async function handleFileChange(file) {
@@ -824,6 +825,19 @@ async function handlePreviewFile(file) {
   } catch (e) {
     ElMessage.error('预览失败')
   }
+}
+
+async function openPreviewFromQuery() {
+  const raw = route.query.preview
+  if (raw == null || raw === '') return
+  const previewId = Number(raw)
+  if (!Number.isFinite(previewId)) return
+  const file = currentFiles.value.find(item => Number(item.id) === previewId)
+  if (!file) return
+  const nextQuery = { ...route.query }
+  delete nextQuery.preview
+  router.replace({ path: route.path, query: nextQuery })
+  await handlePreviewFile(file)
 }
 
 async function handleDownloadFile(file) {
@@ -961,6 +975,12 @@ watch(() => route.params.id, (newId) => {
     currentFolder.value = null
     currentFiles.value = []
     currentSubfolders.value = []
+  }
+})
+
+watch(() => route.query.preview, (id) => {
+  if (id && !fileLoading.value) {
+    openPreviewFromQuery()
   }
 })
 

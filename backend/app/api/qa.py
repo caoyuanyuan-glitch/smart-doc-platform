@@ -23,7 +23,7 @@ from app.database import get_db
 from app.models.qa_feedback import QaFeedback
 from app.models.qa_history import QaSession, QaMessage
 from app.schemas.qa_feedback import QaFeedbackCreate, QaFeedbackOut
-from app.api.auth import get_current_user, oauth2_scheme
+from app.api.auth import get_current_user, oauth2_scheme, require_admin
 
 router = APIRouter()
 
@@ -1150,7 +1150,37 @@ async def delete_qa_session(
     return {"message": "已删除"}
 
 
-# ─── 问答看板（管理员） ──────────────────────────────
+# ─── 统计面板 ──────────────────────────────
+
+@router.get("/scenes/sources")
+async def get_scene_sources(
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    from app.utils.qa_scenes import build_scene_inventory
+
+    scenes = []
+    for scene in build_scene_inventory(db):
+        files = []
+        for item in scene["files"]:
+            files.append({
+                "id": item["id"],
+                "name": item["name"],
+                "folder_id": item["folder_id"],
+                "folder_path": item["folder_path"],
+                "file_type": item["file_type"],
+                "updated_at": _to_beijing_iso(item["updated_at"]),
+            })
+        scenes.append({
+            "key": scene["key"],
+            "kicker": scene["kicker"],
+            "title": scene["title"],
+            "file_count": scene["file_count"],
+            "missing_paths": scene["missing_paths"],
+            "files": files,
+        })
+    return {"scenes": scenes}
+
 
 @router.get("/dashboard")
 async def get_qa_dashboard(
