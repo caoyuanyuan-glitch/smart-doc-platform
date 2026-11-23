@@ -56,6 +56,7 @@ from app.review_engine.term_baseline import check_term_baseline
 from app.review_engine.canonical_writing import check_canonical_writing
 from app.review_engine.cn_typo import check_cn_typos
 from app.review_engine.learned_patch import check_learned_patches
+from app.review_engine.cn_format_consistency import check_cn_format_consistency
 from app.utils.ai_client import ai_client
 from app.utils.spell_checker import run_spelling_and_grammar_check, is_whitelisted
 from app.utils.document_parser import clean_pdf_text, extract_pdf, parse_file, get_file_type
@@ -13820,6 +13821,13 @@ def _run_review_background(review_id: int, document_id: int, mode: str, provider
                         rule_issues.extend(chinese_baseline_issues)
                     except Exception as e:
                         print(f"[审核] 中文人工基线高置信规则执行失败: {e}")
+
+                    try:
+                        cn_format_issues = check_cn_format_consistency(content)
+                        print(f"[审核] 中文确定性格式规则发现问题: {len(cn_format_issues)}个")
+                        rule_issues.extend(cn_format_issues)
+                    except Exception as e:
+                        print(f"[审核] 中文确定性格式规则执行失败: {e}")
 
                 if not snippet_review:
                     try:
