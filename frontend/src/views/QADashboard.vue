@@ -106,34 +106,38 @@
     </div>
 
     <div class="detail-section sources-section" v-if="userStore.isAdmin">
-      <div class="detail-hd">
-        <h3>知识库问答资料清单</h3>
-      </div>
-      <div v-if="sourcesError" class="sources-error">{{ sourcesError }}</div>
-      <div v-for="scene in sourceScenes" :key="scene.key" class="scene-block">
-        <div class="scene-hd">
-          <div>
-            <span class="scene-kicker">{{ scene.kicker }}</span>
-            <span class="scene-title">{{ scene.title }}</span>
+      <el-collapse class="sources-collapse">
+        <el-collapse-item name="sources">
+          <template #title>
+            <span class="sources-title">知识库问答资料清单</span>
+          </template>
+          <div v-if="sourcesError" class="sources-error">{{ sourcesError }}</div>
+          <div v-for="scene in sourceScenes" :key="scene.key" class="scene-block">
+            <div class="scene-hd">
+              <div>
+                <span class="scene-kicker">{{ scene.kicker }}</span>
+                <span class="scene-title">{{ scene.title }}</span>
+              </div>
+              <span class="scene-count">{{ scene.file_count }} 份资料</span>
+            </div>
+            <el-table
+              :data="scene.files"
+              stripe
+              v-loading="sourcesLoading"
+              :empty-text="sceneEmptyText(scene)"
+              class="detail-table scene-table"
+              @row-click="openSourceFile"
+            >
+              <el-table-column label="文件名" min-width="220" prop="name" show-overflow-tooltip />
+              <el-table-column label="所属目录" min-width="220" prop="folder_path" show-overflow-tooltip />
+              <el-table-column label="类型" width="90" prop="file_type" />
+              <el-table-column label="更新时间" width="180">
+                <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
+              </el-table-column>
+            </el-table>
           </div>
-          <span class="scene-count">{{ scene.file_count }} 份资料</span>
-        </div>
-        <el-table
-          :data="scene.files"
-          stripe
-          v-loading="sourcesLoading"
-          :empty-text="sceneEmptyText(scene)"
-          class="detail-table scene-table"
-          @row-click="openSourceFile"
-        >
-          <el-table-column label="文件名" min-width="220" prop="name" show-overflow-tooltip />
-          <el-table-column label="所属目录" min-width="220" prop="folder_path" show-overflow-tooltip />
-          <el-table-column label="类型" width="90" prop="file_type" />
-          <el-table-column label="更新时间" width="180">
-            <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
-          </el-table-column>
-        </el-table>
-      </div>
+        </el-collapse-item>
+      </el-collapse>
     </div>
 
     <div class="detail-section" v-if="userStore.isAdmin">
@@ -440,4 +444,10 @@ onMounted(() => {
 .scene-title { font-size: 14px; font-weight: 600; color: #1e293b; }
 .scene-count { font-size: 12px; color: #64748b; }
 .scene-table { cursor: pointer; }
+.sources-section { padding-top: 8px; padding-bottom: 8px; }
+.sources-collapse { border: none; }
+.sources-title { font-size: 15px; font-weight: 600; color: #1e293b; }
+.sources-collapse :deep(.el-collapse-item__header) { height: 40px; line-height: 40px; border: none; }
+.sources-collapse :deep(.el-collapse-item__wrap) { border: none; }
+.sources-collapse :deep(.el-collapse-item__content) { padding-bottom: 8px; }
 </style>
