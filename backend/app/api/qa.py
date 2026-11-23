@@ -1,3 +1,4 @@
+import time
 import os
 import re
 import uuid
@@ -23,7 +24,8 @@ from app.database import get_db
 from app.models.qa_feedback import QaFeedback
 from app.models.qa_history import QaSession, QaMessage
 from app.schemas.qa_feedback import QaFeedbackCreate, QaFeedbackOut
-from app.api.auth import get_current_user, oauth2_scheme
+from app.api.auth import get_current_user, oauth2_scheme, require_admin
+from app.utils.knowledge_usage import MODULE_QA, record_knowledge_file_call
 
 router = APIRouter()
 
@@ -718,7 +720,9 @@ def _load_qa_documents(db, knowledge_ids):
                 file_name = f.get("name", "")
                 file_type = f.get("file_type", "")
                 if file_path and os.path.exists(file_path):
+                    started = time.perf_counter()
                     content = _extract_file_content(file_path, file_type)
+                    record_knowledge_file_call(fid_unique, MODULE_QA, int((time.perf_counter() - started) * 1000))
                     if _normalize_text(content):
                         documents.append({
                             "document_id": fid_unique,
@@ -1061,11 +1065,11 @@ async def resolve_feedback(
 async def get_qa_sessions(
     type: str = Query("all"),
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
+    current_user = Depends(get_current_user),
 ):
-    user_id = _get_user_id_from_token(token, db)
-    if not user_id:
-        return {"sessions": []}
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可查看历史记录")
+    user_id = current_user.id
 
     q = db.query(QaSession).filter(QaSession.user_id == user_id)
     if type == "general":
@@ -1093,11 +1097,11 @@ async def get_qa_sessions(
 async def get_qa_session_detail(
     session_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
+    current_user = Depends(get_current_user),
 ):
-    user_id = _get_user_id_from_token(token, db)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="请先登录")
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可查看历史记录")
+    user_id = current_user.id
 
     sess = db.query(QaSession).filter(QaSession.id == session_id, QaSession.user_id == user_id).first()
     if not sess:
@@ -1135,11 +1139,11 @@ async def get_qa_session_detail(
 async def delete_qa_session(
     session_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
+    current_user = Depends(get_current_user),
 ):
-    user_id = _get_user_id_from_token(token, db)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="请先登录")
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可查看历史记录")
+    user_id = current_user.id
 
     sess = db.query(QaSession).filter(QaSession.id == session_id, QaSession.user_id == user_id).first()
     if not sess:
@@ -1150,7 +1154,37 @@ async def delete_qa_session(
     return {"message": "已删除"}
 
 
-# ─── 问答看板（管理员） ──────────────────────────────
+# ─── 统计面板 ──────────────────────────────
+
+@router.get("/scenes/sources")
+async def get_scene_sources(
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    from app.utils.qa_scenes import build_scene_inventory
+
+    scenes = []
+    for scene in build_scene_inventory(db):
+        files = []
+        for item in scene["files"]:
+            files.append({
+                "id": item["id"],
+                "name": item["name"],
+                "folder_id": item["folder_id"],
+                "folder_path": item["folder_path"],
+                "file_type": item["file_type"],
+                "updated_at": _to_beijing_iso(item["updated_at"]),
+            })
+        scenes.append({
+            "key": scene["key"],
+            "kicker": scene["kicker"],
+            "title": scene["title"],
+            "file_count": scene["file_count"],
+            "missing_paths": scene["missing_paths"],
+            "files": files,
+        })
+    return {"scenes": scenes}
+
 
 @router.get("/dashboard")
 async def get_qa_dashboard(
@@ -1165,6 +1199,8 @@ async def get_qa_dashboard(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user),
 ):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可查看问答看板")
     now = datetime.now(BEIJING_TZ)
     today = now.date()
 

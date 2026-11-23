@@ -378,6 +378,7 @@ export const qaAPI = {
   deleteSession: (sessionId) => instance.delete(`/qa/history/sessions/${sessionId}`),
   getDashboard: (params = {}) => instance.get('/qa/dashboard', { params }),
   getInitialSuggestions: (kbIds = [], limit = 4) => instance.get('/qa/suggestions/initial', { params: { kb_ids: kbIds.join(','), limit } }),
+  getSceneSources: () => instance.get('/qa/scenes/sources'),
 }
 
 export const manualAPI = {
@@ -517,7 +518,10 @@ export const knowledgeAPI = {
   deleteFile: (fileId) => instance.delete(`/knowledge/files/${fileId}`),
   getFileContent: (fileId) => instance.get(`/knowledge/files/${fileId}/content`),
   updateFileContent: (fileId, content) => instance.put(`/knowledge/files/${fileId}/content`, { content }),
-  updateFilePermission: (fileId, data) => instance.put(`/knowledge/files/${fileId}/permission`, data)
+  updateFilePermission: (fileId, data) => instance.put(`/knowledge/files/${fileId}/permission`, data),
+  updateFolderPermission: (folderId, data) => instance.put(`/knowledge/folders/${folderId}/permission`, data),
+  getUsageSummary: (params = {}) => instance.get('/knowledge/usage/summary', { params }),
+  getUsageFileDetails: (fileId, params = {}) => instance.get(`/knowledge/usage/files/${fileId}`, { params })
 }
 
 export const docPolishAPI = {

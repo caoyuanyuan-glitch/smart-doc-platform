@@ -265,10 +265,10 @@ class AuthScopingTestCase(unittest.TestCase):
 
         db = self.SessionLocal()
         try:
-            other_folder = Folder(name="other-folder", created_by=self.other_id)
-            writer_child = Folder(name="writer-child", parent=other_folder, created_by=self.writer_id)
-            writer_folder = Folder(name="writer-folder", created_by=self.writer_id)
-            db.add_all([other_folder, writer_child, writer_folder])
+            writing = Folder(name="写作规范", created_by=self.admin_id)
+            agent = Folder(name="AI agent知识库", created_by=self.admin_id)
+            writing_child = Folder(name="writer-child", parent=writing, created_by=self.writer_id)
+            db.add_all([writing, agent, writing_child])
             db.flush()
 
             knowledge_file = KnowledgeFile(
@@ -279,18 +279,18 @@ class AuthScopingTestCase(unittest.TestCase):
                 file_type="md",
                 permission="edit",
                 edit_scope="owner",
-                folder_id=writer_child.id,
+                folder_id=writing_child.id,
                 created_by=self.writer_id,
             )
             db.add(knowledge_file)
             db.commit()
-            db.refresh(other_folder)
-            db.refresh(writer_child)
-            db.refresh(writer_folder)
+            db.refresh(writing)
+            db.refresh(agent)
+            db.refresh(writing_child)
             db.refresh(knowledge_file)
-            other_folder_id = other_folder.id
-            writer_child_id = writer_child.id
-            writer_folder_id = writer_folder.id
+            writing_id = writing.id
+            agent_id = agent.id
+            writing_child_id = writing_child.id
             knowledge_file_id = knowledge_file.id
         finally:
             db.close()
@@ -304,50 +304,49 @@ class AuthScopingTestCase(unittest.TestCase):
         response = self.client.get("/api/knowledge/tree", headers=self._auth_headers("writer_user"))
         self.assertEqual(response.status_code, 200)
         root_names = {item["name"] for item in response.json()}
-        self.assertIn("other-folder", root_names)
-        self.assertIn("writer-folder", root_names)
+        self.assertEqual(root_names, {"写作规范"})
 
-        other_folder_node = next(item for item in response.json() if item["name"] == "other-folder")
-        self.assertEqual(len(other_folder_node["children"]), 1)
-        self.assertEqual(other_folder_node["children"][0]["name"], "writer-child")
-        self.assertEqual(other_folder_node["children"][0]["files"][0]["id"], knowledge_file_id)
+        writing_node = next(item for item in response.json() if item["name"] == "写作规范")
+        self.assertEqual(len(writing_node["children"]), 1)
+        self.assertEqual(writing_node["children"][0]["name"], "writer-child")
+        self.assertEqual(writing_node["children"][0]["files"][0]["id"], knowledge_file_id)
 
-        response = self.client.get(f"/api/knowledge/folders/{writer_child_id}", headers=self._auth_headers("writer_user"))
+        response = self.client.get(f"/api/knowledge/folders/{writing_child_id}", headers=self._auth_headers("writer_user"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["files"][0]["id"], knowledge_file_id)
 
-        response = self.client.get(f"/api/knowledge/folders/{other_folder_id}", headers=self._auth_headers("writer_user"))
+        response = self.client.get(f"/api/knowledge/folders/{writing_id}", headers=self._auth_headers("writer_user"))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["subfolders"][0]["id"], writer_child_id)
+        self.assertEqual(response.json()["subfolders"][0]["id"], writing_child_id)
 
-        response = self.client.get(f"/api/knowledge/folders/{writer_folder_id}", headers=self._auth_headers("other_user"))
+        response = self.client.get(f"/api/knowledge/folders/{agent_id}", headers=self._auth_headers("writer_user"))
         self.assertEqual(response.status_code, 404)
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}", headers=self._auth_headers("other_user"))
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}/download", headers=self._auth_headers("other_user"))
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}/preview", headers=self._auth_headers("writer_user"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["type"], "text")
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}/preview", headers=self._auth_headers("other_user"))
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}/raw", headers=self._auth_headers("writer_user"))
         self.assertEqual(response.status_code, 200)
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}/raw", headers=self._auth_headers("other_user"))
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}/content", headers=self._auth_headers("writer_user"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["content"], "hello knowledge")
 
         response = self.client.get(f"/api/knowledge/files/{knowledge_file_id}/content", headers=self._auth_headers("other_user"))
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
 
         response = self.client.delete(f"/api/knowledge/files/{knowledge_file_id}", headers=self._auth_headers("other_user"))
         self.assertEqual(response.status_code, 403)

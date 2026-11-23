@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.api import auth, documents, review, compare, rules, terms, audit_basis, polish, polish_lab, qa, generate, convert, translation, knowledge, spell_check, whitelist, param_compare, manual_search, polish_rules, system, competitor, supplement_feedback, agent
 from app.database import create_tables
+from app.utils.knowledge_usage import install_knowledge_usage_middleware
 import threading
 import os
 
@@ -54,6 +55,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_knowledge_usage_middleware(app)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

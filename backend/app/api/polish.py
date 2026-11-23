@@ -9506,7 +9506,7 @@ def _cat_calc_file_accuracy(decisions: list, total_paragraphs: int) -> dict:
 
 
 @router.get("/feedback/stats", response_model=None)
-def get_feedback_stats(db: Session = Depends(get_db)):
+def get_feedback_stats(db: Session = Depends(get_db), _: object = Depends(require_admin)):
     """获取润色准确率统计：每条反馈的接受率（accuracy/processed_count*100）取平均。"""
     records = db.query(PolishFeedback).all()
     total = len(records)
@@ -9524,7 +9524,7 @@ def get_feedback_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/feedback/document-stats", response_model=None)
-def get_document_feedback_stats(db: Session = Depends(get_db)):
+def get_document_feedback_stats(db: Session = Depends(get_db), _: object = Depends(require_admin)):
     """获取文档润色页统计。每个文档仅按最新一次反馈计 1 次提交。"""
     records = db.query(PolishFeedback).filter(
         PolishFeedback.target == 'document_sentence_guide'
@@ -9533,7 +9533,7 @@ def get_document_feedback_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/stats/text", response_model=None)
-def get_polish_text_stats(db: Session = Depends(get_db)):
+def get_polish_text_stats(db: Session = Depends(get_db), _: object = Depends(require_admin)):
     records = db.query(PolishFeedback).filter(
         PolishFeedback.target.in_(['terminology', 'sentence_guide'])
     ).order_by(PolishFeedback.created_at.asc(), PolishFeedback.id.asc()).all()
@@ -9827,7 +9827,7 @@ def get_polish_document_session_details(
 
 
 @router.get("/stats/document/{analyze_id}", response_model=None)
-def get_polish_document_stats_detail(analyze_id: str, db: Session = Depends(get_db)):
+def get_polish_document_stats_detail(analyze_id: str, db: Session = Depends(get_db), _: object = Depends(require_admin)):
     session_row = db.query(CatAnalysisSession).filter(CatAnalysisSession.analyze_id == analyze_id).first()
     if not session_row:
         raise HTTPException(status_code=404, detail="会话不存在")

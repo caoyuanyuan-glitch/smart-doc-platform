@@ -285,6 +285,7 @@ import { User, Microphone, CopyDocument, Download, ArrowDown, ArrowLeft, Plus } 
 const AGENT_KB_NAME = 'AI agent知识库'
 
 const SCENE_CARDS = [
+  // paths 必须与 backend/app/utils/qa_scenes.py 中 QA_SCENES 保持一致
   {
     key: 'style',
     kicker: '写作规范',

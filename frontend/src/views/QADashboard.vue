@@ -1,9 +1,9 @@
 <template>
   <div class="dashboard-page">
     <div class="page-hd">
-      <h2>智能问答看板</h2>
+      <h2>统计面板</h2>
       <div class="page-hd-right">
-        <el-button size="small" :loading="loading" @click="loadDashboard">刷新</el-button>
+        <el-button size="small" :loading="loading || sourcesLoading" @click="refreshAll">刷新</el-button>
       </div>
     </div>
 
@@ -105,6 +105,45 @@
       </div>
     </div>
 
+    <div class="detail-section sources-section" v-if="userStore.isAdmin">
+      <el-collapse class="sources-collapse">
+        <el-collapse-item name="sources">
+          <template #title>
+            <span class="sources-title">知识库问答资料清单</span>
+          </template>
+          <div v-if="sourcesError" class="sources-error">{{ sourcesError }}</div>
+          <el-collapse class="scene-collapse">
+            <el-collapse-item v-for="scene in sourceScenes" :key="scene.key" :name="scene.key">
+              <template #title>
+                <div class="scene-hd">
+                  <div>
+                    <span class="scene-kicker">{{ scene.kicker }}</span>
+                    <span class="scene-title">{{ scene.title }}</span>
+                  </div>
+                  <span class="scene-count">{{ scene.file_count }} 份资料</span>
+                </div>
+              </template>
+              <el-table
+                :data="scene.files"
+                stripe
+                v-loading="sourcesLoading"
+                :empty-text="sceneEmptyText(scene)"
+                class="detail-table scene-table"
+                @row-click="openSourceFile"
+              >
+                <el-table-column label="文件名" min-width="220" prop="name" show-overflow-tooltip />
+                <el-table-column label="所属目录" min-width="220" prop="folder_path" show-overflow-tooltip />
+                <el-table-column label="类型" width="90" prop="file_type" />
+                <el-table-column label="更新时间" width="180">
+                  <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
+                </el-table-column>
+              </el-table>
+            </el-collapse-item>
+          </el-collapse>
+        </el-collapse-item>
+      </el-collapse>
+    </div>
+
     <div class="detail-section" v-if="userStore.isAdmin">
       <div class="detail-hd">
         <h3>对话明细</h3>
@@ -182,6 +221,7 @@ import { ElMessage } from 'element-plus'
 import { qaAPI } from '@/api'
 import { useUserStore } from '@/store/user'
 import VChart from 'vue-echarts'
+import { useRouter } from 'vue-router'
 import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
@@ -191,6 +231,7 @@ use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer
 
 const userStore = useUserStore()
 const loading = ref(false)
+const router = useRouter()
 const period = ref('today')
 const overview = reactive({ active_users: 0, conversations: 0, active_users_trend: 0, conversations_trend: 0, hit_rate: 0, hit_rate_trend: 0, period_label: '今日', compare_label: '较昨日' })
 const chartUsersData = ref([])
@@ -206,6 +247,9 @@ const dateRange = ref(null)
 const filterUser = ref('')
 const filterType = ref('')
 const filterRating = ref(null)
+const sourceScenes = ref([])
+const sourcesLoading = ref(false)
+const sourcesError = ref('')
 
 const chartUsersOption = computed(() => ({
   tooltip: { trigger: 'axis' },
@@ -286,14 +330,53 @@ function exportData() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `问答看板_${new Date().toISOString().slice(0,10)}.csv`
+  a.download = `统计面板_${new Date().toISOString().slice(0,10)}.csv`
   a.click()
   URL.revokeObjectURL(url)
   ElMessage.success('导出成功')
 }
 
+function formatTime(iso) {
+  if (!iso) return ''
+  return String(iso).replace('T', ' ').slice(0, 19)
+}
+
+function sceneEmptyText(scene) {
+  if (scene?.missing_paths?.length) return '该板块暂无资料 / 目录待同步'
+  return '该板块暂无资料'
+}
+
+function openSourceFile(row) {
+  if (!row?.folder_id || !row?.id) return
+  router.push({ path: `/knowledge/${row.folder_id}`, query: { preview: String(row.id) } })
+}
+
+async function loadSceneSources() {
+  if (!userStore.isAdmin) {
+    sourceScenes.value = []
+    sourcesError.value = ''
+    return
+  }
+  sourcesLoading.value = true
+  sourcesError.value = ''
+  try {
+    const r = await qaAPI.getSceneSources()
+    sourceScenes.value = r.data?.scenes || []
+  } catch (e) {
+    sourceScenes.value = []
+    sourcesError.value = '知识库目录加载失败'
+  }
+  sourcesLoading.value = false
+}
+
+function refreshAll() {
+  loadDashboard()
+  loadSceneSources()
+}
+
 onMounted(() => {
   loadDashboard()
+  loadSceneSources()
 })
 </script>
 
@@ -349,7 +432,7 @@ onMounted(() => {
 .chart-title { font-size: 14px; font-weight: 600; color: #1e293b; margin-bottom: 8px; }
 .chart { height: 260px; }
 
-.detail-section { background: #fff; border-radius: 12px; padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.detail-section { background: #fff; border-radius: 12px; padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,.06); margin-bottom: 24px; }
 .detail-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .detail-hd h3 { margin: 0; font-size: 15px; font-weight: 600; }
 
@@ -357,4 +440,20 @@ onMounted(() => {
 .detail-table { width: 100%; }
 .result-none { color: #94a3b8; font-size: 12px; }
 .pagination { margin-top: 16px; display: flex; justify-content: flex-end; }
+.sources-error { color: #b45309; font-size: 13px; margin-bottom: 12px; }
+.scene-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex: 1; padding-right: 12px; }
+.scene-kicker { font-size: 12px; color: #64748b; margin-right: 8px; }
+.scene-title { font-size: 14px; font-weight: 600; color: #1e293b; }
+.scene-count { font-size: 12px; color: #64748b; }
+.scene-table { cursor: pointer; }
+.sources-section { padding-top: 8px; padding-bottom: 8px; }
+.sources-collapse { border: none; }
+.sources-title { font-size: 15px; font-weight: 600; color: #1e293b; }
+.sources-collapse :deep(.el-collapse-item__header) { height: 40px; line-height: 40px; border: none; }
+.sources-collapse :deep(.el-collapse-item__wrap) { border: none; }
+.sources-collapse :deep(.el-collapse-item__content) { padding-bottom: 8px; }
+.scene-collapse { border: none; }
+.scene-collapse :deep(.el-collapse-item__header) { height: 44px; line-height: 44px; border: none; }
+.scene-collapse :deep(.el-collapse-item__wrap) { border: none; }
+.scene-collapse :deep(.el-collapse-item__content) { padding-bottom: 12px; }
 </style>

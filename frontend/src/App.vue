@@ -133,7 +133,7 @@
           <el-badge v-if="userStore.isAdmin" :value="unreadFeedbackCount" :hidden="unreadFeedbackCount === 0" class="feedback-badge">
             <el-icon class="feedback-icon" @click="goToFeedback"><Message /></el-icon>
           </el-badge>
-          <span class="user-badge" v-if="userStore.isLoggedIn">{{ userStore.user?.username }} ({{ userStore.user?.role }})</span>
+          <span class="user-badge" v-if="userStore.isLoggedIn">{{ userStore.user?.username }} ({{ userStore.roleLabel }})</span>
           <el-button text @click="handleLogout" class="logout-btn">退出</el-button>
         </div>
       </header>
@@ -178,8 +178,8 @@
               <el-menu-item index="/polish/stats">统计面板</el-menu-item>
               <el-menu-item index="/polish">文本润色</el-menu-item>
               <el-menu-item index="/polish/document">文档润色</el-menu-item>
-              <el-menu-item index="/tools/polish-rules">润色规则</el-menu-item>
-              <el-menu-item index="/polish/candidates">AI 诊断候补</el-menu-item>
+              <el-menu-item v-if="userStore.isAdmin" index="/tools/polish-rules">润色规则</el-menu-item>
+              <el-menu-item v-if="userStore.isAdmin" index="/polish/candidates">AI 诊断候补</el-menu-item>
               <el-menu-item index="/polish/history">已润色文档</el-menu-item>
             </el-sub-menu>
 
@@ -222,7 +222,7 @@
               <el-menu-item index="/review/dashboard">统计看板</el-menu-item>
               <el-menu-item index="/review">开始审核</el-menu-item>
               <el-menu-item index="/review/tasks">历史审核任务</el-menu-item>
-              <el-menu-item index="/review/rules">规则管理</el-menu-item>
+              <el-menu-item v-if="userStore.isAdmin" index="/review/rules">规则管理</el-menu-item>
               <el-menu-item v-if="userStore.isAdmin" index="/review/false-positive-memory">误报记忆库</el-menu-item>
               <el-sub-menu index="spell-check-sub">
                 <template #title>拼写检查</template>
@@ -237,14 +237,14 @@
                 <el-icon><ChatDotRound /></el-icon>
                 <span>智能问答</span>
               </template>
+              <el-menu-item v-if="userStore.isAdmin" index="/qa/dashboard">统计面板</el-menu-item>
               <el-menu-item index="/qa">知识库问答</el-menu-item>
               <el-menu-item index="/qa/manual">说明书问答</el-menu-item>
-              <el-sub-menu index="qa-history-sub" class="qa-history-sub">
+              <el-sub-menu v-if="userStore.isAdmin" index="qa-history-sub" class="qa-history-sub">
                 <template #title><span>历史记录</span></template>
                 <el-menu-item index="/qa/history/general">知识库问答历史</el-menu-item>
                 <el-menu-item index="/qa/history/doc">说明书问答历史</el-menu-item>
               </el-sub-menu>
-              <el-menu-item index="/qa/dashboard">问答看板</el-menu-item>
             </el-sub-menu>
 
             <el-sub-menu index="translate-sub">
@@ -258,10 +258,14 @@
               <el-menu-item index="/translate/history">已翻译文档</el-menu-item>
             </el-sub-menu>
 
-            <el-menu-item index="/knowledge">
-              <el-icon><FolderOpened /></el-icon>
-              <template #title>知识库管理</template>
-            </el-menu-item>
+            <el-sub-menu index="knowledge-sub">
+              <template #title>
+                <el-icon><FolderOpened /></el-icon>
+                <span>知识库管理</span>
+              </template>
+              <el-menu-item index="/knowledge">知识库</el-menu-item>
+              <el-menu-item v-if="userStore.isAdmin" index="/knowledge/stats">调用统计</el-menu-item>
+            </el-sub-menu>
 
             <el-menu-item v-if="userStore.isAdmin" index="/users">
               <el-icon><User /></el-icon>
@@ -325,6 +329,7 @@ const providerLabels = {
 
 const activeMenu = computed(() => {
   const path = router?.currentRoute?.value?.path || '/'
+  if (path.startsWith('/knowledge/stats')) return '/knowledge/stats'
   if (path.startsWith('/knowledge')) return '/knowledge'
   return path
 })

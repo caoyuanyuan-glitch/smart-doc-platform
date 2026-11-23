@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from pydantic import field_validator
 from typing import Optional, List
 from datetime import datetime
 
@@ -41,6 +42,14 @@ class UserOut(BaseModel):
     role: str
     status: str
     created_at: datetime
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def canonicalize_role(cls, value):
+        role = str(value or "").strip()
+        if role in {"writer", "reviewer"}:
+            return "user"
+        return role or "user"
 
     class Config:
         from_attributes = True

@@ -25,6 +25,7 @@ export const useUserStore = defineStore('user', () => {
 
   const isAdmin = computed(() => user.value?.role === 'admin')
   const isLoggedIn = computed(() => !!token.value)
+  const roleLabel = computed(() => (user.value?.role === 'admin' ? '管理员' : '普通用户'))
 
   function setToken(newToken) {
     token.value = newToken
@@ -43,5 +44,5 @@ export const useUserStore = defineStore('user', () => {
     localStorage.removeItem('user')
   }
 
-  return { token, user, isAdmin, isLoggedIn, setToken, setUser, logout }
+  return { token, user, isAdmin, isLoggedIn, roleLabel, setToken, setUser, logout }
 })
